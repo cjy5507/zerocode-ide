@@ -20,8 +20,8 @@ const PANE_OF = {
   "account-list": "provider-accounts",
   "codex-account-list": "provider-accounts",
   "google-account-list": "provider-accounts",
-  "model-connection-groups": "api-routers",
-  "router-preset-select": "api-routers",
+  "model-connection-groups": "judgment-models",
+  "router-preset-select": "judgment-models",
   // The Jev dashboard's "in settings" and its consent chip land on the one
   // switch (§6.1), its key chip on the key field and its budget chip on the
   // key card's status (t-6243 D5).
@@ -1005,6 +1005,8 @@ function settingsPaneAvailable(pane) {
 }
 
 function showSettingsPane(pane) {
+  // 「모델 연결」 joined 「모델」 (2026-11-10): its old name opens the one page.
+  if (pane === "api-routers") pane = "judgment-models";
   const arriving = settingsView.hidden || pane !== settingsPane;
   settingsPane = pane;
   // 디자인 페이지는 테마 스위치로 창의 테마 속성을 잠시 바꾼다: 떠나면 사람이 고른 테마로 돌아간다.
@@ -1053,10 +1055,13 @@ function showSettingsPane(pane) {
     void refreshGoogleAccount();
     void refreshCliLogins();
   }
-  if (pane === "judgment-models" && arriving) void modelConnectionsController.refresh();
-  if (pane === "api-routers") {
+  // The page opens on its lists; the connection editor is asked for by name.
+  if (pane === "judgment-models") {
     modelConnectionsController.paintView("catalog");
-    if (arriving) void refreshApiRouters();
+    if (arriving) {
+      void modelConnectionsController.refresh();
+      void prepareRouterEditor();
+    }
   }
   if (pane === "onboarding" && arriving) {
     paintSettingsOnboarding();
@@ -7432,7 +7437,9 @@ function initApiRoutersEvents() {
   });
 }
 
-async function refreshApiRouters() {
+/* What the connection editor needs before anyone opens it: its events, the
+ * presets and where a key would be kept. */
+async function prepareRouterEditor() {
   initApiRoutersEvents();
   try {
     if (routerPresets.length === 0) {
@@ -7448,7 +7455,10 @@ async function refreshApiRouters() {
   } catch (error) {
     showError(error);
   }
+}
 
+async function refreshApiRouters() {
+  await prepareRouterEditor();
   await refreshTypeSafe();
   await modelConnectionsController.refresh();
 }
@@ -7948,7 +7958,7 @@ listen("summon-lineup:read", () => {
   if (!settingsView.hidden && settingsPane === "orchestration" && !typesafeBusy) void refreshTypeSafe();
   if (
     !settingsView.hidden &&
-    (settingsPane === "judgment-models" || settingsPane === "api-routers") &&
+    settingsPane === "judgment-models" &&
     !modelConnectionsController.busy &&
     !modelConnectionsController.picking &&
     !modelConnectionsController.setup &&
@@ -8084,8 +8094,7 @@ async function refreshTypeSafe() {
       if (managedJudgmentController.visible()) managedJudgmentController.render();
     });
   }
-  const connectionsVisible = !settingsView.hidden && settingsPane === "api-routers" && !document.hidden;
-  if ((managedJudgmentController.visible() || connectionsVisible) && !request.managed) {
+  if (managedJudgmentController.visible() && !request.managed) {
     managedJudgmentController.init();
     managedJudgmentController.loading = true;
     request.managed = settled(invoke("managed_judgment_status"));

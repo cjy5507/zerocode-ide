@@ -31,6 +31,8 @@ pub struct Snapshot {
     pub catalog_fingerprint: String,
     pub models: Vec<ModelInfo>,
     pub runtime: RuntimeInfo,
+    /// Every runtime this computer can hold, one row an engine.
+    pub runtimes: Vec<RuntimeRow>,
     pub operation: Option<Operation>,
     pub server: ServerInfo,
     pub provider_identity: Option<String>,
@@ -345,6 +347,79 @@ pub struct RuntimeInfo {
     pub reason: Option<&'static str>,
 }
 
+/// One runtime this computer can hold, as the page lists it: the engine it
+/// runs, the public build its pin names when it has one, and where it
+/// stands — `ready`, `outdated` (an earlier pin's is installed), `missing`
+/// or `unverified`.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeRow {
+    pub id: String,
+    pub engine: EngineKind,
+    pub version: Option<String>,
+    pub home: Option<String>,
+    pub state: &'static str,
+    pub download_bytes: u64,
+}
+
+/// The newest release an engine's public home publishes, beside the build
+/// this app pins. `newer` says the two differ: the pin is a release that was
+/// the newest once, so a different newest one came after it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeNews {
+    pub id: String,
+    pub engine: EngineKind,
+    pub pinned: String,
+    pub latest: String,
+    pub newer: bool,
+}
+
+/// How long an answer about an engine's newest release is kept before its
+/// home is asked again.
+const RUNTIME_NEWS_KEPT: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// The tag a home's `releases/latest` redirects to
+/// (`<home>/releases/tag/<tag>`), or nothing for any other address.
+fn latest_tag(home: &str, location: &str) -> Option<String> {
+    let tag = location
+        .strip_prefix(home)?
+        .strip_prefix("/releases/tag/")?;
+    (!tag.is_empty()
+        && tag.len() <= 64
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
+    .then(|| tag.to_owned())
+}
+
+/// Asks an engine's public home which release is its newest: the one
+/// address its `releases/latest` redirects to. Nothing is received.
+async fn newest_release(home: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+    let response = client
+        .get(format!("{home}/releases/latest"))
+        .header(reqwest::header::USER_AGENT, "ZeroCode")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_redirection() {
+        return None;
+    }
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()?;
+    latest_tag(home, location)
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Operation {
@@ -467,6 +542,8 @@ pub struct Manager {
     profiles: Vec<RuntimeProfile>,
     validation_mode: bool,
     settings: PathBuf,
+    /// The last answer about each engine's newest release, and when it came.
+    runtime_news: Mutex<Option<(Instant, Vec<RuntimeNews>)>>,
     instance: String,
     inner: Mutex<Inner>,
     /// Status reads take turns, so the read that notes a runtime's end has
@@ -556,6 +633,19 @@ impl Manager {
         )
     }
 
+    /// A manager over `catalog` whose one runtime is `profile`, telling
+    /// nobody of its changes.
+    #[cfg(test)]
+    pub(crate) fn with_catalog_for_tests(
+        root: &Path,
+        settings: &Path,
+        catalog: Catalog,
+        profile: Option<RuntimeProfile>,
+    ) -> Arc<Self> {
+        Self::with_catalog(root, settings, catalog, profile, Arc::new(|_| {}))
+            .expect("fixture manager")
+    }
+
     #[cfg(test)]
     fn with_catalog(
         root: &Path,
@@ -606,6 +696,7 @@ impl Manager {
             profiles,
             validation_mode,
             settings: settings.to_owned(),
+            runtime_news: Mutex::new(None),
             instance: uuid::Uuid::new_v4().to_string(),
             inner: Mutex::new(Inner {
                 revision: 1,
@@ -715,6 +806,7 @@ impl Manager {
                 })
                 .collect(),
             runtime: self.runtime_info(self.profile.as_ref()),
+            runtimes: self.runtime_rows(),
             operation: inner.operation.clone(),
             server: inner.server.clone(),
             provider_identity,
@@ -874,6 +966,33 @@ impl Manager {
         self.inspect_source_with_request(input, None).await
     }
 
+    /// What a Hub repository offers before anything is received: whether it
+    /// is a decision model's layout, and the GGUF files in it. One request
+    /// for the repository's file list — no operation is taken, nothing is
+    /// kept, and the snapshot does not move.
+    pub async fn list_source_files(
+        self: &Arc<Self>,
+        repository: &str,
+    ) -> Result<source::HubListing> {
+        let manager = self.clone();
+        let cancelled: source::Cancelled = Arc::new(move || manager.closed.load(Ordering::Acquire));
+        if cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut listing = tokio::time::timeout(
+            Duration::from_secs(45),
+            source::list_hub(repository, &cancelled),
+        )
+        .await
+        .unwrap_or(Err(Error::Timeout))?;
+        listing.memory_limit_bytes = self
+            .profiles
+            .iter()
+            .find(|profile| profile.engine == EngineKind::LlamaCpp)
+            .and_then(|profile| profile.max_rss_bytes);
+        Ok(listing)
+    }
+
     pub async fn inspect_source_with_request(
         self: &Arc<Self>,
         input: SourceInput,
@@ -1008,16 +1127,93 @@ impl Manager {
         Ok(self.snapshot())
     }
 
+    /// Where a profile's runtime stands on this computer.
+    fn runtime_state(&self, profile: &RuntimeProfile) -> &'static str {
+        if self.store.runtime_ready(profile) {
+            "ready"
+        } else if !profile.validated {
+            "unverified"
+        } else if self.store.runtime_outdated(profile) {
+            "outdated"
+        } else {
+            "missing"
+        }
+    }
+
+    fn runtime_rows(&self) -> Vec<RuntimeRow> {
+        self.profiles
+            .iter()
+            .map(|profile| {
+                let release = profile.native.as_ref().and_then(|native| native.release());
+                RuntimeRow {
+                    id: profile.id.clone(),
+                    engine: profile.engine,
+                    version: release.as_ref().map(|(_, tag)| tag.clone()),
+                    home: release.map(|(home, _)| home),
+                    state: self.runtime_state(profile),
+                    download_bytes: profile.download_bytes(),
+                }
+            })
+            .collect()
+    }
+
+    /// For each runtime whose engine has a public home: the newest release
+    /// published there beside the build this app pins. A home that does not
+    /// answer leaves its runtime out; an answer is kept for six hours.
+    pub async fn runtime_news(self: &Arc<Self>) -> Vec<RuntimeNews> {
+        if let Some((at, news)) = &*lock(&self.runtime_news)
+            && at.elapsed() < RUNTIME_NEWS_KEPT
+        {
+            return news.clone();
+        }
+        let mut news = Vec::new();
+        for profile in &self.profiles {
+            let Some((home, pinned)) = profile.native.as_ref().and_then(|native| native.release())
+            else {
+                continue;
+            };
+            if self.closed.load(Ordering::Acquire) {
+                break;
+            }
+            if let Some(latest) = newest_release(&home).await {
+                news.push(RuntimeNews {
+                    id: profile.id.clone(),
+                    engine: profile.engine,
+                    newer: latest != pinned,
+                    pinned,
+                    latest,
+                });
+            }
+        }
+        if !news.is_empty() {
+            *lock(&self.runtime_news) = Some((Instant::now(), news.clone()));
+        }
+        news
+    }
+
+    /// The Hub's repositories of GGUF files that answer `query`, most
+    /// received first. One request; nothing is received or kept.
+    pub async fn search_sources(
+        self: &Arc<Self>,
+        query: &str,
+    ) -> Result<Vec<source::HubSearchHit>> {
+        let manager = self.clone();
+        let cancelled: source::Cancelled = Arc::new(move || manager.closed.load(Ordering::Acquire));
+        if cancelled() {
+            return Err(Error::Cancelled);
+        }
+        tokio::time::timeout(
+            Duration::from_secs(45),
+            source::search_hub(query, &cancelled),
+        )
+        .await
+        .unwrap_or(Err(Error::Timeout))
+    }
+
     fn runtime_info(&self, profile: Option<&RuntimeProfile>) -> RuntimeInfo {
         match profile {
             Some(profile) => RuntimeInfo {
-                state: if self.store.runtime_ready(profile) {
-                    "ready"
-                } else if !profile.validated {
-                    "unverified"
-                } else {
-                    "missing"
-                },
+                state: self.runtime_state(profile),
                 python_requirement: profile
                     .python
                     .version
@@ -1783,7 +1979,36 @@ impl Manager {
         engine.stop();
         result?;
         cancel.check()?;
-        self.commit(cancel, || self.store.commit_runtime(&mut stage, profile))
+        self.commit_runtime(cancel, &mut stage, profile)
+    }
+
+    /// The runtime just verified takes its place. Where an earlier one stands
+    /// there, it gives the place up — unless a server of this engine runs
+    /// from it now: that server keeps its runtime until it is stopped, and
+    /// the preparation ends busy with nothing replaced.
+    fn commit_runtime(
+        &self,
+        cancel: &Cancel,
+        stage: &mut storage::Stage,
+        profile: &RuntimeProfile,
+    ) -> Result<()> {
+        let mut inner = lock(&self.inner);
+        cancel.check()?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        if self.store.runtime_present(profile)
+            && let Some(running) = &inner.running
+            && lock(&self.catalog)
+                .models
+                .iter()
+                .any(|model| model.id == running.model_id && model.engine == profile.engine)
+        {
+            return Err(Error::Busy);
+        }
+        self.store.commit_runtime(stage, profile)?;
+        Self::complete(&mut inner);
+        Ok(())
     }
 
     pub fn install(
@@ -4145,6 +4370,41 @@ mod cancellation_tests {
             assert_eq!(result, Ok(()));
             assert_eq!(applications.load(Ordering::Relaxed), 1);
             assert!(fixture.manager.snapshot().server.checked);
+        }
+    }
+}
+
+#[cfg(test)]
+mod runtime_news_tests {
+    use super::latest_tag;
+
+    #[test]
+    fn the_newest_release_is_read_only_from_its_homes_own_tag_address() {
+        let home = "https://example.invalid/acme/engine";
+        assert_eq!(
+            latest_tag(
+                home,
+                "https://example.invalid/acme/engine/releases/tag/v0.9.0"
+            ),
+            Some("v0.9.0".to_owned())
+        );
+        assert_eq!(
+            latest_tag(
+                home,
+                "https://example.invalid/acme/engine/releases/tag/b11669"
+            ),
+            Some("b11669".to_owned())
+        );
+        for other in [
+            "https://example.invalid/acme/other/releases/tag/v1",
+            "https://elsewhere.invalid/acme/engine/releases/tag/v1",
+            "https://example.invalid/acme/engine/releases/tag/",
+            "https://example.invalid/acme/engine/releases/tag/v1/assets",
+            "https://example.invalid/acme/engine/releases/tag/v1?x=1",
+            "https://example.invalid/acme/engine/releases",
+            "/acme/engine/releases/tag/v1",
+        ] {
+            assert_eq!(latest_tag(home, other), None, "{other}");
         }
     }
 }

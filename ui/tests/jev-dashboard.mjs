@@ -758,25 +758,28 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       await settlePaint(page);
       const basic = await page.evaluate(() => {
         const card = document.querySelector("#typesafe-card");
-        // Getting a model and the old editor stand in the 고급 fold (t-75762 v2).
+        // The old editor stands in the 고급 fold (t-75762 v2); getting a model
+        // stands under 「이 컴퓨터 › 모델 받기」 on the same page (2026-11-10).
         document.getElementById("model-advanced").open = true;
+        modelConnectionsController.receiving = true;
+        modelConnectionsController.paintReceive();
         card.scrollIntoView({ block: "start" });
         const visible = (id) => {
           const node = document.getElementById(id);
           return Boolean(node && !node.closest("details:not([open])") && node.getClientRects().length > 0);
         };
         return {
-          faults: window.__JEV_TEXT_FAULTS__(card),
-          sourceControls: ["judgment-source-hub", "judgment-source-local", "judgment-source-jev", "judgment-source-repository"].filter(visible),
+          faults: [...window.__JEV_TEXT_FAULTS__(card), ...window.__JEV_TEXT_FAULTS__(document.getElementById("model-receive"))],
+          sourceControls: ["judgment-source-hub", "judgment-source-gguf", "judgment-source-local", "judgment-source-repository"].filter(visible),
           hiddenConnectionFields: ["judgment-provider-kind", "judgment-endpoint", "typesafe-key-input"].filter((id) => !visible(id)),
-          primaryActions: card.querySelectorAll(".judgment-model-source .btn--primary").length,
+          primaryActions: document.querySelectorAll(".judgment-model-source .btn--primary").length,
           switches: card.querySelectorAll("[data-jev-switch]").length,
           provider: document.getElementById("judgment-provider-kind").value,
         };
       });
       const path = join(EVIDENCE_DIR, `jev-settings-card-${theme}.png`);
       await page.locator("#typesafe-card").screenshot({ path });
-      ok(`the ${theme} basic model card offers download, local folder and Jev without requiring server settings or cutting text`,
+      ok(`the ${theme} model page offers Hugging Face, a GGUF file and a model folder without requiring server settings or cutting text`,
         basic.faults.length === 0 && basic.sourceControls.length === 4
           && basic.hiddenConnectionFields.length === 3 && basic.primaryActions === 1 && basic.switches === 1,
         JSON.stringify({ ...basic, faults: basic.faults.slice(0, 6), path, counted }));
@@ -802,7 +805,12 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
           && connection.keyVisible && connection.provider === basic.provider,
         JSON.stringify({ ...connection, faults: connection.faults.slice(0, 6), path: connectionPath, counted }));
       await page.locator("#judgment-connection-settings > summary").click();
-      await page.evaluate(() => { document.getElementById("model-advanced").open = false; setSettingsOpen(false); });
+      await page.evaluate(() => {
+        document.getElementById("model-advanced").open = false;
+        modelConnectionsController.receiving = false;
+        modelConnectionsController.paintReceive();
+        setSettingsOpen(false);
+      });
     }
     ok("the evidence pages raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {

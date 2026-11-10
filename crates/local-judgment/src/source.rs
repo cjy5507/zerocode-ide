@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -73,7 +73,78 @@ struct HubMetadata {
     card: Option<Value>,
     #[serde(default)]
     tags: Vec<String>,
+    /// What the Hub read out of the repository's GGUF header, when it holds
+    /// one: only the chat template is taken, and only as a hint.
+    gguf: Option<HubGguf>,
 }
+
+#[derive(Deserialize)]
+struct HubGguf {
+    chat_template: Option<String>,
+}
+
+/// One GGUF file a repository holds, for the person to pick among: its path
+/// under the repository (or the subfolder asked for), its size, the pinned
+/// address [`SourceInput::HuggingFaceFile`] takes — and, when it cannot be
+/// taken, the reason in place of the address.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubFileChoice {
+    pub path: String,
+    pub bytes: u64,
+    pub url: Option<String>,
+    pub reason: Option<&'static str>,
+}
+
+/// What a repository offers before anything is received: whether it is laid
+/// out as a decision model (then the repository itself is inspected), and
+/// every GGUF file in it, smallest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubListing {
+    pub repository: String,
+    pub revision: String,
+    pub license: String,
+    pub native: bool,
+    pub files: Vec<HubFileChoice>,
+    /// The largest file this computer's runtime loads.
+    pub max_file_bytes: u64,
+    /// The memory the runtime that loads these files may use before it is
+    /// stopped, when this computer has one: a file's weights and its working
+    /// memory both count toward it. The manager fills it in.
+    pub memory_limit_bytes: Option<u64>,
+    /// `false` when the Hub names a chat template none of the runtime's
+    /// built-in ones answers to: a file would be received and then refused.
+    /// `None` when the Hub names no template — the file's own header decides.
+    pub template_known: Option<bool>,
+}
+
+/// The most GGUF files a listing carries: a repository of quantisations
+/// holds a few dozen, and a row past this is one nobody scrolls to.
+const MAX_LISTED_FILES: usize = 256;
+
+/// One repository the Hub answered a search with: its ID — the form
+/// [`SourceInput::HuggingFace`] and a listing take — and how often it was
+/// received and liked, as the Hub counts them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubSearchHit {
+    pub repository: String,
+    pub downloads: u64,
+    pub likes: u64,
+}
+
+#[derive(Deserialize)]
+struct HubSearchRow {
+    id: String,
+    #[serde(default)]
+    downloads: u64,
+    #[serde(default)]
+    likes: u64,
+}
+
+/// The most repositories one search answers with.
+const MAX_SEARCH_HITS: usize = 20;
 
 #[derive(Deserialize)]
 struct HubFile {
@@ -720,6 +791,199 @@ async fn inspect_hub(
     })
 }
 
+/// The part of a GGUF file's name that says it is one piece of several
+/// (`…-00001-of-00003.gguf`): the runtime loads a whole model from one file.
+fn split_part(name: &str) -> bool {
+    let Some(stem) = name
+        .len()
+        .checked_sub(5)
+        .and_then(|end| name.get(..end))
+        .filter(|_| name.to_ascii_lowercase().ends_with(".gguf"))
+    else {
+        return false;
+    };
+    let mut parts = stem.rsplitn(4, '-');
+    let digits = |part: Option<&str>| {
+        part.is_some_and(|part| part.len() == 5 && part.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    let total = parts.next();
+    let of = parts.next();
+    let number = parts.next();
+    digits(total) && of == Some("of") && digits(number)
+}
+
+fn listing(source: &HubSource, metadata: &HubMetadata) -> Result<HubListing> {
+    if !hex(&metadata.sha, 40) || metadata.siblings.len() > 2048 {
+        return Err(Error::Manifest);
+    }
+    let prefix = source
+        .subfolder
+        .as_ref()
+        .map(|folder| format!("{folder}/"))
+        .unwrap_or_default();
+    let mut native = false;
+    let mut files = Vec::new();
+    for file in &metadata.siblings {
+        let Some(path) = file.rfilename.strip_prefix(&prefix) else {
+            continue;
+        };
+        if matches!(path, "rl_agent_config.json" | "decision_config.json") {
+            native = true;
+        }
+        if !path.to_ascii_lowercase().ends_with(".gguf") {
+            continue;
+        }
+        let bytes = file
+            .lfs
+            .as_ref()
+            .map(|lfs| lfs.size)
+            .or(file.size)
+            .unwrap_or(0);
+        // The same refusals `inspect_hub_gguf` makes once a file is picked,
+        // said here so a row that cannot be received is not offered as one.
+        let reason = if path.split('/').count() > 16 || !path.split('/').all(segment) {
+            Some(Error::SourceInvalid)
+        } else if split_part(path) {
+            Some(Error::ModelFormatUnsupported)
+        } else if !file.lfs.as_ref().is_some_and(|lfs| {
+            hex(&lfs.sha256, 64) && file.size.is_none_or(|size| size == lfs.size)
+        }) {
+            Some(Error::SourceHashUnavailable)
+        } else if bytes > MAX_DATA_BYTES {
+            Some(Error::TooLarge)
+        } else if bytes < 24 {
+            Some(Error::WeightsFormat)
+        } else {
+            None
+        };
+        let url = match reason {
+            Some(_) => None,
+            None => Some(hub_url(source, &metadata.sha, "blob", Some(path))?.to_string()),
+        };
+        // An address `gguf_hub_source` would refuse for its length alone.
+        let reason = reason.or(url
+            .as_ref()
+            .is_some_and(|url| url.len() > 2048)
+            .then_some(Error::SourceInvalid));
+        files.push(HubFileChoice {
+            path: path.to_owned(),
+            bytes,
+            url: url.filter(|_| reason.is_none()),
+            reason: reason.map(Error::token),
+        });
+    }
+    files.sort_by(|left, right| {
+        left.bytes
+            .cmp(&right.bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    files.truncate(MAX_LISTED_FILES);
+    let license = metadata
+        .card
+        .as_ref()
+        .and_then(|card| card.get("license"))
+        .and_then(Value::as_str)
+        .filter(|license| text_label(license))
+        .unwrap_or("License metadata unavailable")
+        .to_owned();
+    let template_known = metadata
+        .gguf
+        .as_ref()
+        .and_then(|gguf| gguf.chat_template.as_deref())
+        .map(|template| crate::gguf::builtin_template(template).is_some());
+    Ok(HubListing {
+        repository: source.repository.clone(),
+        revision: metadata.sha.clone(),
+        license,
+        native,
+        files,
+        max_file_bytes: MAX_DATA_BYTES,
+        memory_limit_bytes: None,
+        template_known,
+    })
+}
+
+/// What `repository` — an ID or a Hub address, with or without a revision
+/// and a subfolder — offers. One request for the repository's file list;
+/// nothing is received and nothing is kept.
+pub(crate) async fn list_hub(repository: &str, cancelled: &Cancelled) -> Result<HubListing> {
+    if repository.len() > 2048 {
+        return Err(Error::SourceInvalid);
+    }
+    let source = hub_source(repository, None, None)?;
+    let client = client()?;
+    let progress: Progress = Arc::new(|_| {});
+    let bytes = fetch(
+        &client,
+        hub_url(&source, &source.revision, "api", None)?,
+        MAX_METADATA_BYTES,
+        cancelled,
+        &progress,
+    )
+    .await?;
+    let metadata: HubMetadata =
+        serde_json::from_slice(&bytes).map_err(|_| Error::SourceUnavailable)?;
+    listing(&source, &metadata)
+}
+
+/// The Hub's search for repositories that hold GGUF files, most received
+/// first. The words are the person's own and go to the Hub as its search
+/// box would send them; nothing else is sent.
+fn search_url(query: &str) -> Result<url::Url> {
+    let query = query.trim();
+    if query.is_empty() || query.len() > 120 || query.chars().any(char::is_control) {
+        return Err(Error::SourceInvalid);
+    }
+    let mut address =
+        url::Url::parse("https://huggingface.co/api/models").map_err(|_| Error::SourceInvalid)?;
+    address
+        .query_pairs_mut()
+        .append_pair("search", query)
+        .append_pair("filter", "gguf")
+        .append_pair("sort", "downloads")
+        .append_pair("direction", "-1")
+        .append_pair("limit", &MAX_SEARCH_HITS.to_string());
+    Ok(address)
+}
+
+/// The repositories a search answer names, in the Hub's order. A row whose
+/// ID is not `owner/name` in the letters a listing takes is left out: it
+/// could not be opened from here.
+fn search_hits(bytes: &[u8]) -> Result<Vec<HubSearchHit>> {
+    let rows: Vec<HubSearchRow> =
+        serde_json::from_slice(bytes).map_err(|_| Error::SourceUnavailable)?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            let mut parts = row.id.split('/');
+            matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(owner), Some(name), None) if segment(owner) && segment(name)
+            )
+        })
+        .take(MAX_SEARCH_HITS)
+        .map(|row| HubSearchHit {
+            repository: row.id,
+            downloads: row.downloads,
+            likes: row.likes,
+        })
+        .collect())
+}
+
+pub(crate) async fn search_hub(query: &str, cancelled: &Cancelled) -> Result<Vec<HubSearchHit>> {
+    let client = client()?;
+    let progress: Progress = Arc::new(|_| {});
+    let bytes = fetch(
+        &client,
+        search_url(query)?,
+        MAX_METADATA_BYTES,
+        cancelled,
+        &progress,
+    )
+    .await?;
+    search_hits(&bytes)
+}
+
 pub(crate) fn inspect_local(
     directory: &Path,
     cancelled: &Cancelled,
@@ -1199,6 +1463,213 @@ mod tests {
         );
         let lfs: HubFile = serde_json::from_value(serde_json::json!({"rfilename":"config.json","size":2,"lfs":{"sha256":"a".repeat(64),"size":2}})).unwrap();
         assert_eq!(verify_hub_json(&lfs, b"{}"), Err(Error::Integrity));
+    }
+
+    fn hub_metadata(value: serde_json::Value) -> HubMetadata {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_repository_of_gguf_files_lists_each_one_pinned_to_the_resolved_commit() {
+        let commit = "b".repeat(40);
+        let hash = "c".repeat(64);
+        let metadata = hub_metadata(serde_json::json!({
+            "sha": commit,
+            "cardData": {"license": "apache-2.0"},
+            "gguf": {"chat_template": "{{ '<|im_start|>' + message['role'] }}"},
+            "siblings": [
+                {"rfilename": "README.md", "size": 12},
+                {"rfilename": "model-q8_0.gguf", "size": 900, "lfs": {"sha256": hash, "size": 900}},
+                {"rfilename": "model-q4_k_m.gguf", "size": 400, "lfs": {"sha256": hash, "size": 400}},
+                {"rfilename": "nested/model-q2_k.gguf", "size": 200, "lfs": {"sha256": hash, "size": 200}},
+            ],
+        }));
+        let source = hub_source("acme/chat-gguf", None, None).unwrap();
+        let listed = listing(&source, &metadata).unwrap();
+        assert_eq!(listed.repository, "acme/chat-gguf");
+        assert_eq!(listed.revision, commit);
+        assert_eq!(listed.license, "apache-2.0");
+        assert!(!listed.native);
+        assert_eq!(listed.template_known, Some(true));
+        assert_eq!(listed.max_file_bytes, MAX_DATA_BYTES);
+        // Smallest first, and nothing that is not a GGUF file.
+        assert_eq!(
+            listed
+                .files
+                .iter()
+                .map(|file| (file.path.as_str(), file.bytes, file.reason))
+                .collect::<Vec<_>>(),
+            vec![
+                ("nested/model-q2_k.gguf", 200, None),
+                ("model-q4_k_m.gguf", 400, None),
+                ("model-q8_0.gguf", 900, None),
+            ]
+        );
+        // Each address is the one a picked file is inspected by, and it
+        // resolves back to the same repository, commit, folder and name.
+        for file in &listed.files {
+            let address = file.url.as_deref().unwrap();
+            let (resolved, name) = gguf_hub_source(address).unwrap();
+            assert_eq!(resolved.repository, "acme/chat-gguf");
+            assert_eq!(resolved.revision, commit);
+            let path = match &resolved.subfolder {
+                Some(folder) => format!("{folder}/{name}"),
+                None => name,
+            };
+            assert_eq!(path, file.path);
+        }
+    }
+
+    #[test]
+    fn a_listed_file_that_cannot_be_received_says_why_and_carries_no_address() {
+        let commit = "d".repeat(40);
+        let hash = "e".repeat(64);
+        let metadata = hub_metadata(serde_json::json!({
+            "sha": commit,
+            "gguf": {"chat_template": "a template no built-in answers to"},
+            "siblings": [
+                {"rfilename": "huge.gguf", "size": MAX_DATA_BYTES + 1, "lfs": {"sha256": hash, "size": MAX_DATA_BYTES + 1}},
+                {"rfilename": "part-00001-of-00002.gguf", "size": 500, "lfs": {"sha256": hash, "size": 500}},
+                {"rfilename": "unhashed.gguf", "size": 500},
+                {"rfilename": "mismatch.gguf", "size": 500, "lfs": {"sha256": hash, "size": 499}},
+                {"rfilename": "odd name.gguf", "size": 500, "lfs": {"sha256": hash, "size": 500}},
+                {"rfilename": "tiny.gguf", "size": 8, "lfs": {"sha256": hash, "size": 8}},
+                {"rfilename": "fits.GGUF", "size": 500, "lfs": {"sha256": hash, "size": 500}},
+            ],
+        }));
+        let source = hub_source("acme/chat-gguf", None, None).unwrap();
+        let listed = listing(&source, &metadata).unwrap();
+        assert_eq!(listed.template_known, Some(false));
+        assert_eq!(listed.license, "License metadata unavailable");
+        let reasons: BTreeMap<_, _> = listed
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), (file.reason, file.url.is_some())))
+            .collect();
+        assert_eq!(reasons["huge.gguf"], (Some("size_limit"), false));
+        assert_eq!(
+            reasons["part-00001-of-00002.gguf"],
+            (Some("model_format_not_supported"), false)
+        );
+        assert_eq!(
+            reasons["unhashed.gguf"],
+            (Some("source_hash_unavailable"), false)
+        );
+        assert_eq!(
+            reasons["mismatch.gguf"],
+            (Some("source_hash_unavailable"), false)
+        );
+        assert_eq!(reasons["odd name.gguf"], (Some("source_invalid"), false));
+        assert_eq!(
+            reasons["tiny.gguf"],
+            (Some("weights_format_invalid"), false)
+        );
+        assert_eq!(reasons["fits.GGUF"], (None, true));
+    }
+
+    #[test]
+    fn a_listing_reads_only_the_subfolder_asked_for_and_marks_a_decision_layout() {
+        let commit = "f".repeat(40);
+        let hash = "a".repeat(64);
+        let metadata = hub_metadata(serde_json::json!({
+            "sha": commit,
+            "siblings": [
+                {"rfilename": "elsewhere/other.gguf", "size": 300, "lfs": {"sha256": hash, "size": 300}},
+                {"rfilename": "multilingual/rl_agent_config.json", "size": 40},
+                {"rfilename": "multilingual/model.safetensors", "size": 300, "lfs": {"sha256": hash, "size": 300}},
+            ],
+        }));
+        let source = hub_source(
+            "https://huggingface.co/acme/decision/tree/main/multilingual",
+            None,
+            None,
+        )
+        .unwrap();
+        let listed = listing(&source, &metadata).unwrap();
+        assert!(listed.native);
+        assert!(listed.files.is_empty());
+        assert_eq!(listed.template_known, None);
+        // The same repository without the subfolder is not that layout, and
+        // its one GGUF file is offered.
+        let whole = hub_source("acme/decision", None, None).unwrap();
+        let listed = listing(&whole, &metadata).unwrap();
+        assert!(!listed.native);
+        assert_eq!(listed.files.len(), 1);
+        assert_eq!(listed.files[0].path, "elsewhere/other.gguf");
+        // A commit the Hub did not resolve to a full hash lists nothing.
+        let unresolved = hub_metadata(serde_json::json!({"sha": "main", "siblings": []}));
+        assert_eq!(listing(&whole, &unresolved), Err(Error::Manifest));
+    }
+
+    #[test]
+    fn a_search_asks_the_hub_for_gguf_repositories_and_keeps_only_ids_a_listing_takes() {
+        let address = search_url("  qwen coder  ").unwrap();
+        assert_eq!(address.host_str(), Some("huggingface.co"));
+        assert_eq!(address.path(), "/api/models");
+        let asked: BTreeMap<_, _> = address.query_pairs().into_owned().collect();
+        assert_eq!(asked["search"], "qwen coder");
+        assert_eq!(asked["filter"], "gguf");
+        assert_eq!(asked["sort"], "downloads");
+        assert_eq!(asked["limit"], MAX_SEARCH_HITS.to_string());
+        for refused in ["", "   ", "line\nbreak", &"x".repeat(121)] {
+            assert_eq!(
+                search_url(refused),
+                Err(Error::SourceInvalid),
+                "{refused:?}"
+            );
+        }
+        let answer = serde_json::json!([
+            {"id": "acme/chat-gguf", "downloads": 1200, "likes": 7, "tags": ["gguf"]},
+            {"id": "acme/no-counts"},
+            {"id": "not-a-repository"},
+            {"id": "acme/odd name"},
+            {"id": "acme/deep/er"},
+        ]);
+        assert_eq!(
+            search_hits(&serde_json::to_vec(&answer).unwrap()).unwrap(),
+            vec![
+                HubSearchHit {
+                    repository: "acme/chat-gguf".to_owned(),
+                    downloads: 1200,
+                    likes: 7,
+                },
+                HubSearchHit {
+                    repository: "acme/no-counts".to_owned(),
+                    downloads: 0,
+                    likes: 0,
+                },
+            ]
+        );
+        assert_eq!(search_hits(b"{}"), Err(Error::SourceUnavailable));
+        let many: Vec<_> = (0..MAX_SEARCH_HITS + 5)
+            .map(|index| serde_json::json!({"id": format!("acme/model-{index}")}))
+            .collect();
+        assert_eq!(
+            search_hits(&serde_json::to_vec(&many).unwrap())
+                .unwrap()
+                .len(),
+            MAX_SEARCH_HITS
+        );
+    }
+
+    #[test]
+    fn only_a_numbered_piece_of_several_reads_as_a_split_file() {
+        for name in [
+            "model-00001-of-00003.gguf",
+            "Model-Q4_K_M-00002-of-00002.GGUF",
+        ] {
+            assert!(split_part(name), "{name}");
+        }
+        for name in [
+            "model-q4_k_m.gguf",
+            "model-00001-of-00003.bin",
+            "model-0001-of-0003.gguf",
+            "model-00001-in-00003.gguf",
+            "of-00003.gguf",
+            ".gguf",
+        ] {
+            assert!(!split_part(name), "{name}");
+        }
     }
 
     #[test]

@@ -44,15 +44,24 @@ pub(crate) fn native(
             return Err(Error::Cancelled);
         }
         let mut entry = entry.map_err(|_| Error::Integrity)?;
-        let path = entry.path().map_err(|_| Error::UnsafePath)?.into_owned();
-        let name = path.to_str().ok_or(Error::UnsafePath)?;
+        let kind = entry.header().entry_type();
+        let listed = entry.path().map_err(|_| Error::UnsafePath)?.into_owned();
+        let listed = listed.to_str().ok_or(Error::UnsafePath)?;
+        // A folder's own entry closes its name with `/` — the first line of
+        // the pinned release archive (`llama-b11669/`). `relative` reads a
+        // name without one, and the folder is named once like any file.
+        let name = if kind.is_dir() {
+            listed.trim_end_matches('/')
+        } else {
+            listed
+        };
         relative(name)?;
+        let path = PathBuf::from(name);
         if !seen.insert(path.clone()) {
             return Err(Error::UnsafePath);
         }
         let size = entry.size();
         budget.take(size)?;
-        let kind = entry.header().entry_type();
         if kind.is_dir() {
             continue;
         }

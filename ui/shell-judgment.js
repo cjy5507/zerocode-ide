@@ -174,7 +174,7 @@ const judgmentProviderController = {
     document.addEventListener("visibilitychange", () => {
       if (managedJudgmentController.visible()) void refreshTypeSafe();
     });
-    el("judgment-edit-linked")?.addEventListener("click", () => showSettingsPane("api-routers"));
+    el("judgment-edit-linked")?.addEventListener("click", () => el("model-sources")?.scrollIntoView?.({ block: "start" }));
     el("judgment-provider-kind")?.addEventListener("change", () => this.changeKind());
     for (const mode of ["managed", "manual"]) {
       el(`judgment-local-${mode}`)?.addEventListener("click", () => {

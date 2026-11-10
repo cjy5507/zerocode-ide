@@ -59,5 +59,25 @@
       "limit_field": null,
       "used_field": null
     }
+  },
+  {
+    "id": "lmstudio",
+    "name": "LM Studio",
+    "base_url": "http://localhost:1234/v1",
+    "auth": {
+      "header": "Authorization",
+      "scheme": "Bearer"
+    },
+    "models": {
+      "path": "/models",
+      "id_field": "id",
+      "context_field": null,
+      "pricing_field": null
+    },
+    "usage": {
+      "path": null,
+      "limit_field": null,
+      "used_field": null
+    }
   }
 ]

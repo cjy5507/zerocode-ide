@@ -2599,15 +2599,21 @@ mod tests {
                     .0
             })
             .collect();
+        // The page holds the connections too since the two panes became one
+        // (2026-11-10): the old editor's three choices, the received models'
+        // filter under 「이 컴퓨터」, and the connection editor's preset and
+        // key choice — and still no control that names a feature's mode.
         assert_eq!(
             select_ids,
             [
-                "managed-judgment-filter",
                 "judgment-provider-kind",
                 "judgment-protocol",
                 "judgment-listed-model",
+                "managed-judgment-filter",
+                "router-preset-select",
+                "connection-auth",
             ],
-            "model selection and library filters do not add per-feature mode controls"
+            "model selection, the library filter and the connection editor add no per-feature mode controls"
         );
         assert!(card.contains("id=\"judgment-provider-kind\""));
         // The worker rows and the classifier stand on the orchestration pane

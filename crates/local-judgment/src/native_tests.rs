@@ -77,8 +77,14 @@ async fn native_inspection_reports_a_file_instead_of_a_directory() {
     );
 }
 
+/// The llama.cpp runtime is validated on this platform (2026-11-10: the
+/// observed proof — a public 1.1 GB GGUF received, started under the offline
+/// policy, nine real answers, three refusals, cancellation, stop and
+/// parent-exit cleanup with no process left, peak 2.3 GB under the 4 GiB
+/// cap). A GGUF file with a known template is therefore a model this
+/// computer runs, not one it can only keep.
 #[tokio::test]
-async fn native_inspection_reports_the_detected_template_without_claiming_validation() {
+async fn native_inspection_reports_the_detected_template_and_a_runtime_this_mac_runs() {
     let (_root, manager, inspection) = inspected().await;
     let value = serde_json::to_value(inspection).unwrap();
     manager.shutdown();
@@ -86,9 +92,10 @@ async fn native_inspection_reports_the_detected_template_without_claiming_valida
         value["inputTemplate"], "chatml",
         "native_input_template_was_lost"
     );
-    assert_eq!(value["local"]["supported"], false);
-    assert_eq!(value["local"]["downloadOnly"], true);
-    assert_eq!(value["local"]["reason"], "engine_unverified");
+    assert_eq!(value["local"]["supported"], true);
+    assert_eq!(value["local"]["downloadOnly"], false);
+    assert_eq!(value["local"]["reason"], serde_json::Value::Null);
+    assert_eq!(value["readyForInstall"], true);
 }
 
 #[tokio::test]

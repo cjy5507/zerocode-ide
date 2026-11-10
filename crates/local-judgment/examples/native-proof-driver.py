@@ -24,6 +24,12 @@ import psutil
 POLICY = "(version 1)(allow default)(deny network-outbound)"
 INTERVAL = 0.1
 CLEANUP_SECONDS = 5
+# How long a cancellation window waits for the native child to appear. The
+# runtime hashes the whole model file before it starts that child, so the
+# wait grows with the file and with the machine's load: 3 s ran out on a
+# 1.1 GB model beside a release lane (2026-11-10). The cancellation must
+# still overlap an observed child — only the wait for it is longer.
+NATIVE_WAIT_SECONDS = 30
 
 
 def fingerprint(path):
@@ -175,7 +181,7 @@ class Observer:
             self.reply("ready")
         elif self.phase in ("load_cancel_window", "check_cancel_window"):
             # Cancellation must overlap an observed native child, not a mock.
-            until = time.monotonic() + 3
+            until = time.monotonic() + NATIVE_WAIT_SECONDS
             while not self.native_present():
                 self.sample()
                 if time.monotonic() >= until:

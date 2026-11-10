@@ -369,8 +369,11 @@ async fn prove(options: &Options, manager: &Arc<Manager>, report: &mut Value) ->
         }
     }
     for kind in ["choice", "score", "noul"] {
+        // Instructions the protocol refuses: a number. Absent instructions
+        // stopped being a refusal when Jev's instruction values were carried
+        // across providers (0fd193a39), so `null` is answered now.
         let mut invalid_question = question(kind);
-        invalid_question["instructions"] = Value::Null;
+        invalid_question["instructions"] = json!(7);
         let valid = json!({"model":provider.identity(),"state":"A controlled invalid request.","questions":{"answer":question(kind)}});
         let prepared = provider.prepare(serde_json::to_vec(&valid)?)?;
         let mut incoming: Value = serde_json::from_slice(&prepared.body)?;

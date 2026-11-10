@@ -96,11 +96,20 @@ const managedJudgmentController = {
     return JSON.stringify([this.importModel?.id, this.importModel?.revision, el("managed-judgment-import-path").value.trim()]);
   },
 
-  failure(error) {
+  /* `model`, when the failure is one model's: a general model that ran and
+   * answered out of shape is said as that, not as a server's protocol. */
+  failure(error, model = null) {
     const token = typeof error === "string" ? error : error?.code ?? error?.kind ?? error?.message;
     if (token === "settings_changed") return judgmentProviderController.failure(token);
     if (token === "cancelled") return t("settings.managed.cancelled", "취소했습니다. 현재 적용된 모델은 바꾸지 않았습니다.");
+    if (token === "native_protocol_failed" && model?.engine === "llama_cpp") {
+      return t("settings.gguf.answersRefused", "모델은 실행됐지만 판단 질문에 정해진 모양으로 답하지 못했습니다. 작은 모델일수록 자주 그렇습니다. 더 큰 모델이나 다른 모델을 고르세요. 지금 판단 모델은 그대로입니다.");
+    }
     switch (token) {
+      case "source_missing":
+        return t("settings.managed.error.sourceMissing", "이 이름의 저장소를 찾지 못했습니다. 이름을 확인하세요. 로그인이나 이용 동의가 필요한 모델은 여기서 받을 수 없습니다.");
+      case "source_no_models":
+        return t("settings.managed.error.noModels", "이 저장소에는 받을 수 있는 모델 파일이 없습니다. GGUF 파일이 있는 저장소나 판단 모델 저장소를 고르세요.");
       case "insufficient_space":
         return t("settings.managed.error.space", "저장 공간이 부족합니다. 사용하지 않는 모델을 정리한 뒤 다시 시도하세요.");
       case "runtime_missing":
@@ -430,7 +439,8 @@ const managedJudgmentController = {
         model = this.snapshot.models.find((entry) => entry.id === model.id && entry.revision === model.revision);
         if (!model?.installed) throw "model_missing";
       }
-      if (this.runtimeFor(model)?.state === "missing") {
+      // An earlier pin's runtime is replaced the way a missing one is installed.
+      if (["missing", "outdated"].includes(this.runtimeFor(model)?.state)) {
         await this.completed(model.runtime ? "managed_judgment_prepare_model_runtime" : "managed_judgment_prepare_runtime", model.runtime ? this.modelArgs(model) : {});
         model = this.snapshot.models.find((entry) => entry.id === model.id && entry.revision === model.revision);
       }
@@ -489,7 +499,7 @@ const managedJudgmentController = {
 
   actionWords(action, model) {
     switch (action) {
-      case "prepare": return t("settings.managed.prepare", "실행 환경 설치");
+      case "prepare": return this.runtimeFor(model)?.state === "outdated" ? t("settings.managed.updateRuntime", "실행 환경 업데이트") : t("settings.managed.prepare", "실행 환경 설치");
       case "install": return t("settings.managed.download", "다운로드");
       case "activate": return model.installed ? t("settings.managed.activate", "실행하고 적용") : t("settings.models.installUse", "설치하고 사용");
       case "inspect-source": return t("settings.managed.inspectSource", "주소로 확인");
@@ -583,6 +593,7 @@ const managedJudgmentController = {
         : t("settings.managed.downloadOnlyState", "이 컴퓨터의 직접 실행은 아직 검증 전입니다. 모델 주소로 확인하면 파일만 받아 둘 수 있습니다.");
     }
     if (!this.localSupported(model)) return this.failure(model.local?.reason ?? model.compatibilityReason ?? "platform_unsupported");
+    if (model.installed && this.runtimeFor(model)?.state === "outdated") return t("settings.managed.outdatedRuntime", "모델 파일 설치됨 · 실행 환경에 새 판이 있습니다. 실행하면 먼저 업데이트합니다.");
     if (model.installed && this.runtimeFor(model)?.state !== "ready") return t("settings.managed.needsRuntime", "모델 파일 설치됨 · 이 모델의 실행 환경을 설치한 뒤 연결하세요.");
     return model.installed ? t("settings.managed.installed", "설치됨 · 아직 적용하지 않음") : t("settings.managed.notInstalled", "아직 다운로드하지 않음");
   },
@@ -634,7 +645,7 @@ const managedJudgmentController = {
     el("managed-judgment-catalog-file").disabled = busy;
     el("managed-judgment-register-submit").disabled = busy || !snapshot?.catalogFingerprint || !el("managed-judgment-catalog-file").files?.length;
     el("managed-judgment-refresh").disabled = this.loading;
-    el("managed-judgment-prepare").disabled = busy || !snapshot || snapshot.runtime.state !== "missing";
+    el("managed-judgment-prepare").disabled = busy || !snapshot || !["missing", "outdated"].includes(snapshot.runtime.state);
     el("managed-judgment-import-submit").disabled = busy || !this.importModel;
     const runtime = el("managed-judgment-runtime");
     const modelRuntimes = snapshot?.models.length > 0 && snapshot.models.every((model) => model.runtime);
@@ -720,14 +731,14 @@ const managedJudgmentController = {
         button.textContent = this.actionWords(action, model);
         button.disabled = busy;
       }
-      row.buttons.prepare.hidden = !local || !model.runtime || this.runtimeFor(model)?.state !== "missing";
+      row.buttons.prepare.hidden = !local || !model.runtime || !["missing", "outdated"].includes(this.runtimeFor(model)?.state);
       row.buttons.install.hidden = model.installed || !ways.install;
       row.buttons.import.hidden = model.installed || !ways.import;
       row.buttons.activate.hidden = !local;
       row.buttons.connect.hidden = !ways.connect;
       row.buttons.connect.disabled ||= this.connectionMatches(model);
       row.buttons["inspect-source"].hidden = model.installed || !ways["inspect-source"];
-      row.buttons.activate.disabled ||= applied || !["ready", "missing"].includes(this.runtimeFor(model)?.state);
+      row.buttons.activate.disabled ||= applied || !["ready", "missing", "outdated"].includes(this.runtimeFor(model)?.state);
       row.buttons.stop.hidden = !running || restoring;
       row.buttons.remove.hidden = !model.installed;
       row.buttons.remove.disabled ||= configured || running;

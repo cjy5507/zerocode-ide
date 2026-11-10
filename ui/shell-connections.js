@@ -1,6 +1,8 @@
-/* Settings › 모델 and 모델 연결, as the person approved them (t-75762 v2,
- * 2026-10-26): two choices — the coding model and the judgment model — and
- * one page of where each model is reached. Every name a list shows comes
+/* Settings › 모델 — the two choices the person approved (t-75762 v2,
+ * 2026-10-26: the coding model and the judgment model) and, since
+ * 2026-11-10, where each model is reached on the same page: the four places
+ * a model comes from, each with its own door for adding one, and 「이
+ * 컴퓨터」 receiving a model where its rows stand. Every name a list shows comes
  * from zo's own model list (`zo_model_list`, the catalog the model menu
  * already reads) or the saved connections (`model_connections`); every
  * state a row wears comes from a real answer — zo's reports, a check, the
@@ -14,8 +16,8 @@ const MODEL_STATES = Object.freeze({
   working: { key: "settings.models.state.working", word: "동작 중", badge: "connected" },
   running: { key: "settings.models.state.running", word: "실행 중", badge: "connected" },
   usable: { key: "settings.models.state.usable", word: "쓸 수 있음", badge: "connected" },
-  nokey: { key: "settings.models.state.nokey", word: "키를 찾지 못했습니다", badge: "error", todo: "settings.models.todo.nokey", todoWord: "모델 연결에서 이 연결의 키를 다시 붙여 넣으세요." },
-  unreadable: { key: "settings.models.state.nokey", word: "키를 찾지 못했습니다", badge: "error", todo: "settings.models.todo.unreadable", todoWord: "이 연결의 키는 창이 읽지 못하는 환경 변수({{env}})에 있습니다. 모델 연결의 「설정」에서 키를 붙여 넣으세요." },
+  nokey: { key: "settings.models.state.nokey", word: "키를 찾지 못했습니다", badge: "error", todo: "settings.models.todo.nokey", todoWord: "아래 「연결」에서 이 연결의 「설정」을 눌러 키를 다시 붙여 넣으세요." },
+  unreadable: { key: "settings.models.state.nokey", word: "키를 찾지 못했습니다", badge: "error", todo: "settings.models.todo.unreadable", todoWord: "이 연결의 키는 창이 읽지 못하는 환경 변수({{env}})에 있습니다. 이 연결의 「설정」에서 키를 붙여 넣으세요." },
   badkey: { key: "settings.models.state.badkey", word: "키가 맞지 않습니다", badge: "error", todo: "settings.models.todo.badkey", todoWord: "키를 다시 붙여 넣으세요. 키 앞뒤에 빈칸이 들어갔는지도 보세요." },
   down: { key: "settings.models.state.down", word: "서버가 응답하지 않습니다", badge: "error", todo: "settings.models.todo.down", todoWord: "서버를 켜거나 주소를 확인하세요. 켜지면 다시 고를 수 있습니다." },
   schema: { key: "settings.models.state.schema", word: "판단 답을 정해진 모양으로 내지 못합니다", badge: "error", todo: "settings.models.todo.schema", todoWord: "다른 모델을 고르세요. 작은 모델일수록 자주 그렇습니다." },
@@ -31,7 +33,28 @@ const MODEL_STATES = Object.freeze({
   busy: { key: "settings.models.state.busy", word: "다른 작업 중", badge: "checking" },
   changed: { key: "settings.models.state.changed", word: "설정이 방금 바뀜", badge: "checking" },
   none: { key: "settings.models.state.none", word: "없음", badge: "unchecked" },
+  kept: { key: "settings.models.state.kept", word: "받아 둠", badge: "unchecked" },
 });
+
+/* An engine that runs a received model, by the name people know it by; one
+ * the table does not name is said by its own id. */
+const MODEL_ENGINES = Object.freeze({
+  llama_cpp: { name: "llama.cpp", about: () => t("settings.models.engine.llama", "GGUF 모델을 돌리는 실행 엔진") },
+  laya: { name: "Laya", about: () => t("settings.models.engine.decision", "판단 전용 모델을 돌리는 실행 환경") },
+  transformers_system_one: { name: "System One", about: () => t("settings.models.engine.decision", "판단 전용 모델을 돌리는 실행 환경") },
+});
+
+/* Where a runtime stands, in the page's words and badges. */
+const MODEL_RUNTIME_STATES = Object.freeze({
+  ready: { key: "settings.models.runtime.ready", word: "설치됨", badge: "connected" },
+  outdated: { key: "settings.models.runtime.outdated", word: "업데이트 있음", badge: "checking" },
+  missing: { key: "settings.models.runtime.missing", word: "아직 설치 안 함", badge: "unchecked" },
+  unverified: { key: "settings.models.runtime.unverified", word: "검증 전", badge: "unchecked" },
+});
+
+/* How long a window keeps an answer about the engines' newest releases
+ * before it asks again. */
+const RUNTIME_NEWS_EVERY_MS = 60 * 60 * 1000;
 
 /* What a failure a command answered is, in the table's states: a door's
  * token (`no_key`, `unauthorized`, `transport`, `schema_…`, `http_503`…) or
@@ -179,9 +202,12 @@ const modelConnectionsController = {
   picking: null, draft: null, said: new Map(),
   /* The first question, while it stands. */
   setup: null, setupDismissed: false,
+  /* 「모델 받기」, open or folded, and the engines' newest releases as their
+   * homes last answered — by runtime id, with when this window asked. */
+  receiving: false, runtimeNews: new Map(), runtimeNewsAt: null,
 
   show(view) {
-    showSettingsPane("api-routers");
+    showSettingsPane("judgment-models");
     this.paintView(view);
   },
   paintView(view) {
@@ -193,6 +219,66 @@ const modelConnectionsController = {
   add() {
     this.startSetup("add");
     showSettingsPane("judgment-models");
+    el("model-setup")?.scrollIntoView?.({ block: "nearest" });
+  },
+  /* 「API 키 추가」: the first question, answered 「API 키」 at once. */
+  addKey() {
+    if (this.busy) return;
+    this.startSetup("add");
+    this.choose("key");
+    el("model-setup")?.scrollIntoView?.({ block: "nearest" });
+  },
+  /* 「로컬 서버 연결」: the editor, opened on the first preset that names
+   * this computer — another preset or the person's own address is picked
+   * there. */
+  addLocalServer() {
+    const preset = routerPresets.find((row) => this.location(row.base_url) === "local");
+    const id = preset?.id ?? "custom";
+    onRouterPresetChange(id);
+    el("router-preset-select").value = id;
+    if (!preset) {
+      el("connection-auth").value = "none";
+      this.addFields();
+    }
+    say(el("connection-form-title"), () => t("settings.models.addLocalServer", "로컬 서버 연결"));
+    this.show("add");
+    el("router-base-url-input")?.focus();
+  },
+  /* 「모델 받기」, opened or folded; opened, the address field takes the keys. */
+  receive(open = !this.receiving) {
+    this.receiving = open;
+    this.paintReceive();
+    if (open) {
+      el("model-receive").scrollIntoView?.({ block: "nearest" });
+      el("judgment-source-repository")?.focus({ preventScroll: true });
+    }
+  },
+  paintReceive() {
+    const panel = el("model-receive");
+    const toggle = el("model-receive-toggle");
+    if (!panel || !toggle) return;
+    // A model being received keeps its panel on the page whatever was pressed.
+    const flow = judgmentModelSourceController.flow;
+    const open = this.receiving || judgmentModelSourceController.busy || Boolean(flow && !flow.done && !flow.failed);
+    panel.hidden = !open;
+    toggle.setAttribute("aria-expanded", String(open));
+  },
+  /* The engines' newest releases, asked of their homes once an hour while
+   * the page stands, and only when a runtime here names a home. */
+  async askRuntimeNews() {
+    const rows = managedJudgmentController.snapshot?.runtimes ?? [];
+    if (!rows.some((row) => row.home)) return;
+    const now = performance.now();
+    if (this.runtimeNewsAt !== null && now - this.runtimeNewsAt < RUNTIME_NEWS_EVERY_MS) return;
+    this.runtimeNewsAt = now;
+    try {
+      const news = (await invoke("managed_judgment_runtime_news")) ?? [];
+      this.runtimeNews = new Map(news.map((row) => [row.id, row]));
+      this.renderConnections();
+    } catch {
+      // The rows say what this computer holds; the homes are asked again later.
+      this.runtimeNewsAt = null;
+    }
   },
   /* A server the presets do not name, by its address — the editor. */
   addManual() {
@@ -213,7 +299,7 @@ const modelConnectionsController = {
     if (el("connection-auth").value !== "new") el("router-key-input").value = "";
     el("connection-auth-note").textContent = el("connection-auth").value === "saved"
       ? t("settings.connections.referenceHint", "저장된 키는 이 연결의 참조로만 사용합니다. 화면에 읽어오지 않습니다.")
-      : t("settings.connections.registrationHint", "연결을 등록해도 지금 쓰는 모델은 바뀌지 않습니다. 「모델」에서 고르세요.");
+      : t("settings.connections.registrationHint", "연결을 등록해도 지금 쓰는 모델은 바뀌지 않습니다. 등록한 뒤 위의 두 모델에서 고르세요.");
   },
   preset(preset) {
     el("connection-auth").value = (preset && this.location(preset.base_url) === "local") || el("router-key-input").disabled ? "none" : "new";
@@ -268,6 +354,7 @@ const modelConnectionsController = {
     this.autoSetup();
     this.render();
     this.quietSoon();
+    void this.askRuntimeNews();
   },
 
   /* ---- the kept checks (t-76500) ----------------------------------------- */
@@ -691,6 +778,19 @@ const modelConnectionsController = {
     else if (choice === "local") void this.checkLocal();
     else this.renderSetup();
   },
+  /* 「다시 읽기」: zo's list read fresh — a login made in a terminal since
+   * the page opened stands on it after. */
+  async rereadLogins() {
+    if (this.busy) return;
+    const button = el("model-logins-refresh");
+    if (button) button.disabled = true;
+    try {
+      this.zo = await invoke("zo_model_list", { fresh: true });
+    } catch {
+      // The rows keep what was last read.
+    }
+    this.render();
+  },
   async checkLogins() {
     const setup = this.setup;
     setup.checking = true;
@@ -998,15 +1098,22 @@ const modelConnectionsController = {
 
   /* The 이 컴퓨터 row's buttons are the managed server's own commands; a
    * refusal because the settings moved first is said as such (t-59744 ⑥). */
-  async managedAction(action, model) {
+  async managedAction(action, model, hand = null) {
     this.said.delete("managed");
+    if (model) this.said.delete(`managed:${model.id}`);
     managedJudgmentController.lastError = null;
     if (action === "stop") await managedJudgmentController.perform("managed_judgment_stop", { serverId: managedJudgmentController.snapshot.server.id });
     else if (action === "start") await managedJudgmentController.activate(model);
     else if (action === "cancel") await managedJudgmentController.cancel();
+    // Taking a model's files off this computer is the person's own press.
+    else if (action === "remove") await managedJudgmentController.perform("managed_judgment_remove", managedJudgmentController.modelArgs(model), { hand });
+    // A runtime is prepared through a model it runs.
+    else if (action === "runtime") await managedJudgmentController.perform("managed_judgment_prepare_model_runtime", managedJudgmentController.modelArgs(model));
     else await refreshTypeSafe();
     const failed = managedJudgmentController.lastError;
     if ((typeof failed === "string" ? failed : failed?.message ?? failed?.code) === "settings_changed") this.said.set("managed", { state: "changed" });
+    // What a press did not do is said on the row it was pressed on.
+    else if (failed && model) this.said.set(`managed:${model.id}`, { words: managedJudgmentController.failure(failed, model) });
     this.render();
   },
 
@@ -1231,7 +1338,7 @@ const modelConnectionsController = {
     const coding = this.state?.coding;
     const connection = coding && this.state.connections.find((row) => row.id === coding.id);
     const words = [t("settings.models.routeCoding", "코딩: {{model}}", { model: this.state?.codingModel ?? "—" })];
-    if (connection) words.push(t("settings.models.routeConnection", "「{{name}}」 연결로 보냅니다. 주소와 키는 모델 연결의 「설정」에서 바꿉니다.", { name: connection.provider.name }));
+    if (connection) words.push(t("settings.models.routeConnection", "「{{name}}」 연결로 보냅니다. 주소와 키는 「연결」의 그 줄 「설정」에서 바꿉니다.", { name: connection.provider.name }));
     const judged = judgmentProviderWords();
     if (judged) words.push(t("settings.models.routeJudgment", "판단: {{model}}", { model: judged }));
     return words.join(" · ");
@@ -1702,19 +1809,20 @@ const modelConnectionsController = {
     block.append(lines);
     if (!managed.length) {
       const note = modelNode("div", "settings-notice model-verdict");
-      note.append(modelNode("strong", "", t("settings.models.noManaged", "이 컴퓨터에 받은 판단 모델이 없습니다.")), modelNode("span", "model-result-sub", t("settings.models.noManagedTodo", "「고급 — 이 컴퓨터에서 쓸 판단 모델 받기」에서 받으면 여기에 나타납니다.")));
+      note.append(modelNode("strong", "", t("settings.models.noManagedYet", "이 컴퓨터에 받은 모델이 없습니다.")), modelNode("span", "model-result-sub", t("settings.models.noManagedTodo", "「모델 받기」로 Hugging Face에서 찾아 받으면 여기에 나타납니다.")));
       const row = modelNode("div", "settings-action-row");
-      row.append(this.button(t("settings.models.receiveTitle", "이 컴퓨터에서 쓸 판단 모델 받기"), () => {
+      const receive = this.button(t("settings.models.receive", "모델 받기"), () => {
         this.closeSetup();
-        el("model-advanced").open = true;
-        el("judgment-model-source")?.scrollIntoView({ block: "nearest" });
-      }));
+        this.receive(true);
+      });
+      receive.dataset.modelSetupReceive = "";
+      row.append(receive);
       note.append(row);
       block.append(note);
     }
     const note = modelNode("div", "settings-notice model-verdict");
     note.append(modelNode("strong", "", t("settings.models.localOnlyJudgment", "이 방법은 판단 모델만 채웁니다.")),
-      modelNode("span", "model-result-sub", t("settings.models.localOnlyJudgmentTodo", "코딩 모델은 ① 로그인 계정이나 ② API 키로 하나 더 연결하세요. 이 컴퓨터에서 큰 코딩 모델을 돌리는 것은 고급에서 합니다.")));
+      modelNode("span", "model-result-sub", t("settings.models.localOnlyJudgmentTodo", "코딩 모델은 ① 로그인 계정이나 ② API 키로 하나 더 연결하세요. 이 컴퓨터에서 도는 코딩 모델은 Ollama · LM Studio 같은 서버를 「로컬 서버 연결」로 잇습니다.")));
     const row = modelNode("div", "settings-action-row");
     row.append(this.button(t("settings.models.alsoLogin", "① 로그인 계정도 연결하기"), () => {
       const carried = this.setup;
@@ -1852,19 +1960,20 @@ const modelConnectionsController = {
   renderConnections() {
     const holder = el("model-connection-groups");
     if (!holder) return;
+    const lines = (id) => holder.querySelector(`[data-group-lines="${id}"]`);
+    const failed = el("model-connections-failed");
     if (this.failed && !this.state) {
-      holder.replaceChildren(modelNode("p", "settings-hint", this.failure(this.failed)), this.button(t("settings.managed.refresh", "상태 새로고침"), () => void this.refresh()));
+      failed.hidden = false;
+      failed.replaceChildren(modelNode("span", "", this.failure(this.failed)), this.button(t("settings.managed.refresh", "상태 새로고침"), () => void this.refresh()));
+      for (const id of ["login", "key", "local", "jev"]) lines(id)?.replaceChildren();
+      el("model-runtimes").hidden = true;
       return;
     }
-    const group = (id, title, lines, after = []) => {
-      const section = modelNode("section", "model-group");
-      section.dataset.connectionGroup = id;
-      section.append(modelNode("h3", "model-role-title", title), ...after);
-      const list = modelNode("div", "model-lines");
-      list.append(...lines);
-      section.append(list);
-      return section;
-    };
+    failed.hidden = true;
+    failed.replaceChildren();
+    // A group with no row says so in one line — once what would fill it has
+    // been read; before that it says nothing rather than 「없음」.
+    const fill = (id, rows, empty) => lines(id).replaceChildren(...(rows.length ? rows : empty ? [modelNode("p", "settings-hint model-group-empty", empty)] : []));
     const line = (id, name, sub, state, extra, actions) => {
       const row = modelNode("div", "model-line");
       row.dataset.connectionId = id;
@@ -1923,8 +2032,11 @@ const modelConnectionsController = {
       if (connection.legacyKey && this.adopting === connection.id) row.append(this.legacyConfirm(connection));
       (isLocal ? local : remote).push(row);
     }
+    const snapshot = managedJudgmentController.snapshot;
     const managedLines = this.judgmentRows().filter((row) => row.kind === "managed").map((row) => {
-      const state = this.managedState(row.model);
+      // A model received and neither chosen nor running is kept, not absent.
+      const standing = this.managedState(row.model);
+      const state = standing === "none" && row.model.installed ? "kept" : standing;
       const reason = this.managedReason(row.model);
       const extra = [];
       const about = {
@@ -1935,45 +2047,113 @@ const modelConnectionsController = {
       }[state];
       if (reason) extra.push(modelNode("span", "model-line-note", reason));
       if (about) extra.push(modelNode("span", "model-line-note", about));
+      const said = this.said.get(row.key);
+      if (said?.words) {
+        const note = modelNode("span", "model-line-note", said.words);
+        note.dataset.managedSaid = "";
+        note.setAttribute("role", "alert");
+        extra.push(note);
+      }
+      if (!managedJudgmentController.localSupported(row.model)) {
+        extra.push(modelNode("span", "model-line-note", managedJudgmentController.modelState(row.model)));
+      }
       const actions = [...this.usePills((role) => role === "judgment" && judgmentKey === row.key)];
       const action = (word, name, disabled = false) => {
-        const button = this.button(word, () => void this.managedAction(name, row.model));
+        const button = this.button(word, () => void this.managedAction(name, row.model, handNow()));
         button.dataset.managedAction = name;
         button.disabled ||= disabled || managedJudgmentController.busy;
         actions.push(button);
+        return button;
       };
+      const runnable = managedJudgmentController.localSupported(row.model);
       if (state === "running" || state === "restarting" || state === "checking") action(t("settings.models.stop", "멈추기"), "stop");
-      if (state === "stopped" || state === "none") action(t("settings.models.restart", "다시 시작"), "start", !managedJudgmentController.localSupported(row.model));
+      if (state === "stopped") action(t("settings.models.restart", "다시 시작"), "start", !runnable);
+      if (state === "none" || state === "kept") action(t("settings.models.useForJudgment", "판단에 쓰기"), "start", !runnable);
       if (state === "busy") {
         action(t("settings.models.stop", "멈추기"), "stop", true);
         action(t("settings.models.cancelReceive", "받기 취소"), "cancel");
       }
       if (state === "changed") action(t("settings.models.reread", "새로 읽기"), "reread");
-      return line(row.key, row.name, t("settings.models.localJudgmentWay", "앱이 받아 이 Mac에서 돌리는 모델 · 키 불필요"), modelBadge(state), extra, actions);
+      // The files go when nothing holds them: not the model the settings
+      // choose, and not one a server runs.
+      const held = snapshot?.configuredModelId === row.model.id || (snapshot?.server.modelId === row.model.id && !["stopped", "failed"].includes(snapshot.server.state));
+      if (row.model.installed && !held && state !== "busy") action(t("settings.models.removeFiles", "파일 삭제"), "remove").classList.add("account-drop");
+      const sub = [t("settings.models.localJudgmentWay", "앱이 받아 이 Mac에서 돌리는 모델 · 키 불필요"), managedJudgmentController.sizeLabel(row.model)].filter(Boolean).join(" · ");
+      return line(row.key, row.name, sub, modelBadge(state), extra, actions);
     });
     const jev = typesafeState?.jevProvider ? [line("jev", "Jev", t("settings.models.jevWay", "판단 전용 서비스 · Jev 키는 키체인에"),
       modelBadge(typesafeState.provider?.kind === "jev" && typesafeState.keySaved ? "ok" : "unknown"), [],
-      [...this.usePills((role) => role === "judgment" && judgmentKey === "jev"), this.button(t("settings.models.jevKey", "키"), () => {
-        showSettingsPane("judgment-models");
-        el("model-advanced").open = true;
-        el("judgment-connection-settings").open = true;
-        el("judgment-provider-kind").value = "jev";
-        judgmentProviderController.changeKind();
-        el("judgment-connection-settings").scrollIntoView({ block: "nearest" });
-      })])] : [];
-    holder.replaceChildren(
-      group("login", t("settings.models.groupLogin", "① 로그인 계정"), [...logins.children]),
-      group("key", t("settings.models.groupKey", "② API 키"), remote.length ? remote : [modelNode("p", "settings-hint", t("settings.apiRouters.noConnected", "연결된 API 라우터가 없습니다."))]),
-      group("local", t("settings.models.groupLocal", "③ 이 컴퓨터"), [...managedLines, ...local].length ? [...managedLines, ...local] : [modelNode("p", "settings-hint", t("settings.models.noManaged", "이 컴퓨터에 받은 판단 모델이 없습니다."))]),
-      group("jev", t("settings.models.groupJev", "④ Jev 서비스"), jev),
-    );
+      [...this.usePills((role) => role === "judgment" && judgmentKey === "jev"), this.jevKeyButton()])] : [];
+    fill("login", [...logins.children], t("settings.models.noLogins", "zo가 읽은 로그인이 없습니다. 터미널에서 Claude Code · Codex 같은 CLI에 로그인하면 여기에 나타납니다."));
+    fill("key", remote, t("settings.apiRouters.noConnected", "연결한 API 키가 없습니다. 「API 키 추가」로 붙여 넣으세요."));
+    fill("local", [...managedLines, ...local], !snapshot && managedJudgmentController.loading
+      ? t("settings.managed.loading", "로컬 모델 상태를 읽는 중…")
+      : t("settings.models.noManaged", "이 컴퓨터에 받은 모델이 없습니다. 「모델 받기」로 Hugging Face에서 찾아 받거나 파일을 불러옵니다."));
+    fill("jev", jev, typesafeState ? t("settings.models.noJev", "판단 설정을 아직 읽지 못했습니다.") : "");
+    this.renderRuntimes(line);
+    this.paintReceive();
+    for (const id of ["model-logins-refresh", "model-key-add", "model-local-server-add"]) {
+      if (el(id)) el(id).disabled = this.busy;
+    }
+  },
+  /* 「키」 on the Jev row: the old editor in 「고급」, opened on Jev's key. */
+  jevKeyButton() {
+    const button = this.button(t("settings.models.jevKey", "키"), () => {
+      el("model-advanced").open = true;
+      el("judgment-connection-settings").open = true;
+      el("judgment-provider-kind").value = "jev";
+      judgmentProviderController.changeKind();
+      el("judgment-connection-settings").scrollIntoView({ block: "nearest" });
+      el("typesafe-key-input")?.focus({ preventScroll: true });
+    });
+    button.dataset.jevKey = "";
+    return button;
+  },
+  /* The engines that run a received model: one line each for an engine that
+   * names a public build or stands on this computer. An update is the app's
+   * own newer pin; a newer release its home has published is said beside it. */
+  renderRuntimes(line) {
+    const holder = el("model-runtimes");
+    const snapshot = managedJudgmentController.snapshot;
+    const rows = (snapshot?.runtimes ?? []).filter((row) => row.version || ["ready", "outdated"].includes(row.state));
+    holder.hidden = rows.length === 0;
+    el("model-runtime-lines").replaceChildren(...rows.map((row) => {
+      const engine = MODEL_ENGINES[row.engine] ?? { name: row.engine, about: () => "" };
+      const standing = MODEL_RUNTIME_STATES[row.state] ?? MODEL_RUNTIME_STATES.missing;
+      const badge = modelNode("span", "settings-state model-state", t(standing.key, standing.word));
+      badge.dataset.state = standing.badge;
+      badge.dataset.runtimeState = row.state;
+      const extra = [];
+      if (row.state === "missing") extra.push(modelNode("span", "model-line-note", t("settings.models.runtimeLater", "모델을 처음 쓸 때 함께 설치합니다({{size}}).", { size: bytesLabel(row.downloadBytes) })));
+      if (row.state === "outdated") extra.push(modelNode("span", "model-line-note", t("settings.models.runtimeOutdated", "이 앱이 확인한 새 판이 있습니다. 업데이트하면 다음 실행부터 씁니다({{size}}).", { size: bytesLabel(row.downloadBytes) })));
+      const news = this.runtimeNews.get(row.id);
+      if (news?.newer) {
+        const note = modelNode("span", "model-line-note", t("settings.models.runtimeNewer", "공개된 최신판은 {{latest}}입니다. ZeroCode가 확인해 실으면 여기서 업데이트합니다.", { latest: news.latest }));
+        note.dataset.runtimeNewer = news.latest;
+        extra.push(note);
+      }
+      const actions = [];
+      // A runtime is prepared through a model it runs: without one here,
+      // it is installed when its first model is used.
+      const model = snapshot.models.find((entry) => entry.engine === row.engine && entry.installed);
+      if (row.state === "outdated" && model) {
+        const update = this.button(t("settings.models.runtimeUpdate", "업데이트"), () => void this.managedAction("runtime", model), true);
+        update.dataset.runtimeUpdate = row.id;
+        update.disabled ||= managedJudgmentController.busy || managedJudgmentController.operating();
+        actions.push(update);
+      }
+      const name = row.version ? t("settings.models.runtimeName", "{{engine}} · {{version}}", { engine: engine.name, version: row.version }) : engine.name;
+      const made = line(`runtime:${row.id}`, name, engine.about(), badge, extra, actions);
+      made.dataset.runtime = row.id;
+      return made;
+    }));
   },
   deletionNote(connection) {
     const note = modelNode("div", "connection-delete-note settings-notice");
     note.setAttribute("role", "status");
     note.append(modelNode("p", "", this.deletion.message));
     const actions = modelNode("div", "settings-action-row");
-    if (connection.uses.length) actions.append(this.button(t("settings.models.title", "모델"), () => showSettingsPane("judgment-models")));
+    if (connection.uses.length) actions.append(this.button(t("settings.models.other", "다른 모델 고르기"), () => el("typesafe-card")?.scrollIntoView?.({ block: "nearest" })));
     else if (this.deletion.confirm) actions.append(this.button(t("settings.connections.delete", "삭제"), () => void this.remove(connection, true)));
     actions.append(this.button(t("settings.connections.cancel", "취소"), () => { this.deletion = null; this.render(); }));
     note.append(actions);
@@ -2004,7 +2184,7 @@ const modelConnectionsController = {
   async remove(row, confirmed = false) {
     if (row.uses.length) {
       const roles = row.uses.map((role) => (role === "coding" ? t("settings.models.coding", "코딩 모델") : t("settings.judgment.title", "판단 모델"))).join(" · ");
-      this.deletion = { id: row.id, message: `${roles} · ${t("settings.connections.inUseNote", "사용 중인 연결은 지울 수 없습니다. 지우려면 「모델」에서 다른 모델을 먼저 고르세요.")}` };
+      this.deletion = { id: row.id, message: `${roles} · ${t("settings.connections.inUseNote", "사용 중인 연결은 지울 수 없습니다. 지우려면 위에서 다른 모델을 먼저 고르세요.")}` };
       this.render(); return;
     }
     if (!confirmed) { this.deletion = { id: row.id, confirm: true, message: t("settings.connections.deleteConfirm", "연결과 저장된 인증 참조를 삭제할까요? 서버와 모델 파일은 삭제하지 않습니다.") }; this.render(); return; }
@@ -2022,4 +2202,8 @@ el("connections-decisions")?.addEventListener("click", () => openJevView());
 el("model-open-orchestration")?.addEventListener("click", () => showSettingsPane("orchestration"));
 for (const button of document.querySelectorAll("[data-connection-nav]")) button.addEventListener("click", () => modelConnectionsController.show(button.dataset.connectionNav));
 el("connections-add")?.addEventListener("click", () => modelConnectionsController.add());
+el("model-key-add")?.addEventListener("click", () => modelConnectionsController.addKey());
+el("model-local-server-add")?.addEventListener("click", () => modelConnectionsController.addLocalServer());
+el("model-receive-toggle")?.addEventListener("click", () => modelConnectionsController.receive());
+el("model-logins-refresh")?.addEventListener("click", () => void modelConnectionsController.rereadLogins());
 el("connection-auth")?.addEventListener("change", () => { invalidateRouterProbe(); modelConnectionsController.addFields(); });

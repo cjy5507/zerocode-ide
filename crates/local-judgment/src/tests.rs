@@ -1488,6 +1488,65 @@ fn runtime_folder(home: &Path) -> std::path::PathBuf {
     store.runtime_path(&profile).unwrap()
 }
 
+/// A changed pin is a changed profile: the runtime an earlier version of the
+/// app installed reads `outdated`, not `missing`, and the one verified next
+/// takes its place — a folder left behind used to refuse the new runtime
+/// for ever (`storage_failed` at the last step, 2026-11-10).
+#[test]
+fn a_runtime_of_an_earlier_pin_reads_outdated_and_gives_its_place_to_the_new_one() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let earlier = runtime_folder(home.path());
+    fs::write(earlier.join("left-by-the-earlier-pin"), b"old").unwrap();
+    let runtimes: serde_json::Value =
+        serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+    let mut pinned: crate::catalog::RuntimeProfile =
+        serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+    // The same runtime under a newer pin: one artifact's hash moved.
+    pinned.python.sha256 = "0".repeat(64);
+    let store = Store::open(home.path()).unwrap();
+    assert!(!store.runtime_ready(&pinned));
+    assert!(store.runtime_outdated(&pinned));
+    let manager = Manager::with_catalog_for_tests(
+        home.path(),
+        &settings,
+        Catalog {
+            version: 1,
+            models: vec![model()],
+        },
+        Some(pinned.clone()),
+    );
+    let before = manager.snapshot();
+    assert_eq!(before.runtime.state, "outdated");
+    assert_eq!(before.models[0].runtime.state, "outdated");
+    assert_eq!(
+        before
+            .runtimes
+            .iter()
+            .map(|row| (row.id.as_str(), row.state))
+            .collect::<Vec<_>>(),
+        vec![(pinned.id.as_str(), "outdated")]
+    );
+
+    let mut stage = store.stage().unwrap();
+    let executable = stage.path().join(&pinned.executable);
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::write(&executable, b"runtime").unwrap();
+    store.commit_runtime(&mut stage, &pinned).unwrap();
+    assert!(store.runtime_ready(&pinned));
+    assert!(!store.runtime_outdated(&pinned));
+    assert!(
+        !earlier.join("left-by-the-earlier-pin").exists(),
+        "the earlier pin's files stayed under the new runtime"
+    );
+    assert_eq!(manager.snapshot().runtime.state, "ready");
+
+    // No folder at all is a runtime never installed, not an earlier one.
+    let fresh = tempfile::tempdir().unwrap();
+    let store = Store::open(fresh.path()).unwrap();
+    assert!(!store.runtime_outdated(&pinned));
+}
+
 async fn received(manager: &Arc<Manager>, model: &Model) {
     let source = tempfile::tempdir().unwrap();
     for file in &model.files {

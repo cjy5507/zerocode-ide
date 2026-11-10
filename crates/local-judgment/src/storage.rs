@@ -397,7 +397,28 @@ impl Store {
         stage.commit(&self.model_path(model)?, &model.fingerprint()?)
     }
 
+    /// Something stands where this profile's runtime goes, ready or not.
+    pub fn runtime_present(&self, profile: &RuntimeProfile) -> bool {
+        self.runtime_path(profile).is_ok_and(|path| path.exists())
+    }
+
+    /// A runtime stands where this profile's would, and it is not this
+    /// profile's: one an earlier version of the app pinned, kept since.
+    pub fn runtime_outdated(&self, profile: &RuntimeProfile) -> bool {
+        !self.runtime_ready(profile)
+            && self.runtime_path(profile).is_ok_and(|path| {
+                child(&path, "receipt.json").is_ok_and(|receipt| receipt.is_file())
+            })
+    }
+
+    /// The runtime just verified takes its place. One that is not ready —
+    /// an earlier pin's, or one whose files no longer match — gives the place
+    /// up first: nothing starts from a runtime that is not ready, and without
+    /// this a changed pin could never be installed over the old one.
     pub fn commit_runtime(&self, stage: &mut Stage, profile: &RuntimeProfile) -> Result<()> {
+        if !self.runtime_ready(profile) {
+            self.remove_runtime(profile)?;
+        }
         stage.commit(&self.runtime_path(profile)?, &profile.fingerprint()?)
     }
 

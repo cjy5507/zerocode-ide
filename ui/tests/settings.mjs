@@ -77,7 +77,7 @@ const JUDGMENT_NOW = '[data-model-current="judgment"] .model-line-name';
 const JUDGMENT_STATE = '[data-model-current="judgment"] .model-state';
 /* A saved connection's row on the connections page — the rows the settings'
    providers make, not a login, a managed model or Jev (t-75762 v2). */
-const SAVED_CONNECTION_ROWS = '#model-connection-groups .model-line[data-connection-id]:not([data-connection-id^="managed:"]):not([data-connection-id="jev"])';
+const SAVED_CONNECTION_ROWS = '#model-connection-groups .model-line[data-connection-id]:not([data-connection-id^="managed:"]):not([data-connection-id^="runtime:"]):not([data-connection-id="jev"])';
 /* A zo model list as `zo models --json` answers it (t-75762 덧붙임 D):
    three providers' login models with an older generation among them, and
    each source's report. Every id is the fixture's own; the screen reads
@@ -3230,6 +3230,21 @@ class StatefulBackend {
           state: "unknown", reason: "unattributed", unattributedNewer: false, lastRequest: null,
         }));
       }
+      // What a repository offers before anything is received. A test that
+      // names no listing gets a decision model's layout, which the page
+      // inspects whole — the road an address took before lists existed.
+      case "managed_judgment_source_files": {
+        if (this.managedSourceFilesError) throw this.managedSourceFilesError;
+        return clone(await (this.managedSourceFilesWait ?? this.managedSourceFiles ?? {
+          repository: args.repository, revision: "f".repeat(40), license: "apache-2.0", native: true, files: [],
+          maxFileBytes: 4 * 1024 * 1024 * 1024, templateKnown: null,
+        }));
+      }
+      case "managed_judgment_search_sources": {
+        if (this.managedSearchError) throw this.managedSearchError;
+        return clone(await (this.managedSearchWait ?? this.managedSearchHits ?? []));
+      }
+      case "managed_judgment_runtime_news": return clone(this.managedRuntimeNews ?? []);
       case "managed_judgment_inspect_source": {
         if (this.managedSourceError) throw this.managedSourceError;
         const snapshot = this.managedJudgmentSettings();
@@ -4038,10 +4053,25 @@ async function bootPage(page, id) {
 async function openJudgmentSettings(page) {
   const pane = await page.locator("#typesafe-card").evaluate((card) => card.closest(".settings-pane").dataset.pane);
   await openSettings(page, pane);
-  for (const fold of ["#model-advanced", "#judgment-connection-settings"]) {
-    const advanced = page.locator(fold);
-    if (await advanced.count()) await advanced.evaluate((element) => { element.open = true; });
-  }
+  await openModelFolds(page);
+}
+
+/* The folds a model test reaches into, opened: 고급 and its old editor, and —
+   under 「이 컴퓨터」 since the two pages became one (2026-11-10) — 「모델
+   받기」 with the manager of received files. */
+async function openModelFolds(page) {
+  await openModelReceive(page);
+  await page.evaluate(() => { document.getElementById("judgment-connection-settings").open = true; });
+}
+
+/* 고급, and 「이 컴퓨터 › 모델 받기」 with its manager of received files —
+   where getting a model file went when it left 고급. */
+async function openModelReceive(page) {
+  await page.evaluate(() => {
+    for (const fold of ["model-advanced", "model-library-fold"]) document.getElementById(fold).open = true;
+    modelConnectionsController.receiving = true;
+    modelConnectionsController.paintReceive();
+  });
 }
 
 async function withJudgmentStatus(run) {
@@ -4063,8 +4093,9 @@ async function withJudgmentStatus(run) {
   try {
     await bootPage(page, "judgment-status");
     await openSettings(page, "judgment-models");
-    // The model library and the diagnosis line wait in the 고급 fold (t-75762 v2).
-    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    // The diagnosis line waits in the 고급 fold (t-75762 v2), the model
+    // library under 「이 컴퓨터 › 모델 받기」.
+    await openModelFolds(page);
     await page.waitForFunction(() => managedJudgmentController.snapshot?.server.id === "fixture-active-server");
     return await run(page, provider);
   } finally {
@@ -5597,7 +5628,7 @@ await test("the first Orca parity panes are real destinations with one active ow
   await openSettings(pageA, "general");
   for (const pane of [
     "provider-accounts",
-    "api-routers",
+    "judgment-models",
     "onboarding",
     "automations",
     "git",
@@ -5615,7 +5646,7 @@ await test("the first Orca parity panes are real destinations with one active ow
       `${pane} did not own rail selection`,
     );
   }
-  return "provider accounts, api routers, onboarding, automations, git, quick commands";
+  return "provider accounts, models, onboarding, automations, git, quick commands";
 });
 
 await test("the provider accounts pane carries a Google card whose login the window makes", async () => {
@@ -6434,7 +6465,7 @@ await test("라우터 추가→연결 시험→모델 셋 켬→settings.json pr
   await pageA.evaluate(() => modelConnectionsController.addManual());
 
   assert(
-    await pageA.locator('.settings-pane[data-pane="api-routers"]').isVisible(),
+    await pageA.locator('.settings-pane[data-pane="judgment-models"]').isVisible(),
     "API routers pane is not visible",
   );
 
@@ -6789,9 +6820,11 @@ await test("판단 모델 전용 화면은 HF 주소만 받아 기본 폴더에 
     assertEqual(await modelPage.locator('.settings-pane[data-pane="judgment-models"]').count(), 1, "model setup has no dedicated pane");
     await openSettings(modelPage, "judgment-models");
     await modelPage.waitForFunction(() => managedJudgmentController.snapshot?.catalogFingerprint);
-    // Getting a model file is a 고급 item now (t-75762 v2): closed until asked for.
-    assert(await modelPage.locator("#judgment-source-repository").isHidden(), "model files are offered before 고급 is opened");
-    await modelPage.locator("#model-advanced > summary").click();
+    // Getting a model file waits behind 「이 컴퓨터 › 모델 받기」 (2026-11-10;
+    // a 고급 item before): closed until asked for.
+    assert(await modelPage.locator("#judgment-source-repository").isHidden(), "model files are offered before 「모델 받기」 is pressed");
+    await modelPage.click("#model-receive-toggle");
+    assertEqual(await modelPage.locator("#model-receive-toggle").getAttribute("aria-expanded"), "true", "the door does not say it is open");
     assert(await modelPage.locator("#judgment-source-repository").isVisible(), "the basic view has no HF address input");
     assert(await modelPage.locator("#judgment-endpoint").isHidden(), "the basic view requires a server address");
     assert(await modelPage.locator("#typesafe-key-input").isHidden(), "the basic local view requires an API key");
@@ -6842,18 +6875,20 @@ await test("내 모델과 저장 폴더는 선택기로 고르고 설치 취소�
     assertEqual(await modelPage.locator("#judgment-source-local").count(), 1, "there is no local-folder entry point");
     await openSettings(modelPage, "judgment-models");
     await modelPage.waitForFunction(() => managedJudgmentController.snapshot?.catalogFingerprint);
-    await modelPage.locator("#model-advanced > summary").click();
+    await modelPage.click("#model-receive-toggle");
     backend.pickedPaths = ["/models/source-folder"];
+    // Choosing the folder is the asking: it is inspected at once (2026-11-10).
+    const inspectedAt = backend.calls.length;
     await modelPage.click("#judgment-source-local");
-    await modelPage.waitForFunction(() => judgmentModelSourceController.directory === "/models/source-folder" && !judgmentModelSourceController.busy);
+    const inspected = await backend.waitForCall("source-local", "managed_judgment_inspect_source", inspectedAt);
+    assertEqual(inspected.args.source, { kind: "local_directory", directory: "/models/source-folder" });
+    await modelPage.waitForFunction(() => judgmentModelSourceController.directory === "/models/source-folder" && judgmentModelSourceController.inspection?.readyForInstall && !judgmentModelSourceController.busy);
+    assert(await modelPage.locator("#judgment-source-inspect").isHidden(), "a folder on this computer still waits for a second press");
+    // Where it is saved is chosen on the model about to be received.
     backend.pickedPaths = ["/models/chosen-destination"];
     await modelPage.click("#judgment-source-change-destination");
     await modelPage.waitForFunction(() => judgmentModelSourceController.destination === "/models/chosen-destination" && !judgmentModelSourceController.busy);
-    const inspectedAt = backend.calls.length;
-    await modelPage.click("#judgment-source-inspect");
-    const inspected = await backend.waitForCall("source-local", "managed_judgment_inspect_source", inspectedAt);
-    assertEqual(inspected.args.source, { kind: "local_directory", directory: "/models/source-folder" });
-    await modelPage.waitForFunction(() => judgmentModelSourceController.inspection?.readyForInstall && !judgmentModelSourceController.busy);
+    assert(await modelPage.evaluate(() => Boolean(judgmentModelSourceController.currentInspection())), "choosing where to save forgot the inspected model");
     const before = clone(backend.typesafeSettings().provider);
     const usingAt = backend.calls.length;
     await modelPage.click("#judgment-source-use");
@@ -6861,7 +6896,9 @@ await test("내 모델과 저장 폴더는 선택기로 고르고 설치 취소�
     assertEqual(installed.args.destinationDirectory, "/models/chosen-destination");
     assert(!Object.hasOwn(installed.args, "directory") && !Object.hasOwn(installed.args, "source"), "install accepts a client replacement for the inspected source");
     await modelPage.waitForFunction(() => managedJudgmentController.snapshot?.operation?.state === "running");
-    await modelPage.click("#managed-judgment-cancel");
+    // The receive is cancelled where it was started: on the model's own card.
+    assert(await modelPage.locator("#judgment-source-cancel").isVisible(), "a running receive has no way to stop it beside it");
+    await modelPage.click("#judgment-source-cancel");
     await modelPage.waitForFunction(() => !managedJudgmentController.activating);
     assertEqual(backend.typesafeSettings().provider, before, "cancelled import changed the active model");
     assert(!backend.calls.slice(usingAt).some((entry) => ["managed_judgment_start", "managed_judgment_apply"].includes(entry.command)), "cancelled installation reached execution or application");
@@ -6976,9 +7013,11 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assertEqual(selects, {
     // Each saved connection's judgment format (t-76028 F3) is a protocol
     // choice too, folded in 「고급 — 판단 응답 형식」.
-    ids: ["judgment-format-fixture-OpenRouter", "managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model"],
-    visible: ["managed-judgment-filter", "judgment-provider-kind"],
-  }, "the provider and candidate filter are visible; protocol and inactive choices stay folded");
+    ids: ["judgment-format-fixture-OpenRouter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model"],
+    visible: ["judgment-provider-kind"],
+  }, "the provider is visible; protocol and inactive choices stay folded");
+  // The candidate filter went with the library to 「이 컴퓨터 › 모델 받기」.
+  assert(await pageA.locator("#model-receive #managed-judgment-filter").isVisible(), "the library's filter is not under 「모델 받기」");
   // The worker rows and the classifier moved to the orchestration pane
   // (t-75762 v2, decision 4), each on a card of its own since the person
   // passed the before/after draft (2026-10-27) — nothing to unfold.
@@ -7232,9 +7271,9 @@ await test("현재 판단 상태는 실행·요청 허용·응답 점검·실제
   assertEqual(backend.calls.slice(reopenedAt).filter((call) => call.window_id === "judgment-status" && call.command === "managed_judgment_status").length, 1, "reopening did not share one current server read");
   const order = await page.evaluate(() => Boolean(document.getElementById("model-judgment").compareDocumentPosition(document.getElementById("model-advanced")) & Node.DOCUMENT_POSITION_FOLLOWING));
   assert(order, "model changes precede current status");
-  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+  await openModelReceive(page);
   const before = backend.calls.length;
-  await page.click("#judgment-source-jev");
+  await page.click('#model-connection-groups [data-connection-id="jev"] [data-jev-key]');
   assert((await page.locator("#judgment-provider-draft").textContent()).includes("Jev"));
   assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
   assert(await page.locator("#typesafe-key-state").isHidden(), "the active provider's key/check badge was attributed to a draft provider");
@@ -7264,7 +7303,7 @@ await test("현재 모델과 다른 서버·점검 기록은 현재 상태로 �
   assertEqual(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state"), "unknown", "a stale settings identity supplied current server status");
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown");
   backend.judgmentSettingsWait = Promise.resolve({ ...backend.typesafeSettings(), provider: null, providerIdentity: null });
-  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+  await openModelReceive(page);
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assert(await page.locator("#model-judgment .model-off").isVisible(), "missing provider metadata erased known request permission");
@@ -7274,8 +7313,8 @@ await test("현재 모델과 다른 서버·점검 기록은 현재 상태로 �
 }));
 
 await test("현재 상태 새로고침은 초안을 보존하고 늦은 응답을 버린다", async () => withJudgmentStatus(async (page, provider) => {
-  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
-  await page.click("#judgment-source-jev");
+  await openModelReceive(page);
+  await page.click('#model-connection-groups [data-connection-id="jev"] [data-jev-key]');
   await page.fill("#typesafe-model-input", "unapplied-cloud-model");
   const before = backend.calls.length;
   let finishSettings;
@@ -7338,7 +7377,7 @@ await test("실제 요청의 성공·실패·적용 결과는 응답 점검과 �
     lastRequest: { feature: "stall", atMs, outcome: "answered", elapsedMs: 37, applied: true },
   };
   const words = (key, fallback) => page.evaluate(([name, source]) => t(name, source), [key, fallback]);
-  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+  await openModelReceive(page);
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed", "a real request remained permanently unknown");
@@ -7368,7 +7407,7 @@ await test("로컬 판단 서버가 거절한 이유는 카드에 그대로 보�
   const words = (key, fallback) => page.evaluate(([name, said]) => t(name, said), [key, fallback]);
   const failed = await words("settings.judgment.usageFailed", "요청 실패");
   const discarded = await words("settings.judgment.usageDiscarded", "설정 변경으로 응답 미사용");
-  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+  await openModelReceive(page);
   const unsaid = [];
   for (const outcome of refusals.values()) {
     backend.judgmentUsage = {
@@ -7392,7 +7431,7 @@ await test("실제 사용은 최근 미관측·출처 부족·다른 제공자·
     providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
     state: "none_observed", reason: null, unattributedNewer: false, lastRequest: null,
   };
-  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+  await openModelReceive(page);
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "none_observed");
@@ -7423,7 +7462,7 @@ await test("실제 요청에 없는 시각과 적용 여부는 만들어 내지 
     state: "observed", reason: null, unattributedNewer: false,
     lastRequest: { feature: "stall", atMs: null, outcome: "answered", elapsedMs: null, applied: null },
   };
-  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+  await openModelReceive(page);
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed");
@@ -7443,7 +7482,7 @@ await test("가져오기 실패는 해당 초안 옆에 한 번만 표시한다"
   const snapshot = backend.managedJudgmentSettings();
   backend.managedSourceError = "not_native_decision_model";
   const current = await page.locator("#model-judgment").textContent();
-  await page.click("#judgment-source-inspect");
+  await page.evaluate(() => judgmentModelSourceController.inspect());
   await page.waitForFunction(() => !judgmentModelSourceController.busy);
   snapshot.revision += 1;
   snapshot.operation = { id: "unsupported-inspection", kind: "inspect", state: "failed", error: "not_native_decision_model", receivedBytes: 0, totalBytes: 0 };
@@ -7480,8 +7519,8 @@ await test("주소를 붙여 넣으면 정보만 확인하고 실행 검증 전 
   const inspected = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", pastedAt);
   assertEqual(inspected.args.source, { kind: "hugging_face", repository: address }, "a pasted address was not inspected");
   await page.waitForFunction(() => judgmentModelSourceController.inspection?.readyForDownload && !judgmentModelSourceController.inspecting);
-  assert(!backend.calls.slice(pastedAt).some((entry) => entry.command !== "managed_judgment_inspect_source" && entry.command.startsWith("managed_judgment_") && entry.command !== "managed_judgment_status"),
-    "pasting an address did more than read its metadata", backend.calls.slice(pastedAt).map((entry) => entry.command));
+  assert(!backend.calls.slice(pastedAt).some((entry) => !["managed_judgment_source_files", "managed_judgment_inspect_source", "managed_judgment_status"].includes(entry.command) && entry.command.startsWith("managed_judgment_")),
+    "pasting an address did more than read its file list and metadata", backend.calls.slice(pastedAt).map((entry) => entry.command));
   assert(await page.locator("#judgment-source-result").isVisible(), "the inspected address has no result row");
   assertEqual(await page.locator("#judgment-source-model-name").textContent(), "Native Decision Lite");
   assertEqual(await page.locator("#judgment-source-badge-installed").textContent(), words.absent);
@@ -7751,7 +7790,7 @@ await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 
     state: "observed", reason: null, unattributedNewer: true,
     lastRequest: { feature: "stall", atMs: Date.parse("2026-10-01T10:20:30Z"), outcome: "http_503", elapsedMs: 0, applied: null },
   };
-  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+  await openModelReceive(page);
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed");
@@ -7977,7 +8016,7 @@ await test("실행 중인 판단 모델은 원자적 전환 한 번으로 바꾸
   try {
     await bootPage(modelPage, "model-switch");
     await openSettings(modelPage, "judgment-models");
-    await modelPage.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    await openModelReceive(modelPage);
     await modelPage.waitForFunction(() => managedJudgmentController.snapshot?.appliedModelId === "fixture-decision");
     const switchingAt = backend.calls.length;
     const identity = backend.typesafeSettings().providerIdentity;
@@ -8059,7 +8098,7 @@ await test("스스로 멈춘 판단 서버는 중지됨과 그 까닭을 다섯 
   try {
     await bootPage(page, "server-exit");
     await openSettings(page, "judgment-models");
-    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    await openModelReceive(page);
     await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "failed");
     const missing = await page.evaluate((names) => ["en", "ja", "zh", "es"].flatMap((code) => names
       .filter((key) => typeof CATALOG?.[code]?.[key] !== "string" || !CATALOG[code][key].trim()).map((key) => `${code}:${key}`)), keys);
@@ -8126,7 +8165,7 @@ await test("다시 띄우기를 기다리는 판단 서버는 다시 띄우는 �
   try {
     await bootPage(page, "server-restart");
     await openSettings(page, "judgment-models");
-    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    await openModelReceive(page);
     await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "starting");
     const missing = await page.evaluate(() => ["en", "ja", "zh", "es"].filter((code) =>
       typeof CATALOG?.[code]?.["settings.managed.restartingReason"] !== "string" || !CATALOG[code]["settings.managed.restartingReason"].includes("{{reason}}")));
@@ -8284,7 +8323,7 @@ async function photographManagedLibrary(folder) {
     await page.setViewportSize({ width: 1280, height: 2400 });
     await bootPage(page, "managed-photo");
     await openSettings(page, "judgment-models");
-    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    await openModelReceive(page);
     await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
     await renderSettled(page);
     const drawn = await page.evaluate(() => ({
@@ -8340,7 +8379,7 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
   try {
     await bootPage(page, "managed-library");
     await openSettings(page, "judgment-models");
-    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    await openModelReceive(page);
     await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
     assertEqual(await page.locator("#managed-judgment-candidates").count(), 1, "the catalog models not received have no folded line");
     const words = await page.evaluate(() => ({
@@ -8476,7 +8515,7 @@ await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 
   try {
     await bootPage(page, "managed-none");
     await openSettings(page, "judgment-models");
-    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    await openModelReceive(page);
     await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 1);
     assertEqual(await page.locator("#managed-judgment-none").count(), 1, "the library has no line for holding nothing");
     const seen = () => page.evaluate(() => {
@@ -8528,7 +8567,7 @@ await test("로컬 판단 모델의 문구는 다섯 언어 모두 선택 항목
     await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
     const install = page.locator(`#managed-judgment-candidate-list [data-model-id="${laya.id}"] [data-model-action="install"]`);
     assert(!(await install.isVisible()), "the download button stands open with 고급 closed");
-    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
+    await openModelReceive(page);
     await renderSettled(page);
     assertEqual(await page.locator("#managed-judgment-candidates").evaluate((fold) => fold.open), false, "the candidates are not folded");
     assert(!(await install.isVisible()), "the download button stands open with the candidates folded");
@@ -15441,7 +15480,7 @@ async function withModelScene(prepare, run) {
     await prepare?.();
     await openSettings(pageA, "judgment-models");
     await pageA.evaluate(() => {
-      Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
+      Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null, receiving: false });
       for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats, modelConnectionsController.fallbackFormats]) held.clear();
       routerPresets = [];
       return refreshApiRouters();
@@ -15458,7 +15497,7 @@ async function withModelScene(prepare, run) {
     await pageA.setViewportSize({ width: 1280, height: 860 });
     await setQualityTheme(pageA, "dark");
     await pageA.evaluate(() => {
-      Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
+      Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null, receiving: false });
       for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats, modelConnectionsController.fallbackFormats]) held.clear();
       routerPresets = [];
       return refreshApiRouters();
@@ -15611,6 +15650,408 @@ await test("모델 연결: 네 묶음이 실제 상태로 서고, 로그인 줄�
   await pageA.waitForFunction(() => ["down", "badkey"].includes(modelConnectionsController.checks.get("gateway")?.state) && modelConnectionsController.checks.get("gateway")?.raw?.includes("HTTP 503"));
   assertEqual(await key.locator(".model-state").getAttribute("data-model-state"), "down", "a 503 whose body quotes HTTP 401 was said as a wrong key");
   return "login · API key · this computer · Jev, each row's state from its answer";
+}));
+
+/* ---- 「모델」 한 화면 (2026-11-10) ------------------------------------------
+ *
+ * The person: 「모델과 모델 연결쪽을 수정해야 … 좀 더 직관적으로 연결할 수 있게
+ * … 허깅페이스 연결해도 로컬 모델 로드할 수가 없고 … 통합으로 가능하면
+ * 통합으로」, then 「llama.cpp … 업데이트 나오면 자동으로 업데이트 표시되고
+ * LM Studio 컨셉」. What is pinned: one door in the rail and the old name
+ * still opening the page; the two choices over the four places a model comes
+ * from, each with its own door for adding one; words finding a repository,
+ * a repository listing its GGUF files and one file being inspected before
+ * anything is received; a received model standing in 「이 컴퓨터」 with what
+ * can be done to it; and the engine's build, its update and its newest
+ * public release said on its own line. */
+const GGUF_REVISION = "a".repeat(40);
+const ggufAddress = (path) => `https://huggingface.co/acme/chat-gguf/blob/${GGUF_REVISION}/${path}`;
+const GGUF_LISTING = Object.freeze({
+  repository: "acme/chat-gguf", revision: GGUF_REVISION, license: "apache-2.0", native: false,
+  maxFileBytes: 4 * 1024 * 1024 * 1024, memoryLimitBytes: 4 * 1024 * 1024 * 1024, templateKnown: true,
+  files: [
+    { path: "chat-q4_k_m.gguf", bytes: 1_100_000_000, url: ggufAddress("chat-q4_k_m.gguf"), reason: null },
+    { path: "chat-q8_0.gguf", bytes: 1_900_000_000, url: ggufAddress("chat-q8_0.gguf"), reason: null },
+    { path: "chat-f16-small.gguf", bytes: 2_600_000_000, url: ggufAddress("chat-f16-small.gguf"), reason: null },
+    { path: "chat-f16.gguf", bytes: 5_000_000_000, url: null, reason: "size_limit" },
+    { path: "chat-00001-of-00002.gguf", bytes: 900_000_000, url: null, reason: "model_format_not_supported" },
+  ],
+});
+/* `MODEL_SCENE_SHOTS=<folder>` keeps a picture of one part of a receive
+   scene in both themes at 1280 and 390 wide, with nothing wider than it. */
+async function receivePictures(page, name, selector = '[data-connection-group="local"]') {
+  const part = page.locator(selector);
+  for (const theme of ["dark", "light"]) {
+    await setQualityTheme(page, theme);
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 1400 });
+      await settlePaint(page);
+      const wide = await part.evaluate((root) => {
+        const right = root.getBoundingClientRect().right;
+        return [...root.querySelectorAll("*")].filter((node) => node.getClientRects().length && node.getBoundingClientRect().right > right + 1)
+          .map((node) => [node.tagName, node.className, node.id, Math.round(node.getBoundingClientRect().right - right)]).slice(0, 5);
+      });
+      assertEqual(wide, [], `${name} ${theme} ${width}px reaches past its group`);
+      if (process.env.MODEL_SCENE_SHOTS) {
+        await mkdir(process.env.MODEL_SCENE_SHOTS, { recursive: true });
+        // The pane scrolls inside the settings frame: the window is made as
+        // tall as the pane's content so the picture holds the whole part.
+        const tall = await part.evaluate((root) => {
+          const frame = root.closest(".settings-frame") ?? root.parentElement;
+          frame.scrollTop = 0;
+          return Math.ceil(frame.scrollHeight + frame.getBoundingClientRect().top + 16);
+        });
+        await page.setViewportSize({ width, height: Math.min(8000, Math.max(1400, tall)) });
+        await settlePaint(page);
+        await part.screenshot({ path: resolve(process.env.MODEL_SCENE_SHOTS, `${name}-${theme}-${width}.png`), animations: "disabled" });
+      }
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 860 });
+  await setQualityTheme(page, "dark");
+}
+/* What the receive tests leave on the backend, taken off again. */
+function forgetReceiveFixtures() {
+  for (const name of ["managedSourceFiles", "managedSourceFilesError", "managedSourceFilesWait", "managedSearchHits", "managedSearchError", "managedSearchWait", "managedRuntimeNews", "managedSourceResult", "managedSourceInspection"]) delete backend[name];
+}
+/* A GGUF file's inspection as the manager answers it once the llama.cpp
+   runtime is one this computer runs. */
+function ggufInspection(snapshot, path) {
+  const local = { supported: true, reason: null, downloadOnly: false, inputs: ["text", "json"], unsupportedInputs: ["images", "videos"] };
+  const model = {
+    ...clone(snapshot.models[0]), id: "native-fixture-gguf", label: `acme/chat-gguf / ${path}`, engine: "llama_cpp", protocol: "openai_json", nativeFormat: "gguf-v3",
+    revision: GGUF_REVISION, source: ggufAddress(path), installed: false, local, downloadBytes: 1_100_000_000,
+    runtime: { state: "missing", downloadBytes: 37_351_536, reason: null }, compatibility: "supported", compatibilityReason: null,
+  };
+  return {
+    inspectionId: "fixture-gguf-inspection", instanceId: snapshot.instanceId, catalogFingerprint: snapshot.catalogFingerprint, model, local, existingServer: null,
+    readyForInstall: true, readyForDownload: true, reason: null, defaultDestinationDirectory: "/models/managed",
+    allowsDestinationSelection: true, sourceKind: "hugging_face_file", downloadBytes: 1_100_000_000, copyBytes: 0, runtimeDownloadBytes: 37_351_536,
+  };
+}
+
+await test("모델: 「모델 연결」은 「모델」 한 화면이 됐다 — 레일의 문은 하나이고 옛 이름도 같은 화면을 열며, 두 모델 아래에 네 묶음이 제 추가 단추와 함께 선다", async () => withModelScene(() => {
+  backend.zoSettings.providers = [{ name: "Gateway", base_url: "https://gateway.example.test/v1", models: ["vendor/coding-model"], requires_auth: false, connection: { id: "gateway", generation: 1 } }];
+}, async () => {
+  assertEqual(await pageA.locator('.settings-rail-item[data-pane="api-routers"]').count(), 0, "the rail still has a second door");
+  assertEqual(await pageA.locator('.settings-pane[data-pane="api-routers"]').count(), 0, "the old page is still in the window");
+  await openSettings(pageA, "general");
+  await openSettings(pageA, "api-routers");
+  await renderSettled(pageA);
+  assertEqual(await pageA.evaluate(() => settingsPane), "judgment-models", "the old name does not open the one page");
+  assert(await pageA.locator('.settings-pane[data-pane="judgment-models"]').isVisible(), "the old name opened nothing");
+  assertEqual(await pageA.locator('.settings-rail-item[data-pane="judgment-models"]').getAttribute("aria-current"), "page", "the rail does not show where the old name led");
+  // The two choices, then where a model comes from, on one page.
+  const order = await pageA.evaluate(() => {
+    const top = (id) => document.getElementById(id).getBoundingClientRect().top;
+    return { choices: top("typesafe-card"), sources: top("model-sources"), shown: ["typesafe-card", "model-sources"].every((id) => document.getElementById(id).getClientRects().length > 0) };
+  });
+  assert(order.shown && order.choices < order.sources, "the two choices do not stand over the connections", order);
+  const groups = await pageA.locator("#model-connection-groups > [data-connection-group]").evaluateAll((all) => all.map((group) => ({
+    id: group.dataset.connectionGroup,
+    title: group.querySelector(".model-group-title").textContent,
+    about: group.querySelector(".model-group-about").textContent.length > 0,
+    doors: [...group.querySelectorAll(".model-group-actions button")].map((button) => button.id),
+    lines: group.querySelector(":scope > [data-group-lines]").dataset.groupLines,
+  })));
+  assertEqual(groups.map((group) => [group.id, group.doors, group.lines]), [
+    ["login", ["model-logins-refresh"], "login"],
+    ["key", ["model-key-add"], "key"],
+    ["local", ["model-local-server-add", "model-receive-toggle"], "local"],
+    ["jev", [], "jev"],
+  ], "a group lost its place or its door");
+  assert(groups.every((group) => group.about && !/[①②③④]/.test(group.title)), "a group has no line of what it is, or still wears a step number", groups);
+  // Every group is a region with a name, and its rows stand in it.
+  assertEqual(await pageA.locator('#model-connection-groups > [data-connection-group][aria-labelledby]').count(), 4);
+  assertEqual(await pageA.locator('[data-connection-group="key"] [data-connection-id="gateway"]').count(), 1, "a saved connection is not in its group");
+  assert(await pageA.locator("#model-receive").isHidden(), "getting a model stands open before it is asked for");
+  // The page is found by either page's words.
+  for (const words of ["연결", "OpenRouter", "Hugging Face", "판단"]) {
+    await pageA.fill("#settings-search", words);
+    await renderSettled(pageA);
+    assert(await pageA.locator('.settings-rail-item[data-pane="judgment-models"]').isVisible(), `「${words}」 does not find the page`);
+  }
+  await pageA.fill("#settings-search", "");
+  await renderSettled(pageA);
+  await openSettings(pageA, "judgment-models");
+  await modelScenePictures("unified");
+  return "one rail door · api-routers → judgment-models · choices over four groups · login/key/local doors · found by both pages' words";
+}));
+
+await test("모델: 「API 키 추가」는 첫 질문의 API 키로 바로 가고, 「로컬 서버 연결」은 이 컴퓨터를 가리키는 프리셋으로 편집기를 연다", async () => withModelScene(() => {
+  backend.zoSettings.providers = [{ name: "Gateway", base_url: "https://gateway.example.test/v1", models: ["vendor/coding-model"], requires_auth: false, connection: { id: "gateway", generation: 1 } }];
+}, async () => {
+  await pageA.evaluate(() => refreshApiRouters());
+  await renderSettled(pageA);
+  await pageA.click("#model-key-add");
+  const setup = pageA.locator("#model-setup");
+  assert(await setup.isVisible(), "the key door asked nothing");
+  assertEqual(await setup.locator('[data-model-choice][aria-pressed="true"]').evaluateAll((all) => all.map((one) => one.dataset.modelChoice)), ["key"], "the key door did not answer the first question");
+  assertEqual(await setup.locator("#model-setup-service").count(), 1, "the key door has no service to pick");
+  assert(await pageA.locator("#model-sources").isVisible(), "the connections left the page while a key is added");
+  await setup.locator("[data-model-setup-close]").click();
+  assert(await setup.isHidden(), "the key question cannot be closed");
+  const presets = await pageA.evaluate(() => routerPresets.map((preset) => [preset.id, modelConnectionsController.location(preset.base_url)]));
+  const local = presets.find(([, where]) => where === "local");
+  assert(local, "no shipped preset names this computer", presets);
+  assert(presets.some(([id]) => id === "lmstudio"), "LM Studio's local server is not a preset", presets);
+  await pageA.click("#model-local-server-add");
+  assert(await pageA.locator("#router-card").isVisible(), "the local server door opened no editor");
+  assert(await pageA.locator("#model-catalog").isHidden(), "the lists stand beside the editor");
+  assertEqual(await pageA.inputValue("#router-preset-select"), local[0], "the editor did not open on a preset of this computer");
+  assert(/^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(await pageA.inputValue("#router-base-url-input")), "the editor's address is not this computer's");
+  assertEqual(await pageA.inputValue("#connection-auth"), "none", "a server on this computer is asked for a key");
+  await pageA.selectOption("#router-preset-select", "lmstudio");
+  assertEqual(await pageA.inputValue("#router-base-url-input"), "http://localhost:1234/v1", "LM Studio's preset names another address");
+  assertEqual(await pageA.inputValue("#connection-auth"), "none");
+  await pageA.click('[data-connection-nav="catalog"]');
+  assert(await pageA.locator("#model-catalog").isVisible() && await pageA.locator("#router-card").isHidden(), "the way back from the editor is gone");
+  return `key door → first question answered 「API 키」 · local door → editor on ${local[0]} with no key · LM Studio preset at localhost:1234`;
+}));
+
+await test("모델 받기: 낱말은 Hugging Face에서 저장소를 찾고, 저장소는 GGUF 파일 목록을 보이고, 고른 파일은 고정 주소로 확인만 한다 — 그때까지 아무것도 받지 않는다", async () => withJudgmentStatus(async (page) => {
+  try {
+    const snapshot = backend.managedJudgmentSettings();
+    backend.managedSearchHits = [{ repository: "acme/chat-gguf", downloads: 123456, likes: 78 }, { repository: "acme/other-gguf", downloads: 9, likes: 0 }];
+    backend.managedSourceFiles = clone(GGUF_LISTING);
+    backend.managedSourceResult = ggufInspection(snapshot, "chat-q4_k_m.gguf");
+    await page.evaluate(() => { modelConnectionsController.receiving = false; modelConnectionsController.paintReceive(); });
+    assert(await page.locator("#model-receive").isHidden());
+    await page.click("#model-receive-toggle");
+    assert(await page.locator("#model-receive").isVisible(), "「모델 받기」 opened nothing");
+    assertEqual(await page.evaluate(() => document.activeElement?.id), "judgment-source-repository", "the address field does not take the keys");
+    const words = await page.evaluate(() => ({ find: t("settings.models.find", "찾기"), files: t("settings.models.listFiles", "파일 보기"), check: t("settings.models.inspect", "확인") }));
+    // Words: a search, and nothing else.
+    const searchedAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "qwen coder");
+    assertEqual(await page.locator("#judgment-source-inspect").textContent(), words.find, "the button does not say it searches");
+    await page.press("#judgment-source-repository", "Enter");
+    const searched = await backend.waitForCall("judgment-status", "managed_judgment_search_sources", searchedAt);
+    assertEqual(searched.args, { query: "qwen coder" }, "the search sent more than the person's words");
+    await page.waitForFunction(() => judgmentModelSourceController.hits?.length === 2 && !judgmentModelSourceController.finding);
+    const hits = page.locator("#judgment-source-hits button[data-repository]");
+    assertEqual(await hits.evaluateAll((all) => all.map((hit) => hit.dataset.repository)), ["acme/chat-gguf", "acme/other-gguf"], "the search's answers are not the rows");
+    assert(await page.locator("#judgment-source-files").isHidden() && await page.locator("#judgment-source-result").isHidden(), "a search drew a file or a result");
+    // A repository: its files, and nothing received.
+    const listedAt = backend.calls.length;
+    await hits.first().click();
+    const listed = await backend.waitForCall("judgment-status", "managed_judgment_source_files", listedAt);
+    assertEqual(listed.args, { repository: "acme/chat-gguf" });
+    await page.waitForFunction(() => judgmentModelSourceController.listing?.files.length === 5 && !judgmentModelSourceController.finding);
+    assertEqual(await page.inputValue("#judgment-source-repository"), "acme/chat-gguf", "the picked repository is not in the field");
+    assertEqual(await page.locator("#judgment-source-inspect").textContent(), words.files, "the button does not say it lists files");
+    assertEqual(await hits.first().getAttribute("aria-current"), "true", "the picked repository is not marked among the answers");
+    const rows = await page.locator("#judgment-source-file-list .model-file").evaluateAll((all) => all.map((row) => ({
+      path: row.querySelector("input").value, off: row.querySelector("input").disabled, why: row.querySelector(".model-file-why")?.textContent ?? "", size: row.querySelector(".model-file-size").textContent,
+      heavy: Boolean(row.querySelector("[data-file-heavy]")),
+    })));
+    assertEqual(rows.map((row) => [row.path, row.off, row.heavy]), [["chat-q4_k_m.gguf", false, false], ["chat-q8_0.gguf", false, false], ["chat-f16-small.gguf", false, true], ["chat-f16.gguf", true, false], ["chat-00001-of-00002.gguf", true, false]],
+      "a file that cannot be received can be picked, one that can cannot, or the one near the memory limit is not marked");
+    assert(rows.filter((row) => row.off || row.heavy).every((row) => row.why.length > 0) && rows.filter((row) => !row.off && !row.heavy).every((row) => row.why === ""), "a refused or heavy file says no reason, or a good one wears one", rows);
+    assert(rows.every((row) => /\d/.test(row.size)), "a file says no size", rows);
+    assert((await page.locator("#judgment-source-files-title").textContent()).includes("acme/chat-gguf"), "the list does not name its repository");
+    assert(!backend.calls.slice(listedAt).some((entry) => entry.command === "managed_judgment_inspect_source"), "listing a repository inspected a file nobody picked");
+    await receivePictures(page, "receive-files");
+    // One file: inspected by its pinned address.
+    const pickedAt = backend.calls.length;
+    await page.locator('#judgment-source-file-list input[value="chat-q4_k_m.gguf"]').check();
+    const inspected = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", pickedAt);
+    assertEqual(inspected.args.source, { kind: "hugging_face_file", url: ggufAddress("chat-q4_k_m.gguf") }, "the picked file was not inspected at the commit the list was read at");
+    await page.waitForFunction(() => judgmentModelSourceController.inspection?.readyForInstall && !judgmentModelSourceController.busy);
+    assert(await page.locator("#judgment-source-result").isVisible(), "the picked file has no result");
+    const actions = await page.evaluate(() => ({
+      use: document.getElementById("judgment-source-use").textContent, useShown: !document.getElementById("judgment-source-use").hidden,
+      keepShown: !document.getElementById("judgment-source-keep").hidden,
+      said: [t("settings.models.downloadUse", "받아서 판단에 쓰기"), t("settings.models.keepOnly", "받기만")],
+    }));
+    assert(actions.useShown && actions.keepShown && actions.use === actions.said[0], "the inspected file does not offer both ways to receive it", actions);
+    assertEqual(await page.locator(".judgment-model-source .btn--primary:visible").count(), 1, "the receive area has competing primary actions");
+    await receivePictures(page, "receive-picked");
+    const done = backend.calls.slice(searchedAt).filter((entry) => entry.window_id === "judgment-status" && entry.command.startsWith("managed_judgment_")).map((entry) => entry.command);
+    assert(done.every((command) => ["managed_judgment_search_sources", "managed_judgment_source_files", "managed_judgment_inspect_source", "managed_judgment_status"].includes(command)), "finding and inspecting received, started or applied something", done);
+    // Typing again forgets what was found.
+    await page.fill("#judgment-source-repository", "other words");
+    assert(await page.locator("#judgment-source-hits").isHidden() && await page.locator("#judgment-source-files").isHidden() && await page.locator("#judgment-source-result").isHidden(), "the last answers stand under new words");
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(page, theme);
+      const violations = await axeViolations(page, AxeBuilder, "#model-receive");
+      assertEqual(violations, [], `${theme} receive area accessibility`);
+    }
+    await setQualityTheme(page, "dark");
+    return "words → search only · repository → 5 files (2 refused with reasons, 1 marked near the memory limit) · pick → hugging_face_file at the listed commit · two ways to receive · nothing received";
+  } finally {
+    forgetReceiveFixtures();
+  }
+}));
+
+await test("모델 받기: 주소나 ID는 바로 파일 목록으로 가고, 받을 수 있는 파일이 하나면 곧바로 확인하며, 없는 ID는 낱말로 찾고, 모델 파일이 없는 저장소는 그렇다고 말한다", async () => withJudgmentStatus(async (page) => {
+  try {
+    const snapshot = backend.managedJudgmentSettings();
+    backend.managedSourceResult = ggufInspection(snapshot, "only.gguf");
+    backend.managedSourceFiles = { ...clone(GGUF_LISTING), repository: "acme/one-gguf", files: [
+      { path: "only.gguf", bytes: 700_000_000, url: ggufAddress("only.gguf"), reason: null },
+      { path: "huge.gguf", bytes: 9_000_000_000, url: null, reason: "size_limit" },
+    ] };
+    const oneAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "acme/one-gguf");
+    await page.press("#judgment-source-repository", "Enter");
+    const inspected = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", oneAt);
+    assertEqual(inspected.args.source, { kind: "hugging_face_file", url: ggufAddress("only.gguf") }, "the one file that can be received was not picked");
+    await page.waitForFunction(() => judgmentModelSourceController.inspection && !judgmentModelSourceController.busy);
+    assert(!backend.calls.slice(oneAt).some((entry) => entry.command === "managed_judgment_search_sources"), "an ID was sent to the search");
+    assert(await page.locator('#judgment-source-file-list input[value="only.gguf"]').isChecked(), "the picked file is not marked in its list");
+    // A `.gguf` file's own address needs no list.
+    const fileAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "https://huggingface.co/acme/fixture/blob/main/selected.gguf");
+    await page.press("#judgment-source-repository", "Enter");
+    const direct = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", fileAt);
+    assertEqual(direct.args.source, { kind: "hugging_face_file", url: "https://huggingface.co/acme/fixture/blob/main/selected.gguf" });
+    assert(!backend.calls.slice(fileAt).some((entry) => entry.command === "managed_judgment_source_files"), "a file's own address was listed first");
+    await page.waitForFunction(() => !judgmentModelSourceController.busy);
+    // An ID the Hub would not open is read as words — the Hub answers a
+    // repository that does not exist the way it answers one behind a login
+    // (measured 2026-11-10: 401 for a name nobody published).
+    backend.managedSourceFilesError = "source_auth_required";
+    backend.managedSearchHits = [{ repository: "acme/chat-gguf", downloads: 5, likes: 1 }];
+    const missingAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "nobody/published");
+    await page.press("#judgment-source-repository", "Enter");
+    const searched = await backend.waitForCall("judgment-status", "managed_judgment_search_sources", missingAt);
+    assertEqual(searched.args, { query: "nobody/published" }, "an unknown ID was not looked for as words");
+    await page.waitForFunction(() => judgmentModelSourceController.hits?.length === 1 && !judgmentModelSourceController.finding);
+    // With nothing found either, the line says the name was not found —
+    // not that the search came back empty, and not that a login is needed.
+    backend.managedSearchHits = [];
+    const nothingAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "nobody/at-all");
+    await page.press("#judgment-source-repository", "Enter");
+    await backend.waitForCall("judgment-status", "managed_judgment_search_sources", nothingAt);
+    await page.waitForFunction(() => judgmentModelSourceController.problem === "source_missing" && !judgmentModelSourceController.finding);
+    assertEqual(await page.locator("#judgment-source-status").textContent(), await page.evaluate(() => managedJudgmentController.failure("source_missing")), "a name nobody published is not said as not found");
+    // An address that cannot be read says so, and is not searched.
+    const addressAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "https://huggingface.co/nobody/published");
+    await page.press("#judgment-source-repository", "Enter");
+    await backend.waitForCall("judgment-status", "managed_judgment_source_files", addressAt);
+    await page.waitForFunction(() => judgmentModelSourceController.problem === "source_auth_required" && !judgmentModelSourceController.finding);
+    assert(!backend.calls.slice(addressAt).some((entry) => entry.command === "managed_judgment_search_sources"), "an address was sent to the search");
+    assertEqual(await page.locator("#judgment-source-status").textContent(), await page.evaluate(() => managedJudgmentController.failure("source_auth_required")));
+    // A repository with no model file.
+    delete backend.managedSourceFilesError;
+    backend.managedSourceFiles = { ...clone(GGUF_LISTING), repository: "acme/dataset", files: [] };
+    const emptyAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "acme/dataset");
+    await page.press("#judgment-source-repository", "Enter");
+    await backend.waitForCall("judgment-status", "managed_judgment_source_files", emptyAt);
+    await page.waitForFunction(() => judgmentModelSourceController.problem === "source_no_models");
+    assertEqual(await page.locator("#judgment-source-status").textContent(), await page.evaluate(() => managedJudgmentController.failure("source_no_models")), "a repository with nothing to receive is not said as such");
+    assert(!backend.calls.slice(emptyAt).some((entry) => entry.command === "managed_judgment_inspect_source"), "a repository with nothing to receive was inspected");
+    const untranslated = await page.evaluate(() => ["en", "ja", "zh", "es"].filter((code) => typeof CATALOG?.[code]?.["settings.managed.error.noModels"] !== "string"));
+    assertEqual(untranslated, [], "the line for a repository with no model is untranslated");
+    return "ID → list → the one receivable file inspected · .gguf address → inspected directly · unopened ID → search, and 「not found」 when that finds nothing · unreadable address → said, not searched · no model file → said";
+  } finally {
+    forgetReceiveFixtures();
+  }
+}));
+
+await test("모델 받기: 「받기만」은 파일만 받아 두고 판단 모델을 바꾸지 않으며, 받은 모델은 「이 컴퓨터」에 「받아 둠」으로 서서 「판단에 쓰기」와 「파일 삭제」를 단다", async () => withJudgmentStatus(async (page, provider) => {
+  try {
+    const snapshot = backend.managedJudgmentSettings();
+    backend.managedSourceFiles = clone(GGUF_LISTING);
+    backend.managedSourceResult = ggufInspection(snapshot, "chat-q4_k_m.gguf");
+    await page.fill("#judgment-source-repository", "acme/chat-gguf");
+    await page.press("#judgment-source-repository", "Enter");
+    await page.waitForFunction(() => judgmentModelSourceController.listing?.files.length === 5 && !judgmentModelSourceController.finding);
+    await page.locator('#judgment-source-file-list input[value="chat-q4_k_m.gguf"]').check();
+    await page.waitForFunction(() => judgmentModelSourceController.inspection?.readyForInstall && !judgmentModelSourceController.busy);
+    const keptAt = backend.calls.length;
+    await page.click("#judgment-source-keep");
+    await backend.waitForCall("judgment-status", "managed_judgment_install_source", keptAt);
+    await page.waitForFunction(() => judgmentModelSourceController.flow?.done === true);
+    const commands = backend.calls.slice(keptAt).filter((entry) => entry.window_id === "judgment-status").map((entry) => entry.command);
+    assert(!commands.some((command) => ["managed_judgment_prepare_model_runtime", "managed_judgment_start", "managed_judgment_switch_model", "managed_judgment_check", "managed_judgment_apply"].includes(command)), "receiving only prepared, started or applied the model", commands);
+    assertEqual(backend.typesafeSettings().provider, provider, "receiving only changed the judgment model");
+    assertEqual(await page.locator("#judgment-source-status").textContent(), await page.evaluate(() => t("settings.models.keptUsable", "모델 파일을 받아 두었습니다. 「이 컴퓨터」의 그 줄에서 「판단에 쓰기」를 누르면 실행합니다. 지금 모델은 그대로입니다.")));
+    // The received model's row, where the group's other rows stand.
+    const row = page.locator('[data-connection-group="local"] [data-connection-id="managed:native-fixture-gguf"]');
+    await page.waitForFunction(() => document.querySelector('[data-connection-group="local"] [data-connection-id="managed:native-fixture-gguf"]') !== null);
+    assertEqual(await row.locator(".model-state").getAttribute("data-model-state"), "kept", "a received model reads as absent");
+    assertEqual(await row.locator(".model-state").textContent(), await page.evaluate(() => t("settings.models.state.kept", "받아 둠")));
+    await page.evaluate(() => modelConnectionsController.receive(false));
+    await receivePictures(page, "received-row");
+    const doors = await row.locator("[data-managed-action]").evaluateAll((all) => all.map((button) => [button.dataset.managedAction, button.textContent, button.disabled]));
+    const said = await page.evaluate(() => [t("settings.models.useForJudgment", "판단에 쓰기"), t("settings.models.removeFiles", "파일 삭제")]);
+    assertEqual(doors, [["start", said[0], false], ["remove", said[1], false]], "the received model's row does not offer to use it and to delete it");
+    // The model in use keeps its files.
+    const applied = page.locator(`[data-connection-group="local"] [data-connection-id="managed:${provider.model}"]`);
+    assertEqual(await applied.locator('[data-managed-action="remove"]').count(), 0, "the model in use offers to delete its files");
+    const removedAt = backend.calls.length;
+    await row.locator('[data-managed-action="remove"]').click();
+    const removed = await backend.waitForCall("judgment-status", "managed_judgment_remove", removedAt);
+    assertEqual(removed.args, { modelId: "native-fixture-gguf", revision: GGUF_REVISION }, "the row deleted another model's files");
+    return "receive only → install_source and no runtime/start/check/apply · row 「받아 둠」 with 판단에 쓰기 · 파일 삭제 · the model in use keeps its files";
+  } finally {
+    forgetReceiveFixtures();
+  }
+}));
+
+await test("이 컴퓨터: 실행 엔진 줄은 이 앱이 고정한 판과 상태를 말하고, 옛 판이 깔려 있으면 「업데이트」를 달며, 공개된 새 판이 있으면 그 이름을 보인다", async () => withJudgmentStatus(async (page, provider) => {
+  try {
+    const runtime = { id: "macos-aarch64-llama-cpp-cpu", engine: "llama_cpp", version: "b11669", home: "https://example.invalid/acme/engine", state: "outdated", downloadBytes: 37_351_536 };
+    const paint = async (change) => {
+      change(backend.managedModelState);
+      backend.managedModelState.revision += 1;
+      await page.evaluate(() => { modelConnectionsController.runtimeNewsAt = null; modelConnectionsController.runtimeNews = new Map(); return modelConnectionsController.refresh().then(() => refreshTypeSafe()); });
+      await page.waitForFunction((revision) => managedJudgmentController.snapshot?.revision >= revision, backend.managedModelState.revision);
+      await page.evaluate(() => modelConnectionsController.askRuntimeNews());
+      await renderSettled(page);
+    };
+    // No runtime named: no line, and no home is asked.
+    const quietAt = backend.calls.length;
+    await paint(() => {});
+    assert(await page.locator("#model-runtimes").isHidden(), "an engine line stands with no engine named");
+    assert(!backend.calls.slice(quietAt).some((entry) => entry.command === "managed_judgment_runtime_news"), "a home was asked with no engine named");
+    // An earlier pin's runtime under a model this computer holds.
+    backend.managedRuntimeNews = [{ id: runtime.id, engine: "llama_cpp", pinned: "b11669", latest: "v0.9.0", newer: true }];
+    await paint((held) => { held.runtimes = [clone(runtime)]; held.models[0].engine = "llama_cpp"; });
+    const line = page.locator(`#model-runtimes [data-runtime="${runtime.id}"]`);
+    assert(await page.locator("#model-runtimes").isVisible() && await line.count() === 1, "the engine has no line");
+    assertEqual(await line.locator(".model-line-name").textContent(), "llama.cpp · b11669", "the line does not name the engine and the build this app pins");
+    assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "outdated");
+    assertEqual(await line.locator("[data-runtime-state]").textContent(), await page.evaluate(() => t("settings.models.runtime.outdated", "업데이트 있음")));
+    assertEqual(await line.locator("[data-runtime-newer]").getAttribute("data-runtime-newer"), "v0.9.0", "the newest public release is not said");
+    await page.evaluate(() => modelConnectionsController.receive(false));
+    await receivePictures(page, "engine-outdated");
+    assert((await line.locator("[data-runtime-newer]").textContent()).includes("v0.9.0"));
+    const updatedAt = backend.calls.length;
+    await line.locator("[data-runtime-update]").click();
+    const updated = await backend.waitForCall("judgment-status", "managed_judgment_prepare_model_runtime", updatedAt);
+    assertEqual(updated.args, { modelId: provider.model, revision: "fixture-revision" }, "the update did not prepare the runtime through the model it runs");
+    // The pinned runtime, installed, with nothing newer published.
+    backend.managedRuntimeNews = [{ id: runtime.id, engine: "llama_cpp", pinned: "b11669", latest: "b11669", newer: false }];
+    await paint((held) => { held.runtimes = [{ ...clone(runtime), state: "ready" }]; });
+    assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "ready");
+    assertEqual(await line.locator("[data-runtime-update]").count(), 0, "an installed runtime still offers an update");
+    assertEqual(await line.locator("[data-runtime-newer]").count(), 0, "the pinned build is said to be behind itself");
+    // Not installed yet: said as coming with the first model, with no button.
+    await paint((held) => { held.runtimes = [{ ...clone(runtime), state: "missing" }]; });
+    assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "missing");
+    assertEqual(await line.locator("button").count(), 0, "a runtime not installed offers a button of its own");
+    const lines = new Set();
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(page, locale);
+      await page.evaluate(() => modelConnectionsController.render());
+      const seen = await page.locator("#model-runtimes").innerText();
+      if (locale !== "ko") assert(!/[가-힣]/.test(seen), `${locale}: the engine line is not translated`, seen);
+      lines.add(seen);
+    }
+    assertEqual(lines.size, SETTINGS_QUALITY_SPEC.locales.length, "a language shares the engine line with another");
+    await setQualityLocale(page, "ko");
+    return "no runtime → no line, no request · outdated → 업데이트 through its model · newer public release named · ready → neither · missing → no button · five languages";
+  } finally {
+    forgetReceiveFixtures();
+    delete backend.managedModelState?.runtimes;
+  }
 }));
 
 await test("처음 질문: 연결도 로그인도 없으면 저절로 묻고, 처음 화면에는 전문 용어가 없다 (결정 7, 시험 12)", async () => withModelScene(() => {
@@ -16398,7 +16839,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
       return ["sm", "md", "lg", "full"].map((rung) => root.getPropertyValue(`--field-${rung}`).trim());
     });
     assertEqual(rungs, ["18ch", "26ch", "34ch", "100%"], "the field rungs are not four scale tokens");
-    const pane = await box('.settings-pane[data-pane="api-routers"]');
+    const pane = await box('.settings-pane[data-pane="judgment-models"]');
     const key = await box("#router-key-input");
     assert(pane.width > 1200, "the pane was not read at a width where this matters", pane.width);
     assert(
@@ -16408,7 +16849,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
     );
     // Every field on the pane picks a rung, and no field carries a width in px.
     const widths = await pageA.evaluate(() => [...document
-      .querySelectorAll('.settings-pane[data-pane="api-routers"] .settings-field')]
+      .querySelectorAll('.settings-pane[data-pane="judgment-models"] .settings-field')]
       .map((field) => ({
         rung: field.dataset.field ?? null,
         inline: field.getAttribute("style") ?? "",
@@ -16440,7 +16881,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
       { control: url.x + url.width, rowEnd },
     );
     const copy = await pageA.evaluate(() => {
-      const first = document.querySelector('.settings-pane[data-pane="api-routers"] .settings-field-copy');
+      const first = document.querySelector('.settings-pane[data-pane="judgment-models"] .settings-field-copy');
       return { width: first.getBoundingClientRect().width, max: getComputedStyle(first).maxWidth };
     });
     assert(copy.max.endsWith("px") && parseFloat(copy.max) > 0, "the words carry no measure", copy);
@@ -16451,7 +16892,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
     // rail takes 280px before the pane sees any, so the pane's own width is
     // what the row can be asked about.
     const narrow = await pageA.evaluate(() => {
-      const pane = document.querySelector('.settings-pane[data-pane="api-routers"]');
+      const pane = document.querySelector('.settings-pane[data-pane="judgment-models"]');
       pane.style.maxWidth = "560px";
       return pane.getBoundingClientRect().width;
     });
@@ -16465,7 +16906,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
       { stackedLabel, stackedUrl },
     );
     await pageA.evaluate(() => {
-      document.querySelector('.settings-pane[data-pane="api-routers"]').style.maxWidth = "";
+      document.querySelector('.settings-pane[data-pane="judgment-models"]').style.maxWidth = "";
     });
     await renderSettled(pageA);
 

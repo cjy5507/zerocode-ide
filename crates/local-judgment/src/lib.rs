@@ -11,9 +11,9 @@ mod source;
 mod storage;
 
 pub use catalog::{Artifact, Catalog, EngineKind, Model};
-pub use manager::{Manager, Snapshot, SourceInspection};
+pub use manager::{Manager, RuntimeNews, Snapshot, SourceInspection};
 pub use selection::{Binding, MANAGED_MODEL_KEY};
-pub use source::SourceInput;
+pub use source::{HubFileChoice, HubListing, HubSearchHit, SourceInput};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

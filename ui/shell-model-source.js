@@ -1,3 +1,15 @@
+/* How much memory a GGUF file takes to run, for each byte it weighs: its
+ * weights mapped whole plus the working memory of a 4,096-token context.
+ * Measured 2026-11-10 — a 1.12 GB Q4_K_M file ran at 2.31 GB. A file past
+ * the runtime's limit by this measure is still offered, with the warning. */
+const RUN_MEMORY_PER_FILE_BYTE = 2;
+
+/* 「모델 받기」: the address field is read three ways — words find
+ * repositories on Hugging Face, a repository's address or ID lists the GGUF
+ * files in it, and a `.gguf` file's address is that file — and one file is
+ * inspected, received, started and applied. A folder or a file on this
+ * computer takes the same road from its inspection on. Nothing is received
+ * before the person presses the one filled button. */
 const judgmentModelSourceController = {
   initialized: false,
   kind: "hugging_face",
@@ -9,13 +21,21 @@ const judgmentModelSourceController = {
   flow: null,
   working: false,
   inspecting: false,
+  /* A search or a file list on its way, the repositories a search answered
+   * with, the list one repository answered with (and the text it was asked
+   * by), and the path picked out of it. */
+  finding: false,
+  hits: null,
+  listing: null,
+  picked: null,
   inflight: null,
   request: null,
   sequence: 0,
   stepsSignature: "",
+  foundSignature: "",
 
   get busy() {
-    return this.working || this.inspecting;
+    return this.working || this.inspecting || this.finding;
   },
 
   init() {
@@ -26,13 +46,22 @@ const judgmentModelSourceController = {
     }
     el("judgment-source-repository").addEventListener("input", (event) => {
       this.invalidate();
-      if (event.inputType === "insertFromPaste" && this.source()) void this.inspect();
+      // A pasted address or ID is what the person came with: it is read at
+      // once. Words wait for Enter, so a search is not sent letter by letter.
+      if (event.inputType === "insertFromPaste" && !this.reading()?.words) void this.go();
     });
     el("judgment-source-repository").addEventListener("keydown", (event) => {
       if (event.key !== "Enter" || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
-      void this.inspect();
+      void this.go();
+    });
+    el("judgment-source-hits").addEventListener("click", (event) => {
+      const hit = event.target.closest("button[data-repository]");
+      if (hit && !hit.disabled) void this.openHit(hit.dataset.repository);
+    });
+    el("judgment-source-file-list").addEventListener("change", (event) => {
+      if (event.target instanceof HTMLInputElement && event.target.name === "judgment-source-file") this.pick(event.target.value);
     });
     el("judgment-source-browse").addEventListener("click", () => void this.chooseFolder(false));
     el("judgment-source-change-destination").addEventListener("click", () => void this.chooseFolder(true));
@@ -40,25 +69,27 @@ const judgmentModelSourceController = {
       this.destination = null;
       this.render();
     });
-    el("judgment-source-inspect").addEventListener("click", () => void this.inspect());
+    el("judgment-source-inspect").addEventListener("click", () => void this.go());
     el("judgment-source-use").addEventListener("click", () => void this.act());
+    el("judgment-source-keep").addEventListener("click", () => {
+      const inspection = this.currentInspection();
+      if (!this.locked() && !this.inspecting && inspection && this.usable(inspection)) void this.keep(inspection);
+    });
     el("judgment-source-cancel").addEventListener("click", () => void this.cancel());
     el("judgment-source-retry").addEventListener("click", () => void this.retry());
     el("judgment-source-folder-instead").addEventListener("click", () => this.choose("local_directory"));
-    el("judgment-source-jev").addEventListener("click", () => {
-      if (!judgmentProviderController.state) return;
-      el("judgment-connection-settings").open = true;
-      el("judgment-provider-kind").value = "jev";
-      judgmentProviderController.changeKind();
-      el("typesafe-key-input").focus();
-    });
   },
 
+  /* A folder or a file on this computer is inspected as soon as it is
+   * chosen — choosing it is the asking; one chosen before is inspected
+   * again when its tab is come back to. */
   choose(kind) {
     if (this.locked()) return;
     this.kind = kind;
     this.invalidate();
+    if (kind === "hugging_face") return;
     if ((kind === "local_directory" && !this.directory) || (kind === "local_file" && !this.file)) void this.chooseFolder(false);
+    else void this.inspect();
   },
 
   inspectAddress(address) {
@@ -66,20 +97,47 @@ const judgmentModelSourceController = {
     this.kind = "hugging_face";
     el("judgment-source-repository").value = address;
     this.invalidate();
-    void this.inspect();
+    modelConnectionsController.receive(true);
+    void this.go();
     el("judgment-source-result").scrollIntoView?.({ block: "nearest" });
   },
 
+  text() {
+    return el("judgment-source-repository").value.trim();
+  },
+
+  /* What the field holds: a `.gguf` file's address, a repository's address
+   * or ID (`owner/name`), or words to find a repository by. */
+  reading(text = this.text()) {
+    if (!text) return null;
+    try {
+      const address = new URL(text);
+      if (address.protocol === "https:" || address.protocol === "http:") {
+        return /\.gguf$/i.test(address.pathname) ? { file: text } : { repository: text };
+      }
+    } catch {}
+    return /^[\w.-]+\/[\w.-]+$/.test(text) ? { repository: text } : { words: text };
+  },
+
+  /* The file picked out of the repository's list, while it can be received. */
+  pickedFile() {
+    return this.listing?.files.find((file) => file.path === this.picked && file.url) ?? null;
+  },
+
+  /* What an inspection is asked about: the folder or file chosen here, the
+   * `.gguf` address typed, the file picked from the repository's list —
+   * pinned to the commit the list was read at — or, for a repository laid
+   * out as a decision model, the repository itself. */
   source() {
     if (this.kind === "local_directory") return this.directory ? { kind: this.kind, directory: this.directory } : null;
     if (this.kind === "local_file") return this.file ? { kind: this.kind, file: this.file } : null;
-    const repository = el("judgment-source-repository").value.trim();
-    if (!repository) return null;
-    try {
-      const address = new URL(repository);
-      if (/\.gguf$/i.test(address.pathname)) return { kind: "hugging_face_file", url: repository };
-    } catch {}
-    return { kind: this.kind, repository };
+    const reading = this.reading();
+    if (!reading) return null;
+    if (reading.file) return { kind: "hugging_face_file", url: reading.file };
+    if (!reading.repository || this.listing?.asked !== reading.repository) return null;
+    const picked = this.pickedFile();
+    if (picked) return { kind: "hugging_face_file", url: picked.url };
+    return this.listing.native ? { kind: this.kind, repository: reading.repository } : null;
   },
 
   locked() {
@@ -94,9 +152,121 @@ const judgmentModelSourceController = {
     this.problem = null;
     this.flow = null;
     this.inspecting = false;
+    this.finding = false;
+    this.hits = null;
+    this.listing = null;
+    this.picked = null;
     this.stopInspection();
     this.say("");
     this.render();
+  },
+
+  /* The button, Enter and a paste: what the field holds decides the road. */
+  async go() {
+    if (this.kind !== "hugging_face") return this.inspect();
+    const reading = this.reading();
+    if (!reading) return null;
+    if (reading.file) return this.inspect();
+    return reading.repository ? this.list(reading.repository) : this.search(reading.words);
+  },
+
+  /* A request for a search or a file list may start: nothing else is under
+   * way and the manager's state has been read. */
+  findable() {
+    return !this.locked() && !this.inspecting && Boolean(managedJudgmentController.snapshot);
+  },
+
+  /* Words: the repositories of GGUF files Hugging Face finds for them.
+   * `missing` says the words are an ID the Hub would not open: with no
+   * answer, that is what is said. */
+  async search(words, { missing = false } = {}) {
+    if (!this.findable()) return null;
+    const sequence = ++this.sequence;
+    Object.assign(this, { inspection: null, problem: null, flow: null, hits: null, listing: null, picked: null, finding: true });
+    this.say(t("settings.models.searching", "Hugging Face에서 찾는 중…"));
+    managedJudgmentController.render();
+    try {
+      const hits = (await invoke("managed_judgment_search_sources", { query: words })) ?? [];
+      if (sequence !== this.sequence) return null;
+      this.hits = hits;
+      if (missing && !hits.length) this.problem = "source_missing";
+      this.say(hits.length
+        ? t("settings.models.found", "저장소 {{count}}개를 찾았습니다. 하나를 고르면 그 안의 파일을 보여 줍니다.", { count: hits.length })
+        : missing ? managedJudgmentController.failure("source_missing")
+          : t("settings.models.foundNone", "찾은 저장소가 없습니다. 다른 낱말로 찾거나 모델 주소를 붙여 넣으세요."));
+      return hits;
+    } catch (error) {
+      if (sequence !== this.sequence) return null;
+      this.problem = error ?? "failed";
+      this.say(managedJudgmentController.failure(error));
+      return null;
+    } finally {
+      if (sequence === this.sequence) this.finding = false;
+      managedJudgmentController.render();
+    }
+  },
+
+  /* A repository picked out of a search: its ID stands in the field, and
+   * the search's other answers stay on the page. */
+  async openHit(repository) {
+    if (!this.findable()) return null;
+    el("judgment-source-repository").value = repository;
+    return this.list(repository, { keepHits: true });
+  },
+
+  /* A repository's address or ID: what it offers. A decision model's layout
+   * is inspected whole; GGUF files are listed for one to be picked — the
+   * only one that can be received is picked at once. */
+  async list(repository, { keepHits = false } = {}) {
+    if (!this.findable()) return null;
+    const sequence = ++this.sequence;
+    Object.assign(this, { inspection: null, problem: null, flow: null, listing: null, picked: null, finding: true });
+    if (!keepHits) this.hits = null;
+    this.say(t("settings.models.listing", "저장소의 파일 목록을 읽는 중… 아직 아무것도 받지 않습니다."));
+    managedJudgmentController.render();
+    let listing;
+    try {
+      listing = await invoke("managed_judgment_source_files", { repository });
+    } catch (error) {
+      if (sequence !== this.sequence) return null;
+      this.finding = false;
+      // An ID the Hub would not open — it answers a repository that does
+      // not exist the way it answers one that needs a login — is read as
+      // words to find one by.
+      if (["source_unavailable", "source_auth_required"].includes(String(error?.message ?? error)) && !/^https?:/i.test(repository) && !keepHits) {
+        return this.search(repository, { missing: true });
+      }
+      this.problem = error ?? "failed";
+      this.say(managedJudgmentController.failure(error));
+      managedJudgmentController.render();
+      return null;
+    }
+    if (sequence !== this.sequence) return null;
+    this.finding = false;
+    this.listing = { ...listing, files: Array.isArray(listing?.files) ? listing.files : [], asked: repository };
+    const takeable = this.listing.files.filter((file) => file.url);
+    if (this.listing.native) return this.inspect();
+    if (takeable.length === 1) {
+      this.picked = takeable[0].path;
+      return this.inspect();
+    }
+    if (!this.listing.files.length) {
+      this.problem = "source_no_models";
+      this.say(managedJudgmentController.failure(this.problem));
+    } else {
+      this.say(takeable.length
+        ? t("settings.models.pickFile", "받을 파일 하나를 고르세요. 고르면 그 파일을 확인합니다. 아직 아무것도 받지 않았습니다.")
+        : t("settings.models.noFileFits", "이 저장소의 파일 가운데 이 컴퓨터에서 받을 수 있는 것이 없습니다. 줄마다 까닭이 있습니다."));
+    }
+    managedJudgmentController.render();
+    return this.listing;
+  },
+
+  /* One file out of the repository's list: it is inspected, not received. */
+  pick(path) {
+    if (this.locked() || this.inspecting || !this.listing?.files.some((file) => file.path === path && file.url)) return;
+    this.picked = path;
+    void this.inspect();
   },
 
   stopInspection() {
@@ -124,7 +294,7 @@ const judgmentModelSourceController = {
     if (this.locked()) return;
     this.working = true;
     managedJudgmentController.render();
-    let inspectFile = false;
+    let chosenSource = false;
     try {
       const file = !destination && this.kind === "local_file";
       const chosen = await openPathBrowser({ mode: file ? "attach" : "folder", multiple: false, system: true, start: destination ? this.destination : file ? null : this.directory });
@@ -139,7 +309,7 @@ const judgmentModelSourceController = {
       else {
         if (file) this.file = chosen[0]; else this.directory = chosen[0];
         this.invalidate();
-        inspectFile = file;
+        chosenSource = true;
       }
     } catch (error) {
       this.say(managedJudgmentController.failure(error));
@@ -147,7 +317,7 @@ const judgmentModelSourceController = {
       this.working = false;
       managedJudgmentController.render();
     }
-    if (inspectFile) void this.inspect();
+    if (chosenSource) void this.inspect();
   },
 
   currentInspection() {
@@ -222,7 +392,7 @@ const judgmentModelSourceController = {
       if (!result?.inspectionId || !result.model || result.instanceId !== snapshot?.instanceId || result.catalogFingerprint !== snapshot?.catalogFingerprint) throw "catalog_changed";
       this.inspection = result;
       if (this.usable(result)) {
-        this.say(t("settings.models.inspected", "모델을 확인했습니다. 설치하고 사용을 누르면 필요한 준비와 연결을 자동으로 진행합니다."));
+        this.say(t("settings.models.inspected", "모델을 확인했습니다. 아직 아무것도 받지 않았습니다. 받아서 쓰면 받기·실행·응답 확인을 차례로 하고, 통과하면 판단 모델로 씁니다."));
       } else if (this.keepable(result)) {
         this.say(t("settings.models.inspectedKeep", "모델 형식을 확인했습니다. 이 컴퓨터의 직접 실행은 아직 검증 전이라 파일만 받아 둘 수 있습니다. 아직 아무것도 내려받지 않았습니다."));
       } else {
@@ -297,7 +467,7 @@ const judgmentModelSourceController = {
     flow.failed = !applied;
     const error = managedJudgmentController.lastError;
     this.say(applied ? t("settings.models.using", "모델을 불러와 적용했습니다.")
-      : error ? managedJudgmentController.failure(error)
+      : error ? managedJudgmentController.failure(error, this.modelOf(inspection))
         : t("settings.models.notApplied", "새 모델을 적용하지 않았습니다. 아래 진행 결과를 확인한 뒤 다시 시도하세요."));
     managedJudgmentController.render();
   },
@@ -314,7 +484,9 @@ const judgmentModelSourceController = {
       if (!managedJudgmentController.snapshot.models.some((model) => model.id === id && model.revision === revision && model.installed)) throw "model_missing";
       if (flow === this.flow) {
         flow.done = true;
-        this.say(t("settings.models.keptOnly", "모델 파일을 받아 검증했습니다. 이 컴퓨터의 직접 실행은 아직 검증되지 않아 현재 모델은 그대로입니다."));
+        this.say(this.usable(inspection)
+          ? t("settings.models.keptUsable", "모델 파일을 받아 두었습니다. 「이 컴퓨터」의 그 줄에서 「판단에 쓰기」를 누르면 실행합니다. 지금 모델은 그대로입니다.")
+          : t("settings.models.keptOnly", "모델 파일을 받아 검증했습니다. 이 컴퓨터의 직접 실행은 아직 검증되지 않아 현재 모델은 그대로입니다."));
       }
     } catch (error) {
       if (flow === this.flow) {
@@ -342,7 +514,7 @@ const judgmentModelSourceController = {
 
   async retry() {
     const intent = this.flow?.failed ? this.flow.intent : null;
-    const result = await this.inspect();
+    const result = await this.go();
     if (!result || !intent || result !== this.inspection) return;
     if (intent === "keep" && this.keepable(result)) await this.keep(result);
     else if (intent === "use" && this.usable(result)) await this.use(result);
@@ -425,7 +597,7 @@ const judgmentModelSourceController = {
       : !inspection ? (this.problem === "cancelled" ? "cancelled" : "unsupported")
         : current ? "current" : usable ? "ready" : keepable ? (installed ? "kept" : "download-only") : "unsupported";
     el("judgment-source-model-name").textContent = inspection?.model.label
-      ?? (this.kind === "local_directory" ? this.directory : this.kind === "local_file" ? this.file : el("judgment-source-repository").value.trim()) ?? "";
+      ?? (this.kind === "local_directory" ? this.directory : this.kind === "local_file" ? this.file : this.pickedFile()?.path ?? this.text()) ?? "";
     const currentBadge = el("judgment-source-badge-current");
     currentBadge.hidden = !current && !selected;
     currentBadge.dataset.badge = current ? "current" : "selected";
@@ -470,14 +642,21 @@ const judgmentModelSourceController = {
       progress.removeAttribute("value");
     }
     const use = el("judgment-source-use");
-    const offered = Boolean(inspection) && !current && (usable || (keepable && !installed));
+    // A receive that ended has no button left here: the model's own row
+    // under 「이 컴퓨터」 is where it is used from.
+    const offered = Boolean(inspection) && !current && !flow?.done && (usable || (keepable && !installed));
     use.hidden = !offered;
     use.disabled = !offered || locked || this.inspecting || !this.currentInspection();
     use.classList.toggle("btn--primary", offered);
     say(use, () => this.keepable(this.inspection) ? t("settings.models.downloadOnly", "파일만 받기")
-      : this.runnable(this.inspection) ? t("settings.models.runUse", "실행하고 사용")
-        : this.kind.startsWith("local_") || this.installed(this.inspection) ? t("settings.models.loadUse", "불러와서 사용")
-          : t("settings.models.downloadUse", "다운로드하고 사용"));
+      : this.runnable(this.inspection) ? t("settings.models.runUse", "실행해서 판단에 쓰기")
+        : this.kind.startsWith("local_") || this.installed(this.inspection) ? t("settings.models.loadUse", "불러와서 판단에 쓰기")
+          : t("settings.models.downloadUse", "받아서 판단에 쓰기"));
+    // A model this computer can run may also be received and left for later.
+    const keep = el("judgment-source-keep");
+    const kept = Boolean(inspection) && usable && !installed && !current && !this.flow;
+    keep.hidden = !kept;
+    keep.disabled = !kept || locked || this.inspecting || !this.currentInspection();
     const cancel = el("judgment-source-cancel");
     cancel.hidden = !this.inspecting && !running;
     cancel.disabled = !this.inspecting && operation?.state !== "running";
@@ -498,13 +677,13 @@ const judgmentModelSourceController = {
     const local = this.kind.startsWith("local_");
     el("judgment-source-hub-fields").hidden = local;
     el("judgment-source-local-fields").hidden = !local;
-    el("judgment-source-hub").setAttribute("aria-pressed", String(!local));
-    el("judgment-source-local").setAttribute("aria-pressed", String(this.kind === "local_directory"));
-    el("judgment-source-gguf").setAttribute("aria-pressed", String(this.kind === "local_file"));
-    for (const name of ["hub", "local", "gguf", "jev", "repository", "browse", "change-destination", "default-destination"]) {
+    for (const [name, on] of [["hub", !local], ["local", this.kind === "local_directory"], ["gguf", this.kind === "local_file"]]) {
+      el(`judgment-source-${name}`).setAttribute("aria-pressed", String(on));
+      el(`judgment-source-${name}`).classList.toggle("is-active", on);
+    }
+    for (const name of ["hub", "local", "gguf", "repository", "browse", "change-destination", "default-destination"]) {
       el(`judgment-source-${name}`).disabled = locked;
     }
-    el("judgment-source-jev").disabled ||= !judgmentProviderController.state;
     say(el("judgment-source-directory"), () => this.kind === "local_file" ? this.file ?? t("settings.gguf.pickHint", "GGUF 파일 하나를 고르세요. 원본은 그대로 두고 앱 전용 폴더에 복사합니다.") : this.directory ?? t("settings.models.pickHint", "이미 받은 모델의 폴더를 선택하세요. 원본 파일은 그대로 둡니다."));
     say(el("judgment-source-browse"), () => this.kind === "local_file" ? t("settings.gguf.pickFile", "GGUF 파일 선택") : t("settings.models.pickFolder", "모델 폴더 선택"));
     el("judgment-source-default-destination").hidden = !this.destination;
@@ -514,8 +693,109 @@ const judgmentModelSourceController = {
       ? t("settings.models.keepLocation", "이미 설치한 모델의 현재 폴더를 사용합니다.")
       : this.destination ?? t("settings.models.defaultFolder", "기본 모델 폴더"));
     location.dataset.tip = this.destination ?? inspection?.defaultDestinationDirectory ?? "";
-    el("judgment-source-inspect").disabled = locked || !this.source() || !snapshot?.catalogFingerprint;
+    // The button stands beside the address field: for a folder or a file on
+    // this computer, choosing it is the inspection.
+    const reading = local ? null : this.reading();
+    const inspect = el("judgment-source-inspect");
+    inspect.hidden = local;
+    inspect.disabled = locked || this.finding || this.inspecting || !reading || !snapshot?.catalogFingerprint;
+    say(inspect, () => {
+      const now = this.reading();
+      return now?.file ? t("settings.models.inspect", "확인") : now?.repository ? t("settings.models.listFiles", "파일 보기") : t("settings.models.find", "찾기");
+    });
+    this.renderFound(locked);
     this.renderResult(locked);
-    el("judgment-source-inspect").classList.toggle("btn--primary", el("judgment-source-use").hidden);
+    inspect.classList.toggle("btn--primary", el("judgment-source-use").hidden && !this.listing && !this.hits);
+    if (typeof modelConnectionsController !== "undefined") modelConnectionsController.paintReceive();
+  },
+
+  /* The repositories a search answered with and the files one repository
+   * holds. Redrawn only when what they show changes, so a row under the
+   * pointer or the keys is not replaced from under them. */
+  renderFound(locked) {
+    const hub = this.kind === "hugging_face";
+    const hits = el("judgment-source-hits");
+    const files = el("judgment-source-files");
+    const shownHits = hub && this.hits?.length ? this.hits : [];
+    const listing = hub ? this.listing : null;
+    const shownFiles = listing && !listing.native ? listing.files : [];
+    const off = locked || this.inspecting || this.finding;
+    const signature = JSON.stringify([shownHits, listing?.asked, listing?.revision, shownFiles, this.picked, off, listing?.templateKnown, document.documentElement.lang]);
+    hits.hidden = shownHits.length === 0;
+    files.hidden = shownFiles.length === 0;
+    if (signature === this.foundSignature) return;
+    this.foundSignature = signature;
+    const count = (value) => {
+      try {
+        return new Intl.NumberFormat(document.documentElement.lang || "ko", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+      } catch {
+        return String(value);
+      }
+    };
+    hits.replaceChildren(...shownHits.map((hit) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "model-hit";
+      button.dataset.repository = hit.repository;
+      button.disabled = off;
+      if (listing?.asked === hit.repository) button.setAttribute("aria-current", "true");
+      const name = document.createElement("span");
+      name.className = "model-hit-name";
+      name.textContent = hit.repository;
+      const facts = document.createElement("span");
+      facts.className = "model-hit-facts";
+      facts.textContent = t("settings.models.hitFacts", "받음 {{downloads}} · 좋아요 {{likes}}", { downloads: count(hit.downloads), likes: count(hit.likes) });
+      button.append(name, facts);
+      item.append(button);
+      return item;
+    }));
+    if (!listing || listing.native) {
+      el("judgment-source-file-list").replaceChildren();
+      return;
+    }
+    el("judgment-source-files-title").textContent = t("settings.models.filesTitle", "{{repository}} · GGUF 파일 {{count}}개 · {{license}}", {
+      repository: listing.repository ?? listing.asked, count: shownFiles.length, license: listing.license ?? "",
+    });
+    el("judgment-source-files-about").textContent = [
+      t("settings.models.filesAbout", "같은 모델을 다른 크기로 줄인 파일들입니다. 클수록 정확하고 느립니다. 보통 이름에 Q4_K_M이 든 파일이 크기와 품질의 균형이 좋습니다."),
+      listing.templateKnown === false ? t("settings.models.templateUnknown", "이 모델의 대화 형식은 실행 엔진이 아는 형식이 아닙니다. 받아도 실행하지 못할 수 있습니다.") : "",
+    ].filter(Boolean).join(" ");
+    el("judgment-source-file-list").replaceChildren(...shownFiles.map((file) => {
+      const row = document.createElement("label");
+      row.className = `model-file${file.url ? "" : " is-off"}`;
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "judgment-source-file";
+      input.value = file.path;
+      input.checked = this.picked === file.path;
+      input.disabled = off || !file.url;
+      const name = document.createElement("span");
+      name.className = "model-file-name";
+      name.textContent = file.path;
+      const size = document.createElement("span");
+      size.className = "model-file-size";
+      size.textContent = bytesLabel(file.bytes);
+      row.append(input, name, size);
+      const heavy = file.url && listing.memoryLimitBytes > 0 && file.bytes * RUN_MEMORY_PER_FILE_BYTE > listing.memoryLimitBytes;
+      if (!file.url || heavy) {
+        const why = document.createElement("span");
+        why.className = "model-file-why";
+        if (heavy) why.dataset.fileHeavy = "";
+        why.textContent = heavy
+          ? t("settings.models.fileHeavy", "실행 메모리 한도({{limit}})에 가까워 실행 중 멈출 수 있습니다", { limit: bytesLabel(listing.memoryLimitBytes) })
+          : this.fileRefusal(file.reason, listing);
+        row.append(why);
+      }
+      return row;
+    }));
+  },
+
+  /* Why a listed file cannot be received, in the page's words. */
+  fileRefusal(reason, listing) {
+    if (reason === "size_limit") return t("settings.models.fileTooLarge", "{{limit}}를 넘어 이 컴퓨터에서 돌리지 않습니다", { limit: bytesLabel(listing.maxFileBytes ?? 0) });
+    if (reason === "model_format_not_supported") return t("settings.models.fileSplit", "여러 조각으로 나뉜 파일은 받지 않습니다");
+    if (reason === "source_hash_unavailable") return t("settings.models.fileUnhashed", "검증 정보가 없어 받지 않습니다");
+    return t("settings.models.fileRefused", "받을 수 없는 파일입니다");
   },
 };

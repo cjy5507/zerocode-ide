@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 
-use local_judgment::{Binding, Manager, Snapshot, SourceInput, SourceInspection};
+use local_judgment::{
+    Binding, HubListing, HubSearchHit, Manager, RuntimeNews, Snapshot, SourceInput,
+    SourceInspection,
+};
 use tauri::{AppHandle, Emitter, Manager as TauriManager};
 
 use crate::{AppState, api_routers, typesafe_settings};
@@ -117,6 +120,43 @@ pub(crate) async fn managed_judgment_inspect_source(
         .inspect_source_with_request(source, request_id)
         .await
         .map_err(|error| error.to_string())
+}
+
+/// What a Hub repository offers before anything is received: whether it is
+/// a decision model's layout, and its GGUF files with their sizes. A read of
+/// one file list — it starts no operation and changes no setting.
+#[tauri::command]
+pub(crate) async fn managed_judgment_source_files(
+    app: AppHandle,
+    repository: String,
+) -> Result<HubListing, String> {
+    service(&app)?
+        .list_source_files(&repository)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The Hub's repositories of GGUF files that answer the person's words,
+/// most received first. A read: nothing is received and no setting moves.
+#[tauri::command]
+pub(crate) async fn managed_judgment_search_sources(
+    app: AppHandle,
+    query: String,
+) -> Result<Vec<HubSearchHit>, String> {
+    service(&app)?
+        .search_sources(&query)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// For each runtime whose engine has a public home: the newest release
+/// published there beside the build this app pins. A home that does not
+/// answer leaves its runtime out, so the page shows nothing for it.
+#[tauri::command]
+pub(crate) async fn managed_judgment_runtime_news(
+    app: AppHandle,
+) -> Result<Vec<RuntimeNews>, String> {
+    Ok(service(&app)?.runtime_news().await)
 }
 
 #[tauri::command(async)]

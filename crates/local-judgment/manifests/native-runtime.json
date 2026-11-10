@@ -194,7 +194,7 @@
         ]
       },
       "runtimeFiles": [],
-      "validatedPlatforms": [],
+      "validatedPlatforms": ["macos-aarch64"],
       "maxRssBytes": 4294967296,
       "native": {
         "archive": {

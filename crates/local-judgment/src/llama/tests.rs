@@ -26,7 +26,10 @@ fn package(entries: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
         let mut header = tar::Header::new_gnu();
         header.set_path(name).expect("fixture path");
         header.set_mode(0o755);
-        if let Some(link) = link {
+        if name.ends_with('/') {
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+        } else if let Some(link) = link {
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_link_name(link).expect("fixture link");
             header.set_size(0);
@@ -90,6 +93,120 @@ fn the_native_archive_copies_only_pinned_files_and_flattens_internal_library_lin
             .is_symlink()
     );
     assert!(!home.path().join("native/package/other-tool").exists());
+}
+
+/// The pinned release archive opens with its folder's own entry, named with
+/// a closing `/` (`llama-b11669/`), and lists a link before the file it
+/// names. An archive without that entry installed while the real one was
+/// refused at its first line (2026-11-10: the runtime step of every GGUF
+/// model ended `unsafe_path`).
+#[test]
+fn the_native_archive_installs_past_its_own_folder_entry_as_a_release_archive_lists_it() {
+    let server = b"owned fixture executable data";
+    let library = b"owned fixture library data";
+    let bytes = package(&[
+        ("package/", None, b""),
+        ("package/libalias.dylib", Some("libimpl.dylib"), b""),
+        ("package/llama-server", None, server),
+        ("package/libimpl.dylib", None, library),
+    ]);
+    let listed: Vec<String> = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()))
+        .entries()
+        .expect("fixture entries")
+        .map(|entry| {
+            let entry = entry.expect("fixture entry");
+            entry
+                .path()
+                .expect("fixture name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        listed.first().map(String::as_str),
+        Some("package/"),
+        "the fixture does not name its folder the way the release archive does"
+    );
+    let profile = runtime(
+        &bytes,
+        vec![
+            artifact("package/llama-server", server),
+            artifact("package/libimpl.dylib", library),
+            artifact("package/libalias.dylib", library),
+        ],
+    );
+    let home = tempfile::tempdir().expect("owned stage");
+    let archive = home.path().join("native.tar.gz");
+    std::fs::write(&archive, &bytes).expect("archive bytes");
+    assert_eq!(
+        crate::archive::native(&archive, home.path(), &profile, &AtomicBool::new(false)),
+        Ok(())
+    );
+    assert_eq!(
+        std::fs::read(home.path().join("native/package/llama-server")).expect("server data"),
+        server
+    );
+    assert_eq!(
+        std::fs::read(home.path().join("native/package/libalias.dylib")).expect("alias data"),
+        library
+    );
+    // The folder is named once: a second entry for it is a second name.
+    let twice = package(&[
+        ("package/", None, b""),
+        ("package/", None, b""),
+        ("package/llama-server", None, server),
+    ]);
+    let profile = runtime(&twice, vec![artifact("package/llama-server", server)]);
+    let home = tempfile::tempdir().expect("owned stage");
+    let archive = home.path().join("native.tar.gz");
+    std::fs::write(&archive, twice).expect("archive bytes");
+    assert_eq!(
+        crate::archive::native(&archive, home.path(), &profile, &AtomicBool::new(false)),
+        Err(Error::UnsafePath)
+    );
+}
+
+#[test]
+fn a_pinned_archive_names_its_public_release_only_from_a_release_address() {
+    let mut profile = runtime(b"archive", vec![artifact("package/llama-server", b"x")]);
+    profile.archive.url =
+        "https://example.invalid/acme/engine/releases/download/b123/engine-b123-macos.tar.gz"
+            .to_owned();
+    assert_eq!(
+        profile.release(),
+        Some((
+            "https://example.invalid/acme/engine".to_owned(),
+            "b123".to_owned()
+        ))
+    );
+    for other in [
+        URL,
+        "https://example.invalid/acme/engine/releases/download/b123",
+        "https://example.invalid/acme/engine/archive/download/b123/engine.tar.gz",
+        "https://example.invalid/acme/engine/releases/download/b%20123/engine.tar.gz",
+        "https://example.invalid/acme/engine/releases/download/b123/more/engine.tar.gz",
+        "not an address",
+    ] {
+        profile.archive.url = other.to_owned();
+        assert_eq!(profile.release(), None, "{other}");
+    }
+}
+
+/// The shipped pin is a public release: the page names its build and asks
+/// its home for the newest one.
+#[test]
+fn the_shipped_native_runtime_names_the_release_it_pins() {
+    let named: Vec<_> = crate::catalog::runtime_profiles()
+        .expect("shipped runtime profiles")
+        .into_iter()
+        .filter_map(|profile| profile.native.and_then(|native| native.release()))
+        .collect();
+    for (home, tag) in &named {
+        assert!(home.starts_with("https://"), "{home}");
+        assert!(!tag.is_empty(), "{home}");
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    assert_eq!(named.len(), 1, "{named:?}");
 }
 
 #[test]

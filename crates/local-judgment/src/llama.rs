@@ -60,6 +60,33 @@ impl Runtime {
         Ok(())
     }
 
+    /// The public release this pinned archive is: its repository's address
+    /// and the tag it was published under, read from the pinned address
+    /// (`https://<host>/<owner>/<repository>/releases/download/<tag>/<file>`).
+    /// `None` for an archive published any other way.
+    pub fn release(&self) -> Option<(String, String)> {
+        let address = url::Url::parse(&self.archive.url).ok()?;
+        let parts: Vec<_> = address.path_segments()?.collect();
+        if parts.len() != 6 || parts[2] != "releases" || parts[3] != "download" {
+            return None;
+        }
+        let named = |part: &str| {
+            !part.is_empty()
+                && part.len() <= 64
+                && !matches!(part, "." | "..")
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        };
+        if !named(parts[0]) || !named(parts[1]) || !named(parts[4]) {
+            return None;
+        }
+        Some((
+            format!("https://{}/{}/{}", address.host_str()?, parts[0], parts[1]),
+            parts[4].to_owned(),
+        ))
+    }
+
     pub fn file_path(&self, runtime: &Path, name: &str) -> Result<PathBuf> {
         storage::child(runtime, &format!("native/{name}"))
     }

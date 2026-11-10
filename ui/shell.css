@@ -25380,12 +25380,12 @@ button.integration-context-action:hover {
   font: var(--type-heading-14);
 }
 
-.settings-pane[data-pane="judgment-models"] > .settings-card {
+.settings-pane[data-pane="judgment-models"] > .settings-card,
+.model-catalog > .settings-card {
   max-width: 72rem;
   margin-inline: auto;
 }
 
-.judgment-model-source,
 .judgment-connection-settings {
   margin: var(--space-4);
   min-width: 0;
@@ -25399,57 +25399,226 @@ button.integration-context-action:hover {
   max-width: none;
 }
 
+/* 「모델 받기」 (2026-11-10): the work area under 「이 컴퓨터」's rows, set
+ * into the well so it reads as part of that group and not a second card.
+ * One column of steps: how the model is named, what was found, the one
+ * picked, and what receiving it does. */
+.model-receive {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-4);
+  border-block-start: var(--rule-width) solid var(--edge-rule);
+  border-end-start-radius: var(--radius-md);
+  border-end-end-radius: var(--radius-md);
+  background: var(--surface-well);
+}
+
+.judgment-model-source {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+}
+
+.model-receive-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+}
+
 .judgment-model-source h4 {
+  margin: 0;
+  color: var(--ink-chalk);
   font: var(--type-heading-14);
-  margin-block: var(--space-3);
+  letter-spacing: var(--tracking-heading-14);
 }
 
 .judgment-model-source .settings-action-row {
   flex-wrap: wrap;
-  margin-inline: 0;
+  margin: 0;
+  padding: 0;
 }
 
-.judgment-source-choices {
-  justify-content: flex-start;
+.judgment-model-source .settings-row-desc,
+.judgment-model-source .settings-status {
+  max-width: none;
+  margin: 0;
+  padding: 0;
 }
 
-.judgment-source-choices [aria-pressed="true"] {
-  background: var(--row-selected);
-  border-color: var(--ink-chalk);
-  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
-}
-
-.judgment-model-destination {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+#judgment-source-hub-fields,
+#judgment-source-local-fields {
+  display: grid;
   gap: var(--space-2);
-  overflow-wrap: anywhere;
-  color: var(--ink-mist);
-  font-size: var(--text-xs);
+  min-width: 0;
 }
 
-.judgment-model-destination .settings-action-row {
+/* The address field and its one button on a line; the button drops under
+ * the field where the pane is too narrow for both. */
+.model-receive-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.model-receive-search > .settings-input {
+  flex: 1 1 var(--field-md);
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
+
+.model-receive-search > .btn {
+  flex: none;
+}
+
+/* What a search answered with, and the files one repository holds: two
+ * lists of rows in a ring, each scrolling inside itself past eight rows. */
+.model-hits,
+.model-file-list {
+  display: grid;
+  min-width: 0;
+  max-height: calc(var(--control-height-md) * 8);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
+  list-style: none;
+}
+
+.model-hits > li:not(:first-child),
+.model-file:not(:first-child) {
+  border-block-start: var(--rule-width) solid var(--edge-rule);
+}
+
+.model-hit,
+.model-file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--ink-chalk);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.model-hit {
+  width: 100%;
+  border: 0;
+  background: none;
+  text-align: start;
+}
+
+.model-hit:hover:enabled,
+.model-file:hover:not(.is-off) {
+  background: var(--row-hover);
+}
+
+.model-hit[aria-current="true"],
+.model-file:has(input:checked) {
+  background: var(--row-selected);
+}
+
+.model-hit:disabled {
+  cursor: default;
+}
+
+.model-hit:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-offset));
+}
+
+.model-hit-name,
+.model-file-name {
+  flex: 1 1 var(--field-sm);
+  min-width: 0;
+  font: var(--type-label-13-mono);
+  overflow-wrap: anywhere;
+}
+
+.model-hit-facts,
+.model-file-size {
+  flex: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.model-file > input {
+  flex: none;
+  margin: 0;
+}
+
+/* A file that cannot be received keeps its row and says why under its name. */
+.model-file.is-off {
+  cursor: default;
+}
+
+.model-file.is-off .model-file-name {
+  color: var(--ink-mist);
+}
+
+.model-file-why {
+  flex-basis: 100%;
+  padding-inline-start: calc(var(--space-4) + var(--space-3));
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+  word-break: var(--prose-word-break);
+}
+
+.model-files {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
   margin: 0;
   padding: 0;
   border: 0;
 }
 
-.judgment-source-result {
-  margin-block: var(--space-3);
-  padding: var(--space-3);
+.model-files > legend {
+  padding: 0;
+  overflow-wrap: anywhere;
+}
+
+.judgment-model-destination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
   min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+/* The one model the person is about to receive: its name, what it weighs
+ * and what the filled button will do. */
+.judgment-source-result {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
   border: 0;
   border-radius: var(--radius-md);
-  background: var(--row-selected);
-  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
   overflow-wrap: anywhere;
 }
 
 .judgment-source-result[data-state="unsupported"],
 .judgment-source-result[data-state="cancelled"] {
-  border-color: var(--edge-mark);
   background: transparent;
+  box-shadow: var(--shadow-border);
 }
 
 .judgment-source-result-heading {
@@ -25458,10 +25627,6 @@ button.integration-context-action:hover {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--space-2);
-}
-
-.judgment-model-source .judgment-source-result-heading h4 {
-  margin: 0;
 }
 
 .judgment-source-badges {
@@ -25484,23 +25649,46 @@ button.integration-context-action:hover {
 
 .judgment-source-badge[data-badge="current"] {
   color: var(--ink-chalk);
-  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
+  box-shadow: var(--shadow-border);
 }
 
+/* The steps a receive walks, each with a mark that says where it stands
+ * without its colour: a ring ahead, a filled dot behind and at the step
+ * under way (which is also heavier), a struck word where it stopped. */
 .judgment-source-steps {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1) var(--space-3);
-  margin: var(--space-2) 0;
+  margin: 0;
   padding: 0;
   list-style: none;
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
+}
+
+.judgment-source-steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.judgment-source-steps li::before {
+  content: "";
+  flex: none;
+  width: var(--dot-size);
+  height: var(--dot-size);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 var(--rule-width) currentColor;
 }
 
 .judgment-source-steps li[data-state="done"],
 .judgment-source-steps li[data-state="active"] {
   color: var(--ink-chalk);
+}
+
+.judgment-source-steps li[data-state="done"]::before,
+.judgment-source-steps li[data-state="active"]::before {
+  background: currentColor;
 }
 
 .judgment-source-steps li[data-state="active"] {
@@ -25510,6 +25698,18 @@ button.integration-context-action:hover {
 .judgment-source-steps li[data-state="failed"] {
   color: var(--ink-chalk);
   text-decoration: line-through;
+}
+
+/* The manager of received files waits folded under the receive area; it
+ * holds cards and forms, so it is not measured as prose. */
+.model-library-fold > :not(summary) {
+  max-width: none;
+}
+
+/* A fold's line here is a target among buttons: it stands a row tall, so a
+ * finger or a pointer has the 24px the buttons beside it have. */
+.model-receive .settings-fold > summary {
+  padding-block: var(--space-1);
 }
 
 .managed-judgment-library-tools {
@@ -61719,16 +61919,25 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .jev-builtin-status { margin: 0; color: var(--ink-mist); }
 .jev-builtin-status.is-error { color: var(--signal-halt); }
 
-/* Settings › 모델 and 모델 연결 (t-75762 v2): full-bleed rows divided by
- * rules, each a model's name, how it is reached and its state in words.
- * Every width is the pane's own, so a 320px split wraps as a phone does. */
+/* Settings › 모델 (t-75762 v2; one page since 2026-11-10): the two choices
+ * in one card, and under them the four places a model comes from — each a
+ * ringed group whose head says what it is and holds its door for adding one,
+ * over rows divided by rules: a model's name, how it is reached and its
+ * state in words. Every width is the pane's own, so a 320px split wraps as
+ * a phone does. */
 .connection-steps { display: flex; flex-wrap: wrap; gap: var(--space-5); padding-inline-start: var(--space-5); color: var(--ink-mist); font: var(--type-label-12); }
 .connection-delete-note { flex-basis: 100%; min-width: 0; }
 .connection-delete-note .settings-action-row { flex-wrap: wrap; }
-.model-settings, .model-setup { display: grid; gap: var(--space-5); min-width: 0; margin-block: var(--space-4); }
-.model-role, .model-group, .model-step { min-width: 0; padding-block-start: var(--space-4); border-block-start: var(--rule-width) solid var(--edge-rule); }
-/* The pane's head already draws the rule above the first card. */
-.model-settings > .model-role:first-child, .model-connections > .model-group:first-child { padding-block-start: 0; border-block-start: 0; }
+.model-catalog { display: grid; gap: var(--space-5); min-width: 0; margin-block-start: var(--space-4); }
+.model-catalog > .settings-card { width: 100%; margin-block: 0; }
+.model-settings, .model-setup { display: grid; gap: var(--space-4); min-width: 0; padding: var(--space-4); }
+.model-role, .model-step { min-width: 0; padding-block-start: var(--space-4); border-block-start: var(--rule-width) solid var(--edge-rule); }
+/* The card's own edge stands above its first choice. */
+.model-settings > .model-role:first-child { padding-block-start: 0; border-block-start: 0; }
+/* One rule between the two choices: the role's own, not the line's under it. */
+.model-settings .model-line { padding-block-end: 0; border-block-end: 0; }
+.model-settings :is(.settings-notice, .settings-status, .settings-hint, .settings-row-desc, .settings-action-row) { margin-inline: 0; padding-inline: 0; }
+.model-settings .settings-notice { padding: var(--space-3); }
 .model-role-head, .model-setup-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .model-role-title { margin: 0; color: var(--ink-chalk); font: var(--type-heading-16); }
 .model-step > h4, .model-question, .model-reco h4, .model-advanced-item > h4 { margin: 0 0 var(--space-2); color: var(--ink-chalk); font: var(--type-label-14); }
@@ -61737,6 +61946,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .model-off { margin: var(--space-2) 0 0; padding: 0; }
 .model-lines { display: grid; min-width: 0; }
 .model-line { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--space-2) var(--space-3); min-width: 0; padding-block: var(--space-3); border-block-end: var(--rule-width) solid var(--edge-rule); }
+/* The last row of a group sits on the group's own edge. */
+.model-group .model-lines > .model-line:last-child { border-block-end: 0; }
 .model-line-copy { display: grid; gap: var(--space-1); flex: 1 1 var(--field-sm); min-width: 0; }
 .model-line-name { color: var(--ink-chalk); font: var(--type-label-14); word-break: keep-all; overflow-wrap: break-word; }
 .model-line-way, .model-line-note { color: var(--ink-mist); font: var(--type-copy-13); word-break: keep-all; overflow-wrap: break-word; }
@@ -61779,10 +61990,31 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .model-change-table th, .model-change-table td { padding: var(--space-1) var(--space-2); border-block-end: var(--rule-width) solid var(--edge-rule); text-align: start; vertical-align: top; overflow-wrap: anywhere; }
 .model-change-key { font: var(--type-label-12-mono); }
 .model-advanced { margin-block-start: var(--space-2); }
+.model-advanced > .model-advanced-item :is(.settings-row-desc, .settings-action-row, .settings-notice, .settings-status) { margin-inline: 0; padding-inline: 0; }
 .model-formats { display: grid; gap: var(--space-2); margin-block-end: var(--space-3); }
 .model-formats > .model-format { padding: 0; }
 .model-advanced > .model-advanced-item { max-width: none; color: inherit; font-size: inherit; padding-block: var(--space-4) 0; border-block-start: var(--rule-width) solid var(--edge-rule); }
-.model-connections { display: grid; gap: var(--space-5); min-width: 0; margin-block: var(--space-4); }
+/* 연결: a short head and the four groups under it. */
+.model-sources { display: grid; gap: var(--space-3); min-width: 0; }
+.model-sources-head { display: grid; gap: var(--space-1); min-width: 0; }
+.model-sources-title { margin: 0; color: var(--ink-chalk); font: var(--type-heading-16); letter-spacing: var(--tracking-heading-16); }
+.model-sources :is(.settings-row-desc, .settings-hint) { max-width: none; margin: 0; padding: 0; }
+.model-connections { display: grid; gap: var(--space-4); min-width: 0; }
+.model-group { min-width: 0; border-radius: var(--radius-md); background: var(--surface-deck); box-shadow: var(--shadow-border-small); }
+.model-group-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-4); padding: var(--space-3) var(--space-4); border-block-end: var(--rule-width) solid var(--edge-rule); }
+.model-group-copy { display: grid; gap: var(--space-1); flex: 1 1 var(--field-md); min-width: 0; }
+.model-group-title { margin: 0; color: var(--ink-chalk); font: var(--type-heading-14); letter-spacing: var(--tracking-heading-14); }
+.model-group-about { margin: 0; color: var(--ink-mist); font: var(--type-copy-13); word-break: var(--prose-word-break); overflow-wrap: break-word; }
+.model-group-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.model-group > .model-lines { padding-inline: var(--space-4); }
+.model-group .model-group-empty { margin: 0; padding: var(--space-3) 0; font: var(--type-copy-13); }
+/* The engines under a group's rows: a small label, then rows like the rest. */
+.model-runtimes { min-width: 0; padding: var(--space-3) var(--space-4) 0; border-block-start: var(--rule-width) solid var(--edge-rule); }
+.model-sublabel { margin: 0; color: var(--ink-mist); font: var(--type-label-12); }
+.model-sources-note { color: var(--ink-mist); font: var(--type-label-12); }
+/* 고급 closes the card of the two choices, under its own rule. */
+.model-settings > .model-advanced { margin: 0; padding-block-start: var(--space-4); border-block-start: var(--rule-width) solid var(--edge-rule); }
+.model-settings > .model-advanced .judgment-connection-settings { margin-inline: 0; }
 .jev-input-preview-question { border-block-start: var(--rule-width) solid var(--edge-rule); padding-block: var(--space-3); }
 .jev-input-preview-question h3 { font: var(--type-label-13); margin-block: 0 var(--space-2); }
 .jev-input-preview-question p { white-space: pre-wrap; word-break: keep-all; overflow-wrap: break-word; }
@@ -61799,7 +62031,11 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 @container settings (max-width: 640px) {
   [data-connection-view] .settings-subhead--acts { flex-wrap: wrap; padding-inline: 0; }
   .model-line-actions { justify-content: flex-start; }
-  .model-line .btn, .model-choice, .model-pick .btn { white-space: normal; }
+  .model-line .btn, .model-choice, .model-pick .btn, .model-group-actions .btn { white-space: normal; }
+  .model-group-head, .model-runtimes { padding-inline: var(--space-3); }
+  .model-group > .model-lines { padding-inline: var(--space-3); }
+  .model-receive { padding: var(--space-3); }
+  .model-settings, .model-setup { padding: var(--space-3); }
 }
 .model-role-head .settings-jev-switch { margin: 0; padding: 0; border: 0; background: none; }
 .model-role-head .model-switch-about { display: none; }
