@@ -933,13 +933,10 @@ pub(crate) fn run_edit_file(
     enforcer: Option<&PermissionEnforcer>,
     ctx: &ToolContext,
 ) -> Result<String, ToolError> {
-    let (target, target_path) = prepare_guarded_file_write(ctx, enforcer, "edit_file", &input.path)?;
-    let output = edit_file(
-        &target,
-        &input.old_string,
-        &input.new_string,
-        input.replace_all.unwrap_or(false),
-    )?;
+    let replace_all = input.replace_all.unwrap_or(false);
+    let (target, target_path) =
+        prepare_guarded_edit(ctx, enforcer, &input.path, &input.old_string, replace_all)?;
+    let output = edit_file(&target, &input.old_string, &input.new_string, replace_all)?;
     ctx.record_workspace_checkpoint_write(&target_path);
     // 자기 자신이 만든 변경은 신선한 것으로 등재 — 연속 edit 허용.
     record_file_observation(&ctx.file_reads, &output.file_path);
@@ -1226,6 +1223,56 @@ fn prepare_guarded_file_write(
     enforce_read_before_write(&ctx.file_reads, tool_name, &target)?;
     ctx.record_workspace_checkpoint_before(&target_path)?;
     Ok((target, target_path))
+}
+
+/// [`prepare_guarded_file_write`] for `edit_file`, which can prove what a
+/// whole-file write cannot.
+///
+/// The read-before-write guard keeps a change from landing on text the model
+/// does not hold. A whole-file write gives no sign of what it knows, so the
+/// guard asks for a read. An edit does: an `old_string` that stands in the
+/// file on disk exactly once is the text at the place it changes, read or
+/// not — which is the whole of what pi's `edit` asks, and what the model
+/// usually has from a `grep` or a `cat` the registry never hears of. Seven
+/// days on one machine to 2026-11-10: 30 of 41 failed `edit_file` calls were
+/// a file never read and 4 were a string that did not match, and each
+/// refusal cost a read and a second edit — two more requests over a context
+/// that averaged 283k tokens.
+///
+/// Two refusals stay. A file that changed on disk since it was read still has
+/// to be read again: there the model holds an OLD file, and what the person
+/// did to it meanwhile is the thing it must see. And `replace_all` changes
+/// every occurrence, of which one matching string says nothing.
+fn prepare_guarded_edit(
+    ctx: &ToolContext,
+    enforcer: Option<&PermissionEnforcer>,
+    path: &str,
+    old_string: &str,
+    replace_all: bool,
+) -> Result<(String, std::path::PathBuf), ToolError> {
+    let target_path = resolve_guarded_write_target(ctx, enforcer, path)?;
+    let target = target_path.to_string_lossy().into_owned();
+    let never_read = ctx
+        .file_reads
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .check(&target_path)
+        == FileFreshness::NeverRead;
+    let placed = never_read && !replace_all && names_one_place_on_disk(&target_path, old_string);
+    if !placed {
+        enforce_read_before_write(&ctx.file_reads, "edit_file", &target)?;
+    }
+    ctx.record_workspace_checkpoint_before(&target_path)?;
+    Ok((target, target_path))
+}
+
+/// Whether `old_string` stands in the file as it is on disk exactly once. A
+/// file that cannot be read as text answers no, and the guard's own refusal
+/// stands.
+fn names_one_place_on_disk(path: &Path, old_string: &str) -> bool {
+    !old_string.is_empty()
+        && std::fs::read_to_string(path)
+            .is_ok_and(|content| content.matches(old_string).take(2).count() == 1)
 }
 
 fn resolve_guarded_write_target(
@@ -3313,22 +3360,64 @@ mod read_guard_tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// ③ 이 대화에서 읽은 적 없는 기존 파일의 edit은 거부 — `read_file`을
-    /// 지시하는 actionable 에러.
+    /// ③ 이 대화에서 읽은 적 없는 기존 파일이라도, `old_string`이 디스크의
+    /// 파일에 정확히 한 번 있으면 그 edit은 통과한다 — 고칠 자리의 글을 모델이
+    /// 쥐고 있다는 증거가 그 문자열이다. 통과한 edit은 관측으로 등재되어 이어지는
+    /// edit도 재읽기 없이 허용된다.
     #[test]
-    fn edit_without_prior_read_is_rejected() {
+    fn an_edit_that_names_one_place_in_an_unread_file_is_applied() {
         let path = temp_file("never-read-edit");
-        std::fs::write(&path, "alpha\n").expect("seed");
+        std::fs::write(&path, "alpha beta\n").expect("seed");
         let ctx = crate::tests::tool_context_outside_cwd_windows();
 
-        let err = edit(&ctx, &path, "alpha", "omega").expect_err("unread edit must be refused");
-        let message = err.to_string();
-        assert!(
-            message.contains("has not been read") && message.contains(&format!("with {}", core_types::tool_names::CoreTool::Read.wire())),
-            "error must be actionable: {message}"
-        );
-        assert_eq!(std::fs::read_to_string(&path).expect("read back"), "alpha\n");
+        edit(&ctx, &path, "alpha", "omega").expect("a placed edit needs no prior read");
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), "omega beta\n");
+        edit(&ctx, &path, "beta", "gamma").expect("the edit itself is an observation");
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), "omega gamma\n");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// ③-a 자리를 못 박는 edit은 여전히 거부 — 문자열이 파일에 없거나, 두 번
+    /// 있거나, `replace_all`이면 모델이 무엇을 아는지 알 수 없으므로 `read_file`을
+    /// 지시하는 actionable 에러를 내고 파일은 그대로 둔다.
+    #[test]
+    fn an_edit_that_cannot_be_placed_in_an_unread_file_is_told_to_read_it() {
+        let seed = "alpha alpha\n";
+        let refused = |old: &str, replace_all: bool| {
+            let path = temp_file("never-read-unplaced");
+            std::fs::write(&path, seed).expect("seed");
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            let err = run_edit_file(
+                &EditFileInput {
+                    path: path.to_string_lossy().into_owned(),
+                    old_string: old.to_owned(),
+                    new_string: "omega".to_owned(),
+                    replace_all: Some(replace_all),
+                },
+                None,
+                &ctx,
+            )
+            .expect_err("an unplaced edit of an unread file must be refused");
+            assert_eq!(std::fs::read_to_string(&path).expect("read back"), seed);
+            let _ = std::fs::remove_file(&path);
+            err.to_string()
+        };
+        for (old, replace_all, why) in [
+            ("missing", false, "the string is not in the file"),
+            ("alpha", false, "the string is there twice"),
+            ("alpha", true, "replace_all changes places the string does not name"),
+            ("", false, "an empty string names no place"),
+        ] {
+            let message = refused(old, replace_all);
+            assert!(
+                message.contains("has not been read")
+                    && message.contains(&format!(
+                        "with {}",
+                        core_types::tool_names::CoreTool::Read.wire()
+                    )),
+                "{why}: error must be actionable: {message}"
+            );
+        }
     }
 
     /// ③-b 기존 파일을 통째로 덮어쓰는 `write_file`도 같은 가드를 받는다.
@@ -3383,16 +3472,22 @@ mod read_guard_tests {
             .expect("read_file dispatches")
             .expect("conversation A reads the file");
 
-        // A의 읽기는 B의 가드를 만족시키지 못한다.
+        // A의 읽기는 B의 가드를 만족시키지 못한다. (통째로 덮어쓰는 write로
+        // 본다 — 자리를 못 박은 edit은 읽기 없이도 통과하기 때문이다.)
         let err = dispatch(
             &ctx_b,
             None,
-            "edit_file",
-            &json!({ "path": path_str, "old_string": "alpha", "new_string": "omega" }),
+            "write_file",
+            &json!({ "path": path_str, "content": "clobbered\n" }),
         )
-        .expect("edit_file dispatches")
+        .expect("write_file dispatches")
         .expect_err("conversation B must be told to read first");
         assert!(err.to_string().contains("has not been read"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "shared alpha\n",
+            "B's refused overwrite left the file alone"
+        );
 
         // A 자신은 편집 가능.
         dispatch(
