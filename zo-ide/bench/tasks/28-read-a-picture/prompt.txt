@@ -1,0 +1,1 @@
+shot.png is one solid colour. Which colour? Answer with one lowercase English word.

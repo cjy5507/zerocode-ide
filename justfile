@@ -120,6 +120,7 @@ tools-test:
     t tools/tests/test_claude_code_panel_rules.py; \
     t tools/tests/test_codegraph_bench.py; \
     t tools/tests/test_test_times.py; \
+    t tools/tests/test_zo_bench_run_tasks.py; \
     macos "reads proc_pid_rusage through macOS libproc.dylib and mach_absolute_time" tools/tests/test_memory_census_idle.py; \
     macos "ends the measured CLI's process group (os.killpg)" tools/login-renewal-probe/test_probe.py; \
     wait; \

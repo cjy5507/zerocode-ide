@@ -7,7 +7,9 @@ One run = one task, one model, one harness arm:
    works in a real git tree;
 2. run `zo --json` there with the task's `prompt.txt`;
 3. let the task's `check.sh <workdir>` judge the result (it copies the tree and
-   runs a verifier the model never saw).
+   runs a verifier the model never saw). The verifier is also handed the
+   model's last message, in a file kept outside the tree, so a task can ask a
+   question and judge the answer without making the model write it down.
 
 An arm is a catalog overlay handed to zo as the operator's export of
 `ZO_MODEL_CONTEXT_WINDOWS` (`--arm name=<json>`), so an experiment changes one
@@ -16,6 +18,15 @@ harness field without a build. With no `--arm`, one arm runs: `shipped`.
 Output: one JSON line per run (`--out`), and a table per (model, arm) on
 stdout. Token columns are zo's session-cumulative `usage` frame; turning them
 into money is left to the price table of whoever reads them.
+
+`requests` is how many times the model was asked — the round trips of the
+run. Every one re-reads the whole conversation, so on a long session it is
+what a harness change mostly moves: a tool looked up before it is called, a
+file read before it is edited, a rule searched for that could have been in
+the prompt. Pass rate does not see any of that (every arm passes the easy
+tasks), which is what tasks 27–29 are for: each has one answer and a road to
+it that a harness can make shorter. Compare two binaries with two runs, each
+with an `--out` file of its own.
 
 Standard library only. Run it with `python3 -I`.
 """
@@ -34,8 +45,12 @@ from pathlib import Path
 
 CATALOG_ENV = "ZO_MODEL_CONTEXT_WINDOWS"
 # The window plants its vault into every pane; a bench run is not a pane's
-# session and must not recall the developer's notes.
-STRIPPED_ENV = ("ZEROCODE_SECOND_BRAIN",)
+# session and must not recall the developer's notes — nor write to them, which
+# a session told of a vault does. The variable is set to zo's own "off" word
+# and not merely removed: with it absent, a vault that settings declare is
+# connected all the same.
+VAULT_ENV = "ZEROCODE_SECOND_BRAIN"
+VAULT_OFF = "off"
 GIT_IDENTITY = ("-c", "user.name=bench", "-c", "user.email=bench@example.invalid")
 
 
@@ -84,8 +99,9 @@ def prepare_workdir(task):
     return work
 
 
-def run_zo(args, model, overlay, work, prompt):
-    env = {key: value for key, value in os.environ.items() if key not in STRIPPED_ENV}
+def run_zo(args, model, overlay, work, prompt, answer):
+    env = dict(os.environ)
+    env[VAULT_ENV] = VAULT_OFF
     if overlay is None:
         env.pop(CATALOG_ENV, None)
     else:
@@ -93,6 +109,7 @@ def run_zo(args, model, overlay, work, prompt):
     command = [
         args.zo, "--json", "--model", model, "--permission-mode", "workspace-write",
         "--max-turns", str(args.max_turns), "--cwd", str(work),
+        "--last-message", str(answer),
     ]
     if args.effort:
         command += ["--effort", args.effort]
@@ -112,9 +129,14 @@ def run_zo(args, model, overlay, work, prompt):
 def read_events(stdout):
     """What the run did, from zo's `--json` lines: `usage` carries the
     session's running `total_tokens`, `tool_call`/`tool_result` share an
-    `id`, `wire_model` names each model a request went to, and `result`
-    closes the run."""
+    `id`, `wire_model` names each model a request went to, `stream_phase`
+    says when a request is sent, and `result` closes the run.
+
+    A request is counted at its first attempt: a retry after a dropped
+    connection sends the same request again and is not a round trip the model
+    asked for."""
     total_tokens = 0
+    requests = 0
     calls = {}
     tool_errors = 0
     models = []
@@ -132,6 +154,9 @@ def read_events(stdout):
             calls[event.get("id")] = event.get("name")
         elif kind == "tool_result" and event.get("is_error"):
             tool_errors += 1
+        elif kind == "stream_phase":
+            if event.get("phase") == "request_sent" and event.get("attempt", 1) == 1:
+                requests += 1
         elif kind == "wire_model" and event.get("model") not in models:
             models.append(event.get("model"))
         elif kind == "result":
@@ -141,6 +166,7 @@ def read_events(stdout):
         by_tool[name] = by_tool.get(name, 0) + 1
     return {
         "total_tokens": total_tokens,
+        "requests": requests,
         "tool_calls": len(calls),
         "tool_errors": tool_errors,
         "by_tool": by_tool,
@@ -150,19 +176,21 @@ def read_events(stdout):
     }
 
 
-def judge(task, work):
+def judge(task, work, answer):
     """The task's own `check.sh` when it has one; otherwise its hidden
     verifier on a copy of the tree, so a model cannot pass by editing what
-    the verifier reads."""
+    the verifier reads. `answer` is the file the model's last message was
+    written to — the last argument either script is given, and one a task
+    that judges the tree alone never reads."""
     check = task / "check.sh"
     if check.is_file():
-        done = subprocess.run(["sh", str(check), str(work)], capture_output=True, text=True)
+        done = subprocess.run(["sh", str(check), str(work), str(answer)], capture_output=True, text=True)
     else:
         scratch = Path(tempfile.mkdtemp(prefix=f"zo-judge-{task.name}-"))
         try:
             shutil.copytree(work, scratch, dirs_exist_ok=True)
             done = subprocess.run(
-                ["sh", str(task / "hidden" / "verify.sh"), str(scratch), str(task / "repo")],
+                ["sh", str(task / "hidden" / "verify.sh"), str(scratch), str(task / "repo"), str(answer)],
                 capture_output=True, text=True,
             )
         finally:
@@ -183,7 +211,7 @@ def summarize(rows):
     groups = {}
     for row in rows:
         groups.setdefault((row["model"], row["arm"]), []).append(row)
-    print(f"{'model':24} {'arm':14} {'pass':>7} {'wilson95':>9} {'wall_s':>7} {'tokens':>8} {'calls':>6} {'tool_err':>8}")
+    print(f"{'model':24} {'arm':14} {'pass':>7} {'wilson95':>9} {'wall_s':>7} {'tokens':>8} {'req':>5} {'calls':>6} {'tool_err':>8}")
     for (model, arm), group in sorted(groups.items()):
         passed = sum(row["passed"] for row in group)
         total = len(group)
@@ -191,6 +219,7 @@ def summarize(rows):
             f"{model:24} {arm:14} {passed:>3}/{total:<3} {wilson_lower(passed, total):>9.2f} "
             f"{statistics.median(row['wall_s'] for row in group):>7.0f} "
             f"{statistics.median(row['total_tokens'] for row in group):>8.0f} "
+            f"{statistics.mean(row.get('requests', 0) for row in group):>5.1f} "
             f"{statistics.mean(row['tool_calls'] for row in group):>6.1f} "
             f"{statistics.mean(row['tool_errors'] for row in group):>8.1f}"
         )
@@ -207,8 +236,12 @@ def main(argv):
                 for arm, overlay in arms:
                     for attempt in range(args.repeat):
                         work = prepare_workdir(task)
-                        code, stdout, stderr, wall, timed_out = run_zo(args, model, overlay, work, prompt)
-                        passed, verdict = judge(task, work)
+                        # Beside the tree, not in it: the model neither sees
+                        # the file nor finds it in `git status`.
+                        said = Path(tempfile.mkdtemp(prefix=f"zo-bench-said-{task.name}-"))
+                        answer = said / "last-message.txt"
+                        code, stdout, stderr, wall, timed_out = run_zo(args, model, overlay, work, prompt, answer)
+                        passed, verdict = judge(task, work, answer)
                         row = {
                             "task": meta.get("id"), "slug": meta.get("slug"), "model": model,
                             "arm": arm, "attempt": attempt, "passed": passed,
@@ -221,6 +254,7 @@ def main(argv):
                         out.flush()
                         print(f"{meta.get('id'):>4} {model:24} {arm:14} {'PASS' if passed else 'FAIL'} {wall:6.0f}s", flush=True)
                         shutil.rmtree(work, ignore_errors=True)
+                        shutil.rmtree(said, ignore_errors=True)
     summarize(rows)
     return 0
 
