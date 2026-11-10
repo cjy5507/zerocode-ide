@@ -666,10 +666,10 @@ function glideChatPin(list, state, to) {
   const root = getComputedStyle(document.documentElement);
   const duration = Number.parseFloat(root.getPropertyValue("--chat-pin-glide")) || 0;
   const easing = root.getPropertyValue("--ease-standard").trim() || "ease";
-  const clock = new Animation(new KeyframeEffect(null, null, { duration, easing, fill: "forwards" }), document.timeline);
+  // The list's own animation with no keyframes: a clock and a curve, changing nothing it draws.
+  const clock = list.animate([], { duration, easing, fill: "forwards" });
   const glide = { from: list.scrollTop, to, clock, frame: 0, began: performance.now() };
   state.pinGlide = glide;
-  clock.play();
   const step = () => {
     if (state.pinGlide !== glide || !list.isConnected) {
       clock.cancel();
