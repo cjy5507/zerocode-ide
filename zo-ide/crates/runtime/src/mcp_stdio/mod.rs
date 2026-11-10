@@ -908,7 +908,7 @@ impl McpServerManager {
 
     /// Stop every local server process this session has not used, and name
     /// the servers stopped. Their tools stay listed and routed: the first
-    /// call to one starts its server again ([`Self::ensure_server_ready`]),
+    /// call to one starts its server again (`ensure_server_ready`),
     /// exactly as a call after a crash always has.
     ///
     /// Discovery starts every configured server to learn its tools, and each
