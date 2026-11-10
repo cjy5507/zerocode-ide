@@ -8,8 +8,9 @@ use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 use super::marks::{self, Device, Seen, Snapshot};
 
 /// A check as a lone read, for the benches and tests that need no screen
-/// handed on.
-#[cfg(test)]
+/// handed on. Only the phone road's tests and bench read it, and they are a
+/// Mac's (`wda`: unix tests, a macOS bench), so a Windows test build leaves it out.
+#[cfg(all(test, unix))]
 pub(crate) async fn observe(
     platform: EmulatorPlatform,
     device: Device,
