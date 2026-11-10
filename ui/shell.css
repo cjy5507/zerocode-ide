@@ -32629,6 +32629,19 @@ select {
   box-shadow: var(--shadow-drop);
 }
 
+/* A floating surface that takes the focus itself — the tour's card when it
+ * opens, the turn list from the keyboard — keeps its edge and depth. The
+ * window-wide `:focus-visible` halo further down is for the controls on it;
+ * on the surface it replaced the ring and the shadow with a 3px slate band.
+ * The ink outline a surface names for its own focus stays. */
+:is(.qo, .auto-form, .jev-custom-drawer, .onboard, .tour-panel):focus-visible {
+  box-shadow: 0 0 0 var(--rule-width) var(--glass-edge), var(--shadow-float);
+}
+
+:is(.sidebar-menu, .note-pop, .your-turn-list, .workspace-board-settings-pop):focus-visible {
+  box-shadow: 0 0 0 var(--rule-width) var(--glass-edge), var(--shadow-drop);
+}
+
 :root[data-blur="on"] .titlebar,
 :root[data-blur="on"] .threads,
 :root[data-blur="on"] .files,

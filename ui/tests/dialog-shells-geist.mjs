@@ -143,14 +143,19 @@ export async function testDialogShellsGeist(browser, origin, ok) {
         const pointed = tourTargetOf(TOURS.board[0]) !== null;
         startTour("board");
         await new Promise((done) => setTimeout(done, 200));
-        const seen = { pointed, ...(new Function(`return (${fit})`)())("#tour-panel") };
+        // The card takes the focus as it opens; the window-wide focus halo
+        // must not trade its ring and float for a slate band.
+        const panel = document.getElementById("tour-panel");
+        const kept = document.activeElement === panel
+          && getComputedStyle(panel).boxShadow === getComputedStyle(document.querySelector(".qo")).boxShadow;
+        const seen = { pointed, kept, ...(new Function(`return (${fit})`)())("#tour-panel") };
         closeTour();
         return seen;
       }, readFit.toString());
     }
-    const bad = Object.entries(firstRun).filter(([, fit]) => fit.pointed === false || !fit.inside || fit.sideways > 0 || fit.low.length);
+    const bad = Object.entries(firstRun).filter(([, fit]) => fit.pointed === false || fit.kept === false || !fit.inside || fit.sideways > 0 || fit.low.length);
     ok(
-      "onboarding and the tour's card stay inside a 320px window with no sideways scroll, and every word on them keeps WCAG AA against the opaque ground, dark and light, with reduced motion",
+      "onboarding and the tour's card stay inside a 320px window with no sideways scroll, and every word on them keeps WCAG AA against the opaque ground, dark and light, with reduced motion; the tour's card, focused as it opens, keeps the dialog's ringed float",
       bad.length === 0,
       JSON.stringify(Object.fromEntries(bad.length ? bad : Object.entries(firstRun))),
     );
