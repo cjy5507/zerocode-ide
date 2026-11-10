@@ -23495,7 +23495,7 @@ button.integration-context-action:hover {
   border-radius: var(--radius-md);
   background: var(--qr-tile);
   color: var(--qr-module);
-  box-shadow: 0 0 0 1px var(--gray-alpha-400);
+  box-shadow: var(--shadow-border);
 }
 
 .remote-link-qr svg {
@@ -23517,7 +23517,7 @@ button.integration-context-action:hover {
 
 .remote-link-code {
   font-family: var(--font-mono);
-  letter-spacing: 0.08em;
+  letter-spacing: var(--tracking-label);
 }
 
 .integration-error,
