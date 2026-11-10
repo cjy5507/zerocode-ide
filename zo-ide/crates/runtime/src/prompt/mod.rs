@@ -2224,21 +2224,9 @@ mod import_tests {
         expand_context_imports, push_context_file, ContextFile, MAX_CONTEXT_IMPORT_DEPTH,
     };
     use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_dir() -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be after epoch")
-            .as_nanos();
-        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "runtime-prompt-import-{}-{nanos}-{counter}",
-            std::process::id()
-        ));
+    fn temp_dir() -> crate::test_root::TestRoot {
+        let dir = crate::test_root::TestRoot::new("runtime-prompt-import");
         fs::create_dir_all(&dir).expect("temp dir");
         dir
     }

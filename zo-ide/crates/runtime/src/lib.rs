@@ -77,6 +77,8 @@ pub mod task_packet;
 pub mod task_registry;
 mod team_inbox_digest;
 pub mod team_cron_registry;
+#[cfg(test)]
+pub(crate) mod test_root;
 pub mod todo_progress;
 pub mod todo_store;
 pub mod tool_cancel;

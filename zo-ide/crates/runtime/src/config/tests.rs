@@ -12,20 +12,9 @@ use super::{resolve_trusted_git_program_from, trusted_uncommitted_zo_file_snapsh
 use crate::json::JsonValue;
 use crate::sandbox::FilesystemIsolationMode;
 use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-fn temp_dir() -> std::path::PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time should be after epoch")
-        .as_nanos();
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "runtime-config-{}-{nanos}-{counter}",
-        std::process::id()
-    ))
+fn temp_dir() -> crate::test_root::TestRoot {
+    crate::test_root::TestRoot::new("runtime-config")
 }
 
 #[test]

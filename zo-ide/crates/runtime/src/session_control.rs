@@ -742,21 +742,10 @@ mod tests {
     use crate::session::Session;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_dir() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be after epoch")
-            .as_nanos();
-        let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "runtime-session-control-{}-{counter}-{nanos}",
-            std::process::id()
-        ))
+    fn temp_dir() -> crate::test_root::TestRoot {
+        crate::test_root::TestRoot::new("runtime-session-control")
     }
 
     fn with_config_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
