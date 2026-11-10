@@ -27,8 +27,26 @@ pub fn valid_leaf_name(name: &str) -> bool {
 /// 따라가고(없는 폴더를 지나는 `..`는 없는 경로), Windows는 디스크에 묻기 전에
 /// 글자로 접는다(`gone\..\up`은 `up`). 그래서 사람이나 요청이 적은 경로의 `..`는
 /// 풀어 보기 전에 이 한 곳에서 거절한다 — 어느 기계에서든 같은 답이다.
+///
+/// Windows는 `\\?\`로 시작하는 경로의 `/`를 구분자로 읽지 않는다:
+/// `\\?\C:\root/gone/../up`의 끝 마디는 `root/gone/../up`이라는 이름 하나가 되고
+/// `..`는 마디로 드러나지 않는다. `canonicalize`가 돌려준 뿌리에 `/`로 이어
+/// 적으면 그 꼴이 된다(v1.1.138까지 Windows CI의 새 폴더 시험이 이 경로를
+/// 「폴더 이름으로 쓸 수 없습니다」로 읽었다). 그래서 Windows에서는 이름 하나로
+/// 읽힌 마디도 두 구분자로 갈라 본다(`name_steps_up`).
 pub fn steps_up(path: &Path) -> bool {
-    path.components().any(|part| part == Component::ParentDir)
+    path.components().any(|part| match part {
+        Component::ParentDir => true,
+        Component::Normal(name) => cfg!(windows) && name_steps_up(&name.to_string_lossy()),
+        _ => false,
+    })
+}
+
+/// 이름 하나로 읽힌 마디 안에 구분자로 갈린 `..`가 있는가. 유닉스에서 `\`는
+/// 이름의 글자이고 `/`는 이름에 들 수 없으므로 [`steps_up`]은 Windows에서만
+/// 이것을 묻는다.
+fn name_steps_up(name: &str) -> bool {
+    name.split(['/', '\\']).any(|piece| piece == "..")
 }
 
 /// 요청된 경로가 이 워크트리의 담장 안인가.
@@ -772,6 +790,29 @@ mod tests {
                 "a symlink walked the fence"
             );
         }
+    }
+
+    /// `\\?\` 경로에서 Windows가 이름 하나로 읽는 마디 속의 `..`도 위로 가는
+    /// 걸음이다. 점이 든 보통 이름은 아니다.
+    #[test]
+    fn a_step_up_inside_one_name_is_still_a_step_up() {
+        for hidden in [".tmpAb12/gone/../up", "real\\..\\up", "../up", "gone/.."] {
+            assert!(name_steps_up(hidden), "{hidden:?} hid its step up");
+        }
+        for plain in ["up", "a..b", "...", "..a", "a..", ".tmpAb12"] {
+            assert!(!name_steps_up(plain), "{plain:?} is one plain name");
+        }
+        #[cfg(windows)]
+        for typed in [
+            r"\\?\C:\root/gone/../up",
+            r"\\?\C:\root\gone\..\up",
+            r"C:\root/gone/../up",
+        ] {
+            assert!(steps_up(Path::new(typed)), "{typed} stepped up unseen");
+        }
+        // 유닉스에서 `\`는 이름의 글자다: 그런 이름의 파일은 어디로도 올라가지 않는다.
+        #[cfg(unix)]
+        assert!(!steps_up(Path::new("/root/real\\..\\up")));
     }
 
     /// 복제 이름은 Finder의 사다리다: copy, copy 2, copy 3…
