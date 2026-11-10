@@ -376,11 +376,15 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       JSON.stringify(catalogs),
     );
 
+    // The time is written by the page's engine (`toLocaleString()` in `worktreeLandingSay`), so it is read in the
+    // page: Node formats in its own locale (en-US here), and WebKit takes the system's (ko-KR here) where Chromium
+    // headless takes en-US — compared with Node's, the same tooltip failed on WebKit only (t-103178).
+    const landedTime = await page.evaluate((ms) => new Date(ms).toLocaleString(), LANDED_IN.time_ms);
     ok(
       "the tooltip names the ref compared with and how long ago it last moved, the main commit that took the work (nine characters) and its time, and says so for a detached HEAD, a missing ref and an unknown",
       chips["/r/landed"].tip.includes(`비교: ${REF}`) && chips["/r/landed"].tip.includes("마지막 갱신 2일 전") &&
         chips["/r/landed"].tip.includes("012345678 ·") && !chips["/r/landed"].tip.includes("0123456789") &&
-        chips["/r/landed"].tip.includes(new Date(LANDED_IN.time_ms).toLocaleString()) &&
+        chips["/r/landed"].tip.includes(landedTime) &&
         chips["/r/det"].tip.includes("분리된 HEAD") &&
         chips["/r/noref"].tip.includes("origin/gone") && !chips["/r/noref"].tip.includes("origin/gone를") && chips["/r/noref"].tip.includes("시각을 알 수 없음") &&
         chips["/r/unk"].tip.includes("가를 수 없습니다") &&
