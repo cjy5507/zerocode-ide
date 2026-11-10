@@ -408,6 +408,11 @@ pub(crate) fn test_env_mutex() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| {
         std::env::set_var("ZO_DISABLE_KEYCHAIN", "1");
+        // One home a test process, named for its pid; the homes of runs that ended go first.
+        let _ = core_types::ended_process_folders::remove_folders_of_ended_processes(
+            &std::env::temp_dir(),
+            "zo-ide-test-home-",
+        );
         let home = std::env::temp_dir().join(format!("zo-ide-test-home-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&home);
         std::env::set_var("ZO_CONFIG_HOME", &home);

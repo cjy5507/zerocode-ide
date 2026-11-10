@@ -11,6 +11,11 @@
 pub fn isolate() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        // The folders of runs that ended go first: nothing removes a process's own when it ends.
+        let _ = core_types::ended_process_folders::remove_folders_of_ended_processes(
+            &std::env::temp_dir(),
+            "zo-runtime-itest-traces-",
+        );
         let folder = std::env::temp_dir()
             .join(format!("zo-runtime-itest-traces-{}", std::process::id()));
         std::env::set_var("ZO_TRACE_ROOT", folder);

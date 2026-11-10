@@ -331,6 +331,14 @@ fn default_artifact_store_dir() -> Option<PathBuf> {
 #[cfg(test)]
 #[allow(clippy::unnecessary_wraps)] // the product's place can fail to resolve; the signature is shared
 fn default_artifact_store_dir() -> Option<PathBuf> {
+    // The stores of runs that ended go, once a process: nothing removes a process's own when it ends.
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(|| {
+        let _ = core_types::ended_process_folders::remove_folders_of_ended_processes(
+            &std::env::temp_dir(),
+            "zo-tools-test-artifacts-",
+        );
+    });
     Some(std::env::temp_dir().join(format!("zo-tools-test-artifacts-{}", std::process::id())))
 }
 

@@ -11,7 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["fs", "user"] }
+nix = { version = "0.29", features = ["fs", "signal", "user"] }
 
 [target.'cfg(windows)'.dependencies]
 cap-fs-ext = "4.0.3"

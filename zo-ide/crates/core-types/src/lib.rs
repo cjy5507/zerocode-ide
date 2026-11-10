@@ -9,6 +9,7 @@ pub mod card;
 pub mod command_category;
 pub mod council;
 pub mod date;
+pub mod ended_process_folders;
 pub mod helper_run;
 pub mod hex;
 pub mod json;

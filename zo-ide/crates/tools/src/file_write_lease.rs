@@ -381,6 +381,14 @@ mod tests {
     /// `zo_project_state_dir`, which honors `ZO_STATE_DIR`). The env var is
     /// process-global, so callers hold the shared tools env lock first.
     fn isolated_cwd() -> std::path::PathBuf {
+        // The folders of runs that ended go, once a process; this run's stay until the next run's first lease.
+        static SWEPT: std::sync::Once = std::sync::Once::new();
+        SWEPT.call_once(|| {
+            let _ = core_types::ended_process_folders::remove_folders_of_ended_processes(
+                &std::env::temp_dir(),
+                "zo-lease-",
+            );
+        });
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
