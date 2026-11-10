@@ -550,8 +550,14 @@ mod tests {
     /// The marks look: one number column — a row's new number, the old one of
     /// a removed row — and a changed row's band as the row's own style, which
     /// the painter runs to the pane's edge.
+    ///
+    /// The colour depth is handed in, not read from the environment: a CI
+    /// runner and the release lane have no `COLORTERM`, and there the depth is
+    /// ANSI-16, which draws no band on purpose (`line_background`).
     #[test]
     fn the_marks_look_draws_one_number_column_and_a_band_to_the_edge() {
+        use crate::tui::palette::{ColorLevel, TerminalPalette};
+
         let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
         if !crate::tui::style::in_fresh_run(&format!(
             "{module}::the_marks_look_draws_one_number_column_and_a_band_to_the_edge"
@@ -559,22 +565,25 @@ mod tests {
             return;
         }
         crate::tui::style::init(&crate::preferences::Preferences::default());
-        let lines = hunk_lines(
-            &view(vec![hunk(
-                14,
-                14,
-                vec![
-                    line(DiffLineKind::Context, "kept"),
-                    line(DiffLineKind::Removed, "gone"),
-                    line(DiffLineKind::Added, "fresh"),
-                ],
-            )]),
-            80,
-        );
-        let plain: Vec<String> = lines.iter().map(crate::tui::ansi::Line::plain).collect();
-        assert_eq!(plain, ["14   kept", "15 - gone", "15 + fresh"]);
-        assert!(lines[0].style.bg.is_none(), "a context row has no band");
-        assert!(lines[1].style.bg.is_some() && lines[2].style.bg.is_some(), "a changed row's band is the row's");
+        let edit = view(vec![hunk(
+            14,
+            14,
+            vec![
+                line(DiffLineKind::Context, "kept"),
+                line(DiffLineKind::Removed, "gone"),
+                line(DiffLineKind::Added, "fresh"),
+            ],
+        )]);
+        for level in [ColorLevel::TrueColor, ColorLevel::Ansi256, ColorLevel::Ansi16] {
+            let terminal = TerminalPalette::new((220, 220, 220), (20, 20, 20), level);
+            let lines = super::hunk_lines_for_palette(&edit, 80, Some(terminal));
+            let plain: Vec<String> = lines.iter().map(crate::tui::ansi::Line::plain).collect();
+            assert_eq!(plain, ["14   kept", "15 - gone", "15 + fresh"], "{level:?}");
+            assert!(lines[0].style.bg.is_none(), "{level:?}: a context row has no band");
+            let banded = lines[1].style.bg.is_some() && lines[2].style.bg.is_some();
+            // ANSI-16 says a change by the sign's colour alone.
+            assert_eq!(banded, level != ColorLevel::Ansi16, "{level:?}: a changed row's band is the row's");
+        }
     }
 
     /// codex numbers additions from the NEW file and deletions from the OLD
