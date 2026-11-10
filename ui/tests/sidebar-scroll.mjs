@@ -270,6 +270,9 @@ async function installScrollProbes(page) {
       return {
         at: performance.now(),
         top: scroll,
+        // The window's debt (the lead's negative margin) and the furthest the scroll can go, for `rowsHeld`.
+        debt: typeof sidebarDebt === "number" ? sidebarDebt : 0,
+        max: scroller.scrollHeight - scroller.clientHeight,
         rows,
         first,
         blank,
@@ -499,7 +502,22 @@ function rowsHeld(taken, from, to) {
     const wrote = taken.writes
       .filter((write) => write.at > was.at && write.at <= now.at)
       .reduce((sum, write) => sum + (write.after - write.before), 0);
-    const scrolled = now.top - was.top - wrote;
+    // At the bottom the browser can cut a wheel tick short in the middle of a render, while the last rows are built
+    // and the list is for a moment shorter than it ends: WebKit took a 100 px tick as 21 px. The window holds the rows
+    // where the tick put them by taking the rest as debt (`oweSidebarDrift`), and the rows move the whole tick, as on
+    // every other tick; at rest it pays the debt with one write, which moves nothing. That debt is the person's
+    // scroll the browser cut, not a move of the rows: counted as one here, it read as a 79 px jump on WebKit only
+    // (t-103178). Only a tick cut short: a wheel came in that frame or just before it, the scroll stands at its end, and the scroll and
+    // the debt together are no more than the ticks asked for.
+    const wheeled = taken.events
+      .filter((event) => event.type === "wheel" && event.at > Math.min(was.at, now.at - WRITE_WINDOW_MS) && event.at <= now.at)
+      .length;
+    const rose = (now.debt ?? 0) - (was.debt ?? 0);
+    const cut = wrote === 0 && wheeled > 0 && rose > 0 && Math.abs(now.top - now.max) <= 0.5 &&
+      now.top - was.top + rose <= wheeled * STEP + 0.5
+      ? rose
+      : 0;
+    const scrolled = now.top - was.top - wrote + cut;
     const top = now.top <= 0.5;
     for (const key of Object.keys(now.rows)) {
       if (!(key in was.rows)) continue;
