@@ -178,8 +178,7 @@ pub fn wire_tool_output(
 /// then re-append the notice. Deterministic in `(output, tool_name)`.
 fn compress_wire_view(output: &str, tool_name: &str, rewrite: WireRewrite) -> String {
     let (body, recovery_notice) = split_recovery_notice(output);
-    let mut content =
-        compress_tool_output_with(body.as_ref(), tool_name, None, rewrite).content;
+    let mut content = compress_for_wire(body.as_ref(), tool_name, rewrite).content;
     if let Some(notice) = recovery_notice {
         content.push('\n');
         content.push_str(&notice);
@@ -313,6 +312,205 @@ pub fn compress_tool_output_with(
         Some(CoreTool::Write) => compress_write_file(raw),
         None => CompressionOutcome::unchanged(raw),
     }
+}
+
+/// The view one result takes on the wire: a core tool's own compressor, and
+/// for the rest the envelopes [`compress_named_envelope`] knows.
+///
+/// The second half is the wire's alone. `compress_tool_output` also runs at
+/// dispatch, where a rewrite that saved anything keeps the original as an
+/// artifact so it can be recovered; these envelopes lose nothing but their
+/// wrapping, so there is nothing to recover and no reason to write a file
+/// for every skill that is loaded.
+fn compress_for_wire(raw: &str, tool_name: &str, rewrite: WireRewrite) -> CompressionOutcome {
+    if CoreTool::of(tool_name).is_some() {
+        return compress_tool_output_with(raw, tool_name, None, rewrite);
+    }
+    compress_named_envelope(raw, tool_name)
+}
+
+// ---------------------------------------------------------------------------
+// skill bodies / ToolSearch — wire only
+// ---------------------------------------------------------------------------
+
+/// The tool whose result is a set of schemas, printed with indentation.
+const TOOL_SEARCH: &str = "ToolSearch";
+
+/// Envelopes outside the core table that reach the model as pretty JSON.
+///
+/// A skill arrives as its `SKILL.md` escaped into one JSON string beside a
+/// second copy of its description, and `ToolSearch` indents every schema it
+/// returns: seven days of one machine's conversations to 2026-11-10 held
+/// 1.4M characters of the two.
+///
+/// `TodoWrite` is deliberately not here, though its result repeats the list
+/// it was handed. The list it held BEFORE the call (`oldTodos`) is not always
+/// something the model still has — after a compaction, or in a conversation
+/// taken up again — and what a conversation is handed of a plan is a thing
+/// the end-to-end suite reads off the wire.
+fn compress_named_envelope(raw: &str, tool_name: &str) -> CompressionOutcome {
+    // A skill body comes from three tools — `Skill`, and `skill_search` and
+    // `skill_load` behind `CapabilityInvoke` — so it is told by its shape, not
+    // by a name. The two substring checks keep every other result (an MCP
+    // answer of tens of kilobytes) from being parsed just to be turned away.
+    if raw.starts_with('{') && raw.contains("\"prompt\"") && raw.contains("\"skill") {
+        if let Some(view) = skill_envelope_view(raw) {
+            return CompressionOutcome::pick_smaller(raw, view);
+        }
+    }
+    if tool_name == TOOL_SEARCH {
+        return compress_json_whitespace(raw);
+    }
+    CompressionOutcome::unchanged(raw)
+}
+
+/// A skill result as text: one header line a skill, then its `SKILL.md` as
+/// the file is written.
+///
+/// Three envelopes carry skill bodies: `Skill` (one skill at the top level),
+/// `skill_load` (`skills`, `unknown`) and `skill_search` (`skills`, `others`,
+/// and how they were ranked). In all of them the body is a JSON string, so
+/// every newline of a procedure the model is about to follow arrives as two
+/// characters on one long line. The description is dropped when the body's
+/// own frontmatter states it, which is the usual case; every other field is
+/// kept. `None` when the shape is not one of these or a field is missing —
+/// the caller then leaves the result as it is.
+fn skill_envelope_view(raw: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let object = value.as_object()?;
+    let mut view = String::with_capacity(raw.len());
+    if let Some(skills) = object.get("skills").and_then(|v| v.as_array()) {
+        only_keys(object, SKILL_LIST_KEYS)?;
+        view.push_str("[skills]");
+        if let Some(ranked_by) = object.get("rankedBy").and_then(|v| v.as_str()) {
+            let _ = write!(view, " ranked by {ranked_by}");
+        }
+        if let Some(outcome) = object.get("outcome").and_then(|v| v.as_str()) {
+            let _ = write!(view, " · judgment {outcome}");
+        }
+        if let Some(installed) = object.get("installed").and_then(serde_json::Value::as_u64) {
+            let _ = write!(view, " · {installed} installed");
+        }
+        let _ = writeln!(view, " · {} loaded", skills.len());
+        for skill in skills {
+            push_skill(&mut view, skill.as_object()?)?;
+        }
+        if let Some(others) = object.get("others").and_then(|v| v.as_array()) {
+            let names = others.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>();
+            if !names.is_empty() {
+                let _ = writeln!(view, "[others, not loaded] {}", names.join(", "));
+            }
+        }
+        if let Some(unknown) = object.get("unknown").and_then(|v| v.as_array()) {
+            for miss in unknown {
+                let asked = miss.get("asked").and_then(|v| v.as_str())?;
+                let suggestions = miss
+                    .get("suggestions")
+                    .and_then(|v| v.as_array())
+                    .map(|names| names.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    view,
+                    "[unknown] {asked} — closest: {}",
+                    if suggestions.is_empty() { "none".to_string() } else { suggestions.join(", ") }
+                );
+            }
+        }
+        if let Some(note) = object.get("note").and_then(|v| v.as_str()) {
+            let _ = writeln!(view, "[note] {note}");
+        }
+        return Some(view);
+    }
+    // `Skill`: the one skill is the envelope.
+    push_skill(&mut view, object)?;
+    Some(view)
+}
+
+/// Every key a skill list may carry (`SkillSearchOutput`, `SkillLoadOutput`).
+const SKILL_LIST_KEYS: &[&str] = &[
+    "rankedBy", "outcome", "installed", "skills", "others", "unknown", "note",
+];
+/// Every key one skill may carry (`SkillOutput`, `LoadedSkill`).
+const SKILL_KEYS: &[&str] = &[
+    "skill", "path", "args", "description", "origin", "reading", "confidence", "prompt",
+];
+
+/// `Some` when the object holds no key outside `known`. The view is built
+/// from named fields, so a field added to an envelope later would be dropped
+/// without a word; an envelope with a key this module has not heard of is
+/// left as JSON instead.
+fn only_keys(object: &serde_json::Map<String, serde_json::Value>, known: &[&str]) -> Option<()> {
+    object
+        .keys()
+        .all(|key| known.contains(&key.as_str()))
+        .then_some(())
+}
+
+/// One skill: `[skill] name · path · origin`, the fields a search adds, the
+/// arguments a `Skill` call passed, then the body verbatim.
+fn push_skill(
+    view: &mut String,
+    skill: &serde_json::Map<String, serde_json::Value>,
+) -> Option<()> {
+    only_keys(skill, SKILL_KEYS)?;
+    let name = skill.get("skill").and_then(|v| v.as_str())?;
+    let prompt = skill.get("prompt").and_then(|v| v.as_str())?;
+    let _ = write!(view, "[skill] {name}");
+    for key in ["path", "origin"] {
+        if let Some(text) = skill.get(key).and_then(|v| v.as_str()) {
+            let _ = write!(view, " · {text}");
+        }
+    }
+    for key in ["reading", "confidence"] {
+        if let Some(number) = skill.get(key).and_then(serde_json::Value::as_f64) {
+            let _ = write!(view, " · {key} {number:.2}");
+        }
+    }
+    view.push('\n');
+    if let Some(args) = skill.get("args").and_then(|v| v.as_str()) {
+        let _ = writeln!(view, "[args] {args}");
+    }
+    if let Some(description) = skill.get("description").and_then(|v| v.as_str()) {
+        if !prompt.contains(description) {
+            let _ = writeln!(view, "[description] {description}");
+        }
+    }
+    view.push_str(prompt);
+    if !prompt.ends_with('\n') {
+        view.push('\n');
+    }
+    Some(())
+}
+
+/// The same JSON without the indentation it was printed with: the whitespace
+/// between tokens is dropped and every other byte is kept, in order, so the
+/// result parses to the same value with its keys where they were. Text that
+/// is not JSON is left alone.
+fn compress_json_whitespace(raw: &str) -> CompressionOutcome {
+    if serde_json::from_str::<serde::de::IgnoredAny>(raw).is_err() {
+        return CompressionOutcome::unchanged(raw);
+    }
+    let mut compact = String::with_capacity(raw.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if in_string {
+            compact.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            compact.push(ch);
+        } else if !matches!(ch, ' ' | '\n' | '\r' | '\t') {
+            compact.push(ch);
+        }
+    }
+    CompressionOutcome::pick_smaller(raw, compact)
 }
 
 // ---------------------------------------------------------------------------
@@ -2148,5 +2346,196 @@ mod tests {
     fn collapse_preserves_missing_trailing_newline() {
         let input = "a\nb";
         assert_eq!(collapse_repeats(input), "a\nb");
+    }
+
+    // -- TodoWrite / skill bodies / ToolSearch --------------------------------
+
+    fn pretty(value: &serde_json::Value) -> String {
+        serde_json::to_string_pretty(value).expect("pretty JSON")
+    }
+
+    /// `TodoWrite` is left as it is. Its result holds the list the tool had
+    /// before the call, which a conversation that was compacted or taken up
+    /// again may no longer hold itself.
+    #[test]
+    fn a_todo_write_result_is_left_as_it_is() {
+        let raw = pretty(&serde_json::json!({
+            "oldTodos": [{"content": "map the wing", "activeForm": "mapping", "status": "in_progress"}],
+            "newTodos": [{"content": "map the wing", "activeForm": "mapping", "status": "completed"}],
+            "verificationNudgeNeeded": null,
+        }));
+        assert_eq!(wire_tool_output(&raw, "TodoWrite", false, WireRewrite::Full), raw);
+    }
+
+    /// The rewrite is the wire's alone. Dispatch keeps an artifact of whatever
+    /// it compresses, and a skill unwrapped loses nothing worth a file.
+    #[test]
+    fn the_skill_rewrite_does_not_run_at_dispatch() {
+        let raw = pretty(&serde_json::json!({
+            "skill": "second-brain",
+            "path": "/Users/dev/.zo/skills/second-brain/SKILL.md",
+            "description": "Maintain the vault.",
+            "origin": "global-zo",
+            "prompt": skill_body("second-brain", "Maintain the vault."),
+        }));
+        let at_dispatch = compress_tool_output(&raw, "Skill", None);
+        assert!(!at_dispatch.was_compressed);
+        assert_eq!(at_dispatch.content, raw);
+    }
+
+    fn skill_body(name: &str, description: &str) -> String {
+        format!(
+            "---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n1. Read \"the file\" first.\n2. Then run `just verify`.\n"
+        )
+    }
+
+    /// A loaded skill reaches the model as the file is written, not as one
+    /// JSON string with its newlines escaped; the description its frontmatter
+    /// already states is not sent a second time.
+    #[test]
+    fn a_skill_load_result_becomes_the_skill_files_themselves() {
+        let body = skill_body("plain-report", "Write a report a person can read.");
+        let raw = pretty(&serde_json::json!({
+            "skills": [{
+                "skill": "plain-report",
+                "path": "/Users/dev/.zo/skills/plain-report/SKILL.md",
+                "description": "Write a report a person can read.",
+                "origin": "global-zo",
+                "prompt": body,
+            }],
+            "unknown": [{"asked": "plane-report", "suggestions": ["plain-report"]}],
+        }));
+        let wired = wire_tool_output(&raw, "CapabilityInvoke", false, WireRewrite::Lossless);
+        assert!(
+            wired.starts_with(
+                "[skills] · 1 loaded\n[skill] plain-report · /Users/dev/.zo/skills/plain-report/SKILL.md · global-zo\n---\nname: plain-report\n"
+            ),
+            "{wired}"
+        );
+        assert!(wired.contains(&body), "the body is verbatim: {wired}");
+        assert!(wired.contains("1. Read \"the file\" first.\n2. Then run `just verify`.\n"));
+        assert!(!wired.contains("\\n"), "no escaped newline is left: {wired}");
+        assert_eq!(
+            wired.matches("Write a report a person can read.").count(),
+            1,
+            "the description is stated once: {wired}"
+        );
+        assert!(wired.contains("[unknown] plane-report — closest: plain-report\n"), "{wired}");
+        assert!(wired.chars().count() < raw.chars().count());
+    }
+
+    /// A search adds how the skills were ranked and which others it found;
+    /// none of that is dropped, and a description the body does not state is
+    /// kept beside it.
+    #[test]
+    fn a_skill_search_result_keeps_its_ranking_and_the_names_it_did_not_load() {
+        let raw = pretty(&serde_json::json!({
+            "rankedBy": "fallback",
+            "outcome": "off",
+            "installed": 32,
+            "skills": [{
+                "skill": "tui-design",
+                "path": "/Users/dev/.zo/skills/tui-design/SKILL.md",
+                "description": "Design terminal user interfaces.",
+                "origin": "global-zo",
+                "reading": 0.731_707,
+                "prompt": "# TUI design\n\nUse box-drawing characters sparingly.\n",
+            }],
+            "others": ["frontend-design", "ui-ux-pro-max"],
+            "note": "word match only",
+        }));
+        let wired = wire_tool_output(&raw, "CapabilityInvoke", false, WireRewrite::Lossless);
+        assert!(
+            wired.starts_with("[skills] ranked by fallback · judgment off · 32 installed · 1 loaded\n"),
+            "{wired}"
+        );
+        assert!(
+            wired.contains("[skill] tui-design · /Users/dev/.zo/skills/tui-design/SKILL.md · global-zo · reading 0.73\n"),
+            "{wired}"
+        );
+        assert!(wired.contains("[description] Design terminal user interfaces.\n"), "{wired}");
+        assert!(wired.contains("# TUI design\n\nUse box-drawing characters sparingly.\n"));
+        assert!(wired.contains("[others, not loaded] frontend-design, ui-ux-pro-max\n"), "{wired}");
+        assert!(wired.contains("[note] word match only\n"), "{wired}");
+    }
+
+    /// The `Skill` tool's own envelope is one skill, with the arguments the
+    /// call passed.
+    #[test]
+    fn a_skill_tool_result_becomes_its_skill_file_with_the_arguments() {
+        let body = skill_body("second-brain", "Maintain the vault.");
+        let raw = pretty(&serde_json::json!({
+            "skill": "second-brain",
+            "path": "/Users/dev/.zo/skills/second-brain/SKILL.md",
+            "args": "ingest raw",
+            "description": "Maintain the vault.",
+            "origin": "global-zo",
+            "prompt": body,
+        }));
+        let wired = wire_tool_output(&raw, "Skill", false, WireRewrite::Full);
+        assert_eq!(
+            wired,
+            format!(
+                "[skill] second-brain · /Users/dev/.zo/skills/second-brain/SKILL.md · global-zo\n[args] ingest raw\n{body}"
+            )
+        );
+    }
+
+    /// The view is built from named fields. An envelope carrying a field this
+    /// module has not heard of is left as it is, rather than losing the field.
+    #[test]
+    fn a_skill_envelope_with_an_unknown_field_is_left_as_json() {
+        let raw = pretty(&serde_json::json!({
+            "skill": "second-brain",
+            "path": "/Users/dev/.zo/skills/second-brain/SKILL.md",
+            "origin": "global-zo",
+            "prompt": "# Second brain\n",
+            "signature": "a field added later",
+        }));
+        assert_eq!(wire_tool_output(&raw, "Skill", false, WireRewrite::Full), raw);
+
+        let listed = pretty(&serde_json::json!({
+            "skills": [{"skill": "a", "path": "/p", "origin": "o", "prompt": "# a\n", "license": "MIT"}],
+        }));
+        assert_eq!(
+            wire_tool_output(&listed, "CapabilityInvoke", false, WireRewrite::Full),
+            listed
+        );
+    }
+
+    /// Any other tool's JSON — an MCP answer, an agent receipt — is not a
+    /// skill and is not touched, whatever it mentions.
+    #[test]
+    fn other_json_results_are_left_alone() {
+        let agent = pretty(&serde_json::json!({
+            "agentId": "agent-1",
+            "status": "running",
+            "note": "the prompt named the skill to use",
+        }));
+        assert_eq!(wire_tool_output(&agent, "Agent", false, WireRewrite::Full), agent);
+        let cut = "{\n  \"skills\": [\n    {\n      \"skill\": \"a\",\n      \"prompt\": \"# a\\n cut here";
+        assert_eq!(
+            wire_tool_output(cut, "CapabilityInvoke", false, WireRewrite::Full),
+            cut,
+            "an envelope the truncation cut mid-string does not parse and is passed through"
+        );
+    }
+
+    /// `ToolSearch` loses its indentation and nothing else: the same value,
+    /// its keys in the order they were written.
+    #[test]
+    fn a_tool_search_result_loses_only_its_indentation() {
+        let raw = "{\n  \"matches\": [\n    \"TaskOutput\"\n  ],\n  \"schemas\": [\n    {\n      \"name\": \"TaskOutput\",\n      \"description\": \"Retrieve the output:  two spaces, a \\\"quote\\\" and a \\\\ stay.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"required\": [\n          \"task_id\"\n        ]\n      }\n    }\n  ],\n  \"query\": \"select:TaskOutput\",\n  \"total_deferred_tools\": 408,\n  \"pending_mcp_servers\": null\n}";
+        let wired = wire_tool_output(raw, "ToolSearch", false, WireRewrite::Lossless);
+        assert_eq!(
+            wired,
+            "{\"matches\":[\"TaskOutput\"],\"schemas\":[{\"name\":\"TaskOutput\",\"description\":\"Retrieve the output:  two spaces, a \\\"quote\\\" and a \\\\ stay.\",\"input_schema\":{\"type\":\"object\",\"required\":[\"task_id\"]}}],\"query\":\"select:TaskOutput\",\"total_deferred_tools\":408,\"pending_mcp_servers\":null}"
+        );
+        let before: serde_json::Value = serde_json::from_str(raw).expect("raw parses");
+        let after: serde_json::Value = serde_json::from_str(&wired).expect("wired parses");
+        assert_eq!(before, after);
+        // Text that is not JSON is not a candidate.
+        let prose = "No deferred tool matches   that query.";
+        assert_eq!(wire_tool_output(prose, "ToolSearch", false, WireRewrite::Full), prose);
     }
 }
