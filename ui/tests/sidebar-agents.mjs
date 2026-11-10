@@ -1,4 +1,4 @@
-import { openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
+import { openWindowTestPage, recordBootPhases, waitBootSettled, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { afterTurns } from "./conversation-after.mjs";
 import { openPaneConversation, standZo } from "./conversation-parity.mjs";
 
@@ -531,8 +531,13 @@ export async function testSidebarAgents({ browser, origin, ok, faults }) {
  * card's foot counts those panes as 「검토 대기 N」 (t-95969 G2). Only a conversation the window already holds is
  * read — a pane whose conversation is not open says nothing — and opening the review is what clears both. */
 export async function testSidebarReviewMark({ browser, origin, ok, faults }) {
-  const { page } = await openWindowTestPage(browser, origin, { faults });
+  const { page } = await openWindowTestPage(browser, origin, { faults, before: recordBootPhases });
   try {
+    // The boot seats the stage after the list is read (`restoreActiveWorktreeTab`), and it puts forward the first tab
+    // of the workspace that holds an agent. Begun before that, on WebKit two runs in three, the boot came after this
+    // scene had opened its two zo panes and put the other pane's tab in front: the conversation this scene opened
+    // stood behind it, and waiting for its turns to show ran out at 30 s.
+    await waitBootSettled(page);
     await page.waitForFunction(() => projectsRead);
     await page.evaluate(async () => { setEveryProjectClosed(false); await refreshWorktrees(); });
     await standZo(page);
