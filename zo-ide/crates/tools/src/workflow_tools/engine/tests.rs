@@ -295,6 +295,14 @@ impl TempWorktreeProvider {
     }
 }
 
+/// The provider's folder goes with it, however the test ends: every test that made one left it behind
+/// (84 `zo-wf-test-wt-*` in one day, 2026-11-11).
+impl Drop for TempWorktreeProvider {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 impl WorktreeProvider for TempWorktreeProvider {
     fn create(&self, label: &str) -> Result<Box<dyn WorktreeGuard>, String> {
         let n = self

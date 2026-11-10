@@ -43,13 +43,22 @@ use super::{
 use crate::McpLifecyclePhase;
 
 fn temp_dir() -> PathBuf {
+    // The scripts written here outlive the function that writes them, so the folder ends in the pid and the
+    // folders of runs that ended are taken back once a process (core_types::ended_process_folders).
+    static SWEPT: std::sync::Once = std::sync::Once::new();
     static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
+    SWEPT.call_once(|| {
+        let _ = core_types::ended_process_folders::remove_folders_of_ended_processes(
+            &std::env::temp_dir(),
+            "runtime-mcp-stdio-test-",
+        );
+    });
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time should be after epoch")
         .as_nanos();
     let unique_id = NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("runtime-mcp-stdio-{nanos}-{unique_id}"))
+    std::env::temp_dir().join(format!("runtime-mcp-stdio-test-{nanos}-{unique_id}-{}", std::process::id()))
 }
 
 // The echo and audit fixtures are Python, run through `python3` like every

@@ -227,12 +227,22 @@ async fn dispatches_to_transport() {
     assert_eq!(result["hover"], "mocked");
 }
 
+/// A folder of this test's own, named `zo-lsp-test-<label>-<clock>-<pid>`: the fake servers' scripts must
+/// outlive the function that writes them, and most tests never removed theirs, so the folders of runs that
+/// ended are taken back once a process instead (`core_types::ended_process_folders`).
 fn temp_dir(label: &str) -> PathBuf {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(|| {
+        let _ = core_types::ended_process_folders::remove_folders_of_ended_processes(
+            &std::env::temp_dir(),
+            "zo-lsp-test-",
+        );
+    });
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!("zo-lsp-{label}-{unique}"))
+    std::env::temp_dir().join(format!("zo-lsp-test-{label}-{unique}-{}", std::process::id()))
 }
 
 /// Starts a fake server script through `python3`, as the MCP stdio suite
