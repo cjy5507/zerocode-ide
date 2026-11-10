@@ -152,7 +152,7 @@ RELEASE_STUB_LOG=${RELEASE_STUB_LOG:-}
 UPDATER_KEY=${UPDATER_KEY:-$RELEASE_HOME/keys/updater.key}   # `tauri signer generate -w`; its .pub beside it; never in the tree (README.md)
 UPDATER_KEY_PASSWORD_FILE=${UPDATER_KEY_PASSWORD_FILE:-$UPDATER_KEY.password}   # optional; absent means the key has no password
 FEED_PY=$SELF_DIR/updater_feed.py
-UNITS_PY=$SELF_DIR/workspace_units.py   # drops the repository's own build units from a target (trim_targets)
+UNITS_PY=$SELF_DIR/workspace_units.py   # drops the repository's own build units, and build-script runs copied in from another target, from a target (trim_targets)
 RECEIPT_PY=$SELF_DIR/coord_receipt.py   # reads a coordinator's gate receipt again (receipt_cover); enqueue.sh reads it at the door
 # A receipt's jobs are ones the coordinator's build line ran: their files in its done/, each
 # started and ended green in its runner.log — the queue under the project's workspace folder,
@@ -454,10 +454,25 @@ drop_workspace_units() {
   stub_log "drop-workspace-units $1"
   log "target $1: removed $units workspace unit(s), $(( ${bytes:-0} / 1048576 ))M — the fresh scratch rebuilds them anyway"
 }
+# drop_foreign_runs LANE — every build-script run that ran in another target (its `root-output` is not
+# its own `out`): a target copied in from a checkout. Cargo rewrites only the OUT_DIR of a copied run's
+# output, never the paths its script wrote into files (2026-11-10: a worktree's target copied into
+# root-gate kept tauri's permission lists naming that worktree, which was then removed, and v1.1.140's
+# root gate stopped on them); without their folders and fingerprints they run again here.
+drop_foreign_runs() {
+  local out units bytes
+  out=$(python3 "$UNITS_PY" foreign --target "$(target_dir "$1")") \
+    || { log "target $1: build-script runs left unread, $UNITS_PY failed"; return 0; }
+  read -r units bytes <<< "$out"
+  [ "${units:-0}" -gt 0 ] 2>/dev/null || return 0
+  stub_log "drop-foreign-runs $1"
+  log "target $1: removed $units build-script run(s) that ran in another target (copied in) — they run again here"
+}
 trim_targets() {
   local lane kb cap_kb=$(( TARGET_CAP_GB * 1024 * 1024 ))
   for lane in $TARGET_LANES; do
     mkdir -p "$(target_dir "$lane")"
+    drop_foreign_runs "$lane"
     drop_incremental "$lane"
     drop_workspace_units "$lane"
     kb=$(target_kb "$lane"); kb=${kb:-0}

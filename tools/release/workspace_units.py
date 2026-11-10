@@ -10,6 +10,18 @@ on 2026-10-13 they were 10.4 of zo-gate's 12.4 GiB and 11.4 of root-gate's
     workspace_units.py drop --target DIR (--scratch DIR | --names "a b ...")
 
 prints "<units> <bytes>" for what it removed.
+
+    workspace_units.py foreign --target DIR
+
+drops, from any crate, each build-script run that ran in another folder — its
+`root-output`, the OUT_DIR cargo ran it with, is not its own `out` — with its
+fingerprint, so cargo runs that build script again here; it prints the same
+"<units> <bytes>". Cargo keys a registry crate's units by nothing that holds the
+target's own path, and when a target is copied it rewrites only the OUT_DIR in
+a run's recorded `output`, never the paths a script wrote into files under it:
+on 2026-11-10 a worktree's target copied into the lane's root-gate kept tauri's
+permission lists naming that worktree, which was then removed, and v1.1.140's
+root gate stopped on them.
 """
 
 import argparse
@@ -117,6 +129,30 @@ def drop(target, names):
     return units, freed
 
 
+def foreign_runs(target):
+    """Each build-script run folder under TARGET (a host or cross profile) whose `root-output` names an
+    OUT_DIR other than its own `out`: the script ran in another target."""
+    for build in [*Path(target).glob("*/build"), *Path(target).glob("*/*/build")]:
+        for unit in sorted(build.iterdir()):
+            ran_in = unit / "root-output"
+            if not UNIT.match(unit.name) or not ran_in.is_file():
+                continue
+            said = ran_in.read_text(encoding="utf-8", errors="replace").strip()
+            if said not in (str(unit / "out"), os.path.join(os.path.realpath(unit), "out")):
+                yield unit
+
+
+def drop_foreign(target):
+    """Remove each run `foreign_runs` finds, with its fingerprint; (units, bytes)."""
+    units = freed = 0
+    for unit in list(foreign_runs(target)):
+        for path in (unit, unit.parent.parent / ".fingerprint" / unit.name):
+            freed += size(path)
+            remove(path)
+        units += 1
+    return units, freed
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     actions = parser.add_subparsers(dest="action", required=True)
@@ -125,7 +161,13 @@ def main(argv=None):
     source = drop_args.add_mutually_exclusive_group(required=True)
     source.add_argument("--scratch", help="the checkout whose Cargo.toml files name the crates to drop")
     source.add_argument("--names", help="the package names themselves (the lane's dry twin)")
+    foreign_args = actions.add_parser("foreign")
+    foreign_args.add_argument("--target", required=True)
     args = parser.parse_args(argv)
+    if args.action == "foreign":
+        units, freed = drop_foreign(args.target)
+        print(units, freed)
+        return 0
     names = package_names(Path(args.scratch)) if args.scratch is not None else set(args.names.split())
     units, freed = drop(args.target, names)
     print(units, freed)

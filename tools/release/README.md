@@ -381,6 +381,18 @@ zo-gate's 12.4 GiB and 11.4 of root-gate's 19 GiB. Only a target still over
 registry crate (245 for v1.1.62's zo gate, about 6 minutes).
 `tests/test_workspace_units.py` proves the drop on a real cargo build.
 
+A target copied in from elsewhere is read too (2026-11-10): cargo keys a
+registry crate's units by nothing that holds the target's path, and of a copied
+build-script run it rewrites only the OUT_DIR in the recorded output, never the
+paths the script wrote into files. A worktree's target copied into root-gate
+kept tauri's permission lists naming that worktree; the worktree was removed
+and v1.1.140's root gate stopped on them. Before the gates,
+`workspace_units.py foreign` drops each build-script run that ran in another
+target (its `root-output` is not its own `out`), with its fingerprint, and that
+build script runs again (`target <lane>: removed N build-script run(s) that ran
+in another target` in the lane log). Copy a target out of the lane, never into
+it.
+
 ## The two phases after the swaps
 
 - `bundle-updater` — with a key and U-B's `plugins.updater` present, and only

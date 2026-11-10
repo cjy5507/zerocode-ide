@@ -52,6 +52,63 @@ class Names(unittest.TestCase):
         self.assertEqual(load().package_names(self.repo), {"app"})
 
 
+class Foreign(unittest.TestCase):
+    """A build-script run that ran in another target (its `root-output` is not its own `out`) goes, with
+    its fingerprint; a run of this target, in any profile, stays."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="workspace-units-foreign-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.target = self.tmp / "root-gate"
+
+    def run_unit(self, profile, unit, output, ran_in=None):
+        folder = self.target / profile / "build" / unit
+        write(folder / "output", output)
+        write(folder / "out" / "made", "a build product")
+        write(folder / "root-output", str(ran_in or folder) + "/out")
+        write(self.target / profile / ".fingerprint" / unit / "run-build-script-build-script-build.json", "{}")
+
+    def test_a_run_copied_from_another_target_goes_and_one_of_this_target_stays(self):
+        gone = self.tmp / "worktree" / "target" / "debug"
+        own = self.target / "debug"
+        cross = self.target / "x86_64-pc-windows-msvc" / "debug"
+        self.run_unit("debug", "tauri-71514b9904e12dce",
+                      f"cargo:rustc-cfg=desktop\ncargo:PERMISSION_FILES_PATH={gone}/build/tauri-71514b9904e12dce/out/permissions/a.toml\n",
+                      ran_in=gone / "build" / "tauri-71514b9904e12dce")
+        self.run_unit("debug", "aws-lc-sys-a07a165b539ceaf6", "cargo:rustc-link-lib=static=crypto\n",
+                      ran_in=gone / "build" / "aws-lc-sys-a07a165b539ceaf6")
+        self.run_unit("debug", "ring-976e7dd2a29890b7", f"cargo:rustc-link-search=native={own}/build/ring-976e7dd2a29890b7/out\n")
+        self.run_unit("x86_64-pc-windows-msvc/debug", "windows-0123456789abcdef",
+                      f"cargo:rustc-link-search=native={cross}/build/windows-0123456789abcdef/out\n"
+                      f"cargo:rustc-env=HOST={own}/build/ring-976e7dd2a29890b7/out\n")
+        self.run_unit("debug", "serde-fedcba9876543210", "cargo:rerun-if-changed=build.rs\ncargo:rustc-cfg=no_core\n")
+        write(self.target / "debug" / "build" / "serde-0000000000000000" / "build-script-build", "a compiled script")
+
+        units, freed = load().drop_foreign(self.target)
+
+        self.assertEqual(units, 2)
+        self.assertGreater(freed, 0)
+        for unit in ("tauri-71514b9904e12dce", "aws-lc-sys-a07a165b539ceaf6"):
+            self.assertFalse((own / "build" / unit).exists(), unit)
+            self.assertFalse((own / ".fingerprint" / unit).exists(), unit)
+        for profile, unit in (("debug", "ring-976e7dd2a29890b7"), ("debug", "serde-fedcba9876543210"),
+                              ("x86_64-pc-windows-msvc/debug", "windows-0123456789abcdef")):
+            self.assertTrue((self.target / profile / "build" / unit / "out" / "made").exists(), unit)
+            self.assertTrue((self.target / profile / ".fingerprint" / unit).exists(), unit)
+        self.assertTrue((own / "build" / "serde-0000000000000000" / "build-script-build").exists())
+
+    def test_the_command_says_what_it_removed_and_a_missing_target_is_nothing(self):
+        self.run_unit("debug", "tauri-71514b9904e12dce", "cargo:X=1\n",
+                      ran_in=self.tmp / "elsewhere" / "debug" / "build" / "tauri-71514b9904e12dce")
+        r = subprocess.run([sys.executable, str(SCRIPT), "foreign", "--target", str(self.target)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split()[0], "1")
+        r = subprocess.run([sys.executable, str(SCRIPT), "foreign", "--target", str(self.tmp / "none")],
+                           capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "0 0"))
+
+
 @unittest.skipUnless(shutil.which("cargo"), "cargo is not on PATH")
 class OnARealBuild(unittest.TestCase):
     """A real, tiny, offline cargo build: the repository's units go, a crate

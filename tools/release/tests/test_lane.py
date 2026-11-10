@@ -1141,6 +1141,36 @@ class Cap(LaneCase):
         self.assertLess(max(drops), next(i for i, e in enumerate(events) if e.startswith("gate root target=")))
         self.assertIn("workspace unit", r.stdout)
 
+    def test_a_build_script_run_copied_in_from_another_target_runs_again(self):
+        """2026-11-10: a worktree's target copied into root-gate kept tauri's permission lists naming
+        that worktree; the worktree was removed and v1.1.140's root gate stopped on them. Before the
+        gates every target loses the build-script runs that ran in another folder (`root-output`),
+        with their fingerprints; its own stay."""
+        self.warm_all()
+        elsewhere = self.lane.tmp / "worktree" / "target" / "debug"
+        for lane in TARGET_LANES:
+            debug = self.lane.target(lane) / "debug"
+            for unit, folder in (("tauri-71514b9904e12dce", elsewhere), ("ring-976e7dd2a29890b7", debug)):
+                for rel, text in ((f"build/{unit}/output", "cargo:rustc-cfg=desktop\n"),
+                                  (f"build/{unit}/root-output", f"{folder}/build/{unit}/out"),
+                                  (f".fingerprint/{unit}/run.json", "{}")):
+                    (debug / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (debug / rel).write_text(text)
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(DISK_FREE_GB=100)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        for lane in TARGET_LANES:
+            debug = self.lane.target(lane) / "debug"
+            self.assertFalse((debug / "build/tauri-71514b9904e12dce").exists(), lane)
+            self.assertFalse((debug / ".fingerprint/tauri-71514b9904e12dce").exists(), lane)
+            self.assertTrue((debug / "build/ring-976e7dd2a29890b7/output").exists(), lane)
+            self.assertTrue((self.lane.target(lane) / "warm").exists(), f"{lane} must stay warm otherwise")
+        events = [line.split(" ", 1)[1] for line in self.lane.stub_lines()]
+        drops = [i for i, e in enumerate(events) if e.startswith("drop-foreign-runs ")]
+        self.assertEqual(len(drops), len(TARGET_LANES), events)
+        self.assertLess(max(drops), next(i for i, e in enumerate(events) if e.startswith("gate root target=")))
+        self.assertIn("ran in another target", r.stdout)
+
     def solos_run(self):
         return [l for l in self.lane.stub_lines() if " solo " in l]
 
