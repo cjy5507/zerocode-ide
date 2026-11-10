@@ -606,3 +606,84 @@ fn android_verbs_timed_on_an_avd_of_our_own() {
         std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).expect("a row");
     }
 }
+
+/// Where the door bench listens, and how often it looks whether its socket
+/// was taken away (its stop).
+const DOOR_BENCH_IDLE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The emulator door of this build, served with no window (t-101963), so a
+/// model's round trips on a simulator can be measured on a change before it
+/// is released. `ZEROCODE_WALK_BENCH_UDID` names a booted simulator of the
+/// measurer's own, registered the way an open pane registers one; the bench
+/// listens on the Unix socket `ZEROCODE_DOOR_BENCH_SOCKET` and answers one
+/// request a connection — a JSON line `{"argv": [...], "cwd": "..."}` — with
+/// one JSON line `{"stdout", "stderr", "exitCode"}`, the door's own answer.
+/// `open` is the window's and is refused. Removing the socket stops it.
+#[test]
+#[ignore = "drives a booted simulator of the caller's and serves its door until stopped; a measurement"]
+fn the_door_served_for_a_model_on_a_simulator_of_our_own() {
+    use std::io::{BufRead, Write};
+    use std::os::unix::net::UnixListener;
+    let udid = knob("ZEROCODE_WALK_BENCH_UDID").expect("a booted simulator's UDID");
+    let socket = PathBuf::from(knob("ZEROCODE_DOOR_BENCH_SOCKET").expect("where to listen"));
+    stand_in_for_a_pane(&udid);
+    let _ = std::fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).expect("the bench's socket");
+    listener
+        .set_nonblocking(true)
+        .expect("a socket that can wait");
+    println!("door bench on {} for {udid}", socket.display());
+    while socket.exists() {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(DOOR_BENCH_IDLE);
+                continue;
+            }
+            Err(error) => panic!("the bench's socket: {error}"),
+        };
+        stream.set_nonblocking(false).expect("a blocking stream");
+        let mut line = String::new();
+        if std::io::BufReader::new(&stream)
+            .read_line(&mut line)
+            .is_err()
+        {
+            continue;
+        }
+        let asked: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+        let argv: Vec<String> = asked["argv"]
+            .as_array()
+            .map(|words| {
+                words
+                    .iter()
+                    .filter_map(|word| word.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cwd = asked["cwd"].as_str().map(PathBuf::from);
+        let began = Instant::now();
+        let answer = match tauri::async_runtime::block_on(
+            crate::agent_tools_runtime::answer_emulator_off_window(&argv, cwd.as_deref()),
+        ) {
+            std::ops::ControlFlow::Break(answer) => answer,
+            std::ops::ControlFlow::Continue(_) => TeamAnswer {
+                stdout: String::new(),
+                stderr: "open is the window's; the bench's simulator is already open\n".into(),
+                exit_code: 2,
+            },
+        };
+        println!(
+            "{} {:.0} ms exit {}",
+            argv.first().map_or("", String::as_str),
+            began.elapsed().as_secs_f64() * 1_000.0,
+            answer.exit_code
+        );
+        let reply = json!({
+            "stdout": answer.stdout,
+            "stderr": answer.stderr,
+            "exitCode": answer.exit_code,
+        });
+        let _ = writeln!(&stream, "{reply}");
+    }
+    super::ios_hid::release(&udid);
+}

@@ -8,10 +8,12 @@ keywords: [아이폰, 아이패드, 안드로이드, 시뮬레이터, 에뮬레�
 # Mobile devices — iPhone, iPad, Android
 
 ZeroCode's window carries its own iOS Simulator and Android Emulator and drives
-them directly through one command, `zerocode-emulator`. When the person says a
-phone is "connected", "open in the IDE" or "has the app installed" (아이폰
-연결해놨어, 앱 설치해뒀어), start with `zerocode-emulator list`: one call tells
-you which road the device takes. Do not hunt for it first in the Mac window
+them directly through one command, `zerocode-emulator`. A simulator or
+emulator already open in this window needs no `list` and no device id: leave
+`--device` out (section 1). When the person says a phone is "connected" or
+"has the app installed" (아이폰 연결해놨어, 앱 설치해뒀어), or nothing is open
+yet, start with `zerocode-emulator list`: one call tells you which road the
+device takes. Do not hunt for it first in the Mac window
 list, Xcode's `devicectl` or `adb`, and never click the Simulator or Emulator
 window with `zerocode-computer`: the window already holds the device list and
 the input road.
@@ -19,7 +21,16 @@ the input road.
 This is the one place that holds the mobile commands. The `computer-use` skill
 points here and keeps no copy.
 
-## 1. First step, every time
+## 1. Which device
+
+A simulator or emulator that is already open in this window needs no `list`:
+leave `--device` out, and each command goes to the one device of its
+`--platform` the window has open. With none or several open, the refusal says
+so and names their ids, so trying costs nothing. A real phone is never taken
+this way; it is always named.
+
+For anything else (a phone said to be connected, nothing open yet, a device to
+choose), start with:
 
 ```text
 zerocode-emulator list --json
@@ -130,6 +141,17 @@ A step is `marks`, `find`, `foreground`, `wait-for`, `press`, `tap`, `swipe`,
 `scroll`, `scroll-until`, `collect`, `text` or `button`. Look once with `marks`
 when you do not know the way yet; batch what you have seen.
 
+When you know the steps (you were told them, or can guess them from the
+task's words), send the whole errand as one batch, through to the screen that
+holds the answer, with a `wait-for` before each new screen's first press. Guess
+a control's words from the task; you need not see a screen first. A wrong guess
+or a check that fails stops the batch at that step, and the answer lists the
+words that screen shows, so the next batch starts from there: trying costs no
+more than looking first, and every batch you split off costs a whole turn. The
+answer also carries `screen`: the words the screen it ended on shows, top to
+bottom. Read the result there. Do not add a `marks`, `collect` or `screenshot`
+call after the batch to read words it already answered.
+
 When no mark fits, or a gesture is the point, act by position. Coordinates are
 fractions of the device screen (0 to 1), not desktop pixels:
 
@@ -183,7 +205,9 @@ zerocode-emulator screenshot --platform ios|android --device <id> [--out <path>]
 ```
 
 The PNG goes to a file and the answer gives its path; image bytes are never
-printed. Omit `--out` for a private scratch path, or pass a destination when
+printed. A screenshot is for what words cannot say (a picture, a layout, a
+colour). The words a batch's `screen`, `find`, `wait-for` or `collect`
+answered are the screen's own; do not photograph them again to be sure. Omit `--out` for a private scratch path, or pass a destination when
 the picture belongs in the worktree (a relative `--out` starts from the
 shell's own folder).
 

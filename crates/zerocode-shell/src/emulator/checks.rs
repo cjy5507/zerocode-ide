@@ -2,6 +2,7 @@
 
 use serde_json::{Value, json};
 use zerocode_core::computer_use::{EmulatorMethod, EmulatorPlatform, window_title_matches};
+use zerocode_core::computer_use_protocol::marks::ElementFace;
 use zerocode_core::computer_use_protocol::{ProviderError, error_code};
 
 use super::marks::{self, Device, Snapshot};
@@ -52,7 +53,16 @@ pub(crate) const COUNT_KEY: &str = "count";
 /// is not among them.
 pub(crate) const VISIBLE_KEY: &str = "visible";
 
-/// The words a snapshot shows, each once, in the tree's order — at most
+/// The words the device's screen shows now, read once ([`visible`]): what a
+/// batch answers its last screen with.
+pub(crate) async fn screen_words(
+    platform: EmulatorPlatform,
+    device: &Device,
+) -> Result<Vec<String>, ProviderError> {
+    Ok(visible(&marks::snapshot(platform, device).await?))
+}
+
+/// The words a snapshot shows, each once, in reading order — at most
 /// [`EMULATOR_VISIBLE_MAX`] of them and none longer than
 /// [`EMULATOR_VISIBLE_CHARS_MAX`] characters.
 ///
@@ -68,18 +78,45 @@ pub(super) fn visible(snapshot: &Snapshot) -> Vec<String> {
         .collect()
 }
 
-/// Every word a snapshot's faces read, each once, in the tree's order: what a
+/// Every word a snapshot's faces read, each once, in reading order: what a
 /// list walk collects and how it tells one screen from the next.
 pub(super) fn words_of(snapshot: &Snapshot) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    snapshot
-        .faces
-        .iter()
+    reading_order(&snapshot.faces)
+        .into_iter()
         .filter_map(|face| face.name.as_deref().map(str::trim))
         .filter(|name| !name.is_empty())
         .filter(|name| seen.insert((*name).to_owned()))
         .map(str::to_owned)
         .collect()
+}
+
+/// Faces in the order a person reads the screen: rows from the top, and
+/// along a row from the left. The tree's own order is not that — a web
+/// page's text is hit-tested after the browser's bars, and a bold label can
+/// follow the value beside it ("Hours" after ": Mon–Fri 7:30 AM", Phone
+/// Harness 2026-11-10), which sent the model to a screenshot to be sure. Two
+/// faces share a row when their middles are closer than half the shorter
+/// one's height, so a container that spans many rows never swallows them.
+/// Ties keep the tree's order.
+fn reading_order(faces: &[ElementFace]) -> Vec<&ElementFace> {
+    let middle = |face: &ElementFace| face.y + face.height / 2.0;
+    let same_row = |a: &ElementFace, b: &ElementFace| {
+        (middle(a) - middle(b)).abs() <= a.height.min(b.height) / 2.0
+    };
+    let mut by_top: Vec<&ElementFace> = faces.iter().collect();
+    by_top.sort_by(|a, b| a.y.total_cmp(&b.y));
+    let mut rows: Vec<Vec<&ElementFace>> = Vec::new();
+    for face in by_top {
+        match rows.last_mut() {
+            Some(row) if same_row(row[0], face) => row.push(face),
+            _ => rows.push(vec![face]),
+        }
+    }
+    for row in &mut rows {
+        row.sort_by(|a, b| a.x.total_cmp(&b.x));
+    }
+    rows.into_iter().flatten().collect()
 }
 
 /// `wait-for`: read the screen until `subject` is on it — or, `absent`, until it
@@ -207,6 +244,39 @@ mod tests {
             )
             .unwrap()["count"],
             1
+        );
+    }
+
+    /// The screen's words come in reading order: rows from the top, along a
+    /// row from the left — a bold label before the value beside it though
+    /// the tree lists the value first, and a container that spans the rows
+    /// swallows none of them.
+    #[test]
+    fn the_screens_words_read_top_down_and_left_to_right() {
+        let text = |words: &str, left: i64, top: i64, bottom: i64| {
+            json!({"className": "android.widget.TextView", "text": words, "enabled": true,
+                "clickable": false, "packageName": "com.example.shop",
+                "bounds": {"left": left, "top": top, "right": left + 60, "bottom": bottom}})
+        };
+        let tree = json!({"children": [
+            text("Toolbar", 0, 780, 820),
+            text(": Mon–Fri 7:30 AM – 6:00 PM", 70, 301, 321),
+            text("Page", 0, 0, 840),
+            text("Hours", 10, 300, 322),
+            text("Blue Lantern Cafe", 10, 100, 130),
+            text("12 Harbor Street", 10, 200, 220),
+        ]});
+        let snapshot = snapshot(EmulatorPlatform::Android, &tree);
+        assert_eq!(
+            words_of(&snapshot),
+            [
+                "Page",
+                "Blue Lantern Cafe",
+                "12 Harbor Street",
+                "Hours",
+                ": Mon–Fri 7:30 AM – 6:00 PM",
+                "Toolbar"
+            ]
         );
     }
 

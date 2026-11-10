@@ -578,6 +578,12 @@ fn note_start(
     announce_loans();
 }
 
+/// The simulators or emulators of `platform` this window has a pane open on —
+/// where a door command that left `--device` out goes when there is one.
+pub(crate) fn open_devices(platform: zerocode_core::computer_use::EmulatorPlatform) -> Vec<String> {
+    registry().open_devices(platform.into())
+}
+
 /// The door used this device (any verb that named it): a lent one's last use
 /// moves.
 pub(crate) fn used_through_the_door(

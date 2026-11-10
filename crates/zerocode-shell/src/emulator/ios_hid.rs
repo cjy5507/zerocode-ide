@@ -16,6 +16,21 @@ use sha2::{Digest, Sha256};
 const HELPER_BYTES: &[u8] = include_bytes!(env!("ZEROCODE_IOS_HID_HELPER"));
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 const PASTEBOARD_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How long a `text` may take to read and change the keyboard's language
+/// before its first letter: the helper's `type` reads the field (a grid read,
+/// 0.74 s on a Safari page), types two probe keys and waits up to 1.5 s
+/// (`ProbeWait.within`) for them, and each of up to three switches costs a
+/// Control-Space (0.73 s) and two such probes — about 16 s at worst, and
+/// 6 s for the usual one switch from the Korean keyboard. Under the plain
+/// 4 s answer the first English `text` on a Korean keyboard went unanswered
+/// every time, the helper was killed and restarted, and the model typed
+/// again (t-101963, 2026-11-10: 3 of 3 first texts on a fresh simulator).
+const TEXT_LANGUAGE_TIMEOUT: Duration = Duration::from_secs(16);
+
+/// What one typed key costs in the helper: key down, 4 ms, key up, 4 ms,
+/// and the two sends — a long text is waited on for its keys too.
+const TEXT_KEY_TIME: Duration = Duration::from_millis(12);
 const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 
 /// The fixed head of one pushed picture: byte count, surface generation, and
@@ -172,6 +187,19 @@ pub(super) enum InputRequest {
 }
 
 impl InputRequest {
+    /// How long its answer is waited on before the helper is taken for hung:
+    /// a `text` reads and may change the keyboard's language and then types
+    /// key by key; everything else answers within the plain wait.
+    fn answered_within(&self) -> Duration {
+        match self {
+            Self::Text { text } => {
+                let keys = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
+                REQUEST_TIMEOUT + TEXT_LANGUAGE_TIMEOUT + TEXT_KEY_TIME.saturating_mul(keys)
+            }
+            _ => REQUEST_TIMEOUT,
+        }
+    }
+
     /// The request's own name, for a log line about what went wrong with it.
     fn name(&self) -> &'static str {
         match self {
@@ -649,7 +677,7 @@ impl InputClient {
                 "iOS 입력 헬퍼에 보낼 수 없습니다: {error}"
             )));
         }
-        let answer = match state.replies.recv_timeout(REQUEST_TIMEOUT) {
+        let answer = match state.replies.recv_timeout(request.answered_within()) {
             Ok(answer) => answer,
             Err(error) => {
                 self.fell_over(
@@ -1531,6 +1559,26 @@ mod tests {
             first.metadata().unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    /// A `text` is waited on for its language reading and switches and for
+    /// each of its keys; every other request keeps the plain wait, so a
+    /// helper that hangs on a tap is still put down at once.
+    #[test]
+    fn a_text_is_waited_on_for_its_language_and_its_keys() {
+        let text = |text: &str| InputRequest::Text {
+            text: text.to_owned(),
+        };
+        let lantern = text("http://127.0.0.1:50000/shop").answered_within();
+        assert!(lantern > REQUEST_TIMEOUT + TEXT_LANGUAGE_TIMEOUT);
+        assert!(
+            text(&"a".repeat(400)).answered_within() >= TEXT_LANGUAGE_TIMEOUT + TEXT_KEY_TIME * 400
+        );
+        assert_eq!(
+            InputRequest::Tap { x: 0.5, y: 0.5 }.answered_within(),
+            REQUEST_TIMEOUT
+        );
+        assert_eq!(InputRequest::Walk.answered_within(), REQUEST_TIMEOUT);
     }
 
     #[test]

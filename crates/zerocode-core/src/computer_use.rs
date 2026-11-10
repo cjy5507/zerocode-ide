@@ -3505,6 +3505,64 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
     })
 }
 
+/// The platform a command asked for when it acts on one device and left
+/// `--device` out — `None` when it named one, needs none (`list`, `open`), is
+/// a real phone's setup (which always names the phone) or is no command. The
+/// door then answers on the one simulator or emulator of that platform its
+/// window has open ([`emulator_argv_on_device`]), or refuses with the choice
+/// ([`emulator_device_choice`]); a real phone is never taken for granted.
+#[must_use]
+pub fn emulator_device_left_out(argv: &[String]) -> Option<EmulatorPlatform> {
+    let verb = argv.first()?;
+    let method = EmulatorMethod::ALL
+        .into_iter()
+        .find(|method| method.verb_name() == verb)?;
+    if matches!(method, EmulatorMethod::List | EmulatorMethod::Open) || method.is_phone_setup() {
+        return None;
+    }
+    if argv
+        .iter()
+        .any(|word| word == "--device" || word.starts_with("--device="))
+    {
+        return None;
+    }
+    let at = argv.iter().position(|word| word == "--platform")?;
+    argv.get(at + 1)?.parse().ok()
+}
+
+/// A command that left `--device` out, put on `device`.
+#[must_use]
+pub fn emulator_argv_on_device(argv: &[String], device: &str) -> Vec<String> {
+    let mut on = argv.to_vec();
+    on.extend(["--device".to_owned(), device.to_owned()]);
+    on
+}
+
+/// Which device a command that left `--device` out goes to: the one this
+/// window has open for its platform. None, or several, is refused with the
+/// sentence that says what to name instead — the ids when there are several,
+/// so the refusal is the choice and costs no `list`.
+pub fn emulator_device_choice(
+    platform: EmulatorPlatform,
+    open: &[String],
+) -> Result<String, String> {
+    let what = match platform {
+        EmulatorPlatform::Ios => "iOS simulator",
+        EmulatorPlatform::Android => "Android emulator",
+    };
+    match open {
+        [one] => Ok(one.clone()),
+        [] => Err(format!(
+            "no {what} is open in this window, so --device cannot be left out: name one from `zerocode-emulator list`, or `open` one"
+        )),
+        several => Err(format!(
+            "{} {what}s are open in this window ({}): name one with --device",
+            several.len(),
+            several.join(", ")
+        )),
+    }
+}
+
 /// `batch --steps`: a JSON array of command lines, each one this parser accepts
 /// as a step on the batch's own device — checked whole before the first step
 /// runs, so a batch that could never finish is refused before it touches the
@@ -5649,6 +5707,8 @@ pub fn emulator_usage() -> String {
         "",
         "  zerocode-emulator list [--json]",
         list_note.as_str(),
+        "  --device may be left out when this window has exactly one simulator or emulator of that",
+        "  platform open; a real phone is always named.",
         "  zerocode-emulator open --platform ios|android [--device <id>] [--json]",
         "  zerocode-emulator tree --platform ios|android --device <id> [--json]",
         "  zerocode-emulator marks --platform ios|android --device <id> [--text <fragment>] [--json]",
@@ -5688,7 +5748,8 @@ pub fn emulator_usage() -> String {
         "    Several steps on one device in one call, e.g. '[[\"press\",\"--text\",\"Settings\"],[\"wait-for\",\"--text\",\"General\"]]'.",
         "    A step is marks, find, foreground, wait-for, press, tap, swipe, scroll, scroll-until, collect, text or",
         "    button, without --platform and --device. A check that fails (find or foreground counting 0, a wait or",
-        "    a scroll-until not met) or a step refused stops the batch; the answer says each step's result and where it stopped.",
+        "    a scroll-until not met) or a step refused stops the batch; the answer says each step's result and where it stopped,",
+        "    and screen: the words its last screen shows, top to bottom, so reading the result needs no look or screenshot.",
         "  zerocode-emulator phone-check --device <phone-id> [--json]",
         "    A real phone: everything unattended use needs, in one answer; what cannot be read is said as unknown.",
         "  zerocode-emulator phone-install --device <phone-id> [--team <team-id>] [--json]",
@@ -8577,6 +8638,67 @@ mod tests {
                 EmulatorMethod::Batch | EmulatorMethod::Click | EmulatorMethod::Open
             ));
         }
+    }
+
+    /// A command that acts on one device may leave `--device` out; the door
+    /// puts it on the one device of its platform the window has open, and a
+    /// batch's steps follow it there. `list`, `open`, a real phone's setup and
+    /// a command that named its device are left as they are.
+    #[test]
+    fn a_left_out_device_is_the_one_the_window_has_open() {
+        let marks = words(&["marks", "--platform", "ios", "--json"]);
+        assert_eq!(
+            emulator_device_left_out(&marks),
+            Some(EmulatorPlatform::Ios)
+        );
+        let on = emulator_argv_on_device(&marks, "SIM-1");
+        assert_eq!(
+            parse_emulator_command(&on).unwrap().device.as_deref(),
+            Some("SIM-1")
+        );
+        let batch = words(&[
+            "batch",
+            "--platform",
+            "android",
+            "--steps",
+            r#"[["press","--text","Settings"],["find","--text","General"]]"#,
+        ]);
+        assert_eq!(
+            emulator_device_left_out(&batch),
+            Some(EmulatorPlatform::Android)
+        );
+        let parsed = parse_emulator_command(&emulator_argv_on_device(&batch, "emu-1")).unwrap();
+        assert!(
+            parsed
+                .steps
+                .iter()
+                .all(|step| step.device.as_deref() == Some("emu-1"))
+        );
+        for named in [
+            words(&["marks", "--platform", "ios", "--device", "X"]),
+            words(&["list", "--json"]),
+            words(&["open", "--platform", "ios"]),
+            words(&["phone-check", "--json"]),
+            words(&["marks", "--json"]),
+            words(&["marks", "--platform", "windows"]),
+            words(&["nonsense", "--platform", "ios"]),
+        ] {
+            assert_eq!(emulator_device_left_out(&named), None, "{named:?}");
+        }
+
+        assert_eq!(
+            emulator_device_choice(EmulatorPlatform::Ios, &["SIM-1".to_owned()]),
+            Ok("SIM-1".to_owned())
+        );
+        let none = emulator_device_choice(EmulatorPlatform::Ios, &[]).unwrap_err();
+        assert!(none.contains("zerocode-emulator list"), "{none}");
+        let several = emulator_device_choice(
+            EmulatorPlatform::Android,
+            &["emu-1".to_owned(), "emu-2".to_owned()],
+        )
+        .unwrap_err();
+        assert!(several.contains("emu-1, emu-2"), "{several}");
+        assert!(emulator_usage().contains("--device may be left out"));
     }
 
     /// `down` is the content further down, so the finger travels up; the

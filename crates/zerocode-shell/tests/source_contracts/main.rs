@@ -9845,7 +9845,9 @@ mod tests {
                 ),
             "an agent whose session ends keeps the devices it borrowed"
         );
-        let door = block_after(shell, "async fn answer_emulator_command(");
+        // The door is two functions since t-101963: every verb off the
+        // window, and `open`, which the window seats.
+        let door = block_after(shell, "async fn answer_emulator_off_window(");
         assert!(
             door.contains("crate::emulator::used_through_the_door("),
             "the door's verbs no longer move a loan's last use:\n{door}"
@@ -9930,7 +9932,16 @@ mod tests {
                 && step.contains("evidence_runtime::leave_emulator_evidence("),
             "the emulator step no longer answers through the door and its writer:\n{step}"
         );
-        let mobile = block_after(shell, "async fn answer_emulator_command(");
+        let mobile = format!(
+            "{}{}",
+            block_after(shell, "async fn answer_emulator_command("),
+            block_after(shell, "async fn answer_emulator_off_window(")
+        );
+        assert!(
+            block_after(shell, "async fn answer_emulator_command(")
+                .contains("answer_emulator_off_window(argv, cwd)"),
+            "the window's door no longer answers its verbs through the one road a bench shares"
+        );
         for owned in [
             // The list is one function of the emulator module (t-36920); the
             // door only calls it.
@@ -9958,7 +9969,7 @@ mod tests {
                 "built-in emulator gestures lost {owned}"
             );
         }
-        for route in [mobile, gestures] {
+        for route in [mobile.as_str(), gestures] {
             assert!(
                 !route.contains("Command::new") && !route.contains("open_mobile_emulator_direct"),
                 "the agent route opens or drives an external emulator instead of ZeroCode's pane"
