@@ -24,11 +24,21 @@ clippy:
 
 # --no-fail-fast (here and in e2e): a flake in one test binary must not hide
 # the rest — the release lane re-runs only the names that failed.
+#
+# `--tests` takes every integration target, the hermetic e2e among them:
+# `e2e_hermetic` and `portable_workflow_acceptance` run here, with the default
+# threads, and `verify` does not run them a second time. The lane's zo gates
+# from 2026-09-26 to 11-10 (94 logs) ran them both ways and neither way ever
+# failed on its own — the one red serial run was a full disk (1b386383), its
+# 40 names green in the same run's `test` — while the serial pass took 730.7 s
+# against 96.6 s here (v1.1.138).
 [env("ZO_DISABLE_KEYCHAIN", "1")]
 test:
     # The costly workflow lane has its own warning-only CI job. Its schema stays covered.
     cargo test --workspace --lib --bins --tests --no-fail-fast -- --skip lane_a_repeats_have_identical_verdicts
 
+# The two hermetic e2e targets alone, one test at a time — for reading one
+# run's order or a timing by itself. `test` already runs them for `verify`.
 [env("ZO_DISABLE_KEYCHAIN", "1")]
 e2e:
     cargo test -p zo-ide --test e2e_hermetic --test portable_workflow_acceptance --no-fail-fast -- --test-threads=1
@@ -56,12 +66,12 @@ doc:
 
 # Nothing a test wrote stays in a crate folder (t-78045). `cargo test` gives a
 # test its crate's folder as the working folder, zo writes `.zo/` there, and
-# `.gitignore` hides it: this is the only place it shows. It runs after `test`
-# and `e2e`, whose binaries it has to see the leftovers of.
+# `.gitignore` hides it: this is the only place it shows. It runs after `test`,
+# whose binaries it has to see the leftovers of.
 stray-zo:
     cargo test -p zo-ide --test stray_dot_zo
 
-verify: fmt-check doc clippy test e2e stray-zo win-check-if-available
+verify: fmt-check doc clippy test stray-zo win-check-if-available
 
 gate: fmt clippy test
 

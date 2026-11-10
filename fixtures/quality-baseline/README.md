@@ -98,8 +98,9 @@ inherit the outer build coordinator's slot (never nest its lock).
 
 ## Required portable workflows
 
-`cd zo-ide && just e2e` also runs `portable_workflow_acceptance` on every host,
-including Windows. These tests execute the real zo binary over ordinary pipes
+`cd zo-ide && just test` also runs `portable_workflow_acceptance` on every host,
+including Windows (`just e2e` runs it alone, one test at a time). These tests
+execute the real zo binary over ordinary pipes
 against an isolated loopback provider. They verify a completed tool conversation
 across two processes, forced termination after a real file write followed by
 restoration of the original instruction and paired tool receipts, and a failed
