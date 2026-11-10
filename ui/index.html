@@ -4779,12 +4779,12 @@
                     </div>
                   </div>
                   <div id="judgment-source-hub-fields">
-                    <label class="settings-label" for="judgment-source-repository" data-i18n="settings.models.address">찾을 말 또는 모델 주소 · ID</label>
+                    <label class="settings-label" for="judgment-source-repository" data-i18n="settings.models.address">검색어 또는 모델 주소 · ID</label>
                     <div class="model-receive-search">
-                      <input class="settings-input" type="text" id="judgment-source-repository" aria-describedby="judgment-source-hint judgment-source-status" placeholder="qwen coder   ·   owner/model   ·   https://huggingface.co/…" maxlength="8192" autocomplete="off" spellcheck="false" />
+                      <input class="settings-input" type="text" id="judgment-source-repository" aria-describedby="judgment-source-hint judgment-source-status" placeholder="qwen2.5 instruct   ·   owner/model   ·   https://huggingface.co/…" maxlength="8192" autocomplete="off" spellcheck="false" />
                       <button type="button" class="btn" id="judgment-source-inspect" data-i18n="settings.models.find" disabled>찾기</button>
                     </div>
-                    <p class="settings-row-desc" id="judgment-source-hint" data-i18n="settings.gguf.sourceHint">낱말을 넣으면 Hugging Face에서 GGUF 모델을 찾고, 주소나 ID를 넣으면 그 저장소의 파일을 보여 줍니다. 4 GB 이하 파일을 이 컴퓨터에서 돌립니다. 모델이 함께 보낸 코드는 실행하지 않습니다.</p>
+                    <p class="settings-row-desc" id="judgment-source-hint" data-i18n="settings.gguf.sourceHint">검색어를 넣으면 Hugging Face에서 GGUF 모델을 찾고, 주소나 ID를 넣으면 그 저장소의 파일을 보여 줍니다. 파일마다 이 컴퓨터에서 돌릴 수 있는지 함께 알려 줍니다. 모델이 함께 보낸 코드는 실행하지 않습니다.</p>
                     <ul class="model-hits" id="judgment-source-hits" data-i18n-aria="settings.models.hits" aria-label="찾은 저장소" hidden></ul>
                     <fieldset class="model-files" id="judgment-source-files" hidden>
                       <legend class="settings-label" id="judgment-source-files-title"></legend>

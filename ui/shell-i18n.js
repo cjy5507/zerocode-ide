@@ -8336,7 +8336,7 @@ function laterCatalogs() {
 
     /* GGUF import. */
     "settings.gguf.fromFile": "GGUF file",
-    "settings.gguf.sourceHint": "Words find GGUF models on Hugging Face; an address or ID shows that repository's files. Files up to 4 GB run on this computer. Code shipped with a model is not executed.",
+    "settings.gguf.sourceHint": "A search term finds GGUF models on Hugging Face; an address or ID shows that repository's files. Each file says whether this computer can run it. Code shipped with a model is not executed.",
     "settings.gguf.pickHint": "Choose one GGUF file. The original is preserved and copied into app-owned storage.",
     "settings.gguf.pickFile": "Choose a GGUF file",
     "settings.gguf.unverified": "Unverified model selected by you",
@@ -16682,7 +16682,7 @@ function laterCatalogs() {
 
     /* GGUF import. */
     "settings.gguf.fromFile": "GGUF ファイル",
-    "settings.gguf.sourceHint": "言葉を入れると Hugging Face で GGUF モデルを探し、アドレスや ID を入れるとそのリポジトリのファイルを表示します。4 GB 以下のファイルをこのコンピューターで動かします。モデルに付属するコードは実行しません。",
+    "settings.gguf.sourceHint": "検索語を入れると Hugging Face で GGUF モデルを探し、アドレスや ID を入れるとそのリポジトリのファイルを表示します。ファイルごとに、このコンピューターで動かせるかを示します。モデルに付属するコードは実行しません。",
     "settings.gguf.pickHint": "GGUF ファイルを一つ選んでください。元のファイルを保持し、アプリ専用フォルダーにコピーします。",
     "settings.gguf.pickFile": "GGUF ファイルを選択",
     "settings.gguf.unverified": "ユーザーが指定した未検証モデル",
@@ -25027,7 +25027,7 @@ function laterCatalogs() {
 
     /* GGUF import. */
     "settings.gguf.fromFile": "GGUF 文件",
-    "settings.gguf.sourceHint": "输入词语会在 Hugging Face 上查找 GGUF 模型；输入地址或 ID 会显示该仓库中的文件。4 GB 以下的文件可在这台电脑上运行。不会执行模型附带的代码。",
+    "settings.gguf.sourceHint": "输入搜索词可在 Hugging Face 上查找 GGUF 模型；输入地址或 ID 会显示该仓库中的文件。每个文件都会注明这台电脑能否运行。不会执行模型附带的代码。",
     "settings.gguf.pickHint": "请选择一个 GGUF 文件。保留原始文件，并复制到应用专用文件夹。",
     "settings.gguf.pickFile": "选择 GGUF 文件",
     "settings.gguf.unverified": "用户指定的未经验证的模型",
@@ -33380,7 +33380,7 @@ function laterCatalogs() {
 
     /* GGUF import. */
     "settings.gguf.fromFile": "Archivo GGUF",
-    "settings.gguf.sourceHint": "Con palabras se buscan modelos GGUF en Hugging Face; con una dirección o un ID se muestran los archivos de ese repositorio. En este equipo se ejecutan archivos de hasta 4 GB. No se ejecuta el código incluido con un modelo.",
+    "settings.gguf.sourceHint": "Con un término de búsqueda se encuentran modelos GGUF en Hugging Face; con una dirección o un ID se muestran los archivos de ese repositorio. Cada archivo indica si este equipo puede ejecutarlo. No se ejecuta el código incluido con un modelo.",
     "settings.gguf.pickHint": "Elija un archivo GGUF. Se conserva el original y se copia en la carpeta de la aplicación.",
     "settings.gguf.pickFile": "Elegir un archivo GGUF",
     "settings.gguf.unverified": "Modelo sin verificar elegido por el usuario",

@@ -193,7 +193,7 @@ const judgmentModelSourceController = {
       this.say(hits.length
         ? t("settings.models.found", "저장소 {{count}}개를 찾았습니다. 하나를 고르면 그 안의 파일을 보여 줍니다.", { count: hits.length })
         : missing ? managedJudgmentController.failure("source_missing")
-          : t("settings.models.foundNone", "찾은 저장소가 없습니다. 다른 낱말로 찾거나 모델 주소를 붙여 넣으세요."));
+          : t("settings.models.foundNone", "찾은 저장소가 없습니다. 다른 검색어로 찾거나 모델 주소를 붙여 넣으세요."));
       return hits;
     } catch (error) {
       if (sequence !== this.sequence) return null;
