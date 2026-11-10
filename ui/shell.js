@@ -12883,16 +12883,18 @@ function paintWorktreeAgents() {
     // only dresses it.
     host.closest(".wt-node")?.classList.toggle("has-agents", !host.hidden);
   }
-  // Every ring a changed card holds turns from where the old one stood, not from the top — its new rows' rings, and
-  // the card's own ring that a row going quiet or hidden just uncovered. Pinned once, after the last card: asking
-  // the animations brings the style forward, and asked card by card it was one style pass for each card changed
-  // (review t-102958 #1). The first ask settles the style; the asks after it find nothing left to compute.
-  for (const host of stirred) keepTurnsInStep(host.closest(".wt-node") ?? host);
   if (leaving.length > 0) {
     // One layout with the new rows beside the old — the read is what lays them out — then the old ones go.
     void sidebarScroller.scrollHeight;
     for (const node of leaving) node.remove();
   }
+  // Every ring a changed card holds turns from where the old one stood, not from the top — its new rows' rings, and
+  // the card's own ring that a row going quiet or hidden just uncovered. Pinned after the old rows are out: while a
+  // working row still stands the stylesheet hides the card's ring, so pinned before, that ring had no turn yet and
+  // drew one frame at the top (review t-103290 N1). Asking the animations computes style, not layout, so the
+  // new-first swap above keeps its one layout. Pinned once, after the last card: asked card by card it was one style
+  // pass for each card changed (review t-102958 #1); the first ask settles the style, the asks after it find nothing.
+  for (const host of stirred) keepTurnsInStep(host.closest(".wt-node") ?? host);
   // The project heads count the cards that hold nothing — read off the cards themselves, so a card that held (a
   // restore-waiting row, a finished work's row) is not counted as empty (r2 P3-7).
   const seatless = new Set();

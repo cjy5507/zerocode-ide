@@ -7925,6 +7925,19 @@ mod tests {
             "a card's rebuilt agent rows draw their rings from the top, or every \
              changed card brings the style forward on its own:\n{painting}"
         );
+        // Pinned after the old rows are out (review t-103290 N1): a working row that still stands hides the
+        // card's ring, so a pin before it goes finds no turn to pin and the uncovered ring draws at the top.
+        let gone = painting
+            .find("for (const node of leaving) node.remove();")
+            .expect("the card painter no longer takes the old rows out after the new ones stand");
+        let pinned = painting
+            .find("for (const host of stirred) keepTurnsInStep(")
+            .expect("the card painter no longer pins the rings of the cards it changed");
+        assert!(
+            gone < pinned,
+            "the changed cards are pinned while the old rows still stand, so a card ring a \
+             leaving working row uncovers draws one frame at the top:\n{painting}"
+        );
         // The rows a scroll builds and a row that starts working on a standing node are pinned
         // before their first frame, not one frame at the top (review t-102958 #2).
         let windowing = block_after(window, "function renderSidebarWindows() {");
@@ -7940,6 +7953,14 @@ mod tests {
             dots.contains("if (dressWorktreeDot(row, worktreeDotState(path, owned.get(path) ?? []))) started.push(row);")
                 && dots.contains("for (const row of started) keepTurnsInStep(row.closest(\".wt-node\") ?? row);"),
             "a card ring that starts on a standing row draws from the top for a frame:\n{dots}"
+        );
+        // The two card settings that uncover a standing card's ring pin it as they change it (review t-103290 N3).
+        let off = block_after(window, "function paintWorktreeCardProperties() {");
+        let layout = block_after(window, "function paintWorktreeCardLayout() {");
+        assert!(
+            off.contains("keepTurnsInStep(worktreeList);")
+                && layout.contains("if (moved) keepTurnsInStep(worktreeList);"),
+            "a card setting that uncovers the card rings draws them from the top for a frame:\n{off}\n{layout}"
         );
     }
 

@@ -2107,10 +2107,15 @@ const worktreeCardProperties = new Set(WORKTREE_CARD_PROPERTIES.map((one) => one
  * 그리고 이 길은 목록을 다시 짓지 않는다 — CSS 한 줄이 답할 수 있는 물음에
  * 사이드바 전체를 다시 세우는 것이 이 슬라이스가 피한 값이다. */
 function paintWorktreeCardProperties() {
-  document.documentElement.dataset.worktreeCardOff = WORKTREE_CARD_PROPERTIES
+  const off = WORKTREE_CARD_PROPERTIES
     .filter((one) => !worktreeCardProperties.has(one.id))
     .map((one) => one.id)
     .join(" ");
+  if (document.documentElement.dataset.worktreeCardOff === off) return;
+  document.documentElement.dataset.worktreeCardOff = off;
+  // Agents off uncovers the card ring of every working card: it turns where the others stand from its first frame,
+  // not one frame at the top until the late road pins it (review t-103290 N3).
+  keepTurnsInStep(worktreeList);
 }
 
 function setWorktreeCardProperty(property, shown) {
@@ -2126,12 +2131,15 @@ function setWorktreeCardProperty(property, shown) {
 
 function paintWorktreeCardLayout() {
   const mode = compactWorktreeCards ? "compact" : "detailed";
+  const moved = document.documentElement.dataset.worktreeCardLayout !== mode;
   document.documentElement.dataset.worktreeCardLayout = mode;
   for (const button of document.querySelectorAll("button[data-worktree-card-layout]")) {
     const active = button.dataset.worktreeCardLayout === mode;
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-pressed", String(active));
   }
+  // The compact card shows no agent rows, so it uncovers the card ring of every working card (review t-103290 N3).
+  if (moved) keepTurnsInStep(worktreeList);
 }
 
 function setCompactWorktreeCards(compact) {

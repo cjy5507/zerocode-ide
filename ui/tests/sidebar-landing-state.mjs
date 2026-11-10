@@ -624,15 +624,20 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       // The card's own ring (`wt-activity-turn`) stands only where no working agent row is shown, and every working
       // row in this scene shows its agents: with the agents left off the card, the working cards wear the ring
       // instead — the same rebuild, measured on the card's ring (review t-102958 #4).
-      const root = document.documentElement;
-      const offWas = root.dataset.worktreeCardOff;
-      root.dataset.worktreeCardOff = `${offWas ?? ""} agents`.trim();
+      // Turned off through the setting's own painter, the road the 표시 menu takes.
+      const agentsShown = worktreeCardProperties.has("agents");
+      worktreeCardProperties.delete("agents");
+      paintWorktreeCardProperties();
+      // Read before any frame: the setting pins the rings it uncovers as it changes them (review t-103290 N3), so
+      // they already stand on the document's clock. Unpinned, a ring just uncovered has no start time yet.
+      const uncovered = turns().filter((one) => one.animationName === "wt-activity-turn")
+        .map((one) => one.startTime);
       await window.__PAINTED__();
-      // The rings this setting uncovers are pinned on the late road: the window's `animationstart` listener, a frame
-      // after they start (review t-103290 N3). The rebuild is measured against rings that have had that frame, as
-      // any ring a person watches turn has. Read before it they still stand where they were born, and the rebuild
-      // that pins them reads as a hop — which a quiet machine did (v1.1.140's third lane, 2026-11-11: before 1570,
-      // after 0; a loaded one had always drawn the frame first). The wait is for the pin, not for a time.
+      // The rebuild is measured against rings that stand on the document's clock, as any ring a person watches turn
+      // does. The setting pins them; this wait stays as the net under it — the window's `animationstart` listener
+      // pins a ring a frame after it starts — because a ring read before its pin stands where it was born and the
+      // rebuild that pins it reads as a hop (v1.1.140's third lane, 2026-11-11: before 1570, after 0). The wait is
+      // for the pin, not for a time.
       for (let frames = 0; frames < 30 && turns().some((one) => one.startTime !== 0); frames += 1) {
         await new Promise((done) => requestAnimationFrame(done));
       }
@@ -659,14 +664,14 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
         all: turns().filter((one) => one.animationName === "wt-activity-turn").map(turnSaid),
       };
       tell("hook:agent", { term: 9102, state: "done", agent: "claude", session: "s-9102" });
-      if (offWas === undefined) delete root.dataset.worktreeCardOff;
-      else root.dataset.worktreeCardOff = offWas;
+      if (agentsShown) worktreeCardProperties.add("agents");
+      paintWorktreeCardProperties();
 
       window.__ANSWER__.project_catalog = was;
       window.__ANSWER__.worktree_landing_stamp = stampWas;
       await refreshWorktrees();
       await window.__PAINTED__();
-      return { seen, control, dotClass, turnsBefore, turnsAfter, cardBefore, cardAfter, started,
+      return { seen, control, dotClass, turnsBefore, turnsAfter, uncovered, cardBefore, cardAfter, started,
         stampPutBack: window.__ANSWER__.worktree_landing_stamp === stampWas };
     });
     for (const one of steady.seen) {
@@ -692,6 +697,11 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       JSON.stringify({ before: steady.turnsBefore, after: steady.turnsAfter, dot: steady.dotClass }),
     );
     ok(
+      "turning the agents off the cards pins the card rings it uncovers before the frame that first draws them",
+      steady.uncovered.length > 0 && steady.uncovered.every((at) => at === 0),
+      JSON.stringify({ uncovered: steady.uncovered }),
+    );
+    ok(
       "the card's own turning ring (wt-activity-turn) is among the turns measured, and a rebuild leaves it where it stood against the document's clock",
       named(steady.cardBefore, "wt-activity-turn") && named(steady.cardAfter, "wt-activity-turn") &&
         offsets(steady.cardAfter).every((at) => offsets(steady.cardBefore).includes(at)),
@@ -707,6 +717,54 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       "the suite puts back the stamp answer it replaced, so a suite after it asks the stamp it expects",
       steady.stampPutBack,
       JSON.stringify({ stampPutBack: steady.stampPutBack }),
+    );
+
+    /* ---- a working row that goes quiet uncovers its card's ring, pinned before the frame (review t-103290 N1) ----
+     *
+     * The card's ring stands only where no working agent row is shown. A session still streaming in the checkout
+     * keeps the dot working while the one agent row there goes quiet: the quiet row is a new node, the working row
+     * goes once the new one is laid out, and only then does the stylesheet uncover the card's ring. Read before any
+     * frame, that ring must already stand on the document's clock; pinned while the working row still stood, there
+     * was no ring yet to pin and it drew one frame at the top. */
+    const quieted = await page.evaluate(async () => {
+      const PATH = "/r/busy";
+      const TERM = 9101;
+      const LANE = "lane-landing-n1";
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const card = () => document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(PATH)}"]`)?.closest(".wt-node") ?? null;
+      const said = () => {
+        const node = card();
+        return {
+          dot: node?.querySelector(".wt-row .wt-dot")?.dataset.state ?? "",
+          working: node?.querySelectorAll(".wt-agent.is-working").length ?? 0,
+          rings: node?.getAnimations({ subtree: true })
+            .filter((one) => one.animationName === "wt-activity-turn").map((one) => one.startTime) ?? [],
+        };
+      };
+      upsertLane({ id: LANE, title: "busy lane", state: "streaming", session_id: null, worktree_id: PATH, agent: "claude" });
+      paintWorktreeDots();
+      paintWorktreeAgents();
+      await window.__PAINTED__();
+      const before = said();
+      const row = card()?.querySelector(".wt-agent.is-working") ?? null;
+      tell("hook:agent", { term: TERM, state: "done", agent: "claude", session: `s-${TERM}` });
+      flushAgentPaint();
+      // Read before any frame: what the card painter left is what the first frame after it draws.
+      const after = { ...said(), rowGone: row !== null && !row.isConnected };
+      removeLane(LANE);
+      tell("hook:agent", { term: TERM, state: "working", agent: "claude", session: `s-${TERM}` });
+      flushAgentPaint();
+      await window.__PAINTED__();
+      return { before, after, putBack: said().working > 0 && !lanes.has(LANE) };
+    });
+    ok(
+      "a working agent row that goes quiet while its checkout still works uncovers the card's ring, which stands on the document's clock before the frame that first draws it",
+      quieted.before.dot === "working" && quieted.before.working > 0 && quieted.before.rings.length === 0 &&
+        quieted.after.dot === "working" && quieted.after.working === 0 && quieted.after.rowGone &&
+        quieted.after.rings.length > 0 && quieted.after.rings.every((at) => at === 0) && quieted.putBack,
+      JSON.stringify(quieted),
     );
 
     // The artifact card and drawer wear the state's own word only (t-36910 `head`): the clash and the
