@@ -16027,6 +16027,17 @@ await test("이 컴퓨터: 실행 엔진 줄은 이 앱이 고정한 판과 상�
     await line.locator("[data-runtime-update]").click();
     const updated = await backend.waitForCall("judgment-status", "managed_judgment_prepare_model_runtime", updatedAt);
     assertEqual(updated.args, { modelId: provider.model, revision: "fixture-revision" }, "the update did not prepare the runtime through the model it runs");
+    // An earlier pin's runtime with no model of its engine on this computer:
+    // nothing here can be pressed, so the line says when the new one comes
+    // rather than naming an update it does not offer.
+    await paint((held) => { held.models[0].installed = false; });
+    assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "outdated");
+    assertEqual(await line.locator("[data-runtime-update]").count(), 0, "an update is offered with no model to prepare the runtime through");
+    const later = await page.evaluate(() => [t("settings.models.runtimeOutdatedLater", "이 앱이 확인한 새 판이 있습니다. 이 엔진의 모델을 다음에 쓸 때 새 판으로 바꿉니다({{size}}).", { size: bytesLabel(37_351_536) }), t("settings.models.runtimeOutdated", "이 앱이 확인한 새 판이 있습니다. 업데이트하면 다음 실행부터 씁니다({{size}}).", { size: bytesLabel(37_351_536) })]);
+    const said = await line.innerText();
+    assert(said.includes(later[0]) && !said.includes(later[1]), "the line names an update it does not offer", said);
+    await paint((held) => { held.models[0].installed = true; });
+    assertEqual(await line.locator("[data-runtime-update]").count(), 1, "the update did not come back with the model");
     // The pinned runtime, installed, with nothing newer published.
     backend.managedRuntimeNews = [{ id: runtime.id, engine: "llama_cpp", pinned: "b11669", latest: "b11669", newer: false }];
     await paint((held) => { held.runtimes = [{ ...clone(runtime), state: "ready" }]; });

@@ -2125,7 +2125,16 @@ const modelConnectionsController = {
       badge.dataset.runtimeState = row.state;
       const extra = [];
       if (row.state === "missing") extra.push(modelNode("span", "model-line-note", t("settings.models.runtimeLater", "모델을 처음 쓸 때 함께 설치합니다({{size}}).", { size: bytesLabel(row.downloadBytes) })));
-      if (row.state === "outdated") extra.push(modelNode("span", "model-line-note", t("settings.models.runtimeOutdated", "이 앱이 확인한 새 판이 있습니다. 업데이트하면 다음 실행부터 씁니다({{size}}).", { size: bytesLabel(row.downloadBytes) })));
+      // A runtime is prepared through a model it runs: without one here,
+      // it is installed — or an earlier pin's is replaced — when a model
+      // on this engine is next used, and the line says so.
+      const model = snapshot.models.find((entry) => entry.engine === row.engine && entry.installed);
+      if (row.state === "outdated") {
+        const note = model
+          ? t("settings.models.runtimeOutdated", "이 앱이 확인한 새 판이 있습니다. 업데이트하면 다음 실행부터 씁니다({{size}}).", { size: bytesLabel(row.downloadBytes) })
+          : t("settings.models.runtimeOutdatedLater", "이 앱이 확인한 새 판이 있습니다. 이 엔진의 모델을 다음에 쓸 때 새 판으로 바꿉니다({{size}}).", { size: bytesLabel(row.downloadBytes) });
+        extra.push(modelNode("span", "model-line-note", note));
+      }
       const news = this.runtimeNews.get(row.id);
       if (news?.newer) {
         const note = modelNode("span", "model-line-note", t("settings.models.runtimeNewer", "공개된 최신판은 {{latest}}입니다. ZeroCode가 확인해 실으면 여기서 업데이트합니다.", { latest: news.latest }));
@@ -2133,9 +2142,6 @@ const modelConnectionsController = {
         extra.push(note);
       }
       const actions = [];
-      // A runtime is prepared through a model it runs: without one here,
-      // it is installed when its first model is used.
-      const model = snapshot.models.find((entry) => entry.engine === row.engine && entry.installed);
       if (row.state === "outdated" && model) {
         const update = this.button(t("settings.models.runtimeUpdate", "업데이트"), () => void this.managedAction("runtime", model), true);
         update.dataset.runtimeUpdate = row.id;
