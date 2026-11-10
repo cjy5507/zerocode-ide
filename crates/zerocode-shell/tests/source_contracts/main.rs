@@ -14963,6 +14963,15 @@ mod tests {
             "the landing after a removal stopped being this project's own \
              main:\n{finishing}"
         );
+        // The main is looked up in the catalog the window holds, not in the refresh's answer: a
+        // refresh a newer one overtook answers `[]` (review t-102958 #6).
+        assert!(
+            finishing.contains(
+                "const worktrees = projects.flatMap((project) => project.worktrees ?? []);"
+            ) && !finishing.contains("= await refreshWorktrees();"),
+            "the landing after a removal reads the refresh's answer, which an \
+             overtaken refresh leaves empty:\n{finishing}"
+        );
         let unlisting = block_after(window, "async function removeProjectFromList(");
         assert!(
             unlisting

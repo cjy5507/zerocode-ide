@@ -343,4 +343,48 @@ export async function testSidebarStage(browser, origin, ok) {
       receipt({ ...scene, faults: faults.length }),
     );
   }
+
+  // d. A removal whose refresh a newer one overtakes still lands on this project's main (review t-102958 #6).
+  //    The overtaken refresh answers `[]` — the newer one draws the list — and the landing used to read that
+  //    answer, find no main and leave the stage on the checkout just removed.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    await addCheckoutB(page);
+    await page.evaluate(async (CHECKOUT_B) => { await activateWorktree(CHECKOUT_B); }, CHECKOUT_B);
+    await settle(page, 200);
+    const scene = await page.evaluate(async (CHECKOUT_B) => {
+      const main = projects[0].worktrees.find((one) => one.is_main)?.path ?? null;
+      const answered = window.__ANSWER__.project_catalog;
+      // The catalog after the removal: B is gone. Its first read starts a newer refresh, which overtakes it.
+      let overtaken = false;
+      let answers = 0;
+      window.__ANSWER__.project_catalog = (...args) => {
+        answers += 1;
+        if (!overtaken) {
+          overtaken = true;
+          void refreshWorktrees();
+        }
+        return answered(...args).map((project) => ({
+          ...project,
+          worktrees: project.worktrees.filter((one) => one.path !== CHECKOUT_B),
+        }));
+      };
+      const landed = [];
+      const activate = window.activateWorktree;
+      window.activateWorktree = async (worktree) => { landed.push(worktree.path); };
+      try {
+        await finishWorktreeRemoval({ path: CHECKOUT_B, active: true }, null);
+      } finally {
+        window.activateWorktree = activate;
+        window.__ANSWER__.project_catalog = answered;
+      }
+      return { main, overtaken, answers, landed };
+    }, CHECKOUT_B);
+    ok(
+      "a removal whose refresh a newer one overtook still lands on this project's main",
+      scene.main !== null && scene.overtaken && scene.answers >= 2 &&
+        JSON.stringify(scene.landed) === JSON.stringify([scene.main]) && faults.length === 0,
+      receipt({ ...scene, faults: faults.length }),
+    );
+  }
 }

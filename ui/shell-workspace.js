@@ -13965,10 +13965,16 @@ async function finishWorktreeRemoval(worktree, hand) {
   // same-workspace early return mistakes for "already fine" — the blank-stage
   // bug this sweep exists to end.
   if (!(await dropWorktreeSurfaces(path, hand))) return;
-  const worktrees = await refreshWorktrees();
+  await refreshWorktrees();
   // The backend has already moved off a removed worktree; this catches the
   // titlebar and the tree up with it.
   if (active) {
+    // Looked up in the catalog the window holds once the refresh is over, not
+    // in what the refresh answered: a refresh a newer one overtook answers
+    // `[]` — the newer one draws the list — and the landing found no main and
+    // left the stage on the checkout just removed (review t-102958 #6). Which
+    // refresh drew the list does not move a project's main.
+    const worktrees = projects.flatMap((project) => project.worktrees ?? []);
     // This project's OWN main, not the first main of the flat cross-project
     // list — with two projects open those are different rows, and landing in
     // a stranger's repository is worse than the ghost this replaces.
