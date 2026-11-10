@@ -4780,6 +4780,7 @@
                       <button type="button" class="segment-btn" id="judgment-source-local" aria-pressed="false" data-i18n="settings.models.fromFolder">모델 폴더</button>
                     </div>
                   </div>
+                  <p class="settings-row-desc model-receive-about" id="judgment-source-purpose" data-i18n="settings.models.receivePurpose">판단 모델로 쓸 작은 GGUF 모델을 받아 이 컴퓨터에서 돌립니다. 코딩·대화용 큰 모델은 LM Studio나 Ollama로 띄운 뒤 「로컬 서버 연결」로 잇습니다.</p>
                   <div id="judgment-source-hub-fields">
                     <label class="settings-label" for="judgment-source-repository" data-i18n="settings.models.address">검색어 또는 모델 주소 · ID</label>
                     <div class="model-receive-search">
@@ -4791,6 +4792,10 @@
                     <fieldset class="model-files" id="judgment-source-files" hidden>
                       <legend class="settings-label" id="judgment-source-files-title"></legend>
                       <p class="settings-row-desc" id="judgment-source-files-about"></p>
+                      <div class="settings-notice model-files-big" id="judgment-source-files-big" role="note" hidden>
+                        <span data-i18n="settings.models.filesBig">이 저장소의 파일은 대부분 여기서 받기에는 큽니다. 여기서 받는 모델은 판단용 작은 모델입니다. 코딩·대화용 큰 모델은 LM Studio나 Ollama로 띄운 뒤 「로컬 서버 연결」로 잇습니다.</span>
+                        <button type="button" class="btn" id="judgment-source-local-server" data-i18n="settings.models.addLocalServer">로컬 서버 연결</button>
+                      </div>
                       <div class="model-file-list" id="judgment-source-file-list"></div>
                     </fieldset>
                   </div>

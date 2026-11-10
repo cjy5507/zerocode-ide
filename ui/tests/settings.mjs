@@ -15954,6 +15954,89 @@ await test("모델 받기: 주소나 ID는 바로 파일 목록으로 가고, �
   }
 }));
 
+await test("모델 받기: 원본 가중치만 있는 저장소는 같은 모델의 GGUF 저장소를 찾아 보이고, 파일이 대부분 한도를 넘으면 까닭과 「로컬 서버 연결」을 내놓으며, 머리말이 판단용임을 말한다 (2026-11-11)", async () => withJudgmentStatus(async (page) => {
+  try {
+    await openModelReceive(page);
+    // What the panel is for stands under its title, in every language.
+    const purpose = page.locator("#judgment-source-purpose");
+    assert(await purpose.isVisible(), "the panel does not say what it receives");
+    const said = await purpose.textContent();
+    assert(said.includes("판단") && said.includes("로컬 서버 연결"), "the purpose line names neither the judgment model nor the other road", said);
+    // The original weights of a model: no GGUF file, and the Hub names the
+    // repositories that hold it as GGUF — they stand as a search's answers.
+    backend.managedSourceFiles = { ...clone(GGUF_LISTING), repository: "acme/chat", files: [], quantized: [
+      { repository: "acme/chat-GGUF", downloads: 9917, likes: 2 },
+      { repository: "acme/chat-i1-GGUF", downloads: 2625, likes: 2 },
+    ] };
+    const weightsAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "acme/chat");
+    await page.press("#judgment-source-repository", "Enter");
+    await backend.waitForCall("judgment-status", "managed_judgment_source_files", weightsAt);
+    await page.waitForFunction(() => document.querySelectorAll("#judgment-source-hits .model-hit").length === 2 && !judgmentModelSourceController.finding);
+    assertEqual(await page.locator("#judgment-source-hits .model-hit").evaluateAll((all) => all.map((hit) => hit.dataset.repository)), ["acme/chat-GGUF", "acme/chat-i1-GGUF"], "the GGUF repositories of the model are not offered");
+    assertEqual(await page.evaluate(() => judgmentModelSourceController.problem), null, "a repository whose GGUF files stand elsewhere is said as a dead end");
+    const found = await page.locator("#judgment-source-status").textContent();
+    assert(found.includes("원본 가중치") && found.includes("GGUF") && found.includes("2개"), "the page does not say whose repositories these are", found);
+    assertEqual(await page.evaluate(() => ["en", "ja", "zh", "es"].filter((code) => typeof CATALOG?.[code]?.["settings.models.foundQuantized"] !== "string")), [], "the line for a model's GGUF repositories is untranslated");
+    assert(!backend.calls.slice(weightsAt).some((entry) => ["managed_judgment_search_sources", "managed_judgment_inspect_source"].includes(entry.command)), "the page searched or inspected by itself");
+    // One press from there to its files.
+    backend.managedSourceFiles = { ...clone(GGUF_LISTING), repository: "acme/chat-GGUF" };
+    const openedAt = backend.calls.length;
+    await page.locator('#judgment-source-hits .model-hit[data-repository="acme/chat-GGUF"]').click();
+    const opened = await backend.waitForCall("judgment-status", "managed_judgment_source_files", openedAt);
+    assertEqual(opened.args, { repository: "acme/chat-GGUF" });
+    await page.waitForFunction(() => document.querySelectorAll("#judgment-source-file-list .model-file").length === 5);
+    assertEqual(await page.locator("#judgment-source-hits .model-hit").count(), 2, "the other repositories left the page");
+    // One file in five over the limit: nothing to say about the repository.
+    assert(await page.locator("#judgment-source-files-big").isHidden(), "a repository with one large file is called too large");
+    // Most of them over it: why, and the road a large model takes.
+    backend.managedSourceFiles = { ...clone(GGUF_LISTING), repository: "acme/large-GGUF", files: [
+      { path: "large.Q2_K.gguf", bytes: 3_900_000_000, url: ggufAddress("large.Q2_K.gguf"), reason: null },
+      { path: "large.Q4_K_M.gguf", bytes: 5_700_000_000, url: null, reason: "size_limit" },
+      { path: "large.Q6_K.gguf", bytes: 7_400_000_000, url: null, reason: "size_limit" },
+      { path: "large.Q8_0.gguf", bytes: 9_500_000_000, url: null, reason: "size_limit" },
+    ] };
+    const largeAt = backend.calls.length;
+    await page.fill("#judgment-source-repository", "acme/large-GGUF");
+    await page.press("#judgment-source-repository", "Enter");
+    await page.waitForFunction(() => document.querySelectorAll("#judgment-source-file-list .model-file").length === 4 && !judgmentModelSourceController.finding);
+    // The one file under the limit would run at the memory limit: it is
+    // marked, and left for the person to pick rather than picked for them.
+    assertEqual(await page.locator("#judgment-source-file-list [data-file-heavy]").count(), 1, "the file at the memory limit is not marked");
+    assert(!backend.calls.slice(largeAt).some((entry) => entry.command === "managed_judgment_inspect_source"), "a file at the memory limit was picked for the person");
+    assertEqual(await page.evaluate(() => judgmentModelSourceController.picked), null);
+    const big = page.locator("#judgment-source-files-big");
+    assert(await big.isVisible(), "a repository of files over the limit says nothing of why");
+    const lines = new Set();
+    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+      await setQualityLocale(page, locale);
+      await renderSettled(page);
+      const seen = `${await big.innerText()} ${await purpose.innerText()}`;
+      if (locale !== "ko") assert(!/[가-힣]/.test(seen), `${locale}: the words for a large model are not translated`, seen);
+      lines.add(seen);
+    }
+    assertEqual(lines.size, SETTINGS_QUALITY_SPEC.locales.length, "two languages say the same words");
+    await setQualityLocale(page, "ko");
+    await renderSettled(page);
+    await receivePictures(page, "receive-large", "#model-receive");
+    await page.click("#judgment-source-local-server");
+    assert(await page.locator("#router-card").isVisible() && await page.locator("#model-catalog").isHidden(), "the road for a large model opens no editor");
+    assert(/^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(await page.inputValue("#router-base-url-input")), "the editor's address is not this computer's");
+    await page.click('[data-connection-nav="catalog"]');
+    assert(await page.locator("#model-catalog").isVisible(), "the way back from the editor is gone");
+    // A repository with no GGUF anywhere is still said as one.
+    backend.managedSourceFiles = { ...clone(GGUF_LISTING), repository: "acme/weights-only", files: [], quantized: [] };
+    await page.fill("#judgment-source-repository", "acme/weights-only");
+    await page.press("#judgment-source-repository", "Enter");
+    await page.waitForFunction(() => judgmentModelSourceController.problem === "source_no_models");
+    assert((await page.locator("#judgment-source-status").textContent()).includes("GGUF"), "a repository with no GGUF does not say what it lacks");
+    return "purpose line · weights-only → its GGUF repositories as hits → one press to files · mostly over the limit → why + 「로컬 서버 연결」 opens the editor · none anywhere → said";
+  } finally {
+    forgetReceiveFixtures();
+    await setQualityLocale(page, "ko");
+  }
+}));
+
 await test("모델 받기: 「받기만」은 파일만 받아 두고 판단 모델을 바꾸지 않으며, 받은 모델은 「이 컴퓨터」에 「받아 둠」으로 서서 「판단에 쓰기」와 「파일 삭제」를 단다", async () => withJudgmentStatus(async (page, provider) => {
   try {
     const snapshot = backend.managedJudgmentSettings();

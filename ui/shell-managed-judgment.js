@@ -109,7 +109,7 @@ const managedJudgmentController = {
       case "source_missing":
         return t("settings.managed.error.sourceMissing", "이 이름의 저장소를 찾지 못했습니다. 이름을 확인하세요. 로그인이나 이용 동의가 필요한 모델은 여기서 받을 수 없습니다.");
       case "source_no_models":
-        return t("settings.managed.error.noModels", "이 저장소에는 받을 수 있는 모델 파일이 없습니다. GGUF 파일이 있는 저장소나 판단 모델 저장소를 고르세요.");
+        return t("settings.managed.error.noModels", "이 저장소에는 GGUF 파일이 없습니다. 원본 가중치만 있는 저장소로 보이고, 같은 모델의 GGUF 저장소도 Hugging Face에서 찾지 못했습니다. 이름 뒤에 GGUF를 붙여 검색해 보세요.");
       case "insufficient_space":
         return t("settings.managed.error.space", "저장 공간이 부족합니다. 사용하지 않는 모델을 정리한 뒤 다시 시도하세요.");
       case "runtime_missing":

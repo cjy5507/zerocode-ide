@@ -117,6 +117,11 @@ pub struct HubListing {
     /// built-in ones answers to: a file would be received and then refused.
     /// `None` when the Hub names no template — the file's own header decides.
     pub template_known: Option<bool>,
+    /// The repositories that hold this model as GGUF files, most received
+    /// first — asked of the Hub only when this repository holds none itself
+    /// (the original weights of a model, whose GGUF files other people
+    /// publish). Empty when the Hub names none, or did not answer.
+    pub quantized: Vec<HubSearchHit>,
 }
 
 /// The most GGUF files a listing carries: a repository of quantisations
@@ -141,6 +146,8 @@ struct HubSearchRow {
     downloads: u64,
     #[serde(default)]
     likes: u64,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 /// The most repositories one search answers with.
@@ -812,6 +819,17 @@ fn split_part(name: &str) -> bool {
     digits(total) && of == Some("of") && digits(number)
 }
 
+/// A GGUF file that is no model: the projector a vision model loads beside
+/// its weights (`mmproj-…`). It answers nothing by itself, so a listing of
+/// models leaves it out.
+fn projector(name: &str) -> bool {
+    name.rsplit('/')
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase()
+        .contains("mmproj")
+}
+
 fn listing(source: &HubSource, metadata: &HubMetadata) -> Result<HubListing> {
     if !hex(&metadata.sha, 40) || metadata.siblings.len() > 2048 {
         return Err(Error::Manifest);
@@ -830,7 +848,7 @@ fn listing(source: &HubSource, metadata: &HubMetadata) -> Result<HubListing> {
         if matches!(path, "rl_agent_config.json" | "decision_config.json") {
             native = true;
         }
-        if !path.to_ascii_lowercase().ends_with(".gguf") {
+        if !path.to_ascii_lowercase().ends_with(".gguf") || projector(path) {
             continue;
         }
         let bytes = file
@@ -900,6 +918,7 @@ fn listing(source: &HubSource, metadata: &HubMetadata) -> Result<HubListing> {
         max_file_bytes: MAX_DATA_BYTES,
         memory_limit_bytes: None,
         template_known,
+        quantized: Vec::new(),
     })
 }
 
@@ -923,7 +942,35 @@ pub(crate) async fn list_hub(repository: &str, cancelled: &Cancelled) -> Result<
     .await?;
     let metadata: HubMetadata =
         serde_json::from_slice(&bytes).map_err(|_| Error::SourceUnavailable)?;
-    listing(&source, &metadata)
+    let mut listed = listing(&source, &metadata)?;
+    if listed.files.is_empty() && !listed.native {
+        // The original weights of a model: its GGUF files stand in other
+        // repositories, and the Hub knows which. A Hub that does not say
+        // leaves the listing as it is — empty, and said so.
+        if let Ok(address) = quantized_url(&listed.repository)
+            && let Ok(bytes) =
+                fetch(&client, address, MAX_METADATA_BYTES, cancelled, &progress).await
+        {
+            listed.quantized = hits(&bytes, true).unwrap_or_default();
+        }
+    }
+    Ok(listed)
+}
+
+/// The Hub's list of the repositories that hold `repository` — an
+/// `owner/name` a listing already read — quantised as GGUF files, most
+/// received first.
+fn quantized_url(repository: &str) -> Result<url::Url> {
+    let mut address =
+        url::Url::parse("https://huggingface.co/api/models").map_err(|_| Error::SourceInvalid)?;
+    address
+        .query_pairs_mut()
+        .append_pair("filter", &format!("base_model:quantized:{repository}"))
+        .append_pair("filter", "gguf")
+        .append_pair("sort", "downloads")
+        .append_pair("direction", "-1")
+        .append_pair("limit", &MAX_SEARCH_HITS.to_string());
+    Ok(address)
 }
 
 /// The Hub's search for repositories that hold GGUF files, most received
@@ -950,10 +997,18 @@ fn search_url(query: &str) -> Result<url::Url> {
 /// ID is not `owner/name` in the letters a listing takes is left out: it
 /// could not be opened from here.
 fn search_hits(bytes: &[u8]) -> Result<Vec<HubSearchHit>> {
+    hits(bytes, false)
+}
+
+/// The rows of one of the Hub's model lists. `tagged` keeps only a row the
+/// Hub tags `gguf`: the list of a model's quantisations also names ones in
+/// other formats.
+fn hits(bytes: &[u8], tagged: bool) -> Result<Vec<HubSearchHit>> {
     let rows: Vec<HubSearchRow> =
         serde_json::from_slice(bytes).map_err(|_| Error::SourceUnavailable)?;
     Ok(rows
         .into_iter()
+        .filter(|row| !tagged || row.tags.iter().any(|tag| tag == "gguf"))
         .filter(|row| {
             let mut parts = row.id.split('/');
             matches!(
@@ -1599,6 +1654,91 @@ mod tests {
         // A commit the Hub did not resolve to a full hash lists nothing.
         let unresolved = hub_metadata(serde_json::json!({"sha": "main", "siblings": []}));
         assert_eq!(listing(&whole, &unresolved), Err(Error::Manifest));
+    }
+
+    /// A vision model's repository ships a projector beside its weights
+    /// (`mmproj-…gguf`): a GGUF file, and no model. The person who asked for
+    /// a 9B model's files was offered two of them as the only ones small
+    /// enough to receive (2026-11-11).
+    #[test]
+    fn a_listing_leaves_out_the_projector_a_vision_model_ships_beside_its_weights() {
+        let hash = "c".repeat(64);
+        let file = |name: &str, size: u64| serde_json::json!({"rfilename": name, "size": size, "lfs": {"sha256": hash, "size": size}});
+        let metadata = hub_metadata(serde_json::json!({
+            "sha": "b".repeat(40),
+            "siblings": [
+                file("chat.Q2_K.gguf", 400),
+                file("mmproj-Q8_0.gguf", 300),
+                file("chat.mmproj-f16.gguf", 200),
+                file("nested/MMPROJ-chat-f16.gguf", 100),
+            ],
+        }));
+        let source = hub_source("acme/vision-gguf", None, None).unwrap();
+        let listed = listing(&source, &metadata).unwrap();
+        assert_eq!(
+            listed
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chat.Q2_K.gguf"]
+        );
+        assert!(listed.quantized.is_empty());
+        for (name, is) in [
+            ("mmproj-Q8_0.gguf", true),
+            ("deep/er/model-mmproj-f16.gguf", true),
+            ("mmproj/chat.Q4_K_M.gguf", false),
+            ("chat.Q4_K_M.gguf", false),
+        ] {
+            assert_eq!(projector(name), is, "{name}");
+        }
+    }
+
+    /// A repository of a model's original weights holds no GGUF file; the
+    /// ones made from it stand in other repositories, and the Hub lists them
+    /// by the model they were quantised from.
+    #[test]
+    fn a_models_gguf_repositories_are_asked_by_its_id_and_read_only_from_rows_tagged_gguf() {
+        let address = quantized_url("acme/chat").unwrap();
+        assert_eq!(address.host_str(), Some("huggingface.co"));
+        assert_eq!(address.path(), "/api/models");
+        let asked: Vec<(String, String)> = address.query_pairs().into_owned().collect();
+        let asked: Vec<(&str, &str)> = asked
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let limit = MAX_SEARCH_HITS.to_string();
+        assert_eq!(
+            asked,
+            vec![
+                ("filter", "base_model:quantized:acme/chat"),
+                ("filter", "gguf"),
+                ("sort", "downloads"),
+                ("direction", "-1"),
+                ("limit", limit.as_str()),
+            ]
+        );
+        let answer = serde_json::to_vec(&serde_json::json!([
+            {"id": "acme/chat-GGUF", "downloads": 9917, "likes": 2, "tags": ["gguf", "base_model:quantized:acme/chat"]},
+            {"id": "acme/chat-mlx", "downloads": 1365, "likes": 0, "tags": ["mlx"]},
+            {"id": "acme/chat-i1-GGUF", "downloads": 2625, "likes": 2, "tags": ["gguf"]},
+            {"id": "not a repository", "tags": ["gguf"]},
+        ]))
+        .unwrap();
+        assert_eq!(
+            hits(&answer, true)
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.repository, hit.downloads))
+                .collect::<Vec<_>>(),
+            vec![
+                ("acme/chat-GGUF".to_owned(), 9917),
+                ("acme/chat-i1-GGUF".to_owned(), 2625),
+            ]
+        );
+        // A search already asked the Hub for GGUF: it keeps every row.
+        assert_eq!(search_hits(&answer).unwrap().len(), 3);
+        assert_eq!(hits(b"{}", true), Err(Error::SourceUnavailable));
     }
 
     #[test]

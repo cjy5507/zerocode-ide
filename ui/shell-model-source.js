@@ -71,6 +71,8 @@ const judgmentModelSourceController = {
     });
     el("judgment-source-inspect").addEventListener("click", () => void this.go());
     el("judgment-source-use").addEventListener("click", () => void this.act());
+    // A repository of files too large to receive here names the other road.
+    el("judgment-source-local-server").addEventListener("click", () => modelConnectionsController.addLocalServer());
     el("judgment-source-keep").addEventListener("click", () => {
       const inspection = this.currentInspection();
       if (!this.locked() && !this.inspecting && inspection && this.usable(inspection)) void this.keep(inspection);
@@ -246,13 +248,24 @@ const judgmentModelSourceController = {
     this.listing = { ...listing, files: Array.isArray(listing?.files) ? listing.files : [], asked: repository };
     const takeable = this.listing.files.filter((file) => file.url);
     if (this.listing.native) return this.inspect();
-    if (takeable.length === 1) {
+    // The one file that can be received is picked at once — unless its run
+    // would stand at the memory limit: that one the person picks knowingly.
+    if (takeable.length === 1 && !this.heavy(takeable[0], this.listing)) {
       this.picked = takeable[0].path;
       return this.inspect();
     }
     if (!this.listing.files.length) {
-      this.problem = "source_no_models";
-      this.say(managedJudgmentController.failure(this.problem));
+      // The original weights of a model hold no GGUF file: the Hub names
+      // the repositories that hold it as GGUF, and they stand where a
+      // search's answers do — one press from their files.
+      const made = Array.isArray(listing?.quantized) ? listing.quantized : [];
+      if (made.length) {
+        this.hits = made;
+        this.say(t("settings.models.foundQuantized", "이 저장소에는 원본 가중치만 있고 GGUF 파일이 없습니다. 같은 모델을 GGUF로 만들어 올린 저장소 {{count}}개를 찾았습니다. 하나를 고르면 그 안의 파일을 보여 줍니다.", { count: made.length }));
+      } else {
+        this.problem = "source_no_models";
+        this.say(managedJudgmentController.failure(this.problem));
+      }
     } else {
       this.say(takeable.length
         ? t("settings.models.pickFile", "받을 파일 하나를 고르세요. 고르면 그 파일을 확인합니다. 아직 아무것도 받지 않았습니다.")
@@ -723,6 +736,10 @@ const judgmentModelSourceController = {
     const signature = JSON.stringify([shownHits, listing?.asked, listing?.revision, shownFiles, this.picked, off, listing?.templateKnown, document.documentElement.lang]);
     hits.hidden = shownHits.length === 0;
     files.hidden = shownFiles.length === 0;
+    // Half or more of a repository's files over the receive limit: it is a
+    // model for coding or talk, and the page says where such a model goes.
+    const large = shownFiles.filter((file) => file.reason === "size_limit").length;
+    el("judgment-source-files-big").hidden = !(large > 0 && large * 2 >= shownFiles.length);
     if (signature === this.foundSignature) return;
     this.foundSignature = signature;
     const count = (value) => {
@@ -777,7 +794,7 @@ const judgmentModelSourceController = {
       size.className = "model-file-size";
       size.textContent = bytesLabel(file.bytes);
       row.append(input, name, size);
-      const heavy = file.url && listing.memoryLimitBytes > 0 && file.bytes * RUN_MEMORY_PER_FILE_BYTE > listing.memoryLimitBytes;
+      const heavy = this.heavy(file, listing);
       if (!file.url || heavy) {
         const why = document.createElement("span");
         why.className = "model-file-why";
@@ -789,6 +806,12 @@ const judgmentModelSourceController = {
       }
       return row;
     }));
+  },
+
+  /* A file that can be received, whose run would stand close to the
+   * runtime's memory limit: its weights and its working memory both count. */
+  heavy(file, listing) {
+    return Boolean(file.url) && listing.memoryLimitBytes > 0 && file.bytes * RUN_MEMORY_PER_FILE_BYTE > listing.memoryLimitBytes;
   },
 
   /* Why a listed file cannot be received, in the page's words. */
