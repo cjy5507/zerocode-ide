@@ -37,7 +37,14 @@ async function standConversations() {
   const working = await stand("codex", "working");
   const ended = await stand("claude", "done");
   const worker = await stand("claude", "working");
-  paneLedger.set(worker, { task: "워커 과업", taskId: "t-1" });
+  // The worker's seat is the ledger's word, as in the app. A seat set into `paneLedger` by hand is
+  // wiped by the window's own ledger read when that read lands after it — WebKit lands the one the
+  // panes started ~50 ms later, Chromium before — so the ledger says it, and the window's read carries it.
+  window.__LEDGER__ = [{ term: worker, task: "워커 과업", task_id: "t-1" }];
+  for (const until = Date.now() + 2_000; !ledgerHoldsTask(paneLedger.get(worker) ?? {}) && Date.now() < until;) {
+    await refreshPaneLedger();
+    await new Promise((done) => setTimeout(done, 10));
+  }
   window.__TERMS__ = { waiting, working, ended, worker };
   chatListSidebar = true;
   paintChatListSidebar();
