@@ -2419,12 +2419,57 @@ fn login_status_in(
     serde_json::from_slice::<serde_json::Value>(&said).ok()
 }
 
+/// How many days before a stored claude.ai login ends its account row starts
+/// saying so. Claude Code's own window for the same login: 2.1.318 warns on
+/// `claude -p`'s stderr "starting 10 days before" the sign-in ends (its
+/// changelog), and its screen says "Your login expires in N days · run /login
+/// to renew".
+pub const LOGIN_EXPIRY_NOTICE_DAYS: i64 = 10;
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// The whole days left before the login a `claude auth status` answer reports
+/// ends — its `loginExpiresAt`, which the CLI has said since 2.1.318 — when
+/// that is within [`LOGIN_EXPIRY_NOTICE_DAYS`]. Whole days of time, not
+/// calendar days: zero is under a day left, which may still be tomorrow
+/// morning, so the window says "within a day" and never "today".
+///
+/// `None` for a login that ends further out, for one the CLI did not call
+/// alive (the row already says that in stronger words), and for an answer
+/// that names no date — an API key, an older CLI, a stamp without a zone:
+/// nothing is said about a day nobody read.
+#[must_use]
+pub fn login_days_left(status: &serde_json::Value, now_ms: i64) -> Option<u32> {
+    if status.get("loggedIn").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let ends = zerocode_core::civil::epoch_ms_of_iso(status.get("loginExpiresAt")?.as_str()?)?;
+    let left = ends.saturating_sub(now_ms);
+    if left > LOGIN_EXPIRY_NOTICE_DAYS * DAY_MS {
+        return None;
+    }
+    u32::try_from(left.max(0) / DAY_MS).ok()
+}
+
 /// Probe a store and retain the identity the CLI actually reported.
 pub fn probe_identity(program: &str, dir: &Path) -> (Option<bool>, ClaudeIdentity) {
+    let (alive, identity, _) = probe_login(program, dir, 0);
+    (alive, identity)
+}
+
+/// [`probe_identity`], and the days left before that login ends when the CLI
+/// names a day near enough to say ([`login_days_left`]) — one ask of the CLI
+/// answers all three.
+pub fn probe_login(
+    program: &str,
+    dir: &Path,
+    now_ms: i64,
+) -> (Option<bool>, ClaudeIdentity, Option<u32>) {
     let Some(status) = login_status_in(program, dir, dir) else {
-        return (None, ClaudeIdentity::default());
+        return (None, ClaudeIdentity::default(), None);
     };
     let alive = status.get("loggedIn").and_then(serde_json::Value::as_bool);
+    let days_left = login_days_left(&status, now_ms);
     let identity = if alive == Some(true) {
         let mut reported = ClaudeIdentity::from_credentials(&status.to_string());
         let profile = identity_in(dir);
@@ -2454,7 +2499,7 @@ pub fn probe_identity(program: &str, dir: &Path) -> (Option<bool>, ClaudeIdentit
     } else {
         ClaudeIdentity::default()
     };
-    (alive, identity)
+    (alive, identity, days_left)
 }
 
 /// Merge completed probes against the current store, ignoring stale observations.
@@ -4077,6 +4122,55 @@ JSON
             login_alive(&quiet, dir),
             None,
             "a JSON without the field accused a login"
+        );
+    }
+
+    /// The day a stored sign-in ends is said only when the CLI named it and
+    /// it is near (Claude Code 2.1.318's `loginExpiresAt`, its own ten-day
+    /// window): whole days of time left, zero under a day and after it. A login
+    /// further out, one the CLI did not call alive, an answer with no date
+    /// or a date with no zone say nothing.
+    #[test]
+    fn a_login_says_the_days_it_has_left_only_when_the_cli_named_a_near_day() {
+        let now = zerocode_core::civil::epoch_ms_of_iso("2026-11-10T00:00:00Z").expect("now");
+        let status = |alive: bool, ends: &str| serde_json::json!({ "loggedIn": alive, "loginExpiresAt": ends });
+        for (ends, left) in [
+            ("2026-11-30T16:34:08.168Z", None),
+            ("2026-11-20T00:00:00.001Z", None),
+            ("2026-11-20T00:00:00Z", Some(10)),
+            ("2026-11-13T12:00:00+09:00", Some(3)),
+            ("2026-11-11T00:00:00Z", Some(1)),
+            ("2026-11-10T23:59:59Z", Some(0)),
+            ("2026-11-09T00:00:00Z", Some(0)),
+        ] {
+            assert_eq!(login_days_left(&status(true, ends), now), left, "{ends}");
+        }
+        assert_eq!(
+            login_days_left(&status(false, "2026-11-11T00:00:00Z"), now),
+            None,
+            "a dead login is not also said to be ending"
+        );
+        for unread in [
+            serde_json::json!({ "loggedIn": true }),
+            serde_json::json!({ "loggedIn": true, "loginExpiresAt": null }),
+            serde_json::json!({ "loggedIn": true, "loginExpiresAt": "2026-11-11T00:00:00" }),
+            serde_json::json!({ "loggedIn": true, "loginExpiresAt": 1_794_300_000_000_i64 }),
+        ] {
+            assert_eq!(login_days_left(&unread, now), None, "{unread}");
+        }
+
+        // One ask of the CLI answers the login, who it is and the days left.
+        let root = tempfile::tempdir().expect("no temp dir");
+        let cli = crate::test_host::fake_program(
+            root.path(),
+            "ending-cli",
+            "printf '{\"loggedIn\":true,\"loginExpiresAt\":\"2026-11-12T06:00:00Z\"}'",
+        );
+        let (alive, _, days_left) = probe_login(&cli.to_string_lossy(), root.path(), now);
+        assert_eq!((alive, days_left), (Some(true), Some(2)));
+        assert_eq!(
+            probe_identity(&cli.to_string_lossy(), root.path()).0,
+            Some(true)
         );
     }
 

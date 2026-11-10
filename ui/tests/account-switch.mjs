@@ -755,5 +755,70 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     JSON.stringify(plain.catalog),
   );
 
+  // ---- 5. a login's last days are said on its row ---------------------
+  // Claude Code names the day a stored sign-in ends (`loginExpiresAt`,
+  // 2.1.318); the backend answers the days left as a verdict's third word
+  // when that day is within its ten-day window.
+  const ending = await page.evaluate(async () => {
+    const row = (id, extra = {}) => ({
+      id, email: `${id}@example.test`, label: `${id}@example.test`, organization_name: "Acme",
+      organization_type: "claude_max", signed_in: true, login_expired: false, added_at: 1, ...extra,
+    });
+    window.__ACCOUNTS__ = {
+      accounts: [row("in-three"), row("tomorrow"), row("today"), row("far"), row("older-cli"), row("dead"), row("no-credentials", { signed_in: false })],
+      active: "far",
+      can_add: true,
+    };
+    window.__ANSWER__.verify_claude_accounts = () => [
+      ["in-three", true, 3], ["tomorrow", true, 1], ["today", true, 0], ["far", true, null],
+      // An older CLI answers two words; a dead login's days are not said.
+      ["older-cli", true], ["dead", false, 2], ["no-credentials", null, 4],
+    ];
+    setSettingsOpen(true);
+    showSettingsPane("agents");
+    await refreshClaudeAccounts();
+    await new Promise((done) => setTimeout(done, 60));
+    const read = () => Object.fromEntries([...document.querySelectorAll("#account-list .account-row")].map((one) => [
+      one.querySelector(".agent-row-name").textContent.split("@")[0],
+      {
+        under: one.querySelector(".agent-row-cmd").textContent,
+        alarmed: one.classList.contains("is-alarmed"),
+        canRelogin: Boolean(one.querySelector(".account-relogin")),
+      },
+    ]));
+    const ko = read();
+    const expect = {
+      inThree: t("settings.accounts.endsIn", "로그인이 {{n}}일 뒤 만료됩니다 — 다시 로그인하면 연장됩니다", { n: 3 }),
+      tomorrow: t("settings.accounts.endsInADay", "로그인이 하루 뒤 만료됩니다 — 다시 로그인하면 연장됩니다"),
+      today: t("settings.accounts.endsWithinADay", "로그인이 하루 안에 만료됩니다 — 다시 로그인하세요"),
+      expired: t("settings.accounts.expired", "로그인이 만료되었습니다 — 다시 로그인하세요"),
+      signedOut: t("settings.accounts.signedOut", "자격 증명이 없습니다 — 지우고 다시 추가하세요"),
+    };
+    const saved = locale;
+    setLocale("en", { refresh: false, persist: false });
+    paintClaudeAccounts();
+    const en = read();
+    setLocale(saved, { refresh: false, persist: false });
+    delete window.__ANSWER__.verify_claude_accounts;
+    setSettingsOpen(false);
+    return { ko, en, expect };
+  });
+  ok(
+    "an account whose login ends within ten days says the days left on its row — three sentences, the row calm and its 「다시 로그인」 there — and a login further out, an older CLI's two-word verdict, a dead login and a row with no credentials say what they said before",
+    ending.ko["in-three"]?.under === `Acme · 맥스 · ${ending.expect.inThree}` && ending.expect.inThree.includes("3일") &&
+      ending.ko.tomorrow?.under === `Acme · 맥스 · ${ending.expect.tomorrow}` &&
+      ending.ko.today?.under === `Acme · 맥스 · ${ending.expect.today}` &&
+      ["in-three", "tomorrow", "today"].every((id) => !ending.ko[id].alarmed && ending.ko[id].canRelogin) &&
+      ending.ko.far?.under === "Acme · 맥스" && ending.ko["older-cli"]?.under === "Acme · 맥스" &&
+      ending.ko.dead?.under === ending.expect.expired && ending.ko.dead.alarmed &&
+      ending.ko["no-credentials"]?.under === ending.expect.signedOut &&
+      ending.en["in-three"]?.under === "Acme · Max · the login ends in 3 days — sign in again to renew it" &&
+      // Lengths of time, never calendar days: a whole day left may still end tomorrow morning.
+      ending.expect.tomorrow.includes("하루 뒤") && ending.expect.today.includes("하루 안에") &&
+      ending.en.tomorrow?.under.endsWith("the login ends in a day — sign in again to renew it") &&
+      ending.en.today?.under.endsWith("the login ends within a day — sign in again"),
+    JSON.stringify(ending),
+  );
+
   await page.close();
 }

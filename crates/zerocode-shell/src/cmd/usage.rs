@@ -879,6 +879,13 @@ pub(crate) async fn add_claude_account(
     ))
 }
 
+/// What the CLI said of one account's login, as the window reads it — three
+/// words in a row: the account's id, whether the CLI called the login alive
+/// (`None` when it could not be asked), and the whole days left when the CLI
+/// names the day a stored sign-in ends and that day is near
+/// ([`accounts::login_days_left`]).
+type LoginVerdict = (String, Option<bool>, Option<u32>);
+
 /// Every account's login, checked against the CLI itself (1-g17).
 ///
 /// The settings panel calls this AFTER painting from the store: the rows
@@ -886,15 +893,19 @@ pub(crate) async fn add_claude_account(
 /// arrives a moment later and repaints the dead ones. Concurrent because the
 /// answer is per-directory and a person with four accounts should not wait
 /// four times for one.
+///
+/// Each row answers a [`LoginVerdict`], so an account nobody is using says it
+/// is about to lapse before a switch lands on it dead.
 #[tauri::command]
 pub(crate) async fn verify_claude_accounts(
     state: State<'_, AppState>,
-) -> Result<Vec<(String, Option<bool>)>, String> {
+) -> Result<Vec<LoginVerdict>, String> {
     let rows = accounts::read_store(state.config_root()).accounts;
     let Some(program) = claude_program() else {
-        return Ok(rows.into_iter().map(|row| (row.id, None)).collect());
+        return Ok(rows.into_iter().map(|row| (row.id, None, None)).collect());
     };
     let config = state.config_root().to_path_buf();
+    let now = epoch_ms_now();
     tauri::async_runtime::spawn_blocking(move || {
         let results = std::thread::scope(|scope| {
             let asked: Vec<_> = rows
@@ -902,7 +913,7 @@ pub(crate) async fn verify_claude_accounts(
                 .map(|row| {
                     let program = &program;
                     scope.spawn(move || {
-                        accounts::probe_identity(program, Path::new(&row.config_dir))
+                        accounts::probe_login(program, Path::new(&row.config_dir), now)
                     })
                 })
                 .collect();
@@ -914,13 +925,13 @@ pub(crate) async fn verify_claude_accounts(
         let observations = rows
             .iter()
             .zip(&results)
-            .map(|(row, (_, identity))| (row.clone(), identity.clone()))
+            .map(|(row, (_, identity, _))| (row.clone(), identity.clone()))
             .collect::<Vec<_>>();
         accounts::observe_identities(&config, &observations)?;
         Ok(rows
             .into_iter()
             .zip(results)
-            .map(|(row, (alive, _))| (row.id, alive))
+            .map(|(row, (alive, _, days_left))| (row.id, alive, days_left))
             .collect())
     })
     .await
