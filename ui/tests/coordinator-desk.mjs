@@ -2554,6 +2554,45 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       ok(`the desk has no horizontal overflow at ${width}px`,
         size.scroll <= size.width + 1 && size.desk <= size.deskWidth + 1 && size.cards <= 1, JSON.stringify(size));
       await page.screenshot({ path: `output/playwright/coordinator-desk/dark-${width}.png` });
+      // The same width with what a real desk holds and this fixture does not: a task title and a run's name longer
+      // than the card, a state said without a space (a Japanese or Chinese sentence breaks at no word), and a host
+      // whose fallback glyphs run wider than this one's. The hosted Windows runner's Hangul put the two columns of
+      // the workers' table 4px past its card at 360px (v1.1.135–138), and a title that long pushed the table out of
+      // the card at every width — 384px at 360, 178px at 1280.
+      const stretched = await page.evaluate(async () => {
+        const view = document.querySelector("#board-view");
+        const pastTheCards = () => Math.max(0, ...[...view.querySelectorAll(".board-table-card, .board-desk-block")]
+          .filter((one) => one.checkVisibility()).map((one) => one.scrollWidth - one.clientWidth));
+        const frames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        const held = [];
+        const say = (selector, words) => {
+          const node = view.querySelector(selector);
+          if (node === null) return false;
+          held.push([node, node.textContent]);
+          node.textContent = words;
+          return true;
+        };
+        const said = {
+          title: say(".board-desk-worker-task", "v1.1.130 Windows 일정 보드 조용한 보기가 5 ms를 넘음 — Book::read 몫 측정 뒤 고침 또는 OS별 상한"),
+          run: say(".board-desk-worker-run-name", "lowspec-20261105: 저사양 1~6(상태 파일·테두리·CEF·부팅 JS·원장·쉬는 에이전트) · 워커 5"),
+          state: say(".board-desk-worker-state .board-state", "制限に達しましたのでリセットまであと四十四分お待ちください"),
+        };
+        await frames();
+        const longWords = pastTheCards();
+        for (const [node, words] of held) node.textContent = words;
+        const wider = document.createElement("style");
+        wider.textContent = "*, *::before, *::after { letter-spacing: 0.1em !important; }";
+        document.head.appendChild(wider);
+        await frames();
+        const widerGlyphs = pastTheCards();
+        wider.remove();
+        await frames();
+        return { said, longWords, widerGlyphs };
+      });
+      ok(`the desk keeps a long title, a long run name and an unbroken state inside their cards at ${width}px`,
+        Object.values(stretched.said).every(Boolean) && stretched.longWords <= 1, JSON.stringify(stretched));
+      ok(`the desk has no horizontal overflow at ${width}px where the host's glyphs run wider`,
+        stretched.widerGlyphs <= 1, JSON.stringify(stretched));
     }
     ok("the coordinator desk raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {

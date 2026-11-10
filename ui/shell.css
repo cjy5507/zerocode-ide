@@ -39331,6 +39331,9 @@ details.task-board-section > summary {
   font: var(--type-label-13);
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* 줄바꿈 없는 한 줄은 표의 칸에 제 길이만큼의 폭을 요구한다 — 긴 과업 제목 하나가 표를 카드 밖으로 밀어 상태 칸이
+   * 잘렸다(360px에서 384px, 1280px에서 178px). 이 줄은 칸의 폭을 정하지 않고, 정해진 칸 안에서 말줄임으로 선다. */
+  contain: inline-size;
 }
 
 .board-desk-worker-run-name {
@@ -39340,6 +39343,12 @@ details.task-board-section > summary {
   font: var(--type-label-12);
   font-weight: 600;
   text-align: left;
+}
+
+/* 런의 이름은 사람이 지은 문장이라 길 수 있다 — 표의 머리 칸처럼 한 줄로 버티면 표가 카드 밖으로 나간다. */
+.board-table .board-desk-worker-run-name {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .board-desk-worker-work {
@@ -43041,9 +43050,12 @@ button.board-build-failure-part:focus-visible {
   color: var(--ink-mist);
 }
 
-/* 이름은 시안의 500 — 브라우저의 `strong`은 한 단 더 굵어진다. */
+/* 이름은 시안의 500 — 브라우저의 `strong`은 한 단 더 굵어진다. 모델 이름은 낱말이 아니라 식별자라서, 칸이 가장 좁을
+ * 때는 글자에서 꺾인다: 꺾이지 못하면 이름 하나가 칸의 바닥 폭이 되고, 한글 글꼴이 조금 넓은 기계의 360px 판에서 두 칸의
+ * 합이 카드를 4px 넘었다(Windows 러너, v1.1.135~138). */
 .board-desk-worker-model {
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .board-desk-worker-fold:focus-visible,
@@ -43256,8 +43268,11 @@ button.board-build-failure-part:focus-visible {
     display: none;
   }
 
+  /* 좁은 판의 상태 칸은 줄을 바꾼다. 띄어쓰기 없이 이어지는 말(일본어·중국어의 한 문장)은 낱말에서 꺾일 데가 없으니,
+   * 한 줄에 들지 못할 때만 글자에서 꺾는다 — 꺾이지 못한 한 줄은 표를 카드 밖으로 민다. */
   .board-desk-worker-state,
   .board-today-result {
+    overflow-wrap: anywhere;
     white-space: normal;
   }
 
