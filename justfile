@@ -53,13 +53,19 @@ shell-lint:
 # launchd, swiftc, osascript, the release lane) say SKIPPED aloud elsewhere, as
 # `swift-test` does.
 # On Windows Python reads files as UTF-8 here, as it does on a Mac.
+# The scripts run one after another, except the long ones marked `beside`: each of
+# those starts at once and runs beside the rest, its output held and printed when
+# it ends, its verdict counted with the others'. v1.1.138's gate spent 157 s of
+# this recipe's 387 s in test_lane.py, 72 s in test_bench.py and 56 s in
+# test_gate_receipt.py, each waiting on the one before it.
 tools-test:
-    @rc=0; red=; skipped=; \
+    @rc=0; red=; skipped=; held=$(mktemp -d "${TMPDIR:-/tmp}/tools-test.XXXXXX"); beside_n=0; \
     case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) export PYTHONUTF8=1 ;; esac; \
     t() { echo "python3 $*" >&2; python3 "$@" || { rc=1; red="$red $*"; }; }; \
-    macos() { why=$1; shift; if [ "$(uname -s)" = Darwin ]; then t "$@"; else echo "SKIPPED python3 $* — macOS-only: $why"; skipped="$skipped $*"; fi; }; \
-    t -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v; \
-    macos "the release lane runs on this Mac: launchd, plutil, POSIX signals, the build line's done folder" tools/release/tests/test_lane.py; \
+    beside() { beside_n=$((beside_n + 1)); printf '%s' "$*" > "$held/$beside_n.cmd"; echo "python3 $* — beside the rest; its output when it ends" >&2; ( python3 "$@" > "$held/$beside_n.out" 2>&1; echo $? > "$held/$beside_n.rc" ) & }; \
+    macos() { how=t; [ "$1" = beside ] && { how=beside; shift; }; why=$1; shift; if [ "$(uname -s)" = Darwin ]; then $how "$@"; else echo "SKIPPED python3 $* — macOS-only: $why"; skipped="$skipped $*"; fi; }; \
+    beside -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v; \
+    macos beside "the release lane runs on this Mac: launchd, plutil, POSIX signals, the build line's done folder" tools/release/tests/test_lane.py; \
     t tools/release/tests/test_cargo_turn.py; \
     t tools/release/tests/test_coord_receipt.py; \
     t tools/release/tests/test_prebatch.py; \
@@ -78,7 +84,7 @@ tools-test:
     t tools/computer-bench/test_tally.py; \
     macos "walks the macOS screen and accessibility permissions" tools/computer-bench/test_onboarding.py; \
     t tools/computer-bench/test_scenarios.py; \
-    macos "scripts macOS ioreg, pgrep, defaults, open and osascript" tools/computer-bench/test_bench.py; \
+    macos beside "scripts macOS ioreg, pgrep, defaults, open and osascript" tools/computer-bench/test_bench.py; \
     t tools/computer-bench/test_marks.py; \
     t tools/computer-bench/test_eye.py; \
     t tools/computer-bench/test_fixture_apm.py; \
@@ -116,6 +122,8 @@ tools-test:
     t tools/tests/test_test_times.py; \
     macos "reads proc_pid_rusage through macOS libproc.dylib and mach_absolute_time" tools/tests/test_memory_census_idle.py; \
     macos "ends the measured CLI's process group (os.killpg)" tools/login-renewal-probe/test_probe.py; \
+    wait; \
+    for cmd in "$held"/*.cmd; do [ -e "$cmd" ] || continue; one=${cmd%.cmd}; echo "python3 $(cat "$cmd") — ended beside the rest:" >&2; cat "$one.out"; [ "$(cat "$one.rc" 2>/dev/null)" = 0 ] || { rc=1; red="$red $(cat "$cmd")"; }; done; rm -rf "$held"; \
     [ -z "$skipped" ] || echo "tools-test: skipped (macOS-only):$skipped"; \
     [ -z "$red" ] || { echo "tools-test: red scripts:$red" >&2; exit 1; }; exit $rc
 
