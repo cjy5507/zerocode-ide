@@ -1230,6 +1230,16 @@ mod tests {
         let script = format!("#!/bin/sh\necho read >> '{}'\nexec cat '{}'\n", log.display(), kept.display());
         fs::write(root.join("ps"), script).expect("the noting ps is written");
         fs::set_permissions(root.join("ps"), fs::Permissions::from_mode(0o755)).expect("the noting ps runs");
+        // macOS looks a new executable over the first time it runs — a tenth
+        // of a second on a quiet machine, more on a loaded one — and the guard
+        // gives `ps` 800 ms. The first run happens here, outside that wall,
+        // and what it noted is cleared, as tools' `NotingPs` does.
+        let warmed = std::process::Command::new(root.join("ps"))
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("the noting ps runs once");
+        assert!(warmed.success(), "the noting ps runs once");
+        fs::remove_file(&log).expect("the warming run is forgotten");
         let mut dirs = vec![root.clone()];
         dirs.extend(path.iter().flat_map(std::env::split_paths));
         std::env::set_var("PATH", std::env::join_paths(dirs).expect("a PATH"));

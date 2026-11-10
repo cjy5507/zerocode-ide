@@ -4208,6 +4208,22 @@ mod tests {
         const ETAG: &str = "W/\"gated\"";
         const STAMP: &str = "2026-09-30T02:00:00.000000Z";
         const LISTED_BEFORE: [&str; 2] = ["gpt-6-astra", "gpt-6-sol"];
+        /// The word every stand-in program these tests write answers at once,
+        /// counting no call and starting nothing ([`warm`]).
+        const WARM: &str = "warm";
+
+        /// Run a stand-in program a test has just written, once, before the
+        /// code under test does. macOS looks a new executable over the first
+        /// time it runs — a tenth of a second on a quiet machine, past the
+        /// probe's three seconds on a loaded one — so the probe's run would be
+        /// that first run, and a version the stub prints would read as none.
+        fn warm(program: &Path) {
+            let _ = std::process::Command::new(program)
+                .arg(WARM)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
 
         /// `0.159.2` as three numbers; a request always names a whole version.
         fn numbers(version: &str) -> (u64, u64, u64) {
@@ -4335,8 +4351,9 @@ mod tests {
                     OnPath::Hangs => format!("{count}\nexec sleep 20"),
                 };
                 let script = bin.join("codex");
-                std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::write(&script, format!("#!/bin/sh\n[ \"$1\" = {WARM} ] && exit 0\n{body}\n")).unwrap();
                 std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+                warm(&script);
             }
 
             /// One refresh of the OpenAI column against a fresh gated backend.
@@ -4526,8 +4543,9 @@ mod tests {
             let dir = scratch("version-probe");
             let stub = |name: &str, body: &str| -> PathBuf {
                 let script = dir.join(name);
-                std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::write(&script, format!("#!/bin/sh\n[ \"$1\" = {WARM} ] && exit 0\n{body}\n")).unwrap();
                 std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+                warm(&script);
                 script
             };
             let probe = |program: &Path, timeout: Duration| {

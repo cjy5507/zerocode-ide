@@ -226,6 +226,19 @@ pub(crate) mod tests {
         );
     }
 
+    /// Run a stand-in browser program a test has just written, once, and
+    /// forget what that run noted. macOS looks a new executable over the
+    /// first time it runs — a tenth of a second on a quiet machine, seconds on
+    /// a loaded one — and the call under test gives it five.
+    #[cfg(unix)]
+    fn warm(shim: &std::path::Path, directory: &std::path::Path) {
+        let _ = std::process::Command::new(shim)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::fs::remove_file(directory.join("executions.txt"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_old_shims_metadata_shaped_body_stays_untrusted_and_executes_once() {
@@ -252,6 +265,7 @@ pub(crate) mod tests {
         let root = shell_quote(directory.path().to_str().unwrap());
         std::fs::write(&shim, format!("#!/bin/sh\nprintf 'execution\\n' >> {root}/executions.txt\ncat {root}/reply.json\n")).unwrap();
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        warm(&shim, directory.path());
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(
             std::iter::once(directory.path().to_path_buf())
@@ -316,6 +330,7 @@ pub(crate) mod tests {
         let root = shell_quote(directory.path().to_str().unwrap());
         std::fs::write(&shim, format!("#!/bin/sh\n[ \"{}{EXECUTION_ENVELOPE_ENV}\" = 1 ] || exit 9\nprintf 'execution\\n' >> {root}/executions.txt\ncat {root}/reply.json\n", '$')).unwrap();
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        warm(&shim, directory.path());
         let _environment = crate::tests::EnvGuard::clear("ZEROCODE_SECOND_BRAIN");
         let mut context = ToolContext::new();
         context.cwd = Some(directory.path().to_path_buf());

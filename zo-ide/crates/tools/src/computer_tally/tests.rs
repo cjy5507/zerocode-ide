@@ -154,6 +154,12 @@ exit 1
     for body in [old, new] {
         std::fs::write(&shim, body).unwrap();
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Its first run — macOS looks a new executable over then — happens
+        // here, outside the call's deadline; it only prints its refusal.
+        let _ = std::process::Command::new(&shim)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         let result = crate::computer_tools::run_computer_execution(
             &json!({"action":"left_click", "app":"Fixture", "element_index":194}), &ctx, &road);
         assert!(matches!(&result, Err(ToolError::Execution(message)) if message == "element_not_found: fixture helper refusal"),

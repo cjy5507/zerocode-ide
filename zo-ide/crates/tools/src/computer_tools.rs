@@ -4493,6 +4493,7 @@ pub(crate) mod tests {
         let program = dir.join(COMPUTER_SHIM);
         std::fs::write(dir.join("batch"), r#"{"ok":true,"result":{"ran":0,"of":0,"steps":[]}}"#).unwrap();
         let script = r#"#!/bin/sh
+[ "$1" = __warm__ ] && exit 0
 verb="$1"
 echo "$verb" >> '@DIR@/calls'
 asked="$(grep -cx "$verb" '@DIR@/calls')"
@@ -4538,6 +4539,15 @@ printf '%s
         .replace("@DIR@", &dir.display().to_string());
         std::fs::write(&program, script).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // macOS looks a new executable over the first time it runs — a tenth
+        // of a second on a quiet machine, seconds on a loaded one — inside the
+        // call's own deadline. The first run happens here, answering
+        // `__warm__` at once, so it notes no call.
+        let _ = std::process::Command::new(&program)
+            .arg("__warm__")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         (ComputerRoad { program }, changed)
     }
 
