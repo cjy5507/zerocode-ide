@@ -163,6 +163,8 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
         })),
       }];
       window.__ANSWER__.set_sidebar_view = () => null;
+      // The stamp answer this suite starts with: every block that replaces it puts this one back (review t-103290 N7).
+      window.__STAMP_AT_START__ = window.__ANSWER__.worktree_landing_stamp;
       for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 9 });
       const seated = scene.filter((one) => one.ledger).length;
       const settled = scene.filter((one) => one.settled).length;
@@ -472,6 +474,7 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       // The poll: the first look only takes the baseline, a look at the same stamp
       // re-reads nothing, and a stamp that moved re-reads once.
       let stamp = "a";
+      const stampWas = window.__ANSWER__.worktree_landing_stamp;
       window.__ANSWER__.worktree_landing_stamp = () => stamp;
       landingStamp = null;
       landingLookedAt = 0;
@@ -486,6 +489,7 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       const tooSoon = asked.catalog;
       landingLookedAt = 0;
       await lookForLandingChange();
+      window.__ANSWER__.worktree_landing_stamp = stampWas;
       return { first, filled, afterNotice, baseline, unchanged, tooSoon, moved: asked.catalog };
     });
     ok(
@@ -672,7 +676,7 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       await refreshWorktrees();
       await window.__PAINTED__();
       return { seen, control, dotClass, turnsBefore, turnsAfter, uncovered, cardBefore, cardAfter, started,
-        stampPutBack: window.__ANSWER__.worktree_landing_stamp === stampWas };
+        stampPutBack: window.__ANSWER__.worktree_landing_stamp === window.__STAMP_AT_START__ };
     });
     for (const one of steady.seen) {
       ok(
@@ -714,7 +718,7 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       JSON.stringify(steady.started),
     );
     ok(
-      "the suite puts back the stamp answer it replaced, so a suite after it asks the stamp it expects",
+      "the suite puts back the stamp answer it started with, so a suite after it asks the stamp it expects",
       steady.stampPutBack,
       JSON.stringify({ stampPutBack: steady.stampPutBack }),
     );
