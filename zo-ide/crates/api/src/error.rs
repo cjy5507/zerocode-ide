@@ -608,11 +608,11 @@ impl ApiError {
 fn router_key_hint(provider: &str, key_sent: bool) -> String {
     if key_sent {
         format!(
-            "{provider} refused the key zo sent — put the right key in the window's Settings › Model Connections › {provider}, then retry the turn."
+            "{provider} refused the key zo sent — put the right key in the window's Settings › Models › {provider}, then retry the turn."
         )
     } else {
         format!(
-            "No {provider} key — put it in the window's Settings › Model Connections › {provider}, then retry the turn."
+            "No {provider} key — put it in the window's Settings › Models › {provider}, then retry the turn."
         )
     }
 }
