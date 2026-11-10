@@ -59,6 +59,11 @@ fn the_file_a_tool_row_names_opens_from_the_row() {
     let target = rows[0].spans.iter().find(|span| span.text == "src/app.py").expect("the target span");
     let link = target.link.as_ref().expect("a marks row links its file");
     assert!(link.as_str().starts_with("file:///") && link.as_str().ends_with("/src/app.py"), "{}", link.as_str());
+    // A name's own space, `#` and `%` are escaped: left bare, a reader takes
+    // `#1%.md` for the address's fragment and opens `notes/a b`.
+    let rows = read_row("notes/a b#1%.md").lines(WIDTH, Duration::ZERO);
+    let link = rows[0].spans.iter().find_map(|span| span.link.as_ref()).expect("the row links its file");
+    assert!(link.as_str().ends_with("/notes/a%20b%231%25.md"), "{}", link.as_str());
 }
 
 #[test]

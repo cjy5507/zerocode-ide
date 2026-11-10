@@ -1361,6 +1361,14 @@ fn explored_target(item: &Explored) -> (&'static str, Vec<Span>) {
 /// opens the file — an OSC 8 `file://` address, so a terminal that knows
 /// links makes it clickable and one that does not draws the same text.
 /// `path` may carry a read's `:start-end`, which the address leaves off.
+///
+/// The address is spelled by the URL rules its readers parse it with
+/// (`url::Url::from_file_path`): a Windows drive becomes `file:///D:/dir/a.rs`,
+/// and a `#`, `?` or `%` in a name is escaped rather than read as the address's
+/// own. The bare `file://` + path it replaced wrote `file://D:\dir\a.rs` there
+/// — an address with no path after its host, which the window's link reader
+/// (`fileUrlPath`, `ui/shell-term.js`) and every other one refuse. A path those
+/// rules cannot spell is drawn as the same text with no link.
 fn path_span(shown: String, path: &str) -> Span {
     let span = Span::raw(shown);
     if super::style::current().style != super::style::TuiStyle::Marks {
@@ -1376,7 +1384,8 @@ fn path_span(shown: String, path: &str) -> Span {
     } else {
         std::env::current_dir().unwrap_or_default().join(absolute)
     };
-    span.linked(super::ansi::Hyperlink::checked(&format!("file://{}", absolute.display())))
+    let address = url::Url::from_file_path(&absolute).ok();
+    span.linked(address.and_then(|address| super::ansi::Hyperlink::checked(address.as_str())))
 }
 
 fn explored_result(item: &Explored, done: &Outcome) -> Vec<Span> {
