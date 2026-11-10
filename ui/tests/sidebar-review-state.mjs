@@ -984,6 +984,56 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       JSON.stringify(titled),
     );
 
+    /* ---- 10b. …and into a card with no agent row (review t-103290 B1) ----
+     * A card whose panes are gone reads its title from the checkout ledger. Work released without a report is in
+     * none of the sources that card's early gate compares (`sourceSignature`), so the title rides the gate itself:
+     * the ledger renaming such work leaves the node and the drawn shape standing, and the card says the new words.
+     * The record is put in first — a new record may place the row anew, which is its shape — and renamed after. */
+    const titledBare = await page.evaluate(async () => {
+      const PATH = "/r/idle";
+      const FIRST = "dropped before a report";
+      const WORDS = "dropped before a report, renamed";
+      const node = () => document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(PATH)}"]`)?.closest(".wt-node") ?? null;
+      const title = () => node()?.querySelector(".wt-title")?.textContent ?? "";
+      const held = window.__LEDGER__;
+      const like = held.find((row) => row.settled === true);
+      const dropped = (task) => ({
+        ...like, checkout: PATH, worker: "w-idle", task_id: "t-idle", task, reported: false, failed: false,
+        session: null, review: { verified: false, merged: false, deployed: false, written: false },
+        progress: { stage: "working" },
+      });
+      const tell = async (rows, payload, settled) => {
+        window.__LEDGER__ = rows;
+        for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload });
+        for (let tries = 0; tries < 80 && !settled(); tries += 1) {
+          await new Promise((done) => setTimeout(done, 25));
+        }
+        await refreshWorktrees();
+        await window.__PAINTED__();
+      };
+      await tell([...held, dropped(FIRST)], 42, () => checkoutLedger.get(PATH)?.task === FIRST);
+      const before = node();
+      const drawn = worktreeListDrawn;
+      const seen = { agentRows: worktreeAgentRows(PATH).length, titleBefore: title() };
+      await tell([...held, dropped(WORDS)], 43, () => checkoutLedger.get(PATH)?.task === WORDS);
+      const after = node();
+      Object.assign(seen, {
+        title: title(),
+        aria: after?.getAttribute("aria-label") ?? "",
+        same: before !== null && after === before && before.isConnected,
+        drawn: worktreeListDrawn === drawn,
+      });
+      await tell(held, 44, () => !checkoutLedger.has(PATH));
+      return seen;
+    });
+    ok(
+      "a title the ledger rewrites reaches a card with no agent row too — work released without a report: the same row node, the same drawn shape, the new words",
+      titledBare.agentRows === 0 && titledBare.titleBefore === "dropped before a report" &&
+        titledBare.title === "dropped before a report, renamed" &&
+        titledBare.aria.startsWith("dropped before a report, renamed, ") && titledBare.same && titledBare.drawn,
+      JSON.stringify(titledBare),
+    );
+
     /* ---- 11. a reading that orders nothing new rebuilds nothing (review t-102362 #8) ----
      * Sorted by activity, the frozen reading orders the rows. A reading that moved for a row which still stands
      * between the same neighbours draws the same list: the generation stays, the shape is the one drawn, and no

@@ -12806,6 +12806,10 @@ function paintWorktreeAgents() {
     const sourceSignature = rows.length === 0
       ? `dead:${restartSessionsSaid(restartSessions)}|restoring:${restoring ?? ""}`
         + `|lanes:${laneHidden}|${open ? 1 : 0}|${full ? 1 : 0}`
+        // The card's title rides this gate as well as the signature below. A card with no agent row reads its
+        // title from the checkout ledger, and work released without a report is in none of the sources above:
+        // gated on them alone, a title the ledger rewrote stood as first written (review t-103290 B1).
+        + `|title:${worktreeTaskTitle(path)}`
       : null;
     if (sourceSignature !== null && host.dataset.restartSource === sourceSignature) continue;
     if (sourceSignature === null) delete host.dataset.restartSource;

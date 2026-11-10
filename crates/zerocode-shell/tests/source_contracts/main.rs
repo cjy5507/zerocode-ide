@@ -17510,15 +17510,23 @@ mod tests {
             "the shape guard counts a class as a shape, so every switch \
              rebuilds again:\n{shape}"
         );
+        // The painter compares the title twice: in the early gate a card with no
+        // agent row leaves through (`sourceSignature`), and in the signature the
+        // rest are judged by. A card of the first kind reads its title from the
+        // checkout ledger; gated without it, the title of work released with no
+        // report stood as first written (review t-103290 B1).
         assert!(
             !shape.contains("worktreeTaskTitle(")
                 && block_after(window, "function paintWorktreeAgents() {")
-                    .contains("+ `|title:${worktreeTaskTitle(path)}`")
+                    .matches("+ `|title:${worktreeTaskTitle(path)}`")
+                    .count()
+                    == 2
                 && block_after(window, "function dressWorktreeTitle(row) {")
                     .contains("const task = worktreeTaskTitle(path);"),
             "a task title is a shape of the list again, so a title the ledger \
              wrote rebuilds the sidebar — or it left the shape without reaching \
-             the card painter that writes it in place:\n{shape}"
+             the card painter that writes it in place, on both of the painter's \
+             gates:\n{shape}"
         );
     }
 
