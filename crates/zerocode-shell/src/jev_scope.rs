@@ -858,8 +858,15 @@ mod tests {
         assert!(sessions.contains(&format!(
             ".join(\"{ZO_PROJECTS_DIR}\").join(&slug).join(\"{ZO_SESSIONS_DIR}\")"
         )));
+        // The sidecar's extension is one constant in zo's runtime since its retention sweep
+        // learned to take it (8f9ab0f5f); `resume` writes the sidecar under that name.
+        assert!(sessions.contains(&format!(
+            "pub const SESSION_CWD_EXTENSION: &str = \"{SESSION_CWD_EXTENSION}\";"
+        )));
         let resume = include_str!("../../../zo-ide/crates/zo-ide/src/resume.rs");
-        assert!(resume.contains(&format!("with_extension(\"{SESSION_CWD_EXTENSION}\")")));
+        assert!(resume.contains(
+            "session_path.with_extension(runtime::session_control::SESSION_CWD_EXTENSION)"
+        ));
         assert!(resume.contains("struct SessionCwd {\n    cwd: String,"));
         let summary =
             include_str!("../../../zo-ide/crates/tools/src/misc_tools/smart_router/jev_summary.rs");
