@@ -791,14 +791,25 @@ pub fn mirror_ready() -> bool {
     mirror_shims().is_some() && mirror_bin().is_some_and(|bin| bin.is_file())
 }
 
+/// What a window's shim and mirror folders are named in the temporary folder,
+/// each followed by the window's pid.
+const SHIM_DIR_PREFIX: &str = "zerocode-shims-";
+const MIRROR_DIR_PREFIX: &str = "zerocode-mirror-";
+
 fn build_mirror_shims() -> Option<(PathBuf, PathBuf)> {
     let mirror_bin = mirror_bin()?;
     if !mirror_bin.is_file() {
         return None;
     }
     let stamp = std::process::id();
-    let shims = std::env::temp_dir().join(format!("zerocode-shims-{stamp}"));
-    let mirrors = std::env::temp_dir().join(format!("zerocode-mirror-{stamp}"));
+    let temp = std::env::temp_dir();
+    sweep_ownerless_shim_dirs(
+        &temp,
+        stamp,
+        zerocode_core::settings_file_lock::process_alive,
+    );
+    let shims = temp.join(format!("{SHIM_DIR_PREFIX}{stamp}"));
+    let mirrors = temp.join(format!("{MIRROR_DIR_PREFIX}{stamp}"));
     write_shim_dir(&shims, &mirror_bin, resolvable_agents().as_slice()).ok()?;
     std::fs::create_dir_all(&mirrors).ok()?;
     #[cfg(unix)]
@@ -807,6 +818,39 @@ fn build_mirror_shims() -> Option<(PathBuf, PathBuf)> {
         let _ = std::fs::set_permissions(&mirrors, std::fs::Permissions::from_mode(0o700));
     }
     Some((shims, mirrors))
+}
+
+/// The shim and mirror folders windows that are gone left in `temp`, removed;
+/// how many went. A window makes its two once and never removes them, so they
+/// outlived every window (2026-11-10: 118 and 117 here, most of them emptied by
+/// macOS's sweep of old temporary files and left standing). A folder is taken
+/// only when its name is a prefix and a pid in digits, that pid is neither this
+/// window's nor a live process's (`alive`; a pid that cannot be asked is live),
+/// and it is a plain folder, not a link.
+fn sweep_ownerless_shim_dirs(temp: &Path, own: u32, alive: impl Fn(u32) -> bool) -> usize {
+    let Ok(entries) = std::fs::read_dir(temp) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|name| {
+            [SHIM_DIR_PREFIX, MIRROR_DIR_PREFIX]
+                .iter()
+                .find_map(|prefix| name.strip_prefix(prefix))
+                .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|digits| digits.parse::<u32>().ok())
+        }) else {
+            continue;
+        };
+        if pid == own || alive(pid) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        if std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// Every lane binary this machine can actually resolve, by the user's shell
@@ -2890,6 +2934,54 @@ fn settle_prompt_name_in(held: &mut HashMap<u32, HeldPrompt>, report: &mut PaneH
 
 #[cfg(test)]
 mod tests {
+    /// The folders of windows that are gone go; a live one's, this window's,
+    /// a name that is no pid, a file and a link stay.
+    #[test]
+    fn a_gone_windows_shim_and_mirror_folders_are_swept_and_nothing_else() {
+        let temp = tempfile::tempdir().expect("a temporary folder");
+        let at = |name: &str| temp.path().join(name);
+        let gone = [
+            "zerocode-shims-41",
+            "zerocode-mirror-41",
+            "zerocode-mirror-42",
+        ];
+        for gone in gone {
+            std::fs::create_dir_all(at(gone).join("inside")).expect("a gone window's folder");
+            std::fs::write(at(gone).join("inside/codex"), "#!/bin/sh\n").expect("a shim");
+        }
+        let stays = [
+            "zerocode-shims-7",
+            "zerocode-mirror-7",
+            "zerocode-shims-9",
+            "zerocode-shims-x41",
+            "zerocode-shims-+41",
+            "zerocode-shims-",
+            "other-41",
+        ];
+        for name in stays {
+            std::fs::create_dir_all(at(name)).expect("a folder that stays");
+        }
+        std::fs::write(at("zerocode-shims-43"), "").expect("a file under the name");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(at("other-41"), at("zerocode-mirror-44"))
+            .expect("a link under the name");
+
+        let removed = super::sweep_ownerless_shim_dirs(temp.path(), 9, |pid| pid == 7);
+
+        assert_eq!(removed, gone.len());
+        for gone in gone {
+            assert!(!at(gone).exists(), "{gone} stayed");
+        }
+        for name in stays.into_iter().chain(["zerocode-shims-43"]) {
+            assert!(at(name).exists(), "{name} went");
+        }
+        #[cfg(unix)]
+        assert!(
+            at("zerocode-mirror-44").symlink_metadata().is_ok() && at("other-41").is_dir(),
+            "a link was followed or removed"
+        );
+    }
+
     use super::*;
     use zerocode_core::HookEnvelope;
 
