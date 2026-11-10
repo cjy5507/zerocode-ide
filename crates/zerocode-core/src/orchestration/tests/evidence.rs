@@ -630,7 +630,8 @@ fn the_paths_a_task_names_add_their_own_checks() {
     ] {
         let named = crate::orchestration::evidence::pre_handin_paragraph(platform);
         assert!(
-            named.contains("just win-check-if-available"),
+            named.contains("its build is `just win-check`")
+                && named.contains("a SKIPPED is not a check"),
             "{platform}: {named}"
         );
     }
@@ -663,7 +664,7 @@ fn what_a_named_path_adds_is_asked_only_of_a_branch_that_changed_it() {
     for (named, added) in [
         ("ui/shell.js", "just pre-handin <a,b>"),
         ("crates/zerocode-core/src/lib.rs", "cargo clippy -p"),
-        ("scripts/windows/a.ps1", "just win-check-if-available"),
+        ("scripts/windows/a.ps1", "just win-check"),
     ] {
         let told = crate::orchestration::evidence::pre_handin_paragraph(named);
         let line = told

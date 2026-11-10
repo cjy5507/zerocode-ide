@@ -268,7 +268,7 @@ win-check:
 # there). A skip is printed, never silent, so a machine without the tools
 # knows it did not look.
 win-check-if-available:
-    if ! command -v cargo-xwin >/dev/null 2>&1 || [ ! -x /opt/homebrew/opt/llvm/bin/llvm-lib ]; then echo "win-check SKIPPED: cargo-xwin or llvm-lib not installed (the Windows CI leg compiles this for real)"; elif [ ! -d "${CARGO_TARGET_DIR:-target}/x86_64-pc-windows-msvc" ]; then echo "win-check SKIPPED: cold Windows target — a fresh checkout would cross-compile every dependency (the release lane's scratch clone sat in it for 2 h on 2026-09-10); run \`just win-check\` once to warm this checkout"; else just win-check; fi
+    if ! command -v cargo-xwin >/dev/null 2>&1 || [ ! -x /opt/homebrew/opt/llvm/bin/llvm-lib ]; then echo "win-check SKIPPED: cargo-xwin or llvm-lib not installed (the Windows CI leg compiles this for real)"; elif [ ! -d "${CARGO_TARGET_DIR:-target}/x86_64-pc-windows-msvc" ]; then echo "win-check SKIPPED — not a check: cold Windows target. \`just win-check\` cross-compiles every dependency once (1–2 min on this Mac in 2026-10; the release lane's scratch clone sat in it 2 h on 2026-09-10), and \`just pre-handin\` runs it for a branch that changed Rust"; else just win-check; fi
 
 # A recipe as the release lane's launchd job runs it — HOME and PATH only, no
 # controlling terminal, launchd's open-file limit (tools/release/lane-env.sh) —
@@ -317,6 +317,12 @@ fmt:
 #   the gate runs those (the last lines say so). The contracts build the window
 #   once, so a first run in a fresh checkout takes minutes on every core,
 #   whichever crate the branch changed.
+#   Then the Windows build of each workspace the branch changed a Rust source or
+#   manifest of (`changed_crates.py` names it): the gate's own `just win-check`
+#   there, never `win-check-if-available` — whose SKIPPED on a cold target is
+#   rc 0 and was counted as a check in a hand-in (2026-11-10). It cross-compiles
+#   every dependency the first time in a checkout (1–2 min on this Mac, 2026-10),
+#   and a machine without cargo-xwin and Homebrew llvm is red here, not skipped.
 #   Stage 2, only when ui/ changed: the window suites you name, with
 #   `just pre-handin a,b` (names or patterns, as WINDOW_SUITES takes them).
 #   The whole window gate is 23 min on a quiet machine, so a worker never runs
@@ -393,6 +399,11 @@ pre-handin suites='':
                 step "doc:$package" env RUSTDOCFLAGS="$doc_flags" cargo doc -p "$package" --no-deps
             fi
         done <<< "$picked"
+        for workspace in $(printf '%s\n' "$picked" | awk -F'\t' '$1 == "windows" { print $2 }'); do
+            name=win; [ "$workspace" = . ] || name="win-$workspace"
+            hint="fix what the cross-compile says above, then rerun (cd $workspace && just win-check); without cargo-xwin or Homebrew llvm here: cargo install cargo-xwin; brew install llvm"
+            step "$name" bash -c 'cd "$1" && just win-check' _ "$workspace"
+        done
         ui=$(printf '%s\n' "$picked" | awk -F'\t' '$1 == "ui" { print $2 }')
     else
         ui=

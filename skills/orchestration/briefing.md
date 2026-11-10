@@ -35,7 +35,8 @@ So:
 - On a project whose justfile writes a pre-handin recipe, `worker-start` tells
   each worker to run it after its last commit and to copy its last line into the
   summary, with what the paths the task names add if the branch changed them
-  (window suites, clippy of the named crates, `just win-check-if-available`), and
+  (window suites, clippy of the named crates, the Windows build — `just win-check`,
+  whose run the recipe's `win` stage is; a SKIPPED is not a check), and
   that your own words on how to build come before it. A worker has no diff when it starts, and the
   recipe reads the diff when it runs. It is told, not judged: only a `통과 전`
   line you write in the spec refuses a report, so read the line in the summary.

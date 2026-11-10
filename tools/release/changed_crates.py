@@ -7,6 +7,7 @@
 prints one fact a line, tab-separated, for the recipe to read:
 
     crate <workspace dir> <package> <cargo test arguments>
+    windows <workspace dir whose Windows build the change can break>
     ui <changed path under ui/>
     suite <window suite that looks at a changed ui file: named like it, or run by a test module that spells its name>
     suites <how many suites that is> <how many the window registers>
@@ -27,6 +28,12 @@ changed path, in one of two ways, and no list of crates or folders is kept here:
     compile time, so a test that lists a folder at run time is not seen, nor
     is a build script's `cargo:rerun-if-changed=`: every one here formats its
     path from values known at run time, none is a quoted string.
+
+A workspace's Windows build (`just win-check` there, the cross-compile the
+gate runs) is owed when the branch changed a Rust source or a manifest of one
+of its packages (any target: `--all-targets` compiles the tests too), a build
+script, or the workspace's own manifest, lock or `.cargo/` config. A file a
+crate only reads at compile time cannot change what compiles for Windows.
 
 Its unit tests are `--lib` when it has a library and `--bins` when it has
 binaries, both when it has both. Which of them a path picks is the kind of
@@ -54,6 +61,7 @@ MANIFEST = r'env!\(\s*"CARGO_MANIFEST_DIR"\s*\)'
 FILE_READS = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*"([^"{}]+)"')          # beside the source file
 MANIFEST_READS = re.compile(r'concat!\(\s*' + MANIFEST + r'\s*,\s*"([^"{}]+)"')    # under the package dir
 OTHER_TARGET_DIRS = ("tests", "benches", "examples")   # targets of their own, not the unit tests of a lib or a bin
+RUST_BUILD_FILES = ("Cargo.toml", "Cargo.lock", "build.rs")   # beside the `.rs` sources, what a cross-compile reads
 
 
 def git(*args):
@@ -195,6 +203,21 @@ def crates(paths, packages_by_workspace):
             for (workspace, name), flags in sorted(chosen.items()) if flags]
 
 
+def windows_builds(paths, packages_by_workspace):
+    """The workspaces, in their order, whose Windows build one of the paths can break."""
+    found = set()
+    for path in paths:
+        rust = path.endswith(".rs") or posixpath.basename(path) in RUST_BUILD_FILES
+        hit = own(path, packages_by_workspace)
+        if rust and hit:
+            found.add(hit[0])
+        for workspace in packages_by_workspace:
+            top = "" if workspace == "." else workspace + "/"
+            if path in (top + "Cargo.toml", top + "Cargo.lock") or path.startswith(top + ".cargo/"):
+                found.add(workspace)
+    return [workspace for workspace in packages_by_workspace if workspace in found]
+
+
 def suites_for(paths, window_text, tests):
     """Window suites that look at a changed ui file — a hint, never the whole answer.
 
@@ -244,6 +267,8 @@ def main(argv=None):
     attach_reads(by_workspace)
     for workspace, name, arguments in crates(paths, by_workspace):
         print("crate", workspace, name, arguments, sep="\t")
+    for workspace in windows_builds(paths, by_workspace):
+        print("windows", workspace, sep="\t")
     ui = ui_paths(paths)
     for path in ui:
         print("ui", path, sep="\t")

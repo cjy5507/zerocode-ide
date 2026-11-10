@@ -89,9 +89,11 @@ when the lane needs it; replace the file atomically (git checkout or temp + rena
 `cfg(windows)` / `cfg(not(unix))` code compiles nowhere on this Mac unless
 someone cross-compiles it. Both `just verify` recipes (root and `zo-ide/`) now
 end with `win-check-if-available` (cargo-xwin + brew llvm; a loud SKIPPED
-where they are missing). When a change touches a platform gate, a Tauri
-window API, or a process/pty/fs call, run `just win-check` in the workspace
-you touched before pushing — 2026-09-10 found seven product compile errors
+where they are missing, or on a cold Windows target — exit code 0, and not a
+check). When a change touches a platform gate, a Tauri window API, or a
+process/pty/fs call, run `just win-check` in the workspace you touched before
+pushing (`just pre-handin` runs it as its `win` stage for a branch that changed
+Rust) — 2026-09-10 found seven product compile errors
 (macOS-only Tauri APIs, a stub signature, a Rust-2024 extern block) and three
 unix-only tests that the billing-blocked Windows CI leg had hidden for days.
 The root `win-check` also lints (`cargo xwin clippy … -D warnings`, the Windows

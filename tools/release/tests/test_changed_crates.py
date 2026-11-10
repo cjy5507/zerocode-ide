@@ -116,6 +116,26 @@ class Pick(unittest.TestCase):
         found = {"crates/shell/src/a.rs", "ui/shell.css", "../outside", ".", "crates/shell"}
         self.assertEqual(self.mod.outside_reads(found, "crates/shell"), ["ui/shell.css"])
 
+    def test_a_rust_source_or_manifest_owes_its_workspaces_windows_build_and_a_read_file_does_not(self):
+        cases = [
+            (["crates/zerocode-core/src/a.rs"], ["."]),
+            (["crates/zerocode-core/tests/contract.rs"], ["."]),
+            (["crates/bare/Cargo.toml"], ["."]),
+            (["crates/both/build.rs"], ["."]),
+            (["Cargo.lock"], ["."]),
+            ([".cargo/config.toml"], ["."]),
+            (["zo-ide/crates/runtime/src/lib.rs"], ["zo-ide"]),
+            (["zo-ide/Cargo.lock"], ["zo-ide"]),
+            (["zo-ide/Cargo.lock", "crates/zerocode-core/src/a.rs"], [".", "zo-ide"]),
+            (["ui/shell.css"], []),                      # the shell reads it; it compiles the same for Windows
+            (["crates/zerocode-core/README.md"], []),
+            (["tools/release/a.rs"], []),                # no package of either workspace holds it
+            (["justfile", "docs/a.md"], []),
+        ]
+        for paths, owed in cases:
+            with self.subTest(paths=paths):
+                self.assertEqual(self.mod.windows_builds(paths, WORKSPACES), owed)
+
     def test_a_suite_is_hinted_when_it_is_named_like_a_changed_test_or_runs_a_module_that_spells_a_changed_file(self):
         window = (
             'import { testWorkers } from "./workers.mjs";\n'
@@ -189,6 +209,7 @@ class WholeRun(unittest.TestCase):
         self.assertEqual(self.run_script(), [
             "crate\t.\tbin-crate\t--bins",
             "crate\t.\tlib-crate\t--lib",
+            "windows\t.",
             "ui\tui/tests/inbox.mjs",
             "suite\tinbox",
             "suites\t1\t2",
@@ -213,15 +234,15 @@ class WholeRun(unittest.TestCase):
         self.commit("landed on main, not pushed")
         self.git("checkout", "-q", "-b", "work")
         self.write("crates/bin-crate/src/new.rs", "")
-        self.assertEqual(self.run_script(), ["crate\t.\tbin-crate\t--bins"])
+        self.assertEqual(self.run_script(), ["crate\t.\tbin-crate\t--bins", "windows\t."])
 
     def test_a_branch_cut_from_a_stack_tip_counts_from_the_base_it_is_given(self):
         self.git("checkout", "-q", "-b", "stack")
         self.write("crates/lib-crate/src/lib.rs", "pub fn stacked() {}\n")
         self.commit("the stack's change")
         self.write("crates/bin-crate/src/new.rs", "")
-        self.assertEqual(self.run_script(), ["crate\t.\tbin-crate\t--bins", "crate\t.\tlib-crate\t--lib"])
-        self.assertEqual(self.run_script("--base", "stack"), ["crate\t.\tbin-crate\t--bins"])
+        self.assertEqual(self.run_script(), ["crate\t.\tbin-crate\t--bins", "crate\t.\tlib-crate\t--lib", "windows\t."])
+        self.assertEqual(self.run_script("--base", "stack"), ["crate\t.\tbin-crate\t--bins", "windows\t."])
 
     def test_a_file_only_a_test_target_reads_picks_no_unit_tests(self):
         # tests/contract.rs reads AGENTS.md; the contracts are an integration target, not the bins' unit tests
@@ -235,9 +256,10 @@ class WholeRun(unittest.TestCase):
         self.write("data/lib.json", "{}\n")
         self.assertEqual(self.run_script(), ["crate\t.\tmixed\t--lib --bins"])
 
-    def test_a_changed_integration_test_picks_no_unit_tests(self):
+    def test_a_changed_integration_test_picks_no_unit_tests_but_owes_the_windows_build(self):
+        # the cross-compile is `--all-targets`: an integration test is compiled for Windows too
         self.write("crates/mixed/tests/contract.rs", "// edited\n")
-        self.assertEqual(self.run_script(), [])
+        self.assertEqual(self.run_script(), ["windows\t."])
 
     def test_the_other_cargo_workspaces_are_named_by_the_script_alone(self):
         self.assertEqual(self.run_script("--workspaces"), [])

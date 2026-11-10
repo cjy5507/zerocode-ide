@@ -478,7 +478,8 @@ fn names_windows(words: &str) -> bool {
 /// source contract. When a worker starts it has no diff, and the recipe reads
 /// the diff when it runs, so the recipe is named whatever the task; the paths a
 /// task's words name add only what the recipe cannot do by itself: window suites
-/// it would stop to ask for, clippy, and the Windows build.
+/// it would stop to ask for, clippy, and what the Windows build is (2026-11-10: a
+/// hand-in counted `win-check-if-available`'s SKIPPED on a cold target as a check).
 ///
 /// Told, not judged: the words are not added to the spec, so a task the
 /// coordinator wrote no [`CONDITION_MARK`] line for is not refused for them. A
@@ -517,9 +518,11 @@ pub fn pre_handin_paragraph(named: &str) -> String {
     }
     if names_windows(named) {
         lines.push(
-            "If your branch changed the Windows code this task names: run \
-             `just win-check-if-available` too, since nothing on this machine's own build compiles \
-             it. In a cold checkout it says SKIPPED and the coordinator's gate looks instead."
+            "If your branch changed the Windows code this task names: its build is \
+             `just win-check`, the gate's own cross-compile, since nothing on this machine's own \
+             build compiles it. The recipe runs it as its `win` stage when your branch changed a \
+             Rust source or manifest; copy that line. `just win-check-if-available` says SKIPPED \
+             in a cold checkout with exit code 0, and a SKIPPED is not a check."
                 .to_string(),
         );
     }
