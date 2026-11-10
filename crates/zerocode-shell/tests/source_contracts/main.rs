@@ -7895,7 +7895,9 @@ mod tests {
              ring starts again from the top:\n{keeping}"
         );
         assert!(
-            window.contains(r#"const SHARED_TURNS = new Set(["wt-activity-turn", "wt-agent-spin"]);"#),
+            window.contains(
+                r#"const SHARED_TURNS = new Set(["wt-activity-turn", "wt-agent-spin"]);"#
+            ),
             "the turns pinned to one clock no longer name the card's ring and the agent rows' ring"
         );
         assert!(
