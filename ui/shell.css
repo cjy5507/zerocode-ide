@@ -44412,6 +44412,45 @@ button.board-build-failure-part:focus-visible {
   box-shadow: none;
 }
 
+/* 카드 위에 선 줄의 끝난 일감(11-11): 「끝난 일감 N개」 한 줄 — 누르면 그 자리에 펴진다. 「지난 빌드 N개」와 같은 꺾쇠이고,
+ * 줄 칸 안의 글줄이라 제 바닥을 갖지 않는다. */
+.board-line-ended {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-self: start;
+  padding: var(--space-1) 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.board-line-ended[hidden] {
+  display: none;
+}
+
+.board-line-ended:hover {
+  color: var(--ink-chalk);
+}
+
+.board-line-ended:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.board-line-ended > .icon {
+  flex: none;
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.board-line-ended > .icon.is-open {
+  transform: rotate(90deg);
+}
+
 /* 일정의 맨 위 문장 — 지금·워커·기록 탭의 맨 위 문장과 같은 자리, 같은 글꼴: 지금 무엇이 돌고 얼마나 남았는지. */
 .board-schedule-title {
   margin: 0 0 var(--board-intro-after);

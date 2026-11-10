@@ -50,8 +50,8 @@ const deskChoice = {
   // The History tab's record (11-08 draft v3): the days a person opened or shut (today is open until shut), the result
   // shown, the words searched for.
   daysOpen: new Set(), daysShut: new Set(), historyResult: "all", historyQuery: "",
-  // 「지금」의 빌드 카드(11-10): 지난 빌드의 접힌 줄을 폈는가.
-  buildsOld: false,
+  // 「지금」의 빌드 카드(11-10): 지난 빌드의 접힌 줄을 폈는가, 카드 위에 선 빌드 줄의 끝난 일감을 폈는가(11-11).
+  buildsOld: false, lineEnded: false,
 };
 
 /* 쓰는 중인 답(편지 id마다)과 누른 확인(묶음 id마다). 초안은 판이 다시 그려져도
@@ -3450,13 +3450,15 @@ function paintDeskBuilds(block, now) {
   const footNode = body.querySelector(":scope > .board-build-foot") ?? buildFootNode();
   if (foot?.stands) paintBuildFoot(footNode, foot);
   writeHidden(footNode, !foot?.stands);
+  // 줄에서 일감이 도는 동안에는 그 줄이 카드 위에 선다(11-10) — 지금 움직이는 것이 먼저 읽힌다. 위에 선 줄은 도는
+  // 일감과 기다리는 일감만 보이고, 끝난 일감은 한 줄 뒤로 접힌다(11-11): 줄의 답은 끝난 일감을 열둘까지 싣고, 그것이
+  // 통째로 위에 서면 도는 빌드의 카드가 첫 화면 밖으로 밀렸다. 도는 일감이 없는 줄 — 멈췄거나, 기다리기만 하거나, 끝난
+  // 일감만 남은 줄 — 은 예전처럼 발 밑에 통째로 서고, 말할 것이 없으면 서지 않는다.
+  const lineLive = lineStands && line.jobs.some((job) => job.state === "running");
   // Held by the block, so a paint while the line has nothing to say builds no node to throw away.
   const lineNode = block.__line ??= buildLineNode();
-  paintBuildLine(lineNode, line, now);
+  paintBuildLine(lineNode, line, now, lineLive);
   writeHidden(lineNode, !lineStands);
-  // 줄에 도는 일감이나 기다리는 일감이 있으면 그 줄이 카드 위에 선다(11-10) — 지금 움직이는 것이 먼저 읽힌다. 끝난
-  // 일감만 남은 줄은 예전처럼 발 밑에 서고, 말할 것이 없으면 서지 않는다.
-  const lineLive = lineStands && line.jobs.some((job) => job.state === "running" || job.state === "waiting");
   writeClass(lineNode, "is-live", lineLive);
   reconcileElementOrder(body, [...(lineLive ? [lineNode] : []), ...fresh, ...(oldNode ? [oldNode] : []), ...aged, footNode,
     ...(lineStands && !lineLive ? [lineNode] : [])]);
@@ -3534,8 +3536,22 @@ function buildLineNode() {
     const job = buildsAnswerHere()?.line?.jobs?.find((one) => one.id === button?.closest("[data-job]")?.dataset.job);
     if (button && job) void pressLineAct(job, button.dataset.verb);
   };
-  line.append(head, deskElement("p", "board-line-paused"), jobs);
+  // 카드 위에 선 줄의 끝난 일감(11-11): 「끝난 일감 N개」 한 줄 — 누르면 그 자리에 펴진다.
+  const ended = deskElement("button", "board-line-ended");
+  ended.type = "button";
+  ended.insertAdjacentHTML("afterbegin", icon("chevron", false));
+  ended.append(deskElement("span", ""));
+  ended.onclick = () => {
+    deskChoice.lineEnded = !deskChoice.lineEnded;
+    scheduleDeskPaint();
+  };
+  line.append(head, deskElement("p", "board-line-paused"), jobs, ended);
   return line;
+}
+
+/* 아직 끝나지 않은 일감 — 도는 것과 차례를 기다리는 것. */
+function lineJobOpen(job) {
+  return job.state === "running" || job.state === "waiting";
 }
 
 /* 한 일감의 「언제」: 도는 것은 걸린 시간, 기다리는 것은 차례, 끝난 것은 상태와 끝난 시각. */
@@ -3550,10 +3566,18 @@ function lineJobWhen(job, places, now) {
   return Number(job.ended_ms) > 0 ? boardClock(Number(job.ended_ms), now) : "";
 }
 
-function paintBuildLine(node, line, now) {
-  const [head, paused, list] = node.children;
+function paintBuildLine(node, line, now, live = false) {
+  const [head, paused, list, ended] = node.children;
   const [title, sum, pause] = head.children;
   const jobs = line?.jobs ?? [];
+  // 카드 위에 선 줄(`live`)은 끝난 일감을 접는다 — 몇 개인지는 접힌 줄이 말하고, 사람이 펴면 모두 선다.
+  const over = live ? jobs.filter((job) => !lineJobOpen(job)).length : 0;
+  const folded = over > 0 && !deskChoice.lineEnded;
+  const shown = folded ? jobs.filter(lineJobOpen) : jobs;
+  writeHidden(ended, over === 0);
+  writeTextContent(ended.lastElementChild, over > 0 ? t("board.line.ended", "끝난 일감 {{count}}개", { count: over }) : "");
+  writeAttribute(ended, "aria-expanded", String(!folded));
+  ended.querySelector(".icon")?.classList.toggle("is-open", over > 0 && !folded);
   writeTextContent(title, t("board.line.title", "빌드 줄 · 이 기계"));
   const running = jobs.filter((job) => job.state === "running").length;
   const waiting = jobs.filter((job) => job.state === "waiting").length;
@@ -3565,7 +3589,7 @@ function paintBuildLine(node, line, now) {
     : why ? t("board.line.paused", "줄 멈춤 · {{why}}", { why }) : t("board.line.pausedPlain", "줄 멈춤"));
   writeHidden(paused, !line?.pause);
   const held = new Map([...list.children].map((item) => [item.dataset.job, item]));
-  reconcileElementOrder(list, jobs.map((job) => {
+  reconcileElementOrder(list, shown.map((job) => {
     const state = LINE_STATES[job.state] ?? LINE_STATES.lost;
     let item = held.get(job.id);
     if (!item) {

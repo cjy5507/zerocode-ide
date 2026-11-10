@@ -1882,7 +1882,9 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     });
     const readLine = () => page.evaluate(() => {
       const line = document.querySelector("#board-view .board-line");
+      const fold = line?.querySelector(".board-line-ended");
       return {
+        ended: fold?.checkVisibility() ? [fold.textContent, fold.getAttribute("aria-expanded")] : null,
         shown: line?.checkVisibility() ?? false,
         head: line?.querySelector(".board-line-head")?.textContent ?? "",
         jobs: [...(line?.querySelectorAll(".board-line-job") ?? [])].map((one) => [one.dataset.job,
@@ -1892,9 +1894,18 @@ export async function testCoordinatorDesk(browser, origin, ok) {
         paused: line?.querySelector(".board-line-paused")?.checkVisibility() ? line.querySelector(".board-line-paused").textContent : "",
       };
     });
+    // A line with a job running stands over the cards and folds what ended (11-11): the fold is pressed open to read the whole line.
+    const foldedLine = await readLine();
+    ok("while a job runs on it the build line shows what runs and what waits, and folds what ended behind one line",
+      foldedLine.shown && JSON.stringify(foldedLine.jobs.map((one) => one[0])) === JSON.stringify(["j-run", "j-wait"])
+        && JSON.stringify(foldedLine.ended) === JSON.stringify(["끝난 일감 1개", "false"]),
+      JSON.stringify(foldedLine));
+    await page.click("#board-view .board-line-ended");
+    await page.waitForFunction(() => document.querySelectorAll("#board-view .board-line-job").length === 3);
     const lineRead = await readLine();
-    ok("under the cards the machine's build line stands: what runs and for how long, what waits and its place, what ended — each with its own buttons",
+    ok("pressed open, the machine's build line stands whole: what runs and for how long, what waits and its place, what ended — each with its own buttons",
       lineRead.shown && lineRead.head.startsWith("빌드 줄 · 이 기계도는 1 · 기다림 1") && lineRead.head.endsWith("줄 멈추기")
+        && JSON.stringify(lineRead.ended) === JSON.stringify(["끝난 일감 1개", "true"])
         && JSON.stringify(lineRead.jobs.map((one) => [one[0], one[1], one[2], one[3], one[5]])) === JSON.stringify([
           ["j-run", "도는 중", "j-run 일", "shop · run-1/w-2", "멈추기"],
           ["j-wait", "차례 기다림", "j-wait 일", "shop · run-1/w-2", "맨 앞으로|빼기"],
@@ -1919,7 +1930,10 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const pausedLine = await readLine();
     ok("a paused line says so and why, and its button opens it again",
       pausedLine.paused === "줄 멈춤 · release lane" && pausedLine.head.endsWith("줄 다시 열기"), JSON.stringify(pausedLine));
-    await recordBuilds(() => { window.__BUILDS_LINE__ = null; });
+    await recordBuilds(() => {
+      window.__BUILDS_LINE__ = null;
+      deskChoice.lineEnded = false;
+    });
 
     /* 「멈춘 듯」은 기록이 적은 그대로다: 도는 단계의 명령이 오래 아무것도 쓰지 않았고, 쓰는 쪽이 그 단계를
      * 실패로 끝낼 상한이 있으면 그것도. 「21분」은 그리는 시계로 센다 — 시계를 한 시각에 묶는다. */

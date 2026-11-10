@@ -1294,6 +1294,88 @@ async function testBoardNowClarity(browser, origin, ok) {
         && JSON.stringify(refolded.builds.order) === JSON.stringify(["line:live", "card:release", "old", "foot"]),
       JSON.stringify({ unfolded: unfolded.builds, refolded: refolded.builds.order }));
 
+    /* ---- 빌드 줄의 자리 (11-11): 일감이 도는 동안에만 카드 위, 그때 끝난 일감은 한 줄 뒤로 ----
+     *
+     * 2026-11-11 아침의 실제 모양: 발행이 돌고, 그 발행이 줄을 멈춰 두었고, 줄에는 기다리는 일감 다섯과 끝난 일감 열둘이
+     * 있었다(줄의 답은 끝난 일감을 열둘까지 싣는다). 일감 하나짜리 장면은 그 열일곱 행이 도는 발행의 카드 위에 서서
+     * 카드를 첫 화면 밖으로 미는 것을 잡지 못했다. */
+    const standLine = async (shape) => {
+      await page.evaluate(({ running, waiting, ended, paused }) => {
+        const now = Date.now();
+        const minute = 60_000;
+        const job = (id, state, extra = {}) => ({ id, project: "/repos/zerocode/.git", checkout: "/repos/zerocode-wt/checks",
+          owner: "checks", what: `${id} 검사`, cap_secs: 3600, command: ["just", "test"], state, queued_ms: now - 50 * minute, ...extra });
+        const count = (n, make) => Array.from({ length: n }, (_, at) => make(at));
+        window.__BUILDS_LINE__ = {
+          jobs: [
+            ...count(running, (at) => job(`j-run-${at}`, "running", { started_ms: now - 3 * minute, slot: at })),
+            ...count(waiting, (at) => job(`j-wait-${at}`, "waiting")),
+            ...count(ended, (at) => job(`j-end-${at}`, at % 4 === 0 ? "failed" : "passed",
+              { started_ms: now - (80 + at) * minute, ended_ms: now - (60 + at) * minute, rc: at % 4 === 0 ? 1 : 0 })),
+          ],
+          places: Object.fromEntries(count(waiting, (at) => [`j-wait-${at}`, at + 1])),
+          ...(paused ? { pause: { by: "person", since_ms: now - 60 * minute, why: "발행이 도는 동안" } } : {}),
+        };
+        // The release runs: its first step done, its second on, its third ahead.
+        window.__BUILDS__ = window.__BUILDS__.map((one) => (one.id !== "release" ? one : {
+          ...one, state: "running", running_since_ms: now - 20 * minute, updated_ms: now - minute,
+          steps: one.steps.map(({ secs, ...step }, at) => ({ ...step, state: ["done", "running", "ahead"][at], ...(at === 0 ? { secs } : {}) })),
+        }));
+      }, shape);
+      await page.evaluate(async () => {
+        await askBoardBuilds();
+        await askBoardBuilds();
+        paintCoordinatorDesk(document.querySelector("#board-view"));
+      });
+      await fullBoard(page);
+    };
+    const readLinePlace = () => page.evaluate(() => {
+      const builds = document.querySelector('#board-view [data-desk-block="builds"]');
+      const shown = (node) => Boolean(node) && node.checkVisibility();
+      const line = builds.querySelector(".board-line");
+      const fold = line.querySelector(".board-line-ended");
+      const release = builds.querySelector('.board-build[data-build="release"]').getBoundingClientRect();
+      return {
+        order: [...builds.querySelector(".board-desk-body").children].filter(shown).map((node) =>
+          node.classList.contains("board-line") ? `line${node.classList.contains("is-live") ? ":live" : ""}`
+            : node.classList.contains("board-build-old") ? "old"
+              : node.classList.contains("board-build") ? `card:${node.dataset.build}` : "foot"),
+        rows: [...line.querySelectorAll(".board-line-job")].map((row) => row.dataset.state),
+        fold: shown(fold) ? [fold.textContent, fold.getAttribute("aria-expanded")] : null,
+        paused: shown(line.querySelector(".board-line-paused")) ? line.querySelector(".board-line-paused").textContent : "",
+        sum: line.querySelector(".board-line-sum").textContent,
+        release: [Math.round(release.top), Math.round(release.bottom)],
+        line: [Math.round(line.getBoundingClientRect().top), Math.round(line.getBoundingClientRect().height)],
+        screen: window.innerHeight,
+      };
+    });
+    const tally = (rows) => rows.reduce((counts, state) => ({ ...counts, [state]: (counts[state] ?? 0) + 1 }), {});
+    await standLine({ running: 0, waiting: 5, ended: 12, paused: true });
+    const stalled = await readLinePlace();
+    ok("a paused line with five jobs waiting and twelve ended stands whole under the cards — the running release's card stands first, on the first screen",
+      stalled.order[0] === "card:release" && stalled.order.at(-1) === "line" && stalled.release[0] < stalled.line[0]
+        && stalled.release[1] <= stalled.screen && stalled.rows.length === 17 && stalled.fold === null
+        && stalled.sum === "도는 0 · 기다림 5" && stalled.paused === "줄 멈춤 · 발행이 도는 동안",
+      JSON.stringify(stalled));
+    await standLine({ running: 1, waiting: 5, ended: 12, paused: false });
+    const moving = await readLinePlace();
+    ok("while a job runs on it the line stands over the cards with what runs and what waits, its twelve ended jobs behind one line",
+      moving.order[0] === "line:live" && moving.order[1] === "card:release"
+        && JSON.stringify(tally(moving.rows)) === JSON.stringify({ running: 1, waiting: 5 })
+        && JSON.stringify(moving.fold) === JSON.stringify(["끝난 일감 12개", "false"]),
+      JSON.stringify(moving));
+    await page.click("#board-view .board-line-ended");
+    await fullBoard(page);
+    const spread = await readLinePlace();
+    await page.click("#board-view .board-line-ended");
+    await fullBoard(page);
+    const gathered = await readLinePlace();
+    ok("pressing that line stands the ended jobs where they were, and pressing again folds them",
+      spread.rows.length === 18 && JSON.stringify(spread.fold) === JSON.stringify(["끝난 일감 12개", "true"]) && spread.line[1] > moving.line[1]
+        && gathered.rows.length === 6 && JSON.stringify(gathered.fold) === JSON.stringify(["끝난 일감 12개", "false"])
+        && gathered.line[1] === moving.line[1],
+      JSON.stringify({ spread, gathered }));
+
     /* ---- 사람을 기다리는 대화는 당신 차례의 행이다 ---- */
     await quietScene(page, { waiting: true });
     const waiting = await readQuiet();
