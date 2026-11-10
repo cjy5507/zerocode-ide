@@ -23,6 +23,24 @@ pub const START_CONTINUE: &str = "Continue a conversation";
 pub const START_TIPS: [(&str, &str); 4] =
     [("/", "commands"), ("@", "files"), ("shift+tab", "permissions"), ("?", "shortcuts")];
 
+/// The `turns` view's folded cell: `⏺ Worked for 8s · 7 steps`, and the words
+/// its rows open with.
+pub const WORKED: &str = "Worked";
+pub const WORKED_FOR: &str = "Worked for";
+pub const RAN: &str = "Ran";
+pub const EDITED: &str = "Edited";
+pub const CREATED: &str = "Created";
+pub const DELETED: &str = "Deleted";
+/// The key that turns the conversation between its two views, and what the
+/// folded cell says of it.
+/// A plan update and a helper's report, as the fold counts them.
+pub const STEP_PLAN: &str = "Plan";
+pub const STEP_AGENT: &str = "Agent";
+pub const KEY_VIEW: &str = "ctrl+o";
+pub const TO_EXPAND: &str = " to expand";
+pub const VIEW_TURNS: &str = "turns view · each turn's work is folded · ctrl+o shows every step";
+pub const VIEW_FULL: &str = "full view · every step has its row · ctrl+o folds the turns";
+
 /// Before the checks named on the row a turn ends on.
 pub const VERIFIED_BY: &str = "verified by";
 
@@ -71,6 +89,12 @@ pub const THINKING: &str = "Thinking";
 pub const THINKING_COMMAND_DESCRIPTION: &str = "show or hide the model's thinking";
 /// What `/thinking` says it did, one word each way.
 pub const THINKING_SHOWN: &str = "thinking shown · /thinking hides it";
+/// The marks look's three steps of `/thinking`: one row, the whole block, none.
+pub const THINKING_ONE_LINE: &str = "thinking on one row · /thinking shows it whole";
+pub const THINKING_WHOLE: &str = "thinking shown whole · /thinking hides it";
+/// A finished thinking block's row: `✻ Thought for 4s · <what about>`.
+pub const THOUGHT: &str = "Thought";
+pub const THOUGHT_FOR: &str = "Thought for";
 pub const THINKING_HIDDEN: &str = "thinking hidden · /thinking shows it";
 
 /// The status row's word for a route Jev (or the step table) chose this

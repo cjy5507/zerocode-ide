@@ -290,7 +290,13 @@ impl OpenCodeFence {
                 &self.language,
             )?,
         };
-        let (highlighter, lines) = highlighter.append(committed_source)?;
+        let (highlighter, mut lines) = highlighter.append(committed_source)?;
+        // Rows of a code block, as the canonical render marks its own: a cell
+        // draws them on the block's band and never folds them at the reading
+        // width.
+        for line in &mut lines {
+            line.code = true;
+        }
         self.highlighter = Some(highlighter);
         self.source_len = raw_source.len();
         Some((self, lines))
@@ -624,7 +630,11 @@ impl Writer<'_> {
                 let mut spans = self.prefix(marker_line);
                 let style = line.style;
                 spans.extend(line.spans);
-                self.lines.push(Line::new(spans).styled(style));
+                // Laid out for the width it was given: the reading width must
+                // not fold a grid's row.
+                let mut row = Line::new(spans).styled(style);
+                row.wide = true;
+                self.lines.push(row);
                 self.pending_marker = false;
             } else {
                 self.push_line(line.spans);

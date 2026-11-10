@@ -252,6 +252,25 @@ pub fn cell(body: Vec<Line>, mode: FoldMode, ids: &mut FoldIds) -> Vec<Line> {
     out
 }
 
+/// A finished thinking block as one row: the gap every cell opens with, then
+/// `✻ Thought for 4s · Reading the parser` — how long it took when that was a
+/// second or more, and `about`: the words the working row showed for it, its
+/// bold heading or its last whole sentence.
+#[must_use]
+pub fn one_line(about: Option<&str>, took: Option<std::time::Duration>, width: usize) -> Vec<Line> {
+    let glyphs = super::style::glyphs();
+    let said = match took.map(|took| took.as_secs()).filter(|seconds| *seconds > 0) {
+        Some(seconds) => format!("{} {}", strings::THOUGHT_FOR, super::shimmer::fmt_elapsed_compact(seconds)),
+        None => strings::THOUGHT.to_string(),
+    };
+    let mut spans = vec![Span::dim(glyphs.thinking), Span::dim(said)];
+    if let Some(about) = about.map(str::trim).filter(|about| !about.is_empty()) {
+        spans.push(Span::dim(" · "));
+        spans.push(Span::new(about.to_string(), Style::new().dim().italic()));
+    }
+    vec![Line::empty(), Line::new(spans).truncated(super::style::current().reading_width(width))]
+}
+
 /// `  … +N lines` under the title while the fold is closed — the tool
 /// cell's teaser grammar, under an answer cell's indent.
 fn teaser(folded_rows: usize) -> Line {
@@ -281,6 +300,18 @@ mod tests {
     /// reasoning (`chatwidget.rs::extract_first_bold`). Two refusals matter
     /// while deltas are still arriving: an unclosed `**` waits instead of
     /// flashing half a phrase, and an empty `****` never blanks the shimmer.
+    #[test]
+    fn a_finished_block_stands_as_one_row() {
+        use std::time::Duration;
+        let rows = super::one_line(Some("Reading the parser"), Some(Duration::from_millis(2_400)), 80);
+        assert_eq!(rows[0].plain(), "", "the gap every cell opens with");
+        assert_eq!(rows[1].plain(), "• Thought for 2s · Reading the parser");
+        let quick = super::one_line(Some("Checking the test"), Some(Duration::from_millis(300)), 80);
+        assert_eq!(quick[1].plain(), "• Thought · Checking the test", "under a second says no seconds");
+        assert_eq!(super::one_line(None, None, 80)[1].plain(), "• Thought");
+        assert_eq!(super::one_line(Some("  "), None, 80)[1].plain(), "• Thought");
+    }
+
     #[test]
     fn the_shimmer_word_waits_for_a_closed_heading() {
         assert_eq!(first_bold_heading("**Checking the test**\nbody"), Some("Checking the test"));

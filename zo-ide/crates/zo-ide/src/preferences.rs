@@ -40,7 +40,7 @@ pub const REDUCE_MOTION_KEY: &str = "reduceMotion";
 /// row alone, as before 1.1.139). See `tui::start`.
 pub const START_SCREEN_KEY: &str = "startScreen";
 /// How a finished turn stands: `"turns"` (the default — its work folded into
-/// one cell above the answer) or `"full"` (a row a step). See `tui::fold`.
+/// one cell above the answer) or `"full"` (a row a step). See `tui::turns`.
 pub const CONVERSATION_VIEW_KEY: &str = "conversationView";
 /// The widest prose and tool rows are drawn, in columns; `0` is the pane's
 /// whole width. Tables, code and command output keep the pane's width.

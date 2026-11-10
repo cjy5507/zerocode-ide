@@ -315,43 +315,242 @@ fn is_interactive_tty() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-/// Render the 3-way trust prompt and read a choice from stdin. `None` only if
-/// the read fails (e.g. EOF), in which case the caller keeps its safe default.
-/// Plain 3-way trust prompt on a cooked-mode terminal — numbered list on
-/// stdout, one line read from stdin. `None` on EOF/unreadable input so the
-/// caller keeps its safe default. (Ported from the ratatui modal; the pane
-/// never enters raw mode, so the modal itself did not come along.)
-fn prompt_workspace_trust(cwd: &Path, _inline: bool) -> Option<PermissionMode> {
-    use std::io::Write;
-    let choices = [
-        (PermissionMode::DangerFullAccess, "full access (trust this folder)"),
-        (PermissionMode::WorkspaceWrite, "workspace-write (edits inside the folder, ask elsewhere)"),
-        (PermissionMode::ReadOnly, "read-only"),
+/// The three answers, in the order they are listed, with what each means.
+const TRUST_CHOICES: [(PermissionMode, &str, &str); 3] = [
+    (
+        PermissionMode::DangerFullAccess,
+        "Full access",
+        "zo edits files and runs commands here without asking",
+    ),
+    (
+        PermissionMode::WorkspaceWrite,
+        "Workspace-write",
+        "edits inside the folder, asks before anything outside",
+    ),
+    (PermissionMode::ReadOnly, "Read-only", "reads and answers; asks before every change"),
+];
+/// The row Enter takes when nothing was moved: workspace-write, as the typed
+/// prompt's `Enter = 2` was.
+const TRUST_DEFAULT: usize = 1;
+/// The column the choices' meanings start in.
+const TRUST_MEANING_COLUMN: usize = 24;
+
+/// What a key does to the question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustKey {
+    Move(usize),
+    Answer(usize),
+    Leave,
+    Interrupt,
+    Nothing,
+}
+
+fn trust_choice_key(selected: usize, code: crossterm::event::KeyCode, control: bool) -> TrustKey {
+    use crossterm::event::KeyCode;
+    let last = TRUST_CHOICES.len() - 1;
+    match code {
+        KeyCode::Char('c') if control => TrustKey::Interrupt,
+        KeyCode::Up | KeyCode::Char('k') => TrustKey::Move(selected.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => TrustKey::Move((selected + 1).min(last)),
+        KeyCode::Char(digit @ '1'..='3') => TrustKey::Answer(usize::from(digit as u8 - b'1')),
+        KeyCode::Enter => TrustKey::Answer(selected),
+        KeyCode::Esc => TrustKey::Leave,
+        _ => TrustKey::Nothing,
+    }
+}
+
+/// The question's rows at `width` columns, the chosen one marked. `color`
+/// off draws them with no escape at all.
+fn trust_rows(folder: &str, selected: usize, width: usize, color: bool) -> Vec<String> {
+    use crate::tui::ansi::{char_width, str_width};
+    let paint = |code: &str, text: &str| if color { format!("\x1b[{code}m{text}\x1b[0m") } else { text.to_string() };
+    // Cut to the pane: a row that wrapped would break the count of rows the
+    // question redraws over.
+    let fit = |text: &str, room: usize| -> String {
+        if str_width(text) <= room {
+            return text.to_string();
+        }
+        let mut out = String::new();
+        let mut used = 0;
+        for ch in text.chars() {
+            if used + char_width(ch) + 1 > room {
+                break;
+            }
+            used += char_width(ch);
+            out.push(ch);
+        }
+        out.push('…');
+        out
+    };
+    let room = width.saturating_sub(1).max(20);
+    let mut rows = vec![
+        format!("{} {}", paint("1;38;2;255;178;66", "✻"), paint("1", "Trust this folder?")),
+        format!("  {}", fit(folder, room.saturating_sub(2))),
+        String::new(),
     ];
+    for (index, (_, name, meaning)) in TRUST_CHOICES.iter().enumerate() {
+        let label = format!("{}. {name}", index + 1);
+        let pad = " ".repeat(TRUST_MEANING_COLUMN.saturating_sub(2 + str_width(&label)).max(2));
+        let meaning = fit(meaning, room.saturating_sub(2 + str_width(&label) + pad.len()));
+        rows.push(if index == selected {
+            format!("{} {}{pad}{}", paint("1;38;2;255;178;66", "❯"), paint("1", &label), paint("2", &meaning))
+        } else {
+            format!("  {label}{pad}{}", paint("2", &meaning))
+        });
+    }
+    rows.push(String::new());
+    let keys = [("enter", " confirm · "), ("↑/↓", " choose · "), ("1-3", " pick · "), ("esc", " keep the default")];
+    let mut hint = String::from("  ");
+    let mut used = 2;
+    for (key, words) in keys {
+        if used + str_width(key) + str_width(words) > room {
+            break;
+        }
+        used += str_width(key) + str_width(words);
+        hint.push_str(&paint("1", key));
+        hint.push_str(&paint("2", words));
+    }
+    rows.push(hint);
+    rows
+}
+
+/// The trust question as a choice: rows where the cursor stands, moved with
+/// the arrows or picked by their numbers. It takes the keys itself for as
+/// long as it stands — raw mode, put back on every way out — and wipes its
+/// rows when it is answered, so what opens next finds the pane as it was and
+/// the start page has the whole of it. `None` when the person leaves with Esc
+/// or the terminal cannot be read; the caller keeps its safe default. A
+/// terminal that will not give its keys this way is asked the typed question
+/// instead ([`prompt_workspace_trust_typed`]).
+fn prompt_workspace_trust(cwd: &Path, inline: bool) -> Option<PermissionMode> {
+    use crossterm::event::{self, Event, KeyEventKind, KeyModifiers};
+    use std::io::Write;
+
+    if crossterm::terminal::enable_raw_mode().is_err() {
+        return prompt_workspace_trust_typed(cwd, inline);
+    }
+    let width = crossterm::terminal::size().map_or(80, |(columns, _)| usize::from(columns));
+    let color = std::env::var_os("NO_COLOR").is_none();
+    let folder = crate::tui::sessions::directory_display(cwd);
+    let mut out = std::io::stdout();
+    let mut selected = TRUST_DEFAULT;
+    let mut drawn = 0usize;
+    let mut interrupted = false;
+    let answer = loop {
+        let rows = trust_rows(&folder, selected, width, color);
+        let mut frame = String::new();
+        if drawn > 1 {
+            frame.push_str(&format!("\x1b[{}A", drawn - 1));
+        }
+        for (index, row) in rows.iter().enumerate() {
+            frame.push_str("\r\x1b[2K");
+            frame.push_str(row);
+            if index + 1 < rows.len() {
+                frame.push_str("\r\n");
+            }
+        }
+        if out.write_all(frame.as_bytes()).and_then(|()| out.flush()).is_err() {
+            break None;
+        }
+        drawn = rows.len();
+        let key = match event::read() {
+            Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => key,
+            Ok(_) => continue,
+            Err(_) => break None,
+        };
+        match trust_choice_key(selected, key.code, key.modifiers.contains(KeyModifiers::CONTROL)) {
+            TrustKey::Move(to) => selected = to,
+            TrustKey::Answer(index) => break Some(index),
+            TrustKey::Leave => break None,
+            TrustKey::Interrupt => {
+                interrupted = true;
+                break None;
+            }
+            TrustKey::Nothing => {}
+        }
+    };
+    // The rows the question stood on are wiped and the cursor is back where
+    // the question began.
+    let mut frame = String::new();
+    if drawn > 1 {
+        frame.push_str(&format!("\x1b[{}A", drawn - 1));
+    }
+    frame.push_str("\r\x1b[J");
+    let _ = out.write_all(frame.as_bytes());
+    let _ = out.flush();
+    let _ = crossterm::terminal::disable_raw_mode();
+    if interrupted {
+        // ctrl+c before the session exists: there is nothing to save.
+        std::process::exit(130);
+    }
+    answer.map(|index| TRUST_CHOICES[index].0)
+}
+
+/// The typed 3-way question on a cooked-mode terminal — a numbered list on
+/// stdout, one line read from stdin — for a terminal that will not enter raw
+/// mode. `None` on EOF or unreadable input so the caller keeps its default.
+fn prompt_workspace_trust_typed(cwd: &Path, _inline: bool) -> Option<PermissionMode> {
+    use std::io::Write;
     let mut out = std::io::stdout();
     let _ = writeln!(out, "Trust this folder? {}", cwd.display());
-    for (index, (_, label)) in choices.iter().enumerate() {
-        let _ = writeln!(out, "  {}. {label}", index + 1);
+    for (index, (_, name, meaning)) in TRUST_CHOICES.iter().enumerate() {
+        let _ = writeln!(out, "  {}. {name} — {meaning}", index + 1);
     }
-    let _ = write!(out, "choice [1-3, Enter = 2]: ");
+    let _ = write!(out, "choice [1-3, Enter = {}]: ", TRUST_DEFAULT + 1);
     let _ = out.flush();
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).ok()? == 0 {
         return None;
     }
     let picked = match line.trim() {
-        "" | "2" => 1,
+        "" => TRUST_DEFAULT,
         "1" => 0,
+        "2" => 1,
         "3" => 2,
         _ => return None,
     };
-    Some(choices[picked].0)
+    Some(TRUST_CHOICES[picked].0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{classify_cwd, WorkspaceRisk};
     use std::path::Path;
+
+    #[test]
+    fn the_trust_question_is_a_choice_the_arrows_move_and_the_numbers_pick() {
+        use super::{trust_choice_key, trust_rows, TrustKey, TRUST_CHOICES, TRUST_DEFAULT};
+        use crossterm::event::KeyCode;
+        use runtime::PermissionMode;
+
+        assert_eq!(TRUST_CHOICES[TRUST_DEFAULT].0, PermissionMode::WorkspaceWrite, "Enter alone keeps the old default");
+        assert_eq!(trust_choice_key(1, KeyCode::Up, false), TrustKey::Move(0));
+        assert_eq!(trust_choice_key(0, KeyCode::Up, false), TrustKey::Move(0), "the first row holds");
+        assert_eq!(trust_choice_key(2, KeyCode::Down, false), TrustKey::Move(2), "the last row holds");
+        assert_eq!(trust_choice_key(1, KeyCode::Enter, false), TrustKey::Answer(1));
+        assert_eq!(trust_choice_key(1, KeyCode::Char('3'), false), TrustKey::Answer(2));
+        assert_eq!(trust_choice_key(1, KeyCode::Esc, false), TrustKey::Leave);
+        assert_eq!(trust_choice_key(1, KeyCode::Char('c'), true), TrustKey::Interrupt);
+        assert_eq!(trust_choice_key(1, KeyCode::Char('x'), false), TrustKey::Nothing);
+
+        let rows = trust_rows("~/work/acme-api", 1, 100, false);
+        assert_eq!(rows[0], "✻ Trust this folder?");
+        assert_eq!(rows[1], "  ~/work/acme-api");
+        assert_eq!(rows[3], "  1. Full access        zo edits files and runs commands here without asking");
+        assert_eq!(rows[4], "❯ 2. Workspace-write    edits inside the folder, asks before anything outside");
+        assert_eq!(rows[5], "  3. Read-only          reads and answers; asks before every change");
+        assert_eq!(rows[7], "  enter confirm · ↑/↓ choose · 1-3 pick · esc keep the default");
+        assert_eq!(rows.len(), 8);
+        // No row is wider than the pane: a wrapped row would break the redraw.
+        for width in [40, 60, 100] {
+            for row in trust_rows("~/a/very/long/folder/name/that/goes/on/and/on/for/a/while", 0, width, false) {
+                assert!(crate::tui::ansi::str_width(&row) < width, "{width}: {row}");
+            }
+        }
+        // Colour only adds escapes around the same words.
+        let coloured = trust_rows("~/work/acme-api", 1, 100, true);
+        assert!(coloured[4].contains("\x1b[") && coloured[4].contains("2. Workspace-write"));
+    }
     
 
 

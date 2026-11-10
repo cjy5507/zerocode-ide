@@ -110,7 +110,7 @@ impl RowCells {
             if color && span.link.is_some() {
                 return false;
             }
-            let style = if color { span.style.patch(line.style) } else { Style::new() };
+            let style = if color { span.style.on_line(line.style) } else { Style::new() };
             for ch in span.text.chars() {
                 if !stable_width(ch) {
                     return false;

@@ -2186,6 +2186,48 @@ mod tests {
 
     /// Codex 0.157.1's two-row footer (t-10232): row one is the status
     /// line as it was, row two says what the keys do and counts warnings.
+    /// The marks look keeps one row under the field, right under it; a hint
+    /// that applies now takes that row, and warnings keep a row of their own.
+    #[test]
+    fn the_marks_look_keeps_one_row_under_the_field() {
+        use crate::tui::footer_hints::{EnterKey, HintMode};
+
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !crate::tui::style::in_fresh_run(&format!("{module}::the_marks_look_keeps_one_row_under_the_field")) {
+            return;
+        }
+        crate::tui::style::init(&crate::preferences::Preferences::default());
+        let composer = Composer::new();
+        let plain = |frame: &Frame<'_>| -> Vec<String> {
+            build(frame).0.iter().map(Line::plain).collect()
+        };
+        let idle = plain(&frame(&composer, None));
+        let last = idle.len() - 1;
+        assert_eq!(idle[last], "  claude-opus-5 high · /tmp/x");
+        assert!(idle[last - 1].starts_with('╰'), "the row stands right under the field: {idle:#?}");
+
+        let mut counted = frame(&composer, None);
+        counted.hints.warnings = 2;
+        let rows = plain(&counted);
+        assert!(rows[rows.len() - 1].ends_with("⚠ 2 warnings · f2 to view"), "{rows:#?}");
+        assert_eq!(rows[rows.len() - 2], idle[last], "the model row is untouched");
+
+        let mut status = Status::working(Duration::from_secs(3));
+        let mut drafting = Composer::new();
+        drafting.insert_str("draft");
+        let mut queued = frame(&drafting, Some(&status));
+        queued.hints.mode = HintMode::Queue(EnterKey::AddToTurn);
+        queued.hints.transcript_keys = true;
+        let rows = plain(&queued);
+        assert!(rows[rows.len() - 1].contains("to add to this turn"), "{rows:#?}");
+        assert!(rows[rows.len() - 2].starts_with('╰'), "the hint took the one row: {rows:#?}");
+
+        // The working row and what hangs under it wear the look's marks.
+        assert_eq!(status.line(60).plain(), "✻ Working (3s · esc to interrupt)");
+        status.set_details(["cargo test parser".to_string()], StatusDetailsCapitalization::Preserve);
+        assert_eq!(status.detail_lines(60)[0].plain(), "  ⎿ cargo test parser");
+    }
+
     #[test]
     fn the_footer_is_two_rows_and_the_second_says_what_the_keys_do() {
         use crate::tui::footer_hints::{EnterKey, HintMode};

@@ -203,9 +203,15 @@ pub fn hunk_lines_for_palette(
     out
 }
 
-/// Both number columns and the space after them: `old  new `.
+/// Both number columns and the space after them: `old  new `. The marks
+/// look draws one column — a row's new number, or the old one of a row that
+/// was removed.
 fn numbers_width(gutter: usize) -> usize {
-    gutter * 2 + 3
+    if one_number_column() { gutter + 1 } else { gutter * 2 + 3 }
+}
+
+fn one_number_column() -> bool {
+    super::style::current().style == super::style::TuiStyle::Marks
 }
 
 /// The first old and new line numbers after a hunk.
@@ -458,11 +464,17 @@ fn rendered_line(
             spans = emphasize(spans, range, word_bg);
         }
     }
+    let one_column = one_number_column();
     for (index, chunk) in wrapped_spans(&spans, content_width).into_iter().enumerate() {
         let mut row = if index == 0 {
             let column = |number: Option<usize>| number.map_or_else(String::new, |number| number.to_string());
+            let numbers = if one_column {
+                format!("{:>gutter$} ", column(new.or(old)))
+            } else {
+                format!("{:>gutter$}  {:>gutter$} ", column(old), column(new))
+            };
             vec![
-                Span::new(format!("{:>gutter$}  {:>gutter$} ", column(old), column(new)), Style::new().dim()),
+                Span::new(numbers, Style::new().dim()),
                 Span::new(format!("{sign} "), sign_style),
             ]
         } else {
@@ -471,7 +483,13 @@ fn rendered_line(
             vec![Span::new(format!("{:cell$}", "", cell = numbers_width(gutter) + 2), Style::new().dim())]
         };
         row.extend(chunk);
-        out.push(Line::new(row));
+        // The marks look runs a changed row's band to the pane's edge — the
+        // row's own style, so no cell is written to carry it.
+        let line = Line::new(row);
+        out.push(match background.filter(|_| one_column) {
+            Some(background) => line.styled(Style::new().bg(background)),
+            None => line,
+        });
     }
     out
 }
@@ -527,6 +545,36 @@ mod tests {
             new_lines: 0,
             lines,
         }
+    }
+
+    /// The marks look: one number column — a row's new number, the old one of
+    /// a removed row — and a changed row's band as the row's own style, which
+    /// the painter runs to the pane's edge.
+    #[test]
+    fn the_marks_look_draws_one_number_column_and_a_band_to_the_edge() {
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !crate::tui::style::in_fresh_run(&format!(
+            "{module}::the_marks_look_draws_one_number_column_and_a_band_to_the_edge"
+        )) {
+            return;
+        }
+        crate::tui::style::init(&crate::preferences::Preferences::default());
+        let lines = hunk_lines(
+            &view(vec![hunk(
+                14,
+                14,
+                vec![
+                    line(DiffLineKind::Context, "kept"),
+                    line(DiffLineKind::Removed, "gone"),
+                    line(DiffLineKind::Added, "fresh"),
+                ],
+            )]),
+            80,
+        );
+        let plain: Vec<String> = lines.iter().map(crate::tui::ansi::Line::plain).collect();
+        assert_eq!(plain, ["14   kept", "15 - gone", "15 + fresh"]);
+        assert!(lines[0].style.bg.is_none(), "a context row has no band");
+        assert!(lines[1].style.bg.is_some() && lines[2].style.bg.is_some(), "a changed row's band is the row's");
     }
 
     /// codex numbers additions from the NEW file and deletions from the OLD

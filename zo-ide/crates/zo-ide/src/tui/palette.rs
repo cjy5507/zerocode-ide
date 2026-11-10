@@ -196,6 +196,19 @@ pub(crate) fn blend_rgb(
 const STATUS_LINE_COLOR_SATURATION_PERCENT: u16 = 85;
 const STATUS_LINE_COLOR_BRIGHTNESS_PERCENT: u16 = 100;
 
+/// The band a code block stands on: the terminal's background moved a step
+/// toward its opposite — less than the band the person's words stand on.
+#[must_use]
+pub(crate) fn code_background(terminal_palette: TerminalPalette) -> Color {
+    let (overlay, alpha) = if terminal_palette.has_light_background() {
+        ((0, 0, 0), 0.03)
+    } else {
+        ((255, 255, 255), 0.05)
+    };
+    let (red, green, blue) = blend_rgb(overlay, terminal_palette.background(), alpha);
+    Color::Rgb(red, green, blue)
+}
+
 /// A list row's ground in a terminal whose colours are known: the background
 /// moved a little toward its opposite, further for the chosen row. The
 /// `/resume` list and the start page's list stand on the same.

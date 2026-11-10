@@ -1028,10 +1028,13 @@ impl<W: Write> Painter<W> {
     }
 
     fn wrap_for_screen(&self, lines: &[Line]) -> Vec<Line> {
-        let width = self.cols as usize;
+        let screen = self.cols as usize;
         lines
             .iter()
             .flat_map(|line| {
+                // Prose keeps the reading width it was wrapped to, however
+                // wide the screen became.
+                let width = line.measure.map_or(screen, |measure| screen.min(usize::from(measure)));
                 if line.width() <= width {
                     vec![line.clone()]
                 } else {

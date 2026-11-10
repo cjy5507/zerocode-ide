@@ -448,6 +448,8 @@ pub struct ToolCall {
     pub kind: ToolKind,
     pub started: Instant,
     pub done: Option<Outcome>,
+    /// How long the call ran, from its announce to its result.
+    pub took: Option<Duration>,
 }
 
 impl ToolCall {
@@ -458,6 +460,7 @@ impl ToolCall {
             kind,
             started: Instant::now(),
             done: None,
+            took: None,
         }
     }
 
@@ -526,6 +529,70 @@ impl ToolGroup {
     #[must_use]
     pub fn is_spawning(&self) -> bool {
         !self.calls.is_empty() && self.calls.iter().all(|call| call.kind.is_spawn())
+    }
+
+    /// The cell's finished calls as the `turns` view folds them
+    /// ([`super::turns`]): what each did, to what, and how it ended.
+    #[must_use]
+    pub(super) fn steps(&self) -> Vec<super::turns::Step> {
+        use super::strings::{TOOL_CREATE, TOOL_DELETE, TOOL_EDIT, TOOL_LIST, TOOL_READ, TOOL_RUN, TOOL_SEARCH, TOOL_SPAWN};
+        use super::turns::{Step, StepKind};
+        let mut out = Vec::new();
+        for call in &self.calls {
+            let Some(done) = call.done.as_ref() else {
+                continue;
+            };
+            let failure = (!done.ok)
+                .then(|| failure_result(done).iter().map(|span| span.text.as_str()).collect::<String>());
+            let step = |kind: StepKind, verb: &str, target: String| Step {
+                kind,
+                verb: verb.to_string(),
+                target,
+                change: None,
+                ok: done.ok,
+                declined: done.declined,
+                failure: failure.clone(),
+                started: call.started,
+                took: call.took,
+            };
+            match &call.kind {
+                ToolKind::Command { command, .. } => {
+                    out.push(step(StepKind::Run, TOOL_RUN, command.lines().next().unwrap_or_default().to_string()));
+                }
+                ToolKind::Explore(items) => {
+                    for item in items {
+                        out.push(match item {
+                            Explored::Read { name } => step(StepKind::Read, TOOL_READ, shown_path(name)),
+                            Explored::List { path } => step(StepKind::List, TOOL_LIST, shown_path(path)),
+                            Explored::Search { query, path } => step(
+                                StepKind::Search,
+                                TOOL_SEARCH,
+                                path.as_ref().map_or_else(|| query.clone(), |path| format!("{query} in {}", shown_path(path))),
+                            ),
+                        });
+                    }
+                }
+                ToolKind::Edit { path } => {
+                    let change = done.change.as_ref().filter(|_| done.ok);
+                    let verb = change.map_or(TOOL_EDIT, |change| match change.verb {
+                        "Added" => TOOL_CREATE,
+                        "Deleted" => TOOL_DELETE,
+                        _ => TOOL_EDIT,
+                    });
+                    let mut edit = step(StepKind::Edit, verb, change.map_or_else(|| shown_path(path), Change::display_path));
+                    edit.change = change.map(|change| (change.added, change.removed));
+                    out.push(edit);
+                }
+                ToolKind::Plan(_) => out.push(step(StepKind::Other, super::strings::STEP_PLAN, String::new())),
+                ToolKind::WebSearch { detail } => out.push(step(StepKind::Search, TOOL_SEARCH, detail.clone())),
+                ToolKind::Spawn { label, .. } => out.push(step(StepKind::Other, TOOL_SPAWN, label.clone())),
+                ToolKind::AgentResult { label, .. } => {
+                    out.push(step(StepKind::Other, super::strings::STEP_AGENT, label.clone()));
+                }
+                ToolKind::Call { name, .. } => out.push(step(StepKind::Other, name, String::new())),
+            }
+        }
+        out
     }
 
     /// 가장 오래 도는 호출의 시작 시각 — 활동 표시가 이걸 훑는다.
@@ -679,6 +746,7 @@ impl ToolGroup {
         if let Some(kind) = kind {
             call.kind = kind;
         }
+        call.took = Some(call.started.elapsed());
         call.done = Some(outcome);
         self.diff_cache.get_mut().clear();
         true
@@ -839,7 +907,15 @@ impl ToolGroup {
         elapsed: Duration,
         whole: bool,
     ) -> Vec<Line> {
-        let result = call.done.as_ref().map(command_result).unwrap_or_default();
+        let mut result = call.done.as_ref().map(command_result).unwrap_or_default();
+        // The marks look says how long a command took, once that is a second
+        // or more: `3.0s · 10 lines`.
+        if let Some(took) = call.took.filter(|took| {
+            took.as_secs() > 0 && super::style::current().style == super::style::TuiStyle::Marks
+        }) {
+            let seconds = format!("{:.1}s", took.as_secs_f32());
+            result.insert(0, Span::dim(if result.is_empty() { seconds } else { format!("{seconds} · ") }));
+        }
         let marker =
             background.then(|| Span::dim(format!(" {}", super::strings::COMMAND_BACKGROUND)));
         let (mut target, rest) = if call.done.is_some() {
@@ -903,8 +979,17 @@ impl ToolGroup {
                 &change.view,
                 width.saturating_sub(DIFF_INDENT).max(1),
             );
-            out.extend(change_body(change, drawn).into_iter().map(|mut line| {
-                line.spans.insert(0, Span::raw(" ".repeat(DIFF_INDENT)));
+            // The diff hangs under its row as every result does: the look's
+            // hung mark on its first row (the marks look's `  ⎿ `), blank
+            // columns of the same width on the rest.
+            let hung_first = super::style::current().style == super::style::TuiStyle::Marks;
+            out.extend(change_body(change, drawn).into_iter().enumerate().map(|(index, mut line)| {
+                let lead = if hung_first && index == 0 {
+                    Span::dim(super::style::glyphs().result_first)
+                } else {
+                    Span::raw(" ".repeat(DIFF_INDENT))
+                };
+                line.spans.insert(0, lead);
                 line
             }));
         }
@@ -1189,7 +1274,10 @@ const LIVE_TAIL_ROWS: usize = 4;
 /// to it when the row is short. The marks look writes the call as a call,
 /// `<glyph> <Verb>(<target>)`, the result still on the last column.
 fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width: usize) -> Line {
-    let marks = super::style::current().style == super::style::TuiStyle::Marks;
+    let look = super::style::current();
+    // The result ends where prose ends, not at the far edge of a wide pane.
+    let width = look.reading_width(width);
+    let marks = look.style == super::style::TuiStyle::Marks;
     let opened = if marks { format!("{verb}(") } else { format!("{verb} ") };
     let mut spans = vec![glyph, Span::raw(" "), Span::bold(opened)];
     let result_width: usize = result.iter().map(Span::width).sum();

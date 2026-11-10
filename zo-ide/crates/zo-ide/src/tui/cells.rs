@@ -83,7 +83,15 @@ impl Prefix {
 /// 첫 줄에도 이어지는 접두어를 쓴다 — 스트리밍으로 나눠 넣을 때의 이음매다.
 #[must_use]
 pub fn prefixed(lines: &[Line], width: usize, prefix: &Prefix, first: bool) -> Vec<Line> {
-    prefixed_marking(lines, width, prefix, first).0
+    prefixed_marking(lines, width, None, prefix, first).0
+}
+
+/// [`prefixed`] for prose: its lines wrap at the reading width when the look
+/// has one, and remember it, so a screen rebuilt wider wraps them there
+/// again. A code row and a table's row keep the pane's width.
+#[must_use]
+pub fn prefixed_prose(lines: &[Line], width: usize, prefix: &Prefix, first: bool) -> Vec<Line> {
+    prefixed_marking(lines, width, super::style::current().prose_width, prefix, first).0
 }
 
 /// [`prefixed`] 와 같되 **마커를 가져갔는지**를 함께 준다.
@@ -94,18 +102,39 @@ pub fn prefixed(lines: &[Line], width: usize, prefix: &Prefix, first: bool) -> V
 fn prefixed_marking(
     lines: &[Line],
     width: usize,
+    measure: Option<usize>,
     prefix: &Prefix,
     first: bool,
 ) -> (Vec<Line>, bool) {
     #[cfg(test)]
     markdown::probe::wrapped(lines.len());
-    let content = width.saturating_sub(prefix.width()).max(1);
-    let flush_code = super::style::current().flush_code;
+    let pane_content = width.saturating_sub(prefix.width()).max(1);
+    // Prose is no wider than the reading width; `None` is the pane's width.
+    let measure = measure.filter(|measure| *measure < width);
+    let prose_content = measure.map_or(pane_content, |measure| measure.saturating_sub(prefix.width()).max(1));
+    let look = super::style::current();
+    let flush_code = look.flush_code;
+    // The marks look stands a code block on a band of its own — a tint, never
+    // a border's characters, so a mouse copy still carries the code alone.
+    let code_band = (look.style == super::style::TuiStyle::Marks)
+        .then(palette::terminal_palette)
+        .flatten()
+        .map(|terminal_palette| Style::new().bg(palette::code_background(terminal_palette)));
     let mut out = Vec::new();
     // 셀 안의 빈 줄(문단 사이)에는 접두어를 붙이지 않는다 — 캡처의 답변 셀도
     // 그 자리가 진짜 빈 줄이다. 마커는 **내용이 있는 첫 줄**이 가져간다.
     let mut marker_pending = first;
     for line in lines {
+        let banded;
+        let line = match code_band.filter(|_| line.code) {
+            Some(band) => {
+                banded = line.clone().styled(line.style.patch(band));
+                &banded
+            }
+            None => line,
+        };
+        let wraps_at_the_pane = line.code || line.wide;
+        let content = if wraps_at_the_pane { pane_content } else { prose_content };
         // A long list item or quote wraps under its own text: the renderer
         // names the indent it sits under, and every continuation row starts
         // with it (codex wraps with the indent stack as `subsequent_indent`).
@@ -129,7 +158,8 @@ fn prefixed_marking(
         let mut origin: Option<std::sync::Arc<Line>> = None;
         for wrapped in wrap_line(line, content, &hanging) {
             if wrapped.plain().is_empty() {
-                out.push(Line::empty());
+                // A blank row inside a code block stays on the block's band.
+                out.push(if line.code { Line::empty().styled(line.style) } else { Line::empty() });
                 continue;
             }
             let marker = if marker_pending {
@@ -139,7 +169,11 @@ fn prefixed_marking(
                 prefix.subsequent.clone()
             };
             let origin = origin.get_or_insert_with(|| {
-                std::sync::Arc::new(origin_line(line, &marker, &prefix.subsequent, &hanging))
+                let mut origin = origin_line(line, &marker, &prefix.subsequent, &hanging);
+                if !wraps_at_the_pane {
+                    origin.measure = measure.and_then(|measure| u16::try_from(measure).ok());
+                }
+                std::sync::Arc::new(origin)
             });
             let mut row = wrapped.prefixed(marker);
             row.origin = Some(std::sync::Arc::clone(origin));
@@ -332,12 +366,17 @@ fn user_cell_for_palette(
     // (t-51389).
     let mut out = vec![Line::empty()];
     if terminal_palette.is_none() {
-        out.extend(prefixed(&body, width, &Prefix::user(), true));
+        out.extend(prefixed_prose(&body, width, &Prefix::user(), true));
         return out;
+    }
+    // The marks look lets the band's own blank rows be the cell's gap: no
+    // untinted row before it (and the app drops the one after it).
+    if super::style::current().style == super::style::TuiStyle::Marks {
+        out.clear();
     }
     let band_start = out.len();
     out.push(Line::empty());
-    out.extend(prefixed(&body, width, &Prefix::user(), true));
+    out.extend(prefixed_prose(&body, width, &Prefix::user(), true));
     out.push(Line::empty());
     let style = user_message_style_for_palette(terminal_palette);
     for line in &mut out[band_start..] {
@@ -1345,9 +1384,10 @@ impl MarkdownStream {
             .rposition(|line| !line.plain().trim().is_empty())
             .map_or(0, |at| at + 1);
         let trailing = md.split_off(keep);
-        let (lines, marker) = prefixed_marking(&md, self.width, &self.prefix(), first);
+        let measure = super::style::current().prose_width;
+        let (lines, marker) = prefixed_marking(&md, self.width, measure, &self.prefix(), first);
         let (pad, _) =
-            prefixed_marking(&trailing, self.width, &self.prefix(), first && !marker);
+            prefixed_marking(&trailing, self.width, measure, &self.prefix(), first && !marker);
         Segment { lines, pad, marker }
     }
 
@@ -1371,7 +1411,11 @@ impl MarkdownStream {
             self.committed.len(),
         );
         self.open_fence_pad = self.open_code_fence.as_ref().map_or_else(Vec::new, |fence| {
-            vec![Line::empty(); fence.trailing_blank_lines(&self.committed)]
+            // Blank rows of the open block: code rows too, so they stay on
+            // its band.
+            let mut blank = Line::empty();
+            blank.code = true;
+            vec![blank; fence.trailing_blank_lines(&self.committed)]
         });
     }
 
@@ -1412,7 +1456,7 @@ impl MarkdownStream {
             }
             let first = !self.stable_marker && self.total_rows() == 0;
             self.rendered
-                .extend(prefixed(&visible, self.width, &self.prefix(), first));
+                .extend(prefixed_prose(&visible, self.width, &self.prefix(), first));
         }
         self.open_code_fence = Some(fence);
         true
@@ -1558,6 +1602,48 @@ mod tests {
     /// The 2026-09-03 screenshot, pinned at the stream: a bullet whose inline
     /// code token is wider than a narrow split pane stood as one row, twenty
     /// blank rows, then the token. The bullet's rows must be contiguous.
+    /// The marks look: the person's words stand on their band with no
+    /// untinted row before it, prose wraps at the reading width and says so
+    /// to a later rewrap, and a code row keeps the pane's width on a band of
+    /// its own.
+    #[test]
+    fn the_marks_look_bands_the_persons_words_and_measures_prose() {
+        use crate::tui::palette::{ColorLevel, TerminalPalette};
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !crate::tui::style::in_fresh_run(&format!(
+            "{module}::the_marks_look_bands_the_persons_words_and_measures_prose"
+        )) {
+            return;
+        }
+        crate::tui::style::init(&crate::preferences::Preferences::default());
+        let dark = TerminalPalette::new((255, 255, 255), (10, 10, 10), ColorLevel::TrueColor);
+
+        let cell = super::user_cell_for_palette("fix the parser", 201, Some(dark));
+        assert_eq!(cell.len(), 3, "the band's blank rows are the cell's gap: {cell:#?}");
+        assert!(cell.iter().all(|row| row.style.bg.is_some()));
+        assert_eq!(cell[1].plain(), "> fix the parser");
+
+        let prose = super::Line::from_text("word ".repeat(60).trim_end().to_string());
+        let mut code = super::Line::from_text("x".repeat(150));
+        code.code = true;
+        let rows = super::prefixed_prose(&[prose, code], 201, &super::Prefix::bullet(), true);
+        let (code_row, prose_rows) = rows.split_last().expect("rows");
+        assert!(prose_rows.len() >= 3 && prose_rows.iter().all(|row| row.width() <= 100), "{prose_rows:#?}");
+        assert_eq!(
+            prose_rows[0].origin.as_ref().and_then(|origin| origin.measure),
+            Some(100),
+            "a rebuilt screen wraps the line at the reading width again"
+        );
+        assert_eq!(code_row.width(), 152, "a code row is not folded at the reading width");
+        assert_eq!(code_row.origin.as_ref().and_then(|origin| origin.measure), None);
+
+        assert_eq!(
+            crate::tui::palette::code_background(dark),
+            super::Color::Rgb(22, 22, 22),
+            "a step lighter than the pane, less than the person's band"
+        );
+    }
+
     #[test]
     fn a_bullet_with_an_overwide_token_wraps_without_blank_rows() {
         let md = "- 하지만 바로 다음 줄의 `agent_launch_env_with_lock(crates/zerocode-hookd/src/codex_install.rs:1020)`이 ZeroCode 공용 미러 디렉터리(`codex-mirror`)를 `CODEX_HOME`으로 반환하여 앞서 설정한 계정별 경로를 덮어씁니다.\n\n다음 문단.\n";

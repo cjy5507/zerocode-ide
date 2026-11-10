@@ -158,6 +158,10 @@ pub struct Look {
     /// The widest prose and tool rows are drawn, or `None` for the pane's
     /// width. Tables, code and command output keep the pane's width.
     pub prose_width: Option<usize>,
+    /// A finished thinking block stands as one row — how long it took and
+    /// what it was about — until `/thinking` asks for it whole. The marks
+    /// look's, when `showThinking` says nothing.
+    pub thinking_line: bool,
 }
 
 impl Look {
@@ -204,6 +208,7 @@ impl Look {
             prose_width: marks
                 .then(|| preferences.max_prose_width.unwrap_or(DEFAULT_PROSE_WIDTH))
                 .filter(|columns| *columns > 0),
+            thinking_line: marks && preferences.show_thinking.is_none(),
         }
     }
 }
@@ -297,6 +302,9 @@ mod tests {
         assert_eq!(marks.prose_width, Some(super::DEFAULT_PROSE_WIDTH));
         assert_eq!(marks.reading_width(201), 100);
         assert_eq!(marks.reading_width(80), 80);
+        assert!(marks.thinking_line);
+        let asked = Preferences { show_thinking: Some(true), ..Preferences::default() };
+        assert!(!Look::chosen(&asked, None).thinking_line, "an explicit showThinking keeps the whole block");
 
         let set = Preferences {
             start_screen: Some("line".into()),
@@ -315,6 +323,7 @@ mod tests {
         assert!(!codex.start_page);
         assert_eq!(codex.view, ConversationView::Full);
         assert_eq!(codex.prose_width, None);
+        assert!(!codex.thinking_line);
         assert_eq!(Look::default(), Look { style: TuiStyle::Codex, ..Look::default() });
     }
 

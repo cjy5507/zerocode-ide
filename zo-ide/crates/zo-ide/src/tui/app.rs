@@ -42,6 +42,7 @@ use super::agents;
 use super::bell;
 use super::transcript;
 use super::tty;
+use super::turns;
 use super::ansi::{char_width, Line, Style};
 use super::cells::{self, MarkdownStream};
 use super::clipboard_paste::paste_image_to_temp_png;
@@ -146,6 +147,7 @@ const MAX_CATCH_UP_TICKS: u32 = 8;
 /// never from paint. `symbolic-ref` rejects detached HEADs, while requiring the
 /// `wt/` namespace and its `branch.<name>.base` record keeps ordinary checkouts
 /// and repositories that happen to have an upstream out of `ZeroCode` chrome.
+#[cfg(test)]
 fn worktree_context(cwd: &Path) -> Option<String> {
     worktree_context_of(cwd, &checked_out_branch(cwd)?)
 }
@@ -467,6 +469,9 @@ enum KeyOutcome {
     Recovery(String, zerocode_core::conversation_control::Action),
     ReviewChanges(u32),
     CancelOpening,
+    /// `ctrl+o`: the conversation's other view. The session's saved turns are
+    /// drawn again, so [`App`] does it.
+    TurnView,
 }
 
 /// What stands in the footer's place for a while — codex's bottom-pane views
@@ -520,6 +525,9 @@ enum PublishedActivity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryTail {
     ToolCell,
+    /// The person's words on their band, whose last row is blank: the cell
+    /// that follows leaves off the gap row it opens with (the marks look).
+    UserBand,
     Other,
 }
 
@@ -634,6 +642,19 @@ struct Ui {
     /// The empty conversation's page, until the first thing is said in it —
     /// see [`start`]. The session's head row waits with it and is committed
     /// when it ends ([`Ui::history`]).
+    /// How finished turns stand: folded, or a row a step. The look's choice
+    /// when the session opens; `ctrl+o` turns it.
+    view: super::style::ConversationView,
+    /// The turn's work the `turns` view is holding for its one cell.
+    fold: turns::TurnFold,
+    /// A finished thinking block stands as one row
+    /// ([`thinking::one_line`]) — the marks look's first step of `/thinking`.
+    thinking_line: bool,
+    /// When the thinking block that is open began.
+    reasoning_started: Option<Instant>,
+    /// What the working row said the open thinking block was about — its
+    /// bold heading, or its last whole sentence — for the block's one row.
+    reasoning_about: Option<String>,
     start: Option<start::StartPage>,
     /// What was said before the page's first frame — a startup warning. On
     /// the page while it stands, under the head row once it ends.
@@ -1593,7 +1614,25 @@ impl Ui {
             Instant::now,
             |decision_now| stream.tick(decision_now),
         );
-        self.history(&out);
+        self.say_stream(out);
+    }
+
+    /// Rows a text block gives up as it streams, or its last rows as it
+    /// closes. In the `turns` view a block's first rows are held: a short
+    /// block before a tool call is that call's preamble, and only a block
+    /// that outgrows the hold — or ends the turn — is an answer.
+    fn say_stream(&mut self, rows: Vec<Line>) {
+        if rows.is_empty() {
+            return;
+        }
+        if !self.folding() || !matches!(self.segment, Segment::Text(..)) {
+            self.history(&rows);
+            return;
+        }
+        if let Some(rows) = self.fold.take_text(rows) {
+            // An answer: the work before it is said first.
+            self.history(&rows);
+        }
     }
 
     /// 스트리밍 큐에 배출 대기 중인 줄이 있는지 여부.
@@ -1629,7 +1668,10 @@ impl Ui {
                 thinking::bound_scan(buffer, thinking::SCAN_KEEP_BYTES);
             }
             // A new block starts its own search, and its own heading.
-            _ => self.reasoning_scan = Some((id, Some(text.to_string()))),
+            _ => {
+                self.reasoning_scan = Some((id, Some(text.to_string())));
+                self.reasoning_about = None;
+            }
         }
         let Some((_, Some(buffer))) = &self.reasoning_scan else {
             return;
@@ -1644,6 +1686,7 @@ impl Ui {
                 *slot = None;
             }
         }
+        self.reasoning_about = Some(heading.clone());
         if let Some(status) = self.status.as_mut() {
             if status.header != heading {
                 status.set_header(Some(&heading));
@@ -1655,11 +1698,23 @@ impl Ui {
     /// so it answers at once, mid-turn or idle; the block already open keeps
     /// the setting it started with.
     fn toggle_thinking(&mut self) {
-        self.flags.show_thinking = !self.flags.show_thinking;
-        let word = if self.flags.show_thinking {
-            super::strings::THINKING_SHOWN
+        // The marks look steps through three: one row, the whole block, none.
+        let word = if super::style::current().style == super::style::TuiStyle::Marks {
+            let (shown, one_row, word) = match (self.flags.show_thinking, self.thinking_line) {
+                (true, true) => (true, false, super::strings::THINKING_WHOLE),
+                (true, false) => (false, false, super::strings::THINKING_HIDDEN),
+                (false, _) => (true, true, super::strings::THINKING_ONE_LINE),
+            };
+            self.flags.show_thinking = shown;
+            self.thinking_line = one_row;
+            word
         } else {
-            super::strings::THINKING_HIDDEN
+            self.flags.show_thinking = !self.flags.show_thinking;
+            if self.flags.show_thinking {
+                super::strings::THINKING_SHOWN
+            } else {
+                super::strings::THINKING_HIDDEN
+            }
         };
         self.note(SystemLevel::Info, word);
     }
@@ -1863,6 +1918,29 @@ impl Ui {
         self.published_activity = PublishedActivity::Value(card);
     }
 
+    /// What the screen had drawn of the conversation is gone and is about to
+    /// be drawn again from the saved turns — the view was turned. The session
+    /// and what it has cost stay as they are; only what a replay rebuilds is
+    /// let go, so nothing is recorded twice.
+    fn forget_drawn(&mut self) {
+        self.transcript = None;
+        self.transcript_items.clear();
+        self.transcript_bytes = 0;
+        self.transcript_answer.clear();
+        self.segment = Segment::None;
+        self.tools.clear();
+        self.unseated.clear();
+        self.committed_tool_calls.clear();
+        self.tool_cell = None;
+        self.quiet_loop_cell = None;
+        self.quiet_candidate = None;
+        self.turn_tally = TurnTally::default();
+        self.turn_checks.clear();
+        self.fold.clear();
+        self.history_tail = HistoryTail::Other;
+        self.last_commit = None;
+    }
+
     /// 대화가 갈렸다 — 열려 있던 스트림·도구 셀·상태를 놓는다.
     ///
     /// `/resume` 과 `/new` 가 세션을 갈아 끼우는 자리에서 부른다. 스크롤백은
@@ -1888,6 +1966,7 @@ impl Ui {
         self.turn_agent_count = 0;
         self.turn_tally = TurnTally::default();
         self.turn_checks.clear();
+        self.fold.clear();
         self.status = None;
         self.tool_status_detail = None;
         self.subagent_progress.clear();
@@ -1944,6 +2023,26 @@ impl Ui {
     /// 두 번째 값은 "꼬리가 칸을 쥐었는가" — 그때 codex 는 Working 줄을
     /// 감춘다(`sync_active_stream_tail` → `hide_status_indicator`).
     fn active_cell(&self, width: usize) -> (Vec<Line>, bool) {
+        let (cell, tail_owns_slot) = self.live_cell(width);
+        if !self.fold.is_pending() {
+            return (cell, tail_owns_slot);
+        }
+        // The `turns` view: the newest finished steps and the text it holds
+        // stand above whatever is live, so the work shows while it runs.
+        let mut rows = self.fold.live_rows(super::style::current().reading_width(width));
+        let held = self.fold.held();
+        if !held.is_empty() {
+            rows.extend(held.iter().cloned());
+        }
+        if !cell.is_empty() {
+            rows.extend(cell);
+        }
+        (rows, tail_owns_slot)
+    }
+
+    /// The one live cell: the running tool cell, the stream's unsettled tail,
+    /// a finished cell still open for its next call, or a quiet loop's row.
+    fn live_cell(&self, width: usize) -> (Vec<Line>, bool) {
         let elapsed = self.status.as_ref().map_or(Duration::ZERO, |status| status.elapsed);
         if let Some(cell) = self.tool_cell.as_ref().filter(|cell| cell.is_active()) {
             return (cell.lines(width, elapsed), false);
@@ -2135,6 +2234,24 @@ impl Ui {
             self.pending_history.extend(card);
             self.pending_history.extend(notes);
         }
+        // Whatever is said next is said after the work the `turns` view is
+        // holding: its fold goes in first, and the text it held under it.
+        if self.fold.is_pending() {
+            self.flush_fold();
+        }
+        self.push_history(lines);
+    }
+
+    /// [`Self::history`]'s last step: the rows into the frame's hand-over,
+    /// less the gap row a cell opens with when the band above already is one.
+    fn push_history(&mut self, lines: &[Line]) {
+        let lines = match (self.history_tail, lines.split_first()) {
+            (HistoryTail::UserBand, Some((gap, rest))) if *gap == Line::empty() => rest,
+            _ => lines,
+        };
+        if lines.is_empty() {
+            return;
+        }
         self.history_tail = HistoryTail::Other;
         if let Some(candidate) = self.quiet_candidate.as_mut() {
             candidate.extend_from_slice(lines);
@@ -2144,9 +2261,30 @@ impl Ui {
         self.pending_history.extend_from_slice(lines);
     }
 
+    /// Whether finished work is held for a fold instead of committed a row a
+    /// step — the `turns` view.
+    fn folding(&self) -> bool {
+        self.view == super::style::ConversationView::Turns
+    }
+
+    /// Say what the `turns` view held: the fold's one cell, then the text
+    /// that waited under it.
+    fn flush_fold(&mut self) {
+        let width = self.width();
+        let (cell, held) = self.fold.flush(width, Instant::now());
+        self.push_history(&cell);
+        self.push_history(&held);
+    }
+
     /// A committed tool cell into history. Right after another tool cell it
     /// leaves off the gap row it opens with ([`ToolGroup::committed`]).
-    fn commit_tool_rows(&mut self, mut lines: Vec<Line>) {
+    fn commit_tool_rows(&mut self, mut lines: Vec<Line>, steps: Vec<turns::Step>) {
+        // The `turns` view keeps a finished cell for its fold; a cell with
+        // nothing finished in it — a note the tool cell carried — is said.
+        if self.folding() && !steps.is_empty() {
+            self.fold.take_steps(steps);
+            return;
+        }
         if self.history_tail == HistoryTail::ToolCell
             && lines.first().is_some_and(|line| *line == Line::empty())
         {
@@ -2272,7 +2410,14 @@ impl Ui {
         let width = self.width();
         self.record_transcript(ReplayItem::User(text.to_string()));
         let cell = cells::user_cell(text, width);
+        // A band that closes on its own blank row is the gap before what
+        // follows it.
+        let banded = super::style::current().style == super::style::TuiStyle::Marks
+            && cell.last().is_some_and(|row| row.spans.is_empty() && row.style != Style::new());
         self.history(&cell);
+        if banded {
+            self.history_tail = HistoryTail::UserBand;
+        }
     }
 
     /// What the person said — or a peer, through `SendMessage` — drawn the one
@@ -2360,6 +2505,9 @@ impl Ui {
         // 접는다(결과 없이 끝난 호출은 codex `mark_failed` 처럼 닫힌다).
         self.close_segment();
         self.retire_tool_cell();
+        if self.fold.is_pending() {
+            self.flush_fold();
+        }
     }
 
     /// Codex's Ctrl/Alt-V path: clipboards can offer a Finder file list or
@@ -2757,6 +2905,7 @@ impl Ui {
                 }
                 KeyOutcome::Nothing
             }
+            KeyCode::Char('o') if control => KeyOutcome::TurnView,
             KeyCode::Char('u') if control => {
                 self.composer.kill_to_start();
                 KeyOutcome::Nothing
@@ -4531,7 +4680,9 @@ impl Ui {
                 // heading is the answer to "what is it doing", and hiding the
                 // thinking body must not also hide that.
                 self.absorb_reasoning_heading(id.0, &text, done);
-                if !self.flags.show_thinking {
+                // The `turns` view folds thinking with the rest of the work:
+                // its heading is on the working row, the block in Ctrl+T.
+                if !self.flags.show_thinking || self.folding() {
                     return;
                 }
                 self.open_reasoning(id.0);
@@ -4575,6 +4726,9 @@ impl Ui {
                 // 들어오면 활성 칸을 비우고(`flush_active_cell`) 그 자리에
                 // ExecCell 을 앉힌다. 칸은 하나다.
                 self.close_segment();
+                // A short text the `turns` view was holding said what this
+                // call is for: it goes with the fold, not into history.
+                self.fold.drop_preamble();
                 if self.may_take_the_live_slot(LiveSlotRequest::Tool(&kind)) {
                     self.open_tool(tool_call_id.0.clone(), kind.clone());
                 } else {
@@ -4764,7 +4918,7 @@ impl Ui {
                 let mut group = ToolGroup::new(ToolCall::new(AGENT_RESULT_ID.to_string(), kind));
                 group.complete(AGENT_RESULT_ID, outcome);
                 let cell = group.committed(width, &mut self.folds, self.fold_mode);
-                self.commit_tool_rows(cell);
+                self.commit_tool_rows(cell, group.steps());
             }
             RenderBlock::System { level, text, .. } => {
                 if let Some(steer) = text.strip_prefix(runtime::STEERING_ECHO_PREFIX) {
@@ -4904,6 +5058,7 @@ impl Ui {
         self.close_segment();
         self.flush_tool_cell();
         self.segment = Segment::Reasoning(id, MarkdownStream::reasoning(self.width()));
+        self.reasoning_started = Some(Instant::now());
         self.last_commit = None;
     }
 
@@ -4913,17 +5068,37 @@ impl Ui {
             Segment::Text(_, stream) => (stream.finish(), None),
             Segment::Reasoning(_, stream) => {
                 let tail = stream.finish();
-                // A headerless block — Anthropic thinking — commits as a
-                // titled, previewed (or folded) cell; a summary with codex's
-                // own heading keeps codex's cell.
-                let tail = if stream.finished_headerless_thinking() {
+                let headerless = stream.finished_headerless_thinking();
+                let transcript = stream.take_reasoning_transcript();
+                let tail = if self.thinking_line {
+                    // One row says the block happened; Ctrl+T keeps it whole.
+                    let took = self.reasoning_started.take().map(|began| began.elapsed());
+                    let about = self.reasoning_about.take().or_else(|| {
+                        transcript
+                            .as_deref()
+                            .and_then(|text| thinking::live_heading(text, thinking::LIVE_HEADING_MAX_COLUMNS))
+                    });
+                    thinking::one_line(about.as_deref(), took, self.painter.cols() as usize)
+                } else if headerless {
+                    // A headerless block — Anthropic thinking — commits as a
+                    // titled, previewed (or folded) cell; a summary with
+                    // codex's own heading keeps codex's cell.
                     thinking::cell(tail, self.fold_mode, &mut self.folds)
                 } else {
                     tail
                 };
-                (tail, stream.take_reasoning_transcript())
+                (tail, transcript)
             }
         };
+        if matches!(self.segment, Segment::Text(..)) {
+            // While the block is still the open segment, so its last rows
+            // are held or passed as the rest of it was.
+            self.say_stream(tail);
+            self.fold.text_closed();
+            self.segment = Segment::None;
+            self.last_commit = None;
+            return;
+        }
         self.segment = Segment::None;
         self.last_commit = None;
         if let Some(reasoning) = reasoning {
@@ -5038,7 +5213,7 @@ impl Ui {
             orphan.complete(id, outcome);
             let width = self.width();
             let cell = orphan.committed(width, &mut self.folds, self.fold_mode);
-            self.commit_tool_rows(cell);
+            self.commit_tool_rows(cell, orphan.steps());
             self.committed_tool_calls.insert(id.to_string());
             self.seat_waiting_tools();
             return;
@@ -5088,7 +5263,7 @@ impl Ui {
             .extend(cell.call_ids().map(str::to_string));
         let width = self.width();
         let lines = cell.committed(width, &mut self.folds, self.fold_mode);
-        self.commit_tool_rows(lines);
+        self.commit_tool_rows(lines, cell.steps());
     }
 
     /// 훅 보고용 관찰 — 블록을 소비하지 않는다.
@@ -5344,6 +5519,11 @@ impl App {
                 picker: None,
                 sessions: None,
                 start: None,
+                view: super::style::current().view,
+                fold: turns::TurnFold::default(),
+                thinking_line: super::style::current().thinking_line,
+                reasoning_started: None,
+                reasoning_about: None,
                 start_notes: Vec::new(),
             session_scan: None,
             session_scan_cancel: std::sync::Arc::default(),
@@ -5489,6 +5669,7 @@ impl App {
                             KeyOutcome::Recovery(session, action) => self.apply_recovery_key(&session, &action),
                             KeyOutcome::ReviewChanges(index) => self.open_recorded_changes(Some(index)),
                             KeyOutcome::CancelOpening => self.cancel_opening(),
+                            KeyOutcome::TurnView => self.turn_view(),
                             KeyOutcome::Nothing => {}
                         }
                         self.drive_autonomy(&mut events).await;
@@ -5891,6 +6072,32 @@ impl App {
     /// `handle_thread_session` → `on_session_configured_with_display…` 의
     /// `SessionConfiguredDisplay::Normal` 갈래라 `new_session_info` 로 만든
     /// 헤더 상자를 히스토리에 **다시** 커밋한 뒤 턴을 재생한다.
+    /// `ctrl+o`: draw the conversation in its other view — folded turns, or a
+    /// row a step. The scrollback cannot be rewritten, so the screen is
+    /// cleared and the session's saved turns are drawn again, as a restore
+    /// draws them; nothing of the session itself changes.
+    fn turn_view(&mut self) {
+        if super::style::current().style != super::style::TuiStyle::Marks {
+            return;
+        }
+        self.ui.view = self.ui.view.other();
+        let word = match self.ui.view {
+            super::style::ConversationView::Turns => super::strings::VIEW_TURNS,
+            super::style::ConversationView::Full => super::strings::VIEW_FULL,
+        };
+        if self.ui.start.is_some() {
+            // An empty conversation has nothing to redraw; the page stays.
+            self.ui.hold_start_note(SystemLevel::Info, word);
+            return;
+        }
+        self.ui.flush_history();
+        self.ui.painter.clear_terminal();
+        self.ui.forget_drawn();
+        self.session_card();
+        self.replay_history();
+        self.ui.note(SystemLevel::Info, word);
+    }
+
     fn session_card(&mut self) {
         // A card is the start page's end: whoever commits one has left the
         // empty conversation, and takes what was said on the page with it.
@@ -7132,6 +7339,11 @@ impl App {
         // 아직 열린 도구 셀은 여기서 접힌다 — 도는 것이 남아 있으면 codex 의
         // `mark_failed` 로 닫고 커밋한다.
         ui.retire_tool_cell();
+        // The turn is over: the `turns` view says the work it held, and the
+        // text it held under it is the answer.
+        if ui.fold.is_pending() {
+            ui.flush_fold();
+        }
         if let Some(parked) = ui.parked.take() {
             parked.prompt.dismiss();
         }
@@ -7563,6 +7775,11 @@ fn test_ui() -> Ui {
         picker: None,
         sessions: None,
         start: None,
+        view: super::style::ConversationView::Full,
+        fold: turns::TurnFold::default(),
+        thinking_line: false,
+        reasoning_started: None,
+        reasoning_about: None,
         start_notes: Vec::new(),
             session_scan: None,
             session_scan_cancel: std::sync::Arc::default(),
@@ -8585,6 +8802,91 @@ mod tests {
 
     fn history(ui: &super::Ui) -> Vec<String> {
         ui.pending_history.iter().map(Line::plain).collect()
+    }
+
+    /// A read and a command, as the stream brings them, then their results.
+    fn read_then_run(ui: &mut super::Ui, ids: &BlockIdGen) {
+        use runtime::message_stream::types::ToolResultBody;
+        let result = |ids: &BlockIdGen, call: &str, content: &str| RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId(call.to_string()),
+            is_error: false,
+            body: ToolResultBody::Text { content: content.to_string(), truncated: false },
+        };
+        ui.block(tool_call(ids, "toolu_read", "read_file", &json!({ "path": "src/parser.rs" })));
+        ui.block(result(ids, "toolu_read", "fn parse() {}\n"));
+        ui.block(tool_call(ids, "toolu_run", "bash", &json!({ "command": "cargo test parser" })));
+        ui.block(result(ids, "toolu_run", "test result: ok\n"));
+    }
+
+    fn says(ui: &mut super::Ui, ids: &BlockIdGen, words: &str) {
+        ui.block(RenderBlock::TextDelta { id: ids.next(), text: format!("{words}\n"), done: true });
+    }
+
+    /// The `turns` view: finished calls are held for one cell, a short text
+    /// before a call goes with it, and what the turn says last stands under
+    /// the fold.
+    #[test]
+    fn the_turns_view_folds_a_turns_work_above_its_answer() {
+        let mut ui = test_ui();
+        ui.view = super::super::style::ConversationView::Turns;
+        let ids = BlockIdGen::default();
+        says(&mut ui, &ids, "I will read the parser first.");
+        read_then_run(&mut ui, &ids);
+        assert!(history(&ui).is_empty(), "nothing is said while the work runs: {:#?}", history(&ui));
+        says(&mut ui, &ids, "Fixed.");
+        assert!(ui.fold.has_steps(), "the finished cell went to the fold when the answer opened");
+        assert!(history(&ui).is_empty(), "a short text waits to learn what it is: {:#?}", history(&ui));
+        // The viewport shows the work while it is held.
+        let live: Vec<String> = ui.active_cell(80).0.iter().map(Line::plain).collect();
+        assert!(live.iter().any(|row| row.contains("Read src/parser.rs")), "{live:#?}");
+        assert!(live.iter().any(|row| row.contains("Fixed.")), "{live:#?}");
+
+        // The turn's end.
+        ui.close_segment();
+        ui.retire_tool_cell();
+        ui.flush_fold();
+        let said = history(&ui);
+        let worked = said.iter().position(|row| row.contains("Worked")).expect("the fold's row");
+        assert!(said[worked].contains("2 steps"), "{said:#?}");
+        assert!(said[worked + 1].contains("Read 1 file"), "{said:#?}");
+        assert!(said[worked + 2].contains("Ran cargo test parser"), "{said:#?}");
+        let answer = said.iter().position(|row| row.contains("Fixed.")).expect("the answer");
+        assert!(answer > worked + 2, "the answer stands under the fold: {said:#?}");
+        assert!(!said.iter().any(|row| row.contains("I will read the parser first.")), "the preamble went with the fold");
+        assert!(!said.iter().any(|row| row.contains("Read src/parser.rs")), "no row a step: {said:#?}");
+        assert!(!ui.fold.is_pending());
+    }
+
+    /// A text that outgrows the hold is an answer already: the work before it
+    /// is said first, then the text, in the order they happened.
+    #[test]
+    fn a_long_text_in_the_turns_view_goes_in_under_the_work_before_it() {
+        let mut ui = test_ui();
+        ui.view = super::super::style::ConversationView::Turns;
+        let ids = BlockIdGen::default();
+        read_then_run(&mut ui, &ids);
+        let long = (1..=8).map(|n| format!("paragraph {n}")).collect::<Vec<_>>().join("\n\n");
+        says(&mut ui, &ids, &long);
+        let said = history(&ui);
+        let worked = said.iter().position(|row| row.contains("Worked")).expect("the fold went in");
+        let first = said.iter().position(|row| row.contains("paragraph 1")).expect("the text went in");
+        assert!(first > worked, "{said:#?}");
+        assert!(said.iter().any(|row| row.contains("paragraph 8")), "{said:#?}");
+        assert!(!ui.fold.is_pending(), "nothing is held once an answer passed");
+    }
+
+    /// The full view commits a row a step, as it always did.
+    #[test]
+    fn the_full_view_commits_a_row_a_step() {
+        let mut ui = test_ui();
+        let ids = BlockIdGen::default();
+        read_then_run(&mut ui, &ids);
+        says(&mut ui, &ids, "Fixed.");
+        let said = history(&ui);
+        assert!(said.iter().any(|row| row.contains("Read") && row.contains("src/parser.rs")), "{said:#?}");
+        assert!(said.iter().any(|row| row.contains("Fixed.")), "{said:#?}");
+        assert!(!said.iter().any(|row| row.contains("Worked")), "{said:#?}");
     }
 
     /// Two questions in turn: a tab each and the focused option's preview,

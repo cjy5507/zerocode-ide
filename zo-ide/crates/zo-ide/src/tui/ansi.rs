@@ -170,6 +170,19 @@ impl Style {
         self
     }
 
+    /// This span's style on a row whose style is `line`: the row's colours
+    /// and attributes laid over the span's — codex's merge, so the escapes
+    /// carry the row's background — except that a background the span set
+    /// for itself stands. That is a changed word on a changed row's band.
+    #[must_use]
+    pub fn on_line(self, line: Self) -> Self {
+        let mut merged = self.patch(line);
+        if self.bg.is_some() {
+            merged.bg = self.bg;
+        }
+        merged
+    }
+
     /// `other` 의 켜진 속성·색을 덮어씌운다 (ratatui `patch` 대응).
     #[must_use]
     pub fn patch(mut self, other: Self) -> Self {
@@ -317,6 +330,12 @@ pub struct Line {
     /// A row of a code block. With `codeBlocksFlush` a cell draws it from
     /// column 0, without the cell's prefix ([`super::cells::prefixed`]).
     pub code: bool,
+    /// A row laid out for the pane's whole width — a table's — which the
+    /// reading width does not cut ([`super::cells::prefixed`]).
+    pub wide: bool,
+    /// The widest this line is drawn when it is wrapped again: the reading
+    /// width it was first wrapped to. `None` wraps to the screen.
+    pub measure: Option<u16>,
 }
 
 impl Line {
@@ -330,6 +349,8 @@ impl Line {
             continuation: None,
             origin: None,
             code: false,
+            wide: false,
+            measure: None,
         }
     }
 
@@ -448,6 +469,8 @@ impl Line {
             continuation: self.continuation,
             origin: None,
             code: self.code,
+            wide: self.wide,
+            measure: self.measure,
         }
     }
 }
@@ -702,7 +725,7 @@ pub fn write_spans_for_palette(
         if changes && open.is_some() {
             close_hyperlink(out);
         }
-        writer.transition(span.style.patch(line.style), out);
+        writer.transition(span.style.on_line(line.style), out);
         if changes {
             if let Some(target) = target {
                 open_hyperlink(target, out);

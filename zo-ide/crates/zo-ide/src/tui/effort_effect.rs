@@ -335,6 +335,8 @@ fn clip_line(line: Line, width: usize) -> Line {
         continuation: None,
         origin: None,
         code: false,
+        wide: false,
+        measure: None,
     }
 }
 

@@ -98,6 +98,7 @@ fn groups(running: bool) -> [Group; 3] {
             title: "Transcript (open first)",
             entries: vec![
                 ("ctrl+t", "Open transcript"),
+                (super::strings::KEY_VIEW, "Turns / full view"),
                 ("/find", "Search saved history"),
                 ("/diff", "Review changes"),
                 ("/rewind", "Recover a turn"),

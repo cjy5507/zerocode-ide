@@ -41,6 +41,7 @@
 //! | [`question`] | `AskUserQuestion` 오버레이의 재료(codex `request_user_input`) |
 //! | [`sessions`] | 최근 세션 목록(`/resume` 피커) |
 //! | [`start`] | 빈 대화의 시작 화면(가운데 입력창·이어 할 대화) |
+//! | [`turns`] | 차례 보기 — 턴의 작업을 한 칸으로 접는다(`ctrl+o` 로 전체 보기) |
 //! | [`view`] | 뷰포트 레이아웃(상태·컴포저·푸터·다이얼로그) |
 //! | [`paths`] | 부팅 카드 경로의 가운데 자르기 |
 //! | [`painter`] | 스크롤 영역 삽입과 뷰포트 그리기 |
@@ -102,6 +103,7 @@ pub mod tools;
 pub mod transcript;
 mod transcript_source;
 pub mod tty;
+pub mod turns;
 pub mod view;
 pub mod warnings;
 pub mod wire_model;
