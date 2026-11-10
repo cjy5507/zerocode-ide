@@ -7886,13 +7886,23 @@ mod tests {
     #[test]
     fn a_rebuild_keeps_the_turning_rings_where_they_stood() {
         let window = window_source();
+        let pinning = block_after(window, "function pinSharedTurns(root) {");
+        assert!(
+            pinning.contains("root.getAnimations({ subtree: true })")
+                && pinning.contains("SHARED_TURNS.has(turn.animationName)")
+                && pinning.contains("turn.startTime = 0"),
+            "the turns are no longer pinned to the document's clock, so a rebuilt \
+             ring starts again from the top:\n{pinning}"
+        );
+        // Reduced motion stills the sidebar's rings, so its roads do not ask the animations for
+        // nothing (review t-103290 N4); the late road still pins what says it started.
         let keeping = block_after(window, "function keepTurnsInStep(root) {");
         assert!(
-            keeping.contains("root.getAnimations({ subtree: true })")
-                && keeping.contains("SHARED_TURNS.has(turn.animationName)")
-                && keeping.contains("turn.startTime = 0"),
-            "the turns are no longer pinned to the document's clock, so a rebuilt \
-             ring starts again from the top:\n{keeping}"
+            window.contains(
+                r#"const SIDEBAR_TURNS_STILL = window.matchMedia("(prefers-reduced-motion: reduce)");"#
+            ) && keeping.contains("if (SIDEBAR_TURNS_STILL.matches) return;")
+                && keeping.contains("pinSharedTurns(root);"),
+            "the sidebar's roads ask the animations under reduced motion, or no longer pin:\n{keeping}"
         );
         assert!(
             window.contains(
@@ -7901,7 +7911,10 @@ mod tests {
             "the turns pinned to one clock no longer name the card's ring and the agent rows' ring"
         );
         assert!(
-            window.contains(r#"document.addEventListener("animationstart", (event) => {"#),
+            window.contains(r#"document.addEventListener("animationstart", (event) => {"#)
+                && window.contains(
+                    "if (SHARED_TURNS.has(event.animationName)) pinSharedTurns(event.target);"
+                ),
             "a turn that starts on a standing node is never pinned, so the next rebuild moves it"
         );
         let refreshing = block_after(window, "async function refreshWorktrees() {");

@@ -12846,7 +12846,6 @@ function paintWorktreeAgents() {
       + `|review:${waiting}`;
     if (host.dataset.said === signature) continue;
     host.dataset.said = signature;
-    stirred.push(host);
     dressWorktreeReviewFoot(host, waiting);
     dressWorktreeTwist(host.previousElementSibling, path, hidden);
     dressWorktreeTitle(host.previousElementSibling);
@@ -12858,8 +12857,10 @@ function paintWorktreeAgents() {
       // children replace the quiet seat with the real chevron in place.
       if (!redressAgentRows(host, rows)) {
         swapAgentRows(host, fittedOrMadeAgentSlots(host, rows), leaving);
+        stirred.push(host);
       }
     } else {
+      stirred.push(host);
       swapAgentRows(host, [
         ...deadSummary.rows.map(({ kind, row }) => kind === "finished"
           ? makeFinishedWorkRow(path, row)
@@ -12872,7 +12873,12 @@ function paintWorktreeAgents() {
     // Visibility uses the full, pre-slice totals. A collapsed card still has
     // content and must keep its handle; only a genuinely empty card hides the
     // host (a restore-waiting row also keeps it visible).
-    host.hidden = all.length + deadSummary.total === 0 && !restoring;
+    const hide = all.length + deadSummary.total === 0 && !restoring;
+    // Words written in place start no ring: a row's state is in its classes, so a row whose state moved is built
+    // (`fittedAgentRowWords`). Only a card whose rows were swapped, or whose rows came or went from view — that
+    // uncovers or covers its own ring — is pinned (review t-103290 N2).
+    if (host.hidden !== hide && stirred.at(-1) !== host) stirred.push(host);
+    host.hidden = hide;
     // The branch line's standing is one decision (`dressWorktreeTitle`): a name the title already said and a base chip.
     // 「에이전트 창 없음」 is no longer one of its parts: it stands once on the project's head (t-84799 A1).
     dressWorktreeTitle(host.previousElementSibling);

@@ -5109,10 +5109,18 @@ function turningDotClass(base, state) {
  * builds — and so does the dot painter for a row that just began working,
  * whose card ring starts on a node that stands (review t-102958 #2). Any turn
  * none of them reached is pinned when it says it started, a frame late.
- * Reduced motion names no animation, so there is nothing here to pin. */
+ * Reduced motion stills both of the sidebar's rings (`animation: none`), so the
+ * sidebar's roads return at once: asked anyway, every paint brought the style
+ * forward to find nothing to pin (review t-103290 N4). */
 const SHARED_TURNS = new Set(["wt-activity-turn", "wt-agent-spin"]);
+const SIDEBAR_TURNS_STILL = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 function keepTurnsInStep(root) {
+  if (SIDEBAR_TURNS_STILL.matches) return;
+  pinSharedTurns(root);
+}
+
+function pinSharedTurns(root) {
   if (typeof root?.getAnimations !== "function") return;
   for (const turn of root.getAnimations({ subtree: true })) {
     if (SHARED_TURNS.has(turn.animationName) && turn.startTime !== 0) turn.startTime = 0;
@@ -5125,9 +5133,11 @@ function keepTurnsInStep(root) {
  * spinner pinned to the same clock ticks in step with its row instead of a beat apart; a board repaint does not
  * send its spinners back to the top either. It costs a name looked up in a set for every other animation, and one
  * `getAnimations` on the node for a turn that is pinned. The sidebar's own rebuilds still pin what they build
- * before a frame is drawn — this listener is the late road, a frame after the turn has started. */
+ * before a frame is drawn — this listener is the late road, a frame after the turn has started. It pins whatever
+ * says it started, reduced motion or not: the board's spinner keeps turning there, and a turn that started is one
+ * there is to pin. */
 document.addEventListener("animationstart", (event) => {
-  if (SHARED_TURNS.has(event.animationName)) keepTurnsInStep(event.target);
+  if (SHARED_TURNS.has(event.animationName)) pinSharedTurns(event.target);
 });
 
 /* Waking forgets the step it slept on, so the first frame back always writes:

@@ -1,4 +1,4 @@
-import { openWindowTestPage } from "./window-boot.mjs";
+import { openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
 import { afterTurns } from "./conversation-after.mjs";
 import { openPaneConversation, standZo } from "./conversation-parity.mjs";
 
@@ -164,6 +164,90 @@ export async function testSidebarAgents({ browser, origin, ok, faults }) {
       "one agent of a card changing shape rebuilds only its own row: the lead's row keeps its node, in place, never taken out",
       keyed.leadBefore && keyed.mateBefore && keyed.leadSame && !keyed.leadTaken && keyed.mateChanged && keyed.taken > 0,
       JSON.stringify(keyed),
+    );
+
+    /* A paint that only rewrote words asks no animations (review t-103290 N2, N4). A row's state is in its classes,
+     * so words written in place start no ring, and asking brought the style forward on every hook's paint for nothing.
+     * Under reduced motion both of the sidebar's rings stand still, so a paint that swapped rows asks nothing either.
+     * Counted on the sidebar's own nodes; a row that changes shape is the control that the count sees an ask. */
+    const asking = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const term = await openTermTab({ placement: "tab" });
+      const owner = tabOfTerm(term);
+      const path = owner.worktree;
+      const host = () => document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`);
+      const row = () => host()?.querySelector('.wt-agent[data-sub="asked-1"]') ?? null;
+      const helper = (state, uses) => tell("hook:subagent", { term, rows: [
+        { id: "asked-1", name: "explore·asked", state, tool_calls: uses },
+      ] });
+      paneAgents.set(term, "zo");
+      tell("hook:agent", { term, state: "working", agent: "zo", session: "zo-asked-lead" });
+      helper("running", 4);
+      await focusAgentPane(path, owner.id, term, "zo");
+      await window.__PAINTED__();
+      const own = Element.prototype.getAnimations;
+      window.__TURN_ASKS__ = { own, count: 0, term };
+      Element.prototype.getAnimations = function (...args) {
+        if (worktreeList.contains(this)) window.__TURN_ASKS__.count += 1;
+        return own.apply(this, args);
+      };
+      const before = row();
+      const usesBefore = before?.querySelector(".wt-agent-uses")?.textContent ?? "";
+      window.__TURN_ASKS__.count = 0;
+      helper("running", 5);
+      flushAgentPaint();
+      const words = {
+        asks: window.__TURN_ASKS__.count,
+        same: before !== null && row() === before && before.isConnected,
+        uses: [usesBefore, row()?.querySelector(".wt-agent-uses")?.textContent ?? ""],
+      };
+      window.__TURN_ASKS__.count = 0;
+      helper("done", 5);
+      flushAgentPaint();
+      const shape = { asks: window.__TURN_ASKS__.count, built: row() !== before };
+      await window.__PAINTED__();
+      return { words, shape };
+    });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const still = await page.evaluate(async () => {
+      const { term } = window.__TURN_ASKS__;
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const host = document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(tabOfTerm(term).worktree)}"]`);
+      const said = host?.dataset.said ?? "";
+      window.__TURN_ASKS__.count = 0;
+      tell("hook:subagent", { term, rows: [{ id: "asked-1", name: "explore·asked", state: "running", tool_calls: 6 }] });
+      flushAgentPaint();
+      return { asks: window.__TURN_ASKS__.count, painted: (host?.dataset.said ?? "") !== said };
+    });
+    await page.emulateMedia({ reducedMotion: WINDOW_MOTION_REST });
+    await page.evaluate(async () => {
+      const { own, term } = window.__TURN_ASKS__;
+      Element.prototype.getAnimations = own;
+      delete window.__TURN_ASKS__;
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      tell("hook:subagent", { term, rows: [] });
+      tell("term:exited", { term });
+      window.__PANES__ = [];
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+      await window.__PAINTED__();
+    });
+    ok(
+      "a paint that only rewrote a row's words asks the sidebar's animations nothing; a row that changed shape is pinned",
+      asking.words.same && asking.words.uses[0] !== asking.words.uses[1] && asking.words.asks === 0 &&
+        asking.shape.built && asking.shape.asks > 0,
+      JSON.stringify(asking),
+    );
+    ok(
+      "under reduced motion a paint that swapped a card's rows asks the sidebar's animations nothing: both rings stand still",
+      still.painted && still.asks === 0,
+      JSON.stringify(still),
     );
 
     /* Two rows that change places keep their nodes (review t-102958 #5): a card whose rows only moved is not rebuilt —
