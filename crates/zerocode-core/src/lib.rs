@@ -110,6 +110,7 @@ pub mod remote_control;
 pub mod repo_mark;
 pub mod repo_trust;
 pub mod review;
+pub mod rollout_digest;
 pub mod scm_observer;
 pub mod scm_tree;
 pub mod screen_action;

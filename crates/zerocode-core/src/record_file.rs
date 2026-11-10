@@ -80,6 +80,18 @@ pub fn read_to_string(path: &Path) -> io::Result<String> {
     Ok(text)
 }
 
+/// `bytes` as a record compressed where it lies: one zstd frame, which
+/// [`open`] reads back under a name [`is_compressed`] knows.
+///
+/// For what this application writes for itself and reads through the same
+/// door — the digest of a Codex rollout ([`crate::rollout_digest`]). The
+/// encoder is the decoder's sibling in the same crate, its fastest level the
+/// only one it has; a record a CLI wrote is never rewritten with it.
+#[must_use]
+pub fn compressed(bytes: &[u8]) -> Vec<u8> {
+    ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+}
+
 /// A record being read, plain or through its frames — boxed, since a frame
 /// decoder's tables are kilobytes and a plain file is a descriptor.
 pub enum RecordReader {
@@ -195,6 +207,28 @@ pub(crate) mod fixture {
 mod tests {
     use super::fixture::{FRAME_A, FRAME_B, LINES_A, LINES_B, bytes};
     use super::*;
+
+    /// What this application compresses for itself is read back whole
+    /// through the door every record is read through.
+    #[test]
+    fn what_is_compressed_here_is_read_back_by_the_same_door() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let text = format!("{}{}", LINES_A.repeat(40), LINES_B);
+        let squeezed = compressed(text.as_bytes());
+        assert!(
+            squeezed.len() < text.len(),
+            "{} of {}",
+            squeezed.len(),
+            text.len()
+        );
+        let path = dir.path().join("digest.jsonl.zst");
+        std::fs::write(&path, &squeezed).expect("write");
+        assert!(is_compressed(&path));
+        assert_eq!(read_to_string(&path).expect("read"), text);
+        // Nothing at all is a frame too.
+        std::fs::write(&path, compressed(b"")).expect("write");
+        assert_eq!(read_to_string(&path).expect("read"), "");
+    }
 
     /// A skippable frame (RFC 8878 §3.1.2): one of the sixteen magic numbers,
     /// a little-endian length, then that many bytes a decoder steps over.

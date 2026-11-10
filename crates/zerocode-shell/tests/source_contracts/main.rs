@@ -5384,12 +5384,23 @@ mod tests {
         // The scan claims records across the WHOLE walk: a fork copies earlier
         // `token_count` records byte for byte, and a per-file claim set would
         // bill that work once for the original and again for every fork.
+        // The walk itself is `codex_scan_of` — the roots handed in, so it can
+        // be read apart from where a machine keeps its rollouts — and the door
+        // above reaches it through `codex_start`, with the digests of rollouts
+        // at rest (`token_scan::Digests`).
         let scan = include_str!("../../src/usage_stats_scan.rs");
-        let walking = block_after(scan, "pub fn codex_scan(");
+        let walking = block_after(scan, "fn codex_scan_of(");
         assert!(
             walking.contains("let mut claimed: HashSet<String> = HashSet::new();")
                 && walking.contains("found.sort();"),
             "the Codex scan lost its shared claim set or its stable order:\n{walking}"
+        );
+        // One claim set for the scan whichever way a rollout is read: whole,
+        // or through its kept digest.
+        assert!(
+            walking.contains("RolloutReader::new(stem, &mut claimed)")
+                && walking.contains("for_each_rollout_line(&path, digests,"),
+            "a rollout read through its digest no longer shares the scan's claim set:\n{walking}"
         );
 
         // The window switches BOTH the numbers and the labels together. A

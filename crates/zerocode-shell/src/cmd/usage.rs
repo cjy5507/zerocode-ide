@@ -51,11 +51,16 @@ pub(crate) async fn codex_token_usage(
     offset_minutes: i32,
 ) -> Result<codex_tokens::CodexScan, String> {
     let projects = known_project_roots(&state);
+    let local_data_root = state.local_data_root().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let mut places = usage_places::Places::new(workspace_roots(projects));
-        home.map(|home| codex_tokens::scan(&home, offset_minutes, &mut places))
-            .ok_or_else(|| "홈 디렉터리를 찾지 못했습니다".to_string())
+        // A rollout at rest is read once: what the scan takes of it is kept.
+        let digests = token_scan::Digests::under(&local_data_root);
+        home.map(|home| {
+            codex_tokens::scan_through(&home, offset_minutes, &mut places, Some(&digests))
+        })
+        .ok_or_else(|| "홈 디렉터리를 찾지 못했습니다".to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -143,6 +148,7 @@ pub(crate) fn codex_usage_stats(
     if force || held.is_none() {
         usage_stats_scan::codex_start(
             state.config_root().to_path_buf(),
+            state.local_data_root().to_path_buf(),
             managed_worktrees(&state),
             offset_minutes,
             now,

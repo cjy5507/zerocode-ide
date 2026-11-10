@@ -256,12 +256,9 @@ pub struct CodexScan {
     pub capped: bool,
 }
 
-/// Reads every rollout under every Codex root and merges the answer.
-///
-/// The claim set is shared across the whole scan rather than per file: a fork
-/// copies earlier `token_count` records byte for byte into its new rollout,
-/// and a per-file set would bill that work once for the original and again
-/// for every fork of it.
+/// [`codex_scan_through`] with no digests kept: every rollout read whole —
+/// the answer the tests and the measuring runs hold the kept road to.
+#[cfg(test)]
 #[must_use]
 pub fn codex_scan(
     config_root: &Path,
@@ -269,15 +266,53 @@ pub fn codex_scan(
     offset_minutes: i32,
     now_ms: i64,
 ) -> CodexScan {
+    codex_scan_through(config_root, worktrees, offset_minutes, now_ms, None)
+}
+
+/// Reads every rollout under every Codex root and merges the answer — each
+/// rollout at rest through its kept digest ([`crate::token_scan::Digests`])
+/// when `digests` are given: the same ledger, without decoding every rollout
+/// again for it.
+///
+/// The claim set is shared across the whole scan rather than per file: a fork
+/// copies earlier `token_count` records byte for byte into its new rollout,
+/// and a per-file set would bill that work once for the original and again
+/// for every fork of it.
+#[must_use]
+pub(crate) fn codex_scan_through(
+    config_root: &Path,
+    worktrees: &[WorktreeRef],
+    offset_minutes: i32,
+    now_ms: i64,
+    digests: Option<&crate::token_scan::Digests>,
+) -> CodexScan {
+    codex_scan_of(
+        &codex_roots(config_root),
+        worktrees,
+        offset_minutes,
+        now_ms,
+        digests,
+    )
+}
+
+/// [`codex_scan_through`] over the roots it was handed, so the walk can be
+/// read apart from where a machine keeps its rollouts.
+fn codex_scan_of(
+    roots: &[PathBuf],
+    worktrees: &[WorktreeRef],
+    offset_minutes: i32,
+    now_ms: i64,
+    digests: Option<&crate::token_scan::Digests>,
+) -> CodexScan {
     let mut budget = MAX_FILES;
     let mut claimed: HashSet<String> = HashSet::new();
     let mut ledger = codex_stats::Ledger::default();
     let mut files = 0usize;
-    for root in codex_roots(config_root) {
+    for root in roots {
         // Oldest first, so the ORIGINAL of a copied record is the one that
         // claims it and the fork is the copy — the other order would file a
         // session's early turns under whichever fork happened to sort first.
-        let mut found = transcripts(&root, &mut budget, true);
+        let mut found = transcripts(root, &mut budget, true);
         found.sort();
         for path in found {
             files += 1;
@@ -286,7 +321,7 @@ pub fn codex_scan(
             // place decodes to hundreds of megabytes, and the shared reader
             // skips a line past its cap the way the token scan does.
             let mut reader = codex_stats::RolloutReader::new(stem, &mut claimed);
-            crate::token_scan::for_each_line(&path, |line| {
+            crate::token_scan::for_each_rollout_line(&path, digests, |line| {
                 reader.line(line.trim_end_matches(['\n', '\r']));
             });
             let events = reader.finish();
@@ -298,6 +333,9 @@ pub fn codex_scan(
                 codex_stats::aggregate(events, worktrees, offset_minutes),
             );
         }
+    }
+    if let Some(digests) = digests {
+        digests.sweep();
     }
     codex_stats::finalize(&mut ledger);
     CodexScan {
@@ -327,19 +365,114 @@ pub fn codex_scanning() -> bool {
     CODEX.running()
 }
 
-/// Starts a Codex scan unless one is already running.
+/// Starts a Codex scan unless one is already running. The rollouts at rest
+/// are read through the digests kept under `local_data_root`.
 pub fn codex_start(
     config_root: PathBuf,
+    local_data_root: PathBuf,
     worktrees: Vec<WorktreeRef>,
     offset_minutes: i32,
     now_ms: i64,
 ) -> bool {
-    CODEX.start(move || codex_scan(&config_root, &worktrees, offset_minutes, now_ms))
+    CODEX.start(move || {
+        let digests = crate::token_scan::Digests::under(&local_data_root);
+        codex_scan_through(
+            &config_root,
+            &worktrees,
+            offset_minutes,
+            now_ms,
+            Some(&digests),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ledger is the same read whole, read while the digests are being
+    /// made, and read from the digests kept — a fork's copied records claimed
+    /// once either way.
+    #[test]
+    fn the_codex_ledger_is_the_same_whole_and_through_digests() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let day = root.path().join("2026").join("05").join("30");
+        std::fs::create_dir_all(&day).expect("mkdir");
+        let usage = |times: u64| {
+            serde_json::json!({
+                "input_tokens": 1200 * times, "cached_input_tokens": 1000 * times,
+                "output_tokens": 80 * times, "reasoning_output_tokens": 30 * times,
+                "total_tokens": 1280 * times,
+            })
+        };
+        let spent = |at: &str, turns: u64| {
+            serde_json::json!({
+                "timestamp": at, "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": { "total_token_usage": usage(turns), "last_token_usage": usage(1) },
+                    "rate_limits": { "primary": { "used_percent": 1.5 } },
+                },
+            })
+            .to_string()
+        };
+        let header = |id: &str, cwd: &str| {
+            serde_json::json!({
+                "timestamp": "2026-05-30T01:00:00.000Z", "type": "session_meta",
+                "payload": { "id": id, "cwd": cwd, "instructions": "y".repeat(300) },
+            })
+            .to_string()
+        };
+        let model = r#"{"timestamp":"2026-05-30T01:00:00.500Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#;
+        let original = [
+            header("s-1", "/work/app"),
+            model.to_string(),
+            spent("2026-05-30T01:00:01.000Z", 1),
+            r#"{"type":"response_item","payload":{"type":"message","content":"…"}}"#.to_string(),
+            spent("2026-05-30T01:00:02.000Z", 2),
+        ];
+        let fork = [
+            header("s-2", "/work/app"),
+            model.to_string(),
+            spent("2026-05-30T01:00:01.000Z", 1),
+            spent("2026-05-30T01:00:02.000Z", 2),
+            spent("2026-05-31T09:00:00.000Z", 3),
+        ];
+        for (name, lines) in [
+            ("rollout-2026-05-30-a.jsonl.zst", &original),
+            ("rollout-2026-05-31-b.jsonl.zst", &fork),
+        ] {
+            let squeezed = ruzstd::encoding::compress_to_vec(
+                lines.join("\n").as_bytes(),
+                ruzstd::encoding::CompressionLevel::Fastest,
+            );
+            std::fs::write(day.join(name), squeezed).expect("write");
+        }
+        let roots = [root.path().to_path_buf()];
+        let said = |scan: &CodexScan| serde_json::to_value(scan).expect("JSON");
+        let whole = codex_scan_of(&roots, &[], 0, 7, None);
+        assert_eq!(whole.files, 2);
+        let printed = said(&whole).to_string();
+        assert!(printed.contains("gpt-5.5"), "{printed}");
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let through = || {
+            let digests = crate::token_scan::Digests::under(data.path());
+            codex_scan_of(&roots, &[], 0, 7, Some(&digests))
+        };
+        assert_eq!(
+            said(&through()),
+            said(&whole),
+            "read while the digests were made"
+        );
+        assert_eq!(
+            std::fs::read_dir(data.path().join("codex-rollout-digests"))
+                .expect("the digests")
+                .count(),
+            2
+        );
+        assert_eq!(said(&through()), said(&whole), "read from the digests kept");
+    }
 
     /// The Codex scan walks the rollouts Codex compressed where they lay
     /// (`….jsonl.zst`, 0.164) as well as the plain ones; the Claude scan,

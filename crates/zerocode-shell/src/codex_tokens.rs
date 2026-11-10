@@ -236,7 +236,13 @@ struct Tally {
     undated: u64,
 }
 
-fn absorb_rollout(path: &Path, offset_minutes: i32, tally: &mut Tally, places: &mut Places) {
+fn absorb_rollout(
+    path: &Path,
+    offset_minutes: i32,
+    tally: &mut Tally,
+    places: &mut Places,
+    digests: Option<&token_scan::Digests>,
+) {
     // The model a turn ran under is announced by a `turn_context` record and
     // holds until the next one — the token event itself does not name it.
     let mut model = String::from("unknown");
@@ -252,7 +258,7 @@ fn absorb_rollout(path: &Path, offset_minutes: i32, tally: &mut Tally, places: &
         .to_string();
     let mut place = places.of(None);
     let mut previous: Option<RawUsage> = None;
-    token_scan::for_each_line(path, |text| {
+    token_scan::for_each_rollout_line(path, digests, |text| {
         let carries_token = text.contains(TOKEN_MARK);
         let carries_meta = text.contains(META_MARK);
         if !carries_token && !carries_meta && !text.contains(CONTEXT_MARK) {
@@ -519,7 +525,23 @@ fn fold_by_model(days: &[CodexDayRow]) -> Vec<CodexModelRow> {
     models
 }
 
+/// [`scan_through`] with no digests kept: every rollout read whole, the
+/// answer the tests hold the kept road to.
+#[cfg(test)]
 pub(crate) fn scan(home: &Path, offset_minutes: i32, places: &mut Places) -> CodexScan {
+    scan_through(home, offset_minutes, places, None)
+}
+
+/// One pass over every rollout under `home`, rolled up in the caller's day —
+/// each rollout at rest read through its kept digest
+/// ([`token_scan::Digests`]) when `digests` are given: the same answer, for
+/// rollouts read once instead of every time the panel is opened.
+pub(crate) fn scan_through(
+    home: &Path,
+    offset_minutes: i32,
+    places: &mut Places,
+    digests: Option<&token_scan::Digests>,
+) -> CodexScan {
     let mut files = Vec::new();
     for root in session_roots(home) {
         files.extend(
@@ -536,7 +558,10 @@ pub(crate) fn scan(home: &Path, offset_minutes: i32, places: &mut Places) -> Cod
     // new rollout, and a per-file set would let the copy through.
     let mut tally = Tally::default();
     for path in &files {
-        absorb_rollout(path, offset_minutes, &mut tally, places);
+        absorb_rollout(path, offset_minutes, &mut tally, places, digests);
+    }
+    if let Some(digests) = digests {
+        digests.sweep();
     }
     let Tally {
         spent,
@@ -736,6 +761,92 @@ mod tests {
     /// A lookup that knows one workspace.
     fn known() -> Places {
         Places::new([(PathBuf::from("/work/repo"), "main".to_string())])
+    }
+
+    /// The panel's answer is the same read whole, read while the digests
+    /// are being made, and read from the digests kept — over a rollout Codex
+    /// compressed where it lay, a fork that copies its records, and a plain
+    /// one still being written.
+    #[test]
+    fn the_scan_answers_alike_whole_and_through_digests() {
+        let live = vec![
+            meta("s-live", "/work/repo", None),
+            context("gpt-5.6-sol"),
+            event("2026-08-18T05:00:00.000Z", (700, 7), (700, 7)),
+        ];
+        let rest = vec![
+            meta("s-rest", "/work/repo/src", Some("wt/drain")),
+            context_at("gpt-5.6-sol", "/work/repo/src"),
+            event("2026-08-18T01:00:00.000Z", (1000, 10), (1000, 10)),
+            r#"{"type":"response_item","payload":{"type":"message","content":"a \"token_count\" in words"}}"#.to_string(),
+            event("2026-08-18T02:00:00.000Z", (2000, 20), (1000, 10)),
+            // A rate-limit ping: counted as an event, spending nothing.
+            r#"{"timestamp":"2026-08-18T02:00:01.000Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#.to_string(),
+            context_at("gpt-5.4-mini", "/elsewhere"),
+            event("2026-08-18T03:00:00.000Z", (2500, 25), (500, 5)),
+        ];
+        // A fork: the first two turns copied under a new name, then its own.
+        let fork = vec![
+            meta("s-fork", "/work/repo", None),
+            context("gpt-5.6-sol"),
+            event("2026-08-18T01:00:00.000Z", (1000, 10), (1000, 10)),
+            event("2026-08-18T02:00:00.000Z", (2000, 20), (1000, 10)),
+            event("2026-08-19T04:00:00.000Z", (2300, 23), (300, 3)),
+        ];
+        let home = corpus(&[("rollout-live.jsonl", live)]);
+        let day = home
+            .path()
+            .join(CODEX_DIR)
+            .join("sessions")
+            .join("2026")
+            .join("08");
+        for (name, lines) in [
+            ("rollout-a-rest.jsonl.zst", rest),
+            ("rollout-b-fork.jsonl.zst", fork),
+        ] {
+            let squeezed = ruzstd::encoding::compress_to_vec(
+                lines.join("\n").as_bytes(),
+                ruzstd::encoding::CompressionLevel::Fastest,
+            );
+            std::fs::write(day.join(name), squeezed).expect("write");
+        }
+
+        let whole = scan(home.path(), 0, &mut known());
+        assert_eq!(whole.files, 3);
+        assert_eq!(whole.turns, 5, "{whole:?}");
+        assert!(whole.folded >= 3, "the copies and the ping fold: {whole:?}");
+
+        let data = tempfile::tempdir().expect("tempdir");
+        let through = |places: &mut Places| {
+            let digests = token_scan::Digests::under(data.path());
+            scan_through(home.path(), 0, places, Some(&digests))
+        };
+        let making = through(&mut known());
+        assert_eq!(making, whole, "read while the digests were made");
+        let kept = std::fs::read_dir(data.path().join("codex-rollout-digests"))
+            .expect("the digests")
+            .count();
+        assert_eq!(kept, 2, "the two at rest, and not the one being written");
+        let kept_read = through(&mut known());
+        assert_eq!(kept_read, whole, "read from the digests kept");
+        // The rollouts at rest replaced by other bytes of the same length
+        // under the same time: read whole they answer with the live one
+        // alone, and through the digests kept they answer as before — so it
+        // is the digests that were read, and not the files.
+        for name in ["rollout-a-rest.jsonl.zst", "rollout-b-fork.jsonl.zst"] {
+            let path = day.join(name);
+            let held = std::fs::metadata(&path).expect("the rollout");
+            let written = held.modified().expect("its time");
+            let length = usize::try_from(held.len()).expect("its length");
+            std::fs::write(&path, vec![b'x'; length]).expect("write");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(written))
+                .expect("set the modification time");
+        }
+        assert_eq!(scan(home.path(), 0, &mut known()).turns, 1);
+        assert_eq!(through(&mut known()), whole);
     }
 
     /// A rollout says who it is and where it opened, and the rows carry both.
