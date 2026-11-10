@@ -5129,6 +5129,7 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     await pageA.click('.flow-schedule[data-id="job-on"] [data-flow-schedule="edit"]');
     await pageA.waitForSelector("#auto-editor-scrim:not([hidden])");
     assertEqual(await pageA.locator("#auto-flow").inputValue(), "wallet-qa", "editing a Flow job lost its Flow");
+    assert(await pageA.locator("#auto-template-field").isHidden(), "a stored job was offered a template to start from");
     await pageA.click('[data-auto-kind="agent"]');
     assertEqual(
       await pageA.evaluate(() => [
@@ -5140,6 +5141,36 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
       [true, false, true, true],
       "the agent kind did not bring the prompt and the evidence choice back",
     );
+    await pageA.click("#auto-cancel");
+
+    // A new automation can start from a template at any time, not only on the
+    // empty page: choosing one fills the form, and the folded rest says what it
+    // set without being opened.
+    await pageA.click("#auto-new");
+    await pageA.waitForSelector("#auto-editor-scrim:not([hidden])");
+    assertEqual(await pageA.locator("#auto-template-pick option").count(), 7, "the editor did not offer the six templates");
+    await pageA.selectOption("#auto-template-pick", "emulator-qa");
+    const started = await pageA.evaluate(() => ({
+      name: document.getElementById("auto-name").value,
+      want: t("auto.templateQaTitle", ""),
+      closes: document.getElementById("auto-close-done").checked,
+      kind: document.getElementById("auto-form").dataset.kind,
+      picked: document.getElementById("auto-template-pick").value,
+      folded: !document.getElementById("auto-details").open,
+      summary: document.getElementById("auto-details-summary").textContent,
+      closeWord: t("auto.closeWhenDone", ""),
+    }));
+    assert(started.want && started.name === started.want && started.closes, "the template did not fill the form", started);
+    assertEqual([started.kind, started.picked, started.folded], ["agent", "", true], "the template left the form on another kind, or the picker on its choice");
+    assert(started.closeWord && started.summary.includes(started.closeWord), "the folded details did not say what the template set", started);
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(pageA, theme);
+      assertEqual(await axeViolations(pageA, AxeBuilder, "#auto-form"), [], `en/${theme} automation editor accessibility`);
+    }
+    await setQualityTheme(pageA, "dark");
+    // A theme change reads the stored settings again, the language with them:
+    // back to English, whose catalog the sentences below are read from.
+    await setQualityLocale(pageA, "en");
     await pageA.click("#auto-cancel");
 
     // The 예약 side names the Flow a job runs, and the agent of one that runs none.
@@ -5182,6 +5213,28 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     assert(ran.open && ran.report === ran.open, "the run's row did not offer its report", ran);
     assert(ran.keeps && ran.evidence === ran.keeps, "the overview did not say a Flow's run keeps its verdict", ran);
     await pageA.click("#auto-detail-back");
+
+    // In a pane narrower than the row, the row folds instead of scrolling: the
+    // table has nothing to scroll sideways and the edit button is inside it.
+    const viewport = pageA.viewportSize();
+    await pageA.setViewportSize({ width: 820, height: viewport.height });
+    await renderSettled(pageA);
+    const narrow = await pageA.evaluate(() => {
+      const table = document.getElementById("auto-table");
+      const row = document.querySelector("#auto-list .auto-row");
+      const edit = row.querySelector(".auto-row-actions").lastElementChild.getBoundingClientRect();
+      const name = row.querySelector(".auto-row-name").getBoundingClientRect();
+      const schedule = row.querySelector(".auto-row-schedule").getBoundingClientRect();
+      return {
+        sideways: table.scrollWidth - table.clientWidth,
+        editInside: edit.right <= table.getBoundingClientRect().right && edit.width > 0,
+        folded: schedule.top >= name.bottom,
+        sorts: [...document.querySelectorAll(".auto-table-head button")].filter((one) => one.getBoundingClientRect().width > 0).length,
+      };
+    });
+    await pageA.setViewportSize(viewport);
+    await renderSettled(pageA);
+    assertEqual(narrow, { sideways: 0, editInside: true, folded: true, sorts: 2 }, "a narrow table still scrolled its row, or lost a way to sort");
     await closeFlowSide(pageA);
 
     // Settings keeps the count and the door to the Flow side.

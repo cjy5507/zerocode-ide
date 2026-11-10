@@ -9048,6 +9048,8 @@ function setLocale(code) {
     // being held — which may be one this build has never heard of — has to
     // survive the rebuild rather than fall back to the default.
     paintAutoAgents(el("auto-agent").value || null);
+    // The template picker's names and the fold's line are words too.
+    paintAutoTemplatePick();
   }
   // And the ask popup, if one is up. The agent behind it is blocked until it
   // is answered, so it is the last surface that can afford to be left behind.
@@ -11918,11 +11920,15 @@ function paintAutomations() {
     item.classList.toggle("is-off", !row.enabled);
     item.innerHTML =
       '<span class="auto-row-name" role="cell"></span>' +
+      // The five cells that say when and what: columns of the row while the
+      // table is wide, one wrapping line under the name when it is not.
+      '<span class="auto-row-meta" role="presentation">' +
       '<span class="auto-row-schedule" role="cell"></span>' +
       '<span class="auto-row-agent" role="cell"></span>' +
       '<span class="auto-row-project" role="cell"></span>' +
       '<span class="auto-row-when" role="cell"></span>' +
       '<span class="auto-row-last" role="cell"></span>' +
+      '</span>' +
       '<button class="auto-row-toggle" type="button" role="switch"></button>' +
       '<span class="auto-row-actions" role="cell"></span>';
     item.querySelector(".auto-row-name").textContent = row.name || t("auto.untitled", "이름 없음");
@@ -11936,12 +11942,18 @@ function paintAutomations() {
     runs.hidden = !(row.runs > 0);
     if (!runs.hidden) runs.textContent = t("auto.runCount", "런 {{n}}회", { n: row.runs });
     last.appendChild(runs);
-    // How the newest run went, when its folder said: the word before the time.
+    // How the newest run went, when its folder said: on the line under the
+    // time, before the count — the column is a time wide and has no room beside it.
     if (typeof row.last_verdict === "boolean") {
       const verdict = document.createElement("span");
       verdict.className = row.last_verdict ? "auto-row-verdict is-pass" : "auto-row-verdict is-fail";
       verdict.textContent = row.last_verdict ? t("flow.pass", "합격") : t("flow.fail", "불합격");
-      last.prepend(verdict);
+      if (runs.hidden) {
+        runs.hidden = false;
+        runs.append(verdict);
+      } else {
+        runs.prepend(verdict, " · ");
+      }
     }
     // What the job runs: the Flow by name, or the agent its prompt is handed to.
     const what = item.querySelector(".auto-row-agent");
@@ -12875,6 +12887,47 @@ function paintAutoPickers() {
   );
 }
 
+/* The template picker in the editor's head: the six starts the empty page
+ * offers, by the names they give a job. Built here for the reason the pickers
+ * above are — its labels are words, and they follow the language. */
+function paintAutoTemplatePick() {
+  const field = el("auto-template-pick");
+  field.replaceChildren();
+  const first = document.createElement("option");
+  first.value = "";
+  first.textContent = t("auto.templatesTitle", "템플릿에서 시작");
+  field.appendChild(first);
+  for (const [id, make] of Object.entries(AUTO_TEMPLATES)) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = make().name;
+    field.appendChild(option);
+  }
+  field.value = "";
+}
+
+/* What 「세부 설정」 holds now, in one line: where it runs when that is not the
+ * plain case, what happens when it ends, how late a missed run may be, and the
+ * precheck — so the fold can stay shut and still be read. */
+function autoDetailsWords() {
+  const words = [];
+  if (el("auto-mode").value === "new_per_run") {
+    words.push(t("auto.modeNewPerRun", "실행마다 새 워크트리"));
+  } else if (autoKind !== "flow" && el("auto-reuse").checked) {
+    words.push(t("auto.reuse", "실행 중인 세션 재사용"));
+  }
+  if (el("auto-close-done").checked) words.push(t("auto.closeWhenDone", "완료되면 터미널 닫기"));
+  words.push(`${t("auto.grace", "놓친 실행 유예")} ${graceLabel(Number(el("auto-grace").value))}`);
+  const precheck = el("auto-precheck").value.trim();
+  words.push(`${t("auto.precheck", "사전 점검")} ${precheck || t("auto.none", "없음")}`);
+  if (el("auto-command").value.trim()) words.push(t("auto.customCommand", "사용자 명령"));
+  return words;
+}
+
+function paintAutoDetailsSummary() {
+  say(el("auto-details-summary"), () => autoDetailsWords().join(" · "));
+}
+
 function paintAutoSchedule() {
   const cadence = el("auto-cadence").value;
   // Hourly has no hour to pick and custom has no clock at all.
@@ -12964,8 +13017,14 @@ function editAutomation(row, template = null) {
     : t("auto.editorNew", "자동화 만들기")));
   el("auto-form").hidden = false;
   paintAutoSchedule();
+  // A template is a way to start: it is offered only while the job is new.
+  paintAutoTemplatePick();
+  el("auto-template-field").hidden = stored;
+  // The fold opens on the one detail that decides what runs — a command of the
+  // person's own; everything else in it is read from its summary line.
   const advanced = document.querySelector(".auto-advanced");
   if (advanced) advanced.open = autoDraft.command.trim() !== "";
+  paintAutoDetailsSummary();
   showModal(el("auto-editor-scrim"));
 }
 
@@ -13070,6 +13129,7 @@ function paintAutoKind(flow) {
   // A Flow job starts its own session and always leaves its folder (the
   // backend holds both), so the two controls that would say otherwise go.
   el("auto-form").dataset.kind = autoKind;
+  paintAutoDetailsSummary();
   // The prompt is required only of the kind that sends one.
   el("auto-prompt").required = autoKind !== "flow";
   const field = el("auto-flow");
@@ -13127,6 +13187,14 @@ function paintPrecheckTimeout() {
 
 el("auto-mode").addEventListener("change", paintAutoMode);
 el("auto-precheck").addEventListener("input", paintPrecheckTimeout);
+for (const id of ["auto-mode", "auto-reuse", "auto-close-done", "auto-grace", "auto-precheck", "auto-command"]) {
+  el(id).addEventListener("input", paintAutoDetailsSummary);
+  el(id).addEventListener("change", paintAutoDetailsSummary);
+}
+el("auto-template-pick").addEventListener("change", (event) => {
+  const make = AUTO_TEMPLATES[event.target.value];
+  if (make) editAutomation(null, make());
+});
 
 el("auto-new").addEventListener("click", () => editAutomation(null));
 el("auto-empty-new").addEventListener("click", () => editAutomation(null));

@@ -14778,12 +14778,14 @@ mod tests {
         );
 
         // Each control is wired exactly where it belongs and nowhere spurious:
-        // grace and reuse in save + edit (2), the timeout also in its own
-        // enable/disable painter (3). Counted over the window, so the gate's
-        // own string literals here do not inflate the tally.
+        // grace and reuse in save + edit, and read once more by the line that
+        // says what the folded 「세부 설정」 holds (3); the timeout in save +
+        // edit and its own enable/disable painter (3). Counted over the
+        // window, so the gate's own string literals here do not inflate the
+        // tally.
         assert_eq!(
             window.matches(r#"el("auto-grace")"#).count(),
-            2,
+            3,
             "auto-grace is wired in the wrong number of places"
         );
         assert_eq!(
@@ -14793,8 +14795,13 @@ mod tests {
         );
         assert_eq!(
             window.matches(r#"el("auto-reuse")"#).count(),
-            2,
+            3,
             "auto-reuse is wired in the wrong number of places"
+        );
+        let folded = block_after(window, "function autoDetailsWords() {");
+        assert!(
+            folded.contains(r#"el("auto-grace")"#) && folded.contains(r#"el("auto-reuse")"#),
+            "the third reader of grace and reuse is not the fold's summary:\n{folded}"
         );
 
         // The controls exist in the form, with the exact value contract the

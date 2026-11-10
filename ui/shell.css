@@ -29548,6 +29548,12 @@ progress:indeterminate::-webkit-progress-bar {
   display: grid;
 }
 
+/* The cells between the name and the switch share one wrapper: no box of its own
+ * while the table is wide, so they stay columns of the row's grid. */
+.auto-row-meta {
+  display: contents;
+}
+
 .auto-row {
   min-height: 48px;
   padding: var(--space-2) var(--space-3);
@@ -30592,7 +30598,10 @@ progress:indeterminate::-webkit-progress-bar {
 .auto-form {
   display: flex;
   flex-direction: column;
-  width: min(1080px, 100%);
+  /* One column, read top to bottom: what runs, when, where (2026-11-11). 640px
+   * holds the three schedule fields on a line and keeps a sentence of the
+   * prompt within one sweep of the eye. */
+  width: min(640px, 100%);
   max-height: min(820px, 100%);
   overflow: hidden;
   border: var(--rule-width) solid var(--glass-edge);
@@ -30651,44 +30660,25 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 .auto-editor-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 352px;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
-}
-
-.auto-editor-main,
-.auto-editor-settings {
-  min-height: 0;
   overflow-y: auto;
-  padding: var(--space-5) 0;
 }
 
 .auto-editor-main {
-  grid-column: 1;
-  grid-row: 1;
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-}
-
-.auto-editor-settings {
-  grid-column: 2;
-  grid-row: 1;
-  display: grid;
-  align-content: start;
-  gap: var(--space-4);
-  border-left: var(--rule-width) solid var(--edge-rule);
-  background: color-mix(in srgb, var(--surface-well) 82%, transparent);
+  padding: var(--space-5) 0;
 }
 
 .auto-editor-main > .settings-field {
   padding-inline: var(--space-5);
 }
 
-.auto-editor-settings > .settings-field {
-  padding-inline: var(--space-5);
+/* The folded rest: a ledger of rows under 「세부 설정」. */
+.auto-editor-settings {
+  display: grid;
 }
 
 .auto-editor-body .settings-field > span:first-child,
@@ -30746,16 +30736,15 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 .auto-field--tall {
-  flex: 1;
-  grid-template-rows: auto minmax(300px, 1fr);
+  grid-template-rows: auto minmax(calc(var(--space-6) * 5), auto);
   align-items: stretch;
 }
 
 .auto-view .auto-form .auto-prompt {
   height: 100%;
-  min-height: 300px;
+  min-height: calc(var(--space-6) * 5);
   padding: var(--space-3) var(--space-4);
-  resize: none;
+  resize: vertical;
   line-height: 1.65;
   font-family: var(--font-ui);
   font-size: var(--text-sm);
@@ -30767,7 +30756,7 @@ progress:indeterminate::-webkit-progress-bar {
  * legible on a narrow window. */
 .auto-schedule {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(calc(var(--space-6) * 4), 1fr));
   gap: var(--space-2);
   padding-inline: var(--space-5);
 }
@@ -30776,11 +30765,6 @@ progress:indeterminate::-webkit-progress-bar {
   padding-inline: 0;
 }
 
-.auto-editor-settings #auto-reuse-field {
-  margin-top: calc(var(--space-1) * -1);
-  padding: 0 var(--space-5) var(--space-4);
-  border-bottom: var(--rule-width) solid var(--edge-rule);
-}
 
 /* What the schedule means, under the fields that set it. Inset to the same
  * edge as the labels above it so it reads as part of the section. */
@@ -30816,9 +30800,36 @@ progress:indeterminate::-webkit-progress-bar {
   background: var(--row-hover);
 }
 
-.auto-advanced .settings-field {
+.auto-advanced .settings-field,
+.auto-advanced .settings-check {
   padding: var(--space-3);
   border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+/* What the fold holds now, said beside its name so it need not be opened to be
+ * read. */
+.auto-details-summary {
+  margin-left: var(--space-2);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The fold's own name, a step above the line that says what it holds. */
+.auto-advanced summary > [data-i18n] {
+  color: var(--ink-chalk);
+}
+
+/* The template picker in the editor's head: at its words' width, beside close. */
+.auto-template-pick {
+  margin-left: auto;
+  margin-right: var(--space-2);
+}
+
+.auto-view .auto-form .auto-template-pick .settings-input {
+  width: auto;
+  min-height: var(--control-height-md);
+  padding-block: var(--space-1);
 }
 
 .auto-error {
@@ -30945,10 +30956,6 @@ progress:indeterminate::-webkit-progress-bar {
 
 .auto-row-verdict.is-fail {
   color: var(--signal-halt-ink);
-}
-
-.auto-row-verdict {
-  font: var(--type-label-12);
 }
 
 /* 「저장된 Flow」: the session is the run's own and its folder is always kept. */
@@ -31121,11 +31128,6 @@ progress:indeterminate::-webkit-progress-bar {
 }
 
 @media (max-width: 900px) {
-  .auto-editor-body { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
-  .auto-editor-main,
-  .auto-editor-settings { grid-column: 1; grid-row: auto; overflow: visible; }
-  .auto-editor-main { order: 0; }
-  .auto-editor-settings { order: 1; border-left: 0; border-top: var(--rule-width) solid var(--edge-rule); }
   .auto-facts { grid-template-columns: minmax(0, 1fr); }
 }
 
@@ -61891,6 +61893,66 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   white-space: nowrap;
 }
 
+/* A table narrower than its row's least width (1,010px, above) folds the row
+ * instead of scrolling it: the name, the switch and the two buttons stay on the
+ * first line, and when-and-what wraps under them — so no action waits behind a
+ * sideways scroll in a split pane. The table asks its own width, not the
+ * window's. The two headings that sort stay; the rest name columns that are
+ * no longer columns. */
+.auto-table {
+  container: auto-table / inline-size;
+}
+
+@container auto-table (max-width: 1009px) {
+  .auto-table-head,
+  .auto-row {
+    min-width: 0;
+  }
+
+  .auto-table-head {
+    display: flex;
+    gap: var(--space-4);
+  }
+
+  .auto-table-head > span:not(.sr) {
+    display: none;
+  }
+
+  .auto-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "name toggle actions"
+      "meta meta meta";
+    row-gap: var(--space-1);
+  }
+
+  .auto-row-name {
+    grid-area: name;
+  }
+
+  .auto-row-toggle {
+    grid-area: toggle;
+  }
+
+  .auto-row-actions {
+    grid-area: actions;
+  }
+
+  .auto-row-meta {
+    grid-area: meta;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-3);
+    min-width: 0;
+  }
+
+  .auto-row-last {
+    display: inline-flex;
+    gap: var(--space-2);
+  }
+}
+
 /* What Settings keeps of the Flows: the count on the left, the door to the Flow
  * side on the right, folding under each other when the pane is narrow. */
 .flow-summary-card {
@@ -62290,23 +62352,23 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .stage.has-flow-console .pane { grid-template-columns: minmax(0, 1fr); }
 .flow-console { position: absolute; inset: 0 0 0 34%; display: flex; flex-direction: column; min-width: 0; background: var(--surface-deck); color: var(--ink-chalk); border-left: var(--rule-width) solid var(--edge-rule); z-index: 3; }
 .flow-console[hidden] { display: none; }
-.flow-console header, #flow-goal-form { display: flex; align-items: center; gap: 8px; padding: 12px; }
-.flow-console header h2 { flex: 1; margin: 0; font-size: 15px; }
+.flow-console header, #flow-goal-form { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3); }
+.flow-console header h2 { flex: 1; margin: 0; font: var(--type-heading-14); }
 .flow-console-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 30%); min-height: 0; flex: 1; }
-.flow-console-stream, .flow-console aside { overflow: auto; min-width: 0; padding: 12px; }
+.flow-console-stream, .flow-console aside { overflow: auto; min-width: 0; padding: var(--space-3); }
 .flow-console aside { border-left: var(--rule-width) solid var(--edge-rule); }
-.flow-console aside h3 { font-size: 12px; }
-#flow-console-queue, .flow-console-saved { display: flex; flex-direction: column; gap: 8px; }
+.flow-console aside h3 { font: var(--type-label-12); font-weight: 600; }
+#flow-console-queue, .flow-console-saved { display: flex; flex-direction: column; gap: var(--space-2); }
 #flow-console-queue button { white-space: normal; overflow-wrap: anywhere; }
-.flow-step { padding: 12px; margin-bottom: 8px; border: var(--rule-width) solid var(--edge-rule); border-radius: 8px; overflow-wrap: anywhere; }
-.flow-step p { margin: 6px 0; font-size: 12px; }
+.flow-step { padding: var(--space-3); margin-bottom: var(--space-2); border: 0; border-radius: var(--radius-edge); box-shadow: var(--shadow-border); overflow-wrap: break-word; }
+.flow-step p { margin: var(--space-1) 0; font: var(--type-label-12); }
 #flow-goal { flex: 1; min-width: 0; }
 @media (max-width: 900px) {
   .stage.has-flow-console { padding-right: 0; padding-bottom: 60vh; }
   .flow-console { inset: 40% 0 0; }
 }
 
-#flow-console-mirror { min-width: 0; max-width: 42%; color: inherit; background-color: var(--surface-deck); border: var(--rule-width) solid var(--edge-rule); border-radius: 6px; padding: 6px; padding-inline-end: var(--select-room); }
+#flow-console-mirror { min-width: 0; max-width: 42%; color: inherit; background-color: var(--surface-deck); border: 0; border-radius: var(--radius-edge); box-shadow: var(--shadow-border); padding: var(--space-1) var(--space-2); padding-inline-end: var(--select-room); }
 
 /* 「그림·페이지로 설명」 (t-32787): diff 머리·답변 행·보고서 문에 서는 같은 조용한 아이콘 단추,
  * 카드의 사실 한 줄과 구독 한도 문구, 상태 표시줄의 한 칸. 색과 간격은 토큰만 쓴다. */

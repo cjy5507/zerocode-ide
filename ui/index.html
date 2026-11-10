@@ -2496,48 +2496,18 @@
                 <h3 id="auto-editor-title" data-i18n="auto.editorNew">자동화 만들기</h3>
               </div>
             </div>
+            <!-- 템플릿은 자동화가 하나도 없을 때의 빈 화면에만 있었다. 새 자동화를 쓰는 동안은
+                 언제든 고를 수 있다 — 고르면 그 템플릿으로 창을 다시 채운다. -->
+            <label class="auto-template-pick" id="auto-template-field">
+              <span class="sr" data-i18n="auto.templatesTitle">템플릿에서 시작</span>
+              <select class="settings-input" id="auto-template-pick"></select>
+            </label>
             <button class="auto-icon-button" id="auto-editor-close" type="button" data-i18n-aria="app.close" aria-label="닫기"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
           </header>
+          <!-- 한 줄로 읽는 순서(2026-11-11, 창 아티팩트 p-dd51a186ac0258e2): 무엇을 실행할지 →
+               언제 → 어디서. 나머지는 「세부 설정」에 접혀 있고, 접힌 채로도 지금 값이
+               한 줄로 읽힌다(`paintAutoDetailsSummary`). -->
           <div class="auto-editor-body">
-            <aside class="auto-editor-settings">
-              <label class="settings-field"><span data-i18n="auto.agent">에이전트</span><select class="settings-input" id="auto-agent" required></select></label>
-              <label class="settings-field"><span data-i18n="auto.workspace">워크스페이스</span><select class="settings-input" id="auto-workspace" required></select></label>
-              <label class="settings-field"><span data-i18n="auto.mode">실행 위치</span><select class="settings-input" id="auto-mode"><option value="existing" data-i18n="auto.modeExisting">이 워크스페이스에서</option><option value="new_per_run" data-i18n="auto.modeNewPerRun">실행마다 새 워크트리</option></select></label>
-              <label class="settings-field" id="auto-base-field" hidden><span data-i18n="auto.baseBranch">기준 브랜치</span><input class="settings-input" id="auto-base" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="auto.basePlaceholder" placeholder="비우면 HEAD" /></label>
-              <label class="settings-check" id="auto-reuse-field"><input type="checkbox" id="auto-reuse" /><span class="settings-label" data-i18n="auto.reuse">실행 중인 세션 재사용</span></label>
-              <label class="settings-check" id="auto-close-done-field"><input type="checkbox" id="auto-close-done" /><span class="settings-label" data-i18n="auto.closeWhenDone">완료되면 터미널 닫기</span></label>
-              <label class="settings-field" id="auto-evidence-field"><span data-i18n="auto.evidence">증거</span><select class="settings-input" id="auto-evidence"><option value="prompt" data-i18n="auto.evidencePrompt">프롬프트에 따라</option><option value="always" data-i18n="auto.evidenceAlways">항상 남김</option><option value="never" data-i18n="auto.evidenceNever">남기지 않음</option></select></label>
-              <div class="auto-schedule">
-                <label class="settings-field"><span data-i18n="auto.cadence">주기</span><select class="settings-input" id="auto-cadence"></select></label>
-                <label class="settings-field" id="auto-time-field"><span data-i18n="auto.time">시각</span><input class="settings-input" id="auto-time" type="time" /></label>
-                <label class="settings-field" id="auto-day-field" hidden><span data-i18n="auto.dayOfWeek">요일</span><select class="settings-input" id="auto-day"></select></label>
-              </div>
-              <label class="settings-field" id="auto-custom-field" hidden><span data-i18n="auto.customCron">cron 식</span><input class="settings-input" id="auto-custom" type="text" autocomplete="off" spellcheck="false" placeholder="0 9 * * 1-5" /></label>
-              <p class="auto-when" id="auto-when"></p>
-              <label class="settings-field">
-                <span data-i18n="auto.grace">놓친 실행 유예</span>
-                <select class="settings-input" id="auto-grace">
-                <option value="0">유예 없음</option>
-                <option value="30">30분</option>
-                <option value="60">1시간</option>
-                <option value="180">3시간</option>
-                <option value="720">12시간</option>
-                <option value="1440">24시간</option>
-                <option value="2880">48시간</option>
-                </select>
-              </label>
-              <label class="settings-field"><span data-i18n="auto.precheck">사전 점검 명령</span><input class="settings-input" id="auto-precheck" type="text" autocomplete="off" spellcheck="false" /></label>
-              <label class="settings-field">
-                <span data-i18n="auto.precheckTimeout">사전 점검 제한 시간</span>
-                <select class="settings-input" id="auto-precheck-timeout">
-                <option value="30">30초</option>
-                <option value="60">1분</option>
-                <option value="120">2분</option>
-                <option value="300">5분</option>
-                <option value="600">10분</option>
-                </select>
-              </label>
-            </aside>
             <div class="auto-editor-main">
               <label class="settings-field auto-name-field">
                 <span data-i18n="auto.name">이름</span>
@@ -2553,6 +2523,7 @@
                   <button class="segment-btn" type="button" data-auto-kind="flow" aria-pressed="false" data-i18n="auto.kindFlow">저장된 Flow</button>
                 </div>
               </div>
+              <label class="settings-field"><span data-i18n="auto.agent">에이전트</span><select class="settings-input" id="auto-agent" required></select></label>
               <label class="settings-field" id="auto-flow-field" hidden>
                 <span data-i18n="flow.title">Flow</span>
                 <select class="settings-input" id="auto-flow"></select>
@@ -2560,14 +2531,52 @@
               </label>
               <label class="settings-field auto-field--tall" id="auto-prompt-field">
                 <span data-i18n="auto.prompt">프롬프트</span>
-                <textarea class="settings-input auto-prompt" id="auto-prompt" rows="14" spellcheck="true" required></textarea>
+                <textarea class="settings-input auto-prompt" id="auto-prompt" rows="7" spellcheck="true" required></textarea>
               </label>
-              <details class="auto-advanced">
-                <summary data-i18n="auto.advanced">고급 실행</summary>
-                <label class="settings-field">
-                  <span data-i18n="auto.command">사용자 명령</span>
-                  <input class="settings-input" id="auto-command" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="auto.commandPlaceholder" placeholder="비우면 선택한 에이전트 실행" />
-                </label>
+              <div class="auto-schedule">
+                <label class="settings-field"><span data-i18n="auto.cadence">주기</span><select class="settings-input" id="auto-cadence"></select></label>
+                <label class="settings-field" id="auto-time-field"><span data-i18n="auto.time">시각</span><input class="settings-input" id="auto-time" type="time" /></label>
+                <label class="settings-field" id="auto-day-field" hidden><span data-i18n="auto.dayOfWeek">요일</span><select class="settings-input" id="auto-day"></select></label>
+              </div>
+              <label class="settings-field" id="auto-custom-field" hidden><span data-i18n="auto.customCron">cron 식</span><input class="settings-input" id="auto-custom" type="text" autocomplete="off" spellcheck="false" placeholder="0 9 * * 1-5" /></label>
+              <p class="auto-when" id="auto-when"></p>
+              <label class="settings-field"><span data-i18n="auto.workspace">워크스페이스</span><select class="settings-input" id="auto-workspace" required></select></label>
+              <details class="auto-advanced" id="auto-details">
+                <summary><span data-i18n="auto.details">세부 설정</span><span class="auto-details-summary" id="auto-details-summary"></span></summary>
+                <div class="auto-editor-settings">
+                  <label class="settings-field"><span data-i18n="auto.mode">실행 위치</span><select class="settings-input" id="auto-mode"><option value="existing" data-i18n="auto.modeExisting">이 워크스페이스에서</option><option value="new_per_run" data-i18n="auto.modeNewPerRun">실행마다 새 워크트리</option></select></label>
+                  <label class="settings-field" id="auto-base-field" hidden><span data-i18n="auto.baseBranch">기준 브랜치</span><input class="settings-input" id="auto-base" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="auto.basePlaceholder" placeholder="비우면 HEAD" /></label>
+                  <label class="settings-check" id="auto-reuse-field"><input type="checkbox" id="auto-reuse" /><span class="settings-label" data-i18n="auto.reuse">실행 중인 세션 재사용</span></label>
+                  <label class="settings-check" id="auto-close-done-field"><input type="checkbox" id="auto-close-done" /><span class="settings-label" data-i18n="auto.closeWhenDone">완료되면 터미널 닫기</span></label>
+                  <label class="settings-field" id="auto-evidence-field"><span data-i18n="auto.evidence">증거</span><select class="settings-input" id="auto-evidence"><option value="prompt" data-i18n="auto.evidencePrompt">프롬프트에 따라</option><option value="always" data-i18n="auto.evidenceAlways">항상 남김</option><option value="never" data-i18n="auto.evidenceNever">남기지 않음</option></select></label>
+                  <label class="settings-field">
+                    <span data-i18n="auto.grace">놓친 실행 유예</span>
+                    <select class="settings-input" id="auto-grace">
+                <option value="0">유예 없음</option>
+                <option value="30">30분</option>
+                <option value="60">1시간</option>
+                <option value="180">3시간</option>
+                <option value="720">12시간</option>
+                <option value="1440">24시간</option>
+                <option value="2880">48시간</option>
+                    </select>
+                  </label>
+                  <label class="settings-field"><span data-i18n="auto.precheck">사전 점검 명령</span><input class="settings-input" id="auto-precheck" type="text" autocomplete="off" spellcheck="false" /></label>
+                  <label class="settings-field">
+                    <span data-i18n="auto.precheckTimeout">사전 점검 제한 시간</span>
+                    <select class="settings-input" id="auto-precheck-timeout">
+                <option value="30">30초</option>
+                <option value="60">1분</option>
+                <option value="120">2분</option>
+                <option value="300">5분</option>
+                <option value="600">10분</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    <span data-i18n="auto.command">사용자 명령</span>
+                    <input class="settings-input" id="auto-command" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="auto.commandPlaceholder" placeholder="비우면 선택한 에이전트 실행" />
+                  </label>
+                </div>
               </details>
             </div>
           </div>
