@@ -628,6 +628,14 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       const offWas = root.dataset.worktreeCardOff;
       root.dataset.worktreeCardOff = `${offWas ?? ""} agents`.trim();
       await window.__PAINTED__();
+      // The rings this setting uncovers are pinned on the late road: the window's `animationstart` listener, a frame
+      // after they start (review t-103290 N3). The rebuild is measured against rings that have had that frame, as
+      // any ring a person watches turn has. Read before it they still stand where they were born, and the rebuild
+      // that pins them reads as a hop — which a quiet machine did (v1.1.140's third lane, 2026-11-11: before 1570,
+      // after 0; a loaded one had always drawn the frame first). The wait is for the pin, not for a time.
+      for (let frames = 0; frames < 30 && turns().some((one) => one.startTime !== 0); frames += 1) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
       const cardBefore = turns().map(turnSaid);
       move = (one) => ({ ...one, branch: "clash-renamed-again", landing, reclaim });
       await refreshWorktrees();
