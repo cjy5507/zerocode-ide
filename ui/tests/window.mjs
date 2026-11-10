@@ -280,6 +280,31 @@ suite("window-harness", async ({ browser, origin, ok }) => {
   } finally {
     await page.close();
   }
+  /* The harness's own road to the window's files (`OWN_FILES_TURNS`, window-boot.mjs): a page that did not reach one
+   * of them is opened again with nothing of the lost turn left behind, and a file lost on every turn still ends the
+   * suite under its own name. The losses are the two the hosted Windows runner made — the connection for the words'
+   * file not made (v1.1.138: every script that speaks through `t` failed after it) and the one for the secret
+   * prompt's (v1.1.137: the window stood without it). */
+  const lose = (file) => (opened) => opened.route(`**/${file}`, (route) => route.abort("connectionfailed"));
+  const once = { turns: 0, saidOnTheLostTurn: 0, faults: [] };
+  const again = await openWindowTestPage(browser, origin, { faults: once.faults, before: async (opened) => {
+    once.turns += 1;
+    if (once.turns > 1) return;
+    opened.on("pageerror", () => { once.saidOnTheLostTurn += 1; });
+    await lose("shell-i18n.js")(opened);
+  } });
+  once.speaks = await again.page.evaluate(() => typeof t === "function");
+  await again.page.close();
+  ok("a page that did not reach one of the window's own files is opened again, and what the lost turn said is gone with it",
+    once.turns === 2 && once.speaks && once.saidOnTheLostTurn > 0 && once.faults.length === 0, JSON.stringify(once));
+  const every = { turns: 0 };
+  every.end = await openWindowTestPage(browser, origin, { before: async (opened) => {
+    every.turns += 1;
+    await lose("shell-secret.js")(opened);
+  } }).then((opened) => opened.page.close().then(() => "the page stood"), (failure) => String(failure));
+  ok("a file of the window's own that is lost on every turn ends the suite, and the failure names the file",
+    every.turns === 3 && every.end.includes("shell-secret.js failed: net::ERR_CONNECTION_FAILED"),
+    JSON.stringify({ turns: every.turns, end: every.end.slice(0, 300) }));
 });
 
 suite("explorer", async ({ browser, origin, ok }) => {
