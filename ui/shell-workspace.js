@@ -5105,9 +5105,10 @@ function turningDotClass(base, state) {
  * period stands at the same angle on any node, old or just built, and a
  * rebuild draws the ring where it already was. The rebuilds call this on what
  * they just built, before a frame is drawn — the sidebar's rebuild, the cards
- * whose agent rows changed (once, after the last card), the rows a scroll
- * builds — and so does the dot painter for a row that just began working,
- * whose card ring starts on a node that stands (review t-102958 #2). Any turn
+ * whose agent rows changed or a scroll built (once, after the last card) —
+ * and so do the dot painter for a row that just began working, whose card
+ * ring starts on a node that stands (review t-102958 #2), and the two card
+ * settings that uncover the card rings (review t-103290 N3). Any turn
  * none of them reached is pinned when it says it started, a frame late.
  * Reduced motion stills both of the sidebar's rings (`animation: none`), so the
  * sidebar's roads return at once: asked anyway, every paint brought the style
@@ -5947,12 +5948,12 @@ function renderSidebarWindows() {
   // 에이전트 줄과 포트 핀만 워커의 것이므로 그 둘을 마저 부른다. 서명 가드가
   // 이미 입은 호스트를 그냥 지나가니 재호출은 값이 없다.
   if (built) {
+    // A row the scroll just built wears its rings from the frame that first shows it, where every other ring
+    // stands — not one frame at the top until it says it started (review t-102958 #2). Its card's agent host is
+    // new, so the card painter fills it and pins that card; a second pin of the whole list here found nothing
+    // left (review t-103290 N8).
     paintWorktreeAgents();
     paintWorktreePortPins();
-    // A row the scroll just built wears its rings from the frame that first shows it, where every other ring
-    // stands — not one frame at the top until it says it started (review t-102958 #2). The measure below lays
-    // the list out anyway, so the style this brings forward is not a pass of its own.
-    keepTurnsInStep(worktreeList);
   }
   measureSidebarRows();
   const top = anchor ? sidebarAnchorTop(anchor) : null;

@@ -7957,8 +7957,10 @@ mod tests {
         let built = windowing
             .find("if (built) {")
             .expect("the sidebar window no longer knows when the scroll built a row");
+        // The card painter pins every card the scroll built: their agent hosts are new, so it fills each
+        // (review t-103290 N8 — the sidebar-scroll suite reads those rings before a frame).
         assert!(
-            windowing[built..].contains("keepTurnsInStep(worktreeList);"),
+            windowing[built..].contains("paintWorktreeAgents();"),
             "a row the scroll builds draws its rings from the top for a frame:\n{windowing}"
         );
         let dots = block_after(window, "function paintWorktreeDots() {");
