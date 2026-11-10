@@ -168,9 +168,10 @@ impl Notice {
     /// RFC 8030 `Topic`: one per pane, so the push service keeps only the
     /// newest undelivered notice of it.
     pub(crate) fn topic(&self) -> String {
-        self.pane
-            .as_deref()
-            .map_or_else(|| "zerocode-test".to_string(), |pane| format!("zerocode-{pane}"))
+        self.pane.as_deref().map_or_else(
+            || "zerocode-test".to_string(),
+            |pane| format!("zerocode-{pane}"),
+        )
     }
 }
 
@@ -241,7 +242,11 @@ mod tests {
         assert_eq!(gate.judge(1, false, 0), Verdict::Send { more: 0 });
         assert_eq!(gate.judge(1, false, 1_000), Verdict::Fold);
         assert_eq!(gate.judge(1, false, 2_000), Verdict::Fold);
-        assert_eq!(gate.judge(2, false, 2_500), Verdict::Send { more: 0 }, "another pane is its own");
+        assert_eq!(
+            gate.judge(2, false, 2_500),
+            Verdict::Send { more: 0 },
+            "another pane is its own"
+        );
         assert_eq!(gate.judge(1, false, FOLD_MS + 1), Verdict::Send { more: 2 });
         assert_eq!(gate.judge(1, false, FOLD_MS + 2), Verdict::Fold);
     }

@@ -176,7 +176,11 @@ impl Link {
 
     fn status(&self) -> LinkStatus {
         let book = self.book();
-        let look = self.last.lock().map(|look| look.clone()).unwrap_or_default();
+        let look = self
+            .last
+            .lock()
+            .map(|look| look.clone())
+            .unwrap_or_default();
         let listening = self.listening_port().is_some();
         let url = match (&look.tailnet.dns_name, book.https_port, look.exposure) {
             (Some(name), Some(port), Some(Exposure::Ours)) if listening => {
@@ -250,10 +254,7 @@ impl Link {
     /// Turn the link on: listener, then the Serve mapping. `asked` is a
     /// person's press; a boot bring-up maps only what was mapped before.
     fn bring_up(&'static self, asked: bool) -> Result<(), String> {
-        let epoch = self
-            .epoch
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
+        let epoch = self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let cli = tailscale::find_cli().ok_or("tailscale")?;
         let tailnet = tailscale::read_status(&cli);
         if !tailnet.running {
@@ -305,8 +306,8 @@ impl Link {
             tailscale::run(&cli, &tailscale::serve_off_args(https))?;
             serve = tailscale::read_serve(&cli)?;
         }
-        let https = tailscale::pick_port(&serve, &name, port, book.https_port)
-            .ok_or("no-free-port")?;
+        let https =
+            tailscale::pick_port(&serve, &name, port, book.https_port).ok_or("no-free-port")?;
         let exposure = tailscale::judge(&serve, &name, https, Some(port), hook);
         match exposure {
             Exposure::Ours => {}
@@ -344,8 +345,13 @@ impl Link {
                     .ok()
                     .and_then(|look| look.tailnet.dns_name.clone())
                     .unwrap_or_default();
-                tailscale::judge(&serve, &name, https, self.listening_port().or(book.port), None)
-                    == Exposure::Ours
+                tailscale::judge(
+                    &serve,
+                    &name,
+                    https,
+                    self.listening_port().or(book.port),
+                    None,
+                ) == Exposure::Ours
             });
             if mine && let Err(error) = tailscale::run(&cli, &tailscale::serve_off_args(https)) {
                 outcome = Err(error);
@@ -571,12 +577,11 @@ fn panes_of(app: &AppHandle) -> Vec<PaneView> {
     agents
         .iter()
         .filter_map(|agent| {
-            let worktree =
-                crate::pane_runtime::seated_worktree(&state, agent.term).or_else(|| {
-                    cwds.get(&agent.term).map(|cwd| {
-                        crate::pane_cwd_runtime::checkout_of(cwd).unwrap_or_else(|| cwd.clone())
-                    })
-                });
+            let worktree = crate::pane_runtime::seated_worktree(&state, agent.term).or_else(|| {
+                cwds.get(&agent.term).map(|cwd| {
+                    crate::pane_cwd_runtime::checkout_of(cwd).unwrap_or_else(|| cwd.clone())
+                })
+            });
             let task = ledger
                 .agents
                 .iter()
@@ -605,7 +610,10 @@ fn machine_name() -> String {
         // most that many bytes.
         let named = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
         if named {
-            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+            let end = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(buffer.len());
             let name = String::from_utf8_lossy(&buffer[..end]);
             let short = name.split('.').next().unwrap_or_default().trim();
             if !short.is_empty() {

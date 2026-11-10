@@ -240,9 +240,11 @@ mod tests {
 
     // RFC 8291 Section 5 and Appendix A, verbatim.
     const AUTH: &str = "BTBZMqHH6r4Tts7J_aSIgg";
-    const UA_PUBLIC: &str = "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
+    const UA_PUBLIC: &str =
+        "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4";
     const AS_PRIVATE: &str = "yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw";
-    const AS_PUBLIC: &str = "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8";
+    const AS_PUBLIC: &str =
+        "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8";
     const SALT: &str = "DGv6ra1nlYgDCS1FRnbzlw";
     const ECDH_SECRET: &str = "kyrL1jIIOHEzg3sM2ZWRHDRB62YACZhhSlknJ672kSs";
     const CEK: &str = "oIhVW04MRdy2XN9CiKLxTg";
@@ -265,7 +267,10 @@ mod tests {
         let sender = sender();
         assert_eq!(public_bytes(&sender.public_key()).to_vec(), b(AS_PUBLIC));
         let shared = sender.diffie_hellman(&receiver.public);
-        assert_eq!(shared.raw_secret_bytes().as_slice(), b(ECDH_SECRET).as_slice());
+        assert_eq!(
+            shared.raw_secret_bytes().as_slice(),
+            b(ECDH_SECRET).as_slice()
+        );
         let as_public: [u8; 65] = b(AS_PUBLIC).try_into().expect("65 bytes");
         let (cek, nonce) = derive(
             shared.raw_secret_bytes().as_slice(),

@@ -234,8 +234,12 @@ impl Core {
     pub(crate) fn handle(&self, window: &dyn Window, request: &Request) -> Response {
         let mut response = self.route(window, request);
         response.extra.push(("Cache-Control", "no-store".into()));
-        response.extra.push(("X-Content-Type-Options", "nosniff".into()));
-        response.extra.push(("Referrer-Policy", "no-referrer".into()));
+        response
+            .extra
+            .push(("X-Content-Type-Options", "nosniff".into()));
+        response
+            .extra
+            .push(("Referrer-Policy", "no-referrer".into()));
         response.extra.push(("X-Frame-Options", "DENY".into()));
         response.extra.push(("Content-Security-Policy", CSP.into()));
         response
@@ -269,7 +273,10 @@ impl Core {
         if !API.iter().any(|(_, known)| *known == path) {
             return Response::error(404, "not found");
         }
-        if !API.iter().any(|(known_method, known)| *known_method == method && *known == path) {
+        if !API
+            .iter()
+            .any(|(known_method, known)| *known_method == method && *known == path)
+        {
             return Response::error(404, "not found");
         }
         let Some(device) = self.authorize(window, request) else {
@@ -432,9 +439,12 @@ impl Core {
 /// POST without asking first; it cannot send this one without a CORS
 /// preflight, which this listener never answers.
 fn json_body(request: &Request) -> bool {
-    request
-        .header("content-type")
-        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("application/json"))
+    request.header("content-type").is_some_and(|value| {
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("application/json")
+    })
 }
 
 /// Parse one request head. `None` for anything that is not a plain
@@ -639,17 +649,28 @@ mod tests {
     }
 
     fn paired(core: &Core, window: &FakeWindow) -> String {
-        core.pairing.lock().unwrap().issue_exact("ABCD2345", window.now);
+        core.pairing
+            .lock()
+            .unwrap()
+            .issue_exact("ABCD2345", window.now);
         let answer = core.handle(
             window,
             &from_tailnet(
                 "POST",
                 "/api/pair",
-                &[("tailscale-user-login", OWNER), ("content-type", "application/json")],
+                &[
+                    ("tailscale-user-login", OWNER),
+                    ("content-type", "application/json"),
+                ],
                 r#"{"code":"ABCD2345","name":"Fixture phone"}"#,
             ),
         );
-        assert_eq!(answer.status, 200, "{}", String::from_utf8_lossy(&answer.body));
+        assert_eq!(
+            answer.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&answer.body)
+        );
         let value: serde_json::Value = serde_json::from_slice(&answer.body).unwrap();
         assert_eq!(value["vapidPublicKey"], "fixture-vapid");
         value["token"].as_str().unwrap().to_string()
@@ -682,7 +703,12 @@ mod tests {
         let window = window();
         let refused = core.handle(&window, &from_tailnet("GET", "/api/panes", &[], ""));
         assert_eq!(refused.status, 401);
-        assert!(refused.extra.iter().any(|(name, _)| *name == "WWW-Authenticate"));
+        assert!(
+            refused
+                .extra
+                .iter()
+                .any(|(name, _)| *name == "WWW-Authenticate")
+        );
         let wrong = core.handle(
             &window,
             &from_tailnet("GET", "/api/panes", &[("authorization", "Bearer nope")], ""),
@@ -755,7 +781,10 @@ mod tests {
         );
         assert_eq!(stranger.status, 403, "another tailnet user may not pair");
         let anonymous = core.handle(&window, &from_tailnet("POST", "/api/pair", &[], body));
-        assert_eq!(anonymous.status, 403, "a request naming no login may not pair");
+        assert_eq!(
+            anonymous.status, 403,
+            "a request naming no login may not pair"
+        );
         let wrong = core.handle(
             &window,
             &from_tailnet(
@@ -768,12 +797,22 @@ mod tests {
         assert_eq!(wrong.status, 403);
         let right = core.handle(
             &window,
-            &from_tailnet("POST", "/api/pair", &[("tailscale-user-login", OWNER)], body),
+            &from_tailnet(
+                "POST",
+                "/api/pair",
+                &[("tailscale-user-login", OWNER)],
+                body,
+            ),
         );
         assert_eq!(right.status, 200);
         let again = core.handle(
             &window,
-            &from_tailnet("POST", "/api/pair", &[("tailscale-user-login", OWNER)], body),
+            &from_tailnet(
+                "POST",
+                "/api/pair",
+                &[("tailscale-user-login", OWNER)],
+                body,
+            ),
         );
         assert_eq!(again.status, 410, "a code works once");
         let book = core.book.lock().unwrap();
@@ -815,7 +854,12 @@ mod tests {
         let text = String::from_utf8(answer.body).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         let pane = &value["panes"][0];
-        let keys: Vec<&str> = pane.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = pane
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         for key in &keys {
             assert!(
                 ["id", "agent", "name", "task", "group", "waiting", "sinceMs"].contains(key),
@@ -854,7 +898,12 @@ mod tests {
         assert_eq!(core.book.lock().unwrap().push_targets().len(), 1);
         let off = core.handle(
             &window,
-            &from_tailnet("POST", "/api/push/unsubscribe", &[("authorization", &bearer)], ""),
+            &from_tailnet(
+                "POST",
+                "/api/push/unsubscribe",
+                &[("authorization", &bearer)],
+                "",
+            ),
         );
         assert_eq!(off.status, 200);
         assert!(core.book.lock().unwrap().push_targets().is_empty());
@@ -864,7 +913,14 @@ mod tests {
     fn the_app_shell_is_served_without_a_token_under_a_strict_policy() {
         let core = core();
         let window = window();
-        for path in ["/", "/pair", "/phone.js", "/sw.js", "/tokens.css", "/manifest.webmanifest"] {
+        for path in [
+            "/",
+            "/pair",
+            "/phone.js",
+            "/sw.js",
+            "/tokens.css",
+            "/manifest.webmanifest",
+        ] {
             let answer = core.handle(&window, &from_tailnet("GET", path, &[], ""));
             assert_eq!(answer.status, 200, "{path}");
             assert!(
@@ -893,7 +949,10 @@ mod tests {
             &from_tailnet(
                 "POST",
                 "/api/pair",
-                &[("tailscale-user-login", OWNER), ("content-type", "text/plain")],
+                &[
+                    ("tailscale-user-login", OWNER),
+                    ("content-type", "text/plain"),
+                ],
                 r#"{"code":"ABCD2345"}"#,
             ),
         );

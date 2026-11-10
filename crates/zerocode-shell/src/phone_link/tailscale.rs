@@ -83,9 +83,10 @@ pub(crate) fn parse_status(json: &Value) -> Tailnet {
         json.get("CertDomains")
             .and_then(Value::as_array)
             .is_some_and(|domains| {
-                domains.iter().filter_map(Value::as_str).any(|domain| {
-                    domain.trim_end_matches('.').eq_ignore_ascii_case(name)
-                })
+                domains
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|domain| domain.trim_end_matches('.').eq_ignore_ascii_case(name))
             })
     });
     let owner_login = own
@@ -182,7 +183,10 @@ fn targets_port(target: &str, port: u16) -> bool {
         // `tailscale serve 3000` stores a full URL; a bare number is a port.
         return rest.parse::<u16>().ok() == Some(port);
     };
-    let loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1" | "0.0.0.0");
+    let loopback = matches!(
+        host,
+        "127.0.0.1" | "localhost" | "[::1]" | "::1" | "0.0.0.0"
+    );
     loopback && named.parse::<u16>().ok() == Some(port)
 }
 
@@ -254,7 +258,11 @@ pub(crate) fn judge(
                 .as_deref()
                 .is_some_and(|proxy| targets_port(proxy, listener))
     });
-    if ours { Exposure::Ours } else { Exposure::Taken }
+    if ours {
+        Exposure::Ours
+    } else {
+        Exposure::Taken
+    }
 }
 
 /// The first phone port nobody else holds — or the one already ours.
@@ -290,7 +298,11 @@ pub(crate) fn serve_on_args(https_port: u16, listener_port: u16) -> Vec<String> 
 
 /// The argv that removes that one mapping and nothing else.
 pub(crate) fn serve_off_args(https_port: u16) -> Vec<String> {
-    vec!["serve".into(), format!("--https={https_port}"), "off".into()]
+    vec![
+        "serve".into(),
+        format!("--https={https_port}"),
+        "off".into(),
+    ]
 }
 
 /// Run the CLI with a time limit; stdout on a zero exit, the CLI's own
@@ -318,12 +330,17 @@ pub(crate) fn run(cli: &Path, args: &[String]) -> Result<String, String> {
             Err(error) => return Err(error.to_string()),
         }
     }
-    let output = child.wait_with_output().map_err(|error| error.to_string())?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
         let said = String::from_utf8_lossy(&output.stderr);
-        let said = said.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+        let said = said
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("");
         Err(format!("tailscale: {}", said.trim()))
     }
 }
@@ -375,7 +392,10 @@ mod tests {
         assert!(status.https_ready);
         assert_eq!(status.owner_login.as_deref(), Some("owner@example.test"));
         let serialized = serde_json::to_string(&status).expect("json");
-        assert!(!serialized.contains("owner@"), "the login never leaves for the pane");
+        assert!(
+            !serialized.contains("owner@"),
+            "the login never leaves for the pane"
+        );
     }
 
     #[test]
@@ -398,7 +418,10 @@ mod tests {
             "Web": { "host.example.test:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:8788" } } } }
         }));
         assert_eq!(judge(&serve, HOST, 443, Some(5000), None), Exposure::Taken);
-        assert_eq!(judge(&serve, HOST, 8443, Some(5000), None), Exposure::Absent);
+        assert_eq!(
+            judge(&serve, HOST, 8443, Some(5000), None),
+            Exposure::Absent
+        );
         assert_eq!(pick_port(&serve, HOST, 5000, None), Some(8443));
     }
 
@@ -420,7 +443,10 @@ mod tests {
             "Web": { "host.example.test:8443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:5000" } } } },
             "AllowFunnel": { "host.example.test:8443": true }
         }));
-        assert_eq!(judge(&serve, HOST, 8443, Some(5000), None), Exposure::Funnel);
+        assert_eq!(
+            judge(&serve, HOST, 8443, Some(5000), None),
+            Exposure::Funnel
+        );
         assert_eq!(pick_port(&serve, HOST, 5000, Some(8443)), Some(10443));
     }
 
@@ -463,7 +489,13 @@ mod tests {
     fn on_and_off_name_one_port_and_never_reset() {
         assert_eq!(
             serve_on_args(8443, 5000),
-            ["serve", "--bg", "--yes", "--https=8443", "http://127.0.0.1:5000"]
+            [
+                "serve",
+                "--bg",
+                "--yes",
+                "--https=8443",
+                "http://127.0.0.1:5000"
+            ]
         );
         assert_eq!(serve_off_args(8443), ["serve", "--https=8443", "off"]);
         assert!(!serve_off_args(8443).iter().any(|arg| arg == "reset"));

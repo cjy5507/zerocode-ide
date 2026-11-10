@@ -337,7 +337,12 @@ mod tests {
     fn the_device_list_is_capped_and_the_least_recently_seen_phone_leaves() {
         let mut book = Book::default();
         for at in 0..MAX_DEVICES {
-            book.pair("p", &format!("fixture-{at}"), format!("d{at}"), at as i64 + 100);
+            book.pair(
+                "p",
+                &format!("fixture-{at}"),
+                format!("d{at}"),
+                at as i64 + 100,
+            );
         }
         book.devices[0].last_seen_ms = 10_000;
         book.pair("new", "fixture-new", "dn".into(), 20_000);
@@ -396,9 +401,18 @@ mod tests {
     fn a_pairing_code_expires_after_ten_minutes() {
         let mut pairing = Pairing::default();
         pairing.issue_exact("ABCD2345", 0);
-        assert_eq!(pairing.standing_until(CODE_LIFETIME_MS - 1), Some(CODE_LIFETIME_MS));
-        assert_eq!(pairing.redeem("ABCD2345", CODE_LIFETIME_MS), Redeem::Expired);
-        assert_eq!(pairing.redeem("ABCD2345", CODE_LIFETIME_MS + 1), Redeem::NoCode);
+        assert_eq!(
+            pairing.standing_until(CODE_LIFETIME_MS - 1),
+            Some(CODE_LIFETIME_MS)
+        );
+        assert_eq!(
+            pairing.redeem("ABCD2345", CODE_LIFETIME_MS),
+            Redeem::Expired
+        );
+        assert_eq!(
+            pairing.redeem("ABCD2345", CODE_LIFETIME_MS + 1),
+            Redeem::NoCode
+        );
     }
 
     #[test]
