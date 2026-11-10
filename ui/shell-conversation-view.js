@@ -2077,11 +2077,19 @@ function codeRoleOf(classes) {
 }
 
 /* Put `job`'s spans in place of the words they hold, a unit at a time from
- * the top: a unit splits the words still plain where its last span ends, and
- * puts its spans and the words between them in place of the part before.
+ * the top: a unit puts its spans, the words between them and the words still
+ * plain after it — a text node of their own — in place of the words it read.
  * True when the fence wears them all (or no longer holds the words the job
  * read); false when the slice is spent, or the person's selection reaches
- * the fence — it then waits for the selection to move. */
+ * the fence — it then waits for the selection to move.
+ *
+ * Nodes are put in place of the words, never cut where they stand: WebKit —
+ * the installed window's engine — moves the scroll of the list around a text
+ * node whose own words change in place. The list went up 108 px at a fence's
+ * `splitText`, 18 px when a node's words were shortened, and not at all when
+ * the same words stood in new nodes (2026-11-10, WebKit 26, the 400-turn
+ * page); a reader at the foot was taken for one who had scrolled up, and the
+ * list no longer followed. Chromium moves nothing either way. */
 function drawCodeSpans(job, clock) {
   const { spans, pre } = job;
   while (job.laid < spans.length) {
@@ -2096,7 +2104,7 @@ function drawCodeSpans(job, clock) {
     // Where the unit's last span ends, in the words still plain.
     const stop = spans[end - 2] - job.at;
     const text = job.words.data;
-    const rest = stop < text.length ? job.words.splitText(stop) : null;
+    const rest = stop < text.length ? document.createTextNode(text.slice(stop)) : null;
     const drawn = document.createDocumentFragment();
     let at = 0;
     for (; job.laid < end; job.laid += 3) {
@@ -2109,6 +2117,7 @@ function drawCodeSpans(job, clock) {
       drawn.append(span);
       at = to;
     }
+    if (rest !== null) drawn.append(rest);
     job.words.replaceWith(drawn);
     job.words = rest;
     job.at += stop;
