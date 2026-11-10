@@ -126,18 +126,21 @@ function dressToolBody(row, input, output) {
  * What a command printed was cut at its first 60px — and what it came to is
  * most often on its last lines (window artifact p-1c1bbf75726ff227, 「긴 명령
  * 출력」): 214 tests ran, and the line that says so was behind 「더 보기」. An
- * output long by its lines stands as its first lines and its last, with one
- * line between them that says how many it holds back and opens them; opened,
- * 「접기」 under it folds it again. An output long only by its width keeps the
- * clip's grammar. The copy takes the whole either way (`__said`). */
+ * output of twelve lines or more stands as its first lines and its last, with
+ * one line between them that says how many it holds back and opens them;
+ * opened, 「접기」 under it folds it again. A shorter output, and one long only
+ * by its width, keeps the clip's grammar. The copy takes the whole either way
+ * (`__said`). */
 const CHAT_OUT_ENDS = 3;
 
 /* The two ends of an output, or null when it stands whole or is cut by the
- * clip: holding back one line behind a line that says so saves nothing. */
+ * clip: an output takes this shape once it holds back at least as many lines
+ * as it shows — twelve lines and up. A shorter one keeps the clip, which is
+ * the smaller of the two for it (three lines and the door). */
 function outEnds(text) {
   const lines = text.replace(/\n+$/, "").split("\n");
   const hidden = lines.length - 2 * CHAT_OUT_ENDS;
-  if (hidden < 2) return null;
+  if (hidden < 2 * CHAT_OUT_ENDS) return null;
   return { head: lines.slice(0, CHAT_OUT_ENDS).join("\n"), tail: lines.slice(-CHAT_OUT_ENDS).join("\n"), hidden };
 }
 

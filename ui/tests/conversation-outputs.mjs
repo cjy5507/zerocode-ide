@@ -4,6 +4,7 @@
  * check reads the page a browser laid out. The conversations are synthetic.
  *
  *   WINDOW_SUITES='^conversation-outputs' node ui/tests/window.mjs */
+import { openAfterScene } from "./conversation-after.mjs";
 import { openConversation, openPaneConversation, standZo } from "./conversation-parity.mjs";
 import { foldConversations, openWindowTestPage } from "./window-boot.mjs";
 
@@ -602,4 +603,81 @@ export async function testConversationFirstAsk(browser, origin, ok) {
   ok("first: a conversation opened any other way stands at its foot as before", !plain.seen.pinned && plain.seen.gap <= 1 && plain.seen.under < 0,
     JSON.stringify(plain.seen));
   ok("first: no page errors", asked.faults.length === 0 && plain.faults.length === 0, [...asked.faults, ...plain.faults].join("\n"));
+}
+
+/* Between two turns: 32px from an answer's words to the next person's, 12px inside a turn — and an older
+ * answer's marks, when a hand brings them, stand in that gap, take their presses there and move nothing. */
+export async function testConversationTurnGap(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    // A window wide enough that a person's words keep their foot line out of the flow (the page's 720px step).
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openAfterScene(page);
+    await foldConversations(page);
+    await page.evaluate(() => window.__PAINTED__());
+    const gaps = await page.evaluate(() => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const rows = [...list.querySelectorAll(":scope > [data-turn]")];
+      const wordsOf = (row) => row.querySelector(":scope > .helper-said, :scope > .helper-group-cap").getBoundingClientRect();
+      const steps = [];
+      for (let at = 1; at < rows.length; at += 1) {
+        steps.push({
+          from: rows[at - 1].classList.contains("is-user") ? "person" : rows[at - 1].classList.contains("helper-group") ? "fold" : "answer",
+          to: rows[at].classList.contains("is-user") ? "person" : rows[at].classList.contains("helper-group") ? "fold" : "answer",
+          gap: Math.round(wordsOf(rows[at]).top - wordsOf(rows[at - 1]).bottom),
+        });
+      }
+      return steps;
+    });
+    const between = gaps.filter((step) => step.from === "answer" && step.to === "person");
+    const inside = gaps.filter((step) => !(step.from === "answer" && step.to === "person"));
+    ok("gap: 32px from a turn's answer to the next turn's words, 12px between the words, the work's line and the answer inside a turn",
+      between.length === 1 && between.every((step) => Math.abs(step.gap - 32) <= 1) && inside.length >= 3 && inside.every((step) => Math.abs(step.gap - 12) <= 1),
+      JSON.stringify(gaps));
+
+    // The older answer's marks, brought by the pointer: in the gap, over nothing, each taking its press.
+    const older = page.locator(".pane-chat .helper-turns > .helper-turn.is-assistant.is-turn-answer").first();
+    const before = await page.evaluate(() => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      return { height: list.scrollHeight, top: Math.round(list.scrollTop) };
+    });
+    await older.hover();
+    await page.waitForFunction(() => {
+      const row = document.querySelector(".pane-chat .helper-turns > .helper-turn.is-assistant.is-turn-answer");
+      const actions = row.querySelector(":scope > .helper-actions");
+      return actions !== null && getComputedStyle(actions).opacity === "1";
+    });
+    const marks = await page.evaluate(() => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const row = list.querySelector(":scope > .helper-turn.is-assistant.is-turn-answer");
+      const next = [...list.querySelectorAll(":scope > .helper-turn.is-user")].find((one) => one.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_PRECEDING);
+      const words = row.querySelector(":scope > .helper-said").getBoundingClientRect();
+      const bubble = next.querySelector(":scope > .helper-said").getBoundingClientRect();
+      const shown = [...row.querySelectorAll(":scope > .helper-actions > *")].filter((mark) => !mark.hidden && mark.getClientRects().length > 0);
+      return {
+        count: shown.length,
+        inGap: shown.every((mark) => { const box = mark.getBoundingClientRect(); return box.top >= words.bottom - 1 && box.bottom <= bubble.top + 1; }),
+        // Each mark at three heights — its top, its middle and its foot, the part that stands over the next row's pad.
+        pressed: shown.every((mark) => {
+          const box = mark.getBoundingClientRect();
+          return [box.top + 2, box.top + box.height / 2, box.bottom - 2].every((y) => {
+            const hit = document.elementFromPoint(box.left + box.width / 2, y);
+            return hit === mark || mark.contains(hit);
+          });
+        }),
+        height: list.scrollHeight, top: Math.round(list.scrollTop),
+        newestKeeps: (() => {
+          const latest = list.querySelector(":scope > .helper-turn.is-latest");
+          const actions = latest.querySelector(":scope > .helper-actions");
+          return actions === null || actions.getBoundingClientRect().bottom <= latest.getBoundingClientRect().bottom + 1;
+        })(),
+      };
+    });
+    ok("gap: an older answer's marks stand in the gap under it — between its words and the next person's — every one of them takes its press along its whole height, and bringing them moved nothing",
+      marks.count >= 3 && marks.inGap && marks.pressed && marks.height === before.height && marks.top === before.top, JSON.stringify({ before, marks }));
+    ok("gap: the newest answer keeps its marks' room in the page's own flow", marks.newestKeeps, JSON.stringify(marks));
+    ok("gap: no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
 }

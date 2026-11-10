@@ -88,7 +88,7 @@ import { testConversationAfter, testConversationArchive, testConversationCompose
 import { testConversationBudget } from "./conversation-budget.mjs";
 import {
   testConversationCliNotes, testConversationCode, testConversationFailedFold, testConversationFirstAsk, testConversationLongOutput,
-  testConversationTable,
+  testConversationTable, testConversationTurnGap,
 } from "./conversation-outputs.mjs";
 import { testConversationPin, testConversationResult, testConversationViewMenu } from "./conversation-result.mjs";
 import { testHelperDoors } from "./helper-doors.mjs";
@@ -619,6 +619,7 @@ suite("conversation-outputs-table", ({ browser, origin, ok }) => testConversatio
 suite("conversation-outputs-code", ({ browser, origin, ok }) => testConversationCode(browser, origin, ok));
 suite("conversation-outputs-long", ({ browser, origin, ok }) => testConversationLongOutput(browser, origin, ok));
 suite("conversation-first-ask", ({ browser, origin, ok }) => testConversationFirstAsk(browser, origin, ok));
+suite("conversation-turn-gap", ({ browser, origin, ok }) => testConversationTurnGap(browser, origin, ok));
 suite("conversation-budget", ({ browser, origin, ok }) => testConversationBudget(browser, origin, ok));
 suite("conversation-archive", ({ browser, origin, ok }) => testConversationArchive(browser, origin, ok));
 suite("conversation-recovery", ({ browser, origin, ok }) => testConversationRecovery(browser, origin, ok));

@@ -3023,6 +3023,9 @@
   --chat-tally-bar-min: 80px;
   --chat-actions-h: 36px; /* An answer's action marks (2026-11-10): 28px marks and 8px separation. */
   --chat-actions-space: var(--chat-actions-h);
+  /* From the end of one turn's answer to the next turn's words (2026-11-10,
+   * window artifact p-1c1bbf75726ff227: 「차례 사이 32px, 그 안은 12px」). */
+  --chat-turn-gap: var(--space-6);
   --chat-actions-gap: 2px;
   --chat-recovery-width: 480px; /* Approved recovery dialog. */
   --chat-recovery-title-size: 20px; /* Approved modal title, distinct from prose. */

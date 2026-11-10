@@ -63433,6 +63433,27 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .helper-turn.is-assistant.is-turn-answer {
   padding-bottom: var(--chat-actions-space);
 }
+
+/* Between two turns (2026-11-10): every finished answer kept a row's room
+ * under its words for the action marks, shown or not, and with the next
+ * person's own margin and pad a turn stood 54px from the last (62px before the
+ * marks). An answer that is not the newest keeps only what is left of the
+ * turn's gap once the next words' margin and pad are counted — 32px from
+ * answer to words — and its marks, when a hand brings them, stand in that
+ * gap: from where the room begins, over the next row's empty pad, above it in
+ * the stack so every mark takes its press. Nothing moves when they come or go.
+ * The newest answer keeps the row's room in the page's flow, over the dock. */
+.helper-turn.is-assistant.is-turn-answer:not(.is-latest) {
+  --chat-turn-rest: calc(var(--chat-turn-gap) - var(--chat-bubble-gap) - var(--chat-person-pad-top));
+  padding-bottom: var(--chat-turn-rest);
+}
+
+.helper-turn.is-assistant.is-turn-answer:not(.is-latest) > .helper-actions {
+  top: calc(100% - var(--chat-turn-rest));
+  bottom: auto;
+  z-index: 1;
+  min-height: var(--chat-action-icon);
+}
 .is-chat-page .worker-head.chat-head {
   position: relative;
   z-index: 2;
