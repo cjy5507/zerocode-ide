@@ -30,6 +30,11 @@ use crate::error::ToolError;
 /// survived in zo's own artifact log).
 pub const ARTIFACT_STORE_ENV: &str = "ZO_ARTIFACT_STORE";
 
+/// The folder beside a project's `sessions/` under the global Zo home that a
+/// session's artifacts go to (`<home>/projects/<slug>/artifacts`, the value
+/// zo-ide gives [`ARTIFACT_STORE_ENV`] for a session).
+pub const PROJECT_ARTIFACTS_DIR: &str = "artifacts";
+
 /// Chars kept inline on the [`ArtifactRef`] so a viewer can show a teaser without
 /// reading the whole artifact back.
 const PREVIEW_CHARS: usize = 400;
@@ -106,6 +111,15 @@ fn persist_artifact(dir: &Path, sha256: &str, content: &[u8]) -> std::io::Result
     std::fs::create_dir_all(dir)?;
     let path = dir.join(sha256);
     if artifact_matches(&path, sha256, content)? {
+        // The same bytes stored again are a fresh use: the age-based sweep
+        // (`prune_artifact_files_in`) reads the file's mtime, and an artifact
+        // first written forty days ago and stored again today is still read
+        // by today's session. Best-effort — a file that cannot be touched is
+        // still the right artifact, only its age stays the first write's.
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(SystemTime::now()));
         return Ok(());
     }
 
@@ -200,6 +214,33 @@ pub fn prune_artifact_files_older_than(max_age: Duration) -> usize {
         .checked_sub(max_age)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     prune_artifact_files_in(&dir, cutoff)
+}
+
+/// The age sweep (`prune_artifact_files_in`) for every project's store under
+/// `projects_root` (`<home>/projects/<slug>/artifacts`): the boot sweep's
+/// [`prune_artifact_files_older_than`] reaches only the store of the project
+/// zo was opened in, so a project nobody opened for a month kept every
+/// artifact it ever wrote (11,490 files older than 30 days, 72 MB, across
+/// this machine's idle projects on 2026-11-10). A store the sweep empties
+/// goes too — the next artifact makes it again (`persist_artifact`) — so it
+/// does not hold its project's folder from aging out with the sessions.
+/// Answers the files removed.
+#[must_use]
+pub fn prune_artifact_stores_under(projects_root: &Path, cutoff: SystemTime) -> usize {
+    let Ok(projects) = std::fs::read_dir(projects_root) else {
+        return 0;
+    };
+    projects
+        .filter_map(Result::ok)
+        .filter(|project| project.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|project| {
+            let store = project.path().join(PROJECT_ARTIFACTS_DIR);
+            let removed = prune_artifact_files_in(&store, cutoff);
+            // Only an empty folder goes: `remove_dir` refuses any other.
+            let _ = std::fs::remove_dir(&store);
+            removed
+        })
+        .sum()
 }
 
 /// Remove every direct child of `dir` that is a content-addressed artifact
@@ -502,6 +543,56 @@ mod tests {
             "sha-shaped subdirectory survives"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn storing_the_same_bytes_again_renews_the_artifacts_age() {
+        let dir = unique_temp_dir("renew");
+        let stored = store_artifact_in(Some(&dir), "used again", ArtifactKind::Generic).unwrap();
+        let path = dir.join(&stored.sha256);
+        let forty_days = Duration::from_secs(40 * 24 * 60 * 60);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(SystemTime::now() - forty_days))
+            .expect("age the artifact");
+        let thirty_days_ago = SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
+
+        store_artifact_in(Some(&dir), "used again", ArtifactKind::Generic).unwrap();
+
+        assert_eq!(
+            prune_artifact_files_in(&dir, thirty_days_ago),
+            0,
+            "an artifact stored again today is not forty days old"
+        );
+        assert!(read_artifact_in(&dir, &stored.sha256).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_projects_store_is_swept_and_nothing_beside_it() {
+        let root = unique_temp_dir("projects");
+        let store = |slug: &str| root.join(slug).join(PROJECT_ARTIFACTS_DIR);
+        let a = store_artifact_in(Some(&store("idle-a")), "a", ArtifactKind::Generic).unwrap();
+        let b = store_artifact_in(Some(&store("idle-b")), "b", ArtifactKind::Generic).unwrap();
+        // A project's other folders hold artifact-shaped names too; they are not its store.
+        std::fs::create_dir_all(root.join("idle-a").join("state")).unwrap();
+        std::fs::write(root.join("idle-a").join("state").join(&a.sha256), b"a").unwrap();
+        std::fs::write(root.join("stray-file"), b"not a project").unwrap();
+
+        let removed = prune_artifact_stores_under(&root, SystemTime::now() + Duration::from_secs(3600));
+
+        assert_eq!(removed, 2, "one in each project's store");
+        assert!(read_artifact_in(&store("idle-a"), &a.sha256).is_none());
+        assert!(read_artifact_in(&store("idle-b"), &b.sha256).is_none());
+        assert!(!store("idle-b").exists(), "an emptied store does not hold its project's folder");
+        assert!(root.join("idle-a").join("state").join(&a.sha256).exists(), "state is not the store");
+        assert!(root.join("stray-file").exists());
+        assert_eq!(prune_artifact_stores_under(&root.join("absent"), SystemTime::now()), 0);
+        let fresh = store_artifact_in(Some(&store("busy")), "fresh", ArtifactKind::Generic).unwrap();
+        assert_eq!(prune_artifact_stores_under(&root, SystemTime::now() - Duration::from_secs(3600)), 0);
+        assert!(read_artifact_in(&store("busy"), &fresh.sha256).is_some(), "a store with a fresh artifact stays");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

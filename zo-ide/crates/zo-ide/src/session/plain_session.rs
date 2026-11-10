@@ -586,7 +586,7 @@ fn keep_stores_out_of_the_tree(session_path: &Path) {
         return;
     };
     for (key, dir) in [
-        (tools::ARTIFACT_STORE_ENV, "artifacts"),
+        (tools::ARTIFACT_STORE_ENV, tools::PROJECT_ARTIFACTS_DIR),
         (tools::TEAM_INBOX_STORE_ENV, "team_inbox"),
     ] {
         if std::env::var_os(key).is_some_and(|value| !value.is_empty()) {

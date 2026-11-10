@@ -70,10 +70,11 @@ pub use codegraph_tools::codegraph_cache_path;
 pub use aliases::canonical_tool_name;
 pub use bash_redirect::{dedicated_read_for, redirect_note, redirected_read, DedicatedRead};
 pub use computer_tools::COMPUTER_SHIM;
-pub use artifacts::ARTIFACT_STORE_ENV;
+pub use artifacts::{ARTIFACT_STORE_ENV, PROJECT_ARTIFACTS_DIR};
 pub use team_inbox_store::STORE_ENV as TEAM_INBOX_STORE_ENV;
 pub use artifacts::{
-    prune_artifact_files_older_than, read_artifact, store_artifact, ArtifactKind, ArtifactRef,
+    prune_artifact_files_older_than, prune_artifact_stores_under, read_artifact, store_artifact,
+    ArtifactKind, ArtifactRef,
 };
 pub use context::{ForkSource, SubagentIdentity, ToolContext, TurnAgentPolicy, UserQuestionChannel};
 pub use dispatch::{
