@@ -4,7 +4,7 @@
  * check reads the page a browser laid out. The conversations are synthetic.
  *
  *   WINDOW_SUITES='^conversation-outputs' node ui/tests/window.mjs */
-import { openPaneConversation, standZo } from "./conversation-parity.mjs";
+import { openConversation, openPaneConversation, standZo } from "./conversation-parity.mjs";
 import { foldConversations, openWindowTestPage } from "./window-boot.mjs";
 
 /* A pane's conversation that has ended, on the folded page. */
@@ -288,6 +288,178 @@ export async function testConversationTable(browser, origin, ok) {
     ok("table: as CSV a field with a comma or a quote stands in quotes, its own quotes doubled — opened from the keyboard",
       asCsv === ["대화 크기,지금,고친 뒤", "400턴,210 ms,38 ms", "\"4,000턴, \"\"큰\"\" 대화\",\"1,840 ms\",41 ms"].join("\n"), JSON.stringify(asCsv));
     ok("table: no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A code block's bar says what the fence says of the code — the file it names, its language — and keeps the
+ * list's top while a long block is read; a block past 24 lines stands folded behind a door that counts its
+ * lines; 「줄바꿈」 joins the bar when a hand reaches the block, and is one reading for every block. */
+export async function testConversationCode(browser, origin, ok) {
+  const fence = "\x60\x60\x60";
+  const long = Array.from({ length: 40 }, (_, at) => at === 3
+    ? `const wide_${at} = "${"아주 긴 줄입니다 ".repeat(30)}";`
+    : `const value_${at} = compute(${at});`).join("\n");
+  const answer = [
+    "고친 곳입니다.",
+    "",
+    `${fence}rust title="src/session.rs"`, "fn open() {", "    read_head();", "}", fence,
+    "",
+    "긴 파일도 하나 있습니다.",
+    "",
+    `${fence}ts:ui/list.ts`, long, fence,
+    "",
+    `${fence}sh`, "cargo test", fence,
+    "",
+    fence, "plain words", fence,
+    "",
+    "끝입니다.",
+  ].join("\n");
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const parsed = await page.evaluate(() => [
+      "rust", "rust title=\"src/a.rs\"", "ts:ui/list.ts", "12:15:src/a.rs", "src/session.rs", "C:\\src\\a.rs", "c++", "", "python3.11", "title=notes.md",
+    ].map((info) => { const { language, file } = fenceInfoOf(info); return `${language}|${file}`; }));
+    ok("code: a fence's first line is read for its language and the file it names — an attribute, 「lang:path」, a cited range, a path alone, a drive's colon — and a word with no slash and no extension is a language",
+      parsed.join(" ; ") === "rust| ; rust|src/a.rs ; ts|ui/list.ts ; rs|src/a.rs ; rs|src/session.rs ; rs|C:\\src\\a.rs ; c++| ; | ; python3.11| ; |notes.md",
+      JSON.stringify(parsed));
+
+    await openSettled(page, [{ role: "user", text: "고친 곳을 보여 줘." }, { role: "assistant", text: answer }]);
+    const read = () => page.evaluate(() => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const row = list.querySelector(":scope > .helper-turn.is-assistant");
+      const frames = [...row.querySelectorAll(".helper-said .helper-code")];
+      return {
+        blocks: frames.map((frame) => {
+          const bar = frame.querySelector(":scope > .helper-code-bar");
+          const pre = frame.querySelector(":scope > pre");
+          const door = frame.querySelector(":scope > .helper-code-more");
+          const style = getComputedStyle(pre);
+          return {
+            file: bar.querySelector(".helper-code-file")?.textContent ?? null, language: bar.querySelector(".helper-code-lang").textContent,
+            dataLanguage: pre.dataset.language ?? null, dataFile: pre.dataset.file ?? null,
+            copy: bar.querySelector(".helper-code-copy").textContent, copyName: bar.querySelector(".helper-code-copy").getAttribute("aria-label"),
+            wrap: bar.querySelector(".helper-code-wrap")?.getAttribute("aria-pressed") ?? null,
+            long: frame.classList.contains("is-long"), open: frame.classList.contains("is-open"),
+            door: door?.textContent ?? null, expanded: door?.getAttribute("aria-expanded") ?? null,
+            height: Math.round(pre.getBoundingClientRect().height), maxHeight: style.maxHeight, overflowY: style.overflowY, whiteSpace: style.whiteSpace,
+            top: Math.round(frame.getBoundingClientRect().top),
+            barSticks: getComputedStyle(bar).position, barGround: getComputedStyle(bar).backgroundColor,
+          };
+        }),
+        kept: row.__codeOpen === undefined ? null : row.__codeOpen === "all" ? "all" : [...row.__codeOpen],
+        wrapRoot: document.documentElement.dataset.chatCodeWrap ?? null,
+        sideways: list.scrollWidth - list.clientWidth,
+      };
+    });
+    const start = await read();
+    const [named, lengthy, shell, bare] = start.blocks;
+    ok("code: the bar says the file the fence names and its language, a fence with a language says that, one with neither says 「코드」 — and the code keeps the language alone for its colours",
+      named.file === "src/session.rs" && named.language === "rust" && named.dataLanguage === "rust" && named.dataFile === "src/session.rs" &&
+        lengthy.file === "ui/list.ts" && lengthy.language === "ts" && shell.file === null && shell.language === "sh" &&
+        bare.file === null && bare.language === "코드" && bare.dataLanguage === null &&
+        start.blocks.every((block) => block.copy === "복사" && block.copyName === "코드 복사"),
+      JSON.stringify(start.blocks.map(({ file, language, dataLanguage }) => ({ file, language, dataLanguage }))));
+    ok("code: a block of 40 lines stands folded at 400px behind 「전체 보기 (40줄)」; the short ones have no door",
+      lengthy.long && !lengthy.open && lengthy.door === "전체 보기 (40줄)" && lengthy.expanded === "false" && lengthy.maxHeight === "400px" &&
+        lengthy.overflowY === "hidden" && lengthy.height <= 400 && !named.long && named.door === null && !shell.long && !bare.long,
+      JSON.stringify(lengthy));
+    // Opaque: a colour with no alpha part, however the engine spells it (`rgb(…)`, `color(srgb …)`).
+    ok("code: in an answer the bar keeps the list's top, on an opaque ground", start.blocks.every((block) => block.barSticks === "sticky" &&
+      /^(rgb|color)\(/.test(block.barGround) && !block.barGround.includes("/")), JSON.stringify(start.blocks.map((block) => [block.barSticks, block.barGround])));
+
+    await page.locator(".pane-chat .helper-code-more").click();
+    const opened = await read();
+    ok("code: the door opens the whole block and says 「접기」, and the row remembers it",
+      opened.blocks[1].open && opened.blocks[1].door === "접기" && opened.blocks[1].expanded === "true" && opened.blocks[1].height > 400 &&
+        JSON.stringify(opened.kept) === "[1]",
+      JSON.stringify({ block: opened.blocks[1], kept: opened.kept }));
+    // Folded from below its head, the block's head comes back into view.
+    const folded = await page.evaluate(async () => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const frame = list.querySelector(".helper-code.is-long");
+      list.scrollTop += frame.getBoundingClientRect().bottom - list.getBoundingClientRect().top - 120;
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const before = Math.round(frame.getBoundingClientRect().top - list.getBoundingClientRect().top);
+      frame.querySelector(".helper-code-more").click();
+      await window.__PAINTED__();
+      return { before, after: Math.round(frame.getBoundingClientRect().top - list.getBoundingClientRect().top), open: frame.classList.contains("is-open") };
+    });
+    ok("code: folded from its foot, the block's head is back at the list's top rather than above it", folded.before < 0 && folded.after >= 0 && !folded.open, JSON.stringify(folded));
+
+    // 「줄바꿈」 is built by the first reach — the page as it opened carried none, and the press on the long
+    // block's door was a hand on that block — and is one reading for every block.
+    const untouched = start.blocks.map((block) => block.wrap);
+    await page.locator(".pane-chat .helper-code").nth(1).hover();
+    await page.waitForSelector(".pane-chat .helper-code-wrap");
+    const reached = await read();
+    await page.locator(".pane-chat .helper-code-wrap").click();
+    const wrapped = await read();
+    const mark = await page.evaluate(() => getComputedStyle(document.querySelector(".pane-chat .helper-code-wrap"), "::before").content);
+    await page.locator(".pane-chat .helper-code").nth(0).hover();
+    await page.waitForFunction(() => document.querySelectorAll(".pane-chat .helper-code-wrap").length === 2);
+    const second = await read();
+    ok("code: no block carries 「줄바꿈」 until a hand reaches it; then that block's bar does, off",
+      untouched.every((one) => one === null) && reached.blocks.map((block) => block.wrap).join() === ",false,," && reached.wrapRoot === null,
+      JSON.stringify({ untouched, reached: reached.blocks.map((block) => block.wrap) }));
+    ok("code: pressed, every block wraps its long lines and the pressed block has not moved; the control wears a check and says it is on, and a block reached later is born saying so",
+      wrapped.wrapRoot === "on" && wrapped.blocks.every((block) => block.whiteSpace === "pre-wrap") && wrapped.blocks[1].wrap === "true" &&
+        Math.abs(wrapped.blocks[1].top - reached.blocks[1].top) <= 1 && mark === '"✓ "' && second.blocks[0].wrap === "true" && wrapped.sideways <= 0,
+      JSON.stringify({ root: wrapped.wrapRoot, tops: [reached.blocks[1].top, wrapped.blocks[1].top], mark, second: second.blocks[0].wrap }));
+    await page.locator(".pane-chat .helper-code-wrap").first().click();
+    const unwrapped = await read();
+    ok("code: pressed again, the lines are their own again", unwrapped.wrapRoot === null && unwrapped.blocks.every((block) => block.whiteSpace === "pre" && block.wrap !== "true"),
+      JSON.stringify(unwrapped.blocks.map((block) => [block.whiteSpace, block.wrap])));
+    ok("code: no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+  await testConversationCodeStream(browser, origin, ok, answer);
+}
+
+/* An answer read as it came keeps its long code open when its turn takes the streaming row's place; a page
+ * that opens the same turn later folds it. */
+async function testConversationCodeStream(browser, origin, ok, answer) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, [{ role: "user", text: "고친 곳을 보여 줘." }], { status: "working", live: [{ role: "assistant", text: `${answer}\n\n아직 쓰는 중` }] });
+    await foldConversations(page);
+    await page.evaluate(async () => { for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__(); });
+    const streaming = await page.evaluate(() => {
+      const row = document.querySelector("#worker-view .helper-turns > .is-streaming.is-assistant");
+      const pre = [...row.querySelectorAll(".helper-code > pre")].find((one) => one.textContent.includes("value_39"));
+      return { blocks: row.querySelectorAll(".helper-code").length, doors: row.querySelectorAll(".helper-code-more").length,
+        height: Math.round(pre?.getBoundingClientRect().height ?? 0) };
+    });
+    ok("stream: an answer still being written folds none of its code — it is read as it comes",
+      streaming.blocks === 4 && streaming.doors === 0 && streaming.height > 400, JSON.stringify(streaming));
+    const settled = await page.evaluate(async (answer) => {
+      window.__CONVERSATION__.turns.push({ role: "assistant", text: `${answer}\n\n아직 쓰는 중` });
+      window.__CONVERSATION__.live = [];
+      window.__CONVERSATION__.status = "idle";
+      await pollHelperPages();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      const list = document.querySelector("#worker-view .helper-turns");
+      const row = list.querySelector(":scope > .helper-turn.is-assistant:not(.is-streaming)");
+      const frame = row?.querySelector(".helper-code.is-long");
+      const seen = {
+        streaming: list.querySelectorAll(":scope > .is-streaming").length, long: Boolean(frame), open: frame?.classList.contains("is-open") ?? null,
+        door: frame?.querySelector(".helper-code-more")?.textContent ?? null, kept: row?.__codeOpen ?? null,
+        height: Math.round(frame?.querySelector("pre").getBoundingClientRect().height ?? 0),
+      };
+      // The same turn on a row built anew — a page that opens it later — stands folded.
+      const again = helperTurnRowNode(list.__run, row.__turn, -1);
+      list.appendChild(again);
+      seen.later = again.querySelector(".helper-code.is-long")?.classList.contains("is-open") ?? null;
+      again.remove();
+      return seen;
+    }, answer);
+    ok("stream: its turn takes the row's place with the long block still open — 「접기」 under it — and the same turn drawn later stands folded",
+      settled.streaming === 0 && settled.long && settled.open === true && settled.door === "접기" && settled.kept === "all" &&
+        settled.height > 400 && settled.later === false,
+      JSON.stringify(settled));
+    ok("stream: no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }

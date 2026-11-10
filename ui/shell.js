@@ -16097,7 +16097,7 @@ function updateHelperStatus(line, run) {
  * draws once it has settled, and is laid out once: the settled part is drawn
  * once (`settledCut`). The diagrams come after the doors, which walk the words
  * and would walk a drawing's labels too. */
-function paintHelperProse(host, text, base, { colour = true } = {}) {
+function paintHelperProse(host, text, base, { colour = true, clip = true } = {}) {
   const previous = mdWhere;
   mdWhere = { base, page: null };
   try {
@@ -16106,8 +16106,9 @@ function paintHelperProse(host, text, base, { colour = true } = {}) {
     // words still being written are drawn again next frame and ask nothing.
     linkifyHelperProse(host, { chips: colour });
     if (colour) paintMarkdownDiagrams(host);
-    // Each code block wears the extension's copy over its corner (A9).
-    dressCodeCopies(host);
+    // Each code block wears the extension's copy over its corner (A9); a long
+    // one stands folded unless the caller reads it as it comes (`clip`).
+    dressCodeCopies(host, { clip });
     // A settled table wears its copy at the end of its head row (2026-11-10);
     // the block still being written is drawn again next frame and wears none.
     if (colour) dressTables(host);
@@ -17577,7 +17578,8 @@ function paintLiveAnswerNow(row, text, run) {
   const cut = settledCut(text, text.length);
   if (cut > row.__settledEnd) {
     const closed = document.createDocumentFragment();
-    paintHelperProse(closed, text.slice(row.__settledEnd, cut), helperBase(run));
+    // The answer being written is read as it comes: none of its code folds.
+    paintHelperProse(closed, text.slice(row.__settledEnd, cut), helperBase(run), { clip: false });
     settled.append(closed);
     row.__settledEnd = cut;
   }
@@ -17585,7 +17587,7 @@ function paintLiveAnswerNow(row, text, run) {
   if (rest !== row.__tailText) {
     row.__tailText = rest;
     tail.replaceChildren();
-    if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run), { colour: false });
+    if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run), { colour: false, clip: false });
   }
   if (follow) carryToFoot(list);
   else if (list.__follow?.pin) askFootDoor(list);
@@ -17625,6 +17627,8 @@ function helperTurnsNode(run) {
   // 「그림·페이지로 설명」 단추는 답변 행에 포인터나 초점이 처음 닿을 때 짓는다(t-32787).
   watchAnswerActions(list);
   watchExplainTurns(list);
+  // A code block's 「줄바꿈」 is built the first time a hand reaches the block.
+  watchCodeBlocks(list);
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);
   syncHelperTurns(list, run);

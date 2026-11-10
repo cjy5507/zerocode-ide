@@ -17384,7 +17384,57 @@ details.worker-command {
   margin: var(--space-2) 0;
   border-radius: var(--chat-panel-radius);
   background: var(--chat-code-bg);
-  overflow: hidden;
+  /* `clip`, not `hidden`: the corners are cut, and in an answer the bar can
+   * still stay at the list's top while a long block passes under it. */
+  overflow: clip;
+}
+
+/* In an answer the bar keeps the list's top while its block is read
+ * (2026-11-10): what the code is and its copy stay within reach of a block
+ * taller than the screen. Opaque — the code passes under it — in the colour
+ * the panel's ground reads as on the page. */
+.is-chat-page .helper-turn.is-assistant .helper-said .helper-code > .helper-code-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--chat-code-bar-bg);
+}
+
+/* A long block stands folded at `--chat-code-clip` until its door is pressed;
+ * its long lines still scroll sideways inside it. */
+.helper-code.is-long:not(.is-open) > pre {
+  max-height: var(--chat-code-clip);
+  overflow-y: hidden;
+}
+
+/* 「전체 보기 (N줄)」 / 「접기」: the block's foot, in the quiet ink of a line
+ * that is no code. */
+.helper-code-more {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-top: var(--rule-width) solid var(--edge-rule);
+  background: none;
+  color: var(--ink-figure);
+  font: var(--type-label-12);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+
+.helper-code-more:hover {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+/* 「줄바꿈」 on: every block on this window's pages wraps its long lines
+ * (`setChatCodeWrap`). */
+:root[data-chat-code-wrap="on"] .is-chat-page .helper-code > pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .is-chat-page .helper-said .helper-code > pre {
@@ -17411,10 +17461,46 @@ details.worker-command {
 }
 
 .helper-code-lang {
+  /* The words take the bar's room; the controls keep its far end. */
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The file a fence names, before its language: the full ink, cut from its
+ * front's far end when the bar is narrow — the name is at the path's end. */
+.helper-code-file {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 「줄바꿈」: a word on the bar like the copy beside it; on, it wears a check
+ * before its word and the full ink — the shape says it, the ink repeats it. */
+.helper-code-wrap {
+  flex: none;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--ink-figure);
+  font: var(--type-label-12);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-code-wrap:hover,
+.helper-code-wrap[aria-pressed="true"] {
+  color: var(--ink-chalk);
+}
+
+.helper-code-wrap[aria-pressed="true"]::before {
+  content: "✓ ";
 }
 
 .helper-code-bar > .helper-code-copy {
@@ -21257,7 +21343,7 @@ button.helper-sib:hover {
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
  * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo, .helper-table-copy):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo, .helper-table-copy, .helper-code-wrap, .helper-code-more):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -21284,6 +21370,8 @@ button.helper-sib:hover {
   .chat-result-all,
   .chat-result-more,
   .helper-table-copy,
+  .helper-code-wrap,
+  .helper-code-more,
   .chat-result-file,
   .chat-result-file::after,
   .helper-person-time,

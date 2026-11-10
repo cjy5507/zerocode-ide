@@ -2844,6 +2844,12 @@
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 4%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 8%, transparent);
+  /* The code ground as it reads on the page, opaque: a long block's bar stays
+   * at the list's top while its code passes under it (2026-11-10). */
+  --chat-code-bar-bg: color-mix(in srgb, var(--ink-chalk) 8%, var(--chat-ground));
+  /* How tall a long block of code stands before 「전체 보기 (N줄)」: about a
+   * screen's third, Streamdown's default. */
+  --chat-code-clip: 400px;
   /* The approved conversation (t-22100): a step's argument in a soft link
    * ink — the link's colour leaning to the words', so a column of addresses,
    * queries and commands reads as the machine's without shouting — and the
@@ -3688,6 +3694,7 @@
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
+  --chat-code-bar-bg: color-mix(in srgb, var(--ink-chalk) 6%, var(--chat-ground));
   --chat-arg-ink: var(--chat-link);
   --chat-rail-tick: color-mix(in srgb, var(--ink-mist) 30%, transparent);
   --chat-accent: var(--ai-accent);

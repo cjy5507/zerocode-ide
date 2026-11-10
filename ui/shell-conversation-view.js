@@ -1656,20 +1656,82 @@ async function copyAndSay(button, text, words = null) {
   }, CHAT_COPIED_MS);
 }
 
+/* What a fence's first line says of its code: the language, and the file when
+ * the line names one — 「rust title="src/a.rs"」, 「rust:src/a.rs」, a cited range
+ * 「12:15:src/a.rs」, or the path alone, whose extension is then the language. A
+ * word with no slash and no extension is a language (「c++」, 「objective-c」). */
+const FENCE_FILE_ATTR = /(?:^|\s)(?:title|filename|file|path)=(?:"([^"]+)"|'([^']+)'|(\S+))/;
+const FENCE_FILE_NAME = /^[\w@%+~-][\w.@%+~-]*\.[A-Za-z][A-Za-z0-9]{0,7}$/;
+
+function fenceLooksLikeFile(word) {
+  return /[\\/]/.test(word) || FENCE_FILE_NAME.test(word);
+}
+
+function fenceExtension(file) {
+  const name = file.split(/[\\/]/).at(-1) ?? "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+function fenceInfoOf(info) {
+  const said = String(info ?? "").trim();
+  if (said === "") return { language: "", file: "" };
+  const word = said.split(/[\s,{]/, 1)[0];
+  const named = FENCE_FILE_ATTR.exec(said);
+  if (named) return { language: word.includes("=") ? "" : word, file: named[1] ?? named[2] ?? named[3] };
+  // A drive's colon is the path's own (「C:\\src\\a.rs」).
+  const drive = /^[A-Za-z]:[\\/]/.test(word);
+  const colon = drive ? -1 : word.lastIndexOf(":");
+  if (colon > 0 && fenceLooksLikeFile(word.slice(colon + 1))) {
+    const head = word.slice(0, colon);
+    const file = word.slice(colon + 1);
+    return { language: /^\d+(?::\d+)?$/.test(head) ? fenceExtension(file) : head, file };
+  }
+  if (fenceLooksLikeFile(word)) return { language: fenceExtension(word), file: word };
+  return { language: word, file: "" };
+}
+
+/* How many lines a block of code shows before the rest waits behind 「전체
+ * 보기 (N줄)」 (2026-11-10, window artifact p-1c1bbf75726ff227: a block past a
+ * screen's worth buried the prose around it; Streamdown's default folds at the
+ * same 400px, `--chat-code-clip`). */
+const CHAT_CODE_CLIP_LINES = 24;
+
 /* Every code block the prose drew stands on a flat panel (t-22100): a bar over
- * the code with the fence's language — the document viewer's word for it
- * (`fenceLanguageWords`) — and its copy, then the code. The colours inside the
- * code are the fence's own (`colourCodeIn`, t-22095). */
-function dressCodeCopies(host) {
-  for (const block of host.querySelectorAll("pre.md-block")) {
-    if (block.parentElement?.classList.contains("helper-code")) continue;
+ * the code with what the fence says of it — the file it names, when it names
+ * one, then its language (`fenceInfoOf`; 「코드」 when it says neither) — and
+ * its copy, then the code. The bar stays at the list's top while a long block
+ * passes under it (shell.css). The colours inside the code are the fence's own
+ * (`colourCodeIn`, t-22095), read by the language alone — so the fence keeps
+ * that, and the file beside it (`data-file`).
+ *
+ * A block past `CHAT_CODE_CLIP_LINES` stands folded with a door under it that
+ * says how many lines it holds — unless `clip` is false (an answer still being
+ * written is read as it comes), or its row keeps it open (`row.__codeOpen`: a
+ * door the person pressed, an answer they watched being written). 「줄바꿈」
+ * joins the bar the first time a hand reaches the block (`watchCodeBlocks`). */
+function dressCodeCopies(host, { clip = true } = {}) {
+  const kept = clip ? host.closest?.(".helper-turn")?.__codeOpen ?? null : null;
+  host.querySelectorAll("pre.md-block").forEach((block, at) => {
+    if (block.parentElement?.classList.contains("helper-code")) return;
+    const info = fenceInfoOf(block.dataset.language);
+    if (info.language) block.dataset.language = info.language;
+    else delete block.dataset.language;
     const frame = document.createElement("div");
     frame.className = "helper-code";
     const bar = document.createElement("div");
     bar.className = "helper-code-bar";
+    if (info.file) {
+      block.dataset.file = info.file;
+      const file = document.createElement("span");
+      file.className = "helper-code-file";
+      file.textContent = info.file;
+      bar.appendChild(file);
+    }
     const language = document.createElement("span");
     language.className = "helper-code-lang";
-    language.textContent = fenceLanguageWords(block);
+    // A file's name says what the code is; with none, the fence's language or the window's 「코드」.
+    language.textContent = info.file ? info.language : fenceLanguageWords(block);
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "helper-code-copy";
@@ -1681,7 +1743,120 @@ function dressCodeCopies(host) {
     bar.append(language, copy);
     block.replaceWith(frame);
     frame.append(bar, block);
+    const lines = stepLineCount(block.textContent);
+    if (!clip || lines <= CHAT_CODE_CLIP_LINES) return;
+    frame.classList.add("is-long");
+    frame.__at = at;
+    frame.__lines = lines;
+    const door = document.createElement("button");
+    door.type = "button";
+    door.className = "helper-code-more";
+    door.dataset.keyboardOwner = "true";
+    door.addEventListener("click", () => openCodeBlock(frame, door.getAttribute("aria-expanded") !== "true"));
+    frame.appendChild(door);
+    dressCodeDoor(frame, kept === "all" || kept?.has(at) === true);
+  });
+}
+
+/* A long block's door as the block stands: 「전체 보기 (N줄)」 folded, 「접기」 open. */
+function dressCodeDoor(frame, open) {
+  const door = frame.lastElementChild;
+  writeClass(frame, "is-open", open);
+  writeAttribute(door, "aria-expanded", open ? "true" : "false");
+  writeTextContent(door, open ? t("worker.showLess", "접기") : t("worker.codeAll", "전체 보기 ({{n}}줄)", { n: frame.__lines }));
+}
+
+/* A long block opened or folded by its door. Its row remembers which of its
+ * blocks stand open, so a row that takes its body back (the shelf) draws them
+ * as the person left them; folded from below its head, the block's head comes
+ * back into view rather than leave the reader in the answer's later words. */
+function openCodeBlock(frame, open) {
+  dressCodeDoor(frame, open);
+  const row = frame.closest(".helper-turn");
+  if (row) {
+    if (row.__codeOpen === "all" || row.__codeOpen === undefined) {
+      const all = row.__codeOpen === "all";
+      row.__codeOpen = new Set(all ? [...row.querySelectorAll(".helper-code.is-long")].map((one) => one.__at) : []);
+    }
+    if (open) row.__codeOpen.add(frame.__at);
+    else row.__codeOpen.delete(frame.__at);
   }
+  const list = open ? null : pageTurnsOf(frame);
+  if (!list) return;
+  const above = frame.getBoundingClientRect().top - list.getBoundingClientRect().top;
+  if (above < 0) list.scrollTop += above;
+}
+
+/* Every long block of `row` stands open and stays so: the answer a reader
+ * watched being written does not fold its code shut under them when its turn
+ * takes the streaming row's place (`removeStreamingRow`). A page that opens the
+ * same turn later folds it as any other. */
+function keepCodeOpenIn(row) {
+  row.__codeOpen = "all";
+  for (const frame of row.querySelectorAll(".helper-code.is-long:not(.is-open)")) dressCodeDoor(frame, true);
+}
+
+/* ---- 「줄바꿈」: a block's long lines, wrapped (2026-11-10) ---------------------
+ *
+ * One reading for every block on this window's pages (`data-chat-code-wrap` on
+ * the root, read by shell.css), kept where 「결과만」 is kept: a person who
+ * wants code wrapped wants it in the next block too, and a block that takes
+ * its body back from the shelf wears it without being told. The control is a
+ * word on the block's bar, built the first time the pointer or the keyboard
+ * reaches the block — a page of thirty blocks nobody touched pays for none.
+ * The block the person pressed stays where it stood while the others above it
+ * change their height. */
+const CHAT_CODE_WRAP_KEY = "zerocode.chat.codeWrap";
+let chatCodeWrap = false;
+try {
+  chatCodeWrap = localStorage.getItem(CHAT_CODE_WRAP_KEY) === "on";
+} catch {}
+
+function applyChatCodeWrap() {
+  if (chatCodeWrap) document.documentElement.dataset.chatCodeWrap = "on";
+  else delete document.documentElement.dataset.chatCodeWrap;
+}
+
+applyChatCodeWrap();
+
+function setChatCodeWrap(on, from = null) {
+  chatCodeWrap = on;
+  try {
+    localStorage.setItem(CHAT_CODE_WRAP_KEY, on ? "on" : "off");
+  } catch {}
+  const list = from ? pageTurnsOf(from) : null;
+  const stood = list ? from.getBoundingClientRect().top : 0;
+  applyChatCodeWrap();
+  for (const button of document.querySelectorAll(".helper-code-wrap")) writeAttribute(button, "aria-pressed", on ? "true" : "false");
+  if (list) list.scrollTop += from.getBoundingClientRect().top - stood;
+}
+
+function ensureCodeWrapToggle(frame) {
+  const bar = frame.firstElementChild;
+  const copy = bar?.querySelector(":scope > .helper-code-copy");
+  if (!copy || bar.querySelector(":scope > .helper-code-wrap")) return;
+  const wrap = document.createElement("button");
+  wrap.type = "button";
+  wrap.className = "helper-code-wrap";
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  wrap.dataset.keyboardOwner = "true";
+  wrap.textContent = t("worker.codeWrap", "줄바꿈");
+  wrap.setAttribute("aria-pressed", chatCodeWrap ? "true" : "false");
+  wrap.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setChatCodeWrap(!chatCodeWrap, frame);
+  });
+  bar.insertBefore(wrap, copy);
+}
+
+/* One pair of listeners a list, for every block it will ever hold. */
+function watchCodeBlocks(list) {
+  const reach = (event) => {
+    const frame = event.target.closest?.(".helper-code");
+    if (frame) ensureCodeWrapToggle(frame);
+  };
+  list.addEventListener("pointerover", reach);
+  list.addEventListener("focusin", reach);
 }
 
 /* ---- a table in an answer (2026-11-10) ---------------------------------------
@@ -3284,6 +3459,17 @@ function noteThoughtSettled(list, turn, row) {
  * held the keyboard, in a closed pill, hands it to the pill's head
  * (t-81786 P3-5). */
 function removeStreamingRow(stale, run) {
+  // An answer that was read as it came: the turn standing in its place — the
+  // nearest answer above, when it opens with the same words — keeps its long
+  // code open (`keepCodeOpenIn`).
+  if (!stale.classList.contains("is-thinking")) {
+    const said = (stale.__text ?? "").trim().slice(0, 200);
+    for (let row = stale.previousElementSibling; row && said !== ""; row = row.previousElementSibling) {
+      if (!row.classList.contains("is-assistant") || row.classList.contains("is-streaming")) continue;
+      if (cleanseAssistantText(row.__turn?.text ?? "").trim().startsWith(cleanseAssistantText(said).trim())) keepCodeOpenIn(row);
+      break;
+    }
+  }
   const held = stale.firstElementChild === document.activeElement;
   let row = stale.__settled?.row;
   if (row?.isConnected && row.classList.contains("helper-group")) {
