@@ -218,6 +218,9 @@ export async function testSidebarAgents({ browser, origin, ok, faults }) {
       };
       const host = document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(tabOfTerm(term).worktree)}"]`);
       const said = host?.dataset.said ?? "";
+      // The preference reaches a media query the window holds at the next rendering update: WebKit answers a fresh
+      // `matchMedia` at once and the held one only after a frame (Chromium both at once), as the OS's switch would.
+      await window.__PAINTED__();
       window.__TURN_ASKS__.count = 0;
       tell("hook:subagent", { term, rows: [{ id: "asked-1", name: "explore·asked", state: "running", tool_calls: 6 }] });
       flushAgentPaint();
