@@ -1435,6 +1435,46 @@ class UiFlakes(LaneCase):
         runner = (REPO / "ui" / "tests" / "window-runner.mjs").read_text()
         self.assertIn("env.WINDOW_SUITES", runner, "the chooser the lane names is the one the runner reads")
 
+    def test_a_harness_the_lane_judges_is_one_script_and_a_recipe_of_several_runs_them_all(self):
+        # 2026-11-10: window-browser-test ran window.mjs and then the profile data's harness, and just ends
+        # a recipe at its first red line — v1.1.139's lane never ran the second. A `<harness>-browser-test`
+        # is one script: its checks are named by that harness, and a suite of it is judged by running that
+        # recipe alone. Any other verify recipe of several node scripts runs every one of them.
+        text = (REPO / "justfile").read_text(encoding="utf-8")
+        verify = re.search(r"^verify:(.*)$", text, re.M).group(1).split()
+        bodies = {}
+        for recipe in verify:
+            found = re.search(rf"^{re.escape(recipe)}:\n((?:    .*\n)*)", text, re.M)
+            self.assertIsNotNone(found, recipe)
+            bodies[recipe] = [line.strip() for line in found.group(1).splitlines() if line.strip()]
+        for recipe, body in bodies.items():
+            with self.subTest(recipe=recipe):
+                if re.fullmatch(r"[a-z]+-browser-test", recipe):
+                    self.assertEqual(len(body), 1, body)
+                    self.assertTrue(body[0].startswith("node ui/tests/"), body)
+                self.assertLessEqual(sum(line.startswith("node ") for line in body), 1,
+                                     "a second script line would not run after a red first")
+        self.assertEqual(bodies["profile-browser-test"], ["node ui/tests/browser-profile-data.mjs"])
+        self.assertEqual(bodies["window-browser-test"], ["node ui/tests/window.mjs"])
+        self.assertEqual(self.parse(
+            "==> verify recipe window-browser-test\nSUITE  panes\nFAIL  a window check  — x\n"
+            "error: recipe `window-browser-test` failed on line 1 with exit code 1\n"
+            "==> verify recipe profile-browser-test\nSUITE  browser-profile-data\nFAIL  a profile check  — y\n"
+            "error: recipe `profile-browser-test` failed on line 1 with exit code 1\n"),
+            ["ui:profile/browser-profile-data:a profile check", "ui:window/panes:a window check"])
+        bin_dir = self.lane.tmp / "bin-every"
+        bin_dir.mkdir()
+        (bin_dir / "node").write_text('#!/bin/sh\necho "$1" >> ran.txt\ncase $1 in *-ring.mjs|*-door.mjs) exit 1;; esac\n')
+        (bin_dir / "node").chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"}
+        for recipe in ("browser-observation-test", "browser-door-test"):
+            with self.subTest(recipe=recipe):
+                work = self.lane.tmp / recipe
+                work.mkdir()
+                r = subprocess.run([BASH, "-c", bodies[recipe][0]], cwd=work, env=env, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertEqual(len((work / "ran.txt").read_text().splitlines()), 2, "both scripts ran after the first was red")
+
 
 class Queue(LaneCase):
     def test_two_queue_files_drain_by_mtime_one_at_a_time(self):

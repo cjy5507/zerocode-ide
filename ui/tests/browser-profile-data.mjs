@@ -5,8 +5,15 @@
  * and the settings card says how many came. Each scene is counted before the
  * import and after it.
  *
- *   node ui/tests/browser-profile-data.mjs
+ *   just profile-browser-test     (node ui/tests/browser-profile-data.mjs)
  *   PROFILE_DATA_SHOTS=<folder> node ui/tests/browser-profile-data.mjs   # keeps a picture of each scene
+ *
+ * It is a harness of its own, beside the window's (2026-11-10): while it ran in
+ * `window-browser-test` after window.mjs, a red window.mjs ended that recipe and
+ * these checks never ran (the v1.1.139 lane, run by hand afterwards 27/27). Its
+ * report is the window runner's (`SUITE` / `PASS  ` / `FAIL  `), so the release
+ * lane names a red check `ui:profile/browser-profile-data:<check>` and judges it
+ * by running this recipe alone.
  *
  * The backend is the harness's answer table, answering what the import of
  * `tests/fixtures/browser-profile/Bookmarks` and `web-data.sql` stores (the
@@ -18,6 +25,8 @@ import { mkdir } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { endRun } from "./end-run.mjs";
+import { createRunner } from "./window-runner.mjs";
 
 const PROFILE = "a".repeat(32);
 const SHOTS = process.env.PROFILE_DATA_SHOTS ? resolve(process.env.PROFILE_DATA_SHOTS) : null;
@@ -359,21 +368,18 @@ export async function testBrowserProfileData(browser, origin, ok) {
     ok("a pane without a profile shows no strip and asks nothing",
       plain.hidden && plain.buttons === 0 && plain.asked === 0, JSON.stringify(plain));
 
-    ok("the profile data scenes raised no page errors", faults.length === 0, faults.join("\n"));
+    ok("the profile data scenes raised no page errors", faults.length === 0, faults.join(" | "));
   } finally { await page.close(); }
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const { suite, run, report, reportWhenCut } = createRunner();
+  reportWhenCut();
+  suite("browser-profile-data", ({ browser, origin, ok }) => testBrowserProfileData(browser, origin, ok));
   const { files, origin } = await createWindowServer();
   const browser = await chromium.launch({ headless: true });
-  let failed = 0;
-  let passed = 0;
   try {
-    await testBrowserProfileData(browser, origin, (name, pass, details = "") => {
-      console.log(`${pass ? "PASS" : "FAIL"} ${name}${!pass ? `\n${details}` : ""}`);
-      if (pass) passed++; else failed++;
-    });
+    await run({ browser, origin });
   } finally { await browser.close(); files.close(); }
-  console.log(`\n${passed}/${passed + failed} passed`);
-  if (failed) process.exitCode = 1;
+  endRun(report() ? 1 : 0);
 }

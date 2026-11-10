@@ -10,7 +10,7 @@ set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # 않도록 zerocode-shell을 제외하고, 창은 shell-lint/shell-test 단계가 따로
 # 게이트한다.
 # The small source/runner checks answer before the Rust builds start.
-verify: pii-check fmt-check package-runner-test quality-runner-test window-runner-test lint doc test shell-lint shell-test tools-test swift-test settings-browser-test window-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
+verify: pii-check fmt-check package-runner-test quality-runner-test window-runner-test lint doc test shell-lint shell-test tools-test swift-test settings-browser-test window-browser-test profile-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
 
 # The re-entry gate for private values (3.9 s over 1,687 tracked files, the
 # median of 3 on an idle machine): a home directory, an office address, a
@@ -168,27 +168,35 @@ settings-browser-test:
 # And the error reporter, which never throws over the error it was handed when
 # the terminal script stopped while loading (t-94962).
 window-runner-test:
-    node --test ui/tests/window-runner.test.mjs ui/tests/ipc-census.test.mjs ui/tests/hidden-pane-bridge.test.mjs ui/tests/machine-load.test.mjs ui/tests/background-surface-focus.test.mjs ui/tests/jev-real-summary.test.mjs ui/tests/show-error.test.mjs ui/tests/pane-lifecycle.test.mjs ui/tests/pane-close-door.test.mjs ui/tests/pane-late-answer.test.mjs ui/tests/pane-late-seed.test.mjs ui/tests/pane-late-log.test.mjs ui/tests/window-scope.test.mjs ui/tests/vm-fixtures.test.mjs
-    node scripts/window-scope.mjs
+    status=0; node --test ui/tests/window-runner.test.mjs ui/tests/ipc-census.test.mjs ui/tests/hidden-pane-bridge.test.mjs ui/tests/machine-load.test.mjs ui/tests/background-surface-focus.test.mjs ui/tests/jev-real-summary.test.mjs ui/tests/show-error.test.mjs ui/tests/pane-lifecycle.test.mjs ui/tests/pane-close-door.test.mjs ui/tests/pane-late-answer.test.mjs ui/tests/pane-late-seed.test.mjs ui/tests/pane-late-log.test.mjs ui/tests/window-scope.test.mjs ui/tests/vm-fixtures.test.mjs || status=$?; [ "$status" -lt 128 ] || exit "$status"; node scripts/window-scope.mjs || status=$?; exit "$status"
 
 # 설정뿐 아니라 전체 renderer interaction을 실제 layout engine에서 확인한다.
 # 이 gate가 있어야 설정 변경이 탭/보드/온보딩 같은 인접 UI를 깨뜨리지 않았다는
 # 전체 renderer interaction 계약도 CI와 로컬에서 같은 명령으로 검증된다.
+# One harness a recipe (2026-11-10): just ends a recipe at its first red line, so
+# a second script after window.mjs never ran when a window check was red — the
+# v1.1.139 lane shipped without the profile-data checks having run. The release
+# lane names a check by its recipe (`ui:<harness>/<suite>:<check>`) and judges a
+# suite alone by running that recipe with WINDOW_SUITES, so each harness the
+# lane judges is one script under one `<harness>-browser-test`.
 window-browser-test:
     node ui/tests/window.mjs
+
+# A browser profile's imported Chrome data in the window (t-79331).
+profile-browser-test:
     node ui/tests/browser-profile-data.mjs
 
 # Guest error/network observation must also run in a fresh protocol session.
+# Every script runs, whatever the one before it said: the recipe is red when any
+# was, and a script ended by a signal (128+N, the lane's cap) ends it at once.
 browser-observation-test:
-    node ui/tests/browser-ring.mjs
-    node ui/tests/browser-form-fill.mjs
+    rc=0; for script in browser-ring browser-form-fill; do status=0; node "ui/tests/$script.mjs" || status=$?; [ "$status" -lt 128 ] || exit "$status"; [ "$status" = 0 ] || rc=1; done; exit "$rc"
 
 # The browser door's page scripts (zcSelect, click, wait) against a page with
 # hidden twins of its controls: the element a selector names is the first one
 # a person could see. Reads the strings the Rust hands the pane.
 browser-door-test:
-    node ui/tests/browser-door.mjs
-    node ui/tests/expense-workflow.mjs
+    rc=0; for script in browser-door expense-workflow; do status=0; node "ui/tests/$script.mjs" || status=$?; [ "$status" -lt 128 ] || exit "$status"; [ "$status" = 0 ] || rc=1; done; exit "$rc"
 
 # The knowledge graph's 14 browser tests (first paint, frame gap, DOM budget,
 # determinism, hex-literal ban, slicer, path). Outside the gate this file sat
