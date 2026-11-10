@@ -114,6 +114,29 @@ test("the suite body sees the run's context plus ok and its own name", async () 
   assert.equal(typeof seen.ok, "function");
 });
 
+test("a run keeps each suite's wall time and its checks beside the report, in the order it took them", async () => {
+  const { said, log } = lines();
+  const runner = createRunner({ log, env: {}, argv: [] });
+  runner.suite("quick", async ({ ok }) => ok("quick speaks", true));
+  runner.suite("slow", async ({ ok }) => {
+    await new Promise((done) => setTimeout(done, 40));
+    ok("slow speaks", true);
+    ok("slow speaks again", true);
+  });
+  runner.suite("broken", async () => {
+    throw new Error("no");
+  });
+  await runner.run({});
+  // A suite that threw took its time too, and its one line is its FAIL.
+  assert.deepEqual(runner.times.map((one) => [one.suite, one.checks]), [["quick", 1], ["slow", 2], ["broken", 1]]);
+  assert.ok(runner.times[1].ms >= 30, `the slow suite's ${runner.times[1].ms} ms`);
+  assert.ok(runner.times[0].ms < runner.times[1].ms, JSON.stringify(runner.times));
+  // The report is the lane's text contract: no time is written into it.
+  runner.report();
+  assert.equal(said.at(-1), "3/4 passed");
+  assert.deepEqual(said.filter((line) => line.startsWith(REPORT.suite)), ["SUITE  quick", "SUITE  slow", "SUITE  broken"]);
+});
+
 test("a default run takes every suite in registration order and skips the ones that run only by name", async () => {
   const runner = createRunner({ log() {}, env: {}, argv: [] });
   const ran = [];

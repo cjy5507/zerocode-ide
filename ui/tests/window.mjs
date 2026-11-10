@@ -177,7 +177,7 @@ import { testConversationAlign, testConversationColumn } from "./conversation-al
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -231,7 +231,7 @@ const addReportedPlatform = (page, platform) => page.addInitScript(reportedPlatf
 /* The window asks the backend for everything it draws, so the backend is
  * stubbed down to the answers a first frame needs. Anything missing here does
  * not fail politely: `boot()` throws and the page comes up half-drawn. */
-const { suite, ok, run, report, reportWhenCut } = createRunner();
+const { suite, ok, run, report, times, reportWhenCut } = createRunner();
 reportWhenCut();
 /* Renderer faults from every page the shared flow boots — its own window and
  * the rigs it opens beside it (terminal selection folds its faults in here) —
@@ -59679,6 +59679,9 @@ suite("wire-live-stream", async ({ browser, origin, ok }) => {
 });
 
 await run({ browser, origin, faults });
+/* `WINDOW_SUITE_TIMES=<file>`: each suite's wall time and checks as JSON, in the order the run took them — the report
+ * carries no time (window-runner.mjs `times`). */
+if (process.env.WINDOW_SUITE_TIMES) await writeFile(process.env.WINDOW_SUITE_TIMES, `${JSON.stringify(times, null, 1)}\n`);
 await browser.close();
 files.close();
 endRun(report() ? 1 : 0);

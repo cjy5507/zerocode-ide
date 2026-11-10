@@ -97,6 +97,10 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
     if (env.WINDOW_TRACE) process.stderr.write(`ok: ${pass ? REPORT.pass : REPORT.fail} ${name.slice(0, 110)}\n`);
   };
   const ok = (name, pass, detail = "") => record(running, name, pass, detail);
+  /* Each suite's wall time and how many checks it landed, in the order the run took them. The report says nothing of
+   * time — it is the lane's text contract — so this stands beside it: what a split of the run across several browsers
+   * is planned from, and where a run that grew slower is read (`WINDOW_SUITE_TIMES`, window.mjs). */
+  const times = [];
 
   const suite = (name, body, { onlyByName = false } = {}) => {
     if (suites.some((one) => one.name === name)) throw new Error(`suite "${name}" is already registered`);
@@ -152,6 +156,7 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
         heard = arm;
         arm();
       });
+      const began = performance.now();
       try {
         await Promise.race([one.body({ ...context, ok: hands, suite: one.name }), overdue]);
       } catch (error) {
@@ -160,6 +165,8 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
       } finally {
         heard = () => {};
         clearTimeout(clock);
+        times.push({ suite: one.name, ms: Math.round(performance.now() - began),
+          checks: results.filter((result) => result.suite === one.name).length });
       }
     }
     running = null;
@@ -201,5 +208,5 @@ export function createRunner({ log = console.log, env = process.env, argv = proc
     }
   };
 
-  return { suite, ok, run, report, results, chosen, reportWhenCut };
+  return { suite, ok, run, report, results, times, chosen, reportWhenCut };
 }
