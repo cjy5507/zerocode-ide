@@ -36,6 +36,10 @@ function expandDoorNode(target, build = null) {
   const door = document.createElement("button");
   door.type = "button";
   door.className = "helper-expand";
+  // Enter and Space, while it has focus, are its own — on a pane's page the
+  // window's key sink (`rearmKeySink`) took them for the terminal, and the
+  // door a Tab had reached could not be pressed.
+  door.dataset.keyboardOwner = "true";
   paintExpandDoor(door, false);
   door.addEventListener("click", () => {
     const open = !target.classList.contains("is-open");
@@ -87,7 +91,8 @@ function toolBodyNode() {
     copy.className = "helper-code-copy";
     copy.appendChild(iconNode("copy"));
     labelButton(copy, kind === "input" ? t("worker.copyCode", "코드 복사") : t("worker.copyOutput", "출력 복사"));
-    copyOnPress(copy, () => words.textContent);
+    // The whole of it, also while only its two ends stand (`dressToolOut`).
+    copyOnPress(copy, () => words.__said ?? words.textContent);
     well.append(words, copy);
     body.appendChild(well);
   }
@@ -108,10 +113,96 @@ function dressToolBody(row, input, output) {
     const words = well.firstElementChild;
     const content = words.querySelector(".helper-tool-text");
     if (words.classList.contains("helper-tool-output")) {
-      if (content.textContent !== text) content.replaceChildren(...stepOutParts(text, true));
-    } else writeTextContent(content, text);
-    clipWith(words, text !== "" && chatClips(text));
+      dressToolOut(words, content, text);
+    } else {
+      writeTextContent(content, text);
+      clipWith(words, text !== "" && chatClips(text));
+    }
   }
+}
+
+/* ---- a long output's two ends (2026-11-10) ------------------------------------
+ *
+ * What a command printed was cut at its first 60px — and what it came to is
+ * most often on its last lines (window artifact p-1c1bbf75726ff227, 「긴 명령
+ * 출력」): 214 tests ran, and the line that says so was behind 「더 보기」. An
+ * output long by its lines stands as its first lines and its last, with one
+ * line between them that says how many it holds back and opens them; opened,
+ * 「접기」 under it folds it again. An output long only by its width keeps the
+ * clip's grammar. The copy takes the whole either way (`__said`). */
+const CHAT_OUT_ENDS = 3;
+
+/* The two ends of an output, or null when it stands whole or is cut by the
+ * clip: holding back one line behind a line that says so saves nothing. */
+function outEnds(text) {
+  const lines = text.replace(/\n+$/, "").split("\n");
+  const hidden = lines.length - 2 * CHAT_OUT_ENDS;
+  if (hidden < 2) return null;
+  return { head: lines.slice(0, CHAT_OUT_ENDS).join("\n"), tail: lines.slice(-CHAT_OUT_ENDS).join("\n"), hidden };
+}
+
+function dressToolOut(words, content, text) {
+  if (words.__said === text) return;
+  words.__said = text;
+  const ends = text === "" ? null : outEnds(text);
+  if (ends === null) {
+    writeClass(words, "is-ends", false);
+    words.__ends = undefined;
+    content.replaceChildren(...stepOutParts(text, true));
+    clipWith(words, text !== "" && chatClips(text));
+    return;
+  }
+  // Its ends stand: the clip and the clip's door are not this output's.
+  clipWith(words, false);
+  writeClass(words, "is-ends", true);
+  words.__ends = ends;
+  paintOutEnds(words, content, ends);
+}
+
+/* The whole of an output whose ends stand, opened without a press — find
+ * walks into a line it held back, and the keyboard stays in the find's box. */
+function openToolOut(words) {
+  if (!words.classList.contains("is-ends") || words.classList.contains("is-open")) return;
+  words.classList.add("is-open");
+  paintOutEnds(words, words.querySelector(".helper-tool-text"), words.__ends);
+}
+
+/* The output as its reader left it: whole with 「접기」 under it, or its two
+ * ends around the line that opens the rest. The keyboard goes with the press
+ * to the control that undoes it. */
+function paintOutEnds(words, content, ends, pressed = false) {
+  const door = words.nextElementSibling?.classList.contains("helper-expand") ? words.nextElementSibling : null;
+  if (words.classList.contains("is-open")) {
+    content.replaceChildren(...stepOutParts(words.__said, true));
+    if (door) return;
+    const fold = document.createElement("button");
+    fold.type = "button";
+    fold.className = "helper-expand";
+    // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+    fold.dataset.keyboardOwner = "true";
+    paintExpandDoor(fold, true);
+    fold.addEventListener("click", () => {
+      words.classList.remove("is-open");
+      paintOutEnds(words, content, ends, true);
+    });
+    words.after(fold);
+    if (pressed) fold.focus({ preventScroll: true });
+    return;
+  }
+  door?.remove();
+  const gap = document.createElement("button");
+  gap.type = "button";
+  gap.className = "helper-tool-gap";
+  // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+  gap.dataset.keyboardOwner = "true";
+  gap.setAttribute("aria-expanded", "false");
+  gap.textContent = `… ${t("worker.moreLines", "{{n}}줄 더", { n: ends.hidden })}`;
+  gap.addEventListener("click", () => {
+    words.classList.add("is-open");
+    paintOutEnds(words, content, ends, true);
+  });
+  content.replaceChildren(...stepOutParts(ends.head, true), gap, ...stepOutParts(ends.tail, true));
+  if (pressed) gap.focus({ preventScroll: true });
 }
 
 /* ---- the diff --------------------------------------------------------------
@@ -4233,6 +4324,8 @@ function chatFindSpot(list, run, turn, part = "said") {
   }
   const words = chatFindWordsNode(row, part);
   if (words?.classList.contains("is-clipped") && !words.classList.contains("is-open")) words.nextElementSibling?.click();
+  // An output whose two ends stand holds the hit's line back: the whole of it stands for the find.
+  if (words) openToolOut(words);
   return words;
 }
 

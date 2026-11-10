@@ -18345,6 +18345,27 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   opacity: 1;
 }
 
+/* The line between a long output's two ends (`paintOutEnds`): how many lines
+ * it holds back, in the quiet ink, across the output's width — a press opens
+ * them. */
+.helper-tool-gap {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-tool-gap:hover {
+  color: var(--ink-chalk);
+}
+
 .helper-tool-input::before,
 .helper-tool-output::before {
   padding: 0 var(--space-2) 0 var(--space-1);
@@ -21343,7 +21364,7 @@ button.helper-sib:hover {
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`).
  * 입력칸이 키보드를 넘긴 질문 카드도 같은 고리를 두른다(t-81786 r2 P3-2). */
 .worker-view
-  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo, .helper-table-copy, .helper-code-wrap, .helper-code-more):focus-visible {
+  :is(.helper-cap, .helper-step-line, .helper-report-door, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-effort, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-rewind, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door, .chat-tally, .pane-chat-ask, .chat-view, .chat-answer-icon, .chat-answer-action, .chat-result-all, .chat-review-undo, .helper-table-copy, .helper-code-wrap, .helper-code-more, .helper-tool-gap):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -21372,6 +21393,7 @@ button.helper-sib:hover {
   .helper-table-copy,
   .helper-code-wrap,
   .helper-code-more,
+  .helper-tool-gap,
   .chat-result-file,
   .chat-result-file::after,
   .helper-person-time,

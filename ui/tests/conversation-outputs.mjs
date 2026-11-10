@@ -464,3 +464,89 @@ async function testConversationCodeStream(browser, origin, ok, answer) {
     await page.close();
   }
 }
+
+/* What a command printed, opened: an output long by its lines stands as its first three lines and its last
+ * three around one line that says how many it holds back; the copy takes the whole; find walks into a line
+ * it held back without taking the keyboard. */
+export async function testConversationLongOutput(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const printed = ["running 214 tests", ...Array.from({ length: 214 }, (_, at) => `test case_${String(at).padStart(3, "0")} ... ok`),
+      "", "test result: ok. 214 passed; 0 failed"].join("\n");
+    await openSettled(page, [
+      { role: "user", text: "테스트를 돌려 줘." },
+      { role: "tool", text: "Bash cargo test -p session", tool: { call_id: "t1", name: "Bash", kind: "bash", input: "cargo test -p session" } },
+      { role: "tool_result", text: printed, tool: { call_id: "t1", is_error: false } },
+      { role: "tool", text: "Bash git status --short", tool: { call_id: "t2", name: "Bash", kind: "bash", input: "git status --short" } },
+      { role: "tool_result", text: " M src/a.rs\n M src/b.rs\n M src/c.rs\n M src/d.rs\n?? notes.txt", tool: { call_id: "t2", is_error: false } },
+      { role: "assistant", text: "모두 통과했습니다." },
+    ]);
+    const open = await page.evaluate(async () => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      const fold = list.querySelector(":scope > .helper-group");
+      fold.querySelector(".helper-group-cap").click();
+      await window.__PAINTED__();
+      const rows = [...fold.querySelectorAll(":scope > .helper-group-body > .is-tool")];
+      for (const row of rows) row.querySelector("summary").click();
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+      window.__OUT_ROWS__ = rows;
+      return rows.length;
+    });
+    const read = () => page.evaluate(() => window.__OUT_ROWS__.map((row) => {
+      const words = row.querySelector(".helper-tool-output");
+      const gap = words.querySelector(".helper-tool-gap");
+      const door = words.nextElementSibling?.classList.contains("helper-expand") ? words.nextElementSibling : null;
+      return {
+        ends: words.classList.contains("is-ends"), clipped: words.classList.contains("is-clipped"), open: words.classList.contains("is-open"),
+        lines: words.querySelector(".helper-tool-text").textContent.split("\n").length,
+        text: words.querySelector(".helper-tool-text").textContent.slice(0, 60),
+        tail: words.querySelector(".helper-tool-text").textContent.slice(-40),
+        gap: gap?.textContent ?? null, gapIsButton: gap?.tagName === "BUTTON", gapExpanded: gap?.getAttribute("aria-expanded") ?? null,
+        door: door?.textContent ?? null, focusOnDoor: door !== null && document.activeElement === door, focusOnGap: gap !== null && document.activeElement === gap,
+        resLine: row.querySelector(".helper-step-res").textContent,
+      };
+    }));
+    const [long, short] = await read();
+    ok("output: 217 lines stand as the first three and the last three around one line that says how many it holds back — the line that says how the run went is on screen",
+      open === 2 && long.ends && !long.clipped && !long.open && long.gap === "… 211줄 더" && long.gapIsButton && long.gapExpanded === "false" &&
+        long.text.startsWith("running 214 tests") && long.tail.endsWith("test result: ok. 214 passed; 0 failed") && long.door === null,
+      JSON.stringify(long));
+    ok("output: five lines keep the clip's grammar — no ends, no line between", !short.ends && short.gap === null && short.clipped, JSON.stringify(short));
+
+    const copied = await page.evaluate(async () => {
+      const row = window.__OUT_ROWS__[0];
+      const copy = row.querySelector(".helper-tool-output").parentElement.querySelector(".helper-code-copy");
+      copy.click();
+      await window.__PAINTED__();
+      const written = window.__CLIPBOARD_WRITES__.at(-1);
+      return { lines: written.split("\n").length, last: written.split("\n").at(-1), holdsMiddle: written.includes("case_100") && !written.includes("줄 더") };
+    });
+    ok("output: its copy takes the whole of it, not the two ends", copied.lines === 217 && copied.last === "test result: ok. 214 passed; 0 failed" && copied.holdsMiddle,
+      JSON.stringify(copied));
+
+    await page.locator(".pane-chat .helper-tool-gap").focus();
+    await page.keyboard.press("Enter");
+    const [whole] = await read();
+    ok("output: Enter on the line opens the rest in place and the keyboard stands on 「접기」 under it",
+      whole.open && whole.gap === null && whole.lines === 217 && whole.door === "접기" && whole.focusOnDoor, JSON.stringify(whole));
+    await page.keyboard.press("Enter");
+    const [again] = await read();
+    ok("output: 「접기」 stands the two ends again, the keyboard on the line between them",
+      !again.open && again.gap === "… 211줄 더" && again.door === null && again.focusOnGap, JSON.stringify(again));
+
+    // Find walks into a line the ends held back, and the keyboard stays in the find's box.
+    await page.locator(".pane-chat .chat-head-find").click();
+    await page.locator(".pane-chat .chat-find input").fill("case_100");
+    await page.waitForFunction(() => window.__OUT_ROWS__[0].querySelector(".helper-tool-output").classList.contains("is-open"));
+    const found = await page.evaluate(() => {
+      const words = window.__OUT_ROWS__[0].querySelector(".helper-tool-output");
+      return { open: words.classList.contains("is-open"), holds: words.textContent.includes("case_100"), inFind: document.activeElement?.closest(".chat-find") !== null };
+    });
+    ok("output: a find for a line the ends held back stands the whole output, with the keyboard still in the find's box",
+      found.open && found.holds && found.inFind, JSON.stringify(found));
+    ok("output: no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
