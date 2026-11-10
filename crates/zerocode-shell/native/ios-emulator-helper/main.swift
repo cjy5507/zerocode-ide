@@ -590,6 +590,19 @@ private final class HIDInjector {
         usleep(4_000)
     }
 
+    /// The keyboard language this helper last read on its device (`KeyboardMemory`).
+    private var keyboardMemory = KeyboardMemory<PhoneKeyboardState>()
+
+    private static var uptime: Double { ProcessInfo.processInfo.systemUptime }
+
+    /// When the device last booted, as CoreSimulator says (`lastBootedAt`), or nil when this
+    /// Xcode's device does not answer it: a reading belongs to one boot.
+    private var booted: Double? {
+        let selector = NSSelectorFromString("lastBootedAt")
+        guard device.responds(to: selector) else { return nil }
+        return (device.perform(selector)?.takeUnretainedValue() as? Date)?.timeIntervalSince1970
+    }
+
     /// Text as the keys of the simulator's own keyboard: English on the US
     /// keys, Korean on the 2-Set keys (`PhoneTyping`, shared with the mirrored
     /// phone). A hardware key types whatever the keyboard's language makes of
@@ -597,6 +610,11 @@ private final class HIDInjector {
     /// probe keys read the language off the field and are deleted again, and
     /// Control-Space changes it until the probe shows the one wanted.
     /// (`simctl keyboard` took the new language in only 7 of 10 tries.)
+    ///
+    /// A text of one language the keyboard was last read in (`KeyboardMemory`)
+    /// skips the probe, and is looked for in the field once typed instead
+    /// (`confirmTyped`), as is one that needed a switch. Anything that leaves
+    /// the language unknown — a refusal part way — forgets it.
     func type(_ text: String) throws {
         let runs: [PhoneRun]
         switch PhoneTyping.plan(text) {
@@ -605,10 +623,41 @@ private final class HIDInjector {
         case let .failure(refusal):
             throw HelperError.message(Self.refusal(refusal))
         }
+        let languages = Set(runs.compactMap(\.language))
+        do {
+            if languages.count == 1, let only = languages.first,
+               let remembered = keyboardMemory.language(at: Self.uptime, boot: booted),
+               remembered == Self.state(for: only)
+            {
+                for run in runs { try pressKeys(of: run) }
+                try confirmTyped(text, in: remembered, because: .remembered)
+            } else if let (read, switched) = try typeReading(runs) {
+                keyboardMemory.remember(read, at: Self.uptime, boot: booted)
+                // A switch can turn back after the readings that said it
+                // took: a text of one language it led to is looked for too.
+                if switched, languages.count == 1 {
+                    try confirmTyped(text, in: read, because: .switched)
+                }
+            }
+        } catch {
+            keyboardMemory.forget()
+            throw error
+        }
+    }
+
+    private static func state(for language: PhoneLanguage) -> PhoneKeyboardState {
+        language == .korean ? .korean : .english
+    }
+
+    /// Every run typed after its language is read, and changed until it reads
+    /// as the run's: the language the keyboard was last read in and whether
+    /// it was switched to get there, or none when no run needed one.
+    private func typeReading(_ runs: [PhoneRun]) throws -> (PhoneKeyboardState, Bool)? {
         var state: PhoneKeyboardState?
+        var switched = false
         for run in runs {
             if let wanted = run.language {
-                let target: PhoneKeyboardState = wanted == .korean ? .korean : .english
+                let target = Self.state(for: wanted)
                 if state == nil { state = try probeLanguage() }
                 var tries = 0
                 while state != target {
@@ -616,6 +665,7 @@ private final class HIDInjector {
                         throw HelperError.message("시뮬레이터 키보드를 \(wanted == .korean ? "한국어" : "영어")로 바꾸지 못했습니다. 키보드 목록에 그 언어가 있는지 보세요. 그 앞까지만 입력했습니다")
                     }
                     try controlSpace()
+                    switched = true
                     state = try probeLanguage()
                     // A switch can commit later than the probe after it: keys
                     // typed before it read the old language, and the next
@@ -628,12 +678,74 @@ private final class HIDInjector {
                     tries += 1
                 }
             }
-            for key in run.keys {
-                guard let usage = key.usage else {
-                    throw HelperError.message("이 키를 시뮬레이터 키보드로 보낼 수 없습니다")
-                }
-                try press(usage, shift: key.shift)
+            try pressKeys(of: run)
+        }
+        return state.map { ($0, switched) }
+    }
+
+    /// Why a typed text is looked for in the field.
+    private enum Unproven {
+        /// It was typed on the language last read, with no probe.
+        case remembered
+        /// Control-Space was pressed for it, and a switch can commit, or turn
+        /// back, after the readings that said it took (Phone Harness,
+        /// 2026-11-10: 「lantern」 went in as 「ㅣ뭇ㄷ구」 twice in five, answered
+        /// as done).
+        case switched
+    }
+
+    /// A typed text looked for in the field: the walk first (a native
+    /// field), then the whole tree with the grid (a web page's field, which
+    /// the walk never shows) until `TypedCheck` gives up. Seen, the reading
+    /// `state` holds and is renewed. Not seen — a field that hides or
+    /// reshapes what it takes, or a keyboard in another language than read —
+    /// the language is read now with the probe: the same one says the keys
+    /// went in as asked, and another is answered as a failure that names
+    /// both, with nothing deleted.
+    private func confirmTyped(_ text: String, in state: PhoneKeyboardState, because why: Unproven) throws {
+        var reads = 0
+        let check = TypedCheck.wait(
+            now: { Self.uptime },
+            sleep: { usleep(useconds_t($0 * 1_000_000)) },
+            read: {
+                defer { reads += 1 }
+                return try? self.fieldTexts(grid: reads > 0)
+            },
+            shows: { TypedCheck.shows(text, in: $0) }
+        )
+        if check == .shown {
+            keyboardMemory.remember(state, at: Self.uptime, boot: booted)
+            return
+        }
+        keyboardMemory.forget()
+        let read = why == .remembered ? "지난번에 읽은" : "바꾼 뒤 읽은"
+        let now: PhoneKeyboardState
+        do {
+            now = try probeLanguage()
+        } catch {
+            // The keys did go: a field that hid them hides the probe's too.
+            throw HelperError.message("\(read) \(Self.name(state)) 키보드로 모두 쳤지만, 칸에 친 글자가 보이지 않아(비밀번호 칸이거나 글자를 바꾸는 칸일 수 있음) 언어를 다시 확인하지 못했습니다. 지우지 않았습니다. 칸을 보고 정하세요 — \(error.localizedDescription)")
+        }
+        keyboardMemory.remember(now, at: Self.uptime, boot: booted)
+        if now != state {
+            throw HelperError.message("키보드가 \(read) \(Self.name(state))가 아니라 \(Self.name(now))여서 친 글자가 다른 언어로 들어갔을 수 있습니다. 지우지 않았습니다. 칸을 보고 지운 뒤 다시 치세요")
+        }
+    }
+
+    private static func name(_ state: PhoneKeyboardState) -> String {
+        switch state {
+        case .korean: return "한국어"
+        case .english: return "영어"
+        case .looseJamo: return "낱자 한국어"
+        }
+    }
+
+    private func pressKeys(of run: PhoneRun) throws {
+        for key in run.keys {
+            guard let usage = key.usage else {
+                throw HelperError.message("이 키를 시뮬레이터 키보드로 보낼 수 없습니다")
             }
+            try press(usage, shift: key.shift)
         }
     }
 
@@ -674,8 +786,8 @@ private final class HIDInjector {
     /// 2026-11-09: the walk held only the address bar's value while the field
     /// held 「하」). The before and the after of one probe are read the same way,
     /// so a page's own text is never taken for the keys.
-    private func fieldTexts() throws -> [String] {
-        let data = try AccessibilityBridge.shared.describeUI(udid: udid)
+    private func fieldTexts(grid: Bool = true) throws -> [String] {
+        let data = try AccessibilityBridge.shared.describeUI(udid: udid, grid: grid)
         var values: [String] = []
         func walk(_ node: Any) {
             if let object = node as? [String: Any] {
