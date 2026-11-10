@@ -7856,6 +7856,65 @@ mod tests {
             dressing.contains(r#"if (indicator === "working") wakeWorktreeSpin();"#),
             "nothing wakes the spinner when a workspace starts working:\n{dressing}"
         );
+        // A dot that starts working — or one a rebuild has just made — wears the step the
+        // others stand on at once (t-102869), instead of standing at 0° until the loop's next
+        // step: under several working agents a rebuild made every ring hop to the top together.
+        assert!(
+            dressing.contains(r#"dot.className = turningDotClass("wt-dot", indicator);"#),
+            "a new working dot stands at 0° until the loop's next step:\n{dressing}"
+        );
+        let stepping = block_after(window, "function turningDotClass(base, state) {");
+        assert!(
+            stepping.contains("performance.now()")
+                && stepping.contains("WORKTREE_SPIN_PERIOD_MS")
+                && stepping.contains("is-working wt-spin-${step}"),
+            "a new working dot's step is not the loop's step on the document's clock:\n{stepping}"
+        );
+    }
+
+    /// A rebuild does not send the stylesheet's turning rings back to the top (t-102869).
+    ///
+    /// A CSS animation starts at its node's birth, so every rebuild that remains —
+    /// a pane opening or closing rebuilds the sidebar, an agent row that changes
+    /// shape rebuilds its card's rows — started the card's flowing ring
+    /// (`wt-activity-turn`) and the agent rows' ring (`wt-agent-spin`) again from
+    /// the top: the hop the person saw as the sidebar blinking (「네비바의 판이
+    /// 한번씩 깜박거려」, 2026-11-08). Every such turn is pinned to the document
+    /// timeline's origin, so a ring of one period stands at one angle on any
+    /// node: the rebuilds pin what they just built before a frame is drawn, and
+    /// a turn that starts on a standing node is pinned when it says it started.
+    #[test]
+    fn a_rebuild_keeps_the_turning_rings_where_they_stood() {
+        let window = window_source();
+        let keeping = block_after(window, "function keepTurnsInStep(root) {");
+        assert!(
+            keeping.contains("root.getAnimations({ subtree: true })")
+                && keeping.contains("SHARED_TURNS.has(turn.animationName)")
+                && keeping.contains("turn.startTime = 0"),
+            "the turns are no longer pinned to the document's clock, so a rebuilt \
+             ring starts again from the top:\n{keeping}"
+        );
+        assert!(
+            window.contains(r#"const SHARED_TURNS = new Set(["wt-activity-turn", "wt-agent-spin"]);"#),
+            "the turns pinned to one clock no longer name the card's ring and the agent rows' ring"
+        );
+        assert!(
+            window.contains(r#"document.addEventListener("animationstart", (event) => {"#),
+            "a turn that starts on a standing node is never pinned, so the next rebuild moves it"
+        );
+        let refreshing = block_after(window, "async function refreshWorktrees() {");
+        let rebuilt = refreshing
+            .find("worktreeList.replaceChildren(...nextNodes);")
+            .expect("the sidebar rebuild no longer swaps its nodes in one call");
+        assert!(
+            refreshing[rebuilt..].contains("keepTurnsInStep(worktreeList);"),
+            "the sidebar rebuild draws its new rings from the top:\n{refreshing}"
+        );
+        let swapping = block_after(window, "function swapAgentRows(host, rows, leaving) {");
+        assert!(
+            swapping.contains("for (const row of rows) keepTurnsInStep(row);"),
+            "a card's rebuilt agent rows draw their rings from the top:\n{swapping}"
+        );
     }
 
     /// The dot moves without the sidebar being rebuilt around it.
@@ -7904,6 +7963,15 @@ mod tests {
              or without waiting for the list to settle:\n{freezing}"
         );
 
+        // Landing — what git says of a checkout's work against main — is painted in place too
+        // (1fcfd6c52). In the shape, every five-second stamp poll and every `worktree:landing`
+        // notice that moved one number (a commit behind, an unsaved file) rebuilt the whole
+        // sidebar: the blink the person saw (「네비바의 판이 한번씩 깜박거려」, 2026-11-08).
+        assert!(
+            !shape.contains("landingShape(") && !shape.contains(".landing"),
+            "the shape guard counts a checkout's landing as its shape, so every \
+             stamp poll that moved a number rebuilds the sidebar:\n{shape}"
+        );
         let painting = block_after(window, "function paintWorktreeDots() {");
         assert!(
             painting.contains("worktreeList.querySelectorAll(\".wt-row[data-worktree-path]\")")
@@ -7928,6 +7996,12 @@ mod tests {
                 && dressing.contains("worktreeStateLabel(said, phase)"),
             "the dot's mark and its words no longer come off one state and one \
              reading of the ledger:\n{dressing}"
+        );
+        // The landing chip rides the dot's door, so both roads that paint a dot paint the chip.
+        assert!(
+            dressing.contains("dressWorktreeLanding(row, state, phase);"),
+            "the landing chip left the dot's door, so the in-place road no longer \
+             repaints it:\n{dressing}"
         );
         let marking = block_after(window, "function worktreeMark(path, state) {");
         assert!(
@@ -17381,7 +17455,9 @@ mod tests {
         // The guard is only sound if the signature covers what a row is BUILT
         // from. The active row, the selection, the dot's state and the agent
         // rows are deliberately outside it — all four are marked in place —
-        // and everything else has to be inside. (See
+        // and so is the landing chip, the fifth (t-102869): what git says of a
+        // checkout's work is painted in place through the dot's door. Everything
+        // else has to be inside. (See
         // `a_workspace_dot_repaints_without_rebuilding_the_list` for the other
         // half: what left the shape has to have arrived on the paint road.)
         let shape = block_after(window, "function worktreeListShape(held, resting) {");

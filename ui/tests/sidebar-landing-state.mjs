@@ -506,9 +506,136 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       return window.__CHIP__("/r/clash");
     });
     ok(
-      "a change of only the commits behind or of the conflicting files repaints the chip and its tooltip — the row's shape carries both",
+      "a change of only the commits behind or of the conflicting files repaints the chip and its tooltip — landing is painted in place, not rebuilt",
       moved.word === "미반영 3 · 충돌 3" && moved.tip.includes("9커밋 뒤처져") && moved.tip.includes("3개 파일이 충돌합니다: src/a.rs, ui/b.js, c.md"),
       JSON.stringify(moved),
+    );
+
+    /* ---- landing alone is painted in place; a rebuild keeps the rings turning (t-102869) ----
+     *
+     * The person, 2026-11-08: 「네비바의 판이 한번씩 깜박거려」. Landing used to be part of the list's shape,
+     * so every five-second stamp poll and every `worktree:landing` notice that moved one number rebuilt
+     * the whole sidebar (1fcfd6c52 took it out). What stands here keeps it out: each landing field moved
+     * alone, through both paths, leaves the same nodes and the same drawn shape, and only the chip's words
+     * move. A branch renamed is the control — it must rebuild, or this check could not see a rebuild. And
+     * the rebuild that remains must not send a turning ring back to the top: the new nodes' turns stand at
+     * the angle the old ones stood at, and a working dot carries its step from the moment it is built. */
+    const steady = await page.evaluate(async () => {
+      const PATH = "/r/clash";
+      const was = window.__ANSWER__.project_catalog;
+      let move = (one) => one;
+      let asked = 0;
+      window.__ANSWER__.project_catalog = () => {
+        asked += 1;
+        const [project] = was();
+        return [{ ...project, worktrees: project.worktrees.map((one) => (one.path === PATH ? move(one) : one)) }];
+      };
+      const rowNode = () => document.querySelector(`.wt-row[data-worktree-path="${CSS.escape(PATH)}"]`)?.closest(".wt-node") ?? null;
+      const said = () => {
+        const chip = window.__CHIP__(PATH);
+        return `${chip.word}|${chip.tip}`;
+      };
+      const removed = { count: 0 };
+      const watch = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const gone of record.removedNodes) {
+            if (gone.nodeType !== 1) continue;
+            if (gone.matches(".wt-node, .proj")) removed.count += 1;
+            removed.count += gone.querySelectorAll(".wt-node, .proj").length;
+          }
+        }
+      });
+      watch.observe(worktreeList, { childList: true, subtree: true });
+      let stamp = 0;
+      window.__ANSWER__.worktree_landing_stamp = () => `s${stamp}`;
+      const viaPoll = async () => {
+        landingStamp = `s${stamp}`;
+        stamp += 1;
+        landingLookedAt = 0;
+        await lookForLandingChange();
+        await window.__PAINTED__();
+      };
+      const viaNotice = async () => {
+        const before = asked;
+        for (const listener of window.__LISTENERS__["worktree:landing"] ?? []) listener({ payload: null });
+        for (let tries = 0; tries < 80 && asked === before; tries += 1) await new Promise((done) => setTimeout(done, 25));
+        // The notice's refresh is not awaited by the listener: give its last await a turn, then a frame.
+        for (let tries = 0; tries < 4; tries += 1) await new Promise((done) => setTimeout(done, 25));
+        await window.__PAINTED__();
+      };
+      const landed = { sha: "fedcba9876543210fedcba9876543210fedcba98", time_ms: Date.now() - 3600_000 };
+      // Each step moves one more landing field than the step before, so every step changes what the chip says.
+      const steps = [
+        ["ahead", (landing) => ({ ...landing, ahead: 6 })],
+        ["dirty", (landing) => ({ ...landing, dirty: true })],
+        ["behind", (landing) => ({ ...landing, behind: 12 })],
+        ["far_behind", (landing) => ({ ...landing, far_behind: true, behind: 80 })],
+        ["conflict", (landing) => ({ ...landing, conflict: { total: 4, files: ["src/a.rs", "ui/b.js", "c.md", "d.md"] } })],
+        ["overlap", (landing) => ({ ...landing, conflict: { total: 0, files: [] }, overlap: { total: 1, files: ["ui/b.js"] } })],
+        ["reclaim", (landing) => landing, { kind: "locked", detail: "held by a test" }],
+        ["state", () => ({ state: "landed", detached: false, ahead: 0, dirty: false, compare_ref: "origin/main",
+          ref_updated_ms: Date.now() - 86_400_000, dirty_checked_ms: Date.now(), landed_in: landed })],
+      ];
+      const node = rowNode();
+      const drawn = worktreeListDrawn;
+      const seen = [];
+      let landing = was()[0].worktrees.find((one) => one.path === PATH).landing;
+      let reclaim;
+      for (const [at, [field, change, held]] of steps.entries()) {
+        landing = change(landing);
+        if (held) reclaim = held;
+        const now = { landing, reclaim };
+        move = (one) => ({ ...one, landing: now.landing, ...(now.reclaim ? { reclaim: now.reclaim } : {}) });
+        const before = said();
+        const path = at % 2 === 0 ? "poll" : "notice";
+        if (path === "poll") await viaPoll(); else await viaNotice();
+        // The other path too, with nothing new: it must not rebuild either.
+        if (path === "poll") await viaNotice(); else await viaPoll();
+        seen.push({ field, path, same: rowNode() === node && node.isConnected, drawn: worktreeListDrawn === drawn,
+          removed: removed.count, moved: said() !== before, word: window.__CHIP__(PATH).word });
+      }
+
+      // The control, and the turns across it: a branch renamed is a new shape, so the list is rebuilt.
+      const TURNS = new Set(["wt-activity-turn", "wt-agent-spin"]);
+      const turns = () => worktreeList.getAnimations({ subtree: true }).filter((one) => TURNS.has(one.animationName));
+      // Where a turn stands against the document's clock: the same number before and after means the ring did not hop.
+      const offset = (one) => {
+        const period = one.effect.getComputedTiming().duration;
+        const at = Math.round((((document.timeline.currentTime - one.currentTime) % period) + period) % period);
+        return at === period ? 0 : at;
+      };
+      const turnsBefore = turns().map(offset);
+      move = (one) => ({ ...one, branch: "clash-renamed", landing, reclaim });
+      await refreshWorktrees();
+      // Read before any frame: what the rebuild left is what the first frame after it draws.
+      const busyDot = document.querySelector('.wt-row[data-worktree-path="/r/busy"] .wt-dot');
+      const dotClass = busyDot?.className ?? "";
+      const turnsAfter = turns().map(offset);
+      const control = { same: rowNode() === node, drawn: worktreeListDrawn === drawn, removed: removed.count };
+      watch.disconnect();
+      window.__ANSWER__.project_catalog = was;
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      return { seen, control, dotClass, turnsBefore, turnsAfter };
+    });
+    for (const one of steady.seen) {
+      ok(
+        `a change of only the landing's ${one.field} (${one.path} first, then the other path) repaints the chip in place: the same row node, the same drawn shape, no node taken out`,
+        one.same && one.drawn && one.removed === 0 && one.moved,
+        JSON.stringify(one),
+      );
+    }
+    ok(
+      "the control: a branch renamed is a new shape, and the check above sees the rebuild it makes",
+      !steady.control.same && !steady.control.drawn && steady.control.removed > 0,
+      JSON.stringify(steady.control),
+    );
+    ok(
+      "a rebuild does not send a turning ring back to the top: every turn in the list stands where it stood against the document's clock, and a working dot wears its step from the moment it is built",
+      steady.turnsBefore.length > 0 && steady.turnsAfter.length > 0 &&
+        steady.turnsAfter.every((at) => steady.turnsBefore.includes(at)) &&
+        /\bwt-spin-\d+\b/.test(steady.dotClass),
+      JSON.stringify({ before: steady.turnsBefore, after: steady.turnsAfter, dot: steady.dotClass }),
     );
 
     // The artifact card and drawer wear the state's own word only (t-36910 `head`): the clash and the
