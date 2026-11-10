@@ -35,6 +35,16 @@ pub const CODE_BLOCKS_FLUSH_KEY: &str = "codeBlocksFlush";
 pub const TURN_HINTS_IN_DIVIDER_KEY: &str = "turnHintsInDivider";
 /// The working line holds still.
 pub const REDUCE_MOTION_KEY: &str = "reduceMotion";
+/// What an empty conversation shows: `"page"` (the default — the field in the
+/// middle with the conversations to continue under it) or `"line"` (the head
+/// row alone, as before 1.1.139). See `tui::start`.
+pub const START_SCREEN_KEY: &str = "startScreen";
+/// How a finished turn stands: `"turns"` (the default — its work folded into
+/// one cell above the answer) or `"full"` (a row a step). See `tui::fold`.
+pub const CONVERSATION_VIEW_KEY: &str = "conversationView";
+/// The widest prose and tool rows are drawn, in columns; `0` is the pane's
+/// whole width. Tables, code and command output keep the pane's width.
+pub const MAX_PROSE_WIDTH_KEY: &str = "maxProseWidth";
 
 /// The one recognized `workspaceTrust` value: the interactive trust gate is
 /// retired and every folder opens in full access, no prompt, outranking even
@@ -66,6 +76,12 @@ pub struct Preferences {
     pub turn_hints_in_divider: Option<bool>,
     /// `reduceMotion`, when the document says.
     pub reduce_motion: Option<bool>,
+    /// Raw `startScreen`; `tui::style::Look::chosen` reads it.
+    pub start_screen: Option<String>,
+    /// Raw `conversationView`; `tui::style::ConversationView::parse` reads it.
+    pub conversation_view: Option<String>,
+    /// `maxProseWidth`, when the document gives a count.
+    pub max_prose_width: Option<usize>,
 }
 
 impl Preferences {
@@ -141,6 +157,12 @@ pub fn load_from_path(path: &Path) -> Preferences {
         code_blocks_flush: object.get(CODE_BLOCKS_FLUSH_KEY).and_then(Value::as_bool),
         turn_hints_in_divider: object.get(TURN_HINTS_IN_DIVIDER_KEY).and_then(Value::as_bool),
         reduce_motion: object.get(REDUCE_MOTION_KEY).and_then(Value::as_bool),
+        start_screen: object.get(START_SCREEN_KEY).and_then(Value::as_str).map(str::to_string),
+        conversation_view: object.get(CONVERSATION_VIEW_KEY).and_then(Value::as_str).map(str::to_string),
+        max_prose_width: object
+            .get(MAX_PROSE_WIDTH_KEY)
+            .and_then(Value::as_u64)
+            .and_then(|columns| usize::try_from(columns).ok()),
     }
 }
 

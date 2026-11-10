@@ -975,6 +975,8 @@ impl PlainSession {
     }
 
     pub(crate) fn take_initial_prompt(&mut self) -> Option<String> { self.invocation.prompt.take() }
+    /// Whether this launch brought its first prompt: the turn starts before a key does.
+    pub(crate) fn has_initial_prompt(&self) -> bool { self.invocation.prompt.is_some() }
 
     pub(crate) fn invocation_failure(&self) -> Option<&str> { self.invocation.failure.as_deref() }
 

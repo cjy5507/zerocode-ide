@@ -37,7 +37,19 @@ pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
             if !grid.cursor_visible() {
                 return false;
             }
-            if !border(&above, '╭', '╮') || !border(&below, '╰', '╯') || col != 3 {
+            // zo's start page centres the field in a wide pane, so the box may
+            // stand in from the left edge: its left border is the row's first
+            // character, the two rules start in that same column, and the
+            // cursor is three columns in from it — the same three rows, read
+            // where they stand (`zerocode_core::hook::READS_INSET_COMPOSER_ENV`
+            // tells zo this window reads them there).
+            let left = indent(&line);
+            if !border(&above, '╭', '╮')
+                || !border(&below, '╰', '╯')
+                || indent(&above) != left
+                || indent(&below) != left
+                || col != left + 3
+            {
                 return false;
             }
             let Some(body) = line
@@ -51,7 +63,7 @@ pub(crate) fn observed(agent: &str, grid: &TerminalGrid) -> bool {
             // are a draft, even with the cursor moved back to its beginning.
             // A blank row alone may be the scrolled end of a long draft.
             body.trim_end() == "Ask zo to do anything"
-                && (3..3 + "Ask zo to do anything".len())
+                && (left + 3..left + 3 + "Ask zo to do anything".len())
                     .all(|column| grid.cell(row, column).is_some_and(|cell| cell.style.dim))
         }
         "claude" => {
@@ -212,6 +224,12 @@ fn upper_rule_kind(line: &str) -> Option<Rule> {
             .strip_suffix(' ')
             .is_some_and(|name| !name.trim().is_empty()))
     .then_some(Rule::Named)
+}
+
+/// How many columns of blank stand before a row's first character. The rows
+/// asked are a bordered field's, whose blanks are single spaces.
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
 }
 
 fn border(line: &str, left: char, right: char) -> bool {
@@ -412,6 +430,45 @@ mod tests {
         assert!(
             !observed("zo", term.grid()),
             "a cursor in a picker proved the composer empty"
+        );
+    }
+
+    /// zo's field standing `left` columns in — its start page centres it in a
+    /// wide pane — with the terminal's cursor in column `cursor`.
+    fn zo_inset(left: usize, rules_left: usize, body: &str, cursor: usize) -> Terminal {
+        let mut term = Terminal::new(8, 96);
+        let rule = "─".repeat(58);
+        let pad = " ".repeat(left);
+        let rule_pad = " ".repeat(rules_left);
+        term.feed(
+            format!(
+                "\x1b[?2004h\x1b[?25h\x1b[3;1H{rule_pad}╭{rule}╮\r\n{pad}│› {body}│\r\n{rule_pad}╰{rule}╯\x1b[4;{}H",
+                cursor + 1
+            )
+            .as_bytes(),
+        );
+        term
+    }
+
+    #[test]
+    fn a_zo_field_standing_in_from_the_left_edge_is_read_where_it_stands() {
+        let placeholder = "\x1b[2mAsk zo to do anything\x1b[22m";
+        assert!(observed("zo", zo_inset(12, 12, placeholder, 15).grid()));
+        assert!(
+            !observed("zo", zo_inset(12, 12, placeholder, 3).grid()),
+            "a cursor outside the field proved it empty"
+        );
+        assert!(
+            !observed("zo", zo_inset(12, 0, placeholder, 15).grid()),
+            "rules that start in another column than the field were its borders"
+        );
+        assert!(
+            !observed("zo", zo_inset(12, 12, "my unfinished thought", 15).grid()),
+            "a person's words in an inset field were empty"
+        );
+        assert!(
+            !observed("zo", zo_inset(12, 12, "Ask zo to do anything", 15).grid()),
+            "the placeholder's words, typed, were empty"
         );
     }
 

@@ -14,6 +14,18 @@ use std::time::Duration;
 use super::activity::Activity;
 use super::shimmer::fmt_elapsed_compact;
 
+/// The start page's heading. The window's new-conversation page asks the same
+/// (`newChat.heading`), so the two read as one product.
+pub const START_HEADING: &str = "What should we do?";
+/// The head of the start page's list (`newChat.recent` in the window).
+pub const START_CONTINUE: &str = "Continue a conversation";
+/// The keys the start page names, each with what it opens.
+pub const START_TIPS: [(&str, &str); 4] =
+    [("/", "commands"), ("@", "files"), ("shift+tab", "permissions"), ("?", "shortcuts")];
+
+/// Before the checks named on the row a turn ends on.
+pub const VERIFIED_BY: &str = "verified by";
+
 pub const WORKING: &str = "Working";
 /// The status row's word while `/compact` summarizes the conversation
 /// (t-10956) — a job that can take minutes on a large one.

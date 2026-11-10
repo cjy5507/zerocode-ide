@@ -54,7 +54,7 @@ use zerocode_core::jev::MENTION_CANDIDATE_CAP;
 
 use crate::resume::ResumeSession;
 
-use super::ansi::{Color, Line, Span, Style};
+use super::ansi::{Line, Span, Style};
 use super::palette;
 use super::paths::center_truncate_path;
 use super::rerank::{permute_head, PageRerank, Pick};
@@ -1078,14 +1078,7 @@ fn row_background_style(
     let Some(terminal_palette) = terminal_palette else {
         return style;
     };
-    let background = terminal_palette.background();
-    let (overlay, alpha) = if terminal_palette.has_light_background() {
-        ((0, 0, 0), if selected { 0.12 } else { 0.04 })
-    } else {
-        ((255, 255, 255), if selected { 0.12 } else { 0.055 })
-    };
-    let (red, green, blue) = palette::blend_rgb(overlay, background, alpha);
-    style.bg = Some(Color::Rgb(red, green, blue));
+    style.bg = Some(palette::row_background(terminal_palette, selected));
     style
 }
 

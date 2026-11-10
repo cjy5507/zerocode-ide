@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 /// (`term-<n>`). One spelling: the hook bridge's launch env, the browser shim
 /// and the window's pane-key parser all read this constant.
 pub const PANE_KEY_ENV: &str = "ZEROCODE_PANE_KEY";
+/// A window that reads zo's composer wherever it stands in the pane's row —
+/// in from the left edge too — says so to every pane with this set to `1`.
+/// zo centres the field of its start page only then: a window from before it
+/// read the field at column 0 alone, and would take a centred one for a draft.
+pub const READS_INSET_COMPOSER_ENV: &str = "ZEROCODE_READS_INSET_COMPOSER";
 
 /// The environment variable a ZeroCode pane carries naming the window's hook
 /// endpoint file. A pane's grant and the window's installed ledger command are

@@ -142,6 +142,8 @@ fn frame<'a>(
         question: None,
         picker: None,
         sessions: None,
+        start: None,
+        start_notes: &[],
         pager: None,
         popup: None,
         mention: None,

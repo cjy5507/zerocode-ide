@@ -56,6 +56,8 @@ impl TuiStyle {
                 result_first: "  └ ",
                 result_rest: "    ",
                 permission_mark: super::strings::PERMISSION_MARK,
+                working: "•",
+                dot: "•",
             },
             // The composer keeps zo's `›` in this look too: the window reads
             // `│› ` to know the field is empty before it types at a running
@@ -69,6 +71,8 @@ impl TuiStyle {
                 result_first: "  ⎿ ",
                 result_rest: "    ",
                 permission_mark: "⏵⏵",
+                working: "✻",
+                dot: "·",
             },
         }
     }
@@ -93,9 +97,48 @@ pub struct Glyphs {
     pub result_rest: &'static str,
     /// Before the footer's permission word (`Full Access`).
     pub permission_mark: &'static str,
+    /// The working row's mark, which the shimmer runs over.
+    pub working: &'static str,
+    /// Between the working row's seconds and its interrupt key.
+    pub dot: &'static str,
 }
 
-/// The look and its three switches, fixed for the process.
+/// How a finished turn stands in the transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConversationView {
+    /// A row a step, as every step happened — codex's transcript, and what
+    /// `ctrl+o` opens.
+    #[default]
+    Full,
+    /// The turn's work folded into one cell above its answer.
+    Turns,
+}
+
+impl ConversationView {
+    /// The setting's word, as `conversationView` spells it.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "turns" => Some(Self::Turns),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    /// The other view — what `ctrl+o` turns to.
+    #[must_use]
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Full => Self::Turns,
+            Self::Turns => Self::Full,
+        }
+    }
+}
+
+/// The widest prose and tool rows are drawn when `maxProseWidth` says nothing.
+pub const DEFAULT_PROSE_WIDTH: usize = 100;
+
+/// The look and its switches, fixed for the process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Look {
     pub style: TuiStyle,
@@ -106,6 +149,23 @@ pub struct Look {
     pub hints_in_divider: bool,
     /// The working line holds still: no shimmer, no spinner frames.
     pub reduce_motion: bool,
+    /// An empty conversation is a start page — the field in the middle, the
+    /// conversations to continue under it (`tui::start`). The marks look's
+    /// default; codex's opens on its card alone.
+    pub start_page: bool,
+    /// How a finished turn stands when the session opens; `ctrl+o` turns it.
+    pub view: ConversationView,
+    /// The widest prose and tool rows are drawn, or `None` for the pane's
+    /// width. Tables, code and command output keep the pane's width.
+    pub prose_width: Option<usize>,
+}
+
+impl Look {
+    /// `width` cut to the reading width: what prose and tool rows wrap to.
+    #[must_use]
+    pub fn reading_width(self, width: usize) -> usize {
+        self.prose_width.map_or(width, |cap| width.min(cap))
+    }
 }
 
 /// `ZO_TUI_STYLE`: one run's look, over the setting.
@@ -122,11 +182,28 @@ impl Look {
             .and_then(TuiStyle::parse)
             .or_else(|| preferences.tui_style.as_deref().and_then(TuiStyle::parse))
             .unwrap_or(TuiStyle::Marks);
+        // The new layouts are the marks look's. Codex's bytes are pinned by
+        // the goldens, so that look takes none of them whatever the settings
+        // say.
+        let marks = style == TuiStyle::Marks;
         Self {
             style,
             flush_code: preferences.code_blocks_flush.unwrap_or(false),
             hints_in_divider: preferences.turn_hints_in_divider.unwrap_or(false),
             reduce_motion: preferences.reduce_motion.unwrap_or(false),
+            start_page: marks && preferences.start_screen.as_deref().map(str::trim) != Some("line"),
+            view: if marks {
+                preferences
+                    .conversation_view
+                    .as_deref()
+                    .and_then(ConversationView::parse)
+                    .unwrap_or(ConversationView::Turns)
+            } else {
+                ConversationView::Full
+            },
+            prose_width: marks
+                .then(|| preferences.max_prose_width.unwrap_or(DEFAULT_PROSE_WIDTH))
+                .filter(|columns| *columns > 0),
         }
     }
 }
@@ -209,6 +286,36 @@ mod tests {
             let glyphs = style.glyphs();
             assert_eq!(glyphs.result_first.chars().count(), glyphs.result_rest.chars().count(), "{style:?}");
         }
+    }
+
+    #[test]
+    fn the_new_layouts_are_the_marks_looks_and_a_setting_away() {
+        use super::ConversationView;
+        let marks = Look::chosen(&Preferences::default(), None);
+        assert!(marks.start_page);
+        assert_eq!(marks.view, ConversationView::Turns);
+        assert_eq!(marks.prose_width, Some(super::DEFAULT_PROSE_WIDTH));
+        assert_eq!(marks.reading_width(201), 100);
+        assert_eq!(marks.reading_width(80), 80);
+
+        let set = Preferences {
+            start_screen: Some("line".into()),
+            conversation_view: Some("full".into()),
+            max_prose_width: Some(0),
+            ..Preferences::default()
+        };
+        let look = Look::chosen(&set, None);
+        assert!(!look.start_page);
+        assert_eq!(look.view, ConversationView::Full);
+        assert_eq!(look.prose_width, None);
+        assert_eq!(look.reading_width(201), 201);
+
+        // Codex's look keeps codex's layout, whatever the settings say.
+        let codex = Look::chosen(&Preferences::default(), Some("codex"));
+        assert!(!codex.start_page);
+        assert_eq!(codex.view, ConversationView::Full);
+        assert_eq!(codex.prose_width, None);
+        assert_eq!(Look::default(), Look { style: TuiStyle::Codex, ..Look::default() });
     }
 
     #[test]

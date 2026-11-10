@@ -41,7 +41,11 @@ pub const STATUS_DETAILS_DEFAULT_MAX_LINES: usize = 3;
 /// ([`super::mention`]) each show a window of this many rows that follows the
 /// selection; the catalog behind either may be longer.
 pub const MAX_POPUP_ROWS: usize = 8;
-const DETAILS_PREFIX: &str = "  └ ";
+/// What a detail row under the working row hangs from — the look's own hung
+/// row (`  └ `, or the marks look's `  ⎿ `).
+fn details_prefix() -> &'static str {
+    super::style::glyphs().result_first
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusDetailsCapitalization {
@@ -505,7 +509,7 @@ impl Status {
         spans.push(Span::raw(" "));
         let elapsed = fmt_elapsed_compact(self.elapsed.as_secs());
         if self.interruptible {
-            spans.push(Span::dim(format!("({elapsed} • ")));
+            spans.push(Span::dim(format!("({elapsed} {} ", super::style::glyphs().dot)));
             spans.push(Span::dim(self.interrupt_binding.clone()));
             spans.push(Span::dim(" to interrupt)"));
         } else {
@@ -541,16 +545,17 @@ impl Status {
             return Vec::new();
         }
         let max_lines = self.details_max_lines.max(1);
-        let continuation = Span::dim(" ".repeat(DETAILS_PREFIX.chars().count()));
+        let prefix = details_prefix();
+        let continuation = Span::dim(" ".repeat(prefix.chars().count()));
         let mut rows = Vec::new();
         for detail in &self.details {
-            let line = Line::new(vec![Span::dim(DETAILS_PREFIX), Span::dim(detail.clone())]);
+            let line = Line::new(vec![Span::dim(prefix), Span::dim(detail.clone())]);
             rows.extend(wrap_line(&line, width, &continuation));
         }
         if rows.len() > max_lines {
             rows.truncate(max_lines);
             let content_width = width
-                .saturating_sub(DETAILS_PREFIX.chars().count())
+                .saturating_sub(prefix.chars().count())
                 .max(1);
             let max_base_len = content_width.saturating_sub(1);
             if let Some(span) = rows.last_mut().and_then(|line| line.spans.last_mut()) {
@@ -1643,6 +1648,12 @@ pub struct Frame<'a> {
     /// 아니다 — codex 도 `resume_picker.rs` 를 `list_selection_view` 와 따로
     /// 둔다.
     pub sessions: Option<&'a crate::tui::sessions::SessionPicker>,
+    /// The empty conversation's page ([`super::start`]): while it stands the
+    /// composer is drawn in its middle, not on the floor.
+    pub start: Option<&'a super::start::StartPage>,
+    /// What was said before the page's first frame — a startup warning —
+    /// drawn under the page's keys until the page ends.
+    pub start_notes: &'a [Line],
     /// 뷰포트를 통째로 가져가는 페이저(Ctrl+T 트랜스크립트). 피커와 달리
     /// 고르는 목록이 아니라 이미 접힌 줄들이라 `Line` 을 그대로 받는다 —
     /// 여기서 다시 자르면 도구 본문을 펴 보러 연 화면이 또 접힌다.
@@ -1751,7 +1762,72 @@ fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16,
     if let Some(page) = frame.warnings {
         return (page.to_vec(), None);
     }
+    if let Some(built) = frame.start.and_then(|page| build_start_page(frame, page, focus)) {
+        return keep_caret_in_view(built, frame.max_height);
+    }
     keep_caret_in_view(build_bottom_pane(frame, focus), frame.max_height)
+}
+
+/// The start page's rows, or `None` when the pane cannot hold it — the bottom
+/// pane is drawn then. The composer is the bottom pane's own, at the page's
+/// column; a suggestion list takes the rows under it as it takes the footer's.
+fn build_start_page(
+    frame: &Frame<'_>,
+    page: &super::start::StartPage,
+    focus: Color,
+) -> Option<(Vec<Line>, Option<(u16, u16)>)> {
+    let (_, column) = page.column(frame.width);
+    let under = |rows: Vec<Line>| {
+        let mut all = vec![Line::empty()];
+        all.extend(rows);
+        all
+    };
+    let popup = if let Some(mention) = frame.mention {
+        Some(under(mention.lines(column, focus)))
+    } else {
+        frame.popup.map(|popup| under(popup.lines_with_focus(column, focus)))
+    };
+    // The page's own rows around the field: the heading, the blank under it,
+    // the where row and a blank row above and below.
+    let around = super::start::MIN_ROWS.saturating_sub(3);
+    let (composer, caret) = frame.composer.render_with_effort(
+        column,
+        PLACEHOLDER,
+        frame.effort_tier,
+        frame.effort_effect,
+        frame.now,
+        frame.max_rows.saturating_sub(around),
+    );
+    let where_row = match frame.status_line {
+        Some(custom) => custom_footer(custom, frame.permission, column),
+        None => footer(
+            frame.model,
+            frame.effort,
+            frame.model_note,
+            frame.cwd,
+            column,
+            None,
+            None,
+            frame.plan_mode,
+            frame.goal_status,
+            frame.loop_status,
+            frame.permission,
+            frame.effort_tier.map(EffortTier::caret_span),
+        ),
+    };
+    super::start::lines(
+        page,
+        super::start::Parts {
+            width: frame.width,
+            rows: frame.max_rows,
+            composer,
+            caret,
+            popup,
+            where_row,
+            notes: frame.start_notes,
+            version: env!("CARGO_PKG_VERSION"),
+        },
+    )
 }
 
 /// 커서가 있는 행이 `max_height` 안에 들도록 그 위의 행을 덜어 낸다. painter 는 그 높이 밑의 행을
@@ -1873,6 +1949,7 @@ fn custom_footer(custom: &str, permission: Option<&str>, width: usize) -> Line {
 
 /// 컴포저 아래의 줄들 — 빈 줄 하나, 그리고 팝업이나(없으면) 푸터.
 fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
+    let marks = super::style::current().style == super::style::TuiStyle::Marks;
     let mut under: Vec<Line> = vec![Line::empty()];
     // 팝업은 푸터 자리에 앉는다 — 캡처의 `/model` 프레임이 그 자리에서
     // 모델·cwd 줄을 밀어냈다. 둘째 줄도 함께 밀려난다.
@@ -1880,40 +1957,69 @@ fn rows_under_the_composer(frame: &Frame<'_>, focus: Color) -> Vec<Line> {
         under.extend(mention.lines(frame.width, focus));
     } else if let Some(popup) = frame.popup {
         under.extend(popup.lines_with_focus(frame.width, focus));
+    } else if marks {
+        // One row under the field, right under it. A hint that says what a
+        // key does right now — what Enter does to a draft while a turn runs,
+        // how the open card closes, the second ctrl+c — takes the row for as
+        // long as it applies, so the composer never moves for it; the keys of
+        // an idle prompt are on the `?` card. Warnings keep their badge on a
+        // row of their own while there are any.
+        under.clear();
+        if let Some(dream) = frame.dream {
+            under.push(dreamer_footer(dream, frame.width));
+        }
+        let passive = matches!(
+            frame.hints.mode,
+            super::footer_hints::HintMode::Empty | super::footer_hints::HintMode::Draft
+        );
+        if passive {
+            under.push(footer_row(frame));
+            if frame.hints.warnings > 0 {
+                under.push(super::footer_hints::hint_row(frame.hints, frame.width));
+            }
+        } else {
+            under.push(super::footer_hints::hint_row(frame.hints, frame.width));
+        }
     } else {
         if let Some(dream) = frame.dream {
             under.push(dreamer_footer(dream, frame.width));
         }
-        let mut line = match frame.status_line {
-            Some(custom) => custom_footer(custom, frame.permission, frame.width),
-            None => footer(
-                frame.model,
-                frame.effort,
-                frame.model_note,
-                frame.cwd,
-                frame.width,
-                frame.context_left,
-                frame.context_used_tokens,
-                frame.plan_mode,
-                frame.goal_status,
-                frame.loop_status,
-                frame.permission,
-                frame.effort_tier.map(EffortTier::caret_span),
-            ),
-        };
-        if let Some(effect) = frame
-            .effort_effect
-            .filter(|effect| !effect.is_finished_at(frame.now))
-        {
-            line = effect.footer_line_at(&line, frame.width, frame.now);
-        }
-        under.push(line);
+        under.push(footer_row(frame));
         under.push(super::footer_hints::hint_row(frame.hints, frame.width));
         if frame.hints.transcript_keys {
             under.push(super::footer_hints::transcript_row(frame.width));
         }
     }
     under
+}
+
+/// The footer's first row: the person's `statusLine` when it printed one,
+/// else the model row, with the effort effect over it while one runs.
+fn footer_row(frame: &Frame<'_>) -> Line {
+    let line = match frame.status_line {
+        Some(custom) => custom_footer(custom, frame.permission, frame.width),
+        None => footer(
+            frame.model,
+            frame.effort,
+            frame.model_note,
+            frame.cwd,
+            frame.width,
+            frame.context_left,
+            frame.context_used_tokens,
+            frame.plan_mode,
+            frame.goal_status,
+            frame.loop_status,
+            frame.permission,
+            frame.effort_tier.map(EffortTier::caret_span),
+        ),
+    };
+    match frame
+        .effort_effect
+        .filter(|effect| !effect.is_finished_at(frame.now))
+    {
+        Some(effect) => effect.footer_line_at(&line, frame.width, frame.now),
+        None => line,
+    }
 }
 
 /// The active cell's lines that fit above the bottom pane.
@@ -2009,6 +2115,8 @@ mod tests {
             question: None,
             picker: None,
             sessions: None,
+            start: None,
+            start_notes: &[],
             pager: None,
             popup: None,
             mention: None,

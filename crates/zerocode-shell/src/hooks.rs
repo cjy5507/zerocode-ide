@@ -611,6 +611,13 @@ pub fn pty_env(
     if let Some(vault) = second_brain_vault() {
         env.push((zerocode_hookd::env_var::SECOND_BRAIN.into(), vault));
     }
+    // This window reads zo's composer where it stands, in from the pane's left
+    // edge too (`composer_empty::observed`). zo centres its start page's field
+    // only for a window that says so.
+    env.push((
+        zerocode_core::hook::READS_INSET_COMPOSER_ENV.to_string(),
+        "1".to_string(),
+    ));
     // What this pane's PATH is built on, in the order of who knows best.
     //
     // The CALLER first, because a caller that already put a PATH in its

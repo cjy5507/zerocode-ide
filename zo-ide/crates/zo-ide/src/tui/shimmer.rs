@@ -118,10 +118,11 @@ fn color_for_level(intensity: f32) -> Style {
 /// 활동 표시 점. codex 는 같은 shimmer 의 첫 글자를 쓴다.
 #[must_use]
 pub fn activity_marker(elapsed: Duration) -> Span {
-    shimmer_spans("•", elapsed)
+    let mark = super::style::glyphs().working;
+    shimmer_spans(mark, elapsed)
         .into_iter()
         .next()
-        .unwrap_or_else(|| Span::dim("•"))
+        .unwrap_or_else(|| Span::dim(mark))
 }
 
 /// 경과 시간 표기 — codex `fmt_elapsed_compact`.
