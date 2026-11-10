@@ -18376,6 +18376,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
                 ("background".to_string(), "#102030".to_string()),
                 ("brightBlue".to_string(), "#abcdef".to_string()),
             ]),
+            match_claude_theme: true,
             leading: 1.5,
             weight: 800,
             cursor_blink: false,
@@ -18553,6 +18554,7 @@ fn non_default_settings_are_the_next_boot_snapshot() {
     assert!(boot.document.terminal_prefs.focus_follows_mouse);
     assert!(boot.document.terminal_prefs.hide_mouse_while_typing);
     assert!(boot.document.terminal_prefs.copy_on_select);
+    assert!(boot.document.terminal_prefs.match_claude_theme);
     assert!(boot.document.terminal_prefs.right_click_paste);
     assert_eq!(
         boot.document.terminal_prefs.cursor_style,
@@ -19539,6 +19541,8 @@ fn terminal_appearance_defaults_bounds_and_old_documents_have_one_authority() {
     assert!(defaults.use_separate_light_theme);
     assert_eq!(defaults.theme_light, TERM_THEME_LIGHT);
     assert!(defaults.color_overrides.is_empty());
+    // Claude Code's colours are the person's until they hand them over.
+    assert!(!defaults.match_claude_theme);
     assert_eq!(defaults.leading, TERM_LINE_HEIGHT_BASE_LEADING);
     assert_eq!(defaults.weight, 500);
     assert_eq!(defaults.cursor_style, TerminalCursorStyle::Block);
@@ -19740,6 +19744,7 @@ fn terminal_appearance_defaults_bounds_and_old_documents_have_one_authority() {
     old_fields.remove("use_separate_light_theme");
     old_fields.remove("theme_light");
     old_fields.remove("color_overrides");
+    old_fields.remove("match_claude_theme");
     old_fields.remove("cursor_style");
     old_fields.remove("cursor_opacity");
     old_fields.remove("padding_x");
@@ -19949,6 +19954,23 @@ fn terminal_appearance_defaults_bounds_and_old_documents_have_one_authority() {
         copy, expected,
         "copy-on-select patch changed a sibling field"
     );
+
+    let mut claude_theme = defaults.clone();
+    TerminalPrefsPatch::MatchClaudeTheme(true).apply(&mut claude_theme);
+    expected = defaults.clone();
+    expected.match_claude_theme = true;
+    assert_eq!(
+        claude_theme, expected,
+        "Claude-theme patch changed a sibling field"
+    );
+    // The window's own spelling of the patch (`setTermPrefs`).
+    assert!(matches!(
+        serde_json::from_value::<TerminalPrefsPatch>(serde_json::json!({
+            "kind": "match_claude_theme",
+            "value": true,
+        })),
+        Ok(TerminalPrefsPatch::MatchClaudeTheme(true))
+    ));
 
     let mut paste = defaults.clone();
     TerminalPrefsPatch::RightClickPaste(true).apply(&mut paste);

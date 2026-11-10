@@ -39,6 +39,7 @@ pub mod builds;
 pub mod capabilities;
 pub mod checks;
 pub mod civil;
+pub mod claude_theme;
 pub mod cli_login_files;
 pub mod clone;
 pub mod codex_account;

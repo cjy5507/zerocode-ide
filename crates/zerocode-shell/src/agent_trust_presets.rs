@@ -234,14 +234,31 @@ fn claude_config_under(
         Some(value) => (!value.is_empty()).then(|| PathBuf::from(value)),
         None => inherited.filter(|dir| !dir.as_os_str().is_empty()),
     };
-    let config_home = dir
-        .clone()
-        .or_else(|| home.as_ref().map(|home| home.join(".claude")))?;
-    let legacy = config_home.join(".config.json");
+    if let Some(dir) = dir {
+        return Some(claude_config_in(&dir));
+    }
+    // No config directory named: the legacy file is looked for in the home's
+    // `.claude`, and the config itself sits beside that folder.
+    let home = home?;
+    let legacy = home.join(".claude").join(LEGACY_CLAUDE_CONFIG);
     if legacy.is_file() {
         return Some(legacy);
     }
-    Some(dir.or(home)?.join(".claude.json"))
+    Some(home.join(CLAUDE_CONFIG))
+}
+
+const LEGACY_CLAUDE_CONFIG: &str = ".config.json";
+const CLAUDE_CONFIG: &str = ".claude.json";
+
+/// The global config of a Claude Code whose config directory is `config_dir`
+/// (its `CLAUDE_CONFIG_DIR`): the legacy `.config.json` there when one is,
+/// else the `.claude.json` in it.
+pub(crate) fn claude_config_in(config_dir: &Path) -> PathBuf {
+    let legacy = config_dir.join(LEGACY_CLAUDE_CONFIG);
+    if legacy.is_file() {
+        return legacy;
+    }
+    config_dir.join(CLAUDE_CONFIG)
 }
 
 /// Antigravity compares the current workspace by exact path against the

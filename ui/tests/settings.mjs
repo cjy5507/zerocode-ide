@@ -348,6 +348,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
     "theme_light": "Builtin Tango Light",
     "custom_themes": [],
     "color_overrides": {},
+    "match_claude_theme": false,
     "leading": 1.15,
     "weight": 500,
     "cursor_blink": true,
@@ -11393,6 +11394,16 @@ await test("non-default writes become canonical state before the second window b
   await gestureAndWait(pageA, "A", "patch_terminal_prefs", () =>
     pageA.uncheck("#term-separate-light-theme"));
   await waitForSettingsIdle(pageA);
+  // Claude Code's colours from this palette: off until asked for, and one
+  // patch when it is — the backend writes the theme, the window keeps a switch.
+  assertEqual(
+    await pageA.$eval("#term-match-claude-theme", (box) => box.checked),
+    false,
+    "Claude Code's theme was taken before anybody asked",
+  );
+  await gestureAndWait(pageA, "A", "patch_terminal_prefs", () =>
+    pageA.check("#term-match-claude-theme"));
+  await waitForSettingsIdle(pageA);
   await pageA.$eval("#term-color-overrides", (details) => { details.open = true; });
   await gestureAndWait(pageA, "A", "patch_terminal_prefs", async () => {
     await changeField(pageA, '[data-terminal-color-text="background"]', "#102030");
@@ -11486,6 +11497,7 @@ await test("non-default writes become canonical state before the second window b
     "theme_dark",
     "theme_light",
     "use_separate_light_theme",
+    "match_claude_theme",
     "divider_thickness_px",
     "divider_color_dark",
     "divider_color_light",
@@ -11532,6 +11544,7 @@ await test("non-default writes become canonical state before the second window b
       theme_dark: backend.settings.terminal_prefs.theme_dark,
       theme_light: backend.settings.terminal_prefs.theme_light,
       use_separate_light_theme: backend.settings.terminal_prefs.use_separate_light_theme,
+      match_claude_theme: backend.settings.terminal_prefs.match_claude_theme,
       color_overrides: backend.settings.terminal_prefs.color_overrides,
     },
     {
@@ -11542,6 +11555,7 @@ await test("non-default writes become canonical state before the second window b
       theme_dark: "Dracula",
       theme_light: "Solarized Light",
       use_separate_light_theme: false,
+      match_claude_theme: true,
       color_overrides: { background: "#102030", brightBlue: "#abcdef" },
     },
     "terminal prefs did not persist canonically",
@@ -11671,6 +11685,7 @@ await test("the second boot paints every non-default before opening settings", a
     themeLight: document.getElementById("term-theme-light")?.value,
     separateLightTheme: document.getElementById("term-separate-light-theme")?.checked,
     lightThemeHidden: document.getElementById("term-theme-light-field")?.hidden,
+    matchClaudeTheme: document.getElementById("term-match-claude-theme")?.checked,
     themeCount: document.getElementById("term-theme-dark")?.options.length,
     terminalBackground: getComputedStyle(document.documentElement)
       .getPropertyValue("--term-screen-bg").trim(),
@@ -11801,6 +11816,7 @@ await test("the second boot paints every non-default before opening settings", a
     themeLight: "Solarized Light",
     separateLightTheme: false,
     lightThemeHidden: true,
+    matchClaudeTheme: true,
     themeCount: 30,
     terminalBackground: "#102030",
     terminalBrightBlue: "#abcdef",

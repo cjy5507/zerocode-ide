@@ -153,6 +153,7 @@ pub(crate) fn set_terminal_prefs(
             .grid_mut()
             .set_scrollback_cap(scrollback);
     }
+    sync_claude_theme(&app);
     Ok(snapshot)
 }
 
@@ -166,12 +167,135 @@ pub(crate) fn set_terminal_prefs(
 /// the theme it was layered on (`Grid::set_colors`).
 #[tauri::command(async)]
 pub(crate) fn report_terminal_colors(
+    app: AppHandle,
     state: State<'_, AppState>,
     report: TerminalColorsReport,
 ) -> Result<(), String> {
     let colors = Arc::new(report.to_colors()?);
     state.terminal_palette().tell(state.terminals(), colors);
+    // The same palette is what Claude Code's own colours are made of, when
+    // the person asked for that.
+    sync_claude_theme(&app);
     Ok(())
+}
+
+/// Bring this window's Claude Code home in step with the terminal palette, or
+/// let go of it — whichever the person's setting says
+/// ([`crate::claude_theme_sync`]). Asked for where either can have changed: a
+/// palette report, a terminal preference saved. A setting that is on before
+/// the renderer has reported any colours waits for its first report, which
+/// every boot sends.
+///
+/// The pass runs on a thread of its own, one at a time, and reads the setting
+/// and the palette when its turn comes. A takeover starts the CLI to ask its
+/// version, which is not a wait to put in front of a saved setting; and a
+/// report and the switch arrive on different threads, where the older of two
+/// palettes must not be the one left in the file. A request made while a pass
+/// is still waiting its turn is that pass — a colour dragged across a picker
+/// reports sixty palettes a second.
+///
+/// Never an error to the caller: a theme that could not be written is a
+/// line in the window's log, and the next palette report tries again.
+fn sync_claude_theme(app: &AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WAITING: AtomicBool = AtomicBool::new(false);
+    static TURN: Mutex<()> = Mutex::new(());
+    // Off, and nothing to put back: no pass, and no thread to find that out —
+    // which is every palette report of a window that never turned this on.
+    {
+        let state = app.state::<AppState>();
+        let on = remembered_settings(state.settings())
+            .document
+            .terminal_prefs
+            .match_claude_theme;
+        if !on && !crate::claude_theme_sync::holds_record(state.config_root()) {
+            return;
+        }
+    }
+    if WAITING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    let started = std::thread::Builder::new()
+        .name("claude-theme".into())
+        .spawn(move || {
+            let _turn = TURN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Cleared before anything is read: a request from here on may be
+            // for a state this pass does not see, and gets a pass of its own.
+            WAITING.store(false, Ordering::Release);
+            let state = app.state::<AppState>();
+            // What a pass wrote is a line in the window's log — the theme
+            // key of somebody's settings does not change with nothing said.
+            let said = match claude_theme_pass(&state) {
+                Ok(pass) if pass.wrote_settings => "the theme named in settings.json was changed",
+                Ok(pass) if pass.wrote_theme => "themes/zerocode.json was written",
+                Ok(_) => return,
+                Err(error) => {
+                    note_window_event(state.local_data_root(), &format!("claude theme: {error}"));
+                    return;
+                }
+            };
+            note_window_event(state.local_data_root(), &format!("claude theme: {said}"));
+        });
+    if started.is_err() {
+        WAITING.store(false, Ordering::Release);
+    }
+}
+
+/// One pass of [`sync_claude_theme`], over what is true now.
+fn claude_theme_pass(state: &AppState) -> Result<crate::claude_theme_sync::Pass, String> {
+    use crate::claude_theme_sync::{Pass, Target, palette_of, sync};
+    use zerocode_core::claude_theme as theme;
+    let on = remembered_settings(state.settings())
+        .document
+        .terminal_prefs
+        .match_claude_theme;
+    let target_root = state.config_root();
+    match (on, state.terminal_palette().current()) {
+        (true, None) => Ok(Pass::default()),
+        (true, Some(colors)) => {
+            let made = theme::theme_from_terminal(&palette_of(&colors));
+            sync(
+                target_root,
+                Target::Match {
+                    theme: &made,
+                    loads_custom_themes: &claude_loads_custom_themes,
+                },
+            )
+        }
+        (false, colors) => {
+            let terminal_base = colors.map_or("dark", |held| {
+                let background = held.background;
+                theme::base_of([background.0, background.1, background.2])
+            });
+            sync(target_root, Target::Release { terminal_base })
+        }
+    }
+}
+
+/// How long the installed Claude Code may take to say its version.
+const CLAUDE_VERSION_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the Claude Code this window launches loads a custom theme — its
+/// own `--version`, asked once at the takeover and at no other time. A CLI
+/// that is not installed, or does not answer, is not handed a setting an
+/// older one chokes on.
+fn claude_loads_custom_themes() -> bool {
+    claude_program()
+        .and_then(|program| {
+            crate::slash_catalog::captured_lines(
+                Path::new(&program),
+                &["--version"],
+                CLAUDE_VERSION_WAIT,
+            )
+        })
+        .is_some_and(|lines| {
+            lines
+                .iter()
+                .any(|line| zerocode_core::claude_theme::loads_custom_themes(line))
+        })
 }
 
 /// Store exactly one terminal control against the latest canonical record.
@@ -185,6 +309,9 @@ pub(crate) fn patch_terminal_prefs(
     patch: TerminalPrefsPatch,
 ) -> Result<SettingsSnapshot, String> {
     let changes_scrollback = matches!(&patch, TerminalPrefsPatch::Scrollback(_));
+    // The one patch that turns the Claude Code theme on or off. A theme or a
+    // colour changed is followed by the renderer's own palette report.
+    let changes_claude_theme = matches!(&patch, TerminalPrefsPatch::MatchClaudeTheme(_));
     let snapshot = commit_setting(
         &app,
         &webview,
@@ -203,6 +330,9 @@ pub(crate) fn patch_terminal_prefs(
                 .grid_mut()
                 .set_scrollback_cap(scrollback);
         }
+    }
+    if changes_claude_theme {
+        sync_claude_theme(&app);
     }
     Ok(snapshot)
 }

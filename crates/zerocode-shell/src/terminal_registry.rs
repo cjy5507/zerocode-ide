@@ -258,6 +258,13 @@ impl TerminalPalette {
         }
     }
 
+    /// The colours the renderer last reported, when it has reported any —
+    /// for a reader that makes something of the palette rather than dressing
+    /// a shell with it (`claude_theme_sync`).
+    pub fn current(&self) -> Option<Arc<zerocode_pty::TerminalColors>> {
+        self.lock().clone()
+    }
+
     /// Whether another thread holds the palette right now.
     #[cfg(test)]
     fn is_held(&self) -> bool {

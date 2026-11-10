@@ -16665,6 +16665,7 @@ mod tests {
             "term-theme-dark",
             "term-separate-light-theme",
             "term-theme-light",
+            "term-match-claude-theme",
             "term-theme-import-auto",
             "term-theme-import-files",
             "term-theme-import-folder",

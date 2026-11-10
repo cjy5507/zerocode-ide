@@ -93,6 +93,7 @@ mod browser_workspace;
 mod checks_runtime;
 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
 mod chromium_browser;
+mod claude_theme_sync;
 mod claude_tokens;
 mod cli_login;
 mod cmd;

@@ -9934,6 +9934,7 @@ function paintTerminalThemeControls() {
   paintTerminalThemeSelect(el("term-theme-light"), termPrefs.theme_light);
   el("term-separate-light-theme").checked = termPrefs.use_separate_light_theme === true;
   el("term-theme-light-field").hidden = termPrefs.use_separate_light_theme !== true;
+  el("term-match-claude-theme").checked = termPrefs.match_claude_theme === true;
   paintTerminalCustomThemes();
 }
 
@@ -10519,6 +10520,12 @@ el("term-separate-light-theme").addEventListener("change", (event) => {
 });
 el("term-theme-light").addEventListener("change", (event) => {
   setTermPrefs({ theme_light: event.target.value });
+});
+/* Claude Code's own colours, made of this palette (`claude_theme_sync`). The
+ * window only keeps the switch: the backend writes the theme when the palette
+ * is reported, which `applyTerminalPalette` already does on every change. */
+el("term-match-claude-theme").addEventListener("change", (event) => {
+  setTermPrefs({ match_claude_theme: event.target.checked });
 });
 el("term-theme-import-auto").addEventListener("click", () => {
   void openTerminalThemeImport("auto");

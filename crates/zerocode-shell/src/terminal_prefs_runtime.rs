@@ -518,6 +518,10 @@ pub(super) struct TerminalPrefs {
     pub(super) custom_themes: Vec<CustomTerminalTheme>,
     /// Valid per-slot colors layered over either selected theme.
     pub(super) color_overrides: BTreeMap<String, String>,
+    /// Whether Claude Code is handed a theme made of this terminal's palette
+    /// (`claude_theme_sync`). Off until a person turns it on: the colours of
+    /// every Claude Code pane are theirs to change.
+    pub(super) match_claude_theme: bool,
     /// Row height as a multiple of the font size. 1.15 is Orca's
     /// `terminalLineHeight: 1` expressed in the unit CSS multiplies
     /// (docs/reverse/orca-ui-inventory.md 1-em) — the default is not 1.
@@ -586,6 +590,7 @@ pub(super) enum TerminalPrefsPatch {
     RemoveCustomTheme(String),
     ColorOverride(TerminalColorOverridePatch),
     ResetColorOverrides,
+    MatchClaudeTheme(bool),
     Leading(f32),
     Weight(u32),
     CursorBlink(bool),
@@ -644,6 +649,7 @@ impl TerminalPrefsPatch {
                 }
             }
             Self::ResetColorOverrides => prefs.color_overrides.clear(),
+            Self::MatchClaudeTheme(value) => prefs.match_claude_theme = value,
             Self::Leading(value) => prefs.leading = value,
             Self::Weight(value) => prefs.weight = value,
             Self::CursorBlink(value) => prefs.cursor_blink = value,
@@ -685,6 +691,7 @@ impl Default for TerminalPrefs {
             theme_light: TERM_THEME_LIGHT.to_string(),
             custom_themes: Vec::new(),
             color_overrides: BTreeMap::new(),
+            match_claude_theme: false,
             leading: TERM_LINE_HEIGHT_BASE_LEADING,
             weight: 500,
             cursor_blink: true,
@@ -1097,6 +1104,7 @@ impl TerminalPrefs {
             theme_light,
             custom_themes,
             color_overrides: normalized_terminal_color_overrides(self.color_overrides),
+            match_claude_theme: self.match_claude_theme,
             // NaN cannot be clamped into range — `f32::clamp` panics on it —
             // so a file saying `null`-ish nonsense falls back rather than
             // taking the window down on the way up.
