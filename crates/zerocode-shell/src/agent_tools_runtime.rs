@@ -5843,8 +5843,8 @@ async fn observation_seen(
 > {
     use crate::emulator::{checks, lists, marks};
     use zerocode_core::agent_emulator::{
-        EMULATOR_COLLECT_DEFAULT, EMULATOR_SCROLL_UNTIL_DEFAULT, EMULATOR_WAIT_MS_DEFAULT,
-        real_android::is_android_phone, real_phone::is_real_phone,
+        EMULATOR_COLLECT_DEFAULT, EMULATOR_SCROLL_UNTIL_DEFAULT, real_android::is_android_phone,
+        real_phone::is_real_phone,
     };
     use zerocode_core::computer_use::{EmulatorDirection, EmulatorMethod};
     use zerocode_core::computer_use_protocol::ProviderError;
@@ -5888,15 +5888,11 @@ async fn observation_seen(
         )
         .await
         .map(handed_on),
-        EmulatorMethod::WaitFor => checks::wait_for(
-            platform,
-            device,
-            text,
-            command.absent,
-            command.timeout_ms.unwrap_or(EMULATOR_WAIT_MS_DEFAULT),
-        )
-        .await
-        .map(handed_on),
+        EmulatorMethod::WaitFor => {
+            checks::wait_for(platform, device, text, command.absent, command.timeout_ms)
+                .await
+                .map(handed_on)
+        }
         EmulatorMethod::Press => {
             marks::press(platform, device, text, command.nth, command.preview, seen)
                 .await

@@ -111,6 +111,10 @@ zerocode-emulator press --platform ios|android --device <id> --text <words> [--n
 Checks answer a count, where 0 means absent; a `find` that counts 0 also
 answers `visible`, the words the screen does show. To wait for a screen, do not
 sleep: `wait-for` reads until the words are there (gone, with `--absent`).
+Left at its default time, a wait for words that are not there ends once the
+screen has stood still for 2 s and says so (`stoodStillMs`): the words are not
+on that screen, so choose from `visible` rather than waiting longer. Give
+`--timeout-ms` only for words you expect to show late on a still screen.
 
 ```text
 zerocode-emulator find --platform ios|android --device <id> --text <fragment> --json

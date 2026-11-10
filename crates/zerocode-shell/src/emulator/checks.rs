@@ -136,21 +136,34 @@ fn reading_order(faces: &[ElementFace]) -> Vec<&ElementFace> {
 }
 
 /// `wait-for`: read the screen until `subject` is on it — or, `absent`, until it
-/// is not — or `timeout_ms` has gone by, and answer whether it was met, the last
+/// is not — or the time has gone by, and answer whether it was met, the last
 /// count, how long it waited and in how many reads. Not met, the answer carries
 /// what the screen did show. A read the door refuses (a locked phone) ends the
-/// wait with that refusal: waiting does not unlock anything. The screen it last
-/// read is handed on with the answer ([`Seen`]).
+/// wait with that refusal: waiting does not unlock anything.
+///
+/// `timeout_ms` left out is the default time, and then a wait for words that
+/// are not there also ends once the screen has stood still
+/// [`EMULATOR_WAIT_STILL_MS`] ([`Stillness`]), answering how long under
+/// [`EMULATOR_STOOD_STILL_KEY`]. A given time, and a wait for words to go,
+/// are waited whole.
+///
+/// [`EMULATOR_WAIT_STILL_MS`]: zerocode_core::agent_emulator::EMULATOR_WAIT_STILL_MS
+/// [`EMULATOR_STOOD_STILL_KEY`]: zerocode_core::agent_emulator::EMULATOR_STOOD_STILL_KEY
 pub(crate) async fn wait_for(
     platform: EmulatorPlatform,
     device: Device,
     subject: &str,
     absent: bool,
-    timeout_ms: u64,
+    timeout_ms: Option<u64>,
 ) -> Result<(Value, Seen), ProviderError> {
-    use zerocode_core::agent_emulator::EMULATOR_WAIT_POLL_MS;
+    use zerocode_core::agent_emulator::{
+        EMULATOR_STOOD_STILL_KEY, EMULATOR_WAIT_MS_DEFAULT, EMULATOR_WAIT_POLL_MS,
+        EMULATOR_WAIT_STILL_MS,
+    };
     let started = std::time::Instant::now();
-    let limit = std::time::Duration::from_millis(timeout_ms);
+    let limit = std::time::Duration::from_millis(timeout_ms.unwrap_or(EMULATOR_WAIT_MS_DEFAULT));
+    let mut stillness = (timeout_ms.is_none() && !absent)
+        .then(|| Stillness::new(std::time::Duration::from_millis(EMULATOR_WAIT_STILL_MS)));
     let mut reads = 0_u32;
     loop {
         let read = std::time::Instant::now();
@@ -159,19 +172,63 @@ pub(crate) async fn wait_for(
         let count = found(&snapshot, subject);
         let met = (count > 0) != absent;
         let waited = started.elapsed();
-        if met || waited >= limit {
+        let stood_still = stillness
+            .as_mut()
+            .and_then(|still| still.stood(&snapshot, read));
+        if met || waited >= limit || stood_still.is_some() {
             let mut answer = json!({
                 MET_KEY: met,
                 COUNT_KEY: count,
-                "waitedMs": u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+                "waitedMs": millis(waited),
                 "reads": reads,
             });
             if !met {
                 answer[VISIBLE_KEY] = json!(visible(&snapshot));
+                if let Some(still) = stood_still {
+                    answer[EMULATOR_STOOD_STILL_KEY] = json!(millis(still));
+                }
             }
             return Ok((answer, Seen::of(snapshot, device, read)));
         }
         tokio::time::sleep(std::time::Duration::from_millis(EMULATOR_WAIT_POLL_MS)).await;
+    }
+}
+
+fn millis(span: std::time::Duration) -> u64 {
+    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Whether the screen a wait reads has stood still long enough to stop
+/// waiting for words that are not on it: every read since the first of a
+/// run read the same — each element's role, words and frame to the point,
+/// as a settling press compares two reads ([`marks::shape`]) — and the reads
+/// span `quiet`, measured from when the first of them was asked for to when
+/// the last was. Any change starts the run again, so a page loading in, a
+/// list filling or anything that moves keeps the wait going to its time.
+struct Stillness {
+    quiet: std::time::Duration,
+    run: Option<(Vec<marks::FaceShape>, std::time::Instant)>,
+}
+
+impl Stillness {
+    fn new(quiet: std::time::Duration) -> Self {
+        Self { quiet, run: None }
+    }
+
+    /// How long the screen has stood still, once that is `quiet` or more.
+    fn stood(
+        &mut self,
+        snapshot: &Snapshot,
+        read: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        let shape = marks::shape(&snapshot.faces);
+        let since = match &self.run {
+            Some((before, since)) if *before == shape => *since,
+            _ => read,
+        };
+        self.run = Some((shape, since));
+        let still = read.saturating_duration_since(since);
+        (still >= self.quiet).then_some(still)
     }
 }
 
@@ -296,6 +353,43 @@ mod tests {
                 "Toolbar"
             ]
         );
+    }
+
+    /// A wait gives up on a still screen only once every read across the
+    /// quiet span was the same; any change — a word, an element that moved
+    /// a point — starts the span again.
+    #[test]
+    fn a_screen_stands_still_only_when_every_read_across_the_span_agrees() {
+        use std::time::{Duration, Instant};
+        let row = |words: &str, top: i64| {
+            json!({"children": [{"className": "android.widget.TextView", "text": words,
+                "enabled": true, "clickable": false, "packageName": "com.example.shop",
+                "bounds": {"left": 0, "top": top, "right": 200, "bottom": top + 40}}]})
+        };
+        let at = |ms: u64, tree: &Value| (snapshot(EmulatorPlatform::Android, tree), ms);
+        let t0 = Instant::now();
+        let quiet = Duration::from_millis(2_000);
+        let mut still = Stillness::new(quiet);
+        let loading = row("Loading", 100);
+        let shown = row("Blue Lantern Cafe", 100);
+        let moved = row("Blue Lantern Cafe", 101);
+        for (read, ms, expected) in [
+            (at(0, &loading), 0, None),
+            (at(850, &loading), 850, None),
+            (at(1_700, &shown), 1_700, None),
+            (at(2_550, &shown), 2_550, None),
+            (at(3_400, &moved), 3_400, None),
+            (at(4_250, &moved), 4_250, None),
+            (at(5_400, &moved), 5_400, Some(2_000)),
+        ] {
+            let (snapshot, _) = read;
+            let stood = still.stood(&snapshot, t0 + Duration::from_millis(ms));
+            assert_eq!(
+                stood.map(|span| span.as_millis()),
+                expected,
+                "read at {ms} ms"
+            );
+        }
     }
 
     #[test]

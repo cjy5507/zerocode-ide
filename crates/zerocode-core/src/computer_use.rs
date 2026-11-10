@@ -5843,6 +5843,14 @@ fn computer_door<'a>(
 #[must_use]
 pub fn emulator_usage() -> String {
     use crate::agent_emulator::physical::{PHYSICAL_KEY, UNCHECKED_KEY};
+    let wait_note = format!(
+        "    at most {}); answers met, count and waitedMs, and visible when it was not met. Left at its default,\n\
+         \x20   a wait whose words are not there ends once the screen has stood still {} ms ({}); give\n\
+         \x20   --timeout-ms to wait the whole time for words a still screen will show late.",
+        crate::agent_emulator::EMULATOR_WAIT_MS_MAX,
+        crate::agent_emulator::EMULATOR_WAIT_STILL_MS,
+        crate::agent_emulator::EMULATOR_STOOD_STILL_KEY,
+    );
     let list_note = format!(
         "    Answers the simulators and emulators this window drives (ios, android), the real phones it\n\
          \x20   sees ({PHYSICAL_KEY}, each with drivable, its device id and a reason), and a tool that\n\
@@ -5867,7 +5875,7 @@ pub fn emulator_usage() -> String {
         "    A find that counts 0 also answers visible: the words the screen does show, so the next step is not a guess.",
         "  zerocode-emulator wait-for --platform ios|android --device <id> --text <fragment> [--absent] [--timeout-ms N] [--json]",
         "    Reads the screen until the words are there (gone, with --absent), up to --timeout-ms (default 5000,",
-        "    at most 20000); answers met, count and waitedMs, and visible when it was not met.",
+        wait_note.as_str(),
         "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--text <fragment>] [--preview] [--json]",
         "    On iOS a click answers once the screen it led to stops changing; --text counts what find would",
         "    in the tree it stopped on (count; 0 is not proof of absence — look with marks --text); --preview",

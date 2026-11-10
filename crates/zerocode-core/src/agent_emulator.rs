@@ -83,6 +83,20 @@ pub const EMULATOR_WAIT_MS_MAX: u64 = 20_000;
 /// 0.5–2 s, so the pause only keeps a fast simulator from spinning.
 pub const EMULATOR_WAIT_POLL_MS: u64 = 250;
 
+/// How long the screen must stand still — every read of it the same, role,
+/// words and frame of each element — before a `wait-for` left at its default
+/// time gives up on words that are not there: a guessed word that is not on
+/// a still screen will not come by waiting the rest of the 5 s (t-101963:
+/// 5.1–5.6 s and 8–9 reads a wait that missed). A screen that moves at all
+/// (a page loading in, a list filling, a spinner turning) keeps the wait
+/// going to its time; a wait given `--timeout-ms`, and one for words to be
+/// gone (`--absent`), always wait their whole time.
+pub const EMULATOR_WAIT_STILL_MS: u64 = 2_000;
+
+/// The key a wait that ended on a still screen answers how long it stood
+/// still under — so a miss is read as "not on this screen", not as "slow".
+pub const EMULATOR_STOOD_STILL_KEY: &str = "stoodStillMs";
+
 /// How long a wait may hold a walk: its longest wait, then one more read.
 pub const EMULATOR_WAIT_HOLD_MS: u64 = EMULATOR_WAIT_MS_MAX + EMULATOR_HOLD_MS;
 
