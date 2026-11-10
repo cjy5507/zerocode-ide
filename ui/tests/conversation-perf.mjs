@@ -487,6 +487,10 @@ export async function measureRounds({ engine = "chromium", rounds = 5, folded = 
  * 부터 그 뒤 첫 프레임이 그려진 시각(프레임 콜백이 올린 작업이 도는 때)까지.
  *
  *   node ui/tests/conversation-perf.mjs --scenarios [--engine webkit] [--rounds 5] [--json out.json]
+ *   node ui/tests/conversation-perf.mjs --scenarios --folded         the product's default page: the tool work
+ *                                                                    between two answers folded to one line — what
+ *                                                                    a person opens (the harness stands on the whole
+ *                                                                    timeline, 397 rows where the folded page has 110)
  *   node ui/tests/conversation-perf.mjs --scenarios --against <checkout>   그 체크아웃과 이 체크아웃을 한 브라우저에서
  *                                                                          판마다 번갈아 — 전/후(A/B), 같은 창끼리(A/A)
  *   node ui/tests/conversation-perf.mjs --compare a.json b.json      두 실행이 몇 %로 맞는지
@@ -1123,12 +1127,15 @@ function printSwitch(result) {
 }
 
 /* One round: a 200-turn and a 400-turn open on fresh pages; on the 400-turn
- * page, typing, then each stream rate. */
-async function scenarioRound(browser, origin) {
+ * page, typing, then each stream rate. `folded`: the page as the product
+ * opens it — set before the conversation opens, so the open builds the folded
+ * rows and no others. */
+async function scenarioRound(browser, origin, { folded = false } = {}) {
   const round = { faults: [] };
   for (const turns of SCENARIOS.openTurns) {
     const { page, faults } = await openWindowTestPage(browser, origin);
     try {
+      if (folded) await foldConversations(page);
       round[`open${turns}`] = await measureOpen(page, { turns });
       if (turns !== Math.max(...SCENARIOS.openTurns)) continue;
       await quiet(page);
@@ -1208,9 +1215,10 @@ async function leakRound(browser, origin, engine) {
 }
 
 /* What a run of `taken` rounds and its leak test come to. */
-function scenarioResult({ engine, rounds, machine, taken, leaks }) {
+function scenarioResult({ engine, rounds, machine, taken, leaks, folded = false }) {
   return {
     engine,
+    folded,
     throttle: Number(process.env.WINDOW_CPU_THROTTLE ?? 0) || 1,
     rounds,
     machine,
@@ -1223,21 +1231,21 @@ function scenarioResult({ engine, rounds, machine, taken, leaks }) {
 /* Rounds of the four scenarios in one browser, then one leak test on a page
  * of its own. The machine as the run began and ended: a run that started
  * over its cores is read as such, never averaged in silently. */
-export async function measureScenarios({ engine = "chromium", rounds = 5 } = {}) {
+export async function measureScenarios({ engine = "chromium", rounds = 5, folded = false } = {}) {
   const machine = { cores: cpus().length, loadBefore: loadavg()[0], loadAfter: null };
   const { files, origin } = await createWindowServer();
   const browser = await (engine === "webkit" ? webkitType() : chromium).launch({ headless: true });
   const taken = [];
   let leaks = null;
   try {
-    for (let round = 0; round < rounds; round += 1) taken.push(await scenarioRound(browser, origin));
+    for (let round = 0; round < rounds; round += 1) taken.push(await scenarioRound(browser, origin, { folded }));
     leaks = await leakRound(browser, origin, engine);
   } finally {
     await browser.close();
     files.close();
   }
   machine.loadAfter = loadavg()[0];
-  return scenarioResult({ engine, rounds, machine, taken, leaks });
+  return scenarioResult({ engine, rounds, machine, taken, leaks, folded });
 }
 
 /* Two windows in one run (`--against <checkout>`): that checkout's and this
@@ -1246,7 +1254,7 @@ export async function measureScenarios({ engine = "chromium", rounds = 5 } = {})
  * while it runs moves both alike. Run against a checkout of the same window
  * it says how far apart two runs of one window come; against the commit
  * before a change, what the change did. */
-export async function measureScenariosAgainst({ engine = "chromium", rounds = 5, against } = {}) {
+export async function measureScenariosAgainst({ engine = "chromium", rounds = 5, against, folded = false } = {}) {
   const machine = { cores: cpus().length, loadBefore: loadavg()[0], loadAfter: null };
   const there = await import(pathToFileURL(resolve(against, "ui/tests/window-boot.mjs")).href);
   const sides = [
@@ -1257,7 +1265,7 @@ export async function measureScenariosAgainst({ engine = "chromium", rounds = 5,
   try {
     for (let round = 0; round < rounds; round += 1) {
       for (const side of round % 2 === 0 ? sides : [...sides].reverse()) {
-        side.taken.push(await scenarioRound(browser, side.server.origin));
+        side.taken.push(await scenarioRound(browser, side.server.origin, { folded }));
       }
     }
     for (const side of sides) side.leaks = await leakRound(browser, side.server.origin, engine);
@@ -1266,7 +1274,7 @@ export async function measureScenariosAgainst({ engine = "chromium", rounds = 5,
     for (const side of sides) side.server.files.close();
   }
   machine.loadAfter = loadavg()[0];
-  return Object.fromEntries(sides.map((side) => [side.name, scenarioResult({ engine, rounds, machine, taken: side.taken, leaks: side.leaks })]));
+  return Object.fromEntries(sides.map((side) => [side.name, scenarioResult({ engine, rounds, machine, taken: side.taken, leaks: side.leaks, folded })]));
 }
 
 /* The scenarios' numbers as lines. */
@@ -1274,7 +1282,7 @@ function printScenarios(result) {
   const ms = (value) => (value === null || value === undefined ? "—" : `${value.toFixed(1)} ms`);
   const pct = (value) => `${(value * 100).toFixed(1)}%`;
   const { summary } = result;
-  console.log(`engine ${result.engine} · cpu ×${result.throttle} · ${result.rounds} rounds · long tasks by ${result.longtaskSource} · load ${result.machine.loadBefore.toFixed(1)} → ${result.machine.loadAfter.toFixed(1)} on ${result.machine.cores} cores`);
+  console.log(`engine ${result.engine} · ${result.folded ? "folded page" : "whole timeline"} · cpu ×${result.throttle} · ${result.rounds} rounds · long tasks by ${result.longtaskSource} · load ${result.machine.loadBefore.toFixed(1)} → ${result.machine.loadAfter.toFixed(1)} on ${result.machine.cores} cores`);
   for (const turns of SCENARIOS.openTurns) {
     const open = summary[`open${turns}`];
     console.log(`  (a) open ${turns} turns: first paint ${ms(open.firstPaintMs)} (rows stood ${ms(open.mountMs)}, ${open.rowsAtMount} rows) · long tasks ${open.longtasks} · total ${ms(open.longtaskTotalMs)} · max ${ms(open.longtaskMaxMs)}`);
@@ -1352,7 +1360,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   if (argv.includes("--scenarios")) {
     const against = option("--against", null);
     if (against !== null) {
-      const result = await measureScenariosAgainst({ engine, rounds, against });
+      const result = await measureScenariosAgainst({ engine, rounds, against, folded: argv.includes("--folded") });
       console.log("== the checkout run against");
       printScenarios(result.against);
       console.log("== this checkout");
@@ -1364,7 +1372,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
       if (out) writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`);
       process.exit(0);
     }
-    const result = await measureScenarios({ engine, rounds });
+    const result = await measureScenarios({ engine, rounds, folded: argv.includes("--folded") });
     printScenarios(result);
     if (out) writeFileSync(out, `${JSON.stringify(result, null, 2)}\n`);
     process.exit(0);
