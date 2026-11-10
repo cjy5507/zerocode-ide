@@ -23512,6 +23512,7 @@ button.integration-context-action:hover {
 
 .remote-link-pair-label {
   margin: 0;
+  font: var(--type-label-13);
   font-weight: 600;
 }
 

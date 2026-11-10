@@ -81,6 +81,7 @@ import { testPasteRoad } from "./paste-road.mjs";
 import { testTermMouseMotion } from "./term-mouse-motion.mjs";
 import { testFaultReportStorm } from "./fault-report-storm.mjs";
 import { testStartupProjects } from "./startup-projects.mjs";
+import { testPhonePage } from "./phone-page.mjs";
 import { testWorkspaceBoard } from "./workspace-board.mjs";
 import { testFlowConsole } from "./flow-console.mjs";
 import { testWorktreeEvidence } from "./worktree-evidence.mjs";
@@ -454,6 +455,7 @@ suite("paste-road", ({ browser, origin, ok }) => testPasteRoad(browser, origin, 
 suite("term-mouse-motion", ({ browser, origin, ok }) => testTermMouseMotion(browser, origin, ok));
 suite("fault-report-storm", ({ browser, origin, ok }) => testFaultReportStorm(browser, origin, ok));
 suite("startup-projects", ({ browser, origin, ok }) => testStartupProjects(browser, origin, ok));
+suite("phone-page", ({ browser, ok }) => testPhonePage(browser, ok));
 suite("workspace-board", ({ browser, origin, ok }) => testWorkspaceBoard(browser, origin, ok));
 suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, origin, ok));
 suite("worktree-evidence", ({ browser, origin, ok }) => testWorktreeEvidence(browser, origin, ok));

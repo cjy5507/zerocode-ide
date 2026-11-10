@@ -8,6 +8,13 @@
   box-sizing: border-box;
 }
 
+/* The page shows and hides its cards by the `hidden` attribute, and every card
+ * and the list set their own `display`: without this, a class wins over the
+ * attribute and a paired phone still shows the pairing card. */
+[hidden] {
+  display: none !important;
+}
+
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
@@ -163,6 +170,11 @@ body {
   gap: var(--space-3);
 }
 
+#phone-groups {
+  display: grid;
+  gap: var(--space-4);
+}
+
 .phone-group {
   display: grid;
   gap: var(--space-2);
@@ -183,7 +195,7 @@ body {
   min-width: 20px;
   padding: 0 var(--space-1);
   border-radius: var(--radius-pill);
-  background: var(--gray-alpha-400);
+  background: var(--gray-alpha-200);
   color: var(--ink-chalk);
   font: var(--type-label-12);
   text-align: center;
