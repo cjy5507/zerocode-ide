@@ -176,7 +176,9 @@ export async function testConversationFolds(browser, origin, ok) {
       { role: "user", text: lines(40, "브리핑") },
       { role: "user", text: "짧은 부탁" },
       { role: "tool", text: "Bash · cargo test", tool: { call_id: "b1", name: "Bash", kind: "bash", input: "cargo test", is_error: false } },
-      { role: "tool_result", text: lines(200, "test"), tool: { call_id: "b1", is_error: false } },
+      // Longer than the clip and short of the twelve lines from which an output stands as its two ends
+      // (`outEnds`, held by conversation-outputs-long): the clip's own case.
+      { role: "tool_result", text: lines(11, "test"), tool: { call_id: "b1", is_error: false } },
       // A word between keeps steps of one kind from folding into one row.
       { role: "assistant", text: "이어서 봅니다." },
       { role: "tool", text: "Bash · ls", tool: { call_id: "b2", name: "Bash", kind: "bash", input: "ls", is_error: false } },
@@ -244,7 +246,7 @@ export async function testConversationFolds(browser, origin, ok) {
       bash.querySelector(".helper-expand")?.click();
       await window.__PAINTED__();
       // Opened, it is the well it always was: taller than the clip, and it
-      // scrolls on its own rather than lengthening the page by 200 lines.
+      // scrolls on its own rather than lengthening the page by every line.
       seen.outOpen = out ? Math.round(content(out)) > seen.tokens.tool * 3 && getComputedStyle(out).overflowY === "auto" : false;
       bash.querySelector(".helper-expand")?.click();
       await window.__PAINTED__();

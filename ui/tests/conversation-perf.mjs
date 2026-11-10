@@ -954,6 +954,14 @@ export async function standSwitcher(page) {
         const tab = await openWirePage("claude", "/tmp/zerocode-window-test", { history });
         await pollHelperPages();
         await window.__PAINTED__();
+        // A long conversation stands its earlier turns in steps after its first frame (`openHeldTurns`): a page
+        // looked away from is the page that stood, so the steps are waited for — the rows a return finds are the
+        // rows it left, none of them the open's own steps still to come. A checkout from before them has no
+        // floor to wait on.
+        for (let wait = 0; wait < 200 && list()?.__openFloor !== null && list()?.__openFloor !== undefined; wait += 1) {
+          await new Promise((done) => setTimeout(done, 10));
+        }
+        await window.__PAINTED__();
         seen.set(tab, new WeakSet(rows(list())));
         return tab;
       },
