@@ -335,7 +335,8 @@ fn execute_tool_result_with_output_policy(
     }
     let dispatched = match spec.and_then(|spec| wrong_shape(spec, input)) {
         Some(error) => Err(error),
-        None => dispatch_tool_inner(ctx, enforcer, canonical_ref, input),
+        None => dispatch_tool_inner(ctx, enforcer, canonical_ref, input)
+            .map_err(|error| with_the_shape_it_takes(spec, input, error)),
     };
     let raw = match dispatched {
         Ok(raw) => raw,
@@ -882,6 +883,67 @@ fn wrong_shape(spec: &crate::ToolSpec, input: &Value) -> Option<ToolError> {
     }
     let _ = write!(line, ". {tool} takes {}", shape_line(&spec.wire_definition().input_schema));
     Some(ToolError::InvalidInput(line))
+}
+
+/// A refused call to a tool whose schema the model was never shown, with the
+/// input that tool takes on the end of the refusal.
+///
+/// A deferred tool is advertised by name alone, so a model either looks its
+/// schema up first — a whole request, every time — or guesses. A guess that
+/// misses is refused in the handler's words (``missing field `to` ``), which
+/// name one field and not the shape, and the lookup follows anyway. Saying the
+/// shape here makes the guess safe to try: right, it costs nothing; wrong, the
+/// next call is right, which is all the lookup would have bought. Every
+/// deferred tool gets this from its own schema — no tool is named here, and
+/// none needs a hint written for it in the prompt.
+///
+/// Only a refusal the call's shape explains is touched ([`shape_is_off`]). A
+/// well-formed call the handler refuses for its own reasons keeps the
+/// handler's words alone, and a tool on the wire is left to its own schema,
+/// which the model already holds.
+fn with_the_shape_it_takes(
+    spec: Option<&crate::ToolSpec>,
+    input: &Value,
+    error: ToolError,
+) -> ToolError {
+    let ToolError::InvalidInput(message) = &error else {
+        return error;
+    };
+    let Some(spec) = spec.filter(|spec| crate::registry::is_deferred_tool(spec.name)) else {
+        return error;
+    };
+    if !shape_is_off(&spec.input_schema, input) {
+        return error;
+    }
+    let tool = core_types::tool_names::wire_tool_name(spec.name);
+    ToolError::InvalidInput(format!(
+        "{}. {tool} takes {}",
+        message.trim_end_matches('.'),
+        shape_line(&spec.wire_definition().input_schema)
+    ))
+}
+
+/// Whether `input` visibly departs from `schema`: it is not an object, it
+/// leaves out a field the schema requires, or — where the schema admits no
+/// others — it carries a field the schema does not declare.
+fn shape_is_off(schema: &Value, input: &Value) -> bool {
+    let Some(sent) = input.as_object() else {
+        return true;
+    };
+    let leaves_one_out = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|field| !sent.contains_key(field));
+    let closed = schema.get("additionalProperties").and_then(Value::as_bool) == Some(false);
+    let declared = schema.get("properties").and_then(Value::as_object);
+    let carries_a_stranger = closed
+        && sent
+            .keys()
+            .any(|key| declared.is_none_or(|declared| !declared.contains_key(key)));
+    leaves_one_out || carries_a_stranger
 }
 
 /// A schema as one line a model reads at a glance:

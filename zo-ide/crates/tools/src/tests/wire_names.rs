@@ -215,6 +215,47 @@ fn a_grep_without_a_pattern_is_pointed_at_the_listing_tool() {
     assert!(error.contains(&format!("use {}", CoreTool::Glob.wire())), "{error}");
 }
 
+/// A deferred tool is known to the model by its name alone. A call that
+/// guesses its input wrong is answered with the shape that tool takes, drawn
+/// from the tool's own schema — whichever tool it is — so the next call is
+/// right without a lookup turn first.
+#[test]
+fn a_deferred_tool_called_with_the_wrong_input_is_told_the_shape_it_takes() {
+    let output = run_tool("TaskOutput", &json!({ "nope": "task_1" }))
+        .expect_err("the call names no task")
+        .to_string();
+    assert!(output.contains("task_id"), "the handler's own words stay: {output}");
+    assert!(output.contains(r#"TaskOutput takes {"task_id": string}"#), "{output}");
+
+    let image = run_tool("read_image", &json!({ "file": "a.png" }))
+        .expect_err("the call names no path")
+        .to_string();
+    assert!(image.contains(r#"read_image takes {"path": string}"#), "{image}");
+
+    let no_object = run_tool("read_image", &json!("a.png"))
+        .expect_err("a bare string is not an input")
+        .to_string();
+    assert!(no_object.contains(r#"read_image takes {"path": string}"#), "{no_object}");
+}
+
+/// The shape is said only where the shape is what was wrong. A well-formed
+/// call a deferred tool refuses for a reason of its own keeps that reason
+/// alone, and a tool on the wire — whose schema the model already holds — is
+/// never told it.
+#[test]
+fn a_refusal_the_shape_does_not_explain_is_left_in_the_tools_own_words() {
+    let refused = run_tool("skill_load", &json!({ "names": [] }))
+        .expect_err("an empty list asks for nothing")
+        .to_string();
+    assert!(refused.contains("names must not be empty"), "{refused}");
+    assert!(!refused.contains(" takes {"), "{refused}");
+
+    let on_the_wire = run_tool("TodoWrite", &json!({ "nope": true }))
+        .expect_err("no todos")
+        .to_string();
+    assert!(!on_the_wire.contains(" takes {"), "{on_the_wire}");
+}
+
 /// The wire list is a function of configuration alone: the same bytes on
 /// every request of a session, so the prompt cache behind it holds.
 #[test]

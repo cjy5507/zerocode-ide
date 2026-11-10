@@ -69,7 +69,15 @@ impl Bucket {
             // and `MultiEdit` (147, in neither) left — 2,142 measured
             // 2026-11-05, about 340 × (1.25 + 112 × 0.1) ≈ 4,200 tokens' worth
             // per 113-request conversation, cached.
-            Self::Tools => 2_142,
+            //
+            // 2,142 until 2026-11-10, and lower since: 2,136 measured (Anthropic
+            // and Google; OpenAI 2,135). The manifest and `CapabilityInvoke` no
+            // longer send a model to `ToolSearch` before a deferred tool — a
+            // call with the wrong input is answered with the shape the tool
+            // takes — and saying that took fewer words than saying the other,
+            // `Read`'s new word for the images it now opens included. The line
+            // comes down with the measurement so the room is not spent unseen.
+            Self::Tools => 2_136,
             // The renderer's own ceiling (`runtime::SKILL_INDEX_BUDGET_TOKENS`):
             // the index folds its tail to stay under it, so the gate and the
             // prompt ask one number.

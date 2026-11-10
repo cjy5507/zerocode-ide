@@ -164,12 +164,12 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "CapabilityInvoke",
-            description: "Run a deferred registered tool by exact name, with input shaped by its ToolSearch schema. The inner tool's permissions apply.",
+            description: "Run a deferred registered tool by exact name; wrong input is answered with its shape. The inner tool's permissions apply.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "input": { "type": "object", "description": "Arguments matching the searched schema." }
+                    "input": { "type": "object", "description": "The tool's arguments." }
                 },
                 "required": ["name"],
                 "additionalProperties": false

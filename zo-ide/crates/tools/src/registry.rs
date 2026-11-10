@@ -469,7 +469,7 @@ fn deferred_tool_names() -> &'static BTreeSet<&'static str> {
 /// Whether a builtin tool is deferred from the wire advertisement (surfaced via
 /// `ToolSearch` on demand). Deferral hides the schema from the model; it never
 /// blocks execution, which resolves by name.
-fn is_deferred_tool(name: &str) -> bool {
+pub(crate) fn is_deferred_tool(name: &str) -> bool {
     deferred_tool_names().contains(name) && !forced_onto_wire(name)
 }
 
@@ -605,9 +605,9 @@ pub fn deferred_tool_manifest_section() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "# Deferred tools\nHidden but callable: {names}. Get builtin/MCP/plugin schemas \
-         in one ToolSearch (`select:Name,...` or keywords); use \
-         CapabilityInvoke({{name,input}})."
+        "# Deferred tools\nHidden but callable: {names}. Run one: \
+         CapabilityInvoke({{name,input}}); wrong input returns its shape. ToolSearch finds \
+         MCP/plugin tools."
     )
 }
 

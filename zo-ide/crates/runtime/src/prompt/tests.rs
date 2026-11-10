@@ -2374,6 +2374,28 @@ fn the_tool_road_costs_a_fraction_of_the_index_and_keeps_its_heading() {
     );
 }
 
+/// The tool road names two deferred tools, and a deferred tool whose input the
+/// model was never shown costs a lookup turn before its first use. The
+/// section therefore writes both calls out, and never sends the model to
+/// look the schemas up.
+#[test]
+fn the_tool_road_shows_both_calls_so_neither_needs_a_lookup_turn() {
+    let tools = super::render_skills_tools(40);
+    assert!(
+        tools.contains(r#"{"name":"skill_search","input":{"task":"#),
+        "the search call is written out: {tools}"
+    );
+    assert!(
+        tools.contains(r#"{"name":"skill_load","input":{"names":["#),
+        "the load call is written out: {tools}"
+    );
+    assert!(tools.contains("`CapabilityInvoke`"), "{tools}");
+    assert!(
+        !tools.contains("fetch their schemas"),
+        "the section must not send the model to `ToolSearch` first: {tools}"
+    );
+}
+
 /// The whole prompt, both ways: the same builder, the same catalog, and the
 /// only difference is the section.
 #[test]
