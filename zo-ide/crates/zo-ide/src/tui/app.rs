@@ -5164,12 +5164,8 @@ impl Ui {
                 let tail = if self.thinking_line {
                     // One row says the block happened; Ctrl+T keeps it whole.
                     let took = self.reasoning_started.take().map(|began| began.elapsed());
-                    let about = self.reasoning_about.take().or_else(|| {
-                        transcript
-                            .as_deref()
-                            .and_then(|text| thinking::live_heading(text, thinking::LIVE_HEADING_MAX_COLUMNS))
-                    });
-                    thinking::one_line(about.as_deref(), took, self.painter.cols() as usize)
+                    let about = self.reasoning_about.take();
+                    thinking::one_line(about.as_deref(), transcript.as_deref(), took, self.painter.cols() as usize)
                 } else if headerless {
                     // A headerless block — Anthropic thinking — commits as a
                     // titled, previewed (or folded) cell; a summary with

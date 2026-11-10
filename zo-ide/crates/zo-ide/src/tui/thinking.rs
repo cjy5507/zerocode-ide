@@ -255,9 +255,21 @@ pub fn cell(body: Vec<Line>, mode: FoldMode, ids: &mut FoldIds) -> Vec<Line> {
 /// A finished thinking block as one row: the gap every cell opens with, then
 /// `✻ Thought for 4s · Reading the parser` — how long it took when that was a
 /// second or more, and `about`: the words the working row showed for it, its
-/// bold heading or its last whole sentence.
+/// bold heading or its last whole sentence. A block that ended before the
+/// working row had a word for it is read once more, `whole`, through the same
+/// rule ([`live_heading`]).
 #[must_use]
-pub fn one_line(about: Option<&str>, took: Option<std::time::Duration>, width: usize) -> Vec<Line> {
+pub fn one_line(
+    about: Option<&str>,
+    whole: Option<&str>,
+    took: Option<std::time::Duration>,
+    width: usize,
+) -> Vec<Line> {
+    let read_whole = match about {
+        Some(_) => None,
+        None => whole.and_then(|text| live_heading(text, LIVE_HEADING_MAX_COLUMNS)),
+    };
+    let about = about.or(read_whole.as_deref());
     let glyphs = super::style::glyphs();
     let said = match took.map(|took| took.as_secs()).filter(|seconds| *seconds > 0) {
         Some(seconds) => format!("{} {}", strings::THOUGHT_FOR, super::shimmer::fmt_elapsed_compact(seconds)),
@@ -303,13 +315,18 @@ mod tests {
     #[test]
     fn a_finished_block_stands_as_one_row() {
         use std::time::Duration;
-        let rows = super::one_line(Some("Reading the parser"), Some(Duration::from_millis(2_400)), 80);
+        let rows = super::one_line(Some("Reading the parser"), None, Some(Duration::from_millis(2_400)), 80);
         assert_eq!(rows[0].plain(), "", "the gap every cell opens with");
         assert_eq!(rows[1].plain(), "• Thought for 2s · Reading the parser");
-        let quick = super::one_line(Some("Checking the test"), Some(Duration::from_millis(300)), 80);
+        let quick = super::one_line(Some("Checking the test"), None, Some(Duration::from_millis(300)), 80);
         assert_eq!(quick[1].plain(), "• Thought · Checking the test", "under a second says no seconds");
-        assert_eq!(super::one_line(None, None, 80)[1].plain(), "• Thought");
-        assert_eq!(super::one_line(Some("  "), None, 80)[1].plain(), "• Thought");
+        assert_eq!(super::one_line(None, None, None, 80)[1].plain(), "• Thought");
+        assert_eq!(super::one_line(Some("  "), None, None, 80)[1].plain(), "• Thought");
+        // A block the working row never had a word for is read whole, by the
+        // rule the working row reads with; the word it did show stands.
+        let whole = "**Reading the parser**\n\nThe loop ends early.";
+        assert_eq!(super::one_line(None, Some(whole), None, 80)[1].plain(), "• Thought · Reading the parser");
+        assert_eq!(super::one_line(Some("Shown"), Some(whole), None, 80)[1].plain(), "• Thought · Shown");
     }
 
     #[test]
