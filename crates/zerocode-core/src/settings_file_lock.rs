@@ -37,6 +37,9 @@ impl SettingsFileLock {
             fs::create_dir_all(parent)?;
         }
         let path = settings_path.with_extension("json.lock");
+        // The last poll's refusal while the lock file was on its way out
+        // ([`lock_is_leaving`]): what the polls' end says if it never left.
+        let mut leaving = None;
         for _ in 0..200 {
             match fs::OpenOptions::new()
                 .write(true)
@@ -49,18 +52,49 @@ impl SettingsFileLock {
                     return Ok(held);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    leaving = None;
                     if !reclaim_from_a_dead_owner(&path) {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
+                Err(error) if lock_is_leaving(&error) => {
+                    leaving = Some(error);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
                 Err(error) => return Err(error),
             }
         }
-        Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            format!("timed out waiting for {}", path.display()),
-        ))
+        Err(leaving.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("timed out waiting for {}", path.display()),
+            )
+        }))
     }
+}
+
+/// Whether `create_new` was refused because the lock file is being removed
+/// this moment — a held lock's last instant, so the caller polls on.
+///
+/// Windows keeps a deleted file's name until the last handle on it closes (the
+/// owner's own delete, a scanner's read of the file) and answers a create of
+/// that name with "access is denied" (os error 5), not "already exists". The
+/// Windows runs of v1.1.136 and v1.1.138 failed a launch that way, at the
+/// instant a writer let the lock go
+/// (`review_a_launch_waits_out_a_writer_holding_the_settings_lock`: "Access is
+/// denied. (os error 5)"). A folder that really refuses the write answers the
+/// same on every poll, and [`SettingsFileLock::acquire`] returns that refusal
+/// once its polls are spent. Nowhere else does a create meet a name on its way
+/// out: there a refusal is returned at once.
+#[cfg(windows)]
+fn lock_is_leaving(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// See the Windows twin.
+#[cfg(not(windows))]
+fn lock_is_leaving(_error: &io::Error) -> bool {
+    false
 }
 
 impl Drop for SettingsFileLock {
