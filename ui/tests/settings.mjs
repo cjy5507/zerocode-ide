@@ -425,7 +425,8 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "harness": {
     "gate": { "mode": "notify", "task_usd": null, "day_usd": null },
     "launches": { "concurrent": 4, "per_hour": 300, "per_day": 2000 },
-    "alerts": { "landing": true }
+    "alerts": { "landing": true },
+    "workers": { "refuse_prompts": false }
   },
   "worktree_prefs": { "branch_prefix": "git-username" },
   "notifications": { "enabled": true, "agent_attention": true, "agent_completion": "long" },
@@ -1798,6 +1799,8 @@ class StatefulBackend {
           launches,
           // The Rust contract: only a plain `false` turns the ledger's alerts off.
           alerts: { landing: asked.alerts?.landing !== false },
+          // And only a plain `true` has a summoned worker refuse an unwatched prompt.
+          workers: { refuse_prompts: asked.workers?.refuse_prompts === true },
         };
         keys = ["harness"];
         break;
@@ -12028,6 +12031,8 @@ await test("the harness card shows what a person set and what the window counted
       perDay: field("harness-per-day")?.value ?? null,
       alerts: field("harness-alerts-landing")?.value ?? null,
       alertsHint: field("harness-alerts-landing-hint")?.textContent ?? null,
+      prompts: field("harness-workers-prompts")?.value ?? null,
+      promptsHint: field("harness-workers-prompts-hint")?.textContent ?? null,
       status: field("harness-status")?.textContent ?? null,
     };
   });
@@ -12042,7 +12047,7 @@ await test("the harness card shows what a person set and what the window counted
   assert(
     shown.mode === "notify" && shown.task === "" && shown.day === "" &&
       shown.concurrent === "4" && shown.perHour === "300" && shown.perDay === "2000" &&
-      shown.alerts === "on",
+      shown.alerts === "on" && shown.prompts === "ask",
     "the card does not show the document's gate and ceilings", shown,
   );
   assert(
@@ -12065,6 +12070,7 @@ await test("the harness card shows what a person set and what the window counted
         gate: { mode: "notify", task_usd: 12.5, day_usd: null },
         launches: { concurrent: 4, per_hour: 300, per_day: 2000 },
         alerts: { landing: true },
+        workers: { refuse_prompts: false },
       },
     },
     "a budget was sent as something other than the whole record with the number typed",
@@ -12078,6 +12084,7 @@ await test("the harness card shows what a person set and what the window counted
       gate: { mode: "notify", task_usd: 12.5, day_usd: null },
       launches: { concurrent: 4, per_hour: 300, per_day: null },
       alerts: { landing: true },
+      workers: { refuse_prompts: false },
     },
     "a blank ceiling is no ceiling, and the budget saved before it stays",
   );
@@ -12105,6 +12112,29 @@ await test("the harness card shows what a person set and what the window counted
   );
   await waitForSettingsIdle(pageB);
   assertEqual(backend.settings.harness.alerts, { landing: false }, "the stored document does not hold the alerts off");
+  // A summoned worker asks until a person says otherwise; what the other choice costs is said beside it,
+  // and choosing it is one saved word that moves nothing else.
+  assert(
+    /거절/.test(shown.promptsHint ?? "") && /직접 연 판/.test(shown.promptsHint ?? "") &&
+      /2\.1\.319/.test(shown.promptsHint ?? ""),
+    "the choice does not say what refusing does, whose panes it leaves alone and which Claude Code it needs", shown.promptsHint,
+  );
+  const refusing = await gestureAndWait(pageB, "B", "set_harness_settings", () =>
+    pageB.selectOption("#harness-workers-prompts", "refuse"));
+  assertEqual(
+    refusing.args.harness.workers,
+    { refuse_prompts: true },
+    "the choice did not send the workers as refusing",
+  );
+  assertEqual(refusing.args.harness.alerts, { landing: false }, "the choice moved the alerts beside it");
+  await waitForSettingsIdle(pageB);
+  assertEqual(
+    backend.settings.harness.workers,
+    { refuse_prompts: true },
+    "the stored document does not hold the workers as refusing",
+  );
+  await reopenSettings(pageB, "B", "provider-accounts");
+  assertEqual((await card()).prompts, "refuse", "the card does not show the stored choice when it is opened again");
   await backend.externalPatch({ locale: previousLocale }, ["locale"]);
   await renderSettled(pageB);
 });

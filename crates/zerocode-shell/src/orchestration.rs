@@ -1028,7 +1028,24 @@ pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String>
         .view()
         .map_err(|_| "the orchestration ledger could not be read".to_string())?;
     let ledger = cached_ledger(&held, &image);
-    ledger.sleeper_resume_tuning(worker, &current_release)
+    ledger.sleeper_resume_tuning(worker, &current_release, workers_refuse_prompts())
+}
+
+/// Whether the person had summoned workers refuse a permission prompt nobody
+/// is watching (the harness card's 「소환한 Claude 워커가 허락을 물을 때」).
+/// Off until they say otherwise, and read by every road that cuts a worker's
+/// launch words: the fresh summons, the restart's reseat and the window's own
+/// resume of a sleeper.
+static WORKERS_REFUSE_PROMPTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// What a person set, at boot and at each save.
+pub(crate) fn set_workers_refuse_prompts(on: bool) {
+    WORKERS_REFUSE_PROMPTS.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn workers_refuse_prompts() -> bool {
+    WORKERS_REFUSE_PROMPTS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The model those words name for the sleeper `worker`, when they name one —
@@ -4422,6 +4439,12 @@ impl Launcher for LiveCatalog {
             .unwrap_or_else(|held| held.into_inner())
             .clone();
         Catalog::new(overrides).command_for(agent, prompt, tuning)
+    }
+
+    /// The person's own setting, read off a cell — a lookup, as this trait
+    /// requires of everything the actor asks under the ledger.
+    fn workers_refuse_unwatched_prompts(&self) -> bool {
+        workers_refuse_prompts()
     }
 
     fn command_for_resume(

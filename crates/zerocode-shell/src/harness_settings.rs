@@ -27,13 +27,29 @@ impl Default for Alerts {
     }
 }
 
-/// The gate's half, the ledger's half and its alerts, as stored.
+/// What a summoned worker does where nobody is watching. `refuse_prompts`: its
+/// CLI refuses a tool call that would have stopped at a permission prompt,
+/// tells the model and carries on — Claude Code 2.1.319's
+/// `permissions.denyInsteadOfPrompting`, said in the summons' own flag layer
+/// (`zerocode_core::orchestration`, `UNWATCHED_PROMPT_SETTINGS`). Off for a
+/// person who never chose: a prompt is theirs to answer, and the window
+/// already brings a worker's question to them. A pane a person opens is never
+/// told this, whatever is stored here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Workers {
+    pub(crate) refuse_prompts: bool,
+}
+
+/// The gate's half, the ledger's half, its alerts and the workers' standing
+/// orders, as stored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct HarnessSettings {
     pub(crate) gate: Settings,
     pub(crate) launches: Limits,
     pub(crate) alerts: Alerts,
+    pub(crate) workers: Workers,
 }
 
 impl HarnessSettings {
@@ -61,10 +77,19 @@ impl HarnessSettings {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
         };
+        // And a bad word turns nothing on: only a plain `true` does.
+        let workers = Workers {
+            refuse_prompts: value
+                .get("workers")
+                .and_then(|held| held.get("refuse_prompts"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        };
         Ok(Self {
             gate: Settings::parse(&value.get("gate").cloned().unwrap_or_default()),
             launches,
             alerts,
+            workers,
         })
     }
 }

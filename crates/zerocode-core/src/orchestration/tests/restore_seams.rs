@@ -93,9 +93,11 @@ fn a_sleepers_resume_words_are_the_launch_it_was_summoned_with() {
         "xhigh".to_string(),
     ];
     peer.append_launch_tuning(&mut expected);
-    continue_past_classifier_declines("claude", true, &mut expected);
+    continue_past_classifier_declines("claude", true, false, &mut expected);
     assert_eq!(
-        bench.ledger.sleeper_resume_tuning(&worker, &no_successor),
+        bench
+            .ledger
+            .sleeper_resume_tuning(&worker, &no_successor, false),
         Ok(expected),
         "the window's resume would launch a CLI nobody summoned"
     );
@@ -107,14 +109,16 @@ fn a_sleepers_resume_words_are_the_launch_it_was_summoned_with() {
         Some("session-t7812-plain"),
     );
     assert_eq!(
-        plain.ledger.sleeper_resume_tuning(&codex, &no_successor),
+        plain
+            .ledger
+            .sleeper_resume_tuning(&codex, &no_successor, false),
         Ok(Vec::new()),
         "a launch summoned without tuning came back with some"
     );
     assert!(
         plain
             .ledger
-            .sleeper_resume_tuning("w-nobody", &no_successor)
+            .sleeper_resume_tuning("w-nobody", &no_successor, false)
             .is_err()
     );
 }
@@ -211,7 +215,7 @@ fn a_kept_worker_comes_back_on_the_release_that_stands_for_its_rows_model() {
     );
     assert_eq!(command_flag(&cut, "--effort"), Some("xhigh"), "{cut}");
     let words = ledger
-        .sleeper_resume_tuning(&worker, &today)
+        .sleeper_resume_tuning(&worker, &today, false)
         .expect("the window's words")
         .join(" ");
     assert_eq!(
@@ -234,7 +238,7 @@ fn a_kept_worker_comes_back_on_the_release_that_stands_for_its_rows_model() {
         "a taken-over worker's model was moved: {cut}"
     );
     let words = ledger
-        .sleeper_resume_tuning(&worker, &today)
+        .sleeper_resume_tuning(&worker, &today, false)
         .expect("the window's words")
         .join(" ");
     assert_eq!(

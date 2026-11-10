@@ -14516,17 +14516,20 @@ impl Ledger {
     /// it opens for a sleeper's conversation is the launch the ledger's own
     /// reseat would have cut — `current` answering, as the launcher's
     /// [`Launcher::current_release`] does there, which release stands for a
-    /// superseded one today (t-46882). A read; nothing moves.
+    /// superseded one today (t-46882) — and `refuses_prompts` as its
+    /// [`Launcher::workers_refuse_unwatched_prompts`] does. A read; nothing
+    /// moves.
     pub fn sleeper_resume_tuning(
         &self,
         worker_id: &str,
         current: &dyn Fn(&str, &str) -> Option<String>,
+        refuses_prompts: bool,
     ) -> Result<Vec<String>, String> {
         self.runs
             .iter()
             .find_map(|run| {
                 run.worker(worker_id)
-                    .map(|worker| kept_worker_tuning(&run.id, worker, current))
+                    .map(|worker| kept_worker_tuning(&run.id, worker, current, refuses_prompts))
             })
             .unwrap_or_else(|| Err(format!("unknown worker: {worker_id}")))
     }
@@ -14810,7 +14813,12 @@ impl Ledger {
             .clone()
             .ok_or_else(|| format!("{kept} worker {worker_id} has no checkout"))?;
         let current = |agent: &str, model: &str| launcher.current_release(agent, model);
-        let tuning = kept_worker_tuning(run_id, worker, &current)?;
+        let tuning = kept_worker_tuning(
+            run_id,
+            worker,
+            &current,
+            launcher.workers_refuse_unwatched_prompts(),
+        )?;
         /* Resume the conversation without starting the interrupted work yet.
          *
          * The host has to spawn the process before `worker_reseated` can prove
@@ -16516,6 +16524,15 @@ pub trait Launcher {
     /// different worker, and one that takes its prompt only after it starts is
     /// a worker to launch bare and speak to.
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String>;
+
+    /// Whether the window's person asked that a summoned worker never wait at
+    /// a permission prompt: its CLI refuses the call that would have asked,
+    /// tells the model and goes on (the `--settings` words kept in
+    /// `UNWATCHED_PROMPT_SETTINGS`). `false` — the worker asks, as it always
+    /// has — unless a host says otherwise.
+    fn workers_refuse_unwatched_prompts(&self) -> bool {
+        false
+    }
 
     /// The command line that reopens a provider conversation.
     ///
@@ -19823,6 +19840,33 @@ const DECLINE_CONTINUE_WORDS: &[DeclineWords] = &[
     },
 ];
 
+/// What a summoned worker's CLI is told, in the same flag layer, so a
+/// permission prompt nobody is watching is refused rather than waited at —
+/// when the window's person asked for that
+/// ([`Launcher::workers_refuse_unwatched_prompts`]), and never otherwise.
+///
+/// - claude 2.1.319: `permissions.denyInsteadOfPrompting`, whose own schema
+///   says "Never wait for a person to answer a tool permission prompt: a call
+///   that would prompt is denied at once, the model is told, and the turn
+///   carries on", in every kind of session, subagents and agent teams
+///   included; a run of refusals ends the turn. Allow rules, the permission
+///   mode and hooks decide first, so under the bypass flag a worker is
+///   launched with by default it touches only what would still have asked.
+///
+/// A choice, not a default: a prompt is the person's to answer, and the
+/// window already brings a worker's question to them. Refusing in their
+/// place trades an action they might have allowed for a worker that never
+/// stands still — theirs to make, once, in the settings.
+///
+/// One row per CLI, each a key and its value merged into that CLI's
+/// `--settings` object ([`DECLINE_CONTINUE_WORDS`]' row), so the launch
+/// carries one flag layer rather than two.
+const UNWATCHED_PROMPT_SETTINGS: &[(&str, &str, &str)] = &[(
+    "claude",
+    "permissions",
+    r#"{"denyInsteadOfPrompting":true}"#,
+)];
+
 /// One CLI's row of [`DECLINE_CONTINUE_WORDS`]: what a summons that pinned
 /// nothing is told, and what one that pinned a model or an effort is told.
 struct DeclineWords {
@@ -19843,10 +19887,39 @@ fn summons_pins_a_model(model: Option<&str>) -> bool {
 /// pinned column or the unpinned one — on both launch roads, the fresh
 /// summons and the restored one, so a worker a restart seats again is told
 /// what its first launch was.
-fn continue_past_classifier_declines(agent: &str, pinned: bool, words: &mut Vec<String>) {
-    if let Some(row) = DECLINE_CONTINUE_WORDS.iter().find(|row| row.agent == agent) {
-        let said = if pinned { row.pinned } else { row.unpinned };
-        words.extend(said.iter().map(|word| (*word).to_string()));
+///
+/// With `refuses_prompts` the row's settings object also carries
+/// [`UNWATCHED_PROMPT_SETTINGS`]' key for that CLI — the same layer, so a
+/// worker told both is told once.
+fn continue_past_classifier_declines(
+    agent: &str,
+    pinned: bool,
+    refuses_prompts: bool,
+    words: &mut Vec<String>,
+) {
+    let Some(row) = DECLINE_CONTINUE_WORDS.iter().find(|row| row.agent == agent) else {
+        return;
+    };
+    let said = if pinned { row.pinned } else { row.unpinned };
+    words.extend(said.iter().map(|word| (*word).to_string()));
+    if !refuses_prompts {
+        return;
+    }
+    let Some((_, key, value)) = UNWATCHED_PROMPT_SETTINGS
+        .iter()
+        .find(|(cli, _, _)| *cli == agent)
+    else {
+        return;
+    };
+    // The row's last word is its settings object; a row that ends in
+    // anything else carries no layer to merge into, and is left as it is.
+    if let Some(layer) = words.last_mut()
+        && let Ok(serde_json::Value::Object(mut settings)) =
+            serde_json::from_str::<serde_json::Value>(layer)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(value)
+    {
+        settings.insert((*key).to_string(), value);
+        *layer = serde_json::Value::Object(settings).to_string();
     }
 }
 
@@ -19868,6 +19941,7 @@ fn kept_worker_tuning(
     run_id: &str,
     worker: &Worker,
     current: &dyn Fn(&str, &str) -> Option<String>,
+    refuses_prompts: bool,
 ) -> Result<Vec<String>, String> {
     let mut tuning = launch_tuning(
         &worker.agent,
@@ -19882,6 +19956,7 @@ fn kept_worker_tuning(
     continue_past_classifier_declines(
         &worker.agent,
         summons_pins_a_model(worker.model.as_deref()),
+        refuses_prompts,
         &mut tuning,
     );
     Ok(tuning)
@@ -19939,7 +20014,12 @@ fn command_for_reserved_worker(
         peer.append_launch_tuning(&mut words);
     }
     if prepared.task.is_some() {
-        continue_past_classifier_declines(&prepared.agent, pinned, &mut words);
+        continue_past_classifier_declines(
+            &prepared.agent,
+            pinned,
+            launcher.workers_refuse_unwatched_prompts(),
+            &mut words,
+        );
     }
     match launcher.command_for(&prepared.agent, "", &words) {
         Ok(command) => Ok(command),

@@ -79,10 +79,48 @@ fn the_record_round_trips_through_the_settings_document() {
             per_day: Some(100),
         },
         alerts: Alerts { landing: false },
+        workers: Workers {
+            refuse_prompts: true,
+        },
     };
     let text = serde_json::to_string(&harness).expect("serializes");
     let back: HarnessSettings = serde_json::from_str(&text).expect("reads back");
     assert_eq!(back, harness);
     let old_document: HarnessSettings = serde_json::from_str("{}").expect("an old document");
     assert_eq!(old_document, HarnessSettings::default());
+}
+
+/// Whether a summoned worker refuses a permission prompt nobody is watching is
+/// the person's to turn on: a document that never said, a half-written record
+/// and a word that is not a plain `true` all leave the worker asking.
+#[test]
+fn a_worker_refuses_unwatched_prompts_only_on_a_plain_yes() {
+    assert!(!HarnessSettings::default().workers.refuse_prompts);
+    let parsed = |sent: serde_json::Value| {
+        HarnessSettings::parse(&sent)
+            .expect("a settings record")
+            .workers
+            .refuse_prompts
+    };
+    assert!(parsed(
+        serde_json::json!({"workers": {"refuse_prompts": true}})
+    ));
+    for unsaid in [
+        serde_json::json!({}),
+        serde_json::json!({"workers": {}}),
+        serde_json::json!({"workers": {"refuse_prompts": false}}),
+        serde_json::json!({"workers": {"refuse_prompts": "yes"}}),
+        serde_json::json!({"workers": {"refuse_prompts": 1}}),
+        serde_json::json!({"workers": true}),
+    ] {
+        assert!(!parsed(unsaid.clone()), "{unsaid}");
+    }
+    // The other halves do not move with it.
+    let whole = HarnessSettings::parse(&serde_json::json!({
+        "workers": {"refuse_prompts": true},
+        "alerts": {"landing": false},
+    }))
+    .expect("a settings record");
+    assert!(whole.workers.refuse_prompts && !whole.alerts.landing);
+    assert_eq!(whole.gate, Settings::default());
 }

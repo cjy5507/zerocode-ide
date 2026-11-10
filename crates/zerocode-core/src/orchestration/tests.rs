@@ -320,7 +320,19 @@ fn review_facts_read_only_what_a_coordinator_wrote() {
 /// somebody changed a default flag.
 struct Catalog(&'static [&'static str]);
 
+thread_local! {
+    /// What [`Catalog`] answers when asked whether the window's person had
+    /// workers refuse an unwatched permission prompt. A test that is about
+    /// that choice sets it, on its own thread, and puts it back.
+    static REFUSES_UNWATCHED_PROMPTS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 impl Launcher for Catalog {
+    fn workers_refuse_unwatched_prompts(&self) -> bool {
+        REFUSES_UNWATCHED_PROMPTS.with(std::cell::Cell::get)
+    }
+
     /// The test seat picks the first agent this catalog knows — a seat that
     /// acts, so `--agent auto` has a road to land on; a launcher with no seat
     /// keeps the trait's default and refuses.
@@ -12761,6 +12773,181 @@ fn a_pinned_summons_is_never_told_to_switch_models_by_itself() {
             "the reseat of {worker}: {command}"
         );
     }
+}
+
+/// A summoned worker is told to refuse a permission prompt nobody is watching
+/// only where the window's person asked for that. Then the same `--settings`
+/// layer carries Claude's `permissions.denyInsteadOfPrompting` (2.1.319)
+/// beside the classifier switch — pinned or not, on the fresh summons and on
+/// the restart's reseat. A bare pane is the person's and is told nothing, an
+/// agent with no such key keeps its own words, and a window that did not ask
+/// says exactly what it said before.
+#[test]
+fn a_summoned_worker_refuses_an_unwatched_prompt_only_where_the_person_asked() {
+    struct Asked;
+    impl Asked {
+        fn now() -> Self {
+            REFUSES_UNWATCHED_PROMPTS.with(|cell| cell.set(true));
+            Self
+        }
+    }
+    impl Drop for Asked {
+        fn drop(&mut self) {
+            REFUSES_UNWATCHED_PROMPTS.with(|cell| cell.set(false));
+        }
+    }
+    let layer = |command: &str| -> serde_json::Value {
+        serde_json::from_str(command_flag(command, "--settings").expect("a settings layer"))
+            .expect("the layer is one JSON object")
+    };
+    let refusing = |switch: bool| {
+        serde_json::json!({
+            "switchModelsOnFlag": switch,
+            "permissions": { "denyInsteadOfPrompting": true },
+        })
+    };
+    let mut bench = Bench::new();
+    bench.launcher = Catalog(&["claude", "codex", "zo"]);
+    let run = bench.json("run-create --name unwatched-prompts")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let task = |bench: &mut Bench| {
+        bench.json("task-create --spec prompts")["taskId"]
+            .as_str()
+            .expect("an id")
+            .to_string()
+    };
+    let summoned = |bench: &mut Bench, line: &str| {
+        let planned = bench.run(line);
+        assert_eq!(
+            planned.reply.exit_code, 0,
+            "{line}: {}",
+            planned.reply.stderr
+        );
+        let Effect::Split { command, .. } = planned.effect else {
+            panic!("{line} did not plan a split: {:?}", planned.effect);
+        };
+        command
+    };
+
+    // A window that did not ask: the layer is the classifier switch alone.
+    let quiet_task = task(&mut bench);
+    let quiet = summoned(
+        &mut bench,
+        &format!("worker-start --agent claude --task {quiet_task}"),
+    );
+    assert_eq!(
+        command_flag(&quiet, "--settings"),
+        Some(r#"{"switchModelsOnFlag":true}"#),
+        "{quiet}"
+    );
+
+    let asked = Asked::now();
+    let free_task = task(&mut bench);
+    let free = bench.run(&format!("worker-start --agent claude --task {free_task}"));
+    assert_eq!(free.reply.exit_code, 0, "{}", free.reply.stderr);
+    let Effect::Split {
+        command: free_command,
+        pane,
+        from,
+        direction,
+        ..
+    } = &free.effect
+    else {
+        panic!("the worker did not plan a split: {:?}", free.effect);
+    };
+    assert_eq!(layer(free_command), refusing(true), "{free_command}");
+    let pinned_task = task(&mut bench);
+    let pinned = summoned(
+        &mut bench,
+        &format!("worker-start --agent claude --model fable --task {pinned_task}"),
+    );
+    assert_eq!(
+        layer(&pinned),
+        refusing(false),
+        "a pinned summons: {pinned}"
+    );
+    let zo_task = task(&mut bench);
+    let zo = summoned(
+        &mut bench,
+        &format!("worker-start --agent zo --task {zo_task}"),
+    );
+    assert_eq!(
+        command_flag(&zo, "--classifier-fallback"),
+        Some("auto"),
+        "{zo}"
+    );
+    assert_eq!(
+        command_flag(&zo, "--settings"),
+        None,
+        "zo has no such key: {zo}"
+    );
+    let codex_task = task(&mut bench);
+    let codex = summoned(
+        &mut bench,
+        &format!("worker-start --agent codex --task {codex_task}"),
+    );
+    assert_eq!(command_flag(&codex, "--settings"), None, "{codex}");
+    let bare = summoned(&mut bench, "worker-start --agent claude");
+    assert_eq!(
+        command_flag(&bare, "--settings"),
+        None,
+        "a bare pane is the person's: {bare}"
+    );
+
+    // The restart's road says the same of the worker it seats again.
+    let said: serde_json::Value = serde_json::from_str(&free.reply.stdout).expect("a receipt");
+    let worker = said["workerId"].as_str().expect("a worker id").to_string();
+    bench.team.record_split(pane, 71, from, *direction);
+    assert!(bench.ledger.worker_seated(("team-1", pane), "/wt/prompts"));
+    let at = bench.ledger.locate(&worker).expect("the worker");
+    bench.ledger.runs[at.0].workers[at.1].session = Some(ProviderSession {
+        key: SessionKey::SessionId,
+        id: "claude-session-prompts".to_string(),
+        transcript_path: None,
+    });
+    assert!(bench.ledger.window_restarted(2_000).sleeping >= 1);
+    let mut replacement_team = Team::new("team-after-restart", "token", 80);
+    assert!(
+        bench
+            .ledger
+            .coordinator_returned(&run, "team-after-restart/%1", None, 2_001)
+    );
+    let reseat = |bench: &mut Bench, team: &mut Team| {
+        let resumed = bench
+            .ledger
+            .prepare_worker_reseat(
+                &run,
+                &worker,
+                team,
+                agent_teams::LEADER_PANE,
+                &bench.launcher,
+                "continue",
+            )
+            .expect("a resume split");
+        let Effect::Split { command, .. } = resumed.effect else {
+            panic!("the worker did not plan a resume split");
+        };
+        command
+    };
+    let resumed = reseat(&mut bench, &mut replacement_team);
+    assert_eq!(layer(&resumed), refusing(true), "the reseat: {resumed}");
+    // And the window's own resume of a sleeper is handed the same choice.
+    let tuned = bench
+        .ledger
+        .sleeper_resume_tuning(&worker, &|_, _| None, true)
+        .unwrap_or_default();
+    let quietly = bench
+        .ledger
+        .sleeper_resume_tuning(&worker, &|_, _| None, false)
+        .unwrap_or_default();
+    if let (Some(told), Some(untold)) = (tuned.last(), quietly.last()) {
+        assert!(
+            told.contains("denyInsteadOfPrompting") && !untold.contains("denyInsteadOfPrompting")
+        );
+    }
+    drop(asked);
 }
 
 #[test]

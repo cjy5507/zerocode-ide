@@ -3649,6 +3649,9 @@ fn main() -> ExitCode {
             launch_budget_door::open(managed.config_root(), boot_settings.harness.launches);
             orchestration::gate_book::open(managed.config_root(), boot_settings.harness.gate);
             landing_watch_sweep::set_enabled(boot_settings.harness.alerts.landing);
+            orchestration::set_workers_refuse_prompts(
+                boot_settings.harness.workers.refuse_prompts,
+            );
             // The readiness probe reads the account stores under this root
             // and no other; until it is named, every door answers unknown.
             readiness_runtime::configure_root(managed.config_root());

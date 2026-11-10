@@ -5920,6 +5920,9 @@ function harnessFromFields() {
     launches: read(HARNESS_LAUNCH_FIELDS),
     // Only an explicit 「끔」 turns the ledger's alerts off (t-34501).
     alerts: { landing: el("harness-alerts-landing").value !== "off" },
+    // And only an explicit 「거절하고 계속」 has a summoned worker refuse a
+    // permission prompt nobody is watching: a prompt is the person's to answer.
+    workers: { refuse_prompts: el("harness-workers-prompts").value === "refuse" },
   };
 }
 
@@ -5931,9 +5934,10 @@ function setHarnessField(id, value) {
 
 function paintHarnessSettings() {
   if (!harnessSettings) return;
-  const { gate, launches, alerts } = harnessSettings;
+  const { gate, launches, alerts, workers } = harnessSettings;
   setHarnessField("harness-gate-mode", gate.mode);
   setHarnessField("harness-alerts-landing", alerts?.landing === false ? "off" : "on");
+  setHarnessField("harness-workers-prompts", workers?.refuse_prompts === true ? "refuse" : "ask");
   for (const [key, id] of Object.entries(HARNESS_GATE_FIELDS)) setHarnessField(id, gate[key]);
   for (const [key, id] of Object.entries(HARNESS_LAUNCH_FIELDS)) setHarnessField(id, launches[key]);
 }
@@ -5982,6 +5986,7 @@ function commitHarnessSettings() {
 for (const id of [
   "harness-gate-mode",
   "harness-alerts-landing",
+  "harness-workers-prompts",
   ...Object.values(HARNESS_GATE_FIELDS),
   ...Object.values(HARNESS_LAUNCH_FIELDS),
 ]) {
