@@ -129,7 +129,7 @@ isolate ordinary files and environment variables.
 | `node ui/tests/window.mjs` | the window harness — board, graph, terminal, restore, performance contracts |
 | `node ui/tests/settings.mjs` | the settings harness |
 | `cd zo-ide && just verify` | zo units, hermetic e2e, TUI byte goldens, harness budgets |
-| `just lane-env <recipe>` | that recipe as the release lane runs it — HOME and PATH only, no terminal, launchd's 256 open files — for a test that is red only in the lane |
+| `just lane-env <recipe>` | that recipe as the release lane runs it — HOME, PATH and the lane's own exports only, no terminal, launchd's 256 open files — for a test that is red only in the lane |
 | `.github/workflows/verify.yml` | macOS and Windows matrix, plus an unsigned package smoke test |
 
 About 20,000 Rust tests run across the two workspaces — some 11,000 at the root and 9,000 in

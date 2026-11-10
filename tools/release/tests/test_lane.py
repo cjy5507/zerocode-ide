@@ -3141,19 +3141,31 @@ class Stoppable(LaneCase):
 
 class LaneEnv(unittest.TestCase):
     """`just lane-env <recipe>` (tools/release/lane-env.sh, 2026-11-10): a command run the way the lane's
-    launchd job runs its gates — HOME and lane.sh's LAUNCHD_PATH and nothing else of the caller's but where it
-    builds, no controlling terminal, stdin at its end, launchd's open-file limit — with the command's own exit
+    launchd job runs its gates — HOME and lane.sh's LAUNCHD_PATH, the two names lane.sh exports to its gates
+    (CARGO_INCREMENTAL, NODE_PATH) unless the caller set its own, and nothing else of the caller's but where it
+    builds; no controlling terminal, stdin at its end, launchd's open-file limit — with the command's own exit
     code. A test red only in the lane is reproduced in any checkout with it."""
 
     SCRIPT = RELEASE / "lane-env.sh"
     PROBE = ('env | cut -d= -f1 | sort | tr "\\n" " "; echo; echo "PATH=$PATH"; echo "files=$(ulimit -n)"; '
              '(exec 3</dev/tty) 2>/dev/null && echo tty=yes || echo tty=no; '
-             'read -r line && echo stdin=read || echo stdin=end')
+             'read -r line && echo stdin=read || echo stdin=end; '
+             'echo "node=${NODE_PATH-}"; echo "incremental=${CARGO_INCREMENTAL-}"')
 
-    # lane-env.sh hands these on only when the caller holds them, so they are each test's to set. The release lane
-    # exports both to its gates, and a caller built from this process's whole environment handed them to every
-    # command here: the exact-set check below was red in the lane alone (v1.1.140's third lane, 2026-11-11).
+    # A caller's value of these wins over the lane's, so they are each test's to set. The release lane exports
+    # both to its gates, and a caller built from this process's whole environment handed them to every command
+    # here: the exact-set check below was red in the lane alone (v1.1.140's third lane, 2026-11-11).
     KEPT_WHEN_SET = ("NODE_PATH", "CARGO_INCREMENTAL")
+
+    def lane_exports(self, env=None):
+        """What lane.sh exports to its gates, as lane-env finds it: CARGO_INCREMENTAL from the table, and NODE_PATH
+        as the node_modules beside the repository's own .git, when that folder exists."""
+        table = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, check=True,
+                               env={**os.environ, **(env or {})}).stdout
+        common = re.search(r"^RELEASE_GIT_COMMON_DIR='(.*)'$", table, re.M).group(1)
+        node = Path(common).parent / "node_modules"
+        return {"incremental": re.search(r"^CARGO_INCREMENTAL='(.*)'$", table, re.M).group(1),
+                "node": str(node) if node.is_dir() else ""}
 
     def run_env(self, *command, env=None, **options):
         inherited = {name: value for name, value in os.environ.items() if name not in self.KEPT_WHEN_SET}
@@ -3176,15 +3188,33 @@ class LaneEnv(unittest.TestCase):
         run = self.run_env("bash", "-c", self.PROBE, start_new_session=True)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         names, values = self.said(run)
-        self.assertEqual(set(names) - {"PWD", "SHLVL", "_", "OLDPWD"}, {"HOME", "PATH", "CARGO_TARGET_DIR"})
-        self.assertEqual(values, {"PATH": lane_path, "files": files, "tty": "no", "stdin": "end"})
+        exports = self.lane_exports()
+        self.assertEqual(set(names) - {"PWD", "SHLVL", "_", "OLDPWD"},
+                         {"HOME", "PATH", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL"} | ({"NODE_PATH"} if exports["node"] else set()))
+        self.assertEqual(values, {"PATH": lane_path, "files": files, "tty": "no", "stdin": "end", **exports})
+        self.assertEqual(exports["incremental"], "0")
 
-    def test_node_path_and_incremental_go_along_when_set_and_nothing_python_adds_does(self):
-        run = self.run_env("bash", "-c", self.PROBE, env={"NODE_PATH": "/tmp/lane-env-node", "CARGO_INCREMENTAL": "0",
+    def test_the_callers_node_path_and_incremental_win_and_nothing_python_adds_goes_along(self):
+        run = self.run_env("bash", "-c", self.PROBE, env={"NODE_PATH": "/tmp/lane-env-node", "CARGO_INCREMENTAL": "1",
                                                           "SDKROOT": "/x", "CPATH": "/y", "PYTHONPATH": "/z"})
-        names, _ = self.said(run)
+        names, values = self.said(run)
         self.assertEqual(set(names) - {"PWD", "SHLVL", "_", "OLDPWD"},
                          {"HOME", "PATH", "CARGO_TARGET_DIR", "NODE_PATH", "CARGO_INCREMENTAL"})
+        self.assertEqual((values["node"], values["incremental"]), ("/tmp/lane-env-node", "1"))
+
+    def test_the_lanes_node_modules_are_handed_on_only_where_the_repository_has_them(self):
+        # The lane exports the repository's own node_modules as NODE_PATH (lane.sh); a repository with none hands
+        # no NODE_PATH.
+        home = Path(tempfile.mkdtemp(prefix="lane-env-repo-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".git").mkdir()
+        bare = {"RELEASE_GIT_COMMON_DIR": str(home / ".git")}
+        _, values = self.said(self.run_env("bash", "-c", self.PROBE, env=bare))
+        self.assertEqual(values["node"], "")
+        (home / "node_modules").mkdir()
+        _, values = self.said(self.run_env("bash", "-c", self.PROBE, env=bare))
+        self.assertEqual(values["node"], str(home / "node_modules"))
+        self.assertEqual(self.lane_exports(bare)["node"], str(home / "node_modules"))
 
     def test_the_exit_code_is_the_commands_and_a_signal_is_128_and_its_number(self):
         self.assertEqual(self.run_env("bash", "-c", "exit 7").returncode, 7)

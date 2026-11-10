@@ -17,11 +17,15 @@
 #     and reads /dev/null;
 #   · open files — launchd's soft limit, read from `launchctl limit maxfiles`
 #     (256 on this Mac).
-# Kept when set, because the lane sets each to a value of its own and a
-# checkout's are the equivalent: CARGO_TARGET_DIR (where cargo builds), NODE_PATH
-# (where node finds Playwright) and CARGO_INCREMENTAL (the lane's is 0; it
-# changes only what cargo caches, so a checkout keeps its own rather than
-# rebuilding its crates once for nothing a test sees).
+# What lane.sh exports to its gates, the command gets too (2026-11-11: a test
+# that counted the names it was handed was red in the lane alone, because the
+# lane hands two that a run made here did not): CARGO_INCREMENTAL as the table
+# says it (0), and NODE_PATH as the repository's own checkout's node_modules
+# (the folder the lane links into its scratch), when that folder exists. NODE_PATH
+# reaches only `require`: an ES module's `import` resolves through a node_modules
+# folder beside the code, so a worktree without one links it, as the lane links
+# its scratch's. The caller's value of either wins when set, and so does its
+# CARGO_TARGET_DIR (where cargo builds), which the lane also sets to its own.
 #
 # The exit code is the command's (128+N when a signal ended it). A Ctrl-C or a
 # TERM sent here reaches the command's whole process group: it runs in a session
@@ -32,17 +36,25 @@ if [ $# -eq 0 ]; then
   exit 2
 fi
 here=$(cd "$(dirname "$0")" && pwd)
-lane_path=$(bash "$here/lane.sh" --table | sed -n "s/^LAUNCHD_PATH='\(.*\)'$/\1/p")
+table=$(bash "$here/lane.sh" --table)
+said() { printf '%s\n' "$table" | sed -n "s/^$1='\(.*\)'$/\1/p"; }
+lane_path=$(said LAUNCHD_PATH)
 if [ -z "$lane_path" ]; then
   echo "lane-env: lane.sh --table printed no LAUNCHD_PATH" >&2
   exit 2
 fi
+lane_incremental=$(said CARGO_INCREMENTAL)
+common=$(said RELEASE_GIT_COMMON_DIR)
+lane_node=
+[ -z "$common" ] || [ ! -d "$(dirname "$common")/node_modules" ] || lane_node="$(dirname "$common")/node_modules"
 files=$(launchctl limit maxfiles 2>/dev/null | awk '{ print $2 }')
 case $files in ''|*[!0-9]*) files=256 ;; esac
 keep=(HOME="$HOME" PATH="$lane_path")
 [ -z "${CARGO_TARGET_DIR-}" ] || keep+=(CARGO_TARGET_DIR="$CARGO_TARGET_DIR")
-[ -z "${NODE_PATH-}" ] || keep+=(NODE_PATH="$NODE_PATH")
-[ -z "${CARGO_INCREMENTAL-}" ] || keep+=(CARGO_INCREMENTAL="$CARGO_INCREMENTAL")
+node=${NODE_PATH:-$lane_node}
+[ -z "$node" ] || keep+=(NODE_PATH="$node")
+incremental=${CARGO_INCREMENTAL:-$lane_incremental}
+[ -z "$incremental" ] || keep+=(CARGO_INCREMENTAL="$incremental")
 # Python only for setsid and setrlimit. Whatever its launcher adds to its own
 # environment (Apple's /usr/bin/python3 is an xcrun shim that sets SDKROOT and
 # CPATH) stays out: the command gets exactly the names given here.

@@ -18,8 +18,12 @@ builds may still overlap after verification, when no harness is running.
 runs the command with what the lane's launchd job has and nothing else: HOME
 and `LAUNCHD_PATH` (no TERM, COLORTERM, LANG or TMPDIR), no controlling
 terminal and stdin at its end, and launchd's open-file limit (`launchctl limit
-maxfiles`, 256). `CARGO_TARGET_DIR`, `CARGO_INCREMENTAL` and `NODE_PATH` go
-along when set: the lane sets its own, and a checkout's are the equivalent. A test red in the lane and green in a pane is
+maxfiles`, 256). What lane.sh exports to its gates goes along too — the
+table's `CARGO_INCREMENTAL` (0) and the repository's own `node_modules` as
+`NODE_PATH` — unless the caller set its own; so does a caller's
+`CARGO_TARGET_DIR`. `NODE_PATH` reaches only `require`: the harnesses' ES
+`import`s need a `node_modules` beside the code, so a worktree without one
+links the repository's, as the lane links its scratch's. A test red in the lane and green in a pane is
 run this way first. `tests/test_lane.py LaneEnv` pins it.
 
 ## The version (one hand: `bump.sh`)
