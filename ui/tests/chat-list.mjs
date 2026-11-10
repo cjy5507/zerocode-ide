@@ -216,6 +216,72 @@ export async function testChatList(browser, origin, ok) {
   }
 }
 
+/* chat-list-keyed (2026-11-10, v1.1.141): the list follows the agents' news on the beat every agent paint
+ * goes through (`flushAgentPaint`), not only a press or a setting, and puts its groups and rows in place by
+ * their keys — a pane whose state moved is the one row built again, the other rows and the groups keep their
+ * nodes, and a row whose time alone moved keeps its node with its time words changed where they stand. Read
+ * by what the page shows, never by a time. */
+export async function testChatListKeyed(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(standConversations);
+    const seen = await page.evaluate(async () => {
+      const rows = () => new Map([...document.querySelectorAll("#chat-list .chat-row")].map((row) => [row.dataset.term, row]));
+      const groups = () => new Map([...document.querySelectorAll("#chat-list .chat-group")].map((group) => [group.dataset.group, group]));
+      const beat = async () => {
+        scheduleAgentPaint(["cards"]);
+        for (let frame = 0; frame < 3; frame += 1) await window.__PAINTED__();
+      };
+      const { waiting, working } = window.__TERMS__;
+      // 「오늘 끝남」 open too, so three rows stand: the one that moves and two that must not be built again.
+      document.querySelector('.chat-group[data-group="today"] .chat-group-head').click();
+      for (let frame = 0; frame < 2; frame += 1) await window.__PAINTED__();
+      const rowsBefore = rows();
+      const groupsBefore = groups();
+      // One pane asks for the person: told by the hook's state, drawn on the agents' beat — no call to the list.
+      hookStates.set(working, "needs-attention");
+      hookStates.observe(working, Date.now());
+      await beat();
+      const rowsAfter = rows();
+      const groupsAfter = groups();
+      const moved = {
+        inWaiting: Boolean(document.querySelector(`.chat-group[data-group="waiting"] .chat-row[data-term="${working}"]`)),
+        gone: !document.querySelector(`.chat-group[data-group="working"] .chat-row[data-term="${working}"]`),
+        others: [...rowsBefore].filter(([term]) => term !== String(working) && rowsAfter.has(term))
+          .map(([term, node]) => rowsAfter.get(term) === node),
+        groups: [...groupsBefore].filter(([name]) => groupsAfter.has(name)).map(([name, node]) => groupsAfter.get(name) === node),
+        waitingCount: document.querySelector('.chat-group[data-group="waiting"] .chat-group-count')?.textContent ?? null,
+      };
+      // Its time alone moves: the row keeps its node, and its words say the new time.
+      const row = rows().get(String(waiting));
+      const wordBefore = row?.querySelector(".chat-row-word")?.textContent ?? null;
+      hookStates.set(waiting, "working");
+      hookStates.observe(waiting, Date.now());
+      await beat();
+      const working2 = rows().get(String(waiting));
+      paneBorn.set(waiting, Date.now() - 5 * 60_000);
+      await beat();
+      const aged = rows().get(String(waiting));
+      const time = {
+        sameNode: Boolean(working2) && aged === working2,
+        word: aged?.querySelector(".chat-row-word")?.textContent ?? null,
+        tip: aged?.querySelector(".chat-row-open")?.dataset.tip ?? "",
+        wordBefore,
+      };
+      return { moved, time, expected: shortAgo(Date.now() - 5 * 60_000, Date.now()) };
+    });
+    ok("chat-list-keyed: a pane that comes to ask for the person stands in 「기다림」 on the agents' own beat — nobody called the list — and every other row and every group keeps its node",
+      seen.moved.inWaiting && seen.moved.gone && seen.moved.others.length >= 2 && seen.moved.others.every(Boolean) &&
+        seen.moved.groups.length >= 2 && seen.moved.groups.every(Boolean) && seen.moved.waitingCount === "2",
+      JSON.stringify(seen.moved));
+    ok("chat-list-keyed: a row whose time alone moved keeps its node, its time words and its tooltip saying the new time",
+      seen.time.sameNode && seen.time.word === seen.expected && seen.time.tip.includes(seen.expected), JSON.stringify(seen));
+    ok("chat-list-keyed: no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 /* Page hands for the start page's chips: open a chip's menu, wait for it to
  * stand, press the row that says `words`. A page function. */
 function installNewChatHands() {

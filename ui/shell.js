@@ -2119,6 +2119,8 @@ function paintYourTurn() {
   const drawing = yourTurnsDrawing(turns);
   paintYourTurnGroup(turns, drawing);
   if (!el("your-turn-list").hidden) paintYourTurnList(turns, drawing);
+  // The conversation list's 「waiting」 rows are these turns (2026-11-10).
+  if (typeof paintChatList === "function") paintChatList();
 }
 
 function yourTurnButton(className, words, run) {
@@ -12939,6 +12941,9 @@ function flushAgentPaint() {
     paintWorktreeAgents();
     // The team view's rows read the same panes' states (t-56141); a row whose words did not move is not touched.
     paintSidebarTeam();
+    // So does the sidebar's conversation list, and a wire's state (`holdWireState`): it follows the news on
+    // this beat, putting its rows in place by their keys (`paintChatList`, 2026-11-10).
+    if (typeof paintChatList === "function") paintChatList();
     paintStageCard();
     // 같은 사실의 다섯째 표면: 아티팩트 스튜디오의 「초안을 받을 에이전트」는
     // 에이전트가 앉은 판의 목록이다. 서 있을 때만 그린다(2026-09-13, 「에이전트가

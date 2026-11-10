@@ -17201,6 +17201,13 @@ const CHAT_LIST_UNDO_MS = 5000;
 /* The groups that stand open; 「오늘 끝남」 starts folded, as in the draft. */
 const chatListOpen = new Set(["pinned", "waiting", "working"]);
 let chatListDrawn = "";
+/* The groups as they stand, by name, each with its rows by their key
+ * (`chatListKey` — a pane's, a wire session's, a turn's): a paint puts each
+ * in place again and builds only a row whose shape moved; a row whose time
+ * alone moved — 「3분 전」 to 「4분 전」 — keeps its node and its words change
+ * where they stand (2026-11-10, the navigation bar's flicker review, #10:
+ * every repaint built the whole list anew, its time words in its signature). */
+const chatListNodes = new Map();
 
 function readChatListNotes() {
   try {
@@ -17397,6 +17404,7 @@ function paintChatList() {
   if (!shown) {
     if (chatListDrawn !== "") {
       el("chat-list-groups").replaceChildren();
+      chatListNodes.clear();
       chatListDrawn = "";
     }
     return;
@@ -17406,31 +17414,96 @@ function paintChatList() {
     locale,
     focusedTerm,
     [...chatListOpen],
-    [...groups].map(([name, rows]) => [name, rows.map((row) => [
-      row.term, row.key, row.said, row.title, row.agent, row.project, row.mark, row.branch, row.word,
-      chatListNotes.pinned.has(row.key), row.card ? yourTurnKey(row.card) : "",
-    ])]),
+    [...groups].map(([name, rows]) => [name, rows.map((row) => [chatRowShape(row), row.word])]),
   ]);
   if (drawing === chatListDrawn) return;
   chatListDrawn = drawing;
   const parts = [];
   for (const group of CHAT_LIST_GROUPS) {
     const rows = groups.get(group.name);
-    if (rows.length === 0) continue;
-    parts.push(chatListGroupNode(group, rows));
+    if (rows.length === 0) {
+      chatListNodes.delete(group.name);
+      continue;
+    }
+    parts.push(standChatGroup(group, rows));
   }
-  el("chat-list-groups").replaceChildren(...parts);
+  reconcileElementOrder(el("chat-list-groups"), parts);
 }
 
-function chatListGroupNode(group, rows) {
+/* What a row is built from, but for its time words and whether its pane is
+ * the one in front, which it writes in place (`standChatRow`). A permission's
+ * row carries what its last answer refused. */
+function chatRowShape(row) {
+  const permission = row.card && yourTurnKind(row.card) === "permission";
+  return JSON.stringify([
+    locale, row.term, row.key, row.said, row.title, row.agent, row.project, row.mark, row.branch,
+    chatListNotes.pinned.has(row.key), row.card ? yourTurnKey(row.card) : "",
+    permission ? yourTurnDraft(row.card).refusal ?? "" : "",
+  ]);
+}
+
+/* A group as it stands: its head in place, its count and its fold written,
+ * its rows put in order by their keys. A group built in another language is
+ * built again — its head's words are its own. */
+function standChatGroup(group, rows) {
+  let held = chatListNodes.get(group.name);
+  if (!held || held.locale !== locale) {
+    held = chatListGroupNode(group);
+    chatListNodes.set(group.name, held);
+  }
+  const open = chatListOpen.has(group.name);
+  writeAttribute(held.head, "aria-expanded", String(open));
+  writeTextContent(held.count, String(rows.length));
+  if (!open) {
+    held.list?.remove();
+    held.list = null;
+    held.rows.clear();
+    return held.node;
+  }
+  if (!held.list) {
+    held.list = document.createElement("div");
+    held.list.className = "chat-group-rows";
+    held.list.setAttribute("role", "list");
+    held.node.append(held.list);
+  }
+  const keys = new Set(rows.map((row) => row.key));
+  for (const key of [...held.rows.keys()]) if (!keys.has(key)) held.rows.delete(key);
+  reconcileElementOrder(held.list, rows.map((row) => standChatRow(held.rows, row)));
+  return held.node;
+}
+
+/* A row as it stands: built again only when its shape moved, its time words
+ * and the 「here」 mark written in place. */
+function standChatRow(held, row) {
+  const shape = chatRowShape(row);
+  let node = held.get(row.key);
+  if (!node || node.__shape !== shape) {
+    node = chatRowNode(row);
+    node.__shape = shape;
+    held.set(row.key, node);
+  }
+  writeTextContent(node.__word, row.word);
+  const tip = chatRowTip(row);
+  if (node.__open.dataset.tip !== tip) {
+    node.__open.dataset.tip = tip;
+    node.__open.setAttribute("aria-label", tip);
+  }
+  writeClass(node, "is-here", row.term === focusedTerm);
+  return node;
+}
+
+function chatRowTip(row) {
+  const agentWords = row.agent ? agentName(row.agent) : "";
+  return [row.title, row.project, row.branch, agentWords, row.word].filter(Boolean).join(" · ");
+}
+
+function chatListGroupNode(group) {
   const node = document.createElement("section");
   node.className = "chat-group";
   node.dataset.group = group.name;
-  const open = chatListOpen.has(group.name);
   const head = document.createElement("button");
   head.type = "button";
   head.className = "chat-group-head";
-  head.setAttribute("aria-expanded", String(open));
   const mark = group.icon ? iconNode(group.icon) : document.createElement("span");
   mark.classList.add("chat-group-mark");
   mark.setAttribute("aria-hidden", "true");
@@ -17439,7 +17512,6 @@ function chatListGroupNode(group, rows) {
   words.textContent = t(group.key, group.word);
   const count = document.createElement("span");
   count.className = "chat-group-count";
-  count.textContent = String(rows.length);
   const chevron = iconNode("chevron");
   chevron.classList.add("chat-group-chevron");
   chevron.setAttribute("aria-hidden", "true");
@@ -17450,14 +17522,7 @@ function chatListGroupNode(group, rows) {
     paintChatList();
   });
   node.append(head);
-  if (open) {
-    const list = document.createElement("div");
-    list.className = "chat-group-rows";
-    list.setAttribute("role", "list");
-    list.append(...rows.map(chatRowNode));
-    node.append(list);
-  }
-  return node;
+  return { node, head, count, list: null, rows: new Map(), locale };
 }
 
 /* One conversation: the row's door opens its pane in its own workspace
@@ -17500,9 +17565,11 @@ function chatRowNode(row) {
   word.className = "chat-row-word";
   word.textContent = row.word;
   open.append(mono, body, word);
-  const agentWords = row.agent ? agentName(row.agent) : "";
-  open.dataset.tip = [row.title, row.project, row.branch, agentWords, row.word].filter(Boolean).join(" · ");
+  open.dataset.tip = chatRowTip(row);
   open.setAttribute("aria-label", open.dataset.tip);
+  // What a paint writes in place (`standChatRow`).
+  node.__word = word;
+  node.__open = open;
   open.addEventListener("click", () => {
     if (row.open) row.open();
     else void openPaneFromBoard(row.term);
