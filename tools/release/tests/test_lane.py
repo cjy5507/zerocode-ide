@@ -3150,8 +3150,14 @@ class LaneEnv(unittest.TestCase):
              '(exec 3</dev/tty) 2>/dev/null && echo tty=yes || echo tty=no; '
              'read -r line && echo stdin=read || echo stdin=end')
 
+    # lane-env.sh hands these on only when the caller holds them, so they are each test's to set. The release lane
+    # exports both to its gates, and a caller built from this process's whole environment handed them to every
+    # command here: the exact-set check below was red in the lane alone (v1.1.140's third lane, 2026-11-11).
+    KEPT_WHEN_SET = ("NODE_PATH", "CARGO_INCREMENTAL")
+
     def run_env(self, *command, env=None, **options):
-        caller = {**os.environ, "COLORTERM": "truecolor", "TERM": "xterm-256color", "LANG": "ko_KR.UTF-8",
+        inherited = {name: value for name, value in os.environ.items() if name not in self.KEPT_WHEN_SET}
+        caller = {**inherited, "COLORTERM": "truecolor", "TERM": "xterm-256color", "LANG": "ko_KR.UTF-8",
                   "CARGO_TARGET_DIR": "/tmp/lane-env-target", **(env or {})}
         options.setdefault("input", "a line the command must not read\n")
         return subprocess.run([BASH, posix(self.SCRIPT), *command], env=caller, capture_output=True, text=True,
