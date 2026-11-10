@@ -562,9 +562,8 @@ mod front {
             let mut seen = self.samples.join().unwrap_or_default();
             seen.push(front());
             let changed = seen.iter().filter(|sample| **sample != self.before).count();
-            let came_forward = self.app.is_some()
-                && self.app != self.before
-                && seen.iter().any(|sample| *sample == self.app);
+            let came_forward =
+                self.app.is_some() && self.app != self.before && seen.contains(&self.app);
             json!({
                 "unchanged": self.before.is_some() && changed == 0,
                 "samples": seen.len(),
@@ -876,7 +875,7 @@ mod tests {
         );
         say(
             "c-missing",
-            &missing.map_or_else(|e| json!({ "code": e.code, "message": e.message }), |v| v),
+            &missing.unwrap_or_else(|e| json!({ "code": e.code, "message": e.message })),
         );
         let excel = answer(
             &command(
@@ -887,7 +886,7 @@ mod tests {
         );
         say(
             "c-excel",
-            &excel.map_or_else(|e| json!({ "code": e.code, "message": e.message }), |v| v),
+            &excel.unwrap_or_else(|e| json!({ "code": e.code, "message": e.message })),
         );
     }
 
