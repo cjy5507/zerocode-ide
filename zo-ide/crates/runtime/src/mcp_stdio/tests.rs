@@ -3597,3 +3597,150 @@ fn a_reference_resolves_at_launch_and_an_unresolved_one_keeps_its_server_from_st
         cleanup_script(&script_path);
     });
 }
+
+// -- servers nothing has used --------------------------------------------------
+
+/// Discovery starts every server to learn its tools. One the session has
+/// called stays up; one it has only listed is stopped, keeps its tools
+/// routed, and is started again by the first call to it.
+#[test]
+fn a_server_nothing_has_used_is_stopped_and_starts_again_on_its_first_call() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent");
+        let alpha_log = root.join("alpha.log");
+        let beta_log = root.join("beta.log");
+        let servers = BTreeMap::from([
+            (
+                "alpha".to_string(),
+                manager_server_config(&script_path, "alpha", &alpha_log),
+            ),
+            (
+                "beta".to_string(),
+                manager_server_config(&script_path, "beta", &beta_log),
+            ),
+        ]);
+        let mut manager = McpServerManager::from_servers(&servers);
+        manager.discover_tools().await.expect("discover tools");
+        manager
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "used"})))
+            .await
+            .expect("call alpha tool");
+
+        assert_eq!(manager.release_unused_servers().await, vec!["beta".to_string()]);
+        assert_eq!(
+            manager.release_unused_servers().await,
+            Vec::<String>::new(),
+            "a stopped server is not stopped twice"
+        );
+
+        // beta's tool is still routed: the call starts its server again, with
+        // one more handshake and no second listing.
+        let beta = manager
+            .call_tool(&mcp_tool_name("beta", "echo"), Some(json!({"text": "again"})))
+            .await
+            .expect("the first call to a stopped server starts it");
+        assert_eq!(
+            beta.result
+                .as_ref()
+                .and_then(|result| result.structured_content.as_ref())
+                .and_then(|value| value.get("server")),
+            Some(&json!("beta"))
+        );
+        let lines = |log: &Path| -> Vec<String> {
+            fs::read_to_string(log)
+                .expect("read log")
+                .lines()
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(
+            lines(&beta_log),
+            ["initialize", "tools/list", "initialize", "tools/call"]
+        );
+        assert_eq!(
+            lines(&alpha_log),
+            ["initialize", "tools/list", "tools/call"],
+            "the server that was called was never restarted"
+        );
+
+        // Both have been called now: nothing is left to stop.
+        assert_eq!(manager.release_unused_servers().await, Vec::<String>::new());
+
+        manager.shutdown().await.expect("shutdown");
+        cleanup_script(&script_path);
+    });
+}
+
+/// Listing what a server offers is not use; reading one of its resources is.
+#[test]
+fn a_server_whose_resources_were_only_listed_is_stopped_and_one_that_was_read_is_not() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_mcp_server_script();
+        let root = script_path.parent().expect("script parent");
+        let servers = BTreeMap::from([
+            (
+                "listed".to_string(),
+                manager_server_config(&script_path, "listed", &root.join("listed.log")),
+            ),
+            (
+                "read".to_string(),
+                manager_server_config(&script_path, "read", &root.join("read.log")),
+            ),
+        ]);
+        let mut manager = McpServerManager::from_servers(&servers);
+        manager.list_resources("listed").await.expect("list resources");
+        manager.list_resources("read").await.expect("list resources");
+        manager
+            .read_resource("read", "file://guide.txt")
+            .await
+            .expect("read resource");
+
+        assert_eq!(manager.release_unused_servers().await, vec!["listed".to_string()]);
+
+        // The stopped server answers again when it is asked.
+        let listed = manager
+            .list_resources("listed")
+            .await
+            .expect("a stopped server starts again for a listing");
+        assert_eq!(listed.resources.len(), 1);
+
+        manager.shutdown().await.expect("shutdown");
+        cleanup_script(&script_path);
+    });
+}
+
+/// A server that never finished its handshake is not this function's to stop,
+/// and a manager with no servers has nothing to stop.
+#[test]
+fn a_server_that_was_never_started_is_left_alone() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent");
+        let log_path = root.join("alpha.log");
+        let servers = BTreeMap::from([(
+            "alpha".to_string(),
+            manager_server_config(&script_path, "alpha", &log_path),
+        )]);
+        let mut manager = McpServerManager::from_servers(&servers);
+
+        assert_eq!(manager.release_unused_servers().await, Vec::<String>::new());
+        assert!(!log_path.exists(), "nothing was started to be stopped");
+
+        let mut empty = McpServerManager::from_servers(&BTreeMap::new());
+        assert_eq!(empty.release_unused_servers().await, Vec::<String>::new());
+        cleanup_script(&script_path);
+    });
+}

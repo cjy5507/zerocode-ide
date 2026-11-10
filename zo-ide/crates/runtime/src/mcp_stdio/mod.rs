@@ -191,6 +191,12 @@ struct ManagedMcpServer {
     /// tokens, so a later crash can recover with a normal re-spawn that does
     /// NOT open another browser tab.
     interactive_oauth_bridge_spawned: bool,
+    /// Whether this session has had the server do anything: a tool call, a
+    /// resource read, a prompt resolved. Listing what a server offers — its
+    /// tools, resources, prompts — is not use. A server that was only ever
+    /// listed holds nothing a restart would lose, and
+    /// [`McpServerManager::release_unused_servers`] stops it.
+    used: bool,
 }
 
 impl ManagedMcpServer {
@@ -201,6 +207,7 @@ impl ManagedMcpServer {
             initialized: false,
             consecutive_timeout_resets: 0,
             interactive_oauth_bridge_spawned: false,
+            used: false,
         }
     }
 }
@@ -806,6 +813,7 @@ impl McpServerManager {
     ) -> Result<JsonRpcResponse<McpToolCallResult>, McpServerManagerError> {
         let timeout_ms = self.tool_call_timeout_ms(&route.server_name)?;
 
+        self.mark_used(&route.server_name);
         self.ensure_server_ready(&route.server_name).await?;
         let request_id = self.take_request_id();
         let server = self.server_mut(&route.server_name)?;
@@ -850,6 +858,7 @@ impl McpServerManager {
         server_name: &str,
         uri: &str,
     ) -> Result<McpReadResourceResult, McpServerManagerError> {
+        self.mark_used(server_name);
         with_reset_retry!(
             self,
             server_name,
@@ -880,12 +889,58 @@ impl McpServerManager {
         prompt_name: &str,
         arguments: Option<JsonValue>,
     ) -> Result<McpGetPromptResult, McpServerManagerError> {
+        self.mark_used(server_name);
         with_reset_retry!(
             self,
             server_name,
             self.get_prompt_once(server_name, prompt_name, arguments.clone())
                 .await
         )
+    }
+
+    /// Note that the session is having `server_name` do something. An unknown
+    /// name is the request's own error to report.
+    fn mark_used(&mut self, server_name: &str) {
+        if let Some(server) = self.servers.get_mut(server_name) {
+            server.used = true;
+        }
+    }
+
+    /// Stop every local server process this session has not used, and name
+    /// the servers stopped. Their tools stay listed and routed: the first
+    /// call to one starts its server again ([`Self::ensure_server_ready`]),
+    /// exactly as a call after a crash always has.
+    ///
+    /// Discovery starts every configured server to learn its tools, and each
+    /// then ran for as long as the session did, called or not. Seven days on
+    /// one machine to 2026-11-10: a session held ten server processes, about
+    /// 830 MB between them, and three of the twelve configured servers were
+    /// called at all.
+    ///
+    /// Left running: a server the session has used — it may hold state a
+    /// restart would lose (a browser page, an opened file, a login) — a
+    /// server still in its handshake, a remote transport (there is no local
+    /// process to stop), and an interactive OAuth bridge, whose respawn can
+    /// open a browser tab.
+    pub async fn release_unused_servers(&mut self) -> Vec<String> {
+        let unused: Vec<String> = self
+            .servers
+            .iter()
+            .filter(|(name, server)| {
+                !server.used
+                    && server.initialized
+                    && matches!(server.process, Some(ManagedMcpProcess::Stdio(_)))
+                    && !self.is_interactive_oauth_bridge(name)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut released = Vec::with_capacity(unused.len());
+        for server_name in unused {
+            if self.reset_server(&server_name).await.is_ok() {
+                released.push(server_name);
+            }
+        }
+        released
     }
 
     pub async fn shutdown(&mut self) -> Result<(), McpServerManagerError> {

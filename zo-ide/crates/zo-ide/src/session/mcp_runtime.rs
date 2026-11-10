@@ -209,6 +209,13 @@ impl RuntimeMcpState {
         Ok(())
     }
 
+    /// Stop the local servers this session has not used; they start again on
+    /// their first call (`McpServerManager::release_unused_servers`). Returns
+    /// the names of the servers stopped.
+    pub(crate) fn release_unused_servers(&mut self) -> Vec<String> {
+        run_blocking(self.manager.release_unused_servers())
+    }
+
     pub(crate) fn pending_servers(&self) -> Option<Vec<String>> {
         (!self.pending_servers.is_empty()).then(|| self.pending_servers.clone())
     }
@@ -1108,13 +1115,67 @@ pub(crate) fn discover_pending_mcp_tools_in_background(
     let spawned = std::thread::Builder::new()
         .name("mcp-discovery".to_string())
         .spawn(move || {
-            let _finish = DiscoveryPassGuard(Arc::clone(&thread_mcp_state));
-            discover_pending_mcp_tools(&thread_mcp_state, &registry, &pending);
+            {
+                let _finish = DiscoveryPassGuard(Arc::clone(&thread_mcp_state));
+                discover_pending_mcp_tools(&thread_mcp_state, &registry, &pending);
+            }
+            // The wait holds no claim on the session's servers: a session that
+            // ends meanwhile takes them down itself, at once.
+            let waiting = Arc::downgrade(&thread_mcp_state);
+            drop(thread_mcp_state);
+            release_unused_servers_after(&waiting, unused_server_grace());
         });
     // If the thread cannot spawn, clear the in-progress guard so a later turn or
     // command can retry discovery. Startup remains unaffected either way.
     if spawned.is_err() {
         finish_pending_discovery(mcp_state);
+    }
+}
+
+/// How long a discovered server may go unused before it is stopped. Long
+/// enough for the turn that started discovery to reach for a server it was
+/// opened to use; short against a session that runs for hours.
+const UNUSED_SERVER_GRACE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// The switch that keeps every discovered server running, as before
+/// 2026-11-11: any value but empty, `0` or `false`. For a server that does
+/// not come back cleanly when it is started a second time.
+const KEEP_UNUSED_SERVERS_ENV: &str = "ZO_MCP_KEEP_UNUSED_SERVERS";
+
+/// [`UNUSED_SERVER_GRACE`], or `None` where [`KEEP_UNUSED_SERVERS_ENV`] is set.
+fn unused_server_grace() -> Option<std::time::Duration> {
+    let keep = std::env::var(KEEP_UNUSED_SERVERS_ENV).is_ok_and(|value| {
+        let value = value.trim();
+        !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
+    });
+    (!keep).then_some(UNUSED_SERVER_GRACE)
+}
+
+/// Once `grace` has passed, stop the servers nothing has used. A session that
+/// is gone by then has nothing left to stop.
+fn release_unused_servers_after(
+    mcp_state: &std::sync::Weak<Mutex<RuntimeMcpState>>,
+    grace: Option<std::time::Duration>,
+) {
+    let Some(grace) = grace else {
+        return;
+    };
+    std::thread::sleep(grace);
+    let Some(mcp_state) = mcp_state.upgrade() else {
+        return;
+    };
+    let released = mcp_state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .release_unused_servers();
+    if !released.is_empty() {
+        // Stderr reaches zo.log on the TUI path and the terminal on a
+        // headless run; silent when every server was used.
+        eprintln!(
+            "[zo] mcp: stopped {} unused server(s) ({}) — each starts again on its first call",
+            released.len(),
+            released.join(", ")
+        );
     }
 }
 
@@ -1401,7 +1462,7 @@ mod tests {
         RuntimeToolDefinition, begin_pending_discovery, detach_scheduled_discovery_units,
         finish_pending_discovery, join_discovery_class_futures,
         mcp_tool_call_timeout, mcp_tool_result_text, mcp_wrapper_tool_definitions, run_blocking,
-        permission_mode_for_mcp_tool,
+        permission_mode_for_mcp_tool, release_unused_servers_after,
         render_tool_call_result, run_mcp_call_bounded,
         splice_server_tools,
         take_tool_call_images,
@@ -1564,6 +1625,23 @@ mod tests {
             remote_units.iter().any(|unit| unit.server == "context7"),
             "true HTTP remote discovery should still start without waiting for stdio auth bridges"
         );
+    }
+
+    /// The wait after discovery holds no claim on the session: one that ended
+    /// meanwhile is simply gone, and with the switch set there is no wait at
+    /// all. A session with no servers has none to stop.
+    #[test]
+    fn releasing_unused_servers_asks_nothing_of_a_session_that_is_gone() {
+        let state = Arc::new(Mutex::new(RuntimeMcpState::empty()));
+        let waiting = Arc::downgrade(&state);
+
+        release_unused_servers_after(&waiting, None);
+        release_unused_servers_after(&waiting, Some(std::time::Duration::ZERO));
+        assert!(state.lock().expect("state").release_unused_servers().is_empty());
+
+        drop(state);
+        release_unused_servers_after(&waiting, Some(std::time::Duration::ZERO));
+        assert!(waiting.upgrade().is_none());
     }
 
     #[test]
