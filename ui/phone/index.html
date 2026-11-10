@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="ZeroCode" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/tokens.css" />
+  <link rel="stylesheet" href="/phone.css" />
+  <title>ZeroCode</title>
+  <script src="/phone-i18n.js" defer></script>
+  <script src="/phone.js" defer></script>
+</head>
+<body>
+  <header class="phone-bar">
+    <h1 class="phone-title">ZeroCode</h1>
+    <span class="phone-machine" id="phone-machine"></span>
+  </header>
+  <main class="phone-main">
+    <section class="phone-card" id="phone-pair" aria-labelledby="phone-pair-heading" hidden>
+      <h2 class="phone-heading" id="phone-pair-heading" data-i18n="pair.heading">Pair this phone</h2>
+      <p class="phone-help" data-i18n="pair.help"></p>
+      <form class="phone-form" id="phone-pair-form" novalidate>
+        <label class="phone-label" for="phone-pair-code" data-i18n="pair.code">Pairing code</label>
+        <input class="phone-input" id="phone-pair-code" name="code" type="text" inputmode="text"
+               autocomplete="one-time-code" autocapitalize="characters" spellcheck="false"
+               maxlength="16" required />
+        <button class="phone-button phone-button--primary" id="phone-pair-submit" type="submit"
+                data-i18n="pair.submit">Pair</button>
+      </form>
+      <p class="phone-error" id="phone-pair-error" role="alert" hidden></p>
+    </section>
+
+    <section class="phone-card" id="phone-install" aria-labelledby="phone-install-heading" hidden>
+      <h2 class="phone-heading" id="phone-install-heading" data-i18n="install.heading"></h2>
+      <p class="phone-help" data-i18n="install.help"></p>
+    </section>
+
+    <section class="phone-card" id="phone-notify" aria-labelledby="phone-notify-heading" hidden>
+      <h2 class="phone-heading" id="phone-notify-heading" data-i18n="notify.heading"></h2>
+      <p class="phone-help" id="phone-notify-help" data-i18n="notify.help"></p>
+      <button class="phone-button phone-button--primary" id="phone-notify-enable" type="button"
+              data-i18n="notify.enable" hidden></button>
+      <p class="phone-help" id="phone-notify-state" role="status" hidden></p>
+    </section>
+
+    <section class="phone-list" id="phone-list" aria-live="polite" hidden>
+      <p class="phone-error" id="phone-list-error" role="status" hidden></p>
+      <div id="phone-groups"></div>
+      <p class="phone-empty" id="phone-list-empty" data-i18n="list.empty" hidden></p>
+      <p class="phone-updated" id="phone-updated"></p>
+    </section>
+  </main>
+</body>
+</html>
