@@ -17601,7 +17601,7 @@ function buildNewChatView() {
   const box = newChatNode("textarea", "newchat-box");
   box.rows = 3;
   box.dataset.i18nPlaceholder = "newChat.placeholder";
-  box.placeholder = t("newChat.placeholder", "무엇이든 시키세요 — 여러 줄은 Shift+Enter");
+  box.placeholder = t("newChat.placeholder", "무엇이든 시키세요");
   box.dataset.i18nAria = "newChat.boxLabel";
   box.setAttribute("aria-label", t("newChat.boxLabel", "첫 지시"));
   // The composer's own row: the `+` (wired per leaf, `wireNewChatView`), the
@@ -17632,6 +17632,15 @@ function buildNewChatView() {
   terminalWords.dataset.i18n = "newChat.terminalShort";
   terminal.append(iconNode("terminal"), terminalWords);
   under.append(where, engine, newChatNode("span", "newchat-under-gap"), terminal);
+  // What the checkout could use next, as buttons that fill the box (`paintNewChatSuggestions`).
+  const suggest = newChatNode("div", "newchat-suggest");
+  suggest.setAttribute("role", "group");
+  suggest.dataset.i18nAria = "newChat.suggest";
+  suggest.setAttribute("aria-label", t("newChat.suggest", "지금 할 수 있는 일"));
+  suggest.hidden = true;
+  // The keys the box takes, said beside it where the placeholder said one of them.
+  const keys = newChatNode("p", "newchat-keys", t("newChat.keys", "Enter 보내기 · Shift+Enter 줄바꿈 · + 파일 첨부"));
+  keys.dataset.i18n = "newChat.keys";
   const note = newChatNode("p", "newchat-note");
   note.hidden = true;
   const refusal = newChatNode("p", "newchat-refusal");
@@ -17641,7 +17650,7 @@ function buildNewChatView() {
   const recentHead = newChatNode("h2", "newchat-recent-head", t("newChat.recent", "이어서 하기"));
   recentHead.dataset.i18n = "newChat.recent";
   recent.append(recentHead, newChatNode("div", "newchat-recent-rows"));
-  center.append(heading, form, under, note, refusal, recent);
+  center.append(heading, form, under, suggest, keys, note, refusal, recent);
   root.append(center);
   return root;
 }
@@ -17656,6 +17665,10 @@ function wireNewChatView(host) {
   // leaf was wired with came along as dead markup, and are wired anew here.
   form.querySelector(":scope > .composer-attach-row")?.remove();
   tools.querySelector(":scope > .composer-attach-plus")?.remove();
+  // So did the offers under the box, their presses dead: they stand anew at the first paint.
+  const suggest = host.querySelector(".newchat-suggest");
+  suggest.replaceChildren();
+  delete suggest.dataset.drawn;
   composerAttachments(form, box, tools, { start: newChatWhere(), changed: () => paintNewChatSend(host) });
   box.addEventListener("input", () => {
     newChatChoice.draft = box.value;
@@ -17701,6 +17714,8 @@ function paintNewChatViews() {
 
 function paintNewChatStage(tab) {
   const host = docHost(tab.pane, "newchat");
+  // Each visit asks again whether the checkout has a pull request (`newChatHasReview`).
+  newChatReviews.clear();
   paintNewChatView(host);
   requestAnimationFrame(() => {
     const box = host.querySelector(".newchat-box");
@@ -17830,7 +17845,110 @@ function paintNewChatView(host) {
   writeHidden(refusal, newChatRefusal === "");
   writeTextContent(refusal, newChatRefusal);
   paintNewChatSend(host);
+  paintNewChatSuggestions(host);
   paintNewChatRecent(host.querySelector(".newchat-recent"));
+}
+
+/* ---- what the checkout could use next (2026-11-10) ----------------------------
+ *
+ * An empty box asks the person to know what can be asked (window artifact
+ * p-1c1bbf75726ff227; NN/g 2024: suggestions as buttons, and specific). Under
+ * the box stand up to four offers, each read off what the window already holds
+ * of the checkout the conversation will open in — never a guess, and none when
+ * nothing is known: a merge that would clash (`landing.conflict`), changes not
+ * committed (`landing.dirty`, with their count when source control last looked
+ * at this checkout), commits the compare ref lacks with no pull request for
+ * them, a compare ref that moved ahead. A press fills the box — after what is
+ * already typed — and sends nothing. */
+const NEW_CHAT_SUGGESTIONS = 4;
+
+/* Whether the checkout has a pull request: the board's answer when it holds
+ * one, else asked of the board's own source (`github_review_states`, kept a
+ * minute by the backend) once a visit. `null` until an answer came — and for
+ * good on a machine without `gh` — and the offer that needs it does not stand. */
+const newChatReviews = new Map();
+
+function newChatHasReview(where) {
+  if (boardReviews.has(where)) return true;
+  if (newChatReviews.has(where)) return newChatReviews.get(where);
+  newChatReviews.set(where, null);
+  void invoke("github_review_states", { worktrees: [where] }).then((rows) => {
+    if (newChatReviews.get(where) !== null) return;
+    newChatReviews.set(where, Array.isArray(rows) && rows.some((row) => row.worktree === where));
+    paintNewChatViews();
+  }).catch(() => {});
+  return null;
+}
+
+function newChatSuggestions() {
+  const where = newChatWhere();
+  const landing = worktreeLandings.get(where) ?? null;
+  if (!landing) return [];
+  const ref = landing.compare_ref ? landingRefName(landing.compare_ref) : "";
+  const offers = [];
+  const clashing = landing.conflict?.total ?? 0;
+  if (clashing > 0 && ref) {
+    offers.push({
+      id: "conflict",
+      words: t("newChat.offer.conflict", "충돌 {{n}}개 풀기", { n: clashing }),
+      fill: t("newChat.offer.conflictFill", "{{ref}}와 충돌하는 파일 {{n}}개를 풀어 줘.", { ref, n: clashing }),
+    });
+  }
+  if (landing.dirty) {
+    const changed = where === scmStatusOf ? scmCapState?.total ?? scmEntries.length : 0;
+    offers.push({
+      id: "dirty",
+      words: changed > 0 ? t("newChat.offer.dirtyCount", "변경 {{n}}개 검토", { n: changed }) : t("newChat.offer.dirty", "커밋 안 한 변경 검토"),
+      fill: t("newChat.offer.dirtyFill", "커밋하지 않은 변경을 검토해 줘."),
+    });
+  }
+  if (landing.state === "unlanded" && landing.ahead > 0 && ref && newChatHasReview(where) === false) {
+    offers.push({
+      id: "pr",
+      words: t("newChat.offer.pr", "PR 설명 쓰기"),
+      fill: t("newChat.offer.prFill", "{{ref}}에 없는 커밋 {{n}}개로 PR 설명을 써 줘.", { ref, n: landing.ahead }),
+    });
+  }
+  if (Number.isFinite(landing.behind) && landing.behind > 0 && ref) {
+    offers.push({
+      id: "behind",
+      words: t("newChat.offer.behind", "{{ref}} 따라잡기", { ref }),
+      fill: t("newChat.offer.behindFill", "{{ref}}의 새 커밋 {{n}}개를 이 브랜치에 반영해 줘.", { ref, n: landing.behind }),
+    });
+  }
+  return offers.slice(0, NEW_CHAT_SUGGESTIONS);
+}
+
+function paintNewChatSuggestions(host) {
+  const row = host.querySelector(".newchat-suggest");
+  const offers = newChatAgent() ? newChatSuggestions() : [];
+  writeHidden(row, offers.length === 0);
+  const drawing = JSON.stringify([locale, offers.map((offer) => [offer.id, offer.words, offer.fill])]);
+  if (row.dataset.drawn === drawing) return;
+  row.dataset.drawn = drawing;
+  row.replaceChildren(...offers.map((offer) => {
+    const pill = newChatNode("button", "newchat-suggestion", offer.words);
+    pill.type = "button";
+    pill.dataset.offer = offer.id;
+    // Enter and Space, while it has focus, are its own (`rearmKeySink`).
+    pill.dataset.keyboardOwner = "true";
+    pill.addEventListener("click", () => fillNewChat(host, offer.fill));
+    return pill;
+  }));
+}
+
+/* An offer pressed: its words go into the box — on a line of their own after
+ * what the person already typed — and the keyboard with them, at their end.
+ * Nothing is sent. */
+function fillNewChat(host, words) {
+  const box = host.querySelector(".newchat-box");
+  const held = box.value.trimEnd();
+  box.value = held === "" ? words : `${held}\n${words}`;
+  newChatChoice.draft = box.value;
+  fitNewChatBox(box);
+  paintNewChatSend(host);
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
 }
 
 /* A pick from a chip's menu: the choice moves, every start page says it, and
@@ -17956,11 +18074,24 @@ function newChatRowState(row) {
  * work, a tick that ended. */
 function paintNewChatRecent(section) {
   const groups = chatListGroups();
-  const rows = NEW_CHAT_ORDER.flatMap((name) => [...(groups.get(name) ?? [])].sort((one, two) => two.at - one.at))
+  // With the sidebar's list standing, the same conversations were on screen a
+  // third time here (the list, the project tree, this page): the page keeps
+  // the ones that wait for the person — the longest wait first, as the list
+  // has them — and stands nothing when none does. A person who turned the
+  // list off sees the five as before (window artifact p-1c1bbf75726ff227,
+  // decision 5, which replaced the five of 2026-11-09).
+  const listed = chatListShown();
+  const rows = (listed
+    ? [...(groups.get("waiting") ?? [])]
+    : NEW_CHAT_ORDER.flatMap((name) => [...(groups.get(name) ?? [])].sort((one, two) => two.at - one.at)))
     .slice(0, NEW_CHAT_RECENT);
   writeHidden(section, rows.length === 0);
+  const head = section.querySelector(".newchat-recent-head");
+  const headKey = listed ? "newChat.waiting" : "newChat.recent";
+  writeAttribute(head, "data-i18n", headKey);
+  writeTextContent(head, listed ? t("newChat.waiting", "나를 기다리는 대화") : t("newChat.recent", "이어서 하기"));
   const host = section.querySelector(".newchat-recent-rows");
-  const drawing = JSON.stringify([locale, rows.map((row) => [row.key, row.title, row.project, row.branch, row.word, row.agent, row.said])]);
+  const drawing = JSON.stringify([locale, listed, rows.map((row) => [row.key, row.title, row.project, row.branch, row.word, row.agent, row.said])]);
   if (host.dataset.drawn === drawing) return;
   host.dataset.drawn = drawing;
   host.replaceChildren(...rows.map((row) => {

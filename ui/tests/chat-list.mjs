@@ -300,8 +300,24 @@ export async function testNewChat(browser, origin, ok) {
     ok("new-chat: the composer's chips say their values — the agent, the effort's default, the workspace, the engine — and the `+` stands first",
       start.plus && start.agent.length > 0 && start.effort === "기본" && start.where.endsWith(start.whereWants) &&
         start.engine === "터미널 판" && start.sendOff, JSON.stringify(start));
-    ok("new-chat: the conversations going stand waiting first, then at work, then ended",
-      start.recentHead === "이어서 하기" && start.recent.join(",") === "waiting,working,done", JSON.stringify(start.recent));
+    // With the sidebar's list standing the page keeps the conversations that wait for the person (2026-11-10,
+    // window artifact p-1c1bbf75726ff227, decision 5); with the list off, the five of 2026-11-09 as before.
+    const unlisted = await page.evaluate(() => {
+      const view = window.__NEW_CHAT_VIEW__();
+      delete document.documentElement.dataset.chatList;
+      paintNewChatViews();
+      const seen = {
+        recent: [...view.querySelectorAll(".newchat-recent-row")].map((row) => row.dataset.state),
+        head: view.querySelector(".newchat-recent-head").textContent,
+      };
+      document.documentElement.dataset.chatList = "on";
+      paintNewChatViews();
+      return seen;
+    });
+    ok("new-chat: beside the sidebar's list the page keeps only the conversations that wait for the person; with the list off, the ones going stand waiting first, then at work, then ended",
+      start.recentHead === "나를 기다리는 대화" && start.recent.join(",") === "waiting" &&
+        unlisted.head === "이어서 하기" && unlisted.recent.join(",") === "waiting,working,done",
+      JSON.stringify({ listed: [start.recentHead, start.recent], unlisted }));
 
     const menus = await page.evaluate(async () => {
       const names = (menu) => [...(menu?.querySelectorAll(".composer-menu-item") ?? [])]
@@ -429,6 +445,162 @@ export async function testNewChat(browser, origin, ok) {
     ok("new-chat: the conversation on the wire stands in the sidebar's list with the others, at work",
       listed.row && listed.group === "working", JSON.stringify(listed));
     ok("new-chat: no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* The start page as the person passed it on 2026-11-10 (window artifact p-1c1bbf75726ff227, 「새 대화 화면」):
+ * the block a little above the page's middle, the keys the box takes on a line under it, and — under the box —
+ * what the checkout could use next, read off what the window holds of it and written into the box by a press. */
+export async function testNewChatStart(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(standConversations);
+    await page.evaluate(installNewChatHands);
+    await page.evaluate(() => {
+      window.__ANSWER__.agent_models = () => [];
+      window.__ANSWER__.agent_effort_ladder = () => [];
+      window.__ANSWER__.path_kinds = ({ paths }) => paths.map(() => "file");
+      window.__REVIEW_ASKS__ = [];
+      window.__REVIEWS__ = [];
+      // The backend answers when the check lets it, so the page can be read while it still asks.
+      window.__ANSWER__.github_review_states = (args) => {
+        window.__REVIEW_ASKS__.push(args.worktrees);
+        return new Promise((answer) => { window.__REVIEW_ANSWER__ = () => answer(window.__REVIEWS__); });
+      };
+      document.getElementById("chat-list-new").click();
+    });
+    await page.waitForSelector(".newchat-view:not([hidden]) .newchat-box");
+    const place = async () => page.evaluate(async () => {
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const view = window.__NEW_CHAT_VIEW__();
+      const block = view.querySelector(".newchat-center").getBoundingClientRect();
+      const page = view.getBoundingClientRect();
+      return {
+        over: Math.round(block.top - page.top), under: Math.round(page.bottom - block.bottom), tall: Math.round(block.height),
+        scrolls: view.scrollHeight > view.clientHeight + 1, top: Math.round(view.scrollTop),
+        centred: Math.abs(Math.round(block.left + block.width / 2) - Math.round(page.left + page.width / 2)) <= 1,
+      };
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const roomy = await place();
+    await page.setViewportSize({ width: 1440, height: 300 });
+    const tight = await place();
+    await page.setViewportSize({ width: 1280, height: 860 });
+    ok("start: the block stands a little above the page's middle — two parts of the free room over it, three under — and on a page too short for it reads from its top, the 32px step over it",
+      roomy.centred && roomy.over > 32 && Math.abs(roomy.over / (roomy.over + roomy.under) - 0.4) <= 0.03 && !roomy.scrolls &&
+        tight.scrolls && tight.over === 32 && tight.top === 0,
+      JSON.stringify({ roomy, tight }));
+
+    const words = await page.evaluate(() => {
+      const view = window.__NEW_CHAT_VIEW__();
+      const keys = view.querySelector(".newchat-keys");
+      const suggest = view.querySelector(".newchat-suggest");
+      return {
+        placeholder: view.querySelector(".newchat-box").placeholder, keys: keys.textContent, keysShown: keys.getClientRects().length > 0,
+        keysAfterUnder: view.querySelector(".newchat-under").compareDocumentPosition(keys) === Node.DOCUMENT_POSITION_FOLLOWING,
+        suggestHidden: suggest.hidden, suggestRoom: suggest.getClientRects().length, suggestName: suggest.getAttribute("aria-label"),
+      };
+    });
+    ok("start: the box asks in three words and the keys it takes stand on a line under it — only the ones it takes",
+      words.placeholder === "무엇이든 시키세요" && words.keys === "Enter 보내기 · Shift+Enter 줄바꿈 · + 파일 첨부" && words.keysShown && words.keysAfterUnder,
+      JSON.stringify(words));
+    ok("start: with nothing known of the checkout no offer stands, and its row takes no room",
+      words.suggestHidden && words.suggestRoom === 0 && words.suggestName === "지금 할 수 있는 일", JSON.stringify(words));
+
+    // The checkout as source control and the landing check know it: a clash ahead, unsaved changes, three commits the
+    // compare ref lacks, two it gained — and no pull request.
+    const offers = () => page.evaluate(() => [...window.__NEW_CHAT_VIEW__().querySelectorAll(".newchat-suggest:not([hidden]) > .newchat-suggestion")]
+      .map((pill) => ({ id: pill.dataset.offer, words: pill.textContent, button: pill.tagName === "BUTTON" && pill.type === "button" })));
+    const ref = await page.evaluate(() => {
+      worktreeLandings.set(activeWorktreePath, { state: "unlanded", ahead: 3, dirty: true, behind: 2, compare_ref: "origin/main",
+        conflict: { total: 1, files: ["src/a.rs"] } });
+      paintNewChatViews();
+      return landingRefName("origin/main");
+    });
+    await page.waitForFunction(() => window.__REVIEW_ASKS__.length === 1);
+    const asking = await offers();
+    await page.evaluate(() => window.__REVIEW_ANSWER__());
+    await page.waitForFunction(() => window.__NEW_CHAT_VIEW__().querySelector('.newchat-suggestion[data-offer="pr"]') !== null);
+    const known = await offers();
+    const asked = await page.evaluate(() => window.__REVIEW_ASKS__.map((list) => list.length));
+    ok("start: what the window holds of the checkout stands as offers — a clash to resolve, changes to review, commits to catch up with — and the pull request's only once the backend said there is none",
+      asking.map((one) => one.id).join() === "conflict,dirty,behind" && known.map((one) => one.id).join() === "conflict,dirty,pr,behind" &&
+        known.map((one) => one.words).join("|") === `충돌 1개 풀기|커밋 안 한 변경 검토|PR 설명 쓰기|${ref} 따라잡기` &&
+        known.every((one) => one.button) && asked.join() === "1",
+      JSON.stringify({ asking, known, asked, ref }));
+
+    const filled = await page.evaluate(async () => {
+      const view = window.__NEW_CHAT_VIEW__();
+      const box = view.querySelector(".newchat-box");
+      window.__LAUNCHED__ = null;
+      view.querySelector('.newchat-suggestion[data-offer="pr"]').click();
+      const first = { value: box.value, focus: document.activeElement === box, caret: box.selectionStart === box.value.length, sendOff: view.querySelector(".newchat-send").disabled };
+      view.querySelector('.newchat-suggestion[data-offer="dirty"]').click();
+      await new Promise((done) => setTimeout(done, 60));
+      return { first, second: box.value, launched: window.__LAUNCHED__, draft: newChatChoice.draft === box.value };
+    });
+    ok("start: a press writes the offer's sentence into the box with the keyboard at its end and sends nothing; a second offer goes on a line of its own after it",
+      filled.first.value === `${ref}에 없는 커밋 3개로 PR 설명을 써 줘.` && filled.first.focus && filled.first.caret && !filled.first.sendOff &&
+        filled.second === `${ref}에 없는 커밋 3개로 PR 설명을 써 줘.\n커밋하지 않은 변경을 검토해 줘.` && filled.launched === null && filled.draft,
+      JSON.stringify(filled));
+
+    // A checkout that has its pull request is not offered one; a landed, clean checkout is offered nothing.
+    const withReview = await page.evaluate(async () => {
+      window.__REVIEWS__ = [{ worktree: activeWorktreePath, number: 7, state: "open", title: "fix" }];
+      newChatReviews.clear();
+      paintNewChatViews();
+      await new Promise((done) => setTimeout(done, 40));
+      window.__REVIEW_ANSWER__();
+      await new Promise((done) => setTimeout(done, 80));
+      const ids = [...window.__NEW_CHAT_VIEW__().querySelectorAll(".newchat-suggestion")].map((pill) => pill.dataset.offer);
+      worktreeLandings.set(activeWorktreePath, { state: "landed", ahead: 0, dirty: false, behind: 0, compare_ref: "origin/main" });
+      paintNewChatViews();
+      const row = window.__NEW_CHAT_VIEW__().querySelector(".newchat-suggest");
+      return { ids, hidden: row.hidden, room: row.getClientRects().length };
+    });
+    ok("start: a checkout that has its pull request is not offered one, and a checkout with nothing to do is offered nothing — no empty row left",
+      withReview.ids.join() === "conflict,dirty,behind" && withReview.hidden && withReview.room === 0, JSON.stringify(withReview));
+
+    // One line each at 1024, 1440 and 2560, the offers standing. At 1024 the stage between the two side
+    // columns is 433px, narrower than four offers: they take a second line rather than leave the column.
+    await page.evaluate(() => {
+      worktreeLandings.set(activeWorktreePath, { state: "unlanded", ahead: 3, dirty: true, behind: 2, compare_ref: "origin/main",
+        conflict: { total: 1, files: ["src/a.rs"] } });
+      window.__REVIEWS__ = [];
+      newChatReviews.clear();
+      paintNewChatViews();
+    });
+    await page.waitForFunction(() => window.__REVIEW_ASKS__.length === 3);
+    await page.evaluate(() => window.__REVIEW_ANSWER__());
+    await page.waitForFunction(() => window.__NEW_CHAT_VIEW__().querySelectorAll(".newchat-suggestion").length === 4);
+    const lines = {};
+    for (const width of [1024, 1440, 2560]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+      lines[width] = {
+        tools: await page.evaluate(newChatOneLine, ".worker-composer-tools"), under: await page.evaluate(newChatOneLine, ".newchat-under"),
+        offers: await page.evaluate(newChatOneLine, ".newchat-suggest"),
+        offersInside: await page.evaluate(() => {
+          const view = window.__NEW_CHAT_VIEW__();
+          const column = view.querySelector(".newchat-center").getBoundingClientRect();
+          const row = view.querySelector(".newchat-suggest").getBoundingClientRect();
+          return [...view.querySelectorAll(".newchat-suggestion")].every((pill) => pill.getBoundingClientRect().right <= column.right + 1) &&
+            row.height <= 2 * 28 + 8 + 1;
+        }),
+        keys: await page.evaluate(() => {
+          const keys = window.__NEW_CHAT_VIEW__().querySelector(".newchat-keys");
+          return keys.getBoundingClientRect().height <= parseFloat(getComputedStyle(keys).lineHeight) + 1;
+        }),
+        sideways: await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth),
+      };
+    }
+    ok("start: at 1024, 1440 and 2560 the chip line, the line under the box and the keys each stay on one line; four offers are one line from 1440 up and two inside the column at 1024; the page does not move sideways",
+      Object.values(lines).every((one) => one.tools && one.under && one.keys && one.offersInside && one.sideways <= 0) &&
+        lines[1440].offers && lines[2560].offers && !lines[1024].offers,
+      JSON.stringify(lines));
+    ok("start: no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }

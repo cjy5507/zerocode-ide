@@ -135,7 +135,7 @@ import { testPaneFirstView, testPaneHead, testPaneHeadReach } from "./pane-head.
 import { testStackedWork } from "./stacked-work.mjs";
 import { testRightColumnGeist } from "./right-column-geist.mjs";
 import { testPhoneAwake } from "./phone-awake.mjs";
-import { testChatList, testNewChat } from "./chat-list.mjs";
+import { testChatList, testNewChat, testNewChatStart } from "./chat-list.mjs";
 import { testSelfAct } from "./self-act.mjs";
 import { testComputerShare } from "./computer-share.mjs";
 import { testExplain } from "./explain.mjs";
@@ -367,6 +367,7 @@ suite("phone-awake", ({ browser, origin, ok }) => testPhoneAwake(browser, origin
 // The T3 Code chat view, stages 2 and 3 (2026-11-08): the sidebar's conversation list, and the 「새 대화」 start page.
 suite("chat-list", ({ browser, origin, ok }) => testChatList(browser, origin, ok));
 suite("new-chat", ({ browser, origin, ok }) => testNewChat(browser, origin, ok));
+suite("new-chat-start", ({ browser, origin, ok }) => testNewChatStart(browser, origin, ok));
 /* IDE design pass 2 B at five widths, in dark and light. */
 suite("pass2-b-fit", ({ browser, origin, ok }) => testPassTwoBFit(browser, origin, ok));
 /* ZeroCode's own window as a Computer Use target: the page's half (t-73906). */

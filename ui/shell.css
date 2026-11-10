@@ -1320,21 +1320,43 @@ kbd {
  * also a `.file-view`, whose ground (the editor's navy, `--editor-surface`) is
  * declared later at one class and won: the navy the person read as not Geist. */
 .file-view.newchat-view {
+  /* One column: the room over the page's block, the block, the room under it. */
+  display: flex;
+  flex-direction: column;
   overflow: auto;
   background: var(--chat-ground);
   container: newchat / inline-size;
 }
 
+/* The block stands a little above the page's middle (2026-11-10, window
+ * artifact p-1c1bbf75726ff227 — it began a sixth of the way down, and a tall
+ * window was empty under it): two parts of the free room over it, three under,
+ * as an empty ChatGPT, Claude or Codex page stands its box. A block taller
+ * than the page takes both rooms down to the 32px step and reads from its
+ * top. */
+.file-view.newchat-view::before,
+.file-view.newchat-view::after {
+  content: "";
+  min-height: var(--space-6);
+}
+
+.file-view.newchat-view::before {
+  flex: 2 1 0;
+}
+
+.file-view.newchat-view::after {
+  flex: 3 1 0;
+}
+
 .newchat-center {
   display: flex;
+  flex: none;
   flex-direction: column;
   gap: var(--space-4);
   /* The composer dock's own measure, so the box a conversation starts in is the
    * width of the one it continues in. */
   width: min(100% - var(--space-6), var(--chat-dock-max));
-  /* The box in the upper middle and the conversations under it: a sixth of
-   * the page's height down, never under the 32px step. */
-  margin: max(var(--space-6), 18vh) auto var(--space-6);
+  margin: 0 auto;
 }
 
 .newchat-heading {
@@ -1412,6 +1434,45 @@ kbd {
 .newchat-chip .worker-composer-pill-words {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* What the checkout could use next (`paintNewChatSuggestions`): quiet pills
+ * under the box, each a sentence the press writes into it. */
+.newchat-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.newchat-suggestion {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height-sm);
+  padding-inline: var(--space-3);
+  border: var(--rule-width) solid var(--chat-divider);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+}
+
+.newchat-suggestion:hover,
+.newchat-suggestion:focus-visible {
+  background: var(--row-hover);
+  color: var(--ink-chalk);
+}
+
+/* The keys the box takes, one quiet line under it. */
+.newchat-keys {
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  text-align: center;
 }
 
 .newchat-note,
