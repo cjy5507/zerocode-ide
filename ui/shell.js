@@ -11786,8 +11786,9 @@ function fittedAgentRowWords(node, row) {
  * Words are text nodes and can be written in place. Anything that would
  * change a row's SHAPE — its agent, state, depth, fold, or a span that
  * would have to appear or go — is left to the rebuild, and the answer says
- * which it was. A card is re-dressed whole or rebuilt whole, never half of
- * each: every row is checked before any is written. */
+ * which it was. Every row is checked before any is written: a card whose
+ * rows all fit is re-dressed whole, and one that does not goes to
+ * `fittedOrMadeAgentSlots`, which keeps every row that still fits. */
 function redressAgentRows(host, rows) {
   // A helper's row stands in a line with its reading hand (t-95957 r3); the words are the row's.
   const held = [...host.children].map(agentRowOfSlot);
@@ -11798,40 +11799,66 @@ function redressAgentRows(host, rows) {
     if (fit === null) return false;
     fitted.push(fit);
   }
-  for (const fit of fitted) {
-    const { node, row, state } = fit;
-    if (fit.history) continue;
-    if (fit.foldedSummary) {
-      const words = foldedSummaryWords(row, state);
-      if (node.dataset.tip !== words.tip) node.dataset.tip = words.tip;
-      writeAttribute(node, "aria-label", words.label);
-      continue;
-    }
-    writeTextContent(fit.name, fit.primary);
-    if (fit.said !== null) writeTextContent(fit.said, fit.secondary);
-    if (fit.wears !== null) {
-      writeTextContent(fit.wears, fit.model);
-      const modelTip = agentRowModelTip(row);
-      if (fit.wears.dataset.tip !== modelTip) fit.wears.dataset.tip = modelTip;
-    }
-    if (fit.accountNode !== null) {
-      writeTextContent(fit.accountNode, fit.account.words);
-      if (fit.accountNode.dataset.tip !== fit.account.tip) fit.accountNode.dataset.tip = fit.account.tip;
-    }
-    if (fit.usesNode !== null) writeTextContent(fit.usesNode, fit.uses);
-    if (fit.chip !== null) {
-      writeTextContent(fit.chip, paneRoleWord(fit.role));
-      const roleTip = paneRoleTip(fit.role);
-      if (fit.chip.dataset.tip !== roleTip) fit.chip.dataset.tip = roleTip;
-    }
-    writeTextContent(fit.stateNode, fit.status);
-    writeTextContent(node.querySelector(".wt-agent-when"), agentRowAgo(row));
-    const tip = agentRowTip(fit.primary, fit.secondary, fit.uses, row);
-    if (node.dataset.tip !== tip) node.dataset.tip = tip;
-    writeAttribute(node, "aria-label", agentRowSpoken(tip, fit.status, agentRowAgo(row), fit.role,
-      row.kids > 0 ? agentFoldLabel(row) : ""));
-  }
+  for (const fit of fitted) dressFittedAgentRow(fit);
   return true;
+}
+
+/* The slots a card's rows stand in when the card could not be re-dressed whole (t-102869): a row that still
+ * fits a standing one — the same pane or helper, the same shape (`fittedAgentRowWords`) — keeps that node and has
+ * its words written in place; only a row that changed shape, or came, is built. Before, one row changing shape
+ * rebuilt every row of the card: new nodes for agents nothing had happened to, their rings started again, the
+ * pointer's hover and a focused row lost (review t-102362 #2). */
+function fittedOrMadeAgentSlots(host, rows) {
+  const standing = [...host.children];
+  const taken = new Set();
+  return rows.map((row) => {
+    for (const slot of standing) {
+      if (taken.has(slot)) continue;
+      const node = agentRowOfSlot(slot);
+      if (!node?.classList.contains("wt-agent")) continue;
+      const fit = fittedAgentRowWords(node, row);
+      if (fit === null) continue;
+      taken.add(slot);
+      dressFittedAgentRow(fit);
+      return slot;
+    }
+    return makeAgentRow(row, true);
+  });
+}
+
+/* Write one fitted row's words into the nodes it already holds (`fittedAgentRowWords` said they fit). */
+function dressFittedAgentRow(fit) {
+  const { node, row, state } = fit;
+  if (fit.history) return;
+  if (fit.foldedSummary) {
+    const words = foldedSummaryWords(row, state);
+    if (node.dataset.tip !== words.tip) node.dataset.tip = words.tip;
+    writeAttribute(node, "aria-label", words.label);
+    return;
+  }
+  writeTextContent(fit.name, fit.primary);
+  if (fit.said !== null) writeTextContent(fit.said, fit.secondary);
+  if (fit.wears !== null) {
+    writeTextContent(fit.wears, fit.model);
+    const modelTip = agentRowModelTip(row);
+    if (fit.wears.dataset.tip !== modelTip) fit.wears.dataset.tip = modelTip;
+  }
+  if (fit.accountNode !== null) {
+    writeTextContent(fit.accountNode, fit.account.words);
+    if (fit.accountNode.dataset.tip !== fit.account.tip) fit.accountNode.dataset.tip = fit.account.tip;
+  }
+  if (fit.usesNode !== null) writeTextContent(fit.usesNode, fit.uses);
+  if (fit.chip !== null) {
+    writeTextContent(fit.chip, paneRoleWord(fit.role));
+    const roleTip = paneRoleTip(fit.role);
+    if (fit.chip.dataset.tip !== roleTip) fit.chip.dataset.tip = roleTip;
+  }
+  writeTextContent(fit.stateNode, fit.status);
+  writeTextContent(node.querySelector(".wt-agent-when"), agentRowAgo(row));
+  const tip = agentRowTip(fit.primary, fit.secondary, fit.uses, row);
+  if (node.dataset.tip !== tip) node.dataset.tip = tip;
+  writeAttribute(node, "aria-label", agentRowSpoken(tip, fit.status, agentRowAgo(row), fit.role,
+    row.kids > 0 ? agentFoldLabel(row) : ""));
 }
 
 /* A pane row's own 「변경 N」 (t-95969 G2): only a pane's row — a helper's row carries its parent's term. */
@@ -12711,12 +12738,18 @@ function restartSessionGroups(items) {
  * project header jumping into view — and the rows' real height comes back without the scroll. Laid out beside the
  * old rows, the list is never shorter than where it ends. Chromium never cut it. */
 function swapAgentRows(host, rows, leaving) {
-  const old = [...host.childNodes];
-  host.append(...rows);
+  const kept = new Set(rows);
+  for (const node of [...host.childNodes]) if (!kept.has(node)) leaving.push(node);
+  // A kept row stays where it stands unless the order moved (t-102869): a node taken out and put back starts its
+  // ring and its hover again. The leaving rows are stepped over, not moved — they go once the list is laid out.
+  let cursor = host.firstChild;
+  for (const row of rows) {
+    while (cursor !== null && !kept.has(cursor)) cursor = cursor.nextSibling;
+    if (cursor === row) cursor = cursor.nextSibling;
+    else host.insertBefore(row, cursor);
+  }
   // The new rows' rings turn from where the old ones stood (`keepTurnsInStep`), not from the top.
   for (const row of rows) keepTurnsInStep(row);
-  const kept = new Set(rows);
-  for (const node of old) if (!kept.has(node)) leaving.push(node);
 }
 
 function paintWorktreeAgents() {
@@ -12814,7 +12847,7 @@ function paintWorktreeAgents() {
       // exact axis and the two levels read as siblings. Rows that later gain
       // children replace the quiet seat with the real chevron in place.
       if (!redressAgentRows(host, rows)) {
-        swapAgentRows(host, rows.map((row) => makeAgentRow(row, true)), leaving);
+        swapAgentRows(host, fittedOrMadeAgentSlots(host, rows), leaving);
       }
     } else {
       swapAgentRows(host, [

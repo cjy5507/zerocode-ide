@@ -9574,7 +9574,7 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
     let fitting = block_after(window, "function fittedAgentRowWords(node, row) {");
     assert!(
         fitting.contains("Boolean(fit.uses) !== (fit.usesNode !== null)")
-            && block_after(window, "function redressAgentRows(host, rows) {")
+            && block_after(window, "function dressFittedAgentRow(fit) {")
                 .contains("writeTextContent(fit.usesNode, fit.uses)"),
         "the count is rebuilt on every tool call, or never re-dressed \
          at all:\n{fitting}"

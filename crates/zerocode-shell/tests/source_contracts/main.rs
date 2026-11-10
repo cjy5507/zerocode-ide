@@ -17775,11 +17775,30 @@ mod tests {
         assert!(
             redressing.contains("if (held.length !== rows.length) return false;")
                 && redressing.contains("const fit = fittedAgentRowWords(held[at], row);")
-                && redressing.contains("writeTextContent(fit.name, fit.primary);")
+                && block_after(window, "function dressFittedAgentRow(fit) {")
+                    .contains("writeTextContent(fit.name, fit.primary);")
+                && redressing.contains("for (const fit of fitted) dressFittedAgentRow(fit);")
                 && fitting.contains("fit.secondary = agentRowSecondary(row, state, fit.primary);")
                 && block_after(window, "function paintWorktreeAgents() {")
                     .contains("if (!redressAgentRows(host, rows)) {"),
             "a card whose words moved is built again instead of re-dressed:\n{redressing}"
+        );
+        // And a card that cannot be re-dressed whole keeps every row that still fits (t-102869):
+        // one agent changing shape no longer rebuilds the other agents of its card.
+        let keyed = block_after(window, "function fittedOrMadeAgentSlots(host, rows) {");
+        assert!(
+            keyed.contains("const fit = fittedAgentRowWords(node, row);")
+                && keyed.contains("dressFittedAgentRow(fit);")
+                && keyed.contains("return makeAgentRow(row, true);")
+                && block_after(window, "function paintWorktreeAgents() {")
+                    .contains("swapAgentRows(host, fittedOrMadeAgentSlots(host, rows), leaving);"),
+            "one row changing shape rebuilds every row of its card:\n{keyed}"
+        );
+        let swapping = block_after(window, "function swapAgentRows(host, rows, leaving) {");
+        assert!(
+            swapping.contains("if (cursor === row) cursor = cursor.nextSibling;")
+                && !swapping.contains("host.append(...rows)"),
+            "a kept agent row is taken out and put back, restarting its ring:\n{swapping}"
         );
         assert!(
             styles.contains(".wt-agent-said::before {\n  content: \" - \";\n}"),

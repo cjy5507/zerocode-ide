@@ -112,6 +112,60 @@ export async function testSidebarAgents({ browser, origin, ok, faults }) {
       JSON.stringify(folds),
     );
 
+    /* One agent changing shape leaves the other agents of its card standing (t-102869, review t-102362 #2).
+     * A card whose rows could not all be re-dressed in place used to be rebuilt whole: the lead's row — nothing
+     * had happened to it — got a new node, its ring started again from the top and a pointer on it lost its
+     * hover. Now only the row that changed is built; the lead keeps its node, in place, and is never taken out. */
+    const keyed = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const term = await openTermTab({ placement: "tab" });
+      const owner = tabOfTerm(term);
+      const path = owner.worktree;
+      const host = () => document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`);
+      const rowOf = (at) => host()?.querySelector(`.wt-agent[data-term="${at}"]:not([data-history])`) ?? null;
+      paneAgents.set(term, "zo");
+      tell("hook:agent", { term, state: "working", agent: "zo", session: "zo-keyed-lead" });
+      const mate = term + 7300;
+      tell("term:split", { parent: term, term: mate, direction: "vertical", agent: "claude" });
+      tell("hook:agent", { term: mate, state: "working", agent: "claude", session: "cc-keyed-mate" });
+      await focusAgentPane(path, owner.id, term, "zo");
+      await window.__PAINTED__();
+      const lead = rowOf(term);
+      const mateBefore = rowOf(mate);
+      const taken = [];
+      const watch = new MutationObserver((records) => {
+        for (const record of records) for (const gone of record.removedNodes) taken.push(gone);
+      });
+      watch.observe(host(), { childList: true, subtree: true });
+      // The second pane finishes: its row changes shape (state, place), the lead's does not.
+      tell("hook:agent", { term: mate, state: "done", agent: "claude", session: "cc-keyed-mate" });
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+      watch.disconnect();
+      const seen = {
+        rows: [...host().querySelectorAll(".wt-agent")].map((node) => node.dataset.history ? `history:${node.dataset.history}` : node.dataset.term === String(term) ? "lead" : "mate"),
+        leadBefore: Boolean(lead),
+        mateBefore: Boolean(mateBefore),
+        leadSame: lead !== null && rowOf(term) === lead && lead.isConnected,
+        leadTaken: taken.some((gone) => gone === lead || (gone.nodeType === 1 && gone.contains(lead))),
+        mateChanged: rowOf(mate) !== mateBefore,
+        taken: taken.filter((gone) => gone.nodeType === 1).length,
+      };
+      for (const done of [mate, term]) tell("term:exited", { term: done });
+      window.__PANES__ = [];
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok(
+      "one agent of a card changing shape rebuilds only its own row: the lead's row keeps its node, in place, never taken out",
+      keyed.leadBefore && keyed.mateBefore && keyed.leadSame && !keyed.leadTaken && keyed.mateChanged && keyed.taken > 0,
+      JSON.stringify(keyed),
+    );
+
     /* Pressing a helper's row shows what that helper is doing. A helper
      * that runs inside its lead has no pane of its own; its row used to take
      * the person to the lead's pane — the pane already in front of them, so
