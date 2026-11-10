@@ -507,14 +507,19 @@ function rowsHeld(taken, from, to) {
     // where the tick put them by taking the rest as debt (`oweSidebarDrift`), and the rows move the whole tick, as on
     // every other tick; at rest it pays the debt with one write, which moves nothing. That debt is the person's
     // scroll the browser cut, not a move of the rows: counted as one here, it read as a 79 px jump on WebKit only
-    // (t-103178). Only a tick cut short: a wheel came in that frame or just before it, the scroll stands at its end, and the scroll and
-    // the debt together are no more than the ticks asked for.
+    // (t-103178). Only one tick cut short (review t-103290 N6): a wheel came in this frame or the one before it, the
+    // scroll stands at its end and did not go back, and the scroll and the debt together are no more than one tick —
+    // however many wheels came, so a tick counted for one frame is not forgiven again in the next. The frame before
+    // counts because WebKit's clock gives whole ms and the cut tick's wheel came 1-2 ms after the frame before: counted
+    // only between the two frames, one WebKit run in seven missed the cut tick (a 79 px residual).
+    const before = frames[at - 2]?.at ?? was.at - WRITE_WINDOW_MS;
     const wheeled = taken.events
-      .filter((event) => event.type === "wheel" && event.at > Math.min(was.at, now.at - WRITE_WINDOW_MS) && event.at <= now.at)
+      .filter((event) => event.type === "wheel" && event.at > before && event.at <= now.at)
       .length;
     const rose = (now.debt ?? 0) - (was.debt ?? 0);
+    const went = now.top - was.top;
     const cut = wrote === 0 && wheeled > 0 && rose > 0 && Math.abs(now.top - now.max) <= 0.5 &&
-      now.top - was.top + rose <= wheeled * STEP + 0.5
+      went >= -0.5 && went + rose <= STEP + 0.5
       ? rose
       : 0;
     const scrolled = now.top - was.top - wrote + cut;
