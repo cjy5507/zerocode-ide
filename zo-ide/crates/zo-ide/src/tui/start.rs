@@ -162,9 +162,12 @@ pub struct Parts<'a> {
     pub version: &'static str,
 }
 
+/// Rows to draw and where the caret stands on them, when it shows.
+pub type Drawn = (Vec<Line>, Option<(u16, u16)>);
+
 /// The page's rows and the caret, or `None` when the pane cannot hold it.
 #[must_use]
-pub fn lines(page: &StartPage, parts: Parts<'_>) -> Option<(Vec<Line>, Option<(u16, u16)>)> {
+pub fn lines(page: &StartPage, parts: Parts<'_>) -> Option<Drawn> {
     let (left, column) = page.column(parts.width);
     if parts.width < MIN_COLUMNS || parts.rows < MIN_ROWS {
         return None;
@@ -193,14 +196,13 @@ pub fn lines(page: &StartPage, parts: Parts<'_>) -> Option<(Vec<Line>, Option<(u
     rows.push(Line::empty());
     let field_at = rows.len();
     rows.extend(parts.composer);
-    match parts.popup {
-        Some(popup) => rows.extend(popup),
-        None => {
-            rows.push(parts.where_row.truncated(column));
-            rows.extend(recent);
-            rows.extend(tips);
-            rows.extend(parts.notes.iter().map(|note| note.clone().truncated(column)));
-        }
+    if let Some(popup) = parts.popup {
+        rows.extend(popup);
+    } else {
+        rows.push(parts.where_row.truncated(column));
+        rows.extend(recent);
+        rows.extend(tips);
+        rows.extend(parts.notes.iter().map(|note| note.clone().truncated(column)));
     }
     rows.truncate(parts.rows);
     rows.resize(parts.rows, Line::empty());

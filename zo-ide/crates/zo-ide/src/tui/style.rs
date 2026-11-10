@@ -139,6 +139,10 @@ impl ConversationView {
 pub const DEFAULT_PROSE_WIDTH: usize = 100;
 
 /// The look and its switches, fixed for the process.
+///
+/// Each switch is a setting of its own that a person turns alone, so they
+/// stay booleans: an enum of them would have to name every combination.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Look {
     pub style: TuiStyle,

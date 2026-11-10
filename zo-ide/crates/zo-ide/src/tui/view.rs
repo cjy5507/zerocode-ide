@@ -73,6 +73,9 @@ pub struct Status {
     interrupt_binding: String,
     /// `false` 면 `(Ns)` 만 — 인터럽트가 불가능한 구간.
     pub interruptible: bool,
+    /// How many steps the turn's open fold has taken — the `turns` view says
+    /// it beside the clock; `0` says nothing.
+    steps: usize,
     /// Where the model request stands, kept as turn-elapsed offsets so the
     /// line can be rendered from `elapsed` alone: the elapsed at which the
     /// current request left (cleared by the first content block), and the
@@ -225,6 +228,7 @@ impl Status {
             housekeeping: None,
             interrupt_binding: "esc".to_string(),
             interruptible: true,
+            steps: 0,
             request_sent_at: None,
             quiet_stretch: None,
             compaction: None,
@@ -481,6 +485,11 @@ impl Status {
             .filter(|message| !message.is_empty());
     }
 
+    /// The count the row says beside its clock ([`Self::steps`]).
+    pub fn set_steps(&mut self, steps: usize) {
+        self.steps = steps;
+    }
+
     pub fn set_interrupt_binding(&mut self, binding: impl Into<String>) {
         let binding = binding.into();
         if !binding.trim().is_empty() {
@@ -507,7 +516,10 @@ impl Status {
         let mut spans = vec![activity_marker(self.elapsed), Span::raw(" ")];
         spans.extend(shimmer_spans(&self.header, self.elapsed));
         spans.push(Span::raw(" "));
-        let elapsed = fmt_elapsed_compact(self.elapsed.as_secs());
+        let mut elapsed = fmt_elapsed_compact(self.elapsed.as_secs());
+        if self.steps > 0 {
+            elapsed = format!("{elapsed} {} {}", super::style::glyphs().dot, super::turns::steps_word(self.steps));
+        }
         if self.interruptible {
             spans.push(Span::dim(format!("({elapsed} {} ", super::style::glyphs().dot)));
             spans.push(Span::dim(self.interrupt_binding.clone()));
@@ -1771,11 +1783,7 @@ fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16,
 /// The start page's rows, or `None` when the pane cannot hold it — the bottom
 /// pane is drawn then. The composer is the bottom pane's own, at the page's
 /// column; a suggestion list takes the rows under it as it takes the footer's.
-fn build_start_page(
-    frame: &Frame<'_>,
-    page: &super::start::StartPage,
-    focus: Color,
-) -> Option<(Vec<Line>, Option<(u16, u16)>)> {
+fn build_start_page(frame: &Frame<'_>, page: &super::start::StartPage, focus: Color) -> Option<super::start::Drawn> {
     let (_, column) = page.column(frame.width);
     let under = |rows: Vec<Line>| {
         let mut all = vec![Line::empty()];
@@ -2226,6 +2234,12 @@ mod tests {
         assert_eq!(status.line(60).plain(), "✻ Working (3s · esc to interrupt)");
         status.set_details(["cargo test parser".to_string()], StatusDetailsCapitalization::Preserve);
         assert_eq!(status.detail_lines(60)[0].plain(), "  ⎿ cargo test parser");
+        // The steps an open fold has taken stand beside the clock.
+        status.set_steps(7);
+        assert_eq!(status.line(60).plain(), "✻ Working (3s · 7 steps · esc to interrupt)");
+        status.set_steps(1);
+        status.interruptible = false;
+        assert_eq!(status.line(60).plain(), "✻ Working (3s · 1 step)");
     }
 
     #[test]

@@ -414,6 +414,16 @@ fn trust_rows(folder: &str, selected: usize, width: usize, color: bool) -> Vec<S
     rows
 }
 
+/// The escape that takes the cursor from the last of `drawn` rows up to the
+/// first; nothing when one row or none was drawn.
+fn back_to_first_row(drawn: usize) -> String {
+    if drawn > 1 {
+        format!("\x1b[{}A", drawn - 1)
+    } else {
+        String::new()
+    }
+}
+
 /// The trust question as a choice: rows where the cursor stands, moved with
 /// the arrows or picked by their numbers. It takes the keys itself for as
 /// long as it stands — raw mode, put back on every way out — and wipes its
@@ -438,10 +448,7 @@ fn prompt_workspace_trust(cwd: &Path, inline: bool) -> Option<PermissionMode> {
     let mut interrupted = false;
     let answer = loop {
         let rows = trust_rows(&folder, selected, width, color);
-        let mut frame = String::new();
-        if drawn > 1 {
-            frame.push_str(&format!("\x1b[{}A", drawn - 1));
-        }
+        let mut frame = back_to_first_row(drawn);
         for (index, row) in rows.iter().enumerate() {
             frame.push_str("\r\x1b[2K");
             frame.push_str(row);
@@ -471,10 +478,7 @@ fn prompt_workspace_trust(cwd: &Path, inline: bool) -> Option<PermissionMode> {
     };
     // The rows the question stood on are wiped and the cursor is back where
     // the question began.
-    let mut frame = String::new();
-    if drawn > 1 {
-        frame.push_str(&format!("\x1b[{}A", drawn - 1));
-    }
+    let mut frame = back_to_first_row(drawn);
     frame.push_str("\r\x1b[J");
     let _ = out.write_all(frame.as_bytes());
     let _ = out.flush();

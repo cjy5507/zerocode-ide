@@ -156,27 +156,34 @@ impl TurnFold {
         *self = Self::default();
     }
 
+    /// How many steps the fold holds: the working row counts them
+    /// ([`steps_word`]) with the calls still live.
+    #[must_use]
+    pub fn step_count(&self) -> usize {
+        self.steps.len()
+    }
+
     /// The viewport's rows for the work so far: the newest finished steps,
-    /// dim, hung under the look's mark, with a count of the ones above them.
+    /// dim, hung under the look's mark. How many there are in all is the
+    /// working row's to say.
     #[must_use]
     pub fn live_rows(&self, width: usize) -> Vec<Line> {
-        if self.live.is_empty() {
-            return Vec::new();
-        }
         let glyphs = super::style::glyphs();
-        let earlier = self.steps.len().saturating_sub(self.live.len());
         let mut rows = Vec::with_capacity(self.live.len());
         for (index, step) in self.live.iter().enumerate() {
             let lead = if index == 0 { glyphs.result_first } else { glyphs.result_rest };
             let mut spans = vec![Span::dim(lead), Span::dim(format!("{} {}", step.verb, step.target))];
             spans.extend(step_tail(step, true));
-            if index == 0 && earlier > 0 {
-                spans.push(Span::dim(format!("   … +{earlier} earlier")));
-            }
             rows.push(Line::new(spans).truncated(width));
         }
         rows
     }
+}
+
+/// `1 step`, `7 steps` — a fold's count, in its cell and on the working row.
+#[must_use]
+pub fn steps_word(count: usize) -> String {
+    counted(count, "step", "steps")
 }
 
 /// What follows a step's target on its row: an edit's counts, a command's
@@ -216,6 +223,30 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
     }
     let width = super::style::current().reading_width(width);
     let glyphs = super::style::glyphs();
+    let mut body: Vec<Vec<Span>> = Vec::new();
+    body.extend(looked_row(steps));
+    body.extend(edit_rows(steps));
+    body.extend(run_rows(steps));
+    body.extend(other_row(steps));
+    // What did not go through is never folded away.
+    for step in steps.iter().filter(|step| !step.ok) {
+        let mut row = vec![Span::dim(format!("{} ", step.verb)), Span::raw(step.target.clone())];
+        row.extend(step_tail(step, false));
+        body.push(row);
+    }
+
+    let mut out = vec![Line::empty(), Line::new(head_row(steps, width, now)).truncated(width)];
+    for (index, mut row) in body.into_iter().enumerate() {
+        let lead = if index == 0 { glyphs.result_first } else { glyphs.result_rest };
+        row.insert(0, Span::dim(lead));
+        out.push(Line::new(row).truncated(width));
+    }
+    out
+}
+
+/// The cell's first row: how long the steps took and how many there were,
+/// and, where it fits, the key that shows them all.
+fn head_row(steps: &[Step], width: usize, now: Instant) -> Vec<Span> {
     let failed = steps.iter().any(|step| !step.ok && !step.declined);
     let glyph_style = Style::new().fg(if failed { palette::TOOL_FAIL } else { palette::TOOL_OK }).bold();
     let seconds = steps
@@ -229,10 +260,10 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
         strings::WORKED.to_string()
     };
     let mut head = vec![
-        Span::new(glyphs.tool_done.to_string(), glyph_style),
+        Span::new(super::style::glyphs().tool_done.to_string(), glyph_style),
         Span::raw(" "),
         Span::bold(worked),
-        Span::dim(format!(" · {}", counted(steps.len(), "step", "steps"))),
+        Span::dim(format!(" · {}", steps_word(steps.len()))),
     ];
     let hint = [Span::bold(strings::KEY_VIEW), Span::dim(strings::TO_EXPAND)];
     let used: usize = head.iter().map(Span::width).sum();
@@ -241,29 +272,36 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
         head.push(Span::raw(" ".repeat(width - used - hint_width)));
         head.extend(hint);
     }
+    head
+}
 
-    let mut body: Vec<Vec<Span>> = Vec::new();
-    // Looking around, in one row.
+/// Looking around, in one row: `Read 3 files · searched 2 patterns`.
+fn looked_row(steps: &[Step]) -> Option<Vec<Span>> {
     let count = |kind: StepKind| steps.iter().filter(|step| step.ok && step.kind == kind).count();
-    let (read, searched, listed) = (count(StepKind::Read), count(StepKind::Search), count(StepKind::List));
     let mut looked = Vec::new();
-    if read > 0 {
-        looked.push(format!("read {}", counted(read, "file", "files")));
-    }
-    if searched > 0 {
-        looked.push(format!("searched {}", counted(searched, "pattern", "patterns")));
-    }
-    if listed > 0 {
-        looked.push(format!("listed {}", counted(listed, "folder", "folders")));
-    }
-    if !looked.is_empty() {
-        let mut text = looked.join(" · ");
-        if let Some(first) = text.get_mut(0..1) {
-            first.make_ascii_uppercase();
+    for (kind, word, one, many) in [
+        (StepKind::Read, "read", "file", "files"),
+        (StepKind::Search, "searched", "pattern", "patterns"),
+        (StepKind::List, "listed", "folder", "folders"),
+    ] {
+        let seen = count(kind);
+        if seen > 0 {
+            looked.push(format!("{word} {}", counted(seen, one, many)));
         }
-        body.push(vec![Span::dim(text)]);
     }
-    // What changed, by file, in the order the files were first touched.
+    if looked.is_empty() {
+        return None;
+    }
+    let mut text = looked.join(" · ");
+    if let Some(first) = text.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    Some(vec![Span::dim(text)])
+}
+
+/// What changed, by file, in the order the files were first touched; the
+/// files past [`NAMED_EDITS`] are counted in one row.
+fn edit_rows(steps: &[Step]) -> Vec<Vec<Span>> {
     let mut edits: Vec<(String, &str, usize, usize)> = Vec::new();
     for step in steps.iter().filter(|step| step.ok && step.kind == StepKind::Edit) {
         let (added, removed) = step.change.unwrap_or_default();
@@ -275,28 +313,38 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
             None => edits.push((step.target.clone(), past_tense(&step.verb), added, removed)),
         }
     }
-    for (path, verb, added, removed) in edits.iter().take(NAMED_EDITS) {
-        body.push(vec![
-            Span::dim(format!("{verb} ")),
-            Span::raw(path.clone()),
-            Span::raw("  "),
-            Span::new(format!("+{added}"), Style::new().fg(Color::GREEN)),
-            Span::raw(" "),
-            Span::new(format!("-{removed}"), Style::new().fg(Color::RED)),
-        ]);
-    }
+    let mut rows: Vec<Vec<Span>> = edits
+        .iter()
+        .take(NAMED_EDITS)
+        .map(|(path, verb, added, removed)| {
+            vec![
+                Span::dim(format!("{verb} ")),
+                Span::raw(path.clone()),
+                Span::raw("  "),
+                Span::new(format!("+{added}"), Style::new().fg(Color::GREEN)),
+                Span::raw(" "),
+                Span::new(format!("-{removed}"), Style::new().fg(Color::RED)),
+            ]
+        })
+        .collect();
     if edits.len() > NAMED_EDITS {
         let rest = &edits[NAMED_EDITS..];
         let (added, removed) = rest.iter().fold((0, 0), |sum, edit| (sum.0 + edit.2, sum.1 + edit.3));
-        body.push(vec![Span::dim(format!(
+        rows.push(vec![Span::dim(format!(
             "… +{} +{added} -{removed}",
             counted(rest.len(), "more file", "more files")
         ))]);
     }
-    // What ran: the newest that passed, by name.
+    rows
+}
+
+/// What ran: the newest [`NAMED_RUNS`] that passed, by name, under a count
+/// of the ones before them.
+fn run_rows(steps: &[Step]) -> Vec<Vec<Span>> {
     let runs: Vec<&Step> = steps.iter().filter(|step| step.ok && step.kind == StepKind::Run).collect();
+    let mut rows = Vec::new();
     if runs.len() > NAMED_RUNS {
-        body.push(vec![Span::dim(format!(
+        rows.push(vec![Span::dim(format!(
             "… +{}",
             counted(runs.len() - NAMED_RUNS, "earlier command", "earlier commands")
         ))]);
@@ -304,9 +352,13 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
     for step in runs.iter().skip(runs.len().saturating_sub(NAMED_RUNS)) {
         let mut row = vec![Span::dim(format!("{} ", strings::RAN)), Span::raw(step.target.clone())];
         row.extend(step_tail(step, false));
-        body.push(row);
+        rows.push(row);
     }
-    // Everything else, counted by its word.
+    rows
+}
+
+/// Everything else that went through, counted by its word.
+fn other_row(steps: &[Step]) -> Option<Vec<Span>> {
     let mut others: Vec<(&str, usize)> = Vec::new();
     for step in steps.iter().filter(|step| step.ok && step.kind == StepKind::Other) {
         match others.iter_mut().find(|(verb, _)| *verb == step.verb) {
@@ -314,28 +366,15 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
             None => others.push((step.verb.as_str(), 1)),
         }
     }
-    if !others.is_empty() {
-        let text = others
-            .iter()
-            .map(|(verb, count)| if *count == 1 { (*verb).to_string() } else { format!("{verb} ×{count}") })
-            .collect::<Vec<_>>()
-            .join(" · ");
-        body.push(vec![Span::dim(text)]);
+    if others.is_empty() {
+        return None;
     }
-    // What did not go through is never folded away.
-    for step in steps.iter().filter(|step| !step.ok) {
-        let mut row = vec![Span::dim(format!("{} ", step.verb)), Span::raw(step.target.clone())];
-        row.extend(step_tail(step, false));
-        body.push(row);
-    }
-
-    let mut out = vec![Line::empty(), Line::new(head).truncated(width)];
-    for (index, mut row) in body.into_iter().enumerate() {
-        let lead = if index == 0 { glyphs.result_first } else { glyphs.result_rest };
-        row.insert(0, Span::dim(lead));
-        out.push(Line::new(row).truncated(width));
-    }
-    out
+    let text = others
+        .iter()
+        .map(|(verb, count)| if *count == 1 { (*verb).to_string() } else { format!("{verb} ×{count}") })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    Some(vec![Span::dim(text)])
 }
 
 /// A row's verb as the fold says it happened: `Edit` → `Edited`.
@@ -351,7 +390,7 @@ fn past_tense(verb: &str) -> &'static str {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{cell, Step, StepKind, TurnFold, HELD_ROWS, LIVE_STEPS};
+    use super::{cell, steps_word, Step, StepKind, TurnFold, HELD_ROWS, LIVE_STEPS};
     use crate::tui::ansi::Line;
 
     fn step(kind: StepKind, verb: &str, target: &str) -> Step {
@@ -446,13 +485,16 @@ mod tests {
     }
 
     #[test]
-    fn the_viewport_shows_the_newest_steps_and_counts_the_rest() {
+    fn the_viewport_shows_the_newest_steps_and_counts_them_all() {
         let mut fold = TurnFold::default();
+        assert!(fold.live_rows(80).is_empty() && fold.step_count() == 0);
         fold.take_steps((0..5).map(|n| step(StepKind::Read, "Read", &format!("f{n}.rs"))).collect());
         let rows = plain(&fold.live_rows(80));
         assert_eq!(rows.len(), LIVE_STEPS);
-        assert_eq!(rows[0], "  └ Read f2.rs   … +2 earlier");
+        assert_eq!(rows[0], "  └ Read f2.rs");
         assert_eq!(rows[2], "    Read f4.rs");
+        assert_eq!(fold.step_count(), 5);
+        assert_eq!((steps_word(1), steps_word(5)), ("1 step".to_string(), "5 steps".to_string()));
         let (cell, held) = fold.flush(80, Instant::now());
         assert!(cell[1].plain().contains("5 steps") && held.is_empty());
         assert!(fold.live_rows(80).is_empty() && !fold.is_pending());

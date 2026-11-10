@@ -496,6 +496,12 @@ impl ToolGroup {
         self.calls.is_empty()
     }
 
+    /// How many calls the cell holds, finished or not.
+    #[must_use]
+    pub fn call_count(&self) -> usize {
+        self.calls.len()
+    }
+
     /// Stable call ids represented by this cell.
     pub(super) fn call_ids(&self) -> impl Iterator<Item = &str> {
         self.calls.iter().map(|call| call.id.as_str())

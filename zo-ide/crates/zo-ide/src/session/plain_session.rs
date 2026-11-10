@@ -356,6 +356,84 @@ fn steered_words(text: &str) -> Option<Vec<&str>> {
     (!steers.is_empty()).then_some(steers)
 }
 
+/// A place in the saved conversation where a turn ended: how many messages
+/// stood then, and a print of the last of them. The print is what lets a
+/// later replay trust the count — a rewind or a compaction changes what
+/// stands at it, and a cut that no longer matches is passed over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplayCut {
+    messages: usize,
+    print: u64,
+}
+
+impl ReplayCut {
+    /// The cut after the last of `messages`.
+    pub(crate) fn at_end(messages: &[core_types::session::ConversationMessage]) -> Option<Self> {
+        messages.last().map(|last| Self { messages: messages.len(), print: message_print(last) })
+    }
+
+    /// Whether this cut stands earlier in the conversation than `other`.
+    pub(crate) fn before(self, other: Self) -> bool {
+        self.messages < other.messages
+    }
+
+    /// Whether `messages` still end a turn where this cut says.
+    fn holds_in(self, messages: &[core_types::session::ConversationMessage]) -> bool {
+        self.messages
+            .checked_sub(1)
+            .and_then(|last| messages.get(last))
+            .is_some_and(|last| message_print(last) == self.print)
+    }
+}
+
+/// A print of one message, for [`ReplayCut`]: its role and its blocks.
+fn message_print(message: &core_types::session::ConversationMessage) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}{:?}", message.role, message.blocks).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// How many of the newest messages a first paint replays.
+const RECENT_MESSAGES: usize = 128;
+
+/// One part of a replay, and the index of the cut it stops at — `None` for
+/// what follows the last cut.
+pub(crate) type ReplayPage = (Vec<ReplayItem>, Option<usize>);
+
+/// The recent page of `messages` as replay items, cut at each of `cuts` that
+/// still holds and lies inside the page: every part comes with the index of
+/// the cut it stops at, and what follows the last cut comes with `None`. The
+/// flag says older messages were left out. A page that opens mid-turn starts
+/// with the prompt that turn answers.
+fn replay_pages_from(
+    messages: &[core_types::session::ConversationMessage],
+    cuts: &[ReplayCut],
+) -> (Vec<ReplayPage>, bool) {
+    let start = messages.len().saturating_sub(RECENT_MESSAGES);
+    let mut items = Vec::new();
+    if start > 0 && !messages[start].is_user_prompt() {
+        if let Some(at) = messages[..start].iter().rposition(core_types::session::ConversationMessage::is_user_prompt) {
+            items.extend(replay_items_from(&messages[at..=at]));
+        }
+    }
+    let mut pages = Vec::new();
+    let mut from = start;
+    for (index, cut) in cuts.iter().enumerate() {
+        if cut.messages <= from || !cut.holds_in(messages) {
+            continue;
+        }
+        items.extend(replay_items_from(&messages[from..cut.messages]));
+        pages.push((std::mem::take(&mut items), Some(index)));
+        from = cut.messages;
+    }
+    items.extend(replay_items_from(&messages[from..]));
+    if !items.is_empty() {
+        pages.push((items, None));
+    }
+    (pages, start > 0)
+}
+
 /// 트랜스크립트 메시지 → 재생 항목. System 메시지와 thinking 은 화면에 없던
 /// 것이므로 뺀다. `ToolResult` 는 `tool_use_id` 로 앞선 호출에 붙인다.
 #[must_use]
@@ -2426,19 +2504,18 @@ impl PlainSession {
     }
 
     /// First paint is a bounded recent page. The transcript viewer reads the
-    /// full saved history on demand, so opening a chat never repaints its lifetime.
-    pub(crate) fn recent_replay_items(&self) -> (Vec<ReplayItem>, bool) {
-        const RECENT_MESSAGES: usize = 128;
-        let messages = &self.runtime.session().messages;
-        let start = messages.len().saturating_sub(RECENT_MESSAGES);
-        let mut items = Vec::new();
-        if start > 0 && !messages[start].is_user_prompt() {
-            if let Some(at) = messages[..start].iter().rposition(core_types::session::ConversationMessage::is_user_prompt) {
-                items.extend(replay_items_from(&messages[at..=at]));
-            }
-        }
-        items.extend(replay_items_from(&messages[start..]));
-        (items, start > 0)
+    /// full saved history on demand, so opening a chat never repaints its
+    /// lifetime. The page comes cut where `cuts` say a turn ended
+    /// ([`replay_pages_from`]), so what the screen said there can be said
+    /// again between the parts.
+    pub(crate) fn recent_replay_pages(&self, cuts: &[ReplayCut]) -> (Vec<ReplayPage>, bool) {
+        replay_pages_from(&self.runtime.session().messages, cuts)
+    }
+
+    /// Where the conversation ends now, as a place a later replay can find
+    /// again ([`ReplayCut`]). `None` while nothing is saved.
+    pub(crate) fn replay_cut(&self) -> Option<ReplayCut> {
+        ReplayCut::at_end(&self.runtime.session().messages)
     }
 
     /// Composer history contributed by the resumed transcript. The global
@@ -3133,9 +3210,51 @@ mod tests {
 
 #[cfg(test)]
 mod replay_tests {
-    use super::{replay_items_from, user_input_history_from, ReplayItem};
+    use super::{replay_items_from, replay_pages_from, user_input_history_from, ReplayCut, ReplayItem};
     use core_types::session::{ContentBlock, ConversationMessage};
     use runtime::message_stream::AgentResultStatus;
+
+    #[test]
+    fn a_replay_is_cut_where_a_turn_ended_and_a_cut_the_conversation_lost_cuts_nothing() {
+        let text = |words: &str| ConversationMessage::assistant(vec![ContentBlock::Text { text: words.into() }]);
+        let mut messages = vec![ConversationMessage::user_text("first"), text("one")];
+        let first = ReplayCut::at_end(&messages).expect("a turn ended");
+        messages.extend([ConversationMessage::user_text("second"), text("two")]);
+        let second = ReplayCut::at_end(&messages).expect("a turn ended");
+
+        // Each part stops at its cut; nothing follows the last one.
+        let (pages, earlier) = replay_pages_from(&messages, &[first, second]);
+        assert!(!earlier);
+        assert_eq!(
+            pages,
+            vec![
+                (vec![ReplayItem::User("first".into()), ReplayItem::Assistant("one".into())], Some(0)),
+                (vec![ReplayItem::User("second".into()), ReplayItem::Assistant("two".into())], Some(1)),
+            ]
+        );
+        // No cut: one part, as the whole replay was.
+        let (whole, _) = replay_pages_from(&messages, &[]);
+        assert_eq!(whole.len(), 1);
+        assert_eq!(whole[0].0, replay_items_from(&messages));
+        assert_eq!(whole[0].1, None);
+
+        // The last turn was rewound and another took its place: the cut that
+        // stood there is passed over, and the one before it still cuts.
+        messages.truncate(2);
+        messages.extend([ConversationMessage::user_text("again"), text("three")]);
+        let (pages, _) = replay_pages_from(&messages, &[first, second]);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].1, Some(0));
+        assert_eq!(pages[1], (vec![ReplayItem::User("again".into()), ReplayItem::Assistant("three".into())], None));
+
+        // A compaction put a summary where the first turn was: nothing cuts.
+        messages[1] = text("a summary of what came before");
+        let (pages, _) = replay_pages_from(&messages, &[first, second]);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].1, None);
+        // An empty conversation has no place to cut at.
+        assert_eq!(ReplayCut::at_end(&[]), None);
+    }
 
     #[test]
     fn replay_pairs_tool_results_with_their_calls_and_skips_thinking() {

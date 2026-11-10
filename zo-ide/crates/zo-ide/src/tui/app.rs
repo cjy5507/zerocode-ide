@@ -84,7 +84,7 @@ use crate::ide::events::{self, PromptKind};
 use crate::ide::prompt::PendingPrompt;
 use crate::ide::reporter::HookReporter;
 use crate::ide::run_loop::ExitReason;
-use crate::session::plain_session::{LaunchFlags, OpenOptions, PlainSession, ReplayItem};
+use crate::session::plain_session::{LaunchFlags, OpenOptions, PlainSession, ReplayCut, ReplayItem};
 use crate::session::route_fact::{RouteFact, RouteFactReceiver};
 use crate::session::file_search::{FileSearchManager, FileSearchResult};
 use tools::{MentionAnswer, MentionAsk, MentionCandidate, MentionRerank, MentionSurface};
@@ -531,6 +531,10 @@ enum HistoryTail {
     Other,
 }
 
+// Its booleans are separate facts about the session — work was done, the
+// usage is known, fast mode is on, thinking is one row — not states of one
+// machine.
+#[allow(clippy::struct_excessive_bools)]
 struct Ui {
     flags: RenderFlags,
     painter: Painter<std::io::Stdout>,
@@ -585,6 +589,8 @@ struct Ui {
     /// The checks the harness saw pass after this turn's last edit, for the
     /// row the turn ends on (the marks look; codex's look commits a row each).
     turn_checks: Vec<String>,
+    /// The rows this conversation's turns ended on, oldest first ([`EndRow`]).
+    end_rows: Vec<EndRow>,
     /// 접기 마커의 id 발급기 — 세션 안에서 단조 증가한다.
     folds: FoldIds,
     /// 접기 본문을 낼지 — `ZeroCode` 패인 안인가 맨 터미널인가. 런치 env 를
@@ -1019,6 +1025,34 @@ fn load_submission_images(paths: &[PathBuf]) -> Result<Vec<(String, String)>, St
                 .map_err(|error| format!("could not read pasted image {}: {error}", path.display()))
         })
         .collect()
+}
+
+/// The row a finished turn ended on, kept so a redraw of the conversation
+/// (`ctrl+o`) says it again where it stood. The replay rebuilds a turn's cells
+/// from the saved messages, and those do not say how long the turn took or
+/// which checks passed after it.
+struct EndRow {
+    /// Where in the saved conversation the turn ended.
+    cut: ReplayCut,
+    elapsed_seconds: u64,
+    agent_count: usize,
+    tally: TurnTally,
+    checks: Vec<String>,
+    /// Whether the conversation actions rode in the row.
+    actions: bool,
+}
+
+/// How many end rows are kept: more turns than a replayed page can hold.
+const END_ROWS_KEPT: usize = 128;
+
+/// The conversation actions as a turn's end row names them, when they ride
+/// in it.
+fn riding_actions(ride: bool) -> Vec<&'static str> {
+    if ride {
+        shortcuts::CONVERSATION_ACTIONS.iter().map(|(command, _)| *command).collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// What a turn did, for the line it ends on (t-48216).
@@ -1879,7 +1913,10 @@ impl Ui {
                         .map(subagent_status_detail),
                 );
             }
-        } else {
+        } else if super::style::current().style != super::style::TuiStyle::Marks {
+            // The marks look names the running call on the live cell's own
+            // row, right above this one; said again here it was one command
+            // on two rows.
             details.extend(self.tool_status_detail.iter().cloned());
         }
         if let Some(status) = self.status.as_mut() {
@@ -1966,6 +2003,7 @@ impl Ui {
         self.turn_agent_count = 0;
         self.turn_tally = TurnTally::default();
         self.turn_checks.clear();
+        self.end_rows.clear();
         self.fold.clear();
         self.status = None;
         self.tool_status_detail = None;
@@ -2187,6 +2225,12 @@ impl Ui {
             max_height: usize::from(self.painter.max_height()),
         };
         let (rows, cursor) = view::build(&frame);
+        self.place(&rows, cursor, whole);
+    }
+
+    /// Put the built rows on the screen: the head sized for them — as a popup
+    /// over the rows above it when `whole` — then painted and the cursor set.
+    fn place(&mut self, rows: &[Line], cursor: Option<(u16, u16)>, whole: bool) {
         let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
         if whole {
             // History goes under the popup first; then the popup goes back up
@@ -2209,7 +2253,7 @@ impl Ui {
                 self.painter.settle_on_the_floor();
             }
         }
-        self.painter.paint(&rows);
+        self.painter.paint(rows);
         let cursor = cursor.map(|(col, row)| self.painter.absolute(col, row));
         self.painter.end(cursor);
     }
@@ -4212,6 +4256,32 @@ impl Ui {
         commands.next().is_none().then_some(command)
     }
 
+    /// Keep the row a turn just ended on ([`EndRow`]). A row kept for a place
+    /// at or past this one belonged to a turn that was rewound since.
+    fn keep_end_row(&mut self, row: EndRow) {
+        self.end_rows.retain(|kept| kept.cut.before(row.cut));
+        self.end_rows.push(row);
+        let extra = self.end_rows.len().saturating_sub(END_ROWS_KEPT);
+        self.end_rows.drain(..extra);
+    }
+
+    /// Say again the row the turn kept at `index` ended on, as wide as the
+    /// pane is now.
+    fn redraw_end_row(&mut self, index: usize) {
+        let Some(row) = self.end_rows.get(index) else {
+            return;
+        };
+        let separator = turn_separator(
+            self.width(),
+            row.elapsed_seconds,
+            row.agent_count,
+            &row.tally,
+            &riding_actions(row.actions),
+            &row.checks,
+        );
+        self.history(&[Line::empty(), separator]);
+    }
+
     /// The line this turn ends on, after `elapsed_seconds`, carrying
     /// `actions` when the conversation actions ride in it.
     fn turn_summary(&self, elapsed_seconds: u64, actions: &[&str]) -> Line {
@@ -4645,8 +4715,29 @@ impl Ui {
     // 블록 → 셀
     // ------------------------------------------------------------------
 
-    #[allow(clippy::too_many_lines)] // RenderBlock 갈래마다 한 arm.
+    /// One block of the stream into the screen's cells, then the working
+    /// row's count of the steps taken so far.
     fn block(&mut self, block: RenderBlock) {
+        self.take_block(block);
+        self.count_steps();
+    }
+
+    /// The `turns` view's working row says how many steps the open fold has
+    /// taken: the ones it holds and the calls of the cell still live. The
+    /// rows above it show only the newest.
+    fn count_steps(&mut self) {
+        let steps = if self.folding() {
+            self.fold.step_count() + self.tool_cell.as_ref().map_or(0, ToolGroup::call_count)
+        } else {
+            0
+        };
+        if let Some(status) = self.status.as_mut() {
+            status.set_steps(steps);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // RenderBlock 갈래마다 한 arm.
+    fn take_block(&mut self, block: RenderBlock) {
         let width = self.width();
         match block {
             RenderBlock::StreamPhase(phase) => {
@@ -5500,6 +5591,7 @@ impl App {
                 turn_agent_count: 0,
                 turn_tally: TurnTally::default(),
                 turn_checks: Vec::new(),
+                end_rows: Vec::new(),
                 folds: FoldIds::default(),
                 fold_mode: FoldMode::from_env(),
                 last_commit: None,
@@ -6065,13 +6157,6 @@ impl App {
         }
     }
 
-    /// codex 의 세션 정보 셀 — 부팅 카드다. 새로 열 때도, `/resume` 이 세션을
-    /// 갈아 끼울 때도 같은 자리에 선다: codex
-    /// `app/session_lifecycle.rs::resume_target_session` 은 재개 스레드를
-    /// `ThreadAttachPresentation::SessionLineage` 로 붙이고, 그 길이
-    /// `handle_thread_session` → `on_session_configured_with_display…` 의
-    /// `SessionConfiguredDisplay::Normal` 갈래라 `new_session_info` 로 만든
-    /// 헤더 상자를 히스토리에 **다시** 커밋한 뒤 턴을 재생한다.
     /// `ctrl+o`: draw the conversation in its other view — folded turns, or a
     /// row a step. The scrollback cannot be rewritten, so the screen is
     /// cleared and the session's saved turns are drawn again, as a restore
@@ -6098,6 +6183,13 @@ impl App {
         self.ui.note(SystemLevel::Info, word);
     }
 
+    /// codex 의 세션 정보 셀 — 부팅 카드다. 새로 열 때도, `/resume` 이 세션을
+    /// 갈아 끼울 때도 같은 자리에 선다: codex
+    /// `app/session_lifecycle.rs::resume_target_session` 은 재개 스레드를
+    /// `ThreadAttachPresentation::SessionLineage` 로 붙이고, 그 길이
+    /// `handle_thread_session` → `on_session_configured_with_display…` 의
+    /// `SessionConfiguredDisplay::Normal` 갈래라 `new_session_info` 로 만든
+    /// 헤더 상자를 히스토리에 **다시** 커밋한 뒤 턴을 재생한다.
     fn session_card(&mut self) {
         // A card is the start page's end: whoever commits one has left the
         // empty conversation, and takes what was said on the page with it.
@@ -6131,13 +6223,23 @@ impl App {
     /// — 파서가 `RenderBlock::ToolCall`/`ToolResult` 를 만들 때 부르는 그것이다
     /// (`message_stream/anthropic/parser.rs`, `conversation/streaming_turn.rs`).
     fn replay_history(&mut self) {
-        let (items, earlier) = self.session().recent_replay_items();
+        // The turns this screen saw end are cut apart, so each is closed by
+        // the row it ended on; a session opened from disk has none to say.
+        let cuts: Vec<ReplayCut> = self.ui.end_rows.iter().map(|row| row.cut).collect();
+        let (pages, earlier) = self.session().recent_replay_pages(&cuts);
         if earlier { self.ui.note(SystemLevel::Info, "Recent conversation · Ctrl+T or /find opens the full saved history"); }
-        if items.is_empty() {
-            return;
+        // The conversation actions follow only what no end row closed.
+        let mut open = false;
+        for (items, cut) in pages {
+            self.ui.replay(items);
+            open = cut.is_none();
+            if let Some(index) = cut {
+                self.ui.redraw_end_row(index);
+            }
         }
-        self.ui.replay(items);
-        self.ui.history(&shortcuts::conversation_actions(self.ui.width()));
+        if open {
+            self.ui.history(&shortcuts::conversation_actions(self.ui.width()));
+        }
     }
 
     fn execute_conversation_action(&mut self, expected_session: &str, action: &zerocode_core::conversation_control::Action) -> Result<serde_json::Value, String> {
@@ -7383,18 +7485,25 @@ impl App {
             ui.history(&shortcuts::conversation_actions(ui.width()));
         }
         if ui.had_work_activity {
-            let actions: Vec<&str> = if actions_ride {
-                shortcuts::CONVERSATION_ACTIONS.iter().map(|(command, _)| *command).collect()
-            } else {
-                Vec::new()
-            };
-            let separator = ui.turn_summary(started.elapsed().as_secs(), &actions);
+            let elapsed_seconds = started.elapsed().as_secs();
+            let separator = ui.turn_summary(elapsed_seconds, &riding_actions(actions_ride));
             ui.refresh_status_line();
             // A cell of its own, so it carries the gap every cell carries:
             // drawn flush under the answer's last line it read as part of
             // the answer ("이거 붙는거") rather than as the turn's edge.
             ui.history(&[Line::empty(), separator]);
             ui.had_work_activity = false;
+            if let Some(cut) = self.session.as_ref().and_then(PlainSession::replay_cut) {
+                let row = EndRow {
+                    cut,
+                    elapsed_seconds,
+                    agent_count: ui.turn_agent_count,
+                    tally: std::mem::take(&mut ui.turn_tally),
+                    checks: std::mem::take(&mut ui.turn_checks),
+                    actions: actions_ride,
+                };
+                ui.keep_end_row(row);
+            }
             ui.turn_checks.clear();
         }
         // Checks a turn with no row to end on could not say there: rows of
@@ -7731,6 +7840,7 @@ fn not_in_zo(name: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)] // `Ui` 의 필드마다 한 줄.
 fn test_ui() -> Ui {
     let mut painter = Painter::new(std::io::stdout(), 80, 24, 1, false);
     painter.set_height(1);
@@ -7756,6 +7866,7 @@ fn test_ui() -> Ui {
         turn_agent_count: 0,
         turn_tally: TurnTally::default(),
         turn_checks: Vec::new(),
+        end_rows: Vec::new(),
         folds: FoldIds::default(),
         fold_mode: FoldMode::Bare,
         last_commit: None,
@@ -8830,10 +8941,14 @@ mod tests {
     fn the_turns_view_folds_a_turns_work_above_its_answer() {
         let mut ui = test_ui();
         ui.view = super::super::style::ConversationView::Turns;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
         let ids = BlockIdGen::default();
         says(&mut ui, &ids, "I will read the parser first.");
         read_then_run(&mut ui, &ids);
         assert!(history(&ui).is_empty(), "nothing is said while the work runs: {:#?}", history(&ui));
+        // The working row counts the steps the rows above it show the newest of.
+        let working = ui.status.as_ref().map(|status| status.line(80).plain()).unwrap_or_default();
+        assert!(working.contains("2 steps"), "{working}");
         says(&mut ui, &ids, "Fixed.");
         assert!(ui.fold.has_steps(), "the finished cell went to the fold when the answer opened");
         assert!(history(&ui).is_empty(), "a short text waits to learn what it is: {:#?}", history(&ui));
@@ -8887,6 +9002,49 @@ mod tests {
         assert!(said.iter().any(|row| row.contains("Read") && row.contains("src/parser.rs")), "{said:#?}");
         assert!(said.iter().any(|row| row.contains("Fixed.")), "{said:#?}");
         assert!(!said.iter().any(|row| row.contains("Worked")), "{said:#?}");
+    }
+
+    /// A redraw of the conversation (`ctrl+o`) says again the row each turn
+    /// ended on; a turn that was rewound takes its row with it.
+    #[test]
+    fn a_redraw_says_again_the_row_a_turn_ended_on() {
+        use super::{EndRow, ReplayCut, TurnTally};
+        use core_types::session::{ContentBlock, ConversationMessage};
+
+        let mut ui = test_ui();
+        let text = |words: &str| ConversationMessage::assistant(vec![ContentBlock::Text { text: words.into() }]);
+        let mut messages = vec![ConversationMessage::user_text("first"), text("one")];
+        let first = ReplayCut::at_end(&messages).expect("a turn ended");
+        messages.extend([ConversationMessage::user_text("second"), text("two")]);
+        let second = ReplayCut::at_end(&messages).expect("a turn ended");
+        let row = |cut, elapsed_seconds| EndRow {
+            cut,
+            elapsed_seconds,
+            agent_count: 0,
+            tally: TurnTally { calls: 7, added: 1, removed: 1 },
+            checks: vec!["cargo test parser".to_string()],
+            actions: true,
+        };
+        ui.keep_end_row(row(first, 8));
+        ui.keep_end_row(row(second, 9));
+        ui.redraw_end_row(1);
+        let said = history(&ui);
+        let last = said.last().expect("the row was said");
+        assert!(last.contains("9s") && last.contains("7 tool calls") && last.contains("/rewind"), "{said:#?}");
+
+        // A turn ending where a kept one did has taken its place, and a turn
+        // ending before it means the later one was rewound.
+        ui.keep_end_row(row(second, 3));
+        assert_eq!(ui.end_rows.iter().map(|kept| kept.elapsed_seconds).collect::<Vec<_>>(), [8, 3]);
+        ui.keep_end_row(row(first, 1));
+        assert_eq!(ui.end_rows.iter().map(|kept| kept.elapsed_seconds).collect::<Vec<_>>(), [1]);
+        // A place nothing is kept for says nothing.
+        let rows = history(&ui).len();
+        ui.redraw_end_row(4);
+        assert_eq!(history(&ui).len(), rows);
+        // Another conversation starts with none.
+        ui.reset_conversation();
+        assert!(ui.end_rows.is_empty());
     }
 
     /// Two questions in turn: a tab each and the focused option's preview,

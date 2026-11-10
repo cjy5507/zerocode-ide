@@ -429,8 +429,11 @@ fn conversation_resume_first_paint_is_a_recent_page() {
         session.runtime.try_runtime_mut().unwrap().session_mut()
             .push_message(ConversationMessage::user_text(format!("request {index}"))).unwrap();
     }
-    let (page, earlier) = session.recent_replay_items();
+    // Nothing to cut at: the page comes as one part.
+    let (pages, earlier) = session.recent_replay_pages(&[]);
     assert!(earlier);
+    assert_eq!(pages.len(), 1);
+    let page = &pages[0].0;
     assert_eq!(page.len(), 128);
     assert_eq!(page.first(), Some(&ReplayItem::User("request 172".into())));
     assert_eq!(page.last(), Some(&ReplayItem::User("request 299".into())));
