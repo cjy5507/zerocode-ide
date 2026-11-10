@@ -1041,8 +1041,20 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
      * ordered anew, and the generation goes up. An older reading is put in by hand — the reading a row had a
      * settle ago — and the settle's own re-take is what runs. */
     const ordered = await page.evaluate(async () => {
-      setSidebarView({ groupBy: "repo", sortBy: "activity" });
-      await new Promise((done) => setTimeout(done, 120));
+      // The view's own refresh, awaited: `setSidebarView` starts it and does not wait for it, and the scene must
+      // not freeze a reading before the new view stands (review t-103290 N9 — it used to wait 120 ms).
+      const viewed = async (patch) => {
+        const own = window.refreshWorktrees;
+        let refreshed = Promise.resolve();
+        window.refreshWorktrees = (...args) => (refreshed = own(...args));
+        try {
+          setSidebarView(patch);
+        } finally {
+          window.refreshWorktrees = own;
+        }
+        await refreshed;
+      };
+      await viewed({ groupBy: "repo", sortBy: "activity" });
       freezeWorkspaceActivity();
       await refreshWorktrees();
       await window.__PAINTED__();
@@ -1076,8 +1088,7 @@ export async function testSidebarReviewState({ browser, origin, ok, faults }) {
       const controlMoved = freezeWorkspaceActivity();
       const control = { moved: controlMoved, generation: activityGeneration === generation + 1 };
       watch.disconnect();
-      setSidebarView({ groupBy: "state", sortBy: "default" });
-      await new Promise((done) => setTimeout(done, 120));
+      await viewed({ groupBy: "state", sortBy: "default" });
       freezeWorkspaceActivity();
       await refreshWorktrees();
       await window.__PAINTED__();
