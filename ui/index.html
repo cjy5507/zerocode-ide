@@ -2205,6 +2205,17 @@
           <div class="auto-page-identity">
             <svg class="icon" aria-hidden="true"><use href="#i-calendar-clock"></use></svg>
             <h2 id="auto-title" data-i18n="view.automations">자동화</h2>
+            <!-- 예약과 Flow는 한 화면의 두 쪽이다(2026-11-11 사람 승인, 창 아티팩트
+                 p-dd51a186ac0258e2 v2): Flow 목록은 설정 › 컴퓨터 사용에서 이리로 왔다.
+                 쪽은 `setAutoPage`가 바꾸고 `paintAutoPage`가 칠한다. -->
+            <div class="auto-detail-tabs auto-pages" role="tablist" data-i18n-aria="auto.pages" aria-label="자동화 쪽">
+              <button class="is-active" id="auto-page-tab-schedules" role="tab" aria-selected="true" type="button" data-auto-page="schedules">
+                <span data-i18n="auto.pageSchedules">예약</span> <span class="auto-page-count" id="auto-page-count-schedules"></span>
+              </button>
+              <button id="auto-page-tab-flows" role="tab" aria-selected="false" type="button" data-auto-page="flows">
+                <span data-i18n="flow.title">Flow</span> <span class="auto-page-count" id="auto-page-count-flows"></span>
+              </button>
+            </div>
           </div>
           <div class="auto-head-acts">
             <button class="btn btn--primary auto-create" id="auto-new" type="button" data-tour-target="automations-create">
@@ -2293,11 +2304,11 @@
                 <div class="auto-table-head" role="row">
                   <button type="button" data-auto-sort="name" data-i18n="auto.name">이름</button>
                   <span data-i18n="auto.scheduleColumn">일정</span>
+                  <span data-i18n="auto.whatColumn">실행</span>
                   <span data-i18n="auto.projectColumn">프로젝트</span>
                   <span data-i18n="auto.nextRunColumn">다음 실행</span>
                   <button type="button" data-auto-sort="last" data-i18n="auto.lastRunColumn">최근 실행</button>
                   <span data-i18n="auto.statusColumn">상태</span>
-                  <span data-i18n="auto.agent">에이전트</span>
                   <span class="sr" data-i18n="auto.actionsColumn">동작</span>
                 </div>
                 <div class="auto-list" id="auto-list" role="rowgroup"></div>
@@ -2385,6 +2396,91 @@
               <p class="auto-runs-empty" id="auto-runs-empty" data-i18n="auto.runsEmpty">아직 실행 기록이 없습니다.</p>
             </section>
           </section>
+
+          <!-- Flow 쪽(t-4260의 카드가 2026-11-11에 설정 › 컴퓨터 사용에서 옮겨 옴):
+               Flow인 레시피의 목록과, 고른 Flow의 판정·정책·증거 수준·예약. 카드는
+               문서를 읽고 두 Flow 절을 되쓸 뿐이고, 목록·컨트롤·마지막 판정은
+               `flow_list`에서 온다(`paintFlows`). 정책·증거 선택지는 백엔드가 건넨
+               코어 열거형이다 — 여기서 고정하지 않는다. 예약 줄은 그 Flow를 실행하는
+               자동화이고(`paintFlowSchedules`), 켜고 끄기·편집·삭제는 자동화의 것이다. -->
+          <section class="auto-flow-page" id="auto-flow-page" hidden aria-labelledby="auto-page-tab-flows">
+            <div class="flow-card" id="flow-card" hidden>
+              <div class="flow-head">
+                <div class="flow-head-words">
+                  <h3 class="flow-title" data-i18n="flow.title">Flow</h3>
+                  <p class="flow-about" data-i18n="flow.about">한 번 걷고 recipe-save로 남기면 아래 「Flow가 아닌 레시피」에 올라옵니다. 「Flow로 등록」을 누르면 성공 조건이 붙어 여기에 서고, 에이전트는 recipe-save --flow-check로 바로 세웁니다. 이 카드는 문서를 읽고 되쓸 뿐이고, 무엇을 어디에 누르는지는 레시피가 쥡니다.</p>
+                </div>
+                <button class="btn" type="button" id="flow-console-open" data-i18n="flow.live.title">Flow 실행</button>
+              </div>
+              <p class="settings-hint flow-empty" id="flow-empty" hidden data-i18n="flow.empty">아직 Flow가 없습니다. 한 번 걷고 recipe-save로 남기면 아래에 올라오고, 「Flow로 등록」으로 세울 수 있습니다.</p>
+              <div class="flow-columns">
+                <div class="flow-side">
+                  <div class="flow-roster" id="flow-roster" role="group" aria-label="Flow" data-i18n-aria="flow.title"></div>
+                  <!-- The recipes that are not Flows (t-93871): set apart and quieter than
+                       the roster; each can be registered as a Flow or deleted, so no
+                       saved document is out of the card's reach. Painted from
+                       `flow_list`'s `recipes` (`paintFlowRecipes`). -->
+                  <div class="flow-recipes" id="flow-recipes" hidden>
+                    <h4 class="flow-recipes-title" id="flow-recipes-title" data-i18n="flow.recipes.title">Flow가 아닌 레시피</h4>
+                    <p class="settings-hint" data-i18n="flow.recipes.about">성공 조건이 없어 Flow로 서지 않은 레시피입니다. 등록하면 성공 조건이 붙어 위 목록에 올라옵니다.</p>
+                    <div class="flow-recipe-list" id="flow-recipe-list" role="list" aria-labelledby="flow-recipes-title"></div>
+                  </div>
+                </div>
+                <div class="flow-detail" id="flow-detail" hidden>
+                  <div class="flow-detail-head">
+                    <h4 class="flow-detail-name" id="flow-detail-name"></h4>
+                    <span class="orch-pill flow-verdict" id="flow-verdict"></span>
+                  </div>
+                  <p class="flow-detail-summary orch-note" id="flow-detail-summary"></p>
+                  <div class="flow-field">
+                    <span class="flow-field-key" data-i18n="flow.policy">정책</span>
+                    <div class="segment flow-seg" id="flow-policy-seg" role="group" aria-label="정책" data-i18n-aria="flow.policy"></div>
+                  </div>
+                  <p class="flow-guarded-note" id="flow-guarded-note" role="note" hidden></p>
+                  <div class="flow-field">
+                    <span class="flow-field-key" data-i18n="flow.evidence">증거 수준</span>
+                    <div class="segment flow-seg" id="flow-evidence-seg" role="group" aria-label="증거 수준" data-i18n-aria="flow.evidence"></div>
+                  </div>
+                  <!-- 이 Flow를 실행하는 자동화. 줄마다 켜고 끄기·편집·삭제가 있고,
+                       「예약 추가」는 이 Flow를 고른 채로 자동화 만들기 창을 연다. -->
+                  <div class="flow-schedules" id="flow-schedules">
+                    <div class="flow-schedules-head">
+                      <h5 class="flow-schedules-title" id="flow-schedules-title" data-i18n="auto.pageSchedules">예약</h5>
+                      <button class="btn" type="button" id="flow-schedule-add">
+                        <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+                        <span data-i18n="flow.schedules.add">예약 추가</span>
+                      </button>
+                    </div>
+                    <p class="settings-hint" id="flow-schedules-none" data-i18n="flow.schedules.none">예약이 없습니다. 직접 실행할 때만 돕니다.</p>
+                    <div class="flow-schedule-list" id="flow-schedule-list" role="list" aria-labelledby="flow-schedules-title"></div>
+                  </div>
+                  <div class="orch-actions flow-actions">
+                    <button class="btn" type="button" id="flow-run">
+                      <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
+                      <span data-i18n="flow.run">지금 걷기</span>
+                    </button>
+                    <button class="btn" type="button" id="flow-report" hidden>
+                      <svg class="icon" aria-hidden="true"><use href="#i-external"></use></svg>
+                      <span data-i18n="flow.report">리포트 열기</span>
+                    </button>
+                    <button class="btn" type="button" id="flow-open-doc">
+                      <svg class="icon" aria-hidden="true"><use href="#i-file"></use></svg>
+                      <span data-i18n="flow.openDoc">문서 열기</span>
+                    </button>
+                    <!-- Only the person deletes a Flow (t-93871): the mark is the first
+                         wall, the invoke's hand the second (`flow_delete` is on the
+                         person-only list), and one question names what goes with it. -->
+                    <button class="btn btn--halt" type="button" id="flow-delete" data-person-only>
+                      <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
+                      <span data-i18n="flow.delete">지우기</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <p class="settings-hint flow-notice" id="flow-notice" role="status" hidden></p>
+              <p class="orch-error" id="flow-error" role="alert" hidden></p>
+            </div>
+          </section>
         </div>
       </div>
 
@@ -2447,7 +2543,22 @@
                 <span data-i18n="auto.name">이름</span>
                 <input class="settings-input" id="auto-name" type="text" autocomplete="off" required />
               </label>
-              <label class="settings-field auto-field--tall">
+              <!-- 실행할 것: 에이전트에게 프롬프트를 맡기거나, 저장된 Flow를 실행한다.
+                   Flow를 고르면 프롬프트 칸은 숨는다 — 그 Flow를 실행하는 명령은 저장할 때
+                   백엔드가 적는다(`Automation::bind_flow`). -->
+              <div class="settings-field auto-kind-field">
+                <span id="auto-kind-label" data-i18n="auto.kind">실행할 것</span>
+                <div class="segment auto-kind" id="auto-kind" role="group" aria-labelledby="auto-kind-label">
+                  <button class="segment-btn is-active" type="button" data-auto-kind="agent" aria-pressed="true" data-i18n="auto.kindAgent">에이전트에게 맡기기</button>
+                  <button class="segment-btn" type="button" data-auto-kind="flow" aria-pressed="false" data-i18n="auto.kindFlow">저장된 Flow</button>
+                </div>
+              </div>
+              <label class="settings-field" id="auto-flow-field" hidden>
+                <span data-i18n="flow.title">Flow</span>
+                <select class="settings-input" id="auto-flow"></select>
+                <span class="settings-row-desc" data-i18n="auto.flowNote">선택한 에이전트가 이 Flow를 실행하는 명령을 받습니다. 판정은 Flow 쪽에 남습니다.</span>
+              </label>
+              <label class="settings-field auto-field--tall" id="auto-prompt-field">
                 <span data-i18n="auto.prompt">프롬프트</span>
                 <textarea class="settings-input auto-prompt" id="auto-prompt" rows="14" spellcheck="true" required></textarea>
               </label>
@@ -7395,68 +7506,14 @@
           </div>
         </div>
 
-        <!-- Flow cards (t-4260, docs/design/flow-engine-operator-and-qa.md §2.7):
-             the recipes that are Flows. The card reads the document and rewrites
-             its two Flow sections; the roster, the controls and the last verdict
-             are painted from `flow_list` (`paintFlows`), and the policy/evidence
-             segments are the core enums the backend hands back — never fixed
-             here. -->
-        <div class="settings-card flow-card" id="flow-card" hidden>
-          <div class="settings-subhead">
+        <!-- Flow는 자동화 화면의 「Flow」 쪽에 있다(2026-11-11에 옮김). 설정에는 스킬처럼
+             요약과 들어가는 단추만 남는다 — 요약은 `paintFlowSummary`가 칠한다. -->
+        <div class="settings-card flow-summary-card">
+          <div class="flow-summary-words">
             <h3 class="settings-subhead-title" data-i18n="flow.title">Flow</h3>
-            <button class="btn" type="button" id="flow-console-open" data-i18n="flow.live.title">Flow 실행</button>
-            <p class="settings-subhead-desc" data-i18n="flow.about">한 번 걷고 recipe-save로 남기면 아래 「Flow가 아닌 레시피」에 올라옵니다. 「Flow로 등록」을 누르면 성공 조건이 붙어 여기에 서고, 에이전트는 recipe-save --flow-check로 바로 세웁니다. 이 카드는 문서를 읽고 되쓸 뿐이고, 무엇을 어디에 누르는지는 레시피가 쥡니다.</p>
+            <p class="settings-subhead-desc" id="flow-summary" role="status"></p>
           </div>
-          <p class="settings-hint flow-empty" id="flow-empty" hidden data-i18n="flow.empty">아직 Flow가 없습니다. 한 번 걷고 recipe-save로 남기면 아래에 올라오고, 「Flow로 등록」으로 세울 수 있습니다.</p>
-          <div class="flow-roster" id="flow-roster" role="group" aria-label="Flow" data-i18n-aria="flow.title"></div>
-          <div class="flow-detail" id="flow-detail" hidden>
-            <div class="flow-detail-head">
-              <h4 class="flow-detail-name" id="flow-detail-name"></h4>
-              <span class="orch-pill flow-verdict" id="flow-verdict"></span>
-            </div>
-            <p class="flow-detail-summary orch-note" id="flow-detail-summary"></p>
-            <div class="flow-field">
-              <span class="flow-field-key" data-i18n="flow.policy">정책</span>
-              <div class="segment flow-seg" id="flow-policy-seg" role="group" aria-label="정책" data-i18n-aria="flow.policy"></div>
-            </div>
-            <p class="flow-guarded-note" id="flow-guarded-note" role="note" hidden></p>
-            <div class="flow-field">
-              <span class="flow-field-key" data-i18n="flow.evidence">증거 수준</span>
-              <div class="segment flow-seg" id="flow-evidence-seg" role="group" aria-label="증거 수준" data-i18n-aria="flow.evidence"></div>
-            </div>
-            <div class="orch-actions flow-actions">
-              <button class="btn" type="button" id="flow-run">
-                <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
-                <span data-i18n="flow.run">지금 걷기</span>
-              </button>
-              <button class="btn" type="button" id="flow-report" hidden>
-                <svg class="icon" aria-hidden="true"><use href="#i-external"></use></svg>
-                <span data-i18n="flow.report">리포트 열기</span>
-              </button>
-              <button class="btn" type="button" id="flow-open-doc">
-                <svg class="icon" aria-hidden="true"><use href="#i-file"></use></svg>
-                <span data-i18n="flow.openDoc">문서 열기</span>
-              </button>
-              <!-- Only the person deletes a Flow (t-93871): the mark is the first
-                   wall, the invoke's hand the second (`flow_delete` is on the
-                   person-only list), and one question names what goes with it. -->
-              <button class="btn btn--halt" type="button" id="flow-delete" data-person-only>
-                <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
-                <span data-i18n="flow.delete">지우기</span>
-              </button>
-            </div>
-          </div>
-          <!-- The recipes that are not Flows (t-93871): set apart and quieter than
-               the roster; each can be registered as a Flow or deleted, so no
-               saved document is out of the card's reach. Painted from
-               `flow_list`'s `recipes` (`paintFlowRecipes`). -->
-          <div class="flow-recipes" id="flow-recipes" hidden>
-            <h4 class="flow-recipes-title" id="flow-recipes-title" data-i18n="flow.recipes.title">Flow가 아닌 레시피</h4>
-            <p class="settings-hint" data-i18n="flow.recipes.about">성공 조건이 없어 Flow로 서지 않은 레시피입니다. 등록하면 성공 조건이 붙어 위 목록에 올라옵니다.</p>
-            <div class="flow-recipe-list" id="flow-recipe-list" role="list" aria-labelledby="flow-recipes-title"></div>
-          </div>
-          <p class="settings-hint flow-notice" id="flow-notice" role="status" hidden></p>
-          <p class="orch-error" id="flow-error" role="alert" hidden></p>
+          <button class="btn" type="button" id="flow-open-page" data-i18n="flow.openPage">자동화에서 열기</button>
         </div>
         </section>
 

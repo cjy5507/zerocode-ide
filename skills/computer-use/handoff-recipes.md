@@ -76,8 +76,8 @@ Where a paragraph below says "above" or "below", it means the whole guide, which
     worked>"` also stands the recipe up as a Flow (`dry`): those words are its
     one required check, looked for where the steps ended. A recipe whose steps
     name no app or site stays saved, and the answer says why it is no Flow.
-    A recipe is the person's document and only the person deletes it (Settings,
-    Computer Use, Flow): a test or a bench does not save one in their window,
+    A recipe is the person's document and only the person deletes it (the
+    Automations page, Flow): a test or a bench does not save one in their window,
     and a run that must says its name in the report.
   - `recipe-show` answers the recipe's `params`; `recipe-run --name <n>
     --params '{"text-3":"…"}'` walks every step in one call. A walk that

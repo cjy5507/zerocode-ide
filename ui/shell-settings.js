@@ -3329,9 +3329,10 @@ async function refreshComputerUse() {
   // Live reflex after the permission read, never beside it: that read ends
   // the helper's session to see a fresh grant, and this one asks the helper.
   void refreshComputerLiveReflex("computer_use_capabilities");
-  // The Flow roster rides the same arrival: it reads the recipe folder and the
-  // session folders, so it is spent when the pane is looked at, beside the
-  // permission and skill reads above.
+  // The Flow summary rides the same arrival: the roster is read from the recipe
+  // folder and the session folders, so it is spent when the pane is looked at,
+  // beside the permission and skill reads above. The roster itself is drawn on
+  // the 자동화 page's Flow side.
   void refreshFlows();
   // And the key for typing: one keychain read, whether a key is saved.
   void refreshTypeValueKeys();
@@ -4274,6 +4275,11 @@ async function saveTypeValueKey(name, input) {
 
 /* ---- Flow cards (t-4260, docs/design/flow-engine-operator-and-qa.md §2.7) --
  *
+ * Since 2026-11-11 the card stands on the 자동화 page's 「Flow」 side, not in
+ * Settings: a Flow is run and looked at, not set once, and its schedules are
+ * automations (`flow.schedules`, the jobs whose record links the slug). Settings
+ * keeps one summary line and the door here (`paintFlowSummary`).
+ *
  * A Flow is a recipe with `## Flow` / `## Checks` sections (core
  * `computer_flow`). `flow_list` hands back the roster, each Flow's last
  * verdict, and the two closed sets the controls draw from — the core enums
@@ -4324,7 +4330,26 @@ function paintFlows() {
   paintFlowRoster(flows);
   paintFlowDetail(flowBySlug(flowSelected));
   paintFlowRecipes(flowData.recipes ?? []);
+  paintFlowSummary();
+  // The 예약 side names the Flow a job runs, and the tabs count both sides.
+  paintAutomations();
+  paintAutoPage();
 }
+
+/* What Settings › 컴퓨터 사용 keeps of the Flows: how many there are and how
+ * many schedules run them. The list itself is on the 자동화 page. */
+function paintFlowSummary() {
+  const flows = flowData?.flows ?? [];
+  const schedules = flows.reduce((count, flow) => count + (flow.schedules?.length ?? 0), 0);
+  say(el("flow-summary"), () => (flows.length === 0
+    ? t("flow.summaryNone", "아직 Flow가 없습니다.")
+    : t("flow.summary", "Flow {{flows}}개 · 예약 {{schedules}}개", { flows: flows.length, schedules })));
+}
+
+el("flow-open-page").addEventListener("click", () => {
+  setAutoOpen(true);
+  setAutoPage("flows");
+});
 
 function paintFlowRoster(flows) {
   const roster = el("flow-roster");
@@ -4359,8 +4384,23 @@ function paintFlowRoster(flows) {
 function flowChipWords(flow) {
   const where = (flow.fingerprint?.hosts?.length ? flow.fingerprint.hosts : flow.fingerprint?.apps) ?? [];
   const words = [...where, t("flow.checksChip", "체크 {{n}}", { n: flow.checks?.n ?? 0 })];
-  if (flow.trigger) words.push(flow.trigger);
+  const schedule = flowScheduleChip(flow);
+  if (schedule) words.push(schedule);
   return words;
+}
+
+/* The roster's word for how a Flow is scheduled: the first job that is on (else
+ * the first), in the words the 예약 side says its schedule in, marked when it is
+ * off and counted when there are more. A roster read before the jobs falls back
+ * to the cron the backend sent. */
+function flowScheduleChip(flow) {
+  const jobs = flow.schedules ?? [];
+  if (jobs.length === 0) return flow.trigger ?? null;
+  const job = jobs.find((held) => held.enabled) ?? jobs[0];
+  const held = automationById(job.id);
+  let words = held ? automationScheduleText(held) : (flow.trigger ?? job.name);
+  if (!job.enabled) words = `${words} · ${t("auto.off", "꺼짐")}`;
+  return jobs.length > 1 ? `${words} +${jobs.length - 1}` : words;
 }
 
 function paintFlowDetail(flow) {
@@ -4372,8 +4412,98 @@ function paintFlowDetail(flow) {
   el("flow-detail-summary").textContent = flowSummary(flow);
   paintFlowSegments(flow);
   paintFlowGuardedNote(flow);
+  paintFlowSchedules(flow);
   el("flow-report").hidden = !flow.last?.report;
 }
+
+/* The automations that run this Flow, one row each: a switch, the schedule in
+ * words with the next run, and the two doors a job has. The rows are the jobs
+ * `flow_list` linked to the slug, read beside the 예약 side's own records, so
+ * the two sides never say different things about one job. */
+function paintFlowSchedules(flow) {
+  const jobs = flow.schedules ?? [];
+  el("flow-schedules-none").hidden = jobs.length > 0;
+  const list = el("flow-schedule-list");
+  list.replaceChildren();
+  for (const job of jobs) list.append(flowScheduleRow(job));
+}
+
+function flowScheduleRow(job) {
+  const held = automationById(job.id);
+  const row = document.createElement("div");
+  row.className = job.enabled ? "flow-schedule" : "flow-schedule is-off";
+  row.setAttribute("role", "listitem");
+  row.dataset.id = job.id;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "auto-row-toggle";
+  toggle.setAttribute("role", "switch");
+  toggle.setAttribute("aria-checked", job.enabled ? "true" : "false");
+  toggle.setAttribute("aria-label", job.enabled
+    ? t("flow.schedules.pauseNamed", "{{name}} 일시정지", { name: job.name })
+    : t("flow.schedules.resumeNamed", "{{name}} 다시 시작", { name: job.name }));
+  toggle.addEventListener("click", () => void toggleFlowSchedule(job, toggle));
+  const words = document.createElement("span");
+  words.className = "flow-schedule-words";
+  const name = document.createElement("span");
+  name.className = "flow-schedule-name";
+  name.textContent = job.name;
+  const meta = document.createElement("span");
+  meta.className = "flow-schedule-meta";
+  const facts = held ? [automationScheduleText(held)] : [];
+  facts.push(job.enabled && held
+    ? t("flow.schedules.next", "다음 {{when}}", { when: whenNext(held) })
+    : (job.enabled ? "" : t("auto.off", "꺼짐")));
+  meta.textContent = facts.filter(Boolean).join(" · ");
+  words.append(name, meta);
+  const acts = document.createElement("span");
+  acts.className = "flow-schedule-acts";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "btn";
+  edit.dataset.flowSchedule = "edit";
+  edit.textContent = t("app.edit", "편집");
+  edit.setAttribute("aria-label", t("flow.schedules.editNamed", "{{name}} 편집", { name: job.name }));
+  edit.disabled = !held;
+  edit.addEventListener("click", () => { if (held) editAutomation(held); });
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "btn btn--halt";
+  remove.dataset.flowSchedule = "delete";
+  remove.textContent = t("app.delete", "삭제");
+  remove.setAttribute("aria-label", t("flow.schedules.deleteNamed", "{{name}} 삭제", { name: job.name }));
+  remove.disabled = !held;
+  remove.addEventListener("click", () => {
+    if (!held) return;
+    void requestAutomationDeletion(held).then(() => refreshFlows()).catch(showFlowError);
+  });
+  acts.append(edit, remove);
+  row.append(toggle, words, acts);
+  return row;
+}
+
+async function toggleFlowSchedule(job, toggle) {
+  toggle.disabled = true;
+  try {
+    automations = await invoke("enable_automation", { id: job.id, enabled: !job.enabled });
+    await refreshFlows();
+  } catch (error) {
+    showFlowError(error);
+    toggle.disabled = false;
+  }
+}
+
+/* A new schedule for the Flow in view: the same form every automation is made
+ * in, opened on 「저장된 Flow」 with this one chosen. */
+el("flow-schedule-add").addEventListener("click", () => {
+  const flow = flowBySlug(flowSelected);
+  if (!flow) return;
+  editAutomation(null, {
+    name: flow.name,
+    flow: flow.slug,
+    schedule: { cadence: "daily", time: "09:00", day_of_week: 1, custom: "" },
+  });
+});
 
 function paintFlowVerdict(flow) {
   const badge = el("flow-verdict");
@@ -4518,6 +4648,7 @@ function flowRecipeRow(recipe) {
       name: recipe.name,
       hasVerdict: Boolean(recipe.last),
       automations: recipe.automations ?? [],
+      schedules: recipe.schedules ?? [],
     }).catch(showFlowError);
   });
   acts.append(register, remove);
@@ -4586,9 +4717,13 @@ async function requestFlowDeletion(target) {
   const started = handNow();
   const sentences = [t("flow.deleteBody", "{{name}} 문서를 지웁니다. 되돌릴 수 없습니다.", { name: target.name })];
   if (target.hasVerdict) sentences.push(t("flow.deleteVerdict", "마지막 판정 기록도 함께 지웁니다."));
-  if (target.automations?.length) {
+  // Every job that runs it goes too, the ones switched off as well: each is
+  // named with its schedule so the question says what is being given up.
+  const jobs = (target.schedules ?? []).map(flowScheduleWords);
+  const names = jobs.length ? jobs : (target.automations ?? []);
+  if (names.length) {
     sentences.push(t("flow.deleteAutomations", "이 레시피를 걷는 자동화 {{names}}도 함께 지웁니다.", {
-      names: target.automations.join(", "),
+      names: names.join(", "),
     }));
   }
   const said = await askConfirm({
@@ -4605,6 +4740,8 @@ async function requestFlowDeletion(target) {
     const answer = await invoke("flow_delete", { slug: target.slug }, { hand: flowHand(started) });
     flowData = answer.listing;
     paintFlows();
+    // The jobs that ran it went with it: the 예약 side reads its list again.
+    if (answer.automations?.length) void refreshAutomations();
     const words = [t("flow.deleted", "지웠습니다 — {{name}}", { name: target.name })];
     if (answer.automations?.length) words.push(t("flow.deletedAutomations", "지운 자동화: {{names}}", { names: answer.automations.join(", ") }));
     if (answer.deleted?.ledger) words.push(t("flow.deletedLedger", "송금 기록 파일은 그대로 남아 있습니다."));
@@ -4623,8 +4760,20 @@ el("flow-delete").addEventListener("click", () => {
     name: flow.name,
     hasVerdict: Boolean(flow.last),
     automations: flow.automations ?? [],
+    schedules: flow.schedules ?? [],
   }).catch(showFlowError);
 });
+
+/* One job in the delete question: its name, and in brackets its schedule, that
+ * it is off when it is, and how often it has run. */
+function flowScheduleWords(job) {
+  const held = automationById(job.id);
+  const facts = [];
+  if (held) facts.push(automationScheduleText(held));
+  if (!job.enabled) facts.push(t("auto.off", "꺼짐"));
+  if (held?.runs > 0) facts.push(t("auto.runCount", "런 {{n}}회", { n: held.runs }));
+  return facts.length ? `${job.name} (${facts.join(" · ")})` : job.name;
+}
 
 /* The console submits recipe-run to the existing window dispatcher. */
 async function flowRun() {
@@ -11482,6 +11631,10 @@ let autoRunsRequest = 0;
 let autoRefreshGeneration = 0;
 let autoViewMode = "list";
 let autoAllRuns = [];
+/* Which side of the page is up: the schedules, or the Flows they can run. */
+let autoPage = "schedules";
+/* What the job in the editor runs: a prompt handed to an agent, or a saved Flow. */
+let autoKind = "agent";
 const _calInitial = new Date();
 let autoCalYear = _calInitial.getFullYear();
 let autoCalMonth = _calInitial.getMonth();
@@ -11549,6 +11702,50 @@ function selectedAutomation() {
   return automations.find((row) => row.id === autoSelectedId) ?? null;
 }
 
+function automationById(id) {
+  return automations.find((row) => row.id === id) ?? null;
+}
+
+/* The name of the Flow a job runs, or null for a job that hands its prompt to
+ * an agent. A link to a recipe the roster no longer lists is said by its slug,
+ * never dropped: the job still says what it was pointed at. */
+function automationFlowName(row) {
+  if (!row.flow) return null;
+  return flowBySlug(row.flow)?.name
+    ?? (flowData?.recipes ?? []).find((recipe) => recipe.slug === row.flow)?.name
+    ?? row.flow;
+}
+
+/* The page's two sides. Changing side never drops what the other one had
+ * selected; the Flow side reads its roster each time it is shown, because a
+ * walk or a save elsewhere changes it without telling this page. */
+function setAutoPage(page) {
+  autoPage = page === "flows" ? "flows" : "schedules";
+  paintAutomationDetail();
+  if (autoPage === "flows") void refreshFlows();
+}
+
+function paintAutoPage() {
+  const flows = autoPage === "flows";
+  for (const tab of document.querySelectorAll("[data-auto-page]")) {
+    const on = tab.dataset.autoPage === autoPage;
+    tab.classList.toggle("is-active", on);
+    tab.setAttribute("aria-selected", String(on));
+  }
+  el("auto-flow-page").hidden = !flows;
+  if (flows) {
+    el("auto-list-page").hidden = true;
+    el("auto-detail").hidden = true;
+  }
+  el("auto-page-count-schedules").textContent = automations.length > 0 ? String(automations.length) : "";
+  const flowCount = flowData?.flows?.length ?? 0;
+  el("auto-page-count-flows").textContent = flowCount > 0 ? String(flowCount) : "";
+}
+
+for (const tab of document.querySelectorAll("[data-auto-page]")) {
+  tab.addEventListener("click", () => setAutoPage(tab.dataset.autoPage));
+}
+
 async function refreshAutomations() {
   const generation = ++autoRefreshGeneration;
   autoLoading = true;
@@ -11569,6 +11766,12 @@ async function refreshAutomations() {
   if (autoSelectedId && !selectedAutomation()) autoSelectedId = null;
   paintAutomations();
   paintAutomationDetail();
+  // The Flow side says each job's schedule in this list's words: a roster that
+  // arrived before the list is drawn again now that the words are here.
+  if (flowData) {
+    paintFlowRoster(flowData.flows ?? []);
+    paintFlowDetail(flowBySlug(flowSelected));
+  }
   if (selectedAutomation()) void refreshAutomationRuns();
   void refreshAllAutomationRuns();
 }
@@ -11655,7 +11858,7 @@ function autoVisibleRows() {
     if (autoFilter === "enabled" && !row.enabled) return false;
     if (autoFilter === "paused" && row.enabled) return false;
     if (!query) return true;
-    return [row.name, row.prompt, row.workspace, row.agent && agentName(row.agent)]
+    return [row.name, row.prompt, row.workspace, row.agent && agentName(row.agent), automationFlowName(row)]
       .filter(Boolean)
       .some((word) => String(word).toLocaleLowerCase().includes(query));
   });
@@ -11703,11 +11906,11 @@ function paintAutomations() {
     item.innerHTML =
       '<span class="auto-row-name" role="cell"></span>' +
       '<span class="auto-row-schedule" role="cell"></span>' +
+      '<span class="auto-row-agent" role="cell"></span>' +
       '<span class="auto-row-project" role="cell"></span>' +
       '<span class="auto-row-when" role="cell"></span>' +
       '<span class="auto-row-last" role="cell"></span>' +
       '<button class="auto-row-toggle" type="button" role="switch"></button>' +
-      '<span class="auto-row-agent" role="cell"></span>' +
       '<span class="auto-row-actions" role="cell"></span>';
     item.querySelector(".auto-row-name").textContent = row.name || t("auto.untitled", "이름 없음");
     item.querySelector(".auto-row-schedule").textContent = automationScheduleText(row);
@@ -11720,7 +11923,20 @@ function paintAutomations() {
     runs.hidden = !(row.runs > 0);
     if (!runs.hidden) runs.textContent = t("auto.runCount", "런 {{n}}회", { n: row.runs });
     last.appendChild(runs);
-    item.querySelector(".auto-row-agent").textContent = automationAgentLabel(row);
+    // What the job runs: the Flow by name, or the agent its prompt is handed to.
+    const what = item.querySelector(".auto-row-agent");
+    const flowName = automationFlowName(row);
+    if (flowName === null) {
+      what.textContent = automationAgentLabel(row);
+    } else {
+      const chip = document.createElement("span");
+      chip.className = "auto-flow-chip";
+      chip.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>';
+      const named = document.createElement("span");
+      named.textContent = flowName;
+      chip.append(named);
+      what.replaceChildren(chip);
+    }
     const toggle = item.querySelector(".auto-row-toggle");
     toggle.setAttribute("aria-checked", row.enabled ? "true" : "false");
     toggle.setAttribute("aria-label", row.enabled
@@ -12159,9 +12375,13 @@ function paintAutomationDetail() {
   const row = selectedAutomation();
   el("auto-list-page").hidden = row !== null;
   el("auto-detail").hidden = row === null;
+  paintAutoPage();
   if (!row) return;
   el("auto-detail-name").textContent = row.name || t("auto.untitled", "이름 없음");
-  el("auto-detail-prompt").textContent = row.prompt || t("auto.noPrompt", "프롬프트 없음");
+  const flowName = automationFlowName(row);
+  el("auto-detail-prompt").textContent = flowName === null
+    ? (row.prompt || t("auto.noPrompt", "프롬프트 없음"))
+    : t("auto.runsFlow", "Flow 「{{name}}」 실행", { name: flowName });
   const status = el("auto-detail-status");
   status.textContent = row.enabled ? t("auto.enabled", "활성") : t("auto.paused", "일시정지");
   status.classList.toggle("is-enabled", row.enabled);
@@ -12650,6 +12870,7 @@ function newAutomationDraft(template = null) {
     base_branch: null,
     agent: agentRows[0]?.id ?? null,
     prompt: "",
+    flow: null,
     command: "",
     reuse_session: false,
     close_when_done: false,
@@ -12678,6 +12899,7 @@ function editAutomation(row, template = null) {
   el("auto-command").value = autoDraft.command;
   paintAutoAgents(autoDraft.agent ?? null);
   el("auto-prompt").value = autoDraft.prompt;
+  paintAutoKind(autoDraft.flow ?? null);
   el("auto-precheck").value = autoDraft.precheck;
   el("auto-precheck-timeout").value = String(autoDraft.precheck_timeout_seconds);
   el("auto-grace").value = String(autoDraft.missed_run_grace_minutes);
@@ -12723,6 +12945,9 @@ async function saveAutomation(event) {
     agent: el("auto-agent").value || null,
     command: el("auto-command").value.trim(),
     prompt: el("auto-prompt").value,
+    // The Flow the job runs, or absence: a Flow job's prompt is written by the
+    // backend from this link, so the form sends the link and not the command.
+    flow: autoKind === "flow" ? el("auto-flow").value : null,
     precheck: el("auto-precheck").value.trim(),
     reuse_session: el("auto-mode").value === "existing" && el("auto-reuse").checked,
     precheck_timeout_seconds: Number(el("auto-precheck-timeout").value),
@@ -12736,7 +12961,12 @@ async function saveAutomation(event) {
       custom: el("auto-custom").value.trim(),
     },
   };
-  if (!automation.name || !automation.workspace || !automation.prompt.trim()) {
+  if (automation.flow !== null && !automation.flow) {
+    say(el("auto-error"), () => t("auto.flowRequiredError", "실행할 Flow를 선택하세요."));
+    el("auto-error").hidden = false;
+    return;
+  }
+  if (!automation.name || !automation.workspace || (automation.flow === null && !automation.prompt.trim())) {
     say(el("auto-error"), () => t(
       "auto.requiredError",
       "이름, 워크스페이스와 프롬프트를 모두 입력하세요.",
@@ -12762,11 +12992,71 @@ async function saveAutomation(event) {
     el("auto-error").hidden = false;
     return;
   }
+  // A Flow job made on the Flow side is shown where it was made, under its
+  // Flow; any other job is shown on the 예약 side, selected.
+  if (autoPage === "flows" && automation.flow) {
+    closeAutoForm();
+    paintAutomations();
+    void refreshFlows();
+    return;
+  }
+  autoPage = "schedules";
   autoSelectedId = automation.id;
   closeAutoForm();
   paintAutomations();
   paintAutomationDetail();
   void refreshAutomationRuns();
+}
+
+/* What the job runs. 「저장된 Flow」 shows the Flows to choose from in place of
+ * the prompt; a link to a recipe the roster no longer lists stays on the picker
+ * under its slug, for the reason an agent this build cannot place does — opening
+ * a job to rename it must not re-point it. */
+function paintAutoKind(flow) {
+  autoKind = flow === null ? "agent" : "flow";
+  for (const button of document.querySelectorAll("[data-auto-kind]")) {
+    const on = button.dataset.autoKind === autoKind;
+    button.classList.toggle("is-active", on);
+    button.setAttribute("aria-pressed", String(on));
+  }
+  el("auto-flow-field").hidden = autoKind !== "flow";
+  el("auto-prompt-field").hidden = autoKind === "flow";
+  // The prompt is required only of the kind that sends one.
+  el("auto-prompt").required = autoKind !== "flow";
+  const field = el("auto-flow");
+  field.replaceChildren();
+  const flows = flowData?.flows ?? [];
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = flows.length > 0
+    ? t("auto.flowChoose", "Flow 선택")
+    : t("flow.summaryNone", "아직 Flow가 없습니다.");
+  field.appendChild(blank);
+  let known = false;
+  for (const held of flows) {
+    if (held.slug === flow) known = true;
+    const option = document.createElement("option");
+    option.value = held.slug;
+    option.textContent = held.name;
+    field.appendChild(option);
+  }
+  if (flow && !known) {
+    const option = document.createElement("option");
+    option.value = flow;
+    option.textContent = flow;
+    field.appendChild(option);
+  }
+  field.value = flow ?? "";
+}
+
+for (const button of document.querySelectorAll("[data-auto-kind]")) {
+  button.addEventListener("click", () => {
+    if (button.dataset.autoKind === autoKind) return;
+    // Turning to a Flow starts on the one already chosen, else the first there is.
+    paintAutoKind(button.dataset.autoKind === "flow"
+      ? (el("auto-flow").value || autoDraft?.flow || flowData?.flows?.[0]?.slug || "")
+      : null);
+  });
 }
 
 /* The base-branch field only exists for the mode that reads it — a field the
@@ -13016,11 +13306,19 @@ async function requestAutomationDeletion(automation) {
   if (!skipDeleteAutomationConfirm) {
     const confirmed = await askConfirm({
       title: t("auto.deleteTitle", "자동화 삭제"),
-      body: t(
-        "auto.deleteBody",
-        "{{name}} 자동화와 실행 기록을 삭제합니다. 이전 실행이 만든 워크스페이스는 삭제하지 않습니다.",
-        { name: automation.name },
-      ),
+      body: [
+        t(
+          "auto.deleteBody",
+          "{{name}} 자동화와 실행 기록을 삭제합니다. 이전 실행이 만든 워크스페이스는 삭제하지 않습니다.",
+          { name: automation.name },
+        ),
+        // The Flow it ran is not the job's to take: say that it stays.
+        automationFlowName(automation) === null ? "" : t(
+          "auto.deleteKeepsFlow",
+          "Flow 「{{name}}」은(는) 그대로 남습니다.",
+          { name: automationFlowName(automation) },
+        ),
+      ].filter(Boolean).join(" "),
       remember: t("auto.deleteRemember", "다시 묻지 않기"),
       confirm: t("app.delete", "삭제"),
       deny: t("app.cancel", "취소"),
@@ -13536,6 +13834,8 @@ function setAutoOpen(on) {
     setSpaceOpen(false);
     crossingPages = false;
     refreshAutomations();
+    // The Flows a job can run, and the names the 예약 side says them by.
+    void refreshFlows();
     recordNavVisit("automations");
     void askForTour("automations");
   } else if (!autoView.hidden && !crossingPages && activeWorktreePath) {

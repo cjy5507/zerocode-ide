@@ -29511,10 +29511,15 @@ progress:indeterminate::-webkit-progress-bar {
 .auto-table-head,
 .auto-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1.3fr) minmax(126px, 0.8fr) minmax(130px, 0.9fr) 132px 118px 86px 112px 76px;
+  /* 이름 · 일정 · 실행 · 프로젝트 · 다음 실행 · 최근 실행 · 상태 · 동작. The row's
+   * least width is what its columns' least widths add up to (986px with the
+   * seven gaps, 1010px with its padding), so a 1,360px window with the sidebar
+   * open — a 1,030px table — shows the row whole, the edit button at its end
+   * too; the 1,060px floor before it left that button behind a scroll. */
+  grid-template-columns: minmax(168px, 1.3fr) minmax(126px, 0.8fr) minmax(112px, 0.8fr) minmax(112px, 0.9fr) 132px 118px 86px 76px;
   align-items: center;
   gap: var(--space-2);
-  min-width: 1060px;
+  min-width: 1010px;
 }
 
 .auto-table-head {
@@ -61700,8 +61705,186 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
  * one cell of a selectable row to desktop accessibility clients. */
 .workspace-board-card-content { display: contents; }
 
+/* The 자동화 page's two sides (2026-11-11): the tabs sit beside the title and
+ * wear the detail tabs' own states; a count follows each name in the quiet ink. */
+.auto-pages {
+  margin-left: var(--space-3);
+}
+.auto-page-count {
+  color: var(--ink-mist);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The Flow side. It measures its own width, so a split pane folds the two
+ * columns the way a narrow window does. */
+.auto-flow-page {
+  container: auto-flow / inline-size;
+  min-height: 0;
+  height: 100%;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  overflow-y: auto;
+}
+.auto-flow-page .flow-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(100%, 1120px);
+  margin: 0 auto;
+}
+.flow-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.flow-head-words {
+  min-width: 0;
+}
+.flow-title {
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-heading-14);
+}
+.flow-about {
+  max-width: 72ch;
+  margin: var(--space-1) 0 0;
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+}
+.flow-columns {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+.flow-side {
+  min-width: 0;
+}
+.flow-columns > .flow-detail {
+  min-width: 0;
+  padding: var(--space-4);
+  border: 0;
+  border-radius: var(--radius-edge);
+  box-shadow: var(--shadow-border);
+}
+@container auto-flow (max-width: 720px) {
+  .flow-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* A Flow's schedules: the automations that run it, a row each. */
+.flow-schedules {
+  margin-top: var(--space-4);
+}
+.flow-schedules-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.flow-schedules-title {
+  margin: 0;
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+.flow-schedule-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--space-2);
+  border-radius: var(--radius-edge);
+  box-shadow: var(--shadow-border);
+}
+.flow-schedule-list:empty {
+  display: none;
+}
+.flow-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+.flow-schedule:first-child {
+  border-top: 0;
+}
+.flow-schedule-words {
+  display: grid;
+  flex: 1 1 12rem;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.flow-schedule-name {
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 500;
+  overflow-wrap: break-word;
+}
+.flow-schedule.is-off .flow-schedule-name {
+  color: var(--ink-mist);
+}
+.flow-schedule-meta {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+}
+.flow-schedule-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* What a job runs, in the 예약 list: a Flow is a named chip, an agent plain words. */
+.auto-flow-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+}
+.auto-flow-chip .icon {
+  flex: none;
+  width: var(--space-3);
+  height: var(--space-3);
+}
+.auto-flow-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* What Settings keeps of the Flows: the count on the left, the door to the Flow
+ * side on the right, folding under each other when the pane is narrow. */
+.flow-summary-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.flow-summary-words {
+  min-width: 0;
+}
+.flow-summary-card .settings-subhead-title,
+.flow-summary-card .settings-subhead-desc {
+  margin: 0;
+}
+.flow-summary-card .settings-subhead-desc {
+  margin-top: var(--space-1);
+}
+
+/* The editor's 「실행할 것」: the window's own segment, its two halves side by side. */
+.auto-kind-field .segment {
+  margin-bottom: 0;
+}
+
 /* Flow cards (t-4260): the recipes that are Flows, listed and set here. The
- * roster is a column of selectable rows; the detail below it borrows the
+ * roster is a column of selectable rows; the detail beside it borrows the
  * window's own segment control and pill, so every colour and size is a token. */
 .flow-card .flow-roster {
   display: flex;
@@ -61747,8 +61930,10 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   flex-wrap: wrap;
 }
 .flow-detail-name { margin: 0; font-size: var(--text-md); font-weight: 700; }
-.flow-verdict.is-pass { border-color: color-mix(in srgb, var(--signal-ready) 45%, var(--edge-rule)); color: var(--signal-ready); }
-.flow-verdict.is-fail { border-color: color-mix(in srgb, var(--signal-halt) 45%, var(--edge-rule)); color: var(--signal-halt); }
+/* The words take the signal's ink: on the pill's grey ground the light theme's
+ * plain green reads at 4.47:1, under the 4.5 the page is held to. */
+.flow-verdict.is-pass { border-color: color-mix(in srgb, var(--signal-ready) 45%, var(--edge-rule)); color: var(--signal-ready-ink); }
+.flow-verdict.is-fail { border-color: color-mix(in srgb, var(--signal-halt) 45%, var(--edge-rule)); color: var(--signal-halt-ink); }
 .flow-field {
   display: flex;
   align-items: center;
@@ -61762,6 +61947,9 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   min-width: 5rem;
 }
 .flow-field .flow-seg { margin-bottom: 0; flex: none; }
+/* A grammar word is one word: `verdict-only` does not break at its hyphen and
+ * lose its second half under the segment's fixed height. */
+.flow-seg .segment-btn { padding: 0 var(--space-2); white-space: nowrap; }
 .flow-guarded-note {
   margin: var(--space-2) 0 0;
   font-size: var(--text-xs);

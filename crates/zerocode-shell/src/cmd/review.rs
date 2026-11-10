@@ -329,6 +329,9 @@ pub(crate) fn save_automation_in(
     if Cron::parse(&cron).is_none() {
         return Err(format!("일정을 읽을 수 없습니다: {cron}"));
     }
+    // A Flow job's prompt is the command that walks its recipe, written here so
+    // the record never says one thing in its link and another in its prompt.
+    automation.bind_flow()?;
     automation.validate_for_save()?;
     // Reuse is normalised on the way IN, not only on the way out — Orca forces
     // the same pair at both of its doors. A record that says a per-run
@@ -654,67 +657,96 @@ pub(crate) fn automation_born_worktrees(state: State<'_, AppState>) -> Vec<Strin
 // stays the existing `recipe-run` road (the composer), and scheduling it stays
 // the automations above; the roster only reads how a slug is triggered today.
 
-/// One enabled automation whose prompt walks a recipe by name: which job, and
-/// the cron it does so on.
+/// One automation that runs a recipe: which job, the cron it does so on, and
+/// whether it is switched on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecipeTrigger {
     id: String,
     name: String,
     cron: String,
+    enabled: bool,
 }
 
-/// Which recipe slugs an enabled automation re-runs, and by which jobs — the
-/// roster's `trigger`, read from the automation surface, never a scheduler of
-/// the card's own. An automation whose prompt walks a recipe by name
-/// (`recipe-run --name <name>`) maps that recipe's slug to the job (once, however
-/// often the prompt names it); the roster shows the first job's cron, and
-/// deleting the Flow names every job and takes them with it.
+/// The recipe slugs a prompt walks by name (`recipe-run --name <name>`), each
+/// once however often the prompt says it — how a job written before the
+/// recorded link (`Automation::flow`) is still read. The words are split the way
+/// a command line is, so a quoted name of several words is one name; a prompt
+/// that does not read as a command line (an apostrophe in a sentence) falls back
+/// to its plain words.
+fn prompt_recipe_slugs(prompt: &str) -> Vec<String> {
+    if !prompt.contains("recipe-run") {
+        return Vec::new();
+    }
+    let words = zerocode_core::split_command_line(prompt)
+        .unwrap_or_else(|_| prompt.split_whitespace().map(str::to_string).collect());
+    let mut slugs: Vec<String> = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        let named = word.strip_prefix("--name=").or_else(|| {
+            (word == "--name")
+                .then(|| words.get(at + 1).map(String::as_str))
+                .flatten()
+        });
+        let Some(named) = named else {
+            continue;
+        };
+        let slug = zerocode_core::computer_use::recipe_slug(named.trim_matches(['"', '\'']));
+        if !slug.is_empty() && !slugs.contains(&slug) {
+            slugs.push(slug);
+        }
+    }
+    slugs
+}
+
+/// Which recipe slugs the automations run, and by which jobs — read from the
+/// automation surface, never a scheduler of the Flow page's own. A job's link is
+/// the one its record keeps (`Automation::flow`); a job without one is read from
+/// its prompt. Every job counts, switched on or off: the page lists a paused
+/// schedule as paused, and deleting the Flow names every job and takes them
+/// with it, so none is left pointing at a recipe that is gone.
 fn automation_recipe_triggers(
     automations: &[Automation],
 ) -> std::collections::BTreeMap<String, Vec<RecipeTrigger>> {
     let mut triggers: std::collections::BTreeMap<String, Vec<RecipeTrigger>> =
         std::collections::BTreeMap::new();
-    for automation in automations.iter().filter(|automation| automation.enabled) {
-        if !automation.prompt.contains("recipe-run") {
-            continue;
-        }
+    for automation in automations {
+        let slugs = match automation.flow.as_deref() {
+            Some(flow) => vec![zerocode_core::computer_use::recipe_slug(flow)],
+            None => prompt_recipe_slugs(&automation.prompt),
+        };
         let cron = automation.schedule.to_cron();
-        let words: Vec<&str> = automation.prompt.split_whitespace().collect();
-        for (at, word) in words.iter().enumerate() {
-            let named = word.strip_prefix("--name=").or_else(|| {
-                (*word == "--name")
-                    .then(|| words.get(at + 1).copied())
-                    .flatten()
+        for slug in slugs.into_iter().filter(|slug| !slug.is_empty()) {
+            triggers.entry(slug).or_default().push(RecipeTrigger {
+                id: automation.id.clone(),
+                name: automation.name.clone(),
+                cron: cron.clone(),
+                enabled: automation.enabled,
             });
-            if let Some(named) = named {
-                let slug =
-                    zerocode_core::computer_use::recipe_slug(named.trim_matches(['"', '\'']));
-                if slug.is_empty() {
-                    continue;
-                }
-                let held = triggers.entry(slug).or_default();
-                if !held.iter().any(|job| job.id == automation.id) {
-                    held.push(RecipeTrigger {
-                        id: automation.id.clone(),
-                        name: automation.name.clone(),
-                        cron: cron.clone(),
-                    });
-                }
-            }
         }
     }
     triggers
 }
 
-/// How a slug is re-run today, as the roster draws it.
+/// How a slug is re-run today, as the Flow page draws it: the cron of the first
+/// job that is switched on, and every job that runs it.
 fn flow_trigger_of(
     triggers: &std::collections::BTreeMap<String, Vec<RecipeTrigger>>,
     slug: &str,
 ) -> Option<computer_use::recipes::FlowTrigger> {
     let jobs = triggers.get(slug)?;
     Some(computer_use::recipes::FlowTrigger {
-        cron: jobs.first()?.cron.clone(),
+        cron: jobs
+            .iter()
+            .find(|job| job.enabled)
+            .map(|job| job.cron.clone()),
         automations: jobs.iter().map(|job| job.name.clone()).collect(),
+        jobs: jobs
+            .iter()
+            .map(|job| computer_use::recipes::FlowJob {
+                id: job.id.clone(),
+                name: job.name.clone(),
+                enabled: job.enabled,
+            })
+            .collect(),
     })
 }
 
@@ -868,10 +900,11 @@ mod tests {
         .expect("an automation reads with its defaults")
     }
 
-    /// The roster shows a Flow's trigger from the enabled automations whose
-    /// prompt walks its slug by name, once each however often the prompt says it;
-    /// deleting the Flow takes exactly those — with their run history — and no
-    /// automation that walks another recipe, is switched off, or walks nothing.
+    /// The Flow page lists every automation that runs a slug — by the link its
+    /// record keeps or, for an older job, by the name its prompt walks (once each
+    /// however often the prompt says it, a quoted name of several words too) —
+    /// switched on or off. Deleting the Flow takes exactly those, with their run
+    /// history, and no automation that walks another recipe or walks nothing.
     #[test]
     fn deleting_a_flow_takes_the_automations_that_walk_it_and_no_other() {
         let config = tempfile::tempdir().expect("config root");
@@ -900,6 +933,11 @@ mod tests {
                 job("c", "Other recipe", "recipe-run --name other", true),
                 job("d", "Switched off", "recipe-run --name wallet-qa", false),
                 job("e", "Walks nothing", "summarise the week", true),
+                Automation {
+                    flow: Some("wallet-qa".to_string()),
+                    ..job("f", "Recorded link", "says nothing of the recipe", true)
+                },
+                job("g", "Quoted name", r#"recipe-run --name "Wallet QA""#, true),
             ],
         )
         .expect("automation fixtures");
@@ -909,20 +947,38 @@ mod tests {
             "wallet-qa",
         )
         .expect("the roster shows a trigger");
-        assert_eq!(shown.automations, ["Morning wallet QA", "Twice over"]);
+        let all = [
+            "Morning wallet QA",
+            "Twice over",
+            "Switched off",
+            "Recorded link",
+            "Quoted name",
+        ];
+        assert_eq!(shown.automations, all);
         assert!(
-            !shown.cron.is_empty(),
-            "the roster's chip is the first job's cron"
+            shown.cron.as_deref().is_some_and(|cron| !cron.is_empty()),
+            "the chip is the cron of the first job that is switched on"
+        );
+        assert_eq!(
+            shown
+                .jobs
+                .iter()
+                .map(|job| (job.id.as_str(), job.enabled))
+                .collect::<Vec<_>>(),
+            [
+                ("a", true),
+                ("b", true),
+                ("d", false),
+                ("f", true),
+                ("g", true)
+            ],
+            "each job is listed by its id, with whether it is on"
         );
 
         let (deleted, gone) =
             delete_recipe_and_triggers(config.path(), local.path(), "wallet-qa").expect("deleted");
         assert!(deleted.file.ends_with("wallet-qa.md"), "{deleted:?}");
-        assert_eq!(
-            gone,
-            ["Morning wallet QA", "Twice over"],
-            "the jobs the question named"
-        );
+        assert_eq!(gone, all, "the jobs the question named");
         assert!(!recipes.join("wallet-qa.md").exists());
         assert!(recipes.join("other.md").exists(), "another recipe stays");
         assert_eq!(
@@ -930,8 +986,8 @@ mod tests {
                 .into_iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
-            ["c", "d", "e"],
-            "only the jobs the roster showed went"
+            ["c", "e"],
+            "only the jobs the page listed went"
         );
 
         // The next recipe has its own job and goes with it; a slug that is no slug is
@@ -947,7 +1003,7 @@ mod tests {
                 .into_iter()
                 .map(|row| row.id)
                 .collect::<Vec<_>>(),
-            ["d", "e"],
+            ["e"],
             "a refused delete takes no automation"
         );
     }

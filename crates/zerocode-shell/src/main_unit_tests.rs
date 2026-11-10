@@ -14923,6 +14923,7 @@ fn deleting_an_automation_keeps_other_jobs_and_generated_worktrees() {
         missed_run_grace_minutes: 60,
         last_run_at: None,
         armed_at: None,
+        flow: None,
     };
     let run = |id: &str, automation_id: &str, made_worktree: Option<String>| AutomationRun {
         id: id.to_string(),
@@ -15006,6 +15007,7 @@ fn concurrent_automation_mutations_merge_and_a_delete_tombstones_stale_runs() {
         missed_run_grace_minutes: 60,
         last_run_at: None,
         armed_at: None,
+        flow: None,
     };
     let run = |suffix: &str, minute: i64| AutomationRun {
         id: format!("{id}-{suffix}"),
@@ -15165,6 +15167,7 @@ fn nightly_job(enabled: bool, last_run_at: Option<i64>) -> Automation {
         missed_run_grace_minutes: 60,
         last_run_at,
         armed_at: None,
+        flow: None,
     }
 }
 

@@ -109,6 +109,7 @@ fn weekly_review_job(vault: &Path) -> Automation {
         close_when_done: true,
         last_run_at: None,
         armed_at: None,
+        flow: None,
     }
 }
 

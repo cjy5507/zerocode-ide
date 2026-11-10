@@ -62,6 +62,8 @@ window.addEventListener("flow:report", ({ detail: payload }) => {
 
 function openFlowConsole() {
   setSettingsOpen(false);
+  // The console stands on the stage, which the 자동화 page covers.
+  setAutoOpen(false);
   el("stage").classList.add("has-flow-console");
   el("flow-console").hidden = false;
   const mirrors = flowMirrors();

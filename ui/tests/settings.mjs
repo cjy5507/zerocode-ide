@@ -2814,6 +2814,9 @@ class StatefulBackend {
         }
         return clone(this.automations);
       }
+      case "delete_automation":
+        this.automations = this.automations.filter((held) => held.id !== args.id);
+        return clone(this.automations);
       case "list_automation_runs":
         // Newest first, as the backend answers: it stores oldest-first and
         // reverses on the way out.
@@ -2822,7 +2825,18 @@ class StatefulBackend {
       case "reveal_run_evidence": return null;
       // The Flow roster, and the setter that rewrites a Flow's two sections and
       // answers the fresh roster — the pattern `save_automation` uses.
-      case "flow_list": return clone(this.flows);
+      // As the backend does, a Flow lists the automations whose record links
+      // its slug (`flow`), switched on or off.
+      case "flow_list": {
+        const listing = clone(this.flows);
+        for (const flow of listing.flows) {
+          const jobs = this.automations.filter((held) => held.flow === flow.slug);
+          if (jobs.length > 0) {
+            flow.schedules = jobs.map((held) => ({ id: held.id, name: held.name, enabled: held.enabled !== false }));
+          }
+        }
+        return listing;
+      }
       case "flow_set": {
         const flow = this.flows.flows.find((row) => row.slug === args.slug);
         if (!flow) throw new Error(`unknown flow: ${args.slug}`);
@@ -4129,6 +4143,24 @@ function nativeSourceInspection(snapshot, { inspectionId = "fixture-native-inspe
   };
 }
 
+/* The Flow side of the 자동화 page, where the Flow card stands since it left
+ * Settings (2026-11-11). Opening the page reads the roster; the side is turned
+ * back before the page closes, so the next test meets the page as it first shows. */
+async function openFlowSide(page) {
+  await page.evaluate(() => {
+    setAutoOpen(true);
+    setAutoPage("flows");
+  });
+  await page.waitForSelector("#auto-flow-page:not([hidden])");
+}
+
+async function closeFlowSide(page) {
+  await page.evaluate(() => {
+    setAutoPage("schedules");
+    setAutoOpen(false);
+  });
+}
+
 async function openSettings(page, pane = null) {
   await page.evaluate((wanted) => {
     setSettingsOpen(true);
@@ -4853,7 +4885,7 @@ await test("the_flow_card_draws_policy_and_evidence_from_the_core_enums_and_says
     },
   ];
   const from = backend.calls.length;
-  await openSettings(pageA, "computer-use");
+  await openFlowSide(pageA);
   await backend.waitForCall("A", "flow_list", from);
   await renderSettled(pageA);
 
@@ -4916,9 +4948,221 @@ await test("the_flow_card_draws_policy_and_evidence_from_the_core_enums_and_says
   });
 
   backend.flows.flows = [];
-  // Leave Settings closed, as the next test's arrival refresh expects.
-  await pageA.evaluate(() => setSettingsOpen(false));
+  // Leave the page closed, as the next test's arrival refresh expects.
+  await closeFlowSide(pageA);
   return `policy/evidence from the core enums; card first paint over 50 Flows median ${paintMs.toFixed(2)}ms`;
+});
+
+// A Flow's schedules (2026-11-11): the automations whose record links the Flow
+// stand under it on the Flow side — the ones switched off too — each with its
+// switch; the delete question names them with their schedules; a new one is made
+// in the form every automation is made in, opened on 「저장된 Flow」; the 예약
+// side names the Flow a job runs; and Settings keeps a summary and the door here.
+await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", async () => {
+  const job = (id, name, extra) => ({
+    id,
+    name,
+    enabled: true,
+    workspace: BOOT_BASE.project_root,
+    workspace_mode: "existing",
+    base_branch: null,
+    agent: "codex",
+    prompt: "Run the Flow.",
+    command: "",
+    reuse_session: false,
+    close_when_done: false,
+    evidence: "prompt",
+    leaves_evidence: false,
+    schedule: { cadence: "daily", time: "09:30", day_of_week: 1, custom: "" },
+    precheck: "",
+    precheck_timeout_seconds: 60,
+    missed_run_grace_minutes: 60,
+    last_run_at: null,
+    next_run_at: 29_001_440,
+    runs: 0,
+    ...extra,
+  });
+  backend.flows.flows = [{
+    slug: "wallet-qa",
+    name: "Wallet QA",
+    policy: "dry",
+    evidence: "full",
+    fingerprint: { apps: [], hosts: ["shop.example.com"] },
+    checks: { n: 3, required: 2 },
+    last: { at: 5000, pass: true, dir: "/s/1" },
+    file: "/r/wallet-qa.md",
+  }];
+  backend.flows.recipes = [];
+  backend.automations = [
+    job("job-on", "Morning wallet QA", { flow: "wallet-qa", runs: 14 }),
+    job("job-off", "Night wallet QA", {
+      flow: "wallet-qa",
+      enabled: false,
+      schedule: { cadence: "daily", time: "23:00", day_of_week: 1, custom: "" },
+    }),
+    job("job-plain", "Repo audit", {}),
+  ];
+  try {
+    let from = backend.calls.length;
+    await openFlowSide(pageA);
+    await backend.waitForCall("A", "flow_list", from);
+    await backend.waitForCall("A", "list_automations", from);
+    await setQualityLocale(pageA, "en");
+    await pageA.waitForFunction(
+      () => document.querySelectorAll("#flow-schedule-list .flow-schedule").length === 2
+        && document.querySelector("#flow-schedule-list .flow-schedule-meta").textContent.includes("09:30"),
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+
+    // Both jobs stand under the Flow, the paused one marked as off; the tabs
+    // count both sides.
+    const rows = await pageA.$$eval("#flow-schedule-list .flow-schedule", (nodes) => nodes.map((node) => ({
+      id: node.dataset.id,
+      on: node.querySelector('[role="switch"]').getAttribute("aria-checked"),
+      label: node.querySelector('[role="switch"]').getAttribute("aria-label"),
+      words: node.querySelector(".flow-schedule-words").textContent,
+      off: node.classList.contains("is-off"),
+    })));
+    assertEqual(
+      rows.map((row) => [row.id, row.on, row.off]),
+      [["job-on", "true", false], ["job-off", "false", true]],
+      "the Flow did not list the jobs that run it, or lost which one is off",
+    );
+    assert(rows[0].label.includes("Morning wallet QA"), "a schedule's switch is not named by its job", rows);
+    const offWord = await pageA.evaluate(() => t("auto.off", ""));
+    assert(offWord && rows[1].words.includes(offWord), "a paused schedule did not say it is off", rows);
+    assert(await pageA.locator("#flow-schedules-none").isHidden(), "a Flow with schedules still said it has none");
+    assertEqual(await pageA.locator("#auto-page-count-flows").textContent(), "1", "the Flow tab miscounted the Flows");
+    assertEqual(await pageA.locator("#auto-page-count-schedules").textContent(), "3", "the schedule tab miscounted the automations");
+
+    // Deleting the Flow asks once and names every job that goes with it — the
+    // paused one too — each with its schedule, and how often it has run.
+    await pageA.click("#flow-delete");
+    await pageA.waitForSelector("#ask-scrim:not([hidden])");
+    const asked = await pageA.evaluate(() => ({
+      body: document.getElementById("ask-body").textContent,
+      runs: t("auto.runCount", "", { n: 14 }),
+    }));
+    for (const word of ["Morning wallet QA", "Night wallet QA", "09:30", "23:00", offWord, asked.runs]) {
+      assert(word && asked.body.includes(word), `the question did not say: ${word}`, asked);
+    }
+    const kept = backend.count("A", "flow_delete");
+    await pageA.click("#ask-no");
+    await renderSettled(pageA);
+    assertEqual(backend.count("A", "flow_delete"), kept, "keeping the Flow still deleted it");
+
+    // The switch is the job's own: it goes through enable_automation, and the
+    // row follows what the backend answered.
+    from = backend.calls.length;
+    await pageA.click('.flow-schedule[data-id="job-off"] [role="switch"]');
+    assertEqual(
+      (await backend.waitForCall("A", "enable_automation", from)).args,
+      { id: "job-off", enabled: true },
+      "the switch named another job or another state",
+    );
+    await pageA.waitForFunction(
+      () => document.querySelector('.flow-schedule[data-id="job-off"] [role="switch"]')?.getAttribute("aria-checked") === "true",
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+
+    // 예약 추가 opens the same form on 「저장된 Flow」 with this Flow chosen and
+    // no prompt to write; saving sends the link, never a command of the form's.
+    await pageA.click("#flow-schedule-add");
+    await pageA.waitForSelector("#auto-editor-scrim:not([hidden])");
+    assertEqual(
+      await pageA.evaluate(() => ({
+        kind: document.querySelector("[data-auto-kind].is-active").dataset.autoKind,
+        pressed: document.querySelector('[data-auto-kind="flow"]').getAttribute("aria-pressed"),
+        flow: document.getElementById("auto-flow").value,
+        flowHidden: document.getElementById("auto-flow-field").hidden,
+        promptHidden: document.getElementById("auto-prompt-field").hidden,
+        name: document.getElementById("auto-name").value,
+      })),
+      { kind: "flow", pressed: "true", flow: "wallet-qa", flowHidden: false, promptHidden: true, name: "Wallet QA" },
+      "the form did not open on this Flow",
+    );
+    from = backend.calls.length;
+    await pageA.click("#auto-save");
+    const saved = await backend.waitForCall("A", "save_automation", from);
+    assertEqual(
+      [saved.args.automation.flow, saved.args.automation.prompt],
+      ["wallet-qa", ""],
+      "the form sent a command of its own instead of the link",
+    );
+    await pageA.waitForFunction(
+      () => document.querySelectorAll("#flow-schedule-list .flow-schedule").length === 3,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    assert(await pageA.locator("#auto-flow-page").isVisible(), "saving a Flow job left the Flow side");
+
+    // Turning the form to an agent brings the prompt back and drops the link.
+    await pageA.click('.flow-schedule[data-id="job-on"] [data-flow-schedule="edit"]');
+    await pageA.waitForSelector("#auto-editor-scrim:not([hidden])");
+    assertEqual(await pageA.locator("#auto-flow").inputValue(), "wallet-qa", "editing a Flow job lost its Flow");
+    await pageA.click('[data-auto-kind="agent"]');
+    assertEqual(
+      await pageA.evaluate(() => [
+        document.getElementById("auto-flow-field").hidden,
+        document.getElementById("auto-prompt-field").hidden,
+        document.getElementById("auto-prompt").required,
+      ]),
+      [true, false, true],
+      "the agent kind did not bring the prompt back",
+    );
+    await pageA.click("#auto-cancel");
+
+    // The 예약 side names the Flow a job runs, and the agent of one that runs none.
+    await pageA.evaluate(() => setAutoPage("schedules"));
+    await renderSettled(pageA);
+    const listed = await pageA.$$eval("#auto-list .auto-row", (nodes) => nodes.map((node) => [
+      node.querySelector(".auto-row-name").textContent,
+      node.querySelector(".auto-flow-chip")?.textContent ?? null,
+    ]));
+    assertEqual(
+      listed.filter(([name]) => name === "Morning wallet QA" || name === "Repo audit"),
+      [["Morning wallet QA", "Wallet QA"], ["Repo audit", null]],
+      "the schedule list did not say what each job runs",
+    );
+    await closeFlowSide(pageA);
+
+    // Settings keeps the count and the door to the Flow side.
+    from = backend.calls.length;
+    await openSettings(pageA, "computer-use");
+    await backend.waitForCall("A", "flow_list", from);
+    // Opening Settings reads the stored language again: back to English, whose
+    // catalog the sentence is read from.
+    await setQualityLocale(pageA, "en");
+    const summary = await pageA.evaluate(() => t("flow.summary", "", { flows: 1, schedules: 3 }));
+    assert(summary, "the summary sentence is not in the catalog");
+    await pageA.waitForFunction(
+      (words) => document.getElementById("flow-summary").textContent === words,
+      summary,
+      { timeout: UI_TIMEOUT },
+    );
+    assertEqual(await pageA.locator("#flow-card").isVisible(), false, "the Flow card is still drawn in Settings");
+    await pageA.click("#flow-open-page");
+    assert(await pageA.locator("#settings-view").isHidden(), "the door left Settings open over the page");
+    assert(await pageA.locator("#auto-flow-page").isVisible(), "the door did not open the Flow side");
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(pageA, theme);
+      assertEqual(await axeViolations(pageA, AxeBuilder, "#flow-card"), [], `en/${theme} Flow schedules accessibility`);
+    }
+    return "schedules listed with the paused one, switched, added through the form, named by the delete";
+  } finally {
+    await setQualityLocale(pageA, "ko");
+    await setQualityTheme(pageA, "dark");
+    backend.flows.flows = [];
+    backend.flows.recipes = [];
+    backend.automations = [];
+    await pageA.evaluate(() => {
+      closeAutoForm();
+      setSettingsOpen(false);
+    });
+    await closeFlowSide(pageA);
+  }
 });
 
 // The Flow card's two hands (t-93871): taking a Flow — or a recipe of the second
@@ -4958,7 +5202,7 @@ await test("the_flow_card_deletes_with_one_question_and_registers_a_plain_recipe
     { slug: "half-written", name: "Half written", steps: 0, problem: "step 2 (2.): its code span has no words", file: "/r/half-written.md" },
   ];
   let from = backend.calls.length;
-  await openSettings(pageA, "computer-use");
+  await openFlowSide(pageA);
   await backend.waitForCall("A", "flow_list", from);
   // English first: the sentences the question and the notices are built from are
   // read back from the catalog, which Korean (the page's own words) has none of.
@@ -5097,7 +5341,7 @@ await test("the_flow_card_deletes_with_one_question_and_registers_a_plain_recipe
 
   backend.flows.flows = [];
   backend.flows.recipes = [];
-  await pageA.evaluate(() => setSettingsOpen(false));
+  await closeFlowSide(pageA);
   return "delete asks once and names the document, the verdict and the automations · keep runs nothing · a plain recipe deletes the same way · register moves a recipe onto the roster and asks a starting check to be rewritten · five languages × two themes pass axe";
 });
 

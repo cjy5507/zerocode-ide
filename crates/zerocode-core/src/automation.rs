@@ -254,6 +254,12 @@ pub struct Automation {
     /// the person asks: an open pane is also how a run is supervised.
     #[serde(default)]
     pub close_when_done: bool,
+    /// The Flow this job runs, by its recipe slug: the recorded link the Flow
+    /// page lists a recipe's schedules from, and the one a delete names. `None`
+    /// is a job that hands its own prompt to an agent. A record written before
+    /// the field reads as `None` and runs the prompt it always ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<String>,
     /// Local minutes-since-epoch of the last run, or `None` if never.
     #[serde(default)]
     pub last_run_at: Option<i64>,
@@ -283,7 +289,40 @@ const fn grace_minutes() -> u32 {
 /// spring does not walk a year of minutes on the tick that wakes it.
 pub const MISSED_LOOKBACK_MINUTES: i64 = 31 * 24 * 60;
 
+/// What a job that runs a Flow hands its agent: the one command that walks the
+/// recipe, and what to say afterwards. The save door writes it
+/// ([`Automation::bind_flow`]), so a record's prompt never says something its
+/// link does not.
+#[must_use]
+pub fn flow_prompt(slug: &str) -> String {
+    format!(
+        "Run `{} recipe-run --name {slug} --json` once. Report whether the Flow passed; \
+         if it stopped, say at which step and why. Do nothing else.",
+        crate::computer_use::COMPUTER_CLI
+    )
+}
+
 impl Automation {
+    /// Make a Flow job's record say one thing: the link is the recipe store's
+    /// own spelling of the slug, and the prompt is the command that walks it.
+    /// A job with no Flow is left exactly as it was.
+    ///
+    /// # Errors
+    ///
+    /// When the link names nothing a recipe could be called.
+    pub fn bind_flow(&mut self) -> Result<(), String> {
+        let Some(named) = self.flow.as_deref() else {
+            return Ok(());
+        };
+        let slug = crate::computer_use::recipe_slug(named);
+        if slug.is_empty() {
+            return Err("실행할 Flow를 선택해 주세요".to_string());
+        }
+        self.prompt = flow_prompt(&slug);
+        self.flow = Some(slug);
+        Ok(())
+    }
+
     /// Refuse a schedule that cannot run where and how it says it will.
     ///
     /// Validation belongs beside the record rather than in one renderer: the
@@ -1493,6 +1532,55 @@ mod tests {
         );
     }
 
+    /// A record written before the Flow link reads as it was: no link, its
+    /// own prompt. It is written back without the key, so a build from before
+    /// the field still reads the file a newer one saved.
+    #[test]
+    fn a_record_from_before_the_flow_link_reads_and_writes_as_it_was() {
+        let old = serde_json::json!({
+            "id": "a1",
+            "name": "nightly",
+            "workspace": "/repo",
+            "prompt": "tidy up",
+        });
+        let job: Automation = serde_json::from_value(old).expect("an older record still reads");
+        assert_eq!(job.flow, None);
+        assert_eq!(job.prompt, "tidy up");
+        let written = serde_json::to_value(&job).expect("a record serialises");
+        assert!(written.get("flow").is_none(), "{written}");
+    }
+
+    /// A Flow job's record says one thing: the store's spelling of the slug and
+    /// the prompt that walks it. A job without a Flow keeps its own prompt, and
+    /// a link that names nothing is refused before it is stored.
+    #[test]
+    fn a_flow_job_is_bound_to_its_slug_and_the_prompt_that_walks_it() {
+        let mut job = Automation {
+            flow: Some("Wallet QA".into()),
+            prompt: String::new(),
+            ..nightly()
+        };
+        job.bind_flow().expect("a named Flow binds");
+        assert_eq!(job.flow.as_deref(), Some("wallet-qa"));
+        assert!(
+            job.prompt.contains("recipe-run --name wallet-qa"),
+            "{}",
+            job.prompt
+        );
+        assert_eq!(job.validate_for_save(), Ok(()));
+
+        let mut plain = nightly();
+        plain.bind_flow().expect("no Flow is no change");
+        assert_eq!(plain.prompt, "tidy up");
+        assert_eq!(plain.flow, None);
+
+        let mut blank = Automation {
+            flow: Some(" -- ".into()),
+            ..nightly()
+        };
+        assert!(blank.bind_flow().is_err());
+    }
+
     fn nightly() -> Automation {
         Automation {
             id: "a1".into(),
@@ -1507,6 +1595,7 @@ mod tests {
             reuse_session: false,
             evidence: EvidencePolicy::Prompt,
             close_when_done: false,
+            flow: None,
             schedule: Schedule {
                 cadence: Cadence::Daily,
                 time: "03:00".into(),

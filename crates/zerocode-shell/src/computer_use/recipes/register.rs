@@ -461,7 +461,7 @@ fn condition_of(
 mod tests {
     use super::*;
     use crate::computer_use::evidence::SESSIONS_DIR;
-    use crate::computer_use::recipes::{FlowTrigger, RECIPES_DIR, flow_list};
+    use crate::computer_use::recipes::{FlowJob, FlowTrigger, RECIPES_DIR, flow_list};
     use zerocode_core::computer_flow::{FLOW_HEADING, FLOW_HEADING_CHECKS};
     use zerocode_core::computer_recipe::RECIPE_HEADING_STEPS;
 
@@ -736,8 +736,13 @@ mod tests {
 
         let listing = flow_list(root.path(), |slug| {
             (slug == "nightly-probe").then(|| FlowTrigger {
-                cron: "0 3 * * *".to_string(),
+                cron: Some("0 3 * * *".to_string()),
                 automations: vec!["Night job".to_string()],
+                jobs: vec![FlowJob {
+                    id: "night".to_string(),
+                    name: "Night job".to_string(),
+                    enabled: false,
+                }],
             })
         });
         let row = |slug: &str| {
@@ -748,6 +753,15 @@ mod tests {
                 .unwrap_or_else(|| panic!("{slug} must be on the second list"))
         };
         assert_eq!(row("nightly-probe").automations, ["Night job"]);
+        assert_eq!(
+            row("nightly-probe")
+                .schedules
+                .iter()
+                .map(|job| (job.id.as_str(), job.enabled))
+                .collect::<Vec<_>>(),
+            [("night", false)],
+            "a paused job is still listed under the recipe it runs"
+        );
         assert_eq!(
             row("nightly-probe").last.as_ref().map(|last| last.at),
             Some(5_000),

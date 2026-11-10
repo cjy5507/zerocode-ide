@@ -542,6 +542,10 @@ pub struct FlowRow {
     /// takes along, said in the question before they go. Absent when none does.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub automations: Vec<String>,
+    /// The same automations as the page lists them under the Flow: each by its
+    /// id, with whether it is on. Absent when nothing schedules it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<FlowJob>,
     /// Present (`true`) only for a money Flow (`guarded`): the roster's one
     /// read of the policy, so the card need not re-encode which policy is
     /// money. The refusal a money Flow shows rides `FlowListing::policies`.
@@ -580,12 +584,23 @@ pub struct FlowLast {
 }
 
 /// How the automation surface re-runs a slug today: the cron of the first job
-/// that walks it, and the name of every such job. What the roster's chip reads,
-/// and what deleting the Flow names before it takes them.
+/// that is switched on (none when every job is paused), the name of every job,
+/// and the jobs themselves. What the page lists under a Flow, and what deleting
+/// the Flow names before it takes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowTrigger {
-    pub cron: String,
+    pub cron: Option<String>,
     pub automations: Vec<String>,
+    pub jobs: Vec<FlowJob>,
+}
+
+/// One automation that runs a recipe, as the page lists it: the job's id — what
+/// it is switched, edited and deleted by — its name, and whether it is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlowJob {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
 }
 
 /// A recipe document that is not a Flow, as the card's second list reads it —
@@ -603,6 +618,9 @@ pub struct RecipeRow {
     /// deleting the recipe takes them too, so the question names them here as well.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub automations: Vec<String>,
+    /// The same automations by id, as a Flow's row lists them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<FlowJob>,
     /// The last run of its slug, when it was ever walked: deleting the recipe
     /// forgets that run's verdict, and the question says so.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -742,14 +760,16 @@ fn recipe_row(
         Ok(lines) => (lines.len(), None),
         Err(why) => (0, Some(why)),
     };
+    let (automations, schedules) = trigger_of(slug)
+        .map(|held| (held.automations, held.jobs))
+        .unwrap_or_default();
     RecipeRow {
         slug: slug.to_string(),
         name: recipe_title(text).unwrap_or_else(|| slug.to_string()),
         steps,
         problem: flow_problem.or(own_problem),
-        automations: trigger_of(slug)
-            .map(|held| held.automations)
-            .unwrap_or_default(),
+        automations,
+        schedules,
         last: last.get(slug).cloned(),
         file: file.to_string(),
     }
@@ -765,7 +785,9 @@ fn flow_row(
     trigger_of: &impl Fn(&str) -> Option<FlowTrigger>,
 ) -> FlowRow {
     let required = spec.checks.iter().filter(|check| check.required).count();
-    let trigger = trigger_of(&slug);
+    let (trigger, automations, schedules) = trigger_of(&slug)
+        .map(|held| (held.cron, held.automations, held.jobs))
+        .unwrap_or_default();
     FlowRow {
         name: recipe_title(text).unwrap_or_else(|| slug.clone()),
         policy: spec.policy.as_str(),
@@ -778,8 +800,9 @@ fn flow_row(
             n: spec.checks.len(),
             required,
         },
-        trigger: trigger.as_ref().map(|held| held.cron.clone()),
-        automations: trigger.map(|held| held.automations).unwrap_or_default(),
+        trigger,
+        automations,
+        schedules,
         money: (spec.policy == Policy::Guarded).then_some(true),
         last: last.get(&slug).cloned(),
         file,
