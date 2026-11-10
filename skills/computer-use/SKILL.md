@@ -117,6 +117,7 @@ command every other agent runs.
 | A procedure that worked before | `zerocode-computer recipe-run --name <n>` | `recipe_run` |
 | Only the goal: the next press depends on what the screen shows | `zerocode-computer walk --goal "<one sentence>" (--app <a> \| --pane <browser-N> \| --platform ios\|android --device <id>) [--until "<text on screen when it worked>"] [--steps N]` | `walk` |
 | A game or live screen that must be answered faster than a turn | `zerocode-computer reflex-start --flow <file> --display N --seconds N` | none — the CLI only |
+| Cells of a spreadsheet to fill or read | `zerocode-computer sheet-write --path <file.xlsx\|file.csv> --cells '{…}'` (or `--app Numbers\|Excel --document <name>`) | none — the CLI only |
 
 A `walk` runs the window's own loop — look at the screen's numbered controls,
 choose, act, check — in one call, up to `--steps` steps (30 by default, 40
@@ -379,6 +380,34 @@ zerocode-computer evidence --json                                    # the evide
 zerocode-computer stop | resume                                      # the person's hand on you; resume is theirs after their stop
 zerocode-computer capabilities --json | permissions --json           # the first calls of a run
 ```
+
+### Tables — never typed on the screen
+
+A spreadsheet's cells are not keys and clicks. Background keys wrote 0 of 12
+cells in LibreOffice Calc and 6 of 12 in Numbers (Hangul arrived as loose
+jamo, a formula naming cells could not be typed); `sheet-write` wrote 12 of 12
+in under 2 s while the person's front app never changed. So write a table with
+`sheet-write` and check it with `sheet-read`: the file road for an `.xlsx` or
+`.csv` in the home folder (made when missing; an existing workbook keeps its
+other cells, sheets and formats), or the app road for a document already open
+in Numbers or Excel on macOS (the app is never started or brought forward, and
+the answer's `foreground.unchanged` says the front app stayed). `"=…"` is a
+formula, `"'=…"` keeps such words text, `null` empties a cell. Read
+`verified` and `mismatched` in the answer: each written cell is read back.
+In a file, a write clears every formula's stored result, so the app that
+opens it computes them again — until then `sheet-read --path` answers a
+formula as `"value": null` with its `formula`; through the app it answers the
+computed value.
+
+```text
+zerocode-computer sheet-write --path ~/Documents/order.xlsx --sheet Order --cells '{"A1":"item","B1":"qty","A2":"apple","B2":3,"A3":"pear","B3":2,"B4":"=SUM(B2:B3)"}' --json
+zerocode-computer sheet-read --path ~/Documents/order.xlsx --range A1:B4 --json
+zerocode-computer sheet-write --app Numbers --document "Budget" [--sheet <name>] [--table <name>] --cells '{"C2":1200}' --json
+```
+
+A file that an app has open (its lock file beside it) is refused: write it
+through `--app`, or close it there first. Excel's app road is built but has
+not been measured on a Mac with Excel.
 
 ### Batch, hearing, QA — `batch-hearing-qa.md`
 

@@ -7282,6 +7282,13 @@ pub(super) fn answer_computer_command_with(
                 answer
             },
         )
+    } else if matches!(
+        command.method,
+        ComputerMethod::SheetWrite | ComputerMethod::SheetRead
+    ) {
+        // A table is the window's too: its file, or its app's own script —
+        // never the helper's keys or pointer (t-102013).
+        computer_use::sheet::answer(&command, workspace)
     } else if command.method == ComputerMethod::Run {
         // A run is the window's to answer too: a program, no pane, its head of
         // output as the result — the terminal a person would have opened.

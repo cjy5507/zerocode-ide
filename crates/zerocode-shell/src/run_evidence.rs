@@ -185,6 +185,10 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
             "stop" | "resume" | "wait-for" | "sound-wait" | "handoff" | "wait" | "listen-start"
             | "listen-stop" | "mouse-move",
         ) => Some(false),
+        // A table written or read by its file or its app's script leaves a
+        // line (its cells' values replaced by their lengths, its file by its
+        // name); nothing moved on a screen, so nothing is framed.
+        ("computer", "sheet-write" | "sheet-read") => Some(false),
         _ => None,
     }
 }

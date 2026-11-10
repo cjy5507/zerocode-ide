@@ -58,6 +58,7 @@ pub(crate) mod screenshot_png;
 pub(crate) mod self_surface;
 pub mod sequence;
 pub(crate) mod share;
+pub(crate) mod sheet;
 pub mod state;
 pub(crate) mod surface_execution;
 #[cfg(any(target_os = "windows", test))]

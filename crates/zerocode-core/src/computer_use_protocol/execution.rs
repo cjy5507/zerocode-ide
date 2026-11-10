@@ -117,7 +117,10 @@ fn out_of_any_window(method: ComputerMethod) -> bool {
             | ComputerMethod::RecipeRun
             | ComputerMethod::Walk
     );
-    method.acts() && !in_its_window(method) && !composite
+    // A table written to its file or through its app's script takes no
+    // window, pointer, key or front app at all (t-102013).
+    let deskless = method == ComputerMethod::SheetWrite;
+    method.acts() && !in_its_window(method) && !composite && !deskless
 }
 
 fn takes_the_desk(method: ComputerMethod) -> bool {

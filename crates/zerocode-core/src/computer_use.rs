@@ -41,11 +41,14 @@ pub const CWD_HEADER: &str = "x-zerocode-cwd";
 
 /// The Computer Use verbs whose request says where its caller stands
 /// ([`CWD_HEADER`]): the ones the window judges by that folder. A recipe walk
-/// that stops is judged for the workspace it was asked from; no other verb
+/// that stops is judged for the workspace it was asked from, and a sheet
+/// file's relative `--path` starts there, as a person's would; no other verb
 /// reads the folder, so no other call spends two processes spelling it.
 pub const CWD_VERBS: &[&str] = &[
     ComputerMethod::RecipeRun.verb_name(),
     ComputerMethod::Walk.verb_name(),
+    ComputerMethod::SheetWrite.verb_name(),
+    ComputerMethod::SheetRead.verb_name(),
 ];
 
 /// [`CWD_HEADER`]'s value for `cwd` — its UTF-8 bytes as lowercase hex, the
@@ -1863,6 +1866,10 @@ pub fn walked_result_unfinished(method: ComputerMethod, result: &Value) -> Optio
         ComputerMethod::TypeText => {
             crate::computer_use_protocol::typed_check::stop_sentence(result)
         }
+        ComputerMethod::SheetWrite if says("verified", false) => Some(format!(
+            "cells did not read back as written: {}",
+            result.get("mismatched").unwrap_or(&Value::Null)
+        )),
         _ => None,
     }
 }
@@ -2397,6 +2404,13 @@ pub enum ComputerMethod {
     /// the next plan. Answers once the first plan runs; the run holds the
     /// hand until its deadline, a stop or the decision ends it.
     ReflexAuto,
+    /// A table's cells without the pointer, the keys or the front app
+    /// (t-102013) — the window's: a `.xlsx` or `.csv` file written and read
+    /// directly, or an open Numbers or Excel document through the app's own
+    /// script (`computer_sheet`). Background keys wrote 0 of 12 cells in
+    /// Calc and 6 of 12 in Numbers; these roads wrote 12 of 12.
+    SheetWrite,
+    SheetRead,
 }
 
 /// The provider methods the Windows provider answers today
@@ -2525,6 +2539,8 @@ impl ComputerMethod {
         Self::ReflexStatus,
         Self::ReflexStop,
         Self::ReflexAuto,
+        Self::SheetWrite,
+        Self::SheetRead,
     ];
 
     /// Where the verb stands on Windows, by the two tables.
@@ -2590,6 +2606,7 @@ impl ComputerMethod {
             Self::SoundRead => Some("soundRead"),
             Self::SoundWait | Self::Watch | Self::Batch | Self::Parallel | Self::Walk => None,
             Self::ReflexStart | Self::ReflexStatus | Self::ReflexStop | Self::ReflexAuto => None,
+            Self::SheetWrite | Self::SheetRead => None,
         }
     }
 
@@ -2664,6 +2681,8 @@ impl ComputerMethod {
             Self::ReflexStatus => "reflex-status",
             Self::ReflexStop => "reflex-stop",
             Self::ReflexAuto => "reflex-auto",
+            Self::SheetWrite => "sheet-write",
+            Self::SheetRead => "sheet-read",
         }
     }
 
@@ -2780,6 +2799,7 @@ impl ComputerMethod {
                 | Self::Walk
                 | Self::ReflexStart
                 | Self::ReflexAuto
+                | Self::SheetWrite
         )
     }
 
@@ -2895,7 +2915,8 @@ impl ComputerMethod {
         }
     }
 
-    /// A verb that works on the whole desktop names no app.
+    /// A verb that works on the whole desktop names no app — and a sheet
+    /// verb, whose `--app` names the script it goes through, not a window.
     #[must_use]
     pub const fn is_desktop(self) -> bool {
         matches!(
@@ -2948,6 +2969,8 @@ impl ComputerMethod {
                 | Self::ReflexStart
                 | Self::ReflexStatus
                 | Self::ReflexStop
+                | Self::SheetWrite
+                | Self::SheetRead
         )
     }
 }
@@ -3898,6 +3921,8 @@ pub fn verb_method(verb: &str) -> Option<ComputerMethod> {
         "reflex-status" => ComputerMethod::ReflexStatus,
         "reflex-stop" => ComputerMethod::ReflexStop,
         "reflex-auto" => ComputerMethod::ReflexAuto,
+        "sheet-write" => ComputerMethod::SheetWrite,
+        "sheet-read" => ComputerMethod::SheetRead,
         "batch" => ComputerMethod::Batch,
         "parallel" => ComputerMethod::Parallel,
         _ => return None,
@@ -4147,6 +4172,10 @@ fn parse_flags(
         ("l1", "l1"),
         ("after-text", "afterText"),
         ("flow-check", "flowCheck"),
+        ("document", "document"),
+        ("sheet", "sheet"),
+        ("table", "table"),
+        ("range", "range"),
     ] {
         if let Some(value) = optional_string_allowing_empty(&flags, flag)? {
             params.insert(key.into(), Value::String(value));
@@ -4215,6 +4244,14 @@ fn parse_flags(
     // The ears hear by the window's table: the helper keeps no numbers of its own.
     if method == ComputerMethod::ListenStart {
         params.extend(sound_table());
+    }
+    // A table's cells, its app and its names are checked whole before any
+    // file or app is touched; the app is named as the share knows it.
+    if matches!(
+        method,
+        ComputerMethod::SheetWrite | ComputerMethod::SheetRead
+    ) {
+        sheet_params(&flags, &mut params)?;
     }
     // A recipe's values are checked before anything is walked.
     if method == ComputerMethod::RecipeRun
@@ -4656,6 +4693,12 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ],
         ComputerMethod::ReflexStart => &["json", "flow", "display", "seconds", "renew"],
         ComputerMethod::ReflexStatus | ComputerMethod::ReflexStop => &["json", "run"],
+        ComputerMethod::SheetWrite => {
+            &["json", "path", "app", "document", "sheet", "table", "cells"]
+        }
+        ComputerMethod::SheetRead => {
+            &["json", "path", "app", "document", "sheet", "table", "range"]
+        }
         ComputerMethod::ReflexAuto => &["json", "goal", "app", "display", "seconds", "renew", "l1"],
     }
 }
@@ -4912,6 +4955,25 @@ fn validate(
             Some(ms) if ms > 0 => {}
             _ => return Err("wait needs a positive --ms".into()),
         },
+        ComputerMethod::SheetWrite | ComputerMethod::SheetRead => {
+            if has("path") == has("app") {
+                return Err(format!(
+                    "{} needs exactly one of --path <file.xlsx|file.csv> or --app Numbers|Excel --document <name>",
+                    method.verb_name()
+                ));
+            }
+            if has("app") != has("document") {
+                return Err(
+                    "--app and --document go together: the app and its open document".into(),
+                );
+            }
+            if has("path") && has("table") {
+                return Err("--table names a Numbers table; a file's sheet is --sheet".into());
+            }
+            if method == ComputerMethod::SheetWrite && !has("cells") {
+                return Err("missing required --cells '{\"A1\":\"item\",\"B2\":3}'".into());
+            }
+        }
         ComputerMethod::Open => {
             if has("path") == has("url") {
                 return Err("open needs exactly one of --path or --url".into());
@@ -5401,6 +5463,42 @@ fn validate_element_or_coordinates(element: bool, x: bool, y: bool) -> Result<()
     Ok(())
 }
 
+/// A sheet verb's own words, read whole: the cells as canonical addresses,
+/// the app as the share knows it, the sheet name a workbook keeps and the
+/// range as its two corners.
+fn sheet_params(
+    flags: &BTreeMap<String, Option<String>>,
+    params: &mut Map<String, Value>,
+) -> Result<(), String> {
+    use crate::computer_sheet::{
+        CellRange, SheetApp, cells_to_value, check_sheet_name, parse_cells,
+    };
+    if let Some(raw) = optional_string(flags, "cells")? {
+        params.insert("cells".into(), cells_to_value(&parse_cells(&raw)?));
+    }
+    if let Some(app) = params.get("app").and_then(Value::as_str) {
+        let app = SheetApp::parse(app)?;
+        params.insert("app".into(), json!(app.name()));
+    }
+    if let Some(sheet) = params.get("sheet").and_then(Value::as_str) {
+        check_sheet_name(sheet)?;
+    }
+    if let Some(range) = params.get("range").and_then(Value::as_str) {
+        let range = CellRange::parse(range)?;
+        params.insert("range".into(), json!(range.name()));
+    }
+    for key in ["document", "table", "path"] {
+        if params
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|word| word.trim().is_empty())
+        {
+            return Err(format!("--{key} may not be empty"));
+        }
+    }
+    Ok(())
+}
+
 fn require(params: &Map<String, Value>, key: &str, flag: &str) -> Result<(), String> {
     params
         .contains_key(key)
@@ -5574,6 +5672,13 @@ pub fn usage() -> String {
         "      (several apps at once: each batch keeps its own order, they run together, and the answer holds every batch's result)",
         "  zerocode-computer clipboard-read [--json]",
         "  zerocode-computer clipboard-write --text <text> [--json]",
+        "",
+        "  tables — a spreadsheet's cells by its file or the app's own script, never by keys or the pointer (the front app stays):",
+        "  zerocode-computer sheet-write (--path <file.xlsx|file.csv> | --app Numbers|Excel --document <open document> [--table <name>]) [--sheet <name>] --cells '{\"A1\":\"item\",\"B2\":3,\"C4\":\"=SUM(C2:C3)\"}' [--json]",
+        "      (a missing file is made; an existing xlsx keeps its other cells, sheets and formats; \"=...\" is a formula, \"'=...\" keeps it text,",
+        "       null empties a cell; answers the cells written, each read back (verified), the ms it took and, through an app, whether the front app stayed)",
+        "  zerocode-computer sheet-read (--path <file> | --app Numbers|Excel --document <open document> [--table <name>]) [--sheet <name>] [--range A1:C4] [--json]",
+        "      (a path is in your home folder; through an app the document is already open there — the app is never started or brought forward; Excel and Numbers are macOS only)",
         "",
         "  the meaning layer — find, wait for, read (--ocr reads pixels when the tree is empty):",
         "  zerocode-computer find (--app <app> | --ocr [--display N] [--region x,y,w,h]) (--text <t> | --role <r> [--label <l>]) [--json]",
@@ -6304,7 +6409,7 @@ mod windows_shim_tests {
             "could not reach the window",
             "$env:ZEROCODE_RUN_EVIDENCE_DIR",
             "'x-zerocode-run-evidence', $evidence",
-            "if (@('recipe-run', 'walk') -ccontains [string]$args[0]) {",
+            "if (@('recipe-run', 'walk', 'sheet-write', 'sheet-read') -ccontains [string]$args[0]) {",
             "(Get-Location).ProviderPath",
             "'x-zerocode-cwd', [BitConverter]::ToString([System.Text.Encoding]::UTF8.GetBytes($cwd)).Replace('-', '')",
             "zerocode-computer — inspect and operate local desktop apps",

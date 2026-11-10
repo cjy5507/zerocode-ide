@@ -44,6 +44,7 @@ pub fn value_positions(tool: &str, argv: &[String]) -> Vec<usize> {
         .filter(|&index| {
             browser_text && index + 1 == argv.len()
                 || !needle && index > 0 && matches!(argv[index - 1].as_str(), "--text" | "--value")
+                || index > 0 && argv[index - 1] == crate::computer_sheet::SHEET_CELLS_FLAG
         })
         .collect()
 }
@@ -72,6 +73,22 @@ pub fn is_person_parameter(word: &str) -> bool {
 /// optional `--drop`. Where a file sat is not kept, so these never reach a
 /// log or a saved procedure as given.
 pub fn file_positions(tool: &str, argv: &[String]) -> Vec<usize> {
+    // A sheet's file: the log keeps its name, not the folders above it.
+    let sheet = tool == "computer"
+        && argv
+            .first()
+            .and_then(|word| verb_method(word))
+            .is_some_and(|method| {
+                matches!(
+                    method,
+                    ComputerMethod::SheetWrite | ComputerMethod::SheetRead
+                )
+            });
+    if sheet {
+        return (1..argv.len())
+            .filter(|&index| argv[index - 1] == "--path")
+            .collect();
+    }
     if tool != "browser" || argv.first().is_none_or(|verb| verb != "upload") {
         return Vec::new();
     }

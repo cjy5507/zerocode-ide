@@ -48,6 +48,7 @@ pub mod commit_message;
 pub mod compact_diff;
 pub mod computer_flow;
 pub mod computer_recipe;
+pub mod computer_sheet;
 pub mod computer_use;
 pub mod computer_use_protocol;
 pub mod conflict;

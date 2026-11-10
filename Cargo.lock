@@ -8299,6 +8299,7 @@ dependencies = [
  "zerocode-shell-state",
  "zerocode-ssh",
  "zeroize",
+ "zip",
 ]
 
 [[package]]
