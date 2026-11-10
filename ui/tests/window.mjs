@@ -137,6 +137,7 @@ import { testPassTwoBFit } from "./pass2-b-fit.mjs";
 import { testPaneFirstView, testPaneHead, testPaneHeadReach } from "./pane-head.mjs";
 import { testStackedWork } from "./stacked-work.mjs";
 import { testRightColumnGeist } from "./right-column-geist.mjs";
+import { testDialogShellsGeist } from "./dialog-shells-geist.mjs";
 import { testPhoneAwake } from "./phone-awake.mjs";
 import { testChatList, testChatListKeyed, testNewChat, testNewChatStart } from "./chat-list.mjs";
 import { testSelfAct } from "./self-act.mjs";
@@ -371,6 +372,7 @@ suite("pane-head-reach", ({ browser, origin, ok }) => testPaneHeadReach(browser,
 suite("pane-first-view", ({ browser, origin, ok }) => testPaneFirstView(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("stacked-work", ({ browser, origin, ok }) => testStackedWork(browser, origin, ok));
 suite("right-column-geist", ({ browser, origin, ok }) => testRightColumnGeist(browser, origin, ok));
+suite("dialog-shells-geist", ({ browser, origin, ok }) => testDialogShellsGeist(browser, origin, ok));
 // Keeping an Android phone awake (T7, 2026-11-09): the settings card's rows and the status bar's chip.
 suite("phone-awake", ({ browser, origin, ok }) => testPhoneAwake(browser, origin, ok));
 // The T3 Code chat view, stages 2 and 3 (2026-11-08): the sidebar's conversation list, and the 「새 대화」 start page.

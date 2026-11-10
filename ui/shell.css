@@ -114,8 +114,8 @@ body .stage {
   );
 }
 
-body [role="dialog"]:not(:where(.qo, .sidebar-menu, .ports-pop, .note-pop, .usage-pop, .permission, .term-float)),
-body dialog:not(:where(.qo, .sidebar-menu, .ports-pop, .note-pop, .usage-pop, .permission, .term-float)) {
+body [role="dialog"]:not(:where(.qo, .sidebar-menu, .ports-pop, .note-pop, .usage-pop, .permission, .term-float, .auto-form, .your-turn-list, .workspace-board-settings-pop, .jev-custom-drawer, .onboard, .tour-panel)),
+body dialog:not(:where(.qo, .sidebar-menu, .ports-pop, .note-pop, .usage-pop, .permission, .term-float, .auto-form, .your-turn-list, .workspace-board-settings-pop, .jev-custom-drawer, .onboard, .tour-panel)) {
   border-color: var(--edge-glint);
   background-color: var(--surface-glass);
   background-image: linear-gradient(
@@ -30604,12 +30604,8 @@ progress:indeterminate::-webkit-progress-bar {
   width: min(640px, 100%);
   max-height: min(820px, 100%);
   overflow: hidden;
-  border: var(--rule-width) solid var(--glass-edge);
   border-radius: var(--radius-xl);
-  background-color: var(--glass-veil-raised);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: var(--shadow-float);
+  /* Ground, edge and depth: the floating surfaces' one rule (`.term-float,`). */
 }
 
 .auto-editor-head {
@@ -32565,7 +32561,13 @@ select {
 .note-pop,
 .usage-pop,
 .permission,
-.term-float {
+.term-float,
+.auto-form,
+.your-turn-list,
+.workspace-board-settings-pop,
+.jev-custom-drawer,
+.onboard,
+.tour-panel {
   background-color: var(--surface-deck);
   /* The boundary of a floating surface is roughly twice the window's rule —
    * 14%, Orca's `border-white/14` — and it is UNIFORM. The lit top edge used to be
@@ -32600,7 +32602,13 @@ select {
  * Geist's materials, where the edge is a shadow so a row and the corner it
  * sits in line up to the pixel. The popovers and the permission card keep
  * their own borders for now. */
-.qo {
+/* The dialogs, the drawer and the tour's card float over the room; the turn
+ * list and the board's settings drop from the control that opened them. */
+.qo,
+.auto-form,
+.jev-custom-drawer,
+.onboard,
+.tour-panel {
   box-shadow: 0 0 0 var(--rule-width) var(--glass-edge), var(--shadow-float);
 }
 
@@ -32610,7 +32618,9 @@ select {
 }
 
 .sidebar-menu,
-.note-pop {
+.note-pop,
+.your-turn-list,
+.workspace-board-settings-pop {
   box-shadow: 0 0 0 var(--rule-width) var(--glass-edge), var(--shadow-drop);
 }
 
@@ -36440,8 +36450,7 @@ input[type="search"]::-webkit-search-cancel-button {
   overflow-y: auto;
   padding: var(--space-2);
   border-radius: var(--radius-menu);
-  background: var(--surface-deck);
-  box-shadow: var(--shadow-float);
+  /* Ground, edge and depth: the floating surfaces' one rule (`.term-float,`). */
   color: var(--ink-chalk);
 }
 
@@ -47301,10 +47310,8 @@ button.board-build-failure-part:focus-visible {
   width: min(1100px, 100%);
   height: min(960px, 100%);
   padding: var(--space-6);
-  border: 1px solid var(--edge-rule);
   border-radius: var(--radius);
-  background: var(--surface-deck);
-  box-shadow: var(--shadow-float);
+  /* Ground, edge and depth: the floating surfaces' one rule (`.term-float,`). */
   overflow: hidden auto;
 }
 
@@ -47828,10 +47835,8 @@ button.board-build-failure-part:focus-visible {
   position: absolute;
   width: min(20rem, calc(100vw - var(--space-6)));
   padding: var(--space-4);
-  border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius);
-  background: var(--surface-deck);
-  box-shadow: var(--shadow-float);
+  /* Ground, edge and depth: the floating surfaces' one rule (`.term-float,`). */
   pointer-events: auto;
   animation: tour-enter var(--motion-fast) var(--ease-standard);
 }
@@ -54386,11 +54391,9 @@ h4.knowledge-inspector-head::after {
   min-height: 0;
   max-height: 100%;
   overflow: hidden;
-  border: var(--jev-line) solid var(--edge-rule);
   border-radius: var(--radius-xl);
-  background: var(--surface-deck);
+  /* Ground, edge and depth: the floating surfaces' one rule (`.term-float,`). */
   color: var(--ink-chalk);
-  box-shadow: var(--shadow-2);
 }
 
 .jev-custom-drawer-head {
@@ -62728,8 +62731,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   max-height: calc(100vh - var(--your-turn-top, 0px) - var(--space-6));
   overflow-y: auto;
   border-radius: var(--radius-xl);
-  background: var(--surface-deck);
-  box-shadow: var(--shadow-border), var(--shadow-drop);
+  /* Ground, edge and depth: the floating surfaces' one rule (`.term-float,`). */
   color: var(--ink-chalk);
   font: var(--type-copy-13);
 }

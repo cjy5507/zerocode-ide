@@ -2641,7 +2641,9 @@ mod tests {
         // declaring their own ground is how three of them ended up different.
         // The selector list is the anchor, so a surface dropping out of it
         // fails here rather than quietly drawing its own.
-        let list = ".qo,\n.sidebar-menu,\n.ports-pop,\n.note-pop,\n.usage-pop,\n.permission,\n.term-float {";
+        let list = ".qo,\n.sidebar-menu,\n.ports-pop,\n.note-pop,\n.usage-pop,\n.permission,\n.term-float,\n\
+                    .auto-form,\n.your-turn-list,\n.workspace-board-settings-pop,\n.jev-custom-drawer,\n\
+                    .onboard,\n.tour-panel {";
         assert!(
             styles.contains(list),
             "the shared floating rule's selector list changed — a floating \
@@ -2662,6 +2664,35 @@ mod tests {
             !shared.contains("backdrop-filter"),
             "the floating surfaces are blurring what is behind them again:\n{shared}"
         );
+        // The window-wide dialog glass (`body [role="dialog"]`, a more specific
+        // selector than any surface's own class) stays off every one of them —
+        // six were still glass under it on 2026-11-11 although their own rules
+        // said `--surface-deck`.
+        let glass = block_after_css(&styles, "body [role=\"dialog\"]:not(:where(");
+        let glass = &glass[..glass.find('{').expect("the dialog glass rule's body")];
+        let surfaces = list.trim_end_matches(" {").split(",\n").collect::<Vec<_>>();
+        for surface in &surfaces {
+            assert!(
+                glass.matches(&format!("{surface},")).count()
+                    + glass.matches(&format!("{surface})")).count()
+                    == 2,
+                "`{surface}` is not left out of both halves of the window-wide dialog \
+                 glass, so that rule paints over the shared material:\n{glass}"
+            );
+        }
+        // And the six that joined drew their own ground, border and depth in
+        // rules of their own; those rules keep their shape and give the material
+        // back to the shared one.
+        for surface in &surfaces[7..] {
+            let own = block_after_css(&styles, &format!("{surface} {{"));
+            for part in ["background", "backdrop-filter", "box-shadow", "border:"] {
+                assert!(
+                    !own.contains(part),
+                    "`{surface}` draws its own `{part}` again instead of the floating \
+                     surfaces' one material:\n{own}"
+                );
+            }
+        }
 
         // Depth says what KIND of floating a surface is doing. A dialog is
         // floated over the room and a menu is dropped near its trigger, and
@@ -2683,12 +2714,18 @@ mod tests {
         // A dialog and a menu draw their edge as Geist does, a ring riding on
         // the shadow, so a row and the corner it sits in line up to the pixel.
         let ring = "0 0 0 var(--rule-width) var(--glass-edge)";
-        let dialog = block_after_css(&styles, ".qo {\n  box-shadow:");
+        let dialog = block_after_css(
+            &styles,
+            ".qo,\n.auto-form,\n.jev-custom-drawer,\n.onboard,\n.tour-panel {",
+        );
         assert!(
             dialog.contains(&format!("{ring}, var(--shadow-float)")),
             "a dialog lost its ring or its float:\n{dialog}"
         );
-        let menus = block_after_css(&styles, ".sidebar-menu,\n.note-pop {");
+        let menus = block_after_css(
+            &styles,
+            ".sidebar-menu,\n.note-pop,\n.your-turn-list,\n.workspace-board-settings-pop {",
+        );
         assert!(
             menus.contains(&format!("{ring}, var(--shadow-drop)")),
             "a menu lost its ring or its drop:\n{menus}"
