@@ -667,7 +667,7 @@ function glideChatPin(list, state, to) {
   const duration = Number.parseFloat(root.getPropertyValue("--chat-pin-glide")) || 0;
   const easing = root.getPropertyValue("--ease-standard").trim() || "ease";
   const clock = new Animation(new KeyframeEffect(null, null, { duration, easing, fill: "forwards" }), document.timeline);
-  const glide = { from: list.scrollTop, to, clock, frame: 0 };
+  const glide = { from: list.scrollTop, to, clock, frame: 0, began: performance.now() };
   state.pinGlide = glide;
   clock.play();
   const step = () => {
@@ -675,7 +675,10 @@ function glideChatPin(list, state, to) {
       clock.cancel();
       return;
     }
-    const progress = clock.effect.getComputedTiming().progress ?? 1;
+    // A clock not started yet stands at the glide's start; one that never
+    // runs (a page whose frames stopped) is not waited on past twice its time.
+    const over = performance.now() - glide.began > 2 * duration + CHAT_FOLLOW.intent;
+    const progress = over ? 1 : clock.effect.getComputedTiming().progress ?? (clock.playState === "finished" ? 1 : 0);
     list.scrollTop = glide.from + (glide.to - glide.from) * progress;
     state.top = list.scrollTop;
     state.height = list.scrollHeight;
