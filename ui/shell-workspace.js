@@ -18158,6 +18158,8 @@ async function sendNewChat(host) {
           worker.queue = [message];
           // Its name until the session names it: the first line it was asked (the sidebar's row, `chatListGroups`).
           worker.firstLine = (text || message).split("\n", 1)[0];
+          // Those words stand at the top of its page, the answer under them (`takeFirstAsk`).
+          worker.pinFirst = true;
         },
         refused: (error) => {
           throw error;
@@ -18173,6 +18175,8 @@ async function sendNewChat(host) {
       }
     } else {
       const term = await launchAgentTab({ agent: spec.id, prompt: message, rows: 24, cols: 96, model, effort });
+      // The first words stand at the top of the pane's conversation, the answer under them (`takeFirstAsk`).
+      noteFirstAsk(term);
       mountTermTab(term, { agent: spec.name, worktree: where ?? activeWorktreePath }, { focus: true });
     }
     newChatChoice.draft = "";

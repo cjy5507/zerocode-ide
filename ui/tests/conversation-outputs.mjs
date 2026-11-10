@@ -550,3 +550,51 @@ export async function testConversationLongOutput(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* The words a conversation was opened with — sent from the start page — stand at the top of its page with
+ * the answer under them, as words sent from the page's own composer do; a conversation opened any other way
+ * stands at its foot as before. */
+export async function testConversationFirstAsk(browser, origin, ok) {
+  const answer = Array.from({ length: 60 }, (_, line) => `첫 답의 ${line + 1}번째 문단입니다. 화면 하나를 넘길 만큼 깁니다.`).join("\n\n");
+  const open = async (first) => {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    try {
+      await standZo(page);
+      const seen = await page.evaluate(async ({ first, answer }) => {
+        const turns = [{ role: "user", text: "로그인 화면의 오류를 고쳐 줘." }, { role: "assistant", text: answer }];
+        const term = await openTermTab({ placement: "tab" });
+        paneAgents.set(term, "zo");
+        hookStates.set(term, "working");
+        window.__ANSWER__.pane_log = (args) => ({
+          found: true, next: turns.length, turns: args.after == null ? turns : turns.slice(args.after),
+          skipped: false, more: false, folded: false, model: "claude-opus-5",
+        });
+        // What the start page does once the agent's pane stands (`sendNewChat`).
+        if (first) noteFirstAsk(term);
+        await setPaneChat(term, true);
+        await pollHelperPages();
+        for (let beat = 0; beat < 4; beat += 1) await window.__PAINTED__();
+        const list = document.querySelector(".pane-chat .helper-turns");
+        const asked = list.querySelector(":scope > .helper-turn.is-user");
+        const state = list.__follow;
+        return {
+          under: Math.round(asked.getBoundingClientRect().top - list.getBoundingClientRect().top),
+          gap: Math.round(list.scrollHeight - list.scrollTop - list.clientHeight - (state?.room ?? 0)),
+          pinned: Boolean(state?.pin), wish: state?.pinNext ?? null, door: list.__door?.classList.contains("is-shown") ?? null,
+          left: chatFirstAsks.size,
+        };
+      }, { first, answer });
+      return { seen, faults };
+    } finally {
+      await page.close();
+    }
+  };
+  const asked = await open(true);
+  const plain = await open(false);
+  ok("first: the words a conversation was opened with stand at the top of its page, the long answer under them and the button back to the foot beside it",
+    asked.seen.pinned && Math.abs(asked.seen.under - 12) <= 2 && asked.seen.gap > 50 && asked.seen.door === true && asked.seen.wish === false && asked.seen.left === 0,
+    JSON.stringify(asked.seen));
+  ok("first: a conversation opened any other way stands at its foot as before", !plain.seen.pinned && plain.seen.gap <= 1 && plain.seen.under < 0,
+    JSON.stringify(plain.seen));
+  ok("first: no page errors", asked.faults.length === 0 && plain.faults.length === 0, [...asked.faults, ...plain.faults].join("\n"));
+}

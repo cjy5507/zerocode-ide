@@ -499,12 +499,16 @@ function chatFootGap(list) {
  * task — is read here as that event would read it, so no answer lags the
  * list. */
 function chatFollowState(list) {
+  // Asked once, as the list's following is first read — whichever way a new
+  // answer starts here, the wish is this list's and no later one's.
+  const first = list.__follow === undefined && takeFirstAsk(list.__run);
   list.__follow ??= {
     away: false, top: list.scrollTop, height: list.scrollHeight, intent: null, at: 0, touch: null, gliding: null, placed: false,
     // A new answer starts under its question (`pinChatQuestion`): the row the list is pinned under, whether
-    // the next words the person sends are to be one, the room kept under the words, and whether the person
-    // has moved the list since.
-    pin: null, pinNext: false, room: 0, pinMoved: false,
+    // the next words the person sends are to be one — or the words the conversation was opened with, sent
+    // from the start page (`takeFirstAsk`) — the room kept under the words, and whether the person has moved
+    // the list since.
+    pin: null, pinNext: first && chatFollowMode === "question", room: 0, pinMoved: false,
   };
   noteChatScroll(list, list.__follow);
   return list.__follow;
@@ -638,6 +642,26 @@ function setChatFollowMode(mode) {
   for (const list of document.querySelectorAll(".helper-turns")) dropChatPin(list);
 }
 
+/* The conversations the start page opened with the person's first words (a
+ * pane's, by its terminal; a wire's run carries `pinFirst` itself): their
+ * lists are born wishing to pin those words (`chatFollowState`), as a list
+ * pins the words sent from its own composer. */
+const chatFirstAsks = new Set();
+
+function noteFirstAsk(term) {
+  chatFirstAsks.add(term);
+}
+
+function takeFirstAsk(run) {
+  if (!run) return false;
+  if (run.pinFirst === true) {
+    run.pinFirst = false;
+    return true;
+  }
+  // A pane's own conversation, not a helper's page that shares its terminal.
+  return !run.wire && run.helper?.id === PANE_LOG_ID && chatFirstAsks.delete(run.term);
+}
+
 /* A send: the list goes to its foot, where the words will stand — and, in the
  * question's way, the next words of the person that stand are pinned to its
  * top (`pinChatQuestion`, from the paint that stands them). */
@@ -729,8 +753,10 @@ function releaseOutrunChatPin(list, run) {
  * the screen under them. Not under a reader who left for the rows above. */
 function pinChatQuestion(list, row) {
   const state = chatFollowState(list);
+  // A list with no box yet keeps the wish: its first place stands the words (`standChatPlace`).
+  if (state.placed === false || list.clientHeight === 0) return false;
   state.pinNext = false;
-  if (state.away || state.placed === false || list.clientHeight === 0) return false;
+  if (state.away) return false;
   state.pin = row;
   state.pinMoved = false;
   state.gliding = null;
@@ -872,6 +898,11 @@ function standChatPlace(list) {
   } else {
     state.away = false;
     list.scrollTop = list.scrollHeight;
+    // The words this conversation was opened with stood before the list had a
+    // box to pin them in (`pinChatQuestion` kept the wish): they stand at its
+    // top now, the answer under them.
+    const asked = state.pinNext ? [...list.querySelectorAll(":scope > .helper-turn.is-user")].at(-1) : null;
+    if (asked) pinChatQuestion(list, asked);
   }
   paintFootDoor(list);
 }
