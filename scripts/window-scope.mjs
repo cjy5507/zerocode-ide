@@ -79,6 +79,9 @@ export const PANE_NAMED_NOT_OWNED = Object.freeze({
   paneHosts: "keyed by tab id: the element a tab draws into, which ends with the tab (`dropTab`)",
   paneHeads: "keyed by tab id: an agent tab's head line, which ends with the tab (`dropTab`)",
   paneSaveTurns: "keyed by worktree path: which save of a workspace's tab set is the latest",
+  paneSavesInFlight:
+    "keyed by worktree path: the latest save of a workspace's tab set while its answer is on the way, "
+    + "dropped when that answer lands",
   paneSetsBehind: "keyed by worktree path: the stored set a workspace shows until somebody steps into it",
   paneLedger:
     "keyed by shell id, but a mirror of the backend's ledger, replaced whole on every read (`refreshPaneLedger`): "
