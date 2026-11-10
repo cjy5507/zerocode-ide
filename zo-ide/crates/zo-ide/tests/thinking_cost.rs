@@ -25,6 +25,8 @@ fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         question: None,
         picker: None,
         sessions: None,
+        start: None,
+        start_notes: &[],
         pager: None,
         popup: None,
         mention: None,
