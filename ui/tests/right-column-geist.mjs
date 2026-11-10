@@ -91,8 +91,10 @@ function installGeistAudit() {
       const s = getComputedStyle(node);
       const r = node.getBoundingClientRect();
       if (node.tagName.toLowerCase() === "svg") {
-        const w = Math.round(r.width);
-        if (node.classList.contains("icon") && (!ICON.has(w) || w !== Math.round(r.height))) add("icon-size", node, `${w}×${Math.round(r.height)}`);
+        // An outer <svg> has a layout box of its own; read it rather than the
+        // painted one, which a float's entrance scale shrinks.
+        const w = Math.round(node.clientWidth || r.width), h = Math.round(node.clientHeight || r.height);
+        if (node.classList.contains("icon") && (!ICON.has(w) || w !== h)) add("icon-size", node, `${w}×${h}`);
         continue;
       }
       const words = [...node.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim()) || /^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName);
@@ -126,7 +128,8 @@ function installGeistAudit() {
         if (!Number.isNaN(v) && !SPACE.has(Math.round(v * 2) / 2)) { add("space", node, `${prop} ${v}px`); break; }
       }
       const control = /^(BUTTON|INPUT|SELECT|TEXTAREA)$/.test(node.tagName) || node.getAttribute("role") === "tab" || node.classList.contains("segment-btn");
-      if (control && !/checkbox|radio/.test(node.type) && !HEIGHT.has(Math.round(r.height)) && r.height < 48) add("control-height", node, `${Math.round(r.height)}px`);
+      const tall = node.offsetHeight || r.height;
+      if (control && !/checkbox|radio/.test(node.type) && !HEIGHT.has(Math.round(tall)) && tall < 48) add("control-height", node, `${Math.round(tall)}px`);
     }
     return found;
   };
@@ -193,6 +196,17 @@ export async function testRightColumnGeist(browser, origin, ok) {
     const audit = async (scene, selector, options = {}) => {
       await frames(page);
       await page.waitForTimeout(200);
+      // A float scales in (--enter-scale over --motion-fast/--motion-dialog), and
+      // a box read while it does is every size times that scale — a 32px field
+      // reads 31 on a slow runner. Measure once its own entrance has finished.
+      await page.waitForFunction(
+        (selector) => {
+          const node = document.querySelector(selector);
+          return !node || node.getAnimations().every((one) => one.playState !== "running");
+        },
+        selector,
+        { timeout: 5000 },
+      ).catch(() => {});
       const found = await page.evaluate(({ selector, options }) => {
         const root = document.querySelector(selector);
         return root ? window.__geistAudit(root, options) : [{ kind: "missing", at: selector, value: "" }];

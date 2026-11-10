@@ -56868,7 +56868,11 @@ suite("continue-dialog-geist", async ({ browser, origin, ok }) => {
         open: !el("continue-scrim").hidden,
         titleSize: title?.fontSize, subSize: sub?.fontSize, subInk: sub?.color === mist,
         labelSize: label?.fontSize, labelInk: label?.color === mist,
-        comboHeight: Math.round(combo?.getBoundingClientRect().height ?? 0),
+        // The layout height, not the painted box: the dialog scales in from
+        // --enter-scale over --motion-dialog, and a box read 120 ms after the
+        // open is the field times that scale — 31px on a slow CI runner while
+        // the field itself is the 32px token (v1.1.139 tag CI, 2026-11-10).
+        comboHeight: combo?.offsetHeight ?? 0,
         footGround: footStyle?.backgroundColor === abyss, footRule: footStyle?.borderTopWidth === "1px",
         primaryLast: cancel.right <= start.left, primaryRight: footBox ? Math.round(footBox.right - start.right) : -1,
         firstFocus: document.activeElement === el("continue-agent"),
