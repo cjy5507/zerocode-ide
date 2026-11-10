@@ -33902,21 +33902,34 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 /* The view switch is the artifacts head's underline tabs: the chosen tab is
- * ink words over one rule. */
+ * ink words over one rule.
+ *
+ * The tabs are the one part of the row that gives: the record, the filter and
+ * the new-workspace door beside them keep their size, so a row whose words
+ * are wider than the leaf — another language's, or a host whose fallback
+ * glyphs run wider (the Windows runner's 320px leaf, 18px past the head in
+ * v1.1.135–138) — shortens a tab's word to an ellipsis instead of pushing the
+ * last door out of the head. */
 .workspace-board-views {
   display: inline-flex;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   align-self: stretch;
 }
 
 .workspace-board-views button {
   position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
   height: var(--control-height-sm);
   padding: 0 var(--space-3);
+  overflow: hidden;
   border: 0;
   background: none;
   color: var(--ink-mist);
   font: var(--type-label-14);
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
   transition: color var(--motion-fast) var(--ease-standard);
 }

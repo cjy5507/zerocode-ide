@@ -23,27 +23,37 @@ export async function testWorkbenchResponsive(browser, origin, ok) {
       await page.waitForSelector(`.workbench-nav-link[data-workbench-view="${id}"][aria-current="page"]:visible`);
       for (const [width, height] of sizes) {
         await page.setViewportSize({ width, height });
-        const size = await page.evaluate(async ({ id, width, height }) => {
-          const view = id === "workspaces" ? el("workspace-board")
-            : docHost(tabs.find((tab) => tab.kind === (id === "tasks" ? "board" : id)).pane, id === "tasks" ? "board" : id);
-          // The product's surfaces are also split leaves. Isolate a leaf at
-          // this size so the desktop's sidebar cannot choose its width for it.
-          view.style.position = "fixed"; view.style.inset = "0";
-          view.style.width = `${width}px`; view.style.height = `${height}px`; view.style.zIndex = "100";
-          await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-          const nav = view.querySelector(".workbench-nav");
-          const head = view.querySelector(".agent-graph-head, .workspace-board-head, .knowledge-head, .artifacts-head");
-          const body = view.querySelector(".task-board-surface, .workspace-board-body, .knowledge-body, .artifacts-body");
-          const rect = (node) => { const b = node?.getBoundingClientRect(); return b && { top: b.top, bottom: b.bottom, width: b.width, height: b.height }; };
-          return { nav: { width: nav.clientWidth, scroll: nav.scrollWidth, ...rect(nav) },
-            head: head && { width: head.clientWidth, scroll: head.scrollWidth, ...rect(head) }, body: rect(body),
-            view: rect(view), links: [...nav.querySelectorAll("[data-workbench-view]")].map(rect) };
-        }, { id, width, height });
-        const valid = size.nav.scroll <= size.nav.width + 1 && size.nav.height > 0 &&
-          (!size.head || size.head.scroll <= size.head.width + 1) &&
-          size.body?.height > 0 && size.body.bottom <= size.view.bottom + 1 &&
-          size.links.every((link) => link.width > 0 && link.height > 0);
-        ok(`${id} remains usable in a ${width}×${height} leaf`, valid, JSON.stringify(size));
+        // A leaf at the narrowest width is measured twice: as this host draws it, and with every glyph a tenth of an
+        // em wider — another language's words, or a host whose fallback font runs wider than this one's. The hosted
+        // Windows runner's Hangul ran the workspaces head 18px past a 320px leaf that fits to the pixel here
+        // (v1.1.135–138), so a leaf that only fits this host's glyphs has not been shown to fit.
+        for (const wider of width === 320 ? [false, true] : [false]) {
+          const size = await page.evaluate(async ({ id, width, height, wider }) => {
+            const view = id === "workspaces" ? el("workspace-board")
+              : docHost(tabs.find((tab) => tab.kind === (id === "tasks" ? "board" : id)).pane, id === "tasks" ? "board" : id);
+            // The product's surfaces are also split leaves. Isolate a leaf at
+            // this size so the desktop's sidebar cannot choose its width for it.
+            view.style.position = "fixed"; view.style.inset = "0";
+            view.style.width = `${width}px`; view.style.height = `${height}px`; view.style.zIndex = "100";
+            const stretch = wider ? document.head.appendChild(Object.assign(document.createElement("style"),
+              { textContent: "*, *::before, *::after { letter-spacing: 0.1em !important; }" })) : null;
+            await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const nav = view.querySelector(".workbench-nav");
+            const head = view.querySelector(".agent-graph-head, .workspace-board-head, .knowledge-head, .artifacts-head");
+            const body = view.querySelector(".task-board-surface, .workspace-board-body, .knowledge-body, .artifacts-body");
+            const rect = (node) => { const b = node?.getBoundingClientRect(); return b && { top: b.top, bottom: b.bottom, width: b.width, height: b.height }; };
+            const seen = { nav: { width: nav.clientWidth, scroll: nav.scrollWidth, ...rect(nav) },
+              head: head && { width: head.clientWidth, scroll: head.scrollWidth, ...rect(head) }, body: rect(body),
+              view: rect(view), links: [...nav.querySelectorAll("[data-workbench-view]")].map(rect) };
+            stretch?.remove();
+            return seen;
+          }, { id, width, height, wider });
+          const valid = size.nav.scroll <= size.nav.width + 1 && size.nav.height > 0 &&
+            (!size.head || size.head.scroll <= size.head.width + 1) &&
+            size.body?.height > 0 && size.body.bottom <= size.view.bottom + 1 &&
+            size.links.every((link) => link.width > 0 && link.height > 0);
+          ok(`${id} remains usable in a ${width}×${height} leaf${wider ? " where the host's glyphs run wider" : ""}`, valid, JSON.stringify(size));
+        }
         if (width === 320 || width === 1280) await page.screenshot({ path: `output/playwright/connected-workbench/${id}-dark-${width}.png` });
       }
       await page.setViewportSize({ width: 1440, height: 1000 });
