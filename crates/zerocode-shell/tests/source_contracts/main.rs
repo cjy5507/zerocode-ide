@@ -2612,43 +2612,23 @@ mod tests {
         );
     }
 
-    /// Every floating surface is one titanium glass material.
+    /// Every floating surface is one solid material.
     ///
-    /// Orca supplied the shared-material rule. ZeroCode keeps that discipline
-    /// while deepening the dark veil, edge and falloff for its tighter cool
-    /// graphite room.
-    ///
-    /// Ours was near it in three separate ways, each individually defensible:
-    /// a veil that was lighter AND more transparent (38/88% against 23/96%),
-    /// a blur at half strength (22px against `backdrop-blur-2xl`'s 40), and an
-    /// edge at the window's own 7% rule rather than the 14% a thing hovering
-    /// over the window needs to have a silhouette at all. The sum is a dialog
-    /// that read as a grey card instead of as the panel surface with a
-    /// thickness.
+    /// It was one titanium glass — Orca's shared-material rule, a 97% veil
+    /// under a 40px backdrop blur. On 2026-11-10 the person passed the Geist
+    /// draft for the right column and the popups (p-39057edd7d8a28d6, G):
+    /// Geist's menus and modals are opaque, the veil was 97% opaque anyway so
+    /// its blur bought decoration for a backdrop pass per surface, and
+    /// WKWebView now and then dropped a blurred top-layer box altogether. What
+    /// stays from the glass rule is its discipline: ONE rule paints every
+    /// floating surface, so none of them drifts to a ground of its own, and
+    /// its boundary is the floating edge, twice the window's rule.
     #[test]
-    fn a_floating_surface_uses_the_titanium_material() {
+    fn a_floating_surface_is_one_solid_material() {
         let tokens = include_str!("../../../../ui/tokens.css");
         let styles = strip_comments(include_str!("../../../../ui/shell.css"));
         let dark = block_after(tokens, ":root {");
-        let light = block_after(tokens, ":root[data-theme=\"light\"] {");
 
-        // The material, both treatments. Dark is Geist's background-100 at 97%
-        // (t-67607 — the titanium tint is gone with the atelier) while light
-        // keeps the proven 96% paper treatment.
-        assert!(
-            dark.contains("--glass-veil-raised: rgb(10 10 10 / 97%);")
-                && light.contains("--glass-veil-raised: rgb(255 255 255 / 96%);"),
-            "a floating surface's veil drifted off its treatment"
-        );
-        // `backdrop-blur-2xl` = 40px, and no `saturate()`: that utility is not
-        // in Orca's bundle at all, and under a 40px blur it tints every
-        // floating surface a step warmer than the opaque panel beside it.
-        for (treatment, block) in [("dark", &dark), ("light", &light)] {
-            assert!(
-                block.contains("--glass-blur: blur(40px);"),
-                "the {treatment} treatment's glass is not Orca's 40px blur"
-            );
-        }
         // Twice the window's own rule, and it must actually be twice — a
         // floating edge at the panel-divider's weight is the failure this
         // pins, not the literal.
@@ -2658,27 +2638,30 @@ mod tests {
         );
 
         // Worn by every floating surface, from ONE rule — six surfaces each
-        // declaring their own veil is how three of them ended up opaque. The
-        // selector list is the anchor, so a surface dropping out of it fails
-        // here rather than quietly going flat.
+        // declaring their own ground is how three of them ended up different.
+        // The selector list is the anchor, so a surface dropping out of it
+        // fails here rather than quietly drawing its own.
         let list = ".qo,\n.sidebar-menu,\n.ports-pop,\n.note-pop,\n.usage-pop,\n.permission,\n.term-float {";
         assert!(
             styles.contains(list),
-            "the shared glass rule's selector list changed — a floating \
-             surface has left it and is drawing itself opaque"
+            "the shared floating rule's selector list changed — a floating \
+             surface has left it and is drawing its own ground"
         );
-        let glass = &styles[styles.find(list).expect("the glass rule") + list.len()..];
-        let glass = &glass[..glass.find('}').expect("an unterminated glass rule")];
+        let shared = &styles[styles.find(list).expect("the floating rule") + list.len()..];
+        let shared = &shared[..shared.find('}').expect("an unterminated floating rule")];
         for part in [
-            "background-color: var(--glass-veil-raised)",
-            "backdrop-filter: var(--glass-blur)",
+            "background-color: var(--surface-deck)",
             "border-color: var(--glass-edge)",
         ] {
             assert!(
-                glass.contains(part),
-                "the shared glass rule stopped carrying `{part}`:\n{glass}"
+                shared.contains(part),
+                "the shared floating rule stopped carrying `{part}`:\n{shared}"
             );
         }
+        assert!(
+            !shared.contains("backdrop-filter"),
+            "the floating surfaces are blurring what is behind them again:\n{shared}"
+        );
 
         // Depth says what KIND of floating a surface is doing. A dialog is
         // floated over the room and a menu is dropped near its trigger, and
@@ -2697,10 +2680,23 @@ mod tests {
                 && dark.contains("inset 0 1px 0 rgb(255 255 255 / 6%)"),
             "the dropdown shadow lost the titanium drop or lit edge"
         );
+        // A dialog and a menu draw their edge as Geist does, a ring riding on
+        // the shadow, so a row and the corner it sits in line up to the pixel.
+        let ring = "0 0 0 var(--rule-width) var(--glass-edge)";
+        let dialog = block_after_css(&styles, ".qo {\n  box-shadow:");
+        assert!(
+            dialog.contains(&format!("{ring}, var(--shadow-float)")),
+            "a dialog lost its ring or its float:\n{dialog}"
+        );
+        let menus = block_after_css(&styles, ".sidebar-menu,\n.note-pop {");
+        assert!(
+            menus.contains(&format!("{ring}, var(--shadow-drop)")),
+            "a menu lost its ring or its drop:\n{menus}"
+        );
         assert!(
             styles.contains("box-shadow: var(--shadow-drop);"),
-            "nothing wears the dropdown shadow, so the menus are back on the \
-             dialog's float or on a control shadow"
+            "nothing wears the bare dropdown shadow, so the popovers are back \
+             on the dialog's float or on a control shadow"
         );
     }
 

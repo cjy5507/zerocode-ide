@@ -91,7 +91,13 @@ body {
  * almost invisible wash and transient dialogs a soft rim. It adds depth
  * without spending semantic colour on decoration. The left column is one flat
  * Geist panel (t-70028, review t-68962 P3 ①): the 5% lane wash it kept from
- * the obsidian atelier was the one gradient left on the window's chrome. */
+ * the obsidian atelier was the one gradient left on the window's chrome.
+ *
+ * The rim below is for a dialog that stands in a panel. A surface in the
+ * floating material — a modal, a menu, a popover, the permission card, the
+ * floating terminal — is painted by that one rule alone (solid since the
+ * 2026-11-10 Geist pass): `:where()` keeps this rule's specificity what it was
+ * for everything else. */
 body .threads {
   background-color: var(--nav-plane);
   box-shadow:
@@ -108,8 +114,8 @@ body .stage {
   );
 }
 
-body [role="dialog"],
-body dialog {
+body [role="dialog"]:not(:where(.qo, .sidebar-menu, .ports-pop, .note-pop, .usage-pop, .permission, .term-float)),
+body dialog:not(:where(.qo, .sidebar-menu, .ports-pop, .note-pop, .usage-pop, .permission, .term-float)) {
   border-color: var(--edge-glint);
   background-color: var(--surface-glass);
   background-image: linear-gradient(
@@ -2002,11 +2008,13 @@ kbd {
    * It was a block wrapping an inline-block input that carried a 12px bottom
    * margin, so the box was 12px taller than the control inside it — and the
    * glyph, centred on the box with `top: 50%`, sat 6px below the centre of
-   * the field it belongs to. Measured: field mid 125.5, glyph mid 131.5. The
-   * margin moves out here, where it separates the field from what follows
-   * rather than growing the field itself. */
+   * the field it belongs to. Measured: field mid 125.5, glyph mid 131.5.
+   *
+   * No margin of its own either (2026-11-10): what follows the field keeps
+   * the 8px above itself — 이름/내용, then the content search's path
+   * filters — so the three stand on one rhythm whichever of them shows. */
   display: flex;
-  margin-bottom: var(--space-3);
+  margin-bottom: 0;
 }
 
 /* On the column's rail, like every other glyph in it — and the text after it
@@ -2022,6 +2030,30 @@ kbd {
 
 .field .panel-search {
   padding-left: calc(var(--nav-inset) + var(--icon-size) + var(--nav-gutter));
+}
+
+/* The search's three toggles (Aa · 단어 · .*) stand inside the field's end
+ * the way the editor find bar's do, and only while the content search is up
+ * (`paintExplorerFilters`). The field keeps their room on its right. */
+.field-toggles {
+  position: absolute;
+  inset-block: 0;
+  right: var(--space-1);
+  display: flex;
+  align-items: center;
+  gap: var(--workbench-track-inset);
+}
+
+.field:has(.field-toggles:not([hidden])) .panel-search {
+  padding-right: calc(var(--control-height-sm) * 3);
+}
+
+.field-toggles .file-find-case {
+  height: calc(var(--control-height-sm) - var(--space-2));
+  min-width: calc(var(--control-height-sm) - var(--space-2));
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  font: var(--type-label-12-mono);
 }
 
 .panel-search {
@@ -4478,6 +4510,8 @@ svg.wt-agent-dot {
 
 .wt-smart:focus-within {
   border-color: var(--edge-mark);
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
 }
 
 .wt-smart-ico {
@@ -5050,6 +5084,8 @@ svg.wt-agent-dot {
 
 .wt-box:focus-within {
   border-color: var(--edge-mark);
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
 }
 
 .wt-box.is-wrong {
@@ -5923,9 +5959,8 @@ svg.wt-agent-dot {
   gap: 0;
   overflow: hidden;
   padding: 0;
-  border-color: color-mix(in srgb, var(--edge-rule) 86%, var(--ink-mist));
   background: var(--surface-deck);
-  box-shadow: var(--shadow-float);
+  border: 0;
 }
 
 /* A real dialog head: identity and purpose stay together, while generation
@@ -5936,10 +5971,10 @@ svg.wt-agent-dot {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
-  min-height: 64px;
-  padding: 12px 16px;
+  min-height: 0;
+  padding: var(--space-4);
   border-bottom: 1px solid var(--edge-rule);
-  background: color-mix(in srgb, var(--surface-deck) 96%, var(--ink-chalk));
+  background: none;
 }
 
 .prc-name {
@@ -5960,10 +5995,11 @@ svg.wt-agent-dot {
   height: 34px;
   flex: none;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--git-graph-ref) 35%, var(--edge-rule));
+  border: 0;
   border-radius: var(--radius-edge);
-  background: color-mix(in srgb, var(--git-graph-ref) 10%, var(--surface-well));
-  color: var(--git-graph-ref);
+  background: var(--surface-raised);
+  color: var(--ink-chalk);
+  box-shadow: var(--shadow-border);
 }
 
 .prc-mark .icon {
@@ -5975,20 +6011,18 @@ svg.wt-agent-dot {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
 }
 
 .prc-heading-copy strong {
-  font-family: var(--font-display);
-  font-size: var(--text-sm);
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
 }
 
 .prc-heading-copy > span {
   overflow: hidden;
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  font: var(--type-copy-13);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -6022,9 +6056,10 @@ svg.wt-agent-dot {
   height: auto;
   min-height: 30px;
   padding-inline: var(--space-2);
-  border: 1px solid var(--edge-rule);
+  border: 0;
   border-radius: var(--radius-edge);
-  background: var(--surface-well);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
 }
 
 .prc-close {
@@ -6050,17 +6085,17 @@ svg.wt-agent-dot {
 }
 
 .prc-close .icon {
-  width: 15px;
-  height: 15px;
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .prc-content {
   display: grid;
   min-height: 0;
-  gap: 14px;
+  gap: var(--space-4);
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 16px;
+  padding: var(--space-4);
 }
 
 /* Head → base reads as one route card rather than a loose mono sentence and
@@ -6071,17 +6106,18 @@ svg.wt-agent-dot {
   grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
   align-items: center;
   gap: var(--space-2);
-  padding: 10px 12px;
-  border: 1px solid var(--edge-rule);
+  padding: var(--space-3);
+  border: 0;
   border-radius: var(--radius-edge);
-  background: var(--surface-well);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
 }
 
 .prc-route-node {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--space-1);
 }
 
 .prc-route-label-line {
@@ -6095,15 +6131,14 @@ svg.wt-agent-dot {
 .prc-route-label,
 .prc-field-label {
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
-  font-weight: 550;
+  font: var(--type-label-13);
+  font-weight: 500;
 }
 
 .prc-base-said {
   overflow: hidden;
   color: var(--ink-mist);
-  font-family: var(--font-mono);
-  font-size: var(--text-3xs);
+  font: var(--type-label-12-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -6148,7 +6183,7 @@ svg.wt-agent-dot {
 
 .prc-optional {
   color: var(--ink-mist);
-  font-size: var(--text-3xs);
+  font: var(--type-label-12);
 }
 
 /* Orca's fields are boxed, not underlined: rounded-md, border-border,
@@ -6156,14 +6191,14 @@ svg.wt-agent-dot {
 .pr-new .prc-field {
   width: 100%;
   min-width: 0;
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--surface-abyss) 86%, var(--surface-well));
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
   outline: none;
   padding: 0 var(--space-2);
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-label-14);
+  box-shadow: var(--shadow-border);
 }
 
 .pr-new .prc-field::placeholder {
@@ -6171,21 +6206,21 @@ svg.wt-agent-dot {
 }
 
 .pr-new .prc-field:focus-visible {
-  border-color: color-mix(in srgb, var(--ring) 74%, var(--edge-rule));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 24%, transparent);
+  box-shadow: none;
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
 }
 
 .pr-new .prc-title {
-  height: 36px;
-  font-weight: 500;
+  height: var(--control-height-md);
 }
 
 .prc-body {
   min-height: 150px;
   max-height: 320px;
   resize: vertical;
-  padding: 9px 10px;
-  line-height: var(--leading-body);
+  padding: var(--space-2) var(--control-pad-inline);
+  font: var(--type-copy-13);
 }
 
 /* Base 콤보의 결과 상자 — Orca BasePicker의 실측 옷(rounded popover,
@@ -6259,9 +6294,9 @@ svg.wt-agent-dot {
 }
 
 .pr-new .prc-base-input {
-  height: 32px;
+  height: var(--control-height-md);
   padding-right: 28px;
-  font-family: var(--font-mono);
+  font: var(--type-label-13-mono);
 }
 
 /* The chevron is an affordance drawn ON the input, taking no clicks of its
@@ -6282,21 +6317,38 @@ svg.wt-agent-dot {
 .prc-draft {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 52px;
-  padding: 9px 10px;
-  border: var(--rule-width) solid var(--edge-rule);
+  gap: var(--space-3);
+  min-height: 0;
+  padding: 0;
+  border: 0;
   border-radius: var(--radius-edge);
-  background: color-mix(in srgb, var(--surface-well) 74%, transparent);
-  font-size: var(--text-xs);
+  background: none;
+  font: var(--type-label-14);
   color: var(--ink-chalk);
   cursor: pointer;
   transition: border-color var(--motion-fast) ease, background var(--motion-fast) ease;
 }
 
 .prc-draft:hover {
-  background: var(--row-hover);
-  border-color: color-mix(in srgb, var(--ink-mist) 36%, var(--edge-rule));
+  background: none;
+}
+
+/* The dialogs the right column opens — the new pull request, the refused
+ * commit and the agent run review — wear Geist's dialog button: 32px, the
+ * ring and its small drop, Label 14 at 500. The primary keeps its ink fill. */
+.qo:is(.pr-new, .blocked, .composer) .btn {
+  height: var(--control-height-md);
+  min-height: 0;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border-small);
+  font: var(--type-label-14);
+  font-weight: 500;
+}
+
+.qo:is(.pr-new, .blocked, .composer) .btn.btn--primary {
+  box-shadow: none;
 }
 
 .prc-draft input {
@@ -6315,14 +6367,13 @@ svg.wt-agent-dot {
 }
 
 .prc-draft-copy strong {
-  font-size: var(--text-xs);
-  font-weight: 550;
+  font: var(--type-label-14);
+  font-weight: 500;
 }
 
 .prc-draft-copy > span {
   color: var(--ink-mist);
-  font-size: var(--text-3xs);
-  line-height: var(--leading-body);
+  font: var(--type-copy-13);
 }
 
 /* The warning line: the triangle beside the sentence, in the halt ink
@@ -6504,11 +6555,15 @@ svg.wt-agent-dot {
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
-  padding: var(--space-1);
-  border-radius: var(--radius-sm);
+  padding: 0;
+  border-radius: var(--radius-md);
   transition:
     background-color var(--motion-fast) var(--ease-standard),
     color var(--motion-fast) var(--ease-standard);
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
 }
 
 .qo-x:hover,
@@ -6951,7 +7006,7 @@ svg.wt-agent-dot {
   max-height: calc(100vh - 16px);
   overflow-y: auto;
   padding: 4px;
-  border: var(--rule-width) solid var(--edge-rule);
+  border: 0;
   border-radius: var(--radius-menu);
   background: var(--surface-deck);
   /* Depth is decided once, for every floating surface at once, in the glass
@@ -6971,7 +7026,7 @@ svg.wt-agent-dot {
 }
 
 .sidebar-menu-item {
-  min-height: 28px;
+  min-height: var(--control-height-sm);
   padding: 0 8px;
   border: 0;
   /* Orca's `rounded-[7px]` inside the panel's `rounded-[11px]` — a hand-tuned
@@ -6979,9 +7034,7 @@ svg.wt-agent-dot {
   border-radius: var(--radius-menu-item);
   background: none;
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-xs);
-  line-height: 1;
+  font: var(--type-label-13);
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
@@ -6991,6 +7044,7 @@ svg.wt-agent-dot {
 .sidebar-menu-item:not(:disabled):focus-visible {
   background: var(--row-hover);
   outline: none;
+  box-shadow: none;
 }
 
 .sidebar-menu-item.is-danger {
@@ -7172,8 +7226,7 @@ svg.wt-agent-dot {
   flex: 1 0 100%;
   padding-bottom: 2px;
   color: var(--ink-mist);
-  font-size: var(--text-xs);
-  line-height: 1.6;
+  font: var(--type-label-12);
 }
 
 .sidebar-menu-mark {
@@ -9020,7 +9073,7 @@ body.is-dragging-pane {
   min-width: 240px;
   max-width: 320px;
   padding: var(--space-1);
-  border: var(--rule-width) solid var(--edge-rule);
+  border: 0;
   border-radius: var(--radius);
   background: var(--surface-deck);
 }
@@ -9086,7 +9139,7 @@ body.is-dragging-pane {
 .note-pop-label {
   padding: var(--space-1) var(--space-2);
   color: var(--ink-mist);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   font-weight: 500;
 }
 
@@ -9095,16 +9148,15 @@ body.is-dragging-pane {
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  padding: 6px var(--space-2);
+  padding: var(--space-1) var(--space-2);
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-menu-item);
   background: none;
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-xs);
-  font-weight: 500;
+  font: var(--type-label-13);
   text-align: left;
   cursor: pointer;
+  min-height: var(--control-height-sm);
 }
 
 .note-pop-row:hover {
@@ -10704,7 +10756,7 @@ body.is-dragging-pane {
  * on `--surface-deck` is 5.3:1, so the row keeps the colour every other file
  * row has and the slant is what says it is build output. */
 .tree-row.is-ignored .tree-name {
-  font-style: italic;
+  font-style: normal;
 }
 
 /* The ⊘ at an ignored row's edge. Quieter than a status letter — it is a
@@ -10991,6 +11043,166 @@ body.is-dragging-pane {
   padding-inline: var(--space-3);
 }
 
+/* ---- the right column's controls are Geist's (2026-11-10) ----------------
+ *
+ * The person: 「오른쪽 네비바 깃창 파일창 찾기창등 giest 디자인토큰 룰을 어긴것과
+ * 팝업창까지」 — and passed the draft (p-39057edd7d8a28d6) as recommended.
+ * Measured on the window, this column wore three search fields, two switches
+ * and sixteen control heights, and its rows stood on the body leading (12/19).
+ * It now wears one field, one switch and one button — the settings screen's
+ * Geist controls (`.settings-view` below) at a side column's 28px — and its
+ * rows stand on `--row-height` in Label 13. The shared classes are scoped to
+ * `.files` because dialogs and other pages wear them too. */
+.files > .panel-head .panel-title {
+  padding-inline-start: 0;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 600;
+}
+
+/* The panels' own words on Geist's Label 12 rather than the body leading;
+ * every row and label below names its own style on top of it. */
+.files > :is(#activity-files, #activity-scm, #activity-vault, #activity-checks) {
+  font: var(--type-label-12);
+}
+
+/* A control the column draws without naming a face takes the column's, not
+ * the system's: the session record's buttons were drawn in Arial wherever a
+ * rule forgot `font: inherit`. Zero specificity, so any rule that names a
+ * face — a mono value, a type style — still wins. */
+:where(.files) :where(button, input, select, textarea) {
+  font-family: inherit;
+}
+
+/* One field: the side column's 28px, the 1px ring instead of a border, the
+ * 6px corner, Label 13. Focus is the contract's 2px ink line, drawn inside so
+ * the column's overflow cannot clip it — the window-wide `:focus-visible`
+ * halo and the inputs' accent glow are the older treatments this replaces. */
+.files .field {
+  box-shadow: none;
+}
+
+.files :is(.panel-search, .explorer-filters input, .vdock-search, .scm-filter) {
+  height: var(--control-height-sm);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.files :is(.panel-search, .explorer-filters input, .vdock-search, .scm-filter):hover {
+  box-shadow: 0 0 0 var(--rule-width) var(--edge-mark);
+}
+
+.files :is(input, textarea, select):focus-visible,
+.files :is(.vdock-search, .scm-filter):focus-within {
+  border-color: transparent;
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+  box-shadow: none;
+}
+
+.files :is(.vdock-search, .scm-filter) input:focus-visible {
+  outline: none;
+}
+
+.files :is(button, [role="treeitem"], .tree-row, .scm-row, .text-hit, .check-row):focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+  box-shadow: none;
+}
+
+/* One switch: the settings and board track — a recessed well, a raised
+ * thumb that says it is chosen with weight and depth as well as fill. */
+.files :is(.segment:not(.segment--line), .vdock-scope) {
+  display: flex;
+  gap: var(--workbench-track-inset);
+  height: var(--control-height-sm);
+  padding: var(--workbench-track-inset);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  box-shadow: none;
+}
+
+.files :is(.segment:not(.segment--line) > .segment-btn, .vdock-scope-item) {
+  flex: 1 1 0;
+  height: 100%;
+  min-height: 0;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  box-shadow: none;
+  color: var(--ink-label);
+  font: var(--type-label-13);
+  white-space: nowrap;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.files .segment:not(.segment--line) > .segment-btn + .segment-btn {
+  border-left: 0;
+}
+
+/* In the files panel the switch keeps the 8px above itself and none below:
+ * the path filters and the tree's head after it keep their own. */
+.files #activity-files > .segment {
+  margin: var(--space-2) 0 0;
+}
+
+.files :is(.segment:not(.segment--line) > .segment-btn, .vdock-scope-item):hover {
+  color: var(--ink-chalk);
+}
+
+.files :is(.segment:not(.segment--line) > .segment-btn.is-active, .vdock-scope-item[aria-pressed="true"]) {
+  background: var(--workbench-thumb);
+  box-shadow: var(--shadow-2);
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+/* One button: 28px, the ring and its small drop, 6px, Label 13 at 500. The
+ * primary keeps the ink fill it is given window-wide. A glyph-only button
+ * (`.scm-committed-open`) stays the ghost square below. */
+.files .btn:not(.fix-pick, .scm-committed-open) {
+  height: var(--control-height-sm);
+  min-height: 0;
+  padding: 0 var(--control-pad-inline);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 500;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.files .btn:not(.btn--primary, .fix-pick, .scm-committed-open):hover:enabled {
+  background: var(--row-hover);
+}
+
+.files .btn.btn--primary {
+  background: var(--ink-chalk);
+  box-shadow: none;
+  color: var(--surface-abyss);
+}
+
+/* A glyph button: a 24px ghost square on the row it sits in. */
+.files .panel-add {
+  width: var(--row-height);
+  height: var(--row-height);
+  font: var(--type-label-12);
+}
+
 .files:not([data-activity="files"]) > .panel-head {
   display: none;
 }
@@ -11012,7 +11224,7 @@ body.is-dragging-pane {
 .commit-box {
   flex: none;
   margin: 0;
-  padding: 2px var(--space-3) var(--space-2);
+  padding: var(--space-2) var(--space-3);
 }
 
 /* The corner the generate hand stands in — the field is the anchor. */
@@ -11026,19 +11238,17 @@ body.is-dragging-pane {
    * what grows it, from the same count the content has. */
   min-height: 56px;
   resize: none;
-  background: var(--surface-well);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-edge);
+  background: var(--surface-deck);
+  border: 0;
+  border-radius: var(--radius-md);
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
-  padding: var(--space-2);
+  font: var(--type-copy-13);
+  padding: var(--space-2) var(--control-pad-inline);
   /* Room for the corner button — Orca gives the textarea `pr-8` (32px)
    * whenever the generate hand is shown, so the first line never types
    * underneath it. */
   padding-right: 32px;
-  box-shadow: var(--shadow-1);
+  box-shadow: var(--shadow-border);
   transition:
     border-color var(--motion-fast) var(--ease-standard),
     box-shadow var(--motion-fast) var(--ease-standard);
@@ -11049,11 +11259,9 @@ body.is-dragging-pane {
 }
 
 .commit-message:focus-visible {
-  outline: none;
-  border-color: var(--ring);
-  box-shadow:
-    var(--shadow-1),
-    0 0 0 1px color-mix(in srgb, var(--ring) 55%, transparent);
+  outline: var(--focus-ring);
+  box-shadow: none;
+  outline-offset: calc(var(--focus-ring-offset) * -1);
 }
 
 /* The generate hand, in the field's own corner — Orca's placement exactly
@@ -11067,10 +11275,10 @@ body.is-dragging-pane {
   align-items: center;
   justify-content: center;
   width: 20px;
-  height: 20px;
+  height: var(--row-height);
   padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
@@ -11316,10 +11524,15 @@ body.is-dragging-pane {
 
 .fix-split > .fix-pick {
   flex: none;
-  padding: 0 4px;
+  padding: 0;
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
   border-left: 0;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  border: 0;
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
 }
 
 .fix-pick .icon {
@@ -11666,6 +11879,7 @@ body.is-dragging-pane {
   padding-right: var(--space-1);
   border-radius: var(--radius-sm);
   transition: background var(--motion-fast) ease;
+  min-height: var(--control-height-sm);
 }
 
 .scm-sect:hover {
@@ -11682,17 +11896,15 @@ body.is-dragging-pane {
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
-  padding: 2px var(--space-1);
+  padding: 0 var(--space-1);
   border: 0;
   background: none;
-  font-family: var(--font-display);
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
   color: var(--ink-mist);
   text-align: left;
   cursor: pointer;
+  height: var(--row-height);
 }
 
 .scm-sect:hover .scm-sect-fold {
@@ -11721,7 +11933,7 @@ body.is-dragging-pane {
 
 .scm-sect-count {
   flex: none;
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
@@ -11760,11 +11972,11 @@ body.is-dragging-pane {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: var(--row-height);
+  height: var(--row-height);
   padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
@@ -11772,8 +11984,8 @@ body.is-dragging-pane {
 }
 
 .scm-sect-act .icon {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .scm-sect-act:hover:not(:disabled),
@@ -11863,8 +12075,7 @@ body.is-dragging-pane {
 }
 
 .scm-menu-hint {
-  font-size: 10px;
-  line-height: 1.3;
+  font: var(--type-label-12);
   color: var(--ink-mist);
 }
 
@@ -12194,7 +12405,7 @@ body.is-dragging-pane {
   display: flex;
   flex: none;
   gap: 4px;
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   font-variant-numeric: tabular-nums;
 }
 
@@ -12295,15 +12506,15 @@ body.is-dragging-pane {
 .scm-sect-view {
   flex: none;
   margin-left: 2px;
-  padding: 2px 6px;
+  padding: 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-edge);
   background: none;
   color: var(--ink-mist);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
   cursor: pointer;
   transition: color var(--motion-fast) ease;
+  height: var(--row-height);
 }
 
 .scm-sect-view:hover,
@@ -12418,9 +12629,9 @@ body.is-dragging-pane {
   position: sticky;
   top: 0;
   z-index: 6;
-  padding: 6px var(--space-3) var(--space-1);
+  padding: var(--space-2) var(--space-3);
   border-bottom: var(--rule-width) solid var(--edge-rule);
-  background: color-mix(in srgb, var(--surface-deck) 96%, transparent);
+  background: var(--surface-deck);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
 }
@@ -12443,8 +12654,7 @@ body.is-dragging-pane {
 .scm-pr-new {
   height: 24px;
   padding: 0 var(--space-2);
-  gap: var(--space-1);
-  font-size: var(--text-2xs);
+  gap: var(--space-2);
 }
 
 .scm-pr-new .icon {
@@ -12474,30 +12684,55 @@ body.is-dragging-pane {
  * its `xs` button: 24px tall, 11px type, outline — never the large white
  * dialog primary that the shared rule previously turned Stage All into. */
 .scm-head .scm-pr-new {
-  height: 24px;
-  padding: 0 var(--space-2);
-  font-size: var(--text-2xs);
+  height: var(--control-height-sm);
+  padding: 0 var(--control-pad-inline);
+  font: var(--type-label-13);
 }
 
 #activity-scm .commit-box .scm-primary-row .btn {
-  height: 26px;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+  height: var(--control-height-sm);
   padding: 0 var(--space-3);
-  border-color: var(--edge-rule);
-  background: transparent;
+  background: var(--surface-deck);
   color: var(--ink-chalk);
-  font-size: var(--text-2xs);
+  font: var(--type-label-13);
   font-weight: 500;
-  box-shadow: var(--shadow-1);
+  box-shadow: var(--shadow-border-small);
+  border: 0;
 }
 
 #activity-scm .commit-box .scm-primary-row .btn:hover:enabled {
-  border-color: color-mix(in srgb, var(--ink-mist) 45%, var(--edge-rule));
   background: var(--row-hover);
 }
 
 #activity-scm .commit-box .scm-primary-row .scm-primary-more {
-  width: 28px;
+  width: var(--control-height-sm);
   padding: 0;
+}
+
+/* Geist's one primary per surface: the commit is the ink fill when it can
+ * act and the quiet raised face when it cannot, and its menu half wears the
+ * same face as the half it belongs to — a lone white square beside a grey
+ * commit read as the action on offer. */
+#activity-scm .commit-box .scm-primary-row .scm-primary:enabled,
+#activity-scm .commit-box .scm-primary-row .scm-primary:enabled + .scm-primary-more {
+  background: var(--ink-chalk);
+  box-shadow: none;
+  color: var(--surface-abyss);
+}
+
+#activity-scm .commit-box .scm-primary-row .scm-primary:enabled:hover,
+#activity-scm .commit-box .scm-primary-row .scm-primary:enabled + .scm-primary-more:hover {
+  background: color-mix(in srgb, var(--ink-chalk) 86%, transparent);
+}
+
+#activity-scm .commit-box .scm-primary-row .scm-primary:disabled {
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-disabled);
 }
 
 /* The original reaches combined diff from each section's own View all. Keep
@@ -12521,8 +12756,7 @@ body.is-dragging-pane {
   border: 0;
   background: none;
   padding: 0;
-  font-size: 11.5px;
-  line-height: 1;
+  font: var(--type-label-12);
   font-weight: 500;
   color: var(--ink-chalk);
   cursor: pointer;
@@ -12580,9 +12814,9 @@ body.is-dragging-pane {
   justify-content: center;
   flex: none;
   width: 28px;
-  height: 28px;
+  height: var(--row-height);
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
@@ -12684,13 +12918,15 @@ body.is-dragging-pane {
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  padding: var(--space-1) var(--space-3) var(--space-1) 20px;
-  font-size: var(--text-xs);
+  padding: 0 var(--space-3) 0 20px;
+  font: var(--type-label-13);
   color: var(--ink-mist);
   cursor: pointer;
   transition:
     color var(--motion-fast) var(--ease-standard),
     background-color var(--motion-fast) var(--ease-standard);
+  min-height: var(--row-height);
+  border-radius: var(--radius-md);
 }
 
 .scm-row:hover {
@@ -12743,18 +12979,18 @@ body.is-dragging-pane {
   align-items: center;
   justify-content: center;
   width: 20px;
-  height: 20px;
+  height: var(--row-height);
   padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
 }
 
 .scm-act .icon {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .scm-act:hover,
@@ -12796,7 +13032,7 @@ body.is-dragging-pane {
 
 .change-dir {
   margin-left: 6px;
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   color: var(--ink-mist);
 }
 
@@ -12818,8 +13054,9 @@ body.is-dragging-pane {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-2);
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   color: var(--ink-mist);
+  min-height: var(--row-height);
 }
 
 .history-row:hover .history-subject {
@@ -12936,21 +13173,27 @@ body.is-dragging-pane {
   min-width: 0;
 }
 
-/* One badge: Orca's rounded-full pill, 10px words, inked in the ref's own
- * graph colour — the badge and the lane it decorates agree by construction
- * because both spend the same token. */
+/* One badge: Geist's small badge (20px, Label 12 at 500) in the ref's own
+ * graph colour, handed over as `--ref-hue` — the hue tints the ground and
+ * leans the word toward the window's ink, so the badge and the lane it
+ * decorates still agree by construction and the word reads at 4.5:1 in both
+ * treatments (the bare hue on its tint was 3.6:1 in light). */
 .history-ref {
   flex: none;
   max-width: 96px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border: 1px solid var(--edge-rule);
-  border-radius: 999px;
+  border: 0;
+  border-radius: var(--radius-pill);
   padding: 0 var(--space-2);
-  font-size: var(--text-3xs);
-  line-height: 1.5;
-  color: var(--ink-mist);
+  font: var(--type-label-12);
+  color: color-mix(in srgb, var(--ref-hue, var(--ink-mist)) 75%, var(--ink-chalk));
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  background: color-mix(in srgb, var(--ref-hue, var(--ink-mist)) 16%, transparent);
+  font-weight: 500;
 }
 
 .scm-history-more {
@@ -12997,6 +13240,7 @@ body.is-dragging-pane {
   padding-bottom: var(--space-3);
   border-bottom: var(--rule-width) solid var(--edge-rule);
   margin-bottom: var(--space-1);
+  padding-top: var(--space-3);
 }
 
 .pr-line {
@@ -13010,37 +13254,43 @@ body.is-dragging-pane {
 }
 
 .pr-num {
-  font-size: var(--text-sm);
+  font: var(--type-label-14);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--ink-chalk);
 }
 
-/* The state, as a small filled pill. Orca colours the PR glyph and the state
- * together (`prStateColor`): open is the ready signal, merged the AI accent —
- * the one place violet means "this landed" rather than "an agent will act" —
- * and closed the halt. */
+/* The state, as Geist's small badge (20px, Label 12 at 500): its hue's 200
+ * ground under its ink. Open is the ready signal and closed the halt, as
+ * Orca colours them (`prStateColor`); merged is the done cyan the
+ * source-control pill already wears for the same state — it was the AI
+ * accent, which the light treatment draws violet, a decorative purple the
+ * design refuses (2026-11-10 Geist pass). */
 .pr-state {
-  padding: 1px var(--space-2);
-  border-radius: var(--radius-xs);
-  font-size: var(--text-3xs);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-label);
-  color: var(--surface-abyss);
-  background: var(--ink-mist);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  font: var(--type-label-12);
+  font-weight: 500;
+  color: var(--ink-chalk);
+  background: var(--gray-alpha-200);
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
 }
 
 .pr-state[data-state="open"] {
-  background: var(--signal-ready);
+  background: var(--green-200);
+  color: var(--signal-ready-ink);
 }
 
 .pr-state[data-state="merged"] {
-  background: var(--ai-accent);
+  background: color-mix(in srgb, var(--signal-done) 18%, transparent);
+  color: var(--signal-done);
 }
 
 .pr-state[data-state="closed"] {
-  background: var(--signal-halt);
+  background: var(--red-200);
+  color: var(--signal-halt-ink);
 }
 
 .pr-spacer {
@@ -13053,7 +13303,7 @@ body.is-dragging-pane {
   width: var(--row-height);
   height: var(--row-height);
   border: 0;
-  border-radius: var(--radius-edge);
+  border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
@@ -13069,7 +13319,7 @@ body.is-dragging-pane {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-xs);
+  font: var(--type-copy-13);
   color: var(--ink-mist);
 }
 
@@ -13164,15 +13414,15 @@ body.is-dragging-pane {
   gap: var(--space-3);
   flex: none;
   width: 100%;
-  padding: var(--space-2) 0;
+  padding: 0;
   border: 0;
   border-bottom: var(--rule-width) solid var(--edge-rule);
   background: none;
   color: var(--ink-mist);
-  font-family: inherit;
-  font-size: var(--text-3xs);
+  font: var(--type-label-12);
   text-align: left;
   cursor: pointer;
+  min-height: var(--control-height-sm);
 }
 
 .checks-sum:hover {
@@ -13236,8 +13486,9 @@ body.is-dragging-pane {
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  padding: 3px 0;
+  padding: 0;
   cursor: pointer;
+  min-height: var(--row-height);
 }
 
 .check-row:hover {
@@ -13286,13 +13537,13 @@ body.is-dragging-pane {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   color: var(--ink-chalk);
 }
 
 .check-said {
   flex: none;
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   color: var(--ink-mist);
 }
 
@@ -13675,12 +13926,15 @@ body.is-dragging-pane {
   display: flex;
   gap: var(--space-1);
   align-items: center;
-  padding: 1px 0;
+  padding: 0;
   cursor: default;
   color: var(--ink-mist);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-height: var(--row-height);
+  border-radius: var(--radius-md);
+  font: var(--type-label-13);
 }
 
 .tree-row.is-dir {
@@ -13757,8 +14011,7 @@ body.is-dragging-pane {
 .tree-row .badge,
 .scm-row .badge {
   margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: var(--text-3xs);
+  font: var(--type-label-12-mono);
   color: var(--ink-mist);
 }
 
@@ -13814,8 +14067,7 @@ body.is-dragging-pane {
 
 .hit-path,
 .hit-line {
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12-mono);
   color: var(--ink-mist);
 }
 
@@ -13835,8 +14087,7 @@ body.is-dragging-pane {
 .hit-text {
   grid-column: 1 / -1;
   min-width: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12-mono);
   color: var(--ink-chalk);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -21456,7 +21707,7 @@ button.helper-sib:hover {
 .qo {
   width: var(--palette-width);
   background: var(--surface-deck);
-  border: var(--rule-width) solid var(--edge-rule);
+  border: 0;
   border-radius: var(--radius);
   /* Bounded by the window, and what does not fit scrolls.
    *
@@ -21473,11 +21724,9 @@ button.helper-sib:hover {
 .qo-title {
   margin: 0;
   padding: var(--space-3) var(--space-4) 0;
-  font-family: var(--font-display);
-  font-size: var(--text-2xs);
-  font-weight: 600;
-  letter-spacing: var(--tracking-label);
-  color: var(--ink-mist);
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
+  color: var(--ink-chalk);
 }
 
 .qo input {
@@ -21539,7 +21788,7 @@ button.helper-sib:hover {
   flex-direction: column;
   overflow: hidden;
   border-radius: var(--radius-xl);
-  background-color: var(--glass-veil-raised);
+  background-color: var(--surface-deck);
 }
 
 /* The finder is a ZeroCode surface now, not an Orca command list with our
@@ -21549,33 +21798,32 @@ button.helper-sib:hover {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 44px;
-  padding: var(--space-2) var(--space-3) var(--space-1);
+  min-height: 0;
+  padding: var(--space-3) var(--space-3) var(--space-2);
 }
 
 .qo-finder-head .qo-title {
   padding: 0;
   color: var(--ink-chalk);
-  font-size: var(--text-xs);
-  font-weight: 600;
+  font: var(--type-heading-14);
   letter-spacing: 0;
 }
 
 .qo-finder-mark {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: var(--icon-size);
+  height: var(--icon-size);
   flex: none;
-  border: var(--rule-width) solid var(--edge-rule);
+  border: 0;
   border-radius: var(--radius-edge);
-  background: var(--row-hover);
-  color: var(--ink-label);
+  background: none;
+  color: var(--ink-mist);
 }
 
 .qo-finder-mark .icon {
-  width: 13px;
-  height: 13px;
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .qo-searchbox {
@@ -21583,29 +21831,31 @@ button.helper-sib:hover {
   align-items: center;
   gap: var(--space-2);
   flex: none;
-  min-height: 42px;
+  min-height: 0;
   margin: 0 var(--space-2) var(--space-2);
   padding: 0 var(--space-3);
-  border: var(--rule-width) solid var(--edge-rule);
+  border: 0;
   border-radius: var(--radius-edge);
-  background: var(--surface-well);
+  background: var(--surface-deck);
   transition:
     border-color var(--motion-fast) var(--ease-standard),
     background-color var(--motion-fast) var(--ease-standard),
     box-shadow var(--motion-fast) var(--ease-standard);
+  height: 40px;
+  box-shadow: var(--shadow-border);
 }
 
 .qo-searchbox:focus-within {
-  border-color: color-mix(in srgb, var(--ring) 72%, var(--edge-rule));
-  background: color-mix(in srgb, var(--surface-well) 88%, var(--surface-raised));
-  box-shadow: 0 0 0 var(--ring-width) color-mix(in srgb, var(--ring) 18%, transparent);
+  box-shadow: none;
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
 }
 
 .qo-search-icon {
-  width: 15px;
-  height: 15px;
+  width: var(--icon-size);
+  height: var(--icon-size);
   flex: none;
-  color: var(--ink-glyph);
+  color: var(--ink-mist);
 }
 
 .qo--finder .qo-searchbox #qo-input {
@@ -21615,13 +21865,13 @@ button.helper-sib:hover {
   border: 0;
   background: transparent;
   box-shadow: none;
-  font-family: var(--font-ui);
-  font-size: var(--text-sm);
+  font: var(--type-label-14);
 }
 
 .qo--finder .qo-searchbox #qo-input:focus-visible {
   border: 0;
   box-shadow: none;
+  outline: none;
 }
 
 /* Bounded, but not to a flat number.
@@ -21637,7 +21887,7 @@ button.helper-sib:hover {
   min-height: 0;
   max-height: var(--palette-list-height);
   overflow-y: auto;
-  padding: 0 var(--space-2) var(--space-1);
+  padding: var(--space-2);
 }
 
 /* The finder's quiet lines: nothing matched, and what it left out (t-82875). */
@@ -21656,7 +21906,7 @@ button.helper-sib:hover {
   min-height: 34px;
   padding: var(--space-2) var(--space-3);
   border-top: var(--rule-width) solid var(--edge-rule);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   color: var(--ink-mist);
   font-variant-numeric: tabular-nums;
 }
@@ -21669,15 +21919,14 @@ button.helper-sib:hover {
    * inverse (8 down, 16 across at 13px): tighter rows in a narrower column,
    * where Orca gives a scanned list vertical room and takes the horizontal
    * padding back for the path itself. */
-  min-height: 42px;
+  min-height: var(--control-height-md);
   margin: 2px 0;
-  padding: var(--space-2) var(--space-3);
+  padding: 0 var(--space-3);
   padding-left: calc(var(--space-3) - var(--rail-lane));
   border: var(--rule-width) solid transparent;
   border-left: var(--rail-lane) solid transparent;
   border-radius: var(--radius-menu-item);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
+  font: var(--type-label-13-mono);
   color: var(--ink-mist);
   cursor: pointer;
   transition:
@@ -21685,6 +21934,9 @@ button.helper-sib:hover {
     background-color var(--motion-fast) var(--ease-standard),
     border-color var(--motion-fast) var(--ease-standard),
     transform var(--motion-press) var(--ease-standard);
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
 }
 
 /* A worktree with a lane running in it wears that lane's colour. The sidebar is
@@ -21695,8 +21947,8 @@ button.helper-sib:hover {
 }
 
 .qo-row-icon {
-  width: 15px;
-  height: 15px;
+  width: var(--icon-size);
+  height: var(--icon-size);
   flex: none;
   color: var(--ink-glyph);
 }
@@ -21758,9 +22010,6 @@ button.helper-sib:hover {
 .qo-row.is-sel {
   color: var(--ink-chalk);
   background: var(--row-selected);
-  border-top-color: var(--edge-rule);
-  border-right-color: var(--edge-rule);
-  border-bottom-color: var(--edge-rule);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ink-chalk) 4%, transparent);
 }
 
@@ -31668,13 +31917,10 @@ select {
 .pr-fix {
   justify-self: start;
   gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  font-size: var(--text-xs);
+  padding: 0 var(--control-pad-inline);
   color: var(--ink-chalk);
   /* The AI-action accent, because that is exactly what this is: the
    * affordance that hands work to an agent. Orca's own presence for it. */
-  background: color-mix(in srgb, var(--ai-accent) 12%, transparent);
-  border-color: color-mix(in srgb, var(--ai-accent) 72%, transparent);
 }
 
 .pr-fix:hover:enabled {
@@ -31711,10 +31957,12 @@ select {
  * Two kinds of surface wear it, for two different reasons:
  *
  *   - THE OVERLAYS — the finder, a context menu, the ports popover, a modal.
- *     These genuinely sit over the window's own content, so they are glass
- *     whether or not the window is translucent, and they are glass in both
- *     treatments. This is the half that needs nothing from the operating
- *     system.
+ *     These were glass until 2026-11-10, when the person passed the Geist
+ *     draft (p-39057edd7d8a28d6, G): Geist's menus and modals are opaque, the
+ *     veil was 97% opaque anyway so its 40px blur bought decoration for one
+ *     backdrop pass per surface, and WKWebView now and then dropped a blurred
+ *     top-layer box altogether (the palette's 네 번째 실종 below). They stand
+ *     on the panel's own ground under a ring of the floating edge.
  *   - THE CHROME — titlebar, the two columns, the status bar. These are grid
  *     siblings with nothing behind them but the stage's own fill, so blurring
  *     them inside an opaque window would be an expensive no-op. They turn to
@@ -31738,11 +31986,7 @@ select {
 .usage-pop,
 .permission,
 .term-float {
-  background-color: var(--glass-veil-raised);
-  backdrop-filter: var(--glass-blur);
-  /* -webkit- for the WebKit webview this ships in, which is the one engine
-   * that still wants it. */
-  -webkit-backdrop-filter: var(--glass-blur);
+  background-color: var(--surface-deck);
   /* The boundary of a floating surface is roughly twice the window's rule —
    * 14%, Orca's `border-white/14` — and it is UNIFORM. The lit top edge used to be
    * painted here as a brighter `border-top-color`; it is now the `inset 0 1px
@@ -31772,15 +32016,25 @@ select {
  * shadows for the two. Ours gave the dialogs the float and left the menus and
  * popovers on `--shadow-3` — a 4px control shadow — so a context menu had
  * about as much depth as the button that opened it. */
-.qo,
+/* A dialog and a menu draw their edge as a ring riding on that shadow —
+ * Geist's materials, where the edge is a shadow so a row and the corner it
+ * sits in line up to the pixel. The popovers and the permission card keep
+ * their own borders for now. */
+.qo {
+  box-shadow: 0 0 0 var(--rule-width) var(--glass-edge), var(--shadow-float);
+}
+
 .permission,
 .term-float {
   box-shadow: var(--shadow-float);
 }
 
 .sidebar-menu,
+.note-pop {
+  box-shadow: 0 0 0 var(--rule-width) var(--glass-edge), var(--shadow-drop);
+}
+
 .ports-pop,
-.note-pop,
 .usage-pop {
   box-shadow: var(--shadow-drop);
 }
@@ -31913,6 +32167,13 @@ select {
  * recession it was written for; light has to reach for the other neighbour. */
 :root[data-theme="light"] .panel-search {
   background: var(--surface-raised);
+}
+
+/* Not the right column's: its field is the panel's own ground inside a ring
+ * (the Geist field, 2026-11-10), which reads the same in both treatments —
+ * a raised fill there would be a second edge inside the ring. */
+:root[data-theme="light"] .files .panel-search {
+  background: var(--surface-deck);
 }
 
 /* `opacity: 0.4` over a white dialog leaves `.btn--primary`'s white label on a
@@ -32236,13 +32497,11 @@ select {
   position: fixed;
   z-index: 60;
   max-width: 320px;
-  padding: 6px 12px;
+  padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-md);
   background: var(--ink-chalk);
   color: var(--surface-abyss);
-  font-family: var(--font-ui);
-  font-size: var(--text-xs);
-  line-height: var(--leading-tight);
+  font: var(--type-label-12);
   white-space: pre-line;
   pointer-events: none;
   /* The pill is placed after it is measured, so it must not be the thing that
@@ -32307,17 +32566,13 @@ body:has(
 
 .toast {
   width: var(--toast-width);
-  padding: var(--toast-inset);
-  border: var(--rule-width) solid var(--glass-edge);
+  padding: var(--space-3) var(--space-4);
+  border: 0;
   border-radius: var(--radius);
-  background-color: var(--glass-veil-raised);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  box-shadow: var(--shadow-drop);
+  background-color: var(--surface-deck);
+  box-shadow: 0 0 0 var(--rule-width) var(--glass-edge), var(--shadow-drop);
   color: var(--ink-chalk);
-  font-family: var(--font-ui);
-  font-size: var(--text-sm);
-  line-height: var(--leading-tight);
+  font: var(--type-copy-13);
   pointer-events: auto;
   /* A toast rises into place — it is anchored to the bottom edge, so it
    * enters from below. */
@@ -32327,7 +32582,7 @@ body:has(
 /* A failure says so with the rail this window gives every other refusal,
  * rather than by turning the whole surface red. */
 .toast[data-kind="halt"] {
-  border-left: var(--rail-width) solid var(--signal-halt);
+  box-shadow: 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-halt) 45%, var(--edge-rule)), var(--shadow-drop);
 }
 
 /* A toast with a way out: the words take the room and the one button keeps
@@ -32352,8 +32607,14 @@ body:has(
 
 .toast-action {
   flex: 0 0 auto;
-  padding: var(--space-1) var(--space-2);
-  font-size: var(--text-sm);
+  padding: 0 var(--control-pad-inline);
+  font: var(--type-label-13);
+  height: var(--control-height-sm);
+  font-weight: 500;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
 }
 
 /* Controls wear the smallest measured shadow — the layer that separates a
@@ -33670,9 +33931,8 @@ input[type="search"]::-webkit-search-cancel-button {
   flex: 0 1 auto;
   overflow: hidden;
   /* The original's head identity: mono 10.5px, foreground at 90%. */
-  color: color-mix(in srgb, var(--ink-chalk) 90%, transparent);
-  font-size: 10.5px;
-  font-weight: 500;
+  color: var(--ink-chalk);
+  font: var(--type-label-12-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -33703,7 +33963,7 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .scm-compare-base {
   flex: 1 1 8rem;
-  height: 22px;
+  height: var(--row-height);
   padding: 0 var(--select-room) 0 0;
   /* The room the mark needs, restated because the shorthand above
    * out-specifies the `select` rule that reserves it — the control's own
@@ -33721,7 +33981,7 @@ input[type="search"]::-webkit-search-cancel-button {
   background-color: transparent;
   background-position: right 0 center;
   color: var(--ink-chalk);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12-mono);
   text-decoration: underline;
   text-decoration-color: var(--edge-rule);
   text-underline-offset: 2px;
@@ -33753,13 +34013,13 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .scm-committed-open {
   flex: none;
-  width: 24px;
-  height: 24px;
+  width: var(--row-height);
+  height: var(--row-height);
   padding: 0;
   justify-content: center;
-  border-color: transparent;
   background: transparent;
   box-shadow: none;
+  border: 0;
 }
 
 .scm-committed-open .icon {
@@ -34177,8 +34437,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .scm-history-dock.is-open #scm-history-title {
-  min-height: 28px;
-  border-bottom: 1px solid var(--edge-rule);
+  min-height: var(--control-height-sm);
 }
 
 .scm-history-dock.is-open .scm-history-more {
@@ -34208,7 +34467,7 @@ input[type="search"]::-webkit-search-cancel-button {
 /* The count beside COMMITS — Orca's tabular little number, muted so the
  * word keeps the line. */
 .scm-sect-count {
-  font-size: 10px;
+  font: var(--type-label-12);
   font-variant-numeric: tabular-nums;
   opacity: 0.65;
 }
@@ -45683,7 +45942,7 @@ button.board-build-failure-part:focus-visible {
  * icon at size-4 holding a 14px mark, group header h-8 on the accent wash. */
 .vdock-head {
   flex: none;
-  padding: var(--space-2) 10px;
+  padding: var(--space-2) var(--space-3);
   border-bottom: var(--rule-width) solid var(--edge-rule);
 }
 
@@ -45704,7 +45963,7 @@ button.board-build-failure-part:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   font-weight: 600;
   color: var(--ink-chalk);
 }
@@ -45713,7 +45972,7 @@ button.board-build-failure-part:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   color: var(--ink-mist);
 }
 
@@ -45723,15 +45982,16 @@ button.board-build-failure-part:focus-visible {
   display: grid;
   place-items: center;
   width: 24px;
-  height: 24px;
+  height: var(--row-height);
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
   transition:
     background-color var(--motion-fast) var(--ease-standard),
     color var(--motion-fast) var(--ease-standard);
+  font: var(--type-label-12);
 }
 
 .vdock-refresh:hover,
@@ -45746,8 +46006,7 @@ button.board-build-failure-part:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 0 var(--space-1);
-  font-size: var(--text-2xs);
+  padding: 0 var(--space-2);
   white-space: nowrap;
 }
 
@@ -45770,7 +46029,7 @@ button.board-build-failure-part:focus-visible {
   border: var(--rule-width) solid transparent;
   border-radius: var(--radius-sm);
   background: none;
-  font-size: var(--text-2xs);
+  font: var(--type-label-13);
   font-weight: 500;
   color: var(--ink-chalk);
   cursor: pointer;
@@ -45793,13 +46052,10 @@ button.board-build-failure-part:focus-visible {
 .vdock-search {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   margin-top: var(--space-2);
-  height: 32px;
   padding-inline: var(--space-2);
-  border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-sm);
-  background: var(--surface-raised);
 }
 
 .vdock-search .icon {
@@ -45815,9 +46071,9 @@ button.board-build-failure-part:focus-visible {
   border: 0;
   background: none;
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-label-13);
   outline: none;
+  height: 100%;
 }
 
 .vdock-note {
@@ -45839,16 +46095,17 @@ button.board-build-failure-part:focus-visible {
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  height: 32px;
+  height: var(--control-height-sm);
   padding-inline: var(--space-3);
   border: 0;
-  border-block: var(--rule-width) solid var(--edge-rule);
-  background: color-mix(in srgb, var(--surface-raised) 60%, transparent);
-  font-size: var(--text-xs);
+  border-block: 0;
+  background: none;
+  font: var(--type-label-12);
   font-weight: 600;
-  color: var(--ink-chalk);
+  color: var(--ink-mist);
   text-align: left;
   cursor: pointer;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
 }
 
 .vdock-group-head:hover {
@@ -45870,16 +46127,15 @@ button.board-build-failure-part:focus-visible {
 
 .vdock-group-count {
   flex: none;
-  padding: 2px var(--space-2);
-  border: var(--rule-width) solid var(--edge-rule);
+  padding: 0;
+  border: 0;
   border-radius: var(--radius-sm);
   /* Orca's pill stands on bg-background — the page's own ground — so it
    * reads as a window cut into the header's wash. */
-  background: var(--surface-abyss);
-  font-size: var(--text-2xs);
+  background: none;
+  font: var(--type-label-12);
   font-variant-numeric: tabular-nums;
-  line-height: 1;
-  color: var(--ink-chalk);
+  color: var(--ink-mist);
 }
 
 .vdock-card {
@@ -45905,9 +46161,8 @@ button.board-build-failure-part:focus-visible {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
   overflow: hidden;
-  font-size: 13px;
+  font: var(--type-label-13);
   font-weight: 500;
-  line-height: 20px;
   color: var(--ink-chalk);
 }
 
@@ -45944,7 +46199,7 @@ button.board-build-failure-part:focus-visible {
 
 .vdock-role {
   font-weight: 500;
-  color: color-mix(in srgb, var(--ink-chalk) 80%, transparent);
+  color: var(--ink-mist);
 }
 
 .vdock-card-meta {
@@ -45998,10 +46253,10 @@ button.board-build-failure-part:focus-visible {
   display: grid;
   place-items: center;
   width: 22px;
-  height: 22px;
+  height: var(--row-height);
   border: 0;
-  border-radius: var(--radius-sm);
-  background: var(--surface-deck);
+  border-radius: var(--radius-md);
+  background: none;
   color: var(--ink-mist);
   cursor: pointer;
 }
@@ -56015,13 +56270,13 @@ button.jev-token:hover {
 }
 
 /* Explorer filters and path operations use the same theme tokens as find. */
-.explorer-filters { display: grid; gap: 6px; padding: var(--space-2) var(--space-3); position: relative; }
-.explorer-filter-toggles { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-.explorer-filters button, .tree-undo-toast button { font: inherit; color: var(--ink-chalk); background: var(--surface-well); border: 1px solid var(--edge-rule); border-radius: var(--radius-sm); padding: 3px 6px; cursor: pointer; }
-.explorer-filters button.is-active { color: var(--nav-plane-ring); background: var(--row-active); border-color: var(--nav-plane-ring); }
-.explorer-filters input { min-width: 0; width: 100%; box-sizing: border-box; font: inherit; color: var(--ink-chalk); background: var(--surface-well); border: 1px solid var(--edge-rule); border-radius: var(--radius-sm); padding: 5px 7px; }
+.explorer-filters { display: flex; gap: var(--space-2); padding: 0; position: relative; flex-direction: column; margin-top: var(--space-2); }
+.explorer-filter-toggles { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; order: 2; }
+.explorer-filters button, .tree-undo-toast button { font: var(--type-label-12); color: var(--ink-chalk); background: var(--surface-deck); border: 0; border-radius: var(--radius-md); padding: 0 var(--space-2); cursor: pointer; height: var(--row-height); box-shadow: var(--shadow-border-small); }
+.explorer-filters button.is-active { color: var(--ink-chalk); background: var(--row-active); border-color: transparent; }
+.explorer-filters input { min-width: 0; width: 100%; box-sizing: border-box; font: inherit; color: var(--ink-chalk); background: var(--surface-well); border: 1px solid var(--edge-rule); border-radius: var(--radius-sm); padding: 0 var(--space-2); }
 .explorer-filters input::placeholder { color: var(--ink-mist); opacity: 1; }
-.explorer-presets { display: flex; gap: 4px; flex-wrap: wrap; padding: 6px; background: var(--surface-raised); border: 1px solid var(--edge-rule); border-radius: var(--radius-sm); }
+.explorer-presets { display: flex; gap: var(--space-1); flex-wrap: wrap; padding: var(--space-1); background: var(--surface-raised); border: 0; border-radius: var(--radius-md); order: 3; box-shadow: var(--shadow-border); }
 .explorer-error, .tree-drag-badge, .tree-undo-toast { margin: 5px 10px; padding: 7px; font-size: var(--text-2xs); line-height: 1.5; border-radius: var(--radius-sm); overflow-wrap: anywhere; }
 .explorer-error, .tree-drag-badge.is-conflict { color: var(--signal-halt-ink); border: 1px solid var(--signal-halt-ink); }
 .tree-drag-badge, .tree-undo-toast { background: var(--surface-raised); color: var(--ink-chalk); border: 1px solid var(--edge-rule); }
@@ -56040,11 +56295,13 @@ button.jev-token:hover {
 .tree-head {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   min-width: 0;
   padding: 0 var(--space-3);
-  font-size: var(--text-2xs);
+  font: var(--type-label-12);
   color: var(--ink-mist);
+  min-height: var(--row-height);
+  margin-top: var(--space-2);
 }
 .tree-head-space { flex: 1; min-width: 0; }
 .tree-head-button {
@@ -56055,7 +56312,7 @@ button.jev-token:hover {
   width: 24px;
   height: 24px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
@@ -56164,7 +56421,7 @@ button.jev-token:hover {
 /* The keyboard's place in the tree, and the row a reveal pointed at — an
  * `@path` in a prompt, a menu's "show in the file tree". Both are rings and
  * grounds the rest of the explorer already uses. */
-.tree-row:focus-visible { outline: 1px solid var(--nav-plane-ring); outline-offset: -1px; }
+.tree-row:focus-visible { outline: var(--focus-ring); outline-offset: calc(var(--focus-ring-offset) * -1); }
 .tree-row.is-revealed:not(.is-selected) { background: var(--row-hover); }
 
 /* The folder an agent's pane stands in: its glyph in the ring's colour and
@@ -61841,7 +62098,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 
 .pile-title {
   font: var(--type-heading-14);
-  letter-spacing: var(--tracking-heading-14);
+  letter-spacing: normal;
 }
 
 .pile-project,
@@ -61889,6 +62146,12 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   gap: var(--space-1);
 }
 
+/* A build's or the gate's name is a `strong`, which the browser sets at 700 —
+ * a weight Geist does not have. Its heading weight is 600. */
+.pile-build-title {
+  font-weight: 600;
+}
+
 .pile-total-count {
   font: var(--type-heading-24);
   letter-spacing: var(--tracking-heading-24);
@@ -61902,7 +62165,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   align-items: baseline;
   gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-1) 0;
+  padding: 0;
   border: 0;
   border-bottom: var(--rule-width) solid var(--edge-rule);
   background: none;
@@ -61911,6 +62174,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   text-align: left;
   cursor: pointer;
   transition: color var(--motion-fast) var(--ease-standard);
+  min-height: var(--row-height);
 }
 
 .pile-branch:hover {

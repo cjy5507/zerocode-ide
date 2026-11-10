@@ -130,6 +130,7 @@ import { testYourTurn } from "./your-turn.mjs";
 import { testPassTwoBFit } from "./pass2-b-fit.mjs";
 import { testPaneFirstView, testPaneHead, testPaneHeadReach } from "./pane-head.mjs";
 import { testStackedWork } from "./stacked-work.mjs";
+import { testRightColumnGeist } from "./right-column-geist.mjs";
 import { testPhoneAwake } from "./phone-awake.mjs";
 import { testChatList, testNewChat } from "./chat-list.mjs";
 import { testSelfAct } from "./self-act.mjs";
@@ -357,6 +358,7 @@ suite("pane-head", ({ browser, origin, ok }) => testPaneHead(browser, origin, ok
 suite("pane-head-reach", ({ browser, origin, ok }) => testPaneHeadReach(browser, origin, ok));
 suite("pane-first-view", ({ browser, origin, ok }) => testPaneFirstView(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("stacked-work", ({ browser, origin, ok }) => testStackedWork(browser, origin, ok));
+suite("right-column-geist", ({ browser, origin, ok }) => testRightColumnGeist(browser, origin, ok));
 // Keeping an Android phone awake (T7, 2026-11-09): the settings card's rows and the status bar's chip.
 suite("phone-awake", ({ browser, origin, ok }) => testPhoneAwake(browser, origin, ok));
 // The T3 Code chat view, stages 2 and 3 (2026-11-08): the sidebar's conversation list, and the 「새 대화」 start page.
@@ -9837,7 +9839,9 @@ const graph = await page.evaluate(async (rows) => {
   seen.headCircles = drawn[1]?.querySelectorAll("circle").length;
   const badge = drawn[1]?.querySelector(".history-ref");
   seen.badgeWords = badge?.textContent;
-  seen.badgeInk = badge?.style.color;
+  // The ref's lane hue, handed to the sheet as `--ref-hue` (2026-11-10): the
+  // sheet tints the ground with it and leans the word toward the ink.
+  seen.badgeInk = badge?.style.getPropertyValue("--ref-hue");
   // The side branch's lane is inked with the rotation's first colour.
   seen.laneInk = drawn[3]?.querySelector('path[stroke="var(--git-graph-lane-1)"]') !== null;
   // Every stroke is an element handed over, none invented: this row's
@@ -27180,9 +27184,9 @@ ok(
 /* The two `.btn` wearers are the measured sizes as RENDERED, not as declared.
  * Both were written at 11px in the panel's own CSS section and drew at 14px,
  * because the base `.btn` rule is later in the file and wins at equal
- * specificity — a bug no attribute assertion can see. The sizes are the
- * panel's own steps, read from the tokens: on the Geist steps the person
- * passed on 10-21 (t-67607) the away button's 2xs step is 12px, not 11. */
+ * specificity — a bug no attribute assertion can see. Since the right
+ * column's Geist pass (2026-11-10, p-39057edd7d8a28d6) both are the column's
+ * one button: Label 13 on the side column's 28px, read from the tokens. */
 const checkButtons = await page.evaluate(() => {
   const face = (node) => {
     const seen = getComputedStyle(node);
@@ -27192,13 +27196,14 @@ const checkButtons = await page.evaluate(() => {
   return {
     away: face(document.querySelector(".check-pane-away")),
     fix: face(document.getElementById("pr-fix")),
-    steps: { away: tokens.getPropertyValue("--text-2xs").trim(), fix: tokens.getPropertyValue("--text-xs").trim() },
+    steps: { away: tokens.getPropertyValue("--text-sm").trim(), fix: tokens.getPropertyValue("--text-sm").trim() },
+    height: Math.round(Number.parseFloat(tokens.getPropertyValue("--control-height-sm"))),
   };
 });
 ok(
-  "the panel's buttons render at the panel's own type steps, not at the base button's",
-  checkButtons.away.size === checkButtons.steps.away && checkButtons.away.height === 24 &&
-    checkButtons.fix.size === checkButtons.steps.fix && checkButtons.fix.height < 30,
+  "the panel's buttons render as the column's button, not at the base button's",
+  checkButtons.away.size === checkButtons.steps.away && checkButtons.away.height === checkButtons.height &&
+    checkButtons.fix.size === checkButtons.steps.fix && checkButtons.fix.height === checkButtons.height,
   JSON.stringify(checkButtons),
 );
 
@@ -32451,15 +32456,20 @@ const pullRequest = await page.evaluate(async () => {
   const headBox = dialog.querySelector(".prc-head").getBoundingClientRect();
   const actionBox = dialog.querySelector(".prc-actions").getBoundingClientRect();
   const contentStyle = getComputedStyle(dialog.querySelector(".prc-content"));
-  seen.titleWorn = titleBox.height === "36px" && parseFloat(titleBox.borderTopWidth) > 0;
+  // Geist's dialog field since the 2026-11-10 pass: 32px, its edge a ring.
+  seen.titleWorn = titleBox.height === getComputedStyle(document.documentElement).getPropertyValue("--control-height-md").trim() &&
+    (parseFloat(titleBox.borderTopWidth) > 0 || titleBox.boxShadow !== "none");
   seen.titleNotMono = !/mono/i.test(titleBox.fontFamily);
   seen.draftBoxSized = document.getElementById("pr-new-draft").offsetWidth < 30;
   seen.polishedLayout =
     document.querySelectorAll(".prc-route .prc-route-node").length === 2 &&
     document.querySelectorAll(".prc-field-group").length === 2 &&
     contentStyle.overflowY === "auto" &&
-    headBox.top >= dialogBox.top &&
-    actionBox.bottom <= dialogBox.bottom;
+    // The dialog's edge is a ring outside its box since the 2026-11-10 Geist
+    // pass, so the head and the footer meet the box's edges exactly; a box
+    // read while the dialog scales open rounds by a fraction of a pixel.
+    headBox.top >= dialogBox.top - 0.5 &&
+    actionBox.bottom <= dialogBox.bottom + 0.5;
   const close = document.getElementById("pr-new-close");
   seen.closeVisible = !close.hidden && close.getBoundingClientRect().width >= 30;
   close.click();
@@ -33057,10 +33067,28 @@ const scmChrome = await page.evaluate(async () => {
       primary: {
         height: Math.round(Number.parseFloat(primaryStyle.height)),
         font: Number.parseFloat(primaryStyle.fontSize),
-        // The step it is set at, read from the tokens: 2xs is 12px on the
-        // Geist steps the person passed on 10-21 (t-67607), 11px before.
-        step: Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--text-2xs")),
+        // The Geist pass (2026-11-10, p-39057edd7d8a28d6, C): the side
+        // column's control height and Label 13, read from the tokens, and
+        // the ink fill only while the commit can act — Geist's quiet raised
+        // face while it cannot. Orca's outlined xs button before.
+        controlHeight: Math.round(Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--control-height-sm"))),
+        step: Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--text-sm")),
         fill: primaryStyle.backgroundColor,
+        disabled: document.getElementById("scm-primary").disabled,
+        quiet: (() => {
+          const probe = document.body.appendChild(document.createElement("i"));
+          probe.style.background = "var(--surface-raised)";
+          const colour = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return colour;
+        })(),
+        ink: (() => {
+          const probe = document.body.appendChild(document.createElement("i"));
+          probe.style.background = "var(--ink-chalk)";
+          const colour = getComputedStyle(probe).backgroundColor;
+          probe.remove();
+          return colour;
+        })(),
       },
       duplicateAllHidden: getComputedStyle(document.getElementById("changes-open")).display,
       compareBaseBorder: compareBaseStyle.borderTopWidth,
@@ -33109,9 +33137,9 @@ ok(
     scmChrome.stickyHead === "sticky" &&
     scmChrome.headInset === "12px" &&
     scmChrome.commitInset === "12px" &&
-    scmChrome.primary.height === 26 &&
+    scmChrome.primary.height === scmChrome.primary.controlHeight &&
     scmChrome.primary.font === scmChrome.primary.step &&
-    scmChrome.primary.fill === "rgba(0, 0, 0, 0)" &&
+    scmChrome.primary.fill === (scmChrome.primary.disabled ? scmChrome.primary.quiet : scmChrome.primary.ink) &&
     scmChrome.duplicateAllHidden === "none" &&
     scmChrome.compareBaseBorder === "0px" &&
     JSON.stringify(scmChrome.committedOpen) === JSON.stringify([24, 24]) &&
@@ -53419,7 +53447,8 @@ ok(
  * (HudWindow / acrylic) is what blurs the desktop. The four chrome bands wear
  * the veil alone — a `backdrop-filter` on each was a second backdrop layer
  * per window edge, re-rendered by the compositor on every commit the streaming
- * stage made. The overlays keep theirs: they sit over the window's own content. */
+ * stage made. The overlays kept theirs until the 2026-11-10 Geist pass (G):
+ * they are the one solid floating material now, so nothing blurs at all. */
 const blurChrome = await page.evaluate(async () => {
   const root = document.documentElement;
   const prior = root.getAttribute("data-blur");
@@ -53442,9 +53471,9 @@ const blurChrome = await page.evaluate(async () => {
   return { bands, overlays, veil };
 });
 ok(
-  "under blur the chrome bands leave the blur to the platform and only overlays carry a backdrop",
+  "under blur the chrome bands leave the blur to the platform and the overlays are solid, so nothing carries a backdrop",
   blurChrome.bands.every(({ backdrop }) => backdrop === "none") &&
-    blurChrome.overlays.every(({ backdrop }) => backdrop !== null && backdrop !== "none") &&
+    blurChrome.overlays.every(({ backdrop }) => backdrop === "none") &&
     blurChrome.veil !== "rgba(0, 0, 0, 0)",
   JSON.stringify(blurChrome),
 );

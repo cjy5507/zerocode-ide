@@ -49,6 +49,8 @@ function resetExplorerFilters() {
 function paintExplorerFilters() {
   const row = el("file-search-filters");
   row.hidden = fileSearchMode !== 'text';
+  // The three toggles stand inside the field and answer the same question.
+  el("file-search-toggles").hidden = row.hidden;
   const titles = {
     case_sensitive: t("file.searchCase", "대소문자 구분"),
     whole_word: t("file.searchWord", "단어 단위"),

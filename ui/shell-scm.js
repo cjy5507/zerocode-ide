@@ -3747,10 +3747,10 @@ function historyRefs(references) {
     badge.className = "history-ref";
     badge.textContent = reference.name;
     badge.dataset.tip = reference.name;
-    if (reference.color) {
-      badge.style.borderColor = `var(--${reference.color})`;
-      badge.style.color = `var(--${reference.color})`;
-    }
+    // The lane's hue goes to the sheet, which tints the badge's ground with it
+    // and leans its word toward the window's ink: the bare hue on its own tint
+    // read 3.6:1 in the light treatment (2026-11-10 Geist pass).
+    if (reference.color) badge.style.setProperty("--ref-hue", `var(--${reference.color})`);
     box.appendChild(badge);
   }
   if (kept.length > 2) {

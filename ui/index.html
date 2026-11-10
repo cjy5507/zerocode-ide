@@ -3128,18 +3128,6 @@
         <section class="activity-item pile" id="activity-pile" data-i18n-aria="pile.title" aria-label="쌓인 일" hidden></section>
 
         <section class="activity-item" id="activity-files">
-          <div id="file-search-filters" class="explorer-filters" hidden>
-            <div class="explorer-filter-toggles">
-              <button id="file-filter-case" type="button" class="file-find-case" aria-pressed="false">Aa</button>
-              <button id="file-filter-word" type="button" class="file-find-case" aria-pressed="false"></button>
-              <button id="file-filter-regex" type="button" class="file-find-case" aria-pressed="false">.*</button>
-              <button id="file-filter-presets" type="button" aria-controls="file-filter-preset-list"></button>
-              <button id="file-filter-reset" type="button"></button>
-            </div>
-            <input id="file-filter-include" type="text" autocomplete="off" spellcheck="false" />
-            <input id="file-filter-exclude" type="text" autocomplete="off" spellcheck="false" />
-            <div id="file-filter-preset-list" class="explorer-presets" hidden></div>
-          </div>
           <p id="file-search-error" class="explorer-error" role="status" hidden></p>
           <div id="tree-drag-badge" class="tree-drag-badge" role="status" hidden></div>
           <div id="tree-undo-toast" class="tree-undo-toast" role="status" hidden>
@@ -3159,6 +3147,15 @@
               autocomplete="off"
               spellcheck="false"
             />
+            <!-- The content search's three toggles stand inside the field's
+                 end, where the editor's find bar keeps them (2026-11-10, the
+                 Geist draft p-39057edd7d8a28d6, D); only while the field asks
+                 the content question (`paintExplorerFilters`). -->
+            <span class="field-toggles" id="file-search-toggles" hidden>
+              <button id="file-filter-case" type="button" class="file-find-case" aria-pressed="false">Aa</button>
+              <button id="file-filter-word" type="button" class="file-find-case" aria-pressed="false"></button>
+              <button id="file-filter-regex" type="button" class="file-find-case" aria-pressed="false">.*</button>
+            </span>
           </div>
           <div class="segment" role="tablist" data-i18n-aria="file.searchScope" aria-label="검색 대상">
             <button class="segment-btn is-active" id="file-mode-name" role="tab" aria-selected="true">
@@ -3167,6 +3164,17 @@
             <button class="segment-btn" id="file-mode-text" role="tab" aria-selected="false">
               <span data-i18n="file.content">내용</span>
             </button>
+          </div>
+          <!-- Which paths the content search reads, under the question it
+               refines rather than above the field it belongs to. -->
+          <div id="file-search-filters" class="explorer-filters" hidden>
+            <div class="explorer-filter-toggles">
+              <button id="file-filter-presets" type="button" aria-controls="file-filter-preset-list"></button>
+              <button id="file-filter-reset" type="button"></button>
+            </div>
+            <input id="file-filter-include" type="text" autocomplete="off" spellcheck="false" />
+            <input id="file-filter-exclude" type="text" autocomplete="off" spellcheck="false" />
+            <div id="file-filter-preset-list" class="explorer-presets" hidden></div>
           </div>
           <!-- The tree's head (t-24298): where this checkout stands in git,
                and whether the tree follows what the agents touch. -->
@@ -3712,7 +3720,7 @@
             <div class="scm-sect" id="scm-history-title" hidden>
               <button class="scm-sect-fold" id="scm-history-fold" type="button" aria-expanded="false">
                 <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
-                <span class="scm-sect-name" data-i18n="sourceControl.history">COMMITS</span>
+                <span class="scm-sect-name" data-i18n="sourceControl.history">커밋</span>
                 <span class="scm-sect-count" id="scm-history-count"></span>
               </button>
               <span class="scm-sect-acts scm-sect-acts--held" id="scm-history-acts">
