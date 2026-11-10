@@ -23479,7 +23479,6 @@ button.integration-context-action:hover {
   color: var(--ink-mist);
 }
 
-.integration-error,
 /* Settings › Remote link: the pairing QR beside its code. */
 .remote-link-pair {
   display: flex;
@@ -23521,6 +23520,7 @@ button.integration-context-action:hover {
   letter-spacing: 0.08em;
 }
 
+.integration-error,
 .integration-empty {
   margin: var(--space-3) 0 0 var(--integration-indent);
   color: var(--ink-mist);
