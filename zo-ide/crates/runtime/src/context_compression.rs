@@ -333,8 +333,16 @@ fn compress_for_wire(raw: &str, tool_name: &str, rewrite: WireRewrite) -> Compre
 // skill bodies / ToolSearch — wire only
 // ---------------------------------------------------------------------------
 
-/// The tool whose result is a set of schemas, printed with indentation.
-const TOOL_SEARCH: &str = "ToolSearch";
+/// The tools whose whole result is one JSON document zo itself printed with
+/// indentation, and whose every value the model may still need: the schemas
+/// `ToolSearch` found, and the two lists `TodoWrite` hands back. On the wire
+/// such a result keeps every key and value where it was and loses the
+/// indentation alone ([`compress_json_whitespace`]).
+///
+/// The table is names, not a test of the text, on purpose. A result that
+/// merely happens to be JSON — a file an MCP server read, a command's output —
+/// is content, and its whitespace is the content's.
+const INDENTED_ENVELOPES: &[&str] = &["ToolSearch", "TodoWrite"];
 
 /// Envelopes outside the core table that reach the model as pretty JSON.
 ///
@@ -343,11 +351,12 @@ const TOOL_SEARCH: &str = "ToolSearch";
 /// returns: seven days of one machine's conversations to 2026-11-10 held
 /// 1.4M characters of the two.
 ///
-/// `TodoWrite` is deliberately not here, though its result repeats the list
-/// it was handed. The list it held BEFORE the call (`oldTodos`) is not always
-/// something the model still has — after a compaction, or in a conversation
-/// taken up again — and what a conversation is handed of a plan is a thing
-/// the end-to-end suite reads off the wire.
+/// `TodoWrite` keeps both of its lists. The one it held BEFORE the call
+/// (`oldTodos`) is not always something the model still has — after a
+/// compaction, or in a conversation taken up again — and what a conversation
+/// is handed of a plan is a thing the end-to-end suite reads off the wire. A
+/// view that dropped that list was taken back out on 2026-11-10 for exactly
+/// that; only the indentation goes.
 fn compress_named_envelope(raw: &str, tool_name: &str) -> CompressionOutcome {
     // A skill body comes from three tools — `Skill`, and `skill_search` and
     // `skill_load` behind `CapabilityInvoke` — so it is told by its shape, not
@@ -358,7 +367,7 @@ fn compress_named_envelope(raw: &str, tool_name: &str) -> CompressionOutcome {
             return CompressionOutcome::pick_smaller(raw, view);
         }
     }
-    if tool_name == TOOL_SEARCH {
+    if INDENTED_ENVELOPES.contains(&tool_name) {
         return compress_json_whitespace(raw);
     }
     CompressionOutcome::unchanged(raw)
@@ -2354,17 +2363,27 @@ mod tests {
         serde_json::to_string_pretty(value).expect("pretty JSON")
     }
 
-    /// `TodoWrite` is left as it is. Its result holds the list the tool had
-    /// before the call, which a conversation that was compacted or taken up
-    /// again may no longer hold itself.
+    /// `TodoWrite` keeps both of its lists — the one the tool had before the
+    /// call is not always something a conversation that was compacted or taken
+    /// up again still holds — and loses only the indentation they were printed
+    /// with. The same text under a name outside the table is content, and its
+    /// whitespace stays.
     #[test]
-    fn a_todo_write_result_is_left_as_it_is() {
-        let raw = pretty(&serde_json::json!({
-            "oldTodos": [{"content": "map the wing", "activeForm": "mapping", "status": "in_progress"}],
-            "newTodos": [{"content": "map the wing", "activeForm": "mapping", "status": "completed"}],
+    fn a_todo_write_result_keeps_both_lists_and_loses_only_its_indentation() {
+        let value = serde_json::json!({
+            "oldTodos": [{"content": "map the  wing", "activeForm": "mapping", "status": "in_progress"}],
+            "newTodos": [{"content": "map the  wing", "activeForm": "mapping", "status": "completed"}],
             "verificationNudgeNeeded": null,
-        }));
-        assert_eq!(wire_tool_output(&raw, "TodoWrite", false, WireRewrite::Full), raw);
+        });
+        let raw = pretty(&value);
+        let wire = wire_tool_output(&raw, "TodoWrite", false, WireRewrite::Full);
+        assert!(wire.len() < raw.len() && !wire.contains('\n'), "{wire}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&wire).expect("still one JSON document"),
+            value
+        );
+        assert!(wire.contains("map the  wing"), "a space inside a value is the value's: {wire}");
+        assert_eq!(wire_tool_output(&raw, "mcp__files__read", false, WireRewrite::Full), raw);
     }
 
     /// The rewrite is the wire's alone. Dispatch keeps an artifact of whatever
