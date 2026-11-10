@@ -547,6 +547,8 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       });
       watch.observe(worktreeList, { childList: true, subtree: true });
       let stamp = 0;
+      // Put back at the end: the suites after this one ask the stamp too (review t-102958 #7).
+      const stampWas = window.__ANSWER__.worktree_landing_stamp;
       window.__ANSWER__.worktree_landing_stamp = () => `s${stamp}`;
       const viaPoll = async () => {
         landingStamp = `s${stamp}`;
@@ -604,19 +606,56 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
         const at = Math.round((((document.timeline.currentTime - one.currentTime) % period) + period) % period);
         return at === period ? 0 : at;
       };
-      const turnsBefore = turns().map(offset);
+      const turnSaid = (one) => ({ name: one.animationName, at: offset(one) });
+      const turnsBefore = turns().map(turnSaid);
       move = (one) => ({ ...one, branch: "clash-renamed", landing, reclaim });
       await refreshWorktrees();
       // Read before any frame: what the rebuild left is what the first frame after it draws.
       const busyDot = document.querySelector('.wt-row[data-worktree-path="/r/busy"] .wt-dot');
       const dotClass = busyDot?.className ?? "";
-      const turnsAfter = turns().map(offset);
+      const turnsAfter = turns().map(turnSaid);
       const control = { same: rowNode() === node, drawn: worktreeListDrawn === drawn, removed: removed.count };
       watch.disconnect();
+
+      // The card's own ring (`wt-activity-turn`) stands only where no working agent row is shown, and every working
+      // row in this scene shows its agents: with the agents left off the card, the working cards wear the ring
+      // instead — the same rebuild, measured on the card's ring (review t-102958 #4).
+      const root = document.documentElement;
+      const offWas = root.dataset.worktreeCardOff;
+      root.dataset.worktreeCardOff = `${offWas ?? ""} agents`.trim();
+      await window.__PAINTED__();
+      const cardBefore = turns().map(turnSaid);
+      move = (one) => ({ ...one, branch: "clash-renamed-again", landing, reclaim });
+      await refreshWorktrees();
+      const cardAfter = turns().map(turnSaid);
+      // A row that starts working on a node that stands starts its card's ring there: it is read before any frame
+      // too, so it must already stand where the other rings stand, not at the top (review t-102958 #2).
+      const startedPath = "/r/gl";
+      const startedAt = turns().filter((one) => one.animationName === "wt-activity-turn").length;
+      const startedNode = document.querySelector(`.wt-row[data-worktree-path="${startedPath}"]`)?.closest(".wt-node") ?? null;
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      tell("hook:agent", { term: 9102, state: "working", agent: "claude", session: "s-9102" });
+      paintWorktreeDots();
+      const startedRing = startedNode?.getAnimations({ subtree: true })
+        .filter((one) => one.animationName === "wt-activity-turn").map(turnSaid) ?? [];
+      const started = {
+        same: startedNode !== null && startedNode.isConnected,
+        before: startedAt,
+        ring: startedRing,
+        all: turns().filter((one) => one.animationName === "wt-activity-turn").map(turnSaid),
+      };
+      tell("hook:agent", { term: 9102, state: "done", agent: "claude", session: "s-9102" });
+      if (offWas === undefined) delete root.dataset.worktreeCardOff;
+      else root.dataset.worktreeCardOff = offWas;
+
       window.__ANSWER__.project_catalog = was;
+      window.__ANSWER__.worktree_landing_stamp = stampWas;
       await refreshWorktrees();
       await window.__PAINTED__();
-      return { seen, control, dotClass, turnsBefore, turnsAfter };
+      return { seen, control, dotClass, turnsBefore, turnsAfter, cardBefore, cardAfter, started,
+        stampPutBack: window.__ANSWER__.worktree_landing_stamp === stampWas };
     });
     for (const one of steady.seen) {
       ok(
@@ -630,12 +669,32 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       !steady.control.same && !steady.control.drawn && steady.control.removed > 0,
       JSON.stringify(steady.control),
     );
+    const offsets = (turns) => turns.map((one) => one.at);
+    const named = (turns, name) => turns.some((one) => one.name === name);
     ok(
       "a rebuild does not send a turning ring back to the top: every turn in the list stands where it stood against the document's clock, and a working dot wears its step from the moment it is built",
       steady.turnsBefore.length > 0 && steady.turnsAfter.length > 0 &&
-        steady.turnsAfter.every((at) => steady.turnsBefore.includes(at)) &&
+        named(steady.turnsAfter, "wt-agent-spin") &&
+        offsets(steady.turnsAfter).every((at) => offsets(steady.turnsBefore).includes(at)) &&
         /\bwt-spin-\d+\b/.test(steady.dotClass),
       JSON.stringify({ before: steady.turnsBefore, after: steady.turnsAfter, dot: steady.dotClass }),
+    );
+    ok(
+      "the card's own turning ring (wt-activity-turn) is among the turns measured, and a rebuild leaves it where it stood against the document's clock",
+      named(steady.cardBefore, "wt-activity-turn") && named(steady.cardAfter, "wt-activity-turn") &&
+        offsets(steady.cardAfter).every((at) => offsets(steady.cardBefore).includes(at)),
+      JSON.stringify({ before: steady.cardBefore, after: steady.cardAfter }),
+    );
+    ok(
+      "a card ring that starts on a row that stands is drawn from its first frame where the other rings stand, not from the top",
+      steady.started.same && steady.started.ring.length > 0 && steady.started.all.length > steady.started.before &&
+        offsets(steady.started.ring).every((at) => offsets(steady.cardAfter).includes(at)),
+      JSON.stringify(steady.started),
+    );
+    ok(
+      "the suite puts back the stamp answer it replaced, so a suite after it asks the stamp it expects",
+      steady.stampPutBack,
+      JSON.stringify({ stampPutBack: steady.stampPutBack }),
     );
 
     // The artifact card and drawer wear the state's own word only (t-36910 `head`): the clash and the

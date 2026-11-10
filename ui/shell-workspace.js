@@ -5010,13 +5010,16 @@ function dressWorktreeDot(row, state) {
   }
   dressWorktreeLanding(row, state, phase);
   dressWorktreeWall(row);
-  if (dot.dataset.state === indicator && dot.dataset.tip === label) return;
+  if (dot.dataset.state === indicator && dot.dataset.tip === label) return false;
+  const started = indicator === "working" && dot.dataset.state !== "working";
   dot.dataset.state = indicator;
   dot.className = turningDotClass("wt-dot", indicator);
   dot.dataset.tip = label;
   // The tree item carries the name; the row inside it is a plain box (t-88672).
   (row.closest(".wt-node") ?? row).setAttribute("aria-label", `${row.querySelector(".wt-title").textContent}, ${label}`);
   if (indicator === "working") wakeWorktreeSpin();
+  // Whether the card's own ring may just have started on this standing row (`paintWorktreeDots` pins it).
+  return started;
 }
 
 /* 도는 반지는 CSS 키프레임이 아니라 창이 직접 돌린다. 분할+글라스 무대의
@@ -5079,8 +5082,11 @@ function turningDotClass(base, state) {
  * 2026-11-08). Pinned to the document timeline's origin, every turn of one
  * period stands at the same angle on any node, old or just built, and a
  * rebuild draws the ring where it already was. The rebuilds call this on what
- * they just built, before a frame is drawn; a turn that starts on a standing
- * node (a row that just began working) is pinned when it says it started.
+ * they just built, before a frame is drawn — the sidebar's rebuild, the cards
+ * whose agent rows changed (once, after the last card), the rows a scroll
+ * builds — and so does the dot painter for a row that just began working,
+ * whose card ring starts on a node that stands (review t-102958 #2). Any turn
+ * none of them reached is pinned when it says it started, a frame late.
  * Reduced motion names no animation, so there is nothing here to pin. */
 const SHARED_TURNS = new Set(["wt-activity-turn", "wt-agent-spin"]);
 
@@ -5091,6 +5097,13 @@ function keepTurnsInStep(root) {
   }
 }
 
+/* The listener hears the whole document, on purpose (review t-102958 #3): `wt-agent-spin` is also the board card's
+ * spinner (`.board-card-state.is-spin`) and the agent graph's working ring (`.agent-graph-node-state.is-working`).
+ * One agent at work is drawn by all three at once, side by side when the board stands beside the sidebar, and a
+ * spinner pinned to the same clock ticks in step with its row instead of a beat apart; a board repaint does not
+ * send its spinners back to the top either. It costs a name looked up in a set for every other animation, and one
+ * `getAnimations` on the node for a turn that is pinned. The sidebar's own rebuilds still pin what they build
+ * before a frame is drawn — this listener is the late road, a frame after the turn has started. */
 document.addEventListener("animationstart", (event) => {
   if (SHARED_TURNS.has(event.animationName)) keepTurnsInStep(event.target);
 });
@@ -5114,10 +5127,14 @@ function wakeWorktreeSpin() {
  * and every listener under it once a second while four agents ran. */
 function paintWorktreeDots() {
   const owned = worktreeLanes();
+  const started = [];
   for (const row of worktreeList.querySelectorAll(".wt-row[data-worktree-path]")) {
     const path = row.dataset.worktreePath;
-    dressWorktreeDot(row, worktreeDotState(path, owned.get(path) ?? []));
+    if (dressWorktreeDot(row, worktreeDotState(path, owned.get(path) ?? []))) started.push(row);
   }
+  // A row that starts working starts its card's ring on a node that stands: pinned now, before the frame that
+  // draws it, instead of one frame at the top and then where the others stand (review t-102958 #2).
+  for (const row of started) keepTurnsInStep(row.closest(".wt-node") ?? row);
   noteAgentsStirred();
 }
 
@@ -5896,6 +5913,10 @@ function renderSidebarWindows() {
   if (built) {
     paintWorktreeAgents();
     paintWorktreePortPins();
+    // A row the scroll just built wears its rings from the frame that first shows it, where every other ring
+    // stands — not one frame at the top until it says it started (review t-102958 #2). The measure below lays
+    // the list out anyway, so the style this brings forward is not a pass of its own.
+    keepTurnsInStep(worktreeList);
   }
   measureSidebarRows();
   const top = anchor ? sidebarAnchorTop(anchor) : null;

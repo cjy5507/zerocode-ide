@@ -12750,8 +12750,6 @@ function swapAgentRows(host, rows, leaving) {
     if (cursor === row) cursor = cursor.nextSibling;
     else host.insertBefore(row, cursor);
   }
-  // The new rows' rings turn from where the old ones stood (`keepTurnsInStep`), not from the top.
-  for (const row of rows) keepTurnsInStep(row);
 }
 
 function paintWorktreeAgents() {
@@ -12763,6 +12761,8 @@ function paintWorktreeAgents() {
   const hosts = worktreeList.querySelectorAll(".wt-agents[data-worktree-path]");
   // The rows the new ones replace, taken out once every card's new rows stand and are laid out (`swapAgentRows`).
   const leaving = [];
+  // The cards this pass changed, whose rings are pinned once after the last of them (`keepTurnsInStep`).
+  const stirred = [];
   for (const host of hosts) {
     const path = host.dataset.worktreePath;
     const all = worktreeAgentRows(path);
@@ -12839,6 +12839,7 @@ function paintWorktreeAgents() {
       + `|review:${waiting}`;
     if (host.dataset.said === signature) continue;
     host.dataset.said = signature;
+    stirred.push(host);
     dressWorktreeReviewFoot(host, waiting);
     dressWorktreeTwist(host.previousElementSibling, path, hidden);
     dressWorktreeTitle(host.previousElementSibling);
@@ -12875,6 +12876,11 @@ function paintWorktreeAgents() {
     // only dresses it.
     host.closest(".wt-node")?.classList.toggle("has-agents", !host.hidden);
   }
+  // Every ring a changed card holds turns from where the old one stood, not from the top — its new rows' rings, and
+  // the card's own ring that a row going quiet or hidden just uncovered. Pinned once, after the last card: asking
+  // the animations brings the style forward, and asked card by card it was one style pass for each card changed
+  // (review t-102958 #1). The first ask settles the style; the asks after it find nothing left to compute.
+  for (const host of stirred) keepTurnsInStep(host.closest(".wt-node") ?? host);
   if (leaving.length > 0) {
     // One layout with the new rows beside the old — the read is what lays them out — then the old ones go.
     void sidebarScroller.scrollHeight;

@@ -7912,10 +7912,34 @@ mod tests {
             refreshing[rebuilt..].contains("keepTurnsInStep(worktreeList);"),
             "the sidebar rebuild draws its new rings from the top:\n{refreshing}"
         );
-        let swapping = block_after(window, "function swapAgentRows(host, rows, leaving) {");
+        // A card's changed rows are pinned once, after the last card (review t-102958 #1): pinned
+        // card by card, every card's ask brought the style forward again.
+        let painting = block_after(window, "function paintWorktreeAgents() {");
         assert!(
-            swapping.contains("for (const row of rows) keepTurnsInStep(row);"),
-            "a card's rebuilt agent rows draw their rings from the top:\n{swapping}"
+            painting.contains("stirred.push(host);")
+                && painting.contains(
+                    "for (const host of stirred) keepTurnsInStep(host.closest(\".wt-node\") ?? host);"
+                )
+                && !block_after(window, "function swapAgentRows(host, rows, leaving) {")
+                    .contains("keepTurnsInStep("),
+            "a card's rebuilt agent rows draw their rings from the top, or every \
+             changed card brings the style forward on its own:\n{painting}"
+        );
+        // The rows a scroll builds and a row that starts working on a standing node are pinned
+        // before their first frame, not one frame at the top (review t-102958 #2).
+        let windowing = block_after(window, "function renderSidebarWindows() {");
+        let built = windowing
+            .find("if (built) {")
+            .expect("the sidebar window no longer knows when the scroll built a row");
+        assert!(
+            windowing[built..].contains("keepTurnsInStep(worktreeList);"),
+            "a row the scroll builds draws its rings from the top for a frame:\n{windowing}"
+        );
+        let dots = block_after(window, "function paintWorktreeDots() {");
+        assert!(
+            dots.contains("if (dressWorktreeDot(row, worktreeDotState(path, owned.get(path) ?? []))) started.push(row);")
+                && dots.contains("for (const row of started) keepTurnsInStep(row.closest(\".wt-node\") ?? row);"),
+            "a card ring that starts on a standing row draws from the top for a frame:\n{dots}"
         );
     }
 

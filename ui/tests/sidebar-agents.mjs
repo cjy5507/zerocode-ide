@@ -166,6 +166,62 @@ export async function testSidebarAgents({ browser, origin, ok, faults }) {
       JSON.stringify(keyed),
     );
 
+    /* Two rows that change places keep their nodes (review t-102958 #5): a card whose rows only moved is not rebuilt —
+     * each helper's row is the same node after the swap, the rows stand in the new order, and the row that did not
+     * have to move (the lead's) is never taken out. */
+    const reordered = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const term = await openTermTab({ placement: "tab" });
+      const owner = tabOfTerm(term);
+      const path = owner.worktree;
+      const host = () => document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`);
+      const subOf = (id) => host()?.querySelector(`.wt-agent[data-sub="${id}"]`) ?? null;
+      const lead = () => host()?.querySelector(`.wt-agent[data-term="${term}"]:not([data-sub]):not([data-history])`) ?? null;
+      const order = () => [...(host()?.querySelectorAll(".wt-agent") ?? [])]
+        .map((node) => node.dataset.sub ?? (node.dataset.term === String(term) ? "lead" : node.dataset.term));
+      paneAgents.set(term, "zo");
+      tell("hook:agent", { term, state: "working", agent: "zo", session: "zo-reorder" });
+      const first = { id: "order-a", name: "explore·first", state: "running", tool_calls: 2 };
+      const second = { id: "order-b", name: "plan·second", state: "running", tool_calls: 3 };
+      tell("hook:subagent", { term, rows: [first, second] });
+      await focusAgentPane(path, owner.id, term, "zo");
+      await window.__PAINTED__();
+      const before = { order: order(), lead: lead(), a: subOf("order-a"), b: subOf("order-b") };
+      const taken = [];
+      const watch = new MutationObserver((records) => {
+        for (const record of records) for (const gone of record.removedNodes) taken.push(gone);
+      });
+      watch.observe(host(), { childList: true, subtree: true });
+      tell("hook:subagent", { term, rows: [second, first] });
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+      watch.disconnect();
+      const seen = {
+        before: before.order,
+        after: order(),
+        aSame: before.a !== null && subOf("order-a") === before.a && before.a.isConnected,
+        bSame: before.b !== null && subOf("order-b") === before.b && before.b.isConnected,
+        leadSame: before.lead !== null && lead() === before.lead,
+        leadTaken: taken.some((gone) => gone === before.lead || (gone.nodeType === 1 && gone.contains(before.lead))),
+      };
+      tell("hook:subagent", { term, rows: [] });
+      tell("term:exited", { term });
+      window.__PANES__ = [];
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok(
+      "two agent rows that change places keep their own nodes and stand in the new order; the lead's row, which did not move, is never taken out",
+      JSON.stringify(reordered.before) === JSON.stringify(["lead", "order-a", "order-b"]) &&
+        JSON.stringify(reordered.after) === JSON.stringify(["lead", "order-b", "order-a"]) &&
+        reordered.aSame && reordered.bSame && reordered.leadSame && !reordered.leadTaken,
+      JSON.stringify(reordered),
+    );
+
     /* Pressing a helper's row shows what that helper is doing. A helper
      * that runs inside its lead has no pane of its own; its row used to take
      * the person to the lead's pane — the pane already in front of them, so
