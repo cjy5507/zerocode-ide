@@ -4,6 +4,7 @@
 // wait_for_calm: an unknown load is said, never judged calm.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { cpus } from "node:os";
 import * as machineLoad from "./machine-load.mjs";
 
 test("a frame over its wall on a platform that cannot read the load holds, unjudged", () => {
@@ -65,6 +66,25 @@ test("a paired ratio of two paint modes is judged by the load on this machine an
   assert.equal(machineLoad.pairedRatioHolds(1.14, 1.1, { platform: "darwin", load: 1e3, env: {} }), true);
   assert.equal(machineLoad.pairedRatioHolds(1.1, 1.1, { platform: "darwin", load: 0, env: {} }), true);
   assert.equal(machineLoad.pairedRatioHolds(1.14, 1.1, { platform: "win32", load: 0, env: {} }), true);
+});
+
+test("a budget measured on the fast cores is judged while one is free and recorded once the load fills them", () => {
+  const fast = { platform: "darwin", cores: 8, env: {} };
+  // The paint that went red in the v1.1.139 gate: 3.20 ms against 3.1 at load 8.1 of 12 cores, 8 of them fast.
+  assert.equal(machineLoad.frameBudgetHolds(3.2, 3.1, { ...fast, load: 8.1 }), true);
+  assert.match(machineLoad.loadNote({ ...fast, load: 8.1 }), /^load 8\.1\/\d+, 8 fast \(loud — budget unjudged\)$/);
+  // The same reading at a load that leaves a fast core free is judged, and a paint that costs twice as much fails.
+  assert.equal(machineLoad.frameBudgetHolds(3.2, 3.1, { ...fast, load: 7.9 }), false);
+  assert.equal(machineLoad.frameBudgetHolds(2.0, 3.1, { ...fast, load: 7.9 }), true);
+  assert.match(machineLoad.loadNote({ ...fast, load: 7.9 }), /^load 7\.9\/\d+, 8 fast$/);
+  // A budget that names no cores keeps the whole machine's count, and a hosted runner still records.
+  assert.equal(machineLoad.frameBudgetHolds(3.2, 3.1, { platform: "darwin", load: 0.5, env: {} }), false);
+  assert.equal(machineLoad.frameBudgetHolds(9, 3.1, { ...fast, load: 1, env: HOSTED }), true);
+});
+
+test("the fast cores are a count of this machine's cores", () => {
+  assert.ok(Number.isInteger(machineLoad.FAST_CORES) && machineLoad.FAST_CORES >= 1, String(machineLoad.FAST_CORES));
+  assert.ok(machineLoad.FAST_CORES <= cpus().length, `${machineLoad.FAST_CORES} of ${cpus().length}`);
 });
 
 test("the load note this run saw is logged for the record", () => {

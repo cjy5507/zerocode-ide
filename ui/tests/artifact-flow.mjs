@@ -28,7 +28,7 @@ import { REAL_WINDOW, standCatalog } from "./artifact-cards.mjs";
 import { standTasks } from "./artifact-tasks.mjs";
 import { axeViolations, contrastTable } from "./settings-quality.mjs";
 import { median } from "./coordinator-desk-perf.mjs";
-import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
+import { FAST_CORES, frameBudgetHolds, loadNote } from "./machine-load.mjs";
 import { nodeCounterSource } from "./node-count.mjs";
 
 /* The draft's lines for the first screen (t-68338 report, 「처음 연 화면」: 6 · 4 · 3 · 3). */
@@ -841,9 +841,12 @@ export async function testArtifactFlow(browser, origin, ok) {
       work.scratch.made > 0 && work.scratch.made <= MADE_CALLS_MAX, JSON.stringify({ ...work, standing: heavy.elements }));
     ok("drawn again over itself it makes no element and writes nothing to the page",
       work.again.made === 0 && work.again.written === 0, JSON.stringify(work));
-    // The clock is judged on a quiet machine of our own; a shared runner records it (machine-load.mjs).
-    ok(`the flow is drawn from scratch in at most ${PAINT_MS_MAX} ms with the CPU slowed ${CPU_THROTTLE}x (p50 ${median(fresh).toFixed(2)} ms, ${loadNote()})`,
-      frameBudgetHolds(median(fresh), PAINT_MS_MAX + CLOCK_STEP_MS), JSON.stringify(fresh.map((one) => one.toFixed(2))));
+    // The clock is judged on a quiet machine of our own; a shared runner records it (machine-load.mjs). The from-scratch
+    // budget is judged while the load leaves a fast core free: its p50 reads 1.9 to 2.7 ms against 3 in every lane gate at
+    // a load of 8 or less, and crossed it once, at 3.20 ms, when the load (8.1/12) had filled this machine's 8 fast cores.
+    const fast = { cores: FAST_CORES };
+    ok(`the flow is drawn from scratch in at most ${PAINT_MS_MAX} ms with the CPU slowed ${CPU_THROTTLE}x (p50 ${median(fresh).toFixed(2)} ms, ${loadNote(fast)})`,
+      frameBudgetHolds(median(fresh), PAINT_MS_MAX + CLOCK_STEP_MS, fast), JSON.stringify(fresh.map((one) => one.toFixed(2))));
     ok(`and drawn again over itself in at most ${PAINT_MS_MAX} ms (p50 ${median(again).toFixed(2)} ms, ${loadNote()})`,
       frameBudgetHolds(median(again), PAINT_MS_MAX + CLOCK_STEP_MS), JSON.stringify(again.map((one) => one.toFixed(2))));
 

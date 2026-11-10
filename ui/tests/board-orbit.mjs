@@ -237,7 +237,7 @@ async function installOrbitCounters(page) {
 }
 
 export const openOrbit = async (page, fixture = {}) => {
-  await installBoardWaits(page);
+  await installBoardWaits(page, { settleMs: ORBIT_SETTLE_MS });
   await installOrbitCounters(page);
   await page.evaluate(orbitFixture, fixture);
   await page.evaluate(() => window.__BOARD_SETTLED__());
@@ -349,6 +349,11 @@ export async function testBoardOrbit(given, origin, ok) {
 /* 손(올리기·누르기)의 기다림. SwiftShader의 한 장은 붐비는 기계에서 1초에 가깝고, 손은 그림
  * 몇 장을 기다린다 — 5초는 그 판에서 모자랐다. */
 const ORBIT_ACTION_MS = 20_000;
+/* 판이 가라앉기(스냅숏·그림·그래프 모양)를 기다리는 한도. 공용 한도 2.5초(harness-waits.mjs)는 그림 두세
+ * 장이라, 붐비는 레인에서 이 판의 공간 묶음이 「Timed out waiting for board snapshot, paint and graph
+ * geometry」로 넘어졌다(10-16 레인 ea9d5e33, 11-10 게이트 한 번 — 혼자 돌면 3/3 초록). 손과 같은 장수를
+ * 기다린다: 가라앉지 않는 판은 여전히 이 한도에서 실패다. */
+const ORBIT_SETTLE_MS = ORBIT_ACTION_MS;
 
 /* 헤드리스 Chromium에 WebGL2를 주는 손잡이 — SwiftShader(소프트웨어 래스터라이저). */
 export const ORBIT_GL_ARGS = ["--enable-unsafe-swiftshader"];
@@ -1709,7 +1714,7 @@ async function testOrbitLiveMap(browser, origin, ok) {
  * 다시 투영하지 않는 판이다. 옛 트리(카메라가 없는 그림)에서도 같은 함수가 돈다: 전/후를
  * 같은 자로 재기 위해서다. */
 export async function measureBoardOrbit(page, { seconds = 3, fixture = {} } = {}) {
-  await installBoardWaits(page);
+  await installBoardWaits(page, { settleMs: ORBIT_SETTLE_MS });
   await installOrbitCounters(page);
   /* 첫 그림까지: 픽스처가 보드를 열기 시작한 때부터 이 보기의 첫 그림이 끝난 때까지. */
   await page.evaluate(() => {
@@ -1934,7 +1939,7 @@ export function mainNameFixture({ held = false, scheduledNamed = false } = {}) {
 export async function testOrbitMainName(browser, origin, ok, { held = false } = {}) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
-    await installBoardWaits(page);
+    await installBoardWaits(page, { settleMs: ORBIT_SETTLE_MS });
     await installOrbitCounters(page);
     const { lead, asked } = await page.evaluate(mainNameFixture, { held });
     await page.evaluate(() => window.__BOARD_SETTLED__());
@@ -1981,7 +1986,7 @@ async function shootMainName(browser, origin, dir, fixture = {}) {
   const shots = [];
   try {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await installBoardWaits(page);
+    await installBoardWaits(page, { settleMs: ORBIT_SETTLE_MS });
     await installOrbitCounters(page);
     const { lead } = await page.evaluate(mainNameFixture, fixture);
     await page.evaluate(() => window.__BOARD_SETTLED__());

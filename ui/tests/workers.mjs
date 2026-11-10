@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { openWindowTestPage, WINDOW_MOTION_REST } from "./window-boot.mjs";
+import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
 
 /* Workers and helpers, on a page of their own (t-4017).
  *
@@ -1976,6 +1977,13 @@ const HELPER_BRIEFS_BY_LANGUAGE = {
   es: ["Revisa el bucle de reintentos del módulo de sincronización e informa de la causa. No modifiques ningún archivo. Las pruebas no pasan en main.", "No modifiques ningún archivo", "Las pruebas no pasan en main"],
 };
 
+/* One frame, in ms: the stop's press and its answer each change the button within it. Whether the change came before
+ * anything else could run — inside the press itself, or before the first task after the answer — is an order no load
+ * moves, and is judged everywhere. How long that took is a wall clock: 0.1 to 0.3 ms over twenty lane gates here, 0.5
+ * ms on GitHub's macOS runners and once 22.8 ms there (v1.1.139 CI) on the same code: the shared VM's pause, not the press.
+ * So the frame is judged by the machine-load rule every frame budget follows (machine-load.mjs). */
+const STOP_FRAME_MS = 16;
+
 async function testHelperPage(page, ok) {
   const agentSource = await readFile(new URL("../../crates/zerocode-core/src/agent.rs", import.meta.url), "utf8");
   const catalogIds = [...agentSource.matchAll(/^ {8}id: "([^"]+)"/gm)].map((one) => one[1]);
@@ -2567,7 +2575,10 @@ async function testHelperPage(page, ok) {
     watch.observe(button, { childList: true, characterData: true, subtree: true });
     const answered = performance.now();
     reply?.resolve({ status: "stopped", agent_id: "h-a", record_key: "stopped_by_person" });
+    // Whether the words had changed before the first task after the answer: no timer and no frame stood between.
+    const beforeTask = new Promise((done) => setTimeout(() => done(paintedAt !== null), 0));
     await settle(40);
+    seen.replyBeforeTask = await beforeTask;
     watch.disconnect();
     seen.replyToWordsMs = paintedAt === null ? null : Math.round((paintedAt - answered) * 1000) / 1000;
     seen.toldWords = words(button);
@@ -2641,22 +2652,24 @@ async function testHelperPage(page, ok) {
   ok(
     "a press asks the backend once with the pane's session, the agent and the helper's id and nothing else, says stopping at once, and takes no second press while the answer is out",
     stopping.missing !== true &&
-      stopping.pressToBusyMs !== null && stopping.pressToBusyMs < 16 &&
+      /* Not null: the button said stopping when the press returned, before anything else could run. */
+      stopping.pressToBusyMs !== null && frameBudgetHolds(stopping.pressToBusyMs, STOP_FRAME_MS) &&
       stopping.busy.words.length > 0 && stopping.busy.words !== stopping.idle.words && stopping.busy.focusable === true &&
       stopping.callsWhileOut === 1 &&
       JSON.stringify(stopping.args) === JSON.stringify({ session: "sess-parent", agent: "agent-with-road", agentId: "h-a" }) &&
       stopping.session === "sess-parent",
-    JSON.stringify({ pressToBusyMs: stopping.pressToBusyMs, busy: stopping.busy, callsWhileOut: stopping.callsWhileOut, args: stopping.args, session: stopping.session }),
+    JSON.stringify({ pressToBusyMs: stopping.pressToBusyMs, load: loadNote(), busy: stopping.busy, callsWhileOut: stopping.callsWhileOut, args: stopping.args, session: stopping.session }),
   );
   ok(
     "the answer's word stands on the button for a beat and is read out, the head keeps saying running until the roster says the helper ended, and then it says the person stopped it",
     stopping.missing !== true &&
-      stopping.replyToWordsMs !== null && stopping.replyToWordsMs < 16 &&
+      stopping.replyBeforeTask === true &&
+      stopping.replyToWordsMs !== null && frameBudgetHolds(stopping.replyToWordsMs, STOP_FRAME_MS) &&
       stopping.toldWords === stopping.stoppedWords && stopping.told.includes(stopping.stoppedWords) &&
       stopping.stateBeforeRoster === stopping.running &&
       stopping.stateAfterRoster === stopping.byPerson && stopping.byPerson !== stopping.stoppedWords &&
       stopping.stopDuringBeat === true,
-    JSON.stringify({ replyToWordsMs: stopping.replyToWordsMs, toldWords: stopping.toldWords, told: stopping.told, before: stopping.stateBeforeRoster, after: stopping.stateAfterRoster, byPerson: stopping.byPerson }),
+    JSON.stringify({ replyToWordsMs: stopping.replyToWordsMs, replyBeforeTask: stopping.replyBeforeTask, load: loadNote(), toldWords: stopping.toldWords, told: stopping.told, before: stopping.stateBeforeRoster, after: stopping.stateAfterRoster, byPerson: stopping.byPerson }),
   );
   ok(
     "an answer that comes back after its page was left is dropped: the helper now showing keeps its own idle button, and the left helper's button stands idle when the person returns",

@@ -34,6 +34,20 @@ export const FRAME_BUDGET_MS = 12 * 8;
 
 const CORES = cpus().length;
 
+/** The performance cores: where a page's main thread runs at the pace a tight budget was measured at. Apple silicon
+ * names them as its first performance level (8 of this machine's 12); a machine that names no levels has one kind of
+ * core, and all of them count. A budget passes `{ cores: FAST_CORES }` when its margin is narrower than the step down
+ * to an efficiency core: past the fast cores' count the page's thread can be put on one, and the same flow's paint
+ * read p50 3.20 ms there (load 8.1/12, v1.1.139 gate) against 1.9 to 2.7 ms in every gate at a load of 8 or less.
+ * Read once at import, as the core count is. */
+export const FAST_CORES = fastCores();
+
+function fastCores(platform = process.platform) {
+  if (platform !== "darwin") return CORES;
+  const named = Number(outputOf("sysctl", ["-n", "hw.perflevel0.logicalcpu"]).trim());
+  return Number.isInteger(named) && named > 0 && named <= CORES ? named : CORES;
+}
+
 /** The one-minute load right now — read when a budget is judged, not once at
  * import: a suite that runs for minutes beside worker builds sees the load
  * move (11 → 37 within one knowledge run, 2026-09-24), and a reading taken at
@@ -54,10 +68,11 @@ export function loadReadable(platform = process.platform) {
 
 /** Why a budget cannot be judged right now, or null when it can. This is the one rule every frame budget asks: a
  * platform that cannot read its load is never quiet ("unreadable"), and a machine whose one-minute load is above its
- * core count is too loud ("loud"). The platform and the load are this machine's unless a test passes its own. */
-function unjudgedBecause({ platform = process.platform, load = loadNow() } = {}) {
+ * core count is too loud ("loud"). A budget measured on the fast cores passes `cores: FAST_CORES`, and is loud once the
+ * load is above those. The platform and the load are this machine's unless a test passes its own. */
+function unjudgedBecause({ platform = process.platform, load = loadNow(), cores = CORES } = {}) {
   if (!loadReadable(platform)) return "unreadable";
-  if (load > CORES) return "loud";
+  if (load > cores) return "loud";
   return null;
 }
 
@@ -79,13 +94,14 @@ export function frameBudgetHolds(ms, limitMs = FRAME_BUDGET_MS, opts = {}) {
 }
 
 /** The load reading, for a METRIC line: `load 3.2/12`, `load 41.0/12 (loud — budget unjudged)`, `load 3.2/3 (hosted runner
- * — budget unjudged)`, or on a platform that cannot read it, `load unreadable on win32 — budget unjudged`. The numbers stay
- * on the line on every runner: only the judgement is withheld. */
+ * — budget unjudged)`, or on a platform that cannot read it, `load unreadable on win32 — budget unjudged`. A budget judged
+ * on the fast cores names them: `load 8.4/12, 8 fast (loud — budget unjudged)`. The numbers stay on the line on every
+ * runner: only the judgement is withheld. */
 export function loadNote(opts = {}) {
-  const { platform = process.platform, load = loadNow() } = opts;
-  const why = unjudgedBecause({ platform, load });
+  const { platform = process.platform, load = loadNow(), cores = CORES } = opts;
+  const why = unjudgedBecause({ platform, load, cores });
   if (why === "unreadable") return `load unreadable on ${platform} — budget unjudged`;
-  const reading = `load ${load.toFixed(1)}/${CORES}`;
+  const reading = `load ${load.toFixed(1)}/${CORES}${cores === CORES ? "" : `, ${cores} fast`}`;
   if (onHostedRunner(opts.env)) return `${reading} (hosted runner — budget unjudged)`;
   return why === "loud" ? `${reading} (loud — budget unjudged)` : reading;
 }

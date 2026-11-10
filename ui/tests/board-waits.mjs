@@ -1,11 +1,14 @@
 import { installHarnessWaits } from "./harness-waits.mjs";
 import { openWindowTestPage } from "./window-boot.mjs";
 
-export async function installBoardWaits(page) {
+/* `settleMs` bounds how long a settle may take before it is a failure; left out, it is `__UNTIL__`'s own bound. A page
+ * whose every frame is drawn in software (the 3D view's SwiftShader, board-orbit.mjs) passes the bound its own hands
+ * wait: there a frame on a busy machine comes near a second apart, and a settle waits for a few of them. */
+export async function installBoardWaits(page, { settleMs } = {}) {
   await installHarnessWaits(page);
-  await page.evaluate(() => {
+  await page.evaluate((bound) => {
     window.__IN_FLIGHT__ ??= new Map();
-    window.__BOARD_SETTLED__ = async () => {
+    window.__BOARD_SETTLED__ = async (timeout = bound ?? undefined) => {
       // Let a gesture's microtasks and ResizeObserver schedule their work.
       await new Promise((done) => requestAnimationFrame(done));
       await window.__UNTIL__(() => {
@@ -22,10 +25,10 @@ export async function installBoardWaits(page) {
           && (typeof agentGraphRailFrames === "undefined" || !agentGraphRailFrames.has(view)))
           && !agentGraphRefreshing && agentPaintFrame === null
           && !["board_snapshot", "pane_agents", "ledger_agents"].some((name) => window.__IN_FLIGHT__.get(name) > 0);
-      }, "board snapshot, paint and graph geometry");
+      }, "board snapshot, paint and graph geometry", timeout);
       await previewTail;
     };
-  });
+  }, settleMs ?? null);
 }
 
 export async function testBoardWaits(browser, origin, ok) {
