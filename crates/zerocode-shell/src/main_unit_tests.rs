@@ -22031,7 +22031,10 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             vec!["worker.stepResults"],
         ),
         ("function nowWordsOf(list) {", vec!["worker.nowWriting"]),
-        ("function dressCodeCopies(host) {", vec!["worker.copied"]),
+        (
+            "function dressCodeCopies(host, { clip = true } = {}) {",
+            vec!["worker.copied"],
+        ),
         ("function turnRailNode(list) {", vec!["worker.railLabel"]),
         ("function paintTurnRail(rail) {", vec!["worker.railAt"]),
         ("function chatStackNode(run) {", vec!["worker.stackLabel"]),
