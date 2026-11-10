@@ -307,7 +307,45 @@ pub fn flow_prompt(slug: &str) -> String {
     )
 }
 
+/// The terminal id of a run that had no shell: a Flow the window walked
+/// itself. No terminal is ever given it, so nothing that looks a run up by its
+/// shell — the hook that stamps a turn's end, the exit that closes a row, the
+/// tab a row opens — can find one of these by mistake.
+pub const NO_SHELL_TERM: u32 = u32::MAX;
+
+/// Close a run that had no shell, by its id: when it ended, the walk's exit
+/// code, and what it said when it was refused. Answers the automation the run
+/// belongs to; `None` when the row is gone or was already closed, so a late
+/// answer never reopens what the boot sweep closed.
+pub fn mark_flow_run_ended(
+    runs: &mut [AutomationRun],
+    run_id: &str,
+    ended_at: i64,
+    exit_code: i32,
+    result: Option<String>,
+) -> Option<String> {
+    let run = runs.iter_mut().rev().find(|run| run.id == run_id)?;
+    if run.ended_at_epoch_ms.is_some() {
+        return None;
+    }
+    run.completed_at_epoch_ms = Some(ended_at);
+    run.ended_at_epoch_ms = Some(ended_at);
+    run.exit_code = Some(exit_code);
+    if result.is_some() {
+        run.result = result;
+    }
+    Some(run.automation_id.clone())
+}
+
 impl Automation {
+    /// Whether the window walks this job's Flow itself, with no agent in
+    /// between: it names a Flow, and neither an agent to hand the command to
+    /// nor a command of the person's own.
+    #[must_use]
+    pub fn runs_flow_directly(&self) -> bool {
+        self.flow.is_some() && self.agent.is_none() && self.command.trim().is_empty()
+    }
+
     /// Make a Flow job's record say one thing: the link is the recipe store's
     /// own spelling of the slug, and the prompt is the command that walks it.
     /// A job with no Flow is left exactly as it was.
@@ -328,6 +366,13 @@ impl Automation {
         // The walk writes into the folder its own shell was started with; a
         // session that was already running was started with none.
         self.reuse_session = false;
+        // A walk the window makes itself has no checkout to be cut for it and
+        // no terminal to close after it.
+        if self.runs_flow_directly() {
+            self.workspace_mode = WorkspaceMode::Existing;
+            self.base_branch = None;
+            self.close_when_done = false;
+        }
         Ok(())
     }
 
@@ -1603,6 +1648,106 @@ mod tests {
             ..nightly()
         };
         assert!(blank.bind_flow().is_err());
+    }
+
+    /// The window walks a Flow itself only when the job names no one else to:
+    /// an agent, or a command of the person's own, takes the command instead.
+    /// Such a job is stored as what it is — this checkout, no terminal to close.
+    #[test]
+    fn a_flow_job_with_no_agent_is_walked_by_the_window_itself() {
+        let flow = |agent: Option<&str>, command: &str| Automation {
+            flow: Some("wallet-qa".into()),
+            agent: agent.map(str::to_string),
+            command: command.into(),
+            workspace_mode: WorkspaceMode::NewPerRun,
+            base_branch: Some("main".into()),
+            close_when_done: true,
+            ..nightly()
+        };
+        assert!(flow(None, "").runs_flow_directly());
+        assert!(flow(None, "  ").runs_flow_directly());
+        assert!(!flow(Some("codex"), "").runs_flow_directly());
+        assert!(!flow(None, "my-runner --flag").runs_flow_directly());
+        assert!(
+            !Automation {
+                agent: None,
+                ..nightly()
+            }
+            .runs_flow_directly()
+        );
+
+        let mut direct = flow(None, "");
+        direct.bind_flow().expect("a named Flow binds");
+        assert_eq!(direct.workspace_mode, WorkspaceMode::Existing);
+        assert_eq!(direct.base_branch, None);
+        assert!(!direct.close_when_done);
+
+        let mut handed = flow(Some("codex"), "");
+        handed.bind_flow().expect("a named Flow binds");
+        assert_eq!(
+            handed.workspace_mode,
+            WorkspaceMode::NewPerRun,
+            "a job an agent runs keeps where the person said it runs"
+        );
+        assert!(handed.close_when_done);
+    }
+
+    /// A run with no shell is closed by its id, once: the time, the exit code
+    /// and the refusal are stamped, and a second answer — or one for a row the
+    /// boot sweep already closed — changes nothing.
+    #[test]
+    fn a_run_with_no_shell_is_closed_by_its_id_and_only_once() {
+        let run = |id: &str| AutomationRun {
+            id: id.into(),
+            automation_id: "a1".into(),
+            scheduled_for_epoch_minutes: None,
+            at_epoch_ms: 1_000,
+            root: "/repo".into(),
+            term: NO_SHELL_TERM,
+            made_worktree: None,
+            skipped: None,
+            failure: None,
+            missed: None,
+            ended_at_epoch_ms: None,
+            exit_code: None,
+            completed_at_epoch_ms: None,
+            result: None,
+            evidence_dir: None,
+            launch: None,
+            unwitnessed: false,
+        };
+        let mut runs = vec![run("1000-flow"), run("2000-flow")];
+        assert_eq!(
+            mark_flow_run_ended(&mut runs, "2000-flow", 2_500, 1, Some("no recipe".into())),
+            Some("a1".to_string())
+        );
+        assert_eq!(runs[1].ended_at_epoch_ms, Some(2_500));
+        assert_eq!(runs[1].completed_at_epoch_ms, Some(2_500));
+        assert_eq!(runs[1].exit_code, Some(1));
+        assert_eq!(runs[1].result.as_deref(), Some("no recipe"));
+        assert_eq!(runs[0].ended_at_epoch_ms, None, "another run was closed");
+
+        assert_eq!(
+            mark_flow_run_ended(&mut runs, "2000-flow", 9_000, 0, None),
+            None
+        );
+        assert_eq!(
+            runs[1].ended_at_epoch_ms,
+            Some(2_500),
+            "a late answer reopened it"
+        );
+        assert_eq!(mark_flow_run_ended(&mut runs, "gone", 9_000, 0, None), None);
+
+        // Nothing that looks a run up by its shell finds one of these.
+        assert_eq!(
+            mark_completed(&mut runs, NO_SHELL_TERM, None, 3_000, None),
+            None
+        );
+        assert_eq!(close_unwitnessed(&mut runs, 4_000, |_| false), 1);
+        assert!(
+            runs[0].unwitnessed,
+            "an open walk outlived the window that made it"
+        );
     }
 
     fn nightly() -> Automation {

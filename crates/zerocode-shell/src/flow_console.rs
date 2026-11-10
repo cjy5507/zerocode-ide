@@ -37,12 +37,36 @@ fn evidence_in(root: &Path, report: &Path) -> Result<Value, String> {
     }))
 }
 
-type ComputerSender = tokio::sync::mpsc::UnboundedSender<zerocode_hookd::ComputerRequest>;
+pub(crate) type ComputerSender =
+    tokio::sync::mpsc::UnboundedSender<zerocode_hookd::ComputerRequest>;
 static COMPUTER: std::sync::OnceLock<ComputerSender> = std::sync::OnceLock::new();
 
 /// Installed only after the window's bridge binds, with its existing sender.
 pub(crate) fn install_sender(sender: ComputerSender) {
     let _ = COMPUTER.set(sender);
+}
+
+/// The window's own door to the dispatcher, for a scheduled Flow the window
+/// walks itself; `None` until the bridge has bound.
+pub(crate) fn computer_sender() -> Option<&'static ComputerSender> {
+    COMPUTER.get()
+}
+
+/// Why a walk was refused, in its answer's own words; `None` for one that ran.
+pub(crate) fn refusal_of(answer: &zerocode_hookd::TeamAnswer) -> Option<String> {
+    if answer.exit_code == 0 {
+        return None;
+    }
+    let envelope =
+        zerocode_core::computer_use_protocol::answer_envelope(&answer.stdout, &answer.stderr);
+    Some(
+        envelope
+            .as_ref()
+            .and_then(|envelope| envelope.pointer("/error/message"))
+            .and_then(Value::as_str)
+            .unwrap_or(answer.stderr.trim())
+            .to_string(),
+    )
 }
 
 /// A person's Flow action takes the same dispatcher, sequence gate, runner and
@@ -117,12 +141,8 @@ async fn execute(
     let envelope =
         zerocode_core::computer_use_protocol::answer_envelope(&answer.stdout, &answer.stderr)
             .ok_or("the Computer Use request did not return its JSON answer")?;
-    if answer.exit_code != 0 {
-        return Err(envelope
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .unwrap_or(answer.stderr.trim())
-            .to_string());
+    if let Some(why) = refusal_of(&answer) {
+        return Err(why);
     }
     Ok(envelope)
 }

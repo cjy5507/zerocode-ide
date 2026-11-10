@@ -34598,3 +34598,101 @@ fn a_new_folder_is_made_once_and_its_way_is_checked_name_by_name() {
         "a `..` on the way was walked"
     );
 }
+
+/// A Flow job that names no agent is walked by the window itself: through the
+/// window's own Computer Use door — so every guard of a walk guards it — and
+/// only after the claim and the precheck that every start passes. Its row has
+/// no shell, and the walk's answer closes it once, under the store's lock.
+#[test]
+fn a_scheduled_flow_with_no_agent_is_walked_through_the_windows_own_door() {
+    let local = tempfile::tempdir().expect("data root");
+    let folder = "/data/automations/a1/runs/1000".to_string();
+    let open = AutomationRun {
+        id: "1000-flow".to_string(),
+        automation_id: "a1".to_string(),
+        scheduled_for_epoch_minutes: Some(7),
+        at_epoch_ms: 1_000,
+        root: "/repo".to_string(),
+        term: zerocode_core::NO_SHELL_TERM,
+        made_worktree: None,
+        skipped: None,
+        failure: None,
+        missed: None,
+        ended_at_epoch_ms: None,
+        exit_code: None,
+        completed_at_epoch_ms: None,
+        result: None,
+        evidence_dir: Some(folder.clone()),
+        launch: None,
+        unwitnessed: false,
+    };
+    write_automation_runs(local.path(), &[open]).expect("a run history");
+
+    let long = "x".repeat(RUN_RESULT_CHARS + 50);
+    assert_eq!(
+        close_flow_run(local.path(), "1000-flow", 1, Some(long), 2_000),
+        Some(("a1".to_string(), Some(folder)))
+    );
+    let stored = stored_automation_runs(local.path());
+    assert_eq!(stored[0].ended_at_epoch_ms, Some(2_000));
+    assert_eq!(stored[0].completed_at_epoch_ms, Some(2_000));
+    assert_eq!(stored[0].exit_code, Some(1));
+    assert_eq!(
+        stored[0].result.as_ref().map(|said| said.chars().count()),
+        Some(RUN_RESULT_CHARS),
+        "the refusal is kept at the length a shell's last words are"
+    );
+    assert_eq!(
+        close_flow_run(local.path(), "1000-flow", 0, None, 3_000),
+        None,
+        "a second answer closed the row again"
+    );
+    assert_eq!(
+        stored_automation_runs(local.path())[0].ended_at_epoch_ms,
+        Some(2_000)
+    );
+
+    assert_eq!(
+        flow_run_argv("wallet-qa"),
+        ["recipe-run", "--name", "wallet-qa", "--json"],
+        "the words 「지금 걷기」 submits"
+    );
+
+    let backend = shipped_backend();
+    let starting = block_after(backend, "fn start_automation(");
+    let claim = starting
+        .find("claim_automation_run(")
+        .expect("a start claims its job");
+    let gate = starting
+        .find("should_run_precheck(")
+        .expect("a start asks the precheck");
+    let fork = starting
+        .find("return start_flow_run(app, &state, automation, &claim, at, slug);")
+        .expect("a Flow job with no agent forks to the window's own walk");
+    let plan = starting
+        .find("split_command_line(")
+        .expect("a shell run resolves its launch plan");
+    assert!(
+        claim < gate && gate < fork && fork < plan,
+        "the window walks a Flow before the claim or the precheck, or after a shell was planned:\n{starting}"
+    );
+    assert!(
+        starting[..fork].contains("automation.runs_flow_directly()"),
+        "a job that names an agent or a command could be walked by the window:\n{starting}"
+    );
+
+    let walking = block_after(backend, "fn start_flow_run(");
+    assert!(
+        walking.contains("crate::flow_console::computer_sender()")
+            && walking.contains("sender.send(zerocode_hookd::ComputerRequest {")
+            && walking.contains("argv: flow_run_argv(slug),")
+            && walking.contains("pane: None,")
+            && walking.contains("term: zerocode_core::NO_SHELL_TERM,"),
+        "the scheduled walk takes another road than the window's Computer Use door, or claims a shell:\n{walking}"
+    );
+    let closing = block_after(backend, "fn close_flow_run(");
+    assert!(
+        closing.contains("let _store = automation_store_domain();"),
+        "closing a walk's row escaped the shared automation lock:\n{closing}"
+    );
+}

@@ -158,6 +158,10 @@ pub(super) struct StartedRun {
     /// The checkout a `NewPerRun` job cut for itself, so the sidebar can show
     /// it and the person can jump. Absent for a run in an existing workspace.
     pub(super) worktree: Option<String>,
+    /// The Flow the window is walking itself, for a run that has no terminal:
+    /// the window shows such a run on the Flow console instead of a tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) flow: Option<String>,
 }
 
 /// A scheduled job that could not start at all.

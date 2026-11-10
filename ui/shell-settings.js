@@ -4514,6 +4514,8 @@ el("flow-schedule-add").addEventListener("click", () => {
   editAutomation(null, {
     name: flow.name,
     flow: flow.slug,
+    // No agent: the window walks the Flow itself, as 「지금 걷기」 does.
+    agent: null,
     schedule: { cadence: "daily", time: "09:00", day_of_week: 1, custom: "" },
   });
 });
@@ -11861,9 +11863,15 @@ function autoLastRun(row) {
   });
 }
 
+/* A Flow job that names no agent and no command: the window walks it itself. */
+function automationIsDirect(row) {
+  return Boolean(row.flow) && !row.agent && !row.command?.trim();
+}
+
 function automationAgentLabel(row) {
   if (row.agent) return agentName(row.agent);
   if (row.command?.trim()) return t("auto.customCommand", "사용자 명령");
+  if (row.flow) return t("auto.agentNone", "에이전트 없이 바로 실행");
   return t("auto.noAgent", "에이전트 없음");
 }
 
@@ -12424,15 +12432,21 @@ function paintAutomationDetail() {
   el("auto-detail-workspace").textContent = row.workspace_mode === "new_per_run"
     ? t("auto.modeNewPerRun", "실행마다 새 워크트리")
     : row.workspace;
-  el("auto-detail-session").textContent = row.reuse_session
-    ? t("auto.reuse", "실행 중인 세션 재사용")
-    : t("auto.freshSession", "매번 새 세션");
+  // A walk the window makes itself has no session and no terminal to speak of.
+  const direct = automationIsDirect(row);
+  el("auto-detail-session").textContent = direct
+    ? t("auto.none", "없음")
+    : row.reuse_session
+      ? t("auto.reuse", "실행 중인 세션 재사용")
+      : t("auto.freshSession", "매번 새 세션");
   el("auto-detail-grace").textContent = graceLabel(row.missed_run_grace_minutes);
   el("auto-detail-precheck").textContent = row.precheck || t("auto.none", "없음");
   el("auto-detail-agent").textContent = automationAgentLabel(row);
-  el("auto-detail-after").textContent = row.close_when_done
-    ? t("auto.closeWhenDone", "완료되면 터미널 닫기")
-    : t("auto.keepPaneOpen", "터미널을 열어 둠");
+  el("auto-detail-after").textContent = direct
+    ? t("auto.none", "없음")
+    : row.close_when_done
+      ? t("auto.closeWhenDone", "완료되면 터미널 닫기")
+      : t("auto.keepPaneOpen", "터미널을 열어 둠");
   el("auto-detail-evidence").textContent = evidencePolicyLabel(row);
   el("auto-detail-toggle").textContent = row.enabled
     ? t("auto.pause", "일시정지")
@@ -12838,7 +12852,10 @@ function paintAutoAgents(selected) {
   field.replaceChildren();
   const fallback = document.createElement("option");
   fallback.value = "";
-  fallback.textContent = t("auto.agentChoose", "에이전트 선택");
+  // For a Flow the empty choice is a choice — the window walks it itself.
+  fallback.textContent = autoKind === "flow"
+    ? t("auto.agentNone", "에이전트 없이 바로 실행")
+    : t("auto.agentChoose", "에이전트 선택");
   field.appendChild(fallback);
   let known = false;
   for (const row of agentRows) {
@@ -12911,12 +12928,15 @@ function paintAutoTemplatePick() {
  * precheck — so the fold can stay shut and still be read. */
 function autoDetailsWords() {
   const words = [];
-  if (el("auto-mode").value === "new_per_run") {
+  // Where a shell runs and what becomes of its terminal are not said of a walk
+  // the window makes itself: it has neither.
+  const direct = el("auto-form").dataset.direct === "true";
+  if (!direct && el("auto-mode").value === "new_per_run") {
     words.push(t("auto.modeNewPerRun", "실행마다 새 워크트리"));
   } else if (autoKind !== "flow" && el("auto-reuse").checked) {
     words.push(t("auto.reuse", "실행 중인 세션 재사용"));
   }
-  if (el("auto-close-done").checked) words.push(t("auto.closeWhenDone", "완료되면 터미널 닫기"));
+  if (!direct && el("auto-close-done").checked) words.push(t("auto.closeWhenDone", "완료되면 터미널 닫기"));
   words.push(`${t("auto.grace", "놓친 실행 유예")} ${graceLabel(Number(el("auto-grace").value))}`);
   const precheck = el("auto-precheck").value.trim();
   words.push(`${t("auto.precheck", "사전 점검")} ${precheck || t("auto.none", "없음")}`);
@@ -13079,7 +13099,8 @@ async function saveAutomation(event) {
     el("auto-error").hidden = false;
     return;
   }
-  if (!automation.agent && !automation.command) {
+  // A Flow needs neither: with no agent named the window walks it itself.
+  if (!automation.agent && !automation.command && automation.flow === null) {
     say(el("auto-error"), () => t(
       "auto.agentRequiredError",
       "실행할 에이전트를 선택하거나 사용자 명령을 입력하세요.",
@@ -13125,11 +13146,21 @@ function paintAutoKind(flow) {
     button.setAttribute("aria-pressed", String(on));
   }
   el("auto-flow-field").hidden = autoKind !== "flow";
+  el("auto-flow-note").hidden = autoKind !== "flow";
   el("auto-prompt-field").hidden = autoKind === "flow";
   // A Flow job starts its own session and always leaves its folder (the
   // backend holds both), so the two controls that would say otherwise go.
   el("auto-form").dataset.kind = autoKind;
-  paintAutoDetailsSummary();
+  // A Flow needs no agent: the picker's empty choice is then a choice — the
+  // window walks the Flow itself — where for a prompt it is one still to make.
+  const agents = el("auto-agent");
+  agents.required = autoKind !== "flow";
+  if (agents.options.length > 0) {
+    agents.options[0].textContent = autoKind === "flow"
+      ? t("auto.agentNone", "에이전트 없이 바로 실행")
+      : t("auto.agentChoose", "에이전트 선택");
+  }
+  paintAutoDirect();
   // The prompt is required only of the kind that sends one.
   el("auto-prompt").required = autoKind !== "flow";
   const field = el("auto-flow");
@@ -13158,11 +13189,32 @@ function paintAutoKind(flow) {
   field.value = flow ?? "";
 }
 
+/* Who walks the Flow. With no agent named — and no command of the person's
+ * own — the window does, and the note says so; the controls only a shell has
+ * (where it runs, what becomes of its terminal) are put away with it. */
+function paintAutoDirect() {
+  const direct = autoKind === "flow" && !el("auto-agent").value && !el("auto-command").value.trim();
+  el("auto-form").dataset.direct = String(direct);
+  say(el("auto-flow-note"), () => (direct
+    ? t("auto.flowNoteDirect", "창이 이 Flow를 직접 실행합니다. 판정은 실행 기록과 Flow 쪽에 남습니다.")
+    : t("auto.flowNote", "선택한 에이전트가 이 Flow를 실행하는 명령을 받습니다. 판정은 Flow 쪽에 남습니다.")));
+  paintAutoDetailsSummary();
+}
+
+el("auto-agent").addEventListener("change", paintAutoDirect);
+el("auto-command").addEventListener("input", paintAutoDirect);
+
 for (const button of document.querySelectorAll("[data-auto-kind]")) {
   button.addEventListener("click", () => {
     if (button.dataset.autoKind === autoKind) return;
+    const toFlow = button.dataset.autoKind === "flow";
+    const stored = automations.some((held) => held.id === autoDraft?.id);
+    // A new Flow job starts as the window's own walk; a prompt needs an agent
+    // again. A stored job keeps the agent it has either way.
+    if (toFlow && !stored) el("auto-agent").value = "";
+    if (!toFlow && !el("auto-agent").value) el("auto-agent").value = autoDraft?.agent ?? agentRows[0]?.id ?? "";
     // Turning to a Flow starts on the one already chosen, else the first there is.
-    paintAutoKind(button.dataset.autoKind === "flow"
+    paintAutoKind(toFlow
       ? (el("auto-flow").value || autoDraft?.flow || flowData?.flows?.[0]?.slug || "")
       : null);
   });
@@ -13233,6 +13285,12 @@ for (const id of ["auto-time", "auto-day", "auto-custom"]) {
  * Whether it takes the stage is the caller's answer, and the two doors below
  * answer differently on purpose. */
 async function adoptAutomationRun(run, { focus }) {
+  // A Flow the window walks itself has no terminal to bring forward: its steps
+  // are on the Flow console, opened when the person asked for the run.
+  if (run?.flow) {
+    if (focus) openFlowConsole();
+    return null;
+  }
   const term = run?.term;
   if (typeof term !== "number") return null;
   // One run is one tab. The by-hand door adopts what the command answered and
@@ -13469,6 +13527,10 @@ listen("automation:started", (event) => {
   refreshAutomations();
   refreshChrome();
   if (event.payload?.worktree) void refreshWorktrees();
+  // A scheduled walk has no pane to appear: one line says that it began.
+  if (event.payload?.flow) {
+    toast(t("auto.flowStarted", "예약 「{{name}}」 — Flow를 실행합니다", { name: event.payload.name ?? "" }));
+  }
   void adoptAutomationRun(event.payload, { focus: false });
 });
 
@@ -13486,6 +13548,12 @@ listen("automation:skipped", () => {
  * job being looked at needs repainting for that. */
 listen("automation:completed", (event) => {
   if (event.payload?.id === autoSelectedId) void refreshAutomationRuns();
+  // A run that ended may have left a verdict: the list's newest-run word and a
+  // Flow's last verdict are read again while the page is there to show them.
+  if (!autoView.hidden) {
+    void refreshAutomations();
+    if (autoPage === "flows") void refreshFlows();
+  }
 });
 
 // 1분 주기 자동 갱신: 자동화 화면이 열려 있을 때 일정이 지난 작업을 재계산하고 오늘 하이라이트/달력을 최신화

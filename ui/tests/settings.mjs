@@ -5106,17 +5106,29 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
         // controls that would say otherwise are not offered.
         evidenceShown: getComputedStyle(document.getElementById("auto-evidence-field")).display !== "none",
         reuseShown: getComputedStyle(document.getElementById("auto-reuse-field")).display !== "none",
+        // No agent is named: the window walks the Flow itself, the note says so,
+        // and what only a shell has — where it runs, its terminal — is not asked.
+        agent: document.getElementById("auto-agent").value,
+        agentRequired: document.getElementById("auto-agent").required,
+        noAgent: document.getElementById("auto-agent").options[0].textContent === t("auto.agentNone", ""),
+        note: document.getElementById("auto-flow-note").textContent === t("auto.flowNoteDirect", ""),
+        modeShown: getComputedStyle(document.getElementById("auto-mode-field")).display !== "none",
+        closeShown: getComputedStyle(document.getElementById("auto-close-done-field")).display !== "none",
       })),
-      { kind: "flow", pressed: "true", flow: "wallet-qa", flowHidden: false, promptHidden: true, name: "Wallet QA", evidenceShown: false, reuseShown: false },
+      {
+        kind: "flow", pressed: "true", flow: "wallet-qa", flowHidden: false, promptHidden: true, name: "Wallet QA",
+        evidenceShown: false, reuseShown: false,
+        agent: "", agentRequired: false, noAgent: true, note: true, modeShown: false, closeShown: false,
+      },
       "the form did not open on this Flow",
     );
     from = backend.calls.length;
     await pageA.click("#auto-save");
     const saved = await backend.waitForCall("A", "save_automation", from);
     assertEqual(
-      [saved.args.automation.flow, saved.args.automation.prompt],
-      ["wallet-qa", ""],
-      "the form sent a command of its own instead of the link",
+      [saved.args.automation.flow, saved.args.automation.prompt, saved.args.automation.agent],
+      ["wallet-qa", "", null],
+      "the form sent a command of its own instead of the link, or named an agent nobody chose",
     );
     await pageA.waitForFunction(
       () => document.querySelectorAll("#flow-schedule-list .flow-schedule").length === 3,
@@ -5130,6 +5142,17 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     await pageA.waitForSelector("#auto-editor-scrim:not([hidden])");
     assertEqual(await pageA.locator("#auto-flow").inputValue(), "wallet-qa", "editing a Flow job lost its Flow");
     assert(await pageA.locator("#auto-template-field").isHidden(), "a stored job was offered a template to start from");
+    // This job names an agent: it is handed the command, and the note says that.
+    assertEqual(
+      await pageA.evaluate(() => [
+        document.getElementById("auto-agent").value,
+        document.getElementById("auto-form").dataset.direct,
+        document.getElementById("auto-flow-note").textContent === t("auto.flowNote", ""),
+        getComputedStyle(document.getElementById("auto-mode-field")).display !== "none",
+      ]),
+      ["codex", "false", true, true],
+      "a Flow job that names an agent was drawn as the window's own walk",
+    );
     await pageA.click('[data-auto-kind="agent"]');
     assertEqual(
       await pageA.evaluate(() => [
@@ -5185,6 +5208,15 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
       [["Morning wallet QA", "Wallet QA"], ["Repo audit", null]],
       "the schedule list did not say what each job runs",
     );
+
+    // A walk the window started itself has no terminal: the notice of its start
+    // mounts no tab.
+    const tabsBefore = await pageA.evaluate(() => tabs.length);
+    await pageA.evaluate((root) => window.__SETTINGS_TEST_EMIT__("automation:started", {
+      term: 4294967295, name: "Wallet QA", root, worktree: null, flow: "wallet-qa",
+    }), BOOT_BASE.project_root);
+    await renderSettled(pageA);
+    assertEqual(await pageA.evaluate(() => tabs.length), tabsBefore, "a walk with no shell was given a terminal tab");
 
     // How the newest run went stands before its time in the list, and the run's
     // own row says it with the reason and offers the report its folder holds.

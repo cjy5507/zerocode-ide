@@ -487,6 +487,15 @@ pub(super) fn start_automation(
         }
     }
 
+    // A Flow job that names no agent is walked by the window itself, through
+    // the Computer Use door 「지금 걷기」 uses — after the claim and the precheck
+    // above, so a job that is gone, superseded or gated walks nothing.
+    if automation.runs_flow_directly()
+        && let Some(slug) = automation.flow.as_deref()
+    {
+        return start_flow_run(app, &state, automation, &claim, at, slug);
+    }
+
     // Resolve WHAT will be spawned before a per-run checkout is made. A
     // custom command is argv, parsed by the same quote-aware grammar as agent
     // launch settings. When the command is empty but an agent is named, the
@@ -923,7 +932,179 @@ pub(super) fn start_automation(
         name: automation.name.clone(),
         root: root.display().to_string(),
         worktree: made.map(|path| path.display().to_string()),
+        flow: None,
     }))
+}
+
+/// The words a scheduled Flow is walked with: the command the Flow page's
+/// 「지금 걷기」 submits, answered as JSON.
+pub(super) fn flow_run_argv(slug: &str) -> Vec<String> {
+    ["recipe-run", "--name", slug, "--json"]
+        .map(str::to_string)
+        .to_vec()
+}
+
+/// Start a Flow job that names no agent: the window walks the recipe itself.
+///
+/// The walk is one request on the window's own Computer Use door — the
+/// dispatcher, sequence gate, runner and evidence writer every other walk
+/// takes — so what guards a walk guards this one: required sharing, the
+/// question before a payment or a delete, the money gate, the person's hand.
+/// Each of those waits is bounded, so a walk nobody is there to answer stops
+/// with its reason instead of holding the queue.
+///
+/// There is no shell: the run's row carries [`zerocode_core::NO_SHELL_TERM`],
+/// its folder is handed to the walk as its evidence, and the answer closes the
+/// row from a thread of its own — a walk can take minutes, and the tick that
+/// started it goes on to the next job.
+fn start_flow_run(
+    app: &AppHandle,
+    state: &AppState,
+    automation: &Automation,
+    claim: &AutomationRunClaim,
+    at: LocalMinute,
+    slug: &str,
+) -> Result<Option<StartedRun>, String> {
+    let root = PathBuf::from(&automation.workspace);
+    if !root.is_dir() {
+        let error = format!("워크스페이스를 찾을 수 없습니다: {}", root.display());
+        return Err(remember_automation_failure(
+            state,
+            automation,
+            claim,
+            at,
+            AutomationFailureInput::new(AutomationFailureStage::Workspace, error, root.clone()),
+        ));
+    }
+    let Some(sender) = crate::flow_console::computer_sender() else {
+        let error = "Computer Use 연결이 아직 준비되지 않았습니다".to_string();
+        return Err(remember_automation_failure(
+            state,
+            automation,
+            claim,
+            at,
+            AutomationFailureInput::new(AutomationFailureStage::LaunchPlan, error, root.clone()),
+        ));
+    };
+    let at_epoch_ms = now_epoch_ms();
+    let evidence = make_run_evidence(state.local_data_root(), &automation.id, at_epoch_ms);
+    if let Some(dir) = &evidence {
+        artifact_runtime::adopt_evidence(dir, &automation.id, root.to_str());
+    }
+    let run_id = format!("{at_epoch_ms}-flow");
+    let _ = remember_run(
+        state.config_root(),
+        state.local_data_root(),
+        automation,
+        claim,
+        at,
+        AutomationRun {
+            id: run_id.clone(),
+            automation_id: automation.id.clone(),
+            scheduled_for_epoch_minutes: Some(at.epoch_minutes),
+            at_epoch_ms,
+            root: root.display().to_string(),
+            term: zerocode_core::NO_SHELL_TERM,
+            made_worktree: None,
+            skipped: None,
+            failure: None,
+            missed: None,
+            ended_at_epoch_ms: None,
+            exit_code: None,
+            completed_at_epoch_ms: None,
+            result: None,
+            evidence_dir: evidence.clone(),
+            launch: None,
+            unwitnessed: false,
+        },
+    );
+    let (answer, waiting) = tokio::sync::oneshot::channel();
+    let sent = sender.send(zerocode_hookd::ComputerRequest {
+        argv: flow_run_argv(slug),
+        cwd: Some(root.display().to_string()),
+        evidence,
+        pane: None,
+        answer,
+    });
+    let walker = app.clone();
+    if sent.is_err() {
+        // The door shut between the look and the send: the row is closed as
+        // refused, and the caller is told what it was told.
+        let why = "Computer Use 연결이 닫혔습니다".to_string();
+        finish_flow_run(&walker, &run_id, 1, Some(why.clone()));
+        return Err(why);
+    }
+    std::thread::spawn(move || {
+        let (exit_code, refusal) = match waiting.blocking_recv() {
+            Ok(answer) => (answer.exit_code, crate::flow_console::refusal_of(&answer)),
+            Err(_) => (1, Some("the walk ended without an answer".to_string())),
+        };
+        finish_flow_run(&walker, &run_id, exit_code, refusal);
+    });
+    Ok(Some(StartedRun {
+        term: zerocode_core::NO_SHELL_TERM,
+        name: automation.name.clone(),
+        root: root.display().to_string(),
+        worktree: None,
+        flow: Some(slug.to_string()),
+    }))
+}
+
+/// Close the row of a walk the window made itself, by its id, under the lock
+/// every writer of the run history takes. Answers the automation and the run's
+/// evidence folder; `None` when the row was already closed or is gone.
+pub(super) fn close_flow_run(
+    local_data_root: &Path,
+    run_id: &str,
+    exit_code: i32,
+    refusal: Option<String>,
+    ended_at: i64,
+) -> Option<(String, Option<String>)> {
+    let _store = automation_store_domain();
+    let mut history = stored_automation_runs(local_data_root);
+    let refusal = refusal.map(|said| said.chars().take(RUN_RESULT_CHARS).collect::<String>());
+    let automation_id =
+        zerocode_core::mark_flow_run_ended(&mut history, run_id, ended_at, exit_code, refusal)?;
+    let evidence_dir = history
+        .iter()
+        .find(|run| run.id == run_id)
+        .and_then(|run| run.evidence_dir.clone());
+    write_automation_runs(local_data_root, &history).ok()?;
+    Some((automation_id, evidence_dir))
+}
+
+/// The walk answered: close its row, file a failed verdict where a failed QA
+/// run is filed, and tell the window, as a shell's turn ending does.
+fn finish_flow_run(app: &AppHandle, run_id: &str, exit_code: i32, refusal: Option<String>) {
+    let state = app.state::<AppState>();
+    let local_data_root = state.local_data_root().to_path_buf();
+    let Some((automation_id, evidence_dir)) =
+        close_flow_run(&local_data_root, run_id, exit_code, refusal, now_epoch_ms())
+    else {
+        return;
+    };
+    if let Some(dir) = evidence_dir.as_deref()
+        && let Some((false, reason)) = crate::computer_use::evidence::read_verdict(Path::new(dir))
+    {
+        let _ = crate::qa_triage::note_failure(
+            &local_data_root,
+            &crate::qa_triage::QaFailure {
+                run_id: run_id.to_string(),
+                automation_id: automation_id.clone(),
+                evidence_dir: dir.to_string(),
+                reason: reason.unwrap_or_else(|| "failed".to_string()),
+                at_ms: now_epoch_ms(),
+            },
+        );
+    }
+    let _ = app.emit(
+        "automation:completed",
+        AutomationCompleted {
+            id: automation_id,
+            run: run_id.to_string(),
+            term: zerocode_core::NO_SHELL_TERM,
+        },
+    );
 }
 
 /// The shell an earlier run of this job left listening in that checkout, if
@@ -1061,6 +1242,7 @@ pub(super) fn remember_reused_run(
         name: automation.name.clone(),
         root: root.display().to_string(),
         worktree: None,
+        flow: None,
     })
 }
 

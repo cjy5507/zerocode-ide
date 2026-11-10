@@ -2523,12 +2523,14 @@
                   <button class="segment-btn" type="button" data-auto-kind="flow" aria-pressed="false" data-i18n="auto.kindFlow">저장된 Flow</button>
                 </div>
               </div>
-              <label class="settings-field"><span data-i18n="auto.agent">에이전트</span><select class="settings-input" id="auto-agent" required></select></label>
               <label class="settings-field" id="auto-flow-field" hidden>
                 <span data-i18n="flow.title">Flow</span>
                 <select class="settings-input" id="auto-flow"></select>
-                <span class="settings-row-desc" data-i18n="auto.flowNote">선택한 에이전트가 이 Flow를 실행하는 명령을 받습니다. 판정은 Flow 쪽에 남습니다.</span>
               </label>
+              <label class="settings-field"><span data-i18n="auto.agent">에이전트</span><select class="settings-input" id="auto-agent" required></select></label>
+              <!-- 누가 실행하는지에 따라 말이 바뀐다(`paintAutoDirect`): 에이전트를 고르지
+                   않으면 창이 직접 실행하고, 고르면 그 에이전트가 명령을 받는다. -->
+              <p class="settings-row-desc auto-flow-note" id="auto-flow-note" hidden></p>
               <label class="settings-field auto-field--tall" id="auto-prompt-field">
                 <span data-i18n="auto.prompt">프롬프트</span>
                 <textarea class="settings-input auto-prompt" id="auto-prompt" rows="7" spellcheck="true" required></textarea>
@@ -2544,7 +2546,7 @@
               <details class="auto-advanced" id="auto-details">
                 <summary><span data-i18n="auto.details">세부 설정</span><span class="auto-details-summary" id="auto-details-summary"></span></summary>
                 <div class="auto-editor-settings">
-                  <label class="settings-field"><span data-i18n="auto.mode">실행 위치</span><select class="settings-input" id="auto-mode"><option value="existing" data-i18n="auto.modeExisting">이 워크스페이스에서</option><option value="new_per_run" data-i18n="auto.modeNewPerRun">실행마다 새 워크트리</option></select></label>
+                  <label class="settings-field" id="auto-mode-field"><span data-i18n="auto.mode">실행 위치</span><select class="settings-input" id="auto-mode"><option value="existing" data-i18n="auto.modeExisting">이 워크스페이스에서</option><option value="new_per_run" data-i18n="auto.modeNewPerRun">실행마다 새 워크트리</option></select></label>
                   <label class="settings-field" id="auto-base-field" hidden><span data-i18n="auto.baseBranch">기준 브랜치</span><input class="settings-input" id="auto-base" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="auto.basePlaceholder" placeholder="비우면 HEAD" /></label>
                   <label class="settings-check" id="auto-reuse-field"><input type="checkbox" id="auto-reuse" /><span class="settings-label" data-i18n="auto.reuse">실행 중인 세션 재사용</span></label>
                   <label class="settings-check" id="auto-close-done-field"><input type="checkbox" id="auto-close-done" /><span class="settings-label" data-i18n="auto.closeWhenDone">완료되면 터미널 닫기</span></label>

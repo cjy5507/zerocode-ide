@@ -488,8 +488,8 @@ pub(crate) struct RunVerdict {
 /// A folder that holds neither answers nothing, and the row then says only
 /// that the run ended.
 fn folder_verdict(dir: &Path) -> (Option<RunVerdict>, Option<String>) {
-    let verdict = computer_use::evidence::read_verdict(dir)
-        .map(|(pass, reason)| RunVerdict { pass, reason });
+    let verdict =
+        computer_use::evidence::read_verdict(dir).map(|(pass, reason)| RunVerdict { pass, reason });
     let report = dir.join(computer_use::report::REPORT_FILE);
     (
         verdict,

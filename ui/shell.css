@@ -30958,6 +30958,19 @@ progress:indeterminate::-webkit-progress-bar {
   color: var(--signal-halt-ink);
 }
 
+/* Who walks the Flow, said under the picker that decides it. */
+.auto-flow-note {
+  margin: calc(var(--space-2) * -1) var(--space-5) 0;
+}
+
+/* A Flow the window walks itself has no shell: where one would run and what
+ * becomes of its terminal are not choices such a job has. */
+.auto-form[data-direct="true"] #auto-mode-field,
+.auto-form[data-direct="true"] #auto-base-field,
+.auto-form[data-direct="true"] #auto-close-done-field {
+  display: none;
+}
+
 /* 「저장된 Flow」: the session is the run's own and its folder is always kept. */
 .auto-form[data-kind="flow"] #auto-reuse-field,
 .auto-form[data-kind="flow"] #auto-evidence-field {
