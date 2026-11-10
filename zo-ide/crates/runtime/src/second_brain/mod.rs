@@ -58,9 +58,11 @@ pub const RAW_DIR: &str = "raw";
 pub const WIKI_DIR: &str = "wiki";
 /// The vault's own house rules.
 ///
-/// zo does not load it: instruction-file discovery collects `context.md` and
-/// its siblings, never `AGENTS.md`. The prompt section therefore names the file
-/// and tells the model to read it, rather than assuming it is already there.
+/// A session working in another project is not shown it: instruction-file
+/// discovery walks up from the working directory, and the vault is somewhere
+/// else. The prompt section therefore names the file and tells the model to
+/// read it, rather than assuming it is already there. Only a session whose
+/// working directory is inside the vault gets it as a project instruction.
 ///
 /// The window depends on this in the other direction, and says so at
 /// `zerocode_core::second_brain::global_guide_file`: it writes its standing
@@ -71,7 +73,8 @@ pub const WIKI_DIR: &str = "wiki";
 /// started reading a global guide file would leave zo reading a file nobody
 /// writes. What guards the claim this section's own text makes is the
 /// co-located prompt test, which writes a line into a vault `AGENTS.md` and
-/// asserts it never reaches the prompt.
+/// asserts it reaches the prompt of a session inside the vault and of no
+/// session outside it.
 pub const AGENTS_FILE: &str = "AGENTS.md";
 /// Map of content, relative to [`WIKI_DIR`].
 pub const WIKI_INDEX_FILE: &str = "index.md";

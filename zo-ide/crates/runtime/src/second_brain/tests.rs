@@ -758,6 +758,8 @@ fn a_superseded_page_ranks_below_the_page_that_replaced_it() {
 fn the_prompt_names_the_vault_from_outside_it_and_from_inside_it() {
     let world = World::new("prompt");
     world.export_vault();
+    std::fs::write(world.vault.join(super::AGENTS_FILE), "vault house rules\n")
+        .expect("vault AGENTS.md");
     let outside = crate::prompt::load_system_prompt_for_main(
         &world.workspace,
         "2026-09-03",
@@ -770,15 +772,25 @@ fn the_prompt_names_the_vault_from_outside_it_and_from_inside_it() {
     assert!(outside.contains("# Second brain"), "{outside}");
     assert!(outside.contains(&world.vault.display().to_string()));
     assert!(outside.contains("Never modify or delete anything under `raw/`"));
+    // A session working somewhere else is not shown the vault's house rules:
+    // instruction files are found by walking up from the working directory,
+    // and the vault is not on that road. So the section has to name the file
+    // and say it must be read.
+    assert!(
+        !outside.contains("vault house rules"),
+        "the vault's rules reached a session outside the vault: {outside}"
+    );
+    assert!(
+        outside.contains("it is not loaded for you"),
+        "a session outside the vault is told to read the rules itself: {outside}"
+    );
 
-    // The session sitting INSIDE the vault gets it too. Skipping there is the
-    // tempting move — the vault's own `AGENTS.md` states the same rules — but
-    // zo never reads that file: `discover_instruction_files` collects
-    // `context.md`/`CONTEXT.md`/`.zo/context.md` and nothing else. Dropping the
-    // section would leave the one session standing in the second brain as the
-    // only one never told so.
-    std::fs::write(world.vault.join(super::AGENTS_FILE), "vault house rules\n")
-        .expect("vault AGENTS.md");
+    // The session sitting INSIDE the vault gets the section too. Skipping
+    // there is the tempting move — it is shown the vault's own `AGENTS.md` as
+    // a project instruction — but that file holds the house rules, not where
+    // the vault is or how to search it. Dropping the section would leave the
+    // one session standing in the second brain as the only one never told how
+    // to use it.
     let inside = crate::prompt::load_system_prompt_for_main(
         &world.vault,
         "2026-09-03",
@@ -793,9 +805,13 @@ fn the_prompt_names_the_vault_from_outside_it_and_from_inside_it() {
         "a session inside the vault is told where it is: {inside}"
     );
     assert!(
-        !inside.contains("vault house rules"),
-        "and the check above is not vacuous — zo really does not load AGENTS.md, \
-         which is why the section has to name it"
+        inside.contains("vault house rules"),
+        "a session inside the vault is shown the vault's own rules: {inside}"
+    );
+    assert!(
+        inside.contains("shown above under `# Project instructions`")
+            && !inside.contains("it is not loaded for you"),
+        "and is not told to read a file it was just shown: {inside}"
     );
 }
 

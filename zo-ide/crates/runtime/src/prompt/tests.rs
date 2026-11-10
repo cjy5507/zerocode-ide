@@ -205,16 +205,111 @@ fn context_md_dedupes_against_identical_context_variant() {
     fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
+/// The names the other agent CLIs read are read here too, before zo's own, so a
+/// repository that carries only those is not a repository with no rules.
 #[test]
-fn legacy_claude_md_only_directory_has_no_instructions() {
+fn agents_md_and_claude_md_are_read_before_the_context_md_family() {
     let root = temp_dir();
     fs::create_dir_all(&root).expect("root dir");
-    let legacy_name = ["CLAUDE", ".md"].concat();
-    fs::write(root.join(legacy_name), "legacy-only rules").expect("write legacy instructions");
+    fs::write(root.join("context.md"), "zo rules").expect("write context.md");
+    fs::write(root.join("CLAUDE.local.md"), "local rules").expect("write CLAUDE.local.md");
+    fs::write(root.join("CLAUDE.md"), "claude rules").expect("write CLAUDE.md");
+    fs::write(root.join("AGENTS.md"), "agents rules").expect("write AGENTS.md");
 
     let context = ProjectContext::discover(&root, "2026-03-31").expect("context should load");
-    assert!(context.instruction_files.is_empty());
+    let contents = context
+        .instruction_files
+        .iter()
+        .map(|file| file.content.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        contents,
+        vec!["agents rules", "claude rules", "local rules", "zo rules"]
+    );
     fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
+#[test]
+fn a_directory_with_only_claude_md_has_its_rules_read() {
+    let root = temp_dir();
+    fs::create_dir_all(&root).expect("root dir");
+    fs::write(root.join("CLAUDE.md"), "claude-only rules").expect("write CLAUDE.md");
+
+    let context = ProjectContext::discover(&root, "2026-03-31").expect("context should load");
+    assert_eq!(context.instruction_files.len(), 1);
+    assert_eq!(context.instruction_files[0].content, "claude-only rules");
+    fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
+/// Two spellings of one rule set are one rule set: a copy, and a file that
+/// only imports the other, both fold into the first file read.
+#[test]
+fn an_agents_md_repeated_or_imported_by_claude_md_is_shown_once() {
+    let copied = temp_dir();
+    fs::create_dir_all(&copied).expect("root dir");
+    fs::write(copied.join("AGENTS.md"), "shared rules\n").expect("write AGENTS.md");
+    fs::write(copied.join("CLAUDE.md"), "shared rules\n\n").expect("write CLAUDE.md");
+    let context = ProjectContext::discover(&copied, "2026-03-31").expect("context should load");
+    assert_eq!(context.instruction_files.len(), 1);
+    assert!(context.instruction_files[0].path.ends_with("AGENTS.md"));
+    fs::remove_dir_all(copied).expect("cleanup temp dir");
+
+    let imported = temp_dir();
+    fs::create_dir_all(&imported).expect("root dir");
+    fs::write(imported.join("AGENTS.md"), "shared rules\n").expect("write AGENTS.md");
+    fs::write(imported.join("CLAUDE.md"), "@AGENTS.md\n").expect("write CLAUDE.md");
+    let context = ProjectContext::discover(&imported, "2026-03-31").expect("context should load");
+    assert_eq!(
+        context.instruction_files.len(),
+        1,
+        "{:?}",
+        context.instruction_files
+    );
+    fs::remove_dir_all(imported).expect("cleanup temp dir");
+}
+
+/// The rules are shown as rules. The trust label keeps files, logs and tool
+/// output as evidence that orders nothing; it must not file the workspace
+/// owner's own instructions among them, or the model is told in one breath to
+/// read the rules and to obey none of them.
+#[test]
+fn project_instructions_are_presented_as_rules_and_not_as_untrusted_evidence() {
+    let rendered = render_instruction_files(&[ContextFile {
+        path: PathBuf::from("/tmp/project/AGENTS.md"),
+        content: "Never push to main.".to_string(),
+        globs: Vec::new(),
+        always_apply: true,
+    }]);
+    assert!(rendered.starts_with(super::PROJECT_INSTRUCTIONS_HEADING));
+    assert!(rendered.contains("standing rules"), "{rendered}");
+    assert!(
+        rendered.contains("the user's explicit request"),
+        "the rules stand below the person's own words: {rendered}"
+    );
+    assert!(rendered.contains("Never push to main."));
+
+    let label = super::sections::get_context_trust_label_section();
+    assert!(
+        !label.contains("project instructions"),
+        "the trust label must not list the workspace's rules as evidence: {label}"
+    );
+}
+
+/// A rule past the cut is a rule nobody was shown. A file the size of this
+/// repository's own `AGENTS.md` is carried whole.
+#[test]
+fn an_instruction_file_of_a_few_thousand_characters_is_carried_whole() {
+    let body = "- one rule of this workspace, written out in full\n".repeat(120);
+    assert!(body.chars().count() > 5_650);
+    let rendered = render_instruction_files(&[ContextFile {
+        path: PathBuf::from("/tmp/project/AGENTS.md"),
+        content: body.trim().to_string(),
+        globs: Vec::new(),
+        always_apply: true,
+    }]);
+    assert!(!rendered.contains("[truncated;"), "the file was cut");
+    assert!(rendered.contains(body.trim()));
 }
 
 #[test]
@@ -285,7 +380,7 @@ fn always_apply_glob_instructions_still_render_body() {
 fn truncated_instruction_files_point_to_original_path() {
     let rendered = render_instruction_files(&[ContextFile {
         path: PathBuf::from("/tmp/project/.zo/context.md"),
-        content: "x".repeat(4_500),
+        content: "x".repeat(super::MAX_INSTRUCTION_FILE_CHARS + 500),
         globs: Vec::new(),
         always_apply: true,
     }]);
