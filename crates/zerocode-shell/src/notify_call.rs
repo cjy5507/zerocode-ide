@@ -144,6 +144,11 @@ impl NotifyBook {
         self.last_hand_ms = Some(now_ms);
     }
 
+    /// When the person's hand was last on the window, if it has been.
+    pub(crate) fn last_hand_ms(&self) -> Option<i64> {
+        self.last_hand_ms
+    }
+
     /// Read what the question carries about `term`, and remember this ring
     /// as the newest of its pane.
     fn look_at(

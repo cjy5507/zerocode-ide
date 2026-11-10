@@ -142,6 +142,20 @@ trash = "5.2.6"
 aes = "0.9.2"
 cbc = "0.2.1"
 aes-gcm = "0.11.0"
+# The phone link's Web Push (`phone_link/web_push.rs`): RFC 8291 encrypts a
+# notice for one browser with P-256 ECDH, HKDF-SHA-256 and the AES-128-GCM
+# above, and RFC 8292 signs the sender with ES256. All three are already in
+# the lock through the SSH stack, at these versions — `hkdf` 0.13 speaks the
+# `digest` 0.11 that `sha2` 0.11 implements, so that `sha2` is named apart
+# from the 0.10 this crate hashes with elsewhere.
+p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "pkcs8"] }
+hkdf = "0.13"
+sha2_11 = { package = "sha2", version = "0.11" }
+# The pairing QR in Settings › Remote link. The one crate this adds to the
+# lock: pure Rust, no dependencies with its default features off, SVG only —
+# the repository had no QR encoder and the code a phone camera reads is not
+# one worth hand-writing.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 pbkdf2 = "0.13.0"
 sha1 = "0.11.0"
 # The import's readers (browser_cookie_import.rs): Chromium and Firefox keep

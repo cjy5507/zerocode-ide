@@ -3159,6 +3159,10 @@ pub(super) fn ring_now(app: &AppHandle, notice: RingNotice<'_>) {
         interrupted,
         ..
     } = notice;
+    // The paired phones are their own door, with their own gate (attention
+    // only, never while the person is at the window): the desktop switches
+    // below decide the desktop's notice, not the phone's.
+    crate::phone_link::ring(app, term, ring);
     if !ring_gates_open(app, ring) {
         return;
     }

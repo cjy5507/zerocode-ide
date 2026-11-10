@@ -166,6 +166,7 @@ mod pane_layout;
 mod pane_leftovers;
 mod pane_runtime;
 mod pane_transcript;
+mod phone_link;
 mod pick_runtime;
 mod plain_read;
 mod preference_runtime;
@@ -351,7 +352,7 @@ use cmd::{
     note_worker_room_seen, notification_probe, open_board_popout, open_browser_pane,
     open_commit_remote, open_computer_use_permission, open_developer_permission_settings,
     open_download, open_lane, open_mirror_term, open_path_in_application, open_project,
-    open_remote_server_session, open_remote_workspace_terminal, open_ssh_terminal, open_term_tab,
+    open_remote_workspace_terminal, open_ssh_terminal, open_term_tab,
     open_term_tab_in, open_terminal, open_url, open_workspace_in_application, opencode_usage,
     opencode_usage_stats, orchestration_accuracy, orchestration_report,
     orchestration_runtime_state, pane_activities, pane_agents, pane_effort, pane_effort_press,
@@ -2814,7 +2815,12 @@ fn main() -> ExitCode {
             save_remote_server,
             remove_remote_server,
             test_remote_server,
-            open_remote_server_session,
+            phone_link::phone_link_status,
+            phone_link::phone_link_enable,
+            phone_link::phone_link_disable,
+            phone_link::phone_link_new_code,
+            phone_link::phone_link_revoke,
+            phone_link::phone_link_test_push,
             developer_permission_statuses,
             request_developer_permission,
             open_developer_permission_settings,
@@ -3650,6 +3656,9 @@ fn main() -> ExitCode {
             }
             // The stats head's counters, read from disk once and kept.
             stats_events_store::open(managed.config_root());
+            // The phone link (stage 1): read its book, and bring it back up off
+            // this thread only when a person had turned it on.
+            phone_link::boot(&handle, managed.local_data_root());
             managed.native_tray().install_handler(&handle);
             let boot_settings = load_settings_for_boot(managed.settings()).document;
             hang_watchdog::configure(crash::Limits::overlay(&boot_settings.crash));

@@ -108,6 +108,13 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "ssh_remove_target",
     "save_remote_server",
     "remove_remote_server",
+    // The phone link opens a tailnet port, mints a pairing code, drops a
+    // phone, or sends to it — the person's door, never an agent's press.
+    "phone_link_enable",
+    "phone_link_disable",
+    "phone_link_new_code",
+    "phone_link_revoke",
+    "phone_link_test_push",
     "save_remote_workspace",
     "remove_remote_workspace",
     "set_opencode_cookie",
