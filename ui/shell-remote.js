@@ -1825,7 +1825,7 @@ let remoteLinkStatus = null;
 let remoteLinkBusy = false;
 let remoteLinkError = null;
 let remoteLinkCode = null;
-let remoteLinkTestWords = null;
+let remoteLinkTested = null;
 
 function remoteLinkAgo(epochMs) {
   if (!epochMs) return "";
@@ -1937,9 +1937,12 @@ function paintRemoteLinkCode() {
     drawn.setAttribute("focusable", "false");
     qr.replaceChildren(document.importNode(drawn, true));
   }
-  say(el("remote-link-code"), () => remoteLinkCode.code);
+  // Held here, not read back later: a language change re-asks these words
+  // after the code may have gone.
+  const { code, expiresMs } = remoteLinkCode;
+  say(el("remote-link-code"), () => code);
   say(el("remote-link-expires"), () => t("settings.remoteLink.expires", "{{time}}까지", {
-    time: new Date(remoteLinkCode.expiresMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    time: new Date(expiresMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
   }));
 }
 
@@ -1974,8 +1977,11 @@ function paintRemoteLink() {
   el("remote-link-test").disabled = remoteLinkBusy || !status?.pushReady
     || !devices.some((device) => device.push);
   const tested = el("remote-link-test-result");
-  tested.hidden = !remoteLinkTestWords;
-  if (remoteLinkTestWords) say(tested, () => remoteLinkTestWords);
+  const counts = remoteLinkTested;
+  tested.hidden = !counts;
+  if (counts) {
+    say(tested, () => t("settings.remoteLink.testResult", "보냄 {{sent}} · 실패 {{failed}}", counts));
+  }
   paintRemoteLinkCode();
 }
 
@@ -2029,14 +2035,14 @@ el("remote-link-new-code").addEventListener("click", async () => {
 el("remote-link-test").addEventListener("click", async () => {
   if (remoteLinkBusy) return;
   remoteLinkBusy = true;
-  remoteLinkTestWords = null;
+  remoteLinkTested = null;
   paintRemoteLink();
   try {
     const sent = await invoke("phone_link_test_push", {}, { hand: handNow() });
-    remoteLinkTestWords = t("settings.remoteLink.testResult", "보냄 {{sent}} · 실패 {{failed}}", {
+    remoteLinkTested = {
       sent: sent?.sent ?? 0,
       failed: (sent?.failed ?? 0) + (sent?.gone ?? 0),
-    });
+    };
   } catch (error) {
     remoteLinkError = String(error);
   }

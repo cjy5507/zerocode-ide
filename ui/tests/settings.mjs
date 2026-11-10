@@ -10920,9 +10920,8 @@ await test("Remote Servers pairs a tunnel, hides its bearer, and offers no dead 
     "the dead persistent-session button came back",
   );
 
-  const reopenedAt = backend.calls.length;
-  await openSettings(pageA, "remote-servers");
-  await backend.waitForCall("A", "remote_servers", reopenedAt);
+  // Settings never closed (no session tab opened), so the list is still the
+  // one on screen: the removal starts from it.
   backend.loseAcknowledgementOnce("remove_remote_server");
   const removedAt = backend.calls.length;
   await pageA.locator("#remote-server-list .remote-server-remove").click();
