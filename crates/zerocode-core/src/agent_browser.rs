@@ -2009,7 +2009,6 @@ fn bridge_shim<'a>(
         deadline_seconds: u64::from(SHIM_DEADLINE_SECONDS),
         stdin_flags: true,
         pane_header: Some(PANE_HEADER),
-        pane_verbs: &[],
         cwd_verbs: &[],
         cwd_flag: None,
         pane_flag: None,
