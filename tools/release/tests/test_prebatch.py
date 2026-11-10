@@ -195,6 +195,29 @@ class PrebatchTest(unittest.TestCase):
         self.assertIn(f"RC {check}=0", said.stdout)
         self.assertIn("RC prebatch=0", said.stdout)
 
+    def test_a_file_the_other_workspace_reads_at_compile_time_is_owed_and_not_red(self):
+        # 2026-11-11: a zo landing reworded a line of zo's resume.rs that the window crate's jev_scope test
+        # reads with include_str!, ran zo's tests only, and v1.1.140's lane went red on it.
+        self.fx.write("crates/zerocode-shell/Cargo.toml", '[package]\nname = "zerocode-shell"\n')
+        self.fx.write("crates/zerocode-shell/src/jev.rs",
+                      'const R: &str = include_str!("../../../zo-ide/crates/zo/src/resume.rs");\n'
+                      '// include_str!("../../../zo-ide/crates/zo/src/commented.rs")\n'
+                      'const U: &str = include_str!("../../../ui/near.css");\n')
+        for name in ("zo-ide/crates/zo/src/resume.rs", "zo-ide/crates/zo/src/commented.rs", "ui/near.css"):
+            self.fx.write(name, "first\n")
+        base = self.fx.commit("a window test reads zo's source")
+        for name in ("zo-ide/crates/zo/src/resume.rs", "zo-ide/crates/zo/src/commented.rs", "ui/near.css",
+                     "zo-ide/crates/zo/src/unread.rs"):
+            self.fx.write(name, "second\n")
+        self.fx.commit("zo's side changed")
+        said = self.fx.check(base)
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+        owed = [line for line in said.stdout.splitlines() if line.startswith("owed ")]
+        self.assertEqual(len(owed), 1, said.stdout)
+        self.assertTrue(owed[0].startswith("owed crates/zerocode-shell — crates/zerocode-shell/src/jev.rs reads "
+                                           "zo-ide/crates/zo/src/resume.rs at compile time"), owed[0])
+        self.assertIn("RC prebatch=0", said.stdout)
+
     def test_a_changed_skill_without_its_release_line_is_red(self):
         self.fx.write("skills/plain/SKILL.md", "# plain, said again\n")
         self.fx.commit("a skill changed")

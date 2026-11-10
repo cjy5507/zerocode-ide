@@ -224,7 +224,10 @@ of them: `skill-release`, `backend-count` (a count assert over a crate's
 checkout of the head made for it and removed after, four at once (over 30 s it
 is said unchecked: the gate's to run). `test_lane.py` and the computer bench's
 `test_bench.py` ran past that on every 10-25 head, so they run only with
-`--slow` and are otherwise said unchecked; the default run stays under 10 s. It prints `RC <check>=<rc> (<s>s)` with reasons,
+`--slow` and are otherwise said unchecked; the default run stays under 10 s. A changed path a crate of the other Cargo workspace reads at compile time
+(`include_str!` and the like) is printed `owed <crate dir> — …`, not red: on
+2026-11-11 a zo landing reworded a line of zo's resume.rs that the window
+crate's jev_scope test reads, and v1.1.140's lane went red on it. It prints `RC <check>=<rc> (<s>s)` with reasons,
 `unchecked <path>` for a path no check reads, and `RC prebatch=<rc>`; it exits 1
 on a red and 2 when a revision cannot be read. It runs no cargo and stands in for
 no gate: a green says only that these checks found nothing, and every recipe the

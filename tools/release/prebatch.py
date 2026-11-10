@@ -36,6 +36,15 @@ one of them. Every check is one entry of CHECKS below, and what it reads is said
                         gate's first zo cargo rewrote it and every job after stopped on a
                         dirty tree); red only when cargo says the lock must be updated
 
+A changed path a crate of the OTHER Cargo workspace reads at compile time (`include_str!`,
+`include_bytes!`, `include!`, a `concat!(env!("CARGO_MANIFEST_DIR"), …)` path — the reads
+changed_crates.py knows) is printed `owed <crate dir> — …`: that crate's tests read the text
+and are this change's too, though nothing of its own workspace changed. On 2026-11-11 a zo
+landing that ran zo's tests reworded a line of zo-ide/crates/zo-ide/src/resume.rs that the
+window crate's jev_scope test reads, and v1.1.140's lane went red on it (solo 0/3). An
+`owed` line is not red: `just pre-handin` runs that crate's units, and the gate runs all it
+owes.
+
 A changed path no check reads is printed `unchecked <path>`: nothing here passed it, and
 the gate still runs all it owes; pii-scan and lock read every path they are given but pass
 none of them, so they never turn an `unchecked` line into a covered one. Nothing here
@@ -178,6 +187,42 @@ class Check:
 
     def reads(self, path):
         return path in self.paths or any(path == f or path.startswith(f + "/") for f in self.folders)
+
+
+# -- owed across the two workspaces ------------------------------------------------
+
+def changed_crates_module():
+    """changed_crates.py beside this file: the one reader of what a crate's sources read at compile time."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("changed_crates", Path(__file__).with_name("changed_crates.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def workspace_of(path, workspaces):
+    """The workspace folder a path is under: the longest one that prefixes it, the root's being '.'."""
+    under = [w for w in workspaces if w != "." and (path == w or path.startswith(w + "/"))]
+    return max(under, key=len) if under else "."
+
+
+def owed_across(head, changed):
+    """(crate dir, changed path, source) for each changed path that a crate of the other workspace reads at
+    compile time — the crate being the folder with a Cargo.toml nearest above the reading source."""
+    reader = changed_crates_module()
+    workspaces = reader.WORKSPACES
+    changed = set(changed)
+    owed = set()
+    sources = {path for path in head.grep("include", "*.rs") if path.endswith(".rs")}
+    for source in sorted(sources):
+        text = head.read(source) or ""
+        crate = posixpath.dirname(source)
+        while crate and f"{crate}/Cargo.toml" not in head.blobs:
+            crate = posixpath.dirname(crate)
+        for path in reader.reads_of(text, posixpath.dirname(source), crate or "."):
+            if path in changed and workspace_of(path, workspaces) != workspace_of(source, workspaces):
+                owed.add((crate or ".", path, source))
+    return sorted(owed)
 
 
 # -- skill-release -----------------------------------------------------------------
@@ -576,6 +621,16 @@ def main(argv=None):
         head.close()
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
+    try:
+        head = Head(repo, head_sha)
+        for crate, path, source in owed_across(head, changed):
+            print(f"owed {crate} — {source} reads {path} at compile time, so that crate's tests are this "
+                  "change's too (just pre-handin runs its units)")
+    except Unreadable as error:
+        print(f"prebatch: {error}")
+        return 2
+    finally:
+        head.close()
     for path in changed:
         if path not in covered:
             print(f"unchecked {path}")
