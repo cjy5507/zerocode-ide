@@ -225,8 +225,97 @@ type MemoryStoreStamp = Vec<Option<(SystemTime, u64)>>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexedMemoryEntry {
     entry: MemoryEntry,
-    token_weights: BTreeMap<String, usize>,
+    token_weights: TokenWeights,
     classification: crate::memory::MemoryClassification,
+}
+
+/// An entry's tokens and what each is worth, packed into two allocations.
+///
+/// This was a `BTreeMap<String, usize>`: a heap string, a map slot and a word
+/// of weight for every token of every entry, held for as long as the session
+/// lives. A vault of 2,490 pages cost 74 MB that way — a session opened at
+/// 94 MB with the vault connected and at 20 MB without it (2026-11-10). The
+/// same tokens end to end in one string, with one `u32` each to say where a
+/// token stops, are about a fifth of that, and a lookup is the same binary
+/// search over the same strings.
+///
+/// A weight is one of two values — a body token's 1 and a pointer token's
+/// [`POINTER_TOKEN_WEIGHT`] — so it rides in the top bit of the offset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TokenWeights {
+    /// Every token, in sorted order, end to end.
+    text: Box<str>,
+    /// Where each token ends in `text`. [`POINTER_BIT`] marks a pointer token.
+    ends: Box<[u32]>,
+}
+
+/// The bit of an offset that says the token carries the pointer weight. An
+/// entry's text is a few kilobytes, so the offset itself never reaches it.
+const POINTER_BIT: u32 = 1 << 31;
+
+impl TokenWeights {
+    /// Pack `tokens`, which the map hands over already sorted.
+    fn pack(tokens: BTreeMap<String, usize>) -> Self {
+        let mut text = String::with_capacity(tokens.keys().map(String::len).sum());
+        let mut ends = Vec::with_capacity(tokens.len());
+        for (token, weight) in tokens {
+            text.push_str(&token);
+            // An entry too large to address is not indexed past that point; no
+            // source reaches it, and losing a token is the safe half of the
+            // choice between that and a wrong offset.
+            let Ok(end) = u32::try_from(text.len()) else { break };
+            if end >= POINTER_BIT {
+                break;
+            }
+            ends.push(if weight == POINTER_TOKEN_WEIGHT { end | POINTER_BIT } else { end });
+        }
+        Self {
+            text: text.into_boxed_str(),
+            ends: ends.into_boxed_slice(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    fn end_of(&self, index: usize) -> usize {
+        (self.ends[index] & !POINTER_BIT) as usize
+    }
+
+    /// The token at `index`, which the caller knows is in range.
+    fn token_at(&self, index: usize) -> &str {
+        let start = if index == 0 { 0 } else { self.end_of(index - 1) };
+        &self.text[start..self.end_of(index)]
+    }
+
+    fn position(&self, token: &str) -> Option<usize> {
+        let (mut low, mut high) = (0, self.ends.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.token_at(middle).cmp(token) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => return Some(middle),
+            }
+        }
+        None
+    }
+
+    fn contains_key(&self, token: &str) -> bool {
+        self.position(token).is_some()
+    }
+
+    /// What `token` is worth here, or nothing when the entry does not hold it.
+    fn get(&self, token: &str) -> Option<usize> {
+        let index = self.position(token)?;
+        Some(if self.ends[index] & POINTER_BIT == 0 { 1 } else { POINTER_TOKEN_WEIGHT })
+    }
+
+    #[cfg(test)]
+    fn keys(&self) -> impl Iterator<Item = &str> {
+        (0..self.len()).map(move |index| self.token_at(index))
+    }
 }
 
 impl IndexedMemoryEntry {
@@ -272,7 +361,7 @@ impl IndexedMemoryEntry {
         }
         Self {
             entry,
-            token_weights,
+            token_weights: TokenWeights::pack(token_weights),
             classification,
         }
     }
@@ -376,7 +465,7 @@ impl IndexedCorpusPage {
     pub(crate) fn token_footprint(&self) -> (usize, usize) {
         (
             self.indexed.token_weights.len(),
-            self.indexed.token_weights.keys().map(String::len).sum(),
+            self.indexed.token_weights.keys().map(str::len).sum(),
         )
     }
 }
@@ -1337,7 +1426,7 @@ impl<'a> QueryRarity<'a> {
                 continue;
             };
             let (rarity, unlikely) = self.tokens.get(token.as_str()).copied()?;
-            weighted += f64::from(u32::try_from(*weight).unwrap_or(u32::MAX)) * rarity;
+            weighted += f64::from(u32::try_from(weight).unwrap_or(u32::MAX)) * rarity;
             surprise += unlikely;
         }
         if weighted <= 0.0 || surprise < self.chance_bar {
@@ -3515,7 +3604,7 @@ mod tests {
             indexed.entries[0]
                 .token_weights
                 .keys()
-                .cloned()
+                .map(str::to_owned)
                 .collect::<std::collections::BTreeSet<_>>(),
             super::tokenize("mixed-track mixed-track.md 멀티에이전트 트랙4 guard rail")
         );
