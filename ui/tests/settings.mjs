@@ -16247,6 +16247,11 @@ await test("모델 받기: 원본 가중치만 있는 저장소는 같은 모델
     // The one file under the limit would run at the memory limit: it is
     // marked, and left for the person to pick rather than picked for them.
     assertEqual(await page.locator("#judgment-source-file-list [data-file-heavy]").count(), 1, "the file at the memory limit is not marked");
+    // Sizes of a gigabyte and more are said in gigabytes: 「4096.0 MB를 넘어」
+    // beside 「3733.6 MB」 was two numbers to divide before they could be compared.
+    const sizes = await page.locator("#judgment-source-file-list .model-file").evaluateAll((rows) => rows.map((row) => `${row.querySelector(".model-file-size").textContent} | ${row.querySelector(".model-file-why")?.textContent ?? ""}`));
+    assertEqual(sizes[0].split(" | ")[0], "3.6 GB", "a file of gigabytes is sized in megabytes");
+    assert(sizes[1].includes("4.0 GB") && !sizes.some((line) => /\d{4}\.\d MB/.test(line)), "the limit a file is over is said in megabytes", sizes);
     assert(!backend.calls.slice(largeAt).some((entry) => entry.command === "managed_judgment_inspect_source"), "a file at the memory limit was picked for the person");
     assertEqual(await page.evaluate(() => judgmentModelSourceController.picked), null);
     const big = page.locator("#judgment-source-files-big");
