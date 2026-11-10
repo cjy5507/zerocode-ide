@@ -675,9 +675,7 @@ pub(crate) fn ring(app: &AppHandle, term: Option<u32>, ring: Ring) {
             since_ms: 0,
         };
         let notice = Notice::for_pane(pane.as_ref().unwrap_or(&fallback), more);
-        if let Some(link) = link() {
-            let _ = link.deliver(&notice).await;
-        }
+        let _ = link.deliver(&notice).await;
     });
 }
 
@@ -814,5 +812,156 @@ mod tests {
     fn random_bytes_are_not_all_zero() {
         let bytes = super::random_bytes::<32>().expect("os random");
         assert!(bytes.iter().any(|byte| *byte != 0));
+    }
+
+    /// The real road on the machine that runs it, by hand only: this
+    /// machine's Tailscale maps one HTTPS port to a real loopback listener
+    /// with the window's own router behind it, a request through the tailnet
+    /// name is answered, the API is 401 without a token and 200 with one,
+    /// and turning off leaves Serve exactly as it was found. Names are
+    /// printed masked.
+    ///
+    /// `ZEROCODE_PHONE_LINK_LIVE=1 cargo test -p zerocode-shell --bin
+    /// zerocode-shell live_tailscale -- --ignored --nocapture`
+    #[test]
+    #[ignore = "drives this machine's real Tailscale Serve; run by hand"]
+    fn live_tailscale_round_trip() {
+        use super::server::{Core, PaneView, StatusView, Window};
+        use super::{book, tailscale};
+        use std::sync::Arc;
+
+        struct Fixture;
+        impl Window for Fixture {
+            fn now_ms(&self) -> i64 {
+                crate::usage_runtime::epoch_ms_now()
+            }
+            fn status(&self) -> StatusView {
+                StatusView {
+                    version: "live".into(),
+                    name: "fixture".into(),
+                }
+            }
+            fn panes(&self) -> Vec<PaneView> {
+                Vec::new()
+            }
+        }
+
+        /// Puts Serve back the way it was found, whatever the test did.
+        struct Off(std::path::PathBuf, u16);
+        impl Drop for Off {
+            fn drop(&mut self) {
+                let _ = tailscale::run(&self.0, &tailscale::serve_off_args(self.1));
+            }
+        }
+
+        if std::env::var_os("ZEROCODE_PHONE_LINK_LIVE").is_none() {
+            return;
+        }
+        let cli = tailscale::find_cli().expect("a Tailscale CLI");
+        let tailnet = tailscale::read_status(&cli);
+        assert!(tailnet.running && tailnet.https_ready, "tailnet not ready");
+        let name = tailnet.dns_name.clone().expect("a MagicDNS name");
+        let before = tailscale::read_serve(&cli).expect("serve status");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let listener = runtime
+            .block_on(tokio::net::TcpListener::bind(("127.0.0.1", 0)))
+            .expect("loopback bind");
+        let port = listener.local_addr().expect("addr").port();
+        let core = Arc::new(Core::new(None, book::Book::default()));
+        core.hosts.lock().unwrap().dns_name = Some(name.clone());
+        core.hosts.lock().unwrap().listener_port = port;
+        core.owner.lock().unwrap().clone_from(&tailnet.owner_login);
+        let window: Arc<dyn Window> = Arc::new(Fixture);
+        {
+            let core = Arc::clone(&core);
+            runtime.spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let core = Arc::clone(&core);
+                    let window = Arc::clone(&window);
+                    tokio::spawn(super::server::serve_connection(stream, core, window));
+                }
+            });
+        }
+
+        let https = tailscale::pick_port(&before, &name, port, None).expect("a free https port");
+        assert_eq!(
+            tailscale::judge(&before, &name, https, Some(port), None),
+            tailscale::Exposure::Absent
+        );
+        tailscale::run(&cli, &tailscale::serve_on_args(https, port)).expect("serve on");
+        let off = Off(cli.clone(), https);
+        let mapped = tailscale::read_serve(&cli).expect("serve status");
+        assert_eq!(
+            tailscale::judge(&mapped, &name, https, Some(port), None),
+            tailscale::Exposure::Ours,
+            "the mapping is ours and tailnet-only"
+        );
+        println!("on: https://<ts.net 이름>:{https}/ -> 127.0.0.1:<port>");
+
+        let base = format!("https://{name}:{https}");
+        let code = core
+            .pairing
+            .lock()
+            .unwrap()
+            .issue(crate::usage_runtime::epoch_ms_now())
+            .expect("a code")
+            .0;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .expect("client");
+        let (shell, no_token, paired, with_token) = runtime.block_on(async {
+            let shell = client.get(format!("{base}/")).send().await.expect("GET /");
+            let no_token = client
+                .get(format!("{base}/api/panes"))
+                .send()
+                .await
+                .expect("GET /api/panes");
+            let paired = client
+                .post(format!("{base}/api/pair"))
+                .header("Content-Type", "application/json")
+                .body(format!(r#"{{"code":"{code}","name":"live test"}}"#))
+                .send()
+                .await
+                .expect("POST /api/pair");
+            let paired_status = paired.status().as_u16();
+            let token = paired
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| body["token"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            let with_token = client
+                .get(format!("{base}/api/panes"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("GET /api/panes with token");
+            (
+                shell.status().as_u16(),
+                no_token.status().as_u16(),
+                paired_status,
+                with_token.status().as_u16(),
+            )
+        });
+        println!("GET / = {shell}");
+        println!("GET /api/panes without token = {no_token}");
+        println!("POST /api/pair (owner login from Serve) = {paired}");
+        println!("GET /api/panes with token = {with_token}");
+
+        drop(off);
+        let after = tailscale::read_serve(&cli).expect("serve status");
+        println!(
+            "off: phone mapping {:?}; other mappings unchanged = {}",
+            tailscale::judge(&after, &name, https, Some(port), None),
+            after == before
+        );
+        assert_eq!((shell, no_token, paired, with_token), (200, 401, 200, 200));
+        assert_eq!(after, before, "Serve is exactly as it was found");
+        runtime.shutdown_background();
     }
 }

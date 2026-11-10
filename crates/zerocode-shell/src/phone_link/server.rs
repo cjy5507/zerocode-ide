@@ -528,28 +528,28 @@ pub(crate) async fn serve_connection(
                 break at + 4;
             }
             if buffer.len() > MAX_HEAD {
-                return Err(413);
+                return Err(413_u16);
             }
-            let read = stream.read(&mut chunk).await.map_err(|_| 400)?;
+            let read = stream.read(&mut chunk).await.map_err(|_| 400_u16)?;
             if read == 0 {
-                return Err(400);
+                return Err(400_u16);
             }
             buffer.extend_from_slice(&chunk[..read]);
         };
-        let mut request = parse_head(&buffer[..head_end]).ok_or(400)?;
+        let mut request = parse_head(&buffer[..head_end]).ok_or(400_u16)?;
         let length = request
             .header("content-length")
-            .map(|value| value.parse::<usize>().map_err(|_| 400))
+            .map(|value| value.parse::<usize>().map_err(|_| 400_u16))
             .transpose()?
             .unwrap_or(0);
         if length > MAX_BODY || request.header("transfer-encoding").is_some() {
-            return Err(413);
+            return Err(413_u16);
         }
         let mut body = buffer[head_end..].to_vec();
         while body.len() < length {
-            let read = stream.read(&mut chunk).await.map_err(|_| 400)?;
+            let read = stream.read(&mut chunk).await.map_err(|_| 400_u16)?;
             if read == 0 {
-                return Err(400);
+                return Err(400_u16);
             }
             body.extend_from_slice(&chunk[..read]);
         }
