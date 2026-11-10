@@ -12881,6 +12881,7 @@ body.is-dragging-pane {
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
+  padding: 0;
 }
 
 .scm-filter-toggle .icon {
@@ -13368,6 +13369,7 @@ body.is-dragging-pane {
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
+  padding: 0;
 }
 
 .pr-act:hover {
@@ -13619,6 +13621,7 @@ body.is-dragging-pane {
   background: none;
   color: var(--ink-glyph);
   cursor: pointer;
+  padding: 0;
 }
 
 .check-open:hover {
@@ -46500,6 +46503,7 @@ button.board-build-failure-part:focus-visible {
     background-color var(--motion-fast) var(--ease-standard),
     color var(--motion-fast) var(--ease-standard);
   font: var(--type-label-12);
+  padding: 0;
 }
 
 .vdock-refresh:hover,
@@ -46614,6 +46618,7 @@ button.board-build-failure-part:focus-visible {
   text-align: left;
   cursor: pointer;
   border-bottom: var(--rule-width) solid var(--edge-rule);
+  padding-block: 0;
 }
 
 .vdock-group-head:hover {
@@ -46760,13 +46765,14 @@ button.board-build-failure-part:focus-visible {
 .vdock-act {
   display: grid;
   place-items: center;
-  width: 22px;
+  width: var(--row-height);
   height: var(--row-height);
   border: 0;
   border-radius: var(--radius-md);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
+  padding: 0;
 }
 
 .vdock-act .icon {
@@ -56817,8 +56823,8 @@ button.jev-token:hover {
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 24px;
-  height: 24px;
+  width: var(--row-height);
+  height: var(--row-height);
   border: 0;
   border-radius: var(--radius-md);
   background: none;
@@ -56827,6 +56833,7 @@ button.jev-token:hover {
   transition:
     color var(--motion-fast) var(--ease-standard),
     background-color var(--motion-fast) var(--ease-standard);
+  padding: 0;
 }
 .tree-head-button .icon { width: 14px; height: 14px; }
 .tree-head-button:hover { background: var(--row-hover); color: var(--ink-chalk); }
