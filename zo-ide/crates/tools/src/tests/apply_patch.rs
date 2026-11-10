@@ -165,3 +165,228 @@ fn an_edit_deny_rule_holds_for_a_patch_that_edits_the_same_path() {
     assert_eq!(fs::read_to_string(&secret).expect("read secret"), "TOKEN=1\n");
     let _ = fs::remove_dir_all(dir);
 }
+
+// -- one file named by more than one operation --------------------------------
+//
+// The operations of a patch apply in the order they are written, each to what
+// the ones before it left, and nothing is written until all of them have been
+// computed.
+
+fn seeded(dir: &std::path::Path, name: &str, text: &str) -> PathBuf {
+    let file = dir.join(name);
+    fs::write(&file, text).expect("seed");
+    file
+}
+
+/// Two `*** Update File` sections for one file: the second is matched against
+/// what the first left — its context line exists only after the first ran.
+#[test]
+fn a_second_section_for_one_file_works_on_what_the_first_left() {
+    let dir = patch_dir("apply-patch-twice");
+    let file = seeded(&dir, "a.txt", "one\ntwo\nthree\nfour\n");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    let output = apply(
+        &ctx,
+        &format!(
+            "*** Begin Patch\n*** Update File: {0}\n one\n-two\n+TWO\n*** Update File: {0}\n TWO\n-three\n+THREE\n*** End Patch",
+            file.display()
+        ),
+    )
+    .expect("both sections apply");
+
+    assert_eq!(fs::read_to_string(&file).expect("read"), "one\nTWO\nTHREE\nfour\n");
+    let report: serde_json::Value = serde_json::from_str(&output).expect("json report");
+    assert_eq!(report["files"].as_array().map(Vec::len), Some(1), "one entry a file: {output}");
+    assert_eq!(
+        report["summary"].as_str().map(|text| text.matches("\nM ").count()),
+        Some(2),
+        "a line an operation: {output}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_file_the_patch_added_is_updated_by_a_later_section() {
+    let dir = patch_dir("apply-patch-add-update");
+    let file = dir.join("b.txt");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    apply(
+        &ctx,
+        &format!(
+            "*** Begin Patch\n*** Add File: {0}\n+alpha\n+beta\n*** Update File: {0}\n alpha\n-beta\n+BETA\n*** End Patch",
+            file.display()
+        ),
+    )
+    .expect("the update finds the file the patch itself added");
+
+    assert_eq!(fs::read_to_string(&file).expect("read"), "alpha\nBETA\n");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_file_updated_and_then_deleted_is_gone_and_reported_once_as_deleted() {
+    let dir = patch_dir("apply-patch-update-delete");
+    let file = seeded(&dir, "a.txt", "one\ntwo\n");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    let output = apply(
+        &ctx,
+        &format!(
+            "*** Begin Patch\n*** Update File: {0}\n-two\n+TWO\n*** Delete File: {0}\n*** End Patch",
+            file.display()
+        ),
+    )
+    .expect("update then delete applies");
+
+    assert!(!file.exists(), "{} should be gone", file.display());
+    let report: serde_json::Value = serde_json::from_str(&output).expect("json report");
+    let files = report["files"].as_array().expect("files");
+    assert_eq!((files.len(), files[0]["kind"].as_str()), (1, Some("delete")), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_file_deleted_and_then_added_holds_the_added_text() {
+    let dir = patch_dir("apply-patch-delete-add");
+    let file = seeded(&dir, "a.txt", "old\n");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    apply(
+        &ctx,
+        &format!("*** Begin Patch\n*** Delete File: {0}\n*** Add File: {0}\n+new\n*** End Patch", file.display()),
+    )
+    .expect("delete then add applies");
+
+    assert_eq!(fs::read_to_string(&file).expect("read"), "new\n");
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// A rename inside the patch, then a section for the new name.
+#[test]
+fn a_moved_file_is_updated_where_it_went() {
+    let dir = patch_dir("apply-patch-move-update");
+    let from = seeded(&dir, "from.txt", "x\nkeep\n");
+    let to = dir.join("to.txt");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    let output = apply(
+        &ctx,
+        &format!(
+            "*** Begin Patch\n*** Update File: {}\n*** Move to: {}\n-x\n+y\n*** Update File: {}\n y\n-keep\n+kept\n*** End Patch",
+            from.display(),
+            to.display(),
+            to.display()
+        ),
+    )
+    .expect("move then update applies");
+
+    assert_eq!(
+        (from.exists(), fs::read_to_string(&to).ok()),
+        (false, Some("y\nkept\n".to_string()))
+    );
+    let report: serde_json::Value = serde_json::from_str(&output).expect("json report");
+    assert_eq!(report["files"].as_array().map(Vec::len), Some(1), "{output}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// A section for a file, then a rename of it that carries a second change.
+#[test]
+fn an_updated_file_is_moved_with_both_changes() {
+    let dir = patch_dir("apply-patch-update-move");
+    let from = seeded(&dir, "a.txt", "x\nkeep\n");
+    let to = dir.join("b.txt");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    let output = apply(
+        &ctx,
+        &format!(
+            "*** Begin Patch\n*** Update File: {}\n-x\n+y\n*** Update File: {}\n*** Move to: {}\n y\n-keep\n+kept\n*** End Patch",
+            from.display(),
+            from.display(),
+            to.display()
+        ),
+    )
+    .expect("update then move applies");
+
+    assert_eq!(
+        (from.exists(), fs::read_to_string(&to).ok()),
+        (false, Some("y\nkept\n".to_string()))
+    );
+    let report: serde_json::Value = serde_json::from_str(&output).expect("json report");
+    let files = report["files"].as_array().expect("files");
+    assert_eq!(files.len(), 1, "{output}");
+    assert_eq!(
+        files[0]["filePath"].as_str().map(|path| path.ends_with("b.txt")),
+        Some(true),
+        "the entry names the file where it ended up: {output}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// The whole patch is computed before the first write: a later section that
+/// does not match what the earlier ones left refuses the patch, and the disk
+/// keeps every byte — the file two sections named, and the file an earlier
+/// operation would have added.
+#[test]
+fn a_later_section_that_does_not_match_leaves_every_file_as_it_was() {
+    let dir = patch_dir("apply-patch-twice-atomic");
+    let file = seeded(&dir, "a.txt", "one\ntwo\nthree\n");
+    let added = dir.join("added.txt");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    // The second section still asks for `two`, which the first has replaced.
+    let error = apply(
+        &ctx,
+        &format!(
+            "*** Begin Patch\n*** Add File: {1}\n+new\n*** Update File: {0}\n-two\n+TWO\n*** Update File: {0}\n-two\n+2\n*** End Patch",
+            file.display(),
+            added.display()
+        ),
+    )
+    .expect_err("the second section no longer matches");
+
+    assert!(error.to_string().contains("not in the file"), "{error}");
+    assert_eq!(fs::read_to_string(&file).expect("read"), "one\ntwo\nthree\n");
+    assert!(!added.exists(), "nothing of the patch was written");
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// What an earlier operation removed is not there for a later one, and what
+/// an earlier one added is not added again.
+#[test]
+fn an_operation_on_what_the_patch_already_removed_or_added_is_refused() {
+    let dir = patch_dir("apply-patch-gone");
+    let file = seeded(&dir, "a.txt", "one\n");
+    let fresh = dir.join("fresh.txt");
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+
+    let gone = apply(
+        &ctx,
+        &format!(
+            "*** Begin Patch\n*** Delete File: {0}\n*** Update File: {0}\n-one\n+ONE\n*** End Patch",
+            file.display()
+        ),
+    )
+    .expect_err("an update of a file the patch deleted");
+    assert!(gone.to_string().contains("gone by this point of the patch"), "{gone}");
+    assert_eq!(fs::read_to_string(&file).expect("read"), "one\n", "the delete was not carried out either");
+
+    let twice = apply(
+        &ctx,
+        &format!("*** Begin Patch\n*** Add File: {0}\n+a\n*** Add File: {0}\n+b\n*** End Patch", fresh.display()),
+    )
+    .expect_err("the same file added twice");
+    assert!(twice.to_string().contains("already exists"), "{twice}");
+    assert!(!fresh.exists(), "nothing was added");
+
+    let deleted_twice = apply(
+        &ctx,
+        &format!("*** Begin Patch\n*** Delete File: {0}\n*** Delete File: {0}\n*** End Patch", file.display()),
+    )
+    .expect_err("the same file deleted twice");
+    assert!(deleted_twice.to_string().contains("not a file to delete"), "{deleted_twice}");
+    assert!(file.exists(), "the first delete was not carried out either");
+    let _ = fs::remove_dir_all(dir);
+}

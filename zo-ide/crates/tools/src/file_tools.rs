@@ -1031,6 +1031,16 @@ impl PatchedFile<'_> {
 ///
 /// Unlike `Edit`, a file need not have been read first: an update's context
 /// lines must match the file as it is now, which is the freshness proof.
+///
+/// The operations apply in the order the patch wrote them, each to what the
+/// ones before it left ([`planned_state`]) — as they would if every one were a
+/// patch of its own, except that nothing is written until all of them have
+/// been computed. A model that writes two `*** Update File` sections for one
+/// file means the second to follow the first, which is how codex-cli applies
+/// them. Until 2026-11-11 such a patch was refused whole, because each
+/// operation read the file as the disk held it and the second would have
+/// undone the first: 5 of 29 failed `apply_patch` calls in seven days on one
+/// machine, each answered with a second request to say the same thing again.
 pub(crate) fn run_apply_patch(
     input: &ApplyPatchInput,
     enforcer: Option<&PermissionEnforcer>,
@@ -1038,19 +1048,62 @@ pub(crate) fn run_apply_patch(
 ) -> Result<String, ToolError> {
     let operations = runtime::apply_patch::parse_patch(&input.input)
         .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-    let files = operations
-        .iter()
-        .map(|operation| plan_patched_file(operation, enforcer, ctx))
-        .collect::<Result<Vec<_>, _>>()?;
-    refuse_repeated_patch_paths(&files)?;
+    let mut files: Vec<PatchedFile<'_>> = Vec::with_capacity(operations.len());
+    for operation in &operations {
+        let file = plan_patched_file(operation, &files, enforcer, ctx)?;
+        files.push(file);
+    }
     for file in &files {
         write_patched_file(file, ctx)?;
     }
     patch_report(&files)
 }
 
+/// What the operations planned so far have made of one path, before anything
+/// is written.
+enum Planned<'f> {
+    /// They have not touched it: its state is the disk's.
+    Untouched,
+    /// They leave a file there, holding this text.
+    File(&'f str),
+    /// They deleted it or moved it away.
+    Gone,
+}
+
+/// The state the last planned operation on `path` left it in.
+fn planned_state<'f>(planned: &'f [PatchedFile<'_>], path: &Path) -> Planned<'f> {
+    planned
+        .iter()
+        .rev()
+        .find_map(|file| {
+            if file.written() == path {
+                Some(file.contents.as_deref().map_or(Planned::Gone, Planned::File))
+            } else if file.source == path {
+                Some(Planned::Gone)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(Planned::Untouched)
+}
+
+/// Whether a file stands at `path` once the operations planned so far have
+/// run; `on_disk` answers for a path they left alone.
+fn stands_after(
+    planned: &[PatchedFile<'_>],
+    path: &Path,
+    on_disk: impl FnOnce(&Path) -> bool,
+) -> bool {
+    match planned_state(planned, path) {
+        Planned::Untouched => on_disk(path),
+        Planned::File(_) => true,
+        Planned::Gone => false,
+    }
+}
+
 fn plan_patched_file<'p>(
     operation: &runtime::apply_patch::PatchOperation<'p>,
+    planned: &[PatchedFile<'_>],
     enforcer: Option<&PermissionEnforcer>,
     ctx: &ToolContext,
 ) -> Result<PatchedFile<'p>, ToolError> {
@@ -1058,7 +1111,7 @@ fn plan_patched_file<'p>(
     let file = match *operation {
         PatchOperation::Add { path, ref lines } => {
             let source = guard_patch_path(ctx, enforcer, CoreTool::Write, path)?;
-            if source.exists() {
+            if stands_after(planned, &source, Path::exists) {
                 return Err(ToolError::InvalidInput(format!(
                     "{path} already exists; change it with `*** Update File: {path}`"
                 )));
@@ -1074,7 +1127,7 @@ fn plan_patched_file<'p>(
         }
         PatchOperation::Delete { path } => {
             let source = guard_patch_path(ctx, enforcer, CoreTool::Write, path)?;
-            if !source.is_file() {
+            if !stands_after(planned, &source, Path::is_file) {
                 return Err(ToolError::InvalidInput(format!("{path} is not a file to delete")));
             }
             PatchedFile {
@@ -1088,7 +1141,15 @@ fn plan_patched_file<'p>(
         }
         PatchOperation::Update { path, move_to, ref hunks } => {
             let source = guard_patch_path(ctx, enforcer, CoreTool::Edit, path)?;
-            let original = std::fs::read_to_string(&source)?;
+            let original = match planned_state(planned, &source) {
+                Planned::File(text) => std::borrow::Cow::Borrowed(text),
+                Planned::Gone => {
+                    return Err(ToolError::InvalidInput(format!(
+                        "{path} is gone by this point of the patch: an earlier operation deleted or moved it"
+                    )));
+                }
+                Planned::Untouched => std::borrow::Cow::Owned(std::fs::read_to_string(&source)?),
+            };
             let contents = apply_hunks(&original, hunks, path)
                 .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
             let destination = move_to
@@ -1096,7 +1157,7 @@ fn plan_patched_file<'p>(
                 .transpose()?
                 .filter(|destination| destination != &source);
             if let (Some(to), Some(destination)) = (move_to, &destination) {
-                if destination.exists() {
+                if stands_after(planned, destination, Path::exists) {
                     return Err(ToolError::InvalidInput(format!(
                         "cannot move {path} to {to}: {to} already exists"
                     )));
@@ -1139,24 +1200,6 @@ fn guard_patch_path(
     resolve_guarded_write_target(ctx, enforcer, path)
 }
 
-/// Two operations on one file would each read the file as it was before the
-/// patch, and the second would silently undo the first.
-fn refuse_repeated_patch_paths(files: &[PatchedFile<'_>]) -> Result<(), ToolError> {
-    let mut seen: Vec<&std::path::Path> = Vec::with_capacity(files.len() * 2);
-    for file in files {
-        for path in std::iter::once(file.source.as_path()).chain(file.destination.as_deref()) {
-            if seen.contains(&path) {
-                return Err(ToolError::InvalidInput(format!(
-                    "the patch changes {} more than once; merge those hunks into one `*** Update File`",
-                    file.label
-                )));
-            }
-            seen.push(path);
-        }
-    }
-    Ok(())
-}
-
 fn write_patched_file(file: &PatchedFile<'_>, ctx: &ToolContext) -> Result<(), ToolError> {
     let written = file.written();
     let moved = written != file.source;
@@ -1190,6 +1233,11 @@ fn write_patched_file(file: &PatchedFile<'_>, ctx: &ToolContext) -> Result<(), T
 /// codex-cli's success text, plus the files in the envelope shape
 /// `runtime::edited_file_paths` reads (`files[].filePath`). No diff: the
 /// model wrote the patch, and echoing it back is paid on every later turn.
+///
+/// The text has a line for every operation, in order. `files` has one entry a
+/// path — the last operation's — because its readers act on the file each
+/// entry names (auto-format, diagnostics), and an earlier operation's entry
+/// would name a file a later one rewrote, moved or removed.
 fn patch_report(files: &[PatchedFile<'_>]) -> Result<String, ToolError> {
     let mut summary = String::from("Success. Updated the following files:");
     for file in files {
@@ -1204,7 +1252,14 @@ fn patch_report(files: &[PatchedFile<'_>]) -> Result<String, ToolError> {
     }
     let listed: Vec<Value> = files
         .iter()
-        .map(|file| {
+        .enumerate()
+        .filter(|(index, file)| {
+            let path = file.written();
+            !files[index + 1..]
+                .iter()
+                .any(|later| later.source == path || later.written() == path)
+        })
+        .map(|(_, file)| {
             let mut entry = json!({
                 "filePath": file.written().to_string_lossy(),
                 "kind": file.kind.key(),
@@ -2463,8 +2518,8 @@ mod read_image_tests {
 mod boundary_tests {
     use super::{
         enforce_read_before_write, record_file_observation, restore_workspace_checkpoint,
-        run_edit_file, run_grep_search, run_read_file, run_write_file, EditFileInput,
-        ReadFileInput, WriteFileInput,
+        run_apply_patch, run_edit_file, run_grep_search, run_read_file, run_write_file,
+        ApplyPatchInput, EditFileInput, ReadFileInput, WriteFileInput,
     };
     use crate::{error::ToolError, ToolContext};
     use runtime::permission_enforcer::PermissionEnforcer;
@@ -2651,6 +2706,104 @@ mod boundary_tests {
         }
         // Sanity: the file must not exist after a denied write.
         assert!(!outside.exists(), "file should not have been created");
+    }
+
+    /// An enforcer that knows what each tool needs, as a session's does. A
+    /// bare policy asks full access of every tool it was not told of, and
+    /// would turn a patch away at its first operation — before the boundary
+    /// or a rule was ever asked about a later one.
+    fn session_enforcer(denied: &[&str]) -> PermissionEnforcer {
+        let rules = runtime::RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            denied.iter().map(|rule| (*rule).to_string()).collect(),
+            Vec::new(),
+        );
+        let policy = crate::mvp_tool_specs()
+            .iter()
+            .fold(PermissionPolicy::new(PermissionMode::WorkspaceWrite), |policy, spec| {
+                policy.with_tool_requirement(spec.name, spec.required_permission)
+            })
+            .with_permission_rules(&rules);
+        PermissionEnforcer::new(policy)
+    }
+
+    fn patch(ctx: &ToolContext, enforcer: &PermissionEnforcer, text: String) -> Result<String, ToolError> {
+        run_apply_patch(&ApplyPatchInput { input: text }, Some(enforcer), ctx)
+    }
+
+    /// A patch is guarded one operation at a time, and nothing is written
+    /// until every operation has passed: a later operation that leaves the
+    /// workspace refuses the patch, and the file two earlier sections named —
+    /// inside the workspace, and a patch of their own this session may apply
+    /// — keeps every byte.
+    #[test]
+    fn a_patch_whose_later_operation_leaves_the_workspace_writes_nothing() {
+        let workspace = temp_dir("outside-patch-ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let inside = workspace.join("a.txt");
+        std::fs::write(&inside, "one\ntwo\n").expect("seed");
+        let outside = temp_dir("outside-patch-target.txt");
+        let enforcer = session_enforcer(&[]);
+        let ctx = context(Some(&workspace));
+        let twice = format!(
+            "*** Update File: {0}\n-one\n+ONE\n*** Update File: {0}\n-two\n+TWO\n",
+            inside.display()
+        );
+
+        let result = patch(
+            &ctx,
+            &enforcer,
+            format!("*** Begin Patch\n{twice}*** Add File: {}\n+escaped\n*** End Patch", outside.display()),
+        );
+        assert!(
+            matches!(result, Err(ToolError::PermissionDenied { .. })),
+            "expected PermissionDenied, got {result:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&inside).expect("read inside"), "one\ntwo\n");
+        assert!(!outside.exists(), "file should not have been created");
+
+        // The two sections alone are a patch this session may apply: it was
+        // the third operation that refused the one above.
+        patch(&ctx, &enforcer, format!("*** Begin Patch\n{twice}*** End Patch"))
+            .expect("the two sections apply by themselves");
+        assert_eq!(std::fs::read_to_string(&inside).expect("read inside"), "ONE\nTWO\n");
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// The same for a rule: a deny rule that covers a later section refuses
+    /// the patch before the earlier sections are written.
+    #[test]
+    fn a_deny_rule_on_a_later_section_keeps_the_earlier_ones_from_being_written() {
+        let workspace = temp_dir("deny-patch-ws");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        let notes = workspace.join("notes.txt");
+        let secret = workspace.join(".env");
+        std::fs::write(&notes, "one\n").expect("seed notes");
+        std::fs::write(&secret, "TOKEN=1\n").expect("seed secret");
+        let enforcer = session_enforcer(&["edit_file(*.env)"]);
+        let ctx = context(Some(&workspace));
+        let twice = format!(
+            "*** Update File: {0}\n-one\n+ONE\n*** Update File: {0}\n-ONE\n+1\n",
+            notes.display()
+        );
+
+        let error = patch(
+            &ctx,
+            &enforcer,
+            format!(
+                "*** Begin Patch\n{twice}*** Update File: {}\n-TOKEN=1\n+TOKEN=2\n*** End Patch",
+                secret.display()
+            ),
+        )
+        .expect_err("the deny rule on edit_file covers the last section");
+        assert!(error.to_string().contains("edit_file"), "{error}");
+        assert_eq!(std::fs::read_to_string(&notes).expect("read notes"), "one\n");
+        assert_eq!(std::fs::read_to_string(&secret).expect("read secret"), "TOKEN=1\n");
+
+        patch(&ctx, &enforcer, format!("*** Begin Patch\n{twice}*** End Patch"))
+            .expect("the two sections apply by themselves");
+        assert_eq!(std::fs::read_to_string(&notes).expect("read notes"), "1\n");
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     /// A DANGLING symlink leaf inside the workspace pointing OUT of it must be
