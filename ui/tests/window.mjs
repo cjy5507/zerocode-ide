@@ -37842,8 +37842,11 @@ ok(
  * 같은 종류가 붙어 서는 걸음은 한 줄로 접히므로 400걸음의 실측
  * (measure-steps)은 오히려 준다. 이 검사가 돌 때마다 실측이 `HELPER_NODES`
  * 줄로 로그에 남는다. 09-30(t-16914): 표식이 svg·use 대신 span 하나(마스크)가 되어
- * 행마다 둘이 줄어 실측 2153이고 상한도 그 값이다. */
-const HELPER_LIST_NODES_CEILING = 2153;
+ * 행마다 둘이 줄어 실측 2153이고 상한도 그 값이다. 11-10(v1.1.140): 차례 사이가
+ * 32px로 좁아져(사람이 승인한 대화 화면, 아티팩트 p-1c1bbf75726ff227) 선반이 몸을
+ * 입히는 두 화면 안에 답 하나가 더 들어온다 — 몸을 입은 답 8 → 9, 그 문단 하나가
+ * 늘어 실측 2154이고 상한도 그 값이다. 노드를 지은 쪽은 아무것도 늘지 않았다. */
+const HELPER_LIST_NODES_CEILING = 2154;
 await page.setViewportSize({ width: 1280, height: 860 });
 const flatTranscript = await page.evaluate(async () => {
   const seen = {};
