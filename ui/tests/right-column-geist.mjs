@@ -130,6 +130,20 @@ function installGeistAudit() {
       const control = /^(BUTTON|INPUT|SELECT|TEXTAREA)$/.test(node.tagName) || node.getAttribute("role") === "tab" || node.classList.contains("segment-btn");
       const tall = node.offsetHeight || r.height;
       if (control && !/checkbox|radio/.test(node.type) && !HEIGHT.has(Math.round(tall)) && tall < 48) add("control-height", node, `${Math.round(tall)}px`);
+      // An action button holds its glyph and word in its middle. A row or a menu
+      // item is a button too and reads from the left, so only `.btn` is asked.
+      if (node.classList.contains("btn")) {
+        const inner = { left: r.left + parseFloat(s.borderLeftWidth) + parseFloat(s.paddingLeft), right: r.right - parseFloat(s.borderRightWidth) - parseFloat(s.paddingRight) };
+        let lo = Infinity, hi = -Infinity;
+        for (const child of node.childNodes) {
+          let box = null;
+          if (child.nodeType === 1 && shown(child)) box = child.getBoundingClientRect();
+          else if (child.nodeType === 3 && child.textContent.trim()) { const range = document.createRange(); range.selectNodeContents(child); box = range.getBoundingClientRect(); }
+          if (box && box.width >= 1) { lo = Math.min(lo, box.left); hi = Math.max(hi, box.right); }
+        }
+        const before = lo - inner.left, after = inner.right - hi;
+        if (lo < hi && before >= 0 && after >= 0 && Math.abs(before - after) > 2) add("off-centre", node, `${Math.round(before)}|${Math.round(after)}`);
+      }
     }
     return found;
   };

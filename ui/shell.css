@@ -6469,8 +6469,11 @@ svg.wt-agent-dot {
   background: color-mix(in srgb, var(--surface-deck) 96%, var(--surface-well));
 }
 
+/* The width holds the longest of its three words (만들기 · 초안 · 만드는 중…), so
+ * the shorter ones stand in its middle rather than against its left edge. */
 .prc-go {
   min-width: 148px;
+  justify-content: center;
 }
 
 @media (max-width: 560px) {
@@ -11591,6 +11594,7 @@ body.is-dragging-pane {
   border-left: 0;
   width: var(--control-height-sm);
   height: var(--control-height-sm);
+  justify-content: center;
   border: 0;
   background: var(--surface-deck);
   box-shadow: var(--shadow-border-small);
