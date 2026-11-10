@@ -23480,6 +23480,47 @@ button.integration-context-action:hover {
 }
 
 .integration-error,
+/* Settings › Remote link: the pairing QR beside its code. */
+.remote-link-pair {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.remote-link-qr {
+  flex: none;
+  width: var(--qr-size);
+  height: var(--qr-size);
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--qr-tile);
+  color: var(--qr-module);
+  box-shadow: 0 0 0 1px var(--gray-alpha-400);
+}
+
+.remote-link-qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.remote-link-pair-text {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.remote-link-pair-label {
+  margin: 0;
+  font-weight: 600;
+}
+
+.remote-link-code {
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+}
+
 .integration-empty {
   margin: var(--space-3) 0 0 var(--integration-indent);
   color: var(--ink-mist);

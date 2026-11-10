@@ -4207,6 +4207,10 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg>
                 <span data-i18n="settings.remoteServers.title">원격 서버</span>
               </button>
+              <button class="settings-rail-item" type="button" data-pane="remote-link">
+                <svg class="icon" aria-hidden="true"><use href="#i-phone"></use></svg>
+                <span data-i18n="settings.remoteLink.title">원격 연결</span>
+              </button>
             </div>
             <div class="settings-rail-group-box" data-group="workflows">
               <p class="settings-rail-group" data-i18n="settings.rail.workflows">워크플로</p>
@@ -6101,7 +6105,7 @@
             <p class="integration-empty" id="remote-server-empty"
                data-i18n="settings.remoteServers.empty">페어링된 원격 서버가 없습니다.</p>
             <p class="sr" id="remote-server-list-help" data-i18n="settings.remoteServers.listHelp">
-              각 서버의 연결 검사, 지속 세션 열기, 편집, 삭제를 할 수 있습니다.
+              각 서버의 연결 검사, 편집, 삭제를 할 수 있습니다.
             </p>
             <p class="settings-hint" data-i18n="settings.remoteServers.tunnelHint">
               먼저 SSH 또는 Tailscale로 터널을 만들고, 숫자형 loopback 끝점이 든 액세스 링크를 사용하세요.
@@ -6115,6 +6119,81 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
                 <span data-i18n="settings.remoteServers.add">서버 추가</span>
               </button>
+            </div>
+          </section>
+        </div>
+        </section>
+
+        <section class="settings-pane" data-pane="remote-link" hidden
+                 data-keywords="원격 연결 폰 휴대폰 아이폰 안드로이드 알림 푸시 페어링 QR 코드 Tailscale Serve phone mobile iPhone Android remote link push notification pairing">
+        <header class="settings-section-head">
+          <h2 class="settings-section-title" data-i18n="settings.remoteLink.title">원격 연결</h2>
+          <p class="settings-section-desc" data-i18n="settings.remoteLink.about">
+            이 컴퓨터의 에이전트 목록을 폰에서 보고, 답이 필요할 때 폰으로 알림을 받습니다. 창은 127.0.0.1에만 열고, 폰이 들어오는 길은 Tailscale Serve가 tailnet 안에서만 맡습니다.
+          </p>
+        </header>
+        <div class="settings-card settings-card--providers">
+          <section class="integration-provider" aria-labelledby="remote-link-road-title">
+            <header class="integration-provider-head">
+              <div class="integration-provider-identity">
+                <span class="integration-mark" aria-hidden="true">TS</span>
+                <div>
+                  <h3 class="integration-provider-title" id="remote-link-road-title">Tailscale Serve</h3>
+                  <p class="integration-provider-desc" id="remote-link-road-desc"></p>
+                </div>
+              </div>
+              <span class="settings-state" id="remote-link-summary" role="status" aria-live="polite"
+                    data-state="unchecked" data-i18n="settings.integrations.unchecked">확인 전</span>
+            </header>
+            <p class="integration-error" id="remote-link-error" role="alert" hidden></p>
+            <p class="settings-hint" data-i18n="settings.remoteLink.certHint">
+              HTTPS를 켜면 이 기기 이름과 tailnet 이름이 공개 인증서 기록에 남습니다.
+            </p>
+            <div class="integration-actions integration-actions--end">
+              <button class="btn" id="remote-link-refresh" type="button">
+                <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+                <span data-i18n="settings.integrations.recheck">다시 확인</span>
+              </button>
+              <button class="btn btn--primary" id="remote-link-toggle" type="button"
+                      data-i18n="settings.remoteLink.turnOn">켜기</button>
+            </div>
+          </section>
+          <section class="integration-provider" aria-labelledby="remote-link-phones-title">
+            <header class="integration-provider-head">
+              <div class="integration-provider-identity">
+                <span class="integration-mark" aria-hidden="true">
+                  <svg class="icon"><use href="#i-phone"></use></svg>
+                </span>
+                <div>
+                  <h3 class="integration-provider-title" id="remote-link-phones-title"
+                      data-i18n="settings.remoteLink.phones">폰</h3>
+                  <p class="integration-provider-desc" data-i18n="settings.remoteLink.phonesHint">
+                    「새 코드」는 10분 안에 만료되고 한 번만 쓰입니다. 폰은 이 기기의 Tailscale 계정으로만 연결됩니다.
+                  </p>
+                </div>
+              </div>
+            </header>
+            <div class="remote-link-pair" id="remote-link-pair" hidden>
+              <div class="remote-link-qr" id="remote-link-qr" role="img"
+                   aria-labelledby="remote-link-qr-label"></div>
+              <div class="remote-link-pair-text">
+                <p class="remote-link-pair-label" id="remote-link-qr-label"
+                   data-i18n="settings.remoteLink.scan">폰 카메라로 QR을 찍으세요</p>
+                <p class="settings-hint">
+                  <code class="remote-link-code" id="remote-link-code"></code>
+                  <span id="remote-link-expires"></span>
+                </p>
+              </div>
+            </div>
+            <div class="integration-site-list" id="remote-link-devices" role="list" aria-live="polite"></div>
+            <p class="integration-empty" id="remote-link-empty"
+               data-i18n="settings.remoteLink.noDevices">연결된 폰이 없습니다.</p>
+            <p class="settings-hint" id="remote-link-test-result" role="status" hidden></p>
+            <div class="integration-actions integration-actions--end">
+              <button class="btn" id="remote-link-test" type="button"
+                      data-i18n="settings.remoteLink.testPush">시험 알림 보내기</button>
+              <button class="btn btn--primary" id="remote-link-new-code" type="button"
+                      data-i18n="settings.remoteLink.newCode">새 코드</button>
             </div>
           </section>
         </div>

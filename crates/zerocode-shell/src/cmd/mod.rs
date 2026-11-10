@@ -70,7 +70,7 @@ pub(crate) mod workspace;
 pub(crate) mod worktree;
 
 pub(crate) use remote::{
-    developer_permission_statuses, open_developer_permission_settings, open_remote_server_session,
+    developer_permission_statuses, open_developer_permission_settings,
     open_remote_workspace_terminal, open_ssh_terminal, probe_remote_workspace, probe_ssh_host,
     remote_servers, remote_workspaces, remove_remote_server, remove_remote_workspace,
     remove_ssh_host, request_developer_permission, save_remote_server, save_remote_workspace,

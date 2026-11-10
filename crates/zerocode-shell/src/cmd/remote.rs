@@ -519,33 +519,6 @@ pub(crate) async fn test_remote_server(app: AppHandle, id: String) -> Result<(),
     .await
 }
 
-#[tauri::command]
-pub(crate) async fn open_remote_server_session(
-    app: AppHandle,
-    id: String,
-    rows: u16,
-    cols: u16,
-) -> Result<TermId, String> {
-    let (repository, service) = {
-        let state = app.state::<AppState>();
-        (Arc::clone(state.settings()), state.remote_servers().clone())
-    };
-    let pty = run_remote_host_task(move || {
-        let (entry, token) = remote_server_connection_material(&repository, &service, &id)?;
-        let zo = ZoBinary::discover().ok_or_else(|| {
-            "zo is not installed, so a remote session cannot be attached".to_string()
-        })?;
-        let supervisor =
-            LaneSupervisor::new(zo, entry.endpoint().to_string(), Some(token.to_string()))
-                .map_err(|error| error.to_string())?;
-        supervisor
-            .open_lane(Box::new(LocalPty), None, None, &[], rows, cols)
-            .map_err(|error| error.to_string())
-    })
-    .await?;
-    Ok(hold_terminal_handle(&app, pty))
-}
-
 /// Read the nine permissions on a blocking worker.
 ///
 /// Each answer is a TCC round trip, so the whole refresh costs tens of

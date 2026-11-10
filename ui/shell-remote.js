@@ -1620,12 +1620,6 @@ function remoteServerNode(server) {
     () => void testRemoteServer(server),
   ));
   actions.appendChild(integrationActionButton(
-    "remote-server-open",
-    t("settings.remoteServers.open", "지속 세션 열기"),
-    busy || remoteServerMutation !== null || !connectable,
-    () => void openRemoteServerSession(server),
-  ));
-  actions.appendChild(integrationActionButton(
     "btn--halt remote-server-remove",
     t("settings.remoteServers.remove", "삭제"),
     busy || remoteServerMutation !== null,
@@ -1817,34 +1811,238 @@ async function testRemoteServer(server) {
   paintRemoteServers();
 }
 
-async function openRemoteServerSession(server) {
-  if (!remoteServerCanConnect(server) || remoteServerActions.get(server.id)?.busy) return;
-  remoteServerActions.set(server.id, { busy: true });
-  remoteServerError = null;
-  paintRemoteServers();
-  try {
-    const term = await invoke("open_remote_server_session", {
-      id: server.id,
-      rows: 24,
-      cols: 96,
-    });
-    remoteServerActions.delete(server.id);
-    setSettingsOpen(false);
-    mountTermTab(term, {
-      label: server.name,
-      remoteServer: server.id,
-      worktree: `zerocode://${server.endpoint}`,
-    }, { placement: "tab" });
-  } catch (error) {
-    remoteServerActions.delete(server.id);
-    remoteServerError = String(error);
-    paintRemoteServers();
-  }
-}
-
 el("remote-server-refresh").addEventListener("click", () => void refreshRemoteServers());
 el("remote-server-add").addEventListener("click", () => openRemoteServerDialog());
 el("remote-server-cancel").addEventListener("click", closeRemoteServerDialog);
+
+/* ---- Remote link (phone, stage 1) -----------------------------------------
+ *
+ * The native side owns every decision — Tailscale's state, which HTTPS port,
+ * whether Funnel or the hook bridge refuse the link, the pairing code and its
+ * QR. This pane draws what `phone_link_status` answers and sends five
+ * presses: on/off, a new code, revoke, and a test notice. */
+let remoteLinkStatus = null;
+let remoteLinkBusy = false;
+let remoteLinkError = null;
+let remoteLinkCode = null;
+let remoteLinkTestWords = null;
+
+function remoteLinkAgo(epochMs) {
+  if (!epochMs) return "";
+  const minutes = Math.max(0, Math.floor((Date.now() - epochMs) / 60000));
+  if (minutes < 1) return t("settings.remoteLink.justNow", "방금");
+  if (minutes < 60) return t("settings.remoteLink.minutesAgo", "{{count}}분 전", { count: minutes });
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return t("settings.remoteLink.hoursAgo", "{{count}}시간 전", { count: hours });
+  return t("settings.remoteLink.daysAgo", "{{count}}일 전", { count: Math.floor(hours / 24) });
+}
+
+function remoteLinkProblemWords(problem) {
+  switch (problem) {
+    case "tailscale":
+      return t("settings.remoteLink.noTailscale", "Tailscale이 없습니다. 설치하고 로그인한 뒤 다시 확인하세요.");
+    case "tailscale-stopped":
+      return t("settings.remoteLink.stopped", "Tailscale이 꺼져 있습니다. Tailscale을 켜고 다시 확인하세요.");
+    case "tailscale-name":
+    case "tailscale-https":
+      return t("settings.remoteLink.noHttps", "이 tailnet은 HTTPS 인증서를 쓸 수 없습니다. Tailscale 관리 화면에서 MagicDNS와 HTTPS를 켜세요.");
+    case "hook-exposed":
+      return t("settings.remoteLink.hookExposed", "에이전트 훅 브리지 포트가 Serve나 Funnel에 올라가 있어 켤 수 없습니다. 그 매핑을 먼저 지우세요.");
+    case "port-taken":
+    case "no-free-port":
+      return t("settings.remoteLink.portTaken", "쓸 수 있는 HTTPS 포트(8443·10443·9443)를 다른 Serve 매핑이 모두 쓰고 있습니다.");
+    case "refused":
+      return t("settings.remoteLink.funnel", "이 포트에 Funnel(인터넷 공개)이 켜져 있어 폰 기능을 껐습니다.");
+    default:
+      return problem ? String(problem) : null;
+  }
+}
+
+function remoteLinkRoad(status) {
+  const tailscale = status?.tailscale ?? {};
+  if (!tailscale.installed) {
+    return { state: "disconnected", summary: t("settings.remoteLink.off", "꺼짐"), words: remoteLinkProblemWords("tailscale"), can: false };
+  }
+  if (!tailscale.running) {
+    return { state: "disconnected", summary: t("settings.remoteLink.off", "꺼짐"), words: remoteLinkProblemWords("tailscale-stopped"), can: false };
+  }
+  if (!tailscale.httpsReady) {
+    return { state: "disconnected", summary: t("settings.remoteLink.off", "꺼짐"), words: remoteLinkProblemWords("tailscale-https"), can: false };
+  }
+  if (status.exposure === "hookExposed") {
+    return { state: "error", summary: t("settings.remoteLink.refused", "거절됨"), words: remoteLinkProblemWords("hook-exposed"), can: false };
+  }
+  if (status.exposure === "funnel") {
+    return { state: "error", summary: t("settings.remoteLink.refused", "거절됨"), words: remoteLinkProblemWords("refused"), can: status.enabled };
+  }
+  if (status.enabled && status.listening && status.url) {
+    return {
+      state: "connected",
+      summary: t("settings.remoteLink.on", "켜짐"),
+      words: t("settings.remoteLink.onWords", "tailnet 안에서만 열려 있습니다 · {{url}}", { url: status.url }),
+      can: true,
+    };
+  }
+  return {
+    state: "disconnected",
+    summary: t("settings.remoteLink.off", "꺼짐"),
+    words: t("settings.remoteLink.offWords", "켜면 이 기기의 tailnet 이름에 HTTPS 포트 하나를 열고, 다른 Serve 매핑은 건드리지 않습니다."),
+    can: true,
+  };
+}
+
+function remoteLinkDeviceNode(device) {
+  const row = document.createElement("div");
+  row.className = "integration-site";
+  row.dataset.deviceId = device.id;
+  row.setAttribute("role", "listitem");
+  const name = document.createElement("span");
+  name.className = "integration-site-pick";
+  say(name, () => device.name);
+  row.appendChild(name);
+  const summary = document.createElement("span");
+  summary.className = "integration-site-summary";
+  say(summary, () => [
+    t("settings.remoteLink.lastSeen", "{{when}} 접속", { when: remoteLinkAgo(device.lastSeenMs) }),
+    device.push
+      ? t("settings.remoteLink.pushOn", "알림 켜짐")
+      : t("settings.remoteLink.pushOff", "알림 꺼짐"),
+  ].join(" · "));
+  row.appendChild(summary);
+  const actions = document.createElement("div");
+  actions.className = "integration-site-actions";
+  actions.appendChild(integrationActionButton(
+    "btn--halt remote-link-revoke",
+    t("settings.remoteLink.revoke", "철회"),
+    remoteLinkBusy,
+    () => void remoteLinkPress("phone_link_revoke", { id: device.id }),
+  ));
+  row.appendChild(actions);
+  return row;
+}
+
+function paintRemoteLinkCode() {
+  const pair = el("remote-link-pair");
+  const live = remoteLinkCode && remoteLinkCode.expiresMs > Date.now()
+    && remoteLinkStatus?.listening;
+  pair.hidden = !live;
+  const qr = el("remote-link-qr");
+  if (!live) {
+    qr.replaceChildren();
+    return;
+  }
+  const drawn = new DOMParser().parseFromString(remoteLinkCode.qrSvg, "image/svg+xml").documentElement;
+  if (drawn?.nodeName === "svg") {
+    drawn.setAttribute("aria-hidden", "true");
+    drawn.setAttribute("focusable", "false");
+    qr.replaceChildren(document.importNode(drawn, true));
+  }
+  say(el("remote-link-code"), () => remoteLinkCode.code);
+  say(el("remote-link-expires"), () => t("settings.remoteLink.expires", "{{time}}까지", {
+    time: new Date(remoteLinkCode.expiresMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+  }));
+}
+
+function paintRemoteLink() {
+  const status = remoteLinkStatus;
+  const summary = el("remote-link-summary");
+  const road = status ? remoteLinkRoad(status) : null;
+  if (remoteLinkBusy && !status) {
+    summary.dataset.state = "checking";
+    say(summary, () => t("settings.integrations.checking", "확인 중…"));
+  } else if (road) {
+    summary.dataset.state = road.state;
+    say(summary, () => road.summary);
+  }
+  say(el("remote-link-road-desc"), () => road?.words ?? "");
+  const problem = remoteLinkError ?? remoteLinkProblemWords(status?.problem);
+  const error = el("remote-link-error");
+  error.hidden = !problem;
+  if (problem) say(error, () => problem);
+  const toggle = el("remote-link-toggle");
+  const on = status?.enabled === true;
+  say(toggle, () => (on
+    ? t("settings.remoteLink.turnOff", "끄기")
+    : t("settings.remoteLink.turnOn", "켜기")));
+  toggle.classList.toggle("btn--primary", !on);
+  toggle.disabled = remoteLinkBusy || !road?.can;
+  el("remote-link-refresh").disabled = remoteLinkBusy;
+  const devices = status?.devices ?? [];
+  el("remote-link-devices").replaceChildren(...devices.map(remoteLinkDeviceNode));
+  el("remote-link-empty").hidden = devices.length > 0;
+  el("remote-link-new-code").disabled = remoteLinkBusy || !(status?.listening && status?.url);
+  el("remote-link-test").disabled = remoteLinkBusy || !status?.pushReady
+    || !devices.some((device) => device.push);
+  const tested = el("remote-link-test-result");
+  tested.hidden = !remoteLinkTestWords;
+  if (remoteLinkTestWords) say(tested, () => remoteLinkTestWords);
+  paintRemoteLinkCode();
+}
+
+async function remoteLinkPress(command, args = {}) {
+  if (remoteLinkBusy) return;
+  remoteLinkBusy = true;
+  remoteLinkError = null;
+  paintRemoteLink();
+  try {
+    remoteLinkStatus = await invoke(command, args, { hand: handNow() });
+    if (!remoteLinkStatus?.listening) remoteLinkCode = null;
+  } catch (error) {
+    remoteLinkError = String(error);
+  }
+  remoteLinkBusy = false;
+  paintRemoteLink();
+}
+
+async function refreshRemoteLink() {
+  if (remoteLinkBusy) return;
+  remoteLinkBusy = true;
+  remoteLinkError = null;
+  paintRemoteLink();
+  try {
+    remoteLinkStatus = await invoke("phone_link_status");
+  } catch (error) {
+    remoteLinkError = String(error);
+  }
+  remoteLinkBusy = false;
+  paintRemoteLink();
+}
+
+el("remote-link-refresh").addEventListener("click", () => void refreshRemoteLink());
+el("remote-link-toggle").addEventListener("click", () => void remoteLinkPress(
+  remoteLinkStatus?.enabled ? "phone_link_disable" : "phone_link_enable",
+));
+el("remote-link-new-code").addEventListener("click", async () => {
+  if (remoteLinkBusy) return;
+  remoteLinkBusy = true;
+  remoteLinkError = null;
+  paintRemoteLink();
+  try {
+    remoteLinkCode = await invoke("phone_link_new_code", {}, { hand: handNow() });
+  } catch (error) {
+    remoteLinkCode = null;
+    remoteLinkError = String(error);
+  }
+  remoteLinkBusy = false;
+  paintRemoteLink();
+});
+el("remote-link-test").addEventListener("click", async () => {
+  if (remoteLinkBusy) return;
+  remoteLinkBusy = true;
+  remoteLinkTestWords = null;
+  paintRemoteLink();
+  try {
+    const sent = await invoke("phone_link_test_push", {}, { hand: handNow() });
+    remoteLinkTestWords = t("settings.remoteLink.testResult", "보냄 {{sent}} · 실패 {{failed}}", {
+      sent: sent?.sent ?? 0,
+      failed: (sent?.failed ?? 0) + (sent?.gone ?? 0),
+    });
+  } catch (error) {
+    remoteLinkError = String(error);
+  }
+  remoteLinkBusy = false;
+  await refreshRemoteLink();
+});
 
 /* ---- macOS developer permissions ---------------------------------------
  *

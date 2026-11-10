@@ -688,6 +688,11 @@
   --blue-800: #0062d1;
   --signal-you-solid: var(--blue-800);
   --ink-on-solid: #ffffff;
+  /* A QR code is read by a camera, not a theme: dark modules on a light
+   * tile in both treatments (inverted codes are not read by every phone). */
+  --qr-tile: #ffffff;
+  --qr-module: #000000;
+  --qr-size: 176px;
   --leading-body: 1.55;
   --leading-tight: 1.25;
   --tracking-label: 0.08em;

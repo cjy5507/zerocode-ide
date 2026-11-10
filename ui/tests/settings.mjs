@@ -998,6 +998,18 @@ class StatefulBackend {
     this.nextRemoteWorkspace = 1;
     this.remoteServers = [];
     this.nextRemoteServer = 1;
+    /* The phone link as `phone_link_status` answers it: Tailscale running
+     * with HTTPS ready, the link off, one phone already paired. */
+    this.phoneLink = {
+      enabled: false,
+      listening: false,
+      tailscale: { installed: true, running: true, dnsName: "host.example.test", httpsReady: true },
+      exposure: "absent",
+      pushReady: false,
+      devices: [
+        { id: "phone-1", name: "Fixture phone", pairedMs: 1, lastSeenMs: 1, push: true },
+      ],
+    };
     this.nextRemoteTerm = 900;
     this.keyboardLayout = { category: "us" };
     this.pwshAvailable = true;
@@ -2532,7 +2544,35 @@ class StatefulBackend {
         this.remoteServers = this.remoteServers.filter((server) => server.id !== args.id);
       });
       case "test_remote_server": return null;
-      case "open_remote_server_session": return ++this.nextRemoteTerm;
+      case "phone_link_status": return clone(this.phoneLink);
+      case "phone_link_enable":
+        this.phoneLink = {
+          ...this.phoneLink,
+          enabled: true,
+          listening: true,
+          exposure: "ours",
+          pushReady: true,
+          url: "https://host.example.test:8443/",
+        };
+        return clone(this.phoneLink);
+      case "phone_link_disable": {
+        const { url: _url, ...rest } = this.phoneLink;
+        this.phoneLink = { ...rest, enabled: false, listening: false, exposure: "absent" };
+        return clone(this.phoneLink);
+      }
+      case "phone_link_new_code": return {
+        code: "ABCD2345",
+        url: "https://host.example.test:8443/pair#ABCD2345",
+        expiresMs: Date.now() + 10 * 60 * 1000,
+        qrSvg: '<?xml version="1.0" standalone="yes"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><path fill="currentColor" d="M0 0h1v1H0z"/></svg>',
+      };
+      case "phone_link_revoke":
+        this.phoneLink = {
+          ...this.phoneLink,
+          devices: this.phoneLink.devices.filter((device) => device.id !== args.id),
+        };
+        return clone(this.phoneLink);
+      case "phone_link_test_push": return { sent: 1, gone: 0, failed: 0 };
       case "developer_permission_statuses": return clone(DEVELOPER_PERMISSION_STATES);
       case "request_developer_permission": return {
         id: args.id,
@@ -10828,7 +10868,7 @@ await test("SSH Hosts verifies the server key and drives one native-backed remot
   return "host pin/vault + SFTP canonical workspace + two real remote PTY roots";
 });
 
-await test("Remote Servers pairs a tunnel, hides its bearer, and opens one persistent session", async () => {
+await test("Remote Servers pairs a tunnel, hides its bearer, and offers no dead persistent-session button", async () => {
   const accessLink = "zerocode://pair?endpoint=127.0.0.1%3A43123&token=fixture-bearer-never-rendered";
   const openedAt = backend.calls.length;
   await openSettings(pageA, "remote-servers");
@@ -10872,20 +10912,12 @@ await test("Remote Servers pairs a tunnel, hides its bearer, and opens one persi
   await pageA.waitForFunction(() =>
     document.querySelector("#remote-server-list")?.textContent.includes("연결됨"));
 
-  const sessionAt = backend.calls.length;
-  await pageA.locator("#remote-server-list .remote-server-open").click();
-  const session = await backend.waitForCall("A", "open_remote_server_session", sessionAt);
+  // zo has no `attach` any more, so the button that called it is gone
+  // (stage-1 phone link decision 3); the list, pairing and token stay.
   assertEqual(
-    session.args,
-    { id: "20000000-0000-4000-8000-000000000001", rows: 24, cols: 96 },
-    "the persistent session did not open by its saved server identity",
-  );
-  await pageA.waitForFunction(() =>
-    currentTab()?.remoteServer === "20000000-0000-4000-8000-000000000001");
-  assertEqual(
-    await pageA.evaluate(() => currentTab()?.worktree),
-    "zerocode://127.0.0.1:43123",
-    "the tunneled server session was labelled as a local workspace",
+    await pageA.locator("#remote-server-list .remote-server-open").count(),
+    0,
+    "the dead persistent-session button came back",
   );
 
   const reopenedAt = backend.calls.length;
@@ -10899,7 +10931,60 @@ await test("Remote Servers pairs a tunnel, hides its bearer, and opens one persi
   await pageA.waitForFunction(() =>
     document.querySelectorAll("#remote-server-list [data-server-id]").length === 0);
   assert(await pageA.locator("#remote-servers-error").isHidden(), "a recovered removal reported a false failure");
-  return "native bearer isolation + exact loopback identity + persistent zo attach";
+  return "native bearer isolation + exact loopback identity + no dead attach button";
+});
+
+await test("Remote link turns the phone link on, shows a one-time QR, and revokes a phone", async () => {
+  const openedAt = backend.calls.length;
+  await openSettings(pageA, "remote-link");
+  await backend.waitForCall("A", "phone_link_status", openedAt);
+  await pageA.waitForFunction(() =>
+    document.querySelector("#remote-link-summary")?.dataset.state === "disconnected");
+  assert(await pageA.locator("#remote-link-new-code").isDisabled(), "a code was offered while the link is off");
+  assert(await pageA.locator("#remote-link-pair").isHidden(), "a QR stood while the link is off");
+  assertEqual(
+    await pageA.locator("#remote-link-devices [data-device-id]").count(),
+    1,
+    "the paired phone was not listed",
+  );
+
+  const enabledAt = backend.calls.length;
+  await pageA.locator("#remote-link-toggle").click();
+  const enabled = await backend.waitForCall("A", "phone_link_enable", enabledAt);
+  assertEqual(enabled.args, {}, "turning on carried arguments the native side never takes");
+  await pageA.waitForFunction(() =>
+    document.querySelector("#remote-link-summary")?.dataset.state === "connected");
+  assert(
+    (await pageA.locator("#remote-link-road-desc").innerText()).includes("https://host.example.test:8443/"),
+    "the tailnet address was not shown once the link was on",
+  );
+
+  const codeAt = backend.calls.length;
+  await pageA.locator("#remote-link-new-code").click();
+  await backend.waitForCall("A", "phone_link_new_code", codeAt);
+  await pageA.locator("#remote-link-pair").waitFor({ state: "visible" });
+  assertEqual(await pageA.locator("#remote-link-code").innerText(), "ABCD2345", "the code was not shown");
+  assertEqual(await pageA.locator("#remote-link-qr svg").count(), 1, "the QR was not drawn");
+
+  const testAt = backend.calls.length;
+  await pageA.locator("#remote-link-test").click();
+  await backend.waitForCall("A", "phone_link_test_push", testAt);
+  await pageA.locator("#remote-link-test-result").waitFor({ state: "visible" });
+
+  const revokedAt = backend.calls.length;
+  await pageA.locator("#remote-link-devices .remote-link-revoke").click();
+  const revoked = await backend.waitForCall("A", "phone_link_revoke", revokedAt);
+  assertEqual(revoked.args, { id: "phone-1" }, "revoke did not name the phone by its id");
+  await pageA.waitForFunction(() =>
+    document.querySelectorAll("#remote-link-devices [data-device-id]").length === 0);
+
+  const offAt = backend.calls.length;
+  await pageA.locator("#remote-link-toggle").click();
+  await backend.waitForCall("A", "phone_link_disable", offAt);
+  await pageA.waitForFunction(() =>
+    document.querySelector("#remote-link-summary")?.dataset.state === "disconnected");
+  assert(await pageA.locator("#remote-link-pair").isHidden(), "the QR outlived the link");
+  return "tailnet-only status + one-time QR + revoke + off";
 });
 
 await test("macOS Permissions exposes one closed native inventory and a private-LAN-only test", async () => {

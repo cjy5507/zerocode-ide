@@ -1091,6 +1091,7 @@ function showSettingsPane(pane) {
   }
   if (pane === "ssh" && arriving) void enterSshTargetsPane();
   if (pane === "remote-servers" && arriving) void refreshRemoteServers();
+  if (pane === "remote-link" && arriving) void refreshRemoteLink();
   if (pane === "macos-permissions" && arriving) void refreshDeveloperPermissions();
   const query = el("settings-search").value.trim().toLowerCase();
   // A section that is on screen but does not answer the query would be the
