@@ -6729,6 +6729,8 @@ async function refreshWorktrees() {
     } catch {
       fetched = new Map();
     }
+    // A newer refresh started while this one waited: it draws, this one would only draw twice.
+    if (generation !== worktreeRefreshGeneration) return [];
     const said = (held) => [...held].sort().map((pair) => pair.join(":")).join(",");
     if (said(fetched) !== said(sidebarReviewStates)) reviewGeneration += 1;
     sidebarReviewStates = fetched;
