@@ -4462,6 +4462,11 @@ function flowScheduleRow(job) {
   facts.push(job.enabled && held
     ? t("flow.schedules.next", "다음 {{when}}", { when: whenNext(held) })
     : (job.enabled ? "" : t("auto.off", "꺼짐")));
+  if (typeof held?.last_verdict === "boolean") {
+    facts.push(t("flow.schedules.last", "최근 {{verdict}}", {
+      verdict: held.last_verdict ? t("flow.pass", "합격") : t("flow.fail", "불합격"),
+    }));
+  }
   meta.textContent = facts.filter(Boolean).join(" · ");
   words.append(name, meta);
   const acts = document.createElement("span");
@@ -11931,6 +11936,13 @@ function paintAutomations() {
     runs.hidden = !(row.runs > 0);
     if (!runs.hidden) runs.textContent = t("auto.runCount", "런 {{n}}회", { n: row.runs });
     last.appendChild(runs);
+    // How the newest run went, when its folder said: the word before the time.
+    if (typeof row.last_verdict === "boolean") {
+      const verdict = document.createElement("span");
+      verdict.className = row.last_verdict ? "auto-row-verdict is-pass" : "auto-row-verdict is-fail";
+      verdict.textContent = row.last_verdict ? t("flow.pass", "합격") : t("flow.fail", "불합격");
+      last.prepend(verdict);
+    }
     // What the job runs: the Flow by name, or the agent its prompt is handed to.
     const what = item.querySelector(".auto-row-agent");
     const flowName = automationFlowName(row);
@@ -12366,6 +12378,8 @@ function setAutoDetailTab(tab) {
 /* What the job's evidence setting comes to for THIS prompt: the policy is a
  * word, but "프롬프트에 따라" is only useful once it says which way. */
 function evidencePolicyLabel(row) {
+  // A Flow's run is judged from its folder, so it always leaves one.
+  if (row.flow) return t("auto.evidenceFlow", "Flow의 판정과 리포트를 남김");
   if (row.evidence === "always") return t("auto.evidenceAlways", "항상 남김");
   if (row.evidence === "never") return t("auto.evidenceNever", "남기지 않음");
   return row.leaves_evidence
@@ -12527,8 +12541,23 @@ function paintAutomationRuns() {
       state.className = "auto-run-ended";
       state.textContent = t("auto.running", "실행 중");
     }
+    // A run whose folder holds a verdict — a Flow's walk, or a QA scenario's —
+    // says how it went, where it could only say that it ended.
+    const judged = run.verdict && !run.failure && !run.skipped && !run.missed;
+    if (judged) {
+      state.className = run.verdict.pass ? "auto-run-ended auto-run-pass" : "auto-run-ended auto-run-failed";
+      state.textContent = run.verdict.pass ? t("flow.pass", "합격") : t("flow.fail", "불합격");
+    }
     const actions = document.createElement("span");
     actions.className = "auto-run-actions";
+    if (run.report) {
+      const report = document.createElement("button");
+      report.className = "btn auto-run-report";
+      report.type = "button";
+      report.textContent = t("flow.report", "리포트 열기");
+      report.addEventListener("click", () => void openBrowserTab(pathAsFileUrl(run.report)));
+      actions.appendChild(report);
+    }
     const tab = run.skipped || run.missed ? null : tabOfTerm(run.term);
     const openableTab = run.failure ? null : tab;
     if (openableTab) {
@@ -12543,9 +12572,17 @@ function paintAutomationRuns() {
       actions.appendChild(open);
     }
     let detail = null;
-    if (run.result || run.evidence_dir) {
+    const failedWhy = judged && !run.verdict.pass && run.verdict.reason ? run.verdict.reason : null;
+    if (run.result || run.evidence_dir || failedWhy) {
       detail = document.createElement("div");
       detail.className = "auto-run-detail";
+    }
+    // Why it failed, under the row: the state column is a word wide.
+    if (failedWhy) {
+      const why = document.createElement("p");
+      why.className = "auto-run-result auto-run-why";
+      why.textContent = failedWhy;
+      detail.appendChild(why);
     }
     if (run.result) {
       const result = document.createElement("p");
@@ -13030,6 +13067,9 @@ function paintAutoKind(flow) {
   }
   el("auto-flow-field").hidden = autoKind !== "flow";
   el("auto-prompt-field").hidden = autoKind === "flow";
+  // A Flow job starts its own session and always leaves its folder (the
+  // backend holds both), so the two controls that would say otherwise go.
+  el("auto-form").dataset.kind = autoKind;
   // The prompt is required only of the kind that sends one.
   el("auto-prompt").required = autoKind !== "flow";
   const field = el("auto-flow");

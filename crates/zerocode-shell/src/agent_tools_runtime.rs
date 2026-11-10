@@ -198,6 +198,11 @@ pub(super) struct AutomationRow {
     /// next-run time alone, and the difference is the first thing anybody
     /// checks when a job seems not to be working.
     pub(super) runs: usize,
+    /// How the newest run went, when its folder holds a verdict — a Flow's
+    /// walk, or a QA scenario's. Absent for a run that left none: the list
+    /// then says only when it last ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_verdict: Option<bool>,
 }
 
 /// A prompt that finished its journey into a shell, either way — or that is

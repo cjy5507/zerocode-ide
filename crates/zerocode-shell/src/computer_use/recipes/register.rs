@@ -107,16 +107,12 @@ pub fn flow_delete(root: &Path, slug: &str) -> Result<FlowDeleted, ComputerUseEr
     })
 }
 
-/// Drop every walk record that names `slug` from every session folder.
+/// Drop every walk record that names `slug` from every folder a walk writes
+/// to — the session folders and the scheduled runs' — so a recipe saved later
+/// under the same name does not inherit a verdict it never earned.
 fn forget_runs_of(root: &Path, slug: &str) -> usize {
-    let Ok(sessions) = std::fs::read_dir(root.join(crate::computer_use::evidence::SESSIONS_DIR))
-    else {
-        return 0;
-    };
-    sessions
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|dir| dir.is_dir())
+    crate::run_evidence::walk_folders(root)
+        .into_iter()
         .map(|dir| {
             crate::run_evidence::forget_walks(&dir, |record| {
                 walk_slug(record).as_deref() == Some(slug)
@@ -501,7 +497,11 @@ mod tests {
 
     /// A walk record the way a recipe-run leaves it, with a verdict beside it.
     fn walked(root: &Path, session: &str, recipe: &str, at: i64) -> PathBuf {
-        let dir = root.join(SESSIONS_DIR).join(session);
+        walked_in(root.join(SESSIONS_DIR).join(session), recipe, at)
+    }
+
+    /// The same record in the folder it is given — a scheduled run's, say.
+    fn walked_in(dir: PathBuf, recipe: &str, at: i64) -> PathBuf {
         std::fs::create_dir_all(&dir).unwrap();
         crate::run_evidence::record_walk(
             &dir,
@@ -776,6 +776,45 @@ mod tests {
             .and_then(|rows| rows.iter().find(|row| row["slug"] == "quiet"))
             .expect("the quiet recipe is listed");
         assert!(quiet.get("automations").is_none() && quiet.get("last").is_none());
+    }
+
+    /// A walk a scheduled run made is a walk like any other: its folder under
+    /// `automations/<job>/runs/` gives the recipe its last verdict when it is the
+    /// newest, and deleting the recipe forgets that record with the sessions'.
+    #[test]
+    fn a_scheduled_runs_folder_gives_the_recipe_its_last_verdict_and_is_forgotten_with_it() {
+        let (root, recipes) = folder();
+        std::fs::write(
+            recipes.join("nightly-probe.md"),
+            plain("Nightly probe", &["zerocode-computer key --key tab"]),
+        )
+        .unwrap();
+        walked(root.path(), "20260914-020000-1", "Nightly probe", 5_000);
+        let run = walked_in(
+            root.path()
+                .join(crate::run_evidence::AUTOMATIONS_DIR)
+                .join("job-1")
+                .join(crate::run_evidence::AUTOMATION_RUNS_DIR)
+                .join("9000"),
+            "Nightly probe",
+            9_000,
+        );
+
+        let listing = flow_list(root.path(), |_| None);
+        let last = listing.recipes[0]
+            .last
+            .as_ref()
+            .expect("the recipe has been walked");
+        assert_eq!(last.at, 9_000, "the scheduled run is the newer walk");
+        assert_eq!(last.dir, run.display().to_string());
+        assert_eq!(last.pass, Some(true));
+
+        let deleted = flow_delete(root.path(), "nightly-probe").expect("deleted");
+        assert_eq!(deleted.walks, 2, "the session's record and the run's");
+        assert!(
+            crate::run_evidence::walks_in(&run).is_empty(),
+            "the run's folder still names the recipe"
+        );
     }
 
     /// Registering appends the two Flow sections to a plain recipe, leaves its

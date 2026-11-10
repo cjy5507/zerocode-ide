@@ -185,6 +185,11 @@ pub fn evidence_requested(prompt: &str) -> bool {
 /// Whether this job's next run leaves evidence.
 #[must_use]
 pub fn leaves_evidence(automation: &Automation) -> bool {
+    // A Flow's verdict and its report are files in the run's folder: without
+    // the folder the run could only ever say that it ended.
+    if automation.flow.is_some() {
+        return true;
+    }
     match automation.evidence {
         EvidencePolicy::Always => true,
         EvidencePolicy::Never => false,
@@ -320,6 +325,9 @@ impl Automation {
         }
         self.prompt = flow_prompt(&slug);
         self.flow = Some(slug);
+        // The walk writes into the folder its own shell was started with; a
+        // session that was already running was started with none.
+        self.reuse_session = false;
         Ok(())
     }
 
@@ -1573,6 +1581,22 @@ mod tests {
         plain.bind_flow().expect("no Flow is no change");
         assert_eq!(plain.prompt, "tidy up");
         assert_eq!(plain.flow, None);
+
+        // A Flow's run is judged from its folder: it leaves one whatever the
+        // evidence setting says, and starts its own shell to be handed it.
+        let mut quiet = Automation {
+            flow: Some("wallet-qa".into()),
+            evidence: EvidencePolicy::Never,
+            reuse_session: true,
+            ..nightly()
+        };
+        assert!(leaves_evidence(&quiet));
+        quiet.bind_flow().expect("a named Flow binds");
+        assert!(!quiet.reuse_session);
+        assert!(!leaves_evidence(&Automation {
+            evidence: EvidencePolicy::Never,
+            ..nightly()
+        }));
 
         let mut blank = Automation {
             flow: Some(" -- ".into()),

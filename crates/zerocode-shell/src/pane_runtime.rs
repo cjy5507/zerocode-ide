@@ -1037,9 +1037,9 @@ pub(super) fn run_evidence_dir(
     at_epoch_ms: i64,
 ) -> PathBuf {
     local_data_root
-        .join("automations")
+        .join(crate::run_evidence::AUTOMATIONS_DIR)
         .join(automation_id)
-        .join("runs")
+        .join(crate::run_evidence::AUTOMATION_RUNS_DIR)
         .join(at_epoch_ms.to_string())
 }
 

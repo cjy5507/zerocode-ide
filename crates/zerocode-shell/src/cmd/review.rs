@@ -290,11 +290,24 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
                 .iter()
                 .filter(|run| run.automation_id == automation.id && run.missed.is_none())
                 .count();
+            // The newest run that started, judged by what its folder holds.
+            let last_verdict = history
+                .iter()
+                .rev()
+                .find(|run| {
+                    run.automation_id == automation.id
+                        && run.missed.is_none()
+                        && run.skipped.is_none()
+                })
+                .and_then(|run| run.evidence_dir.as_deref())
+                .and_then(|dir| computer_use::evidence::read_verdict(Path::new(dir)))
+                .map(|(pass, _)| pass);
             AutomationRow {
                 cron: automation.schedule.to_cron(),
                 leaves_evidence: zerocode_core::leaves_evidence(&automation),
                 next_run_at: next,
                 runs,
+                last_verdict,
                 automation,
             }
         })
@@ -434,25 +447,54 @@ pub(crate) fn list_automation_runs(
     mine.reverse();
     mine.into_iter()
         .map(|run| {
-            let evidence_files = run
-                .evidence_dir
-                .as_deref()
-                .map_or(0, |dir| evidence_file_count(Path::new(dir)));
+            let dir = run.evidence_dir.as_deref().map(Path::new);
+            let evidence_files = dir.map_or(0, evidence_file_count);
+            let (verdict, report) = dir.map(folder_verdict).unwrap_or_default();
             AutomationRunRow {
                 run,
                 evidence_files,
+                verdict,
+                report,
             }
         })
         .collect()
 }
 
-/// One run as the runs tab reads it: the row, and how many files its
-/// evidence folder holds — the number that tells "완료" from "proved".
+/// One run as the runs tab reads it: the row, how many files its evidence
+/// folder holds — the number that tells "완료" from "proved" — and, when the
+/// folder holds them, the verdict of what ran and the report rendered from it.
 #[derive(Serialize, Clone)]
 pub(crate) struct AutomationRunRow {
     #[serde(flatten)]
     run: AutomationRun,
     evidence_files: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verdict: Option<RunVerdict>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<String>,
+}
+
+/// How a run went, in its folder's own words: whether it passed, and the
+/// reason it gave when it did not.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunVerdict {
+    pass: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// What a run's evidence folder says of how it went: the verdict a Flow's walk
+/// — or a QA scenario — left in it, and the report rendered from the folder.
+/// A folder that holds neither answers nothing, and the row then says only
+/// that the run ended.
+fn folder_verdict(dir: &Path) -> (Option<RunVerdict>, Option<String>) {
+    let verdict = computer_use::evidence::read_verdict(dir)
+        .map(|(pass, reason)| RunVerdict { pass, reason });
+    let report = dir.join(computer_use::report::REPORT_FILE);
+    (
+        verdict,
+        report.is_file().then(|| report.display().to_string()),
+    )
 }
 
 /// The files in an evidence folder that are evidence — the step log is the
@@ -898,6 +940,40 @@ mod tests {
             "prompt": prompt,
         }))
         .expect("an automation reads with its defaults")
+    }
+
+    /// A run's row reads how it went from its own folder: nothing from a folder
+    /// that holds no verdict, the verdict with its reason from one that does,
+    /// and the report only when the file is there to open.
+    #[test]
+    fn a_runs_row_says_the_verdict_and_the_report_its_folder_holds() {
+        let folder = tempfile::tempdir().expect("an evidence folder");
+        assert_eq!(folder_verdict(folder.path()), (None, None));
+
+        computer_use::evidence::write_verdict(
+            folder.path(),
+            &["verdict".to_string(), "--fail".to_string()],
+            false,
+            Some("the balance was not shown"),
+            1_000,
+        )
+        .expect("a verdict is written");
+        let (verdict, report) = folder_verdict(folder.path());
+        assert_eq!(
+            verdict,
+            Some(RunVerdict {
+                pass: false,
+                reason: Some("the balance was not shown".to_string()),
+            })
+        );
+        assert_eq!(report, None, "no report was rendered");
+
+        let file = folder.path().join(computer_use::report::REPORT_FILE);
+        std::fs::write(&file, "<!doctype html>").expect("a report");
+        assert_eq!(
+            folder_verdict(folder.path()).1,
+            Some(file.display().to_string())
+        );
     }
 
     /// The Flow page lists every automation that runs a slug — by the link its

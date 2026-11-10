@@ -821,21 +821,14 @@ fn walk_slug(record: &Value) -> Option<String> {
         .filter(|slug| !slug.is_empty())
 }
 
-/// The last run of every slug: the newest session folder a walk named it in
-/// (`walk-NNN.json` `name`, slugified the same way the file is), with that
-/// folder's `qa-verdict.json` and its `report.html`. One pass over the
-/// sessions, so a roster of many Flows does not reread the tree per Flow.
+/// The last run of every slug: the newest folder a walk named it in
+/// (`walk-NNN.json` `name`, slugified the same way the file is) — a session
+/// folder, or the evidence folder of a scheduled run — with that folder's
+/// `qa-verdict.json` and its `report.html`. One pass over the folders, so a
+/// roster of many Flows does not reread the tree per Flow.
 fn last_runs(root: &Path) -> BTreeMap<String, FlowLast> {
     let mut best: BTreeMap<String, FlowLast> = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(root.join(crate::computer_use::evidence::SESSIONS_DIR))
-    else {
-        return best;
-    };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
+    for dir in crate::run_evidence::walk_folders(root) {
         for (_, record) in crate::run_evidence::walks_in(&dir) {
             let Some(slug) = walk_slug(&record) else {
                 continue;

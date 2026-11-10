@@ -4994,7 +4994,7 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
   }];
   backend.flows.recipes = [];
   backend.automations = [
-    job("job-on", "Morning wallet QA", { flow: "wallet-qa", runs: 14 }),
+    job("job-on", "Morning wallet QA", { flow: "wallet-qa", runs: 14, last_verdict: false }),
     job("job-off", "Night wallet QA", {
       flow: "wallet-qa",
       enabled: false,
@@ -5002,6 +5002,27 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     }),
     job("job-plain", "Repo audit", {}),
   ];
+  // The newest run of the morning job: its folder holds a failed verdict and
+  // the report rendered from it.
+  backend.automationRuns = [{
+    id: "1756800000000-7",
+    automation_id: "job-on",
+    scheduled_for_epoch_minutes: 29_000_000,
+    at_epoch_ms: 1_756_800_000_000,
+    root: BOOT_BASE.project_root,
+    term: 7,
+    made_worktree: null,
+    skipped: null,
+    failure: null,
+    ended_at_epoch_ms: 1_756_800_900_000,
+    exit_code: 0,
+    completed_at_epoch_ms: 1_756_800_800_000,
+    result: null,
+    evidence_dir: "/data/automations/job-on/runs/1756800000000",
+    evidence_files: 4,
+    verdict: { pass: false, reason: "the balance was not shown" },
+    report: "/data/automations/job-on/runs/1756800000000/report.html",
+  }];
   try {
     let from = backend.calls.length;
     await openFlowSide(pageA);
@@ -5032,6 +5053,8 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     assert(rows[0].label.includes("Morning wallet QA"), "a schedule's switch is not named by its job", rows);
     const offWord = await pageA.evaluate(() => t("auto.off", ""));
     assert(offWord && rows[1].words.includes(offWord), "a paused schedule did not say it is off", rows);
+    const failWord = await pageA.evaluate(() => t("flow.fail", ""));
+    assert(failWord && rows[0].words.includes(failWord), "a schedule did not say how its newest run went", rows);
     assert(await pageA.locator("#flow-schedules-none").isHidden(), "a Flow with schedules still said it has none");
     assertEqual(await pageA.locator("#auto-page-count-flows").textContent(), "1", "the Flow tab miscounted the Flows");
     assertEqual(await pageA.locator("#auto-page-count-schedules").textContent(), "3", "the schedule tab miscounted the automations");
@@ -5079,8 +5102,12 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
         flowHidden: document.getElementById("auto-flow-field").hidden,
         promptHidden: document.getElementById("auto-prompt-field").hidden,
         name: document.getElementById("auto-name").value,
+        // A Flow's run keeps its folder and starts its own session: the two
+        // controls that would say otherwise are not offered.
+        evidenceShown: getComputedStyle(document.getElementById("auto-evidence-field")).display !== "none",
+        reuseShown: getComputedStyle(document.getElementById("auto-reuse-field")).display !== "none",
       })),
-      { kind: "flow", pressed: "true", flow: "wallet-qa", flowHidden: false, promptHidden: true, name: "Wallet QA" },
+      { kind: "flow", pressed: "true", flow: "wallet-qa", flowHidden: false, promptHidden: true, name: "Wallet QA", evidenceShown: false, reuseShown: false },
       "the form did not open on this Flow",
     );
     from = backend.calls.length;
@@ -5108,9 +5135,10 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
         document.getElementById("auto-flow-field").hidden,
         document.getElementById("auto-prompt-field").hidden,
         document.getElementById("auto-prompt").required,
+        getComputedStyle(document.getElementById("auto-evidence-field")).display !== "none",
       ]),
-      [true, false, true],
-      "the agent kind did not bring the prompt back",
+      [true, false, true, true],
+      "the agent kind did not bring the prompt and the evidence choice back",
     );
     await pageA.click("#auto-cancel");
 
@@ -5126,6 +5154,34 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
       [["Morning wallet QA", "Wallet QA"], ["Repo audit", null]],
       "the schedule list did not say what each job runs",
     );
+
+    // How the newest run went stands before its time in the list, and the run's
+    // own row says it with the reason and offers the report its folder holds.
+    assertEqual(
+      await pageA.locator("#auto-list .auto-row .auto-row-verdict.is-fail").count(),
+      1,
+      "the list did not say that the morning job's newest run failed",
+    );
+    from = backend.calls.length;
+    await pageA.locator("#auto-list .auto-row", { hasText: "Morning wallet QA" }).click();
+    await backend.waitForCall("A", "list_automation_runs", from);
+    await pageA.click("#auto-runs-tab");
+    await pageA.waitForSelector("#auto-runs-list .auto-run-row .auto-run-failed");
+    const ran = await pageA.evaluate(() => ({
+      state: document.querySelector("#auto-runs-list .auto-run-row .auto-run-failed").textContent,
+      failed: t("flow.fail", ""),
+      why: document.querySelector("#auto-runs-list .auto-run-why")?.textContent ?? "",
+      report: document.querySelector("#auto-runs-list .auto-run-report")?.textContent ?? "",
+      want: "the balance was not shown",
+      open: t("flow.report", ""),
+      evidence: document.getElementById("auto-detail-evidence").textContent,
+      keeps: t("auto.evidenceFlow", ""),
+    }));
+    assert(ran.failed && ran.state === ran.failed, "the run's row did not say its verdict", ran);
+    assert(ran.want && ran.why === ran.want, "the run's row did not say why it failed, under the row", ran);
+    assert(ran.open && ran.report === ran.open, "the run's row did not offer its report", ran);
+    assert(ran.keeps && ran.evidence === ran.keeps, "the overview did not say a Flow's run keeps its verdict", ran);
+    await pageA.click("#auto-detail-back");
     await closeFlowSide(pageA);
 
     // Settings keeps the count and the door to the Flow side.
@@ -5157,6 +5213,7 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     backend.flows.flows = [];
     backend.flows.recipes = [];
     backend.automations = [];
+    backend.automationRuns = [];
     await pageA.evaluate(() => {
       closeAutoForm();
       setSettingsOpen(false);

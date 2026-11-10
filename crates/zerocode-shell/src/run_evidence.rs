@@ -30,6 +30,36 @@ const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 /// How much of a refusal a step line keeps.
 const ERROR_CHARS: usize = 400;
 
+/// Where the scheduled runs keep their evidence, under the local data root:
+/// `automations/<job>/runs/<started at>`.
+pub const AUTOMATIONS_DIR: &str = "automations";
+pub const AUTOMATION_RUNS_DIR: &str = "runs";
+
+/// Every folder a walk can have left its record in: the session folders a walk
+/// run by hand writes to, and the evidence folder of each scheduled run, which
+/// a run that was handed one writes to instead. What a Flow's last verdict is
+/// read from, and what forgetting a deleted recipe's walks goes through.
+#[must_use]
+pub fn walk_folders(local_data_root: &Path) -> Vec<PathBuf> {
+    fn folders_in(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    let mut folders =
+        folders_in(&local_data_root.join(crate::computer_use::evidence::SESSIONS_DIR));
+    for job in folders_in(&local_data_root.join(AUTOMATIONS_DIR)) {
+        folders.extend(folders_in(&job.join(AUTOMATION_RUNS_DIR)));
+    }
+    folders
+}
+
 /// One line of the step log, as written and as read back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
@@ -110,7 +140,7 @@ pub enum Framing<'a> {
 /// header is a claim; the tree is the fence.
 pub fn fenced_dir(local_data_root: &Path, presented: Option<&str>) -> Option<PathBuf> {
     let dir = PathBuf::from(presented?);
-    (dir.starts_with(local_data_root.join("automations")) && dir.is_dir()).then_some(dir)
+    (dir.starts_with(local_data_root.join(AUTOMATIONS_DIR)) && dir.is_dir()).then_some(dir)
 }
 
 /// Whether one verb of one tool is a step — and whether a frame follows it.

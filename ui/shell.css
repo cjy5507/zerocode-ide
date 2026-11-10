@@ -30855,8 +30855,12 @@ progress:indeterminate::-webkit-progress-bar {
   display: block;
 }
 
+/* The rows are the list's own columns (subgrid): the buttons' column is as wide
+ * as the widest row needs, for every row, so a run with no button says its
+ * state in the same column as one with three. */
 .auto-runs-list {
   display: grid;
+  grid-template-columns: 150px minmax(140px, 1fr) 120px auto;
   overflow: hidden;
   border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-edge);
@@ -30864,7 +30868,8 @@ progress:indeterminate::-webkit-progress-bar {
 
 .auto-run-row {
   display: grid;
-  grid-template-columns: 150px minmax(140px, 1fr) 120px auto;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
   gap: var(--space-3);
   min-height: 48px;
@@ -30931,6 +30936,27 @@ progress:indeterminate::-webkit-progress-bar {
   color: var(--signal-halt);
 }
 
+/* A run that passed, in the signal's ink (the plain green is under 4.5:1 on the
+ * light theme's row); the word is there too, so colour is not the only sign. */
+.auto-run-pass,
+.auto-row-verdict.is-pass {
+  color: var(--signal-ready-ink);
+}
+
+.auto-row-verdict.is-fail {
+  color: var(--signal-halt-ink);
+}
+
+.auto-row-verdict {
+  font: var(--type-label-12);
+}
+
+/* 「저장된 Flow」: the session is the run's own and its folder is always kept. */
+.auto-form[data-kind="flow"] #auto-reuse-field,
+.auto-form[data-kind="flow"] #auto-evidence-field {
+  display: none;
+}
+
 .auto-run-actions {
   display: flex;
   gap: var(--space-1);
@@ -30969,6 +30995,13 @@ progress:indeterminate::-webkit-progress-bar {
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Why a run failed, under its row: the failure's ink over the result's grey
+ * (two classes, so this wins wherever it stands), on the label's own line. */
+.auto-run-result.auto-run-why {
+  color: var(--signal-halt-ink);
+  font: var(--type-label-12);
 }
 
 .auto-run-evidence {
