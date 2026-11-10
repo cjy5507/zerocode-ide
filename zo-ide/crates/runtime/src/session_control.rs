@@ -13,6 +13,21 @@ pub const LATEST_SESSION_REFERENCE: &str = "latest";
 /// per session, `<stem>.json`. The retention sweep deletes each with its
 /// transcript.
 pub const SESSION_PREFERENCES_DIR: &str = "session-prefs";
+/// The extension of the sidecar beside a transcript that records the workspace
+/// the session was started in (`<stem>.cwd`, zo-ide's `resume`).
+pub const SESSION_CWD_EXTENSION: &str = "cwd";
+/// The extension of the sidecar beside a transcript that names where its agent
+/// registry lives (`<stem>.registry`, zo-ide's `resume`).
+pub const SESSION_REGISTRY_EXTENSION: &str = "registry";
+/// The sidecars a transcript owns under its own stem whose extension is
+/// neither `jsonl` nor `json` — on purpose: a resumable-file listing must never
+/// take one for a transcript. For the same reason the retention sweep, which
+/// expires files by those two extensions, never saw them: it took each
+/// transcript and left these behind (578 of them, every one older than the
+/// 30-day horizon, beside one project's 64 transcripts on 2026-11-10). The
+/// sweep now takes one once nothing else of its session is left (see
+/// [`sidecar_is_ownerless`]) and it is past the same horizon itself.
+pub const SESSION_SIDECAR_EXTENSIONS: [&str; 2] = [SESSION_CWD_EXTENSION, SESSION_REGISTRY_EXTENSION];
 
 const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
 
@@ -177,6 +192,9 @@ pub struct SessionCleanupReport {
     /// Orphan `<session>.lock` files reclaimed — see
     /// [`core_types::session::try_reclaim_orphan_lock`].
     pub removed_locks: usize,
+    /// `<stem>.cwd` / `<stem>.registry` sidecars taken with their transcript,
+    /// or left by an earlier sweep ([`SESSION_SIDECAR_EXTENSIONS`]).
+    pub removed_sidecars: usize,
     pub removed_dirs: usize,
     pub reclaimed_bytes: u64,
 }
@@ -209,7 +227,15 @@ pub fn cleanup_expired_sessions(retention_days: u32) -> SessionCleanupReport {
     )) else {
         return SessionCleanupReport::default();
     };
-    cleanup_expired_sessions_under(&crate::default_config_home().join("projects"), cutoff)
+    cleanup_expired_sessions_under(&managed_projects_root(), cutoff)
+}
+
+/// Where every project's session store lives under the global Zo home
+/// (`<home>/projects/<slug>/sessions`) — the root the retention sweep walks,
+/// slug by slug.
+#[must_use]
+pub fn managed_projects_root() -> PathBuf {
+    crate::default_config_home().join("projects")
 }
 
 /// Env-free core of [`cleanup_expired_sessions`]: sweep `projects_root`
@@ -281,6 +307,10 @@ pub fn cleanup_expired_sessions_under(
             }
         }
 
+        // After the transcripts above and the locks they orphaned, so a
+        // session that left nothing else behind is seen as gone this sweep.
+        sweep_ownerless_sidecars(&sessions_dir, cutoff, &mut report);
+
         // A memory store holding nothing but its own lock file is residue: the
         // lock is zero bytes, but it pins the slug directory forever
         // (`remove_dir` refuses non-empty), so slugs from throwaway cwds —
@@ -321,6 +351,68 @@ pub fn cleanup_expired_sessions_under(
         }
     }
     report
+}
+
+/// Take the sidecars in `sessions_dir` whose session is gone
+/// ([`sidecar_is_ownerless`]). A sidecar is taken only as a plain file — a
+/// link is never followed or removed — and only past `cutoff` itself: a
+/// session being opened this moment may write its `.cwd` before its first
+/// transcript line, and that one is never this old.
+fn sweep_ownerless_sidecars(sessions_dir: &Path, cutoff: SystemTime, report: &mut SessionCleanupReport) {
+    let entries: Vec<fs::DirEntry> = fs::read_dir(sessions_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect();
+    let names: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    for entry in &entries {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !sidecar_is_ownerless(&name, &names) || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let expired = metadata
+            .modified()
+            .is_ok_and(|modified| modified < cutoff);
+        if expired && fs::remove_file(entry.path()).is_ok() {
+            report.removed_sidecars += 1;
+            report.reclaimed_bytes += metadata.len();
+        }
+    }
+}
+
+/// Whether `name` is a session sidecar ([`SESSION_SIDECAR_EXTENSIONS`]) with
+/// nothing else of its session in the same folder: no file of `names` but the
+/// sidecars themselves starts with its stem and a dot. A session lives on in
+/// any of the shapes zo gives it beside the sidecars — the transcript
+/// (`<stem>.jsonl`, or `.json` from before), its rotated segments
+/// (`<stem>.rot-<ms>.jsonl`), its message vault (`<stem>.vault.jsonl`), its
+/// prompt, loop and autonomy records, and its lock while a writer holds it —
+/// and any one of them keeps the sidecars.
+#[must_use]
+pub fn sidecar_is_ownerless(name: &str, names: &[String]) -> bool {
+    let Some((stem, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if stem.is_empty() || !SESSION_SIDECAR_EXTENSIONS.contains(&extension) {
+        return false;
+    }
+    let prefix = format!("{stem}.");
+    !names.iter().any(|other| {
+        other.starts_with(&prefix)
+            && !other
+                .rsplit_once('.')
+                .is_some_and(|(other_stem, other_ext)| {
+                    other_stem == stem && SESSION_SIDECAR_EXTENSIONS.contains(&other_ext)
+                })
+    })
 }
 
 /// True when a memory store directory holds no state worth keeping: nothing at
@@ -830,6 +922,155 @@ mod tests {
             !root.join("slug").exists(),
             "with the locks gone the emptied slug finally prunes"
         );
+    }
+
+    /// A file's mtime `days` ago — what a sidecar written at a session's start
+    /// looks like a month later.
+    fn age(path: &Path, days: u64) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|file| {
+                file.set_modified(SystemTime::now() - std::time::Duration::from_secs(days * 86_400))
+            })
+            .unwrap_or_else(|error| panic!("age {}: {error}", path.display()));
+    }
+
+    /// **곁 파일 누수 회귀 핀** — 보존 스윕은 확장자 `jsonl`·`json` 만
+    /// 트랜스크립트로 보아, 일부러 다른 확장자를 쓰는 `<stem>.cwd`·
+    /// `<stem>.registry` 를 남겼다(한 프로젝트에 578개, 트랜스크립트는 64개).
+    /// 이제 그 세션의 다른 것이 하나도 남지 않고 곁 파일 자신도 기한을 넘었을
+    /// 때만 지운다 — 방금 열리는 세션의 곁 파일은 남는다.
+    #[test]
+    fn retention_sweep_takes_the_sidecars_of_a_session_nothing_else_is_left_of() {
+        use super::cleanup_expired_sessions_under;
+        let root = temp_dir();
+        let sessions = root.join("slug").join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        for name in ["old.jsonl", "old.cwd", "old.registry", "ancient.cwd", "ancient.registry", "opening.cwd"] {
+            fs::write(sessions.join(name), "x").expect(name);
+        }
+        for name in ["old.jsonl", "old.cwd", "old.registry", "ancient.cwd", "ancient.registry"] {
+            age(&sessions.join(name), 40);
+        }
+        let cutoff = SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+
+        let report = cleanup_expired_sessions_under(&root, cutoff);
+
+        assert_eq!(report.removed_sessions, 1, "{report:?}");
+        assert_eq!(report.removed_sidecars, 4, "old's two and ancient's two: {report:?}");
+        for gone in ["old.jsonl", "old.cwd", "old.registry", "ancient.cwd", "ancient.registry"] {
+            assert!(!sessions.join(gone).exists(), "{gone} outlived the sweep");
+        }
+        assert!(sessions.join("opening.cwd").exists(), "a session being opened keeps its sidecar");
+        let second = cleanup_expired_sessions_under(&root, cutoff);
+        assert!(second.is_empty(), "nothing left to take: {second:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 세션이 어떤 모양으로든 남아 있으면 곁 파일은 나이와 상관없이 남는다:
+    /// 트랜스크립트(`.jsonl`·옛 `.json`), 돌린 조각(`.rot-*.jsonl`), 메시지
+    /// 금고(`.vault.jsonl`), 프롬프트·루프 기록.
+    #[test]
+    fn a_sidecar_stays_while_any_shape_of_its_session_does() {
+        use super::cleanup_expired_sessions_under;
+        let root = temp_dir();
+        let sessions = root.join("slug").join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        let shapes = ["a.jsonl", "b.json", "c.rot-1794000000000.jsonl", "d.vault.jsonl", "e.system-prompt.json", "f.loops.json"];
+        for shape in shapes {
+            fs::write(sessions.join(shape), "x").expect(shape);
+            let stem = shape.split('.').next().expect("stem");
+            for extension in super::SESSION_SIDECAR_EXTENSIONS {
+                let sidecar = sessions.join(format!("{stem}.{extension}"));
+                fs::write(&sidecar, "x").expect("sidecar");
+                age(&sidecar, 400);
+            }
+        }
+        let cutoff = SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+
+        let report = cleanup_expired_sessions_under(&root, cutoff);
+
+        assert_eq!(report.removed_sidecars, 0, "every sidecar has a session: {report:?}");
+        for stem in ["a", "b", "c", "d", "e", "f"] {
+            for extension in super::SESSION_SIDECAR_EXTENSIONS {
+                assert!(sessions.join(format!("{stem}.{extension}")).exists(), "{stem}.{extension}");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 지금 열려 있는 세션 — 쓰는 쪽이 락을 쥔 — 의 곁 파일은 트랜스크립트가
+    /// 사라져도, 곁 파일이 아무리 오래돼도 남는다. 쓰는 쪽이 놓은 뒤에야
+    /// 같은 스윕이 락과 곁 파일을 함께 거둔다.
+    #[test]
+    fn an_open_sessions_sidecars_stay_whatever_their_age() {
+        use super::cleanup_expired_sessions_under;
+        let root = temp_dir();
+        let sessions = root.join("slug").join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        let session_path = sessions.join("live.jsonl");
+        let mut live = Session::new().with_persistence_path(&session_path);
+        live.push_user_text("held").expect("write takes the lease");
+        for extension in super::SESSION_SIDECAR_EXTENSIONS {
+            let sidecar = session_path.with_extension(extension);
+            fs::write(&sidecar, "x").expect("sidecar");
+            age(&sidecar, 400);
+        }
+        let cutoff = SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+
+        let open = cleanup_expired_sessions_under(&root, cutoff);
+        assert_eq!(open.removed_sidecars, 0, "an open session keeps its sidecars: {open:?}");
+
+        // Its transcript removed under it, the held lock still speaks for the session.
+        fs::remove_file(&session_path).expect("remove the transcript");
+        let held = cleanup_expired_sessions_under(&root, cutoff);
+        assert_eq!(held.removed_sidecars, 0, "a held lock keeps the sidecars: {held:?}");
+        for extension in super::SESSION_SIDECAR_EXTENSIONS {
+            assert!(session_path.with_extension(extension).exists());
+        }
+
+        drop(live);
+        let released = cleanup_expired_sessions_under(&root, cutoff);
+        assert_eq!((released.removed_locks, released.removed_sidecars), (1, 2), "{released:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 곁 파일 자리에 선 링크는 따라가지도 지우지도 않는다 — 스윕이 지우는
+    /// 것은 zo 홈 안의 일반 파일뿐이다.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_where_a_sidecar_would_be_is_neither_followed_nor_removed() {
+        use super::cleanup_expired_sessions_under;
+        let root = temp_dir();
+        let sessions = root.join("slug").join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        let outside = root.join("outside.txt");
+        fs::write(&outside, "kept").expect("outside");
+        age(&outside, 400);
+        std::os::unix::fs::symlink(&outside, sessions.join("linked.cwd")).expect("link");
+        let cutoff = SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+
+        let report = cleanup_expired_sessions_under(&root, cutoff);
+
+        assert_eq!(report.removed_sidecars, 0, "{report:?}");
+        assert!(fs::symlink_metadata(sessions.join("linked.cwd")).is_ok(), "the link stays");
+        assert_eq!(fs::read_to_string(&outside).expect("target"), "kept");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_ownerless_rule_reads_the_stem_and_nothing_wider() {
+        let names = |list: &[&str]| list.iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
+        assert!(super::sidecar_is_ownerless("s.cwd", &names(&["s.cwd", "s.registry"])));
+        assert!(!super::sidecar_is_ownerless("s.cwd", &names(&["s.cwd", "s.jsonl.lock"])));
+        assert!(!super::sidecar_is_ownerless("s.cwd", &names(&["s.cwd", "s.rot-1.jsonl"])));
+        // `s-1.jsonl` is another session; `s.cwd` is still ownerless.
+        assert!(super::sidecar_is_ownerless("s.cwd", &names(&["s.cwd", "s-1.jsonl", "ss.jsonl"])));
+        // A stem with dots of its own reads up to the sidecar's extension.
+        assert!(!super::sidecar_is_ownerless("a.b.cwd", &names(&["a.b.cwd", "a.b.jsonl"])));
+        assert!(!super::sidecar_is_ownerless("s.jsonl", &names(&["s.jsonl"])), "a transcript is no sidecar");
+        assert!(!super::sidecar_is_ownerless(".cwd", &names(&[".cwd"])), "no stem, no session");
     }
 
     /// 살아있는 세션의 락은 **세션 파일이 사라져도** 남는다 — 그 프로세스가

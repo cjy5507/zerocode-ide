@@ -1886,10 +1886,11 @@ fn spawn_session_retention_cleanup(config: &runtime::RuntimeConfig) {
                 // Boot-time stderr reaches zo.log on the TUI path and the
                 // terminal on headless runs; silent when nothing expired.
                 eprintln!(
-                    "[zo] session retention: removed {} transcript(s), {} pref file(s), {} stale lock(s), {} empty dir(s) (~{} MB, older than {days}d)",
+                    "[zo] session retention: removed {} transcript(s), {} pref file(s), {} stale lock(s), {} sidecar(s), {} empty dir(s) (~{} MB, older than {days}d)",
                     report.removed_sessions,
                     report.removed_prefs,
                     report.removed_locks,
+                    report.removed_sidecars,
                     report.removed_dirs,
                     report.reclaimed_bytes / (1024 * 1024),
                 );

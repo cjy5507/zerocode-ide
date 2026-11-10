@@ -138,7 +138,7 @@ pub fn render_recent_sessions(limit: usize) -> Result<String, Box<dyn std::error
 /// canonical registry treats those extensions as resumable transcript files.
 #[must_use]
 pub fn session_cwd_path(session_path: &Path) -> PathBuf {
-    session_path.with_extension("cwd")
+    session_path.with_extension(runtime::session_control::SESSION_CWD_EXTENSION)
 }
 
 /// Record a session's workspace once, without overwriting an existing record.
@@ -197,7 +197,7 @@ struct SessionCwd {
 /// `json` for the same reason as [`session_cwd_path`].
 #[must_use]
 pub fn session_registry_locator_path(session_path: &Path) -> PathBuf {
-    session_path.with_extension("registry")
+    session_path.with_extension(runtime::session_control::SESSION_REGISTRY_EXTENSION)
 }
 
 /// Record where the session's agent registry lives. Overwrites only when the
