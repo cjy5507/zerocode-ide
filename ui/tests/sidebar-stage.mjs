@@ -29,6 +29,36 @@ const WORKER = 9101;
 const settle = (page, ms) =>
   page.evaluate((ms) => new Promise((done) => setTimeout(done, ms)), ms);
 
+/* Counts the sidebar refreshes in flight from here on, so a scene waits for the ones a step left running to end
+ * rather than for a time (review t-103290 N9). Every road calls the refresh by its global name, so the count sees
+ * them all; `refreshesEnded` waits a frame at a time until none runs. */
+const countRefreshes = (page) =>
+  page.evaluate(() => {
+    const own = window.refreshWorktrees;
+    window.__REFRESHES__ = { own, running: 0 };
+    window.refreshWorktrees = async (...args) => {
+      window.__REFRESHES__.running += 1;
+      try {
+        return await own(...args);
+      } finally {
+        window.__REFRESHES__.running -= 1;
+      }
+    };
+  });
+const refreshesEnded = (page) =>
+  page.evaluate(async () => {
+    for (let frames = 0; frames < 300; frames += 1) {
+      await window.__PAINTED__();
+      if (window.__REFRESHES__.running === 0) return true;
+    }
+    return false;
+  });
+const stopCountingRefreshes = (page) =>
+  page.evaluate(() => {
+    window.refreshWorktrees = window.__REFRESHES__.own;
+    delete window.__REFRESHES__;
+  });
+
 /* Adds checkout B to the catalog, so the sidebar draws its card, and answers the
  * pane file of B with `stored`. The ledger's answer for B is `lastSeat`. */
 const addCheckoutB = (page, { stored = [], lastSeat } = {}) =>
@@ -350,8 +380,12 @@ export async function testSidebarStage(browser, origin, ok) {
   {
     const { page, faults } = await openWindowTestPage(browser, origin);
     await addCheckoutB(page);
+    await countRefreshes(page);
     await page.evaluate(async (CHECKOUT_B) => { await activateWorktree(CHECKOUT_B); }, CHECKOUT_B);
-    await settle(page, 200);
+    // The refreshes the visit left running end before the removal's scene: one still running would take the scene's
+    // first answer, and the removal would land without ever being overtaken.
+    const quiet = await refreshesEnded(page);
+    await stopCountingRefreshes(page);
     const scene = await page.evaluate(async (CHECKOUT_B) => {
       const main = projects[0].worktrees.find((one) => one.is_main)?.path ?? null;
       const answered = window.__ANSWER__.project_catalog;
@@ -382,8 +416,48 @@ export async function testSidebarStage(browser, origin, ok) {
     }, CHECKOUT_B);
     ok(
       "a removal whose refresh a newer one overtook still lands on this project's main",
-      scene.main !== null && scene.overtaken && scene.answers >= 2 &&
+      quiet && scene.main !== null && scene.overtaken && scene.answers >= 2 &&
         JSON.stringify(scene.landed) === JSON.stringify([scene.main]) && faults.length === 0,
+      receipt({ ...scene, quiet, faults: faults.length }),
+    );
+  }
+
+  // e. A removal whose project no longer holds its main lands nowhere — never on another project's main (review
+  //    t-103290 N5). The removed checkout's project leaves the list with it; the first project's main is a
+  //    stranger's repository, and the refresh has already cleared the stage of the checkout just removed.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    const scene = await page.evaluate(async () => {
+      const OTHER = "/tmp/t44057/other";
+      const OTHER_B = "/tmp/t44057/other-b";
+      const base = JSON.parse(JSON.stringify(projects));
+      const first = base[0].worktrees.find((one) => one.is_main)?.path ?? null;
+      const row = (path, is_main) => ({
+        path, branch: is_main ? "main" : "wt/t-103504/other-b", is_main, active: false, is_folder: false,
+        ownership: "zerocode-managed", external_hidden: false,
+      });
+      const other = { ...base[0], name: "other", path: OTHER, worktrees: [row(OTHER, true), row(OTHER_B, false)] };
+      const answered = window.__ANSWER__.project_catalog;
+      window.__ANSWER__.project_catalog = () => [...base, other];
+      await refreshWorktrees();
+      const home = projectOfWorktree(OTHER_B)?.path ?? null;
+      // The removal's catalog: the other project left the list with the checkout.
+      window.__ANSWER__.project_catalog = () => base;
+      const landed = [];
+      const activate = window.activateWorktree;
+      window.activateWorktree = async (worktree) => { landed.push(worktree.path); };
+      try {
+        await finishWorktreeRemoval({ path: OTHER_B, active: true }, null);
+      } finally {
+        window.activateWorktree = activate;
+        window.__ANSWER__.project_catalog = answered;
+      }
+      return { first, home, landed, listed: projects.map((project) => project.path) };
+    });
+    ok(
+      "a removal whose project no longer holds its main lands nowhere, not on another project's main",
+      scene.first !== null && scene.home === "/tmp/t44057/other" && scene.landed.length === 0 &&
+        !scene.listed.includes("/tmp/t44057/other") && faults.length === 0,
       receipt({ ...scene, faults: faults.length }),
     );
   }

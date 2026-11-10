@@ -14993,9 +14993,10 @@ mod tests {
             "the one sweep no longer ends the shells it drops:\n{sweeping}"
         );
         assert!(
-            finishing.contains("projectOfWorktree(held.path)?.path === home,"),
+            finishing.contains("projectOfWorktree(held.path)?.path === home,")
+                && !finishing.contains("?? worktrees.find((held) => held.is_main)"),
             "the landing after a removal stopped being this project's own \
-             main:\n{finishing}"
+             main, or falls back to another project's:\n{finishing}"
         );
         // The main is looked up in the catalog the window holds, not in the refresh's answer: a
         // refresh a newer one overtook answers `[]` (review t-102958 #6).

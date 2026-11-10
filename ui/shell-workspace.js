@@ -14011,13 +14011,16 @@ async function finishWorktreeRemoval(worktree, hand) {
     // left the stage on the checkout just removed (review t-102958 #6). Which
     // refresh drew the list does not move a project's main.
     const worktrees = projects.flatMap((project) => project.worktrees ?? []);
-    // This project's OWN main, not the first main of the flat cross-project
+    // This project's OWN main, never the first main of the flat cross-project
     // list — with two projects open those are different rows, and landing in
-    // a stranger's repository is worse than the ghost this replaces.
-    const main =
-      worktrees.find(
-        (held) => held.is_main && projectOfWorktree(held.path)?.path === home,
-      ) ?? worktrees.find((held) => held.is_main);
+    // a stranger's repository is worse than the ghost this replaces. A project
+    // whose main is no longer held (it left the list, or another refresh took
+    // the removed row out before `home` was read) lands nowhere: the refresh
+    // above already cleared the stage of the checkout just removed (review
+    // t-103290 N5).
+    const main = worktrees.find(
+      (held) => held.is_main && projectOfWorktree(held.path)?.path === home,
+    );
     if (main) await activateWorktree(main);
   }
 }
