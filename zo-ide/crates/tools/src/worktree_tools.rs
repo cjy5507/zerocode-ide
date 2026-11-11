@@ -217,7 +217,7 @@ pub(crate) fn run_enter_worktree(input: &EnterWorktreeInput) -> Result<String, T
     })
 }
 
-pub(crate) fn run_exit_worktree(input: ExitWorktreeInput) -> Result<String, ToolError> {
+pub(crate) fn run_exit_worktree(input: &ExitWorktreeInput) -> Result<String, ToolError> {
     let saved = lock_recovered(&SAVED_CWD).pop();
 
     let Some(SavedCwd { prev: restore_to, created }) = saved else {
@@ -266,7 +266,8 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// `git worktree remove` without `--force`, run from the repository the
 /// worktree was added from: git removes a clean worktree and refuses one
 /// holding modified or untracked files, which then stays for the person.
-/// Returns the tail of the exit message.
+/// Returns the tail of the exit message. A refusal is reported by its reason,
+/// not by git's own text, which points at `--force`.
 fn remove_created_worktree(repo: &Path, worktree: &Path) -> String {
     let output = Command::new("git")
         .arg("-C")
@@ -276,10 +277,9 @@ fn remove_created_worktree(repo: &Path, worktree: &Path) -> String {
         .output();
     match output {
         Ok(out) if out.status.success() => format!("; removed worktree {}", worktree.display()),
-        Ok(out) => format!(
-            "; kept worktree {}: {}",
+        Ok(_) => format!(
+            "; kept worktree {}: git did not find it clean (uncommitted, untracked or locked work), so it stays as it is for the person",
             worktree.display(),
-            String::from_utf8_lossy(&out.stderr).trim(),
         ),
         Err(error) => format!("; kept worktree {}: git did not run: {error}", worktree.display()),
     }
@@ -315,7 +315,7 @@ mod tests {
         // Drain any leftovers from previous tests.
         SAVED_CWD.lock().expect("cwd lock").clear();
 
-        let out = run_exit_worktree(ExitWorktreeInput { path: None }).expect("should return noop");
+        let out = run_exit_worktree(&ExitWorktreeInput { path: None }).expect("should return noop");
         assert!(out.contains("noop"));
     }
 
@@ -342,9 +342,9 @@ mod tests {
             tmp.canonicalize().ok()
         );
 
-        // Exit back — pass the worktree path explicitly so `git worktree
-        // remove` targets the tmp dir instead of whatever cwd happens to be.
-        let out = run_exit_worktree(ExitWorktreeInput {
+        // Exit back. The tmp dir existed before EnterWorktree, so exit only
+        // restores the cwd and leaves it in place.
+        let out = run_exit_worktree(&ExitWorktreeInput {
             path: Some(tmp.to_string_lossy().to_string()),
         })
         .expect("should exit");
@@ -368,8 +368,8 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             let original_cwd = env::current_dir().expect("cwd");
             let repo = Self { dir, original_cwd };
-            repo.git(&["init", "-q", "-b", "main", "repo"], &repo.root());
-            repo.git(
+            Self::git(&["init", "-q", "-b", "main", "repo"], &repo.root());
+            Self::git(
                 &["-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false",
                   "commit", "-q", "--allow-empty", "-m", "init"],
                 &repo.repo(),
@@ -385,7 +385,7 @@ mod tests {
             self.root().join("repo")
         }
 
-        fn git(&self, args: &[&str], at: &Path) {
+        fn git(args: &[&str], at: &Path) {
             let out = Command::new("git").arg("-C").arg(at).args(args).output().expect("git runs");
             assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         }
@@ -394,10 +394,18 @@ mod tests {
         /// one file nobody committed.
         fn persons_worktree_with_unsaved_work(&self, name: &str) -> PathBuf {
             let path = self.root().join(name);
-            self.git(&["worktree", "add", "-q", "-b", name, path.to_str().expect("utf8")], &self.repo());
+            Self::git(&["worktree", "add", "-q", "-b", name, path.to_str().expect("utf8")], &self.repo());
             std::fs::write(path.join("unsaved.txt"), "work in progress\n").expect("write unsaved");
             path
         }
+    }
+
+    /// The env lock, with every git these tests start — theirs and the
+    /// tool's — kept off the person's global and system git settings (hooks
+    /// among them).
+    fn git_without_the_persons_config() -> crate::tests::EnvGuard {
+        let no_file = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        crate::tests::EnvGuard::set("GIT_CONFIG_GLOBAL", no_file).set_also("GIT_CONFIG_NOSYSTEM", "1")
     }
 
     impl Drop for ScratchRepo {
@@ -412,15 +420,13 @@ mod tests {
     }
 
     fn exit(path: Option<&Path>) -> String {
-        run_exit_worktree(ExitWorktreeInput { path: path.map(|path| path.to_string_lossy().to_string()) })
+        run_exit_worktree(&ExitWorktreeInput { path: path.map(|path| path.to_string_lossy().to_string()) })
             .expect("should exit")
     }
 
     #[test]
     fn exit_leaves_a_worktree_that_existed_before_enter() {
-        let _guard = crate::tests::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = git_without_the_persons_config();
         SAVED_CWD.lock().expect("cwd lock").clear();
         let scratch = ScratchRepo::new();
         let persons = scratch.persons_worktree_with_unsaved_work("persons");
@@ -433,10 +439,23 @@ mod tests {
     }
 
     #[test]
+    fn exit_leaves_a_clean_worktree_that_existed_before_enter() {
+        let _guard = git_without_the_persons_config();
+        SAVED_CWD.lock().expect("cwd lock").clear();
+        let scratch = ScratchRepo::new();
+        let persons = scratch.root().join("persons");
+        ScratchRepo::git(&["worktree", "add", "-q", "-b", "persons", persons.to_str().expect("utf8")], &scratch.repo());
+        env::set_current_dir(scratch.repo()).expect("cd repo");
+
+        enter(&persons);
+        let out = exit(None);
+
+        assert!(persons.is_dir(), "only a worktree EnterWorktree made is removed, clean or not: {out}");
+    }
+
+    #[test]
     fn exit_keeps_a_worktree_it_created_while_it_holds_uncommitted_work() {
-        let _guard = crate::tests::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = git_without_the_persons_config();
         SAVED_CWD.lock().expect("cwd lock").clear();
         let scratch = ScratchRepo::new();
         env::set_current_dir(scratch.repo()).expect("cd repo");
@@ -448,13 +467,12 @@ mod tests {
 
         assert!(created.join("unsaved.txt").is_file(), "uncommitted work is never forced away: {out}");
         assert!(out.contains("kept worktree"), "{out}");
+        assert!(!out.contains("--force"), "the result never points the model at a forced removal: {out}");
     }
 
     #[test]
     fn exit_removes_a_clean_worktree_it_created() {
-        let _guard = crate::tests::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = git_without_the_persons_config();
         SAVED_CWD.lock().expect("cwd lock").clear();
         let scratch = ScratchRepo::new();
         env::set_current_dir(scratch.repo()).expect("cd repo");
@@ -469,9 +487,7 @@ mod tests {
 
     #[test]
     fn exit_never_removes_a_named_worktree_it_did_not_create() {
-        let _guard = crate::tests::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = git_without_the_persons_config();
         SAVED_CWD.lock().expect("cwd lock").clear();
         let scratch = ScratchRepo::new();
         let persons = scratch.persons_worktree_with_unsaved_work("persons");

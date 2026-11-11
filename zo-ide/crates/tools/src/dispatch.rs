@@ -754,7 +754,7 @@ fn dispatch_worktree(
         "ExitWorktree" => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 from_value::<worktree_tools::ExitWorktreeInput>(input)
-                    .and_then(worktree_tools::run_exit_worktree)
+                    .and_then(|input| worktree_tools::run_exit_worktree(&input))
             }),
         ),
         _ => None,
