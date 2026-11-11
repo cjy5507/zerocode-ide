@@ -679,12 +679,11 @@ const EXIT_TIMED_OUT: i64 = 124;
 /// not pass, with no code to say how.
 fn interpreted_exit_code(value: &Value) -> Option<i64> {
     let word = value.get("returnCodeInterpretation")?.as_str()?;
-    let code = match word.strip_prefix("exit_code:") {
-        Some(code) => code.parse().unwrap_or(1),
-        None if word == "timeout" => EXIT_TIMED_OUT,
-        None => 1,
-    };
-    Some(code)
+    Some(match crate::CommandEnding::read(word) {
+        crate::CommandEnding::Exit(code) => i64::from(code),
+        crate::CommandEnding::TimedOut => EXIT_TIMED_OUT,
+        crate::CommandEnding::Other(_) => 1,
+    })
 }
 
 /// Bash result formatter. Pure; returns the structured

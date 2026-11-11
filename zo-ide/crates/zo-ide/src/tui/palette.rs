@@ -196,6 +196,14 @@ pub(crate) fn blend_rgb(
 const STATUS_LINE_COLOR_SATURATION_PERCENT: u16 = 85;
 const STATUS_LINE_COLOR_BRIGHTNESS_PERCENT: u16 = 100;
 
+/// How far the band stands from the terminal's ground, as the share of white
+/// (on a dark ground) or of black (on a light one) laid over it: Geist's
+/// `gray-alpha-100` for the marks look, codex's own steps for codex's.
+const BAND_SHARE_GEIST_DARK: f32 = 0.06;
+const BAND_SHARE_GEIST_LIGHT: f32 = 0.05;
+const BAND_SHARE_CODEX_DARK: f32 = 0.12;
+const BAND_SHARE_CODEX_LIGHT: f32 = 0.04;
+
 /// The band the person's words and the composer stand on, in a terminal
 /// whose colours are known: its background moved a step toward its opposite.
 ///
@@ -210,10 +218,10 @@ const STATUS_LINE_COLOR_BRIGHTNESS_PERCENT: u16 = 100;
 pub(crate) fn band_background(terminal_palette: TerminalPalette, style: super::style::TuiStyle) -> Color {
     let marks = style == super::style::TuiStyle::Marks;
     let (overlay, alpha) = match (terminal_palette.has_light_background(), marks) {
-        (true, true) => ((0, 0, 0), 0.05),
-        (true, false) => ((0, 0, 0), 0.04),
-        (false, true) => ((255, 255, 255), 0.06),
-        (false, false) => ((255, 255, 255), 0.12),
+        (true, true) => ((0, 0, 0), BAND_SHARE_GEIST_LIGHT),
+        (true, false) => ((0, 0, 0), BAND_SHARE_CODEX_LIGHT),
+        (false, true) => ((255, 255, 255), BAND_SHARE_GEIST_DARK),
+        (false, false) => ((255, 255, 255), BAND_SHARE_CODEX_DARK),
     };
     let (red, green, blue) = blend_rgb(overlay, terminal_palette.background(), alpha);
     Color::Rgb(red, green, blue)

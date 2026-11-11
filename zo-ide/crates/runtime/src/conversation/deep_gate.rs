@@ -1342,9 +1342,7 @@ pub(super) fn bash_result_exited_nonzero(output: &str) -> bool {
     };
     bash_result_completed(&value)
         && value.get("returnCodeInterpretation").and_then(serde_json::Value::as_str)
-            .and_then(|word| word.strip_prefix("exit_code:"))
-            .and_then(|code| code.parse::<i32>().ok())
-            .is_some_and(|code| code != 0)
+            .is_some_and(|word| matches!(crate::CommandEnding::read(word), crate::CommandEnding::Exit(code) if code != 0))
 }
 
 fn bash_result_completed(value: &serde_json::Value) -> bool {

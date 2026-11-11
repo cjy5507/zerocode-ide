@@ -99,7 +99,7 @@ pub use core_types::usage;
 
 pub use bash::{
     execute_bash, execute_bash_with_tasks, interrupt_foreground_bash, replace_bash_transport_output, timeout_stderr,
-    timeout_stderr_with_background_advice, BashCommandInput, BashCommandOutput, BASH_TRANSPORT_MAX_BYTES,
+    timeout_stderr_with_background_advice, BashCommandInput, BashCommandOutput, CommandEnding, BASH_TRANSPORT_MAX_BYTES,
 };
 #[cfg(windows)]
 pub use bash::end_process_tree_command;

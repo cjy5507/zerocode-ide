@@ -501,15 +501,10 @@ fn spec_requests_worktree(spec: &Value) -> bool {
 /// other interpretation (e.g. `"timeout"`) = the negative infrastructure
 /// sentinel. Pure so the parsing is unit-testable without spawning a shell.
 fn interpret_check_exit(interpretation: Option<&str>) -> i32 {
-    match interpretation {
+    match interpretation.map(runtime::CommandEnding::read) {
         None => 0,
-        Some(code) => match code
-            .strip_prefix("exit_code:")
-            .and_then(|n| n.parse::<i32>().ok())
-        {
-            Some(126 | 127) | None => engine::CHECK_INFRA_ERROR,
-            Some(exit) => exit,
-        },
+        Some(runtime::CommandEnding::Exit(exit)) if !matches!(exit, 126 | 127) => exit,
+        Some(_) => engine::CHECK_INFRA_ERROR,
     }
 }
 

@@ -818,17 +818,18 @@ fn run_inline_command(
 /// code (`timeout`, `interrupted`). A `timeout` under a limit a screen put on
 /// the line says what it did ([`slow_line_notice`]).
 fn how_it_ended(output: &runtime::BashCommandOutput, line_limit_ms: Option<u64>) -> String {
-    if output.return_code_interpretation.as_deref() == Some("timeout") {
-        return line_limit_ms.map_or_else(|| "timeout".to_string(), slow_line_notice);
+    let ending = output.return_code_interpretation.as_deref().map(runtime::CommandEnding::read);
+    if ending == Some(runtime::CommandEnding::TimedOut) {
+        return line_limit_ms.map_or_else(runtime::CommandEnding::timed_out_word, slow_line_notice);
     }
     if output.interrupted {
         return "interrupted".to_string();
     }
-    match output.return_code_interpretation.as_deref() {
+    match ending {
         None => "exit 0".to_string(),
-        Some(word) => word
-            .strip_prefix("exit_code:")
-            .map_or_else(|| word.to_string(), |code| format!("exit {code}")),
+        Some(runtime::CommandEnding::Exit(code)) => format!("exit {code}"),
+        Some(runtime::CommandEnding::TimedOut) => runtime::CommandEnding::timed_out_word(),
+        Some(runtime::CommandEnding::Other(word)) => word.to_string(),
     }
 }
 
@@ -847,7 +848,10 @@ fn slow_line_notice(limit_ms: u64) -> String {
 /// in for the output that never came.
 fn inline_output(output: &runtime::BashCommandOutput, command: &str, line_limit_ms: Option<u64>) -> String {
     match line_limit_ms {
-        Some(limit) if output.return_code_interpretation.as_deref() == Some("timeout") => {
+        Some(limit)
+            if output.return_code_interpretation.as_deref().map(runtime::CommandEnding::read)
+                == Some(runtime::CommandEnding::TimedOut) =>
+        {
             format!("[!{command}: {}]", slow_line_notice(limit))
         }
         _ => output.stdout.trim_end_matches('\n').to_string(),

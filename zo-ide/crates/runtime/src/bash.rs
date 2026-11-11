@@ -51,6 +51,47 @@ pub struct BashCommandInput {
     pub cwd: Option<std::path::PathBuf>,
 }
 
+/// How a command ended, as [`BashCommandOutput::return_code_interpretation`]
+/// words it: the one place that writes the word and reads it back. A command
+/// that returned zero carries no word at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEnding<'a> {
+    /// `exit_code:N` — the command ran to its end and returned `N`.
+    Exit(i32),
+    /// `timeout` — the command was stopped at its time limit.
+    TimedOut,
+    /// Any other word: a command refused before it ran, say.
+    Other(&'a str),
+}
+
+impl<'a> CommandEnding<'a> {
+    const EXIT: &'static str = "exit_code:";
+    const TIMED_OUT: &'static str = "timeout";
+
+    /// Read the word. An exit that names no number is the word as it stands.
+    #[must_use]
+    pub fn read(word: &'a str) -> Self {
+        if word == Self::TIMED_OUT {
+            return Self::TimedOut;
+        }
+        word.strip_prefix(Self::EXIT)
+            .and_then(|code| code.parse().ok())
+            .map_or(Self::Other(word), Self::Exit)
+    }
+
+    /// The word for a command that returned `code`.
+    #[must_use]
+    pub fn exit_word(code: i32) -> String {
+        format!("{}{code}", Self::EXIT)
+    }
+
+    /// The word for a command stopped at its time limit.
+    #[must_use]
+    pub fn timed_out_word() -> String {
+        Self::TIMED_OUT.to_string()
+    }
+}
+
 /// Output returned from a bash tool invocation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct BashCommandOutput {
@@ -128,7 +169,7 @@ pub fn replace_bash_transport_output(mut output: BashCommandOutput) -> (BashComm
     output.stdout = cap_transport_stream(&envelope.stdout);
     output.stderr = cap_transport_stream(&stderr);
     if output.return_code_interpretation.is_none() && envelope.exit_code != 0 {
-        output.return_code_interpretation = Some(format!("exit_code:{}", envelope.exit_code));
+        output.return_code_interpretation = Some(CommandEnding::exit_word(envelope.exit_code));
     }
     output.no_output_expected = Some(output.stdout.trim().is_empty() && output.stderr.trim().is_empty());
     (output, surface)
@@ -1130,7 +1171,7 @@ async fn execute_bash_async(
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
     let return_code_interpretation = match status.code() {
         Some(0) => None,
-        Some(code) => Some(format!("exit_code:{code}")),
+        Some(code) => Some(CommandEnding::exit_word(code)),
         // `ExitStatus::code()` is absent when the shell is terminated by a
         // signal. `None` is otherwise reserved for a clean exit, so preserve a
         // non-success interpretation instead of reporting SIGKILL/OOM as green.
@@ -1169,7 +1210,7 @@ fn timed_out_output(
         stderr: timeout_stderr_with_background_advice(effective_timeout_ms, registry_backed),
         interrupted: true,
         dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-        return_code_interpretation: Some(String::from("timeout")),
+        return_code_interpretation: Some(CommandEnding::timed_out_word()),
         no_output_expected: Some(true),
         sandbox_status: Some(sandbox_status),
         ..BashCommandOutput::default()
@@ -1648,6 +1689,24 @@ fn prepare_sandbox_dirs(cwd: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    /// The word a command's end is written in reads back as that end.
+    #[test]
+    fn a_commands_ending_reads_back_from_its_word() {
+        use super::CommandEnding;
+
+        assert_eq!(CommandEnding::read(&CommandEnding::exit_word(7)), CommandEnding::Exit(7));
+        assert_eq!(CommandEnding::read(&CommandEnding::timed_out_word()), CommandEnding::TimedOut);
+        assert_eq!(
+            CommandEnding::read("preflight_blocked:workspace_scope"),
+            CommandEnding::Other("preflight_blocked:workspace_scope")
+        );
+        assert_eq!(
+            CommandEnding::read("exit_code:soon"),
+            CommandEnding::Other("exit_code:soon"),
+            "an exit that names no number is the word as it stands"
+        );
+    }
+
     /// Timeout for the tests that spawn a real sandboxed shell.
     ///
     /// Generous on purpose: these assert *what the child sees* (env, stdin, cwd,

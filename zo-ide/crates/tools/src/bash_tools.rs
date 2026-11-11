@@ -851,7 +851,7 @@ fn completed_command_output(output: &Output, sandbox_status: SandboxStatus) -> B
             .status
             .code()
             .filter(|code| *code != 0)
-            .map(|code| format!("exit_code:{code}")),
+            .map(runtime::CommandEnding::exit_word),
         no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
         structured_content: None,
         persisted_output_path: None,
@@ -877,7 +877,7 @@ fn timed_out_command_output(
         backgrounded_by_user: None,
         assistant_auto_backgrounded: None,
         dangerously_disable_sandbox: None,
-        return_code_interpretation: Some(String::from("timeout")),
+        return_code_interpretation: Some(runtime::CommandEnding::timed_out_word()),
         no_output_expected: Some(false),
         structured_content: None,
         persisted_output_path: None,
