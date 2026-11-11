@@ -4029,6 +4029,14 @@ fn automatic_curation_dirs(cwd: &Path) -> [PathBuf; 2] {
     [dream_dir(cwd), user_pattern_dir(cwd)]
 }
 
+/// The folders a pass read until it stopped mining the turn trace and the
+/// automation events, each with the read cursor that pass kept there. No
+/// pass writes in them now, so a pass stopped mid-write by an earlier zo
+/// left a temporary file there that nothing else would ever take away.
+fn retired_cursor_dirs(cwd: &Path) -> [PathBuf; 2] {
+    [trace_base(cwd).join(ZO_DIR_NAME).join("turns"), dream_dir(cwd).join(AUTOMATION_DIR)]
+}
+
 /// Cheap file-presence prefilter for automatic curation. The actual
 /// promotion gate still rejects one-off noise, unsupported hypotheses, and
 /// transient tool output; this merely avoids opening every candidate/index
@@ -4064,18 +4072,22 @@ fn owns_an_entry_to_age(cwd: &Path) -> bool {
 }
 
 /// Remove what an automatic pass stopped at its deadline left half-written:
-/// the temporary files of the read cursors, the marker and the error file
-/// that were last written more than [`AUTO_DREAM_PASS_DEADLINE`] before `now`.
-/// Only a pass that holds the lock calls it, and a writer still at work wrote
-/// its temporary file within the deadline, so that one stays.
+/// the temporary files of the read cursors — in the folders a pass reads and
+/// in the ones it used to ([`retired_cursor_dirs`]) — the marker and the
+/// error file that were last written more than [`AUTO_DREAM_PASS_DEADLINE`]
+/// before `now`. Only a pass that holds the lock calls it, and a writer still
+/// at work wrote its temporary file within the deadline, so that one stays.
 fn remove_abandoned_pass_writes(cwd: &Path, now: SystemTime) {
     let Some(cutoff) = now.checked_sub(AUTO_DREAM_PASS_DEADLINE) else {
         return;
     };
     let dream = dream_dir(cwd);
-    let cursors = automatic_curation_dirs(cwd).map(|dir| (dir, READ_CURSOR_FILE));
+    let cursors = automatic_curation_dirs(cwd)
+        .into_iter()
+        .chain(retired_cursor_dirs(cwd))
+        .map(|dir| (dir, READ_CURSOR_FILE));
     let pass_files = [(dream.clone(), THROTTLE_MARKER), (dream, AUTO_DREAM_ERROR_FILE)];
-    for (dir, file) in cursors.into_iter().chain(pass_files) {
+    for (dir, file) in cursors.chain(pass_files) {
         crate::secure_fs::remove_abandoned_temp_files(&dir, Path::new(file), cutoff);
     }
 }
