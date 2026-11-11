@@ -714,6 +714,7 @@ fn a_permission_prompt_is_parked_not_answered() {
                     decision: PermissionDecision::Deny,
                 },
             ],
+            person_only: false,
             question: None,
             responder,
         }))

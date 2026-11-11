@@ -76,8 +76,10 @@ impl PendingPrompt {
     }
 }
 
-/// 권한 답 해석. 빈 줄은 Deny(zo TUI 의 기본 커서와 동일). 키 글자는
-/// 대소문자 무시로 선택지의 `key` 와 맞춘다; 모르는 글자는 `None`.
+/// 권한 답 해석. 빈 줄은 Deny 다 — TUI 의 대화상자는 「이번만 허용」 줄에서
+/// 열리므로(`tui::view` 의 `ENTER_ANSWERS`, t-48216) 두 화면의 빈 Enter 는 서로
+/// 다르다. 키 글자는 대소문자 무시로 선택지의 `key` 와 맞춘다; 모르는 글자는
+/// `None`.
 #[must_use]
 pub fn parse_permission_answer(
     line: &str,
@@ -165,6 +167,7 @@ mod tests {
                     decision: PermissionDecision::Deny,
                 },
             ],
+            person_only: false,
             question: None,
             responder: tx,
         }

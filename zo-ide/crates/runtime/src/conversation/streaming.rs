@@ -113,6 +113,7 @@ pub(crate) fn refusal_question(
         reasoning,
         choices,
         risk_level: AsyncRiskLevel::Low,
+        person_only: false,
         question: Some(question),
     }
 }
@@ -382,6 +383,7 @@ pub(crate) fn build_async_permission_request(
             default_permission_choices()
         },
         risk_level: risk_from_tool_name(&sync_request.tool_name),
+        person_only: sync_request.person_only,
         question: None,
     }
 }
@@ -440,6 +442,11 @@ mod permission_metadata_tests {
         };
         assert!(!lasting(true));
         assert!(lasting(false), "an ordinary question keeps its lasting allow");
+        assert!(
+            build_async_permission_request(&request(true)).person_only,
+            "the request says it, so no front-end infers it from the choices"
+        );
+        assert!(!build_async_permission_request(&request(false)).person_only);
         let offered = build_async_permission_request(&request(true)).choices;
         assert!(
             offered.iter().any(|choice| choice.decision == crate::permission::PermissionDecision::AllowOnce)

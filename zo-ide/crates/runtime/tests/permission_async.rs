@@ -39,6 +39,7 @@ fn sample_request(tool: &str) -> PermissionRequest {
             },
         ],
         risk_level: RiskLevel::Medium,
+        person_only: false,
         question: None,
     }
 }
@@ -134,9 +135,10 @@ async fn channel_prompter_concurrent_requests_do_not_interleave() {
 #[tokio::test]
 async fn permission_request_is_provider_neutral() {
     // Compile-time / structural assertion: the neutral request exposes
-    // only tool/reasoning/choices/risk_level, and the question a prompt may
-    // carry when it is not a tool (t-17474). No Anthropic-specific
-    // field names leak across the seam (code-rules R1).
+    // only tool/reasoning/choices/risk_level, whether only a person may
+    // answer it, and the question a prompt may carry when it is not a tool
+    // (t-17474). No Anthropic-specific field names leak across the seam
+    // (code-rules R1).
     let req = sample_request("bash");
     let PermissionRequest {
         tool,
@@ -145,6 +147,7 @@ async fn permission_request_is_provider_neutral() {
         reasoning,
         choices,
         risk_level,
+        person_only,
         question,
     } = req;
     assert_eq!(tool, "bash");
@@ -153,6 +156,7 @@ async fn permission_request_is_provider_neutral() {
     assert!(reasoning.contains("bash"));
     assert_eq!(choices.len(), 3);
     assert_eq!(risk_level, RiskLevel::Medium);
+    assert!(!person_only, "an ordinary tool call may be allowed for the session");
     assert_eq!(question, None, "a tool call is not a question");
 }
 

@@ -1600,6 +1600,7 @@ mod tests {
                     decision,
                 })
                 .collect(),
+            person_only: false,
             question,
             responder,
         };

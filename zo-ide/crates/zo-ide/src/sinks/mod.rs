@@ -233,6 +233,14 @@ pub(crate) mod serializable {
             /// Selectable options in display order. Empty for a pre-F2 frame.
             #[serde(default)]
             choices: Vec<SerializablePermissionChoice>,
+            /// `true` when only a person may answer the prompt, and only for
+            /// this call — a kill a person should allow, a schedule a person
+            /// should approve. A window reads the key and does not infer it
+            /// from the choices: a lasting allow can be missing for another
+            /// reason. Written only when true, so every other prompt — and
+            /// every frame older than the key — reads as false.
+            #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+            person_only: bool,
             /// What kind of prompt this is: `question` for a
             /// choice zo puts to the person itself (the refusal ladder's
             /// "switch models?"); absent for a tool call awaiting approval —
@@ -516,6 +524,7 @@ pub(crate) mod serializable {
                             decision: permission_decision_tag(c.decision).to_string(),
                         })
                         .collect(),
+                    person_only: prompt.person_only,
                     kind: prompt.question.as_ref().map(|_| PROMPT_KIND_QUESTION.to_string()),
                     topic: prompt.question.as_ref().map(|question| question.topic.clone()),
                     title: prompt.question.as_ref().map(|question| question.title.clone()),
@@ -765,6 +774,7 @@ pub(crate) mod serializable {
                 audit_hint,
                 risk_level,
                 choices,
+                person_only,
                 kind,
                 topic,
                 title,
@@ -801,6 +811,7 @@ pub(crate) mod serializable {
                                 decision: permission_decision_from_tag(&c.decision),
                             })
                             .collect(),
+                        person_only: *person_only,
                         question: (kind.as_deref() == Some(PROMPT_KIND_QUESTION)).then(|| {
                             runtime::permission::PromptQuestion {
                                 topic: topic.clone().unwrap_or_default(),
@@ -1166,6 +1177,7 @@ mod prompt_wire_tests {
                 label: "Once".to_string(),
                 decision: PermissionDecision::AllowOnce,
             }],
+            person_only: false,
             question,
             responder,
         })
@@ -1218,6 +1230,34 @@ mod prompt_wire_tests {
                 assert_eq!(back.question, None);
                 assert_eq!(back.tool_name, "Bash");
             }
+            other => panic!("not a permission prompt: {other:?}"),
+        }
+    }
+
+    /// A prompt only a person may answer says so on its frame and comes back
+    /// saying it. No other prompt's frame has the key, and a frame without it
+    /// — every frame older than the key — is no person-only prompt.
+    #[test]
+    fn a_person_only_prompt_says_so_over_the_wire_and_no_other_frame_does() {
+        let RenderBlock::PermissionPrompt(mut asked) = prompt(None) else {
+            panic!("the fixture is a permission prompt");
+        };
+        asked.person_only = true;
+        let json = serde_json::to_value(SerializableRenderBlock::from_block(
+            &RenderBlock::PermissionPrompt(asked),
+        ))
+        .expect("serialize");
+        assert_eq!(json["person_only"], true, "{json}");
+        match render_block_from_value(&json).expect("deserialize") {
+            RenderBlock::PermissionPrompt(back) => assert!(back.person_only),
+            other => panic!("not a permission prompt: {other:?}"),
+        }
+
+        let ordinary = serde_json::to_value(SerializableRenderBlock::from_block(&prompt(None)))
+            .expect("serialize");
+        assert!(ordinary.get("person_only").is_none(), "an ordinary prompt gains no key: {ordinary}");
+        match render_block_from_value(&ordinary).expect("deserialize") {
+            RenderBlock::PermissionPrompt(back) => assert!(!back.person_only),
             other => panic!("not a permission prompt: {other:?}"),
         }
     }

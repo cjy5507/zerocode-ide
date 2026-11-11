@@ -1002,6 +1002,7 @@ mod tests {
                 label: "Allow once".to_string(),
                 decision: PermissionDecision::AllowOnce,
             }],
+            person_only: false,
             question: None,
             responder,
         })

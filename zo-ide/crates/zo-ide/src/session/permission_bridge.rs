@@ -76,6 +76,7 @@ pub fn build_render_prompt(
         audit_hint: request.prompt_audit_hint(),
         risk_level: request.question.is_none().then_some(request.risk_level),
         choices,
+        person_only: request.person_only,
         question: request.question.clone(),
         responder: modal_tx,
     }
@@ -148,6 +149,7 @@ mod tests {
                 decision: L3Decision::AllowOnce,
             }],
             risk_level: runtime::permission::RiskLevel::Low,
+            person_only: false,
             question: None,
         };
         let decide = tokio::spawn(async move { prompter.decide(request).await });
@@ -199,6 +201,7 @@ mod tests {
                 },
             ],
             risk_level: runtime::permission::RiskLevel::Low,
+            person_only: false,
             question: Some(PromptQuestion {
                 topic: "model_switch".to_string(),
                 title: "Switch models?".to_string(),

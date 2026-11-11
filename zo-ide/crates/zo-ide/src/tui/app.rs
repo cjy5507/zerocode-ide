@@ -8253,6 +8253,7 @@ mod tests {
                     decision: PermissionDecision::Deny,
                 },
             ],
+            person_only: false,
             question: None,
             responder,
         });
@@ -11297,6 +11298,7 @@ mod tests {
                 },
             ],
             risk_level: RiskLevel::High,
+            person_only: false,
             question: None,
         };
         let (responder, _answer) = tokio::sync::oneshot::channel();
@@ -11347,6 +11349,7 @@ mod tests {
                 decision: PermissionDecision::AllowOnce,
             }],
             risk_level: RiskLevel::High,
+            person_only: false,
             question: None,
         };
         let (responder, _answer) = tokio::sync::oneshot::channel();

@@ -714,6 +714,11 @@ pub struct PermissionPrompt {
     pub risk_level: Option<crate::permission::RiskLevel>,
     /// The available choices, in display order.
     pub choices: Vec<PermissionChoice>,
+    /// Only a person may answer the prompt, and only for this call
+    /// ([`crate::permission::PermissionRequest::person_only`]): what the pane's
+    /// dialog and the window's card read to know it, in place of noticing
+    /// that no lasting allow is offered.
+    pub person_only: bool,
     /// Set when the prompt is a question zo puts to the person itself — the
     /// refusal ladder's "switch models?" — and not a tool call awaiting
     /// approval (t-17474): the pane titles it and the window dresses it by its

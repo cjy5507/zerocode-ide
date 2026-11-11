@@ -111,6 +111,12 @@ pub struct PermissionRequest {
     pub choices: Vec<PermissionChoice>,
     /// Relative risk classification. Says nothing for a question.
     pub risk_level: RiskLevel,
+    /// Only a person may answer it, and only for this call
+    /// ([`crate::permissions::PermissionRequest::person_only`]). Said on the
+    /// request, so a front-end reads it here and does not infer it from which
+    /// choices happen to be offered — a lasting allow can be missing for
+    /// another reason.
+    pub person_only: bool,
     /// Set when this is a question zo puts to the person itself rather than a
     /// tool call awaiting approval (t-17474).
     pub question: Option<PromptQuestion>,
@@ -359,6 +365,7 @@ mod tests {
             reasoning: "run a command".to_string(),
             choices: Vec::new(),
             risk_level: RiskLevel::Medium,
+            person_only: false,
             question: None,
         }
     }
@@ -402,6 +409,7 @@ mod tests {
                 },
             ],
             risk_level: RiskLevel::High,
+            person_only: false,
             question: None,
         };
         let hint = request.audit_hint();
@@ -425,6 +433,7 @@ mod tests {
                 decision: PermissionDecision::Allow,
             }],
             risk_level: RiskLevel::Low,
+            person_only: false,
             question: Some(PromptQuestion {
                 topic: "model_switch".to_string(),
                 title: "Switch models?".to_string(),

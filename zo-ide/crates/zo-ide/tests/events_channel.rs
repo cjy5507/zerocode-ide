@@ -70,6 +70,7 @@ fn parked_permission(block_id: u64) -> (RenderBlock, PendingPrompt, oneshot::Rec
                 decision: PermissionDecision::Deny,
             },
         ],
+        person_only: false,
         question: None,
         responder,
     };
@@ -86,6 +87,7 @@ fn parked_permission(block_id: u64) -> (RenderBlock, PendingPrompt, oneshot::Rec
         audit_hint: prompt.audit_hint.clone(),
         risk_level: prompt.risk_level,
         choices: prompt.choices.clone(),
+        person_only: prompt.person_only,
         question: prompt.question.clone(),
         responder: twin_responder,
     });
@@ -295,6 +297,35 @@ async fn the_pane_answering_first_retires_the_prompt() {
     assert_eq!(asking(listed), Some(0), "an answered prompt is not waited on");
 }
 
+/// A prompt only a person may answer says so on the frame the window reads:
+/// `person_only: true`. The window reads that key and does not infer it from
+/// the choices — a lasting allow can be missing for another reason. An
+/// ordinary prompt's frame gains no key, so a frame from a zo older than the
+/// key reads the same as one that says no.
+#[tokio::test]
+async fn a_person_only_prompt_says_so_on_the_frame_the_window_reads() {
+    let channel = Arc::new(open(None).await);
+    let mut client = connect(&channel, None).await;
+    client.session_name(SESSION).await.expect("subscribe");
+
+    let (ordinary, _parked, _runtime_side) = parked_permission(0);
+    let ordinary_id = channel.publish(&ordinary).expect("prompt id");
+    let frame = next_frame_of(&mut client, "permission_prompt").await;
+    assert!(frame.get("person_only").is_none(), "an ordinary prompt carries no `person_only`: {frame}");
+    channel.retire_prompt(ordinary_id, ResolvedBy::Pane);
+    next_frame_of(&mut client, "prompt_resolved").await;
+
+    let (block, _parked, _runtime_side) = parked_permission(1);
+    let RenderBlock::PermissionPrompt(mut asked) = block else {
+        panic!("the fixture is a permission prompt");
+    };
+    asked.person_only = true;
+    channel.publish(&RenderBlock::PermissionPrompt(asked)).expect("prompt id");
+    let frame = next_frame_of(&mut client, "permission_prompt").await;
+    assert_eq!(frame["person_only"], json!(true), "{frame}");
+    assert_eq!(frame["tool_name"], json!("Bash"), "it is still a tool prompt: {frame}");
+}
+
 /// A question zo puts to the person itself — the refusal ladder's "switch
 /// models?" — crosses the channel as a question (t-17474). The frame is still
 /// a `permission_prompt` and is answered on the same road, `permission.respond`
@@ -346,6 +377,7 @@ async fn a_question_zo_puts_to_the_person_crosses_the_channel_as_a_question() {
                 decision: PermissionDecision::Deny,
             },
         ],
+        person_only: false,
         question: Some(runtime::permission::PromptQuestion {
             topic: "model_switch".to_string(),
             title: "Switch models?".to_string(),

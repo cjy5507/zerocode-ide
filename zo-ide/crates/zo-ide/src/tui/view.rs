@@ -599,6 +599,32 @@ pub struct Dialog {
     pub footer: String,
 }
 
+/// What a bare Enter answers on a tool prompt: this one call. The
+/// session-wide allow is a choice the person makes, never the row the dialog
+/// opens on (t-48216).
+const ENTER_ANSWERS: runtime::message_stream::PermissionDecision =
+    runtime::message_stream::PermissionDecision::AllowOnce;
+
+/// What a bare Enter answers on a prompt only a person may answer
+/// ([`runtime::message_stream::PermissionPrompt::person_only`]) — a kill a
+/// person should allow, a schedule a person should approve.
+///
+/// Its own name because it is the person's to decide and was not decided when
+/// this was written (2026-11-11): a stray Enter — a line typed into the pane
+/// by something else — allows the call while this is an allow. Until the
+/// person says otherwise it is what every tool prompt answers; this is the
+/// one place that changes when they do, and the window's card follows the
+/// same answer.
+const ENTER_ANSWERS_PERSON_ONLY: runtime::message_stream::PermissionDecision = ENTER_ANSWERS;
+
+/// The row a tool prompt's dialog opens on, which is the row a bare Enter
+/// answers with: the first choice that decides what Enter is to answer for
+/// this kind of prompt, or the first row when no choice does.
+fn row_enter_answers(prompt: &runtime::message_stream::PermissionPrompt) -> usize {
+    let answer = if prompt.person_only { ENTER_ANSWERS_PERSON_ONLY } else { ENTER_ANSWERS };
+    prompt.choices.iter().position(|choice| choice.decision == answer).unwrap_or(0)
+}
+
 impl Dialog {
     /// The dialog a permission prompt parks as. A tool call awaiting approval
     /// reads `Allow <tool>` over its risk-and-unblock line, as ever. A
@@ -625,15 +651,7 @@ impl Dialog {
                 )),
                 body: permission_body(prompt),
                 options,
-                // Enter allows this one call; the session-wide allow is a
-                // choice the person makes, never the default (t-48216).
-                selected: prompt
-                    .choices
-                    .iter()
-                    .position(|choice| {
-                        matches!(choice.decision, runtime::message_stream::PermissionDecision::AllowOnce)
-                    })
-                    .unwrap_or(0),
+                selected: row_enter_answers(prompt),
                 footer,
             },
         }
@@ -2580,6 +2598,7 @@ mod tests {
                 choice('n', "Stay on claude-sonnet-5-5", PermissionDecision::Deny),
             ],
             risk_level: RiskLevel::Low,
+            person_only: false,
             question: Some(PromptQuestion {
                 topic: core_types::retry_signal::REFUSAL_SWITCH_TOPIC.to_string(),
                 title: core_types::retry_signal::REFUSAL_SWITCH_TITLE.to_string(),
@@ -2610,6 +2629,7 @@ mod tests {
                 choice('n', "Deny", PermissionDecision::Deny),
             ],
             risk_level: RiskLevel::High,
+            person_only: false,
             question: None,
         };
         let plain: Vec<String> = Dialog::for_permission(&prompt_block(&tool))
@@ -3254,6 +3274,7 @@ mod card_tests {
                 choice('n', "Deny", PermissionDecision::Deny),
             ],
             risk_level: RiskLevel::High,
+            person_only: false,
             question: None,
         }
     }
@@ -3272,6 +3293,36 @@ mod card_tests {
     fn the_card_starts_on_allow_once_never_on_the_session_wide_allow() {
         let dialog = card();
         assert_eq!(dialog.options[dialog.selected], "Allow once");
+    }
+
+    /// A prompt only a person may answer opens on the row that one constant
+    /// names, wherever that row stands among the choices — so the answer a
+    /// bare Enter gives there is decided in one place.
+    #[test]
+    fn a_person_only_card_opens_on_the_row_its_one_constant_names() {
+        let choice = |key, label: &str, decision| PermissionChoice {
+            key,
+            label: label.to_string(),
+            decision,
+        };
+        let request = PermissionRequest {
+            choices: vec![
+                choice('n', "Deny", PermissionDecision::Deny),
+                choice('o', "Allow once", PermissionDecision::AllowOnce),
+            ],
+            person_only: true,
+            ..bash_request()
+        };
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        let prompt = crate::session::permission_bridge::build_render_prompt(
+            &request,
+            responder,
+            runtime::message_stream::BlockId(1),
+        );
+        assert!(prompt.person_only, "the bridge carries it to the block the pane parks");
+        let dialog = Dialog::for_permission(&prompt);
+        let opened_on = prompt.choices[dialog.selected].decision;
+        assert_eq!(opened_on, super::ENTER_ANSWERS_PERSON_ONLY);
     }
 
     #[test]
