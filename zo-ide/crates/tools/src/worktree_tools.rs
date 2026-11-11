@@ -3,7 +3,10 @@
 //! `EnterWorktree` verifies or creates a git worktree at the given path,
 //! then switches the process working directory so all subsequent tool
 //! calls operate inside it.  `ExitWorktree` restores the original cwd
-//! and optionally removes the worktree.
+//! and removes the worktree only when `EnterWorktree` created it — and
+//! then without `--force`, so git refuses a tree with uncommitted work.
+//! A directory that already existed (the person's own worktree or
+//! checkout) is never removed.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -17,28 +20,37 @@ use serde_json::json;
 use super::{to_pretty_json, ToolError, ToolSpec};
 use runtime::PermissionMode;
 
+/// One `EnterWorktree` still open: the cwd it left, and the worktree it
+/// created there — `None` when the directory already existed, which
+/// `ExitWorktree` then never removes.
+#[derive(Debug, Clone)]
+struct SavedCwd {
+    prev: PathBuf,
+    created: Option<PathBuf>,
+}
+
 /// Stack of saved working directories. The last entry is the cwd
 /// before the most recent `EnterWorktree` call.
 ///
 /// Poison policy: recover (`lock_recovered`) — push/pop of complete
-/// `PathBuf` values keeps the stack consistent at every panic point.
-static SAVED_CWD: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// entries keeps the stack consistent at every panic point.
+static SAVED_CWD: Mutex<Vec<SavedCwd>> = Mutex::new(Vec::new());
 
 /// The directories saved by every `EnterWorktree` still on the stack, oldest
 /// first. Read by the session agent registry when it adopts legacy stores —
 /// each entry is a cwd a pre-registry session may have spawned children from.
 pub(crate) fn saved_cwd_stack() -> Vec<PathBuf> {
-    lock_recovered(&SAVED_CWD).clone()
+    lock_recovered(&SAVED_CWD).iter().map(|saved| saved.prev.clone()).collect()
 }
 
 /// Run `f` with `path` pushed on the `EnterWorktree` stack, as if the session
 /// had entered a worktree from there, then pop it again.
 #[cfg(test)]
 pub(crate) fn with_saved_cwd_for_tests<T>(path: &std::path::Path, f: impl FnOnce() -> T) -> T {
-    lock_recovered(&SAVED_CWD).push(path.to_path_buf());
+    lock_recovered(&SAVED_CWD).push(SavedCwd { prev: path.to_path_buf(), created: None });
     let out = f();
     let mut stack = lock_recovered(&SAVED_CWD);
-    if let Some(at) = stack.iter().rposition(|saved| saved == path) {
+    if let Some(at) = stack.iter().rposition(|saved| saved.prev == path) {
         stack.remove(at);
     }
     out
@@ -82,7 +94,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "ExitWorktree",
-            description: "Exit a previously entered git worktree.",
+            description: "Exit a previously entered git worktree and return to the directory you entered it from. A worktree EnterWorktree created is removed when it holds no uncommitted work; a directory that already existed is left in place.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -116,14 +128,22 @@ fn worktree_disk_preflight(parent: &Path) -> Result<Option<String>, String> {
     Ok(runtime::low_disk_warning(parent))
 }
 
+/// What [`ensure_worktree`] found or made at a path.
+struct EnsuredWorktree {
+    /// Whether `git worktree add` made it now; a directory that was already
+    /// there is somebody's, and leaving it never removes it.
+    created: bool,
+    warning: Option<String>,
+}
+
 /// Ensure a git worktree exists at `path`. If the path is already a
 /// directory (worktree, checkout, or plain dir) it is accepted as-is.
 /// Otherwise a new git worktree is created.
-fn ensure_worktree(path: &Path, branch: Option<&str>) -> Result<Option<String>, String> {
+fn ensure_worktree(path: &Path, branch: Option<&str>) -> Result<EnsuredWorktree, String> {
     if path.is_dir() {
         // Already exists — accept it (could be a worktree, checkout, or
         // a plain directory the caller wants to work in).
-        return Ok(None);
+        return Ok(EnsuredWorktree { created: false, warning: None });
     }
 
     let parent = path
@@ -146,12 +166,12 @@ fn ensure_worktree(path: &Path, branch: Option<&str>) -> Result<Option<String>, 
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git worktree add failed: {stderr}"));
     }
-    Ok(warning)
+    Ok(EnsuredWorktree { created: true, warning })
 }
 
 /// Prepare a CLI startup worktree through the same disk check and git creation path.
 pub fn prepare_start_worktree(path: &Path) -> Result<std::path::PathBuf, String> {
-    if let Some(warning) = ensure_worktree(path, None)? { eprintln!("{warning}"); }
+    if let Some(warning) = ensure_worktree(path, None)?.warning { eprintln!("{warning}"); }
     let output = Command::new("git").arg("-C").arg(path).args(["rev-parse", "--show-toplevel"]).output().map_err(|e| e.to_string())?;
     if !output.status.success() { return Err("--worktree requires a git working tree".into()); }
     let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
@@ -171,7 +191,7 @@ pub(crate) fn run_enter_worktree(input: &EnterWorktreeInput) -> Result<String, T
     };
 
     // Ensure the worktree exists (creates if necessary).
-    let warning = ensure_worktree(&target, input.branch.as_deref())
+    let EnsuredWorktree { created, warning } = ensure_worktree(&target, input.branch.as_deref())
         .map_err(|e| ToolError::Execution(format!("worktree setup failed: {e}")))?;
 
     // Save current cwd before switching.
@@ -181,7 +201,7 @@ pub(crate) fn run_enter_worktree(input: &EnterWorktreeInput) -> Result<String, T
     env::set_current_dir(&target)
         .map_err(|e| ToolError::Execution(format!("cannot chdir to {}: {e}", target.display())))?;
 
-    lock_recovered(&SAVED_CWD).push(prev);
+    lock_recovered(&SAVED_CWD).push(SavedCwd { prev, created: created.then_some(target.clone()) });
 
     to_pretty_json(WorktreeOutput {
         status: "ok",
@@ -198,20 +218,14 @@ pub(crate) fn run_enter_worktree(input: &EnterWorktreeInput) -> Result<String, T
 }
 
 pub(crate) fn run_exit_worktree(input: ExitWorktreeInput) -> Result<String, ToolError> {
-    let prev = lock_recovered(&SAVED_CWD).pop();
+    let saved = lock_recovered(&SAVED_CWD).pop();
 
-    let Some(restore_to) = prev else {
+    let Some(SavedCwd { prev: restore_to, created }) = saved else {
         return to_pretty_json(WorktreeOutput {
             status: "noop",
             message: "Not inside a worktree entered via EnterWorktree.".to_string(),
         });
     };
-
-    // Optionally remove the worktree we're leaving.
-    let worktree_path = input
-        .path
-        .map(PathBuf::from)
-        .or_else(|| env::current_dir().ok());
 
     env::set_current_dir(&restore_to).map_err(|e| {
         ToolError::Execution(format!(
@@ -220,20 +234,55 @@ pub(crate) fn run_exit_worktree(input: ExitWorktreeInput) -> Result<String, Tool
         ))
     })?;
 
-    // Best-effort cleanup: `git worktree remove` the path we just left.
-    if let Some(wt) = worktree_path {
-        let _ = Command::new("git")
-            .arg("worktree")
-            .arg("remove")
-            .arg("--force")
-            .arg(&wt)
-            .output();
-    }
+    let removal = match created {
+        // A `path` names the worktree to leave; one that is not the worktree
+        // this EnterWorktree created is never removed.
+        Some(created) if input.path.as_deref().is_none_or(|named| same_dir(Path::new(named), &created)) => {
+            remove_created_worktree(&restore_to, &created)
+        }
+        Some(created) => format!(
+            "; left {} in place: {} is not the worktree EnterWorktree created",
+            created.display(),
+            input.path.as_deref().unwrap_or_default(),
+        ),
+        None => "; the directory already existed before EnterWorktree, so it was left in place".to_string(),
+    };
 
     to_pretty_json(WorktreeOutput {
         status: "ok",
-        message: format!("Restored cwd to {}", restore_to.display()),
+        message: format!("Restored cwd to {}{removal}", restore_to.display()),
     })
+}
+
+/// Whether two paths name one directory: by their resolved form when both
+/// resolve, else as written.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// `git worktree remove` without `--force`, run from the repository the
+/// worktree was added from: git removes a clean worktree and refuses one
+/// holding modified or untracked files, which then stays for the person.
+/// Returns the tail of the exit message.
+fn remove_created_worktree(repo: &Path, worktree: &Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["worktree", "remove"])
+        .arg(worktree)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => format!("; removed worktree {}", worktree.display()),
+        Ok(out) => format!(
+            "; kept worktree {}: {}",
+            worktree.display(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        ),
+        Err(error) => format!("; kept worktree {}: git did not run: {error}", worktree.display()),
+    }
 }
 
 #[cfg(test)]
@@ -304,5 +353,134 @@ mod tests {
             env::current_dir().expect("cwd").canonicalize().ok(),
             original.canonicalize().ok()
         );
+    }
+
+    /// A scratch repository with one commit, and the process cwd put back
+    /// when the test ends — these tests move it, and the next test must not
+    /// start inside a deleted directory.
+    struct ScratchRepo {
+        dir: tempfile::TempDir,
+        original_cwd: PathBuf,
+    }
+
+    impl ScratchRepo {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let original_cwd = env::current_dir().expect("cwd");
+            let repo = Self { dir, original_cwd };
+            repo.git(&["init", "-q", "-b", "main", "repo"], &repo.root());
+            repo.git(
+                &["-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "--allow-empty", "-m", "init"],
+                &repo.repo(),
+            );
+            repo
+        }
+
+        fn root(&self) -> PathBuf {
+            self.dir.path().canonicalize().expect("canonical tempdir")
+        }
+
+        fn repo(&self) -> PathBuf {
+            self.root().join("repo")
+        }
+
+        fn git(&self, args: &[&str], at: &Path) {
+            let out = Command::new("git").arg("-C").arg(at).args(args).output().expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+
+        /// A worktree the person made before the session entered it, with
+        /// one file nobody committed.
+        fn persons_worktree_with_unsaved_work(&self, name: &str) -> PathBuf {
+            let path = self.root().join(name);
+            self.git(&["worktree", "add", "-q", "-b", name, path.to_str().expect("utf8")], &self.repo());
+            std::fs::write(path.join("unsaved.txt"), "work in progress\n").expect("write unsaved");
+            path
+        }
+    }
+
+    impl Drop for ScratchRepo {
+        fn drop(&mut self) {
+            let _ = env::set_current_dir(&self.original_cwd);
+        }
+    }
+
+    fn enter(path: &Path) -> String {
+        run_enter_worktree(&EnterWorktreeInput { path: path.to_string_lossy().to_string(), branch: None })
+            .expect("should enter")
+    }
+
+    fn exit(path: Option<&Path>) -> String {
+        run_exit_worktree(ExitWorktreeInput { path: path.map(|path| path.to_string_lossy().to_string()) })
+            .expect("should exit")
+    }
+
+    #[test]
+    fn exit_leaves_a_worktree_that_existed_before_enter() {
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SAVED_CWD.lock().expect("cwd lock").clear();
+        let scratch = ScratchRepo::new();
+        let persons = scratch.persons_worktree_with_unsaved_work("persons");
+        env::set_current_dir(scratch.repo()).expect("cd repo");
+
+        enter(&persons);
+        let out = exit(None);
+
+        assert!(persons.join("unsaved.txt").is_file(), "the person's uncommitted file survives: {out}");
+    }
+
+    #[test]
+    fn exit_keeps_a_worktree_it_created_while_it_holds_uncommitted_work() {
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SAVED_CWD.lock().expect("cwd lock").clear();
+        let scratch = ScratchRepo::new();
+        env::set_current_dir(scratch.repo()).expect("cd repo");
+        let created = scratch.root().join("created");
+
+        enter(&created);
+        std::fs::write(created.join("unsaved.txt"), "work in progress\n").expect("write unsaved");
+        let out = exit(None);
+
+        assert!(created.join("unsaved.txt").is_file(), "uncommitted work is never forced away: {out}");
+        assert!(out.contains("kept worktree"), "{out}");
+    }
+
+    #[test]
+    fn exit_removes_a_clean_worktree_it_created() {
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SAVED_CWD.lock().expect("cwd lock").clear();
+        let scratch = ScratchRepo::new();
+        env::set_current_dir(scratch.repo()).expect("cd repo");
+        let created = scratch.root().join("created");
+
+        enter(&created);
+        let out = exit(None);
+
+        assert!(!created.exists(), "a clean worktree EnterWorktree made is cleaned up: {out}");
+        assert_eq!(env::current_dir().expect("cwd").canonicalize().ok(), Some(scratch.repo()));
+    }
+
+    #[test]
+    fn exit_never_removes_a_named_worktree_it_did_not_create() {
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SAVED_CWD.lock().expect("cwd lock").clear();
+        let scratch = ScratchRepo::new();
+        let persons = scratch.persons_worktree_with_unsaved_work("persons");
+        env::set_current_dir(scratch.repo()).expect("cd repo");
+        let created = scratch.root().join("created");
+
+        enter(&created);
+        let out = exit(Some(&persons));
+
+        assert!(persons.join("unsaved.txt").is_file(), "a worktree it never entered is not its to remove: {out}");
     }
 }
