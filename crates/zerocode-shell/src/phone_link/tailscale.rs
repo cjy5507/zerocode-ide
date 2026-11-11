@@ -31,9 +31,18 @@ use serde_json::Value;
 /// those are the three ports Funnel can open to the internet, so a mapping on
 /// 10443 or 9443 can never be Funnelled, by anybody, by mistake.
 pub(crate) const HTTPS_PORTS: [u16; 2] = [10443, 9443];
+/// The phone port an earlier build used. A mapping the book names on it is
+/// still the window's to take down; on any other port the book is not
+/// believed, so a hand-edited book cannot point the window at a person's own.
+const RETIRED_HTTPS_PORTS: [u16; 1] = [8443];
 pub(crate) const CLI_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long the window's close waits for the CLI to take its mapping down.
+/// How long the window's close waits, in all, for the CLI to take its
+/// mapping down.
 pub(crate) const EXIT_CLI_TIMEOUT: Duration = Duration::from_secs(3);
+/// How often a running CLI is asked whether it has finished.
+const CLI_POLL: Duration = Duration::from_millis(50);
+/// The one loopback address the listener binds and the mapping names.
+pub(crate) const LOOPBACK: &str = "127.0.0.1";
 
 /// The places the Tailscale installers put the CLI. PATH is never searched:
 /// opening Settings runs this program with the window's rights, and a PATH
@@ -78,6 +87,16 @@ pub(crate) struct Tailnet {
     /// The login that owns this machine — the only person who may pair.
     #[serde(skip)]
     pub(crate) owner_login: Option<String>,
+}
+
+impl Tailnet {
+    /// A CLI is there but its status could not be read.
+    pub(crate) fn unread() -> Self {
+        Self {
+            installed: true,
+            ..Self::default()
+        }
+    }
 }
 
 pub(crate) fn parse_status(json: &Value) -> Tailnet {
@@ -159,61 +178,139 @@ pub(crate) struct ServeConfig {
     pub(crate) funnel: Vec<String>,
 }
 
-pub(crate) fn parse_serve(json: &Value) -> ServeConfig {
-    let mut config = ServeConfig::default();
-    read_scope(json, Scope::Background, &mut config);
-    for (field, scope) in [
-        ("Foreground", Scope::Foreground),
-        ("Services", Scope::Service),
-    ] {
-        if let Some(entries) = json.get(field).and_then(Value::as_object) {
-            for entry in entries.values() {
-                read_scope(entry, scope, &mut config);
+/// The fields `ipn.ServeConfig` writes, by where they stand. A Serve
+/// configuration with anything else, or with a known field of another
+/// shape, is not read as "nothing exposed": a newer Tailscale could have put
+/// a road to the listener there, so it is an error and the link stays shut.
+const SERVE_FIELDS: &[&str] = &["TCP", "Web", "Services", "AllowFunnel", "Foreground"];
+const FOREGROUND_FIELDS: &[&str] = &["TCP", "Web", "AllowFunnel"];
+const SERVICE_FIELDS: &[&str] = &["TCP", "Web", "Tun"];
+const TCP_FIELDS: &[&str] = &[
+    "HTTPS",
+    "HTTP",
+    "TCPForward",
+    "TerminateTLS",
+    "ProxyProtocol",
+];
+const SITE_FIELDS: &[&str] = &["Handlers"];
+const HANDLER_FIELDS: &[&str] = &["Path", "Proxy", "Text", "AcceptAppCaps", "Redirect"];
+
+/// The object at `json`, after its fields are checked against `known`; an
+/// absent or `null` value is an empty one.
+fn fields<'a>(
+    json: Option<&'a Value>,
+    known: &[&str],
+    at: &str,
+) -> Result<Option<&'a serde_json::Map<String, Value>>, String> {
+    match json {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(object)) => {
+            match object.keys().find(|field| !known.contains(&field.as_str())) {
+                Some(field) => Err(format!(
+                    "tailscale serve status: unknown {at} field {field}"
+                )),
+                None => Ok(Some(object)),
             }
         }
+        Some(_) => Err(format!("tailscale serve status: {at} is not an object")),
     }
-    config
 }
 
-fn read_scope(json: &Value, scope: Scope, config: &mut ServeConfig) {
-    if let Some(web) = json.get("Web").and_then(Value::as_object) {
-        for (host_port, site) in web {
-            if let Some(handlers) = site.get("Handlers").and_then(Value::as_object) {
-                for (path, handler) in handlers {
-                    config.handlers.push(Handler {
-                        host_port: host_port.to_ascii_lowercase(),
-                        path: path.clone(),
-                        proxy: handler
-                            .get("Proxy")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        scope,
-                    });
-                }
+/// A map field (`host:port → …`, `port → …`): any keys, an object.
+fn entries<'a>(
+    json: Option<&'a Value>,
+    at: &str,
+) -> Result<Option<&'a serde_json::Map<String, Value>>, String> {
+    match json {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(object)) => Ok(Some(object)),
+        Some(_) => Err(format!("tailscale serve status: {at} is not an object")),
+    }
+}
+
+/// A string field, when it is there.
+fn text<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<&'a str>, String> {
+    match object.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text)),
+        Some(_) => Err(format!("tailscale serve status: {field} is not a string")),
+    }
+}
+
+pub(crate) fn parse_serve(json: &Value) -> Result<ServeConfig, String> {
+    let mut config = ServeConfig::default();
+    let top = fields(Some(json), SERVE_FIELDS, "top-level")?;
+    read_scope(top, Scope::Background, &mut config)?;
+    for (field, known, scope) in [
+        ("Foreground", FOREGROUND_FIELDS, Scope::Foreground),
+        ("Services", SERVICE_FIELDS, Scope::Service),
+    ] {
+        for entry in entries(top.and_then(|top| top.get(field)), field)?
+            .into_iter()
+            .flat_map(|entries| entries.values())
+        {
+            let entry = fields(Some(entry), known, field)?;
+            if let Some(tun) = entry.and_then(|entry| entry.get("Tun"))
+                && !tun.is_boolean()
+            {
+                return Err("tailscale serve status: Tun is not a boolean".into());
             }
+            read_scope(entry, scope, &mut config)?;
         }
     }
-    if let Some(tcp) = json.get("TCP").and_then(Value::as_object) {
-        for (port, entry) in tcp {
-            if let Ok(port) = port.parse::<u16>() {
-                config.tcp.push(Forward {
-                    port,
-                    target: entry
-                        .get("TCPForward")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    scope,
-                });
-            }
+    Ok(config)
+}
+
+fn read_scope(
+    scope_json: Option<&serde_json::Map<String, Value>>,
+    scope: Scope,
+    config: &mut ServeConfig,
+) -> Result<(), String> {
+    let Some(json) = scope_json else {
+        return Ok(());
+    };
+    for (host_port, site) in entries(json.get("Web"), "Web")?.into_iter().flatten() {
+        let site = fields(Some(site), SITE_FIELDS, "Web site")?;
+        let handlers = entries(site.and_then(|site| site.get("Handlers")), "Handlers")?;
+        for (path, handler) in handlers.into_iter().flatten() {
+            let Some(handler) = fields(Some(handler), HANDLER_FIELDS, "handler")? else {
+                continue;
+            };
+            config.handlers.push(Handler {
+                host_port: host_port.to_ascii_lowercase(),
+                path: path.clone(),
+                proxy: text(handler, "Proxy")?.map(str::to_string),
+                scope,
+            });
         }
     }
-    if let Some(funnel) = json.get("AllowFunnel").and_then(Value::as_object) {
-        for (host_port, on) in funnel {
-            if on.as_bool() == Some(true) {
-                config.funnel.push(host_port.to_ascii_lowercase());
-            }
+    for (port, entry) in entries(json.get("TCP"), "TCP")?.into_iter().flatten() {
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| format!("tailscale serve status: TCP port {port}"))?;
+        let Some(entry) = fields(Some(entry), TCP_FIELDS, "TCP")? else {
+            continue;
+        };
+        config.tcp.push(Forward {
+            port,
+            target: text(entry, "TCPForward")?.map(str::to_string),
+            scope,
+        });
+    }
+    for (host_port, on) in entries(json.get("AllowFunnel"), "AllowFunnel")?
+        .into_iter()
+        .flatten()
+    {
+        match on {
+            Value::Bool(true) => config.funnel.push(host_port.to_ascii_lowercase()),
+            Value::Bool(false) | Value::Null => {}
+            _ => return Err("tailscale serve status: AllowFunnel is not a boolean".into()),
         }
     }
+    Ok(())
 }
 
 /// Whether a proxy or forward target names this loopback port.
@@ -229,16 +326,18 @@ fn targets_port(target: &str, port: u16) -> bool {
         // `tailscale serve 3000` stores a full URL; a bare number is a port.
         return rest.parse::<u16>().ok() == Some(port);
     };
-    let loopback = matches!(
-        host,
-        "127.0.0.1" | "localhost" | "[::1]" | "::1" | "0.0.0.0"
-    );
+    let loopback = matches!(host, LOOPBACK | "localhost" | "[::1]" | "::1" | "0.0.0.0");
     loopback && named.parse::<u16>().ok() == Some(port)
 }
 
 /// The proxy URL the window's own mapping uses.
 pub(crate) fn our_proxy(port: u16) -> String {
-    format!("http://127.0.0.1:{port}")
+    format!("http://{LOOPBACK}:{port}")
+}
+
+/// Whether an HTTPS port can hold a mapping of the window's at all.
+fn window_port(https: u16) -> bool {
+    HTTPS_PORTS.contains(&https) || RETIRED_HTTPS_PORTS.contains(&https)
 }
 
 fn key(dns_name: &str, https_port: u16) -> String {
@@ -312,6 +411,45 @@ pub(crate) fn ours_stands(
     config.handlers_to(listener_port).any(|handler| {
         handler.scope == Scope::Background && handler.host_port == key && handler.path == "/"
     })
+}
+
+/// The mapping the book names, while it stands on a port the window uses.
+fn named_mapping(
+    config: &ServeConfig,
+    dns_name: &str,
+    (https, port): (Option<u16>, Option<u16>),
+) -> Option<u16> {
+    let (Some(https), Some(port)) = (https, port) else {
+        return None;
+    };
+    (window_port(https) && ours_stands(config, dns_name, https, port)).then_some(https)
+}
+
+/// Add every phone port whose `/` sends to the listener.
+fn add_phone_ports_to(config: &ServeConfig, dns_name: &str, listener: u16, ports: &mut Vec<u16>) {
+    for https in HTTPS_PORTS {
+        if !ports.contains(&https) && ours_stands(config, dns_name, https, listener) {
+            ports.push(https);
+        }
+    }
+}
+
+/// Every mapping of the window's: the one the book names, wherever it now
+/// points, and each phone port sending to the listener — what turning off,
+/// closing and a start with the link off take down.
+pub(crate) fn own_mappings(
+    config: &ServeConfig,
+    dns_name: &str,
+    remembered: (Option<u16>, Option<u16>),
+    listener: Option<u16>,
+) -> Vec<u16> {
+    let mut ports: Vec<u16> = named_mapping(config, dns_name, remembered)
+        .into_iter()
+        .collect();
+    if let Some(listener) = listener {
+        add_phone_ports_to(config, dns_name, listener, &mut ports);
+    }
+    ports
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -498,21 +636,15 @@ pub(crate) fn decide(facts: &Facts<'_>) -> Decision {
     } = *facts;
     let mut remove = Vec::new();
     let mut funnelled_ours = false;
-    if let (Some(https), Some(port)) = (remembered_https, remembered_port)
-        && ours_stands(config, dns_name, https, port)
-    {
+    if let Some(https) = named_mapping(config, dns_name, (remembered_https, remembered_port)) {
         funnelled_ours = config.funnel.contains(&key(dns_name, https));
-        if port != listener || funnelled_ours || !HTTPS_PORTS.contains(&https) {
+        if remembered_port != Some(listener) || funnelled_ours || !HTTPS_PORTS.contains(&https) {
             remove.push(https);
         }
     }
     let after = config.without(dns_name, &remove);
     let refuse = |refusal: Refusal, mut remove: Vec<u16>| {
-        for https in HTTPS_PORTS {
-            if !remove.contains(&https) && ours_stands(&after, dns_name, https, listener) {
-                remove.push(https);
-            }
-        }
+        add_phone_ports_to(&after, dns_name, listener, &mut remove);
         Decision {
             remove,
             then: Then::Refuse(refusal),
@@ -604,13 +736,8 @@ pub(crate) fn serve_off_args(https_port: u16) -> Vec<String> {
     ]
 }
 
-/// Run the CLI within [`CLI_TIMEOUT`]; stdout on a zero exit, the CLI's own
-/// words otherwise.
-pub(crate) fn run(cli: &Path, args: &[String]) -> Result<String, String> {
-    run_within(cli, args, CLI_TIMEOUT)
-}
-
-/// [`run`] with its own time limit. Both pipes are read while the child
+/// Run the CLI within `limit`; stdout on a zero exit, the CLI's own words
+/// otherwise. Both pipes are read while the child
 /// runs: `status --json` on a large tailnet is more than a pipe holds, and a
 /// child whose pipe is full never exits.
 pub(crate) fn run_within(cli: &Path, args: &[String], limit: Duration) -> Result<String, String> {
@@ -647,7 +774,7 @@ pub(crate) fn run_within(cli: &Path, args: &[String], limit: Duration) -> Result
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() < limit => {
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(CLI_POLL);
             }
             Ok(None) => {
                 let _ = child.kill();
@@ -671,27 +798,83 @@ pub(crate) fn run_within(cli: &Path, args: &[String], limit: Duration) -> Result
     }
 }
 
-pub(crate) fn read_status(cli: &Path) -> Tailnet {
-    run(cli, &["status".into(), "--json".into()])
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .map_or(
-            Tailnet {
-                installed: true,
-                ..Tailnet::default()
-            },
-            |json| parse_status(&json),
-        )
+/// `tailscale status --json`, or why it could not be read.
+fn read_status_within(cli: &Path, limit: Duration) -> Result<Tailnet, String> {
+    let text = run_within(cli, &["status".into(), "--json".into()], limit)?;
+    serde_json::from_str::<Value>(&text)
+        .map(|json| parse_status(&json))
+        .map_err(|error| format!("tailscale status: {error}"))
 }
 
-pub(crate) fn read_serve(cli: &Path) -> Result<ServeConfig, String> {
-    let text = run(cli, &["serve".into(), "status".into(), "--json".into()])?;
+/// `tailscale serve status --json`, or why it could not be read or was not
+/// a shape this reads.
+fn read_serve_within(cli: &Path, limit: Duration) -> Result<ServeConfig, String> {
+    let text = run_within(
+        cli,
+        &["serve".into(), "status".into(), "--json".into()],
+        limit,
+    )?;
     if text.trim().is_empty() {
         return Ok(ServeConfig::default());
     }
-    serde_json::from_str::<Value>(&text)
-        .map(|json| parse_serve(&json))
-        .map_err(|error| format!("tailscale serve status: {error}"))
+    let json = serde_json::from_str::<Value>(&text)
+        .map_err(|error| format!("tailscale serve status: {error}"))?;
+    parse_serve(&json)
+}
+
+/// What the window asks the CLI, so the judgments around it are tried
+/// without one.
+pub(crate) trait Cli {
+    fn status(&self) -> Result<Tailnet, String>;
+    fn serve(&self) -> Result<ServeConfig, String>;
+    fn run(&self, args: &[String]) -> Result<String, String>;
+}
+
+/// The installed CLI, each call within [`CLI_TIMEOUT`] and all of them
+/// within one deadline when it has one.
+pub(crate) struct Installed {
+    path: PathBuf,
+    until: Option<std::time::Instant>,
+}
+
+impl Installed {
+    pub(crate) fn find() -> Option<Self> {
+        find_cli().map(|path| Self { path, until: None })
+    }
+
+    /// The CLI with every call it makes ending by `budget` from now.
+    pub(crate) fn find_within(budget: Duration) -> Option<Self> {
+        let until = std::time::Instant::now() + budget;
+        find_cli().map(|path| Self {
+            path,
+            until: Some(until),
+        })
+    }
+
+    fn limit(&self) -> Result<Duration, String> {
+        let Some(until) = self.until else {
+            return Ok(CLI_TIMEOUT);
+        };
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err("tailscale did not answer in time".into());
+        }
+        Ok(left.min(CLI_TIMEOUT))
+    }
+}
+
+impl Cli for Installed {
+    fn status(&self) -> Result<Tailnet, String> {
+        read_status_within(&self.path, self.limit()?)
+    }
+
+    fn serve(&self) -> Result<ServeConfig, String> {
+        read_serve_within(&self.path, self.limit()?)
+    }
+
+    fn run(&self, args: &[String]) -> Result<String, String> {
+        run_within(&self.path, args, self.limit()?)
+    }
 }
 
 #[cfg(test)]
@@ -702,7 +885,7 @@ mod tests {
     const HOST: &str = "host.example.test";
 
     fn config(value: Value) -> ServeConfig {
-        parse_serve(&value)
+        parse_serve(&value).expect("a shape Tailscale writes")
     }
 
     #[test]
@@ -1048,6 +1231,25 @@ mod tests {
         }
     }
 
+    /// The ports are said from [`HTTPS_PORTS`] alone: the pane reads them
+    /// from the status, and no word of it names one.
+    #[test]
+    fn the_pane_says_the_phone_ports_the_window_sends() {
+        let pane = include_str!("../../../../ui/shell-remote.js");
+        let words = include_str!("../../../../ui/shell-i18n.js");
+        assert!(pane.contains("status?.phonePorts"));
+        for https in HTTPS_PORTS {
+            let port = https.to_string();
+            assert!(!pane.contains(&port), "shell-remote.js names {port}");
+            assert!(
+                !words
+                    .lines()
+                    .any(|line| line.contains("remoteLink.") && line.contains(&port)),
+                "shell-i18n.js names {port}"
+            );
+        }
+    }
+
     #[test]
     fn on_and_off_name_one_port_and_never_reset() {
         assert_eq!(
@@ -1067,5 +1269,59 @@ mod tests {
     #[test]
     fn an_empty_serve_status_is_an_empty_configuration() {
         assert_eq!(config(json!({})), ServeConfig::default());
+    }
+
+    /// What the window takes down is one picker for every road: the book's
+    /// mapping on a port the window uses, and phone ports sending to the
+    /// listener — never a port a hand-edited book names.
+    #[test]
+    fn a_book_naming_a_port_the_window_never_uses_is_not_believed() {
+        let person = config(json!({
+            "TCP": { "443": { "HTTPS": true } },
+            "Web": { "host.example.test:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:5000" } } } }
+        }));
+        assert!(own_mappings(&person, HOST, (Some(443), Some(5000)), None).is_empty());
+        let start = decide(&facts(&person, (Some(443), Some(5000)), 6000, None, false));
+        assert!(start.remove.is_empty(), "443 is the person's");
+        let window = config(ours(10443, 5000));
+        assert_eq!(
+            own_mappings(&window, HOST, (Some(10443), Some(5000)), None),
+            vec![10443]
+        );
+        assert_eq!(
+            own_mappings(&window, HOST, (None, None), Some(5000)),
+            vec![10443]
+        );
+        assert!(own_mappings(&window, HOST, (Some(10443), Some(5001)), Some(5001)).is_empty());
+    }
+
+    /// A shape this does not know is never read as "nothing exposed".
+    #[test]
+    fn a_serve_status_of_an_unknown_shape_is_refused() {
+        for unknown in [
+            json!({ "Tunnels": { "x": {} } }),
+            json!({ "Web": [] }),
+            json!({ "TCP": { "443": { "HTTPS": true, "Upstream": "127.0.0.1:5000" } } }),
+            json!({ "TCP": { "https": { "HTTPS": true } } }),
+            json!({ "TCP": { "7000": { "TCPForward": 5000 } } }),
+            json!({ "Web": { "host.example.test:443": { "Handlers": { "/": { "Proxy": 5000 } } } } }),
+            json!({ "Web": { "host.example.test:443": { "Handlers": { "/": { "Upstream": "x" } } } } }),
+            json!({ "AllowFunnel": { "host.example.test:443": "yes" } }),
+            json!({ "Services": { "svc:a": { "Tun": "yes" } } }),
+            json!({ "Foreground": { "s": { "Foreground": {} } } }),
+        ] {
+            assert!(parse_serve(&unknown).is_err(), "{unknown}");
+        }
+        // Every field Tailscale writes is read without complaint.
+        let known = config(json!({
+            "TCP": { "443": { "HTTPS": true, "HTTP": false, "TerminateTLS": "", "ProxyProtocol": 0 } },
+            "Web": { "host.example.test:443": { "Handlers": {
+                "/": { "Path": "/srv", "Text": "hi", "AcceptAppCaps": [], "Redirect": "" }
+            } } },
+            "Services": { "svc:a": { "Tun": true } },
+            "Foreground": { "s": { "AllowFunnel": {} } }
+        }));
+        assert_eq!(known.handlers.len(), 1);
+        assert_eq!(known.handlers[0].proxy, None);
     }
 }

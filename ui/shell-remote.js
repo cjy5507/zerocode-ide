@@ -1837,7 +1837,12 @@ function remoteLinkAgo(epochMs) {
   return t("settings.remoteLink.daysAgo", "{{count}}일 전", { count: Math.floor(hours / 24) });
 }
 
-function remoteLinkProblemWords(problem) {
+/** The HTTPS ports the link may use, as the window says them (`phonePorts`). */
+function remoteLinkPorts(status) {
+  return (status?.phonePorts ?? []).join(", ");
+}
+
+function remoteLinkProblemWords(problem, status) {
   switch (problem) {
     case "tailscale":
       return t("settings.remoteLink.noTailscale", "Tailscale이 없습니다. 설치하고 로그인한 뒤 다시 확인하세요.");
@@ -1850,7 +1855,7 @@ function remoteLinkProblemWords(problem) {
       return t("settings.remoteLink.hookExposed", "에이전트 훅 브리지 포트가 Serve나 Funnel에 올라가 있어 켤 수 없습니다. 그 매핑을 먼저 지우세요.");
     case "port-taken":
     case "no-free-port":
-      return t("settings.remoteLink.portTaken", "쓸 수 있는 HTTPS 포트(10443·9443)를 다른 Serve 매핑이 모두 쓰고 있습니다.");
+      return t("settings.remoteLink.portTaken", "쓸 수 있는 HTTPS 포트({{ports}})를 다른 Serve 매핑이 모두 쓰고 있습니다.", { ports: remoteLinkPorts(status) });
     case "refused":
       return t("settings.remoteLink.funnel", "이 포트에 Funnel(인터넷 공개)이 켜져 있어 폰 기능을 껐습니다.");
     case "listener-shared":
@@ -1963,7 +1968,7 @@ function paintRemoteLink() {
     say(summary, () => road.summary);
   }
   say(el("remote-link-road-desc"), () => road?.words ?? "");
-  const problem = remoteLinkError ?? remoteLinkProblemWords(status?.problem);
+  const problem = remoteLinkError ?? remoteLinkProblemWords(status?.problem, status);
   const error = el("remote-link-error");
   error.hidden = !problem;
   if (problem) say(error, () => problem);

@@ -20,7 +20,8 @@ mod tailscale;
 mod view;
 mod web_push;
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -33,7 +34,7 @@ use zeroize::Zeroizing;
 use crate::ShellStateExt as _;
 use book::{Book, DeviceView};
 use server::{Core, PaneView, StatusView, Window};
-use tailscale::{Exposure, Facts, Refusal, Tailnet, Then};
+use tailscale::{Cli, Exposure, Facts, Installed, Refusal, ServeConfig, Tailnet, Then};
 use view::{Gate, Notice, RawPane, Verdict};
 
 const CREDENTIAL_SERVICE: &str = "dev.zerocode.shell.phone-link";
@@ -48,6 +49,9 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the accept loop rests after a failed accept, so a process out of
 /// file handles does not spin a core asking again.
 const ACCEPT_REST: Duration = Duration::from_millis(100);
+/// Minute looks in a row that may fail to read Tailscale before the listener
+/// closes: one is a hiccup, two is a link nobody can vouch for.
+const MISSED_LOOKS_BEFORE_CLOSING: u32 = 2;
 
 /// `count` bytes from the operating system's generator.
 pub(crate) fn random_bytes<const N: usize>() -> Option<[u8; N]> {
@@ -67,7 +71,17 @@ struct Link {
     /// What the last look at Tailscale found.
     last: Mutex<Look>,
     /// Bumped by every on/off, so a recheck that started before it stands down.
-    epoch: std::sync::atomic::AtomicU64,
+    epoch: AtomicU64,
+    /// Held by turning on, turning off, the minute's look, closing and a
+    /// start's clean-up, so no two of them change the listener or the
+    /// mappings at once.
+    turn: Mutex<()>,
+    /// The loopback port the book's mapping points at, bound from the first
+    /// moment of a start so nothing else this process starts — the hook
+    /// bridge binds right after — is handed it while the mapping may stand.
+    reserved: Mutex<Option<std::net::TcpListener>>,
+    /// The window is closing; a second close does not wait again.
+    closing: AtomicBool,
 }
 
 struct Listening {
@@ -92,40 +106,138 @@ fn hook_port() -> Option<u16> {
     crate::hooks::bridge().map(|bridge| bridge.port)
 }
 
+fn as_cli(cli: Option<&Installed>) -> Option<&dyn Cli> {
+    cli.map(|cli| cli as &dyn Cli)
+}
+
 /// `serve --https=<port> off` for each port, stopping at the first refusal.
-fn take_down(
-    cli: &std::path::Path,
-    ports: &[u16],
-    run: impl Fn(&std::path::Path, &[String]) -> Result<String, String>,
-) -> Result<(), String> {
+fn take_down(cli: &dyn Cli, ports: &[u16]) -> Result<(), String> {
     for https in ports {
-        run(cli, &tailscale::serve_off_args(*https))?;
+        cli.run(&tailscale::serve_off_args(*https))?;
     }
     Ok(())
+}
+
+/// The mapping the book says the window made: HTTPS port, loopback port.
+fn pair_of(book: &Book) -> (Option<u16>, Option<u16>) {
+    (book.https_port, book.port)
+}
+
+/// Take down every Serve mapping of the window's. With nothing to take down
+/// nothing is asked. With something to take down, a CLI, status, name or
+/// Serve configuration that cannot be read is an error, never "done" — the
+/// book keeps naming the mapping until it is known gone.
+fn take_down_own(
+    cli: Option<&dyn Cli>,
+    remembered: (Option<u16>, Option<u16>),
+    listening: Option<u16>,
+) -> Result<(), String> {
+    if remembered.0.is_none() && listening.is_none() {
+        return Ok(());
+    }
+    let cli = cli.ok_or("tailscale")?;
+    let name = cli.status()?.dns_name.ok_or("tailscale-name")?;
+    let serve = cli.serve()?;
+    take_down(
+        cli,
+        &tailscale::own_mappings(&serve, &name, remembered, listening),
+    )
+}
+
+/// Forget the pair a take-down was for once its mappings are known gone,
+/// and only while the book still names that pair: a press that wrote a new
+/// one in between keeps it.
+fn forget_when_gone(
+    book: &mut Book,
+    taken: (Option<u16>, Option<u16>),
+    outcome: &Result<(), String>,
+) {
+    if outcome.is_ok() && pair_of(book) == taken {
+        book.https_port = None;
+        book.port = None;
+    }
+}
+
+fn book_of(core: &Core) -> Book {
+    core.book
+        .lock()
+        .map(|book| book.clone())
+        .unwrap_or_default()
+}
+
+fn write_book_of(core: &Core, change: impl FnOnce(&mut Book)) {
+    {
+        let Ok(mut book) = core.book.lock() else {
+            return;
+        };
+        change(&mut book);
+    }
+    core.save();
+}
+
+/// The book's half of turning off: the window's mappings taken down, the
+/// link marked off, and the pair forgotten only when they went.
+fn turn_off(core: &Core, cli: Option<&dyn Cli>, listening: Option<u16>) -> Result<(), String> {
+    let pair = pair_of(&book_of(core));
+    let outcome = take_down_own(cli, pair, listening);
+    write_book_of(core, |book| {
+        book.enabled = false;
+        forget_when_gone(book, pair, &outcome);
+    });
+    outcome
+}
+
+/// A start with the link off still owns the mapping its book names — an off
+/// whose take-down failed, a press that failed after mapping — and takes it
+/// down without opening anything. `None` when the book names none.
+fn sweep_off(core: &Core, cli: Option<&dyn Cli>) -> Option<Result<(), String>> {
+    let book = book_of(core);
+    if book.enabled || book.https_port.is_none() {
+        return None;
+    }
+    let pair = pair_of(&book);
+    let outcome = take_down_own(cli, pair, None);
+    write_book_of(core, |book| {
+        if !book.enabled {
+            forget_when_gone(book, pair, &outcome);
+        }
+    });
+    Some(outcome)
 }
 
 /// The window is closing: the mapping it made comes down with it, so no
 /// tailnet name points at a loopback port somebody else may take before the
 /// next start. The book keeps the link on and its port, and the next start
-/// maps it again.
+/// maps it again. The whole close waits [`tailscale::EXIT_CLI_TIMEOUT`] at
+/// most: the CLI runs on a thread of its own, and a close that outlives it
+/// is finished by the next start.
 pub(crate) fn shutdown() {
     let Some(link) = link() else {
         return;
     };
-    if link.listening_port().is_none() {
+    if link.listening_port().is_none() || link.closing.swap(true, Ordering::SeqCst) {
         return;
     }
-    link.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let _ = link.take_down_own(tailscale::EXIT_CLI_TIMEOUT);
-    link.stop_listener();
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        link.close();
+        let _ = done.send(());
+    });
+    let _ = finished.recv_timeout(tailscale::EXIT_CLI_TIMEOUT);
 }
 
 /// Read the book and, when a person had turned the link on, bring it back up
-/// off the boot path.
+/// off the boot path; when they had turned it off and the book still names a
+/// mapping, take that down.
 pub(crate) fn boot(app: &AppHandle, local_data_root: &std::path::Path) {
     let path = book::book_path(local_data_root);
     let held = book::load(&path);
     let enabled = held.enabled;
+    let named = held.https_port.is_some();
+    let reserved = held
+        .https_port
+        .and(held.port)
+        .and_then(|port| std::net::TcpListener::bind((tailscale::LOOPBACK, port)).ok());
     let core = Arc::new(Core::new(Some(path), held));
     let made = LINK.set(Link {
         app: app.clone(),
@@ -134,19 +246,41 @@ pub(crate) fn boot(app: &AppHandle, local_data_root: &std::path::Path) {
         gate: Mutex::new(Gate::default()),
         vapid: Mutex::new(None),
         last: Mutex::new(Look::default()),
-        epoch: std::sync::atomic::AtomicU64::new(0),
+        epoch: AtomicU64::new(0),
+        turn: Mutex::new(()),
+        reserved: Mutex::new(reserved),
+        closing: AtomicBool::new(false),
     });
-    if made.is_err() || !enabled {
+    if made.is_err() || !enabled && !named {
         return;
     }
-    std::thread::spawn(|| {
-        if let Some(link) = link()
-            && let Err(word) = link.bring_up(false)
+    std::thread::spawn(move || {
+        let Some(link) = link() else {
+            return;
+        };
+        if !enabled {
+            link.sweep();
+        } else if let Err(word) = link.bring_up(false)
             && let Ok(mut look) = link.last.lock()
         {
             look.problem = Some(word);
         }
     });
+}
+
+/// The listener's socket: one already serving, or a fresh one that accepts
+/// nothing until the judgment says to serve.
+enum Socket {
+    Serving(u16),
+    Bound(std::net::TcpListener, u16),
+}
+
+impl Socket {
+    fn port(&self) -> u16 {
+        match self {
+            Self::Serving(port) | Self::Bound(_, port) => *port,
+        }
+    }
 }
 
 /// The pane's whole picture.
@@ -164,6 +298,8 @@ pub(crate) struct LinkStatus {
     url: Option<String>,
     push_ready: bool,
     devices: Vec<DeviceView>,
+    /// The HTTPS ports the link may use, for the pane's words about them.
+    phone_ports: [u16; 2],
     #[serde(skip_serializing_if = "Option::is_none")]
     code_expires_ms: Option<i64>,
 }
@@ -188,21 +324,15 @@ pub(crate) struct TestPush {
 
 impl Link {
     fn book(&self) -> Book {
-        self.core
-            .book
-            .lock()
-            .map(|book| book.clone())
-            .unwrap_or_default()
+        book_of(&self.core)
     }
 
     fn write_book(&self, change: impl FnOnce(&mut Book)) {
-        {
-            let Ok(mut book) = self.core.book.lock() else {
-                return;
-            };
-            change(&mut book);
-        }
-        self.core.save();
+        write_book_of(&self.core, change);
+    }
+
+    fn turn(&self) -> MutexGuard<'_, ()> {
+        self.turn.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn listening_port(&self) -> Option<u16> {
@@ -236,6 +366,7 @@ impl Link {
             url,
             push_ready: self.vapid.lock().map(|key| key.is_some()).unwrap_or(false),
             devices: book.views(),
+            phone_ports: tailscale::HTTPS_PORTS,
             code_expires_ms: self
                 .core
                 .pairing
@@ -247,22 +378,38 @@ impl Link {
 
     /// Look at Tailscale without changing anything.
     fn look(&self) -> Look {
-        let Some(cli) = tailscale::find_cli() else {
-            return Look::default();
+        let cli = Installed::find();
+        self.read(as_cli(cli.as_ref())).0
+    }
+
+    /// One read of Tailscale — status, then Serve — that the pane and a
+    /// judgment share: what the pane shows, and this machine's name and the
+    /// Serve configuration, or why they could not be read.
+    fn read(&self, cli: Option<&dyn Cli>) -> (Look, Result<(String, ServeConfig), String>) {
+        let Some(cli) = cli else {
+            return (Look::default(), Err("tailscale".into()));
         };
-        let tailnet = tailscale::read_status(&cli);
+        let tailnet = match cli.status() {
+            Ok(tailnet) => tailnet,
+            Err(error) => {
+                let look = Look {
+                    tailnet: Tailnet::unread(),
+                    ..Look::default()
+                };
+                return (look, Err(error));
+            }
+        };
         let mut look = Look {
             tailnet,
             exposure: None,
             problem: None,
         };
         let (Some(name), true) = (look.tailnet.dns_name.clone(), look.tailnet.running) else {
-            return look;
+            return (look, Err("tailscale-stopped".into()));
         };
-        match tailscale::read_serve(&cli) {
+        match cli.serve() {
             Ok(serve) => {
-                let book = self.book();
-                let https = book.https_port.unwrap_or(tailscale::HTTPS_PORTS[0]);
+                let https = self.book().https_port.unwrap_or(tailscale::HTTPS_PORTS[0]);
                 look.exposure = Some(tailscale::exposure_of(
                     &serve,
                     &name,
@@ -270,10 +417,13 @@ impl Link {
                     self.listening_port(),
                     hook_port(),
                 ));
+                (look, Ok((name, serve)))
             }
-            Err(error) => look.problem = Some(error),
+            Err(error) => {
+                look.problem = Some(error.clone());
+                (look, Err(error))
+            }
         }
-        look
     }
 
     fn remember(&self, look: Look) {
@@ -292,7 +442,8 @@ impl Link {
     /// person's press; a start serves only behind the phone port it had.
     /// Whatever stops it closes the listener again.
     fn bring_up(&'static self, asked: bool) -> Result<(), String> {
-        let epoch = self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let _turn = self.turn();
+        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let outcome = self.bring_up_at(epoch, asked);
         if outcome.is_err() {
             self.stop_listener();
@@ -301,8 +452,8 @@ impl Link {
     }
 
     fn bring_up_at(&'static self, epoch: u64, asked: bool) -> Result<(), String> {
-        let cli = tailscale::find_cli().ok_or("tailscale")?;
-        let tailnet = tailscale::read_status(&cli);
+        let cli = Installed::find().ok_or("tailscale")?;
+        let tailnet = cli.status().unwrap_or_else(|_| Tailnet::unread());
         let refused_before = |word: &str| {
             self.remember(Look {
                 tailnet: tailnet.clone(),
@@ -320,21 +471,22 @@ impl Link {
             return refused_before("tailscale-https");
         }
         let book = self.book();
-        let listener = self.start_listener(book.port)?;
-        let serve = tailscale::read_serve(&cli)?;
+        let socket = self.bind(book.port)?;
+        let listener = socket.port();
+        let serve = cli.serve()?;
         let facts = Facts {
             config: &serve,
             dns_name: &name,
-            remembered: (book.https_port, book.port),
+            remembered: pair_of(&book),
             listener,
             hook: hook_port(),
             asked,
         };
         let mut decision = tailscale::decide(&facts);
-        take_down(&cli, &decision.remove, tailscale::run)?;
+        take_down(&cli, &decision.remove)?;
         if !decision.remove.is_empty() && matches!(decision.then, Then::Serve { .. }) {
             // What the CLI left is read again rather than assumed.
-            let left = tailscale::read_serve(&cli)?;
+            let left = cli.serve()?;
             decision = tailscale::decide(&Facts {
                 config: &left,
                 ..facts
@@ -346,7 +498,13 @@ impl Link {
         let https = match decision.then {
             Then::Serve { https, map } => {
                 if map {
-                    tailscale::run(&cli, &tailscale::serve_on_args(https, listener))?;
+                    // The book names the mapping before it exists, so one a
+                    // failure leaves behind is still the window's to take down.
+                    self.write_book(|book| {
+                        book.port = Some(listener);
+                        book.https_port = Some(https);
+                    });
+                    cli.run(&tailscale::serve_on_args(https, listener))?;
                 }
                 https
             }
@@ -359,6 +517,7 @@ impl Link {
                 return Err(refusal.word().into());
             }
         };
+        self.serve(socket);
         self.load_vapid(true);
         self.write_book(|book| {
             book.enabled = true;
@@ -371,70 +530,69 @@ impl Link {
         Ok(())
     }
 
-    /// Take down every Serve mapping of the window's: the one the book names
-    /// wherever it now points, and any phone port sending to the listener.
-    fn take_down_own(&self, limit: Duration) -> Result<(), String> {
-        let Some(cli) = tailscale::find_cli() else {
-            return Ok(());
-        };
-        let book = self.book();
-        let listening = self.listening_port();
-        if book.https_port.is_none() && listening.is_none() {
-            return Ok(());
+    /// The close's half of [`shutdown`]: the window's mappings, then the port.
+    fn close(&self) {
+        let _turn = self.turn();
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        let cli = Installed::find_within(tailscale::EXIT_CLI_TIMEOUT);
+        let _ = take_down_own(
+            as_cli(cli.as_ref()),
+            pair_of(&self.book()),
+            self.listening_port(),
+        );
+        self.stop_listener();
+    }
+
+    /// A start with the link off: [`sweep_off`], and the reserved port let go
+    /// once nothing of the window's points at it.
+    fn sweep(&self) {
+        let _turn = self.turn();
+        let cli = Installed::find();
+        if let Some(Ok(())) = sweep_off(&self.core, as_cli(cli.as_ref())) {
+            self.release_reserved();
         }
-        let Some(name) = tailscale::read_status(&cli).dns_name else {
-            return Ok(());
-        };
-        let serve = tailscale::read_serve(&cli)?;
-        let mut ports: Vec<u16> = Vec::new();
-        if let (Some(https), Some(port)) = (book.https_port, book.port)
-            && tailscale::ours_stands(&serve, &name, https, port)
-        {
-            ports.push(https);
+    }
+
+    fn release_reserved(&self) {
+        if let Ok(mut reserved) = self.reserved.lock() {
+            reserved.take();
         }
-        if let Some(port) = listening {
-            for https in tailscale::HTTPS_PORTS {
-                if !ports.contains(&https) && tailscale::ours_stands(&serve, &name, https, port) {
-                    ports.push(https);
-                }
-            }
-        }
-        take_down(&cli, &ports, |cli, args| {
-            tailscale::run_within(cli, args, limit)
-        })
     }
 
     /// Turn the link off: the Serve mappings this window made, then the port.
+    /// A mapping that could not be taken down stays named in the book, and
+    /// the next start takes it down.
     fn bring_down(&self) -> Result<(), String> {
-        self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let outcome = self.take_down_own(tailscale::CLI_TIMEOUT);
+        let _turn = self.turn();
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        let cli = Installed::find();
+        let outcome = turn_off(&self.core, as_cli(cli.as_ref()), self.listening_port());
         self.stop_listener();
+        if outcome.is_ok() {
+            self.release_reserved();
+        }
         if let Ok(mut pairing) = self.core.pairing.lock() {
             pairing.clear();
         }
-        let gone = outcome.is_ok();
-        self.write_book(|book| {
-            book.enabled = false;
-            // A mapping that could not be taken down stays named, so the next
-            // start tries again.
-            if gone {
-                book.https_port = None;
-                book.port = None;
-            }
-        });
         let look = self.look();
         self.remember(look);
         outcome
     }
 
-    fn start_listener(&'static self, remembered: Option<u16>) -> Result<u16, String> {
+    /// The socket a turn-on judges with: the serving one, the port a start
+    /// reserved, the port the book remembers, or any.
+    fn bind(&self, remembered: Option<u16>) -> Result<Socket, String> {
         if let Some(port) = self.listening_port() {
-            return Ok(port);
+            return Ok(Socket::Serving(port));
         }
-        let bound = remembered
-            .and_then(|port| std::net::TcpListener::bind(("127.0.0.1", port)).ok())
-            .map_or_else(|| std::net::TcpListener::bind(("127.0.0.1", 0)), Ok)
-            .map_err(|error| format!("listen: {error}"))?;
+        let reserved = self.reserved.lock().ok().and_then(|mut held| held.take());
+        let bound = match reserved {
+            Some(socket) => socket,
+            None => remembered
+                .and_then(|port| std::net::TcpListener::bind((tailscale::LOOPBACK, port)).ok())
+                .map_or_else(|| std::net::TcpListener::bind((tailscale::LOOPBACK, 0)), Ok)
+                .map_err(|error| format!("listen: {error}"))?,
+        };
         bound
             .set_nonblocking(true)
             .map_err(|error| format!("listen: {error}"))?;
@@ -442,6 +600,14 @@ impl Link {
             .local_addr()
             .map_err(|error| format!("listen: {error}"))?
             .port();
+        Ok(Socket::Bound(bound, port))
+    }
+
+    /// Start accepting on a socket the judgment said to serve.
+    fn serve(&'static self, socket: Socket) {
+        let Socket::Bound(bound, port) = socket else {
+            return;
+        };
         if let Ok(mut hosts) = self.core.hosts.lock() {
             hosts.listener_port = port;
         }
@@ -474,7 +640,6 @@ impl Link {
         if let Ok(mut running) = self.running.lock() {
             *running = Some(Listening { port, task });
         }
-        Ok(port)
     }
 
     fn stop_listener(&self) {
@@ -483,41 +648,67 @@ impl Link {
         }
     }
 
-    /// Re-read Serve every minute while on, and judge it as a start would:
-    /// a refusal takes the window's mappings down and closes the listener.
+    /// Re-read Tailscale every minute while on, once for the pane and the
+    /// judgment both, and judge it as a start would: a refusal takes the
+    /// window's mappings down and closes the listener, and so do two looks
+    /// in a row that could not read it.
     fn watch(&'static self, epoch: u64) {
         std::thread::spawn(move || {
+            let mut missed = 0;
             loop {
                 std::thread::sleep(RECHECK);
-                if self.epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+                let _turn = self.turn();
+                if self.epoch.load(Ordering::SeqCst) != epoch {
                     return;
                 }
-                let mut look = self.look();
-                if let Some(refusal) = self.refusal_now()
-                    && self.epoch.load(std::sync::atomic::Ordering::SeqCst) == epoch
-                {
-                    look.exposure = Some(refusal.exposure());
-                    look.problem = Some(refusal.word().into());
-                    self.remember(look);
+                let Some(listener) = self.listening_port() else {
                     return;
-                }
+                };
+                let cli = Installed::find();
+                let (mut look, read) = self.read(as_cli(cli.as_ref()));
+                let stop = match (read, as_cli(cli.as_ref())) {
+                    (Ok((name, serve)), Some(cli)) => {
+                        missed = 0;
+                        let refusal = self.refusal_of(cli, &name, &serve, listener);
+                        if let Some(refusal) = refusal {
+                            look.exposure = Some(refusal.exposure());
+                            look.problem = Some(refusal.word().into());
+                        }
+                        refusal.is_some()
+                    }
+                    (Ok(_), None) => false,
+                    (Err(error), _) => {
+                        missed += 1;
+                        let stop = missed >= MISSED_LOOKS_BEFORE_CLOSING;
+                        if stop {
+                            self.stop_listener();
+                            look.problem = Some(error);
+                        }
+                        stop
+                    }
+                };
                 self.remember(look);
+                if stop {
+                    return;
+                }
             }
         });
     }
 
-    /// Judge the running link once; when refused, take its mappings down and
-    /// close the listener.
-    fn refusal_now(&self) -> Option<Refusal> {
-        let listener = self.listening_port()?;
-        let cli = tailscale::find_cli()?;
-        let name = tailscale::read_status(&cli).dns_name?;
-        let serve = tailscale::read_serve(&cli).ok()?;
+    /// Judge the running link on one read; when refused, take its mappings
+    /// down and close the listener.
+    fn refusal_of(
+        &self,
+        cli: &dyn Cli,
+        name: &str,
+        serve: &ServeConfig,
+        listener: u16,
+    ) -> Option<Refusal> {
         let book = self.book();
         let decision = tailscale::decide(&Facts {
-            config: &serve,
-            dns_name: &name,
-            remembered: (book.https_port, book.port),
+            config: serve,
+            dns_name: name,
+            remembered: pair_of(&book),
             listener,
             hook: hook_port(),
             asked: false,
@@ -525,7 +716,7 @@ impl Link {
         let Then::Refuse(refusal) = decision.then else {
             return None;
         };
-        let _ = take_down(&cli, &decision.remove, tailscale::run);
+        let _ = take_down(cli, &decision.remove);
         self.stop_listener();
         Some(refusal)
     }
@@ -906,6 +1097,162 @@ fn qr_svg(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::book::Book;
+    use super::server::Core;
+    use super::tailscale::{self, Cli, ServeConfig, Tailnet};
+    use std::sync::Mutex;
+
+    const HOST: &str = "host.example.test";
+
+    /// A CLI that answers from fixtures and writes down what it was told to
+    /// run.
+    struct Fixture {
+        status: Result<Tailnet, String>,
+        serve: Result<ServeConfig, String>,
+        ran: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl Fixture {
+        fn named(serve: serde_json::Value) -> Self {
+            Self {
+                status: Ok(Tailnet {
+                    installed: true,
+                    running: true,
+                    dns_name: Some(HOST.into()),
+                    https_ready: true,
+                    owner_login: None,
+                }),
+                serve: tailscale::parse_serve(&serve),
+                ran: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn ran(&self) -> Vec<Vec<String>> {
+            self.ran.lock().expect("ran").clone()
+        }
+    }
+
+    impl Cli for Fixture {
+        fn status(&self) -> Result<Tailnet, String> {
+            self.status.clone()
+        }
+        fn serve(&self) -> Result<ServeConfig, String> {
+            self.serve.clone()
+        }
+        fn run(&self, args: &[String]) -> Result<String, String> {
+            self.ran.lock().expect("ran").push(args.to_vec());
+            Ok(String::new())
+        }
+    }
+
+    /// The window's mapping `10443 → 127.0.0.1:5000`, as Serve writes it.
+    fn ours() -> serde_json::Value {
+        serde_json::json!({
+            "TCP": { "10443": { "HTTPS": true } },
+            "Web": { "host.example.test:10443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:5000" } } } }
+        })
+    }
+
+    fn core(enabled: bool) -> Core {
+        Core::new(
+            None,
+            Book {
+                enabled,
+                port: Some(5000),
+                https_port: Some(10443),
+                ..Book::default()
+            },
+        )
+    }
+
+    fn pair(core: &Core) -> (Option<u16>, Option<u16>) {
+        super::pair_of(&super::book_of(core))
+    }
+
+    /// The re-check's blocking scene: 「끄기」 pressed while Tailscale's status
+    /// cannot be read. The mapping cannot be taken down, so the book keeps
+    /// naming it — off, but still the window's to take down.
+    #[test]
+    fn turning_off_with_tailscale_unread_keeps_the_mapping_named() {
+        let core = core(true);
+        let mut unread = Fixture::named(ours());
+        unread.status = Err("tailscale did not answer in time".into());
+        assert!(super::turn_off(&core, Some(&unread), Some(5000)).is_err());
+        assert!(!super::book_of(&core).enabled);
+        assert_eq!(pair(&core), (Some(10443), Some(5000)));
+        assert!(unread.ran().is_empty());
+
+        let mut nameless = Fixture::named(ours());
+        nameless.status = Ok(Tailnet::unread());
+        assert!(super::turn_off(&core, Some(&nameless), Some(5000)).is_err());
+        assert_eq!(
+            pair(&core),
+            (Some(10443), Some(5000)),
+            "no name, no take-down"
+        );
+
+        let mut unserved = Fixture::named(ours());
+        unserved.serve = Err("tailscale: serve status failed".into());
+        assert!(super::turn_off(&core, Some(&unserved), Some(5000)).is_err());
+        assert!(super::turn_off(&core, None, Some(5000)).is_err(), "no CLI");
+        assert_eq!(pair(&core), (Some(10443), Some(5000)));
+
+        let read = Fixture::named(ours());
+        assert!(super::turn_off(&core, Some(&read), Some(5000)).is_ok());
+        assert_eq!(read.ran(), [tailscale::serve_off_args(10443)]);
+        assert_eq!(pair(&core), (None, None), "gone, then forgotten");
+    }
+
+    /// The book is off but still names a mapping: the next start takes it
+    /// down without a listener, then forgets it.
+    #[test]
+    fn a_start_with_the_link_off_takes_the_named_mapping_down() {
+        let core = core(false);
+        let mut unread = Fixture::named(ours());
+        unread.status = Err("tailscale did not answer in time".into());
+        assert!(matches!(
+            super::sweep_off(&core, Some(&unread)),
+            Some(Err(_))
+        ));
+        assert_eq!(
+            pair(&core),
+            (Some(10443), Some(5000)),
+            "kept for the next start"
+        );
+
+        let read = Fixture::named(ours());
+        assert_eq!(super::sweep_off(&core, Some(&read)), Some(Ok(())));
+        assert_eq!(read.ran(), [tailscale::serve_off_args(10443)]);
+        assert_eq!(pair(&core), (None, None));
+        assert_eq!(
+            super::sweep_off(&core, Some(&read)),
+            None,
+            "nothing named now"
+        );
+
+        let on = self::core(true);
+        assert_eq!(
+            super::sweep_off(&on, Some(&read)),
+            None,
+            "an on link is the start's"
+        );
+        assert_eq!(pair(&on), (Some(10443), Some(5000)));
+    }
+
+    /// A mapping somebody else moved off the window's port is not the
+    /// window's: the start forgets the pair and touches nothing.
+    #[test]
+    fn a_start_with_the_link_off_leaves_a_mapping_it_did_not_make() {
+        let core = core(false);
+        let moved = Fixture::named(serde_json::json!({
+            "TCP": { "10443": { "HTTPS": true } },
+            "Web": { "host.example.test:10443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:7777" } } } }
+        }));
+        assert_eq!(super::sweep_off(&core, Some(&moved)), Some(Ok(())));
+        assert!(moved.ran().is_empty());
+        assert_eq!(pair(&core), (None, None));
+    }
+
     #[test]
     fn a_qr_code_draws_in_the_panes_own_colour() {
         let svg = super::qr_svg("https://host.example.test:8443/pair#ABCD2345").expect("fits");
@@ -953,28 +1300,28 @@ mod tests {
         }
 
         /// Puts Serve back the way it was found, whatever the test did.
-        struct Off(std::path::PathBuf, u16);
+        struct Off(tailscale::Installed, u16);
         impl Drop for Off {
             fn drop(&mut self) {
-                let _ = tailscale::run(&self.0, &tailscale::serve_off_args(self.1));
+                let _ = self.0.run(&tailscale::serve_off_args(self.1));
             }
         }
 
         if std::env::var_os("ZEROCODE_PHONE_LINK_LIVE").is_none() {
             return;
         }
-        let cli = tailscale::find_cli().expect("a Tailscale CLI");
-        let tailnet = tailscale::read_status(&cli);
+        let cli = tailscale::Installed::find().expect("a Tailscale CLI");
+        let tailnet = cli.status().expect("tailscale status");
         assert!(tailnet.running && tailnet.https_ready, "tailnet not ready");
         let name = tailnet.dns_name.clone().expect("a MagicDNS name");
-        let before = tailscale::read_serve(&cli).expect("serve status");
+        let before = cli.serve().expect("serve status");
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("runtime");
         let listener = runtime
-            .block_on(tokio::net::TcpListener::bind(("127.0.0.1", 0)))
+            .block_on(tokio::net::TcpListener::bind((tailscale::LOOPBACK, 0)))
             .expect("loopback bind");
         let port = listener.local_addr().expect("addr").port();
         let core = Arc::new(Core::new(None, book::Book::default()));
@@ -1005,9 +1352,13 @@ mod tests {
         let tailscale::Then::Serve { https, map: true } = pressed.then else {
             panic!("no free phone port: {pressed:?}");
         };
-        tailscale::run(&cli, &tailscale::serve_on_args(https, port)).expect("serve on");
-        let off = Off(cli.clone(), https);
-        let mapped = tailscale::read_serve(&cli).expect("serve status");
+        cli.run(&tailscale::serve_on_args(https, port))
+            .expect("serve on");
+        let off = Off(
+            tailscale::Installed::find().expect("a Tailscale CLI"),
+            https,
+        );
+        let mapped = cli.serve().expect("serve status");
         assert_eq!(
             tailscale::reach_of(&mapped, &name, port),
             tailscale::Reach::Ours(https),
@@ -1067,7 +1418,7 @@ mod tests {
         println!("GET /api/panes with token = {with_token}");
 
         drop(off);
-        let after = tailscale::read_serve(&cli).expect("serve status");
+        let after = cli.serve().expect("serve status");
         println!(
             "off: phone mapping stands = {}; Serve as found = {}",
             tailscale::ours_stands(&after, &name, https, port),
