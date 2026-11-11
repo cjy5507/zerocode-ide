@@ -976,7 +976,31 @@ pub struct MarkdownStream {
     /// heading — Anthropic thinking — so the caller commits it as a thinking
     /// cell ([`super::thinking::cell`]) rather than codex's summary cell.
     headerless_thinking: bool,
+    /// The line still being written is drawn as far as it has come
+    /// ([`Self::showing_unfinished`]); codex's silence until the newline
+    /// otherwise.
+    shows_unfinished: bool,
+    /// The unfinished line's rows as [`Self::refresh_unfinished`] last
+    /// rendered them, and what they were rendered from: a frame that brings
+    /// no new text draws them again unread.
+    unfinished: Option<UnfinishedRows>,
 }
+
+/// The rows of a line still being written ([`MarkdownStream::refresh_unfinished`]),
+/// kept with the lengths and the width they were rendered at.
+#[derive(Debug)]
+struct UnfinishedRows {
+    committed: usize,
+    pending: usize,
+    width: usize,
+    rows: Vec<Line>,
+}
+
+/// The most source — the block being written and its unfinished line — that
+/// is rendered again as the line grows. A block past this, a list or a quote
+/// with no boundary for pages, shows its line when the line ends, as codex
+/// does: the price of a frame stays bounded.
+const UNFINISHED_MAX_SOURCE: usize = 16 * 1024;
 
 impl MarkdownStream {
     /// 답변 셀.
@@ -1007,7 +1031,25 @@ impl MarkdownStream {
             kind: MarkdownStreamKind::Answer,
             reasoning_transcript: None,
             headerless_thinking: false,
+            shows_unfinished: false,
+            unfinished: None,
         }
+    }
+
+    /// An answer whose line still being written is drawn as far as it has
+    /// come, when `shows` — the marks look's.
+    ///
+    /// codex draws nothing of a line until its newline, so a paragraph of
+    /// one long line — every paragraph of a Korean answer — stands blank for
+    /// seconds and then lands whole. Here the line's rows stand in the live
+    /// cell from its first word ([`Self::tail`]), rendered as they will be
+    /// when the newline comes, and go into the scrollback in the frame it
+    /// does: rows a person is already reading are not typed out a second
+    /// time ([`Self::tick`]).
+    #[must_use]
+    pub fn showing_unfinished(mut self, shows: bool) -> Self {
+        self.shows_unfinished = shows;
+        self
     }
 
     /// reasoning 셀 — 본문 전체에 dim+italic 을 덧입힌다.
@@ -1163,6 +1205,13 @@ impl MarkdownStream {
 
     /// 커밋 애니메이션 한 틱 — 이번에 스크롤백으로 갈 행들.
     pub fn tick(&mut self, now: Instant) -> Vec<Line> {
+        if self.shows_unfinished {
+            // The rows stood in the live cell while their line was written:
+            // they go into the scrollback as they are, in this frame, where
+            // the cadence below would take them off the screen and type them
+            // back a row a tick.
+            return self.drain(self.queue.len());
+        }
         let snapshot = Snapshot {
             queued_lines: self.queue.len(),
             oldest_age: self
@@ -1253,10 +1302,97 @@ impl MarkdownStream {
     /// 올 때까지 화면은 `Working` 만 보여 준다.
     #[must_use]
     pub fn tail(&self) -> Vec<Line> {
+        if self.shows_unfinished {
+            // Every row that is not in the scrollback yet — a queued row
+            // stays on screen until the tick that hands it over — and then
+            // the line still being written.
+            let mut tail = self.rendered[self.at(self.emitted)..].to_vec();
+            tail.extend(self.unfinished_rows().iter().cloned());
+            return tail;
+        }
         if self.enqueued >= self.total_rows() {
             return Vec::new();
         }
         self.rendered[self.at(self.enqueued)..].to_vec()
+    }
+
+    /// The rows of the line still being written, as [`Self::refresh_unfinished`]
+    /// last rendered them — none once the text they were rendered beside has
+    /// been committed, since they stand among the committed rows then.
+    fn unfinished_rows(&self) -> &[Line] {
+        match &self.unfinished {
+            Some(drawn) if drawn.committed == self.committed.len() && drawn.width == self.width => drawn.rows.as_slice(),
+            _ => &[],
+        }
+    }
+
+    /// Render the line still being written as it will stand when its newline
+    /// lands: the block it belongs to rendered with it, less the rows that
+    /// stand already. So a list item, a heading or a quote reads as one from
+    /// its first word, and the newline moves nothing. Called once a frame,
+    /// before the frame is painted; a frame with no new text renders nothing.
+    ///
+    /// No rows for a line whose shape is not settled until it ends — a table
+    /// row (a row re-lays every row above it), a line that opens a code
+    /// fence, a line inside one (its colour is its block's) — nor for a block
+    /// past [`UNFINISHED_MAX_SOURCE`].
+    pub fn refresh_unfinished(&mut self) {
+        if !self.shows_unfinished || self.kind != MarkdownStreamKind::Answer {
+            return;
+        }
+        let fresh = self.unfinished.as_ref().is_some_and(|drawn| {
+            drawn.committed == self.committed.len() && drawn.pending == self.pending.len() && drawn.width == self.width
+        });
+        if fresh {
+            return;
+        }
+        let rows = self.render_unfinished();
+        self.unfinished = Some(UnfinishedRows {
+            committed: self.committed.len(),
+            pending: self.pending.len(),
+            width: self.width,
+            rows,
+        });
+    }
+
+    fn render_unfinished(&self) -> Vec<Line> {
+        if self.pending.trim().is_empty() {
+            return Vec::new();
+        }
+        let opens = self.pending.trim_start();
+        if self.holdback.state() != holdback::State::None
+            || self.open_code_fence.is_some()
+            || opens.starts_with("```")
+            || opens.starts_with("~~~")
+            || opens.starts_with('|')
+        {
+            return Vec::new();
+        }
+        let block = &self.committed[self.stable_cut..];
+        if block.len() + self.pending.len() > UNFINISHED_MAX_SOURCE {
+            return Vec::new();
+        }
+        let mut source = String::with_capacity(block.len() + self.pending.len() + 1);
+        source.push_str(block);
+        source.push_str(&self.pending);
+        source.push('\n');
+        let written = self.segment(&source, !self.stable_marker);
+        // The rows from the stable prefix on, built as `render_mutable_tail`
+        // builds them, so the count that stands lines up with these.
+        let mut rows = Vec::new();
+        if !written.lines.is_empty() {
+            if self.stable_cut > 0 {
+                rows.extend(self.stable_pad.iter().cloned());
+                rows.push(Line::empty());
+            }
+            rows.extend(written.lines);
+        }
+        let standing = self.total_rows().saturating_sub(self.stable_lines);
+        if rows.len() > standing {
+            rows.split_off(standing)
+        } else {
+            Vec::new()
+        }
     }
 
     /// 확정 영역의 경계를 밀고 새 행을 큐에 넣는다 — codex
@@ -2020,6 +2156,173 @@ mod tests {
         let rows: Vec<String> = stream.finish().iter().map(Line::plain).collect();
         assert_eq!(rows, vec![String::new(), "  one two three".to_string()]);
         assert!(stream.finish().is_empty());
+    }
+
+    /// One frame of a stream that draws its unfinished line: the line is
+    /// rendered, the queue is handed over, and what stands on screen is what
+    /// went into the scrollback (`said`) and then the tail.
+    fn frame(stream: &mut MarkdownStream, said: &mut Vec<String>) -> Vec<String> {
+        stream.refresh_unfinished();
+        said.extend(stream.tick(Instant::now()).iter().map(Line::plain));
+        let mut rows = said.clone();
+        rows.extend(stream.tail().iter().map(Line::plain));
+        rows
+    }
+
+    fn plain_tail(stream: &MarkdownStream) -> Vec<String> {
+        stream.tail().iter().map(Line::plain).collect()
+    }
+
+    /// A stream asked to shows its line from the first word, wrapped as the
+    /// finished line will be. The newline takes nothing off the screen — the
+    /// rows stay in the tail until the frame that hands them over — and that
+    /// frame hands all of them over at once: rows already read are not typed
+    /// out a row a tick.
+    #[test]
+    fn a_line_still_being_written_shows_as_far_as_it_has_come() {
+        let mut stream = MarkdownStream::answer(12).showing_unfinished(true);
+        let mut said = Vec::new();
+        stream.push("alpha beta ");
+        assert_eq!(frame(&mut stream, &mut said), ["  alpha beta"]);
+        stream.push("gamma");
+        assert_eq!(frame(&mut stream, &mut said), ["  alpha beta", "  gamma"]);
+        assert!(said.is_empty(), "nothing is in the scrollback before the newline");
+        // A frame with nothing new draws the same rows.
+        assert_eq!(frame(&mut stream, &mut said), ["  alpha beta", "  gamma"]);
+
+        stream.push("\n");
+        assert_eq!(plain_tail(&stream), ["  alpha beta", "  gamma"], "the newline alone moves nothing");
+        assert_eq!(frame(&mut stream, &mut said), ["", "  alpha beta", "  gamma"]);
+        assert_eq!(said, ["", "  alpha beta", "  gamma"], "one frame hands the whole line over");
+        assert!(stream.tail().is_empty());
+
+        // The next line stands under it from its first word.
+        stream.push("delta");
+        assert_eq!(frame(&mut stream, &mut said), ["", "  alpha beta", "  gamma", "  delta"]);
+    }
+
+    /// An unfinished line stands as it will when its newline lands, whatever
+    /// it is: the answer's first line, a paragraph after a blank line, a list
+    /// item, a heading, a quote, the next line of a paragraph, a line that
+    /// wraps over ten rows. A row that differed would be a jump on screen.
+    #[test]
+    fn an_unfinished_line_stands_as_it_will_when_its_newline_lands() {
+        let long = "word ".repeat(70);
+        let cases: [(&str, &str); 9] = [
+            ("", "a first line that wraps over the width of the pane"),
+            ("first paragraph\n\n", "second paragraph, after a blank line"),
+            ("- one item\n", "- a second item that is being written now"),
+            ("- one item\n- a second\n\n", "prose after the list is over"),
+            ("# Heading\n\n", "## a second heading on its way"),
+            ("> quoted\n", "> more of the quote arriving"),
+            ("a line\n", "and the line under it in the same paragraph"),
+            ("1. first\n", "2. the second step being written"),
+            ("intro\n\n", long.trim_end()),
+        ];
+        for (before, line) in cases {
+            let mut stream = MarkdownStream::answer(30).showing_unfinished(true);
+            if !before.is_empty() {
+                stream.push(before);
+            }
+            let (head, rest) = line.split_at(line.len() / 2);
+            stream.push(head);
+            stream.refresh_unfinished();
+            let half = plain_tail(&stream);
+            stream.push(rest);
+            stream.refresh_unfinished();
+            let standing = plain_tail(&stream);
+            assert!(standing.len() >= half.len(), "{before:?} + {line:?}: rows went away as the line grew");
+            let last_word = line.split_whitespace().next_back().unwrap_or_default();
+            assert!(
+                standing.last().is_some_and(|row| row.contains(last_word)),
+                "{before:?} + {line:?}: the line's last word is not on its last row: {standing:#?}"
+            );
+            stream.push("\n");
+            assert_eq!(plain_tail(&stream), standing, "{before:?} + {line:?}: the newline moved a row");
+        }
+        let rows = |line: &str| {
+            let mut stream = MarkdownStream::answer(30).showing_unfinished(true);
+            stream.push("intro\n\n");
+            stream.push(line);
+            stream.refresh_unfinished();
+            stream.tail().len()
+        };
+        assert!(rows(long.trim_end()) > 10, "the long case wraps over ten rows");
+    }
+
+    /// A line whose shape is not settled until it ends is not drawn early: a
+    /// table's row, a line that opens a code fence, a line inside one. What
+    /// stood before it stays.
+    #[test]
+    fn a_line_whose_shape_waits_for_its_end_is_not_drawn_early() {
+        for (before, line) in [
+            ("intro\n\n", "| name | value"),
+            ("| a | b |\n| --- | --- |\n", "| 1 | 2"),
+            ("intro\n\n", "```rust"),
+            ("intro\n\n```rust\nlet a = 1;\n", "let b = 2;"),
+        ] {
+            let mut stream = MarkdownStream::answer(40).showing_unfinished(true);
+            stream.push(before);
+            stream.refresh_unfinished();
+            let standing = plain_tail(&stream);
+            stream.push(line);
+            stream.refresh_unfinished();
+            assert_eq!(plain_tail(&stream), standing, "{before:?} + {line:?}");
+        }
+    }
+
+    /// A stream that was not asked to keeps codex's silence, and thinking is
+    /// never drawn this way: its whole body is pending until it ends.
+    #[test]
+    fn an_unfinished_line_is_drawn_only_where_it_was_asked_for() {
+        let mut as_codex = MarkdownStream::answer(40);
+        as_codex.push("alpha beta");
+        as_codex.refresh_unfinished();
+        assert!(as_codex.tail().is_empty());
+
+        let mut thinking = MarkdownStream::reasoning(40).showing_unfinished(true);
+        thinking.push("a thought\nand more of it");
+        thinking.refresh_unfinished();
+        assert!(thinking.tail().is_empty());
+    }
+
+    /// What a growing line costs: each frame renders the block being written
+    /// and the line, never the answer before it — and a frame with no new
+    /// text renders nothing.
+    #[test]
+    fn a_growing_line_renders_its_own_block_and_nothing_before_it() {
+        let mut stream = MarkdownStream::answer(60).showing_unfinished(true);
+        let paragraph = "A paragraph of the answer that has already been written out in full.\n\n";
+        for _ in 0..200 {
+            stream.push(paragraph);
+        }
+        let _ = stream.tick(Instant::now());
+        let answer = paragraph.len() * 200;
+
+        crate::tui::markdown::probe::reset();
+        let mut line = 0usize;
+        for _ in 0..50 {
+            stream.push("six more ");
+            line += "six more ".len();
+            stream.refresh_unfinished();
+            assert!(!stream.tail().is_empty());
+        }
+        let (calls, bytes, _) = crate::tui::markdown::probe::read();
+        assert_eq!(calls, 50, "one render a frame");
+        // Each render reads the block being written — the paragraphs since the
+        // last boundary, a few at most — and the line: a few hundred bytes a
+        // frame where the answer is fourteen thousand.
+        assert!(
+            bytes <= 50 * (3 * paragraph.len() + line + 1),
+            "{bytes} bytes parsed for a {line}-byte line over a {answer}-byte answer"
+        );
+
+        crate::tui::markdown::probe::reset();
+        for _ in 0..50 {
+            stream.refresh_unfinished();
+            let _ = stream.tail();
+        }
+        assert_eq!(crate::tui::markdown::probe::read().0, 0, "a frame with no new text renders nothing");
     }
 
     #[test]

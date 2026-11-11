@@ -666,6 +666,10 @@ struct Ui {
     /// The newest words of the turn's thinking so far, bounded
     /// ([`thinking::TAIL_KEEP_BYTES`]); empty once the answer or a call began.
     thinking_said: String,
+    /// An answer's line shows as far as it has come while it is written
+    /// ([`MarkdownStream::showing_unfinished`]), with the working row kept
+    /// under it — the marks look's.
+    unfinished_lines: bool,
     /// When the thinking block that is open began.
     reasoning_started: Option<Instant>,
     /// What the working row said the open thinking block was about — its
@@ -1648,6 +1652,9 @@ impl Ui {
             self.last_commit = None;
             return;
         };
+        // The line still being written is rendered here, once a frame, for
+        // the frame painted next ([`MarkdownStream::refresh_unfinished`]).
+        stream.refresh_unfinished();
         if !stream.is_draining() {
             self.last_commit = Some(now);
             return;
@@ -2259,7 +2266,10 @@ impl Ui {
             status: self.status.as_ref(),
             pending_input: (!pending_input.is_empty()).then_some(pending_input.as_slice()),
             active: (!active.is_empty()).then_some(active.as_slice()),
-            tail_owns_slot,
+            // Where an answer shows as it is written the working row stays
+            // under it: what the turn is doing is on screen at all times.
+            tail_owns_slot: tail_owns_slot && !self.unfinished_lines,
+            active_keeps_newest: tail_owns_slot && self.unfinished_lines,
             dialog,
             question,
             picker: self.overlay(),
@@ -2287,7 +2297,7 @@ impl Ui {
             max_height: usize::from(self.painter.max_height()),
         };
         let built = view::build_parts(&frame);
-        let dense = self.work_opens_dense(tail_owns_slot);
+        let dense = self.work_opens_dense(tail_owns_slot) || self.tail_continues_its_answer(tail_owns_slot);
         self.place(built, whole, dense);
     }
 
@@ -2303,6 +2313,17 @@ impl Ui {
             HistoryTail::ToolCell => !tail_owns_slot && !self.fold.is_pending() && self.tool_cell.is_some(),
             HistoryTail::Other => false,
         }
+    }
+
+    /// Whether the live rows are the next rows of an answer whose earlier
+    /// rows are in the transcript already: they stand right under those, with
+    /// no gap row, as they will once the line ends — a gap would put the line
+    /// a row lower than it lands.
+    fn tail_continues_its_answer(&self, tail_owns_slot: bool) -> bool {
+        tail_owns_slot
+            && self.unfinished_lines
+            && !self.fold.is_pending()
+            && matches!(&self.segment, Segment::Text(_, stream) if !stream.is_empty())
     }
 
     /// Put the built rows on the screen: the head sized for them — as a popup
@@ -5237,7 +5258,8 @@ impl Ui {
         // 이므로 답변 행이 그 앞을 지나가면 순서가 뒤집힌다. 아직 도는 셀은
         // 그대로 둔다(codex 도 활성 칸은 하나지만 도는 exec 을 버리지 않는다).
         self.flush_tool_cell();
-        self.segment = Segment::Text(id, MarkdownStream::answer(self.width()));
+        self.segment =
+            Segment::Text(id, MarkdownStream::answer(self.width()).showing_unfinished(self.unfinished_lines));
         self.last_commit = None;
     }
 
@@ -5719,6 +5741,7 @@ impl App {
                 thinking_line: super::style::current().thinking_line,
                 thinking_tail: super::style::current().style == super::style::TuiStyle::Marks,
                 thinking_said: String::new(),
+                unfinished_lines: super::style::current().style == super::style::TuiStyle::Marks,
                 reasoning_started: None,
                 reasoning_about: None,
                 start_notes: Vec::new(),
@@ -8007,6 +8030,7 @@ fn test_ui() -> Ui {
         thinking_line: false,
         thinking_tail: false,
         thinking_said: String::new(),
+        unfinished_lines: false,
         reasoning_started: None,
         reasoning_about: None,
         start_notes: Vec::new(),
@@ -9188,6 +9212,65 @@ mod tests {
         reason(&mut as_before, ids.next(), "I should read the parser", false);
         assert!(shown(&as_before).is_empty(), "{}", shown(&as_before));
         assert_eq!(header(&as_before), crate::tui::view::Status::DEFAULT_HEADER);
+    }
+
+    /// An answer's line shows in the live rows from its first word, and its
+    /// newline moves it into the transcript without a frame in which a row
+    /// of it is missing or stands twice — a short line and one that wraps
+    /// over ten rows. The live rows of an answer already in the transcript
+    /// open with no gap row, so the line lands on the rows it stood on.
+    #[test]
+    fn an_answers_unfinished_line_stands_live_and_lands_once() {
+        /// One frame: the stream's due rows go to the transcript, and what
+        /// the screen then shows is the transcript and the live rows.
+        fn frame(ui: &mut super::Ui) -> Vec<String> {
+            ui.commit_stream(Instant::now());
+            let mut rows = history(ui);
+            rows.extend(ui.active_cell(80).0.iter().map(Line::plain));
+            rows
+        }
+        fn times(rows: &[String], word: &str) -> usize {
+            rows.iter().map(|row| row.matches(word).count()).sum()
+        }
+
+        for words in [8usize, 200] {
+            let mut ui = test_ui();
+            ui.unfinished_lines = true;
+            ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+            let ids = BlockIdGen::default();
+            let id = ids.next();
+            let mut say = |ui: &mut super::Ui, text: String| ui.block(RenderBlock::TextDelta { id, text, done: false });
+
+            // A first line, finished: it is in the transcript.
+            say(&mut ui, "The first line.\n".to_string());
+            let rows = frame(&mut ui);
+            assert_eq!(times(&rows, "The first line."), 1, "{rows:#?}");
+
+            // The second line arrives a word at a time.
+            let mut shown = Vec::new();
+            for n in 0..words {
+                say(&mut ui, format!("w{n:03} "));
+                shown = frame(&mut ui);
+                assert_eq!(times(&shown, &format!("w{n:03}")), 1, "word {n} of {words}: {shown:#?}");
+            }
+            assert_eq!(times(&history(&ui), "w000"), 0, "nothing of the line is in the transcript yet");
+            assert!(!ui.work_opens_dense(true), "the transcript's last cell is no band and no tool cell");
+            assert!(ui.tail_continues_its_answer(true), "the live rows are the answer's next rows: no gap row");
+
+            // The newline: every word once, in the frame before any tick and
+            // in the frame after, and the rows are the rows that stood.
+            say(&mut ui, "\n".to_string());
+            let before_tick: Vec<String> =
+                history(&ui).into_iter().chain(ui.active_cell(80).0.iter().map(Line::plain)).collect();
+            let landed = frame(&mut ui);
+            for rows in [&before_tick, &landed] {
+                for n in 0..words {
+                    assert_eq!(times(rows, &format!("w{n:03}")), 1, "word {n} of {words}: {rows:#?}");
+                }
+            }
+            assert_eq!(landed, shown, "{words} words: the newline moved a row");
+            assert_eq!(times(&history(&ui), &format!("w{:03}", words - 1)), 1, "the line is in the transcript");
+        }
     }
 
     /// The `turns` view folds each call as it finishes: commands that come
@@ -11116,6 +11199,7 @@ mod tests {
             pending_input: None,
             active: None,
             tail_owns_slot: false,
+            active_keeps_newest: false,
             dialog: None,
             question: None,
             picker: None,

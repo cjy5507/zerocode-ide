@@ -21,6 +21,7 @@ fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         pending_input: None,
         active: None,
         tail_owns_slot: false,
+        active_keeps_newest: false,
         dialog: None,
         question: None,
         picker: None,

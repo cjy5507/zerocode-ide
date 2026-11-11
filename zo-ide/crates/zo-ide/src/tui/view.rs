@@ -1708,6 +1708,10 @@ pub struct Frame<'a> {
     /// indicator while leaving task-running state untouched" — esc 는 그대로
     /// 턴을 끊는다).
     pub tail_owns_slot: bool,
+    /// The active cell is an answer being written: when it is taller than
+    /// the rows it may take, its newest rows are the ones kept
+    /// ([`clip_newest`]) — the words arriving now, not the ones read already.
+    pub active_keeps_newest: bool,
     pub dialog: Option<&'a Dialog>,
     /// 떠 있는 `AskUserQuestion` 오버레이. 보기가 있으면 뷰포트를 통째로 쓰고,
     /// 자유 서술 또는 활성 Other 행이면 컴포저가 답을 받는다.
@@ -2014,11 +2018,8 @@ fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16
     let budget = frame.max_rows.saturating_sub(rows.len() + 1);
     let mut head: Vec<Line> = Vec::with_capacity(budget + 1);
     head.push(Line::empty());
-    head.extend(
-        clip_active(active, budget)
-            .into_iter()
-            .map(|line| line.truncated(frame.width)),
-    );
+    let clipped = if frame.active_keeps_newest { clip_newest(active, budget) } else { clip_active(active, budget) };
+    head.extend(clipped.into_iter().map(|line| line.truncated(frame.width)));
     let composer_row = composer_row + u16::try_from(head.len()).unwrap_or(u16::MAX);
     let work_rows = head.len() + status_rows;
     head.extend(rows);
@@ -2147,6 +2148,21 @@ fn clip_active(active: &[Line], budget: usize) -> Vec<Line> {
     lines
 }
 
+/// [`clip_active`] for a cell whose newest rows matter most — an answer being
+/// written: the count of the rows not shown stands first, then the last rows.
+fn clip_newest(active: &[Line], budget: usize) -> Vec<Line> {
+    if active.len() <= budget {
+        return active.to_vec();
+    }
+    let shown = budget.saturating_sub(1);
+    let mut lines: Vec<Line> = Vec::with_capacity(budget);
+    if budget > 0 {
+        lines.push(Line::new(vec![Span::dim(strings::more_lines(active.len() - shown))]));
+    }
+    lines.extend(active[active.len() - shown..].iter().cloned());
+    lines
+}
+
 /// The keep-list of slash commands — the `?` card's last section
 /// ([`super::shortcuts::card`]), where codex prints `/keymap customize`.
 #[must_use]
@@ -2213,6 +2229,7 @@ mod tests {
             pending_input: None,
             active: None,
             tail_owns_slot: false,
+            active_keeps_newest: false,
             dialog: None,
             question: None,
             picker: None,

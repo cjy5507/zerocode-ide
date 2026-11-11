@@ -138,6 +138,7 @@ fn frame<'a>(
         pending_input: pending,
         active: None,
         tail_owns_slot: false,
+        active_keeps_newest: false,
         dialog: None,
         question: None,
         picker: None,
