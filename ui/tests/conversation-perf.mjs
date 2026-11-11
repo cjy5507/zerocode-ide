@@ -229,7 +229,16 @@ export function streamingAnswer({ fences = ["js"] } = {}) {
  * that closed). With `timed`, the open is measured as a person meets it —
  * from the moment the page is asked to open to the first frame painted after
  * its rows stand (`mountMs` when the rows stand, `firstPaintMs` when that
- * frame is on screen, `from` on the page's clock). */
+ * frame is on screen, `from` on the page's clock).
+ *
+ * "On screen" is the start of the first task after that frame's callbacks,
+ * whoever posted it. The task this posts from its own callback is one; the
+ * page's timers are the others, and a long open posts one from its callback
+ * in the same frame (`standRestOfOpen`: the next step of rows, 15–16 ms in
+ * WebKit). Which of the two runs first is the engine's choice, and when the
+ * step did, its length was read as part of the paint it follows — 75 ms where
+ * the frame stood at 57 (WebKit 26, 400 turns folded, 8 of 8 opens,
+ * 2026-11-11). So the page's timers are watched while the open is timed. */
 export async function openFixtureConversation(page, turns, { timed = false } = {}) {
   return page.evaluate(async ({ history, png, timed }) => {
     window.__PERF_LIVE__ = [];
@@ -243,6 +252,16 @@ export async function openFixtureConversation(page, turns, { timed = false } = {
     window.__ANSWER__.wire_stop = () => null;
     // A picture's bytes, when the page asks for one (A8's lazy load).
     window.__ANSWER__.wire_image = () => png;
+    // When the first timer to run began, while the open is timed.
+    const timers = { began: null, timeout: window.setTimeout };
+    if (timed) {
+      window.setTimeout = (run, ms, ...rest) => timers.timeout.call(window, typeof run === "function"
+        ? (...args) => {
+          timers.began ??= performance.now();
+          return run(...args);
+        }
+        : run, ms, ...rest);
+    }
     const from = performance.now();
     await openWirePage("claude", "/tmp/zerocode-window-test", { history });
     const mounted = performance.now();
@@ -250,14 +269,18 @@ export async function openFixtureConversation(page, turns, { timed = false } = {
     // if they did.
     const rowsAtMount = document.querySelectorAll("#worker-view .helper-turns > [data-turn]").length;
     // The frame after the rows stand, once it is on screen: a task posted
-    // from inside the frame's callback runs after the frame is drawn.
+    // from inside the frame's callback runs after the frame is drawn — this
+    // one, or a timer of the page's that began first.
     const painted = timed
       ? await new Promise((done) => requestAnimationFrame(() => {
+        // What ran before this frame is not after it.
+        timers.began = null;
         const channel = new MessageChannel();
-        channel.port1.onmessage = () => done(performance.now());
+        channel.port1.onmessage = () => done(timers.began ?? performance.now());
         channel.port2.postMessage(null);
       }))
       : null;
+    if (timed) window.setTimeout = timers.timeout;
     await pollHelperPages();
     await window.__PAINTED__();
     await new Promise((done) => setTimeout(done, 50));
