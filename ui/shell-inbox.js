@@ -788,8 +788,13 @@ async function closeInboxQuestion(item) {
  * sidebar's worker row all close through it, with the same limit (`INBOX_CLOSE_REASON_MAX`), the same refusal
  * sentences (`inboxRefusal`) and the same receipt name rule. `closing` is the words written and the state of
  * their one send (`inboxDraft`); `repaint` draws the surface again; `started` runs once the send is on its way
- * and `closed` once the ledger took it. */
-async function closeQuestionWithoutAnswer(closing, { run, message, repaint, started = () => {}, closed = () => {} }) {
+ * and `closed` once the ledger took it. Closing is the person's alone (`desk_question_close`): `hand` is the
+ * hand of the press that asked — read here when the caller is that press itself (the inbox's button and its
+ * Enter), handed in by a form, whose `submit` comes after its press (`submitByPress`). */
+async function closeQuestionWithoutAnswer(
+  closing,
+  { run, message, repaint, started = () => {}, closed = () => {}, hand = handNow() },
+) {
   const reason = closing.text.trim();
   if (reason === "") {
     closing.error = t("inbox.close.needsReason", "닫는 까닭을 한 줄 적어야 닫힙니다.");
@@ -805,7 +810,7 @@ async function closeQuestionWithoutAnswer(closing, { run, message, repaint, star
   started();
   repaint();
   try {
-    const answer = await invoke("desk_question_close", { run, message, reason, retryRequest: closing.retry.id }, { hand: handNow() });
+    const answer = await invoke("desk_question_close", { run, message, reason, retryRequest: closing.retry.id }, { hand });
     closing.sent = true;
     closing.answered = Boolean(answer?.answerId);
     closing.retry = null;
@@ -830,7 +835,9 @@ function questionClosing(run, message) {
 
 /* The why a row asks for before it closes (t-88847): one line on the inbox's limit, a confirm and a cancel.
  * `formClass` is the form's own class and `prefix` the stem of its parts (`<prefix>-field`, `-send`, `-cancel`,
- * `-error`), so each surface styles its own and shares the words. Esc is the cancel. */
+ * `-error`), so each surface styles its own and shares the words. Esc is the cancel. `send(hand)` is given the
+ * hand of the press — the button's click or Enter in the field (`submitByPress`): the browser submits a form
+ * after its press, where the hand is nobody's, and closing a question is the person's alone. */
 function questionCloseForm(formClass, prefix, { send, cancel, input }) {
   const form = document.createElement("form");
   form.className = formClass;
@@ -862,11 +869,8 @@ function questionCloseForm(formClass, prefix, { send, cancel, input }) {
   const actions = document.createElement("div");
   actions.className = `${prefix}-actions`;
   actions.append(error, stop, go);
-  form.onsubmit = (event) => {
-    event.preventDefault();
-    send();
-  };
   form.append(field, actions);
+  submitByPress(form, go, (hand) => send(hand));
   return form;
 }
 

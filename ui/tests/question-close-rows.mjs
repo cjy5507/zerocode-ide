@@ -23,9 +23,16 @@ import { standTeamScene } from "./sidebar-team.mjs";
 async function stand(page) {
   await page.evaluate(() => {
     window.__CLOSED__ = [];
+    window.__CLOSE_HANDS__ = [];
     window.__CLOSE_FAIL__ = null;
-    window.__ANSWER__.desk_question_close = (args) => {
+    // What the ledger was asked, and whose hand the page said asked it (`zerocode-hand`, shell-boot.js
+    // `invoke`): closing a question is the person's alone, so the window runs it for `person` and no other.
+    window.__CLOSE_SAW__ = (args, options) => {
       window.__CLOSED__.push(args);
+      window.__CLOSE_HANDS__.push(options?.headers?.["zerocode-hand"] ?? null);
+    };
+    window.__ANSWER__.desk_question_close = (args, options) => {
+      window.__CLOSE_SAW__(args, options);
       if (window.__CLOSE_FAIL__) throw new Error(window.__CLOSE_FAIL__);
       return { closed: true, already: false };
     };
@@ -175,8 +182,8 @@ async function boardScene({ browser, origin, ok, faults }) {
     await page.evaluate(async () => {
       window.__CLOSED__.length = 0;
       window.__CLOSE_FAIL__ = null;
-      window.__ANSWER__.desk_question_close = (args) => {
-        window.__CLOSED__.push(args);
+      window.__ANSWER__.desk_question_close = (args, options) => {
+        window.__CLOSE_SAW__(args, options);
         return { closed: false, already: true, answerId: "a-77" };
       };
       const [asked] = deskLedger.mail;
@@ -204,6 +211,13 @@ async function boardScene({ browser, origin, ok, faults }) {
       return { shown: closes.some((close) => !close.hidden && close.checkVisibility()), rows: closes.length };
     }, row);
     ok("a window that does not hold the run's seat shows no 답 없이 닫기", unseated.shown === false, JSON.stringify(unseated));
+
+    // Every close above said whose hand pressed it — Enter in the field once, the 닫기 button twice. The
+    // browser submits a form after its press has been dispatched, where the hand is nobody's: read there,
+    // the person's own close was refused by the window (it was, until the form sent by its press).
+    const hands = await page.evaluate(() => [...window.__CLOSE_HANDS__]);
+    ok("every_close_from_a_board_row_says_the_persons_hand_by_enter_and_by_the_button",
+      JSON.stringify(hands) === JSON.stringify(["person", "person", "person"]), JSON.stringify(hands));
   } finally {
     await page.close();
   }
@@ -334,8 +348,8 @@ async function sidebarScene({ browser, origin, ok, faults }) {
       window.__FRESH__ = { ...window.__FRESH__, mail: [window.__LETTER__("m-q3", "w-b2", "둘째 워커의 질문", 3)] };
       window.__LEDGER__.find((row) => row.worker === "w-b2").asking = true;
       window.__CLOSED__.length = 0;
-      window.__ANSWER__.desk_question_close = (args) => {
-        window.__CLOSED__.push(args);
+      window.__ANSWER__.desk_question_close = (args, options) => {
+        window.__CLOSE_SAW__(args, options);
         return { closed: false, already: true, answerId: "a-9" };
       };
     });
@@ -424,6 +438,10 @@ async function sidebarScene({ browser, origin, ok, faults }) {
       button: document.querySelector(".team-close")?.checkVisibility() ?? false,
       form: document.querySelector(".team-close-form")?.checkVisibility() ?? false }));
     ok("leaving the team view takes the control and the form away", away.button === false && away.form === false, JSON.stringify(away));
+    // The same form on the sidebar: each close sent by Enter said the person's hand.
+    const hands = await side.evaluate(() => [...window.__CLOSE_HANDS__]);
+    ok("every_close_from_the_sidebars_worker_row_says_the_persons_hand",
+      hands.length >= 2 && hands.every((hand) => hand === "person"), JSON.stringify(hands));
     ok("the scenes raise no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await side.close();

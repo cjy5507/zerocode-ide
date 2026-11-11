@@ -614,7 +614,7 @@ function deskCloseForm(row, view) {
       // The door it came through: the focus goes back to 답 없이 닫기, not to the page.
       row.querySelector(".board-desk-letter-close")?.focus();
     },
-    send: () => void closeDeskQuestion(view, row.__letter),
+    send: (hand) => void closeDeskQuestion(view, row.__letter, hand),
   });
   // Esc is the cancel from any part of the form, not only from its field.
   form.addEventListener("keydown", (event) => {
@@ -627,12 +627,13 @@ function deskCloseForm(row, view) {
   return form;
 }
 
-async function closeDeskQuestion(view, letter) {
+async function closeDeskQuestion(view, letter, hand) {
   const closing = letter && questionClosing(letter.run, letter.id);
   if (!closing || closing.sending || closing.sent) return;
   await closeQuestionWithoutAnswer(closing, {
     run: letter.run,
     message: letter.id,
+    hand,
     repaint: () => paintCoordinatorDesk(view),
     closed: () => {
       closing.open = false;

@@ -7940,7 +7940,7 @@ function teamCloseForm() {
   teamCloseFormNode = questionCloseForm("team-close-form", "team-close", {
     input: (text) => { closingOf().text = text; },
     cancel: () => closeTeamClose(),
-    send: () => void closeTeamQuestion(),
+    send: (hand) => void closeTeamQuestion(hand),
   });
   // Which question this closes, said in words: whose it is, what it asks, and how many wait when more than one does.
   const head = document.createElement("div");
@@ -8011,7 +8011,7 @@ function closeTeamClose({ focus = true } = {}) {
   if (focus && node) node.focus();
 }
 
-async function closeTeamQuestion() {
+async function closeTeamQuestion(hand) {
   const open = teamCloseOpen;
   if (!open) return;
   const closing = questionClosing(open.letter.run, open.letter.id);
@@ -8019,6 +8019,7 @@ async function closeTeamQuestion() {
   await closeQuestionWithoutAnswer(closing, {
     run: open.letter.run,
     message: open.letter.id,
+    hand,
     repaint: paintTeamClose,
     closed: () => {
       if (deskViews().length > 0) refreshDeskLedger();

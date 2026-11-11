@@ -531,63 +531,182 @@ fn saving_switching_and_running_an_automation_are_the_persons_alone() {
 /// (2026-11-11). The browser submits as the press's default action, after the
 /// press has been dispatched, and `handNow` answers `none` there — so a
 /// person-only command called from `submit` is refused for the person's own
-/// press (the automation's save was, the day it became person-only, and a
-/// GitLab token's sign-in before it). No `submit` listener in the page reads a
-/// hand or names a person-only command; the two forms whose submission runs
-/// one read the hand at the button's click and at Enter in a one-line field,
-/// and their `submit` only keeps the page where it is. What a listener calls
-/// is not followed here: the words it holds itself are.
+/// press. It was: a GitLab token's sign-in and a question closed without an
+/// answer, both since they were written, and the automation's save the day it
+/// became person-only.
+///
+/// Every handler the browser's own submission reaches is read — a
+/// `addEventListener("submit", …)` and a `.onsubmit = …` alike — with the
+/// functions it calls by name, one step down: none reads a hand, none names a
+/// person-only command. A form whose submission does run one reads the hand
+/// at its button's click and at Enter in a one-line field (`submitByPress`),
+/// or submits inside its press, as the worker composer's button and key do.
+///
+/// A handler that is handed its work as a closure cannot be followed by
+/// words: the question-closing form was that shape, and passed. So the
+/// handlers are also counted, file by file. A new one is read by whoever adds
+/// it before the count is moved: where does what it calls read its hand?
 #[test]
 fn a_forms_submit_never_reads_the_hand_of_a_person_only_command() {
     let person_only = person_only_commands();
-    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
-    let listens = "addEventListener(\"submit\"";
-    let mut listeners = 0;
-    for entry in std::fs::read_dir(&ui).expect("ui reads") {
-        let path = entry.expect("ui entry").path();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        if !name.ends_with(".js") {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        for (at, _) in text.match_indices(listens) {
-            listeners += 1;
-            let listener = enclosing_call(&text, at + "addEventListener(".len());
-            assert!(
-                !listener.contains("handNow("),
-                "{name}: a submit listener reads a hand: {listener}"
-            );
-            for command in &person_only {
+    let scripts = ui_scripts();
+    let mut counted = std::collections::BTreeMap::new();
+    for (name, text) in &scripts {
+        let listened = text
+            .match_indices("addEventListener(\"submit\"")
+            .map(|(at, _)| enclosing_call(text, at + "addEventListener(".len()));
+        let assigned = text
+            .match_indices(".onsubmit = ")
+            .map(|(at, opens)| statement_at(text, at + opens.len()));
+        for handler in listened.chain(assigned) {
+            *counted.entry(name.as_str()).or_insert(0usize) += 1;
+            let called = called_names(handler)
+                .into_iter()
+                .filter_map(|function| function_block(&scripts, function));
+            for read in std::iter::once(handler).chain(called) {
                 assert!(
-                    !listener.contains(&format!("\"{command}\"")),
-                    "{name}: a submit listener runs {command}: {listener}"
+                    !read.contains("handNow("),
+                    "{name}: a form's submit reads a hand — in itself or one call down: {read}"
                 );
+                for command in &person_only {
+                    assert!(
+                        !read.contains(&format!("\"{command}\"")),
+                        "{name}: a form's submit runs {command} — in itself or one call down: {read}"
+                    );
+                }
             }
         }
     }
-    assert!(listeners > 5, "the page's submit listeners were read");
-    let settings = ui_file("shell-settings.js");
-    let by_press = block_after(&settings, "function submitByPress(form, button, send) {");
+    // Read 2026-11-11, each to the end of what it calls. One reaches a
+    // person-only command further down than one call: the worker composer
+    // (`shell.js`), whose button and key both submit inside the press, so its
+    // hand is that press's. The new-chat form (`shell-workspace.js`) calls
+    // `closeTab`, which ends a lane or a shell only for a lane's or a
+    // terminal's tab: the tab it closes is neither, so nothing there is the
+    // person's alone.
+    let expected: std::collections::BTreeMap<&str, usize> = [
+        ("shell-board-now.js", 1),
+        ("shell-board.js", 1),
+        ("shell-boot.js", 1),
+        ("shell-composer.js", 1),
+        ("shell-doc.js", 2),
+        ("shell-flow.js", 1),
+        ("shell-jev.js", 3),
+        ("shell-knowledge.js", 1),
+        ("shell-remote.js", 2),
+        ("shell-settings.js", 1),
+        ("shell-sftp.js", 2),
+        ("shell-workspace.js", 1),
+        ("shell.js", 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        counted, expected,
+        "a form's submit handler was added or taken away: read where what it calls takes its hand, then move the count"
+    );
+
+    let boot = ui_file("shell-boot.js");
+    let by_press = block_after(&boot, "function submitByPress(form, button, send) {");
     assert!(
         by_press.contains("form.addEventListener(\"submit\", (event) => event.preventDefault());")
             && by_press.contains("button.addEventListener(\"click\", press);")
             && by_press.contains("if (!button.disabled && form.reportValidity()) send(handNow());")
-            && by_press.contains("event.isComposing"),
+            && by_press.contains("event.isComposing")
+            && by_press.contains("event.keyCode === 229"),
         "the press reads the hand, and submit only keeps the page where it is"
     );
-    for wired in [
-        "submitByPress(el(\"auto-form\"), el(\"auto-save\"), (hand) => void saveAutomation(hand));",
-        "submitByPress(paste, send, (hand) => void connectGitlabHost(host, field, said, send, hand));",
+    let settings = ui_file("shell-settings.js");
+    let inbox = ui_file("shell-inbox.js");
+    for (script, wired) in [
+        (
+            &settings,
+            "submitByPress(el(\"auto-form\"), el(\"auto-save\"), (hand) => void saveAutomation(hand));",
+        ),
+        (
+            &settings,
+            "submitByPress(paste, send, (hand) => void connectGitlabHost(host, field, said, send, hand));",
+        ),
+        (&inbox, "submitByPress(form, go, (hand) => send(hand));"),
     ] {
-        assert!(
-            settings.contains(wired),
-            "a form saves by its press: {wired}"
-        );
+        assert!(script.contains(wired), "a form sends by its press: {wired}");
     }
+    // The question's close takes the hand it is handed, or reads it where the
+    // caller is the press itself — before anything is awaited.
+    let closing = block_after(&inbox, "async function closeQuestionWithoutAnswer(");
+    let taken = closing
+        .find("hand = handNow() },")
+        .expect("closing a question takes its press's hand");
+    let awaited = closing.find("await ").expect("it awaits");
+    assert!(
+        taken < awaited && closing.contains("retryRequest: closing.retry.id }, { hand });"),
+        "the close is sent with the hand of its press"
+    );
+    let shell = ui_file("shell.js");
+    let send_button = block_after(
+        &shell,
+        "send.addEventListener(\"click\", async (event) => {",
+    );
+    assert!(
+        send_button.contains("event.preventDefault();\n    form.requestSubmit();"),
+        "the worker composer's button submits inside its press"
+    );
+}
+
+/// Every script the page loads from `ui/`, by file name, in name order.
+fn ui_scripts() -> Vec<(String, String)> {
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+    let mut scripts: Vec<(String, String)> = std::fs::read_dir(&ui)
+        .expect("ui reads")
+        .filter_map(|entry| {
+            let path = entry.expect("ui entry").path();
+            let name = path.file_name()?.to_string_lossy().to_string();
+            name.ends_with(".js")
+                .then(|| (name, std::fs::read_to_string(&path).unwrap_or_default()))
+        })
+        .collect();
+    scripts.sort();
+    scripts
+}
+
+/// From `at` to the `;` that ends the statement, brackets balanced.
+fn statement_at(text: &str, at: usize) -> &str {
+    let mut depth = 0usize;
+    for (offset, letter) in text[at..].char_indices() {
+        match letter {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => depth = depth.saturating_sub(1),
+            ';' if depth == 0 => return &text[at..at + offset],
+            _ => {}
+        }
+    }
+    &text[at..]
+}
+
+/// The names a piece of script calls: every word that stands before a `(`.
+fn called_names(script: &str) -> std::collections::BTreeSet<&str> {
+    script
+        .match_indices('(')
+        .filter_map(|(at, _)| {
+            let start = script[..at]
+                .char_indices()
+                .rev()
+                .find(|(_, letter)| {
+                    !(letter.is_ascii_alphanumeric() || matches!(letter, '_' | '$'))
+                })
+                .map_or(0, |(before, letter)| before + letter.len_utf8());
+            (start < at).then(|| &script[start..at])
+        })
+        .collect()
+}
+
+/// A function the page declares by that name, as its whole block.
+fn function_block<'a>(scripts: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    let opens = format!("function {name}(");
+    scripts
+        .iter()
+        .find(|(_, text)| text.contains(&opens))
+        .map(|(_, text)| block_after(text, &opens))
 }
 
 #[test]
