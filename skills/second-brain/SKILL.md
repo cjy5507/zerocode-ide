@@ -60,13 +60,17 @@ then report the pages created or updated.
 
 ## Answer from the vault
 
-Search with `zo vault search <words>` first. It reads every page's words,
-counts a rare word for more than a common one, leaves out what chance would
-match, and names each page's path and the line that holds most of the words;
-open the pages it names. Never read `wiki/index.md` whole — a grown vault's
-index is past one read. Fall back to `rg` over `wiki/`, and search `raw/` only
-when the wiki is incomplete. Answer with the supporting `[[wiki pages]]` and
-raw source paths. Separate what the vault supports from outside knowledge, and
+Search with `zo vault search <words>` first. It answers from one index of
+passages: the vault's pages (`wiki`) first, then its originals (`raw`) and any
+folder a person added with `zo vault source add <folder>`, each under its own
+layer. A rare word counts for more than a common one, and what chance would
+match is left out. Each answer names its file as `path:line`; the first
+answers of a layer show the passage that holds the words and the rest its one
+best line, and a page another page `supersedes` gives its place to that page.
+`--layer <name>` asks one layer alone. Open the files it names before relying
+on them. Never read `wiki/index.md` whole — a grown vault's index is past one
+read. Fall back to `rg` over `wiki/` and `raw/` only when the command is
+missing. Answer with the supporting `[[wiki pages]]` and raw source paths. Separate what the vault supports from outside knowledge, and
 say clearly when the vault has no evidence.
 
 File a lasting answer back. When an answer draws on two or more wiki pages
