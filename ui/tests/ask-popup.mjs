@@ -298,6 +298,8 @@ async function tool(browser, origin, ok) {
     // A question only the person may answer (zo's `person_only` on the frame):
     // Enter is no answer — neither an allow nor a refusal — and the person
     // picks one. The frame is the shape zo sends: two choices, the field last.
+    // Its words are the ones zo's schedule guard writes for a schedule of its
+    // own (five lines), and its risk note is the one every tool prompt carries.
     const personOnly = await page.evaluate(async () => {
       const T = window.__ASK_T__;
       T.reset();
@@ -305,8 +307,8 @@ async function tool(browser, origin, ok) {
         type: "permission_prompt",
         prompt_id: 14,
         tool_name: "CronCreate",
-        reasoning: "zo wants to keep a schedule of its own.\nCalled: 아침 점검\nRuns: 저장소를 점검하고 결과를 적는다\nWhen: 0 9 * * *\nWhere: /Users/dev/app",
-        audit_hint: null,
+        reasoning: "A schedule runs by itself: each time it comes due, zo opens a turn here on this prompt, with nobody watching.\nCalled: Morning check\nRuns: \"Run the wallet check and report\"\nWhen: 0 9 * * 1-5 (Asia/Seoul time). Next: Thu 2026-11-12 09:00 · Fri 2026-11-13 09:00 · Mon 2026-11-16 09:00\nWhere: /Users/dev/project",
+        audit_hint: "risk: high; explicitly unblock with [o] Allow once",
         risk_level: "high",
         choices: [
           { key: "o", label: "Allow once", decision: "allow_once" },
@@ -330,8 +332,9 @@ async function tool(browser, origin, ok) {
     });
     ok(
       "a reason of several lines is read line by line",
-      personOnly.space === "pre-line" && personOnly.lines.length === 5
-        && personOnly.lines[1] === "Called: 아침 점검" && personOnly.lines[4] === "Where: /Users/dev/app",
+      personOnly.space === "pre-line" && personOnly.lines.length === 6
+        && personOnly.lines[1] === "Called: Morning check" && personOnly.lines[4] === "Where: /Users/dev/project"
+        && personOnly.lines[5].startsWith("risk: high"),
       JSON.stringify({ lines: personOnly.lines, space: personOnly.space }),
     );
     ok(

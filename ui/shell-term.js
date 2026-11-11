@@ -5300,7 +5300,10 @@ registerAskKind("tool", {
       agentClass: who.className,
       title: t("perm.title", "이 도구를 실행할까요?"),
       mono: frame.tool_name ? String(frame.tool_name) : null,
-      why: [frame.reasoning, frame.audit_hint].filter(Boolean).join(" — ") || null,
+      // The risk note follows the reason in its paragraph; under a reason
+      // written in lines (`lines` below) it stands on a line of its own, so it
+      // does not run on from the reason's last line.
+      why: [frame.reasoning, frame.audit_hint].filter(Boolean).join(frame.person_only === true ? "\n" : " — ") || null,
       choices,
       // A question only the person may answer — zo says so on the frame
       // (`person_only`: a kill of the window's own processes, a schedule of
