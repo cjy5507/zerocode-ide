@@ -11,8 +11,8 @@
 //! name does not win by holding more words. The words that only say how
 //! something is asked are not searched for, a Korean spelling also finds the
 //! Latin name a page uses, and a page the words could match by chance is not
-//! shown. A turn nobody asked for — a background task's notice, the mail
-//! pointer — asks nothing at all ([`recall_words`]).
+//! shown. A turn nobody asked for — a background task's notice, a letter from
+//! another session, the mail pointer — asks nothing at all ([`recall_words`]).
 //!
 //! The block is bounded on every axis a prompt hook cares about:
 //! [`MAX_RELATED_ENTRIES`] pages, [`MAX_RELATED_RELATIONS_PER_LINE`] relations
@@ -236,10 +236,10 @@ fn is_structural(node: &GraphNode) -> bool {
 /// The words a prompt asks the vault with, or nothing when nobody asked.
 ///
 /// Most of what reaches a prompt hook is not a question: a background task's
-/// notice, the line this window types when mail waits, a nudge it types after a
-/// restart. Those go first, then the plumbing around what is left
-/// ([`crate::transcript::searchable_words`]). A worker's briefing is the same
-/// words in every prompt, so only the task after it asks.
+/// notice, a letter from another session, the line this window types when mail
+/// waits, a nudge it types after a restart. Those go first, then the plumbing
+/// around what is left ([`crate::transcript::searchable_words`]). A worker's
+/// briefing is the same words in every prompt, so only the task after it asks.
 #[must_use]
 pub fn recall_words(prompt: &str) -> Option<String> {
     let said = prompt
@@ -1208,6 +1208,9 @@ mod tests {
         let cut = format!("{} `cargo test`", crate::orchestration::CUT_COMMANDS_NUDGE);
         for said in [
             "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+            // The same notice as the model is shown it, inside the CLI's own
+            // reminder and its sentences about who did not speak.
+            "<system-reminder>\n[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message from the user.\n\n<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>\n</system-reminder>",
             "<command-name>/effort</command-name>\n<command-args></command-args>",
             "<local-command-stdout>Set effort level</local-command-stdout>",
             crate::orchestration::pointer_text(1).as_str(),
@@ -1224,6 +1227,36 @@ mod tests {
         ] {
             assert_eq!(recall_words(said), None, "{said:?}");
         }
+    }
+
+    /// A letter as a CLI frames it. The socket and the session are made up.
+    fn letter(body: &str) -> String {
+        format!(
+            "<cross-session-message from=\"uds:/tmp/cc-socks/0000.sock\" \
+             from-name=\"zerocode-00\" from-mode=\"bypass\">\n{body}\n</cross-session-message>"
+        )
+    }
+
+    /// A letter from another session asks the vault nothing. Its words are a
+    /// long report, so they found five pages every time, and a coordinator's
+    /// pane is sent hundreds a day. Both ways a CLI hands one over are quiet —
+    /// between its own sentences and bare — and so is one the mail pointer
+    /// came beside. A person who only writes the tag's name still asks.
+    #[test]
+    fn a_letter_from_another_session_has_no_words_to_recall_with() {
+        let sent = letter("레인이 초록으로 끝났고 창 시험이 모두 통과했다. 다음은 발행 카드다.");
+        for said in [
+            sent.clone(),
+            format!(
+                "Another Claude session sent a message:\n{sent}\n\nThis came from another \
+                 Claude session — not typed by your user, but very likely working on their behalf."
+            ),
+            format!("{}{sent}", crate::orchestration::pointer_text(1)),
+        ] {
+            assert_eq!(recall_words(&said), None, "{said:?}");
+        }
+        let asked = "<cross-session-message> 태그가 붙은 프롬프트에는 블록을 끄자";
+        assert_eq!(recall_words(asked).as_deref(), Some(asked));
     }
 
     /// A prompt says what it says past the plumbing around it. The envelope

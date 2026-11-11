@@ -491,16 +491,47 @@ pub fn prompt_words(prompt: &str) -> Option<String> {
     (!words.is_empty()).then(|| words.to_string())
 }
 
+/// The frame a CLI writes around a letter from another of its sessions:
+/// `<cross-session-message from="…" from-name="…">` before it and
+/// `</cross-session-message>` after.
+///
+/// Not one of [`MACHINE_ENVELOPES`]: its opening carries attributes, as a
+/// pasted block's does ([`PASTED_FRAMES`]), and it does not lead the prompt —
+/// the CLI stands sentences of its own before and after it.
+const PEER_LETTER_FRAMES: [&str; 2] = ["<cross-session-message", "</cross-session-message>"];
+
+/// Whether `text` holds a letter another session sent: the frame a CLI opens
+/// before one and closes after it (`PEER_LETTER_FRAMES`).
+///
+/// The frame is the whole test. The sentences a CLI writes beside a letter
+/// change with its version, and it also hands a letter over bare. A person
+/// who writes the tag's name closed nothing around anything, so a frame that
+/// never opens or never closes is theirs — as an envelope that never closes
+/// is ([`searchable_words`]).
+#[must_use]
+pub fn holds_a_peer_letter(text: &str) -> bool {
+    let [opens, closes] = PEER_LETTER_FRAMES;
+    text.find(opens).is_some_and(|at| {
+        text[at..]
+            .find('>')
+            .is_some_and(|opened| text[at + opened..].contains(closes))
+    })
+}
+
 /// What a prompt asks with, for a reader that searches rather than names.
 ///
 /// A name can lose an odd prompt; a question must not. So where
 /// [`prompt_words`] drops everything after an envelope that never closes,
 /// this keeps it, because a person typed that tag; and a slash command's
 /// arguments stay, in both shapes a CLI hands them over, while the command's
-/// own name goes.
+/// own name goes. A letter from another session asks nothing, whatever
+/// stands beside it ([`holds_a_peer_letter`]).
 #[must_use]
 pub fn searchable_words(prompt: &str) -> Option<String> {
     let unframed = without_pasted_frames(prompt);
+    if holds_a_peer_letter(&unframed) {
+        return None;
+    }
     let mut rest = unframed.trim_start();
     let mut arguments = "";
     for _ in 0..8 {
@@ -3492,6 +3523,36 @@ mod tests {
             without_pasted_frames("kept <pasted_content id=\"x"),
             "kept "
         );
+    }
+
+    /// A letter from another session is nobody's question. It is known by the
+    /// frame the CLI closes around it and by nothing the CLI says beside it:
+    /// those sentences change with the CLI, and it hands the letter over bare
+    /// as well. A person who writes the tag's name closed nothing around
+    /// anything, and still asks with every word.
+    #[test]
+    fn a_letter_from_another_session_is_not_searched_with() {
+        let letter = "<cross-session-message from=\"uds:/tmp/cc-socks/0000.sock\" \
+                      from-name=\"zerocode-00\" from-mode=\"bypass\">\n\
+                      레인이 초록으로 끝났고 창 시험이 모두 통과했다.\n\
+                      </cross-session-message>";
+        for said in [
+            letter.to_string(),
+            format!(
+                "Another Claude session sent a message:\n{letter}\n\n\
+                 This came from another Claude session."
+            ),
+            format!("다른 세션이 보낸 편지:\n{letter}\n받는 쪽 권한 안에서 처리한다."),
+        ] {
+            assert_eq!(searchable_words(&said), None, "{said:?}");
+        }
+        for said in [
+            "<cross-session-message> 태그가 붙은 프롬프트는 누가 보낸 거야",
+            "편지는 <cross-session-message from= 으로 시작한다는데 맞아?",
+            "</cross-session-message> 로 끝나는 글은 어떻게 걸러",
+        ] {
+            assert_eq!(searchable_words(said).as_deref(), Some(said), "{said:?}");
+        }
     }
 
     /// How full a pane's context is, recovered from the file it already
