@@ -326,14 +326,17 @@ fn read_config(path: &Path) -> Option<Map<String, Value>> {
     }
 }
 
-fn write_config(path: &Path, config: &Map<String, Value>) -> std::io::Result<()> {
-    // The window reconciles at every start and the agents watch these files:
-    // a file that already says this (in whatever formatting the user keeps)
-    // is not written again.
-    if let Ok(text) = std::fs::read_to_string(path)
-        && let Ok(Value::Object(current)) = serde_json::from_str::<Value>(&text)
-        && current == *config
-    {
+/// Write `config` over the file `read` came from — unless it says what the
+/// file already said. The window reconciles at every start and the agents
+/// watch these files: a file that already says this (in whatever formatting
+/// the user keeps) is not written again, and it is not read a second time to
+/// find that out.
+fn write_config(
+    path: &Path,
+    read: &Map<String, Value>,
+    config: &Map<String, Value>,
+) -> std::io::Result<()> {
+    if read == config {
         return Ok(());
     }
     let mut text = serde_json::to_string_pretty(&Value::Object(config.clone()))
@@ -736,11 +739,12 @@ pub fn install_agent(paths: &InstallPaths, agent: AgentKind) -> HookStatus {
         // home file AND one per account directory, because a launched claude
         // reads only the `CLAUDE_CONFIG_DIR` it was handed.
         for file in paths.config_paths(agent) {
-            let Some(mut config) = read_config(&file) else {
+            let Some(read) = read_config(&file) else {
                 return unreadable(agent, &file);
             };
+            let mut config = read.clone();
             install_nested(&mut config, agent, events, &script, host, timeout);
-            if write_config(&file, &config).is_err() {
+            if write_config(&file, &read, &config).is_err() {
                 return unreadable(agent, &file);
             }
         }
@@ -773,13 +777,14 @@ pub fn remove_agent(paths: &InstallPaths, agent: AgentKind) -> HookStatus {
     // Taken out of every file it was put into — the account files too, or
     // "off" leaves a hook running in each launched claude.
     for file in paths.config_paths(agent) {
-        let Some(mut config) = read_config(&file) else {
+        let Some(read) = read_config(&file) else {
             // A file that never existed has nothing of ours in it.
             if !file.exists() {
                 continue;
             }
             return unreadable(agent, &file);
         };
+        let mut config = read.clone();
         if agent == AgentKind::Antigravity {
             remove_antigravity_bundle(&mut config, agent);
         } else if let Some(hooks) = config.get("hooks").and_then(Value::as_object) {
@@ -787,7 +792,7 @@ pub fn remove_agent(paths: &InstallPaths, agent: AgentKind) -> HookStatus {
             clean_hooks_object(&mut hooks, agent);
             config.insert("hooks".to_string(), Value::Object(hooks));
         }
-        if file.exists() && write_config(&file, &config).is_err() {
+        if file.exists() && write_config(&file, &read, &config).is_err() {
             return unreadable(agent, &file);
         }
     }
@@ -876,9 +881,10 @@ fn nested_or_flat_present(config: &Map<String, Value>, agent: AgentKind, events:
 
 fn install_cursor(paths: &InstallPaths, config_path: &Path, command: &str) -> HookStatus {
     let agent = AgentKind::Cursor;
-    let Some(mut config) = read_config(config_path) else {
+    let Some(read) = read_config(config_path) else {
         return unreadable(agent, config_path);
     };
+    let mut config = read.clone();
     let mut hooks = config
         .get("hooks")
         .and_then(Value::as_object)
@@ -900,7 +906,7 @@ fn install_cursor(paths: &InstallPaths, config_path: &Path, command: &str) -> Ho
     if !config.contains_key("version") {
         config.insert("version".to_string(), json!(1));
     }
-    if write_config(config_path, &config).is_err() {
+    if write_config(config_path, &read, &config).is_err() {
         return unreadable(agent, config_path);
     }
     status_of(paths, agent)
@@ -934,9 +940,10 @@ const COPILOT_EVENTS: &[&str] = &[
 /// because Copilot's payload does not say which event fired.
 fn install_copilot(paths: &InstallPaths, config_path: &Path) -> HookStatus {
     let agent = AgentKind::Copilot;
-    let Some(mut config) = read_config(config_path) else {
+    let Some(read) = read_config(config_path) else {
         return unreadable(agent, config_path);
     };
+    let mut config = read.clone();
     let mut hooks = config
         .get("hooks")
         .and_then(Value::as_object)
@@ -961,7 +968,7 @@ fn install_copilot(paths: &InstallPaths, config_path: &Path) -> HookStatus {
         hooks.insert((*event).to_string(), Value::Array(definitions));
     }
     config.insert("hooks".to_string(), Value::Object(hooks));
-    if write_config(config_path, &config).is_err() {
+    if write_config(config_path, &read, &config).is_err() {
         return unreadable(agent, config_path);
     }
     status_of(paths, agent)
@@ -987,9 +994,10 @@ const ANTIGRAVITY_BUNDLE: &str = "zerocode-status";
 
 fn install_antigravity(paths: &InstallPaths, config_path: &Path, host: ScriptHost) -> HookStatus {
     let agent = AgentKind::Antigravity;
-    let Some(mut config) = read_config(config_path) else {
+    let Some(read) = read_config(config_path) else {
         return unreadable(agent, config_path);
     };
+    let mut config = read.clone();
     let script = script_path_for(&paths.home, agent, host);
     // Clean every old managed event, including ones we no longer install.
     remove_antigravity_bundle(&mut config, agent);
@@ -1014,7 +1022,7 @@ fn install_antigravity(paths: &InstallPaths, config_path: &Path, host: ScriptHos
         bundle.insert((*event).to_string(), Value::Array(definitions));
     }
     config.insert(ANTIGRAVITY_BUNDLE.to_string(), Value::Object(bundle));
-    if write_config(config_path, &config).is_err() {
+    if write_config(config_path, &read, &config).is_err() {
         return unreadable(agent, config_path);
     }
     status_of(paths, agent)
