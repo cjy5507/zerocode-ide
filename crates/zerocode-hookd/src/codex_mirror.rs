@@ -568,7 +568,17 @@ pub fn upsert_project_trust_level(
     if updated == existing {
         return Ok(());
     }
-    crate::codex_install::write_atomically(config_path, &updated, None)
+    replace_config(config_path, &updated)
+}
+
+/// Replace a `config.toml` whole: through a temp and a rename, so a stop or a
+/// full disk never leaves half of the person's Codex settings and a reading
+/// Codex never sees half a file; written through a link, which stays a link;
+/// keeping the mode the file had.
+fn replace_config(path: &Path, body: &str) -> std::io::Result<()> {
+    let target = crate::codex_install::write_path(path);
+    let mode = crate::private_file::mode_of(&target);
+    crate::codex_install::write_atomically(&target, body, mode)
 }
 
 /// Byte offset just past the header line's text (before its own line end) of
@@ -865,10 +875,7 @@ pub fn write_trust(home: &Home, entries: &[TrustEntry]) -> std::io::Result<bool>
     if next == existing {
         return Ok(false);
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, next)?;
+    replace_config(&path, &next)?;
     Ok(true)
 }
 
@@ -898,7 +905,7 @@ pub fn remove_trust_at(path: &std::path::Path, keys: &[String]) -> std::io::Resu
     if next == existing {
         return Ok(false);
     }
-    std::fs::write(path, next)?;
+    replace_config(path, &next)?;
     Ok(true)
 }
 
@@ -1045,8 +1052,7 @@ pub fn sync(home: &Home, system_home: &Path) -> std::io::Result<Sync> {
     if existing.as_deref() == Some(next.as_str()) {
         return Ok(Sync::Unchanged);
     }
-    std::fs::create_dir_all(home.path())?;
-    std::fs::write(&target, next)?;
+    replace_config(&target, &next)?;
     Ok(how)
 }
 
@@ -1569,5 +1575,81 @@ mod tests {
                 "an unchanged upsert rewrote the file"
             );
         }
+    }
+
+    /// The person's `config.toml` is replaced whole — never truncated in place,
+    /// where a stop or a full disk leaves half of their Codex settings — and
+    /// keeps its mode and the link a dotfiles checkout may make it.
+    #[cfg(unix)]
+    #[test]
+    fn config_toml_is_replaced_whole_keeping_its_mode_and_link() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().expect("temp");
+        let mode =
+            |path: &Path| std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
+        let inode = |path: &Path| std::fs::metadata(path).expect("stat").ino();
+        let private = |path: &Path| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod")
+        };
+
+        // The mirror's own file: trust written and synced.
+        let home = Home::under(&dir.path().join("mirror"));
+        assert!(write_trust(&home, &[entry("stop")]).expect("write"));
+        private(&home.config_path());
+        let before = inode(&home.config_path());
+        assert!(write_trust(&home, &[entry("pre_tool_use")]).expect("write"));
+        assert_ne!(
+            inode(&home.config_path()),
+            before,
+            "write_trust wrote in place"
+        );
+        assert_eq!(mode(&home.config_path()), 0o600);
+        let planted = std::fs::read_to_string(home.config_path()).expect("read");
+
+        let system = dir.path().join("dot-codex");
+        std::fs::create_dir_all(&system).expect("mkdir");
+        std::fs::write(system.join("config.toml"), "model = \"example-model\"\n").expect("seed");
+        let before = inode(&home.config_path());
+        assert!(!matches!(
+            sync(&home, &system).expect("sync"),
+            Sync::Unchanged
+        ));
+        assert_ne!(inode(&home.config_path()), before, "sync wrote in place");
+        assert_eq!(mode(&home.config_path()), 0o600);
+
+        // The system home's file, kept behind a link: the trust residue leaves,
+        // the link stays a link and the file behind it keeps 0600.
+        let real = dir.path().join("dotfiles/config.toml");
+        std::fs::create_dir_all(real.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&real, &planted).expect("seed");
+        private(&real);
+        let link = system.join("linked.toml");
+        std::os::unix::fs::symlink(&real, &link).expect("link");
+        let before = inode(&real);
+        assert!(remove_trust_at(&link, &[trust_key(&entry("stop"))]).expect("remove"));
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("lstat")
+                .file_type()
+                .is_symlink(),
+            "the link was replaced by a file"
+        );
+        assert_ne!(inode(&real), before, "remove_trust_at wrote in place");
+        assert_eq!(mode(&real), 0o600);
+        assert!(
+            !std::fs::read_to_string(&real)
+                .expect("read")
+                .contains(&trust_key(&entry("stop")))
+        );
+
+        upsert_project_trust_level(&link, "/w/repo", ProjectTrust::Trusted).expect("upsert");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("lstat")
+                .file_type()
+                .is_symlink(),
+            "the project trust replaced the link by a file"
+        );
+        assert_eq!(mode(&real), 0o600, "the project trust widened the file");
     }
 }
