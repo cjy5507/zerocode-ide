@@ -1909,7 +1909,7 @@ final class Provider {
             throw ProviderError.coded("window_not_found", "app '\(app.name)' has no on-screen window")
         }
         ShareControlPanel.observedWindow(pid: app.pid, windowID: capture.windowId)
-        guard let window = matchingWindow(appElement: appElement, capture: capture, focused: focused, explicitTarget: windowId != nil || windowIndex != nil) else {
+        guard let window = try matchingWindow(appElement: appElement, capture: capture, focused: focused, explicitTarget: windowId != nil || windowIndex != nil) else {
             throw ProviderError.coded("window_not_found", "could not match accessibility window to requested window; run get-app-state again or retry without a window selector")
         }
         let title = stringAttribute(window, kAXTitleAttribute as String) ?? capture.title ?? app.name
@@ -2750,7 +2750,7 @@ final class Provider {
         guard let focus, let root = snapshot.rootIndex.flatMap({ snapshot.elements[$0]?.element }),
               copyElement(focus, kAXWindowAttribute as String).map({ CFEqual($0, root) }) == true || reaches(focus, root)
         else {
-            throw ProviderError.coded("focus_changed", "the background keyboard receiver cannot be verified in the target window")
+            throw ProviderError.coded("focus_changed", "the background keyboard receiver cannot be verified in the target window: the app's keyboard focus is in another of its windows, or nowhere this look saw. Press the control itself or set the field's value instead of sending a key; when the person asked for the foreground, focus this window by its id and send the key with --foreground")
         }
     }
 
@@ -3624,19 +3624,49 @@ private func requireTargetWindowFocused(_ snapshot: Snapshot, restoreWindowReque
     }
 }
 
-private func matchingWindow(appElement: AXUIElement, capture: WindowCapture, focused: AXUIElement, explicitTarget: Bool) -> AXUIElement? {
+private func matchingWindow(appElement: AXUIElement, capture: WindowCapture, focused: AXUIElement, explicitTarget: Bool) throws -> AXUIElement? {
     guard let windows = copyArray(appElement, kAXWindowsAttribute as String) else {
         return nil
     }
     if let byNumber = windows.first(where: { windowNumber($0) == capture.windowId }) {
         return byNumber
     }
-    if let byBounds = windows.first(where: { window in
-        guard usableWindow(window), let frame = absoluteFrame(window) else { return false }
-        let intersection = frame.intersection(capture.bounds)
-        return !intersection.isNull && intersection.area >= min(frame.area, capture.bounds.area) * 0.75
-    }) {
-        return byBounds
+    // A window that publishes no number is told by where it stands, and two at
+    // one frame by what they are called — never by which comes first, which
+    // would picture one window and read and press the other. A window that
+    // was named is refused when nothing tells it apart; a look that named
+    // none takes the one the app is focused in.
+    let rows: [(number: UInt32?, frame: CGRect?, title: String?)] = windows.map { window in
+        let frame: CGRect? = usableWindow(window) ? absoluteFrame(window) : nil
+        return (number: windowNumber(window), frame: frame, title: stringAttribute(window, kAXTitleAttribute as String))
+    }
+    let picked = DesktopWindowPick.pick(target: capture.windowId, targetBounds: capture.bounds, targetTitle: capture.title, windows: rows)
+    switch picked {
+    case let .found(at): return windows[at]
+    case .ambiguous:
+        if explicitTarget {
+            throw ProviderError.coded("window_not_found", DesktopWindowPick.ambiguousSaid(capture.windowId))
+        }
+        return focused
+    case .none: break
+    }
+    // Nothing stands at the target's frame: it is no window of its own in the
+    // app's list — a sheet, a popover, a menu — and the window that covers
+    // where it stands holds it. Several are told apart by name, then by which
+    // one the app is focused in; a named target nothing tells is refused.
+    let covering = DesktopWindowPick.pickCovering(
+        targetBounds: capture.bounds, targetTitle: capture.title,
+        windows: zip(windows, rows).map { window, row in
+            (frame: row.frame, title: row.title, focused: CFEqual(window, focused))
+        })
+    switch covering {
+    case let .found(at): return windows[at]
+    case .ambiguous:
+        if explicitTarget {
+            throw ProviderError.coded("window_not_found", DesktopWindowPick.coveredSaid(capture.windowId))
+        }
+        return focused
+    case .none: break
     }
     if explicitTarget {
         return nil
@@ -3644,9 +3674,10 @@ private func matchingWindow(appElement: AXUIElement, capture: WindowCapture, foc
     guard let titleHint = capture.title, !titleHint.isEmpty else {
         return focused
     }
-    return windows.first {
+    let called = windows.filter {
         usableWindow($0) && stringAttribute($0, kAXTitleAttribute as String) == titleHint
-    } ?? focused
+    }
+    return called.count == 1 ? called[0] : focused
 }
 
 private func recoverWindow(
@@ -7969,18 +8000,23 @@ private enum DesktopWindows {
         let appElement = AXUIElementCreateApplication(ownerPid)
         // Many Cocoa windows publish no AXWindowNumber: the window the list
         // numbers is then the one numberless window at its frame, if only one
-        // stands there (t-15085); two are refused as a missing one is.
+        // stands there (t-15085). Two at one frame are told apart by the name
+        // the list gives the target; when that does not tell either, the
+        // refusal says so — it is not a missing window, and not a permission.
         let listed = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowId) as? [[String: Any]])?.first
         let targetBounds = (listed?[kCGWindowBounds as String] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }
-        guard let windows = copyArray(appElement, kAXWindowsAttribute as String),
-              case let .found(at) = DesktopWindowPick.pick(
-                  target: windowId,
-                  targetBounds: targetBounds,
-                  windows: windows.map { (number: windowNumber($0), frame: absoluteFrame($0)) })
-        else {
-            throw ProviderError.coded("window_not_found", "window \(windowId) has no accessibility element (is Accessibility granted, and does the app publish its windows?)")
+        let targetTitle = listed?[kCGWindowName as String] as? String
+        let missing = ProviderError.coded("window_not_found", "window \(windowId) has no accessibility element (is Accessibility granted, and does the app publish its windows?)")
+        guard let windows = copyArray(appElement, kAXWindowsAttribute as String) else { throw missing }
+        let rows: [(number: UInt32?, frame: CGRect?, title: String?)] = windows.map { window in
+            (number: windowNumber(window), frame: absoluteFrame(window), title: stringAttribute(window, kAXTitleAttribute as String))
         }
-        return (windows[at], ownerPid)
+        let picked = DesktopWindowPick.pick(target: windowId, targetBounds: targetBounds, targetTitle: targetTitle, windows: rows)
+        switch picked {
+        case let .found(at): return (windows[at], ownerPid)
+        case .ambiguous: throw ProviderError.coded("window_not_found", DesktopWindowPick.ambiguousSaid(windowId))
+        case .none: throw missing
+        }
     }
 
     static func act(params: [String: JSONValue]) throws -> [String: Any] {
