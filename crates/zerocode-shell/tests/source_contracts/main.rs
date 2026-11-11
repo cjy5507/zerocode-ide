@@ -2683,8 +2683,20 @@ mod tests {
         // And the six that joined drew their own ground, border and depth in
         // rules of their own; those rules keep their shape and give the material
         // back to the shared one.
+        // A surface's own rule is the one its selector opens alone: the same
+        // selector also ends the shared lists above, and those are not it.
+        fn own_rule<'a>(styles: &'a str, surface: &str) -> &'a str {
+            let opens = format!("\n{surface} {{");
+            let at = styles
+                .match_indices(&opens)
+                .map(|(at, _)| at)
+                .find(|at| !styles[..*at].trim_end().ends_with(','))
+                .unwrap_or_else(|| panic!("`{surface}` has no rule of its own in ui/shell.css"));
+            let rest = &styles[at + 1..];
+            &rest[..rest.find("\n}").unwrap_or(rest.len())]
+        }
         for surface in &surfaces[7..] {
-            let own = block_after_css(&styles, &format!("{surface} {{"));
+            let own = own_rule(&styles, surface);
             for part in ["background", "backdrop-filter", "box-shadow", "border:"] {
                 assert!(
                     !own.contains(part),
