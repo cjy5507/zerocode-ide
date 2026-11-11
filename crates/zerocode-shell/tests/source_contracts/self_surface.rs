@@ -467,6 +467,7 @@ fn saving_switching_and_running_an_automation_are_the_persons_alone() {
         "auto-detail-toggle",
         "second-brain-ingest-on",
         "second-brain-weekly-review",
+        "auto-detail-approve",
     ] {
         let at = index
             .find(&format!("id=\"{id}\""))

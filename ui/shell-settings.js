@@ -11826,6 +11826,9 @@ async function refreshAllAutomationRuns() {
  * the local timezone offset. */
 function whenNext(row) {
   if (!row.enabled) return t("auto.off", "꺼짐");
+  // A job an agent asked for whose Flow changed since does not run until the
+  // person allows it again: the list says that where the next run would be.
+  if (row.flow_changed) return t("auto.needsApproval", "다시 승인 필요");
   if (row.next_run_at === null || row.next_run_at === undefined) {
     return t("auto.never", "예정 없음");
   }
@@ -12461,6 +12464,20 @@ function paintAutomationDetail() {
   el("auto-detail-toggle").textContent = row.enabled
     ? t("auto.pause", "일시정지")
     : t("auto.resume", "다시 시작");
+  // A job an agent asked for says so, with when the person allowed it. Once its
+  // Flow reads differently it waits for them: the line says that instead, and
+  // the button that allows the document as it stands is the person's alone.
+  const asked = el("auto-detail-asked");
+  asked.hidden = !row.asked;
+  if (row.asked) {
+    asked.textContent = row.flow_changed
+      ? t("auto.flowChanged", "승인한 뒤 Flow 문서가 바뀌어 이 예약은 돌지 않습니다. 문서를 확인하고 다시 승인해 주세요.")
+      : t("auto.askedBy", "{{pane}}의 에이전트가 요청 · {{when}} 사람이 승인", {
+        pane: row.asked.pane,
+        when: new Date(row.asked.approved_at_ms).toLocaleString(),
+      });
+  }
+  el("auto-detail-approve").hidden = row.flow_changed !== true;
   el("auto-runs-count").textContent = String(autoRuns.length || row.runs || 0);
   setAutoDetailTab(autoDetailTab);
 }
@@ -13401,6 +13418,36 @@ el("auto-detail-edit").addEventListener("click", () => {
   const row = selectedAutomation();
   if (row) editAutomation(row);
 });
+
+/* 「다시 승인」: the Flow of a job an agent asked for changed after the person
+ * allowed it, and the job waits. The question says what would run — the Flow
+ * by name, and when — and the yes is the person's alone
+ * (`approve_automation_flow`): the press's hand is carried past the question. */
+async function approveAutomationFlowAgain(row) {
+  if (!row?.asked) return;
+  const started = handNow();
+  const confirmed = await askConfirm({
+    title: t("auto.approveAgain", "다시 승인"),
+    body: t(
+      "auto.approveAgainBody",
+      "Flow 「{{flow}}」의 문서가 승인한 뒤에 바뀌었습니다. 지금 문서대로 {{schedule}}에 사람 없이 도는 것을 다시 승인할까요? 문서는 Flow 탭에서 먼저 열어 볼 수 있습니다.",
+      { flow: automationFlowName(row) ?? row.flow, schedule: automationScheduleText(row) },
+    ),
+    confirm: t("auto.approveAgain", "다시 승인"),
+    deny: t("app.cancel", "취소"),
+    cancel: false,
+  });
+  if (confirmed !== true) return;
+  try {
+    automations = await invoke("approve_automation_flow", { id: row.id }, { hand: flowHand(started) });
+    paintAutomations();
+    paintAutomationDetail();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+el("auto-detail-approve").addEventListener("click", () => void approveAutomationFlowAgain(selectedAutomation()));
 
 el("auto-detail-toggle").addEventListener("click", async () => {
   const row = selectedAutomation();

@@ -2800,6 +2800,12 @@ class StatefulBackend {
         }
         return clone(this.automations);
       }
+      // 「다시 승인」: the Flow reads as allowed again, and the list is answered.
+      case "approve_automation_flow": {
+        const row = this.automations.find((held) => held.id === args.id);
+        if (row) row.flow_changed = false;
+        return clone(this.automations);
+      }
       // 「지금 실행」: the run it started. It names no terminal and no Flow, so the
       // page has nothing to bring forward — the scene reads whose hand asked.
       case "run_automation":
@@ -5557,6 +5563,119 @@ await test("a_job_is_saved_switched_and_run_by_the_persons_own_press", async () 
       document.getElementById("hand-gitlab-stand")?.remove();
       closeAutoForm();
     });
+    await closeFlowSide(pageA);
+    backend.automations = held.automations;
+    backend.flows.flows = held.flows;
+    backend.flows.recipes = held.recipes;
+  }
+});
+
+// A job an agent asked for (`recipe-schedule`) says so on its page, with when
+// the person allowed it. Once its Flow's document changed it waits: the list
+// and the page say so, and 「다시 승인」 — the person's alone — asks what would
+// run before it allows the document as it stands.
+await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_changed", async () => {
+  const held = {
+    automations: backend.automations,
+    flows: backend.flows.flows,
+    recipes: backend.flows.recipes,
+  };
+  backend.flows.flows = [{
+    slug: "wallet-qa",
+    name: "Wallet QA",
+    policy: "dry",
+    evidence: "full",
+    fingerprint: { apps: [], hosts: ["shop.example.com"] },
+    checks: { n: 3, required: 2 },
+    last: null,
+    file: "/r/wallet-qa.md",
+  }];
+  backend.flows.recipes = [];
+  backend.automations = [{
+    id: "asked-1",
+    name: "Asked wallet QA",
+    enabled: true,
+    workspace: BOOT_BASE.project_root,
+    workspace_mode: "existing",
+    base_branch: null,
+    agent: null,
+    prompt: "zerocode-computer recipe-run --name wallet-qa",
+    command: "",
+    reuse_session: false,
+    close_when_done: false,
+    evidence: "prompt",
+    leaves_evidence: false,
+    flow: "wallet-qa",
+    schedule: { cadence: "daily", time: "09:30", day_of_week: 1, custom: "" },
+    precheck: "",
+    precheck_timeout_seconds: 60,
+    missed_run_grace_minutes: 60,
+    last_run_at: null,
+    next_run_at: 29_001_440,
+    runs: 0,
+    asked: { pane: "term:7", approved_at_ms: 1_794_000_000_000, flow_sha256: "aa" },
+    flow_changed: true,
+  }];
+  try {
+    await pageA.evaluate(() => {
+      setAutoOpen(true);
+      setAutoPage("schedules");
+    });
+    await pageA.waitForFunction(
+      () => automations.some((one) => one.id === "asked-1"),
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    await pageA.evaluate(() => {
+      autoSelectedId = null;
+      autoRuns = [];
+      paintAutomations();
+      paintAutomationDetail();
+    });
+    const listed = await pageA.evaluate(() => ({
+      when: document.querySelector("#auto-list .auto-row .auto-row-when")?.textContent ?? "",
+      want: t("auto.needsApproval", "다시 승인 필요"),
+    }));
+    assert(listed.want && listed.when === listed.want, "the list did not say the job waits for the person", listed);
+
+    await pageA.evaluate(() => selectAutomation("asked-1"));
+    await pageA.waitForSelector("#auto-detail-approve", { timeout: UI_TIMEOUT });
+    const waiting = await pageA.evaluate(() => ({
+      note: document.getElementById("auto-detail-asked").textContent,
+      want: t("auto.flowChanged", "승인한 뒤 Flow 문서가 바뀌어 이 예약은 돌지 않습니다. 문서를 확인하고 다시 승인해 주세요."),
+      mark: "personOnly" in document.getElementById("auto-detail-approve").dataset,
+    }));
+    assert(
+      waiting.want && waiting.note === waiting.want && waiting.mark,
+      "the page did not say the Flow changed since it was allowed, or 「다시 승인」 lacks the person-only mark",
+      waiting,
+    );
+
+    // The press asks first, naming what would run; nothing is allowed before the yes.
+    const before = backend.count("A", "approve_automation_flow");
+    const from = backend.calls.length;
+    await pageA.click("#auto-detail-approve");
+    await pageA.waitForSelector("#ask-scrim:not([hidden])");
+    const question = await pageA.evaluate(() => document.getElementById("ask-body").textContent);
+    assert(question.includes("Wallet QA"), "the question did not name the Flow that would run", question);
+    assertEqual(backend.count("A", "approve_automation_flow"), before, "the Flow was allowed again before the person said yes");
+    await pageA.click("#ask-yes");
+    const approved = await backend.waitForCall("A", "approve_automation_flow", from);
+    assertEqual(
+      [approved.args, approved.hand],
+      [{ id: "asked-1" }, "person"],
+      "allowing again named another job, or did not say the person pressed it",
+    );
+    await pageA.waitForFunction(
+      () => document.getElementById("auto-detail-approve").hidden,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    const allowed = await pageA.evaluate(() => document.getElementById("auto-detail-asked").textContent);
+    assert(allowed.includes("term:7"), "the page did not say which pane asked and when it was allowed", allowed);
+    return "an asked job said it waits, asked before allowing again, and the yes was the person's";
+  } finally {
+    await pageA.evaluate(() => closeAutoForm());
     await closeFlowSide(pageA);
     backend.automations = held.automations;
     backend.flows.flows = held.flows;

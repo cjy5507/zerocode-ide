@@ -2369,6 +2369,8 @@
                 <div>
                   <h3 id="auto-detail-name"></h3>
                   <p id="auto-detail-prompt"></p>
+              <!-- 에이전트가 요청하고 사람이 승인한 예약이면 그 사실과 때를, 승인 뒤 Flow가 바뀌었으면 그것을 말한다. -->
+              <p class="auto-detail-asked" id="auto-detail-asked" hidden></p>
                 </div>
                 <span class="auto-status" id="auto-detail-status"></span>
               </div>
@@ -2376,6 +2378,7 @@
                 <button class="btn btn--primary" id="auto-detail-run" type="button" data-person-only><svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg><span data-i18n="auto.runNow">지금 실행</span></button>
                 <button class="btn" id="auto-detail-edit" type="button"><svg class="icon" aria-hidden="true"><use href="#i-pencil"></use></svg><span data-i18n="app.edit">편집</span></button>
                 <button class="btn" id="auto-detail-toggle" type="button" data-person-only></button>
+              <button class="btn" id="auto-detail-approve" type="button" data-person-only hidden data-i18n="auto.approveAgain">다시 승인</button>
                 <button class="btn btn--halt" id="auto-detail-delete" type="button" data-i18n="app.delete">삭제</button>
               </div>
               <dl class="auto-facts">

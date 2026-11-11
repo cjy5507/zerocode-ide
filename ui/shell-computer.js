@@ -640,6 +640,17 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
   "emulator.realPhone.remove": (args) => t("emulator.realPhone.remove", "에이전트가 진짜 폰 「{{phone}}」의 WebDriverAgent와 이 Mac의 빌드를 지우고 폰 조작을 끄려고 합니다. 폰의 다른 것은 바뀌지 않습니다. Xcode가 Apple 계정에 만든 App ID와 프로파일은 남습니다. 허락하면 「다 했어요」를 누르세요.", args),
   "emulator.realPhone.androidConsent": (args) => t("emulator.realPhone.androidConsent", "에이전트가 진짜 안드로이드 폰 「{{phone}}」을 USB 또는 무선 디버깅(adb)으로 조작하려고 허락을 구합니다. 허락하면 어느 언어든 입력되도록 저희의 작은 입력 도우미를 폰의 /data/local/tmp에 복사합니다. 앱은 설치하지 않습니다. 그 뒤 에이전트는 Mac 포인터 없이 이 폰의 화면을 읽고 누르고 쓸어 넘기고 글을 칩니다. 사람이 폰을 쓰는 중에도 누를 수 있으니, 멈추려면 폰을 잠그세요. 잠금 해제, 전원 키, 설정 바꾸기, 앱 설치·삭제, 비밀번호 입력은 하지 않으며 결제·이체는 사람 몫으로 남습니다. 이 폰에 대해, 설정에서 끄거나 phone-remove로 지울 때까지 유지됩니다. 허락하면 「다 했어요」를 누르세요.", args),
   "emulator.realPhone.androidRemove": (args) => t("emulator.realPhone.androidRemove", "에이전트가 진짜 안드로이드 폰 「{{phone}}」에서 입력 도우미를 지우고 이 폰의 조작을 끄려고 합니다. 폰의 다른 것은 바뀌지 않습니다. 허락하면 「다 했어요」를 누르세요.", args),
+  // A schedule an agent asks for (`recipe-schedule`): the sentence is the window's, and what the agent gave —
+  // the name — is in it as data, cut and cleaned by the backend. When it runs is said the way the list says it.
+  "auto.asked.card": (args) => t(
+    "auto.asked.card",
+    "{{pane}} 판의 에이전트가 Flow 「{{flow}}」(정책 {{policy}})를 「{{name}}」 예약으로 등록하려고 합니다. 일정: {{schedule}} · 다음 실행: {{next}} · 워크스페이스: {{workspace}}. 허락하면 창이 지켜보는 사람 없이 이 Flow를 걷습니다. 허락하려면 「다 했어요」를 누르고, 아니면 취소하세요. 답하지 않으면 등록되지 않습니다.",
+    {
+      ...args,
+      schedule: `${automationScheduleText({ schedule: args.schedule, cron: args.cron })} (${args.cron})`,
+      next: (args.next ?? []).map(localMinuteText).join(" · "),
+    },
+  ),
   "computer.cover.gone": (args) => t("computer.cover.gone", "누르려던 창이 화면에 없습니다(최소화했거나 다른 데스크톱에 있음). 창이 보이게 한 뒤 「다 했어요」를 눌러 주세요.", args),
 });
 
