@@ -178,6 +178,7 @@ fn native_start_passes_the_verified_executable_to_the_supervisor() {
     profile.native = Some(crate::llama::Runtime {
         archive: artifact("native.tar.gz", b"synthetic archive"),
         executable: "package/llama-server".to_owned(),
+        build_note: None,
         files: vec![artifact("package/llama-server", native)],
     });
     let server = root.path().join("native/package/llama-server");

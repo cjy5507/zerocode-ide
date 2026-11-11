@@ -384,6 +384,9 @@ pub struct RuntimeNews {
     pub engine: EngineKind,
     pub pinned: String,
     pub latest: String,
+    /// The build the newest release names for itself, when it publishes its
+    /// archives under another tag (llama.cpp's `v0.9.0` is build `b12110`).
+    pub build: Option<String>,
     pub newer: bool,
 }
 
@@ -403,6 +406,37 @@ fn latest_tag(home: &str, location: &str) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
     .then(|| tag.to_owned())
+}
+
+/// The build tag a release's note names: one name on one line.
+fn build_tag(note: &str) -> Option<String> {
+    let tag = note.trim();
+    crate::llama::release_name(tag).then(|| tag.to_owned())
+}
+
+/// Reads the few bytes a release publishes to name its build
+/// (`<home>/releases/download/<tag>/<note>`). The answer is a name to show
+/// and to compare with the pin — nothing is installed from it.
+async fn release_build(home: &str, tag: &str, note: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .build()
+        .ok()?;
+    let response = client
+        .get(format!("{home}/releases/download/{tag}/{note}"))
+        .header(reqwest::header::USER_AGENT, "ZeroCode")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() || response.content_length().is_none_or(|bytes| bytes > 256)
+    {
+        return None;
+    }
+    let bytes = response.bytes().await.ok()?;
+    build_tag(std::str::from_utf8(&bytes).ok()?)
 }
 
 /// Asks an engine's public home which release is its newest: the one
@@ -1183,20 +1217,29 @@ impl Manager {
         }
         let mut news = Vec::new();
         for profile in &self.profiles {
-            let Some((home, pinned)) = profile.native.as_ref().and_then(|native| native.release())
-            else {
+            let Some(native) = profile.native.as_ref() else {
+                continue;
+            };
+            let Some((home, pinned)) = native.release() else {
                 continue;
             };
             if self.closed.load(Ordering::Acquire) {
                 break;
             }
             if let Some(latest) = newest_release(&home).await {
+                // A release that is not the pin may still be the pinned
+                // build under its release name: its note says which build.
+                let build = match native.build_note.as_deref() {
+                    Some(note) if latest != pinned => release_build(&home, &latest, note).await,
+                    _ => None,
+                };
                 news.push(RuntimeNews {
                     id: profile.id.clone(),
                     engine: profile.engine,
-                    newer: latest != pinned,
+                    newer: build.as_deref().unwrap_or(&latest) != pinned,
                     pinned,
                     latest,
+                    build,
                 });
             }
         }
@@ -1901,6 +1944,18 @@ impl Manager {
 
     pub fn prepare_runtime(self: &Arc<Self>) -> Result<Snapshot> {
         let profile = self.profile.clone().ok_or(Error::Unsupported)?;
+        self.prepare_profile(profile)
+    }
+
+    /// Prepares the runtime the page names by its row — an engine installed
+    /// before any model asks for it, or an earlier pin's replaced.
+    pub fn prepare_runtime_named(self: &Arc<Self>, id: &str) -> Result<Snapshot> {
+        let profile = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+            .ok_or(Error::Unsupported)?;
         self.prepare_profile(profile)
     }
 
@@ -4391,7 +4446,27 @@ mod cancellation_tests {
 
 #[cfg(test)]
 mod runtime_news_tests {
-    use super::{installed_version, latest_tag};
+    use super::{build_tag, installed_version, latest_tag};
+
+    /// llama.cpp's stable release holds one file naming its build; the page
+    /// compares that build, not the release's name, with the pin.
+    #[test]
+    fn a_releases_note_names_one_build_and_nothing_else() {
+        assert_eq!(build_tag("b12110\n"), Some("b12110".to_owned()));
+        assert_eq!(build_tag("  b12110  "), Some("b12110".to_owned()));
+        for other in [
+            "",
+            "\n",
+            "b12110 b12111",
+            "b12110\nb12111",
+            "../b1",
+            "b/1",
+            "<html>",
+        ] {
+            assert_eq!(build_tag(other), None, "{other:?}");
+        }
+        assert_eq!(build_tag(&"b".repeat(65)), None);
+    }
 
     /// The page shows two versions apart — the one on this computer and the
     /// one this app would receive — so a runtime that is not installed must

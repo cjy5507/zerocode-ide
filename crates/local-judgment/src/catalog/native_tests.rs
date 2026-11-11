@@ -79,6 +79,7 @@ fn native_files_cannot_be_empty_instead_of_the_python_runtime_files() {
             ..pinned()
         },
         executable: "package/llama-server".to_owned(),
+        build_note: None,
         files: Vec::new(),
     };
     assert_eq!(native.validate(), Err(Error::Manifest));

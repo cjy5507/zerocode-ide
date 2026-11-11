@@ -257,7 +257,7 @@ const modelConnectionsController = {
   setup: null, setupDismissed: false,
   /* 「모델 받기」, open or folded, and the engines' newest releases as their
    * homes last answered — by runtime id, with when this window asked. */
-  receiving: false, runtimeNews: new Map(), runtimeNewsAt: null,
+  receiving: false, runtimeNews: new Map(), runtimeNewsAt: null, runtimeAsked: null,
 
   show(view) {
     showSettingsPane("judgment-models");
@@ -1160,8 +1160,11 @@ const modelConnectionsController = {
     else if (action === "cancel") await managedJudgmentController.cancel();
     // Taking a model's files off this computer is the person's own press.
     else if (action === "remove") await managedJudgmentController.perform("managed_judgment_remove", managedJudgmentController.modelArgs(model), { hand });
-    // A runtime is prepared through a model it runs.
-    else if (action === "runtime") await managedJudgmentController.perform("managed_judgment_prepare_model_runtime", managedJudgmentController.modelArgs(model));
+    // An engine is installed or updated by its own line: `model` is its row.
+    else if (action === "runtime") {
+      this.runtimeAsked = model.id;
+      await managedJudgmentController.perform("managed_judgment_prepare_runtime", { runtimeId: model.id });
+    }
     else await refreshTypeSafe();
     const failed = managedJudgmentController.lastError;
     if ((typeof failed === "string" ? failed : failed?.message ?? failed?.code) === "settings_changed") this.said.set("managed", { state: "changed" });
@@ -2165,12 +2168,17 @@ const modelConnectionsController = {
     return button;
   },
   /* The engines that run a received model: one line each for an engine that
-   * names a public build or stands on this computer. An update is the app's
-   * own newer pin; a newer release its home has published is said beside it. */
+   * names a public build, stands on this computer, or is needed by a model
+   * received here. The line says which version is installed and which this
+   * app would receive, and carries the engine's own button — 설치 with nothing
+   * installed, 업데이트 over an earlier pin's. A newer release its home has
+   * published is said beside them, by its release name and its build. */
   renderRuntimes(line) {
     const holder = el("model-runtimes");
     const snapshot = managedJudgmentController.snapshot;
-    const rows = (snapshot?.runtimes ?? []).filter((row) => row.version || ["ready", "outdated"].includes(row.state));
+    const models = snapshot?.models ?? [];
+    const rows = (snapshot?.runtimes ?? []).filter((row) => row.version || ["ready", "outdated"].includes(row.state)
+      || models.some((model) => model.engine === row.engine && model.installed));
     holder.hidden = rows.length === 0;
     el("model-runtime-lines").replaceChildren(...rows.map((row) => {
       const engine = MODEL_ENGINES[row.engine] ?? { name: row.engine, about: () => "" };
@@ -2178,46 +2186,70 @@ const modelConnectionsController = {
       const badge = modelNode("span", "settings-state model-state", t(standing.key, standing.word));
       badge.dataset.state = standing.badge;
       badge.dataset.runtimeState = row.state;
+      const news = this.runtimeNews.get(row.id);
+      // A build is said with its release's name once its home has named it.
+      const named = (version) => (news?.build === version && news.latest !== version ? `${news.latest} (${version})` : version);
       const extra = [];
       // Two versions, said apart: the one on this computer, and — while that
       // is not the pinned one — the one this app would receive.
       const versions = [];
       if (row.state === "ready") {
-        if (row.installedVersion) versions.push(t("settings.models.runtimeHas", "설치된 버전: {{version}}", { version: row.installedVersion }));
+        if (row.installedVersion) versions.push(t("settings.models.runtimeHas", "설치된 버전: {{version}}", { version: named(row.installedVersion) }));
       } else {
         versions.push(row.state === "outdated"
           ? t("settings.models.runtimeHasEarlier", "설치된 버전: 이전 버전")
           : t("settings.models.runtimeHasNone", "설치된 버전: 없음"));
-        if (row.version) versions.push(t("settings.models.runtimeWill", "앱이 받을 버전: {{version}}", { version: row.version }));
+        if (row.version) versions.push(t("settings.models.runtimeWill", "앱이 받을 버전: {{version}}", { version: named(row.version) }));
       }
       if (versions.length) {
         const said = modelNode("span", "model-line-note", versions.join(" · "));
         said.dataset.runtimeVersions = "";
         extra.push(said);
       }
-      if (row.state === "missing") extra.push(modelNode("span", "model-line-note", t("settings.models.runtimeLater", "모델을 처음 쓸 때 함께 설치합니다({{size}}).", { size: bytesLabel(row.downloadBytes) })));
-      // A runtime is prepared through a model it runs: without one here,
-      // it is installed — or an earlier pin's is replaced — when a model
-      // on this engine is next used, and the line says so.
-      const model = snapshot.models.find((entry) => entry.engine === row.engine && entry.installed);
-      if (row.state === "outdated") {
-        const note = model
-          ? t("settings.models.runtimeOutdated", "이 앱이 확인한 새 판이 있습니다. 업데이트하면 다음 실행부터 씁니다({{size}}).", { size: bytesLabel(row.downloadBytes) })
-          : t("settings.models.runtimeOutdatedLater", "이 앱이 확인한 새 판이 있습니다. 이 엔진의 모델을 다음에 쓸 때 새 판으로 바꿉니다({{size}}).", { size: bytesLabel(row.downloadBytes) });
-        extra.push(modelNode("span", "model-line-note", note));
+      // An install this line asked for, or one a model of this engine
+      // brought with it, is shown where the engine stands.
+      const operation = snapshot.operation;
+      const installing = operation?.kind === "runtime" && ["running", "cancelling"].includes(operation.state)
+        && (this.runtimeAsked === row.id || models.some((model) => model.id === operation.modelId && model.engine === row.engine));
+      if (installing) {
+        const progress = modelNode("span", "model-line-note", t("settings.models.runtimeInstalling", "설치 중 · {{received}} / {{total}}", {
+          received: bytesLabel(operation.receivedBytes ?? 0), total: bytesLabel(operation.totalBytes ?? 0),
+        }));
+        progress.dataset.runtimeProgress = "";
+        progress.setAttribute("role", "status");
+        extra.push(progress);
+      } else if (row.state === "missing") {
+        extra.push(modelNode("span", "model-line-note", t("settings.models.runtimeLater", "모델을 처음 쓸 때 함께 설치합니다({{size}}).", { size: bytesLabel(row.downloadBytes) })));
+      } else if (row.state === "outdated") {
+        extra.push(modelNode("span", "model-line-note", t("settings.models.runtimeOutdated", "이 앱이 확인한 새 판이 있습니다. 업데이트하면 다음 실행부터 씁니다({{size}}).", { size: bytesLabel(row.downloadBytes) })));
       }
-      const news = this.runtimeNews.get(row.id);
       if (news?.newer) {
-        const note = modelNode("span", "model-line-note", t("settings.models.runtimeNewer", "공개된 최신판은 {{latest}}입니다. ZeroCode가 확인해 실으면 여기서 업데이트합니다.", { latest: news.latest }));
+        const note = modelNode("span", "model-line-note", t("settings.models.runtimeNewer", "공개된 최신판은 {{latest}}입니다. ZeroCode가 확인해 실으면 여기서 업데이트합니다.", {
+          latest: news.build ? `${news.latest} (${news.build})` : news.latest,
+        }));
         note.dataset.runtimeNewer = news.latest;
         extra.push(note);
       }
+      const said = this.said.get(`managed:${row.id}`);
+      if (said?.words) {
+        const note = modelNode("span", "model-line-note", said.words);
+        note.dataset.managedSaid = "";
+        note.setAttribute("role", "alert");
+        extra.push(note);
+      }
       const actions = [];
-      if (row.state === "outdated" && model) {
-        const update = this.button(t("settings.models.runtimeUpdate", "업데이트"), () => void this.managedAction("runtime", model), true);
-        update.dataset.runtimeUpdate = row.id;
-        update.disabled ||= managedJudgmentController.busy || managedJudgmentController.operating();
-        actions.push(update);
+      if (installing) {
+        const cancel = this.button(t("settings.connections.cancel", "취소"), () => void this.managedAction("cancel"));
+        cancel.dataset.runtimeCancel = row.id;
+        cancel.disabled ||= operation.state === "cancelling";
+        actions.push(cancel);
+      } else if (row.state === "missing" || row.state === "outdated") {
+        const outdated = row.state === "outdated";
+        const install = this.button(outdated ? t("settings.models.runtimeUpdate", "업데이트") : t("settings.models.runtimeInstall", "설치"),
+          () => void this.managedAction("runtime", row), outdated);
+        install.dataset[outdated ? "runtimeUpdate" : "runtimeInstall"] = row.id;
+        install.disabled ||= managedJudgmentController.busy || managedJudgmentController.operating();
+        actions.push(install);
       }
       const made = line(`runtime:${row.id}`, engine.name, engine.about(), badge, extra, actions);
       made.dataset.runtime = row.id;

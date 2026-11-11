@@ -53,6 +53,7 @@ fn runtime(bytes: &[u8], files: Vec<Artifact>) -> Runtime {
     Runtime {
         archive: artifact("native.tar.gz", bytes),
         executable: "package/llama-server".to_owned(),
+        build_note: None,
         files,
     }
 }

@@ -190,10 +190,17 @@ pub(crate) fn managed_judgment_register_catalog(
 }
 
 #[tauri::command]
-pub(crate) async fn managed_judgment_prepare_runtime(app: AppHandle) -> Result<Snapshot, String> {
-    service(&app)?
-        .prepare_runtime()
-        .map_err(|error| error.to_string())
+pub(crate) async fn managed_judgment_prepare_runtime(
+    app: AppHandle,
+    runtime_id: Option<String>,
+) -> Result<Snapshot, String> {
+    let manager = service(&app)?;
+    match runtime_id {
+        // The engine line's own button names the runtime it stands for.
+        Some(id) => manager.prepare_runtime_named(&id),
+        None => manager.prepare_runtime(),
+    }
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

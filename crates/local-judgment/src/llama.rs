@@ -14,13 +14,37 @@ use crate::{Error, Result, gguf, storage};
 pub struct Runtime {
     pub archive: Artifact,
     pub executable: String,
+    /// The file a release of this engine publishes to name its build, when
+    /// the release itself carries no archive: llama.cpp's stable releases
+    /// (`v0.9.0`) hold one text file with the tag of the build they are
+    /// (`b12110`), and the archives stand under that tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_note: Option<String>,
     pub files: Vec<Artifact>,
+}
+
+/// One name in a release's address — an owner, a repository, a tag, a file:
+/// letters, digits, `.`, `-` and `_`, at most 64 of them, and no folder step.
+pub(crate) fn release_name(part: &str) -> bool {
+    !part.is_empty()
+        && part.len() <= 64
+        && !matches!(part, "." | "..")
+        && part
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 impl Runtime {
     pub fn validate(&self) -> Result<()> {
         catalog::relative(&self.archive.path)?;
         catalog::relative(&self.executable)?;
+        if self
+            .build_note
+            .as_deref()
+            .is_some_and(|note| !release_name(note))
+        {
+            return Err(Error::Manifest);
+        }
         if self.archive.bytes == 0
             || self.archive.bytes > 64 * 1024 * 1024
             || self.archive.sha256.len() != 64
@@ -70,14 +94,7 @@ impl Runtime {
         if parts.len() != 6 || parts[2] != "releases" || parts[3] != "download" {
             return None;
         }
-        let named = |part: &str| {
-            !part.is_empty()
-                && part.len() <= 64
-                && !matches!(part, "." | "..")
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
-        };
+        let named = release_name;
         if !named(parts[0]) || !named(parts[1]) || !named(parts[4]) {
             return None;
         }

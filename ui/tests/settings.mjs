@@ -16557,19 +16557,25 @@ await test("이 컴퓨터: 실행 엔진 줄은 이 앱이 고정한 판과 상�
     assert((await line.locator("[data-runtime-newer]").textContent()).includes("v0.9.0"));
     const updatedAt = backend.calls.length;
     await line.locator("[data-runtime-update]").click();
-    const updated = await backend.waitForCall("judgment-status", "managed_judgment_prepare_model_runtime", updatedAt);
-    assertEqual(updated.args, { modelId: provider.model, revision: "fixture-revision" }, "the update did not prepare the runtime through the model it runs");
-    // An earlier pin's runtime with no model of its engine on this computer:
-    // nothing here can be pressed, so the line says when the new one comes
-    // rather than naming an update it does not offer.
-    await paint((held) => { held.models[0].installed = false; });
+    const updated = await backend.waitForCall("judgment-status", "managed_judgment_prepare_runtime", updatedAt);
+    assertEqual(updated.args, { runtimeId: runtime.id }, "the update did not name the engine its line stands for");
+    // The engine's own button needs no model: an earlier pin's runtime with
+    // no model of its engine on this computer is updated all the same.
+    await paint((held) => { held.models[0].installed = false; held.runtimes = [clone(runtime)]; });
     assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "outdated");
-    assertEqual(await line.locator("[data-runtime-update]").count(), 0, "an update is offered with no model to prepare the runtime through");
-    const later = await page.evaluate(() => [t("settings.models.runtimeOutdatedLater", "이 앱이 확인한 새 판이 있습니다. 이 엔진의 모델을 다음에 쓸 때 새 판으로 바꿉니다({{size}}).", { size: bytesLabel(37_351_536) }), t("settings.models.runtimeOutdated", "이 앱이 확인한 새 판이 있습니다. 업데이트하면 다음 실행부터 씁니다({{size}}).", { size: bytesLabel(37_351_536) })]);
-    const said = await line.innerText();
-    assert(said.includes(later[0]) && !said.includes(later[1]), "the line names an update it does not offer", said);
+    assertEqual(await line.locator("[data-runtime-update]").count(), 1, "the update needs a model to stand");
     await paint((held) => { held.models[0].installed = true; });
-    assertEqual(await line.locator("[data-runtime-update]").count(), 1, "the update did not come back with the model");
+    // The newest release named with its build: the home's release name is
+    // not the build this app pins, and both are said.
+    backend.managedRuntimeNews = [{ id: runtime.id, engine: "llama_cpp", pinned: "b11669", latest: "v0.9.0", build: "b12110", newer: true }];
+    await paint((held) => { held.runtimes = [clone(runtime)]; });
+    assert((await line.locator("[data-runtime-newer]").textContent()).includes("v0.9.0 (b12110)"), "the newest release is not said with its build");
+    // The pinned build is the newest release's: nothing newer is said, and
+    // the installed version wears the release's name.
+    backend.managedRuntimeNews = [{ id: runtime.id, engine: "llama_cpp", pinned: "b11669", latest: "v0.9.0", build: "b11669", newer: false }];
+    await paint((held) => { held.runtimes = [{ ...clone(runtime), state: "ready", installedVersion: "b11669" }]; });
+    assertEqual(await line.locator("[data-runtime-newer]").count(), 0, "the pinned build of the newest release is said to be behind it");
+    assertEqual(await versions(), "설치된 버전: v0.9.0 (b11669)", "the installed build does not wear its release's name");
     // The pinned runtime, installed, with nothing newer published.
     backend.managedRuntimeNews = [{ id: runtime.id, engine: "llama_cpp", pinned: "b11669", latest: "b11669", newer: false }];
     await paint((held) => { held.runtimes = [{ ...clone(runtime), state: "ready", installedVersion: "b11669" }]; });
@@ -16582,7 +16588,22 @@ await test("이 컴퓨터: 실행 엔진 줄은 이 앱이 고정한 판과 상�
     assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "missing");
     assertEqual(await versions(), "설치된 버전: 없음 · 앱이 받을 버전: b11669", "a runtime not installed reads as if the pinned build were on this computer");
     await receivePictures(page, "engine-missing");
-    assertEqual(await line.locator("button").count(), 0, "a runtime not installed offers a button of its own");
+    // Nothing installed: the line carries 「설치」, which names the engine —
+    // no model has to be received first (the person, 2026-11-11: 「없으면
+    // 최신 다운로드 받을수있는 버튼」).
+    assertEqual(await line.locator("button").count(), 1, "a runtime not installed has no button, or more than one");
+    const installAt = backend.calls.length;
+    await line.locator("[data-runtime-install]").click();
+    const installed = await backend.waitForCall("judgment-status", "managed_judgment_prepare_runtime", installAt);
+    assertEqual(installed.args, { runtimeId: runtime.id }, "the install did not name the engine its line stands for");
+    // While it is received the line says how far, and 「취소」 stands in the button's place.
+    await paint((held) => {
+      held.runtimes = [{ ...clone(runtime), state: "missing" }];
+      held.operation = { id: "fixture-runtime-install", kind: "runtime", modelId: null, state: "running", receivedBytes: 31.3 * 1024 * 1024, totalBytes: 183.2 * 1024 * 1024, error: null };
+    });
+    assertEqual(await line.locator("[data-runtime-progress]").textContent(), "설치 중 · 31.3 MB / 183.2 MB", "an install under way does not say how far it is");
+    assertEqual(await line.locator("button").evaluateAll((all) => all.map((button) => Object.keys(button.dataset).join())), ["runtimeCancel"], "an install under way keeps its install button, or has no way to stop");
+    await paint((held) => { held.operation = null; });
     const lines = new Set();
     for (const locale of SETTINGS_QUALITY_SPEC.locales) {
       await setQualityLocale(page, locale);
