@@ -250,17 +250,26 @@ These are the ones that cost you a run when you get them wrong.
   `"ok":false` is a failed attempt — the task goes back to ready and can be
   tried again, and three failures on one task ends it rather than spending a
   fourth agent on the same wall.
-- **Nothing wakes a busy coordinator.** The pointer that says "you have N
-  orchestration messages" is typed into a pane the window knows is IDLE —
-  deliberately, because typing at a pane mid-turn would land in whatever its
-  agent is composing. So a coordinator running a long turn of its own gets no
-  signal at all, however many reports arrive. Two consequences, both learned
-  the hard way. **Check between your own slices**, not only when you finish:
-  a `check --peek` costs nothing and needs no retry name. And if you watch
-  workers with a loop, **watch the SET of active workers change, never wait
-  for the count to reach zero** — with three running, the first to finish
-  moves nothing your loop is looking at, and its report sits unread behind
-  any other queued notices.
+- **A busy pane hears about mail at its next safe point, never mid-keystroke.**
+  The window does not type at a pane mid-turn — the words would land in
+  whatever its agent is composing. The pointer that says "you have N
+  orchestration messages" goes by the pane's own road instead: a Claude pane
+  gets it from its own hooks, as context when its next tool call ends
+  (`PostToolUse`) or as a continuation when its turn would stop (`Stop`); a
+  zo pane gets it over its own channel, during a turn or between turns; a
+  Codex worker gets it through `codex queue`. A pane waiting on a question of
+  its own is not offered it until that wait is over. A pane with none of these
+  roads, and a pointer its road did not take (not collected within a few
+  seconds, or collected and still unread a minute later), get it typed into
+  the composer the next time the pane is IDLE. It is only the pointer: the
+  mail waits for your `check`. Two consequences, both
+  learned the hard way. **Check between your own slices** anyway, not only
+  when you finish: one long tool call — a foreground build, a long sleep —
+  holds the pointer until it returns, and a `check --peek` costs nothing and
+  needs no retry name. And if you watch workers with a loop, **watch the SET
+  of active workers change, never wait for the count to reach zero** — with
+  three running, the first to finish moves nothing your loop is looking at,
+  and its report sits unread behind any other queued notices.
 
 The rest of the list is in `news.md`, and it is about the ledger's own news:
 silence is not failure (`went_quiet` is information, read the screen), a death
