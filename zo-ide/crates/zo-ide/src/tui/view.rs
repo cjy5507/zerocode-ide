@@ -595,9 +595,16 @@ pub struct Dialog {
     pub subject: String,
     pub body: String,
     pub options: Vec<String>,
-    pub selected: usize,
+    /// The row drawn as chosen, which a bare Enter answers with. `None` while
+    /// no row is chosen: Enter answers nothing then, and the dialog says how
+    /// to choose ([`CHOOSE_FOOTER`]).
+    pub selected: Option<usize>,
     pub footer: String,
 }
+
+/// What the dialog says under its rows while none is chosen, in the footer's
+/// place: Enter is not an answer yet.
+const CHOOSE_FOOTER: &str = "Press a number, or ↑↓ then enter";
 
 /// What a bare Enter answers on a tool prompt: this one call. The
 /// session-wide allow is a choice the person makes, never the row the dialog
@@ -607,22 +614,22 @@ const ENTER_ANSWERS: runtime::message_stream::PermissionDecision =
 
 /// What a bare Enter answers on a prompt only a person may answer
 /// ([`runtime::message_stream::PermissionPrompt::person_only`]) — a kill a
-/// person should allow, a schedule a person should approve.
+/// person should allow, a schedule a person should approve: nothing.
 ///
-/// Its own name because it is the person's to decide and was not decided when
-/// this was written (2026-11-11): a stray Enter — a line typed into the pane
-/// by something else — allows the call while this is an allow. Until the
-/// person says otherwise it is what every tool prompt answers; this is the
-/// one place that changes when they do, and the window's card follows the
-/// same answer.
-const ENTER_ANSWERS_PERSON_ONLY: runtime::message_stream::PermissionDecision = ENTER_ANSWERS;
+/// The person chose this (2026-11-11) over a deny and over the allow-once
+/// every other tool prompt opens on: a stray Enter — a line something else
+/// typed into the pane — neither allows nor denies, and the question stays.
+/// Allowing is one key as it was, the row's number. The window's card follows
+/// the same answer.
+const ENTER_ANSWERS_PERSON_ONLY: Option<runtime::message_stream::PermissionDecision> = None;
 
 /// The row a tool prompt's dialog opens on, which is the row a bare Enter
 /// answers with: the first choice that decides what Enter is to answer for
-/// this kind of prompt, or the first row when no choice does.
-fn row_enter_answers(prompt: &runtime::message_stream::PermissionPrompt) -> usize {
-    let answer = if prompt.person_only { ENTER_ANSWERS_PERSON_ONLY } else { ENTER_ANSWERS };
-    prompt.choices.iter().position(|choice| choice.decision == answer).unwrap_or(0)
+/// this kind of prompt (the first row when no choice does), or no row when
+/// Enter is to answer nothing.
+fn row_enter_answers(prompt: &runtime::message_stream::PermissionPrompt) -> Option<usize> {
+    let answer = if prompt.person_only { ENTER_ANSWERS_PERSON_ONLY } else { Some(ENTER_ANSWERS) }?;
+    Some(prompt.choices.iter().position(|choice| choice.decision == answer).unwrap_or(0))
 }
 
 impl Dialog {
@@ -641,7 +648,7 @@ impl Dialog {
                 subject: crate::util::ansi::sanitize_inline(&question.title),
                 body: prompt.reasoning.clone(),
                 options,
-                selected: 0,
+                selected: Some(0),
                 footer,
             },
             None => Self {
@@ -690,7 +697,7 @@ impl Dialog {
         }
         out.push(Line::empty());
         for (index, option) in self.options.iter().enumerate() {
-            let selected = index == self.selected;
+            let selected = Some(index) == self.selected;
             let label = format!("{}. {option}", index + 1);
             let line = if selected {
                 let style = Style::new().bold().fg(focus);
@@ -704,10 +711,23 @@ impl Dialog {
             out.push(line.truncated(width));
         }
         if !self.footer.is_empty() {
+            let footer = if self.selected.is_some() { self.footer.as_str() } else { CHOOSE_FOOTER };
             out.push(Line::empty());
-            out.push(Line::new(vec![Span::dim(self.footer.clone())]).truncated(width));
+            out.push(Line::new(vec![Span::dim(footer.to_string())]).truncated(width));
         }
         out
+    }
+
+    /// Move the choice one row down, or up: what ↓ and ↑ do. From no row
+    /// chosen, down takes the first row and up the last.
+    pub fn step(&mut self, down: bool) {
+        let last = self.options.len().saturating_sub(1);
+        self.selected = Some(match (self.selected, down) {
+            (None, true) => 0,
+            (None, false) => last,
+            (Some(row), true) => (row + 1).min(last),
+            (Some(row), false) => row.saturating_sub(1),
+        });
     }
 }
 
@@ -2529,7 +2549,7 @@ mod tests {
             subject: "/tmp/x".to_string(),
             body: "Do you trust the contents of this directory?".to_string(),
             options: vec!["Yes, continue".to_string(), "No, quit".to_string()],
-            selected: 0,
+            selected: Some(0),
             footer: "Press enter to continue".to_string(),
         };
         let mut frame = frame(&composer, None);
@@ -3292,14 +3312,12 @@ mod card_tests {
     #[test]
     fn the_card_starts_on_allow_once_never_on_the_session_wide_allow() {
         let dialog = card();
-        assert_eq!(dialog.options[dialog.selected], "Allow once");
+        assert_eq!(dialog.selected.map(|row| dialog.options[row].as_str()), Some("Allow once"));
     }
 
-    /// A prompt only a person may answer opens on the row that one constant
-    /// names, wherever that row stands among the choices — so the answer a
-    /// bare Enter gives there is decided in one place.
-    #[test]
-    fn a_person_only_card_opens_on_the_row_its_one_constant_names() {
+    /// The dialog of a prompt only a person may answer, as the bridge hands
+    /// the pane its block: allow once, or deny.
+    fn person_only_card() -> Dialog {
         let choice = |key, label: &str, decision| PermissionChoice {
             key,
             label: label.to_string(),
@@ -3307,8 +3325,8 @@ mod card_tests {
         };
         let request = PermissionRequest {
             choices: vec![
-                choice('n', "Deny", PermissionDecision::Deny),
                 choice('o', "Allow once", PermissionDecision::AllowOnce),
+                choice('n', "Deny", PermissionDecision::Deny),
             ],
             person_only: true,
             ..bash_request()
@@ -3320,9 +3338,43 @@ mod card_tests {
             runtime::message_stream::BlockId(1),
         );
         assert!(prompt.person_only, "the bridge carries it to the block the pane parks");
-        let dialog = Dialog::for_permission(&prompt);
-        let opened_on = prompt.choices[dialog.selected].decision;
-        assert_eq!(opened_on, super::ENTER_ANSWERS_PERSON_ONLY);
+        Dialog::for_permission(&prompt)
+    }
+
+    /// A prompt only a person may answer opens with no row chosen: none is
+    /// drawn as chosen, and the line under the rows says how to choose in the
+    /// place of "enter to continue" — Enter answers nothing there.
+    #[test]
+    fn a_person_only_card_opens_with_no_row_chosen_and_says_how_to_choose() {
+        let dialog = person_only_card();
+        assert_eq!(dialog.selected, None);
+        let plain: Vec<String> = dialog.lines(100).iter().map(Line::plain).collect();
+        assert!(plain.contains(&"  1. Allow once".to_string()), "{plain:#?}");
+        assert!(plain.contains(&"  2. Deny".to_string()), "{plain:#?}");
+        assert!(!plain.iter().any(|row| row.starts_with('›')), "no row is chosen: {plain:#?}");
+        assert_eq!(plain.last().map(String::as_str), Some(super::CHOOSE_FOOTER));
+    }
+
+    /// ↓ from no row takes the first and ↑ the last; from a row they move one
+    /// and stop at the ends. Once a row is chosen the card says Enter goes on.
+    #[test]
+    fn the_arrows_choose_a_row_from_none_and_stop_at_the_ends() {
+        let mut down = person_only_card();
+        down.step(true);
+        assert_eq!(down.selected, Some(0));
+        down.step(true);
+        down.step(true);
+        assert_eq!(down.selected, Some(1), "the last row holds");
+        let plain: Vec<String> = down.lines(100).iter().map(Line::plain).collect();
+        assert!(plain.contains(&"› 2. Deny".to_string()), "{plain:#?}");
+        assert_eq!(plain.last().map(String::as_str), Some("Press enter to continue"));
+
+        let mut up = person_only_card();
+        up.step(false);
+        assert_eq!(up.selected, Some(1), "up from none is the last row");
+        up.step(false);
+        up.step(false);
+        assert_eq!(up.selected, Some(0), "the first row holds");
     }
 
     #[test]

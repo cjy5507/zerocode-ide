@@ -3986,19 +3986,19 @@ impl Ui {
             ParkedScreen::Question(_) => None,
         }) {
             match key.code {
-                KeyCode::Up => dialog.selected = dialog.selected.saturating_sub(1),
-                KeyCode::Down => {
-                    dialog.selected =
-                        (dialog.selected + 1).min(dialog.options.len().saturating_sub(1));
-                }
+                KeyCode::Up => dialog.step(false),
+                KeyCode::Down => dialog.step(true),
                 KeyCode::Char(ch) if ch.is_ascii_digit() => {
                     let index = ch.to_digit(10).unwrap_or(0) as usize;
                     if index >= 1 && index <= dialog.options.len() {
-                        dialog.selected = index - 1;
+                        dialog.selected = Some(index - 1);
                         confirm = true;
                     }
                 }
-                KeyCode::Enter => confirm = true,
+                // Enter answers with the chosen row. With none chosen — how a
+                // prompt only a person may answer opens — it answers nothing,
+                // and the prompt stays up.
+                KeyCode::Enter => confirm = dialog.selected.is_some(),
                 _ => {}
             }
         }
@@ -4012,20 +4012,22 @@ impl Ui {
     }
 
     fn answer_dialog(&mut self) {
+        let chosen = match self.parked.as_ref().map(|parked| &parked.screen) {
+            Some(ParkedScreen::Dialog(dialog)) => dialog.selected,
+            Some(ParkedScreen::Question(_)) => Some(0),
+            None => None,
+        };
+        // A dialog with no row chosen has no answer to give: it stays parked.
+        let Some(selected) = chosen else {
+            return;
+        };
         let Some(parked) = self.parked.take() else {
             return;
         };
         events::retire_prompt(parked.prompt_id, ResolvedBy::Pane);
-        let (selected, label) = match &parked.screen {
-            ParkedScreen::Dialog(dialog) => (
-                dialog.selected,
-                dialog
-                    .options
-                    .get(dialog.selected)
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
-            ParkedScreen::Question(_) => (0, String::new()),
+        let label = match &parked.screen {
+            ParkedScreen::Dialog(dialog) => dialog.options.get(selected).cloned().unwrap_or_default(),
+            ParkedScreen::Question(_) => String::new(),
         };
         match parked.prompt {
             PendingPrompt::Permission(prompt) => {
@@ -11316,6 +11318,69 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains(long), "the whole command is on the card:\n{text}");
+    }
+
+    /// A prompt only a person may answer takes no answer from a bare Enter:
+    /// the dialog opens with no row chosen, Enter leaves it up and sends
+    /// nothing, and the row's number answers it in one key as before. With a
+    /// row chosen by an arrow, Enter answers with that row.
+    #[test]
+    fn enter_answers_nothing_on_a_prompt_only_a_person_may_answer() {
+        use crossterm::event::KeyCode as Pressed;
+        use runtime::message_stream::PermissionDecision as Answered;
+        use runtime::permission::{
+            PermissionChoice, PermissionDecision, PermissionRequest, RiskLevel,
+        };
+
+        let ids = BlockIdGen::default();
+        let asked = |ui: &mut super::Ui| {
+            let request = PermissionRequest {
+                tool: "bash".to_string(),
+                input_summary: "kill 4242".to_string(),
+                input_hash: String::new(),
+                reasoning: "a person should say yes first".to_string(),
+                choices: vec![
+                    PermissionChoice {
+                        key: 'o',
+                        label: "Allow once".to_string(),
+                        decision: PermissionDecision::AllowOnce,
+                    },
+                    PermissionChoice {
+                        key: 'n',
+                        label: "Deny".to_string(),
+                        decision: PermissionDecision::Deny,
+                    },
+                ],
+                risk_level: RiskLevel::High,
+                person_only: true,
+                question: None,
+            };
+            let (responder, answer) = tokio::sync::oneshot::channel();
+            ui.block(RenderBlock::PermissionPrompt(
+                crate::session::permission_bridge::build_render_prompt(&request, responder, ids.next()),
+            ));
+            answer
+        };
+
+        // Enter, and Enter again: the prompt is still up and nothing was sent.
+        let mut ui = test_ui();
+        let mut answer = asked(&mut ui);
+        key(&mut ui, Pressed::Enter);
+        key(&mut ui, Pressed::Enter);
+        assert!(ui.parked.is_some(), "a bare Enter leaves the prompt up");
+        assert!(answer.try_recv().is_err(), "and answers nothing");
+        // The row's number answers it, in one key.
+        key(&mut ui, Pressed::Char('1'));
+        assert!(ui.parked.is_none());
+        assert_eq!(answer.try_recv().expect("answered"), Answered::AllowOnce);
+
+        // An arrow chooses a row, and then Enter answers with it.
+        let mut ui = test_ui();
+        let mut answer = asked(&mut ui);
+        key(&mut ui, Pressed::Up);
+        key(&mut ui, Pressed::Enter);
+        assert!(ui.parked.is_none());
+        assert_eq!(answer.try_recv().expect("answered"), Answered::Deny);
     }
 
     /// The parser names a call the way the model made it (`Bash`), the
