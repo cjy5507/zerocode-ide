@@ -32287,11 +32287,13 @@ select {
   color: var(--ink-mist);
 }
 
-/* A question's reason of several lines is read line by line: zo's question
- * for a schedule of its own says what it is called, what runs, when and
- * where, a line each. Only the question card's own reason — the other
- * dialogs' notes share the class and are written across source lines. */
-#ask-why {
+/* A reason written in lines is read line by line: zo's question for a
+ * schedule of its own says what it is called, what runs, when and where, a
+ * line each. Only where the card's kind says so (`view.lines`, shell-term.js)
+ * — any other reason holds an asker's words, whose line breaks could stretch
+ * the card — and only on the question card: the other dialogs' notes share
+ * the class and are written across source lines. */
+#ask-why[data-lines] {
   white-space: pre-line;
 }
 

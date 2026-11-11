@@ -4986,6 +4986,10 @@ function paintAsk() {
           error: ask.failure,
         }),
   );
+  // A reason is one paragraph: line breaks in it are drawn as spaces, so what
+  // an asker wrote cannot stretch the card. Only a kind that says its reason
+  // is written in lines (`view.lines`) has them kept.
+  el("ask-why").toggleAttribute("data-lines", ask.failure === undefined && view.lines === true);
   paintAskPart("ask-fallback", ask.failure === undefined ? null : kind.refused?.(ask) ?? null);
   paintAskPart("ask-clock", kind.clock?.(ask) ?? null);
   const choices = view.choices ?? null;
@@ -5305,6 +5309,11 @@ registerAskKind("tool", {
       // answer they mean with a click or a Tab (their choice, 2026-11-11).
       // A frame without the field, every older zo's, opens on its first choice.
       initial: frame.person_only === true ? null : 0,
+      // Such a question's reason is zo's own writing, a line for each thing it
+      // says — what a schedule is called, what runs, when and where — with
+      // every value it shows cleaned to one line: its lines are kept. Any
+      // other prompt's reason holds what the model wrote, and stays a paragraph.
+      lines: frame.person_only === true,
       safe: choices.findIndex((choice) => choice.decision === "deny"),
     };
   },

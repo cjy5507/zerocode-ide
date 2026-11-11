@@ -683,7 +683,8 @@ async function computerHandoff(browser, origin, ok) {
         timeoutMs: 180000,
       });
       await T.settle(260);
-      return T.look();
+      // This card's words hold what an asker named: its reason is a paragraph.
+      return { ...T.look(), space: getComputedStyle(document.getElementById("ask-why")).whiteSpace };
     });
     await page.keyboard.press("Enter");
     await page.waitForTimeout(90);
@@ -695,6 +696,7 @@ async function computerHandoff(browser, origin, ok) {
       "a schedule an agent asks for is an approval card: its own title, 「허락」 for the yes and the job in the window's words; Enter allows nothing and the click does",
       asked.title === "예약을 허락할까요?" && asked.buttons.join() === "취소,허락"
         && ["Wallet QA", "Morning wallet", "30 9 * * *", "「/Users/dev/app」", "term:7"].every((shown) => asked.why.includes(shown))
+        && asked.space !== "pre-line"
         && unallowed === 2 && allowed?.id === "handoff-3" && allowed?.allow === true,
       JSON.stringify({ asked, unallowed, allowed }),
     );
