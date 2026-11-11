@@ -17,7 +17,7 @@ use crate::slash::{Callable, CallableSource, Slash};
 ///
 /// `/` opens a slash command — but it also opens every Unix absolute path,
 /// and a person who pastes `/Users/dev/Desktop/web.config 이 파일 확인해봐`
-/// means the path, not a command named `Users/joe/Desktop/web.config` (live
+/// means the path, not a command named `Users/dev/Desktop/web.config` (live
 /// report 2026-09-09: zo answered "is not in zo" instead of reading the
 /// file). A command is ONE word after the slash, so a first word holding
 /// another `/` is a path; and a first word that names something on disk

@@ -153,6 +153,22 @@ class PiiScan(unittest.TestCase):
         hits = found(self.checkout.root)["home-path"]
         self.assertEqual([h["line"] for h in hits], [1, 2], hits)
 
+    def test_a_home_directory_is_caught_without_its_leading_separator(self):
+        """A comment that quotes what a person pasted may drop the first
+        separator — the path after a backtick or a quote. The account in it
+        is as real as in the whole path; a word that merely ends in `Users`
+        is no home directory, and the placeholder is forgiven here too."""
+        name = CAUGHT["home-path"].rsplit("/", 1)[-1]
+        self.checkout.write(
+            "a.rs",
+            f"/// a command named `Users/{name}/Desktop/web.config`\n"
+            f'let q = "Users\\\\{name}\\\\y";\n'
+            "/// a command named `Users/dev/Desktop/web.config`\n"
+            f"let all = AllUsers/{name};\n",
+        )
+        hits = found(self.checkout.root)["home-path"]
+        self.assertEqual([h["line"] for h in hits], [1, 2], hits)
+
     def test_a_retina_asset_name_is_not_a_mailbox(self):
         """`icon@2x.png` and `128x128@2x.png` end in a scale suffix, not a
         domain: the mailbox row forgives that whole family of asset names."""
