@@ -15056,6 +15056,15 @@ mod tests {
             "the landing after a removal stopped being this project's own \
              main, or falls back to another project's:\n{finishing}"
         );
+        // A removed row another refresh already took out leaves `home` unknown, not gone: the backend has made
+        // that checkout's own main active, and landing nowhere left the stage without a tab (review t-103588 M1).
+        assert!(
+            finishing.contains(
+                ") ?? (home === null ? worktrees.find((held) => held.active) : undefined);"
+            ),
+            "a removal whose row a refresh took out before its project was read \
+             lands nowhere again, leaving the stage empty:\n{finishing}"
+        );
         // The main is looked up in the catalog the window holds, not in the refresh's answer: a
         // refresh a newer one overtook answers `[]` (review t-102958 #6).
         assert!(

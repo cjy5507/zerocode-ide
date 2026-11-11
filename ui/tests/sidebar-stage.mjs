@@ -461,4 +461,48 @@ export async function testSidebarStage(browser, origin, ok) {
       receipt({ ...scene, faults: faults.length }),
     );
   }
+
+  // f. A removal whose row another refresh took out before `home` was read lands on the main the backend made active
+  //    (review t-103588 M1). The backend re-roots the window on the removed checkout's own main before the window
+  //    hears of the removal; a refresh in between drops the row and marks that main active, so the removal no longer
+  //    knows which project it belonged to. Landing nowhere left the stage without a tab while the sidebar painted the
+  //    main as active.
+  {
+    const { page, faults } = await openWindowTestPage(browser, origin);
+    await addCheckoutB(page);
+    await countRefreshes(page);
+    await page.evaluate(async (CHECKOUT_B) => { await activateWorktree(CHECKOUT_B); }, CHECKOUT_B);
+    const quiet = await refreshesEnded(page);
+    await stopCountingRefreshes(page);
+    const scene = await page.evaluate(async (CHECKOUT_B) => {
+      const main = projects[0].worktrees.find((one) => one.is_main)?.path ?? null;
+      // The main holds no tab of its own — the person works in B — so nothing on the stage stands in for a landing.
+      for (const held of tabs.filter((one) => one.worktree === main)) dropTab(held.id);
+      const answered = window.__ANSWER__.project_catalog;
+      // The backend's catalog after the removal: B is gone and its project's main is the active checkout.
+      window.__ANSWER__.project_catalog = (...args) => answered(...args).map((project) => ({
+        ...project,
+        worktrees: project.worktrees
+          .filter((one) => one.path !== CHECKOUT_B)
+          .map((one) => ({ ...one, active: one.path === main })),
+      }));
+      // Another refresh draws that list before the removal reads which project B belonged to.
+      await refreshWorktrees();
+      const home = projectOfWorktree(CHECKOUT_B)?.path ?? null;
+      try {
+        await finishWorktreeRemoval({ path: CHECKOUT_B, active: true }, null);
+        await window.__PAINTED__();
+      } finally {
+        window.__ANSWER__.project_catalog = answered;
+      }
+      const front = tabs.find((held) => held.id === activeTabId);
+      return { main, home, active: activeWorktreePath, front: front ? { kind: front.kind, worktree: front.worktree } : null };
+    }, CHECKOUT_B);
+    ok(
+      "a removal whose row another refresh already took out lands on the main the backend made active, with its terminal in front",
+      quiet && scene.main !== null && scene.home === null && scene.active === scene.main &&
+        scene.front?.worktree === scene.main && faults.length === 0,
+      receipt({ ...scene, quiet, faults: faults.length }),
+    );
+  }
 }
