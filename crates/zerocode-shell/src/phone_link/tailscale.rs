@@ -43,6 +43,12 @@ pub(crate) const EXIT_CLI_TIMEOUT: Duration = Duration::from_secs(3);
 const CLI_POLL: Duration = Duration::from_millis(50);
 /// The one loopback address the listener binds and the mapping names.
 pub(crate) const LOOPBACK: &str = "127.0.0.1";
+/// The terminal the CLI is told it runs in. On macOS the app's own binary is
+/// the CLI only when `TERM` is set; without it — a window opened from the
+/// Finder or the Dock has none — it tries to start the Tailscale app instead
+/// and says "The Tailscale GUI failed to start", or never answers.
+#[cfg(target_os = "macos")]
+const CLI_TERM: &str = "dumb";
 
 /// The places the Tailscale installers put the CLI. PATH is never searched:
 /// opening Settings runs this program with the window's rights, and a PATH
@@ -745,7 +751,11 @@ pub(crate) fn serve_off_args(https_port: u16) -> Vec<String> {
 /// runs: `status --json` on a large tailnet is more than a pipe holds, and a
 /// child whose pipe is full never exits.
 pub(crate) fn run_within(cli: &Path, args: &[String], limit: Duration) -> Result<String, String> {
-    let mut child = crate::proc::quiet_command(cli)
+    #[allow(unused_mut)] // only macOS adds to it.
+    let mut command = crate::proc::quiet_command(cli);
+    #[cfg(target_os = "macos")]
+    command.env("TERM", CLI_TERM);
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1256,6 +1266,20 @@ mod tests {
                 "shell-i18n.js names {port}"
             );
         }
+    }
+
+    /// A window opened from the Finder has no `TERM`, and the macOS app's
+    /// binary without one is not the CLI: the CLI is always told one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_cli_is_told_a_terminal_the_window_does_not_have() {
+        let said = run_within(
+            Path::new("/usr/bin/printenv"),
+            &["TERM".into()],
+            CLI_TIMEOUT,
+        )
+        .expect("printenv");
+        assert_eq!(said.trim(), CLI_TERM);
     }
 
     #[test]
