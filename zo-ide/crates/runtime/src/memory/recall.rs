@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use core_types::text::truncate_on_char_boundary;
 use core_types::{MemoryEntry, MemoryHit, MemoryRetriever};
+use zerocode_core::second_brain_search::NEIGHBOR_RULE;
 
 use crate::memory::MemoryModelTag;
 
@@ -1070,7 +1071,10 @@ const POINTER_TOKEN_WEIGHT: usize = 2;
 /// page is about the *query*, so a page with zero lexical overlap is never
 /// admitted by one. The typed relations in [`GRAPH_RELATION_DECAY`] are the
 /// ones a person wrote deliberately, and those do admit.
-pub const GRAPH_NEIGHBOR_BOOST: i64 = 1;
+///
+/// This number and the four below it are written once, in the table the
+/// vault's search reads too ([`NEIGHBOR_RULE`]).
+pub const GRAPH_NEIGHBOR_BOOST: i64 = NEIGHBOR_RULE.mention_boost;
 
 /// Ceiling on the hub prior, in boost points.
 ///
@@ -1078,7 +1082,7 @@ pub const GRAPH_NEIGHBOR_BOOST: i64 = 1;
 /// an index of the vault rather than a fact about it, and an index is never the
 /// answer to a question. Kept below the smallest lexical step so the prior can
 /// only reorder pages the query scored equally.
-const GRAPH_HUB_PRIOR_MAX: i64 = 3;
+const GRAPH_HUB_PRIOR_MAX: i64 = NEIGHBOR_RULE.hub_prior_max;
 
 /// Fixed-point scale of the two score axes: one point is this many
 /// milli-points. Only [`Candidate::lexical`] and [`Candidate::points`] are
@@ -1090,13 +1094,13 @@ const GRAPH_SCORE_SCALE: i64 = 1_000;
 /// Three, not one: a query often splits its evidence over two pages, and the
 /// answer can hang off the second. Not more, because the fifth-best lexical
 /// answer is already a weak claim and its neighbours would be a weaker one.
-const GRAPH_SEED_HITS: usize = 3;
+const GRAPH_SEED_HITS: usize = NEIGHBOR_RULE.seeds;
 
 /// Neighbours one seed may contribute per relation kind — `contradicts`
 /// excepted, which is unbounded. Two is what "the pages this one depends on"
 /// means in a vault where a hub declares a dozen: the first two are the answer,
 /// the rest are the topic.
-const GRAPH_NEIGHBORS_PER_KIND: usize = 2;
+const GRAPH_NEIGHBORS_PER_KIND: usize = NEIGHBOR_RULE.per_kind;
 
 /// How much of a seed's lexical score each relation carries to a neighbour, in
 /// thousandths. One table, because a relation's strength is one decision and
@@ -1127,12 +1131,31 @@ const GRAPH_NEIGHBORS_PER_KIND: usize = 2;
 /// one of them a candidate — which is a topic, not an answer. `supersedes` is
 /// absent too: it is answered by folding the older page onto the newer one, not
 /// by pulling a second copy of the same claim into the budget.
-pub const GRAPH_RELATION_DECAY: [(crate::second_brain::corpus::RelationKind, i64); 4] = [
-    (crate::second_brain::corpus::RelationKind::Contradicts, 900),
-    (crate::second_brain::corpus::RelationKind::DependsOn, 700),
-    (crate::second_brain::corpus::RelationKind::Implements, 600),
-    (crate::second_brain::corpus::RelationKind::Related, 450),
-];
+pub const GRAPH_RELATION_DECAY: [(crate::second_brain::corpus::RelationKind, i64); 4] = {
+    let mut decay = [(crate::second_brain::corpus::RelationKind::Related, 0); 4];
+    let mut at = 0;
+    while at < decay.len() {
+        let (kind, share) = NEIGHBOR_RULE.decay[at];
+        decay[at] = (relation_of(kind), share);
+        at += 1;
+    }
+    decay
+};
+
+/// The relation the window's graph calls by the same name: the two enums
+/// spell one vault's keys (`corpus::RelationKind`).
+const fn relation_of(kind: zerocode_core::second_brain_graph::EdgeKind) -> crate::second_brain::corpus::RelationKind {
+    use crate::second_brain::corpus::RelationKind;
+    use zerocode_core::second_brain_graph::EdgeKind;
+    match kind {
+        EdgeKind::Mentions => RelationKind::Mentions,
+        EdgeKind::Related => RelationKind::Related,
+        EdgeKind::Implements => RelationKind::Implements,
+        EdgeKind::DependsOn => RelationKind::DependsOn,
+        EdgeKind::Supersedes => RelationKind::Supersedes,
+        EdgeKind::Contradicts => RelationKind::Contradicts,
+    }
+}
 
 /// The decay a relation carries, or `None` for a kind the graph does not
 /// expand.

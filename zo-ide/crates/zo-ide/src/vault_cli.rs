@@ -1,12 +1,16 @@
 //! `zo vault …` — the second brain's graph, from outside a session.
 //!
-//! `search` (2026-11-03): the pages a few words point at, ranked by zo's own
-//! recall over the vault's pages alone — every page's words read, rarer words
-//! counting for more, and a page chance would match left out. It is the
-//! vault's search for an agent, which cannot read `wiki/index.md` whole once
-//! the vault outgrows one read.
+//! `search`: the files a few words point at, each with the passage that
+//! holds the most of them and the line it starts on. The answer comes from
+//! one index of passages the window's core keeps
+//! ([`zerocode_core::second_brain_search`]): the vault's pages first, then
+//! its originals and any folder a person added with `source add`, each read
+//! where it lies and only when it changed. It is the vault's search for an
+//! agent, which cannot read `wiki/index.md` whole once the vault outgrows
+//! one read. This door reads the arguments and prints the answer; it ranks
+//! nothing itself.
 //!
-//! Three verbs. `path`, the question Graphify answers with "how do these two
+//! Three more verbs. `path`, the question Graphify answers with "how do these two
 //! concepts connect" (t-5966 G3): the calculator is the window's own,
 //! [`zerocode_core::second_brain_paths::report`] over the same scanner the
 //! knowledge graph and `zerocode vault-lint` read — this door prints the
@@ -17,7 +21,8 @@
 //! once, and nowhere in the window.
 //!
 //! ```text
-//! zo vault search <words…> [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
+//! zo vault search <words…> [--limit <n>] [--layer <name>] [--json] [--vault <dir>] [--cwd <dir>]
+//! zo vault source add <folder> [--layer <name>] | list | remove <folder|layer>
 //! zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
 //! zo vault code [--project <dir>] [--json] [--vault <dir>] [--cwd <dir>]
 //! ```
@@ -35,6 +40,7 @@ use std::time::Instant;
 use codegraph::{CodeGraph, Resolved};
 
 use runtime::second_brain::{SecondBrain, WIKI_DIR};
+use zerocode_core::second_brain_search::{self as vault_search, Answer, Hit, LayerReport};
 use runtime::ConfigLoader;
 use serde_json::{json, Value};
 use zerocode_core::second_brain_code::{
@@ -44,16 +50,27 @@ use zerocode_core::second_brain_graph::{EdgeKind, GraphCache, NodeKind, VaultGra
 use zerocode_core::second_brain_paths::{render_chain, report, PathReport, PATH_LIMITS};
 
 pub const USAGE: &str = "\
-zo vault search <words…> [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
+zo vault search <words…> [--limit <n>] [--layer <name>] [--json] [--vault <dir>] [--cwd <dir>]
+zo vault source add <folder> [--layer <name>] | list | remove <folder|layer>
 zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault code [--project <dir>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault pairs [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault mark <left> <right> <merge|related|supersedes|contradicts|none> [--vault <dir>]
 
-  search: the pages these words point at, best first, each with its path and
-  the line of it that holds most of the words. Every page's words are read,
-  a rare word counts for more than a common one, and a page the words would
-  match by chance is left out. Open a page before relying on it.
+  search: the files these words point at, best first — the vault's pages
+  (wiki), then its originals (raw) and any folder added with `source add`.
+  Each answer names its path and the line its best passage starts on
+  (path:line); the first answers of a layer show that passage, the rest the
+  one line of it that holds most of the words. A rare word counts for more
+  than a common one, a file the words would match by chance is left out, and
+  a page another page replaced (supersedes) gives its place to that page.
+  The answer comes from an index of passages under the vault's .zerocode/:
+  only files that changed are read again. --layer asks one layer alone.
+  Open a file before relying on it.
+  source: the folders outside the vault the search also reads, each where it
+  lies and under its own layer. add lists a folder (its name is the layer
+  unless --layer says), list shows what is read, remove takes one out by its
+  folder or its layer and drops its index; the folder is never written to.
   path: paths between two pages of the second brain, shortest first, each
   hop naming the relation and the road that wrote it (measured · declared ·
   inferred). A page is named by its id (wiki/a/b.md), its path below wiki/,
@@ -68,21 +85,22 @@ zo vault mark <left> <right> <merge|related|supersedes|contradicts|none> [--vaul
 ";
 
 /// The verbs, in a table so the parser names the word that is not one.
-const VERBS: [&str; 5] = ["search", "path", "code", "pairs", "mark"];
+const VERBS: [&str; 6] = ["search", "source", "path", "code", "pairs", "mark"];
+
+/// What `zo vault source` does, as its first word.
+const SOURCE_ADD: &str = "add";
+const SOURCE_LIST: &str = "list";
+const SOURCE_REMOVE: &str = "remove";
 
 /// Pages `search` names when nobody says, and the most it names: a list an
 /// agent reads whole before it opens any of them.
 const SEARCH_LIMIT: usize = 8;
 const SEARCH_LIMIT_MAX: usize = 20;
 
-/// How much of a page `search` reads for its best line, and how long that line
-/// may be: a pointer into the page, not the page.
-const SEARCH_LINE_READ_BYTES: usize = 64 * 1024;
-const SEARCH_LINE_MAX_BYTES: usize = 240;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Search,
+    Source,
     Path,
     Code,
     Pairs,
@@ -100,6 +118,8 @@ struct Request {
     cwd: Option<PathBuf>,
     project: Option<PathBuf>,
     limit: usize,
+    /// The layer `search` asks alone, or the one `source add` files a folder under.
+    layer: Option<String>,
     label: Option<zerocode_core::second_brain_pairs::Suggestion>,
 }
 
@@ -111,6 +131,7 @@ pub struct Report {
 fn parse(args: &[String]) -> Result<Request, String> {
     let verb = match args.first().map(String::as_str) {
         Some("search") => Verb::Search,
+        Some("source") => Verb::Source,
         Some("path") => Verb::Path,
         Some("code") => Verb::Code,
         Some("pairs") => Verb::Pairs,
@@ -137,6 +158,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
         } else {
             zerocode_core::second_brain_pairs::PAIR_LIMIT
         },
+        layer: None,
         label: None,
     };
     let mut named: Vec<String> = Vec::new();
@@ -162,6 +184,9 @@ fn parse(args: &[String]) -> Result<Request, String> {
                 request.project = Some(PathBuf::from(
                     rest.next().ok_or("--project needs a directory")?,
                 ));
+            }
+            "--layer" if matches!(verb, Verb::Search | Verb::Source) => {
+                request.layer = Some(rest.next().ok_or("--layer needs a name")?.clone());
             }
             "--limit" if verb == Verb::Search => {
                 let value = rest.next().ok_or("--limit needs a number")?;
@@ -198,6 +223,23 @@ fn take_pages(mut request: Request, mut named: Vec<String>) -> Result<Request, S
             return Err(format!("`zo vault search` needs the words to look for\n\n{USAGE}"));
         }
         request.from = named.join(" ");
+        return Ok(request);
+    }
+    if verb == Verb::Source {
+        // `from` is what to do, `to` the folder or layer it is done to.
+        let wanted = match named.first().map(String::as_str) {
+            Some(SOURCE_LIST) => Some(1),
+            Some(SOURCE_ADD | SOURCE_REMOVE) => Some(2),
+            _ => None,
+        };
+        if wanted != Some(named.len()) {
+            return Err(format!(
+                "`zo vault source` takes `{SOURCE_ADD} <folder>`, `{SOURCE_LIST}` or `{SOURCE_REMOVE} <folder|layer>`\n\n{USAGE}"
+            ));
+        }
+        let mut named = named.into_iter();
+        request.from = named.next().unwrap_or_default();
+        request.to = named.next().unwrap_or_default();
         return Ok(request);
     }
     if matches!(verb, Verb::Code | Verb::Pairs) {
@@ -260,7 +302,10 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
         ));
     }
     if request.verb == Verb::Search {
-        return Ok(run_search(&request, &vault));
+        return run_search(&request, &vault);
+    }
+    if request.verb == Verb::Source {
+        return run_source(&request, &cwd, vault.root());
     }
     if request.verb == Verb::Code {
         return run_code(&request, &cwd, vault.root());
@@ -284,166 +329,207 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
     })
 }
 
-/// One page `search` names.
-struct Found {
-    slug: String,
-    path: PathBuf,
-    summary: String,
-    line: Option<String>,
-}
-
-/// The file of the page `slug` names (`wiki/a/b` → `<root>/wiki/a/b.md`),
-/// one component at a time: joining the `/`-spelled slug whole left a mixed
-/// `C:\…\vault\wiki/a/b.md` on Windows (t-78118). Only the last component
-/// takes `.md`, appended — `set_extension` would eat the tail of a dotted name.
-fn page_path(root: &Path, slug: &str) -> PathBuf {
-    let mut path = root.to_path_buf();
-    let mut parts = slug.split('/').peekable();
-    while let Some(part) = parts.next() {
-        if parts.peek().is_some() {
-            path.push(part);
-        } else {
-            path.push(format!("{part}.md"));
-        }
-    }
-    path
-}
-
-/// The pages the words point at, by zo's own recall over the vault's pages
-/// alone: no project memory, no session, nothing written.
-fn run_search(request: &Request, vault: &SecondBrain) -> Report {
-    use runtime::MemoryRetriever as _;
+/// The files the words point at, from the core's index of passages: no
+/// project memory, no session, and nothing written but that index.
+fn run_search(request: &Request, vault: &SecondBrain) -> Result<Report, String> {
     let began = Instant::now();
-    let scan = runtime::second_brain::corpus::scan(vault);
-    let pages = scan.pages.len();
-    let retriever = runtime::LexicalMemoryRetriever::from_index_markdown("").with_corpus(scan);
-    let hits = retriever.recall(&request.from, request.limit);
+    let answer = vault_search::search(
+        vault.root(),
+        &vault_search::Request {
+            words: &request.from,
+            limit: request.limit,
+            layer: request.layer.as_deref(),
+        },
+    )?;
     let took_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let asked = zerocode_core::second_brain_related::asked_tokens(&request.from);
-    let found: Vec<Found> = hits
-        .into_iter()
-        .map(|hit| {
-            let path = page_path(vault.root(), &hit.entry.slug);
-            let line = best_line(&path, &asked);
-            // The recall pointer opens with the page's own `[[slug]] — `; the
-            // list already names the slug, so the summary starts at the title.
-            let summary = hit
-                .entry
-                .summary
-                .strip_prefix(&format!("[[{}]] — ", hit.entry.slug))
-                .map_or_else(|| hit.entry.summary.clone(), ToOwned::to_owned);
-            Found {
-                slug: hit.entry.slug,
-                path,
-                summary,
-                line,
-            }
-        })
-        .collect();
     let text = if request.json {
-        json!({
-            "vault": vault.root().display().to_string(),
-            "words": request.from,
-            "pages": pages,
-            "tookMs": took_ms,
-            "found": found.iter().map(|one| json!({
-                "slug": one.slug,
-                "path": one.path.display().to_string(),
-                "summary": one.summary,
-                "line": one.line,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string()
+        search_json(vault.root(), &request.from, took_ms, &answer).to_string()
     } else {
-        search_text(vault.root(), &request.from, pages, took_ms, &found)
+        search_text(vault.root(), &request.from, took_ms, &answer)
     };
-    Report { text }
+    Ok(Report { text })
 }
 
-fn search_text(vault: &Path, words: &str, pages: usize, took_ms: u64, found: &[Found]) -> String {
+/// `path:line` for an answer whose passage has a line, else the path alone.
+fn place_of(hit: &Hit) -> String {
+    match hit.line_number {
+        Some(line) => format!("{}:{line}", hit.path.display()),
+        None => hit.path.display().to_string(),
+    }
+}
+
+/// The vault's own pages in the index — what `pages` has always counted.
+fn pages_of(answer: &Answer) -> usize {
+    answer
+        .layers
+        .iter()
+        .find(|layer| layer.layer == WIKI_DIR)
+        .map_or(0, |layer| layer.files)
+}
+
+/// The answer on the wire. `found[].slug · summary · line · path`, `pages`,
+/// `tookMs`, `vault` and `words` are what scripts and skills already read;
+/// everything else was added beside them.
+fn search_json(vault: &Path, words: &str, took_ms: u64, answer: &Answer) -> Value {
+    json!({
+        "vault": vault.display().to_string(),
+        "words": words,
+        "pages": pages_of(answer),
+        "tookMs": took_ms,
+        "found": answer.hits.iter().map(|hit| json!({
+            "slug": hit.slug,
+            "path": hit.path.display().to_string(),
+            "summary": hit.summary(),
+            "line": hit.line,
+            "layer": hit.layer,
+            "lineNumber": hit.line_number,
+            "at": place_of(hit),
+            "passage": hit.passage,
+            "score": hit.score,
+            "via": hit.via.as_ref().map(|via| json!({
+                "kind": via.kind.as_str(),
+                "page": via.seed,
+                "declaredByThatPage": via.from_seed,
+            })),
+        })).collect::<Vec<_>>(),
+        "layers": answer.layers.iter().map(|layer| json!({
+            "layer": layer.layer,
+            "files": layer.files,
+            "passages": layer.passages,
+            "index": layer.freshness.as_str(),
+            "read": layer.read,
+            "found": layer.found,
+            "tookMs": layer.took_ms,
+        })).collect::<Vec<_>>(),
+        "notices": answer.notices,
+    })
+}
+
+/// What each layer's index holds, on one line: `wiki 3 files · raw 1 file`.
+fn layer_words(layers: &[LayerReport]) -> String {
+    layers
+        .iter()
+        .map(|layer| {
+            format!(
+                "{} {} {}",
+                layer.layer,
+                layer.files,
+                if layer.files == 1 { "file" } else { "files" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn search_text(vault: &Path, words: &str, took_ms: u64, answer: &Answer) -> String {
     let mut text = String::new();
-    if found.is_empty() {
+    let indexed = layer_words(&answer.layers);
+    if answer.hits.is_empty() {
         let _ = writeln!(
             text,
-            "No page of {} holds \"{words}\" beyond what chance would match ({pages} pages read in {took_ms} ms).",
+            "Nothing in {} holds \"{words}\" beyond what chance would match ({indexed} · {took_ms} ms).",
             vault.display()
         );
         let _ = write!(
             text,
             "Try a page's own words: a title word, a Latin name (Windows, not 윈도우 alone), a task id, or fewer words."
         );
-        return text;
-    }
-    let _ = writeln!(
-        text,
-        "{} {} of {} for \"{words}\" ({pages} pages read in {took_ms} ms):",
-        found.len(),
-        if found.len() == 1 { "page" } else { "pages" },
-        vault.display()
-    );
-    for (at, one) in found.iter().enumerate() {
-        let _ = writeln!(text, "{}. {} — {}", at + 1, one.slug, one.summary);
-        if let Some(line) = &one.line {
-            let _ = writeln!(text, "   > {line}");
+    } else {
+        let _ = writeln!(
+            text,
+            "{} {} in {} for \"{words}\" ({indexed} · {took_ms} ms):",
+            answer.hits.len(),
+            if answer.hits.len() == 1 { "answer" } else { "answers" },
+            vault.display()
+        );
+        let mut layer = "";
+        for (at, hit) in answer.hits.iter().enumerate() {
+            if hit.layer != layer {
+                layer = &hit.layer;
+                let _ = writeln!(text, "[{layer}]");
+            }
+            let _ = writeln!(text, "{}. {} — {}", at + 1, hit.slug, hit.summary());
+            // The passage when the answer carries it, else its one best line.
+            let shown = hit.passage.as_deref().or(hit.line.as_deref()).unwrap_or_default();
+            for line in shown.lines().filter(|line| !line.trim().is_empty()) {
+                let _ = writeln!(text, "   > {line}");
+            }
+            let _ = writeln!(text, "   {}", place_of(hit));
         }
-        let _ = writeln!(text, "   {}", one.path.display());
+        let _ = write!(
+            text,
+            "Open a file before relying on it. A page another page replaced gives its place to that page."
+        );
     }
-    let _ = write!(
-        text,
-        "Open a page before relying on it. A page marked superseded names the one that replaced it."
-    );
+    for notice in &answer.notices {
+        let _ = write!(text, "\nnote: {notice}");
+    }
     text
 }
 
-/// The line of a page that holds most of the words asked, past its
-/// frontmatter, without its Markdown marks, and cut to a pointer's length.
-/// The `# ` heading is skipped, because it repeats the title the summary
-/// already shows, and a body line beats a section heading holding as many
-/// words, because it says more.
-fn best_line(path: &Path, asked: &BTreeSet<String>) -> Option<String> {
-    use std::io::Read as _;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(u64::try_from(SEARCH_LINE_READ_BYTES).unwrap_or(u64::MAX))
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    let body = text
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---\n").map(|(_, body)| body))
-        .unwrap_or(&text);
-    let mut best: Option<((usize, bool), &str)> = None;
-    for line in body.lines() {
-        let line = line.trim();
-        if line.starts_with("# ") {
-            continue;
+/// `zo vault source`: the folders outside the vault the search also reads.
+fn run_source(request: &Request, cwd: &Path, vault: &Path) -> Result<Report, String> {
+    let folder = || {
+        let named = Path::new(&request.to);
+        if named.is_absolute() {
+            named.to_path_buf()
+        } else {
+            cwd.join(named)
         }
-        let said = !line.starts_with('#');
-        let line = line.trim_start_matches(['#', '-', '>', '*', ' ']).trim();
-        if line.is_empty() {
-            continue;
+    };
+    let said = match request.from.as_str() {
+        SOURCE_ADD => {
+            let source = vault_search::add_source(vault, &folder(), request.layer.as_deref())?;
+            format!(
+                "added {} as layer {} — the next search reads it where it lies",
+                source.root.display(),
+                source.layer
+            )
         }
-        let held = zerocode_core::second_brain_related::tokenize(line)
-            .intersection(asked)
-            .count();
-        let rank = (held, said);
-        if held > 0 && best.is_none_or(|(most, _)| rank > most) {
-            best = Some((rank, line));
+        SOURCE_REMOVE => {
+            // By its layer first; a path is tried as written and from the cwd.
+            let gone = vault_search::remove_source(vault, &request.to)
+                .or_else(|refused| vault_search::remove_source(vault, &folder().display().to_string()).map_err(|_| refused))?;
+            gone.iter()
+                .map(|source| {
+                    format!(
+                        "removed {} (layer {}) — its index is gone, the folder is untouched",
+                        source.root.display(),
+                        source.layer
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         }
-    }
-    best.map(|(_, line)| clipped_line(line))
-}
-
-fn clipped_line(line: &str) -> String {
-    if line.len() <= SEARCH_LINE_MAX_BYTES {
-        return line.to_string();
-    }
-    let mut end = SEARCH_LINE_MAX_BYTES - '…'.len_utf8();
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &line[..end])
+        _ => String::new(),
+    };
+    let sources = vault_search::read_settings(vault).sources;
+    let kind = |source: &vault_search::Source| match source.kind {
+        vault_search::Kind::Wiki => "pages",
+        vault_search::Kind::Raw => "originals",
+        vault_search::Kind::Added => "added",
+    };
+    let text = if request.json {
+        json!({
+            "vault": vault.display().to_string(),
+            "sources": sources.iter().map(|source| json!({
+                "layer": source.layer,
+                "path": source.root.display().to_string(),
+                "kind": kind(source),
+            })).collect::<Vec<_>>(),
+        })
+        .to_string()
+    } else {
+        let mut text = said;
+        for source in &sources {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let _ = write!(text, "{} · {} · {}", source.layer, kind(source), source.root.display());
+        }
+        text
+    };
+    Ok(Report { text })
 }
 
 fn run_mark(request: &Request, vault: &Path) -> Result<Report, String> {
@@ -893,8 +979,10 @@ mod tests {
         assert_eq!(request.verb, Verb::Search);
         assert_eq!(request.from, "hook bridge");
         assert_eq!(request.limit, SEARCH_LIMIT);
-        let request = parse(&args(&["search", "hook", "--limit", "3"])).unwrap();
+        let request = parse(&args(&["search", "hook", "--limit", "3", "--layer", "raw"])).unwrap();
         assert_eq!(request.limit, 3);
+        assert_eq!(request.layer.as_deref(), Some("raw"));
+        assert!(parse(&args(&["path", "A", "B", "--layer", "raw"])).unwrap_err().contains("unknown argument"));
         assert!(parse(&args(&["search"])).unwrap_err().starts_with("`zo vault search` needs"));
         assert!(parse(&args(&["search", "hook", "--limit", "0"])).is_err());
         assert!(parse(&args(&["search", "hook", "--limit", "21"])).is_err());
@@ -914,33 +1002,109 @@ mod tests {
         ]);
         let root = vault.path().display().to_string();
         let report = run(&args(&["search", "hook", "bridge", "--vault", &root]), vault.path()).unwrap();
-        let first = report.text.lines().nth(1).unwrap_or_default();
-        assert!(report.text.starts_with("1 page of "), "{}", report.text);
-        assert!(first.starts_with("1. wiki/hook-bridge — \"Hook Bridge\" · tags: hooks"), "{}", report.text);
-        assert!(!first.contains("[[wiki/hook-bridge]]"), "{}", report.text);
-        assert!(report.text.contains("> The bridge carries every hook to the window."), "{}", report.text);
+        let lines: Vec<&str> = report.text.lines().collect();
+        assert!(lines[0].starts_with("1 answer in "), "{}", report.text);
+        assert!(lines[0].contains("(wiki 2 files · raw 0 files · "), "{}", report.text);
+        assert_eq!(lines[1], "[wiki]", "{}", report.text);
+        assert_eq!(lines[2], "1. wiki/hook-bridge — Hook Bridge · tags: hooks", "{}", report.text);
+        // The first answers carry their passage: the headings and the line under them.
+        assert_eq!(
+            lines[3..6],
+            ["   > # Hook Bridge", "   > ## Hook bridge wiring", "   > The bridge carries every hook to the window."],
+            "{}",
+            report.text
+        );
         let page = vault.path().join("wiki").join("hook-bridge.md");
-        assert!(report.text.contains(&format!("   {}\n", page.display())), "{}", report.text);
+        assert_eq!(lines[6], format!("   {}:6", page.display()), "{}", report.text);
         assert!(!report.text.contains("cooking"), "{}", report.text);
 
         let report = run(&args(&["search", "hook", "--json", "--vault", &root]), vault.path()).unwrap();
         let value: Value = serde_json::from_str(&report.text).unwrap();
+        // What scripts already read, unchanged in name and meaning.
         assert_eq!(value["found"][0]["slug"], "wiki/hook-bridge");
         assert_eq!(value["found"][0]["path"], page.display().to_string());
+        assert_eq!(value["found"][0]["summary"], "Hook Bridge · tags: hooks");
+        assert_eq!(value["found"][0]["line"], "The bridge carries every hook to the window.");
         assert_eq!(value["pages"], 2);
+        assert_eq!(value["words"], "hook");
+        assert_eq!(value["vault"], root);
+        assert!(value["tookMs"].is_u64());
+        // What was added beside them.
+        assert_eq!(value["found"][0]["layer"], "wiki");
+        assert_eq!(value["found"][0]["lineNumber"], 6);
+        assert_eq!(value["found"][0]["at"], format!("{}:6", page.display()));
+        assert!(value["found"][0]["passage"].as_str().unwrap().ends_with("every hook to the window."));
+        assert_eq!(value["layers"][0]["layer"], "wiki");
+        assert_eq!(value["layers"][0]["index"], "fresh");
+        assert_eq!(value["layers"][0]["files"], 2);
     }
 
-    /// A page's file is built component by component in the host's own
-    /// spelling, and a dotted name keeps its dots (t-78118: a mixed
-    /// `…\wiki/hook-bridge.md` on Windows, PR #5 log lines 10824-10859).
+    /// An original under `raw/` answers after the pages, under its own layer,
+    /// and `--layer` asks one layer alone.
     #[test]
-    fn a_page_path_is_joined_one_component_at_a_time() {
-        let root = Path::new("vault-root");
-        assert_eq!(
-            page_path(root, "wiki/zo/v1.2-notes"),
-            root.join("wiki").join("zo").join("v1.2-notes.md")
-        );
-        assert_eq!(page_path(root, "top"), root.join("top.md"));
+    fn search_shows_the_pages_first_and_the_originals_under_their_own_layer() {
+        let vault = vault_with(&[("hook-bridge", "# Hook Bridge\n\nThe bridge carries every hook to the window.\n")]);
+        std::fs::write(vault.path().join("raw").join("call-notes.txt"), "the hook fired twice on the bridge\n").unwrap();
+        let root = vault.path().display().to_string();
+        let report = run(&args(&["search", "hook", "bridge", "--vault", &root]), vault.path()).unwrap();
+        let lines: Vec<&str> = report.text.lines().collect();
+        let wiki = lines.iter().position(|line| *line == "[wiki]").expect("the pages' layer");
+        let raw = lines.iter().position(|line| *line == "[raw]").expect("the originals' layer");
+        assert!(wiki < raw, "{}", report.text);
+        assert_eq!(lines[raw + 1], "2. raw/call-notes.txt — call-notes", "{}", report.text);
+        assert_eq!(lines[raw + 2], "   > the hook fired twice on the bridge", "{}", report.text);
+        let original = vault.path().join("raw").join("call-notes.txt");
+        assert_eq!(lines[raw + 3], format!("   {}:1", original.display()), "{}", report.text);
+
+        let only = run(&args(&["search", "hook", "--layer", "raw", "--json", "--vault", &root]), vault.path()).unwrap();
+        let value: Value = serde_json::from_str(&only.text).unwrap();
+        assert_eq!(value["found"].as_array().unwrap().len(), 1);
+        assert_eq!(value["found"][0]["layer"], "raw");
+        assert_eq!(value["pages"], 0, "no page was asked");
+        let refused = run(&args(&["search", "hook", "--layer", "nope", "--vault", &root]), vault.path()).unwrap_err();
+        assert!(refused.starts_with("no layer named `nope`"), "{refused}");
+    }
+
+    /// `source` lists what the search reads, adds a folder outside the vault
+    /// under a layer and takes it out again; the search follows.
+    #[test]
+    fn source_adds_lists_and_removes_a_folder_outside_the_vault() {
+        let vault = vault_with(&[("hook-bridge", "# Hook Bridge\n\nThe bridge carries every hook.\n")]);
+        let root = vault.path().display().to_string();
+        let outside = tempfile::tempdir().expect("outside");
+        let reports = outside.path().join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("week.md"), "The hook bridge passed its soak test.\n").unwrap();
+
+        assert_eq!(parse(&args(&["source", "list"])).unwrap().from, SOURCE_LIST);
+        assert!(parse(&args(&["source"])).unwrap_err().starts_with("`zo vault source` takes"));
+        assert!(parse(&args(&["source", "add"])).unwrap_err().starts_with("`zo vault source` takes"));
+        assert!(parse(&args(&["source", "drop", "x"])).unwrap_err().starts_with("`zo vault source` takes"));
+
+        let listed = run(&args(&["source", "list", "--vault", &root]), vault.path()).unwrap().text;
+        assert_eq!(listed.lines().count(), 2, "{listed}");
+        assert!(listed.starts_with("wiki · pages · "), "{listed}");
+
+        let added = run(
+            &args(&["source", "add", &reports.display().to_string(), "--layer", "weekly", "--vault", &root]),
+            vault.path(),
+        )
+        .unwrap()
+        .text;
+        assert!(added.starts_with("added "), "{added}");
+        assert!(added.lines().last().unwrap().starts_with("weekly · added · "), "{added}");
+        let found = run(&args(&["search", "soak", "test", "--json", "--vault", &root]), vault.path()).unwrap();
+        let value: Value = serde_json::from_str(&found.text).unwrap();
+        assert_eq!(value["found"][0]["slug"], "weekly/week.md");
+        assert_eq!(value["found"][0]["layer"], "weekly");
+
+        let removed = run(&args(&["source", "remove", "weekly", "--vault", &root]), vault.path()).unwrap().text;
+        assert!(removed.starts_with("removed "), "{removed}");
+        assert_eq!(removed.lines().count(), 3, "{removed}");
+        let found = run(&args(&["search", "soak", "test", "--json", "--vault", &root]), vault.path()).unwrap();
+        let value: Value = serde_json::from_str(&found.text).unwrap();
+        assert!(value["found"].as_array().unwrap().is_empty(), "{}", found.text);
+        assert!(reports.join("week.md").is_file(), "the folder is the person's");
     }
 
     /// Words no page holds get a sentence saying so and what to try, not an
@@ -950,7 +1114,7 @@ mod tests {
         let vault = vault_with(&[("cooking", "# Cooking\n\nUnrelated.\n")]);
         let root = vault.path().display().to_string();
         let report = run(&args(&["search", "parser", "--vault", &root]), vault.path()).unwrap();
-        assert!(report.text.starts_with("No page of "), "{}", report.text);
+        assert!(report.text.starts_with("Nothing in "), "{}", report.text);
         assert!(report.text.contains("Try a page's own words"), "{}", report.text);
     }
 }

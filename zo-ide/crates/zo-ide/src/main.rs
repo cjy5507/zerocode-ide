@@ -519,10 +519,11 @@ fn run_settings(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::erro
     })
 }
 
-/// `zo vault search …` finds the pages a few words point at, and
-/// `zo vault path …` answers how two pages of the second brain connect, with
-/// the window's own calculator over the same scanner — no session, no
-/// credentials, no workspace trust (t-5966 G3).
+/// `zo vault search …` finds the files a few words point at — the vault's
+/// pages, its originals and the folders `zo vault source` adds — from the
+/// core's index of passages, and `zo vault path …` answers how two pages of
+/// the second brain connect, with the window's own calculator over the same
+/// scanner — no session, no credentials, no workspace trust (t-5966 G3).
 fn run_vault(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     Ok(match zo_ide::vault_cli::run(args, &cwd) {

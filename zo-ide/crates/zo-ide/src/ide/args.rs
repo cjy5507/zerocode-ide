@@ -34,7 +34,8 @@ zo mcp diagnose|list|get|add|remove|login|logout [<name>] [--url <url>|-- <comma
 zo build [--build <id> …] [--step <step>] [--label <text>] | zo build stop|approve [--build <id> …]
 zo build report begin|step|stalled|end --build <id> [...] [--cwd <dir>]
 zo cron ensure|show|remove --description <name> [--schedule <expr>] [--prompt <text>|--prompt-file <path|->] [--cwd <dir>]
-zo vault search <words…> [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
+zo vault search <words…> [--limit <n>] [--layer <name>] [--json] [--vault <dir>] [--cwd <dir>]
+zo vault source add <folder> [--layer <name>] | list | remove <folder|layer>
 zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo decision-shadow eval --labels <file.jsonl> [--cwd <dir>] [--json]
 zo decision-shadow check [--json]
