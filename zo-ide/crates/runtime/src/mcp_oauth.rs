@@ -41,13 +41,17 @@ pub enum McpAuthResult {
 /// that says what is missing rather than sending the person — and then the
 /// authorization code — to a placeholder host.
 pub fn mcp_oauth_to_config(server_name: &str, mcp_oauth: &McpOAuthConfig) -> io::Result<OAuthConfig> {
+    use crate::config::mcp_keys as keys;
     let Some(metadata_url) = mcp_oauth.auth_server_metadata_url.as_ref() else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "MCP server '{server_name}' has an oauth block without {key}, so zo does not know where it signs in: \
-                 set oauth.{key} to the server's OAuth metadata URL, or remove the oauth block to let zo discover it",
-                key = crate::config::mcp_keys::AUTH_SERVER_METADATA_URL,
+                "MCP server '{server_name}' has an {oauth} block without {key}, so zo does not know where it signs in: \
+                 add {oauth}.{key} with the server's OAuth metadata URL; the block's {client_id} and {callback_port} stay as they are",
+                oauth = keys::OAUTH,
+                key = keys::AUTH_SERVER_METADATA_URL,
+                client_id = keys::CLIENT_ID,
+                callback_port = keys::CALLBACK_PORT,
             ),
         ));
     };
@@ -1238,6 +1242,7 @@ mod tests {
         assert!(reason.contains("authServerMetadataUrl"), "{reason}");
         assert!(reason.contains("mcp-oauth-defaults-test"), "{reason}");
         assert!(!reason.contains("example.com"), "{reason}");
+        assert!(!reason.contains("remove"), "removing the block would lose the person's clientId and callbackPort: {reason}");
     }
 
     /// A metadata URL whose document cannot be read names the URL and stops;
