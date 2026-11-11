@@ -2134,9 +2134,12 @@ impl Ui {
         if !self.fold.is_pending() {
             return (cell, tail_owns_slot);
         }
-        // The `turns` view: the newest finished steps and the text it holds
-        // stand above whatever is live, so the work shows while it runs.
-        let mut rows = self.fold.live_rows(super::style::current().reading_width(width));
+        // The `turns` view: the finished steps, the texts that led into them
+        // and the text it holds stand above whatever is live, one under
+        // another, so the work shows while it runs and no row of it goes
+        // away before the fold is said.
+        let room = turns::live_room(usize::from(self.painter.max_height()));
+        let mut rows = self.fold.live_rows(super::style::current().reading_width(width), room);
         let held = self.fold.held();
         if !held.is_empty() {
             rows.extend(held.iter().cloned());
@@ -2269,7 +2272,9 @@ impl Ui {
             // Where an answer shows as it is written the working row stays
             // under it: what the turn is doing is on screen at all times.
             tail_owns_slot: tail_owns_slot && !self.unfinished_lines,
-            active_keeps_newest: tail_owns_slot && self.unfinished_lines,
+            // So do the rows of a turn's work: the call that runs now is
+            // the last of them, and a short pane must not cut it off.
+            active_keeps_newest: (tail_owns_slot && self.unfinished_lines) || self.fold.is_pending(),
             dialog,
             question,
             picker: self.overlay(),
@@ -4841,7 +4846,8 @@ impl Ui {
 
     /// The `turns` view's working row says how many steps the open fold has
     /// taken: the ones it holds and the calls of the cell still live. The
-    /// rows above it show only the newest.
+    /// rows above it show them one under another, as many as the pane has
+    /// room for.
     fn count_steps(&mut self) {
         let steps = if self.folding() {
             self.fold.step_count() + self.tool_cell.as_ref().map_or(0, ToolGroup::call_count)
@@ -4938,8 +4944,9 @@ impl Ui {
                 // ExecCell 을 앉힌다. 칸은 하나다.
                 self.close_segment();
                 // A short text the `turns` view was holding said what this
-                // call is for: it goes with the fold, not into history.
-                self.fold.drop_preamble();
+                // call is for: it stays in the viewport with the steps, and
+                // does not go into history.
+                self.fold.preamble_joins_the_work();
                 if self.may_take_the_live_slot(LiveSlotRequest::Tool(&kind)) {
                     self.open_tool(tool_call_id.0.clone(), kind.clone());
                 } else {
@@ -9105,6 +9112,10 @@ mod tests {
         let live: Vec<String> = ui.active_cell(80).0.iter().map(Line::plain).collect();
         assert!(live.iter().any(|row| row.contains("Read src/parser.rs")), "{live:#?}");
         assert!(live.iter().any(|row| row.contains("Fixed.")), "{live:#?}");
+        // And the words that led into it stay above it until the fold is said.
+        let preamble = live.iter().position(|row| row.contains("I will read the parser first."));
+        let read = live.iter().position(|row| row.contains("Read src/parser.rs"));
+        assert!(preamble.is_some() && preamble < read, "{live:#?}");
 
         // The turn's end.
         ui.close_segment();
@@ -9277,6 +9288,68 @@ mod tests {
             assert_eq!(landed, shown, "{words} words: the newline moved a row");
             assert_eq!(times(&history(&ui), &format!("w{:03}", words - 1)), 1, "the line is in the transcript");
         }
+    }
+
+    /// The `turns` view stacks a turn's work in the viewport: every finished
+    /// call adds a row under the one before it and takes none away, a short
+    /// text a call followed stays above that call, and the working row counts
+    /// them. It showed the newest three, so a turn of six calls showed rows
+    /// that came and went ("보였다 사라졌다", 2026-11-12: `5 steps` over three
+    /// rows). The turn over, one cell says the work and nothing of it is left
+    /// in the viewport.
+    #[test]
+    fn the_turns_view_stacks_every_step_under_the_one_before_it() {
+        use runtime::message_stream::types::ToolResultBody;
+        let read = |ui: &mut super::Ui, ids: &BlockIdGen, n: usize| {
+            let call = format!("toolu_read_{n}");
+            ui.block(tool_call(ids, &call, "read_file", &json!({ "path": format!("src/f{n}.rs") })));
+            ui.block(RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId(call),
+                is_error: false,
+                body: ToolResultBody::Text { content: "fn main() {}\n".to_string(), truncated: false },
+            });
+        };
+        let live = |ui: &super::Ui| ui.active_cell(80).0.iter().map(Line::plain).collect::<Vec<_>>();
+        let at = |rows: &[String], words: &str| {
+            rows.iter().position(|row| row.contains(words)).unwrap_or_else(|| panic!("no row says {words}: {rows:#?}"))
+        };
+
+        let mut ui = test_ui();
+        ui.view = super::super::style::ConversationView::Turns;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        let ids = BlockIdGen::default();
+        says(&mut ui, &ids, "I will read the sources.");
+        let mut before: Vec<String> = Vec::new();
+        for n in 0..6 {
+            read(&mut ui, &ids, n);
+            let rows = live(&ui);
+            assert!(rows.len() > before.len(), "call {n} added a row: {rows:#?}");
+            assert_eq!(rows[..before.len()], before[..], "and moved none of the rows above it");
+            before = rows;
+        }
+        for n in 0..6 {
+            assert_eq!(
+                before.iter().filter(|row| row.contains(&format!("src/f{n}.rs"))).count(),
+                1,
+                "call {n} has its row: {before:#?}"
+            );
+        }
+        assert!(at(&before, "I will read the sources.") < at(&before, "src/f0.rs"), "{before:#?}");
+        assert!(at(&before, "src/f0.rs") < at(&before, "src/f5.rs"), "{before:#?}");
+        let working = ui.status.as_ref().map(|status| status.line(80).plain()).unwrap_or_default();
+        assert!(working.contains("6 steps"), "{working}");
+        assert!(history(&ui).is_empty(), "nothing is said while the work runs: {:#?}", history(&ui));
+
+        // The turn's end: one cell says the six, and the viewport holds none.
+        ui.close_segment();
+        ui.retire_tool_cell();
+        ui.flush_fold();
+        let said = history(&ui);
+        assert_eq!(said.iter().filter(|row| row.contains("Worked")).count(), 1, "{said:#?}");
+        assert!(said.iter().any(|row| row.contains("6 steps")), "{said:#?}");
+        assert!(!said.iter().any(|row| row.contains("src/f3.rs")), "no row a step: {said:#?}");
+        assert!(live(&ui).is_empty() && !ui.fold.is_pending(), "{:#?}", live(&ui));
     }
 
     /// The `turns` view folds each call as it finishes: commands that come

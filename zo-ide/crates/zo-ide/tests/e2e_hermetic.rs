@@ -7440,6 +7440,121 @@ async fn e2e_a_pane_closed_mid_turn_ends_zo_without_a_hang_up_signal() {
     let _ = resumed.finish();
 }
 
+/// A turn's work stacks in the marks look's viewport: every call that has
+/// finished keeps its row, one under another, while a later one runs. The
+/// viewport showed the newest three, so by the sixth call the first three had
+/// come and gone ("보였다 사라졌다", 2026-11-12: `5 steps` over three rows).
+/// The turn over, the rows are the one folded cell with the answer under it,
+/// and nothing of them is left between the answer and the composer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_marks_a_turns_steps_stack_while_it_runs_and_fold_when_it_ends() {
+    const ROWS: usize = 40;
+    const COMPOSER: &str = "Ask zo to do anything";
+    const FILES: usize = 6;
+    let layout = Layout::new();
+    let hold = layout.root.path().join("hold");
+    fs::create_dir(&hold).expect("make the held command's folder");
+    // Six reads, a request each, then a command that runs until it is let go.
+    let mut calls: Vec<(&str, serde_json::Value)> = Vec::new();
+    for n in 1..=FILES {
+        let name = format!("stacked{n}.txt");
+        fs::write(layout.cwd.join(&name), format!("file {n}\n")).expect("write a file to read");
+        calls.push(("Read", serde_json::json!({ "file_path": name })));
+    }
+    let waits = format!(
+        "touch '{0}/started' && while [ ! -e '{0}/release' ]; do sleep 0.1; done && printf 'held done'",
+        hold.display()
+    );
+    calls.push(("bash", serde_json::json!({ "command": waits, "timeout": 120_000 })));
+    let service = ScriptedAnthropicService::tool_calls(&calls, "the stack landed")
+        .await
+        .expect("start the script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[(zo_ide::tui::style::STYLE_ENV, "marks")],
+    )
+    .expect("spawn zo in PTY");
+    let screen_of = |bytes: &[u8]| {
+        let mut screen = Screen::new(ROWS);
+        screen.feed(bytes);
+        screen.visible()
+    };
+    let row_of = |visible: &[String], words: &str| visible.iter().position(|row| row.contains(words));
+    // The rows that name each file read, in the order the files were read.
+    let read_rows = |visible: &[String]| -> Vec<Vec<usize>> {
+        (1..=FILES)
+            .map(|n| {
+                let name = format!("stacked{n}.txt");
+                (0..visible.len()).filter(|row| visible[*row].contains(&name)).collect()
+            })
+            .collect()
+    };
+
+    run.wait_for_screen(COMPOSER, ROWS, TEST_TIMEOUT);
+    run.send(b"Read the six files and then wait\r").expect("send the prompt");
+    wait_for_path(&hold.join("started"), TEST_TIMEOUT);
+    // The seventh call is held, so the screen rests on a turn at work with
+    // six calls behind it: each has its row.
+    run.wait_until(0, TEST_TIMEOUT, |bytes| {
+        let visible = screen_of(bytes);
+        row_of(&visible, "esc to interrupt").is_some() && read_rows(&visible).iter().all(|rows| !rows.is_empty())
+    });
+    let visible = screen_of(&run.snapshot_output());
+    let working = row_of(&visible, "esc to interrupt").expect("the working row");
+    let reads = read_rows(&visible);
+    assert!(
+        reads.iter().all(|rows| rows.len() == 1),
+        "each finished read has one row while the turn runs: {reads:?}\n{visible:#?}"
+    );
+    let reads: Vec<usize> = reads.iter().map(|rows| rows[0]).collect();
+    assert!(
+        reads.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "one under another, in the order they ran: {reads:?}\n{visible:#?}"
+    );
+    assert!(reads[FILES - 1] < working, "and above the working row: {visible:#?}");
+
+    fs::write(hold.join("release"), b"").expect("let the held command go");
+    run.wait_for_screen("the stack landed", ROWS, TEST_TIMEOUT);
+    // The turn's end frame: nobody is working, and the work is one cell.
+    run.wait_until(0, TEST_TIMEOUT, |bytes| {
+        let visible = screen_of(bytes);
+        row_of(&visible, "esc to interrupt").is_none() && row_of(&visible, "Worked").is_some()
+    });
+    let visible = screen_of(&run.snapshot_output());
+    assert_eq!(
+        visible.iter().filter(|row| row.contains("Worked")).count(),
+        1,
+        "the work is one folded cell: {visible:#?}"
+    );
+    assert!(
+        read_rows(&visible).iter().all(Vec::is_empty),
+        "no step's row is left once the fold says them: {visible:#?}"
+    );
+    let words = row_of(&visible, "Read the six files").expect("the person's words");
+    let worked = row_of(&visible, "Worked").expect("the turn's folded work");
+    let answer = row_of(&visible, "the stack landed").expect("the answer");
+    let composer = row_of(&visible, COMPOSER).expect("the composer");
+    assert!(
+        worked > words && worked - words <= 3,
+        "the work folded where it ran, right under the words: {visible:#?}"
+    );
+    assert!(answer > worked, "the answer stands under the work: {visible:#?}");
+    assert!(
+        composer >= ROWS - 4,
+        "the composer left the floor for row {composer} of {ROWS}: {visible:#?}"
+    );
+    // Under the answer stands the turn's done row and nothing of its work.
+    let left = visible[answer + 1..composer - 1].iter().filter(|row| !row.trim().is_empty()).count();
+    assert!(left <= 1, "{left} rows are left between the answer and the composer: {visible:#?}");
+    let _ = run.finish();
+}
+
 /// A turn reads from the person's words down while it runs. In the marks
 /// look — the interactive front's own, which this suite otherwise leaves to
 /// codex's — the running step and the working row stand right under the words

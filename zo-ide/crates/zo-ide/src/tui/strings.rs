@@ -168,6 +168,12 @@ pub const TOOL_CALL_INTERRUPTED: &str = "interrupted before its result";
 pub fn more_lines(more: usize) -> String {
     format!("… {more} more lines")
 }
+/// The first row of a turn's work in the viewport when not all of it fits:
+/// how many rows of it stand above the ones shown ([`super::turns`]).
+#[must_use]
+pub fn earlier_rows(earlier: usize) -> String {
+    format!("… {earlier} earlier")
+}
 /// The header of a message a peer agent sent with `SendMessage`.
 pub const PEER_MESSAGE: &str = "Message";
 

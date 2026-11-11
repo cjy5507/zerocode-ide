@@ -3539,3 +3539,21 @@ mod footer_mark_tests {
         assert_eq!(line.plain(), "  claude-opus-5-5 high · /tmp");
     }
 }
+
+#[cfg(test)]
+mod clip_tests {
+    /// A cell taller than its rows keeps its newest when asked to: the count
+    /// of the rows above stands first, then the last rows — the call that
+    /// runs now, under a turn's stacked work, is never the row cut off.
+    #[test]
+    fn a_cell_that_keeps_its_newest_rows_counts_the_ones_above() {
+        use crate::tui::ansi::Line;
+        use crate::tui::strings::more_lines;
+
+        let rows: Vec<Line> = (0..10).map(|n| Line::from_text(format!("row {n}"))).collect();
+        let plain = |lines: Vec<Line>| lines.iter().map(Line::plain).collect::<Vec<_>>();
+        assert_eq!(plain(super::clip_newest(&rows, 10)).len(), 10, "a cell that fits is whole");
+        assert_eq!(plain(super::clip_newest(&rows, 4)), [more_lines(7).as_str(), "row 7", "row 8", "row 9"]);
+        assert_eq!(plain(super::clip_active(&rows, 4)), ["row 0", "row 1", "row 2", more_lines(7).as_str()]);
+    }
+}
