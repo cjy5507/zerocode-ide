@@ -3460,6 +3460,21 @@ mod tests {
         );
     }
 
+    /// A command that failed is drawn as one that failed: the bash tool says
+    /// its exit in `returnCodeInterpretation`, and the row reads it.
+    #[test]
+    fn a_command_the_bash_tool_says_failed_is_not_drawn_as_one_that_passed() {
+        let raw = r#"{"stdout":"","stderr":"ZeroDivisionError: division by zero","interrupted":false,"returnCodeInterpretation":"exit_code:1"}"#;
+        let body = format_tool_result_from_raw("bash", raw, false);
+        let outcome = Outcome::from_result(false, &body, "");
+        assert!(!outcome.ok, "exit 1 is a failure");
+        assert_eq!(outcome.exit_code, Some(1));
+        assert_eq!(outcome.output, "ZeroDivisionError: division by zero");
+
+        let passed = format_tool_result_from_raw("bash", r#"{"stdout":"done","stderr":"","interrupted":false}"#, false);
+        assert!(Outcome::from_result(false, &passed, "").ok);
+    }
+
     #[test]
     fn a_bash_result_reads_its_exit_code() {
         let body = ToolResultBody::Bash(BashResult {

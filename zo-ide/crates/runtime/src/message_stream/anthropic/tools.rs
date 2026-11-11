@@ -665,6 +665,28 @@ fn is_json_number_document(raw: &str) -> bool {
 // Individual formatters
 // ============================================================================
 
+/// The code a `timeout` gives a command it stopped, by the shell's custom.
+const EXIT_TIMED_OUT: i64 = 124;
+
+/// The exit code in the word zo's own bash tool says a command's end with.
+///
+/// That tool names no `exit_code`: a command that failed carries
+/// `returnCodeInterpretation: "exit_code:N"` and one that passed carries no
+/// such key. Read as "no code named, so zero", every failed command was drawn
+/// as one that passed, and a turn's fold counted it among the commands that
+/// ran (zo 1.1.142, 2026-11-11: `python3 -c "1 / 0"`). A command stopped at
+/// its time limit is [`EXIT_TIMED_OUT`]; any other word is a command that did
+/// not pass, with no code to say how.
+fn interpreted_exit_code(value: &Value) -> Option<i64> {
+    let word = value.get("returnCodeInterpretation")?.as_str()?;
+    let code = match word.strip_prefix("exit_code:") {
+        Some(code) => code.parse().unwrap_or(1),
+        None if word == "timeout" => EXIT_TIMED_OUT,
+        None => 1,
+    };
+    Some(code)
+}
+
 /// Bash result formatter. Pure; returns the structured
 /// [`BashResult`] the TUI expects.
 #[must_use]
@@ -673,6 +695,7 @@ pub fn format_bash_result(value: &Value) -> BashResult {
         .get("exit_code")
         .or_else(|| value.get("exitCode"))
         .and_then(Value::as_i64)
+        .or_else(|| interpreted_exit_code(value))
         .unwrap_or(0) as i32;
     let (stdout, stdout_truncated) = truncate(
         value
@@ -1271,6 +1294,19 @@ mod tests {
         assert_eq!(shown(json!({})), ".");
         assert_eq!(shown(json!({ "path": "src/tui" })), "src/tui");
         assert_eq!(shown(json!({ "pattern": "**/*.rs", "path": "src" })), "**/*.rs");
+    }
+
+    /// What zo's own bash tool hands back says a failed command in a word,
+    /// not in an `exit_code`: the result reads the code out of the word.
+    #[test]
+    fn a_bash_result_reads_the_exit_code_the_bash_tool_words() {
+        let code = |output: Value| format_bash_result(&output).exit_code;
+        assert_eq!(code(json!({ "stdout": "", "stderr": "boom", "returnCodeInterpretation": "exit_code:7" })), 7);
+        assert_eq!(code(json!({ "stdout": "ok", "stderr": "" })), 0, "no word: the command passed");
+        assert_eq!(code(json!({ "stdout": "ok", "stderr": "", "returnCodeInterpretation": null })), 0);
+        assert_eq!(code(json!({ "stdout": "", "stderr": "", "interrupted": true, "returnCodeInterpretation": "timeout" })), 124);
+        assert_eq!(code(json!({ "stdout": "", "stderr": "", "returnCodeInterpretation": "preflight_blocked:workspace_scope" })), 1);
+        assert_eq!(code(json!({ "stdout": "", "stderr": "", "exit_code": 3, "returnCodeInterpretation": "exit_code:7" })), 3, "a named code stands");
     }
 
     #[test]
