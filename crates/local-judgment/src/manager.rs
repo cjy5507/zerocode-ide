@@ -57,7 +57,7 @@ pub struct Supervision {
     /// choose no managed model), `restart` (planned, at `next_at_ms`),
     /// `after_operation` (planned, once the operation that runs ends),
     /// `loading` (a start runs now) or `press` (only the person's
-    /// 「실행하고 적용」).
+    /// 「판단에 쓰기」).
     pub next: &'static str,
     /// When the planned restart runs, in ms since the epoch.
     pub next_at_ms: Option<u64>,
@@ -223,7 +223,7 @@ impl Clock for Tokio {
     }
 }
 
-/// How the manager brings back a server the person's 「실행하고 적용」 still
+/// How the manager brings back a server the person's 「판단에 쓰기」 still
 /// wants after its runtime ended, and where it stops. Three restarts in the
 /// window cover a runtime that crashed once or twice; a fourth end is one
 /// that cannot stay up, and the person decides.
@@ -263,7 +263,7 @@ const NO_INTENT: &str = "no_intent";
 const SELECTION_CHANGED: &str = "selection_changed";
 const JEV_OFF: &str = "jev_off";
 
-/// The person's 「실행하고 적용」 the manager keeps a server up for: the model
+/// The person's 「판단에 쓰기」 the manager keeps a server up for: the model
 /// it applied, the provider identity it wrote, and the restarts it has had.
 /// It lives in memory only, so a new app start has none.
 struct Intent {

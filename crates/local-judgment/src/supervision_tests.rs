@@ -2,7 +2,7 @@
 //! runtime's end is told when it happens, not when a status read finds it,
 //! and how it ended stays with the stopped state and on disk — the stop that
 //! fired or the runtime's own exit, its code or signal, and the last of its
-//! stderr, bounded and scrubbed. A server the person's 「실행하고 적용」 still
+//! stderr, bounded and scrubbed. A server the person's 「판단에 쓰기」 still
 //! wants comes back on its own port within its budget; nothing else does.
 
 use std::fs;
@@ -909,7 +909,7 @@ impl Recovering {
         started
     }
 
-    /// The rest of the person's 「실행하고 적용」 for the server that is up:
+    /// The rest of the person's 「판단에 쓰기」 for the server that is up:
     /// its check, then the settings write the window makes.
     async fn apply(&self, server: &str) -> Provider {
         self.manager.check(server).unwrap();

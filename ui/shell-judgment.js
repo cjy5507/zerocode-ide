@@ -149,7 +149,7 @@ const judgmentProviderController = {
 
   setupHint() {
     if (this.draft?.kind === "local" && this.localMode === "managed") {
-      return ["local", t("settings.managed.setupHint", "실행 환경과 모델을 설치한 뒤 실행하고 적용을 누르세요. 서버 주소나 포트는 직접 입력하지 않아도 됩니다.")];
+      return ["local", t("settings.managed.setupHint", "「이 컴퓨터」에서 모델을 받아 「판단에 쓰기」를 누르세요. 서버 주소나 포트는 직접 입력하지 않아도 됩니다.")];
     }
     if (!this.draft?.baseUrl) {
       return ["connection", t("settings.judgment.nextConnection", "먼저 연결할 판단 서버 주소를 입력하세요. 모델을 고르기 전까지 현재 설정은 유지됩니다.")];
@@ -231,22 +231,6 @@ const judgmentProviderController = {
     if (!provider) return;
     this.reset(provider);
     this.render();
-  },
-
-  connectModel(model) {
-    const modelId = managedJudgmentController.serverModel(model);
-    if (!modelId || typesafeBusy || managedJudgmentController.busy || managedJudgmentController.operating()) return;
-    const kind = this.draft?.kind === "remote" ? "remote" : "local";
-    const previous = this.draft?.kind === kind ? this.draft : this.drafts.get(kind);
-    const provider = previous ? this.copy(previous)
-      : { kind, protocol: "system_one", baseUrl: "", model: "", requiresAuth: kind === "remote" };
-    if (provider.protocol !== "system_one") { provider.protocol = "system_one"; provider.baseUrl = ""; provider.requiresAuth = kind === "remote"; }
-    provider.model = modelId;
-    el("judgment-connection-settings").open = true;
-    this.localMode = "manual";
-    this.reset(provider);
-    this.render();
-    el(provider.baseUrl ? "typesafe-model-input" : "judgment-endpoint")?.focus();
   },
 
   read() {

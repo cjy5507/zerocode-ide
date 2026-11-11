@@ -7386,14 +7386,14 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assert(await toggle.isVisible(), "the card has no switch");
   assert(!(await toggle.isChecked()), "a machine that never met Jev reads as using it");
   assert(await partial.isHidden(), "a switch that is off says where it is used");
-  // The library's filter stands over the library's rows (t-69998): the
-  // fixture's one catalog model is not received and no server answers with
-  // it, so this computer holds no model and has nothing to filter.
+  // A model has a row once this computer holds it (t-69998): the fixture's
+  // one catalog model is not received and no server answers with it, so
+  // 「이 컴퓨터」 has no row for it.
   await pageA.waitForFunction(() => managedJudgmentController.snapshot);
   assertEqual(await pageA.evaluate(() => ({
     catalog: managedJudgmentController.snapshot.models.map((model) => [model.id, model.installed]),
-    rows: document.querySelectorAll("#managed-judgment-models > .managed-judgment-model").length,
-  })), { catalog: [["fixture-decision", false]], rows: 0 }, "a catalog model this computer does not hold stands as a library row");
+    rows: document.querySelectorAll('[data-connection-group="local"] [data-connection-id^="managed:"]').length,
+  })), { catalog: [["fixture-decision", false]], rows: 0 }, "a catalog model this computer does not hold stands as a row");
   // A closed fold keeps its body's boxes (content-visibility) while nobody
   // sees them, so what is folded away is counted as out of sight.
   const selects = await pageA.locator("#typesafe-card select").evaluateAll((all) => ({
@@ -7406,8 +7406,9 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     ids: ["judgment-format-fixture-OpenRouter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model"],
     visible: ["judgment-provider-kind"],
   }, "the provider is visible; protocol and inactive choices stay folded");
-  // The candidate filter went with the library to 「이 컴퓨터 › 모델 받기」.
-  assert(await pageA.locator("#model-receive #managed-judgment-filter").isVisible(), "the library's filter is not under 「모델 받기」");
+  // The library's own filter left with its cards (2026-11-11): the page
+  // carries no chooser of its own beside the provider's.
+  assertEqual(await pageA.locator("#managed-judgment-filter").count(), 0, "the old library's filter is still on the page");
   // The worker rows and the classifier moved to the orchestration pane
   // (t-75762 v2, decision 4), each on a card of its own since the person
   // passed the before/after draft (2026-10-27) — nothing to unfold.
@@ -7934,7 +7935,7 @@ await test("주소를 붙여 넣으면 정보만 확인하고 실행 검증 전 
   assertEqual(await page.locator("#judgment-source-badge-installed").textContent(), words.present);
   assert(await page.locator("#judgment-source-badge-current").isHidden(), "kept files looked applied");
   assert(await page.locator("#judgment-source-use").isHidden(), "kept files still offered an action");
-  assertEqual(await page.evaluate(() => managedJudgmentController.rows.get("fixture-native")?.state.textContent), words.library, "the library row hid that the runtime is not verified");
+  assert((await page.locator('[data-connection-group="local"] [data-connection-id="managed:fixture-native"]').textContent()).includes(words.library), "the model's row hid that the runtime is not verified");
   return "paste reads metadata only · one explicit download-only action · named steps · no runtime/start/check/apply · active model kept";
 }));
 
@@ -8033,15 +8034,29 @@ await test("지원하지 않는 주소는 결과 줄에서 이유와 다음 행�
   return "reason in the result row · retry and folder route · active model kept";
 }));
 
-await test("실행 검증 전 카탈로그 후보는 주소 확인으로 같은 결과 줄에 불러온다", async () => withJudgmentStatus(async (page) => {
+await test("목록 파일로 추가한 실행 검증 전 모델은 「고급」의 줄에서 주소 확인으로 같은 결과 줄에 불러오고, 앱에 실린 모델은 받기 전에 어디에도 서지 않는다", async () => withJudgmentStatus(async (page) => {
   const native = nativeSourceInspection(backend.managedJudgmentSettings()).model;
+  // The same model as the app ships it: a pin, and no line anywhere until
+  // its files are on this computer (the person, 2026-11-11: 「하드코딩된
+  // 모델들이 있는거같은데」).
   backend.managedModelState.models.push({ ...native, origin: "bundled" });
   backend.managedModelState.revision += 1;
   backend.managedSourceResult = nativeSourceInspection(backend.managedJudgmentSettings());
   await backend.emitManaged(backend.managedJudgmentSettings());
-  assertEqual(await page.locator("#managed-judgment-candidate-list").count(), 1, "the catalog models not received have no list of their own");
+  await page.waitForFunction((revision) => managedJudgmentController.snapshot?.revision >= revision, backend.managedModelState.revision);
+  assertEqual(await page.evaluate(() => ({
+    listed: managedJudgmentController.candidates.has("fixture-native"),
+    shown: !document.getElementById("managed-judgment-candidates").hidden,
+    row: document.querySelectorAll('[data-connection-id="managed:fixture-native"]').length,
+  })), { listed: false, shown: false, row: 0 }, "a model the app ships is offered before it was received");
+  // A list file the person brought names it: it waits in 「고급」.
+  backend.managedModelState.models.at(-1).origin = "registered";
+  backend.managedModelState.revision += 1;
+  await backend.emitManaged(backend.managedJudgmentSettings());
+  assertEqual(await page.locator("#managed-judgment-candidate-list").count(), 1, "the models a list file added have no list of their own");
   await page.waitForFunction(() => managedJudgmentController.candidates.has("fixture-native"));
-  assert(!(await page.evaluate(() => managedJudgmentController.rows.has("fixture-native"))), "a model whose files were never received stood as a library row");
+  assertEqual(await page.locator('[data-connection-id="managed:fixture-native"]').count(), 0, "a model whose files were never received stood as a row");
+  assertEqual(await page.locator("#managed-judgment-candidates-count").textContent(), await page.evaluate(() => t("settings.managed.addedCount", "목록 파일로 추가한 모델 {{count}}개", { count: 1 })), "the list does not say how many models the file added");
   const candidate = page.locator('#managed-judgment-candidate-list [data-model-id="fixture-native"]');
   const button = candidate.locator('button[data-model-action="inspect-source"]');
   assert(!(await button.evaluate((element) => element.hidden || element.disabled)), "the candidate has no way to its download-only action");
@@ -8053,7 +8068,7 @@ await test("실행 검증 전 카탈로그 후보는 주소 확인으로 같은 
   assertEqual(await page.locator("#judgment-source-repository").inputValue(), native.source);
   await page.waitForFunction(() => judgmentModelSourceController.inspection?.readyForDownload && !judgmentModelSourceController.inspecting);
   assert(!backend.calls.slice(at).some((entry) => ["managed_judgment_install", "managed_judgment_install_source"].includes(entry.command)), "the candidate downloaded before the person chose to");
-  return "candidate, not a row · address check only · routes into the same inspected row · no download before the explicit action";
+  return "shipped pin → nowhere · list file's model → a line in 「고급」, not a row · address check only · routes into the same inspected row · no download before the explicit action";
 }));
 
 await test("주소를 고쳐도 다른 요청이 시작한 모델 확인을 취소하지 않는다", async () => withJudgmentStatus(async (page, provider) => {
@@ -8295,45 +8310,45 @@ await test("로컬 모델은 서버 주소 대신 다운로드 상태를 보이�
     assert(await pageA.locator("#managed-judgment-panel").isVisible(), "local selection does not offer managed models");
     assert(await pageA.locator("#judgment-endpoint").isHidden(), "local setup still starts with an empty server address");
     const applied = clone(backend.typesafeSettings().provider);
-    // A model not received yet is a candidate, folded under the library (t-69998).
-    assertEqual(await pageA.locator("#managed-judgment-candidates").count(), 1, "the catalog models not received have no folded line");
-    await pageA.locator("#managed-judgment-candidates > summary").click();
+    // A model a list file added waits in 「고급」 until it is received; it has
+    // no row before that (t-69998, and 2026-11-11 for the list's place).
+    backend.managedModelState.models[0].origin = "registered";
+    backend.managedModelState.revision += 1;
+    await backend.emitManaged(backend.managedJudgmentSettings());
+    const row = pageA.locator('[data-connection-group="local"] [data-connection-id="managed:fixture-decision"]');
+    await pageA.waitForFunction(() => managedJudgmentController.candidates.has("fixture-decision"));
+    assertEqual(await row.count(), 0, "a model not received has a row");
     const downloadedAt = backend.calls.length;
     await pageA.click('#managed-judgment-candidate-list [data-model-id="fixture-decision"] [data-model-action="install"]');
     const request = await backend.waitForCall("A", "managed_judgment_install", downloadedAt);
     assertEqual(request.args, { modelId: "fixture-decision", revision: "fixture-revision" }, "download did not bind the catalog revision");
-    await pageA.waitForFunction(() => !document.getElementById("managed-judgment-progress").hidden);
-    const meterStyle = await pageA.locator("#managed-judgment-progress progress").evaluate((meter) => ({
-      appearance: getComputedStyle(meter).appearance,
-      height: meter.getBoundingClientRect().height,
-      label: document.getElementById(meter.getAttribute("aria-labelledby"))?.textContent.trim(),
-    }));
-    assertEqual(meterStyle.appearance, "none", "download progress still uses native platform decoration");
-    assert(meterStyle.height > 0 && meterStyle.label, "download progress is invisible or has no accessible label");
+    // While it is received it has its row, and the row says how far.
+    const progress = row.locator("[data-managed-progress]");
+    await progress.waitFor();
+    assertEqual(await progress.getAttribute("role"), "status", "download progress is not announced");
+    assert((await progress.textContent()).trim().length > 0, "download progress says nothing");
+    assertEqual(await pageA.evaluate(() => managedJudgmentController.candidates.has("fixture-decision")), false, "a model being received still waits in the list");
     const stale = clone(backend.managedModelState);
     backend.managedModelState.revision += 1;
     backend.managedModelState.operation.receivedBytes = 512;
     await backend.emitManaged(backend.managedJudgmentSettings());
     await backend.emitManaged(stale);
-    assertEqual(await pageA.locator("#managed-judgment-progress progress").evaluate((meter) => meter.value), 512, "a late event rewound download progress");
-    await pageA.click("#managed-judgment-cancel");
-    await pageA.waitForFunction(() => document.getElementById("managed-judgment-progress").hidden);
+    assert((await progress.textContent()).includes("512 B"), "a late event rewound download progress", await progress.textContent());
+    await row.locator('[data-managed-action="cancel"]').click();
+    await pageA.waitForFunction(() => document.querySelectorAll('[data-connection-id="managed:fixture-decision"]').length === 0);
     assertEqual(backend.typesafeSettings().provider, applied, "download or cancellation changed the applied model");
     assert(!backend.managedModelState.models[0].installed, "a cancelled download was shown as installed");
-    assert(await pageA.evaluate(() => managedJudgmentController.candidates.has("fixture-decision") && !managedJudgmentController.rows.has("fixture-decision")),
-      "a cancelled download left the candidates for the library");
+    assert(await pageA.evaluate(() => managedJudgmentController.candidates.has("fixture-decision")), "a cancelled download did not go back to the list");
     assert(!backend.calls.slice(downloadedAt).some((entry) => entry.command === "managed_judgment_apply"), "download silently applied a model");
   } finally {
     backend.zoSettings.smart = previous;
     delete backend.managedPendingKinds;
     await pageA.evaluate(() => {
-      const fold = document.getElementById("managed-judgment-candidates");
-      if (fold) fold.open = false;
       judgmentProviderController.draft = null;
       return refreshApiRouters();
     });
   }
-  return "no server field · candidate's revision-bound download · stale event ignored · cancellation is not installation";
+  return "no server field · a listed model's revision-bound download · progress on its row · stale event ignored · cancellation is not installation";
 });
 
 await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 명시적으로 적용한다", async () => {
@@ -8348,32 +8363,39 @@ await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 
   try {
     await pageA.selectOption("#judgment-provider-kind", "local");
     await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models[0]?.installed);
+    // The model's own row carries its buttons (2026-11-11): 「판단에 쓰기」
+    // starts, checks and applies, as the old card's 「실행하고 적용」 did.
+    const row = pageA.locator('[data-connection-group="local"] [data-connection-id="managed:fixture-decision"]');
     const before = clone(backend.typesafeSettings().provider);
     const failedAt = backend.calls.length;
-    await pageA.click('[data-model-action="activate"]');
+    await row.locator('[data-managed-action="start"]').click();
     await backend.waitForCall("A", "managed_judgment_check", failedAt);
     await pageA.waitForFunction(() => !managedJudgmentController.activating);
     assertEqual(backend.typesafeSettings().provider, before, "a failed response check replaced the provider");
     assert(!backend.calls.slice(failedAt).some((entry) => entry.command === "managed_judgment_apply"), "a failed check reached apply");
     const runningWords = await pageA.evaluate(() => t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음"));
-    assert((await pageA.locator(".managed-judgment-model").textContent()).includes(runningWords), "a running but unverified model was shown as merely installed");
+    assert((await row.textContent()).includes(runningWords), "a running but unverified model was shown as merely installed");
     backend.managedCheckFailure = false;
     backend.managedChangeOnCheck = true;
     const changedAt = backend.calls.length;
-    await pageA.click('[data-model-action="activate"]');
+    await row.locator('[data-managed-action="start"]').click();
     await backend.waitForCall("A", "managed_judgment_apply", changedAt);
     await pageA.waitForFunction(() => !managedJudgmentController.activating);
     assertEqual(backend.typesafeSettings().provider.kind, "jev", "apply overwrote another window's selection");
     assertEqual(backend.typesafeSettings().provider.model, "jev-other-window", "the newer setting was lost");
     backend.managedChangeOnCheck = false;
-    await pageA.evaluate(() => managedJudgmentController.refresh());
+    // The row says another window changed the settings first and offers one
+    // press — read again — before the model can be asked for once more.
+    assertEqual(await row.locator("[data-managed-action]").evaluateAll((all) => all.map((button) => button.dataset.managedAction)), ["reread"], "a change from another window left the old buttons on the row");
+    await row.locator('[data-managed-action="reread"]').click();
+    await row.locator('[data-managed-action="start"]').waitFor();
     const successfulAt = backend.calls.length;
-    await pageA.click('[data-model-action="activate"]');
+    await row.locator('[data-managed-action="start"]').click();
     await backend.waitForCall("A", "managed_judgment_apply", successfulAt);
     await pageA.waitForFunction(() => managedJudgmentController.snapshot?.appliedModelId === "fixture-decision" && !managedJudgmentController.activating);
     assertEqual(backend.typesafeSettings().provider.model, "fixture-decision");
-    assert(await pageA.locator('[data-model-action="remove"]').isDisabled(), "the configured model can be deleted");
-    await pageA.click('[data-model-action="stop"]');
+    assertEqual(await row.locator('[data-managed-action="remove"]').count(), 0, "the configured model can be deleted");
+    await row.locator('[data-managed-action="stop"]').click();
     await pageA.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "stopped");
     assertEqual(backend.managedModelState.configuredModelId, "fixture-decision", "stopping forgot the configured binding");
     assertEqual(backend.managedModelState.appliedModelId, null, "a stopped server is shown as running and applied");
@@ -8410,7 +8432,7 @@ await test("실행 중인 판단 모델은 원자적 전환 한 번으로 바꾸
     await modelPage.waitForFunction(() => managedJudgmentController.snapshot?.appliedModelId === "fixture-decision");
     const switchingAt = backend.calls.length;
     const identity = backend.typesafeSettings().providerIdentity;
-    await modelPage.click('[data-model-id="fixture-next"] [data-model-action="activate"]');
+    await modelPage.click('[data-connection-id="managed:fixture-next"] [data-managed-action="start"]');
     const switched = await backend.waitForCall("model-switch", "managed_judgment_switch_model", switchingAt);
     assertEqual(switched.args, { modelId: "fixture-next", revision: "next-revision", serverId: "fixture-original-server", expectedProviderIdentity: identity, instanceId: "fixture-instance" });
     await modelPage.waitForFunction(() => !managedJudgmentController.activating && managedJudgmentController.snapshot?.appliedModelId === "fixture-next");
@@ -8421,17 +8443,19 @@ await test("실행 중인 판단 모델은 원자적 전환 한 번으로 바꾸
     const server = clone(held.server);
     backend.managedSwitchFailure = true;
     const failingAt = backend.calls.length;
-    await modelPage.click('[data-model-id="fixture-decision"] [data-model-action="activate"]');
+    await modelPage.click('[data-connection-id="managed:fixture-decision"] [data-managed-action="start"]');
     await backend.waitForCall("model-switch", "managed_judgment_switch_model", failingAt);
     await modelPage.waitForFunction(() => !managedJudgmentController.activating);
     assertEqual(backend.typesafeSettings().provider, selected, "failed switch replaced the selected provider");
     assertEqual(held.server, server, "the UI stopped or replaced the restored server");
     assertEqual(held.appliedModelId, "fixture-next");
-    assert((await modelPage.locator("#managed-judgment-status").textContent()).includes("System One"), "protocol failure has no actionable explanation");
+    // The failure is said once, on the row that was pressed.
+    assert((await modelPage.locator('[data-connection-id="managed:fixture-decision"] [data-managed-said]').textContent()).includes("System One"), "protocol failure has no actionable explanation");
+    assertEqual(await modelPage.locator("#managed-judgment-status").textContent(), "", "the failed press is said under the rows as well");
     backend.managedSwitchFailure = false;
     backend.managedSwitchOtherWindow = true;
     const staleAt = backend.calls.length;
-    await modelPage.click('[data-model-id="fixture-decision"] [data-model-action="activate"]');
+    await modelPage.click('[data-connection-id="managed:fixture-decision"] [data-managed-action="start"]');
     await backend.waitForCall("model-switch", "managed_judgment_switch_model", staleAt);
     await modelPage.waitForFunction(() => !managedJudgmentController.activating);
     assertEqual(backend.typesafeSettings().provider.model, "jev-other-window", "stale switch replaced another window's choice");
@@ -8484,7 +8508,7 @@ await test("스스로 멈춘 판단 서버는 중지됨과 그 까닭을 다섯 
   const page = await context.newPage();
   await installTauri(page, "server-exit");
   attachFaultRecorder(page, "server-exit");
-  const shown = () => page.locator('[data-model-id="fixture-decision"].managed-judgment-model').textContent();
+  const shown = () => page.locator('[data-connection-group="local"] [data-connection-id="managed:fixture-decision"]').textContent();
   try {
     await bootPage(page, "server-exit");
     await openSettings(page, "judgment-models");
@@ -8498,10 +8522,10 @@ await test("스스로 멈춘 판단 서버는 중지됨과 그 까닭을 다섯 
       await setQualityLocale(page, locale);
       await page.evaluate(() => managedJudgmentController.render());
       const words = await page.evaluate(() => ({
-        line: t("settings.managed.stoppedReason", "중지됨 · {{reason}}. 실행하고 적용을 눌러 다시 시작하세요.", {
+        line: t("settings.managed.stoppedReason", "중지됨 · {{reason}}. 「다시 시작」을 누르면 다시 띄웁니다.", {
           reason: t("settings.managed.exit.memory", "메모리 한도를 넘어 실행 환경이 스스로 멈췄습니다"),
         }),
-        generic: t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요."),
+        generic: t("settings.managed.configuredStopped", "판단 모델로 골라 둔 모델인데 지금은 돌고 있지 않습니다. 「다시 시작」을 누르면 다시 띄웁니다."),
       }));
       const text = await shown();
       assert(text.includes(words.line), `${locale} hides why the server stopped`, { text, words });
@@ -8551,7 +8575,7 @@ await test("다시 띄우기를 기다리는 판단 서버는 다시 띄우는 �
   const page = await context.newPage();
   await installTauri(page, "server-restart");
   attachFaultRecorder(page, "server-restart");
-  const card = page.locator('[data-model-id="fixture-decision"].managed-judgment-model');
+  const card = page.locator('[data-connection-group="local"] [data-connection-id="managed:fixture-decision"]');
   try {
     await bootPage(page, "server-restart");
     await openSettings(page, "judgment-models");
@@ -8565,7 +8589,7 @@ await test("다시 띄우기를 기다리는 판단 서버는 다시 띄우는 �
       await setQualityLocale(page, locale);
       await page.evaluate(() => managedJudgmentController.render());
       const words = await page.evaluate(() => ({
-        line: t("settings.managed.restartingReason", "다시 띄우는 중 · {{reason}}. 중지를 누르면 다시 띄우지 않습니다.", {
+        line: t("settings.managed.restartingReason", "다시 띄우는 중 · {{reason}}. 「멈추기」를 누르면 다시 띄우지 않습니다.", {
           reason: t("settings.managed.exit.code", "실행 환경이 스스로 끝났습니다(종료 코드 {{code}})", { code: 7 }),
         }),
         starting: t("settings.managed.starting", "모델을 시작하는 중 · 아직 적용하지 않음"),
@@ -8577,7 +8601,7 @@ await test("다시 띄우기를 기다리는 판단 서버는 다시 띄우는 �
       said[locale] = words.line;
     }
     assertEqual(new Set(Object.values(said)).size, SETTINGS_QUALITY_SPEC.locales.length, "a locale repeats another's restart line");
-    const stop = card.locator('[data-model-action="stop"]');
+    const stop = card.locator('[data-managed-action="stop"]');
     assert(await stop.isVisible(), "the stop button is gone while a restart waits");
     await stop.click();
     await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "stopped");
@@ -8588,86 +8612,6 @@ await test("다시 띄우기를 기다리는 판단 서버는 다시 띄우는 �
     backend.managedModelState = previousManaged;
   }
   return "restarting with its reason · five locales · stop kept and sent for the waiting server";
-});
-
-await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 모델을 현재 설정 변경 없이 고른다", async () => {
-  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
-  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
-  delete backend.managedModelState;
-  backend.managedJudgmentSettings();
-  // Both models are this computer's (t-69998): the local one received, the
-  // server one's files kept though it cannot run here.
-  const local = backend.managedModelState.models[0];
-  local.local = { supported: true, reason: null };
-  local.existingServer = { supported: true, protocol: "system_one", modelId: local.id, requiresCheck: true };
-  local.installed = true;
-  backend.managedModelState.models.push({
-    ...clone(local), id: "fixture-server-decision", label: "Example Decision Server", engine: "transformers_system_one",
-    serverModelId: "acme/decision", compatibility: "unsupported", compatibilityReason: "engine_not_supported",
-    local: { supported: false, downloadOnly: true, reason: "engine_not_supported" },
-    existingServer: { supported: true, protocol: "system_one", modelId: "acme/decision", requiresCheck: true },
-  });
-  // Not received, unable to run here and with no files to keep: its server is
-  // its one way in.
-  backend.managedModelState.models.push({
-    ...clone(local), id: "fixture-server-only", label: "Fixture Server Only", engine: "transformers_system_one", installed: false,
-    serverModelId: "acme/server-only", compatibility: "unsupported", compatibilityReason: "engine_not_supported",
-    local: { supported: false, downloadOnly: false, reason: "engine_not_supported" },
-    existingServer: { supported: true, protocol: "system_one", modelId: "acme/server-only", requiresCheck: true },
-  });
-  await openJudgmentSettings(pageA);
-  await pageA.evaluate(() => {
-    managedJudgmentController.snapshot = null;
-    managedJudgmentController.query = "";
-    managedJudgmentController.filter = "all";
-    judgmentProviderController.localMode = "managed";
-  });
-  try {
-    await pageA.selectOption("#judgment-provider-kind", "local");
-    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
-    assertEqual(await pageA.locator("#managed-judgment-search").count(), 1, "a multi-model library has no search control");
-    const before = clone(backend.typesafeSettings().provider);
-    const requestsAt = backend.calls.length;
-    await pageA.fill("#managed-judgment-search", "EXAMPLE");
-    assert(await pageA.locator('[data-model-id="fixture-decision"].managed-judgment-model').isHidden(), "search did not filter unrelated models");
-    const server = pageA.locator('[data-model-id="fixture-server-decision"].managed-judgment-model');
-    assert(await server.isVisible(), "search is not case-insensitive");
-    assert(await server.locator('[data-model-action="activate"]').isHidden(), "an unsupported local adapter offers to run here");
-    assert(await server.locator('[data-model-action="connect"]').isVisible(), "a compatible server model has no connection path");
-    assertEqual(await pageA.locator('[data-model-id="fixture-server-only"].managed-judgment-model').count(), 0, "a model not received here stands as a library row");
-    await pageA.fill("#managed-judgment-search", "");
-    await pageA.locator("#managed-judgment-candidates > summary").click();
-    const serverOnly = pageA.locator('#managed-judgment-candidate-list > [data-model-id="fixture-server-only"]');
-    for (const action of ["install", "inspect-source", "import"]) {
-      assert(await serverOnly.locator(`[data-model-action="${action}"]`).isHidden(), `a candidate that cannot run or be kept here offers ${action}`);
-    }
-    assert(await serverOnly.locator('[data-model-action="connect"]').isVisible(), "a candidate reached only through its server has no connection path");
-    await pageA.fill("#managed-judgment-search", "");
-    await pageA.selectOption("#managed-judgment-filter", "local");
-    assert(await server.isHidden(), "the local filter includes server-only models");
-    await pageA.selectOption("#managed-judgment-filter", "all");
-    assert(!backend.calls.slice(requestsAt).some((entry) => entry.command.startsWith("managed_judgment_")), "filtering models performs backend work");
-    await pageA.click("#judgment-local-manual");
-    await pageA.fill("#judgment-endpoint", "http://127.0.0.1:32102");
-    await pageA.click("#judgment-local-managed");
-    await server.locator('[data-model-action="connect"]').click();
-    assert(await pageA.locator("#judgment-endpoint").isVisible(), "connecting a server model did not open its connection form");
-    assertEqual(await pageA.inputValue("#typesafe-model-input"), "acme/decision", "connection did not use the server model ID");
-    assertEqual(await pageA.inputValue("#judgment-endpoint"), "http://127.0.0.1:32102", "selecting a model discarded the configured server address");
-    assertEqual(backend.typesafeSettings().provider, before, "choosing a library model changed the applied provider");
-  } finally {
-    backend.zoSettings.smart = previous;
-    backend.managedModelState = previousManaged;
-    await pageA.evaluate(() => {
-      managedJudgmentController.snapshot = null;
-      managedJudgmentController.query = "";
-      managedJudgmentController.filter = "all";
-      judgmentProviderController.draft = null;
-      document.getElementById("managed-judgment-candidates").open = false;
-      return refreshApiRouters();
-    });
-  }
-  return "search and support filters · no backend polling · no local run for an unsupported adapter · a server-only candidate offers its server alone · exact server ID and address preserved";
 });
 
 /* The catalog the app compiles in, as a snapshot says it: the two models
@@ -8694,301 +8638,91 @@ async function bundledManagedCatalog() {
   return { entry, laya, d3 };
 }
 
-/* The settings › 판단 모델 picture the person sent on 10-22 (t-69998): the
- * bundled catalog plus the address they had checked, with only Laya received.
- * Written to `MANAGED_JUDGMENT_SHOTS` beside what the library drew, so the
- * same run makes the before and the after of a change. */
-async function photographManagedLibrary(folder) {
-  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
-  const { entry, laya, d3 } = await bundledManagedCatalog();
-  delete backend.managedModelState;
-  backend.managedJudgmentSettings();
-  backend.managedModelState.runtime.state = "ready";
-  backend.managedModelState.models = [entry(laya, true), entry(d3, false),
-    { ...entry(d3, false), id: "native-checked-address", label: d3.serverModelId, revision: "checked-address-revision", origin: "registered", quality: "source_inspected_unverified" }];
-  const page = await context.newPage();
-  await installTauri(page, "managed-photo");
-  attachFaultRecorder(page, "managed-photo");
-  try {
-    await page.setViewportSize({ width: 1280, height: 2400 });
-    await bootPage(page, "managed-photo");
-    await openSettings(page, "judgment-models");
-    await openModelReceive(page);
-    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
-    await renderSettled(page);
-    const drawn = await page.evaluate(() => ({
-      rows: [...document.querySelectorAll("#managed-judgment-models > .managed-judgment-model h4")].map((title) => title.textContent),
-      pinnedFolds: [...document.querySelectorAll("#managed-judgment-panel details > summary")]
-        .filter((summary) => summary.textContent === t("settings.managed.details", "모델 출처와 고정 버전")).length,
-      candidates: [...document.querySelectorAll("#managed-judgment-candidate-list > li .managed-judgment-candidate-name")].map((name) => name.textContent),
-    }));
-    await mkdir(folder, { recursive: true });
-    await writeFile(resolve(folder, "library.json"), `${JSON.stringify(drawn, null, 2)}\n`);
-    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
-      await setQualityTheme(page, theme);
-      await renderSettled(page);
-      await page.locator("#managed-judgment-panel").screenshot({ path: resolve(folder, `library-${theme}.png`), animations: "disabled" });
-      const fold = page.locator("#managed-judgment-candidates");
-      if (!(await fold.isVisible())) continue;
-      await fold.evaluate((element) => { element.open = true; });
-      await renderSettled(page);
-      await page.locator("#managed-judgment-panel").screenshot({ path: resolve(folder, `library-${theme}-unfolded.png`), animations: "disabled" });
-      await fold.evaluate((element) => { element.open = false; });
-    }
-  } finally {
-    await page.close();
-    backend.managedModelState = previousManaged;
-  }
-}
-
-await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈로그 모델은 「직접 받는 선택 모델」 접힘 한 줄로 간다", async () => {
-  if (process.env.MANAGED_JUDGMENT_SHOTS) await photographManagedLibrary(process.env.MANAGED_JUDGMENT_SHOTS);
+await test("이 컴퓨터: 앱에 실린 모델은 받기 전에 어디에도 서지 않고, 받은 모델은 줄 하나로 서며 고정 버전은 「자세히」 안에 있다 (2026-11-11)", async () => {
   const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
   const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
   delete backend.managedModelState;
   backend.managedJudgmentSettings();
-  // The person's photo of 10-22 (t-69998): a catalog of three, one of them
-  // received. Beside it stand a model this computer can run and a
-  // download-only one that a System One server can answer with.
+  // The catalog the app compiles in: nothing of it is on this computer.
+  const { entry, laya, d3 } = await bundledManagedCatalog();
   const held = backend.managedModelState;
-  const base = held.models[0];
   held.runtime.state = "ready";
-  held.models = [
-    { ...clone(base), id: "fixture-laya", label: "Fixture Laya 322M", engine: "laya", revision: "laya-revision", weightsBytes: 643_835_514,
-      local: { supported: true, downloadOnly: false, reason: null }, installed: true, installedDirectory: "/models/managed/fixture-laya" },
-    { ...clone(base), id: "fixture-local-candidate", label: "Fixture Local Candidate", revision: "local-candidate-revision", weightsBytes: 1_073_741_824,
-      local: { supported: true, downloadOnly: false, reason: null } },
-    { ...clone(base), id: "fixture-d3", label: "Fixture D3 lite", engine: "transformers_system_one", revision: "d3-revision", serverModelId: "acme/d3",
-      source: "https://huggingface.co/acme/d3/tree/d3-revision", weightsBytes: 1_707_072_248, compatibility: "unsupported", compatibilityReason: "engine_unverified",
-      local: { supported: false, downloadOnly: true, reason: "engine_unverified" },
-      existingServer: { supported: true, protocol: "system_one", modelId: "acme/d3", requiresCheck: true } },
-  ];
+  held.models = [entry(laya, false), entry(d3, false)];
   const page = await context.newPage();
-  await installTauri(page, "managed-library");
-  attachFaultRecorder(page, "managed-library");
+  await installTauri(page, "local-rows");
+  attachFaultRecorder(page, "local-rows");
   try {
-    await bootPage(page, "managed-library");
+    await bootPage(page, "local-rows");
     await openSettings(page, "judgment-models");
     await openModelReceive(page);
-    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
-    assertEqual(await page.locator("#managed-judgment-candidates").count(), 1, "the catalog models not received have no folded line");
-    const words = await page.evaluate(() => ({
-      details: t("settings.managed.details", "모델 출처와 고정 버전"),
-      source: t("settings.managed.detailsSource", "모델 출처"),
-      connected: t("settings.managed.connectedApplied", "기존 판단 서버로 연결됨 · 현재 적용됨"),
-      offered: [2, 1].map((count) => t("settings.managed.availableCount", "직접 받는 선택 모델 {{count}}개", { count })),
-      counted: [1, 2, 3].map((total) => t("settings.managed.libraryCount", "모델 {{shown}}개 표시 · 전체 {{total}}개", { shown: total, total })),
-      download: t("settings.managed.download", "다운로드"),
-      register: t("settings.managed.import", "기존 파일 등록"),
-      inspect: t("settings.managed.inspectSource", "주소로 확인"),
-      connect: t("settings.managed.connectServer", "이 모델의 서버 연결"),
-      sizes: [1_073_741_824, 1_707_072_248].map((bytes) => bytesLabel(bytes)),
-    }));
-    const library = () => page.evaluate(() => [...document.querySelectorAll("#managed-judgment-models > .managed-judgment-model")].map((row) => row.dataset.modelId));
-    const said = () => page.evaluate(() => ({
-      count: document.getElementById("managed-judgment-library-summary").textContent,
-      fold: document.getElementById("managed-judgment-candidates").hidden ? null : document.querySelector("#managed-judgment-candidates > summary").textContent.trim(),
-    }));
-    const fold = page.locator("#managed-judgment-candidates");
-    assertEqual(await library(), ["fixture-laya"], "a catalog model not received here stood as a library row");
-    assertEqual(await said(), { count: words.counted[0], fold: words.offered[0] }, "the library is not counted by its rows, or the candidates by theirs");
-    assert(!(await fold.evaluate((element) => element.open)), "the candidates start unfolded");
-    assert(await fold.locator(".settings-notice").isHidden(), "the experimental notice stands while the candidates are folded");
-    assert(await page.locator("#managed-judgment-none").isHidden(), "a library holding a model says it holds none");
-    // A pinned revision is a fact of received files alone.
-    const pinned = await page.evaluate((details) => {
-      const panel = document.getElementById("managed-judgment-panel");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
+    const local = page.locator('[data-connection-group="local"]');
+    // The group is painted once the connections are read too: it holds the
+    // local servers an earlier scene connected, or its one empty line.
+    await local.locator("[data-group-lines] > *").first().waitFor();
+    const seen = () => page.evaluate(() => {
+      const group = document.querySelector('[data-connection-group="local"]');
+      const shown = (node) => Boolean(node && !node.closest("[hidden]") && node.getClientRects().length > 0);
       return {
-        folds: [...panel.querySelectorAll("details > summary")].filter((summary) => summary.textContent === details)
-          .map((summary) => summary.closest("[data-model-id]")?.dataset.modelId ?? null),
-        revisions: ["laya-revision", "local-candidate-revision", "d3-revision"].filter((revision) => panel.textContent.includes(revision)),
+        rows: [...group.querySelectorAll('[data-connection-id^="managed:"]')].map((row) => row.dataset.connectionId),
+        // One empty line when the group holds nothing at all — a connected
+        // local server is a row of the same group.
+        empty: [...group.querySelectorAll(".model-group-empty")].filter(shown).length === (group.querySelector("[data-group-lines] [data-connection-id]") ? 0 : 1),
+        listed: shown(document.getElementById("managed-judgment-candidates")),
+        names: ["Laya", "D3"].filter((name) => group.textContent.includes(name)),
+        gone: ["managed-judgment-search", "managed-judgment-filter", "managed-judgment-models", "managed-judgment-progress", "managed-judgment-prepare", "managed-judgment-refresh", "managed-judgment-none"]
+          .filter((id) => document.getElementById(id)),
       };
-    }, words.details);
-    assertEqual(pinned, { folds: ["fixture-laya"], revisions: ["laya-revision"] }, "a model not received here shows a source and pinned revision");
-
-    await fold.locator("summary").click();
-    assert(await fold.evaluate((element) => element.open), "the folded line did not open");
-    assert(await fold.locator(".settings-notice").isVisible(), "the unfolded candidates lost the experimental notice");
-    const offered = await page.evaluate(() => [...document.querySelectorAll("#managed-judgment-candidate-list > li")].map((item) => ({
-      id: item.dataset.modelId,
-      name: item.querySelector(".managed-judgment-candidate-name").textContent,
-      size: item.querySelector(".managed-judgment-candidate-name ~ span").textContent,
-      actions: [...item.querySelectorAll("button[data-model-action]")].filter((button) => !button.hidden).map((button) => [button.dataset.modelAction, button.textContent]),
-      folds: item.querySelectorAll("details").length,
-    })));
-    assertEqual(offered, [
-      { id: "fixture-local-candidate", name: "Fixture Local Candidate", size: words.sizes[0], actions: [["install", words.download], ["import", words.register]], folds: 0 },
-      { id: "fixture-d3", name: "Fixture D3 lite", size: words.sizes[1], actions: [["inspect-source", words.inspect], ["connect", words.connect]], folds: 0 },
-    ], "an unfolded candidate is not one line of its name, its size and the ways to have it");
-    assert(await page.locator('[data-model-id="fixture-d3"] .managed-judgment-candidate-reason').isVisible(), "a download-only candidate does not explain its limitation");
-    await page.fill("#managed-judgment-search", "fixture-d3");
-    assert(await page.locator('#managed-judgment-candidate-list > li[data-model-id="fixture-d3"]').isVisible(), "search cannot find a model not downloaded yet");
-    assert(await page.locator('#managed-judgment-candidate-list > li[data-model-id="fixture-local-candidate"]').isHidden(), "candidate search ignored the query");
-    assert(await page.locator("#managed-judgment-no-matches").isHidden(), "a matching candidate is reported as no matches");
-    await page.fill("#managed-judgment-search", "");
+    });
+    // Nothing received: one line saying so, and no model named anywhere —
+    // not as a row, not as a list to download from.
+    assertEqual(await seen(), { rows: [], empty: true, listed: false, names: [], gone: [] }, "a model the app ships is on the page before it was received");
+    assertEqual(await page.locator("#model-library-fold > summary").textContent(), await page.evaluate(() => t("settings.models.advancedTools", "고급 — 모델 목록 파일로 추가")), "the fold still names the old manager");
+    assert(await page.locator("#managed-judgment-register").isVisible(), "the list file's form is not in the fold");
+    // An empty catalog reads the same.
+    held.models = [];
+    held.revision += 1;
+    await backend.emitManaged(backend.managedJudgmentSettings());
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 0);
+    assertEqual(await seen(), { rows: [], empty: true, listed: false, names: [], gone: [] }, "an empty catalog draws something else");
+    // Received: one row, with the two buttons a kept model has. Its pinned
+    // revision and folder wait under 「자세히」 (t-69998: a pin is a fact of
+    // files that are here).
+    held.models = [entry(laya, true), entry(d3, false)];
+    held.revision += 1;
+    await backend.emitManaged(backend.managedJudgmentSettings());
+    const row = local.locator(`[data-connection-id="managed:${laya.id}"]`);
+    await row.waitFor();
+    assertEqual((await seen()).rows, [`managed:${laya.id}`], "the model not received stands beside the received one");
+    assertEqual(await row.locator(".model-line-name").textContent(), laya.label);
+    assertEqual(await row.locator("[data-managed-action]").evaluateAll((all) => all.map((button) => button.dataset.managedAction)), ["start", "remove"], "a kept model does not offer use and delete");
+    const more = row.locator("details.model-line-more");
+    assert(!(await more.evaluate((fold) => fold.open)), "the row stands unfolded");
+    // At rest — 「모델 받기」 closed — the group is its head and the one row,
+    // in both themes and at both widths.
+    await page.evaluate(() => { modelConnectionsController.receiving = false; modelConnectionsController.paintReceive(); });
+    assert(await page.locator("#model-receive").isHidden(), "the receive panel stays open with nothing being received");
+    await receivePictures(page, "local-row-rest");
+    await openModelReceive(page);
+    assert(await more.locator("p").evaluate((facts, revision) => facts.textContent.includes(revision), laya.revision), "the pinned revision is not under 「자세히」");
+    await more.locator("summary").click();
+    assert(await more.locator("a").isVisible(), "the model's source has no link under 「자세히」");
+    // The fold stays as the person left it when the rows are painted again.
+    held.revision += 1;
+    await backend.emitManaged(backend.managedJudgmentSettings());
+    await page.waitForFunction((revision) => managedJudgmentController.snapshot?.revision >= revision, held.revision);
+    assert(await row.locator("details.model-line-more").evaluate((fold) => fold.open), "a repaint folded 「자세히」 back");
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
       await setQualityTheme(page, theme);
-      await renderSettled(page);
-      assertEqual(await axeViolations(page, AxeBuilder, "#managed-judgment-panel"), [], `${theme} unfolded candidates accessibility`);
+      assertEqual(await axeViolations(page, AxeBuilder, '[data-connection-group="local"]'), [], `${theme}: the local group's accessibility`);
     }
-    await page.setViewportSize(SETTINGS_QUALITY_SPEC.viewport);
-    await renderSettled(page);
-    const geometry = await page.locator("#managed-judgment-panel").evaluate((panel) => ({ client: panel.clientWidth, scroll: panel.scrollWidth }));
-    assert(geometry.client > 0 && geometry.scroll <= geometry.client + 1, "the unfolded candidates overflow the narrowest settings pane", geometry);
-
-    // Received, a candidate joins the library with the revision it was pinned to.
-    const installedAt = backend.calls.length;
-    await page.click('#managed-judgment-candidate-list [data-model-id="fixture-local-candidate"] [data-model-action="install"]');
-    const request = await backend.waitForCall("managed-library", "managed_judgment_install", installedAt);
-    assertEqual(request.args, { modelId: "fixture-local-candidate", revision: "local-candidate-revision" }, "the candidate's download did not bind its catalog revision");
-    await page.waitForFunction(() => managedJudgmentController.rows.has("fixture-local-candidate") && !managedJudgmentController.busy);
-    assertEqual(await library(), ["fixture-laya", "fixture-local-candidate"], "a received candidate did not join the library");
-    assertEqual(await said(), { count: words.counted[1], fold: words.offered[1] }, "receiving a candidate did not move it from one count to the other");
-    assert(await page.evaluate(() => managedJudgmentController.rows.get("fixture-local-candidate").identity.textContent.includes("local-candidate-revision")),
-      "the received model does not show the revision it was pinned to");
-
-    // A server of the person's own answering with the download-only model
-    // makes it a row, with no revision it cannot know. The address the person
-    // checked for the same model answers with the same server model ID: one
-    // connection is one row, and the other entry stays a candidate.
-    const checked = { ...clone(held.models.find((model) => model.id === "fixture-d3")), id: "fixture-d3-checked", label: "acme/d3", revision: "d3-checked-revision", origin: "registered" };
-    held.models.push(checked);
-    held.revision += 1;
-    backend.zoSettings.smart = { ...(previous ?? {}), judgmentProvider: { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32105", model: "acme/d3", requiresAuth: false } };
-    await page.evaluate(() => refreshTypeSafe());
-    await page.waitForFunction(() => managedJudgmentController.rows.has("fixture-d3") && managedJudgmentController.snapshot?.models.length === 4);
-    const answering = () => page.evaluate((connected) => ({
-      rows: [...document.querySelectorAll("#managed-judgment-models > .managed-judgment-model")].filter((row) => row.textContent.includes(connected)).map((row) => row.dataset.modelId),
-      candidates: [...document.querySelectorAll("#managed-judgment-candidate-list > li")].map((item) => item.dataset.modelId),
-    }), words.connected);
-    assertEqual(await answering(), { rows: ["fixture-d3"], candidates: ["fixture-d3-checked"] }, "two catalog entries of one server model stand as two connected rows");
-    assert(await page.locator('#managed-judgment-candidate-list [data-model-id="fixture-d3-checked"] [data-model-action="connect"]').isDisabled(), "the same connected server is offered as a new connection");
-    assertEqual(await library(), ["fixture-laya", "fixture-local-candidate", "fixture-d3"], "the model a connected server answers with is not in the library");
-    const served = await page.evaluate(() => {
-      const row = managedJudgmentController.rows.get("fixture-d3");
-      return { summary: row.summary.textContent, identity: row.identity.textContent, state: row.state.textContent };
-    });
-    assertEqual(served, { summary: words.source, identity: "acme/d3 · transformers_system_one", state: words.connected },
-      "the connected server's model claims a pinned revision it cannot know, or hides that it is connected");
-    assertEqual(await said(), { count: words.counted[2], fold: words.offered[1] }, "the connected server model is not counted as one row beside one candidate");
-    held.configuredModelId = checked.id;
-    held.revision += 1;
-    await page.evaluate(() => refreshTypeSafe());
-    await page.waitForFunction(() => managedJudgmentController.snapshot?.configuredModelId === "fixture-d3-checked");
-    assertEqual(await answering(), { rows: ["fixture-d3-checked"], candidates: ["fixture-d3"] }, "a connection bound to the second entry still selected the first");
-    held.configuredModelId = null;
-    // Files received for the checked address make it the connection's row,
-    // and the bundled entry goes back to the candidates.
-    checked.installed = true;
-    checked.installedDirectory = "/models/managed/fixture-d3-checked";
-    held.revision += 1;
-    await page.evaluate(() => refreshTypeSafe());
-    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.some((model) => model.id === "fixture-d3-checked" && model.installed));
-    assertEqual(await answering(), { rows: ["fixture-d3-checked"], candidates: ["fixture-d3"] }, "the connection's row is not the entry whose files are here");
-    assertEqual(await library(), ["fixture-laya", "fixture-local-candidate", "fixture-d3-checked"], "a connected server model stands as more than one row");
+    await receivePictures(page, "local-row-kept");
   } finally {
     await page.close();
     backend.zoSettings.smart = previous;
     backend.managedModelState = previousManaged;
   }
-  return "catalog 3 · received 1 → 1 row + 「2 to add」 folded · revision only on received files · unfolded: name, size, ways · axe 2 themes · download joins the library · connected server model is a row without a revision · two entries of one server model ID → 1 row + 1 candidate, the received one the row";
-});
-
-await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 상태 한 줄만 보이고 후보는 접혀 있다", async () => {
-  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
-  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
-  delete backend.managedModelState;
-  backend.managedJudgmentSettings();
-  const page = await context.newPage();
-  await installTauri(page, "managed-none");
-  attachFaultRecorder(page, "managed-none");
-  try {
-    await bootPage(page, "managed-none");
-    await openSettings(page, "judgment-models");
-    await openModelReceive(page);
-    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 1);
-    assertEqual(await page.locator("#managed-judgment-none").count(), 1, "the library has no line for holding nothing");
-    const seen = () => page.evaluate(() => {
-      const shown = (node) => Boolean(node && !node.parentElement.closest("details:not([open])") && node.getClientRects().length > 0);
-      return {
-        rows: document.querySelectorAll("#managed-judgment-models > .managed-judgment-model").length,
-        lines: ["managed-judgment-library-tools", "managed-judgment-library-summary", "managed-judgment-no-matches", "managed-judgment-none", "managed-judgment-empty", "managed-judgment-candidates"]
-          .filter((id) => shown(document.getElementById(id))),
-        notice: shown(document.querySelector("#managed-judgment-candidates .settings-notice")),
-        open: document.getElementById("managed-judgment-candidates").open,
-        pinned: document.getElementById("managed-judgment-panel").textContent.includes("fixture-revision"),
-      };
-    });
-    assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-library-tools", "managed-judgment-none", "managed-judgment-candidates"], notice: false, open: false, pinned: false },
-      "a computer holding no model cannot search the available candidates");
-    assertEqual(await page.locator("#managed-judgment-none").textContent(),
-      await page.evaluate(() => t("settings.managed.noneReceived", "받은 판단 모델이 없습니다. 선택 사항이라 받지 않아도 판단은 연결한 모델로 돌아갑니다.")), "the empty library does not point at the candidates below");
-    // With nothing in the catalog either, the line left is the server one.
-    backend.managedModelState.models = [];
-    backend.managedModelState.revision += 1;
-    await page.evaluate(() => managedJudgmentController.refresh());
-    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 0);
-    assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-empty"], notice: false, open: false, pinned: false },
-      "an empty catalog still points at candidates that are not there");
-  } finally {
-    await page.close();
-    backend.zoSettings.smart = previous;
-    backend.managedModelState = previousManaged;
-  }
-  return "received 0 · server 0 → 0 rows, one line and the candidates folded · no search, count or notice · an empty catalog keeps its server line";
-});
-
-/* Each language says the local models are optional, and says it in its own words (t-88166). */
-const OPTIONAL_LOCAL_WORD = { ko: "선택", en: "ptional", ja: "任意", zh: "可选", es: "pcional" };
-
-await test("로컬 판단 모델의 문구는 다섯 언어 모두 선택 항목이라고 말하고, 받기 단추는 두 겹 접힘 안에 있다 (t-88166)", async () => {
-  const { entry, laya, d3 } = await bundledManagedCatalog();
-  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
-  delete backend.managedModelState;
-  backend.managedJudgmentSettings();
-  Object.assign(backend.managedModelState, { instanceId: "fixture-optional-instance", runtime: { state: "ready", downloadBytes: 0, reason: null } });
-  backend.managedModelState.models = [entry(laya, false), entry(d3, false)];
-  const page = await context.newPage();
-  await installTauri(page, "managed-optional");
-  attachFaultRecorder(page, "managed-optional");
-  try {
-    await bootPage(page, "managed-optional");
-    await openSettings(page, "judgment-models");
-    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
-    const install = page.locator(`#managed-judgment-candidate-list [data-model-id="${laya.id}"] [data-model-action="install"]`);
-    assert(!(await install.isVisible()), "the download button stands open with 고급 closed");
-    await openModelReceive(page);
-    await renderSettled(page);
-    assertEqual(await page.locator("#managed-judgment-candidates").evaluate((fold) => fold.open), false, "the candidates are not folded");
-    assert(!(await install.isVisible()), "the download button stands open with the candidates folded");
-    await page.locator("#managed-judgment-candidates > summary").click();
-    await renderSettled(page);
-    assert(await install.isVisible(), "the download button cannot be reached");
-    await page.locator("#managed-judgment-candidates > summary").click();
-    const words = new Set();
-    for (const locale of SETTINGS_QUALITY_SPEC.locales) {
-      await setQualityLocale(page, locale);
-      await renderSettled(page);
-      const word = OPTIONAL_LOCAL_WORD[locale];
-      assert(word, `${locale}: no word to look for`);
-      const lines = await page.evaluate(() => ({
-        none: document.getElementById("managed-judgment-none").textContent,
-        fold: document.getElementById("managed-judgment-candidates-count").textContent,
-        notice: document.querySelector("#managed-judgment-candidates .settings-notice").textContent,
-        choice: t("settings.models.choiceLocalAbout", "선택 사항입니다. 원할 때 모델을 직접 받아 이 Mac 안에서 돌립니다."),
-      }));
-      for (const [name, line] of Object.entries(lines)) {
-        assert(line.toLowerCase().includes(word), `${locale}: ${name} does not say it is optional`, line);
-        if (locale !== "ko") assert(!/[가-힣]/.test(line), `${locale}: ${name} is not translated`, line);
-        words.add(line);
-      }
-    }
-    assertEqual(words.size, SETTINGS_QUALITY_SPEC.locales.length * 4, "a language shares a line with another");
-  } finally {
-    await page.close();
-    backend.managedModelState = previousManaged;
-  }
-  return "two folds over the download button · four lines in five languages say optional";
+  return "nothing received → one empty line, no shipped model named, the old manager's parts gone · received → one row (use · delete), pin under 「자세히」, which a repaint leaves open";
 });
 
 await test("로컬 모델 실패는 실제 원인과 다음 행동을 안내하고 적용된 모델을 보존한다", async () => {
@@ -9061,15 +8795,24 @@ await test("모델별 실행 환경은 서로 준비됐다고 표시하지 않�
     await pageA.selectOption("#judgment-provider-kind", "local");
     await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models[0]?.runtime?.state === "missing");
     assertEqual(await pageA.evaluate(() => managedJudgmentController.snapshot.models[0].runtime.state), "missing", "an unrelated runtime made this model ready");
-    assert(await pageA.locator('[data-model-action="activate"]').isEnabled(), "automatic setup is not available for this supported model");
-    assert(await pageA.locator("#managed-judgment-runtime").isHidden(), "a global ready message contradicts the model runtime");
+    // The model's row carries the one button; the engine it lacks is said on
+    // the row, and the press installs it first (2026-11-11 — the old card's
+    // separate 「실행 환경 설치」 is gone).
+    const row = pageA.locator('[data-connection-group="local"] [data-connection-id="managed:fixture-decision"]');
+    const start = row.locator('[data-managed-action="start"]');
+    assert(await start.isEnabled(), "automatic setup is not available for this supported model");
+    assert((await row.locator("[data-managed-told]").textContent()).includes(await pageA.evaluate(() => t("settings.managed.needsRuntime", "실행 엔진이 아직 없습니다. 「판단에 쓰기」를 누르면 엔진부터 설치합니다."))),
+      "the row does not say its engine is still to come");
+    assertEqual(await pageA.locator("#managed-judgment-runtime").count(), 0, "a global runtime line is back beside the per-model one");
+    backend.managedCheckFailure = true;
     const preparedAt = backend.calls.length;
-    await pageA.click('[data-model-action="prepare"]');
+    await start.click();
     const prepared = await backend.waitForCall("A", "managed_judgment_prepare_model_runtime", preparedAt);
     assertEqual(prepared.args, { modelId: "fixture-decision", revision: "fixture-revision" });
-    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models[0]?.runtime?.state === "ready");
-    assert(await pageA.locator('[data-model-action="activate"]').isEnabled(), "the prepared model is still blocked");
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models[0]?.runtime?.state === "ready" && !managedJudgmentController.activating);
+    assert(!backend.calls.slice(preparedAt).some((entry) => entry.command === "managed_judgment_apply"), "a model whose check failed was applied");
   } finally {
+    delete backend.managedCheckFailure;
     backend.managedModelState = previousManaged;
     await pageA.evaluate(() => { managedJudgmentController.snapshot = null; judgmentProviderController.draft = null; return refreshApiRouters(); });
   }
@@ -9135,77 +8878,77 @@ await test("새 판단 연결은 적용 전에 확인하고 실패나 다른 창
   return "candidate failure preserves active model · draft check is read-only · stale probe refuses · atomic apply after success";
 });
 
-await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁은 화면을 지원한다", async () => {
+await test("이 컴퓨터의 줄과 「고급」은 키보드와 다섯 언어·두 테마·좁은 화면에서 쓸 수 있다", async () => {
   const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
   const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
   delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  const held = backend.managedModelState;
+  held.runtime.state = "ready";
+  held.models[0].installed = true;
+  // A second model a list file added, so 「고급」 has its list.
+  held.models.push({ ...clone(held.models[0]), id: "fixture-listed", label: "Fixture Listed", installed: false, origin: "registered",
+    local: { supported: true, downloadOnly: false, reason: null } });
+  backend.managedCheckFailure = true;
   const managedPage = await context.newPage();
   await installTauri(managedPage, "managed-quality");
   attachFaultRecorder(managedPage, "managed-quality");
-  const traceManaged = (phase) => {
-    if (process.env.SETTINGS_TRACE) process.stderr.write(`managed quality ${phase}\n`);
-  };
-  const deadline = setTimeout(() => {
-    traceManaged("deadline exceeded");
-    void managedPage.close().catch(() => {});
-  }, 60_000);
   try {
-    traceManaged("boot");
     await bootPage(managedPage, "managed-quality");
-    await openJudgmentSettings(managedPage);
-    await managedPage.selectOption("#judgment-provider-kind", "local");
-    traceManaged("model list");
-    await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.models.length > 0);
-    await managedPage.locator("#managed-judgment-prepare").focus();
-    const preparedAt = backend.calls.length;
-    traceManaged("keyboard prepare");
+    await openSettings(managedPage, "judgment-models");
+    await openModelReceive(managedPage);
+    await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
+    const row = managedPage.locator('[data-connection-group="local"] [data-connection-id="managed:fixture-decision"]');
+    // A real Enter on the row's button starts the model.
+    await row.locator('[data-managed-action="start"]').focus();
+    const startedAt = backend.calls.length;
     await managedPage.keyboard.press("Enter");
-    await backend.waitForCall("managed-quality", "managed_judgment_prepare_runtime", preparedAt);
-    await managedPage.waitForFunction(() => managedJudgmentController.snapshot?.runtime.state === "ready");
-    await managedPage.locator("#managed-judgment-import").evaluate((element) => { element.open = true; });
+    await backend.waitForCall("managed-quality", "managed_judgment_start", startedAt);
+    await managedPage.waitForFunction(() => !managedJudgmentController.activating);
+    // A listed model's 「기존 파일 등록」 opens its form with the keyboard.
+    await managedPage.locator('#managed-judgment-candidate-list [data-model-id="fixture-listed"] [data-model-action="import"]').focus();
+    await managedPage.keyboard.press("Enter");
+    await managedPage.locator("#managed-judgment-import-path").waitFor();
+    assertEqual(await managedPage.evaluate(() => document.activeElement?.id), "managed-judgment-import-path", "the import form did not take the keys");
     await managedPage.locator("#managed-judgment-import-path").fill("/models/example");
     for (const locale of SETTINGS_QUALITY_SPEC.locales) {
-      traceManaged(`locale ${locale}`);
       await setQualityLocale(managedPage, locale);
-      await managedPage.evaluate(() => judgmentProviderController.render());
+      await managedPage.evaluate(() => { managedJudgmentController.render(); modelConnectionsController.render(); });
+      const words = await managedPage.evaluate(() => [document.querySelector('[data-connection-group="local"] [data-group-lines]').innerText, document.getElementById("managed-judgment-panel").innerText].join("\n"));
+      // The row's note of the failed check is among them: it is said again in
+      // the language the page speaks now, not in the one it failed in.
+      assert(await row.locator("[data-managed-said]").count() === 1, `${locale}: the failed press is no longer said on its row`);
+      if (locale !== "ko") assert(!/[가-힣]/.test(words), `${locale}: the local rows or 「고급」 are not translated`, words);
       for (const theme of SETTINGS_QUALITY_SPEC.themes) {
-        traceManaged(`accessibility ${locale}/${theme}`);
         await setQualityTheme(managedPage, theme);
         await managedPage.locator("#managed-judgment-import-path").evaluate((input) => input.scrollIntoView({ block: "center", inline: "nearest" }));
         await renderSettled(managedPage);
-        const violations = await axeViolations(managedPage, AxeBuilder, "#managed-judgment-panel");
-        assertEqual(violations, [], `${locale}/${theme} local manager accessibility`);
+        assertEqual(await axeViolations(managedPage, AxeBuilder, '[data-connection-group="local"]'), [], `${locale}/${theme} local group accessibility`);
         const contrast = await contrastTable(managedPage, AxeBuilder, "#managed-judgment-import-path");
-        const importedPath = contrast.find((row) => row.target === "#managed-judgment-import-path");
-        assert(importedPath?.verdict !== "hidden" && importedPath?.ratio >= 4.5
-          && importedPath.fg !== null && importedPath.bg !== null,
-        `${locale}/${theme} visible import path has no passing contrast measurement`, importedPath);
+        const importedPath = contrast.find((entry) => entry.target === "#managed-judgment-import-path");
+        assert(importedPath?.verdict !== "hidden" && importedPath?.ratio >= 4.5 && importedPath.fg !== null && importedPath.bg !== null,
+          `${locale}/${theme} visible import path has no passing contrast measurement`, importedPath);
       }
       for (const viewport of [SETTINGS_QUALITY_SPEC.viewport, { width: 1280, height: 1069 }, { width: 1998, height: 1069 }]) {
-        traceManaged(`layout ${locale}/${viewport.width}x${viewport.height}`);
         await managedPage.setViewportSize(viewport);
         await renderSettled(managedPage);
-        const geometry = await managedPage.locator("#managed-judgment-panel").evaluate((panel) => ({ client: panel.clientWidth, scroll: panel.scrollWidth }));
-        assert(geometry.client > 0 && geometry.scroll <= geometry.client + 1, `${locale}/${viewport.width}×${viewport.height} local manager overflows`, geometry);
+        const geometry = await managedPage.locator('[data-connection-group="local"]').evaluate((group) => ({ client: group.clientWidth, scroll: group.scrollWidth }));
+        assert(geometry.client > 0 && geometry.scroll <= geometry.client + 1, `${locale}/${viewport.width}×${viewport.height} the local group overflows`, geometry);
       }
     }
     await setQualityLocale(managedPage, "ko");
-    await managedPage.evaluate(() => judgmentProviderController.render());
-    if (process.env.MANAGED_JUDGMENT_SHOTS) {
-      for (const theme of SETTINGS_QUALITY_SPEC.themes) {
-        await setQualityTheme(managedPage, theme);
-        await managedPage.locator("#typesafe-card").screenshot({ path: resolve(process.env.MANAGED_JUDGMENT_SHOTS, `managed-${theme}.png`), animations: "disabled" });
-      }
-    }
-    const looseButtons = await managedPage.locator("#managed-judgment-panel .btn").evaluateAll((buttons) => buttons.filter((button) => !button.closest(".settings-action-row") && button.id !== "managed-judgment-cancel").map((button) => button.id));
-    assertEqual(looseButtons, [], "managed actions are not grouped with their controls");
+    await managedPage.evaluate(() => { managedJudgmentController.render(); modelConnectionsController.render(); });
+    // The running row, the list a file added and the import form together.
+    await receivePictures(managedPage, "local-listed");
+    const looseButtons = await managedPage.locator("#managed-judgment-panel .btn").evaluateAll((buttons) => buttons.filter((button) => !button.closest(".settings-action-row")).map((button) => button.id || button.textContent));
+    assertEqual(looseButtons, [], "the fold's actions are not grouped with their controls");
   } finally {
-    clearTimeout(deadline);
+    delete backend.managedCheckFailure;
     await managedPage.close();
     backend.zoSettings.smart = previous;
     backend.managedModelState = previousManaged;
   }
-  return "real Enter · 5 locales × 2 themes · supported 720×480 minimum and wider viewports · model actions grouped";
+  return "real Enter on a row and on a listed model · 5 locales × 2 themes · supported 720×480 minimum and wider viewports";
 });
 
 await test("판단 연결 시험은 입력 키를 임시로 쓰고 실패해도 기존 키를 바꾸지 않는다", async () => {

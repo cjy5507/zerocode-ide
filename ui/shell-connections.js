@@ -258,6 +258,8 @@ const modelConnectionsController = {
   /* 「모델 받기」, open or folded, and the engines' newest releases as their
    * homes last answered — by runtime id, with when this window asked. */
   receiving: false, runtimeNews: new Map(), runtimeNewsAt: null, runtimeAsked: null,
+  /* The rows whose 「자세히」 the person opened. */
+  rowsOpen: new Set(),
 
   show(view) {
     showSettingsPane("judgment-models");
@@ -1169,8 +1171,23 @@ const modelConnectionsController = {
     const failed = managedJudgmentController.lastError;
     if ((typeof failed === "string" ? failed : failed?.message ?? failed?.code) === "settings_changed") this.said.set("managed", { state: "changed" });
     // What a press did not do is said on the row it was pressed on.
-    else if (failed && model) this.said.set(`managed:${model.id}`, { words: managedJudgmentController.failure(failed, model) });
+    else if (failed && model) {
+      this.said.set(`managed:${model.id}`, { failed });
+      // Said once, on the row that was pressed — not under the rows as well.
+      managedJudgmentController.say("");
+    }
     this.render();
+  },
+  /* What a press on a model's or an engine's row did not do. The failure is
+   * what is kept; its words are made when the row is drawn, so they follow
+   * the language the page speaks now. */
+  managedSaid(row) {
+    const failed = this.said.get(`managed:${row.id}`)?.failed;
+    return failed ? managedJudgmentController.failure(failed, row) : "";
+  },
+  /* Whether the row of this model or engine already says what failed. */
+  managedSaidOn(id) {
+    return Boolean(this.said.get(`managed:${id}`)?.failed);
   },
 
   /* The old judgment setting's key, moved only when a person presses, after
@@ -2091,12 +2108,31 @@ const modelConnectionsController = {
       (isLocal ? local : remote).push(row);
     }
     const snapshot = managedJudgmentController.snapshot;
-    const managedLines = this.judgmentRows().filter((row) => row.kind === "managed").map((row) => {
+    // A model has a row once this computer holds it — and while it is being
+    // received, so its progress and 「받기 취소」 stand where the model will.
+    const operation = snapshot?.operation;
+    const receiving = (model) => managedJudgmentController.receiving(model);
+    const managedLines = (snapshot?.models ?? []).filter((model) => managedJudgmentController.held(model) || receiving(model))
+      .map((model) => ({ key: `managed:${model.id}`, model, name: model.label })).map((row) => {
       // A model received and neither chosen nor running is kept, not absent.
       const standing = this.managedState(row.model);
       const state = standing === "none" && row.model.installed ? "kept" : standing;
       const reason = this.managedReason(row.model);
       const extra = [];
+      if (receiving(row.model)) {
+        const progress = modelNode("span", "model-line-note", operation.state === "cancelling"
+          ? t("settings.managed.cancelling", "취소하고 임시 파일을 정리하는 중…")
+          : operation.kind === "restore"
+            ? t("settings.managed.restoreWorking", "이전에 실행하던 판단 모델을 복원하는 중…")
+          : operation.totalBytes > 0
+            ? t(operation.kind === "runtime" ? "settings.models.runtimeInstalling" : "settings.models.receivingProgress",
+              operation.kind === "runtime" ? "설치 중 · {{received}} / {{total}}" : "받는 중 · {{received}} / {{total}}",
+              { received: bytesLabel(operation.receivedBytes ?? 0), total: bytesLabel(operation.totalBytes) })
+            : t("settings.managed.working", "작업 중… 완료될 때까지 현재 모델을 유지합니다."));
+        progress.dataset.managedProgress = "";
+        progress.setAttribute("role", "status");
+        extra.push(progress);
+      }
       const about = {
         restarting: t("settings.models.managedRestarting", "실행 환경이 스스로 끝나 앱이 다시 띄우고 있습니다. 「멈추기」를 누르면 다시 띄우지 않습니다."),
         stopped: t("settings.models.managedStopped", "그동안 판단 요청은 보내지 않습니다. 「다시 시작」을 누르면 다시 띄우고 응답을 확인합니다."),
@@ -2105,15 +2141,23 @@ const modelConnectionsController = {
       }[state];
       if (reason) extra.push(modelNode("span", "model-line-note", reason));
       if (about) extra.push(modelNode("span", "model-line-note", about));
-      const said = this.said.get(row.key);
-      if (said?.words) {
-        const note = modelNode("span", "model-line-note", said.words);
+      const said = this.managedSaid(row.model);
+      if (said) {
+        const note = modelNode("span", "model-line-note", said);
         note.dataset.managedSaid = "";
         note.setAttribute("role", "alert");
         extra.push(note);
       }
-      if (!managedJudgmentController.localSupported(row.model)) {
-        extra.push(modelNode("span", "model-line-note", managedJudgmentController.modelState(row.model)));
+      // What the badges do not say: running and not applied yet, chosen and
+      // not running, an engine still to come, a model this computer cannot
+      // run. A plain 「받아 둠」 or 「판단에 쓰는 중」 needs no second line.
+      const told = managedJudgmentController.modelState(row.model);
+      const plain = [t("settings.managed.inUse", "실행 중 · 현재 적용됨"), t("settings.managed.installed", "설치됨 · 아직 적용하지 않음"),
+        t("settings.managed.notInstalled", "아직 다운로드하지 않음")];
+      if (told && told !== reason && !plain.includes(told) && !receiving(row.model)) {
+        const note = modelNode("span", "model-line-note", told);
+        note.dataset.managedTold = "";
+        extra.push(note);
       }
       const actions = [...this.usePills((role) => role === "judgment" && judgmentKey === row.key)];
       const action = (word, name, disabled = false) => {
@@ -2125,6 +2169,9 @@ const modelConnectionsController = {
       };
       const runnable = managedJudgmentController.localSupported(row.model);
       if (state === "running" || state === "restarting" || state === "checking") action(t("settings.models.stop", "멈추기"), "stop");
+      // Running, and its answers not taken for judgment yet (a check that
+      // failed, a start from another window): the same press asks again.
+      if (state === "running" && runnable && !managedJudgmentController.appliedModel(row.model)) action(t("settings.models.useForJudgment", "판단에 쓰기"), "start");
       if (state === "stopped") action(t("settings.models.restart", "다시 시작"), "start", !runnable);
       if (state === "none" || state === "kept") action(t("settings.models.useForJudgment", "판단에 쓰기"), "start", !runnable);
       if (state === "busy") {
@@ -2136,6 +2183,24 @@ const modelConnectionsController = {
       // choose, and not one a server runs.
       const held = snapshot?.configuredModelId === row.model.id || (snapshot?.server.modelId === row.model.id && !["stopped", "failed"].includes(snapshot.server.state));
       if (row.model.installed && !held && state !== "busy") action(t("settings.models.removeFiles", "파일 삭제"), "remove").classList.add("account-drop");
+      // Where the files came from and which revision is pinned: one fold,
+      // which stays as the person left it across repaints.
+      const more = document.createElement("details");
+      more.className = "settings-fold model-line-more";
+      more.open = this.rowsOpen.has(row.key);
+      more.addEventListener("toggle", () => { if (more.open) this.rowsOpen.add(row.key); else this.rowsOpen.delete(row.key); });
+      const facts = [row.model.serverModelId ?? row.model.id, row.model.installed ? row.model.revision : null, row.model.installedDirectory, row.model.license,
+        managedJudgmentController.inputSupport(row.model)].filter(Boolean).join(" · ");
+      more.append(modelNode("summary", "", t("settings.models.rowDetails", "자세히")), modelNode("p", "settings-row-desc", facts));
+      const href = managedJudgmentController.sourceHref(row.model);
+      if (href) {
+        const source = modelNode("a", "settings-jev-link", t("settings.managed.source", "모델 출처 보기"));
+        source.href = href;
+        source.target = "_blank";
+        source.rel = "noopener noreferrer";
+        more.append(source);
+      }
+      extra.push(more);
       const sub = [t("settings.models.localJudgmentWay", "앱이 받아 이 Mac에서 돌리는 모델 · 키 불필요"), managedJudgmentController.sizeLabel(row.model)].filter(Boolean).join(" · ");
       return line(row.key, row.name, sub, modelBadge(state), extra, actions);
     });
@@ -2230,9 +2295,9 @@ const modelConnectionsController = {
         note.dataset.runtimeNewer = news.latest;
         extra.push(note);
       }
-      const said = this.said.get(`managed:${row.id}`);
-      if (said?.words) {
-        const note = modelNode("span", "model-line-note", said.words);
+      const said = this.managedSaid(row);
+      if (said) {
+        const note = modelNode("span", "model-line-note", said);
         note.dataset.managedSaid = "";
         note.setAttribute("role", "alert");
         extra.push(note);

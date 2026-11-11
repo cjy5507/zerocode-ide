@@ -25376,17 +25376,6 @@ button.integration-context-action:hover {
   margin-inline: 0;
 }
 
-.managed-judgment-model {
-  padding: var(--space-4) 0;
-  border-bottom: var(--rule-width) solid var(--edge-rule);
-  overflow-wrap: anywhere;
-}
-
-.managed-judgment-model h4 {
-  margin: 0;
-  font: var(--type-heading-14);
-}
-
 .settings-pane[data-pane="judgment-models"] > .settings-card,
 .model-catalog > .settings-card {
   max-width: 72rem;
@@ -25719,8 +25708,8 @@ button.integration-context-action:hover {
   text-decoration: line-through;
 }
 
-/* The manager of received files waits folded under the receive area; it
- * holds cards and forms, so it is not measured as prose. */
+/* What is left of the old manager waits folded under the receive area: a
+ * list file's form and the models it added, so it is not measured as prose. */
 .model-library-fold > :not(summary) {
   max-width: none;
 }
@@ -25731,45 +25720,8 @@ button.integration-context-action:hover {
   padding-block: var(--space-1);
 }
 
-.managed-judgment-library-tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.managed-judgment-library-tools > .settings-field {
-  flex: 1 1 260px;
-  min-width: 0;
-  margin-inline: 0;
-}
-
-.managed-judgment-model-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.managed-judgment-route {
-  color: var(--ink-mist);
-  font-size: var(--text-2xs);
-}
-
-.managed-judgment-model .settings-fold {
-  margin-inline: 0;
-}
-
-/* The catalog models this computer has not received (t-69998), folded under
- * the library: one ruled line each, the name and size, then the ways to have
- * it. The list takes the panel's width, unlike a fold's prose. */
-.settings-fold > .managed-judgment-candidates {
-  max-width: none;
-}
-
-.managed-judgment-candidates > .settings-notice {
-  margin-inline: 0;
-}
+/* The models a list file added that this computer has not received: one
+ * ruled line each, the name and size, then the ways to have it. */
 
 #managed-judgment-candidate-list {
   margin: var(--space-2) 0 0;
@@ -25806,6 +25758,27 @@ button.integration-context-action:hover {
   margin: 0;
   padding: 0;
   border: 0;
+}
+
+/* A received model's 「자세히」: a fold inside its row, quiet until opened. */
+.model-line-more {
+  margin: var(--space-1) 0 0;
+}
+
+.model-line-more > summary {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  padding-block: var(--space-1);
+}
+
+/* What an operation on this computer ended as, under the group's rows. */
+.model-local-status:empty {
+  display: none;
+}
+
+.model-local-status {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
 }
 
 #typesafe-card .settings-fold > summary {

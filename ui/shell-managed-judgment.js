@@ -9,7 +9,6 @@ const managedJudgmentController = {
   // write landed — what the settings must read back (t-76873 P2 ①).
   appliedProvider: null,
   statusError: false,
-  rows: new Map(),
   candidates: new Map(),
   waiters: new Set(),
   importModel: null,
@@ -17,24 +16,11 @@ const managedJudgmentController = {
   ownedOperation: null,
   restoreRefresh: null,
   subscription: null,
-  query: "",
-  filter: "all",
   catalogLimitBytes: 512 * 1024,
 
   init() {
     if (this.initialized) return;
     this.initialized = true;
-    el("managed-judgment-refresh")?.addEventListener("click", () => void this.refresh());
-    el("managed-judgment-prepare")?.addEventListener("click", () => void this.perform("managed_judgment_prepare_runtime"));
-    el("managed-judgment-cancel")?.addEventListener("click", () => void this.cancel());
-    el("managed-judgment-search")?.addEventListener("input", (event) => {
-      this.query = event.target.value;
-      this.render();
-    });
-    el("managed-judgment-filter")?.addEventListener("change", (event) => {
-      this.filter = event.target.value;
-      this.render();
-    });
     el("managed-judgment-catalog-file")?.addEventListener("change", () => this.render());
     el("managed-judgment-register-submit")?.addEventListener("click", () => void this.registerCatalog());
     el("managed-judgment-import-submit")?.addEventListener("click", () => {
@@ -43,25 +29,20 @@ const managedJudgmentController = {
       void this.perform("managed_judgment_install", { ...this.modelArgs(this.importModel), sourceDirectory });
     });
     el("managed-judgment-import-path")?.addEventListener("input", () => this.sayImport(""));
-    // The library's rows and the candidates folded under it carry the same actions.
+    // A model a list file added, not on this computer yet: received, or
+    // registered from files the person already has.
     el("managed-judgment-panel")?.addEventListener("click", (event) => {
       const button = event.target.closest("button[data-model-action]");
       if (!button || button.disabled) return;
       const model = this.snapshot?.models.find((entry) => entry.id === button.dataset.modelId);
       if (!model) return;
       const action = button.dataset.modelAction;
-      if (action === "activate") void this.activate(model);
-      else if (action === "prepare") void this.perform("managed_judgment_prepare_model_runtime", this.modelArgs(model));
-      else if (action === "install") void this.perform("managed_judgment_install", this.modelArgs(model));
-      else if (action === "remove") void this.perform("managed_judgment_remove", this.modelArgs(model), { hand: handNow() });
-      else if (action === "stop") void this.perform("managed_judgment_stop", { serverId: this.snapshot.server.id });
-      else if (action === "connect") judgmentProviderController.connectModel(model);
+      if (action === "install") void this.perform("managed_judgment_install", this.modelArgs(model));
       else if (action === "inspect-source") judgmentModelSourceController.inspectAddress(model.source);
       else if (action === "import") {
         this.importModel = model;
         this.sayImport("");
-        el("managed-judgment-import").open = true;
-        el("managed-judgment-import-model").textContent = model.label;
+        this.render();
         el("managed-judgment-import-path").focus();
       }
     });
@@ -77,6 +58,12 @@ const managedJudgmentController = {
 
   operating() {
     return ["running", "cancelling"].includes(this.snapshot?.operation?.state);
+  },
+
+  // The model an operation still under way names: it has its row while it is
+  // received, and is back where it was once the operation ended.
+  receiving(model) {
+    return this.operating() && this.snapshot.operation.modelId === model.id;
   },
 
   visible() {
@@ -250,7 +237,6 @@ const managedJudgmentController = {
     return {
       install: local,
       "inspect-source": this.downloadOnly(model) && Boolean(this.sourceHref(model)),
-      connect: Boolean(this.serverModel(model)),
       import: local,
     };
   },
@@ -266,15 +252,6 @@ const managedJudgmentController = {
 
   sizeLabel(model) {
     return bytesLabel(model.weightsBytes ?? model.downloadBytes);
-  },
-
-  matches(model) {
-    const query = this.query.trim().toLocaleLowerCase();
-    if (query && ![model.label, model.id, model.engine, model.serverModelId, model.license].some((value) => String(value ?? "").toLocaleLowerCase().includes(query))) return false;
-    if (this.filter === "local") return this.localSupported(model);
-    if (this.filter === "server") return Boolean(this.serverModel(model));
-    if (this.filter === "installed") return model.installed;
-    return true;
   },
 
   async registerCatalog() {
@@ -497,48 +474,10 @@ const managedJudgmentController = {
     return { row, buttons };
   },
 
-  actionWords(action, model) {
-    switch (action) {
-      case "prepare": return this.runtimeFor(model)?.state === "outdated" ? t("settings.managed.updateRuntime", "실행 환경 업데이트") : t("settings.managed.prepare", "실행 환경 설치");
-      case "install": return t("settings.managed.download", "다운로드");
-      case "activate": return model.installed ? t("settings.managed.activate", "실행하고 적용") : t("settings.models.installUse", "설치하고 사용");
-      case "inspect-source": return t("settings.managed.inspectSource", "주소로 확인");
-      case "connect": return this.connectionMatches(model)
-        ? t("settings.managed.alreadyConnected", "이미 연결됨")
-        : t("settings.managed.connectServer", "이 모델의 서버 연결");
-      case "import": return t("settings.managed.import", "기존 파일 등록");
-      case "stop": return t("settings.managed.stop", "중지");
-    }
-    return t("settings.managed.remove", "다운로드 파일 삭제");
-  },
-
-  makeRow(model) {
-    const card = document.createElement("article");
-    card.className = "managed-judgment-model";
-    card.dataset.modelId = model.id;
-    const title = document.createElement("h4");
-    const heading = document.createElement("div");
-    heading.className = "managed-judgment-model-heading";
-    const route = document.createElement("span");
-    route.className = "managed-judgment-route";
-    heading.append(title, route);
-    const facts = document.createElement("p");
-    facts.className = "settings-row-desc";
-    const state = document.createElement("p");
-    state.className = "settings-row-desc";
-    const source = document.createElement("a");
-    source.className = "settings-jev-link";
-    source.target = "_blank";
-    source.rel = "noopener noreferrer";
-    const { row: actions, buttons } = this.makeActions(model, ["prepare", "install", "activate", "inspect-source", "connect", "import", "stop", "remove"]);
-    const details = document.createElement("details");
-    details.className = "settings-fold";
-    const summary = document.createElement("summary");
-    const identity = document.createElement("p");
-    identity.className = "settings-row-desc";
-    details.append(summary, identity, source);
-    card.append(heading, facts, state, actions, details);
-    return { card, title, route, facts, source, state, summary, identity, buttons, signature: null };
+  actionWords(action) {
+    if (action === "install") return t("settings.managed.download", "다운로드");
+    if (action === "inspect-source") return t("settings.managed.inspectSource", "주소로 확인");
+    return t("settings.managed.import", "기존 파일 등록");
   },
 
   // A candidate is one line: its name, its size and the ways to have it — no
@@ -563,7 +502,6 @@ const managedJudgmentController = {
   prune(entries, kept) {
     for (const [modelId, entry] of entries) {
       if (kept.has(modelId)) continue;
-      if (entry.card.contains(document.activeElement)) el("managed-judgment-refresh").focus();
       entry.card.remove();
       entries.delete(modelId);
     }
@@ -586,15 +524,15 @@ const managedJudgmentController = {
     if (snapshot.server.modelId === model.id && snapshot.server.state === "ready") return t("settings.managed.runningUnapplied", "실행 중 · 아직 적용하지 않음");
     const stopped = snapshot.server.modelId === model.id && snapshot.server.state === "failed" && snapshot.server.exit ? this.endedState(snapshot.server.exit) : null;
     if (stopped) return stopped;
-    if (this.configuredModel(model)) return t("settings.managed.configuredStopped", "선택된 모델 · 실행되지 않음. 실행하고 적용을 눌러 다시 연결하세요.");
+    if (this.configuredModel(model)) return t("settings.managed.configuredStopped", "판단 모델로 골라 둔 모델인데 지금은 돌고 있지 않습니다. 「다시 시작」을 누르면 다시 띄웁니다.");
     if (this.downloadOnly(model)) {
       return model.installed
         ? t("settings.managed.filesReady", "파일 준비됨 · 이 컴퓨터의 직접 실행은 아직 검증되지 않았습니다. 현재 모델은 바뀌지 않습니다.")
         : t("settings.managed.downloadOnlyState", "이 컴퓨터의 직접 실행은 아직 검증 전입니다. 모델 주소로 확인하면 파일만 받아 둘 수 있습니다.");
     }
     if (!this.localSupported(model)) return this.failure(model.local?.reason ?? model.compatibilityReason ?? "platform_unsupported");
-    if (model.installed && this.runtimeFor(model)?.state === "outdated") return t("settings.managed.outdatedRuntime", "모델 파일 설치됨 · 실행 환경에 새 판이 있습니다. 실행하면 먼저 업데이트합니다.");
-    if (model.installed && this.runtimeFor(model)?.state !== "ready") return t("settings.managed.needsRuntime", "모델 파일 설치됨 · 이 모델의 실행 환경을 설치한 뒤 연결하세요.");
+    if (model.installed && this.runtimeFor(model)?.state === "outdated") return t("settings.managed.outdatedRuntime", "실행 엔진에 새 버전이 있습니다. 「판단에 쓰기」를 누르면 먼저 업데이트합니다.");
+    if (model.installed && this.runtimeFor(model)?.state !== "ready") return t("settings.managed.needsRuntime", "실행 엔진이 아직 없습니다. 「판단에 쓰기」를 누르면 엔진부터 설치합니다.");
     return model.installed ? t("settings.managed.installed", "설치됨 · 아직 적용하지 않음") : t("settings.managed.notInstalled", "아직 다운로드하지 않음");
   },
 
@@ -619,8 +557,8 @@ const managedJudgmentController = {
     }
     if (!reason) return null;
     return restarting
-      ? t("settings.managed.restartingReason", "다시 띄우는 중 · {{reason}}. 중지를 누르면 다시 띄우지 않습니다.", { reason })
-      : t("settings.managed.stoppedReason", "중지됨 · {{reason}}. 실행하고 적용을 눌러 다시 시작하세요.", { reason });
+      ? t("settings.managed.restartingReason", "다시 띄우는 중 · {{reason}}. 「멈추기」를 누르면 다시 띄우지 않습니다.", { reason })
+      : t("settings.managed.stoppedReason", "중지됨 · {{reason}}. 「다시 시작」을 누르면 다시 띄웁니다.", { reason });
   },
 
   configuredModel(model) {
@@ -645,114 +583,27 @@ const managedJudgmentController = {
     judgmentProviderController.renderStatus();
     const snapshot = this.snapshot;
     const busy = this.busy || this.operating() || typesafeBusy || judgmentModelSourceController.busy;
-    if (document.activeElement !== el("managed-judgment-search")) el("managed-judgment-search").value = this.query;
-    el("managed-judgment-filter").value = this.filter;
     el("managed-judgment-register").hidden = !snapshot?.catalogFingerprint;
     el("managed-judgment-catalog-file").disabled = busy;
     el("managed-judgment-register-submit").disabled = busy || !snapshot?.catalogFingerprint || !el("managed-judgment-catalog-file").files?.length;
-    el("managed-judgment-refresh").disabled = this.loading;
-    el("managed-judgment-prepare").disabled = busy || !snapshot || !["missing", "outdated"].includes(snapshot.runtime.state);
-    el("managed-judgment-import-submit").disabled = busy || !this.importModel;
-    const runtime = el("managed-judgment-runtime");
-    const modelRuntimes = snapshot?.models.length > 0 && snapshot.models.every((model) => model.runtime);
-    runtime.hidden = modelRuntimes;
-    el("managed-judgment-prepare").hidden = modelRuntimes;
-    runtime.textContent = !snapshot
-      ? t("settings.managed.loading", "로컬 모델 상태를 읽는 중…")
-      : snapshot.runtime.state === "ready"
-        ? t("settings.managed.runtimeReady", "실행 환경이 준비됐습니다. 모델을 내려받거나 기존 파일을 등록하세요.")
-        : snapshot.runtime.state === "unsupported"
-          ? t("settings.managed.unsupported", "이 컴퓨터에서 자동 설치를 지원하지 않습니다. 기존 판단 서버 연결을 사용할 수 있습니다.")
-          : t("settings.managed.runtimeMissing", "처음 한 번 실행 환경을 설치하세요. 시스템 Python이나 다른 앱의 설정은 바꾸지 않습니다.");
+    // What an operation ended as is said with the group's rows: a row's own
+    // note when it names a model, this line otherwise.
     const operation = snapshot?.operation;
-    const progress = el("managed-judgment-progress");
-    progress.hidden = !operation || !["running", "cancelling"].includes(operation.state);
-    const meter = progress.querySelector("progress");
-    if (operation && operation.totalBytes > 0) {
-      meter.max = operation.totalBytes;
-      meter.value = Math.min(operation.receivedBytes, operation.totalBytes);
-    } else {
-      meter.removeAttribute("value");
-    }
-    el("managed-judgment-progress-label").textContent = operation?.state === "cancelling"
-      ? t("settings.managed.cancelling", "취소하고 임시 파일을 정리하는 중…")
-      : operation?.kind === "restore"
-        ? t("settings.managed.restoreWorking", "이전에 실행하던 판단 모델을 복원하는 중…")
-        : operation && operation.totalBytes > 0
-        ? t("settings.managed.progress", "{{received}} / {{total}}", { received: bytesLabel(operation.receivedBytes), total: bytesLabel(operation.totalBytes) })
-        : t("settings.managed.working", "작업 중… 완료될 때까지 현재 모델을 유지합니다.");
-    el("managed-judgment-cancel").disabled = operation?.state !== "running";
     if (["failed", "cancelled"].includes(operation?.state) && !this.busy && operation.kind !== "inspect") {
       const reason = this.failure(operation.state === "cancelled" ? "cancelled" : operation.error);
       const words = operation.kind === "restore" && operation.state === "failed"
         ? t("settings.managed.restoreFailed", "복원 실패 · {{reason}}", { reason }) : reason;
       if (operation.id === this.importAttempt?.operationId) {
         if (this.importAttempt.key === this.importKey()) this.sayImport(words);
-      } else this.say(words);
+      } else if (!modelConnectionsController.managedSaidOn(operation.modelId)) this.say(words);
     }
-    const catalog = snapshot?.models ?? [];
-    const held = catalog.filter((model) => this.held(model));
-    const offered = catalog.filter((model) => !held.includes(model) && Object.values(this.ways(model)).some(Boolean));
-    const models = el("managed-judgment-models");
-    const kept = new Set();
-    let shown = 0;
-    for (const model of held) {
-      kept.add(model.id);
-      let row = this.rows.get(model.id);
-      if (!row) {
-        row = this.makeRow(model);
-        this.rows.set(model.id, row);
-        models.append(row.card);
-      }
-      row.card.hidden = !this.matches(model);
-      if (!row.card.hidden) shown += 1;
-      const running = snapshot.server.modelId === model.id && snapshot.server.state !== "stopped" && snapshot.server.state !== "failed";
-      const applied = this.appliedModel(model);
-      const configured = snapshot.configuredModelId === model.id;
-      const connected = this.connected(model);
-      const restoring = operation?.kind === "restore" && operation.modelId === model.id && ["running", "cancelling"].includes(operation.state);
-      const signature = JSON.stringify([model, busy, running, applied, configured, connected, snapshot.server.state, snapshot.server.exit, snapshot.runtime.state,
-        operation?.kind, operation?.state, operation?.error, snapshot.providerIdentity, judgmentProviderController.state?.providerIdentity, this.statusError, t("settings.managed.download", "다운로드")]);
-      if (row.signature === signature) continue;
-      row.signature = signature;
-      row.title.textContent = model.label;
-      const local = this.localSupported(model);
-      const ways = this.ways(model);
-      row.route.textContent = local
-        ? t("settings.managed.filterLocal", "이 컴퓨터에서 직접 실행")
-        : ways.connect ? t("settings.managed.filterServer", "기존 판단 서버로 연결")
-          : t("settings.managed.routeUnavailable", "실행 방법 확인 필요");
-      row.facts.textContent = [`${this.sizeLabel(model)} · ${model.license}`, this.inputSupport(model)].filter(Boolean).join(" · ");
-      // A pinned revision is a fact of files received here; a connected server
-      // answers with whatever revision it runs.
-      row.summary.textContent = model.installed ? t("settings.managed.details", "모델 출처와 고정 버전") : t("settings.managed.detailsSource", "모델 출처");
-      row.identity.textContent = [model.serverModelId ?? model.id, model.engine, model.installed ? model.revision : null, model.installedDirectory].filter(Boolean).join(" · ");
-      row.source.textContent = t("settings.managed.source", "모델 출처 보기");
-      const href = this.sourceHref(model);
-      row.source.hidden = !href;
-      if (href) row.source.href = href;
-      else row.source.removeAttribute("href");
-      row.state.textContent = this.modelState(model);
-      for (const [action, button] of Object.entries(row.buttons)) {
-        button.textContent = this.actionWords(action, model);
-        button.disabled = busy;
-      }
-      row.buttons.prepare.hidden = !local || !model.runtime || !["missing", "outdated"].includes(this.runtimeFor(model)?.state);
-      row.buttons.install.hidden = model.installed || !ways.install;
-      row.buttons.import.hidden = model.installed || !ways.import;
-      row.buttons.activate.hidden = !local;
-      row.buttons.connect.hidden = !ways.connect;
-      row.buttons.connect.disabled ||= this.connectionMatches(model);
-      row.buttons["inspect-source"].hidden = model.installed || !ways["inspect-source"];
-      row.buttons.activate.disabled ||= applied || !["ready", "missing", "outdated"].includes(this.runtimeFor(model)?.state);
-      row.buttons.stop.hidden = !running || restoring;
-      row.buttons.remove.hidden = !model.installed;
-      row.buttons.remove.disabled ||= configured || running;
-    }
-    this.prune(this.rows, kept);
+    // The models a list file the person brought names and this computer does
+    // not hold. The app lists none of its own: a model it ships a pin for is
+    // a row of the group once it is here, and nowhere before that.
+    const offered = (snapshot?.models ?? []).filter((model) => model.origin === "registered" && !this.held(model)
+      && !this.receiving(model) && Object.values(this.ways(model)).some(Boolean));
     const list = el("managed-judgment-candidate-list");
     const waiting = new Set();
-    let offeredShown = 0;
     for (const model of offered) {
       waiting.add(model.id);
       let item = this.candidates.get(model.id);
@@ -761,10 +612,7 @@ const managedJudgmentController = {
         this.candidates.set(model.id, item);
         list.append(item.card);
       }
-      item.card.hidden = !this.matches(model);
-      if (!item.card.hidden) offeredShown += 1;
-      const connected = this.connectionMatches(model);
-      const signature = JSON.stringify([model, busy, connected, t("settings.managed.download", "다운로드")]);
+      const signature = JSON.stringify([model, busy, t("settings.managed.download", "다운로드")]);
       if (item.signature === signature) continue;
       item.signature = signature;
       item.name.textContent = model.label;
@@ -773,26 +621,18 @@ const managedJudgmentController = {
       item.reason.textContent = this.downloadOnly(model) ? this.modelState(model) : "";
       const ways = this.ways(model);
       for (const [action, button] of Object.entries(item.buttons)) {
-        button.textContent = this.actionWords(action, model);
+        button.textContent = this.actionWords(action);
         button.disabled = busy;
         button.hidden = !ways[action];
       }
-      item.buttons.connect.disabled ||= connected;
     }
     this.prune(this.candidates, waiting);
-    // Search covers both the received library and the candidates, including
-    // a first visit before any model has been downloaded.
-    const tools = el("managed-judgment-library-tools");
-    if (catalog.length === 0 && tools.contains(document.activeElement)) el("managed-judgment-refresh").focus();
-    tools.hidden = catalog.length === 0;
-    el("managed-judgment-library-summary").hidden = held.length === 0;
-    el("managed-judgment-library-summary").textContent = snapshot && held.length > 0
-      ? t("settings.managed.libraryCount", "모델 {{shown}}개 표시 · 전체 {{total}}개", { shown, total: held.length }) : "";
-    el("managed-judgment-no-matches").hidden = !snapshot || catalog.length === 0 || shown + offeredShown > 0;
-    el("managed-judgment-none").hidden = !snapshot || held.length > 0 || offered.length === 0;
-    el("managed-judgment-empty").hidden = !snapshot || held.length > 0 || offered.length > 0;
-    el("managed-judgment-candidates").hidden = offeredShown === 0;
-    if (this.query.trim() && offeredShown > 0) el("managed-judgment-candidates").open = true;
-    el("managed-judgment-candidates-count").textContent = t("settings.managed.availableCount", "직접 받는 선택 모델 {{count}}개", { count: offeredShown });
+    el("managed-judgment-candidates").hidden = offered.length === 0;
+    el("managed-judgment-candidates-count").textContent = t("settings.managed.addedCount", "목록 파일로 추가한 모델 {{count}}개", { count: offered.length });
+    // Registering files the person already has, for the listed model picked.
+    if (this.importModel && !offered.some((model) => model.id === this.importModel.id)) this.importModel = null;
+    el("managed-judgment-import").hidden = !this.importModel;
+    el("managed-judgment-import-model").textContent = this.importModel?.label ?? "";
+    el("managed-judgment-import-submit").disabled = busy || !this.importModel;
   },
 };
