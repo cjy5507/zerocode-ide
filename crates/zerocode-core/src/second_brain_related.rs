@@ -11,8 +11,10 @@
 //! name does not win by holding more words. The words that only say how
 //! something is asked are not searched for, a Korean spelling also finds the
 //! Latin name a page uses, and a page the words could match by chance is not
-//! shown. A turn nobody asked for — a background task's notice, a letter from
-//! another session, the mail pointer — asks nothing at all ([`recall_words`]).
+//! shown. A page another page replaced gives its line to that page
+//! ([`standing_page`]). A turn nobody asked for — a background task's notice,
+//! a letter from another session, the mail pointer — asks nothing at all
+//! ([`recall_words`]).
 //!
 //! The block is bounded on every axis a prompt hook cares about:
 //! [`MAX_RELATED_ENTRIES`] pages, [`MAX_RELATED_RELATIONS_PER_LINE`] relations
@@ -37,6 +39,12 @@ pub const MAX_RELATED_RELATIONS_PER_LINE: usize = 3;
 /// One line's budget. A line longer than this wraps in every pane it is read
 /// in, which costs more attention than the relations it carries are worth.
 pub const MAX_RELATED_LINE_BYTES: usize = 240;
+/// What a title keeps of its line when relations want the room: an even part,
+/// as if the title and every relation the line may show split it. A title is
+/// the one thing a line may cut, but it is also what says why the page is
+/// there, so relations are fitted beside this much of it and never instead.
+const MIN_RELATED_TITLE_BYTES: usize =
+    MAX_RELATED_LINE_BYTES / (MAX_RELATED_RELATIONS_PER_LINE + 1);
 /// The whole block's budget — the tokens this feature spends on every single
 /// turn, and the one number that keeps the cost predictable.
 pub const MAX_RELATED_BLOCK_BYTES: usize = 1_536;
@@ -55,8 +63,8 @@ const MENTIONS_WEIGHT: f64 = 1.0;
 /// BM25's two constants at their usual values; nothing about this vault chose
 /// them. A word counts once in a field, so `BM25_K1` only sets how hard
 /// `BM25_B` leans on the field's length.
-const BM25_K1: f64 = 1.2;
-const BM25_B: f64 = 0.75;
+pub(crate) const BM25_K1: f64 = 1.2;
+pub(crate) const BM25_B: f64 = 0.75;
 
 /// What a page's first paragraph counts for beside its name. Half, because a
 /// paragraph is about the page but was not written to name it.
@@ -65,7 +73,7 @@ const EXCERPT_WEIGHT: f64 = 0.5;
 /// The vault size from which a match can be told from chance. Below it nearly
 /// every word is common and nearly every page is worth naming, so no page is
 /// held back.
-const MIN_PAGES_TO_JUDGE_CHANCE: u32 = 64;
+pub(crate) const MIN_PAGES_TO_JUDGE_CHANCE: u32 = 64;
 
 /// Pieces of Korean that say how something is asked and never what about:
 /// question words, endings, connectives and the bare verbs of a request. They
@@ -159,7 +167,7 @@ pub fn tokenize(text: &str) -> BTreeSet<String> {
 /// with no separators, so the alphanumeric-run tokenizer would collapse an
 /// entire word into one token that never overlaps a query phrased even
 /// slightly differently.
-fn is_cjk(ch: char) -> bool {
+pub(crate) fn is_cjk(ch: char) -> bool {
     is_hangul(ch)
         || matches!(u32::from(ch),
             0x4E00..=0x9FFF      // CJK Unified Ideographs
@@ -212,12 +220,7 @@ fn flush_cjk_run(run: &mut Vec<char>, tokens: &mut BTreeSet<String>) {
 #[must_use]
 pub fn slug_of(node: &GraphNode) -> Option<String> {
     match node.kind {
-        NodeKind::Page => Some(
-            node.id
-                .strip_suffix(MARKDOWN_SUFFIX)
-                .unwrap_or(&node.id)
-                .to_string(),
-        ),
+        NodeKind::Page => Some(page_name(&node.id).to_string()),
         NodeKind::Ghost => Some(node.id.strip_prefix(GHOST_PREFIX)?.to_string()),
         // Evidence rather than pages to read: a raw file, and the project's
         // code the layer grafts beside the vault.
@@ -225,12 +228,122 @@ pub fn slug_of(node: &GraphNode) -> Option<String> {
     }
 }
 
+/// A page's id without the suffix its file carries: what a link calls it.
+fn page_name(id: &str) -> &str {
+    id.strip_suffix(MARKDOWN_SUFFIX).unwrap_or(id)
+}
+
 /// The vault's own pages — the home (`wiki/index.md`) and the journal
 /// (`wiki/log.md`). They link everything and are about nothing, so they are
 /// never a page the prompt is about, never reached as a neighbour, and never
 /// shown as a relation: every slot they took was a slot a real page lost.
 fn is_structural(node: &GraphNode) -> bool {
-    node.id == WIKI_INDEX_FILE || node.id == WIKI_LOG_FILE
+    is_structural_id(&node.id)
+}
+
+/// [`is_structural`] for a reader that holds a page's id and no node.
+pub(crate) fn is_structural_id(id: &str) -> bool {
+    id == WIKI_INDEX_FILE || id == WIKI_LOG_FILE
+}
+
+/// A page an agent can open and a prompt can be about. A ghost and a source
+/// are not pages to read; the home and the journal are about nothing.
+fn is_readable(node: &GraphNode) -> bool {
+    node.kind == NodeKind::Page && !is_structural(node)
+}
+
+/// A page that says it replaced another, as [`standing_page`] weighs it
+/// against the others that say the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replacement<P> {
+    pub page: P,
+    /// When it was written, in milliseconds since the epoch.
+    pub written_ms: i64,
+    /// What a `[[link]]` calls it.
+    pub slug: String,
+}
+
+/// The page that stands where `page` stood: `page` itself while nothing
+/// replaced it, else the page that did, followed for as long as that one was
+/// replaced in its turn.
+///
+/// `replaced_by` answers the pages that declare `supersedes` on the one asked
+/// about, and nothing for a page that stands. That is all this asks of a
+/// vault, so the block answers it from a scanned graph and a search can
+/// answer it from its own index, and both follow the one rule. Of several
+/// pages that replaced the same one, the one written last stands for it, and
+/// the earlier name settles two written at the same moment.
+///
+/// Pages that replace each other in a ring name none that stands. The walk
+/// ends at the page where it entered the ring, so it always ends: a page of
+/// the ring answers itself, and a page outside it the first of the ring it
+/// reached.
+#[must_use]
+pub fn standing_page<P, R>(page: P, mut replaced_by: impl FnMut(&P) -> R) -> P
+where
+    P: PartialEq,
+    R: IntoIterator<Item = Replacement<P>>,
+{
+    let mut walked: Vec<P> = Vec::new();
+    let mut at = page;
+    loop {
+        let latest = replaced_by(&at).into_iter().min_by(|left, right| {
+            right
+                .written_ms
+                .cmp(&left.written_ms)
+                .then_with(|| left.slug.cmp(&right.slug))
+        });
+        let Some(next) = latest else {
+            return at;
+        };
+        walked.push(at);
+        if walked.contains(&next.page) {
+            return next.page;
+        }
+        at = next.page;
+    }
+}
+
+/// Who replaced whom in a scanned graph: every `supersedes` a readable page
+/// declared, as (the page replaced, the page that replaced it), sorted so one
+/// page's are found without walking the edges again.
+struct Replaced<'graph> {
+    graph: &'graph VaultGraph,
+    pairs: Vec<(u32, u32)>,
+}
+
+impl<'graph> Replaced<'graph> {
+    fn of(graph: &'graph VaultGraph) -> Self {
+        let mut pairs: Vec<(u32, u32)> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Supersedes)
+            .filter(|edge| graph.nodes.get(edge.from as usize).is_some_and(is_readable))
+            .map(|edge| (edge.to, edge.from))
+            .collect();
+        pairs.sort_unstable();
+        Self { graph, pairs }
+    }
+
+    /// [`standing_page`] over this graph, by node index. A page nothing
+    /// replaced — nearly every page — costs one search of the sorted pairs.
+    fn standing(&self, at: u32) -> u32 {
+        standing_page(at, |replaced: &u32| {
+            let replaced = *replaced;
+            let first = self.pairs.partition_point(|(held, _)| *held < replaced);
+            self.pairs[first..]
+                .iter()
+                .take_while(move |(held, _)| *held == replaced)
+                .filter_map(|(_, by)| {
+                    let node = self.graph.nodes.get(*by as usize)?;
+                    Some(Replacement {
+                        page: *by,
+                        written_ms: node.modified_ms,
+                        slug: slug_of(node)?,
+                    })
+                })
+        })
+    }
 }
 
 /// The words a prompt asks the vault with, or nothing when nobody asked.
@@ -279,6 +392,13 @@ pub fn asked_tokens(words: &str) -> BTreeSet<String> {
     tokens
 }
 
+/// A page the words or an edge found, before the block names it.
+#[derive(Clone, Copy)]
+struct Found {
+    at: u32,
+    score: f64,
+}
+
 /// One page the block will name.
 struct Entry {
     at: u32,
@@ -289,11 +409,11 @@ struct Entry {
 /// Best first. An equal score goes to the page written last, because a name's
 /// place in the alphabet says nothing about a prompt. The walk's order only
 /// settles two pages written at the same moment, so the answer stays one answer.
-fn ranked(graph: &VaultGraph, left: &Entry, right: &Entry) -> Ordering {
-    let written = |entry: &Entry| {
+fn ranked(graph: &VaultGraph, left: &Found, right: &Found) -> Ordering {
+    let written = |found: &Found| {
         graph
             .nodes
-            .get(entry.at as usize)
+            .get(found.at as usize)
             .map_or(0, |node| node.modified_ms)
     };
     right
@@ -306,7 +426,8 @@ fn ranked(graph: &VaultGraph, left: &Entry, right: &Entry) -> Ordering {
 /// The block for this prompt, or nothing when the vault has nothing to say.
 ///
 /// `skip` holds slugs the caller already put in front of the agent this turn —
-/// the same page named twice is noise, not emphasis.
+/// the same page named twice is noise, not emphasis. A page another page
+/// replaced is answered with the one standing in its place ([`standing_page`]).
 #[must_use]
 pub fn related_block(
     graph: &VaultGraph,
@@ -318,39 +439,30 @@ pub fn related_block(
         return None;
     }
 
-    let scores = page_scores(graph, &tokens);
-    let mut seeds: Vec<Entry> = Vec::new();
-    for (at, score) in scores.iter().enumerate() {
-        if *score <= 0.0 {
-            continue;
-        }
-        let Some(slug) = graph.nodes.get(at).and_then(slug_of) else {
-            continue;
-        };
-        if !skip.contains(&slug) {
-            seeds.push(Entry {
-                at: index_of(at),
-                score: *score,
-                slug,
-            });
-        }
-    }
-    seeds.sort_by(|left, right| ranked(graph, left, right));
-    seeds.truncate(MAX_RELATED_ENTRIES);
-    if seeds.is_empty() {
+    // A page the words found stands for itself unless another replaced it;
+    // then that page takes its score, and its line.
+    let replaced = Replaced::of(graph);
+    let mut found: Vec<Found> = page_scores(graph, &tokens)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, score)| *score > 0.0)
+        .map(|(at, score)| Found {
+            at: replaced.standing(index_of(at)),
+            score,
+        })
+        .collect();
+    found.sort_by(|left, right| ranked(graph, left, right));
+    let mut entries: Vec<Entry> = Vec::with_capacity(MAX_RELATED_ENTRIES);
+    name_pages(&mut entries, graph, skip, &found);
+    if entries.is_empty() {
         return None;
     }
 
     // The words fill the block first: a neighbour holds none of them, so it
     // takes only a line they left empty.
-    let candidates = if seeds.len() < MAX_RELATED_ENTRIES {
-        neighbours(graph, &seeds, skip)
-    } else {
-        Vec::new()
-    };
-    let entries = collect(seeds, candidates);
-    if entries.is_empty() {
-        return None;
+    if entries.len() < MAX_RELATED_ENTRIES {
+        let reached = neighbours(graph, &replaced, &entries);
+        name_pages(&mut entries, graph, skip, &reached);
     }
     Some(render(graph, &entries))
 }
@@ -385,13 +497,10 @@ fn page_scores(graph: &VaultGraph, tokens: &BTreeSet<String>) -> Vec<f64> {
             .collect()
     };
     for (at, node) in graph.nodes.iter().enumerate() {
-        if node.kind != NodeKind::Page || is_structural(node) {
+        if !is_readable(node) {
             continue;
         }
-        let Some(slug) = slug_of(node) else {
-            continue;
-        };
-        let name = name_words(node, &slug);
+        let name = name_words(node);
         let excerpt = tokenize(&node.excerpt);
         let name_length = length_of(&name);
         let excerpt_length = length_of(&excerpt);
@@ -429,21 +538,14 @@ fn page_scores(graph: &VaultGraph, tokens: &BTreeSet<String>) -> Vec<f64> {
     let vault = f64::from(pages.max(1));
     let average_name = (total_name_length / vault).max(1.0);
     let average_excerpt = (total_excerpt_length / vault).max(1.0);
-    // How unlikely a page is to hold these words by chance must beat the number
-    // of pages it could have happened in: past that, chance alone would match
-    // fewer than one page.
-    let chance_bar = if pages >= MIN_PAGES_TO_JUDGE_CHANCE {
-        vault.ln()
-    } else {
-        0.0
-    };
+    let bar = chance_bar(pages);
     for holding in holdings {
         let surprise: f64 = holding
             .in_either
             .iter()
-            .map(|&word| (vault / f64::from(either_holders[word])).ln())
+            .map(|&word| surprise_of(pages, either_holders[word]))
             .sum();
-        if surprise < chance_bar {
+        if surprise < bar {
             continue;
         }
         let name = field_score(
@@ -463,13 +565,35 @@ fn page_scores(graph: &VaultGraph, tokens: &BTreeSet<String>) -> Vec<f64> {
     scores
 }
 
+/// What the surprise of a page's match must reach for the page to be shown.
+/// How unlikely a page is to hold the words by chance must beat the number of
+/// pages it could have happened in: past that, chance alone would match fewer
+/// than one page. A vault too small to tell holds no page back.
+pub(crate) fn chance_bar(pages: u32) -> f64 {
+    if pages >= MIN_PAGES_TO_JUDGE_CHANCE {
+        f64::from(pages).ln()
+    } else {
+        0.0
+    }
+}
+
+/// How surprising it is that a page holds a word `holding` of `pages` hold.
+pub(crate) fn surprise_of(pages: u32, holding: u32) -> f64 {
+    (f64::from(pages.max(1)) / f64::from(holding)).ln()
+}
+
 fn length_of(words: &BTreeSet<String>) -> f64 {
     f64::from(u32::try_from(words.len()).unwrap_or(u32::MAX))
 }
 
 /// One field's BM25: the rarity of the words it holds, leaned on by how long
 /// the field is against the average one.
-fn field_score(held: &[usize], holders: &[u32], pages: u32, relative_length: f64) -> f64 {
+pub(crate) fn field_score(
+    held: &[usize],
+    holders: &[u32],
+    pages: u32,
+    relative_length: f64,
+) -> f64 {
     let rarity: f64 = held
         .iter()
         .map(|&word| rarity_of(pages, holders[word]))
@@ -480,31 +604,43 @@ fn field_score(held: &[usize], holders: &[u32], pages: u32, relative_length: f64
 
 /// What one word is worth: more the fewer pages hold it, and never below zero,
 /// so a word every page holds still counts for a little.
-fn rarity_of(pages: u32, holding: u32) -> f64 {
+pub(crate) fn rarity_of(pages: u32, holding: u32) -> f64 {
     let pages = f64::from(pages);
     let holding = f64::from(holding);
     ((pages - holding + 0.5) / (holding + 0.5)).ln_1p()
 }
 
-/// The words a page answers to: its title, its tags and its file name.
-fn name_words(node: &GraphNode, slug: &str) -> BTreeSet<String> {
-    let stem = slug.rsplit('/').next().unwrap_or(slug);
-    let mut text = String::with_capacity(node.title.len() + stem.len() + 16);
-    text.push_str(&node.title);
-    for tag in &node.tags {
+/// The words a page answers to: its title, its tags and its file name. The
+/// file name is read off the id where it lies: this runs for every page of the
+/// vault on every prompt, and a slug built to be cut again was an allocation
+/// each time.
+fn name_words(node: &GraphNode) -> BTreeSet<String> {
+    let name = page_name(&node.id);
+    let stem = name.rsplit('/').next().unwrap_or(name);
+    tokenize(&name_text(&node.title, &node.tags, stem))
+}
+
+/// The text [`name_words`] cuts into words, for a reader that holds a page's
+/// title, tags and file name and no node.
+pub(crate) fn name_text(title: &str, tags: &[String], stem: &str) -> String {
+    let mut text = String::with_capacity(title.len() + stem.len() + 16);
+    text.push_str(title);
+    for tag in tags {
         text.push(' ');
         text.push_str(tag);
     }
     text.push(' ');
     text.push_str(stem);
-    tokenize(&text)
+    text
 }
 
 /// Pages one hop from a seed, in either direction, scored by how they were
-/// reached. A page reachable from two seeds keeps its best reason. Asked only
-/// when the words left room, so none of these holds a word of the prompt.
-fn neighbours(graph: &VaultGraph, seeds: &[Entry], skip: &HashSet<String>) -> Vec<Entry> {
-    let mut best: Vec<(u32, f64)> = Vec::new();
+/// reached, best first. A page reachable from two seeds keeps its best reason,
+/// and one that was replaced is reached as the page standing in its place.
+/// Asked only when the words left room, so none of these holds a word of the
+/// prompt.
+fn neighbours(graph: &VaultGraph, replaced: &Replaced<'_>, seeds: &[Entry]) -> Vec<Found> {
+    let mut best: Vec<Found> = Vec::new();
     for edge in &graph.edges {
         let weight = match edge.kind {
             EdgeKind::Mentions => MENTIONS_WEIGHT,
@@ -514,46 +650,45 @@ fn neighbours(graph: &VaultGraph, seeds: &[Entry], skip: &HashSet<String>) -> Ve
             let Some(from) = seeds.iter().find(|held| held.at == seed) else {
                 continue;
             };
+            let other = replaced.standing(other);
             if seeds.iter().any(|held| held.at == other) {
                 continue;
             }
             let score = from.score + weight;
-            match best.iter_mut().find(|(at, _)| *at == other) {
-                Some(held) => held.1 = held.1.max(score),
-                None => best.push((other, score)),
+            match best.iter_mut().find(|held| held.at == other) {
+                Some(held) => held.score = held.score.max(score),
+                None => best.push(Found { at: other, score }),
             }
         }
     }
-
-    let mut held: Vec<Entry> = best
-        .into_iter()
-        .filter_map(|(at, score)| {
-            let node = graph.nodes.get(at as usize)?;
-            // Ghosts and sources are not pages an agent can read; the home
-            // and the journal are not pages a prompt is about.
-            if node.kind != NodeKind::Page || is_structural(node) {
-                return None;
-            }
-            let slug = slug_of(node)?;
-            (!skip.contains(&slug)).then_some(Entry { at, score, slug })
-        })
-        .collect();
-    held.sort_by(|left, right| ranked(graph, left, right));
-    held
+    best.retain(|held| graph.nodes.get(held.at as usize).is_some_and(is_readable));
+    best.sort_by(|left, right| ranked(graph, left, right));
+    best
 }
 
-/// Seeds first — the pages the prompt named — then what they reach.
-fn collect(seeds: Vec<Entry>, candidates: Vec<Entry>) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = Vec::with_capacity(MAX_RELATED_ENTRIES);
-    for entry in seeds.into_iter().chain(candidates) {
+/// Names the pages of `found`, in the order given, on the lines the block has
+/// left: each page once, and none the caller already showed. A slug is built
+/// only for a page that gets this far, not for every page the words touched.
+fn name_pages(
+    entries: &mut Vec<Entry>,
+    graph: &VaultGraph,
+    skip: &HashSet<String>,
+    found: &[Found],
+) {
+    for &Found { at, score } in found {
         if entries.len() >= MAX_RELATED_ENTRIES {
             break;
         }
-        if !entries.iter().any(|held| held.at == entry.at) {
-            entries.push(entry);
+        if entries.iter().any(|held| held.at == at) {
+            continue;
+        }
+        let Some(slug) = graph.nodes.get(at as usize).and_then(slug_of) else {
+            continue;
+        };
+        if !skip.contains(&slug) {
+            entries.push(Entry { at, score, slug });
         }
     }
-    entries
 }
 
 fn render(graph: &VaultGraph, entries: &[Entry]) -> RelatedBlock {
@@ -590,35 +725,43 @@ fn render(graph: &VaultGraph, entries: &[Entry]) -> RelatedBlock {
     RelatedBlock { text, slugs }
 }
 
-/// `- [[slug]] — title`, then the relations that still fit.
+/// `- [[slug]] — title`, then the relations that fit beside it.
+///
+/// The relations are given their room first, whole and most telling first,
+/// beside the title's share of the line ([`MIN_RELATED_TITLE_BYTES`]); the
+/// title then has everything they left. So a long title no longer spends the
+/// room a relation needed, and a relation is left out only when the line could
+/// not hold it beside that share.
 fn line_for(graph: &VaultGraph, entry: &Entry) -> String {
     let title = graph
         .nodes
         .get(entry.at as usize)
         .map_or("", |node| node.title.as_str());
-    let head = format!("- [[{}]] — ", entry.slug);
-    let mut line = head.clone();
-    if head.len() + title.len() > MAX_RELATED_LINE_BYTES {
+    let mut line = format!("- [[{}]] — ", entry.slug);
+    let kept_for_title = title.len().min(MIN_RELATED_TITLE_BYTES);
+    let mut room = MAX_RELATED_LINE_BYTES.saturating_sub(line.len() + kept_for_title);
+    let mut relations = String::new();
+    for suffix in suffixes(graph, entry.at) {
+        if suffix.len() > room {
+            break;
+        }
+        room -= suffix.len();
+        relations.push_str(&suffix);
+    }
+    let room = MAX_RELATED_LINE_BYTES.saturating_sub(line.len() + relations.len());
+    if title.len() > room {
         // The one thing this renderer may cut: a title carries no link, so a
         // reader loses words rather than a destination.
-        line.push_str(&clipped(
-            title,
-            MAX_RELATED_LINE_BYTES.saturating_sub(head.len()),
-        ));
+        line.push_str(&clipped(title, room));
     } else {
         line.push_str(title);
     }
-    for suffix in suffixes(graph, entry.at) {
-        if line.len() + suffix.len() > MAX_RELATED_LINE_BYTES {
-            break;
-        }
-        line.push_str(&suffix);
-    }
+    line.push_str(&relations);
     line
 }
 
 /// `text` cut to fit `budget` bytes with an ellipsis, on a character boundary.
-fn clipped(text: &str, budget: usize) -> String {
+pub(crate) fn clipped(text: &str, budget: usize) -> String {
     const ELLIPSIS: &str = "…";
     let Some(room) = budget.checked_sub(ELLIPSIS.len()) else {
         return String::new();
@@ -630,8 +773,7 @@ fn clipped(text: &str, budget: usize) -> String {
     format!("{}{ELLIPSIS}", &text[..end])
 }
 
-/// The relations one page shows, most telling first: what it declared, then
-/// what was declared about it, then the plain links either way. A relation
+/// The relations one page shows, most telling first ([`rank_of`]). A relation
 /// both pages declared is one relation, shown as this page's own; the home
 /// and the journal are not shown at all.
 fn suffixes(graph: &VaultGraph, at: u32) -> Vec<String> {
@@ -679,12 +821,19 @@ fn suffixes(graph: &VaultGraph, at: u32) -> Vec<String> {
         .collect()
 }
 
-/// Declared by the page, declared about it, merely linked.
+/// What is shown first on a line that seldom holds every relation. A relation
+/// that changes how the page is read comes before one that only points
+/// somewhere else: the page is disputed, or it replaced another — or was
+/// replaced, which a line still says of a page in a ring. Within each, what
+/// the page declared comes before what was declared about it, and a plain
+/// link is last.
 fn rank_of(kind: EdgeKind, incoming: bool) -> u8 {
     match (kind, incoming) {
-        (EdgeKind::Mentions, _) => 2,
-        (_, false) => 0,
-        (_, true) => 1,
+        (EdgeKind::Contradicts | EdgeKind::Supersedes, false) => 0,
+        (EdgeKind::Contradicts | EdgeKind::Supersedes, true) => 1,
+        (EdgeKind::Mentions, _) => 4,
+        (_, false) => 2,
+        (_, true) => 3,
     }
 }
 
@@ -1326,5 +1475,265 @@ mod tests {
         let lines: Vec<&str> = block.text.lines().collect();
         assert_eq!(lines[lines.len() - 2], CAPPED_NOTICE);
         assert_eq!(lines[lines.len() - 1], RELATED_FOOTER);
+    }
+
+    /// The words found a page another page has replaced. The block names the
+    /// page that stands now, on the line and with the score the old one won:
+    /// one block in seven named a replaced page, and its line had no room to
+    /// say so.
+    #[test]
+    fn a_replaced_page_gives_its_line_to_the_page_that_replaced_it() {
+        let held = graph(
+            vec![
+                page("wiki/Old.md", "parser 정리", &[]),
+                page("wiki/New.md", "다시 쓴 글", &[]),
+            ],
+            &[(1, 0, EdgeKind::Supersedes)],
+        );
+        let block = related_block(&held, "parser", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/New"]);
+        assert!(
+            block
+                .text
+                .contains("- [[wiki/New]] — 다시 쓴 글 · supersedes: [[wiki/Old]]\n"),
+            "{}",
+            block.text
+        );
+        assert!(!block.text.contains("- [[wiki/Old]]"), "{}", block.text);
+    }
+
+    #[test]
+    fn a_page_replaced_twice_is_followed_to_the_one_that_stands() {
+        let held = graph(
+            vec![
+                page("wiki/First.md", "parser 정리", &[]),
+                page("wiki/Second.md", "다시 쓴 글", &[]),
+                page("wiki/Third.md", "또 다시 쓴 글", &[]),
+            ],
+            &[(1, 0, EdgeKind::Supersedes), (2, 1, EdgeKind::Supersedes)],
+        );
+        let block = related_block(&held, "parser", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Third"]);
+    }
+
+    /// Pages that replace each other in a ring name none that stands. The walk
+    /// ends at the page where it entered the ring: a page of the ring keeps its
+    /// own line, a page outside it gets the first of the ring it reached, and
+    /// every prompt still gets one answer with each page once.
+    #[test]
+    fn a_ring_of_pages_replacing_each_other_ends_where_it_was_entered() {
+        let held = graph(
+            vec![
+                page("wiki/Outside.md", "parser", &[]),
+                page("wiki/RingA.md", "lexer", &[]),
+                page("wiki/RingB.md", "tokens", &[]),
+            ],
+            &[
+                (1, 0, EdgeKind::Supersedes),
+                (2, 1, EdgeKind::Supersedes),
+                (1, 2, EdgeKind::Supersedes),
+            ],
+        );
+        for (said, named) in [
+            ("parser", ["wiki/RingA", "wiki/RingB"]),
+            ("lexer", ["wiki/RingA", "wiki/RingB"]),
+            ("tokens", ["wiki/RingB", "wiki/RingA"]),
+        ] {
+            let block = related_block(&held, said, &nothing()).unwrap();
+            assert_eq!(block.slugs, named, "{said}");
+        }
+    }
+
+    /// The words found the page that replaced another as well. The old one
+    /// only leaves: the page is named once, and the line it gave up goes to the
+    /// next page the words found.
+    #[test]
+    fn a_replaced_page_whose_successor_was_found_too_leaves_its_line_to_the_next() {
+        let nodes: Vec<GraphNode> = (0..6_i64)
+            .map(|at| {
+                written_at(
+                    page(&format!("wiki/P{at}.md"), "alpha", &[]),
+                    100 * (at + 1),
+                )
+            })
+            .collect();
+        let held = graph(nodes, &[(5, 4, EdgeKind::Supersedes)]);
+        let block = related_block(&held, "alpha", &nothing()).unwrap();
+        assert_eq!(
+            block.slugs,
+            vec!["wiki/P5", "wiki/P3", "wiki/P2", "wiki/P1", "wiki/P0"]
+        );
+    }
+
+    #[test]
+    fn a_page_already_shown_is_not_named_again_as_the_one_that_replaced_another() {
+        let held = graph(
+            vec![
+                page("wiki/Old.md", "parser 정리", &[]),
+                page("wiki/New.md", "다시 쓴 글", &[]),
+            ],
+            &[(1, 0, EdgeKind::Supersedes)],
+        );
+        let skip: HashSet<String> = ["wiki/New".to_string()].into_iter().collect();
+        assert_eq!(related_block(&held, "parser", &skip), None);
+    }
+
+    /// Two pages may each say they replaced the same one. The one written last
+    /// stands for it, and the earlier name settles two written at the same
+    /// moment.
+    #[test]
+    fn of_two_pages_that_replaced_one_the_later_written_stands() {
+        let replaced_by = |early: i64, late: i64| {
+            let held = graph(
+                vec![
+                    page("wiki/Old.md", "parser 정리", &[]),
+                    written_at(page("wiki/Early.md", "먼저 다시 쓴 글", &[]), early),
+                    written_at(page("wiki/Late.md", "나중에 다시 쓴 글", &[]), late),
+                ],
+                &[(1, 0, EdgeKind::Supersedes), (2, 0, EdgeKind::Supersedes)],
+            );
+            related_block(&held, "parser", &nothing()).unwrap().slugs
+        };
+        assert_eq!(replaced_by(100, 200), vec!["wiki/Late"]);
+        assert_eq!(replaced_by(100, 100), vec!["wiki/Early"]);
+    }
+
+    #[test]
+    fn a_replaced_neighbour_is_reached_as_the_page_that_replaced_it() {
+        let held = graph(
+            vec![
+                page("wiki/Seed.md", "parser", &[]),
+                page("wiki/Old.md", "옛 글", &[]),
+                page("wiki/New.md", "새 글", &[]),
+            ],
+            &[(0, 1, EdgeKind::Mentions), (2, 1, EdgeKind::Supersedes)],
+        );
+        let block = related_block(&held, "parser", &nothing()).unwrap();
+        assert_eq!(block.slugs, vec!["wiki/Seed", "wiki/New"]);
+    }
+
+    /// Whichever replaced page the words rank first, the block opens with the
+    /// page standing in its place and names no replaced page anywhere.
+    #[test]
+    fn whichever_replaced_page_ranks_first_the_block_names_what_stands() {
+        const PAIRS: u32 = 24;
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for pair in 0..PAIRS {
+            nodes.push(page(
+                &format!("wiki/Old{pair}.md"),
+                &format!("topic{pair} 옛 글"),
+                &[],
+            ));
+            nodes.push(page(&format!("wiki/New{pair}.md"), "새 글", &[]));
+            edges.push((2 * pair + 1, 2 * pair, EdgeKind::Supersedes));
+        }
+        let held = graph(nodes, &edges);
+        for pair in 0..PAIRS {
+            let block = related_block(&held, &format!("topic{pair}"), &nothing()).unwrap();
+            assert_eq!(block.slugs, vec![format!("wiki/New{pair}")]);
+        }
+    }
+
+    /// The rule asks a vault one thing — who replaced this page — so a reader
+    /// with no scanned graph follows it by name alone: to the end of a chain,
+    /// by the page written last and then the earlier name, and out of a ring
+    /// at the page it entered by.
+    #[test]
+    fn the_standing_page_needs_only_to_be_told_who_replaced_a_page() {
+        let by = |page: &'static str, written_ms: i64| Replacement {
+            page,
+            written_ms,
+            slug: page.to_string(),
+        };
+        let replaced_by = |page: &&'static str| match *page {
+            "old" => vec![by("early", 100), by("late", 200)],
+            "late" => vec![by("latest", 300)],
+            "twin" => vec![by("zeta", 100), by("alpha", 100)],
+            "outside" => vec![by("ring-a", 100)],
+            "ring-a" => vec![by("ring-b", 100)],
+            "ring-b" => vec![by("ring-a", 100)],
+            "itself" => vec![by("itself", 100)],
+            _ => Vec::new(),
+        };
+        for (page, stands) in [
+            ("latest", "latest"),
+            ("old", "latest"),
+            ("twin", "alpha"),
+            ("outside", "ring-a"),
+            ("ring-a", "ring-a"),
+            ("ring-b", "ring-b"),
+            ("itself", "itself"),
+        ] {
+            assert_eq!(standing_page(page, replaced_by), stands, "{page}");
+        }
+    }
+
+    /// A long name and a long title filled the line between them, and the
+    /// relation after them was dropped without a word. The title is the one
+    /// thing a line may cut, so it gives way and the relation is there whole —
+    /// but only down to the title's share of the line: a relation that would
+    /// need more than that is the one left out.
+    #[test]
+    fn a_long_title_gives_way_to_a_relation_down_to_its_share_of_the_line() {
+        let share = MAX_RELATED_LINE_BYTES / (MAX_RELATED_RELATIONS_PER_LINE + 1);
+        let name = format!("wiki/{}", "long-name-".repeat(9));
+        let head = format!("- [[{name}]] — ");
+        let first_line = |target: &str| {
+            let held = graph(
+                vec![
+                    page(&format!("{name}.md"), &"긴 한글 제목 ".repeat(30), &[]),
+                    page(&format!("{target}.md"), "T", &[]),
+                ],
+                &[(0, 1, EdgeKind::DependsOn)],
+            );
+            let block = related_block(&held, "long", &nothing()).unwrap();
+            block.text.lines().nth(1).unwrap().to_string()
+        };
+
+        let relation = " · depends_on: [[wiki/Next]]";
+        let line = first_line("wiki/Next");
+        assert!(line.len() <= MAX_RELATED_LINE_BYTES, "{} bytes", line.len());
+        assert!(line.starts_with(&head), "{line}");
+        assert!(line.ends_with(&format!("…{relation}")), "{line}");
+
+        // Beside the head and the title's share there is no room for this one.
+        let far = format!("wiki/{}", "far-".repeat(20));
+        let relation = format!(" · depends_on: [[{far}]]");
+        assert!(head.len() + share + relation.len() > MAX_RELATED_LINE_BYTES);
+        assert!(head.len() + relation.len() <= MAX_RELATED_LINE_BYTES);
+        let line = first_line(&far);
+        assert_eq!(line.len(), MAX_RELATED_LINE_BYTES - 1, "{line}");
+        assert!(line.ends_with('…') && !line.contains(" · "), "{line}");
+    }
+
+    /// A line seldom holds every relation, so what comes first is what is
+    /// read. A relation that changes how the page is read — it is disputed, it
+    /// replaced another — comes before one that only points somewhere else,
+    /// whichever page declared it.
+    #[test]
+    fn a_relation_that_changes_how_a_page_is_read_comes_first() {
+        let held = graph(
+            vec![
+                page("wiki/Topic.md", "parser", &[]),
+                page("wiki/Near.md", "가까운 글", &[]),
+                page("wiki/Rival.md", "다르게 말하는 글", &[]),
+                page("wiki/Before.md", "옛 글", &[]),
+            ],
+            &[
+                (0, 1, EdgeKind::Related),
+                (2, 0, EdgeKind::Contradicts),
+                (0, 3, EdgeKind::Supersedes),
+            ],
+        );
+        let block = related_block(&held, "parser", &nothing()).unwrap();
+        assert!(
+            block.text.contains(
+                "- [[wiki/Topic]] — parser · supersedes: [[wiki/Before]] \
+                 · ← contradicts: [[wiki/Rival]] · related: [[wiki/Near]]\n"
+            ),
+            "{}",
+            block.text
+        );
     }
 }
