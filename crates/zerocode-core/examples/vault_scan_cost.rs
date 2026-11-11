@@ -109,6 +109,16 @@ fn shapes(sessions: &[VaultSession], app_home: &Path, temporary: &[PathBuf]) -> 
         );
         count("with_helpers", !session.children.is_empty());
         count("only_the_window_spoke", session.window_made);
+        // Read by the head alone, and that head held no turn or only the
+        // window's: listed, where a file read whole would be hidden.
+        count(
+            "head_only_and_nobody_spoke",
+            session.cut_short && !session.resumable(),
+        );
+        count(
+            "head_only_and_only_the_window_spoke",
+            session.cut_short && session.window_made,
+        );
         for line in &session.preview {
             if let Some(tag) = leading_tag(&line.text) {
                 *tags.entry(format!("{}:{tag}", line.role)).or_default() += 1;

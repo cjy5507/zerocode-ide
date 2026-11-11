@@ -760,6 +760,12 @@ pub struct VaultSession {
     /// CLI took for a prompt, a pane that was only ever told mail waits.
     #[serde(default)]
     pub window_made: bool,
+    /// Whether the file goes on past the head this card was read from
+    /// ([`MAX_HEAD_BYTES`]). What such a card lacks — a turn, a word a person
+    /// typed — the rest of the file may hold, so nothing is concluded from
+    /// its absence ([`Self::hidden_as`]).
+    #[serde(default)]
+    pub cut_short: bool,
 }
 
 impl VaultSession {
@@ -792,6 +798,19 @@ impl VaultSession {
     /// temporary folders, as the caller resolved them.
     #[must_use]
     pub fn hidden_as(&self, temporary: &[PathBuf]) -> Option<Hidden> {
+        self.said_by_nobody()
+            .or_else(|| self.ran_in_one_of(temporary))
+    }
+
+    /// Whether nobody spoke in it, or only the window did — answered of a
+    /// card read to the end of its file and of no other
+    /// ([`VaultSession::cut_short`]).
+    /// A conversation that opens with a line longer than the head has no
+    /// turn in that head, and it is not an empty one.
+    fn said_by_nobody(&self) -> Option<Hidden> {
+        if self.cut_short {
+            return None;
+        }
         if !self.resumable() {
             return Some(Hidden::Empty);
         }
@@ -801,9 +820,12 @@ impl VaultSession {
         // Records, and no words: a session in which the person ran slash
         // commands and nobody answered has turns the store counts and not a
         // line either side spoke.
-        if self.preview.is_empty() {
-            return Some(Hidden::Empty);
-        }
+        self.preview.is_empty().then_some(Hidden::Empty)
+    }
+
+    /// Whether it ran in a temporary folder — which the head says of a file
+    /// of any length.
+    fn ran_in_one_of(&self, temporary: &[PathBuf]) -> Option<Hidden> {
         let ran_in = Path::new(self.cwd.as_deref()?);
         temporary
             .iter()
@@ -2251,20 +2273,24 @@ fn zo_workspace_record(path: &Path) -> PathBuf {
 }
 
 /// The head of a file, as text, bounded — decompressed first when its CLI
-/// compressed it ([`crate::record_file`]).
-fn read_head(path: &Path) -> std::io::Result<String> {
+/// compressed it ([`crate::record_file`]) — and whether the file goes on past
+/// it.
+fn read_head(path: &Path) -> std::io::Result<(String, bool)> {
     use std::io::Read;
-    let mut buffer = Vec::with_capacity(MAX_HEAD_BYTES);
+    // One byte past the bound, asked for only to learn that there is one.
+    let mut buffer = Vec::with_capacity(MAX_HEAD_BYTES + 1);
     crate::record_file::open(path)?
-        .take(MAX_HEAD_BYTES as u64)
+        .take(MAX_HEAD_BYTES as u64 + 1)
         .read_to_end(&mut buffer)?;
+    let goes_on = buffer.len() > MAX_HEAD_BYTES;
+    buffer.truncate(MAX_HEAD_BYTES);
     // Lossy, because a session file is a vendor's and may hold anything; a
     // panel that shows nothing because one byte was invalid UTF-8 is worse.
-    Ok(String::from_utf8_lossy(&buffer).into_owned())
+    Ok((String::from_utf8_lossy(&buffer).into_owned(), goes_on))
 }
 
 fn read_session(candidate: &Candidate) -> Result<Option<VaultSession>, String> {
-    let text = read_head(&candidate.path).map_err(|_| "unreadable".to_string())?;
+    let (text, cut_short) = read_head(&candidate.path).map_err(|_| "unreadable".to_string())?;
     let mut session = match candidate.agent.format {
         Format::ClaudeLines => claude_session(&text),
         Format::CodexRollout => codex_session(&text),
@@ -2273,6 +2299,7 @@ fn read_session(candidate: &Candidate) -> Result<Option<VaultSession>, String> {
         Format::Unread => None,
     }
     .unwrap_or_default();
+    session.cut_short = cut_short;
     // Antigravity's transcript does not say which conversation it is — the id
     // is the brain directory the file lives under
     // (`brain/<id>/.system_generated/logs/transcript.jsonl`), which is also
@@ -2413,6 +2440,7 @@ pub fn card(
         parent_id: parsed.parent_id,
         origin: None,
         window_made,
+        cut_short: parsed.cut_short,
     };
     if built.depth > 0 {
         child_preview(&mut built);
@@ -2454,6 +2482,10 @@ pub struct Parsed {
     /// person typed ([`Self::wants`]).
     pub(crate) asked: usize,
     pub(crate) window_typed: usize,
+    /// The reader stopped before the end of what it read from
+    /// ([`VaultSession::cut_short`]). A database row is never this: its
+    /// store counted the turns itself.
+    pub(crate) cut_short: bool,
 }
 
 /// How many conversation lines a card keeps.
@@ -2852,6 +2884,7 @@ mod tests {
             parent_id: None,
             origin: None,
             window_made: false,
+            cut_short: false,
         }
     }
 
@@ -4362,15 +4395,21 @@ mod tests {
 
     /// One Claude conversation of one user line, under `home`'s own store.
     fn write_claude(home: &Path, id: &str, words: &str) {
+        write_claude_records(
+            home,
+            id,
+            &[format!(
+                r#"{{"type":"user","cwd":"/w/a","sessionId":"{id}","message":{{"role":"user","content":"{words}"}}}}"#
+            )],
+        );
+    }
+
+    /// One Claude conversation of these records, a line each, under `home`'s
+    /// own store.
+    fn write_claude_records(home: &Path, id: &str, records: &[String]) {
         let project = home.join(".claude/projects/-w-a");
         std::fs::create_dir_all(&project).expect("mkdir");
-        std::fs::write(
-            project.join(format!("{id}.jsonl")),
-            format!(
-                r#"{{"type":"user","cwd":"/w/a","sessionId":"{id}","message":{{"role":"user","content":"{words}"}}}}"#
-            ),
-        )
-        .expect("write");
+        std::fs::write(project.join(format!("{id}.jsonl")), records.join("\n")).expect("write");
     }
 
     fn scan_through(home: &Path, index: &mut Index) -> Scan {
@@ -4912,6 +4951,71 @@ mod tests {
                     "zerocode-00: 레인이 초록으로 끝났다. 창 시험이 모두 통과했다."
                 )]
             )
+        );
+    }
+
+    /* ---- a card of the head alone (t-104810) ---- */
+
+    /// A card is made from the head of its file ([`MAX_HEAD_BYTES`]), and what
+    /// the head lacks the rest may hold. A conversation that opens with a line
+    /// longer than the head — a pasted picture, a long log — has no whole
+    /// record in it: no turn is counted and no word is read, and it was
+    /// hidden as one nobody spoke in. One the window's mail line opened, with
+    /// the person's words past the head, was hidden as the window's. Both are
+    /// listed. A file the head holds whole is known by what it lacks, and
+    /// stays hidden and counted.
+    #[test]
+    fn a_session_read_only_by_its_head_is_not_hidden_for_what_the_head_lacks() {
+        let dir = tempfile::tempdir().expect("temp");
+        let past_the_head = "x".repeat(MAX_HEAD_BYTES);
+        let mail_waits = claude_user(crate::orchestration::pointer_text(1).into());
+        write_claude(dir.path(), "long", &past_the_head);
+        write_claude_records(
+            dir.path(),
+            "told",
+            &[
+                mail_waits.clone(),
+                serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": past_the_head},
+                })
+                .to_string(),
+                claude_user("그 편지대로 고쳐줘".into()),
+            ],
+        );
+        write_claude(dir.path(), "blank", "");
+        write_claude_records(dir.path(), "checked", &[mail_waits]);
+
+        let found = scan_through(dir.path(), &mut Index::default());
+        let seen = view(
+            found.sessions,
+            &VaultQuery {
+                hide_empty: true,
+                ..Default::default()
+            },
+            Vec::new(),
+            false,
+            &[],
+        );
+        let mut listed: Vec<&str> = seen
+            .groups
+            .iter()
+            .flat_map(|group| &group.sessions)
+            .filter_map(|session| Path::new(&session.file_path).file_stem()?.to_str())
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(
+            (listed, seen.hidden),
+            (
+                vec!["long", "told"],
+                HiddenCount {
+                    empty: 1,
+                    window_made: 1,
+                    measured: 0,
+                }
+            ),
+            "a conversation longer than the head that was read is hidden for \
+             what that head did not hold"
         );
     }
 }
