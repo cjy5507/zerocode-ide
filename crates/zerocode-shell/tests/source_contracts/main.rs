@@ -3463,7 +3463,7 @@ mod tests {
         );
         assert!(
             fitted.contains("WIDE_GLYPH_ROW_FILL")
-                && fitted.contains("wide.className = \"term-wide\";")
+                && fitted.contains("wide.className = WIDE_RUN_CLASS;")
                 && fitted.contains("const grownWidth = parseFloat(getComputedStyle(wide).width);")
                 && fitted.contains("wideLine.getBoundingClientRect().bottom"),
             "a wide glyph is grown without the row's height as the ceiling of \
@@ -3546,15 +3546,25 @@ mod tests {
                  line box:\n{wide}"
             );
         }
-        // An underline under a wide run stands where a narrow run's does:
-        // both against the terminal's one gap.
+        // A link under a wide run is underlined where a narrow link is: both
+        // against the link's one gap. An SGR 4 underline is the engine's own,
+        // as it was — a Latin screen draws its underlines where it always did.
         assert!(
-            styles.contains(
-                ".term .underline { text-decoration: underline; text-underline-offset: var(--term-underline-offset); }"
-            ) && block_after(styles, ".term .term-wide.underline,").contains(
-                "text-underline-offset: calc((var(--term-underline-offset) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));"
-            ),
-            "a wide run's underline is drawn off its neighbour's again"
+            styles.contains("\n.term .underline { text-decoration: underline; }\n")
+                && block_after(styles, ".term .term-wide.term-link {").contains(
+                    "text-underline-offset: calc((var(--term-underline-offset) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));"
+                ),
+            "a wide link's underline is drawn off its neighbour's again, or \
+             an SGR underline no longer stands where the engine puts it"
+        );
+        // The two numbers the fit turns on: lowered, the gap between two
+        // syllables comes back while every check that reads the window's own
+        // ceiling stays green.
+        assert!(
+            source.contains("\nconst WIDE_GLYPH_ROW_FILL = 0.9;\n")
+                && source.contains("\nconst WIDE_GLYPH_STRETCH_LIMIT = 1.3;\n"),
+            "the row's share of a wide glyph's ink, or how far it may be \
+             widened, is another number than the one measured"
         );
     }
 
@@ -16592,6 +16602,10 @@ mod tests {
                 "  function runsOf(cells, marks, selected = null) {",
             ),
             ("marksOf", "  function marksOf(index, cells) {"),
+            ("glyphPitch", "  function glyphPitch(glyph, wide) {"),
+            ("narrowPitch", "  function narrowPitch(glyph) {"),
+            ("widePitch", "  function widePitch(glyph) {"),
+            ("glyphAdvance", "  function glyphAdvance(glyph, scale) {"),
             ("dressRun", "  function dressRun(span, run, was) {"),
             ("shiftNodes", "  function shiftNodes(count) {"),
             ("paintRail", "  function paintRail() {"),

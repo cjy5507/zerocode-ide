@@ -1541,6 +1541,8 @@ function wideDressIdle([size, stretch, spread]) {
  * `fitWide`), so there is one for each face with another advance — an emoji,
  * a Han face. */
 const wideClasses = new Map();
+/* The class every dressed double-width run wears (shell.css `.term .term-wide`). */
+const WIDE_RUN_CLASS = "term-wide";
 
 function wideClass(dress) {
   if (wideDressIdle(dress)) return "";
@@ -1549,7 +1551,7 @@ function wideClass(dress) {
   if (held !== undefined) return held;
   const name = `term-wide-${wideClasses.size}`;
   writePitchRule(`.term .${name} { ${wideDressVars(...dress).map(([property, value]) => `${property}: ${value}`).join("; ")}; }`);
-  const classes = `term-wide ${name}`;
+  const classes = `${WIDE_RUN_CLASS} ${name}`;
   wideClasses.set(key, classes);
   return classes;
 }
@@ -2225,34 +2227,39 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       stack.appendChild(filler);
     }
     pre.appendChild(stack);
-    const stackHeight = parseFloat(getComputedStyle(stack).height);
-    const runWidth = parseFloat(getComputedStyle(run).width);
-    const wideWidth = parseFloat(getComputedStyle(wide).width);
-    const shaped = getComputedStyle(pre);
-    if (stackHeight > 0 && runWidth > 0) {
-      cell.width = runWidth / PROBE_RUN_GLYPHS;
-      cell.height = stackHeight / 16;
-      // Recorded only when a measurement actually landed. A hidden host lays
-      // nothing out and answers zero, and remembering THAT would leave a view
-      // first measured behind another tab holding the default 8×18 forever.
-      measuredUnder = under;
-      // Every glyph's pitch was an answer about the old cell and the old face.
-      // Read out now: the computed style is live, and a glyph asked about in
-      // the middle of a paint must not ask the cascade anything.
-      const face = `${shaped.fontStyle} ${shaped.fontWeight}`;
-      const fontPx = parseFloat(shaped.fontSize);
-      const family = shaped.fontFamily;
-      glyphFontAt = (scale) => `${face} ${fontPx * scale}px ${family}`;
-      const meter = glyphMeter();
-      meter.font = glyphFontAt(1);
-      glyphFontPitch = meter.measureText(CELL_PROBE_GLYPH).width;
-      // No meter, no per-glyph answers: every glyph is left as its face draws it.
-      glyphFont = glyphFontPitch > 0 ? glyphFontAt(1) : "";
-      glyphSpreads.clear();
-      wideDresses.clear();
-      if (wideWidth > 0) fitWide(wideWidth / PROBE_RUN_GLYPHS, probe, band, line, wide, wideLine);
+    // Whatever the measuring meets — a canvas that gives no context — the
+    // probe rows never stay on the screen.
+    try {
+      const stackHeight = parseFloat(getComputedStyle(stack).height);
+      const runWidth = parseFloat(getComputedStyle(run).width);
+      const wideWidth = parseFloat(getComputedStyle(wide).width);
+      const shaped = getComputedStyle(pre);
+      if (stackHeight > 0 && runWidth > 0) {
+        cell.width = runWidth / PROBE_RUN_GLYPHS;
+        cell.height = stackHeight / 16;
+        // Recorded only when a measurement actually landed. A hidden host lays
+        // nothing out and answers zero, and remembering THAT would leave a view
+        // first measured behind another tab holding the default 8×18 forever.
+        measuredUnder = under;
+        // Every glyph's pitch was an answer about the old cell and the old face.
+        // Read out now: the computed style is live, and a glyph asked about in
+        // the middle of a paint must not ask the cascade anything.
+        const face = `${shaped.fontStyle} ${shaped.fontWeight}`;
+        const fontPx = parseFloat(shaped.fontSize);
+        const family = shaped.fontFamily;
+        glyphFontAt = (scale) => `${face} ${fontPx * scale}px ${family}`;
+        const meter = glyphMeter();
+        meter.font = glyphFontAt(1);
+        glyphFontPitch = meter.measureText(CELL_PROBE_GLYPH).width;
+        // No meter, no per-glyph answers: every glyph is left as its face draws it.
+        glyphFont = glyphFontPitch > 0 ? glyphFontAt(1) : "";
+        glyphSpreads.clear();
+        wideDresses.clear();
+        if (wideWidth > 0) fitWide(wideWidth / PROBE_RUN_GLYPHS, probe, band, line, wide, wideLine);
+      }
+    } finally {
+      stack.remove();
     }
-    stack.remove();
   }
 
   /* Fit the face that draws `WIDE_PROBE_GLYPH` to two columns (`cell.wide`).
@@ -2292,7 +2299,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // engine's (it rounds a face's ascent to whole pixels at each size).
     const [size, stretch] = wideShape(advance, false);
     for (const [property, value] of wideDressVars(size, stretch, 0, 0, 0)) wide.style.setProperty(property, value);
-    wide.className = "term-wide";
+    wide.className = WIDE_RUN_CLASS;
     const grownWidth = parseFloat(getComputedStyle(wide).width);
     const grown = grownWidth > 0 ? grownWidth / PROBE_RUN_GLYPHS : advance * size;
     const landed = (wideLine.getBoundingClientRect().bottom - row.top) * unit;
@@ -2309,7 +2316,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       fit.worn = worn;
       for (const [property, value] of wideDressVars(...dress)) pre.style.setProperty(property, value);
     }
-    fit.cls = wideDressIdle(dress) ? "" : "term-wide";
+    fit.cls = wideDressIdle(dress) ? "" : WIDE_RUN_CLASS;
   }
 
   /* The size and the stretch a double-width glyph of this advance wears: grown

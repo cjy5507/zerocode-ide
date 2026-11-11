@@ -1471,10 +1471,10 @@
    * Measured, not reasoned: `the_row_box_contains_its_own_glyphs`. */
   --term-font-size: 14px;
   --term-leading: 1.15;
-  /* How far under the baseline a terminal's underline is drawn — a link's and
-   * an SGR 4 run's alike. Named because a double-width run draws its glyphs
-   * at another size on a line of its own and must still put its underline
-   * beside its neighbour's (shell.css `.term-wide`). */
+  /* How far under the baseline a terminal link's underline is drawn. Named
+   * because a double-width run draws its glyphs at another size on a line of
+   * its own and must still put a link's underline beside its neighbour's
+   * (shell.css `.term-wide.term-link`). */
   --term-underline-offset: 2px;
   /* Body weight, as a variable rather than a rule, because it is one of the
    * terminal settings a person can change (1-en) and the settings screen
