@@ -9230,7 +9230,7 @@ mod tests {
         /// One frame: the stream's due rows go to the transcript, and what
         /// the screen then shows is the transcript and the live rows.
         fn frame(ui: &mut super::Ui) -> Vec<String> {
-            ui.commit_stream(Instant::now());
+            ui.commit_stream(std::time::Instant::now());
             let mut rows = history(ui);
             rows.extend(ui.active_cell(80).0.iter().map(Line::plain));
             rows
