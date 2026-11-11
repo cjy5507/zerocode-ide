@@ -291,6 +291,57 @@ async function tool(browser, origin, ok) {
         && explicit.buttons.join() === "허용,거부" && explicit.why === null,
       JSON.stringify(explicit),
     );
+    // A question only the person may answer (zo's `person_only` on the frame):
+    // Enter is no answer — neither an allow nor a refusal — and the person
+    // picks one. The frame is the shape zo sends: two choices, the field last.
+    const personOnly = await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      T.reset();
+      T.frame("s-a", {
+        type: "permission_prompt",
+        prompt_id: 14,
+        tool_name: "CronCreate",
+        reasoning: "매일 09:00에 점검을 돌리는 예약을 만듭니다.",
+        audit_hint: null,
+        risk_level: "high",
+        choices: [
+          { key: "o", label: "Allow once", decision: "allow_once" },
+          { key: "n", label: "Deny", decision: "deny" },
+        ],
+        person_only: true,
+      });
+      await T.settle();
+      const opened = T.look();
+      // The terminal's key sink focused behind the popup: the keyboard comes
+      // back to the frame, not to a choice.
+      keySink.focus();
+      return { opened, returned: T.look().focus };
+    });
+    ok(
+      "a question only the person may answer opens on none of its choices, and a focus that left comes back to the frame",
+      personOnly.opened.shown && personOnly.opened.kind === "tool" && personOnly.opened.mono === "CronCreate"
+        && personOnly.opened.buttons.join() === "Allow once,Deny" && personOnly.opened.focus === "(dialog)"
+        && personOnly.returned === "(dialog)",
+      JSON.stringify(personOnly),
+    );
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(90);
+    const unanswered = await page.evaluate(() => ({ sent: window.__ASK_T__.sent.slice(), shown: window.__ASK_T__.look().shown }));
+    ok(
+      "Enter answers such a question nothing: no decision goes back and the question stands",
+      unanswered.sent.length === 0 && unanswered.shown === true,
+      JSON.stringify(unanswered),
+    );
+    await page.keyboard.press("Tab");
+    const walked = await page.evaluate(() => window.__ASK_T__.look().focus);
+    await page.locator("#ask-scrim").getByRole("button", { name: "Allow once", exact: true }).click();
+    await page.waitForTimeout(90);
+    const picked = await page.evaluate(() => window.__ASK_T__.sent.slice());
+    ok(
+      "Tab reaches its first choice, and the person's click on a choice answers it for that very prompt",
+      walked === "Allow once" && picked.length === 1 && picked[0].promptId === 14 && picked[0].decision === "allow_once",
+      JSON.stringify({ walked, picked }),
+    );
     ok("the tool permission scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   });
 }

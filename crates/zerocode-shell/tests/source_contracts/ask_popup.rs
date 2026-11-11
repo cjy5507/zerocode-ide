@@ -234,10 +234,12 @@ fn enter_is_the_safe_answer_of_its_kind_and_a_held_key_answers_once() {
             && !initial.contains("allow_always"),
         "Enter on a question can pick the choice that stays:\n{initial}"
     );
-    // A tool prompt is what it always was: the first choice holds the keyboard.
+    // A tool prompt is what it always was — the first choice holds the
+    // keyboard — unless its frame says only the person may answer it
+    // (`person_only`): then Enter answers nothing, as on the hand-over.
     let tool = block_after(window, "registerAskKind(\"tool\", {");
     assert!(
-        tool.contains("initial: 0,"),
+        tool.contains("initial: frame.person_only === true ? null : 0,"),
         "the tool prompt's keyboard moved:\n{tool}"
     );
     // Escape refuses with the plain `deny` — the one that is not remembered.

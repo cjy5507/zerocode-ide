@@ -5298,7 +5298,13 @@ registerAskKind("tool", {
       mono: frame.tool_name ? String(frame.tool_name) : null,
       why: [frame.reasoning, frame.audit_hint].filter(Boolean).join(" — ") || null,
       choices,
-      initial: 0,
+      // A question only the person may answer — zo says so on the frame
+      // (`person_only`: a kill of the window's own processes, a schedule of
+      // zo's own) — hands Enter nothing: the keyboard starts on the frame, a
+      // stray Enter neither allows nor refuses, and the person picks the
+      // answer they mean with a click or a Tab (their choice, 2026-11-11).
+      // A frame without the field, every older zo's, opens on its first choice.
+      initial: frame.person_only === true ? null : 0,
       safe: choices.findIndex((choice) => choice.decision === "deny"),
     };
   },
