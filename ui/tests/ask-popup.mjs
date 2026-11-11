@@ -301,7 +301,7 @@ async function tool(browser, origin, ok) {
         type: "permission_prompt",
         prompt_id: 14,
         tool_name: "CronCreate",
-        reasoning: "매일 09:00에 점검을 돌리는 예약을 만듭니다.",
+        reasoning: "zo wants to keep a schedule of its own.\nCalled: 아침 점검\nRuns: 저장소를 점검하고 결과를 적는다\nWhen: 0 9 * * *\nWhere: /Users/dev/app",
         audit_hint: null,
         risk_level: "high",
         choices: [
@@ -315,8 +315,21 @@ async function tool(browser, origin, ok) {
       // The terminal's key sink focused behind the popup: the keyboard comes
       // back to the frame, not to a choice.
       keySink.focus();
-      return { opened, returned: T.look().focus };
+      const why = document.getElementById("ask-why");
+      return {
+        opened,
+        returned: T.look().focus,
+        // What the person reads: a reason of several lines, line by line.
+        lines: why.innerText.split("\n").map((line) => line.trim()).filter(Boolean),
+        space: getComputedStyle(why).whiteSpace,
+      };
     });
+    ok(
+      "a reason of several lines is read line by line",
+      personOnly.space === "pre-line" && personOnly.lines.length === 5
+        && personOnly.lines[1] === "Called: 아침 점검" && personOnly.lines[4] === "Where: /Users/dev/app",
+      JSON.stringify({ lines: personOnly.lines, space: personOnly.space }),
+    );
     ok(
       "a question only the person may answer opens on none of its choices, and a focus that left comes back to the frame",
       personOnly.opened.shown && personOnly.opened.kind === "tool" && personOnly.opened.mono === "CronCreate"

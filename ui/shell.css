@@ -32285,6 +32285,10 @@ select {
   margin: 0 0 var(--space-4);
   font-size: var(--text-xs);
   color: var(--ink-mist);
+  /* A reason of several lines is read line by line: zo's question for a
+   * schedule of its own says what it is called, what runs, when and where,
+   * a line each. */
+  white-space: pre-line;
 }
 
 /* 뒤에 서 있는 질문의 수. 답을 재촉하는 경고가 아니라 사실이므로 — 한 번에
