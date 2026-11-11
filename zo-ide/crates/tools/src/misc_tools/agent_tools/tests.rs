@@ -1645,6 +1645,38 @@ fn zo_process_comm_requires_exact_basename() {
     assert!(!is_zo_process_comm("/usr/local/bin/forge"));
 }
 
+/// `comm` is the rest of the `ps` line: a zo installed under a folder with a
+/// space in its name (`Application Support`) is still a zo.
+#[test]
+fn a_ps_listing_keeps_a_zo_whose_path_holds_spaces() {
+    let listing = "  4242 /Users/dev/Library/Application Support/dev.example/bin/zo\n\
+                   77 /usr/local/bin/zoxide\n\
+                   5150 zo\n\
+                   9 /Users/dev/My Tools/zo helper\n";
+    assert_eq!(
+        zo_pids_in_ps_listing(listing),
+        std::collections::HashSet::from([4242, 5150]),
+    );
+}
+
+/// The probe itself, against a real process: an executable named `zo` in a
+/// folder whose name holds a space is alive while it runs, so the agents it
+/// owns are not overwritten as stopped.
+#[cfg(unix)]
+#[test]
+fn a_live_zo_under_a_path_with_spaces_is_alive() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let folder = dir.path().join("Application Support");
+    std::fs::create_dir_all(&folder).expect("folder");
+    let zo = folder.join("zo");
+    std::fs::copy("/bin/sleep", &zo).expect("copy sleep as zo");
+    let mut child = std::process::Command::new(&zo).arg("30").spawn().expect("spawn zo");
+    let alive = live_zo_pids(std::iter::once(child.id()));
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(alive.contains(&child.id()), "a running zo is alive: {alive:?}");
+}
+
 #[test]
 fn orphan_reap_settles_dead_owner_pids_and_spares_live_and_terminal() {
     fn manifest(dir: &std::path::Path, id: &str, status: &str, owner_pid: Option<u32>) -> AgentOutput {

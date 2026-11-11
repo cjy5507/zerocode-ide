@@ -2132,19 +2132,21 @@ fn live_zo_pids(pids: impl Iterator<Item = u32>) -> std::collections::HashSet<u3
     else {
         return unique; // probe failed — presume alive, reap nothing
     };
-    let mut alive = std::collections::HashSet::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(pid), Some(comm)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        if let Ok(pid) = pid.parse::<u32>() {
-            if is_zo_process_comm(comm) {
-                alive.insert(pid);
-            }
-        }
-    }
-    alive
+    zo_pids_in_ps_listing(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The pids of zo processes in `ps -o pid=,comm=` output. `comm` is the rest
+/// of the line after the pid — on macOS the executable's full path, which may
+/// hold spaces (`…/Application Support/…/zo`), so it is never split further.
+fn zo_pids_in_ps_listing(listing: &str) -> std::collections::HashSet<u32> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (pid, comm) = line.trim_start().split_once(char::is_whitespace)?;
+            let pid = pid.parse::<u32>().ok()?;
+            is_zo_process_comm(comm.trim()).then_some(pid)
+        })
+        .collect()
 }
 
 #[must_use]
