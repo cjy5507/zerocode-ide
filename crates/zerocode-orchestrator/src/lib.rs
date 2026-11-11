@@ -663,7 +663,7 @@ impl Orchestrator {
             if output.ok {
                 return self.worktree_at(&path);
             }
-            if !self.name_is_taken(&path, &branch)? {
+            if !self.name_is_taken(&path, &branch, options)? {
                 return Err(self.failure("worktree add", &output));
             }
             last_failure = self.failure("worktree add", &output).to_string();
@@ -788,8 +788,19 @@ impl Orchestrator {
     /// Measured against real git, the distinction is clean. A genuine failure —
     /// an unborn `HEAD`, an invalid start point — leaves neither the branch nor
     /// the path behind, so finding either is exactly what "taken" means.
-    fn name_is_taken(&self, path: &Path, branch: &str) -> Result<bool, OrchestratorError> {
-        Ok(path.exists() || self.branch_exists(branch)?)
+    ///
+    /// A named branch is outside the suffix search ([`Self::free_name`]) and
+    /// only the directory can be taken: a reused branch always exists, so
+    /// asking about it read every refusal — the branch checked out in another
+    /// worktree above all — as a taken name, and the create walked every
+    /// suffix before blaming the names instead of saying git's own reason.
+    fn name_is_taken(
+        &self,
+        path: &Path,
+        branch: &str,
+        options: &NewWorktree<'_>,
+    ) -> Result<bool, OrchestratorError> {
+        Ok(path.exists() || (options.branch.is_none() && self.branch_exists(branch)?))
     }
 
     /// Every worktree of this repository, the repository's own checkout first.

@@ -287,6 +287,31 @@ fn an_existing_branch_can_be_checked_out_rather_than_cut() {
     );
 }
 
+/// A reuse git refuses is git's own error, at once. The reused branch always
+/// exists, so reading "the branch is there" as "the name is taken" walked all
+/// the directory suffixes — some two hundred git runs — and then blamed the
+/// names. Checked out in another worktree already is the common refusal.
+#[test]
+fn a_reuse_git_refuses_says_why_at_once() {
+    let (dir, _root, orchestrator) = fixture();
+    let refused = orchestrator.create_with(
+        &task("pick up main"),
+        &NewWorktree {
+            branch: Some("main"),
+            reuse_branch: true,
+            ..NewWorktree::default()
+        },
+    );
+    assert!(
+        matches!(refused, Err(OrchestratorError::Git { .. })),
+        "{refused:?}"
+    );
+    let left = fs::read_dir(dir.path().join("worktrees"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(left, 0, "a refused reuse left directories behind");
+}
+
 /// The `none` prefix mode. The branch is the name, with nothing in front of
 /// it, and the one place that spells it is `prefixed_branch`.
 #[test]
