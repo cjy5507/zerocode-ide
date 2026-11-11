@@ -316,6 +316,15 @@ fn read_config(path: &Path) -> Option<Map<String, Value>> {
 }
 
 fn write_config(path: &Path, config: &Map<String, Value>) -> std::io::Result<()> {
+    // The window reconciles at every start and the agents watch these files:
+    // a file that already says this (in whatever formatting the user keeps)
+    // is not written again.
+    if let Ok(text) = std::fs::read_to_string(path)
+        && let Ok(Value::Object(current)) = serde_json::from_str::<Value>(&text)
+        && current == *config
+    {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1132,7 +1141,14 @@ fn install_kimi(paths: &InstallPaths, config_path: &Path, command: &str) -> Hook
 /// Atomic, and with a `.bak` of what was there — measured off Orca's own kimi
 /// writer, and warranted here more than anywhere: this file is the user's
 /// whole kimi configuration and we are editing it as TEXT.
+///
+/// A file that already reads `text` is not written, and so not backed up:
+/// a second start would otherwise replace the user's own file in `.bak` with
+/// our first write.
 fn write_kimi(config_path: &Path, text: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(config_path).is_ok_and(|current| current == text) {
+        return Ok(());
+    }
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1793,6 +1809,60 @@ mod tests {
                 mode(&config_path),
                 0o600,
                 "{agent:?} remove widened the file"
+            );
+        }
+    }
+
+    /// A reconcile that changes nothing writes nothing: the window reconciles
+    /// at every start, the agents watch these files, and kimi's `.bak` must
+    /// still hold the user's own file after the second start, not our output.
+    #[test]
+    fn an_unchanged_config_is_not_written_again() {
+        let (_home, paths) = paths();
+        let kimi = paths.config_path(AgentKind::Kimi);
+        std::fs::create_dir_all(kimi.parent().expect("parent")).expect("dir");
+        let seed = "model = \"k2\"\n";
+        std::fs::write(&kimi, seed).expect("seed");
+        let backup = kimi.with_extension("toml.bak");
+
+        install_agent(&paths, AgentKind::Kimi);
+        assert_eq!(std::fs::read_to_string(&backup).expect("bak"), seed);
+        install_agent(&paths, AgentKind::Kimi);
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("bak"),
+            seed,
+            "a second start replaced the user's backup with our own output"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let inode = |path: &Path| std::fs::metadata(path).expect("stat").ino();
+            for agent in [AgentKind::Claude, AgentKind::Cursor, AgentKind::Kimi] {
+                install_agent(&paths, agent);
+                let file = paths.config_path(agent);
+                let before = inode(&file);
+                install_agent(&paths, agent);
+                assert_eq!(
+                    inode(&file),
+                    before,
+                    "{agent:?}: an unchanged config was rewritten"
+                );
+            }
+            // A user file with nothing of ours is not reformatted by a remove.
+            let droid = paths.config_path(AgentKind::Droid);
+            std::fs::create_dir_all(droid.parent().expect("parent")).expect("dir");
+            std::fs::write(&droid, "{ \"theme\": \"dark\" }").expect("seed");
+            let before = inode(&droid);
+            remove_agent(&paths, AgentKind::Droid);
+            assert_eq!(
+                inode(&droid),
+                before,
+                "a remove rewrote a file it had nothing in"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&droid).expect("read"),
+                "{ \"theme\": \"dark\" }"
             );
         }
     }

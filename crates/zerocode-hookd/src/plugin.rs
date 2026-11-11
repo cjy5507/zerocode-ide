@@ -163,6 +163,10 @@ pub fn install_agent(home: &Path, agent: AgentKind) -> HookStatus {
     // Through a temp and a rename: the agent may be loading its plugins right
     // now, and half a plugin file is a parse error that takes the agent's whole
     // plugin directory down with it. The file keeps the mode it had.
+    // The same plugin is not written again: Amp watches this folder.
+    if std::fs::read_to_string(&path).is_ok_and(|current| current == source) {
+        return status_of(home, agent);
+    }
     let mode = crate::private_file::mode_of(&path);
     if crate::codex_install::write_atomically(&path, &source, mode).is_err() {
         return status(
@@ -471,6 +475,20 @@ mod tests {
         let gone = remove_agent(home.path(), AgentKind::Amp);
         assert_eq!(gone.state, HookInstallState::NotInstalled);
         assert!(!path.exists());
+    }
+
+    /// A second install of the same plugin leaves the file alone.
+    #[cfg(unix)]
+    #[test]
+    fn the_same_plugin_is_not_written_twice() {
+        use std::os::unix::fs::MetadataExt;
+        let home = tempfile::tempdir().expect("tempdir");
+        install_agent(home.path(), AgentKind::Amp);
+        let path = plugin_path(home.path(), AgentKind::Amp);
+        let before = std::fs::metadata(&path).expect("stat").ino();
+        let again = install_agent(home.path(), AgentKind::Amp);
+        assert_eq!(again.state, HookInstallState::Installed, "{again:?}");
+        assert_eq!(std::fs::metadata(&path).expect("stat").ino(), before);
     }
 
     /// A file with our name that we did not write is never overwritten and never
