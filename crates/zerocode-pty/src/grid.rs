@@ -3587,19 +3587,35 @@ impl TerminalGrid {
         self.dirty = true;
     }
 
-    /// After cells slide, a wide glyph may have lost its second half or a
-    /// continuation may have lost the glyph it belonged to. Either half alone
-    /// is a lie about what occupies the column, so both are blanked.
+    /// After cells slide, a wide glyph may have lost part of its tail or a
+    /// continuation may have lost the glyph it belonged to. Either alone is a
+    /// lie about what occupies the column, so both are blanked.
+    ///
+    /// Measured by the whole cluster ([`cell_width`]), not its first scalar:
+    /// `☂️` is two columns and `🏴 ZWJ Ⓜ` three, and a head scalar's width
+    /// called their tails orphans.
     fn heal_wide_pairs(&mut self, row: usize) {
-        for col in 0..self.cols {
-            let wide = |cell: &Cell| cell.ch.width().unwrap_or(0) >= 2;
-            let orphaned_tail = self.cells[row][col].is_continuation()
-                && (col == 0 || !wide(&self.cells[row][col - 1]));
-            let headless = wide(&self.cells[row][col])
-                && (col + 1 >= self.cols || !self.cells[row][col + 1].is_continuation());
-            if orphaned_tail || headless {
-                self.cells[row][col] = Cell::default();
+        let line = &mut self.cells[row];
+        let cols = self.cols.min(line.len());
+        let mut col = 0;
+        while col < cols {
+            if line[col].is_continuation() {
+                // No head in front claims it: the walk below steps over every
+                // continuation a head owns.
+                line[col] = Cell::default();
+                col += 1;
+                continue;
             }
+            let width = cell_width(&line[col]);
+            let tails = (1..width)
+                .take_while(|offset| col + offset < cols && line[col + offset].is_continuation())
+                .count();
+            if tails + 1 < width {
+                for cell in &mut line[col..=col + tails] {
+                    *cell = Cell::default();
+                }
+            }
+            col += 1 + tails;
         }
     }
 
@@ -6174,6 +6190,42 @@ mod tests {
             Some(' '),
             "a two-column glyph is still claiming a column the row lost"
         );
+    }
+
+    /// A slide keeps a whole cluster whole, however its width is made.
+    ///
+    /// `heal_wide_pairs` asked the head scalar how wide it was, and `☂` is one
+    /// column: after any `CSI @` or `CSI P` on the row, the second column of
+    /// `☂️` read as an orphan and was blanked, leaving a two-column glyph over
+    /// a column nothing claimed. `🏴 ZWJ Ⓜ` lost its third column the same way.
+    #[test]
+    fn a_slide_keeps_a_cluster_wider_than_its_head_scalar() {
+        let mut term = screen(2, 12, "a\u{2602}\u{FE0F}b");
+        term.feed(b"\x1b[1;1H\x1b[1@");
+        assert_eq!(term.grid().cell(0, 2).map(|c| c.ch), Some('\u{2602}'));
+        assert!(
+            term.grid().cell(0, 3).unwrap().is_continuation(),
+            "the insert cut the umbrella's second column"
+        );
+        assert_eq!(term.grid().line(0), " a\u{2602}\u{FE0F}b");
+        term.feed(b"\x1b[1;1H\x1b[1P");
+        assert!(
+            term.grid().cell(0, 2).unwrap().is_continuation(),
+            "the delete cut the umbrella's second column"
+        );
+        assert_eq!(term.grid().line(0), "a\u{2602}\u{FE0F}b");
+
+        let mut term = screen(2, 12, "\u{1F3F4}\u{200D}\u{24C2}x");
+        assert_eq!(term.grid().cell(0, 3).map(|c| c.ch), Some('x'));
+        term.feed(b"\x1b[1;1H\x1b[1@");
+        assert_eq!(term.grid().cell(0, 1).map(|c| c.ch), Some('\u{1F3F4}'));
+        for col in [2, 3] {
+            assert!(
+                term.grid().cell(0, col).unwrap().is_continuation(),
+                "the insert cut column {col} of a three-column cluster"
+            );
+        }
+        assert_eq!(term.grid().cell(0, 4).map(|c| c.ch), Some('x'));
     }
 
     /// Colour does not end a grapheme.
