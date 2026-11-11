@@ -479,7 +479,7 @@ pub fn prompt_in_payload(payload: &str) -> Option<String> {
 /// [`prompt_in_payload`], for a caller that already paid the parse.
 #[must_use]
 pub fn prompt_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<String> {
-    prompt_words_in_parsed(payload).map(|words| clamp(&words))
+    prompt_line(payload.tree()?.get("prompt")?.as_str()?).map(|line| clamp(&line))
 }
 
 /// What a person typed in a `UserPromptSubmit`-family payload, whole: past
@@ -519,12 +519,78 @@ const PEER_LETTER_FRAMES: [&str; 2] = ["<cross-session-message", "</cross-sessio
 /// is ([`searchable_words`]).
 #[must_use]
 pub fn holds_a_peer_letter(text: &str) -> bool {
+    peer_letter(text).is_some()
+}
+
+/// The attribute of a letter's opening that names the session it came from,
+/// as that session is called on the sender's side (`from-name="zerocode-41"`).
+const PEER_LETTER_SENDER: &str = "from-name";
+
+/// A letter another session sent, as the frame around it says it.
+struct PeerLetter<'a> {
+    /// The sending session's name, when the frame says one.
+    from: Option<&'a str>,
+    /// What the letter says, the frame taken off.
+    body: &'a str,
+}
+
+impl PeerLetter<'_> {
+    /// `said` of this letter with who sent it: `zerocode-41: 레인이 끝났다`.
+    fn told(&self, said: &str) -> String {
+        match self.from {
+            Some(from) => format!("{from}: {said}"),
+            None => said.to_string(),
+        }
+    }
+
+    /// The letter on one line, for a name: its sender and the line it opens
+    /// with. `None` for a letter that says nothing.
+    fn name(&self) -> Option<String> {
+        let opens = self
+            .body
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())?;
+        Some(self.told(opens))
+    }
+}
+
+/// The letter in `text`: the first frame a CLI opened before one and closed
+/// after it ([`PEER_LETTER_FRAMES`]). The one reading of that frame — the
+/// test that a prompt is a letter ([`holds_a_peer_letter`]) and the line a
+/// letter is shown and named by both ask here.
+fn peer_letter(text: &str) -> Option<PeerLetter<'_>> {
     let [opens, closes] = PEER_LETTER_FRAMES;
-    text.find(opens).is_some_and(|at| {
-        text[at..]
-            .find('>')
-            .is_some_and(|opened| text[at + opened..].contains(closes))
+    let at = text.find(opens)?;
+    let opened = at + text[at..].find('>')?;
+    let closed = opened + text[opened..].find(closes)?;
+    let from = text[at + opens.len()..opened]
+        .split_once(&format!("{PEER_LETTER_SENDER}=\""))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(name, _)| name.trim())
+        .filter(|name| !name.is_empty());
+    Some(PeerLetter {
+        from,
+        body: text[opened + 1..closed].trim(),
     })
+}
+
+/// A prompt as a card says it on one line and a pane is named by it: a letter
+/// another session sent by who sent it and the line it opens with, anything
+/// else by its words ([`prompt_words`]).
+///
+/// A pane a letter opened was named `<cross-session-mes…` on the tab strip,
+/// the sidebar and the session list (2026-11-11, t-103659): the frame was
+/// the first thing in the prompt and nothing read it. The hook's prompt, a
+/// restart's remembered prompt and a stored session's card all ask here, so
+/// the three surfaces name a letter alike.
+#[must_use]
+pub fn prompt_line(prompt: &str) -> Option<String> {
+    let unframed = without_pasted_frames(prompt);
+    match peer_letter(&unframed) {
+        Some(letter) => letter.name(),
+        None => prompt_words(prompt),
+    }
 }
 
 /// What a prompt asks with, for a reader that searches rather than names.
@@ -622,6 +688,11 @@ fn without_envelopes_inside(text: &str) -> std::borrow::Cow<'_, str> {
 #[must_use]
 pub fn shown_words(said: &str) -> Option<String> {
     let unframed = without_pasted_frames(said);
+    // A letter is shown as who sent it and what it says; the sentences a CLI
+    // stands beside its frame are the CLI's.
+    if let Some(letter) = peer_letter(&unframed) {
+        return (!letter.body.is_empty()).then(|| letter.told(letter.body));
+    }
     let words = without_envelopes_inside(past_the_envelopes(&unframed));
     let words = words.trim();
     (!words.is_empty()).then(|| words.to_string())
@@ -638,6 +709,11 @@ pub fn shown_words(said: &str) -> Option<String> {
 /// plumbing ("세션 내용도 orca처럼 나와야하는데 태그가 붙어서 보임", 1-g101).
 #[must_use]
 pub fn naming_words(said: &str) -> Option<String> {
+    // A letter names by its sender and the line it opens with — the line a
+    // pane a letter opened is named by ([`prompt_line`]).
+    if let Some(letter) = peer_letter(&without_pasted_frames(said)) {
+        return letter.name();
+    }
     let shown = shown_words(said)?;
     let mut rest = shown.trim_start();
     while rest.starts_with('<') {
@@ -809,10 +885,8 @@ pub fn last_naming_prompt(path: &Path) -> Option<String> {
 pub fn last_naming_prompt_words(path: &Path) -> Option<String> {
     let tail = Tail::read_within(path, NAMING_PROMPT_SEARCH_BYTES)?;
     tail.lines().rev().find_map(|line| {
-        let typed = typed_prompt(line.trim())?;
-        let unframed = without_pasted_frames(&typed);
-        let prompt = past_the_envelopes(&unframed).trim();
-        names_the_turn(prompt).then(|| prompt.to_string())
+        let prompt = prompt_line(&typed_prompt(line.trim())?)?;
+        names_the_turn(&prompt).then_some(prompt)
     })
 }
 
@@ -4780,6 +4854,80 @@ mod tests {
                 typed_words(&result),
             ],
             [Some("hello".into()), Some("look at this".into()), None]
+        );
+    }
+
+    /* ---- a letter from another session, shown and named (t-103659) ---- */
+
+    const LETTER: &str = "<cross-session-message from=\"uds:/tmp/cc-socks/0000.sock\" \
+                          from-name=\"zerocode-00\" from-mode=\"bypass\">\n\
+                          레인이 초록으로 끝났다.\n창 시험이 모두 통과했다.\n\
+                          </cross-session-message>";
+
+    /// A letter is named by who sent it and the line it opens with, whatever
+    /// a CLI stands beside its frame — on a card's line, in a pane's name
+    /// and on a session card alike.
+    #[test]
+    fn a_letter_is_named_by_its_sender_and_its_first_line() {
+        let named = "zerocode-00: 레인이 초록으로 끝났다.";
+        for said in [
+            LETTER.to_string(),
+            format!(
+                "Another Claude session sent a message:\n{LETTER}\n\n\
+                 This came from another Claude session."
+            ),
+        ] {
+            assert_eq!(
+                [prompt_line(&said), naming_words(&said)],
+                [Some(named.to_string()), Some(named.to_string())],
+                "{said:?}"
+            );
+            let payload = serde_json::json!({ "prompt": said }).to_string();
+            assert_eq!(prompt_in_payload(&payload).as_deref(), Some(named));
+        }
+    }
+
+    /// A session card shows a letter as who sent it and what it says, the
+    /// frame and the CLI's own sentences gone.
+    #[test]
+    fn a_card_shows_a_letter_as_its_sender_and_what_it_says() {
+        let said = format!("Another Claude session sent a message:\n{LETTER}");
+        assert_eq!(
+            shown_words(&said).as_deref(),
+            Some("zerocode-00: 레인이 초록으로 끝났다.\n창 시험이 모두 통과했다.")
+        );
+    }
+
+    /// A frame that names no sender gives the letter alone, and one that says
+    /// nothing gives no line at all.
+    #[test]
+    fn a_letter_with_no_sender_or_no_words_is_said_as_it_is() {
+        let unsigned = "<cross-session-message>\n배포가 끝났다\n</cross-session-message>";
+        let blank =
+            "<cross-session-message from-name=\"zerocode-00\">\n \n</cross-session-message>";
+        assert_eq!(
+            [
+                prompt_line(unsigned),
+                prompt_line(blank),
+                shown_words(blank)
+            ],
+            [Some("배포가 끝났다".to_string()), None, None]
+        );
+    }
+
+    /// A person who writes the tag's name closed nothing around anything:
+    /// the prompt is theirs, word for word.
+    #[test]
+    fn a_tag_a_person_wrote_is_not_a_letter() {
+        for said in [
+            "<cross-session-message> 태그가 붙은 프롬프트는 누가 보낸 거야",
+            "편지는 <cross-session-message from= 으로 시작한다는데 맞아?",
+        ] {
+            assert_eq!(shown_words(said).as_deref(), Some(said), "{said:?}");
+        }
+        assert_eq!(
+            prompt_line("편지는 <cross-session-message from= 으로 시작한다는데 맞아?").as_deref(),
+            Some("편지는 <cross-session-message from= 으로 시작한다는데 맞아?")
         );
     }
 }

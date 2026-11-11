@@ -2500,9 +2500,9 @@ impl Parsed {
     /// One turn, shown while the card still wants words ([`Self::wants`]) —
     /// for a reader whose store counts the turns itself (a database row).
     ///
-    /// The user side is shown as what was asked ([`asked_words`]): the task a
-    /// worker's briefing hands over rather than the briefing, the words
-    /// rather than the frames a CLI wrote around them. A turn that was all
+    /// The user side is shown as what was asked: the task a worker's
+    /// briefing hands over rather than the briefing, the words rather than
+    /// the frames a CLI wrote around them. A turn that was all
     /// machinery is no line and no name; the next one is tried. The first
     /// user turn that reads as words names the card, wherever it stands —
     /// three slash-command records used to fill the preview and leave the
@@ -2517,13 +2517,22 @@ impl Parsed {
             return;
         };
         let shown = if role == USER {
-            let Some(asked) = asked_words(&words) else {
+            // Two readings that already exist, in order: the task's own words
+            // out of a worker's prompt ([`crate::jev::file_pick::task_words`]
+            // — everything a summoned worker is told before `Now do this:` is
+            // the same in every prompt, and 553 of 623 Claude cards on one
+            // machine were named by its first sentence), then the words
+            // without the frames and envelopes a CLI wrote ([`shown_words`]).
+            let task = crate::jev::file_pick::task_words(&words);
+            let Some(asked) = shown_words(&task) else {
                 return;
             };
             self.asked += 1;
             self.window_typed += usize::from(crate::orchestration::is_window_typed(&asked));
+            // Named from the turn as it was said, not as it is shown: a
+            // letter names by its sender and the line it opens with.
             if !self.is_named()
-                && let Some(name) = naming_words(&asked).map(|name| clamp(&name))
+                && let Some(name) = naming_words(&task).map(|name| clamp(&name))
                 && (self.title.is_empty() || names_the_turn(&name))
             {
                 self.title = name;
@@ -2539,18 +2548,6 @@ impl Parsed {
             });
         }
     }
-}
-
-/// What a card shows of one thing the user side said.
-///
-/// Two readings that already exist, in order: the task's own words out of a
-/// worker's prompt ([`crate::jev::file_pick::task_words`] — everything a
-/// summoned worker is told before `Now do this:` is the same in every
-/// prompt, and 553 of 623 Claude cards on one machine were named by its
-/// first sentence), then the words without the frames and envelopes a CLI
-/// wrote ([`shown_words`]).
-fn asked_words(said: &str) -> Option<String> {
-    shown_words(&crate::jev::file_pick::task_words(said))
 }
 
 /// Claude's store: one JSON object per line.
@@ -4890,6 +4887,31 @@ mod tests {
                 card.session_id.as_str()
             ),
             ("", false, "session-1790000000000-0")
+        );
+    }
+
+    /// A conversation a letter opened is named by the letter: who sent it and
+    /// the line it opens with. Its tab and its row in the sidebar are named
+    /// by the same line ([`crate::transcript::prompt_line`]); they read
+    /// `<cross-session-mes…`.
+    #[test]
+    fn a_session_a_letter_opened_is_named_by_the_letter() {
+        let letter = "Another Claude session sent a message:\n\
+                      <cross-session-message from=\"uds:/tmp/cc-socks/0000.sock\" from-name=\"zerocode-00\">\n\
+                      레인이 초록으로 끝났다.\n창 시험이 모두 통과했다.\n</cross-session-message>";
+        let card = built(
+            "claude",
+            claude_session(&claude_user(letter.into())).expect("parsed"),
+        );
+        assert_eq!(
+            says(&card),
+            (
+                "zerocode-00: 레인이 초록으로 끝났다.",
+                vec![(
+                    "user",
+                    "zerocode-00: 레인이 초록으로 끝났다. 창 시험이 모두 통과했다."
+                )]
+            )
         );
     }
 }
