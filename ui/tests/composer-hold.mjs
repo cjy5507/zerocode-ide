@@ -11,6 +11,8 @@
  *     말하고, `COMPOSER_HOLD_MS`가 지나면 창이 제 시계로 기다린 글을 판에 한 번
  *     보내며, 그 뒤의 Enter는 곧바로 나간다. 선에는 마감(`deadlineMs`)이 실려
  *     늦게 선 선은 백엔드가 닫는다.
+ *   - 질문 카드가 서 있을 때 상자의 글은 그 답으로 나간다. 답하기(`answer_ask`)는 사람의
+ *     것이라, 「보내기」 단추로 보내든 Enter로 보내든 그 부름은 사람의 손을 말한다.
  *   - 답이 나간 질문 카드는 시계로 풀리지 않는다 — 카드 아래 메뉴에 글이 떨어지는
  *     길(t-81786 P0)을 다시 열지 않는다. 판이 움직이면 나간다. 보낸 글의 턴 시작도
  *     붙잡음의 시계(`COMPOSER_HOLD_MS`)로는 풀리지 않는다: 판이 움직이면 나간다. 그 글이
@@ -26,11 +28,16 @@ import { openWindowTestPage } from "./window-boot.mjs";
 /* The page's tools for one scene: what reached the pane, what the wire was
  * asked with, the long timers the window armed, a hook to tell. */
 const STAND = async () => {
-  window.__HOLD__ = { sent: [], wires: [], long: [] };
+  window.__HOLD__ = { sent: [], wires: [], long: [], hands: [] };
   const hold = window.__HOLD__;
   window.__ANSWER__.term_paste = (args) => (hold.sent.push(`paste:${args.text}`), null);
   window.__ANSWER__.term_key = (args) => (hold.sent.push(`key:${JSON.stringify(args.press ?? null)}`), null);
-  window.__ANSWER__.answer_ask = (args) => (hold.sent.push(`answer:${JSON.stringify(args.selections ?? null)}`), null);
+  // Whose hand the page said answered (`zerocode-hand`, shell-boot.js `invoke`).
+  window.__ANSWER__.answer_ask = (args, options) => {
+    hold.sent.push(`answer:${JSON.stringify(args.selections ?? null)}`);
+    hold.hands.push(options?.headers?.["zerocode-hand"] ?? null);
+    return null;
+  };
   window.__ANSWER__.answer_approval = () => null;
   const rows = [{ role: "user", text: "어제 하던 일" }, { role: "assistant", text: "끝났습니다." }];
   window.__ANSWER__.pane_log = (args) => ({
@@ -89,6 +96,7 @@ const LOOK = () => {
     queue: [...(paneChats.get(term)?.run?.queue ?? [])],
     why: composer?.querySelector(".composer-queue-why")?.textContent ?? null,
     sent: [...window.__HOLD__.sent],
+    hands: [...window.__HOLD__.hands],
     wires: window.__HOLD__.wires.length,
     refused: chat?.querySelector('.pane-chat-notice[data-says="worker.wireRefused"]')?.textContent ?? null,
     exitTyped: chat?.querySelector('.pane-chat-notice[data-says="worker.handOverExitTyped"]')?.textContent ?? null,
@@ -151,6 +159,7 @@ export async function testComposerHold(browser, origin, ok) {
   await testExitTypedThenRefused(browser, origin, ok);
   await testPaneLeftAndWireRefused(browser, origin, ok);
   await testAnsweredCardHolds(browser, origin, ok);
+  await testAnswerFromTheBoxIsThePersons(browser, origin, ok);
   await testSentTurnHolds(browser, origin, ok);
 }
 
@@ -585,6 +594,42 @@ async function testAnsweredCardHolds(browser, origin, ok) {
       JSON.stringify({ held, passed, moved, words }),
     );
   });
+}
+
+/* ③′ The words in the box under a standing question are its answer, and
+ * answering (`answer_ask`) is the person's alone: the call says whose hand
+ * sent it. By Enter the form is submitted inside the key; by the 「보내기」
+ * button the browser submits after the click has been dispatched, where the
+ * hand is nobody's — so the button's press submits inside itself. A real
+ * pointer and a real key, one page each. */
+async function testAnswerFromTheBoxIsThePersons(browser, origin, ok) {
+  const said = {};
+  const presses = [
+    ["button", (page) => page.locator(".pane-chat .worker-composer-send").click()],
+    ["enter", (page) => page.keyboard.press("Enter")],
+  ];
+  for (const [how, press] of presses) {
+    await scene(browser, origin, ok, `answer from the box by ${how}`, async (page) => {
+      await page.evaluate(async () => {
+        window.__TELL__({ term: window.__TERM__, state: "waiting", agent: "claude",
+          ask_prompt: { questions: [{ question: "어느 쪽으로 할까요?", header: "방향",
+            options: [{ label: "A", description: "가" }, { label: "B", description: "나" }], multi_select: false }] } });
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      });
+      await page.locator(".pane-chat .worker-composer-box").click();
+      await page.keyboard.type("B로 가 주세요");
+      await press(page);
+      await page.waitForTimeout(250);
+      const look = await page.evaluate(LOOK);
+      said[how] = { hands: look.hands, sent: look.sent };
+    });
+  }
+  const answered = JSON.stringify({ hands: ["person"], sent: [`answer:${JSON.stringify([{ indices: [], other: "B로 가 주세요" }])}`] });
+  ok(
+    "an_answer_sent_from_the_box_says_the_persons_hand_by_the_button_and_by_enter: under a standing question the box's words went as its answer, once, and the call said the person sent it — by the 「보내기」 button as by Enter",
+    JSON.stringify(said.button) === answered && JSON.stringify(said.enter) === answered,
+    JSON.stringify(said),
+  );
 }
 
 /* ④ The queue sent its first message and no report says the turn it should

@@ -18018,7 +18018,15 @@ function workerComposerNode(run, owner = null) {
       run.status = "idle";
       run.sending = false;
       syncWorkerComposers(run);
+      return;
     }
+    // The press submits inside itself. The browser's own submission comes after
+    // the click has been dispatched, where the hand is nobody's (`handNow`) — and
+    // words sent here under a standing question are its answer (`answer_ask`),
+    // which is the person's alone: the window refused the person's own press.
+    // Enter already submits inside its key (`composerKeys`).
+    event.preventDefault();
+    form.requestSubmit();
   });
   right.appendChild(send);
   tools.appendChild(right);
