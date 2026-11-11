@@ -340,7 +340,19 @@ fn user_cell_for_palette(
     width: usize,
     terminal_palette: Option<palette::TerminalPalette>,
 ) -> Vec<Line> {
-    let body: Vec<Line> = text.lines().map(Line::from_text).collect();
+    let band = user_message_style_for_palette(terminal_palette);
+    // What was said, without the blank lines before and after it: a message
+    // handed over with a newline on either side — the window's pointer while
+    // a turn works — is its words, not a band a row taller for each.
+    let said: Vec<&str> = text.lines().collect();
+    let first = said.iter().position(|line| !line.trim().is_empty()).unwrap_or(said.len());
+    let last = said.iter().rposition(|line| !line.trim().is_empty()).map_or(first, |at| at + 1);
+    // The band is each line's own style before it is wrapped, so the line a
+    // row came from carries it. A resize rebuilds the rows above the head
+    // from those lines, and a band the rows alone wore was lost there: the
+    // band's blank rows kept their tint and the words stood between them on
+    // the pane's own ground (zo 1.1.142, 2026-11-11).
+    let body: Vec<Line> = said[first..last].iter().map(|line| Line::from_text(*line).styled(band)).collect();
     let body = if body.is_empty() {
         vec![Line::empty()]
     } else {
@@ -367,9 +379,9 @@ fn user_cell_for_palette(
     out.push(Line::empty());
     out.extend(prefixed_prose(&body, width, &Prefix::user(), true));
     out.push(Line::empty());
-    let style = user_message_style_for_palette(terminal_palette);
+    // The band's blank rows, and a blank line inside the message.
     for line in &mut out[band_start..] {
-        line.style = style;
+        line.style = band;
     }
     out
 }
@@ -1703,6 +1715,44 @@ mod tests {
         let plain: Vec<String> = lines.iter().map(Line::plain).collect();
         assert_eq!(plain[1], "› alpha beta");
         assert_eq!(plain[2], "  gamma delta");
+    }
+
+    /// The band is on the line a row came from, not only on the row. A resize
+    /// rebuilds the rows above the head from those lines, and a band the rows
+    /// alone wore was lost there: the blank rows kept their tint and the
+    /// words stood between them on the pane's own ground.
+    #[test]
+    fn a_user_rows_line_carries_the_band_so_a_resize_keeps_it() {
+        use crate::tui::palette::{ColorLevel, TerminalPalette};
+
+        let terminal = TerminalPalette::new((255, 255, 255), (0, 0, 0), ColorLevel::TrueColor);
+        let cell = user_cell_for_palette("alpha beta gamma delta epsilon", 14, Some(terminal));
+        let worded: Vec<&Line> = cell.iter().filter(|row| !row.plain().trim().is_empty()).collect();
+        assert!(worded.len() > 1, "the message wraps at this width");
+        for row in worded {
+            let band = row.style.bg;
+            assert!(band.is_some(), "the row stands on the band: {:?}", row.plain());
+            let origin = row.origin.as_deref().expect("a wrapped row names its line");
+            assert_eq!(origin.style.bg, band, "and so does the line it is rebuilt from");
+        }
+    }
+
+    /// A message handed over with a newline before it and one after — the
+    /// window's pointer while a turn works — is its words: its band is the
+    /// band of the same words alone, not a row taller for each newline.
+    #[test]
+    fn blank_lines_around_a_message_are_not_rows_of_its_band() {
+        use crate::tui::palette::{ColorLevel, TerminalPalette};
+
+        let terminal = TerminalPalette::new((255, 255, 255), (0, 0, 0), ColorLevel::TrueColor);
+        let rows_of = |text: &str| -> Vec<String> {
+            user_cell_for_palette(text, 60, Some(terminal)).iter().map(Line::plain).collect()
+        };
+        assert_eq!(rows_of("\nYou have 1 message.\n"), rows_of("You have 1 message."));
+        assert_eq!(rows_of("\r\n \nYou have 1 message.\n\n"), rows_of("You have 1 message."));
+        assert_eq!(rows_of("\n \n"), rows_of(""), "nothing said is one empty band");
+        // A blank line inside the message is the person's, and stays.
+        assert_eq!(rows_of("first\n\nsecond").len(), rows_of("first").len() + 2);
     }
 
     #[test]
