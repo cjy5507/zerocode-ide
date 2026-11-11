@@ -107,8 +107,14 @@ pub fn preview_tool_input(name: &str, input: &Value) -> ToolPreview {
                 .map_or(1, Vec::len);
             ToolPreview::Edit { path, hunk_count }
         }
+        // The glob tool takes a call with no `pattern` as "everything under
+        // `path`", and under the working folder with no `path` either — the
+        // way models list a folder. The row says the folder it lists: a `?`
+        // there read as a call that went wrong (`List(?)`, 2026-11-11).
         Some(CoreTool::Glob) => ToolPreview::Glob {
-            pattern: extract_str(input, "pattern").unwrap_or_else(|| "?".to_string()),
+            pattern: extract_str(input, "pattern")
+                .or_else(|| extract_str(input, "path"))
+                .unwrap_or_else(|| ".".to_string()),
         },
         Some(CoreTool::Grep) => ToolPreview::Grep {
             pattern: extract_str(input, "pattern").unwrap_or_else(|| "?".to_string()),
@@ -1251,6 +1257,20 @@ mod tests {
         let (out, truncated) = truncate(&short, 80, 4_000);
         assert!(!truncated);
         assert_eq!(out, "가나다");
+    }
+
+    /// A glob with no pattern lists a folder, and its row names that folder:
+    /// the `path` it was given, or the working folder. A pattern is shown as
+    /// it always was.
+    #[test]
+    fn a_glob_without_a_pattern_is_shown_as_the_folder_it_lists() {
+        let shown = |input: Value| match preview_tool_input("glob_search", &input) {
+            ToolPreview::Glob { pattern } => pattern,
+            other => panic!("a glob call previews as a glob: {other:?}"),
+        };
+        assert_eq!(shown(json!({})), ".");
+        assert_eq!(shown(json!({ "path": "src/tui" })), "src/tui");
+        assert_eq!(shown(json!({ "pattern": "**/*.rs", "path": "src" })), "**/*.rs");
     }
 
     #[test]
