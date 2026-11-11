@@ -578,7 +578,7 @@ pub fn upsert_project_trust_level(
 fn replace_config(path: &Path, body: &str) -> std::io::Result<()> {
     let target = crate::codex_install::write_path(path);
     let mode = crate::private_file::mode_of(&target);
-    crate::codex_install::write_atomically(&target, body, mode)
+    crate::private_file::write_atomically(&target, body.as_bytes(), mode)
 }
 
 /// Byte offset just past the header line's text (before its own line end) of

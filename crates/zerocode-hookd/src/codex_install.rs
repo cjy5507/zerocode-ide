@@ -457,31 +457,12 @@ pub fn backup_once(state_dir: &Path, previous_raw: Option<&str>) -> Result<(), R
         return Ok(());
     }
     std::fs::create_dir_all(state_dir).map_err(|error| Refusal::Failed(error.to_string()))?;
-    write_atomically(&backup, raw, Some(0o600)).map_err(|error| Refusal::Failed(error.to_string()))
-}
-
-pub(crate) fn write_atomically(path: &Path, body: &str, mode: Option<u32>) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    // The temp name carries our own prefix so a sweep can tell its leftovers from
-    // another writer's, and the target's name so two files written into one
-    // folder at once (a home's settings beside its hooks) never share a temp.
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let temp = dir.join(format!(".zerocode-hooks-{}-{name}.tmp", std::process::id()));
-    std::fs::write(&temp, body)?;
-    // Unix gets the exact mode back (the undo restores "the bytes and the
-    // mode"); elsewhere only an owner-only mode has a road.
-    if let Some(mode) = mode {
-        crate::private_file::apply_mode(&temp, mode)?;
-    }
-    let renamed = std::fs::rename(&temp, path);
-    if renamed.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    renamed
+    crate::private_file::write_atomically(
+        &backup,
+        raw.as_bytes(),
+        Some(crate::private_file::PRIVATE_FILE_MODE),
+    )
+    .map_err(|error| Refusal::Failed(error.to_string()))
 }
 
 /// Remove our groups from one hooks file, as it stands NOW.
@@ -583,7 +564,7 @@ pub fn write(
         return Ok(false);
     }
     assert_unchanged(config_path, found.raw.as_deref())?;
-    write_atomically(&target, &body, found.mode)
+    crate::private_file::write_atomically(&target, body.as_bytes(), found.mode)
         .map(|()| true)
         .map_err(|error| Refusal::Failed(error.to_string()))
 }
@@ -603,7 +584,7 @@ pub fn restore(config_path: &Path, found: &Found) -> Result<(), Refusal> {
             }
             Ok(())
         }
-        Some(raw) => write_atomically(&target, raw, found.mode)
+        Some(raw) => crate::private_file::write_atomically(&target, raw.as_bytes(), found.mode)
             .map_err(|error| Refusal::Failed(error.to_string())),
     }
 }

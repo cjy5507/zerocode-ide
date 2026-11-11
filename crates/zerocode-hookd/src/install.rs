@@ -350,7 +350,7 @@ fn write_config(path: &Path, config: &Map<String, Value>) -> std::io::Result<()>
 /// hook the user wrote too. The file keeps the mode it had — a settings file
 /// the user keeps at 0600 (its `env` may hold a key) stays 0600.
 fn write_keeping_mode(path: &Path, text: &str) -> std::io::Result<()> {
-    crate::codex_install::write_atomically(path, text, crate::private_file::mode_of(path))
+    crate::private_file::write_atomically(path, text.as_bytes(), crate::private_file::mode_of(path))
 }
 
 /// Does this hook definition (in any of the vendor shapes) run one of our

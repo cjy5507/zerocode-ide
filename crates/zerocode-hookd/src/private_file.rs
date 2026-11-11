@@ -14,7 +14,6 @@ use std::io;
 use std::path::Path;
 
 /// Owner read/write only.
-#[cfg(unix)]
 pub(crate) const PRIVATE_FILE_MODE: u32 = 0o600;
 
 /// Whether a unix mode asks for a private file (no group or other bits).
@@ -64,33 +63,16 @@ pub(crate) fn apply_mode(path: &Path, mode: u32) -> io::Result<()> {
     }
 }
 
-/// Write `contents` into a file that is its owner's alone before the first
-/// byte lands. Unix creates it 0600 (a stale file at `path` is removed first,
-/// since a mode is given only at creation); elsewhere the file is written and
-/// then made private, the only road there.
-pub(crate) fn write_new_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        if let Err(error) = std::fs::remove_file(path)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            return Err(error);
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(PRIVATE_FILE_MODE)
-            .open(path)?;
-        file.write_all(contents)?;
-        file.sync_all()
+/// Through a sibling temp and a rename, so no reader ever sees half a file.
+/// The temp is born with `mode` on unix and gets it exactly (or, elsewhere,
+/// its owner-only ACL) before the rename; it is removed whatever step fails.
+pub(crate) fn write_atomically(path: &Path, body: &[u8], mode: Option<u32>) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, contents)?;
-        make_private(path)
-    }
+    zerocode_core::atomic_file::write_atomically_sealed(path, body, mode, |temp| {
+        mode.map_or(Ok(()), |mode| apply_mode(temp, mode))
+    })
 }
 
 /// Make `path` readable and writable by its owner alone.
@@ -175,31 +157,6 @@ mod tests {
             std::fs::read_to_string(&path).expect("owner reads"),
             "secret"
         );
-    }
-
-    /// Private from birth: even over a stale world-readable file of the
-    /// same name, what is written is never readable by anyone else.
-    #[test]
-    fn a_new_private_file_is_private_over_a_stale_one() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("stage");
-        std::fs::write(&path, "old").expect("stale");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        }
-        write_new_private(&path, b"example-token").expect("write");
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read"),
-            "example-token"
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
     }
 
     #[test]

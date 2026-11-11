@@ -168,7 +168,7 @@ pub fn install_agent(home: &Path, agent: AgentKind) -> HookStatus {
         return status_of(home, agent);
     }
     let mode = crate::private_file::mode_of(&path);
-    if crate::codex_install::write_atomically(&path, &source, mode).is_err() {
+    if crate::private_file::write_atomically(&path, source.as_bytes(), mode).is_err() {
         return status(
             HookInstallState::Error,
             Some("플러그인을 쓰지 못했습니다".into()),
