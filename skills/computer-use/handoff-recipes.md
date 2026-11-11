@@ -122,12 +122,14 @@ Where a paragraph below says "above" or "below", it means the whole guide, which
     a step that is the person's. Their no answers `confirmation_refused`:
     do not ask again. Three minutes with no answer is
     `confirmation_timeout`: say in your reply what you wanted scheduled and
-    why. A recipe that is no Flow, a schedule that fires closer together
-    than 15 minutes, and a request while the person is answering another
-    question (`person_asked`) are refused before any card. Changing,
-    pausing and deleting the job are the person's (the Automations page),
-    and a Flow whose document changes after their yes waits there until
-    they allow it again — say so when you save over a scheduled Flow.
+    why. A recipe that is no Flow, a Flow that may spend money (any policy
+    but `dry` — the person schedules those themselves), a schedule that
+    fires closer together than 15 minutes, and a request while the person
+    is answering another question (`person_asked`) are refused before any
+    card. Changing, pausing and deleting the job are the person's (the
+    Automations page), and a Flow whose document changes after their yes
+    waits there until they allow it again — say so when you save over a
+    scheduled Flow.
 - **Memory across a cut context**: `status --json` carries `state` — the
   last verb, whether it worked, failures in a row, recent actions — and the
   session's evidence folder holds `state.json` and `steps.jsonl`. Read them
