@@ -22,18 +22,12 @@ pub const COMPUTER_CLI: &str = "zerocode-computer";
 
 /// Where [`COMPUTER_CLI`] is on the search path `path`, the way a shell looks
 /// it up: the window puts it on every pane's `PATH`, so a session that finds
-/// it can reach Computer Use and one that does not cannot. `windows` names
-/// the `.cmd` launcher Windows runs instead.
+/// it can reach Computer Use and one that does not cannot. `windows` looks
+/// it up by Windows' rule, where the window's launcher is the `.cmd`
+/// ([`crate::agent::resolve_on_path`]).
 #[must_use]
 pub fn computer_cli_on_path(path: &std::ffi::OsStr, windows: bool) -> Option<std::path::PathBuf> {
-    let program = if windows {
-        format!("{COMPUTER_CLI}.cmd")
-    } else {
-        COMPUTER_CLI.to_string()
-    };
-    std::env::split_paths(path)
-        .map(|dir| dir.join(&program))
-        .find(|candidate| candidate.is_file())
+    crate::agent::resolve_on_path_by(Some(path), COMPUTER_CLI, windows)
 }
 // Protocol 2 requires the window-supplied guard table and its budget shape.
 pub const COMPUTER_USE_PROTOCOL_VERSION: u64 = 2;

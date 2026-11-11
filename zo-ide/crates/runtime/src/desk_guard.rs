@@ -22,14 +22,15 @@
 //! after the kill guard's judgment, and refuses in every permission mode: no
 //! mode, allow rule or hook answers it. Only in a session that can reach the
 //! Computer tool (inside a pane of the window), and only while the person's
-//! settings leave [`SETTING`] on.
+//! user settings leave [`SETTING`] on.
 
 use zerocode_core::shell_rule::runs::{self, ProgramRun};
 
 use crate::kill_guard::Shell;
 
-/// The settings key a person sets `false` to turn the guard off. A
-/// repository's `.zo/settings.json` cannot (`crate::config`).
+/// The settings key a person sets `false` to turn the guard off, in their
+/// user settings file only: a repository's `.zo/settings.json`, a workspace's
+/// `.zo/settings.local.json` and a `--settings` file cannot (`crate::config`).
 pub const SETTING: &str = "deskGuard";
 
 /// Every name the guard knows, in one place: nothing outside it is
@@ -48,14 +49,21 @@ pub(crate) struct Table {
     pub(crate) screen_verbs: &'static [&'static [&'static str]],
     /// What a script tells an app that changes its windows or tabs.
     pub(crate) window_verbs: &'static [&'static [&'static str]],
+    /// A window verb that opens these words does something else
+    /// (`close access` closes a file).
+    pub(crate) not_window_verbs: &'static [&'static [&'static str]],
     /// `set`, then — past an optional `the` — a property of a window, tab or
     /// element: a change of it, where `set <variable> to …` only fills a
     /// variable.
     pub(crate) set_verb: &'static str,
     pub(crate) article: &'static str,
     pub(crate) set_properties: &'static [&'static [&'static str]],
-    /// The flags a one-line program is handed by (`python3 -c`, `node -e`,
-    /// `powershell -Command`), any case.
+    /// The programs that run a one-line program, by name, and by the start
+    /// of a name (`python3.12`, `pypy3`).
+    pub(crate) interpreters: &'static [&'static str],
+    pub(crate) interpreter_families: &'static [&'static str],
+    /// The flags an interpreter is handed a one-line program by (`python3 -c`,
+    /// `node -e`, `powershell -Command`), any case (`perl -E`).
     pub(crate) code_flags: &'static [&'static str],
     /// Names in a one-line program that inject input, any case.
     pub(crate) code_names: &'static [&'static str],
@@ -88,11 +96,13 @@ pub(crate) const TABLE: Table = Table {
     window_verbs: &[
         &["activate"],
         &["close"],
-        &["make", "new"],
-        &["open", "location"],
+        &["make", "new", "window"],
+        &["make", "new", "tab"],
+        &["make", "new", "document"],
         &["execute"],
         &["do", "javascript"],
     ],
+    not_window_verbs: &[&["close", "access"]],
     set_verb: "set",
     article: "the",
     set_properties: &[
@@ -111,6 +121,8 @@ pub(crate) const TABLE: Table = Table {
         &["selected"],
         &["focused"],
     ],
+    interpreters: &["node", "ruby", "perl", "swift", "osascript", "pwsh", "powershell"],
+    interpreter_families: &["python", "pypy"],
     code_flags: &["-c", "-e", "-command"],
     code_names: &[
         "pyautogui",
@@ -198,15 +210,31 @@ fn caught_in_run(run: &ProgramRun) -> Option<Caught> {
             return Some(caught);
         }
     }
+    if !is_interpreter(program) {
+        return None;
+    }
     run.args
         .iter()
         .zip(run.args.iter().skip(1))
         .filter(|(flag, _)| TABLE.code_flags.iter().any(|code| flag.eq_ignore_ascii_case(code)))
-        .find_map(|(_, code)| code_name_in(code))
+        .map(|(_, code)| code)
+        .chain(&run.input)
+        .find_map(|code| code_name_in(code))
         .map(|name| Caught {
             kind: Kind::OneLiner,
             words: name.to_string(),
         })
+}
+
+/// Whether `program` runs a one-line program it is handed: the program
+/// that reads a `-c` · `-e` as code, where another reads a pattern, a folder
+/// or a package there (`grep -E`, `git -C`, `pip install -e`).
+fn is_interpreter(program: &str) -> bool {
+    TABLE.interpreters.contains(&program)
+        || TABLE
+            .interpreter_families
+            .iter()
+            .any(|family| program.starts_with(family))
 }
 
 /// The `AppleScript` an `osascript` run is handed: its `-e` lines and what it
@@ -235,7 +263,7 @@ fn caught_in_script(script: &str) -> Option<Caught> {
             words: verb.join(" "),
         });
     }
-    if let Some(verb) = TABLE.window_verbs.iter().find(|verb| has_phrase(&verbs, verb)) {
+    if let Some(verb) = window_verb(&verbs) {
         return Some(Caught {
             kind: Kind::AppWindows,
             words: verb.join(" "),
@@ -244,6 +272,17 @@ fn caught_in_script(script: &str) -> Option<Caught> {
     set_property(&verbs).map(|property| Caught {
         kind: Kind::AppWindows,
         words: format!("{} {}", TABLE.set_verb, property.join(" ")),
+    })
+}
+
+/// The table's window verb that stands in `words`, where it is not one of
+/// the verbs that only start like it (`close access`).
+fn window_verb(words: &[String]) -> Option<&'static [&'static str]> {
+    TABLE.window_verbs.iter().copied().find(|verb| {
+        (0..words.len()).any(|at| {
+            let rest = &words[at..];
+            starts_with(rest, verb) && !TABLE.not_window_verbs.iter().any(|not| starts_with(rest, not))
+        })
     })
 }
 
@@ -349,17 +388,25 @@ pub fn refused(shell: Shell, command: &str) -> Option<String> {
 /// Whether the guard stands in this session: it can reach the Computer tool
 /// — the window's `zerocode-computer` is on its `PATH`, so there is a road
 /// to send the model back to — and the person's settings leave [`SETTING`]
-/// on. Asked only after a command is caught, so an ordinary command costs
-/// neither the path search nor the settings read.
+/// on. Read once per process, and only after a command is first caught, so
+/// an ordinary command costs neither the path search nor the settings read
+/// (design §6: turned off, it stands down from the next session).
+#[cfg(not(test))]
 fn stands_in_this_session() -> bool {
-    #[cfg(test)]
-    let for_test = STANDS_FOR_TEST.with(std::cell::Cell::get);
-    #[cfg(not(test))]
-    let for_test: Option<bool> = None;
-    for_test.unwrap_or_else(|| computer_tool_reachable() && setting_on())
+    static STANDS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STANDS.get_or_init(|| computer_tool_reachable() && setting_on())
+}
+
+/// In a test build the guard stands only where a test says so
+/// ([`with_session`]): no test reads the machine's `PATH` or the person's
+/// settings.
+#[cfg(test)]
+fn stands_in_this_session() -> bool {
+    STANDS_FOR_TEST.with(std::cell::Cell::get)
 }
 
 /// Whether this session can reach the Computer tool.
+#[cfg(not(test))]
 fn computer_tool_reachable() -> bool {
     let path = std::env::var_os("PATH").unwrap_or_default();
     zerocode_core::computer_use::computer_cli_on_path(&path, cfg!(windows)).is_some()
@@ -367,6 +414,7 @@ fn computer_tool_reachable() -> bool {
 
 /// Whether the person's settings leave the guard on. Settings that do not
 /// load leave it on.
+#[cfg(not(test))]
 fn setting_on() -> bool {
     let cwd = std::env::current_dir().unwrap_or_default();
     match crate::ConfigLoader::default_for(cwd).load() {
@@ -377,20 +425,20 @@ fn setting_on() -> bool {
 
 #[cfg(test)]
 thread_local! {
-    /// What [`stands_in_this_session`] answers on this test thread, when set.
-    static STANDS_FOR_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// What [`stands_in_this_session`] answers on this test thread.
+    static STANDS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Run `f` with the guard standing (`true`) or not on this test thread.
 #[cfg(test)]
 pub(crate) fn with_session<T>(stands: bool, f: impl FnOnce() -> T) -> T {
-    struct Restore(Option<bool>);
+    struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
             STANDS_FOR_TEST.with(|slot| slot.set(self.0));
         }
     }
-    let _restore = Restore(STANDS_FOR_TEST.with(|slot| slot.replace(Some(stands))));
+    let _restore = Restore(STANDS_FOR_TEST.with(|slot| slot.replace(stands)));
     f()
 }
 

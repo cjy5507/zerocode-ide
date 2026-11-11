@@ -125,6 +125,9 @@ fn a_session_the_guard_does_not_stand_in_refuses_nothing() {
     // No Computer tool to go back to, or the person's `deskGuard` off.
     with_session(false, || assert_eq!(refused(Shell::Bash, "cliclick p"), None));
     with_session(true, || assert!(refused(Shell::Bash, "cliclick p").is_some()));
+    // Unsaid, a test build stands nowhere: no test reads the machine's PATH
+    // or the person's settings.
+    assert_eq!(refused(Shell::Bash, "cliclick p"), None);
 }
 
 /* ---- design §3 · §7, 11-11 23:4x: the review's narrowing (t-104945) ----------- */
@@ -229,12 +232,25 @@ fn every_name_in_the_table_catches_a_command() {
         let words = format!("{} {property}", TABLE.set_verb);
         assert_eq!((caught.kind, caught.words.as_str()), (Kind::AppWindows, words.as_str()));
     }
-    for flag in TABLE.code_flags {
-        for name in TABLE.code_names {
-            let command = format!(r#"interpreter {flag} "use {name}""#);
-            let caught = bash(&command).unwrap_or_else(|| panic!("{command}"));
-            assert_eq!((caught.kind, caught.words.as_str()), (Kind::OneLiner, *name));
+    for not_verb in TABLE.not_window_verbs {
+        let not_verb = not_verb.join(" ");
+        let command = format!(r#"osascript -e 'tell application "Finder" to {not_verb} x'"#);
+        assert_eq!(bash(&command), None, "{command}");
+    }
+    let interpreters = TABLE.interpreters.iter().chain(TABLE.interpreter_families);
+    for interpreter in interpreters {
+        for flag in TABLE.code_flags {
+            for name in TABLE.code_names {
+                let command = format!(r#"{interpreter} {flag} "use {name}""#);
+                let caught = bash(&command).unwrap_or_else(|| panic!("{command}"));
+                assert_eq!((caught.kind, caught.words.as_str()), (Kind::OneLiner, *name));
+                // The same flag of a program that is not an interpreter reads no code.
+                let not_code = format!(r#"grep {flag} "{name}" src"#);
+                assert_eq!(bash(&not_code), None, "{not_code}");
+            }
         }
+        let fed = format!("{interpreter} - <<'EOF'\nuse {}\nEOF", TABLE.code_names[0]);
+        assert!(bash(&fed).is_some(), "{fed}");
     }
 }
 

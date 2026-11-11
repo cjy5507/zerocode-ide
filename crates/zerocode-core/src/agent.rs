@@ -2321,7 +2321,7 @@ pub fn resolve_on_path(
 
 /// [`resolve_on_path`] by Windows' rule or by unix's. Both are compiled on
 /// every platform, so the Windows rule is tested where it is built.
-fn resolve_on_path_by(
+pub(crate) fn resolve_on_path_by(
     path_var: Option<&std::ffi::OsStr>,
     command: &str,
     windows: bool,

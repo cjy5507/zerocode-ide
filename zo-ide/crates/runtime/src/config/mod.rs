@@ -949,8 +949,12 @@ impl ConfigLoader {
                 if !project_lsp_opt_in {
                     value.remove("lspServers");
                 }
-                // The desk guard is a person's to turn off (t-104888): a
-                // repository cannot lift it for whoever opens it.
+            }
+            // The desk guard is a person's to turn off (t-104888), in their
+            // user settings file only: a repository cannot lift it for
+            // whoever opens it, and a workspace's `settings.local.json` or a
+            // `--settings` file is one the model's writes may reach.
+            if entry.source != ConfigSource::User {
                 value.remove(DESK_GUARD_KEY);
             }
             validate_optional_hooks_config(&value, &entry.path)?;
@@ -2851,7 +2855,7 @@ impl RuntimeFeatureConfig {
 
     /// Settings `deskGuard`: whether the desk guard refuses a shell command
     /// of the model's that moves the person's screen ([`crate::desk_guard`]).
-    /// On unless a person's own settings say `false`.
+    /// On unless the person's user settings file says `false`.
     #[must_use]
     pub fn desk_guard(&self) -> bool {
         self.desk_guard
