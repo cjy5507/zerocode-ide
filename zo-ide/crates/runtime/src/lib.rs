@@ -66,6 +66,7 @@ pub mod scoreboard;
 mod registry_io;
 pub mod retry;
 pub mod sandbox;
+pub mod schedule_guard;
 pub mod second_brain;
 pub mod secure_fs;
 pub mod session_control;

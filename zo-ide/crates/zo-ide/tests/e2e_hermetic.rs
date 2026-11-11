@@ -9066,6 +9066,12 @@ async fn e2e_cron_aimed_at_the_next_minute_fires_within_five_seconds() {
     let mut run = pty(&layout, service.base_url(), &args);
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"register the cron\r").expect("send prompt");
+    // A schedule zo asks for is a person's to approve, in full access too
+    // (`runtime::schedule_guard`): the card stands with no row chosen, and the
+    // row's number is the yes.
+    run.wait_for("A schedule runs by itself", TEST_TIMEOUT);
+    run.wait_for("Press a number", TEST_TIMEOUT);
+    run.send(b"1").expect("allow this schedule once");
     run.wait_for("cron registered", TEST_TIMEOUT);
 
     let bodies = service.request_bodies().await;

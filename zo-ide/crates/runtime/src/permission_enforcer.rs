@@ -40,7 +40,16 @@ impl PermissionEnforcer {
         // conversation-layer prompter (sub-agent / headless) would silently allow
         // a tool the operator explicitly denied.
         if self.policy.active_mode() == PermissionMode::Prompt {
-            return match self.policy.deny_reason(tool_name, input) {
+            // A schedule zo asks for is a person's to approve, and this layer
+            // has nobody to ask ([`crate::schedule_guard`]): it is refused
+            // here too, where every other question is left to a prompter this
+            // path may never reach. In the other modes the policy below
+            // refuses it, having no prompter either.
+            let refused = self.policy.deny_reason(tool_name, input).or_else(|| {
+                crate::schedule_guard::asks(tool_name, input)
+                    .then(crate::schedule_guard::nobody_to_ask)
+            });
+            return match refused {
                 Some(reason) => EnforcementResult::Denied {
                     tool: tool_name.to_owned(),
                     active_mode: self.policy.active_mode().as_str().to_owned(),

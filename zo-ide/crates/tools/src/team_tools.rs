@@ -289,8 +289,8 @@ fn team_inbox_tool_specs() -> Vec<ToolSpec> {
 fn cron_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
-            name: "CronCreate",
-            description: "Register recurring idle-session work: exactly one prompt or workflow. A workflow is {spec: graphSpec, input?} or {library: name, input?}; its validated graph is frozen now and executed directly by the host each due slot, without a parent model turn. Agent graphs require max_agents and max_output_tokens budgets. Prompt crons retain their existing turn behavior.",
+            name: runtime::schedule_guard::TOOL,
+            description: "Register recurring idle-session work: exactly one prompt or workflow. A person at the session approves each schedule before it is registered; where nobody can be asked it is refused. A workflow is {spec: graphSpec, input?} or {library: name, input?}; its validated graph is frozen now and executed directly by the host each due slot, without a parent model turn. Agent graphs require max_agents and max_output_tokens budgets. Prompt crons retain their existing turn behavior.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -401,7 +401,7 @@ pub(crate) fn dispatch(
                     .and_then(|parsed| run_team_delete(&ctx.teams, &ctx.tasks, &parsed))
             }),
         ),
-        "CronCreate" => Some(
+        runtime::schedule_guard::TOOL => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 from_value::<CronCreateInput>(input)
                     .and_then(|parsed| run_cron_create(&ctx.crons, &parsed))

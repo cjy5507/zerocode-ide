@@ -411,7 +411,9 @@ impl PermissionPolicy {
     }
 
     /// The decision for one call. A call through the wrapper is judged as the
-    /// call it carries — `CapabilityInvoke` is an address and grants nothing.
+    /// call it carries — `CapabilityInvoke` is an address and grants nothing —
+    /// and a schedule zo asks for is a person's to approve in every mode
+    /// ([`crate::schedule_guard`]).
     ///
     /// A bash command that would send a signal is
     /// judged by the kill guard first (t-80732): a signal to the window is
@@ -460,35 +462,19 @@ impl PermissionPolicy {
                     reason: crate::kill_guard::unanswered(&reason),
                 }
             }
-            Some(KillVerdict::Ask { reason }) => {
-                let mut would_ask = WouldAsk::default();
-                match self.authorize_by_mode_and_rules(
+            Some(KillVerdict::Ask { reason }) => match self.alone(tool_name, input, context) {
+                Alone::Refuses(reason) => PermissionOutcome::Deny { reason },
+                Alone::Runs => PermissionOutcome::Deny {
+                    reason: crate::kill_guard::unasked(&reason),
+                },
+                Alone::Asks => self.ask_a_person(
                     tool_name,
                     input,
-                    context,
-                    Some(&mut would_ask),
-                ) {
-                    PermissionOutcome::Deny { reason } if !would_ask.asked => {
-                        PermissionOutcome::Deny { reason }
-                    }
-                    PermissionOutcome::Allow => PermissionOutcome::Deny {
-                        reason: crate::kill_guard::unasked(&reason),
-                    },
-                    PermissionOutcome::Deny { .. } => Self::prompt_or_deny(
-                        tool_name,
-                        input,
-                        ModeAudit {
-                            current_mode: self.active_mode(),
-                            required_mode: self.required_mode_for_input(tool_name, input),
-                            phase_clamp_base: self.phase_clamp_base,
-                        },
-                        Some(reason.clone()),
-                        Some(crate::kill_guard::unanswered(&reason)),
-                        true,
-                        prompter,
-                    ),
-                }
-            }
+                    reason.clone(),
+                    crate::kill_guard::unanswered(&reason),
+                    prompter,
+                ),
+            },
             Some(KillVerdict::Allow) | None => {
                 // The wrapper is an address and grants nothing: the call it
                 // carries is the one judged, by every line of this function,
@@ -496,9 +482,81 @@ impl PermissionPolicy {
                 if let Some((carried, arguments)) = carried_call(tool_name, input) {
                     return self.authorize_with_context(&carried, &arguments, context, prompter);
                 }
-                self.authorize_by_mode_and_rules(tool_name, input, context, prompter)
+                match crate::schedule_guard::asked(tool_name, input) {
+                    Some(card) => self.authorize_asked_schedule(tool_name, input, context, card, prompter),
+                    None => self.authorize_by_mode_and_rules(tool_name, input, context, prompter),
+                }
             }
         }
+    }
+
+    /// A schedule zo asks for is a person's to approve, whatever the mode and
+    /// the rules would do with the call ([`crate::schedule_guard`]). What they
+    /// refuse without asking — a deny rule, a mode that never asks — stays
+    /// refused. Everything else, a call they would run unasked included, is
+    /// put to a person, with no lasting allow; and where nobody can be asked —
+    /// no prompter, or a pane the ledger summoned as a worker, which nobody
+    /// watches — it is refused with where to ask instead.
+    fn authorize_asked_schedule(
+        &self,
+        tool_name: &str,
+        input: &str,
+        context: &PermissionContext,
+        card: String,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> PermissionOutcome {
+        if let Alone::Refuses(reason) = self.alone(tool_name, input, context) {
+            return PermissionOutcome::Deny { reason };
+        }
+        if prompter.is_none() || crate::kill_guard::in_a_summoned_worker_pane() {
+            return PermissionOutcome::Deny {
+                reason: crate::schedule_guard::nobody_to_ask(),
+            };
+        }
+        self.ask_a_person(
+            tool_name,
+            input,
+            card,
+            crate::schedule_guard::unanswered(),
+            prompter,
+        )
+    }
+
+    /// What the mode, the rules and the hooks would do with a call by
+    /// themselves.
+    fn alone(&self, tool_name: &str, input: &str, context: &PermissionContext) -> Alone {
+        let mut would_ask = WouldAsk::default();
+        match self.authorize_by_mode_and_rules(tool_name, input, context, Some(&mut would_ask)) {
+            PermissionOutcome::Deny { reason } if !would_ask.asked => Alone::Refuses(reason),
+            PermissionOutcome::Allow => Alone::Runs,
+            PermissionOutcome::Deny { .. } => Alone::Asks,
+        }
+    }
+
+    /// Puts a call to a person and to nobody else: the question says `says`
+    /// and offers no lasting allow, and a no — or nobody to ask — reads
+    /// `unanswered`.
+    fn ask_a_person(
+        &self,
+        tool_name: &str,
+        input: &str,
+        says: String,
+        unanswered: String,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> PermissionOutcome {
+        Self::prompt_or_deny(
+            tool_name,
+            input,
+            ModeAudit {
+                current_mode: self.active_mode(),
+                required_mode: self.required_mode_for_input(tool_name, input),
+                phase_clamp_base: self.phase_clamp_base,
+            },
+            Some(says),
+            Some(unanswered),
+            true,
+            prompter,
+        )
     }
 
     /// [`Self::authorize_with_context`] as the mode, the rules and the hooks
@@ -764,6 +822,18 @@ impl PermissionPolicy {
             allow: Self::find_matching_rule(&self.allow_rules, &tool, input).is_some(),
         }
     }
+}
+
+/// What the mode, the rules and the hooks would do with a call by themselves
+/// ([`PermissionPolicy::alone`]): what a guard that asks a person of its own
+/// accord — the kill guard, the schedule guard — reads before it asks.
+enum Alone {
+    /// Refuse it without asking anyone, for this reason.
+    Refuses(String),
+    /// Run it without asking anyone.
+    Runs,
+    /// Put it to a person.
+    Asks,
 }
 
 /// Says no, and remembers whether it was asked: whether the mode, the rules
