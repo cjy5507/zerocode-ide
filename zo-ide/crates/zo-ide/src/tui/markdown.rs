@@ -345,6 +345,10 @@ fn write_lines(source: &str, width: Option<usize>, trim_tail: bool) -> Vec<Line>
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
+    // Emphasis set against Korean, Japanese or Chinese text opens and closes
+    // as it was meant to; every offset below is into this text.
+    let flanked = flanked_for_cjk(source);
+    let source: &str = &flanked;
     let mut writer = Writer {
         source,
         wrap_width: width,
@@ -356,6 +360,169 @@ fn write_lines(source: &str, width: Option<usize>, trim_tail: bool) -> Vec<Line>
         writer.event(&event, range);
     }
     writer.finish(trim_tail)
+}
+
+/// A whitespace character set beside an emphasis run so that the run opens
+/// or closes ([`flanked_for_cjk`]), and taken out of the text again
+/// ([`without_flank_marks`]). MEDIUM MATHEMATICAL SPACE: whitespace to the
+/// parser, and in no answer of its own accord.
+const FLANK_MARK: char = '\u{205F}';
+
+/// A letter of a script written without spaces between words: Hangul, kana,
+/// Han.
+const fn is_cjk_letter(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{1100}'..='\u{11FF}'
+            | '\u{3040}'..='\u{30FF}'
+            | '\u{3130}'..='\u{318F}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{AC00}'..='\u{D7A3}'
+            | '\u{F900}'..='\u{FAFF}'
+    )
+}
+
+/// What the flanking rule calls punctuation, near enough: anything that is
+/// neither a letter, a digit nor whitespace.
+fn is_flank_punctuation(ch: char) -> bool {
+    !ch.is_alphanumeric() && !ch.is_whitespace()
+}
+
+/// `source` with [`FLANK_MARK`] beside the emphasis runs that text in Korean,
+/// Japanese or Chinese needs it beside.
+///
+/// `CommonMark` lets a `**` close only if it is "right-flanking", and a run
+/// that follows punctuation is right-flanking only when whitespace or more
+/// punctuation follows it. That suits words set apart by spaces. A Korean
+/// particle joins its word with none: in `**"가독성"**이며` the closing run
+/// stands between a quote and a letter, so it may open and may not close, and
+/// the row showed its asterisks (zo 1.1.142, 2026-11-11). The mirror case is
+/// an opening run between a letter and a quote: `이것은**"강조"**입니다`.
+///
+/// Both are mended the same way: a mark — whitespace to the parser — after a
+/// run that should close, before a run that should open. A run is mended
+/// only where one of those scripts' letters stands on its far side and an
+/// emphasis of its kind is open (to close) or none is (to open); every other
+/// run is left to the parser, and code — fenced, or in backticks on a line —
+/// is not read at all.
+fn flanked_for_cjk(source: &str) -> std::borrow::Cow<'_, str> {
+    if !source.contains(['*', '~']) || !source.chars().any(is_cjk_letter) {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let mut marks: Vec<usize> = Vec::new();
+    // Emphasis runs opened and not yet closed in this paragraph: `*`, `~`.
+    let mut open = [0_usize; 2];
+    let mut fence: Option<(char, usize)> = None;
+    let mut line_start = 0;
+    for line in source.split_inclusive('\n') {
+        let start = line_start;
+        line_start += line.len();
+        let body = line.trim_start_matches(' ');
+        let fence_run = body.chars().next().filter(|ch| matches!(ch, '`' | '~')).map(|ch| {
+            (ch, body.chars().take_while(|next| *next == ch).count())
+        });
+        if let Some((marker, length)) = fence {
+            if fence_run.is_some_and(|(ch, run)| ch == marker && run >= length)
+                && body.trim_start_matches(marker).trim().is_empty()
+            {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some((marker, run)) = fence_run.filter(|(_, run)| *run >= 3) {
+            fence = Some((marker, run));
+            continue;
+        }
+        if line.trim().is_empty() {
+            open = [0, 0];
+            continue;
+        }
+        // A line with no emphasis run changes nothing: most lines.
+        if line.contains(['*', '~']) {
+            flank_marks_in_line(line, start, &mut open, &mut marks);
+        }
+    }
+    if marks.is_empty() {
+        return std::borrow::Cow::Borrowed(source);
+    }
+    let mut flanked = String::with_capacity(source.len() + marks.len() * FLANK_MARK.len_utf8());
+    let mut copied = 0;
+    for at in marks {
+        flanked.push_str(&source[copied..at]);
+        flanked.push(FLANK_MARK);
+        copied = at;
+    }
+    flanked.push_str(&source[copied..]);
+    std::borrow::Cow::Owned(flanked)
+}
+
+/// One line of [`flanked_for_cjk`]: where in `source` — the line starts at
+/// byte `start` — a mark goes, and which emphasis the line leaves open.
+fn flank_marks_in_line(line: &str, start: usize, open: &mut [usize; 2], marks: &mut Vec<usize>) {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let run_from = |from: usize| chars[from..].iter().take_while(|(_, ch)| *ch == chars[from].1).count();
+    let mut at = 0;
+    while at < chars.len() {
+        let (offset, ch) = chars[at];
+        match ch {
+            // An escaped character is itself and nothing else.
+            '\\' => at += 2,
+            '`' => {
+                // A code span runs to the next run of as many backticks; with
+                // none on the line the backticks are text.
+                let run = run_from(at);
+                let mut close = at + run;
+                while close < chars.len() && !(chars[close].1 == '`' && run_from(close) == run) {
+                    close += if chars[close].1 == '`' { run_from(close) } else { 1 };
+                }
+                at = if close < chars.len() { close + run } else { at + run };
+            }
+            '*' | '~' => {
+                let run = run_from(at);
+                let kind = usize::from(ch == '~');
+                let before = at.checked_sub(1).map(|index| chars[index].1);
+                let after = chars.get(at + run).map(|(_, next)| *next);
+                at += run;
+                // Strikethrough is two tildes; one, or three, is text.
+                if ch == '~' && run != 2 {
+                    continue;
+                }
+                let space = |side: Option<char>| side.is_none_or(char::is_whitespace);
+                let punctuation = |side: Option<char>| side.is_some_and(is_flank_punctuation);
+                let letter = |side: Option<char>| side.is_some_and(is_cjk_letter);
+                let opens = !space(after) && (!punctuation(after) || space(before) || punctuation(before));
+                let closes = !space(before) && (!punctuation(before) || space(after) || punctuation(after));
+                let after_run = start + chars.get(at).map_or(line.len(), |(next, _)| *next);
+                let open = &mut open[kind];
+                if opens && !closes && *open > 0 && punctuation(before) && letter(after) {
+                    // Between punctuation and a letter with an emphasis open:
+                    // it was meant to close.
+                    marks.push(after_run);
+                    *open -= 1;
+                } else if closes && !opens && *open == 0 && letter(before) && punctuation(after) {
+                    // Between a letter and punctuation with none open: it was
+                    // meant to open.
+                    marks.push(start + offset);
+                    *open += 1;
+                } else if closes && (*open > 0 || !opens) {
+                    *open = open.saturating_sub(1);
+                } else if opens {
+                    *open += 1;
+                }
+            }
+            _ => at += 1,
+        }
+    }
+}
+
+/// `text` without the marks [`flanked_for_cjk`] set.
+fn without_flank_marks(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains(FLANK_MARK) {
+        std::borrow::Cow::Owned(text.replace(FLANK_MARK, ""))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -394,10 +561,10 @@ impl Writer<'_> {
         match event {
             Event::Start(tag) => self.start(tag, range),
             Event::End(tag) => self.end(*tag),
-            Event::Text(text) => self.text(text),
+            Event::Text(text) => self.text(&without_flank_marks(text)),
             Event::Code(code) => {
                 let style = self.style().patch(CODE_STYLE);
-                self.push_span(Span::new(code.to_string(), style));
+                self.push_span(Span::new(without_flank_marks(code).into_owned(), style));
             }
             Event::SoftBreak | Event::HardBreak => {
                 if let Some(cell) = self.table.as_mut().and_then(tables::State::cell_mut) {
@@ -414,7 +581,7 @@ impl Writer<'_> {
                 self.needs_newline = true;
             }
             Event::Html(html) | Event::InlineHtml(html) => {
-                self.push_span(Span::new(html.to_string(), self.style()));
+                self.push_span(Span::new(without_flank_marks(html).into_owned(), self.style()));
             }
             Event::TaskListMarker(_)
             | Event::FootnoteReference(_)
@@ -509,7 +676,7 @@ impl Writer<'_> {
             Tag::Strikethrough => self.inline.push(Style::new().strike()),
             Tag::Link { dest_url, .. } => {
                 self.inline.push(LINK_STYLE);
-                self.links.push(Hyperlink::checked(dest_url));
+                self.links.push(Hyperlink::checked(&without_flank_marks(dest_url)));
             }
             _ => {}
         }
@@ -1147,6 +1314,67 @@ mod tests {
             plain("### t\n\n- a"),
             vec!["t".to_string(), String::new(), "• a".to_string()]
         );
+    }
+
+    /// The span that says `text` on the first line, and that line's text.
+    fn span_of(source: &str, text: &str) -> (crate::tui::ansi::Style, String) {
+        let line = &render(source)[0];
+        let span = line
+            .spans
+            .iter()
+            .find(|span| span.text == text)
+            .unwrap_or_else(|| panic!("no span says {text:?} in {:?}", line.plain()));
+        (span.style, line.plain())
+    }
+
+    /// A closing `**` between a quote and a Korean particle closes, and an
+    /// opening one between a letter and a quote opens: the flanking rule of
+    /// `CommonMark` alone leaves both as asterisks on the row.
+    #[test]
+    fn emphasis_set_against_korean_text_opens_and_closes() {
+        let (style, line) = span_of("TOML은 **\"가독성\"**이며 주석을 지원합니다.", "\"가독성\"");
+        assert!(style.bold, "the quoted words are bold");
+        assert_eq!(line, "TOML은 \"가독성\"이며 주석을 지원합니다.", "no asterisk and no mark is left");
+
+        let (style, line) = span_of("이것은**\"강조\"**입니다.", "\"강조\"");
+        assert!(style.bold);
+        assert_eq!(line, "이것은\"강조\"입니다.");
+
+        let (style, line) = span_of("결과는 *(예상대로)*였다.", "(예상대로)");
+        assert!(style.italic);
+        assert_eq!(line, "결과는 (예상대로)였다.");
+
+        let (style, line) = span_of("이 줄은 ~~\"취소\"~~입니다.", "\"취소\"");
+        assert!(style.strike);
+        assert_eq!(line, "이 줄은 \"취소\"입니다.");
+
+        // Two on one line, and Japanese.
+        let line = &render("**\"A\"**이고 **\"B\"**이며, これは**「強調」**です。")[0];
+        assert_eq!(line.plain(), "\"A\"이고 \"B\"이며, これは「強調」です。");
+        for bold in ["\"A\"", "\"B\"", "「強調」"] {
+            assert!(line.spans.iter().any(|span| span.text == bold && span.style.bold), "{bold} is bold");
+        }
+    }
+
+    /// Emphasis the parser already reads is read as before, and what is not
+    /// emphasis — code, a list marker, a product of numbers — is left alone.
+    #[test]
+    fn emphasis_the_parser_already_reads_and_text_that_is_none_are_left_alone() {
+        let (style, line) = span_of("**굵게**는 그대로다.", "굵게");
+        assert!(style.bold);
+        assert_eq!(line, "굵게는 그대로다.");
+        let (style, line) = span_of("괄호 안(**굵게**)도 그대로다.", "굵게");
+        assert!(style.bold);
+        assert_eq!(line, "괄호 안(굵게)도 그대로다.");
+
+        let (style, _) = span_of("코드는 `**\"그대로\"**이며` 남는다.", "**\"그대로\"**이며");
+        assert!(!style.bold, "a code span is not read for emphasis");
+        let fenced: Vec<String> = render("```\n**\"그대로\"**이며\n```").iter().map(Line::plain).collect();
+        assert!(fenced.iter().any(|line| line.contains("**\"그대로\"**이며")), "{fenced:?}");
+
+        assert_eq!(render("값은 2 * 3 * 4 이다.")[0].plain(), "값은 2 * 3 * 4 이다.");
+        assert_eq!(render("닫히지 않은 **\"강조\"이며 끝.")[0].plain(), "닫히지 않은 **\"강조\"이며 끝.");
+        assert_eq!(render("plain **\"quoted\"** words")[0].plain(), "plain \"quoted\" words");
     }
 
     #[test]
