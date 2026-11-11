@@ -2112,6 +2112,14 @@ const modelConnectionsController = {
     // received, so its progress and 「받기 취소」 stand where the model will.
     const operation = snapshot?.operation;
     const receiving = (model) => managedJudgmentController.receiving(model);
+    // A fold's own `open` is the truth the moment a press lands; its `toggle`
+    // comes a task later, and rows painted in between read a set that had not
+    // heard yet — the fold shut under the press that opened it. So the folds
+    // standing on the page say which rows are open before they are replaced.
+    for (const fold of document.querySelectorAll("details.model-line-more[data-model-row]")) {
+      if (fold.open) this.rowsOpen.add(fold.dataset.modelRow);
+      else this.rowsOpen.delete(fold.dataset.modelRow);
+    }
     const managedLines = (snapshot?.models ?? []).filter((model) => managedJudgmentController.held(model) || receiving(model))
       .map((model) => ({ key: `managed:${model.id}`, model, name: model.label })).map((row) => {
       // A model received and neither chosen nor running is kept, not absent.
@@ -2187,6 +2195,7 @@ const modelConnectionsController = {
       // which stays as the person left it across repaints.
       const more = document.createElement("details");
       more.className = "settings-fold model-line-more";
+      more.dataset.modelRow = row.key;
       more.open = this.rowsOpen.has(row.key);
       more.addEventListener("toggle", () => { if (more.open) this.rowsOpen.add(row.key); else this.rowsOpen.delete(row.key); });
       const facts = [row.model.serverModelId ?? row.model.id, row.model.installed ? row.model.revision : null, row.model.installedDirectory, row.model.license,
