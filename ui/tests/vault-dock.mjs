@@ -118,16 +118,18 @@ export async function testVaultDock(browser, origin, ok) {
       await wait(VAULT_REFRESH_RETRY_MS + 200);
       seen.asksOnceSettled = asked() - quiet;
 
-      // ---- sessions nobody spoke in: one line says how many, one hand shows them ----
+      // ---- sessions that are not a person's: one line says how many of each kind, one hand shows them ----
       seen.hidesByDefault = window.__ASKED_VAULT__?.query?.hide_empty;
-      window.__VAULT__.hidden_empty = 3;
+      window.__VAULT__.hidden = { empty: 3, window_made: 138, measured: 0 };
       await refreshVaultDock();
       const note = document.getElementById("vdock-note");
       seen.hiddenSays = note.hidden ? "" : note.textContent;
       [...note.querySelectorAll("button")].find((one) => one.textContent === "보기")?.click();
       await wait(80);
       seen.showAsked = window.__ASKED_VAULT__?.query?.hide_empty;
-      window.__VAULT__.hidden_empty = 0;
+      window.__VAULT__.hidden = { empty: 0, window_made: 0, measured: 0 };
+      await refreshVaultDock();
+      seen.nothingHiddenSays = note.hidden ? "" : note.textContent;
 
       // ---- a session with no name says so, never an id ----
       window.__VAULT__.groups[0].sessions[0].title = "";
@@ -145,7 +147,10 @@ export async function testVaultDock(browser, origin, ok) {
       seen.nothingFoundSays = list.querySelector(".vdock-empty")?.textContent;
 
       // ---- every new word is in every catalog ----
-      const keys = ["vaultDock.refreshing", "vaultDock.hiddenEmpty", "vaultDock.showEmpty", "vaultDock.untitled"];
+      const keys = [
+        "vaultDock.refreshing", "vaultDock.hidden", "vaultDock.hiddenEmpty", "vaultDock.hiddenWindow",
+        "vaultDock.hiddenMeasured", "vaultDock.showHidden", "vaultDock.untitled",
+      ];
       seen.catalogs = ["en", "ja", "zh", "es"].every((lang) => keys.every((key) => CATALOG[lang][key]));
 
       window.vaultDockCard = builder;
@@ -195,9 +200,11 @@ export async function testVaultDock(browser, origin, ok) {
       JSON.stringify({ says: seen.refreshingSays, busy: seen.refreshingBusy, again: seen.askedAgain, force: seen.againForce, settled: seen.settledSays, after: seen.asksOnceSettled }),
     );
     ok(
-      "sessions nobody spoke in are hidden unless asked for, one line says how many, and its hand shows them",
-      seen.hidesByDefault === true && seen.hiddenSays.includes("대화 없는 세션 3개 숨김") && seen.showAsked === false,
-      JSON.stringify({ byDefault: seen.hidesByDefault, says: seen.hiddenSays, show: seen.showAsked }),
+      "sessions that are not a person's are hidden unless asked for, one line says how many of each kind, and its hand shows them",
+      seen.hidesByDefault === true &&
+        seen.hiddenSays.includes("숨김: 빈 대화 3개 · 창이 만든 확인 138개보기") && !seen.hiddenSays.includes("측정 실행") &&
+        seen.showAsked === false && !seen.nothingHiddenSays.includes("숨김"),
+      JSON.stringify({ byDefault: seen.hidesByDefault, says: seen.hiddenSays, show: seen.showAsked, none: seen.nothingHiddenSays }),
     );
     ok(
       "a session with no name says so and the first run says it is reading, in every catalog's words",

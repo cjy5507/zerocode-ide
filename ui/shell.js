@@ -8925,10 +8925,12 @@ let vaultSort = "updated";
  * 그대로 있고, 고른 프로젝트가 없으면 범위가 전체로 물러선다(`vaultScopeAsked`). 원본의 기본값
  * `workspace`는 지금 있는 작업 공간 옆에 서는 독이 쓴다. */
 let vaultScope = "project";
-/* A session nobody spoke in is not a row (t-103659): on one machine 64 of 354 zo sessions were a meta line and
- * nothing else, each drawn as its id over 「대화 미리보기를 사용할 수 없습니다」. They are hidden unless asked
- * for, the answer says how many (`hidden_empty`), and one line offers them. Both surfaces start here, and the
- * dock's 보기 초기화 comes back to it. */
+/* A session that is not a person's conversation is not a row (t-103659). Three kinds, told apart by the backend
+ * (`vault::Hidden`): one nobody spoke in (64 of 354 zo sessions on one machine were a meta line and nothing else,
+ * each drawn as its id over 「대화 미리보기를 사용할 수 없습니다」), one only this window spoke in (138 login
+ * checks a CLI took for a prompt), and one a measurement ran in a temporary folder (59 bench rounds). They are
+ * hidden unless asked for, the answer says how many of each (`hidden`), and one line offers them. The files stay
+ * where they are. Both surfaces start here, and the dock's 보기 초기화 comes back to it. */
 const VAULT_HIDE_EMPTY_DEFAULT = true;
 let vaultHideEmpty = VAULT_HIDE_EMPTY_DEFAULT;
 let vaultLoading = false;
@@ -8946,16 +8948,23 @@ function vaultAsksAgain(answer, again) {
   return answer?.refreshing ? setTimeout(again, VAULT_REFRESH_RETRY_MS) : 0;
 }
 
-/* The line that says sessions nobody spoke in are hidden, with the hand that shows them — or nothing when none
- * is. Shared by the two surfaces; `show` is the surface's own way to ask again without the hiding. */
-function vaultHiddenEmptyNote(answer, show) {
-  if (!answer?.hidden_empty) return null;
+/* The line that says which sessions are hidden — how many of each kind — with the hand that shows them, or
+ * nothing when none is. Shared by the two surfaces; `show` is the surface's own way to ask again without the
+ * hiding. */
+function vaultHiddenNote(answer, show) {
+  const hidden = answer?.hidden ?? {};
+  const parts = [
+    [hidden.empty, (n) => t("vaultDock.hiddenEmpty", "빈 대화 {{n}}개", { n })],
+    [hidden.window_made, (n) => t("vaultDock.hiddenWindow", "창이 만든 확인 {{n}}개", { n })],
+    [hidden.measured, (n) => t("vaultDock.hiddenMeasured", "측정 실행 {{n}}개", { n })],
+  ].filter(([n]) => n > 0).map(([n, said]) => said(n));
+  if (parts.length === 0) return null;
   const line = document.createElement("span");
-  line.textContent = t("vaultDock.hiddenEmpty", "대화 없는 세션 {{n}}개 숨김", { n: answer.hidden_empty });
+  line.textContent = t("vaultDock.hidden", "숨김: {{parts}}", { parts: parts.join(" · ") });
   const hand = document.createElement("button");
   hand.type = "button";
   hand.className = "vault-limit-more";
-  hand.textContent = t("vaultDock.showEmpty", "보기");
+  hand.textContent = t("vaultDock.showHidden", "보기");
   hand.onclick = show;
   line.appendChild(hand);
   return line;
@@ -9518,12 +9527,12 @@ function paintVaultView(tab = tabs.find((held) => held.kind === "vault")) {
     lines.push(vaultIssueText(issue));
   }
   note.textContent = lines.join(" · ");
-  const hiddenEmpty = vaultHiddenEmptyNote(vaultAnswer, () => {
+  const hiddenNote = vaultHiddenNote(vaultAnswer, () => {
     vaultHideEmpty = false;
     void refreshVault();
   });
-  if (hiddenEmpty) note.append(lines.length ? " · " : "", hiddenEmpty);
-  note.hidden = lines.length === 0 && !hiddenEmpty;
+  if (hiddenNote) note.append(lines.length ? " · " : "", hiddenNote);
+  note.hidden = lines.length === 0 && !hiddenNote;
 }
 
 /* ---- the session history, docked in the right column (1-g77) ----
@@ -10053,12 +10062,12 @@ function paintVaultDock() {
     more.onclick = () => setVaultSessionLimit(vaultLimits?.choices.find(value => value > (vaultSessionLimit ?? vaultLimits.default)) ?? 0);
     note.appendChild(more);
   }
-  const hiddenEmpty = vaultHiddenEmptyNote(vaultDockAnswer, () => {
+  const hiddenNote = vaultHiddenNote(vaultDockAnswer, () => {
     vaultDockHideEmpty = false;
     void refreshVaultDock();
   });
-  if (hiddenEmpty) note.append(lines.length || canShowMore ? " · " : "", hiddenEmpty);
-  note.hidden = lines.length === 0 && !canShowMore && !hiddenEmpty;
+  if (hiddenNote) note.append(lines.length || canShowMore ? " · " : "", hiddenNote);
+  note.hidden = lines.length === 0 && !canShowMore && !hiddenNote;
 
   // The list, with every card that did not change kept where it stood: the
   // groups are laid out again around them, and — when this is the same
@@ -10160,7 +10169,7 @@ function openVaultDockView(x, y, opener) {
   items.push({
     check: true,
     checked: vaultDockHideEmpty,
-    label: t("vault.hideEmpty", "빈 세션 숨기기"),
+    label: t("vault.hideEmpty", "대화 아닌 세션 숨기기"),
     run: () => {
       vaultDockHideEmpty = !vaultDockHideEmpty;
       return again();

@@ -21807,6 +21807,24 @@ pub fn is_window_note(text: &str) -> bool {
     .any(|nudge| text.starts_with(nudge))
 }
 
+/// The words this window's login check hands a CLI (`<cli> auth status`). A
+/// CLI with no such verb takes them for a prompt — zo did until 2026-11-09 —
+/// and every check left a conversation whose only words are these: 138 of
+/// them in one project on one machine (t-103659).
+pub const LOGIN_CHECK_WORDS: &str = "auth status";
+
+/// Whether `text` — one whole thing the user side of a conversation said — is
+/// this window's and no person's: the line it types at an idle pane when mail
+/// waits ([`is_pointer_text`]), a nudge it types into a pane it brought back
+/// ([`is_window_note`]), or its login check's words ([`LOGIN_CHECK_WORDS`]).
+/// The one reading of "the window typed this", for a list that keeps a
+/// conversation nobody but the window spoke in apart from a person's.
+#[must_use]
+pub fn is_window_typed(text: &str) -> bool {
+    let said = text.trim();
+    is_pointer_text(said) || is_window_note(said) || said == LOGIN_CHECK_WORDS
+}
+
 /// The most rows a paged read hands back in one answer, and the cap on a
 /// caller-typed `--limit`. One hundred is a page a person can actually scan
 /// and a program can actually hold; past it, the next page is one cursor away.

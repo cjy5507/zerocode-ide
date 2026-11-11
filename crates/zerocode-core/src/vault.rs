@@ -755,6 +755,11 @@ pub struct VaultSession {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub origin: Option<ChildOrigin>,
+    /// Whether everything the user side said was typed by this window and by
+    /// no person ([`crate::orchestration::is_window_typed`]): a login check a
+    /// CLI took for a prompt, a pane that was only ever told mail waits.
+    #[serde(default)]
+    pub window_made: bool,
 }
 
 impl VaultSession {
@@ -780,6 +785,63 @@ impl VaultSession {
         chosen
             .filter(|value| !value.is_empty())
             .unwrap_or(&self.modified_at)
+    }
+
+    /// Why this session is kept out of the list unless it is asked for, when
+    /// it is: it is not a person's conversation. `temporary` is the machine's
+    /// temporary folders, as the caller resolved them.
+    #[must_use]
+    pub fn hidden_as(&self, temporary: &[PathBuf]) -> Option<Hidden> {
+        if !self.resumable() {
+            return Some(Hidden::Empty);
+        }
+        if self.window_made {
+            return Some(Hidden::WindowMade);
+        }
+        // Records, and no words: a session in which the person ran slash
+        // commands and nobody answered has turns the store counts and not a
+        // line either side spoke.
+        if self.preview.is_empty() {
+            return Some(Hidden::Empty);
+        }
+        let ran_in = Path::new(self.cwd.as_deref()?);
+        temporary
+            .iter()
+            .any(|root| ran_in.starts_with(root))
+            .then_some(Hidden::Measured)
+    }
+}
+
+/// Why a session is not a person's conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hidden {
+    /// Nobody spoke in it: no turn, or none that reads as words.
+    Empty,
+    /// The window spoke in it and nobody else did
+    /// ([`VaultSession::window_made`]).
+    WindowMade,
+    /// It ran in a temporary folder: a bench round's `mkdtemp`, a test's
+    /// `tempfile`, a scratchpad — the folders zo's scoreboard leaves out for
+    /// the same reason.
+    Measured,
+}
+
+/// How many sessions a query matched and kept out of the list, by why
+/// ([`Hidden`]). Said in one line, so they can be asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct HiddenCount {
+    pub empty: usize,
+    pub window_made: usize,
+    pub measured: usize,
+}
+
+impl HiddenCount {
+    fn add(&mut self, why: Hidden) {
+        match why {
+            Hidden::Empty => self.empty += 1,
+            Hidden::WindowMade => self.window_made += 1,
+            Hidden::Measured => self.measured += 1,
+        }
     }
 }
 
@@ -1066,8 +1128,11 @@ pub struct VaultQuery {
     pub sort: Sort,
     #[serde(default)]
     pub group: Group,
-    /// Hide the sessions with nothing in them
-    /// (`DEFAULT_AI_VAULT_HIDE_EMPTY_SESSIONS` is false).
+    /// Hide the sessions that are not a person's conversation ([`Hidden`]):
+    /// the ones with nothing in them — the original's switch
+    /// (`DEFAULT_AI_VAULT_HIDE_EMPTY_SESSIONS`), and its name on the wire —
+    /// and, by the same switch, the ones only this window spoke in and the
+    /// ones a measurement ran.
     #[serde(default)]
     pub hide_empty: bool,
     /// Only sessions under one of these directories. Empty means everywhere.
@@ -1143,9 +1208,9 @@ pub struct VaultView {
     /// is the failure this flag exists to prevent.
     pub truncated: bool,
     /// Sessions the query matched and [`VaultQuery::hide_empty`] kept out of
-    /// the list: nobody spoke in them. Said as a number so the panel can say
-    /// it in one line and show them when asked.
-    pub hidden_empty: usize,
+    /// the list, by why. Said as numbers so the panel can say them in one
+    /// line and show the sessions when asked.
+    pub hidden: HiddenCount,
     /// Whether a scan is looking at the disk while this answer is read: the
     /// list is what was known, and the window asks again. Set by whoever
     /// holds the walk; a view made from sessions alone is not refreshing.
@@ -1205,7 +1270,7 @@ pub fn view(
     truncated: bool,
     worktrees: &[crate::usage_stats::WorktreeRef],
 ) -> VaultView {
-    view_of(&sessions, query, issues, truncated, worktrees)
+    view_of(&sessions, query, issues, truncated, worktrees, &[])
 }
 
 /// [`view`] over sessions somebody else keeps.
@@ -1213,17 +1278,21 @@ pub fn view(
 /// A keystroke asks this of the whole kept walk — a thousand sessions with
 /// their helpers and previews — and shows two hundred of them at most. Only
 /// the cards that are shown are copied; the walk stays where it is held.
+///
+/// `temporary` is the machine's temporary folders, as the caller resolved
+/// them: a session that ran under one is a measurement's ([`Hidden`]).
 pub fn view_of(
     sessions: &[VaultSession],
     query: &VaultQuery,
     issues: Vec<ScanIssue>,
     truncated: bool,
     worktrees: &[crate::usage_stats::WorktreeRef],
+    temporary: &[PathBuf],
 ) -> VaultView {
     let total = sessions.len();
     let agents = agent_rows(sessions);
     let parsed = parse_query(&query.query);
-    let mut hidden_empty = 0usize;
+    let mut hidden = HiddenCount::default();
     let mut kept: Vec<&VaultSession> = sessions
         .iter()
         .filter(|session| {
@@ -1245,11 +1314,13 @@ pub fn view_of(
                 .any(|scope| inside_or_equal(scope, cwd))
         })
         .filter(|session| matches(session, &parsed))
-        // Last, so the number hidden is of what the query otherwise shows.
+        // Last, so the numbers hidden are of what the query otherwise shows.
         .filter(|session| {
-            let hidden = query.hide_empty && !session.resumable();
-            hidden_empty += usize::from(hidden);
-            !hidden
+            let Some(why) = session.hidden_as(temporary).filter(|_| query.hide_empty) else {
+                return true;
+            };
+            hidden.add(why);
+            false
         })
         .collect();
 
@@ -1305,7 +1376,7 @@ pub fn view_of(
         matched,
         limits: Limits::DEFAULT,
         truncated,
-        hidden_empty,
+        hidden,
         refreshing: false,
     }
 }
@@ -2320,6 +2391,7 @@ pub fn card(
         clamp(&parsed.title)
     };
 
+    let window_made = parsed.asked > 0 && parsed.only_the_window_spoke();
     let mut built = VaultSession {
         id: format!("{agent}:{}:{file_path}", parsed.session_id),
         agent: agent.to_string(),
@@ -2340,6 +2412,7 @@ pub fn card(
         depth: parsed.depth,
         parent_id: parsed.parent_id,
         origin: None,
+        window_made,
     };
     if built.depth > 0 {
         child_preview(&mut built);
@@ -2374,6 +2447,13 @@ pub struct Parsed {
     pub not_a_session: bool,
     pub parent_id: Option<String>,
     pub depth: u8,
+    /// How many turns of the user side were read as words, and how many of
+    /// those this window typed ([`crate::orchestration::is_window_typed`]).
+    /// Equal and not zero, the conversation is one only the window spoke in
+    /// ([`VaultSession::window_made`]); read no further than the first turn a
+    /// person typed ([`Self::wants`]).
+    pub(crate) asked: usize,
+    pub(crate) window_typed: usize,
 }
 
 /// How many conversation lines a card keeps.
@@ -2389,7 +2469,15 @@ impl Parsed {
     /// line, or — from the user side — its name. Once it wants neither, a
     /// turn is only counted, and its text is not read out of the record.
     fn wants(&self, role: &str) -> bool {
-        self.preview.len() < PREVIEW_LINES || (role == USER && !self.is_named())
+        self.preview.len() < PREVIEW_LINES
+            || (role == USER && (!self.is_named() || self.only_the_window_spoke()))
+    }
+
+    /// Whether every turn of the user side read so far was this window's —
+    /// true of a conversation nobody has spoken in yet, so the next user
+    /// turn is read.
+    fn only_the_window_spoke(&self) -> bool {
+        self.asked == self.window_typed
     }
 
     /// Whether the title says what the conversation is about — the test a
@@ -2432,6 +2520,8 @@ impl Parsed {
             let Some(asked) = asked_words(&words) else {
                 return;
             };
+            self.asked += 1;
+            self.window_typed += usize::from(crate::orchestration::is_window_typed(&asked));
             if !self.is_named()
                 && let Some(name) = naming_words(&asked).map(|name| clamp(&name))
                 && (self.title.is_empty() || names_the_turn(&name))
@@ -2764,6 +2854,7 @@ mod tests {
             depth: 0,
             parent_id: None,
             origin: None,
+            window_made: false,
         }
     }
 
@@ -4530,18 +4621,29 @@ mod tests {
         );
     }
 
-    /// A session nobody spoke in is kept out of the list when the panel asks,
-    /// and counted — so one line can say how many, and show them.
+    /// A session that is not a person's conversation is kept out of the list
+    /// when the panel asks, and counted by why — nobody spoke in it, only the
+    /// window did, or a measurement ran it in a temporary folder — so one
+    /// line can say how many, and show them. Only among what the query
+    /// otherwise shows: the blank one outside the scope is not counted.
     #[test]
-    fn hidden_empty_sessions_are_counted_among_what_the_query_shows() {
-        let spoke = session("claude", "spoke", Some("/w/a"), "2026-01-02T00:00:00Z");
-        let mut blank = session("claude", "blank", Some("/w/a"), "2026-01-01T00:00:00Z");
+    fn sessions_that_are_not_a_persons_are_hidden_and_counted_by_why() {
+        let at = "2026-01-01T00:00:00Z";
+        let persons = session("claude", "persons", Some("/w/a"), at);
+        let mut blank = session("claude", "blank", Some("/w/a"), at);
         blank.message_count = 0;
         blank.preview.clear();
         let mut elsewhere = blank.clone();
         elsewhere.id = "claude:elsewhere:/f/elsewhere.jsonl".into();
         elsewhere.cwd = Some("/w/b".into());
-        let sessions = [spoke, blank, elsewhere];
+        // Turns the store counts, and not a word in them: slash commands.
+        let mut wordless = session("claude", "wordless", Some("/w/a"), at);
+        wordless.preview.clear();
+        let mut checked = session("zo", "checked", Some("/w/a"), at);
+        checked.window_made = true;
+        let bench = session("zo", "bench", Some("/w/a/tmp/zo-bench-1"), at);
+        let sessions = [persons, blank, elsewhere, wordless, checked, bench];
+        let temporary = [PathBuf::from("/w/a/tmp")];
         let asked = |hide_empty: bool| {
             let seen = view_of(
                 &sessions,
@@ -4553,11 +4655,44 @@ mod tests {
                 Vec::new(),
                 false,
                 &[],
+                &temporary,
             );
-            (seen.shown, seen.matched, seen.hidden_empty, seen.total)
+            (seen.shown, seen.matched, seen.hidden, seen.total)
         };
-        // The blank one outside the scope is not among what was hidden.
-        assert_eq!([asked(true), asked(false)], [(1, 1, 1, 3), (2, 2, 0, 3)]);
+        let hidden = HiddenCount {
+            empty: 2,
+            window_made: 1,
+            measured: 1,
+        };
+        assert_eq!(
+            [asked(true), asked(false)],
+            [(1, 1, hidden, 6), (5, 5, HiddenCount::default(), 6)]
+        );
+    }
+
+    /// A conversation is the window's when every turn of its user side was
+    /// typed by the window: its login check's words, the line it types when
+    /// mail waits. One turn a person typed makes it theirs.
+    #[test]
+    fn a_conversation_only_the_window_spoke_in_is_the_windows() {
+        let made = |turns: &[&str]| {
+            let text: Vec<String> = turns
+                .iter()
+                .map(|said| claude_user((*said).into()))
+                .collect();
+            built("claude", claude_session(&text.join("\n")).expect("parsed")).window_made
+        };
+        let pointer = crate::orchestration::pointer_text(2);
+        assert_eq!(
+            [
+                made(&[crate::orchestration::LOGIN_CHECK_WORDS]),
+                made(&[pointer.as_str(), pointer.as_str()]),
+                made(&[pointer.as_str(), "그 편지대로 고쳐줘"]),
+                made(&["auth status 가 왜 실패하는지 봐줘"]),
+                made(&[]),
+            ],
+            [true, true, false, false, false]
+        );
     }
 
     /* ---- what a card says (t-103659) ---- */

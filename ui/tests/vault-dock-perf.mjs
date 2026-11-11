@@ -60,7 +60,7 @@ export async function standVaultDockScene(page, scene = VAULT_DOCK_SCENE) {
     window.__VAULT_LIMIT_ROWS__ = undefined;
     window.__VAULT__ = {
       groups, agents: [{ slug: "claude", label: "Claude", sessions: 150 }, { slug: "codex", label: "Codex", sessions: 50 }],
-      issues: [], shown: scene.sessions, total: 1000, matched: 1000, truncated: true, hidden_empty: 0, refreshing: false,
+      issues: [], shown: scene.sessions, total: 1000, matched: 1000, truncated: true, hidden: { empty: 0, window_made: 0, measured: 0 }, refreshing: false,
       limits: { choices: [50, 100, 200], absolute_max: 1000, default: 200, children_per_parent: 50 },
     };
     vaultSessionLimit = scene.sessions;

@@ -28,7 +28,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use zerocode_core::vault::{self, Home, Limits, Scan, VaultQuery, VaultSession};
+use zerocode_core::vault::{
+    self, Hidden, HiddenCount, Home, Limits, Scan, VaultQuery, VaultSession,
+};
 use zerocode_core::vault_index::Index;
 
 /// The agent the window keeps under its own data (`vault_walk` in the shell).
@@ -36,14 +38,6 @@ const APP_STORE_AGENT: &str = "claude";
 
 /// How a worker's briefing opens: a card named by it is named by nothing.
 const BRIEFING_HEAD: &str = "You are a worker in this window";
-
-/// The folders a measurement or a test runs an agent in.
-const TEMP_ROOTS: [&str; 4] = [
-    "/private/tmp",
-    "/tmp",
-    "/private/var/folders",
-    "/var/folders",
-];
 
 fn ms(took: Duration) -> f64 {
     (took.as_secs_f64() * 10_000.0).round() / 10.0
@@ -95,7 +89,7 @@ fn leading_tag(text: &str) -> Option<String> {
 }
 
 /// How the cards read, by agent — counts only.
-fn shapes(sessions: &[VaultSession], app_home: &Path) -> serde_json::Value {
+fn shapes(sessions: &[VaultSession], app_home: &Path, temporary: &[PathBuf]) -> serde_json::Value {
     let mut per_agent: BTreeMap<&str, BTreeMap<&'static str, usize>> = BTreeMap::new();
     let mut tags: BTreeMap<String, usize> = BTreeMap::new();
     let mut temp_runs: BTreeMap<String, usize> = BTreeMap::new();
@@ -114,6 +108,7 @@ fn shapes(sessions: &[VaultSession], app_home: &Path) -> serde_json::Value {
             session.title.starts_with(BRIEFING_HEAD),
         );
         count("with_helpers", !session.children.is_empty());
+        count("only_the_window_spoke", session.window_made);
         for line in &session.preview {
             if let Some(tag) = leading_tag(&line.text) {
                 *tags.entry(format!("{}:{tag}", line.role)).or_default() += 1;
@@ -122,11 +117,7 @@ fn shapes(sessions: &[VaultSession], app_home: &Path) -> serde_json::Value {
         // Where a run in a temporary folder was stored, and whether the
         // window keeps that store: what a measurement or a test leaves in
         // the list.
-        if session
-            .cwd
-            .as_deref()
-            .is_some_and(|cwd| TEMP_ROOTS.iter().any(|root| cwd.starts_with(root)))
-        {
+        if session.hidden_as(temporary) == Some(Hidden::Measured) {
             let store = if Path::new(&session.file_path).starts_with(app_home) {
                 "the window's own store"
             } else {
@@ -196,6 +187,7 @@ fn main() {
 
     // What a query costs over the kept list.
     let sessions = second.map_or(first.sessions, |found| found.sessions);
+    let temporary = zerocode_core::zo_project::temporary_roots();
     let mut views = serde_json::Map::new();
     for (name, query, limit) in [
         ("default_200", "", Some(200)),
@@ -210,23 +202,24 @@ fn main() {
         };
         let mut took_all = Vec::new();
         let mut wire = 0;
-        let mut seen = (0, 0, 0);
+        let mut seen = (0, 0, HiddenCount::default());
         for _ in 0..rounds {
-            let (view, took) = timed(|| vault::view_of(&sessions, &asked, Vec::new(), false, &[]));
+            let (view, took) =
+                timed(|| vault::view_of(&sessions, &asked, Vec::new(), false, &[], &temporary));
             took_all.push(took);
             wire = serde_json::to_vec(&view).map_or(0, |bytes| bytes.len());
-            seen = (view.shown, view.matched, view.hidden_empty);
+            seen = (view.shown, view.matched, view.hidden);
         }
         views.insert(
             name.into(),
             serde_json::json!({
                 "ms": took_all, "wire_bytes": wire,
-                "shown": seen.0, "matched": seen.1, "hidden_empty": seen.2,
+                "shown": seen.0, "matched": seen.1, "hidden": seen.2,
             }),
         );
     }
     report.insert("views".into(), views.into());
-    report.insert("cards".into(), shapes(&sessions, &app_home));
+    report.insert("cards".into(), shapes(&sessions, &app_home, &temporary));
 
     println!(
         "{}",

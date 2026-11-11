@@ -65,6 +65,25 @@ pub fn recorded_workspace(sidecar: &Path) -> Option<PathBuf> {
     (!cwd.is_empty()).then(|| PathBuf::from(cwd))
 }
 
+/// The machine's temporary roots, as spelled and resolved — zo's scoreboard's
+/// own (`temp_roots`): the system temporary directory and `/tmp`. A folder
+/// under one is a bench round's `mkdtemp`, a test's `tempfile`, a scratchpad:
+/// not one a person keeps work in. The seat dashboard leaves such projects
+/// out and the session vault keeps such conversations apart, by this list.
+#[must_use]
+pub fn temporary_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for root in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+        if let Ok(resolved) = root.canonicalize() {
+            roots.push(resolved);
+        }
+        roots.push(root);
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

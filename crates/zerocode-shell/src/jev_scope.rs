@@ -313,16 +313,7 @@ pub fn has_own_records(seats: &[SeatNumbers]) -> bool {
 /// own (`temp_roots`): the system temporary directory and `/tmp`.
 #[must_use]
 pub fn temporary_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    for root in [std::env::temp_dir(), PathBuf::from("/tmp")] {
-        if let Ok(resolved) = root.canonicalize() {
-            roots.push(resolved);
-        }
-        roots.push(root);
-    }
-    roots.sort();
-    roots.dedup();
-    roots
+    zerocode_core::zo_project::temporary_roots()
 }
 
 /// Every project with zo records in the window — a ledger under its state

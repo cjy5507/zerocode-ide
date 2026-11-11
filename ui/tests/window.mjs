@@ -46636,7 +46636,7 @@ const vaultDock = await page.evaluate(async () => {
     .map((one) => one.textContent);
   const viewRow = (said) => [...menu.querySelectorAll(".sidebar-menu-item")]
     .find((one) => one.querySelector(".sidebar-menu-label")?.textContent === said);
-  viewRow("빈 세션 숨기기").click();
+  viewRow("대화 아닌 세션 숨기기").click();
   await settle();
   seen.askedHideEmpty = window.__ASKED_VAULT__?.query?.hide_empty;
   viewRow("Claude (2)").click();
@@ -46688,7 +46688,7 @@ ok(
     JSON.stringify(vaultDock.moreRows) ===
       JSON.stringify(["다시 열기", "명령 복사", "파일 보기"]) &&
     vaultDock.viewRows.includes("모두") && vaultDock.viewRows.includes("Claude (2)") &&
-    vaultDock.viewRows.includes("빈 세션 숨기기") &&
+    vaultDock.viewRows.includes("대화 아닌 세션 숨기기") &&
     vaultDock.viewRows.includes("보기 초기화") &&
     vaultDock.arrivalForce === true && vaultDock.arrivalHidesEmpty === true &&
     vaultDock.askedHideEmpty === false &&

@@ -87,6 +87,10 @@ pub struct Walk {
     /// what a card's group is named by. Kept with the walk because listing
     /// them is two git processes a project, and a keystroke used to pay that.
     pub worktrees: Vec<WorktreeRef>,
+    /// The machine's temporary folders, as this walk resolved them
+    /// ([`zerocode_core::zo_project::temporary_roots`]): a conversation that
+    /// ran under one is a measurement's, kept apart from a person's.
+    pub temporary: Vec<PathBuf>,
 }
 
 /// The sessions no file gives, and what reading them could not do.
@@ -136,6 +140,7 @@ struct Reading {
     issues: Vec<ScanIssue>,
     truncated: bool,
     worktrees: Vec<WorktreeRef>,
+    temporary: Vec<PathBuf>,
     /// What the last walk of this run did, in counts: one that opened a
     /// file is written down. Not written down itself: it says what a walk
     /// cost, and the next run's walk has its own.
@@ -155,6 +160,7 @@ impl Reading {
             issues: self.issues.clone(),
             truncated: self.truncated || cut || dropped,
             worktrees: self.worktrees.clone(),
+            temporary: self.temporary.clone(),
         }
     }
 }
@@ -286,6 +292,7 @@ impl Store {
             issues,
             truncated: found.truncated || dropped,
             worktrees: worktrees(),
+            temporary: zerocode_core::zo_project::temporary_roots(),
         };
         let changed = before.as_ref().is_none_or(|kept| **kept != walk);
         reading = Reading {
@@ -296,6 +303,7 @@ impl Store {
             issues: written_issues,
             truncated: walk.truncated,
             worktrees: walk.worktrees.clone(),
+            temporary: walk.temporary.clone(),
             count: found.count,
         };
         if changed || reading.count.read > 0 {

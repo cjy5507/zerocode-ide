@@ -907,6 +907,7 @@ pub(crate) async fn vault_sessions(
             walk.issues.clone(),
             walk.truncated,
             &walk.worktrees,
+            &walk.temporary,
         );
         view.refreshing = answer.refreshing;
         // The card's command wears the resolved base. Rewritten here and not in
