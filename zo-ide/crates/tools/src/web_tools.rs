@@ -605,7 +605,10 @@ fn guard_against_ssrf(url: &reqwest::Url) -> Result<(), ToolError> {
 
 /// `false` for any address that must never be reachable via a fetched URL:
 /// loopback, link-local (incl. cloud IMDS `169.254.0.0/16`), private/RFC1918,
-/// CGNAT, documentation, unspecified, and their IPv6 equivalents.
+/// CGNAT, benchmarking, documentation, multicast, reserved, unspecified, and
+/// their IPv6 equivalents. An IPv6 address that carries an IPv4 one — mapped
+/// (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) — is judged
+/// by the IPv4 address it reaches.
 fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -616,18 +619,42 @@ fn is_public_ip(ip: IpAddr) -> bool {
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 || v4.is_unspecified()
+                || v4.is_multicast()
                 || o[0] == 0
                 // carrier-grade NAT 100.64.0.0/10
-                || (o[0] == 100 && (o[1] & 0xc0) == 64))
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+                // benchmarking 198.18.0.0/15
+                || (o[0] == 198 && (o[1] & 0xfe) == 18)
+                // reserved 240.0.0.0/4
+                || o[0] >= 240)
         }
         IpAddr::V6(v6) => {
             if let Some(mapped) = v6.to_ipv4_mapped() {
                 return is_public_ip(IpAddr::V4(mapped));
             }
-            let first = v6.segments()[0];
+            let s = v6.segments();
+            let v4_from = |high: u16, low: u16| {
+                let [a, b] = high.to_be_bytes();
+                let [c, d] = low.to_be_bytes();
+                IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+            };
+            // NAT64 well-known prefix 64:ff9b::/96: a translator forwards it
+            // to the IPv4 address in its low 32 bits.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_public_ip(v4_from(s[6], s[7]));
+            }
+            // 6to4 2002::/16: the IPv4 relay address sits in bits 16..48.
+            if s[0] == 0x2002 {
+                return is_public_ip(v4_from(s[1], s[2]));
+            }
+            let first = s[0];
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
+                // deprecated IPv4-compatible ::a.b.c.d (::/96)
+                || s[..6] == [0; 6]
+                // documentation 2001:db8::/32
+                || (first == 0x2001 && s[1] == 0x0db8)
                 // unique local fc00::/7
                 || (first & 0xfe00) == 0xfc00
                 // link-local fe80::/10
@@ -1235,6 +1262,33 @@ mod tests {
         assert!(!is_public_ip("fc00::1".parse().unwrap()));
         assert!(!is_public_ip("fe80::1".parse().unwrap()));
         assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    /// Addresses the first list missed: IPv4 multicast, reserved and
+    /// benchmarking ranges, and IPv6 forms that carry an internal IPv4 address
+    /// (NAT64, 6to4), the deprecated IPv4-compatible form, and documentation.
+    #[test]
+    fn is_public_ip_refuses_multicast_reserved_and_tunnelled_internal_addresses() {
+        for ip in [
+            "224.0.0.1",          // IPv4 multicast
+            "239.255.255.250",    // IPv4 multicast (SSDP)
+            "240.0.0.1",          // reserved 240/4
+            "198.18.0.1",         // benchmarking 198.18/15
+            "198.19.255.254",     // benchmarking 198.18/15
+            "64:ff9b::a9fe:a9fe", // NAT64 of 169.254.169.254 (cloud IMDS)
+            "64:ff9b::7f00:1",    // NAT64 of 127.0.0.1
+            "2002:a9fe:a9fe::1",  // 6to4 of 169.254.169.254
+            "2002:c0a8:1::1",     // 6to4 of 192.168.0.1
+            "::a9fe:a9fe",        // IPv4-compatible 169.254.169.254
+            "::808:808",          // IPv4-compatible, deprecated even when public
+            "2001:db8::1",        // documentation
+        ] {
+            assert!(!is_public_ip(ip.parse().unwrap()), "{ip} must be non-public");
+        }
+        // The same forms around a public IPv4 address stay reachable.
+        for ip in ["64:ff9b::808:808", "2002:808:808::1", "198.20.0.1", "223.255.255.1"] {
+            assert!(is_public_ip(ip.parse().unwrap()), "{ip} is public");
+        }
     }
 
     #[test]
