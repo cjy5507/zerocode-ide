@@ -110,6 +110,7 @@ import { testTerminalRaster } from "./terminal-raster.mjs";
 import { testTerminalThroughput } from "./terminal-throughput.mjs";
 import { testTerminalPacing } from "./terminal-pacing.mjs";
 import { testTerminalCadence } from "./terminal-cadence.mjs";
+import { testDimInk } from "./terminal-dim-ink.mjs";
 import { installHarnessWaits } from "./harness-waits.mjs";
 import { installBoardWaits, testBoardWaits } from "./board-waits.mjs";
 
@@ -688,6 +689,18 @@ suite("terminal-cadence", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {
     await testTerminalCadence(page, ok);
+  } finally {
+    await page.close();
+  }
+});
+
+/* SGR 2 dims the ink of a run and leaves its ground whole (terminal-dim-ink.mjs):
+ * a dim word on a painted band stands on the band's own colour. Computed
+ * style on one frame — a page of its own, so it runs alone in seconds. */
+suite("terminal-dim", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    await testDimInk(page, ok);
   } finally {
     await page.close();
   }

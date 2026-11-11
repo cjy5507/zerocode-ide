@@ -1477,6 +1477,10 @@
    * `terminalFontWeight: 500` and its derived bold floor of 700. */
   --term-weight: 500;
   --term-bold-weight: 700;
+  /* SGR 2 — how much of its colour dim ink keeps. The share is the ink's
+   * alone: the ground under a dim word is the ground its neighbours stand on
+   * (shell.css, `.term .dim`). */
+  --term-dim-ink: 60%;
 
   /* The board card's own screen — the tail of what an agent is printing.
    *

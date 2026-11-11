@@ -15907,7 +15907,20 @@ body.is-dragging-pane {
 }
 
 .term .bold { font-weight: var(--term-bold-weight); }
-.term .dim { opacity: 0.6; }
+/* SGR 2 dims the INK. `opacity` dimmed the whole run, its ground with it, so
+ * a dim word on a painted band stood on a darker box than the band — zo's
+ * placeholder on #2d2e35 inside a composer of #38393f (2026-11-11). The fill
+ * of the glyphs is the run's own colour at the token's share, whichever class
+ * or inline style gave it — and so is the line an underline or a strike
+ * draws (below) — while the ground, and a selection painted over the run,
+ * stay whole. No layer is opened for it, where `opacity` opened one for every
+ * dim run.
+ *
+ * Reverse video is the other way round: there the foreground IS the cell's
+ * ground, so the colour that dims is the block, and such a run keeps
+ * `opacity` (`dim-reverse`, shell-term.js `runsOf`). */
+.term .dim { -webkit-text-fill-color: color-mix(in srgb, currentColor var(--term-dim-ink), transparent); }
+.term .dim-reverse { opacity: var(--term-dim-ink); }
 .term .italic { font-style: italic; }
 .term .underline { text-decoration: underline; }
 /* SGR 9 and SGR 5, which the grid had no fields for at all until now. A diff
@@ -15921,6 +15934,13 @@ body.is-dragging-pane {
  * would silently lose its underline. */
 .term .strike { text-decoration: line-through; }
 .term .underline.strike { text-decoration: underline line-through; }
+/* The line dims with the ink it is drawn under or through (`.term .dim`).
+ * After the rules above, and as specific as the longest of them: each of
+ * those sets `text-decoration` whole, its colour included. */
+.term .dim.underline,
+.term .dim.strike {
+  text-decoration-color: color-mix(in srgb, currentColor var(--term-dim-ink), transparent);
+}
 /* A run of double-width glyphs the fallback face draws short (shell-term.js
  * `measure`): grown toward its two columns as far as the row allows, the rest
  * of the shortfall as tracking with half of it leading the run, so each glyph

@@ -2277,7 +2277,9 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       const fgPaint = finiteColorClass(fgSpec, fgFall, "fg", bgAsked);
       let classes = "";
       if (s.bold) classes += "bold ";
-      if (s.dim) classes += "dim ";
+      // Dim ink — and under reverse video the ink is the cell's ground, which
+      // is a different thing to dim (shell.css, `.term .dim`).
+      if (s.dim) classes += s.reverse ? "dim-reverse " : "dim ";
       if (s.italic) classes += "italic ";
       if (s.underline) classes += "underline ";
       // SGR 9 and SGR 5, which this grid had no fields for at all. A TUI
