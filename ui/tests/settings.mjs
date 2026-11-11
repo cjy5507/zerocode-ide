@@ -5683,6 +5683,53 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
   }
 });
 
+// The folded 「세부 설정」 line is where a save's command is read before the
+// press. A character that draws nothing or turns the reading direction could
+// make that line read as another command than the field holds: the line names
+// it by its code point, and the field keeps what it holds.
+await test("the_folded_details_line_names_a_mark_hidden_in_a_command", async () => {
+  try {
+    await pageA.evaluate(() => {
+      setAutoOpen(true);
+      setAutoPage("schedules");
+      editAutomation(null);
+    });
+    await pageA.waitForSelector("#auto-editor-scrim:not([hidden])");
+    const shown = await pageA.evaluate(() => {
+      const set = (id, value) => {
+        const field = document.getElementById(id);
+        field.value = value;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      // The command's input is what paints the line: the precheck goes in first.
+      set("auto-precheck", "test -f a\u200bb");
+      set("auto-command", "echo ok \u202egnp.exe");
+      return {
+        line: document.getElementById("auto-details-summary").textContent,
+        command: document.getElementById("auto-command").value,
+        named: withMarksNamed("a\u202eb\u0007c"),
+        wide: withMarksNamed("x\u00ady\u{e0041}z\ufe0f"),
+      };
+    });
+    assert(
+      shown.line.includes("echo ok ⟦U+202E⟧gnp.exe") && shown.line.includes("test -f a⟦U+200B⟧b"),
+      "the folded line drew a hidden mark instead of naming it",
+      shown,
+    );
+    assert(!/[\u202e\u200b]/.test(shown.line), "a hidden mark is still in the line", shown);
+    assertEqual(shown.command, "echo ok \u202egnp.exe", "the field lost what it holds");
+    assertEqual(shown.named, "a⟦U+202E⟧b⟦U+0007⟧c", "a mark was not named by its code point");
+    assertEqual(shown.wide, "x⟦U+00AD⟧y⟦U+E0041⟧z⟦U+FE0F⟧",
+      "a soft hyphen, a tag character or a variation selector was not named by its code point");
+    return "a direction mark and a zero-width space were named in the line; the field kept them";
+  } finally {
+    await pageA.evaluate(() => {
+      closeAutoForm();
+      setAutoOpen(false);
+    });
+  }
+});
+
 // The Flow card's two hands (t-93871): taking a Flow — or a recipe of the second
 // list — away behind one question that names what goes with it, and standing a
 // plain recipe up as a Flow. Both are the person's alone, so their buttons wear

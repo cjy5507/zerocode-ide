@@ -12950,6 +12950,20 @@ function paintAutoTemplatePick() {
   field.value = "";
 }
 
+/* A command, as a line shows it to be read before a save: every character that
+ * draws nothing or turns the reading direction is written out by its code
+ * point. Such a mark could make the line read as another command than the one
+ * the field holds — the field keeps what it holds, and the line names it.
+ * The set is the one a card's words are cleaned by (`card_words` in the core):
+ * control characters and Unicode's Default_Ignorable_Code_Point. */
+const UNSEEN_MARKS = /[\p{Cc}\p{Default_Ignorable_Code_Point}]/gu;
+function withMarksNamed(text) {
+  return text.replace(
+    UNSEEN_MARKS,
+    (mark) => `⟦U+${mark.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}⟧`,
+  );
+}
+
 /* What 「세부 설정」 holds now, in one line: where it runs when that is not the
  * plain case, what happens when it ends, how late a missed run may be, and the
  * precheck — so the fold can stay shut and still be read. */
@@ -12966,11 +12980,12 @@ function autoDetailsWords() {
   if (!direct && el("auto-close-done").checked) words.push(t("auto.closeWhenDone", "완료되면 터미널 닫기"));
   words.push(`${t("auto.grace", "놓친 실행 유예")} ${graceLabel(Number(el("auto-grace").value))}`);
   const precheck = el("auto-precheck").value.trim();
-  words.push(`${t("auto.precheck", "사전 점검")} ${precheck || t("auto.none", "없음")}`);
+  words.push(`${t("auto.precheck", "사전 점검")} ${precheck ? withMarksNamed(precheck) : t("auto.none", "없음")}`);
   // The command itself, as the precheck above: what a save stores is read off
-  // this line even when the fold is closed.
+  // this line even when the fold is closed — a mark that would hide part of it
+  // or turn its order is named, not drawn.
   const command = el("auto-command").value.trim();
-  if (command) words.push(`${t("auto.customCommand", "사용자 명령")} ${command}`);
+  if (command) words.push(`${t("auto.customCommand", "사용자 명령")} ${withMarksNamed(command)}`);
   return words;
 }
 
