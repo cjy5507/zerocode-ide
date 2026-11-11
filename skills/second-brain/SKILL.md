@@ -63,7 +63,9 @@ then report the pages created or updated.
 Search with `zo vault search <words>` first. It answers from one index of
 passages: the vault's pages (`wiki`) first, then its originals (`raw`) and any
 folder a person added with `zo vault source add <folder>`, each under its own
-layer. A rare word counts for more than a common one, and what chance would
+layer. Add a folder only when the person asks: its words, paths and titles
+are kept in the index under the vault's `.zerocode/`, so a vault that is
+synced carries them along. A rare word counts for more than a common one, and what chance would
 match is left out. Each answer names its file as `path:line`; the first
 answers of a layer show the passage that holds the words and the rest its one
 best line, and a page another page `supersedes` gives its place to that page.

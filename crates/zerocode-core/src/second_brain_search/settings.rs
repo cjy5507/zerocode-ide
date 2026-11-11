@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
+use super::index;
 use super::passages::Bounds;
 use super::segment;
 use crate::atomic_file::write_atomically;
@@ -30,6 +31,9 @@ use crate::second_brain_live::TRACE_DIR as STATE_DIR;
 pub const SETTINGS_FILE: &str = "search.json";
 /// The folder the index files live in, inside the vault's private folder.
 pub const INDEX_DIR: &str = "search-index";
+/// What a person is told when a folder is added, and wherever the added
+/// folders are listed: the index is a part of the folder, kept in the vault.
+pub const ADDED_FOLDER_NOTICE: &str = "an added folder's words, paths and titles are kept in the index under the vault's .zerocode/ — a vault that is synced carries them along";
 
 /// Files read as prose, by extension. On unless the settings name their own.
 pub const PROSE_EXTENSIONS: [&str; 7] = ["md", "markdown", "mdx", "txt", "rst", "org", "adoc"];
@@ -381,6 +385,7 @@ pub fn add_source(vault: &Path, folder: &Path, layer: Option<&str>) -> Result<So
 
 /// Takes a folder out of what the search of `vault` reads, named by its path
 /// or by its layer, and removes its index. The folder itself is not touched.
+/// A search that is writing that index is waited for first (`index::remove`).
 ///
 /// # Errors
 ///
@@ -412,9 +417,9 @@ pub fn remove_source(vault: &Path, named: &str) -> Result<Vec<Source>, String> {
         });
     }
     write_object(vault, &written)?;
+    let table = read(vault).table;
     for source in &gone {
-        // The index is a copy of nothing: removing it only frees its bytes.
-        let _ = std::fs::remove_dir_all(index_dir(vault).join(&source.key));
+        index::remove(&index_dir(vault).join(&source.key), &table);
     }
     Ok(gone)
 }

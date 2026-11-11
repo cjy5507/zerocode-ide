@@ -43,8 +43,8 @@ use crate::second_brain_graph::{
 };
 use crate::second_brain_related::{is_structural_id, name_text, tokenize};
 
-const MANIFEST_FILE: &str = "manifest.json";
-const LOCK_FILE: &str = "lock";
+pub(super) const MANIFEST_FILE: &str = "manifest.json";
+pub(super) const LOCK_FILE: &str = "lock";
 /// How often a reader reads the manifest again when the files it names are
 /// gone: a writer swept them between the two reads.
 const READ_TRIES: usize = 3;
@@ -494,6 +494,26 @@ fn in_step(
 /// an index that opened and then read wrong.
 pub(super) fn discard(dir: &Path) {
     let _ = fs::remove_file(dir.join(MANIFEST_FILE));
+}
+
+/// Removes a layer's index for good: its folder left the settings. The
+/// index is a copy of nothing, so this only frees its bytes — but the
+/// folder's one writer is waited for first ([`Table::lock_patience`] at
+/// most) and the lock held while the files go, so they do not go from under
+/// a search that is writing them. A search that outlasts the wait, or was
+/// waiting for the lock itself, finds no folder to write to and answers from
+/// memory, as it does without an index.
+pub(super) fn remove(dir: &Path, table: &Table) {
+    if !dir.is_dir() {
+        return;
+    }
+    let writer = lock(dir, table);
+    if fs::remove_dir_all(dir).is_err() {
+        // A host that will not remove a file held open: let go of the lock
+        // file and remove what is left.
+        drop(writer);
+        let _ = fs::remove_dir_all(dir);
+    }
 }
 
 /// Every file read, and the index kept in memory.

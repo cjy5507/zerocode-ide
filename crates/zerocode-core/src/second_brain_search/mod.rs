@@ -37,8 +37,8 @@ use std::time::Instant;
 pub use index::Freshness;
 pub use rank::{NAME_WEIGHT, NEIGHBOR_RULE, NeighborRule, PASSAGE_WEIGHT};
 pub use settings::{
-    INDEX_DIR, Kind, PROSE_EXTENSIONS, RECORD_EXTENSIONS, SETTINGS_FILE, Settings, Source, Table,
-    add_source, read as read_settings, remove_source,
+    ADDED_FOLDER_NOTICE, INDEX_DIR, Kind, PROSE_EXTENSIONS, RECORD_EXTENSIONS, SETTINGS_FILE,
+    Settings, Source, Table, add_source, read as read_settings, remove_source,
 };
 
 use index::Layer;
@@ -1268,6 +1268,46 @@ mod tests {
                 .unwrap_err()
                 .starts_with("no added folder")
         );
+    }
+
+    /// Taking a folder out waits for the search that is writing its index:
+    /// the files do not go from under a writer, and go once it is done.
+    #[test]
+    fn removing_a_folder_waits_for_the_search_writing_its_index() {
+        /// How long the writer holds on before it lets go. Nothing can answer
+        /// in that time, so the wait makes this test slower and never wrong.
+        const WRITER_HOLDS: std::time::Duration = std::time::Duration::from_millis(300);
+
+        let vault = Vault::new();
+        let outside = tempfile::tempdir().expect("reports");
+        fs::write(outside.path().join("crane.md"), "The crane lifts cargo.\n").unwrap();
+        let source = add_source(vault.root(), outside.path(), Some("reports")).unwrap();
+        assert_eq!(slugs(&vault.ask("crane")), ["reports/crane.md"]);
+        let dir = settings::index_dir(vault.root()).join(&source.key);
+
+        // A search writing the layer's index holds its lock.
+        let writer = fs::File::options()
+            .write(true)
+            .open(dir.join(index::LOCK_FILE))
+            .unwrap();
+        writer.try_lock().unwrap();
+        let (done, removed) = std::sync::mpsc::channel();
+        let root = vault.root();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let gone = remove_source(root, "reports").map(|gone| gone.len());
+                let _ = done.send(gone);
+            });
+            assert!(
+                removed.recv_timeout(WRITER_HOLDS).is_err(),
+                "the index went while a search was writing it"
+            );
+            assert!(dir.join(index::MANIFEST_FILE).is_file());
+            writer.unlock().unwrap();
+            assert_eq!(removed.recv().unwrap(), Ok(1));
+        });
+        assert!(!dir.exists());
+        assert!(vault.ask("crane").hits.is_empty());
     }
 
     /// The table's defaults read prose alone; the settings file turns the

@@ -71,6 +71,9 @@ zo vault mark <left> <right> <merge|related|supersedes|contradicts|none> [--vaul
   lies and under its own layer. add lists a folder (its name is the layer
   unless --layer says), list shows what is read, remove takes one out by its
   folder or its layer and drops its index; the folder is never written to.
+  An added folder's words, paths and titles are kept in the index under the
+  vault's .zerocode/, so a vault that is synced carries them along: add a
+  folder only when its owner asks.
   path: paths between two pages of the second brain, shortest first, each
   hop naming the relation and the road that wrote it (measured · declared ·
   inferred). A page is named by its id (wiki/a/b.md), its path below wiki/,
@@ -481,9 +484,10 @@ fn run_source(request: &Request, cwd: &Path, vault: &Path) -> Result<Report, Str
         SOURCE_ADD => {
             let source = vault_search::add_source(vault, &folder(), request.layer.as_deref())?;
             format!(
-                "added {} as layer {} — the next search reads it where it lies",
+                "added {} as layer {} — the next search reads it where it lies\nnote: {}",
                 source.root.display(),
-                source.layer
+                source.layer,
+                vault_search::ADDED_FOLDER_NOTICE
             )
         }
         SOURCE_REMOVE => {
@@ -509,6 +513,11 @@ fn run_source(request: &Request, cwd: &Path, vault: &Path) -> Result<Report, Str
         vault_search::Kind::Raw => "originals",
         vault_search::Kind::Added => "added",
     };
+    // Said wherever an added folder is listed: what of it the vault now holds.
+    let notice = sources
+        .iter()
+        .any(|source| source.kind == vault_search::Kind::Added)
+        .then_some(vault_search::ADDED_FOLDER_NOTICE);
     let text = if request.json {
         json!({
             "vault": vault.display().to_string(),
@@ -517,6 +526,7 @@ fn run_source(request: &Request, cwd: &Path, vault: &Path) -> Result<Report, Str
                 "path": source.root.display().to_string(),
                 "kind": kind(source),
             })).collect::<Vec<_>>(),
+            "notice": notice,
         })
         .to_string()
     } else {
@@ -526,6 +536,10 @@ fn run_source(request: &Request, cwd: &Path, vault: &Path) -> Result<Report, Str
                 text.push('\n');
             }
             let _ = write!(text, "{} · {} · {}", source.layer, kind(source), source.root.display());
+        }
+        // `add` has said it already, on its own second line.
+        if let Some(notice) = notice.filter(|_| request.from == SOURCE_LIST) {
+            let _ = write!(text, "\nnote: {notice}");
         }
         text
     };
@@ -1092,7 +1106,15 @@ mod tests {
         .unwrap()
         .text;
         assert!(added.starts_with("added "), "{added}");
+        assert_eq!(added.lines().nth(1), Some(format!("note: {}", vault_search::ADDED_FOLDER_NOTICE).as_str()), "{added}");
         assert!(added.lines().last().unwrap().starts_with("weekly · added · "), "{added}");
+        // The list says the same wherever an added folder is on it, and in --json.
+        let listed = run(&args(&["source", "list", "--vault", &root]), vault.path()).unwrap().text;
+        assert_eq!(listed.lines().count(), 4, "{listed}");
+        assert!(listed.ends_with(vault_search::ADDED_FOLDER_NOTICE), "{listed}");
+        let listed = run(&args(&["source", "list", "--json", "--vault", &root]), vault.path()).unwrap().text;
+        let value: Value = serde_json::from_str(&listed).unwrap();
+        assert_eq!(value["notice"], vault_search::ADDED_FOLDER_NOTICE);
         let found = run(&args(&["search", "soak", "test", "--json", "--vault", &root]), vault.path()).unwrap();
         let value: Value = serde_json::from_str(&found.text).unwrap();
         assert_eq!(value["found"][0]["slug"], "weekly/week.md");
@@ -1101,6 +1123,7 @@ mod tests {
         let removed = run(&args(&["source", "remove", "weekly", "--vault", &root]), vault.path()).unwrap().text;
         assert!(removed.starts_with("removed "), "{removed}");
         assert_eq!(removed.lines().count(), 3, "{removed}");
+        assert!(!removed.contains("note:"), "no added folder is left to speak of: {removed}");
         let found = run(&args(&["search", "soak", "test", "--json", "--vault", &root]), vault.path()).unwrap();
         let value: Value = serde_json::from_str(&found.text).unwrap();
         assert!(value["found"].as_array().unwrap().is_empty(), "{}", found.text);
