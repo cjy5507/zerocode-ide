@@ -3496,10 +3496,32 @@ mod tests {
             "every wide glyph wears the Hangul face's numbers again, so an \
              emoji stands past its two columns:\n{asked}"
         );
+        // A blank between two wide words rides in their run: a run a word is
+        // a box a word, and each box is a layer of its own to paint. The
+        // dress gives the blank back to one cell, measured as the face shapes
+        // it between two of its glyphs — not assumed from the mono face.
+        let runs = nested_block(source, "  function runsOf(cells, marks, selected = null) {");
+        assert!(
+            runs.contains(
+                "const nextWide = cells[i + 2] !== undefined && cells[i + 2].ch === CONTINUATION;"
+            ) && runs.contains(
+                "if (glyph === \" \" && nextWide && run !== null && run.wide && run.pitch !== \"\""
+            ),
+            "a blank between two wide words is a run of its own again — every \
+             Korean word is a separate transformed box:\n{runs}"
+        );
+        let blank = nested_block(source, "  function wideBlank(glyph, size, spread) {");
+        assert!(
+            blank.contains(
+                "meter.measureText(`${glyph} ${glyph}`).width - 2 * meter.measureText(glyph).width"
+            ),
+            "a riding blank's width is assumed instead of measured between \
+             two glyphs of the face:\n{blank}"
+        );
         // The dress, as the properties the stylesheet reads.
         let dress = block_after(
             source,
-            "function wideDressVars(size, stretch, spread, rise, drop) {",
+            "function wideDressVars(size, stretch, spread, rise, drop, blank) {",
         );
         for property in [
             "--term-wide-scale",
@@ -3509,6 +3531,7 @@ mod tests {
             "--term-wide-lead",
             "--term-wide-rise",
             "--term-wide-drop",
+            "--term-wide-blank",
         ] {
             assert!(
                 dress.contains(&format!("[\"{property}\", ")),
@@ -3534,6 +3557,7 @@ mod tests {
             "font-size: var(--term-wide-scale, 1em);",
             "line-height: 0;",
             "letter-spacing: var(--term-cell-spread, 0px);",
+            "word-spacing: var(--term-wide-blank, 0px);",
             "margin-left: var(--term-wide-lead, 0px);",
             "margin-right: calc(-1 * var(--term-wide-lead, 0px));",
             "transform: var(--term-wide-squash, none);",
@@ -16608,6 +16632,7 @@ mod tests {
             ("glyphPitch", "  function glyphPitch(glyph, wide) {"),
             ("narrowPitch", "  function narrowPitch(glyph) {"),
             ("widePitch", "  function widePitch(glyph) {"),
+            ("wideBlank", "  function wideBlank(glyph, size, spread) {"),
             ("glyphAdvance", "  function glyphAdvance(glyph, scale) {"),
             ("dressRun", "  function dressRun(span, run, was) {"),
             ("shiftNodes", "  function shiftNodes(count) {"),

@@ -1510,8 +1510,9 @@ function wideSnap(value) {
  * width alone and is pressed back out of its height, `spread` the tracking
  * still short of two columns (half of it leads the glyph), `rise` how far the
  * baseline is let down inside the run's box, `drop` how far below the narrow
- * glyphs' line that puts it (an underline is drawn back up by it). */
-function wideDressVars(size, stretch, spread, rise, drop) {
+ * glyphs' line that puts it (an underline is drawn back up by it), `blank`
+ * what a blank between two of its glyphs gives back to stand on one cell. */
+function wideDressVars(size, stretch, spread, rise, drop, blank) {
   return [
     ["--term-wide-scale", `${size}em`],
     ["--term-wide-stretch", `${stretch}`],
@@ -1520,12 +1521,13 @@ function wideDressVars(size, stretch, spread, rise, drop) {
     ["--term-wide-lead", `${spread / 2}px`],
     ["--term-wide-rise", `${rise}px`],
     ["--term-wide-drop", `${drop}px`],
+    ["--term-wide-blank", `${blank}px`],
   ];
 }
 
 /* A dress in whole steps. */
-function wideDress(size, stretch, spread, rise, drop) {
-  return [size, stretch, spread, rise, drop].map(wideSnap);
+function wideDress(size, stretch, spread, rise, drop, blank) {
+  return [size, stretch, spread, rise, drop, blank].map(wideSnap);
 }
 
 /* Whether a dress changes nothing: its face already draws the glyph across
@@ -2298,7 +2300,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // and where its baseline lands under a box of another size is the
     // engine's (it rounds a face's ascent to whole pixels at each size).
     const [size, stretch] = wideShape(advance, false);
-    for (const [property, value] of wideDressVars(size, stretch, 0, 0, 0)) wide.style.setProperty(property, value);
+    for (const [property, value] of wideDressVars(size, stretch, 0, 0, 0, 0)) wide.style.setProperty(property, value);
     wide.className = WIDE_RUN_CLASS;
     const grownWidth = parseFloat(getComputedStyle(wide).width);
     const grown = grownWidth > 0 ? grownWidth / PROBE_RUN_GLYPHS : advance * size;
@@ -2310,7 +2312,8 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // already draws Hangul across two columns (a CJK mono font in the stack):
     // the dress is then one that changes nothing, and a run painted from
     // there on wears no class at all.
-    const dress = wideDress(size, stretch, wideSpread(grown), ...wideSeat(size, stretch, landed));
+    const spread = wideSpread(grown);
+    const dress = wideDress(size, stretch, spread, ...wideSeat(size, stretch, landed), wideBlank(WIDE_PROBE_GLYPH, size, spread));
     const worn = dress.join(" ");
     if (worn !== fit.worn) {
       fit.worn = worn;
@@ -2349,6 +2352,21 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     return [Math.max((wanted - landed) * stretch, 0), wanted - cell.wide.line];
   }
 
+  /* What a blank inside a dressed run of `glyph` gives back so that it stands
+   * on one cell: the run's font-size is the glyph's, grown and widened, and a
+   * blank shaped at that size — between two such glyphs, as the face that
+   * draws them shapes it — is wider than a cell. The dress's `blank`
+   * (`word-spacing`), over the tracking every character of the run carries. */
+  function wideBlank(glyph, size, spread) {
+    // No meter, no per-glyph answers (`measure`): no run is dressed by one,
+    // and no blank rides.
+    if (!(glyphFontPitch > 0)) return 0;
+    const meter = glyphMeter();
+    meter.font = glyphFontAt(size);
+    const between = meter.measureText(`${glyph} ${glyph}`).width - 2 * meter.measureText(glyph).width;
+    return cell.width - (cell.width * between) / glyphFontPitch - spread;
+  }
+
   /* A glyph's advance in this screen's pixels, at `scale` times its font size.
    *
    * Asked of the cascade through `measureText`, relative to the cell's glyph
@@ -2380,7 +2398,8 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     if (!picture && Math.abs(advance - fit.advance) < PITCH_SLACK_PX) return fit.cls;
     const [size, stretch] = wideShape(advance, picture);
     const landed = fit.top + (fit.sink * size) / stretch;
-    return wideClass(wideDress(size, stretch, wideSpread(glyphAdvance(glyph, size)), ...wideSeat(size, stretch, landed)));
+    const spread = wideSpread(glyphAdvance(glyph, size));
+    return wideClass(wideDress(size, stretch, spread, ...wideSeat(size, stretch, landed), wideBlank(glyph, size, spread)));
   }
 
   /* The class that puts `glyph` on the columns the grid gave it — one cell, or
@@ -2468,6 +2487,18 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       // The grid already claimed the column behind a wide glyph, so its own
       // mark answers this — the view keeps no width table of its own.
       const wide = cells[i + 1] !== undefined && cells[i + 1].ch === CONTINUATION;
+      // A blank between two dressed double-width glyphs rides in their run
+      // (its dress gives the blank one cell): Korean prose is words with one
+      // blank between them, and a run a word is a box a word — each one a
+      // layer of its own to paint (`.term .term-wide` is transformed). Only
+      // BETWEEN two: a blank before a narrow glyph, or the blank rest of a
+      // row, stays the narrow run it is.
+      const nextWide = cells[i + 2] !== undefined && cells[i + 2].ch === CONTINUATION;
+      if (glyph === " " && nextWide && run !== null && run.wide && run.pitch !== "" && run.mark === mark && run.sel === sel && sameStyle(s, runStyle)) {
+        run.text += glyph;
+        run.to = i + 1;
+        continue;
+      }
       // A glyph a fallback face draws off its columns carries its own fit —
       // a narrow one its tracking, a wide one its size, stretch and tracking
       // — so a run holds glyphs of one fit only.

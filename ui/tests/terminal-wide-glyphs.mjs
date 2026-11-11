@@ -64,6 +64,7 @@ async function standRig(page) {
       return cells;
     };
     const hangul = "한글자간";
+    const riders = ["가나", "다라"];
     const bar = (at) => ({ ch: "|", style: { fg: { indexed: BAR_COLOURS[at % BAR_COLOURS.length] } } });
     const dressed = { bg: { indexed: 4 }, underline: true };
     const rowsOf = () => [
@@ -80,6 +81,9 @@ async function standRig(page) {
       // between two empty rows.
       pad([...narrowCells("  "), ...wideCells("믐믐"), ...narrowCells("  "), ...wideCells("홁퉜")]),
       pad([]),
+      // 8: two wide words with one blank between them, then a bar — the blank
+      // rides in their run and still takes one cell.
+      pad([...wideCells(riders[0]), ...narrowCells(" "), ...wideCells(riders[1]), bar(0)]),
     ];
     const feed = async () => {
       const rows = rowsOf().map((cells, index) => ({ index, cells }));
@@ -126,7 +130,7 @@ async function standRig(page) {
       };
     };
     window[WIDE_RIG] = {
-      term, view, hangul, feed, settle, natural, rowAt, runOf, footprint,
+      term, view, hangul, riders, feed, settle, natural, rowAt, runOf, footprint,
       leave() {
         const tab = tabOfTerm(term);
         if (tab) {
@@ -173,6 +177,11 @@ async function readRows(page) {
       return { top: rect.top - row.top, height: rect.height, left: rect.left - left, right: rect.right - left };
     };
     const inkRow = rig.rowAt(6).getBoundingClientRect();
+    // Row 8: the runs its glyphs stand in, and the bar after two wide words
+    // and their blank — nine columns in.
+    const ridden = [...rig.rowAt(8).querySelectorAll("span")];
+    const afterRiders = ridden.find((span) => span.textContent === "|");
+    const riderColumns = 2 * [...rig.riders.join("")].length + 1;
     return {
       ...rig.footprint(),
       advance,
@@ -185,6 +194,11 @@ async function readRows(page) {
       bars: bars.length,
       shifts,
       pictures,
+      riding: {
+        runs: ridden.map((span) => span.textContent).filter((text) => text.trim() !== ""),
+        whole: rig.riders.join(" "),
+        shift: afterRiders.getBoundingClientRect().left - left - riderColumns * cell,
+      },
       narrowStrip: box(rig.runOf(4, "ab")),
       wideStrip: box(rig.runOf(4, "한글")),
       // The ink row with half of the empty row above it and half of the one
@@ -341,6 +355,12 @@ export async function testWideGlyphs(page, ok) {
   ok("a wide glyph the fallback face draws short is grown and widened until it covers its two columns, or as far as it may be widened",
     !rows.short || (rows.fit.classes.includes("term-wide") && (filled >= COLUMNS_FILLED || widenedOut)),
     JSON.stringify({ short: rows.short, advance: rows.advance, cell: rows.cell, filled, fit: rows.fit, limit: rows.stretchLimit }));
+
+  // Asked only of a face that is dressed: a run left as its face draws it is
+  // not a box of its own, and its blanks stay the narrow runs they are.
+  ok("a blank between two wide words rides in their run and still takes one cell",
+    !rows.short || (rows.riding.runs[0] === rows.riding.whole && Math.abs(rows.riding.shift) < COLUMN_SLACK_PX),
+    JSON.stringify({ short: rows.short, ...rows.riding }));
 
   ok("a picture is sized to its columns and never stretched",
     rows.pictures.length > 0 && rows.pictures.every((seen) => seen.stretch === 1 && seen.transform === "none"),
