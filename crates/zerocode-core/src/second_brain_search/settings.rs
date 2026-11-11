@@ -23,6 +23,7 @@ use super::passages::Bounds;
 use super::segment;
 use crate::atomic_file::write_atomically;
 use crate::second_brain::{RAW_DIR, WIKI_DIR};
+use crate::second_brain_graph::MAX_PAGE_BYTES;
 use crate::second_brain_live::TRACE_DIR as STATE_DIR;
 
 /// The settings file, inside the vault's private folder.
@@ -61,7 +62,11 @@ pub struct Table {
     /// Lower-case extensions of the files read.
     pub extensions: BTreeSet<String>,
     /// A file longer than this is left out: past it a file is a dump, and a
-    /// passage's place must fit four bytes.
+    /// passage's place must fit four bytes. Unless the settings say another,
+    /// it is what the knowledge graph reads of one page (`MAX_PAGE_BYTES`):
+    /// the vault's two readers agree on how long a page is. They part past
+    /// it — the graph reads a longer page up to the bound, the search leaves
+    /// it out, because a passage names bytes of the whole file.
     pub max_file_bytes: u64,
     /// How long a passage may be and how short one may stand alone.
     pub(super) passage: Bounds,
@@ -92,7 +97,7 @@ impl Default for Table {
                 .iter()
                 .map(|held| (*held).to_string())
                 .collect(),
-            max_file_bytes: 256 * 1024,
+            max_file_bytes: MAX_PAGE_BYTES as u64,
             passage: Bounds {
                 most,
                 // A line and a half of prose: less says too little to be an
@@ -221,10 +226,13 @@ pub fn read(vault: &Path) -> Settings {
     }
     if let Some(most) = written.get(KEY_PASSAGE_BYTES).and_then(Value::as_u64) {
         let share = Table::default().passage;
-        let most = usize::try_from(most).unwrap_or(usize::MAX).max(1);
+        // No passage is longer than the longest file read (the key above, so
+        // it is final here): a number past that says nothing more, and cut
+        // to it the arithmetic on a passage's length stays in range.
+        let most = usize::try_from(most.clamp(1, table.max_file_bytes)).unwrap_or(usize::MAX);
         table.passage = Bounds {
             most,
-            least: most * share.least / share.most,
+            least: most.saturating_mul(share.least) / share.most,
         };
     }
 

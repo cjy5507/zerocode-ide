@@ -59,13 +59,18 @@ const KINDS: [EdgeKind; 6] = [
     EdgeKind::Contradicts,
 ];
 
-/// The byte a relation is stored as.
-pub(super) fn kind_byte(kind: EdgeKind) -> u8 {
-    // Six kinds: the position fits a byte.
-    KINDS
-        .iter()
-        .position(|held| *held == kind)
-        .map_or(0, |at| at as u8)
+/// The byte a relation is stored as: its place in [`KINDS`]. Every kind is
+/// named, so a kind the graph gains does not compile until it has a byte
+/// here — give it the next one and add it to the end of [`KINDS`].
+pub(super) const fn kind_byte(kind: EdgeKind) -> u8 {
+    match kind {
+        EdgeKind::Mentions => 0,
+        EdgeKind::Related => 1,
+        EdgeKind::Implements => 2,
+        EdgeKind::DependsOn => 3,
+        EdgeKind::Supersedes => 4,
+        EdgeKind::Contradicts => 5,
+    }
 }
 
 /// The relation a stored byte names, or nothing for a byte no kind has.
@@ -767,6 +772,17 @@ mod tests {
         assert_eq!(held.holders("cargo").unwrap(), [2]);
         assert_eq!(held.holders("gamma").unwrap(), [5]);
         assert!(held.holders("absent").unwrap().is_empty());
+    }
+
+    /// Every relation reads back from the byte it is stored as, and a byte
+    /// no relation has names none.
+    #[test]
+    fn every_relation_reads_back_from_its_byte() {
+        for (at, kind) in KINDS.into_iter().enumerate() {
+            assert_eq!(usize::from(kind_byte(kind)), at, "{kind:?}");
+            assert_eq!(kind_of(kind_byte(kind)), Some(kind));
+        }
+        assert_eq!(kind_of(u8::try_from(KINDS.len()).unwrap()), None);
     }
 
     /// An index of nothing opens and answers nothing.

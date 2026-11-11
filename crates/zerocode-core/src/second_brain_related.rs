@@ -730,8 +730,9 @@ fn render(graph: &VaultGraph, entries: &[Entry]) -> RelatedBlock {
 /// The relations are given their room first, whole and most telling first,
 /// beside the title's share of the line ([`MIN_RELATED_TITLE_BYTES`]); the
 /// title then has everything they left. So a long title no longer spends the
-/// room a relation needed, and a relation is left out only when the line could
-/// not hold it beside that share.
+/// room a relation needed. The relations end at the first one the line cannot
+/// hold beside that share: a shorter one after it is left out with it, so the
+/// ones shown are always the most telling, in their order.
 fn line_for(graph: &VaultGraph, entry: &Entry) -> String {
     let title = graph
         .nodes

@@ -49,8 +49,14 @@ pub struct NeighborRule {
     pub hub_prior_max: i64,
 }
 
-/// The numbers, as zo's recall measured them on its r49 fixture vault
-/// (`docs/analysis/recall-quality-r49.md`).
+/// The numbers zo's session recall settled on, measured on its 49-question
+/// fixture vault. An answer holding five of the words asked scored 5,000
+/// there, and each share is set by what the neighbour it brings must beat.
+/// Every relation clears a page sharing two of the words (2,000).
+/// `contradicts` comes in nearly beside its answer (4,500), because a reader
+/// who misses a disagreement acts on half a fact; `related`, the claim
+/// written most freely, only just clears the two-word page (2,250) and never
+/// a page sharing three (3,000).
 pub const NEIGHBOR_RULE: NeighborRule = NeighborRule {
     seeds: 3,
     per_kind: 2,

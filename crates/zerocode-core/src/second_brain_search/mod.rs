@@ -60,6 +60,10 @@ pub const PASSAGE_SHOW_BYTES: usize = 600;
 /// Answers a layer gets when it is shown after another: the evidence under
 /// the pages is a few pointers, not a second list.
 pub const LATER_LAYER_HITS: usize = 3;
+/// Answers the ranking is asked for, for each one shown. A page that was
+/// replaced gives its place to the page that replaced it, and two that end at
+/// one page are one answer, so the list is shorter once that is done.
+const RANKED_PER_SHOWN: usize = 2;
 /// How many places a text longer than its room may be shown from, per room:
 /// the stretch shown starts on one of them.
 const SHOWN_STARTS: usize = 4;
@@ -251,9 +255,8 @@ fn ask_layer(
     limit: usize,
 ) -> Option<(LayerReport, Vec<Hit>)> {
     let began = Instant::now();
-    // Twice what is shown: a page that was replaced gives its place to the
-    // page that replaced it, and two that end at one page are one answer.
-    let asking = |layer: &mut Layer| rank::rank(layer, asked, limit.saturating_mul(2));
+    let asking =
+        |layer: &mut Layer| rank::rank(layer, asked, limit.saturating_mul(RANKED_PER_SHOWN));
     let mut layer = index::open(dir, source, table, segment::word_hash).ok()?;
     let ranked = match asking(&mut layer) {
         Ok(ranked) => ranked,
@@ -1315,6 +1318,40 @@ mod tests {
             "{:?}",
             answer.notices
         );
+    }
+
+    /// A number in the settings file past any file's length — the largest a
+    /// JSON number holds — is cut to the longest file read, and the search
+    /// answers.
+    #[test]
+    fn a_passage_bound_past_any_file_is_cut_to_the_longest_file_read() {
+        let vault = Vault::new();
+        vault.write("wiki/crane.md", "The crane lifts cargo.\n");
+        vault.write(
+            ".zerocode/search.json",
+            &format!("{{\"passageBytes\": {}}}\n", u64::MAX),
+        );
+        let whole = Table::default();
+        let table = read_settings(vault.root()).table;
+        assert_eq!(
+            u64::try_from(table.passage.most).unwrap(),
+            whole.max_file_bytes
+        );
+        assert_eq!(
+            table.passage.least,
+            table.passage.most * whole.passage.least / whole.passage.most
+        );
+        assert_eq!(slugs(&vault.ask("crane")), ["wiki/crane"]);
+
+        vault.write(
+            ".zerocode/search.json",
+            &format!(
+                "{{\"maxFileBytes\": 1000, \"passageBytes\": {}}}\n",
+                u64::MAX
+            ),
+        );
+        assert_eq!(read_settings(vault.root()).table.passage.most, 1000);
+        assert_eq!(slugs(&vault.ask("crane")), ["wiki/crane"]);
     }
 
     /// The home and the journal link every page and are about none: they are
