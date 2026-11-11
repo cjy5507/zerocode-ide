@@ -37,7 +37,10 @@ use crate::atomic_file::write_atomically;
 use crate::file_stamp::{FileStamp, stamp_of};
 use crate::held_file_lock::HeldFileLock;
 use crate::second_brain::WIKI_DIR;
-use crate::second_brain_graph::{FoundPage, LinkLookup, MAX_PAGE_LINKS, parse_page};
+use crate::second_brain_graph::{
+    FoundPage, LinkLookup, MAX_PAGE_LINKS, WalkBounds, enters_vault_folder, parse_page, path_below,
+    walk_files,
+};
 use crate::second_brain_related::{is_structural_id, name_text, tokenize};
 
 const MANIFEST_FILE: &str = "manifest.json";
@@ -110,61 +113,48 @@ pub(super) struct Walked {
 }
 
 /// The files of a source that the table lets in, by path, and whether
-/// [`Table::max_files`] cut the walk short.
+/// [`Table::max_files`] ended the walk before the folder did.
+///
+/// The walk is the knowledge graph's (`walk_files`). The vault's own folders
+/// are entered as the graph enters them, however deep, so the search and the
+/// graph hold the same pages. Only a folder a person added keeps the table's
+/// own bounds on folders: code a build wrote lies there, not in a vault.
 pub(super) fn walk(source: &Source, table: &Table) -> (Vec<Walked>, bool) {
-    let mut files = Vec::new();
-    let mut capped = false;
-    let mut pending = vec![(source.root.clone(), String::new(), 0_usize)];
-    'folders: while let Some((folder, below, depth)) = pending.pop() {
-        let Ok(entries) = fs::read_dir(&folder) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            // The entry's own kind: a link out of the folder is not the
-            // folder's, and following one is how a walk leaves its tree.
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let rel = if below.is_empty() {
-                name.to_string()
-            } else {
-                format!("{below}/{name}")
-            };
-            if kind.is_dir() {
-                let skipped =
-                    name.starts_with('.') || table.skipped_folders.iter().any(|held| held == name);
-                if !skipped && depth < table.max_depth {
-                    pending.push((entry.path(), rel, depth + 1));
-                }
-                continue;
-            }
-            if !kind.is_file() || !table.reads(name) {
-                continue;
-            }
-            if source.kind == Kind::Wiki && is_structural_id(&format!("{WIKI_DIR}/{rel}")) {
-                continue;
-            }
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            if metadata.len() > table.max_file_bytes {
-                continue;
-            }
-            if files.len() >= table.max_files {
-                capped = true;
-                break 'folders;
-            }
-            files.push(Walked {
-                rel,
-                path: entry.path(),
-                stamp: stamp_of(&metadata),
-            });
+    let own = source.kind != Kind::Added;
+    let bounds = WalkBounds {
+        entries: usize::MAX,
+        files: table.max_files,
+        depth: if own { usize::MAX } else { table.max_depth },
+    };
+    let enters = |name: &str| {
+        if own {
+            enters_vault_folder(name)
+        } else {
+            !name.starts_with('.') && !table.skipped_folders.iter().any(|held| held == name)
         }
-    }
+    };
+    let mut files = Vec::new();
+    let capped = walk_files(&source.root, bounds, enters, |folder, name, entry| {
+        if !table.reads(name) {
+            return false;
+        }
+        let rel = path_below(folder, name);
+        if source.kind == Kind::Wiki && is_structural_id(&format!("{WIKI_DIR}/{rel}")) {
+            return false;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            return false;
+        };
+        if metadata.len() > table.max_file_bytes {
+            return false;
+        }
+        files.push(Walked {
+            rel,
+            path: entry.path(),
+            stamp: stamp_of(&metadata),
+        });
+        true
+    });
     files.sort_by(|left, right| left.rel.cmp(&right.rel));
     (files, capped)
 }

@@ -487,24 +487,61 @@ pub(crate) struct FoundPage {
     pub(crate) len: u64,
 }
 
-/// Breadth-first, bounded, sorted. Sorted because the answer is a picture: a
-/// graph whose node order followed `read_dir` would lay itself out differently
-/// on two machines holding the same vault.
-fn walk_pages(wiki: &Path) -> (Vec<FoundPage>, bool) {
-    let mut found = Vec::new();
-    let mut pending = VecDeque::from([wiki.to_path_buf()]);
-    let mut visited = 0;
-    let mut capped = false;
-    while let Some(directory) = pending.pop_front() {
+/// Where a walk of a folder stops.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WalkBounds {
+    /// Directory entries looked at.
+    pub(crate) entries: usize,
+    /// Files kept.
+    pub(crate) files: usize,
+    /// Folders gone down into below the one walked.
+    pub(crate) depth: usize,
+}
+
+/// Whether a walk of one of a vault's own folders enters a folder of this
+/// name: every one but an application's private state and its wastebasket
+/// ([`SKIPPED_DIRS`]).
+pub(crate) fn enters_vault_folder(name: &str) -> bool {
+    !SKIPPED_DIRS.contains(&name)
+}
+
+/// A path below a walked folder, with `/` separators on every platform: it is
+/// wire-visible, and a vault must not read differently on Windows.
+pub(crate) fn path_below(folder: &str, name: &str) -> String {
+    if folder.is_empty() {
+        name.to_string()
+    } else {
+        format!("{folder}/{name}")
+    }
+}
+
+/// The plain files under `root`, breadth-first and bounded: the one walk the
+/// graph and the vault's search both read a folder by, so the two never
+/// differ on which files a vault holds.
+///
+/// `enters` is asked of every folder's name. `keep` is shown every plain file
+/// — the folder it lies in ([`path_below`] `root`), its name and its entry —
+/// and says whether it kept it. A link is neither a folder nor a file here:
+/// following one is how a walk leaves its tree. A name that is not UTF-8 is
+/// passed over. The answer is whether a bound ended the walk before the
+/// folder did.
+pub(crate) fn walk_files(
+    root: &Path,
+    bounds: WalkBounds,
+    enters: impl Fn(&str) -> bool,
+    mut keep: impl FnMut(&str, &str, &fs::DirEntry) -> bool,
+) -> bool {
+    let mut pending = VecDeque::from([(root.to_path_buf(), String::new(), 0_usize)]);
+    let mut visited = 0_usize;
+    let mut kept = 0_usize;
+    while let Some((directory, folder, depth)) = pending.pop_front() {
         let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
         for entry in entries.flatten() {
             visited += 1;
-            if visited > MAX_GRAPH_ENTRIES || found.len() >= MAX_GRAPH_PAGES {
-                capped = true;
-                pending.clear();
-                break;
+            if visited > bounds.entries || kept >= bounds.files {
+                return true;
             }
             let Ok(kind) = entry.file_type() else {
                 continue;
@@ -514,42 +551,43 @@ fn walk_pages(wiki: &Path) -> (Vec<FoundPage>, bool) {
                 continue;
             };
             if kind.is_dir() {
-                if !SKIPPED_DIRS.contains(&name) {
-                    pending.push_back(entry.path());
+                if depth < bounds.depth && enters(name) {
+                    pending.push_back((entry.path(), path_below(&folder, name), depth + 1));
                 }
-                continue;
+            } else if kind.is_file() && keep(&folder, name, &entry) {
+                kept += 1;
             }
-            if !kind.is_file() || !name.to_ascii_lowercase().ends_with(MARKDOWN_SUFFIX) {
-                continue;
-            }
-            let path = entry.path();
-            let Some(id) = relative_id(wiki, &path) else {
-                continue;
-            };
-            let metadata = entry.metadata().ok();
-            found.push(FoundPage {
-                id,
-                stem: name[..name.len() - MARKDOWN_SUFFIX.len()].to_string(),
-                modified_ms: metadata.as_ref().and_then(modified_ms).unwrap_or(0),
-                len: metadata.as_ref().map_or(0, fs::Metadata::len),
-                path,
-            });
         }
     }
-    found.sort_by(|left, right| left.id.cmp(&right.id));
-    (found, capped)
+    false
 }
 
-/// `wiki/` plus the path below it, with `/` separators on every platform: the
-/// id is wire-visible and a graph must not read differently on Windows.
-fn relative_id(wiki: &Path, path: &Path) -> Option<String> {
-    let below = path.strip_prefix(wiki).ok()?;
-    let mut id = String::from(WIKI_DIR);
-    for part in below.components() {
-        id.push('/');
-        id.push_str(part.as_os_str().to_str()?);
-    }
-    Some(id)
+/// Breadth-first, bounded, sorted. Sorted because the answer is a picture: a
+/// graph whose node order followed `read_dir` would lay itself out differently
+/// on two machines holding the same vault.
+fn walk_pages(wiki: &Path) -> (Vec<FoundPage>, bool) {
+    let mut found = Vec::new();
+    let bounds = WalkBounds {
+        entries: MAX_GRAPH_ENTRIES,
+        files: MAX_GRAPH_PAGES,
+        depth: usize::MAX,
+    };
+    let capped = walk_files(wiki, bounds, enters_vault_folder, |folder, name, entry| {
+        if !name.to_ascii_lowercase().ends_with(MARKDOWN_SUFFIX) {
+            return false;
+        }
+        let metadata = entry.metadata().ok();
+        found.push(FoundPage {
+            id: format!("{WIKI_DIR}/{}", path_below(folder, name)),
+            stem: name[..name.len() - MARKDOWN_SUFFIX.len()].to_string(),
+            modified_ms: metadata.as_ref().and_then(modified_ms).unwrap_or(0),
+            len: metadata.as_ref().map_or(0, fs::Metadata::len),
+            path: entry.path(),
+        });
+        true
+    });
+    found.sort_by(|left, right| left.id.cmp(&right.id));
+    (found, capped)
 }
 
 fn modified_ms(metadata: &fs::Metadata) -> Option<i64> {

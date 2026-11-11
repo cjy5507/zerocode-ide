@@ -1354,11 +1354,65 @@ mod tests {
         assert_eq!(slugs(&vault.ask("crane")), ["wiki/crane"]);
     }
 
-    /// The home and the journal link every page and are about none: they are
-    /// not read, and neither is anything under a folder whose name starts
-    /// with a dot.
+    /// The vault's own folders are read as its knowledge graph reads them: a
+    /// page in a folder named like a build's output, in a folder whose name
+    /// starts with a dot, or thirteen folders down is a page — in `wiki/` and
+    /// in `raw/` alike. Only a folder a person added leaves such folders out.
     #[test]
-    fn the_home_the_journal_and_dot_folders_are_not_read() {
+    fn a_page_in_a_folder_named_like_a_builds_output_is_read_as_the_graph_reads_it() {
+        use crate::second_brain_graph::{GraphCache, NodeKind};
+
+        let vault = Vault::new();
+        let deep = "a/".repeat(Table::default().max_depth + 1);
+        vault.write("wiki/target/crane.md", "The crane lifts cargo.\n");
+        vault.write(
+            "wiki/node_modules/winch.md",
+            "A winch pulls the mooring line.\n",
+        );
+        vault.write("wiki/.drafts/capstan.md", "The capstan turns at dawn.\n");
+        vault.write(
+            &format!("wiki/{deep}ballast.md"),
+            "Ballast keeps the keel down.\n",
+        );
+        vault.write("wiki/cooking.md", "Unrelated soup.\n");
+        vault.write("raw/target/shift-log.txt", "the crane was oiled\n");
+
+        let asked = |words: &str, layer: &str| -> Vec<String> {
+            slugs(&vault.ask_in(words, Some(layer)))
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(asked("crane", WIKI_DIR), ["wiki/target/crane"]);
+        assert_eq!(asked("winch", WIKI_DIR), ["wiki/node_modules/winch"]);
+        assert_eq!(asked("capstan", WIKI_DIR), ["wiki/.drafts/capstan"]);
+        assert_eq!(asked("ballast", WIKI_DIR), [format!("wiki/{deep}ballast")]);
+        assert_eq!(asked("crane", "raw"), ["raw/target/shift-log.txt"]);
+
+        // File for file, the pages the graph holds.
+        let settings = settings::read(vault.root());
+        let (walked, _) = index::walk(&settings.sources[0], &settings.table);
+        let searched: Vec<String> = walked
+            .iter()
+            .map(|file| format!("{WIKI_DIR}/{}", file.rel))
+            .collect();
+        let graph = GraphCache::new().scan(vault.root(), false);
+        let mut pages: Vec<&str> = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Page)
+            .map(|node| node.id.as_str())
+            .collect();
+        pages.sort_unstable();
+        assert_eq!(searched, pages);
+        assert_eq!(searched.len(), 5);
+    }
+
+    /// The home and the journal link every page and are about none: they are
+    /// not read, and neither is anything under the folder an application
+    /// keeps for itself.
+    #[test]
+    fn the_home_the_journal_and_an_applications_own_folder_are_not_read() {
         let vault = Vault::new();
         vault.write("wiki/index.md", "crane crane crane\n");
         vault.write("wiki/log.md", "crane crane crane\n");

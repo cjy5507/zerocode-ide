@@ -70,11 +70,13 @@ pub struct Table {
     pub max_file_bytes: u64,
     /// How long a passage may be and how short one may stand alone.
     pub(super) passage: Bounds,
-    /// Folders never entered, beside every folder whose name starts with a dot.
+    /// Folders never entered in a folder a person added, beside every folder
+    /// there whose name starts with a dot: what a build wrote, not a person.
+    /// The vault's own folders are entered as its knowledge graph enters them.
     pub skipped_folders: Vec<String>,
     /// Files one source contributes; past it the walk stops and says so.
     pub max_files: usize,
-    /// Folders descended into.
+    /// Folders descended into in a folder a person added.
     pub max_depth: usize,
     /// Files changed since the base was built, as one in this many of it,
     /// past which the folder is built whole again — and the count below
