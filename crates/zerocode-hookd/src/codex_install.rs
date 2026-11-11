@@ -183,8 +183,8 @@ pub fn managed_matcher(script_file_name: &str) -> impl Fn(&str) -> bool + '_ {
         .trim_end_matches(".cmd")
         .trim_end_matches(".ps1")
         .to_string();
-    let needle = format!(".zerocode/agent-hooks/{stem}.");
-    move |command: &str| command.contains(needle.as_str())
+    let needle = crate::install::our_script_needle(&stem);
+    move |command: &str| crate::install::command_has_needle(command, &needle)
 }
 
 /// The handler object our hooks are (`buildManagedCommandHook`, :730-736).
@@ -1439,6 +1439,25 @@ mod tests {
         assert!(!ours("/h/scripts/codex-hook.sh"));
         assert!(!ours("/usr/local/bin/codex-hook"));
         assert!(!ours("/h/.other/agent-hooks/their-hook.sh"));
+    }
+
+    /// A Windows install writes the command through `cmd_wrapper`, with the
+    /// path in backslashes. Unrecognized, every install appended one more
+    /// handler and an uninstall removed none.
+    #[test]
+    fn a_windows_spelled_command_is_ours_too() {
+        let ours = ours();
+        assert!(ours(
+            r#"cmd.exe /d /c "if exist "C:\Users\x\.zerocode\agent-hooks\codex-hook.cmd" (call "C:\Users\x\.zerocode\agent-hooks\codex-hook.cmd") else (more >nul)""#
+        ));
+        let windows = crate::install::cmd_wrapper(
+            Path::new("C:/Users/x/.zerocode/agent-hooks/codex-hook.cmd"),
+            &[],
+        );
+        assert!(ours(&windows), "not recognized as ours: {windows}");
+        assert!(!ours(
+            r#"cmd.exe /d /c "C:\Users\x\.orca\agent-hooks\codex-hook.cmd""#
+        ));
     }
 
     /// The whole plan, against the file this machine actually had: Orca's

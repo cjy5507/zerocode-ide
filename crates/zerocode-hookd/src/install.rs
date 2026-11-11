@@ -221,14 +221,25 @@ pub fn script_path_for(home: &Path, agent: AgentKind, host: ScriptHost) -> PathB
 /// extension left open the way Orca leaves it (a `.cmd` written by a Windows
 /// install of this app is still ours to clean from a synced config).
 fn managed_needle(agent: AgentKind) -> String {
-    format!(".zerocode/agent-hooks/{}-hook.", agent.slug())
+    our_script_needle(&format!("{}-hook", agent.slug()))
 }
 
-/// A Windows install spells the same path with backslashes; one spelling
-/// before the needle looks, so an entry written on either host is
-/// recognized on both.
+/// The needle for the script with this file stem in our
+/// `.zerocode/agent-hooks/` folder, extension left open.
+pub(crate) fn our_script_needle(stem: &str) -> String {
+    format!(".zerocode/agent-hooks/{stem}.")
+}
+
+/// Does `command` carry `needle`? A Windows install spells the same path
+/// with backslashes; one spelling before the needle looks, so an entry
+/// written on either host is recognized on both — for every agent's
+/// settings and for Codex's `hooks.json` alike.
+pub(crate) fn command_has_needle(command: &str, needle: &str) -> bool {
+    command.replace('\\', "/").contains(needle)
+}
+
 fn is_managed_command(command: &str, agent: AgentKind) -> bool {
-    command.replace('\\', "/").contains(&managed_needle(agent))
+    command_has_needle(command, &managed_needle(agent))
 }
 
 /// `'…'`-quote for /bin/sh, the only quoting a path in a command gets.
