@@ -1539,6 +1539,22 @@ mod tests {
         let tailnet = cli.status().expect("tailscale status");
         assert!(tailnet.running && tailnet.https_ready, "tailnet not ready");
         let name = tailnet.dns_name.clone().expect("a MagicDNS name");
+        // This machine's resolver need not answer for its own MagicDNS name
+        // (11-12: `getaddrinfo` said no such name while 100.100.100.100
+        // answered it), so the requests go to its tailnet address under that
+        // name — TLS and Host still carry the name, as a phone's do.
+        let own = cli
+            .run(&["status".into(), "--json".into()])
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|json| {
+                json["Self"]["TailscaleIPs"].as_array().and_then(|ips| {
+                    ips.iter()
+                        .filter_map(|ip| ip.as_str()?.parse::<std::net::IpAddr>().ok())
+                        .find(std::net::IpAddr::is_ipv4)
+                })
+            })
+            .expect("this machine's tailnet address");
         let before = cli.serve().expect("serve status");
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1601,6 +1617,7 @@ mod tests {
             .0;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            .resolve(&name, std::net::SocketAddr::new(own, https))
             .build()
             .expect("client");
         let (shell, no_token, paired, with_token) = runtime.block_on(async {
