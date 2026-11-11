@@ -1860,6 +1860,8 @@ function remoteLinkProblemWords(problem, status) {
       return t("settings.remoteLink.funnel", "이 포트에 Funnel(인터넷 공개)이 켜져 있어 폰 기능을 껐습니다.");
     case "listener-shared":
       return t("settings.remoteLink.shared", "폰 리스너 포트를 다른 Serve 매핑도 가리키고 있어 폰 기능을 껐습니다. 그 매핑을 지우고 다시 켜세요.");
+    case "serve-shape":
+      return t("settings.remoteLink.serveShape", "Tailscale Serve 설정에 이 판이 모르는 항목이 있어 폰 기능을 켜지 않았습니다. ZeroCode를 업데이트하세요.");
     case "port-moved":
       return t("settings.remoteLink.portMoved", "폰 기능이 쓰던 HTTPS 포트를 지금은 쓸 수 없어 꺼 두었습니다. 끄고 다시 켜면 빈 포트를 고릅니다.");
     default:

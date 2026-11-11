@@ -64,7 +64,8 @@ pub(crate) fn random_bytes<const N: usize>() -> Option<[u8; N]> {
 struct Link {
     app: AppHandle,
     core: Arc<Core>,
-    running: Mutex<Option<Listening>>,
+    /// The listener's loopback port, served or only held.
+    seat: Mutex<Seat<tauri::async_runtime::JoinHandle<()>>>,
     gate: Mutex<Gate>,
     /// The VAPID signing key, read from the OS credential store once.
     vapid: Mutex<Option<p256::SecretKey>>,
@@ -76,17 +77,8 @@ struct Link {
     /// start's clean-up, so no two of them change the listener or the
     /// mappings at once.
     turn: Mutex<()>,
-    /// The loopback port the book's mapping points at, bound from the first
-    /// moment of a start so nothing else this process starts — the hook
-    /// bridge binds right after — is handed it while the mapping may stand.
-    reserved: Mutex<Option<std::net::TcpListener>>,
     /// The window is closing; a second close does not wait again.
     closing: AtomicBool,
-}
-
-struct Listening {
-    port: u16,
-    task: tauri::async_runtime::JoinHandle<()>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -190,13 +182,13 @@ fn turn_off(core: &Core, cli: Option<&dyn Cli>, listening: Option<u16>) -> Resul
 /// A start with the link off still owns the mapping its book names — an off
 /// whose take-down failed, a press that failed after mapping — and takes it
 /// down without opening anything. `None` when the book names none.
-fn sweep_off(core: &Core, cli: Option<&dyn Cli>) -> Option<Result<(), String>> {
+fn sweep_off(core: &Core, cli: Option<&dyn Cli>, held: Option<u16>) -> Option<Result<(), String>> {
     let book = book_of(core);
     if book.enabled || book.https_port.is_none() {
         return None;
     }
     let pair = pair_of(&book);
-    let outcome = take_down_own(cli, pair, None);
+    let outcome = take_down_own(cli, pair, held);
     write_book_of(core, |book| {
         if !book.enabled {
             forget_when_gone(book, pair, &outcome);
@@ -215,7 +207,7 @@ pub(crate) fn shutdown() {
     let Some(link) = link() else {
         return;
     };
-    if link.listening_port().is_none() || link.closing.swap(true, Ordering::SeqCst) {
+    if link.held_port().is_none() || link.closing.swap(true, Ordering::SeqCst) {
         return;
     }
     let (done, finished) = std::sync::mpsc::channel();
@@ -232,8 +224,9 @@ pub(crate) fn shutdown() {
 pub(crate) fn boot(app: &AppHandle, local_data_root: &std::path::Path) {
     let path = book::book_path(local_data_root);
     let held = book::load(&path);
-    let enabled = held.enabled;
-    let named = held.https_port.is_some();
+    let start = start_of(&held);
+    // The loopback port the book's mapping points at is bound first, before
+    // the hook bridge binds, so nothing this process starts is handed it.
     let reserved = held
         .https_port
         .and(held.port)
@@ -242,23 +235,22 @@ pub(crate) fn boot(app: &AppHandle, local_data_root: &std::path::Path) {
     let made = LINK.set(Link {
         app: app.clone(),
         core,
-        running: Mutex::new(None),
+        seat: Mutex::new(Seat::new(reserved)),
         gate: Mutex::new(Gate::default()),
         vapid: Mutex::new(None),
         last: Mutex::new(Look::default()),
         epoch: AtomicU64::new(0),
         turn: Mutex::new(()),
-        reserved: Mutex::new(reserved),
         closing: AtomicBool::new(false),
     });
-    if made.is_err() || !enabled && !named {
+    if made.is_err() || start == Start::Nothing {
         return;
     }
     std::thread::spawn(move || {
         let Some(link) = link() else {
             return;
         };
-        if !enabled {
+        if start == Start::Sweep {
             link.sweep();
         } else if let Err(word) = link.bring_up(false)
             && let Ok(mut look) = link.last.lock()
@@ -266,6 +258,110 @@ pub(crate) fn boot(app: &AppHandle, local_data_root: &std::path::Path) {
             look.problem = Some(word);
         }
     });
+}
+
+/// What a start does with the book it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    Nothing,
+    /// A person had turned the link on.
+    BringUp,
+    /// The link is off, and the book still names a mapping of the window's.
+    Sweep,
+}
+
+fn start_of(book: &Book) -> Start {
+    if book.enabled {
+        Start::BringUp
+    } else if book.https_port.is_some() {
+        Start::Sweep
+    } else {
+        Start::Nothing
+    }
+}
+
+/// A task that can be told to stop: the accept loop, or a test's stand-in.
+trait Stop {
+    fn stop(self);
+}
+
+impl Stop for tauri::async_runtime::JoinHandle<()> {
+    fn stop(self) {
+        self.abort();
+    }
+}
+
+/// The listener's loopback port, served or only held. Holding keeps it bound
+/// and accepts nothing: no byte goes out, and no other program can take it.
+/// The port is let go only by [`Seat::release`], once the window knows no
+/// mapping of its points there — a mapping that may stand never points at a
+/// port somebody else can bind.
+struct Seat<T: Stop> {
+    serving: Option<Serving<T>>,
+    held: Option<std::net::TcpListener>,
+}
+
+struct Serving<T> {
+    port: u16,
+    task: T,
+    /// The socket the task accepts on, kept so stopping the task keeps the port.
+    socket: std::net::TcpListener,
+}
+
+impl<T: Stop> Seat<T> {
+    fn new(held: Option<std::net::TcpListener>) -> Self {
+        Self {
+            serving: None,
+            held,
+        }
+    }
+
+    fn serving_port(&self) -> Option<u16> {
+        self.serving.as_ref().map(|serving| serving.port)
+    }
+
+    /// The port the window holds, served or not.
+    fn port(&self) -> Option<u16> {
+        self.serving_port().or_else(|| {
+            self.held
+                .as_ref()
+                .and_then(|socket| socket.local_addr().ok())
+                .map(|address| address.port())
+        })
+    }
+
+    fn take_held(&mut self) -> Option<std::net::TcpListener> {
+        self.held.take()
+    }
+
+    fn hold(&mut self, socket: std::net::TcpListener) {
+        self.held = Some(socket);
+    }
+
+    fn serve(&mut self, port: u16, task: T, socket: std::net::TcpListener) {
+        self.serving = Some(Serving { port, task, socket });
+    }
+
+    /// Stop accepting and keep the port.
+    fn pause(&mut self) {
+        if let Some(serving) = self.serving.take() {
+            serving.task.stop();
+            self.held = Some(serving.socket);
+        }
+    }
+
+    /// Let the port go: no mapping of the window's points at it any more.
+    fn release(&mut self) {
+        self.pause();
+        self.held = None;
+    }
+}
+
+/// One more minute look that could not read Tailscale; whether the listener
+/// now stops accepting.
+fn missed_look(missed: &mut u32) -> bool {
+    *missed += 1;
+    *missed >= MISSED_LOOKS_BEFORE_CLOSING
 }
 
 /// The listener's socket: one already serving, or a fresh one that accepts
@@ -335,11 +431,18 @@ impl Link {
         self.turn.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn seat(&self) -> MutexGuard<'_, Seat<tauri::async_runtime::JoinHandle<()>>> {
+        self.seat.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The port the listener accepts on, while it does.
     fn listening_port(&self) -> Option<u16> {
-        self.running
-            .lock()
-            .ok()
-            .and_then(|running| running.as_ref().map(|one| one.port))
+        self.seat().serving_port()
+    }
+
+    /// The port the window holds, accepting or not.
+    fn held_port(&self) -> Option<u16> {
+        self.seat().port()
     }
 
     fn status(&self) -> LinkStatus {
@@ -440,18 +543,28 @@ impl Link {
 
     /// Turn the link on: listener, then the Serve mapping. `asked` is a
     /// person's press; a start serves only behind the phone port it had.
-    /// Whatever stops it closes the listener again.
+    /// Whatever stops it stops the listener accepting again.
     fn bring_up(&'static self, asked: bool) -> Result<(), String> {
-        let _turn = self.turn();
-        let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
-        let outcome = self.bring_up_at(epoch, asked);
-        if outcome.is_err() {
-            self.stop_listener();
+        let outcome = {
+            let _turn = self.turn();
+            let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            let outcome = self.bring_up_at(asked);
+            match outcome {
+                Ok(()) => self.watch(epoch),
+                Err(_) => self.stop_listener(),
+            }
+            outcome
+        };
+        // The keychain and the pane's look need no lock.
+        if outcome.is_ok() {
+            self.load_vapid(true);
+            let look = self.look();
+            self.remember(look);
         }
         outcome
     }
 
-    fn bring_up_at(&'static self, epoch: u64, asked: bool) -> Result<(), String> {
+    fn bring_up_at(&'static self, asked: bool) -> Result<(), String> {
         let cli = Installed::find().ok_or("tailscale")?;
         let tailnet = cli.status().unwrap_or_else(|_| Tailnet::unread());
         let refused_before = |word: &str| {
@@ -473,17 +586,45 @@ impl Link {
         let book = self.book();
         let socket = self.bind(book.port)?;
         let listener = socket.port();
+        let https = match self.judge(&cli, &tailnet, &name, &book, listener, asked) {
+            Ok(https) => https,
+            Err(word) => {
+                // A mapping of the window's may still point here.
+                self.hold(socket);
+                return Err(word);
+            }
+        };
+        self.serve(socket)?;
+        self.write_book(|book| {
+            book.enabled = true;
+            book.port = Some(listener);
+            book.https_port = Some(https);
+        });
+        Ok(())
+    }
+
+    /// Read Serve, take down what the judgment says, and map the phone port
+    /// when it says to: the HTTPS port to serve behind, or why not.
+    fn judge(
+        &self,
+        cli: &Installed,
+        tailnet: &Tailnet,
+        name: &str,
+        book: &Book,
+        listener: u16,
+        asked: bool,
+    ) -> Result<u16, String> {
         let serve = cli.serve()?;
         let facts = Facts {
             config: &serve,
-            dns_name: &name,
-            remembered: pair_of(&book),
+            dns_name: name,
+            remembered: pair_of(book),
             listener,
             hook: hook_port(),
             asked,
         };
         let mut decision = tailscale::decide(&facts);
-        take_down(&cli, &decision.remove)?;
+        take_down(cli, &decision.remove)?;
         if !decision.remove.is_empty() && matches!(decision.then, Then::Serve { .. }) {
             // What the CLI left is read again rather than assumed.
             let left = cli.serve()?;
@@ -495,7 +636,7 @@ impl Link {
                 decision.then = Then::Refuse(Refusal::Shared);
             }
         }
-        let https = match decision.then {
+        match decision.then {
             Then::Serve { https, map } => {
                 if map {
                     // The book names the mapping before it exists, so one a
@@ -506,31 +647,21 @@ impl Link {
                     });
                     cli.run(&tailscale::serve_on_args(https, listener))?;
                 }
-                https
+                Ok(https)
             }
             Then::Refuse(refusal) => {
                 self.remember(Look {
-                    tailnet,
+                    tailnet: tailnet.clone(),
                     exposure: Some(refusal.exposure()),
                     problem: None,
                 });
-                return Err(refusal.word().into());
+                Err(refusal.word().into())
             }
-        };
-        self.serve(socket);
-        self.load_vapid(true);
-        self.write_book(|book| {
-            book.enabled = true;
-            book.port = Some(listener);
-            book.https_port = Some(https);
-        });
-        let look = self.look();
-        self.remember(look);
-        self.watch(epoch);
-        Ok(())
+        }
     }
 
-    /// The close's half of [`shutdown`]: the window's mappings, then the port.
+    /// The close's half of [`shutdown`]: the window's mappings, then the
+    /// listener. The process ends right after, port and all.
     fn close(&self) {
         let _turn = self.turn();
         self.epoch.fetch_add(1, Ordering::SeqCst);
@@ -538,39 +669,41 @@ impl Link {
         let _ = take_down_own(
             as_cli(cli.as_ref()),
             pair_of(&self.book()),
-            self.listening_port(),
+            self.held_port(),
         );
         self.stop_listener();
     }
 
-    /// A start with the link off: [`sweep_off`], and the reserved port let go
+    /// A start with the link off: [`sweep_off`], and the held port let go
     /// once nothing of the window's points at it.
     fn sweep(&self) {
         let _turn = self.turn();
         let cli = Installed::find();
-        if let Some(Ok(())) = sweep_off(&self.core, as_cli(cli.as_ref())) {
-            self.release_reserved();
+        if let Some(Ok(())) = sweep_off(&self.core, as_cli(cli.as_ref()), self.held_port()) {
+            self.release_port();
         }
     }
 
-    fn release_reserved(&self) {
-        if let Ok(mut reserved) = self.reserved.lock() {
-            reserved.take();
-        }
+    fn release_port(&self) {
+        self.seat().release();
     }
 
-    /// Turn the link off: the Serve mappings this window made, then the port.
-    /// A mapping that could not be taken down stays named in the book, and
-    /// the next start takes it down.
+    /// Turn the link off: the Serve mappings this window made, then the
+    /// port. A mapping that could not be taken down stays named in the book
+    /// and its port stays held, and the next start takes it down.
     fn bring_down(&self) -> Result<(), String> {
-        let _turn = self.turn();
-        self.epoch.fetch_add(1, Ordering::SeqCst);
-        let cli = Installed::find();
-        let outcome = turn_off(&self.core, as_cli(cli.as_ref()), self.listening_port());
-        self.stop_listener();
-        if outcome.is_ok() {
-            self.release_reserved();
-        }
+        let outcome = {
+            let _turn = self.turn();
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+            let cli = Installed::find();
+            let outcome = turn_off(&self.core, as_cli(cli.as_ref()), self.held_port());
+            if outcome.is_ok() {
+                self.release_port();
+            } else {
+                self.stop_listener();
+            }
+            outcome
+        };
         if let Ok(mut pairing) = self.core.pairing.lock() {
             pairing.clear();
         }
@@ -579,34 +712,49 @@ impl Link {
         outcome
     }
 
-    /// The socket a turn-on judges with: the serving one, the port a start
-    /// reserved, the port the book remembers, or any.
+    /// The socket a turn-on judges with: the serving one, the port the
+    /// window holds, the port the book remembers, or any.
     fn bind(&self, remembered: Option<u16>) -> Result<Socket, String> {
         if let Some(port) = self.listening_port() {
             return Ok(Socket::Serving(port));
         }
-        let reserved = self.reserved.lock().ok().and_then(|mut held| held.take());
-        let bound = match reserved {
+        let held = self.seat().take_held();
+        let bound = match held {
             Some(socket) => socket,
             None => remembered
                 .and_then(|port| std::net::TcpListener::bind((tailscale::LOOPBACK, port)).ok())
                 .map_or_else(|| std::net::TcpListener::bind((tailscale::LOOPBACK, 0)), Ok)
                 .map_err(|error| format!("listen: {error}"))?,
         };
-        bound
-            .set_nonblocking(true)
-            .map_err(|error| format!("listen: {error}"))?;
         let port = bound
             .local_addr()
             .map_err(|error| format!("listen: {error}"))?
             .port();
+        if let Err(error) = bound.set_nonblocking(true) {
+            self.seat().hold(bound);
+            return Err(format!("listen: {error}"));
+        }
         Ok(Socket::Bound(bound, port))
     }
 
+    /// Keep a socket a turn-on bound but did not serve.
+    fn hold(&self, socket: Socket) {
+        if let Socket::Bound(socket, _) = socket {
+            self.seat().hold(socket);
+        }
+    }
+
     /// Start accepting on a socket the judgment said to serve.
-    fn serve(&'static self, socket: Socket) {
+    fn serve(&'static self, socket: Socket) -> Result<(), String> {
         let Socket::Bound(bound, port) = socket else {
-            return;
+            return Ok(());
+        };
+        let kept = match bound.try_clone() {
+            Ok(kept) => kept,
+            Err(error) => {
+                self.seat().hold(bound);
+                return Err(format!("listen: {error}"));
+            }
         };
         if let Ok(mut hosts) = self.core.hosts.lock() {
             hosts.listener_port = port;
@@ -637,21 +785,21 @@ impl Link {
                 });
             }
         });
-        if let Ok(mut running) = self.running.lock() {
-            *running = Some(Listening { port, task });
-        }
+        self.seat().serve(port, task, kept);
+        Ok(())
     }
 
+    /// Stop accepting; the port stays the window's.
     fn stop_listener(&self) {
-        if let Some(listening) = self.running.lock().ok().and_then(|mut held| held.take()) {
-            listening.task.abort();
-        }
+        self.seat().pause();
     }
 
     /// Re-read Tailscale every minute while on, once for the pane and the
     /// judgment both, and judge it as a start would: a refusal takes the
-    /// window's mappings down and closes the listener, and so do two looks
-    /// in a row that could not read it.
+    /// window's mappings down and stops the listener. Two looks in a row
+    /// that cannot read Tailscale stop it accepting too, port still held,
+    /// and the next look that can judges it as a start would and serves it
+    /// again.
     fn watch(&'static self, epoch: u64) {
         std::thread::spawn(move || {
             let mut missed = 0;
@@ -662,11 +810,24 @@ impl Link {
                     return;
                 }
                 let Some(listener) = self.listening_port() else {
-                    return;
+                    match self.bring_up_at(false) {
+                        Ok(()) => {
+                            missed = 0;
+                            let look = self.look();
+                            self.remember(look);
+                        }
+                        Err(word) => {
+                            self.stop_listener();
+                            if let Ok(mut look) = self.last.lock() {
+                                look.problem = Some(word);
+                            }
+                        }
+                    }
+                    continue;
                 };
                 let cli = Installed::find();
                 let (mut look, read) = self.read(as_cli(cli.as_ref()));
-                let stop = match (read, as_cli(cli.as_ref())) {
+                let refused = match (read, as_cli(cli.as_ref())) {
                     (Ok((name, serve)), Some(cli)) => {
                         missed = 0;
                         let refusal = self.refusal_of(cli, &name, &serve, listener);
@@ -678,17 +839,15 @@ impl Link {
                     }
                     (Ok(_), None) => false,
                     (Err(error), _) => {
-                        missed += 1;
-                        let stop = missed >= MISSED_LOOKS_BEFORE_CLOSING;
-                        if stop {
+                        if missed_look(&mut missed) {
                             self.stop_listener();
                             look.problem = Some(error);
                         }
-                        stop
+                        false
                     }
                 };
                 self.remember(look);
-                if stop {
+                if refused {
                     return;
                 }
             }
@@ -696,7 +855,7 @@ impl Link {
     }
 
     /// Judge the running link on one read; when refused, take its mappings
-    /// down and close the listener.
+    /// down and stop the listener.
     fn refusal_of(
         &self,
         cli: &dyn Cli,
@@ -1211,7 +1370,7 @@ mod tests {
         let mut unread = Fixture::named(ours());
         unread.status = Err("tailscale did not answer in time".into());
         assert!(matches!(
-            super::sweep_off(&core, Some(&unread)),
+            super::sweep_off(&core, Some(&unread), None),
             Some(Err(_))
         ));
         assert_eq!(
@@ -1221,18 +1380,18 @@ mod tests {
         );
 
         let read = Fixture::named(ours());
-        assert_eq!(super::sweep_off(&core, Some(&read)), Some(Ok(())));
+        assert_eq!(super::sweep_off(&core, Some(&read), None), Some(Ok(())));
         assert_eq!(read.ran(), [tailscale::serve_off_args(10443)]);
         assert_eq!(pair(&core), (None, None));
         assert_eq!(
-            super::sweep_off(&core, Some(&read)),
+            super::sweep_off(&core, Some(&read), None),
             None,
             "nothing named now"
         );
 
         let on = self::core(true);
         assert_eq!(
-            super::sweep_off(&on, Some(&read)),
+            super::sweep_off(&on, Some(&read), None),
             None,
             "an on link is the start's"
         );
@@ -1248,9 +1407,75 @@ mod tests {
             "TCP": { "10443": { "HTTPS": true } },
             "Web": { "host.example.test:10443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:7777" } } } }
         }));
-        assert_eq!(super::sweep_off(&core, Some(&moved)), Some(Ok(())));
+        assert_eq!(super::sweep_off(&core, Some(&moved), None), Some(Ok(())));
         assert!(moved.ran().is_empty());
         assert_eq!(pair(&core), (None, None));
+    }
+
+    /// What a start does is read from the book alone: on brings the link
+    /// up, off with a mapping named takes that mapping down.
+    #[test]
+    fn a_start_reads_what_to_do_from_the_book() {
+        use super::{Start, start_of};
+        assert_eq!(start_of(&Book::default()), Start::Nothing);
+        let on = Book {
+            enabled: true,
+            ..Book::default()
+        };
+        assert_eq!(start_of(&on), Start::BringUp);
+        let named = Book {
+            https_port: Some(10443),
+            port: Some(5000),
+            ..Book::default()
+        };
+        assert_eq!(start_of(&named), Start::Sweep);
+    }
+
+    /// A stand-in for the accept loop.
+    struct Task(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl super::Stop for Task {
+        fn stop(self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn free(port: u16) -> bool {
+        std::net::TcpListener::bind((tailscale::LOOPBACK, port)).is_ok()
+    }
+
+    /// The delta check's blocking scene: two minute looks in a row cannot
+    /// read Tailscale while the window's mapping may stand. The listener
+    /// stops accepting, and the port stays the window's — no other program
+    /// can bind what the mapping points at — until the window knows the
+    /// mapping is gone.
+    #[test]
+    fn two_missed_looks_stop_accepting_and_keep_the_port() {
+        let socket = std::net::TcpListener::bind((tailscale::LOOPBACK, 0)).expect("bind");
+        let port = socket.local_addr().expect("address").port();
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut seat = super::Seat::new(None);
+        seat.serve(port, Task(std::sync::Arc::clone(&stopped)), socket);
+        let mut missed = 0;
+        assert!(!super::missed_look(&mut missed), "one miss is a hiccup");
+        assert!(super::missed_look(&mut missed), "two stop the listener");
+        seat.pause();
+        assert!(
+            stopped.load(std::sync::atomic::Ordering::SeqCst),
+            "nothing is accepted"
+        );
+        assert_eq!(seat.serving_port(), None);
+        assert_eq!(seat.port(), Some(port), "the port is still the window's");
+        assert!(!free(port), "no other program can take it");
+        // A look that reads again serves the same port.
+        let again = seat.take_held().expect("held");
+        assert_eq!(again.local_addr().expect("address").port(), port);
+        seat.hold(again);
+        assert!(!free(port));
+        // Turned off with the mapping known gone: the port goes.
+        seat.release();
+        assert_eq!(seat.port(), None);
+        assert!(free(port), "let go once the mapping is gone");
     }
 
     #[test]

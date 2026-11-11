@@ -178,6 +178,10 @@ pub(crate) struct ServeConfig {
     pub(crate) funnel: Vec<String>,
 }
 
+/// What the pane is told when Serve's configuration is not a shape this
+/// reads (`ui/shell-remote.js`).
+pub(crate) const SERVE_SHAPE: &str = "serve-shape";
+
 /// The fields `ipn.ServeConfig` writes, by where they stand. A Serve
 /// configuration with anything else, or with a known field of another
 /// shape, is not read as "nothing exposed": a newer Tailscale could have put
@@ -817,9 +821,10 @@ fn read_serve_within(cli: &Path, limit: Duration) -> Result<ServeConfig, String>
     if text.trim().is_empty() {
         return Ok(ServeConfig::default());
     }
-    let json = serde_json::from_str::<Value>(&text)
-        .map_err(|error| format!("tailscale serve status: {error}"))?;
-    parse_serve(&json)
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|json| parse_serve(&json).ok())
+        .ok_or_else(|| SERVE_SHAPE.into())
 }
 
 /// What the window asks the CLI, so the judgments around it are tried
@@ -1216,17 +1221,20 @@ mod tests {
     #[test]
     fn refusals_say_the_words_the_pane_knows() {
         let pane = include_str!("../../../../ui/shell-remote.js");
-        for refusal in [
+        for word in [
             Refusal::Funnel,
             Refusal::HookExposed,
             Refusal::Shared,
             Refusal::PortMoved,
             Refusal::NoFreePort,
-        ] {
+        ]
+        .map(Refusal::word)
+        .into_iter()
+        .chain([SERVE_SHAPE])
+        {
             assert!(
-                pane.contains(&format!("case \"{}\":", refusal.word())),
-                "the settings pane has no words for {}",
-                refusal.word()
+                pane.contains(&format!("case \"{word}\":")),
+                "the settings pane has no words for {word}"
             );
         }
     }
