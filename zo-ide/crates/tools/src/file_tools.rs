@@ -132,9 +132,10 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "path": { "type": "string" },
                     // The line to start at, counted from 1 — the minimum is
                     // where the schema says so, at no cost: the tool bucket
-                    // has five tokens of head under its budget, and words
-                    // here would be billed on every request. A call that
-                    // gives 0 still starts at the top (`skipped_lines`).
+                    // stands one token under its budget (`harness_budget`:
+                    // 2,135 of 2,136), and words here would be billed on
+                    // every request. A call that gives 0 still starts at the
+                    // top (`skipped_lines`).
                     "offset": { "type": "integer", "minimum": 1 },
                     "limit": { "type": "integer", "minimum": 1 }
                 },
