@@ -608,10 +608,10 @@ impl HookRunner {
         child.envs(env);
         child.env("HOOK_EVENT", event.as_str());
         child.env("HOOK_TOOL_NAME", tool_name);
-        child.env("HOOK_TOOL_INPUT", hook_env_value(tool_input));
+        set_hook_env_text(&mut child, "HOOK_TOOL_INPUT", tool_input);
         child.env("HOOK_TOOL_IS_ERROR", if is_error { "1" } else { "0" });
         if let Some(tool_output) = tool_output {
-            child.env("HOOK_TOOL_OUTPUT", hook_env_value(tool_output));
+            set_hook_env_text(&mut child, "HOOK_TOOL_OUTPUT", tool_output);
         }
 
         match child.output_with_stdin(payload.as_bytes(), abort_signal, timeout) {
@@ -1214,13 +1214,28 @@ enum CommandExecution {
 /// The most of a tool's input or output a hook gets in its environment
 /// (`HOOK_TOOL_INPUT`, `HOOK_TOOL_OUTPUT`). One variable may hold 128 KiB on
 /// Linux and the whole environment about 1 MiB on macOS; past that the hook
-/// cannot start, and a PreToolUse hook that cannot start refuses the tool.
+/// cannot start, and a `PreToolUse` hook that cannot start refuses the tool.
 /// The whole text always reaches the hook on stdin, in the JSON payload.
 const HOOK_ENV_VALUE_MAX: usize = 64 * 1024;
+
+/// Ends the name of the variable that says `<name>` was cut, and holds the
+/// whole text's length in bytes; absent when nothing was cut.
+const HOOK_ENV_TRUNCATED_SUFFIX: &str = "_TRUNCATED";
 
 /// `text` cut to [`HOOK_ENV_VALUE_MAX`] bytes at a character boundary.
 fn hook_env_value(text: &str) -> &str {
     &text[..text.floor_char_boundary(HOOK_ENV_VALUE_MAX)]
+}
+
+/// Puts `text` in the hook's `name` variable, cut by [`hook_env_value`]. A cut
+/// value also sets `<name>_TRUNCATED` to the whole length, so a hook that reads
+/// only its environment knows it did not see everything.
+fn set_hook_env_text(child: &mut CommandWithStdin, name: &str, text: &str) {
+    let value = hook_env_value(text);
+    child.env(name, value);
+    if value.len() < text.len() {
+        child.env(format!("{name}{HOOK_ENV_TRUNCATED_SUFFIX}"), text.len().to_string());
+    }
 }
 
 #[cfg(test)]
@@ -1408,6 +1423,26 @@ mod tests {
         let result = runner.run_pre_tool_use("Write", &input);
 
         assert_eq!(result, HookRunResult::allow(vec![format!("input {}", super::HOOK_ENV_VALUE_MAX)]));
+    }
+
+    /// A hook that reads only `HOOK_TOOL_INPUT` learns when it was cut, and
+    /// how long the whole input is; an input that fits sets no such variable.
+    #[cfg(unix)]
+    #[test]
+    fn a_cut_hook_input_says_how_long_the_whole_input_is() {
+        let runner = HookRunner::new(RuntimeHookConfig::new(
+            vec![shell_snippet(r#"printf 'cut %s' "${HOOK_TOOL_INPUT_TRUNCATED:-no}""#)],
+            Vec::new(),
+            Vec::new(),
+        ));
+        let content = "x".repeat(super::HOOK_ENV_VALUE_MAX * 2);
+        let big = serde_json::json!({ "path": "big.txt", "content": content }).to_string();
+        let small = serde_json::json!({ "path": "small.txt", "content": "x" }).to_string();
+
+        // The hook gets the input under its wire names (`path` is `file_path`).
+        let whole = core_types::tool_names::input_text_to_wire("Write", &big).map_or(big.len(), |wire| wire.len());
+        assert_eq!(runner.run_pre_tool_use("Write", &big), HookRunResult::allow(vec![format!("cut {whole}")]));
+        assert_eq!(runner.run_pre_tool_use("Write", &small), HookRunResult::allow(vec!["cut no".to_string()]));
     }
 
     #[test]

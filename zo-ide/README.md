@@ -82,6 +82,8 @@ zo mcp diagnose --json                         # 설정 진단, 연결 시험은
 
 `--add-dir`는 이번 실행에 정규화한 폴더만 추가한다. 권한 모드와 deny 규칙은 계속 적용된다. `/resume`은 모든 적격 세션에서 비동기로 검색하며 PageUp·PageDown으로 결과 페이지를 바꾼다. `/fork [이름]`은 원본 대화를 보존하고 독립된 대화로 이동한다. 파이프의 `/fork`는 복제 경로를 출력한다. `/rename <이름>`과 `/export <새 파일>`도 사용할 수 있다.
 
+훅 명령의 환경 변수 `HOOK_TOOL_INPUT` · `HOOK_TOOL_OUTPUT`은 64 KiB에서 잘린다. 잘리면 `HOOK_TOOL_INPUT_TRUNCATED` · `HOOK_TOOL_OUTPUT_TRUNCATED`에 원래 바이트 수가 들어간다. 전체 입력과 출력은 늘 stdin의 JSON(`tool_input` · `tool_input_json` · `tool_output`)으로 간다.
+
 권한 모드 `read-only | workspace-write | danger-full-access`(Claude Code 별칭 수용), effort `off…max|ultra|smart`.
 
 ## 자동화 그래프
