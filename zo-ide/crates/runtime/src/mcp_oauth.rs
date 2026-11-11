@@ -14,8 +14,6 @@ use crate::oauth::{
 use core_types::{OAuthAuthorizationRequest, OAuthConfig, OAuthTokenExchangeRequest};
 
 const DEFAULT_CALLBACK_PORT: u16 = 18_923;
-const DEFAULT_AUTHORIZE_URL: &str = "https://auth.example.com/oauth/authorize";
-const DEFAULT_TOKEN_URL: &str = "https://auth.example.com/oauth/token";
 
 /// Trait for opening a browser URL. CLI provides the real implementation.
 pub trait BrowserOpener: Send + Sync {
@@ -37,45 +35,45 @@ pub enum McpAuthResult {
 
 /// Build an [`OAuthConfig`] from the MCP-specific config, filling defaults.
 ///
-/// When `auth_server_metadata_url` is set, this function attempts RFC 8414
-/// metadata discovery: it fetches the URL as JSON and extracts
-/// `authorization_endpoint` and `token_endpoint`.  If the fetch fails, the
-/// metadata URL is used directly as the authorize URL for backward
-/// compatibility.
-#[must_use]
-pub fn mcp_oauth_to_config(server_name: &str, mcp_oauth: &McpOAuthConfig) -> OAuthConfig {
-    let metadata = mcp_oauth
-        .auth_server_metadata_url
-        .as_ref()
-        .and_then(|url| fetch_oauth_metadata(url).ok());
-
-    let (authorize_url, token_url) = match (&metadata, &mcp_oauth.auth_server_metadata_url) {
-        (Some(meta), _) => (
-            meta.authorization_endpoint.clone(),
-            meta.token_endpoint.clone(),
-        ),
-        // Metadata URL set but discovery failed: use it directly as the authorize
-        // URL (backward compat for servers that don't serve RFC 8414).
-        (None, Some(metadata_url)) => (metadata_url.clone(), DEFAULT_TOKEN_URL.to_string()),
-        (None, None) => (
-            DEFAULT_AUTHORIZE_URL.to_string(),
-            DEFAULT_TOKEN_URL.to_string(),
-        ),
+/// The sign-in and token endpoints come from the RFC 8414 metadata at
+/// `auth_server_metadata_url`. Without that URL, or when its document cannot be
+/// read, zo does not know where the server signs in: it stops with an error
+/// that says what is missing rather than sending the person — and then the
+/// authorization code — to a placeholder host.
+pub fn mcp_oauth_to_config(server_name: &str, mcp_oauth: &McpOAuthConfig) -> io::Result<OAuthConfig> {
+    let Some(metadata_url) = mcp_oauth.auth_server_metadata_url.as_ref() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MCP server '{server_name}' has an oauth block without {key}, so zo does not know where it signs in: \
+                 set oauth.{key} to the server's OAuth metadata URL, or remove the oauth block to let zo discover it",
+                key = crate::config::mcp_keys::AUTH_SERVER_METADATA_URL,
+            ),
+        ));
     };
+    let metadata = fetch_oauth_metadata(metadata_url).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "MCP server '{server_name}': could not read the OAuth metadata at {metadata_url} ({error}), \
+                 so zo does not know the server's sign-in and token endpoints"
+            ),
+        )
+    })?;
 
     let port = mcp_oauth.callback_port.unwrap_or(DEFAULT_CALLBACK_PORT);
     let (client_id, client_secret) =
-        resolve_client_credentials(server_name, mcp_oauth, metadata.as_ref(), port);
+        resolve_client_credentials(server_name, mcp_oauth, Some(&metadata), port);
 
-    OAuthConfig {
+    Ok(OAuthConfig {
         client_id,
-        authorize_url,
-        token_url,
+        authorize_url: metadata.authorization_endpoint,
+        token_url: metadata.token_endpoint,
         callback_port: mcp_oauth.callback_port,
         manual_redirect_url: None,
         scopes: Vec::new(),
         client_secret,
-    }
+    })
 }
 
 /// RFC 8414 OAuth Authorization Server Metadata (the subset zo uses).
@@ -304,7 +302,15 @@ pub fn authenticate_mcp_server(
     // Metadata discovery + DCR (each a `run_http`) happen only here, so the async
     // refresh path below never nests a `run_http` inside `run_http` — which would
     // panic with "Cannot start a runtime from within a runtime".
-    let config = mcp_oauth_to_config(server_name, mcp_oauth);
+    let config = match mcp_oauth_to_config(server_name, mcp_oauth) {
+        Ok(config) => config,
+        Err(error) => {
+            return McpAuthResult::Failed {
+                server: server_name.to_string(),
+                reason: error.to_string(),
+            };
+        }
+    };
 
     complete_mcp_auth(server_name, &config, cached.as_ref(), browser)
 }
@@ -351,17 +357,18 @@ pub fn authenticate_mcp_server_remote_with_scopes(
     // Explicit config wins and is unchanged; otherwise discover natively. Both
     // build the config in this top-level synchronous context so the refresh path
     // never nests a `run_http` inside `run_http`.
-    let mut config = match &remote.oauth {
+    let config = match &remote.oauth {
         Some(mcp_oauth) => mcp_oauth_to_config(server_name, mcp_oauth),
-        None => match discover_oauth_config(server_name, &remote.url) {
-            Ok(config) => config,
-            Err(error) => {
-                return McpAuthResult::Failed {
-                    server: server_name.to_string(),
-                    reason: error.to_string(),
-                };
-            }
-        },
+        None => discover_oauth_config(server_name, &remote.url),
+    };
+    let mut config = match config {
+        Ok(config) => config,
+        Err(error) => {
+            return McpAuthResult::Failed {
+                server: server_name.to_string(),
+                reason: error.to_string(),
+            };
+        }
     };
     if !scopes.is_empty() {
         config.scopes = scopes.to_vec();
@@ -1216,30 +1223,69 @@ mod tests {
         assert_eq!(argument.as_str(), serialized.as_str());
     }
 
+    /// An oauth block that names no metadata URL leaves zo without a place to
+    /// sign in: it says so instead of sending the browser to a placeholder.
     #[test]
-    fn mcp_oauth_to_config_fills_defaults() {
+    fn an_oauth_block_without_a_metadata_url_is_refused_by_what_it_lacks() {
         let mcp = McpOAuthConfig {
             client_id: None,
             callback_port: Some(9999),
             auth_server_metadata_url: None,
             xaa: None,
         };
-        let config = mcp_oauth_to_config("mcp-oauth-defaults-test", &mcp);
-        assert_eq!(config.client_id, "mcp-client");
-        assert_eq!(config.callback_port, Some(9999));
+        let error = mcp_oauth_to_config("mcp-oauth-defaults-test", &mcp).expect_err("no endpoints");
+        let reason = error.to_string();
+        assert!(reason.contains("authServerMetadataUrl"), "{reason}");
+        assert!(reason.contains("mcp-oauth-defaults-test"), "{reason}");
+        assert!(!reason.contains("example.com"), "{reason}");
     }
 
+    /// A metadata URL whose document cannot be read names the URL and stops;
+    /// the token exchange is never pointed at a placeholder host.
     #[test]
-    fn mcp_oauth_to_config_uses_provided_values() {
+    fn an_unreadable_metadata_document_is_refused_and_names_its_url() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("a free loopback port")
+            .port();
+        // Nothing listens there once the probe listener is dropped.
+        let metadata_url = format!("http://127.0.0.1:{port}/.well-known/oauth-authorization-server");
         let mcp = McpOAuthConfig {
             client_id: Some("my-client".to_string()),
             callback_port: None,
-            auth_server_metadata_url: Some("https://auth.test/authorize".to_string()),
+            auth_server_metadata_url: Some(metadata_url.clone()),
             xaa: Some(true),
         };
-        let config = mcp_oauth_to_config("mcp-oauth-provided-test", &mcp);
+        let error = mcp_oauth_to_config("mcp-oauth-provided-test", &mcp).expect_err("unreadable metadata");
+        assert!(error.to_string().contains(&metadata_url), "{error}");
+    }
+
+    /// Readable metadata supplies both endpoints and the configured client.
+    #[test]
+    fn mcp_oauth_to_config_takes_endpoints_from_the_metadata() {
+        let base = spawn_mock_server(|base| {
+            let base = base.to_owned();
+            move |method: &str, path: &str, _body: &str| -> MockResponse {
+                if method == "GET" && path == "/.well-known/oauth-authorization-server" {
+                    return MockResponse::json(&serde_json::json!({
+                        "issuer": base,
+                        "authorization_endpoint": format!("{base}/authorize"),
+                        "token_endpoint": format!("{base}/token"),
+                    }));
+                }
+                MockResponse::ok_empty()
+            }
+        });
+        let mcp = McpOAuthConfig {
+            client_id: Some("my-client".to_string()),
+            callback_port: None,
+            auth_server_metadata_url: Some(format!("{base}/.well-known/oauth-authorization-server")),
+            xaa: None,
+        };
+        let config = mcp_oauth_to_config("mcp-oauth-provided-test", &mcp).expect("metadata read");
         assert_eq!(config.client_id, "my-client");
-        assert_eq!(config.authorize_url, "https://auth.test/authorize");
+        assert_eq!(config.authorize_url, format!("{base}/authorize"));
+        assert_eq!(config.token_url, format!("{base}/token"));
     }
 
     #[test]
@@ -1732,8 +1778,8 @@ mod tests {
     fn a_config_calling_back_on(port: u16) -> OAuthConfig {
         OAuthConfig {
             client_id: "prompt-client".to_string(),
-            authorize_url: DEFAULT_AUTHORIZE_URL.to_string(),
-            token_url: DEFAULT_TOKEN_URL.to_string(),
+            authorize_url: "https://auth.example.com/oauth/authorize".to_string(),
+            token_url: "https://auth.example.com/oauth/token".to_string(),
             callback_port: Some(port),
             manual_redirect_url: None,
             scopes: Vec::new(),

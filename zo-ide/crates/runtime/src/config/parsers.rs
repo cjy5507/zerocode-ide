@@ -30,7 +30,7 @@ use super::{
 /// The writer (`super::mcp_edit`) is the inverse of the parsers below, and a
 /// second copy of these spellings would be a file `zo mcp add` writes and
 /// `ConfigLoader` cannot read back. Both sides read this module instead.
-pub(super) mod mcp_keys {
+pub(crate) mod mcp_keys {
     /// The settings section itself.
     pub const SERVERS: &str = "mcpServers";
     /// The transport tag, and the tags it may carry.

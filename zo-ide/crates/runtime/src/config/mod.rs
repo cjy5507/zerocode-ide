@@ -22,7 +22,7 @@ pub use self::mcp_secrets::{
     PersonsOwnSettingsSecrets, SkippedSettingsFile,
 };
 
-use self::parsers::mcp_keys;
+pub(crate) use self::parsers::mcp_keys;
 use self::parsers::{
     deep_merge_objects, extend_unique, merge_lsp_servers, merge_mcp_servers, optional_string_map,
     parse_optional_hooks_config, parse_optional_model, parse_optional_oauth_config,
