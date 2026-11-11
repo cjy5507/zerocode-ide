@@ -110,6 +110,24 @@ Where a paragraph below says "above" or "below", it means the whole guide, which
     value stops as `persons_turn` — never guess a path. A recipe saved before
     this keeps its path and still runs; saving again turns it into `$file_N`.
     The evidence log keeps an upload's file names, sizes and count only.
+  - `recipe-schedule --name <flow> --every daily --at 09:00` (also `hourly`,
+    `weekdays`, `weekly --day mon`, or `--cron '<minute hour day-of-month
+    month day-of-week>'`; `--label <name>` names the job) is for when the
+    person asks, in words, for a Flow to run on a schedule. It writes
+    nothing by itself: the window shows the person a card — the Flow, when
+    it would run, the folder you asked from, your pane — and only their yes
+    saves the job (`result.scheduled`, its `id`, the next runs). From then
+    on the window walks the Flow at those minutes with no agent watching,
+    so ask only for a Flow you have seen end well, and never to get around
+    a step that is the person's. Their no answers `confirmation_refused`:
+    do not ask again. Three minutes with no answer is
+    `confirmation_timeout`: say in your reply what you wanted scheduled and
+    why. A recipe that is no Flow, a schedule that fires closer together
+    than 15 minutes, and a request while the person is answering another
+    question (`person_asked`) are refused before any card. Changing,
+    pausing and deleting the job are the person's (the Automations page),
+    and a Flow whose document changes after their yes waits there until
+    they allow it again — say so when you save over a scheduled Flow.
 - **Memory across a cut context**: `status --json` carries `state` — the
   last verb, whether it worked, failures in a row, recent actions — and the
   session's evidence folder holds `state.json` and `steps.jsonl`. Read them

@@ -98,7 +98,7 @@ This file is the short form: the routing above, the roads, the command names, th
 | `browser-tabs.md` | you work in a built-in browser tab: opening, the person's pause or hand and `workspace_paused`, the revision a mutation carries, `upload`, `diagnose`, `tabs`, `console`, `network` |
 | `web-forms.md` | a page has a form: `fields`, `fill`, a script step, dates, suggestion lists, dialogs, a read-only field a window picks |
 | `observation.md` | you judge what a look shows: the bounds on unchanged looks, `--no-screenshot`, OCR, `observe --diff --settle`, `watch`, marks |
-| `handoff-recipes.md` | a look shows no progress, an action must be undone, the person must act (`handoff`, a one-time code), or you save or run a recipe |
+| `handoff-recipes.md` | a look shows no progress, an action must be undone, the person must act (`handoff`, a one-time code), or you save, run or schedule a recipe |
 | `app-and-desktop.md` | the core loop and every `zerocode-computer` verb for one app's window, and the desktop verbs with no app named |
 | `batch-hearing-qa.md` | `batch`, a window with no tree (a mirrored phone, a remote desktop), listening for a sound, a QA scenario with `compare` and `verdict` |
 | `terminals.md` | a shell, a saved SSH host or a remote workspace through `zerocode-ssh` |
@@ -374,7 +374,7 @@ zerocode-computer find | wait-for | read                              # --app <a
 zerocode-computer observe [--app <app>] [--ocr] [--marks] --diff --settle --json   # one look; click --mark N --look <lookId>
 zerocode-computer watch [--until change|quiet] [--timeout-ms N] --json
 zerocode-computer handoff --reason "…" --json                        # the person's turn; --ask-code --into '[…]' for a one-time code
-zerocode-computer recipe-save | recipe-list | recipe-show | recipe-run
+zerocode-computer recipe-save | recipe-list | recipe-show | recipe-run | recipe-schedule
 zerocode-computer status --json                                      # state, pace, whether you are stopped
 zerocode-computer evidence --json                                    # the evidence folder and the last steps
 zerocode-computer stop | resume                                      # the person's hand on you; resume is theirs after their stop
