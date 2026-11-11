@@ -303,15 +303,17 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
                 .and_then(|dir| computer_use::evidence::read_verdict(Path::new(dir)))
                 .map(|(pass, _)| pass);
             // A job an agent asked for waits once its Flow reads differently
-            // from the one the person allowed.
-            let flow_changed = automation.asked.is_some()
-                && automation.flow_changed_since_approval(
-                    automation
-                        .flow
-                        .as_deref()
-                        .and_then(|slug| flow_document_stands(state.local_data_root(), slug))
-                        .as_deref(),
-                );
+            // from the one the person allowed. One reading answers that and
+            // what 「다시 승인」 will ask about: the row carries the hash of
+            // the very text it judged, and whether that text may spend.
+            let standing = automation
+                .asked
+                .as_ref()
+                .and(automation.flow.as_deref())
+                .and_then(|slug| flow_standing(state.local_data_root(), slug));
+            let flow_changed = automation
+                .flow_changed_since_approval(standing.as_ref().map(|one| one.sha256.as_str()));
+            let waits_on = standing.filter(|_| flow_changed);
             AutomationRow {
                 cron: automation.schedule.to_cron(),
                 leaves_evidence: zerocode_core::leaves_evidence(&automation),
@@ -319,6 +321,8 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
                 runs,
                 last_verdict,
                 flow_changed,
+                flow_money: waits_on.as_ref().is_some_and(|one| one.money),
+                flow_stands: waits_on.map(|one| one.sha256),
                 automation,
             }
         })
@@ -345,42 +349,47 @@ pub(crate) fn save_automation(
     Ok(list_automations(state))
 }
 
-/// 「다시 승인」: allow the Flow of a job an agent asked for as its document
-/// stands now. The person's alone (`PERSON_ONLY_COMMANDS`): it is the yes the
-/// card took, said again for a document that has changed since.
+/// 「다시 승인」: allow the Flow of a job an agent asked for, as the document
+/// the person was asked about. The person's alone (`PERSON_ONLY_COMMANDS`): it
+/// is the yes the card took, said again for a document that has changed since.
+///
+/// `seen` is the hash the list read for the row (`flow_stands`) and the
+/// question was drawn from. A document that changed again while the question
+/// stood is refused — as the card's own road refuses one that changed under
+/// the card (`schedule::settle`) — and the page reads the list again.
 ///
 /// # Errors
 ///
-/// When the job is gone, was written by the person, or its Flow's document
-/// cannot be read.
+/// When the job is gone or was written by the person, when its Flow's document
+/// cannot be read or is no Flow, or when it is not the document that was seen.
 #[tauri::command(async)]
 pub(crate) fn approve_automation_flow(
     state: State<'_, AppState>,
     id: String,
+    seen: String,
 ) -> Result<Vec<AutomationRow>, String> {
-    let flow = stored_automations(state.config_root())
-        .into_iter()
-        .find(|held| held.id == id)
-        .and_then(|held| held.flow)
-        .ok_or_else(|| format!("자동화 {id}을(를) 찾지 못했습니다"))?;
-    let stands = flow_document_stands(state.local_data_root(), &flow)
-        .ok_or_else(|| format!("Flow 문서를 읽을 수 없습니다: {flow}"))?;
+    let root = state.local_data_root();
     approve_automation_flow_in(
         state.config_root(),
         &id,
-        &stands,
+        &seen,
         u64::try_from(now_epoch_ms()).unwrap_or_default(),
+        |slug| flow_standing(root, slug),
     )?;
     Ok(list_automations(state))
 }
 
-/// The hash of a Flow's document as it stands under the window's data root,
-/// or `None` when it cannot be read: what an approval is held against
-/// (`recipes::schedule`). The root is the window's own (`AppState`), not the
-/// one the Computer Use door remembers from its first request: a window just
-/// opened has answered none, and every asked job read as changed until it did.
-pub(crate) fn flow_document_stands(local_data_root: &Path, slug: &str) -> Option<String> {
-    computer_use::recipes::schedule::document_sha256(local_data_root, slug)
+/// A Flow's document as it stands under the window's data root — its hash and
+/// what a question about it says — or `None` when it cannot be read or is no
+/// Flow: what an approval is held against (`recipes::schedule`). The root is
+/// the window's own (`AppState`), not the one the Computer Use door remembers
+/// from its first request: a window just opened has answered none, and every
+/// asked job read as changed until it did.
+pub(crate) fn flow_standing(
+    local_data_root: &Path,
+    slug: &str,
+) -> Option<computer_use::recipes::schedule::Standing> {
+    computer_use::recipes::schedule::standing(local_data_root, slug)
 }
 
 /// The save behind [`save_automation`], for every writer of a job: the second

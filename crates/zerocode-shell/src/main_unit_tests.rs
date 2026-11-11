@@ -34759,20 +34759,138 @@ fn a_flows_document_is_hashed_under_the_root_it_is_handed() {
     let root = tempfile::tempdir().expect("a root");
     let recipes = root.path().join(crate::computer_use::recipes::RECIPES_DIR);
     std::fs::create_dir_all(&recipes).expect("the recipes folder");
-    std::fs::write(recipes.join("wallet-qa.md"), "# Wallet QA\n").expect("a document");
+    let flow = asked_flow_document("dry");
+    std::fs::write(recipes.join("wallet-qa.md"), &flow).expect("a document");
     assert_eq!(
-        crate::cmd::review::flow_document_stands(root.path(), "wallet-qa"),
-        Some(zerocode_core::automation::flow_document_sha256(
-            "# Wallet QA\n"
-        ))
+        crate::cmd::review::flow_standing(root.path(), "wallet-qa").map(|one| one.sha256),
+        Some(zerocode_core::automation::flow_document_sha256(&flow))
     );
     assert_eq!(
-        crate::cmd::review::flow_document_stands(root.path(), "nothing"),
+        crate::cmd::review::flow_standing(root.path(), "nothing"),
         None
     );
-    let reading = block_after(shipped_backend(), "fn flow_document_stands(");
+    let reading = block_after(shipped_backend(), "fn flow_standing(");
     assert!(
         !reading.contains("evidence::root()"),
         "the document is looked for where a new window has no word of it:\n{reading}"
+    );
+}
+
+/// A Flow as `recipe-save --flow-check` leaves one, under the policy named.
+fn asked_flow_document(policy: &str) -> String {
+    format!(
+        "# Wallet QA\n\n## Steps\n\n\
+         1. `zerocode-computer launch --app \"Sample Wallet\"`\n\n\
+         ## Flow\n\n\
+         - policy: {policy}\n\
+         - evidence: full\n\
+         - fingerprint: apps=com.example.wallet hosts=shop.example.com protocol={}\n\n\
+         ## Checks\n\n\
+         1. `zerocode-computer wait-for --app \"Sample Wallet\" --text Balance` — event, required\n",
+        zerocode_core::computer_use::COMPUTER_USE_PROTOCOL_VERSION
+    )
+}
+
+/// 「다시 승인」 moves an approval only to the document the person was asked
+/// about (t-105044, question 7). The list reads the document and the question
+/// is drawn from that reading; the press hands its hash back. A document
+/// rewritten while the question stood is not the one that was read: nothing
+/// is allowed, the stored approval stays where it was, and the job keeps
+/// waiting. Before, the press allowed whatever stood there at that moment.
+#[test]
+fn allowing_a_flow_again_moves_the_approval_only_to_the_document_that_was_seen() {
+    use crate::computer_use::recipes::schedule::{
+        FLOW_CHANGED_UNDER_QUESTION, FLOW_NOT_A_FLOW, standing,
+    };
+    let config = tempfile::tempdir().expect("config");
+    let root = tempfile::tempdir().expect("a root");
+    let recipes = root.path().join(crate::computer_use::recipes::RECIPES_DIR);
+    std::fs::create_dir_all(&recipes).expect("the recipes folder");
+    let document = recipes.join("wallet-qa.md");
+    let allowed_first = asked_flow_document("dry");
+    let job = zerocode_core::Automation::asked_flow(
+        "asked-1".to_string(),
+        "Asked wallet QA".to_string(),
+        "/Users/dev/app".to_string(),
+        "wallet-qa".to_string(),
+        zerocode_core::Schedule::from_words(Some("daily"), Some("09:30"), None, None)
+            .expect("a schedule"),
+        zerocode_core::automation::Asked {
+            pane: "term:7".to_string(),
+            agent: None,
+            approved_at_ms: 1,
+            flow_sha256: zerocode_core::automation::flow_document_sha256(&allowed_first),
+        },
+    );
+    write_automations(config.path(), std::slice::from_ref(&job)).expect("definition");
+    let stored = || {
+        stored_automations(config.path())
+            .into_iter()
+            .find(|held| held.id == "asked-1")
+            .and_then(|held| held.asked)
+            .expect("the asked job")
+    };
+    let allow = |seen: &str| {
+        approve_automation_flow_in(config.path(), "asked-1", seen, 2, |slug| {
+            standing(root.path(), slug)
+        })
+    };
+
+    // The document changed after the approval; the list read it and the
+    // question was drawn from that reading.
+    let seen_text = allowed_first.replace("com.example.wallet", "com.example.other");
+    std::fs::write(&document, &seen_text).expect("the document the person is asked about");
+    let seen = zerocode_core::automation::flow_document_sha256(&seen_text);
+
+    // It is rewritten again while the question stands: the yes is refused,
+    // and the approval has not moved.
+    let rewritten = seen_text.replace("com.example.other", "com.example.third");
+    std::fs::write(&document, &rewritten).expect("rewritten under the question");
+    assert_eq!(
+        allow(&seen),
+        Err(FLOW_CHANGED_UNDER_QUESTION.to_string()),
+        "a document rewritten under the question was allowed as if the person had read it"
+    );
+    assert_eq!(stored().flow_sha256, job.asked.as_ref().expect("asked").flow_sha256);
+    assert_eq!(stored().approved_at_ms, 1);
+
+    // No longer a Flow, or gone: nothing to allow.
+    std::fs::write(&document, "# Wallet QA\n").expect("a plain recipe now");
+    assert_eq!(allow(&seen), Err(FLOW_NOT_A_FLOW.to_string()));
+    std::fs::remove_file(&document).expect("gone");
+    assert_eq!(allow(&seen), Err(FLOW_NOT_A_FLOW.to_string()));
+    assert_eq!(stored().approved_at_ms, 1);
+
+    // The document the person was asked about, still standing: the approval
+    // moves to it and to this moment, and the job is armed.
+    std::fs::write(&document, &seen_text).expect("as it was seen");
+    assert_eq!(allow(&seen), Ok(()));
+    assert_eq!(stored().flow_sha256, seen);
+    assert_eq!(stored().approved_at_ms, 2);
+    assert!(
+        stored_automations(config.path())[0].armed_at.is_some(),
+        "allowing again did not arm the job"
+    );
+
+    // A job the person wrote has no approval to move.
+    let mut own = job.clone();
+    own.id = "own-1".to_string();
+    own.asked = None;
+    write_automations(config.path(), std::slice::from_ref(&own)).expect("the person's own");
+    assert!(
+        approve_automation_flow_in(config.path(), "own-1", &seen, 3, |slug| standing(
+            root.path(),
+            slug
+        ))
+        .is_err()
+    );
+
+    // The command is handed what the page saw and reads under the window's own root.
+    let command = block_after(shipped_backend(), "fn approve_automation_flow(");
+    assert!(
+        command.contains("seen: String,")
+            && command.contains("&seen,")
+            && command.contains("|slug| flow_standing(root, slug),"),
+        "the command does not hold the yes to the document the page saw:\n{command}"
     );
 }

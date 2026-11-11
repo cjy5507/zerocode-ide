@@ -1648,15 +1648,22 @@ pub(super) fn set_automation_enabled_in(
     Ok(())
 }
 
-/// Allow again the Flow of a job an agent asked for, as its document stands
-/// now (`stands`, its hash): the approval moves to this document and this
-/// moment, and the job is armed — the firings it waited through are not ones
-/// it missed. A job the person wrote has no approval to move.
+/// Allow again the Flow of a job an agent asked for: the approval moves to
+/// the document the person was asked about and this moment, and the job is
+/// armed — the firings it waited through are not ones it missed. A job the
+/// person wrote has no approval to move.
+///
+/// `seen` is the hash of the document the question was drawn from. Under the
+/// store's lock the job's Flow is read once more (`standing`, by the slug the
+/// job names now) and the approval moves only when that reading is the
+/// document that was seen (`schedule::allowed_again`): one that changed while
+/// the question stood is not the one the person said yes to.
 pub(super) fn approve_automation_flow_in(
     config_root: &Path,
     id: &str,
-    stands: &str,
+    seen: &str,
     approved_at_ms: u64,
+    standing: impl FnOnce(&str) -> Option<computer_use::recipes::schedule::Standing>,
 ) -> Result<(), String> {
     let mut domain = automation_store_domain();
     let mut rows = stored_automations(config_root);
@@ -1666,7 +1673,9 @@ pub(super) fn approve_automation_flow_in(
     let Some(asked) = held.asked.as_mut() else {
         return Err("직접 만든 자동화에는 다시 승인할 것이 없습니다".to_string());
     };
-    asked.flow_sha256 = stands.to_string();
+    let stands = held.flow.as_deref().and_then(standing);
+    let allowed = computer_use::recipes::schedule::allowed_again(stands.as_ref(), seen)?;
+    asked.flow_sha256 = allowed.to_string();
     asked.approved_at_ms = approved_at_ms;
     held.armed_at = Some(local_minute_now().epoch_minutes);
     write_automations(config_root, &rows)?;

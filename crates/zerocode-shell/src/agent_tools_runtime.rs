@@ -212,6 +212,17 @@ pub(super) struct AutomationRow {
     /// Absent on a job that does not wait — every job the person wrote.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(super) flow_changed: bool,
+    /// On a job that waits: the hash of its Flow's document as this list read
+    /// it — what 「다시 승인」 asks about and hands back, so the yes is held to
+    /// the document the question was drawn from. Absent when the job does not
+    /// wait, and when the document cannot be read or is no Flow: there is then
+    /// nothing to allow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) flow_stands: Option<String>,
+    /// On a job that waits: whether that document may spend money when it is
+    /// walked — the question says so, as the card of a request does.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) flow_money: bool,
 }
 
 /// A prompt that finished its journey into a shell, either way — or that is

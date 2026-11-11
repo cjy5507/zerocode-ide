@@ -11829,7 +11829,12 @@ function whenNext(row) {
   if (!row.enabled) return t("auto.off", "꺼짐");
   // A job an agent asked for whose Flow changed since does not run until the
   // person allows it again: the list says that where the next run would be.
-  if (row.flow_changed) return t("auto.needsApproval", "다시 승인 필요");
+  // With no Flow left to allow, it says the document is what needs a look.
+  if (row.flow_changed) {
+    return row.flow_stands
+      ? t("auto.needsApproval", "다시 승인 필요")
+      : t("auto.needsFlow", "Flow 문서 확인 필요");
+  }
   if (row.next_run_at === null || row.next_run_at === undefined) {
     return t("auto.never", "예정 없음");
   }
@@ -12468,17 +12473,21 @@ function paintAutomationDetail() {
   // A job an agent asked for says so, with when the person allowed it. Once its
   // Flow reads differently it waits for them: the line says that instead, and
   // the button that allows the document as it stands is the person's alone.
+  // A document that cannot be read, or is no Flow any more, has nothing to
+  // allow (no `flow_stands`): the line says that, and there is no button.
   const asked = el("auto-detail-asked");
   asked.hidden = !row.asked;
   if (row.asked) {
-    asked.textContent = row.flow_changed
-      ? t("auto.flowChanged", "승인한 뒤 Flow 문서가 바뀌어 이 예약은 돌지 않습니다. 문서를 확인하고 다시 승인해 주세요.")
-      : t("auto.askedBy", "{{pane}}의 에이전트가 요청 · {{when}} 사람이 승인", {
+    asked.textContent = !row.flow_changed
+      ? t("auto.askedBy", "{{pane}}의 에이전트가 요청 · {{when}} 사람이 승인", {
         pane: row.asked.pane,
         when: new Date(row.asked.approved_at_ms).toLocaleString(),
-      });
+      })
+      : row.flow_stands
+        ? t("auto.flowChanged", "승인한 뒤 Flow 문서가 바뀌어 이 예약은 돌지 않습니다. 문서를 확인하고 다시 승인해 주세요.")
+        : t("auto.flowGone", "이 예약의 Flow 문서를 읽을 수 없거나 더는 Flow가 아니어서 돌지 않습니다. Flow 탭에서 문서를 확인해 주세요.");
   }
-  el("auto-detail-approve").hidden = row.flow_changed !== true;
+  el("auto-detail-approve").hidden = row.flow_changed !== true || !row.flow_stands;
   el("auto-runs-count").textContent = String(autoRuns.length || row.runs || 0);
   setAutoDetailTab(autoDetailTab);
 }
@@ -13437,29 +13446,44 @@ el("auto-detail-edit").addEventListener("click", () => {
 
 /* 「다시 승인」: the Flow of a job an agent asked for changed after the person
  * allowed it, and the job waits. The question says what would run — the Flow
- * by name, and when — and the yes is the person's alone
- * (`approve_automation_flow`): the press's hand is carried past the question. */
+ * by name, when, and that it may spend money when the document now says so —
+ * and the yes is the person's alone (`approve_automation_flow`): the press's
+ * hand is carried past the question.
+ *
+ * The yes is held to the document the question was drawn from: the list read
+ * that document once (`flow_stands`, its hash, and `flow_money`), both are
+ * taken here before the question opens, and the hash goes back with the yes.
+ * A document rewritten while the question stood is refused by the window, and
+ * the list is read again so the next question is about what stands now. */
 async function approveAutomationFlowAgain(row) {
-  if (!row?.asked) return;
+  if (!row?.asked || !row.flow_stands) return;
+  const seen = row.flow_stands;
   const started = handNow();
-  const confirmed = await askConfirm({
-    title: t("auto.approveAgain", "다시 승인"),
-    body: t(
+  const body = [
+    t(
       "auto.approveAgainBody",
       "Flow 「{{flow}}」의 문서가 승인한 뒤에 바뀌었습니다. 지금 문서대로 {{schedule}}에 사람 없이 도는 것을 다시 승인할까요? 문서는 Flow 탭에서 먼저 열어 볼 수 있습니다.",
       { flow: automationFlowName(row) ?? row.flow, schedule: automationScheduleText(row) },
     ),
+    row.flow_money === true
+      ? t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다.")
+      : "",
+  ].filter(Boolean).join(" ");
+  const confirmed = await askConfirm({
+    title: t("auto.approveAgain", "다시 승인"),
+    body,
     confirm: t("auto.approveAgain", "다시 승인"),
     deny: t("app.cancel", "취소"),
     cancel: false,
   });
   if (confirmed !== true) return;
   try {
-    automations = await invoke("approve_automation_flow", { id: row.id }, { hand: flowHand(started) });
+    automations = await invoke("approve_automation_flow", { id: row.id, seen }, { hand: flowHand(started) });
     paintAutomations();
     paintAutomationDetail();
   } catch (error) {
     showError(error);
+    void refreshAutomations();
   }
 }
 

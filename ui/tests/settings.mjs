@@ -2840,10 +2840,20 @@ class StatefulBackend {
         }
         return clone(this.automations);
       }
-      // 「다시 승인」: the Flow reads as allowed again, and the list is answered.
+      // 「다시 승인」: the yes is held to the document the question was drawn
+      // from — `seen`, the hash the list read for the row. The window refuses
+      // any other, and allows that one: the row stops waiting.
       case "approve_automation_flow": {
         const row = this.automations.find((held) => held.id === args.id);
-        if (row) row.flow_changed = false;
+        if (row && args.seen !== row.flow_stands) {
+          throw new Error("묻는 동안 Flow 문서가 다시 바뀌었습니다 — 문서를 확인한 뒤 다시 승인해 주세요");
+        }
+        if (row) {
+          row.flow_changed = false;
+          row.asked = { ...row.asked, flow_sha256: args.seen };
+          delete row.flow_stands;
+          delete row.flow_money;
+        }
         return clone(this.automations);
       }
       // 「지금 실행」: the run it started. It names no terminal and no Flow, so the
@@ -5613,7 +5623,12 @@ await test("a_job_is_saved_switched_and_run_by_the_persons_own_press", async () 
 // A job an agent asked for (`recipe-schedule`) says so on its page, with when
 // the person allowed it. Once its Flow's document changed it waits: the list
 // and the page say so, and 「다시 승인」 — the person's alone — asks what would
-// run before it allows the document as it stands.
+// run before it allows the document as it stands. The yes goes back with the
+// hash of the document the question was drawn from (`flow_stands`): one that
+// was rewritten while the question stood is refused, the list is read again,
+// and the next question is about what stands then. A document that may spend
+// money is said so in the question; one that is no Flow any more has nothing
+// to allow, and no button.
 await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_changed", async () => {
   const held = {
     automations: backend.automations,
@@ -5655,7 +5670,9 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     runs: 0,
     asked: { pane: "term:7", approved_at_ms: 1_794_000_000_000, flow_sha256: "aa" },
     flow_changed: true,
+    flow_stands: "bb",
   }];
+  const said = [];
   try {
     await pageA.evaluate(() => {
       setAutoOpen(true);
@@ -5692,19 +5709,65 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     );
 
     // The press asks first, naming what would run; nothing is allowed before the yes.
+    const money = await pageA.evaluate(() => t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다."));
     const before = backend.count("A", "approve_automation_flow");
     const from = backend.calls.length;
     await pageA.click("#auto-detail-approve");
     await pageA.waitForSelector("#ask-scrim:not([hidden])");
     const question = await pageA.evaluate(() => document.getElementById("ask-body").textContent);
     assert(question.includes("Wallet QA"), "the question did not name the Flow that would run", question);
+    assert(money && !question.includes(money), "a Flow that spends nothing was asked about as one that may spend", question);
     assertEqual(backend.count("A", "approve_automation_flow"), before, "the Flow was allowed again before the person said yes");
+
+    // The document is rewritten while the question stands — and now may spend.
+    // The yes carries the hash the question was drawn from; the window refuses
+    // it, says why, and the page reads the list again.
+    backend.automations[0].flow_stands = "cc";
+    backend.automations[0].flow_money = true;
+    await pageA.evaluate(() => {
+      window.__askedSaid = [];
+      window.__realShowError = window.showError;
+      window.showError = (message) => window.__askedSaid.push(String(message));
+    });
+    const reread = backend.count("A", "list_automations");
     await pageA.click("#ask-yes");
-    const approved = await backend.waitForCall("A", "approve_automation_flow", from);
+    const refused = await backend.waitForCall("A", "approve_automation_flow", from);
+    assertEqual(
+      [refused.args, refused.hand],
+      [{ id: "asked-1", seen: "bb" }, "person"],
+      "the yes did not carry the document the question was drawn from, or named another job or hand",
+    );
+    await pageA.waitForFunction(
+      () => automations.find((one) => one.id === "asked-1")?.flow_stands === "cc",
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    said.push(...await pageA.evaluate(() => window.__askedSaid));
+    assert(
+      said.length === 1 && said[0].includes("다시 바뀌었습니다"),
+      "a yes to a document rewritten under the question was not refused out loud",
+      said,
+    );
+    assert(backend.count("A", "list_automations") > reread, "the list was not read again after the refusal");
+    const still = await pageA.evaluate(() => ({
+      hidden: document.getElementById("auto-detail-approve").hidden,
+      waits: automations.find((one) => one.id === "asked-1")?.flow_changed,
+    }));
+    assertEqual(still, { hidden: false, waits: true }, "the job stopped waiting though nothing was allowed");
+
+    // Asked again, about what stands now: the question says it may spend, and
+    // the yes carries this document's hash.
+    const again = backend.calls.length;
+    await pageA.click("#auto-detail-approve");
+    await pageA.waitForSelector("#ask-scrim:not([hidden])");
+    const second = await pageA.evaluate(() => document.getElementById("ask-body").textContent);
+    assert(second.includes("Wallet QA") && second.includes(money), "the question did not say this document may spend money", second);
+    await pageA.click("#ask-yes");
+    const approved = await backend.waitForCall("A", "approve_automation_flow", again);
     assertEqual(
       [approved.args, approved.hand],
-      [{ id: "asked-1" }, "person"],
-      "allowing again named another job, or did not say the person pressed it",
+      [{ id: "asked-1", seen: "cc" }, "person"],
+      "allowing again named another job or document, or did not say the person pressed it",
     );
     await pageA.waitForFunction(
       () => document.getElementById("auto-detail-approve").hidden,
@@ -5713,8 +5776,38 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     );
     const allowed = await pageA.evaluate(() => document.getElementById("auto-detail-asked").textContent);
     assert(allowed.includes("term:7"), "the page did not say which pane asked and when it was allowed", allowed);
-    return "an asked job said it waits, asked before allowing again, and the yes was the person's";
+
+    // A document that cannot be read, or is no Flow any more: nothing to
+    // allow. The list and the page say the document needs a look, and there
+    // is no button to press.
+    backend.automations[0].flow_changed = true;
+    await pageA.evaluate(() => refreshAutomations());
+    await pageA.waitForFunction(
+      () => automations.find((one) => one.id === "asked-1")?.flow_changed === true,
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+    const gone = await pageA.evaluate(() => ({
+      when: document.querySelector("#auto-list .auto-row .auto-row-when")?.textContent ?? "",
+      wantWhen: t("auto.needsFlow", "Flow 문서 확인 필요"),
+      note: document.getElementById("auto-detail-asked").textContent,
+      wantNote: t("auto.flowGone", "이 예약의 Flow 문서를 읽을 수 없거나 더는 Flow가 아니어서 돌지 않습니다. Flow 탭에서 문서를 확인해 주세요."),
+      hidden: document.getElementById("auto-detail-approve").hidden,
+    }));
+    assert(
+      gone.wantWhen && gone.when === gone.wantWhen && gone.wantNote && gone.note === gone.wantNote && gone.hidden,
+      "a job whose Flow is gone offered 「다시 승인」, or did not say the document needs a look",
+      gone,
+    );
+    return "an asked job said it waits, asked before allowing again, was held to the document it asked about, and the yes was the person's";
   } finally {
+    await pageA.evaluate(() => {
+      if (window.__realShowError) {
+        window.showError = window.__realShowError;
+        delete window.__realShowError;
+      }
+      delete window.__askedSaid;
+    });
     await pageA.evaluate(() => closeAutoForm());
     await closeFlowSide(pageA);
     backend.automations = held.automations;

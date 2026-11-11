@@ -223,6 +223,61 @@ pub(crate) fn document_sha256(recipes_root: &Path, slug: &str) -> Option<String>
         .map(|(_, text)| flow_document_sha256(&text))
 }
 
+/// A Flow's document as one reading of it stands: the hash an approval is held
+/// against, and what a question about allowing it has to say — both off the
+/// same text, so the person is not asked about one document and answered for
+/// another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Standing {
+    /// The hash of the text that was read (`flow_document_sha256`).
+    pub sha256: String,
+    /// Whether walking it may spend money ([`spends`]): the question says so.
+    pub money: bool,
+}
+
+/// The document of `slug` under `recipes_root` as it stands, read once.
+/// `None` when it cannot be read or no longer reads as a Flow: there is then
+/// nothing to allow — a walk would refuse it too.
+#[must_use]
+pub(crate) fn standing(recipes_root: &Path, slug: &str) -> Option<Standing> {
+    let (_, text) = show(recipes_root, slug).ok()?;
+    let spec = parse_flow(&text).ok().flatten()?;
+    Some(Standing {
+        sha256: flow_document_sha256(&text),
+        money: spends(spec.policy),
+    })
+}
+
+/// What 「다시 승인」 is refused with when the document is no longer the one
+/// the question was asked about ([`allowed_again`]).
+pub(crate) const FLOW_CHANGED_UNDER_QUESTION: &str =
+    "묻는 동안 Flow 문서가 다시 바뀌었습니다 — 문서를 확인한 뒤 다시 승인해 주세요";
+
+/// What 「다시 승인」 is refused with when there is no Flow to allow.
+pub(crate) const FLOW_NOT_A_FLOW: &str =
+    "Flow 문서를 읽을 수 없거나 더는 Flow가 아닙니다 — Flow 탭에서 문서를 확인해 주세요";
+
+/// The person's yes to allowing a job's Flow again, held to the document the
+/// question was asked about: `seen` is the hash the list read and the question
+/// was drawn from, `stands` the document as it reads at the press. The hash an
+/// approval may move to is answered only when the two are one document — the
+/// one that was compared is the one that is stored.
+///
+/// # Errors
+///
+/// When there is no Flow to allow, or the document changed under the question.
+pub(crate) fn allowed_again<'a>(
+    stands: Option<&'a Standing>,
+    seen: &str,
+) -> Result<&'a str, &'static str> {
+    let stands = stands.ok_or(FLOW_NOT_A_FLOW)?;
+    if stands.sha256 == seen {
+        Ok(stands.sha256.as_str())
+    } else {
+        Err(FLOW_CHANGED_UNDER_QUESTION)
+    }
+}
+
 /// What a job says when the Flow it was allowed for reads differently: it
 /// waits for the person instead of walking it.
 pub(crate) const FLOW_CHANGED: &str =
@@ -369,8 +424,13 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use zerocode_core::computer_flow::{FLOW_HEADING, FLOW_HEADING_CHECKS};
-    use zerocode_core::computer_recipe::RECIPE_HEADING_STEPS;
+    use zerocode_core::computer_flow::{
+        FLOW_HEADING, FLOW_HEADING_CHECKS, FLOW_KEY_MONEY, FLOW_MONEY_AMOUNT, FLOW_MONEY_ID,
+        FLOW_MONEY_RECIPIENT,
+    };
+    use zerocode_core::computer_recipe::{
+        RECIPE_HEADING_STEPS, RECIPE_MARK_MONEY, RECIPE_MARK_SEPARATOR,
+    };
     use zerocode_core::computer_use::COMPUTER_USE_PROTOCOL_VERSION;
 
     /// 2026-11-11 00:00, local: a Wednesday.
@@ -390,6 +450,24 @@ mod tests {
              - fingerprint: apps=com.example.wallet hosts=shop.example.com protocol={COMPUTER_USE_PROTOCOL_VERSION}\n\n\
              {FLOW_HEADING_CHECKS}\n\n\
              1. `zerocode-computer wait-for --app \"Sample Wallet\" --text Balance` — event, required\n"
+        )
+    }
+
+    /// A Flow that may spend: policy `guarded`, a money line, and the one step
+    /// that carries the money mark.
+    fn spending_document() -> String {
+        format!(
+            "# Wallet top-up\n\n{RECIPE_HEADING_STEPS}\n\n\
+             1. `zerocode-browser type browser-1 #recipient {{{{recipient}}}}`\n\
+             2. `zerocode-browser type browser-1 #amount {{{{amount}}}}`\n\
+             3. `zerocode-browser click browser-1 #send`{RECIPE_MARK_SEPARATOR}{RECIPE_MARK_MONEY}\n\n\
+             {FLOW_HEADING}\n\n\
+             - policy: guarded\n\
+             - evidence: full\n\
+             - fingerprint: hosts=shop.example.com protocol={COMPUTER_USE_PROTOCOL_VERSION}\n\
+             - {FLOW_KEY_MONEY}: {FLOW_MONEY_ID}=txn {FLOW_MONEY_AMOUNT}=amount {FLOW_MONEY_RECIPIENT}=recipient\n\n\
+             {FLOW_HEADING_CHECKS}\n\n\
+             1. `zerocode-browser find browser-1 \"Sent\"` — event, required\n"
         )
     }
 
@@ -450,6 +528,75 @@ mod tests {
             parse_flow(&plain)
         );
         assert_eq!(recipe_title(&flow).as_deref(), Some("Wallet QA"));
+        let spending = spending_document();
+        assert!(
+            matches!(parse_flow(&spending), Ok(Some(ref spec)) if spec.policy == Policy::Guarded),
+            "{:?}",
+            parse_flow(&spending)
+        );
+    }
+
+    /// One reading of a Flow's document gives the hash an approval is held
+    /// against and what a question about it says. A document that cannot be
+    /// read, or is no Flow, stands as nothing: there is nothing to allow.
+    #[test]
+    fn a_flows_document_stands_as_its_hash_and_whether_it_may_spend() {
+        let (flow, spending, plain) = (flow_document(), spending_document(), plain_document());
+        let (root, _) = stand(&[
+            ("wallet-qa", &flow),
+            ("wallet-top-up", &spending),
+            ("plain-steps", &plain),
+        ]);
+        assert_eq!(
+            standing(root.path(), "wallet-qa"),
+            Some(Standing {
+                sha256: flow_document_sha256(&flow),
+                money: false,
+            })
+        );
+        assert_eq!(
+            standing(root.path(), "wallet-top-up"),
+            Some(Standing {
+                sha256: flow_document_sha256(&spending),
+                money: true,
+            })
+        );
+        assert_eq!(standing(root.path(), "plain-steps"), None);
+        assert_eq!(standing(root.path(), "nothing"), None);
+    }
+
+    /// 「다시 승인」 is the person's yes to the document the question was drawn
+    /// from: the approval may move only to that one. A document that changed
+    /// again while the question stood is refused — what the person read about
+    /// is not what is there — and so is one that is no longer a Flow.
+    #[test]
+    fn allowing_again_is_held_to_the_document_the_question_was_asked_about() {
+        let asked_about = Standing {
+            sha256: flow_document_sha256(&flow_document()),
+            money: false,
+        };
+        let changed_again = Standing {
+            sha256: flow_document_sha256(&spending_document()),
+            money: true,
+        };
+        assert_eq!(
+            allowed_again(Some(&asked_about), &asked_about.sha256),
+            Ok(asked_about.sha256.as_str())
+        );
+        assert_eq!(
+            allowed_again(Some(&changed_again), &asked_about.sha256),
+            Err(FLOW_CHANGED_UNDER_QUESTION),
+            "a document that changed under the question was allowed as if it had been read"
+        );
+        assert_eq!(
+            allowed_again(None, &asked_about.sha256),
+            Err(FLOW_NOT_A_FLOW)
+        );
+        // A page that sent no hash — an older one — allows nothing.
+        assert_eq!(
+            allowed_again(Some(&asked_about), ""),
+            Err(FLOW_CHANGED_UNDER_QUESTION)
+        );
     }
 
     /// The job is built before the card, and the card is drawn from it: a Flow
