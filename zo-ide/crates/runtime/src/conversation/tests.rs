@@ -12028,7 +12028,9 @@ fn read_file_distinct_windows_do_not_escalate_repetition_guard() {
         vec!["system".to_string()],
     );
 
-    for i in 0..(super::TOOL_REPETITION_HARD_STOP * 2) {
+    // A window a line: `offset` is the line read, counted from 1 (0 and 1
+    // are both the first line, so they would be one window).
+    for i in 1..=(super::TOOL_REPETITION_HARD_STOP * 2) {
         let input = format!("{{\"path\":\"x.rs\",\"offset\":{i},\"limit\":1}}");
         assert!(
             matches!(
