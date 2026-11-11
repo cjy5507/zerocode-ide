@@ -24,6 +24,24 @@ pub(crate) fn mode_is_private(mode: u32) -> bool {
     mode & 0o077 == 0
 }
 
+/// The permission bits `path` has now, so a rewrite can put them back.
+/// `None` off unix, where a mode is not this file's vocabulary, and when the
+/// file is not there.
+pub(crate) fn mode_of(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .ok()
+            .map(|meta| meta.permissions().mode())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Give `path` the unix `mode` a caller recorded or asked for.
 ///
 /// Unix sets exactly that mode: a file put back is put back as it was, so a

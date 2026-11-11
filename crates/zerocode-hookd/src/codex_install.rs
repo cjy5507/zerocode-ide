@@ -132,21 +132,6 @@ pub fn write_path(config_path: &Path) -> PathBuf {
     }
 }
 
-fn mode_of(path: &Path) -> Option<u32> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .ok()
-            .map(|meta| meta.permissions().mode())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
-    }
-}
-
 /// Read `hooks.json`, refusing anything we could not put back.
 pub fn read(config_path: &Path) -> Result<Found, Refusal> {
     let target = write_path(config_path);
@@ -176,7 +161,7 @@ pub fn read(config_path: &Path) -> Result<Found, Refusal> {
     }
     Ok(Found {
         raw: Some(raw),
-        mode: mode_of(&target),
+        mode: crate::private_file::mode_of(&target),
         config,
     })
 }
@@ -479,8 +464,13 @@ pub(crate) fn write_atomically(path: &Path, body: &str, mode: Option<u32>) -> st
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     // The temp name carries our own prefix so a sweep can tell its leftovers from
-    // another writer's.
-    let temp = dir.join(format!(".zerocode-hooks-{}.tmp", std::process::id()));
+    // another writer's, and the target's name so two files written into one
+    // folder at once (a home's settings beside its hooks) never share a temp.
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let temp = dir.join(format!(".zerocode-hooks-{}-{name}.tmp", std::process::id()));
     std::fs::write(&temp, body)?;
     // Unix gets the exact mode back (the undo restores "the bytes and the
     // mode"); elsewhere only an owner-only mode has a road.

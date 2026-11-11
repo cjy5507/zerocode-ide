@@ -322,14 +322,15 @@ fn write_config(path: &Path, config: &Map<String, Value>) -> std::io::Result<()>
     let mut text = serde_json::to_string_pretty(&Value::Object(config.clone()))
         .expect("a JSON map serializes");
     text.push('\n');
-    // Through a sibling temp and a rename: the agent may read its settings at
-    // any moment, and half a settings file is a parse error that turns off
-    // every hook the user wrote too.
-    let tmp = path.with_extension("json.zerocode-tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    write_keeping_mode(path, &text)
+}
+
+/// Through a sibling temp and a rename: the agent may read its settings at
+/// any moment, and half a settings file is a parse error that turns off every
+/// hook the user wrote too. The file keeps the mode it had — a settings file
+/// the user keeps at 0600 (its `env` may hold a key) stays 0600.
+fn write_keeping_mode(path: &Path, text: &str) -> std::io::Result<()> {
+    crate::codex_install::write_atomically(path, text, crate::private_file::mode_of(path))
 }
 
 /// Does this hook definition (in any of the vendor shapes) run one of our
@@ -1138,11 +1139,7 @@ fn write_kimi(config_path: &Path, text: &str) -> std::io::Result<()> {
     if config_path.exists() {
         let _ = std::fs::copy(config_path, config_path.with_extension("toml.bak"));
     }
-    let tmp = config_path.with_extension("toml.zerocode-tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, config_path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    write_keeping_mode(config_path, text)
 }
 
 fn remove_kimi(paths: &InstallPaths, config_path: &Path) -> HookStatus {
@@ -1755,6 +1752,49 @@ mod tests {
             config_path.with_extension("toml.bak").exists(),
             "no backup was kept"
         );
+    }
+
+    /// A rewrite keeps the mode the user gave the file: a 0600 settings file
+    /// (its `env` may hold a key) is not 0644 after our install or remove,
+    /// and neither is a 0600 kimi config.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewritten_config_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode =
+            |path: &Path| std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
+        let (_home, paths) = paths();
+        for agent in [AgentKind::Claude, AgentKind::Kimi] {
+            let config_path = paths.config_path(agent);
+            std::fs::create_dir_all(config_path.parent().expect("parent")).expect("dir");
+            let seed = if agent == AgentKind::Kimi {
+                "model = \"k2\"\n"
+            } else {
+                "{\"env\":{\"EXAMPLE_KEY\":\"example-token\"}}"
+            };
+            std::fs::write(&config_path, seed).expect("seed");
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod");
+
+            let installed = install_agent(&paths, agent);
+            assert_eq!(
+                installed.state,
+                HookInstallState::Installed,
+                "{installed:?}"
+            );
+            assert_eq!(
+                mode(&config_path),
+                0o600,
+                "{agent:?} install widened the file"
+            );
+
+            remove_agent(&paths, agent);
+            assert_eq!(
+                mode(&config_path),
+                0o600,
+                "{agent:?} remove widened the file"
+            );
+        }
     }
 
     /// Half-present entries answer `partial`, so the settings screen can say

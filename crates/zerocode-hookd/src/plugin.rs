@@ -162,20 +162,12 @@ pub fn install_agent(home: &Path, agent: AgentKind) -> HookStatus {
     }
     // Through a temp and a rename: the agent may be loading its plugins right
     // now, and half a plugin file is a parse error that takes the agent's whole
-    // plugin directory down with it.
-    let tmp = path.with_extension("zerocode-tmp");
-    if std::fs::write(&tmp, source).is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    // plugin directory down with it. The file keeps the mode it had.
+    let mode = crate::private_file::mode_of(&path);
+    if crate::codex_install::write_atomically(&path, &source, mode).is_err() {
         return status(
             HookInstallState::Error,
             Some("플러그인을 쓰지 못했습니다".into()),
-        );
-    }
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return status(
-            HookInstallState::Error,
-            Some("플러그인을 제자리에 놓지 못했습니다".into()),
         );
     }
     status_of(home, agent)
@@ -471,7 +463,10 @@ mod tests {
         );
         assert!(path.exists());
         // No temp file left beside it.
-        assert!(!path.with_extension("zerocode-tmp").exists());
+        let beside = std::fs::read_dir(path.parent().expect("parent"))
+            .expect("list")
+            .count();
+        assert_eq!(beside, 1, "a temp file was left beside the plugin");
 
         let gone = remove_agent(home.path(), AgentKind::Amp);
         assert_eq!(gone.state, HookInstallState::NotInstalled);
