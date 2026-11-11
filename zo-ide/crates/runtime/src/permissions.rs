@@ -416,7 +416,9 @@ impl PermissionPolicy {
     /// call without asking — full access, an allow rule — the question is
     /// refused unasked too, with what to do instead, as the window's hook
     /// answers it (t-82420): nobody is expected at a question there, and one
-    /// left unanswered stalls the turn.
+    /// left unanswered stalls the turn. Right after the kill guard, the desk
+    /// guard refuses a command that moves the person's screen, in every mode
+    /// and unasked ([`crate::desk_guard`], t-104888).
     #[must_use]
     pub fn authorize_with_context(
         &self,
@@ -425,8 +427,18 @@ impl PermissionPolicy {
         context: &PermissionContext,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
-        let verdict = shell_command(tool_name, input)
-            .and_then(|(shell, command)| crate::kill_guard::judged(shell, &command));
+        let shell = shell_command(tool_name, input);
+        let verdict = shell
+            .as_ref()
+            .and_then(|(shell, command)| crate::kill_guard::judged(*shell, command));
+        if !matches!(verdict, Some(KillVerdict::Deny { .. })) {
+            if let Some(reason) = shell
+                .as_ref()
+                .and_then(|(shell, command)| crate::desk_guard::refused(*shell, command))
+            {
+                return PermissionOutcome::Deny { reason };
+            }
+        }
         match verdict {
             Some(KillVerdict::Deny { reason }) => PermissionOutcome::Deny {
                 reason: crate::kill_guard::refusal(&reason),

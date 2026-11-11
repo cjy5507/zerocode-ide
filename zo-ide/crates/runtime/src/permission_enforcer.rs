@@ -151,11 +151,16 @@ impl PermissionEnforcer {
     /// The kill guard (t-80732) goes first, in every mode: a signal to the
     /// window is refused, and a signal that needs a person's yes is refused
     /// too, since this layer has nobody to ask — saying what the session may
-    /// still end itself (t-82854).
+    /// still end itself (t-82854). The desk guard comes right after it, in
+    /// every mode: a command that moves the person's screen is refused
+    /// ([`crate::desk_guard`], t-104888).
     #[must_use]
     pub fn check_bash(&self, command: &str) -> EnforcementResult {
         let mode = self.policy.active_mode();
-        if let Err(reason) = crate::kill_guard::judge_where_nobody_can_ask(command) {
+        let refused = crate::kill_guard::judge_where_nobody_can_ask(command)
+            .err()
+            .or_else(|| crate::desk_guard::refused(crate::kill_guard::Shell::Bash, command));
+        if let Some(reason) = refused {
             return EnforcementResult::Denied {
                 tool: "bash".to_owned(),
                 active_mode: mode.as_str().to_owned(),
