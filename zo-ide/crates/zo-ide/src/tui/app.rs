@@ -5340,7 +5340,14 @@ impl Ui {
             self.seat_waiting_tools();
             return;
         }
-        if self.tool_cell.as_ref().is_some_and(ToolGroup::should_flush) {
+        // The `turns` view folds a cell as soon as nothing in it is running.
+        // Left open for the next command to join — what the full view's
+        // `Ran N commands` needs — the whole group stood in the viewport,
+        // every command and its output, for as long as commands kept coming:
+        // six `Run` cells under one prompt where the view promises the newest
+        // three steps and the one that is running (2026-11-11).
+        let folds_now = self.folding() && !self.tool_cell.as_ref().is_some_and(ToolGroup::is_active);
+        if folds_now || self.tool_cell.as_ref().is_some_and(ToolGroup::should_flush) {
             self.flush_tool_cell();
         }
         self.seat_waiting_tools();
@@ -9054,6 +9061,52 @@ mod tests {
             took: None,
         }]);
         assert!(!ui.work_opens_dense(false), "held work becomes a fold, which keeps its gap row here");
+    }
+
+    /// The `turns` view folds each call as it finishes: commands that come
+    /// one after another do not pile up whole in the viewport. What shows
+    /// while the next one runs is a row a finished step and the running call;
+    /// the full view keeps the group open for the next command, as before.
+    #[test]
+    fn the_turns_view_folds_each_call_as_it_finishes() {
+        use runtime::message_stream::types::ToolResultBody;
+        let result = |ids: &BlockIdGen, call: &str, content: &str| RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId(call.to_string()),
+            is_error: false,
+            body: ToolResultBody::Text { content: content.to_string(), truncated: false },
+        };
+        let run = |ids: &BlockIdGen, call: &str, command: &str| tool_call(ids, call, "bash", &json!({ "command": command }));
+
+        let mut ui = test_ui();
+        ui.view = super::super::style::ConversationView::Turns;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        let ids = BlockIdGen::default();
+        ui.block(run(&ids, "toolu_one", "cargo build"));
+        assert!(ui.tool_cell.is_some(), "the running command has the live cell");
+        ui.block(result(&ids, "toolu_one", "built\n"));
+        assert!(ui.tool_cell.is_none(), "a finished command leaves the live cell at once");
+        assert_eq!(ui.fold.step_count(), 1);
+
+        ui.block(run(&ids, "toolu_two", "cargo test parser"));
+        let live: Vec<String> = ui.active_cell(80).0.iter().map(Line::plain).collect();
+        assert_eq!(
+            live.iter().filter(|row| row.contains("cargo build")).count(),
+            1,
+            "the finished command is one row: {live:#?}"
+        );
+        assert!(!live.iter().any(|row| row.contains("built")), "and its output is not shown: {live:#?}");
+        assert!(live.iter().any(|row| row.contains("cargo test parser")), "the running one shows: {live:#?}");
+        ui.block(result(&ids, "toolu_two", "test result: ok\n"));
+        assert!(ui.tool_cell.is_none());
+        assert_eq!(ui.fold.step_count(), 2);
+        assert!(history(&ui).is_empty(), "nothing is said while the work runs: {:#?}", history(&ui));
+
+        // The full view keeps a finished group open for the next command.
+        let mut full = test_ui();
+        full.block(run(&ids, "toolu_three", "cargo build"));
+        full.block(result(&ids, "toolu_three", "built\n"));
+        assert!(full.tool_cell.is_some(), "the full view's group waits for the next command");
     }
 
     /// The full view commits a row a step, as it always did.
