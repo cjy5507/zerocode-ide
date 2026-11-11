@@ -26,13 +26,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use core_types::tool_input::parse_tool_arguments;
-use core_types::tool_names::tool_key;
 use serde_json::Value;
-use zerocode_core::card_words::{shown, EXCERPT_MAX_CHARS, WORD_MAX_CHARS};
+use zerocode_core::card_words::{hidden_said, shown, shown_counting, EXCERPT_MAX_CHARS, WORD_MAX_CHARS};
 
-use crate::team_cron_registry::{
-    cron_zone, next_due_at_after_in_zone, validate_cron_schedule, CronZone,
-};
+use crate::team_cron_registry::{cron_zone, next_due_at_after_in_zone, CronCreateInput, CronWork, CronZone};
 
 /// The tool that registers a schedule.
 pub const TOOL: &str = "CronCreate";
@@ -78,16 +75,18 @@ enum Runs {
 
 /// The card for the schedule `tool_name` called with `input` would register.
 /// `None` for any other tool, and for a call that registers nothing
-/// ([`asks`]).
+/// ([`asks`]). `workspace` is the folder the session's schedules are kept
+/// for, which is where this one would run; without it the card names the
+/// folder this process stands in.
 #[must_use]
-pub(crate) fn asked(tool_name: &str, input: &str) -> Option<String> {
+pub(crate) fn asked(tool_name: &str, input: &str, workspace: Option<&Path>) -> Option<String> {
     let registration = registration(tool_name, input)?;
-    let folder = std::env::current_dir().ok();
+    let here = if workspace.is_none() { std::env::current_dir().ok() } else { None };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    Some(card(&registration, cron_zone(), now, folder.as_deref()))
+    Some(card(&registration, cron_zone(), now, workspace.or(here.as_deref())))
 }
 
 /// Whether `tool_name` called with `input` would register a schedule, which
@@ -121,36 +120,31 @@ pub fn nobody_to_ask() -> String {
     )
 }
 
+/// Whether `tool_name` is the tool that registers a schedule, in any
+/// spelling a rule would meet it by (`tool_key`: case aside — it has no
+/// alias and no separator). Asked of every call, so it compares in place.
+fn registers_schedules(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case(TOOL)
+}
+
 /// What `tool_name` called with `input` would register. The input is read as
-/// the executor reads it (`parse_tool_arguments`, a mended slip included), the
-/// expression by the registry's own check, and the choice between a prompt and
-/// a workflow as the tool makes it — so a call the tool would run is never one
-/// the guard did not see.
+/// the executor reads it (`parse_tool_arguments`, a mended slip included), into
+/// the arguments the tool reads, and what they register is the tool's own
+/// judgment ([`CronCreateInput::work`]) — so a call the tool would run is
+/// never one the guard did not see.
 fn registration(tool_name: &str, input: &str) -> Option<Registration> {
-    if tool_key(tool_name) != tool_key(TOOL) {
+    if !registers_schedules(tool_name) {
         return None;
     }
-    let call = parse_tool_arguments(input).ok()?;
-    let schedule = call.get("schedule").and_then(Value::as_str)?;
-    validate_cron_schedule(schedule).ok()?;
-    let prompt = call
-        .get("prompt")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    let workflow = call.get("workflow").filter(|workflow| !workflow.is_null());
-    let runs = match (workflow, prompt.is_empty()) {
-        (Some(workflow), true) => Runs::Workflow(workflow_name(workflow)),
-        (None, false) => Runs::Prompt(prompt.to_string()),
-        _ => return None,
+    let call: CronCreateInput = serde_json::from_value(parse_tool_arguments(input).ok()?).ok()?;
+    let runs = match call.work().ok()? {
+        CronWork::Workflow(workflow) => Runs::Workflow(workflow_name(workflow)),
+        CronWork::Prompt(prompt) => Runs::Prompt(prompt.trim().to_string()),
     };
     Some(Registration {
-        schedule: schedule.to_string(),
+        schedule: call.schedule,
         runs,
-        label: call
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        label: call.description,
     })
 }
 
@@ -172,20 +166,27 @@ fn card(registration: &Registration, zone: CronZone, now: u64, folder: Option<&P
         Runs::Prompt(_) => SAYS_OF_A_PROMPT,
         Runs::Workflow(_) => SAYS_OF_A_WORKFLOW,
     });
-    let said = |words: &str| Some(shown(words, WORD_MAX_CHARS)).filter(|shown| !shown.is_empty());
-    if let Some(label) = registration.label.as_deref().and_then(said) {
+    // Letters that draw nothing are left out of what is shown and counted,
+    // and the card says how many: what would run holds no word a person
+    // approving it cannot see.
+    let mut hidden = 0usize;
+    if let Some(label) = registration.label.as_deref().and_then(|label| said(label, &mut hidden)) {
         let _ = write!(card, "\nCalled: {label}");
     }
     match &registration.runs {
         Runs::Prompt(prompt) => {
+            hidden += shown_counting(prompt, EXCERPT_MAX_CHARS).hidden;
             let _ = write!(card, "\nRuns: {}", excerpt(prompt));
         }
-        Runs::Workflow(name) => match name.as_deref().and_then(said) {
+        Runs::Workflow(name) => match name.as_deref().and_then(|name| said(name, &mut hidden)) {
             Some(name) => {
                 let _ = write!(card, "\nRuns: the workflow {name}");
             }
             None => card.push_str("\nRuns: a workflow that gave no name"),
         },
+    }
+    if let Some(left_out) = hidden_said(hidden) {
+        let _ = write!(card, "\nHidden: {left_out}");
     }
     let _ = write!(
         card,
@@ -202,6 +203,14 @@ fn card(registration: &Registration, zone: CronZone, now: u64, folder: Option<&P
         );
     }
     card
+}
+
+/// A name the call gave, as the card shows it — none when nothing of it
+/// draws — with the letters left out of it added to `hidden`.
+fn said(words: &str, hidden: &mut usize) -> Option<String> {
+    let shown = shown_counting(words, WORD_MAX_CHARS);
+    *hidden += shown.hidden;
+    Some(shown.text).filter(|text| !text.is_empty())
 }
 
 /// The head of a prompt as the card shows it, and how long the whole is when
@@ -240,21 +249,10 @@ fn coming(schedule: &str, zone: CronZone, now: u64) -> String {
 
 /// `Thu 2026-11-12 09:00`: an instant on the clock `offset_secs` ahead of UTC.
 fn clock(unix_secs: u64, offset_secs: i64) -> String {
-    /// Sunday first, as the arithmetic below counts them.
-    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-    let wall = i64::try_from(unix_secs)
-        .unwrap_or(i64::MAX)
-        .saturating_add(offset_secs);
-    let days = wall.div_euclid(86_400);
-    let seconds = wall.rem_euclid(86_400);
-    let (year, month, day) = core_types::date::civil_from_unix_days(days);
-    // The Unix epoch was a Thursday.
-    let weekday = WEEKDAYS[usize::try_from((days + 4).rem_euclid(7)).unwrap_or(0)];
+    let at = core_types::date::wall_clock(i64::try_from(unix_secs).unwrap_or(i64::MAX), offset_secs);
     format!(
-        "{weekday} {year:04}-{month:02}-{day:02} {:02}:{:02}",
-        seconds / 3_600,
-        (seconds % 3_600) / 60
+        "{} {:04}-{:02}-{:02} {:02}:{:02}",
+        at.weekday, at.year, at.month, at.day, at.hour, at.minute
     )
 }
 

@@ -45,10 +45,10 @@ impl PermissionEnforcer {
             // here too, where every other question is left to a prompter this
             // path may never reach. In the other modes the policy below
             // refuses it, having no prompter either.
-            let refused = self.policy.deny_reason(tool_name, input).or_else(|| {
-                crate::schedule_guard::asks(tool_name, input)
-                    .then(crate::schedule_guard::nobody_to_ask)
-            });
+            let refused = self
+                .policy
+                .deny_reason(tool_name, input)
+                .or_else(|| self.policy.refused_with_nobody_to_ask(tool_name, input));
             return match refused {
                 Some(reason) => EnforcementResult::Denied {
                     tool: tool_name.to_owned(),

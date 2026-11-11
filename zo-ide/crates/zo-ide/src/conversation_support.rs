@@ -72,7 +72,9 @@ pub(crate) fn permission_policy(
         .map_err(|e| e.to_string())?
         .into_iter()
         .fold(
-            PermissionPolicy::new(mode).with_permission_rules(feature_config.permission_rules()),
+            PermissionPolicy::new(mode)
+                .with_permission_rules(feature_config.permission_rules())
+                .with_schedule_workspace(tool_registry.schedule_workspace()),
             |policy, (name, required_permission)| {
                 policy.with_tool_requirement(name, required_permission)
             },

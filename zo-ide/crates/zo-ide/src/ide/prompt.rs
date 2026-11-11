@@ -38,6 +38,14 @@ impl PendingPrompt {
         }
     }
 
+    /// Whether this is a permission prompt only a person may answer: a run
+    /// with nobody at it decides such a prompt at once, where it takes any
+    /// other from the lines still to come ([`crate::ide::run_loop`]).
+    #[must_use]
+    pub fn only_a_person_may_answer(&self) -> bool {
+        matches!(self, PendingPrompt::Permission(prompt) if prompt.person_only)
+    }
+
     /// 프롬프트를 답 없이 닫는다 — 권한은 명시적 Deny, 질문은 responder drop.
     pub fn dismiss(self) {
         match self {
@@ -227,6 +235,9 @@ mod tests {
         assert_eq!(parse_permission_answer("n", &prompt), Some(PermissionDecision::Deny));
 
         let pending = PendingPrompt::Permission(prompt);
+        assert!(pending.only_a_person_may_answer());
+        assert!(!PendingPrompt::Permission(permission_prompt()).only_a_person_may_answer());
+        assert!(!PendingPrompt::Question(question_prompt(false)).only_a_person_may_answer());
         assert!(!pending.hint().contains("Enter"), "{}", pending.hint());
         let Some(still) = pending.answer("") else {
             panic!("an empty line resolved the prompt");

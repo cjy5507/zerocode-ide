@@ -879,9 +879,12 @@ async fn run_one_turn<W: Write>(
                                 "autonomous turn stopped: a question requires a person"
                             },
                         );
-                    } else if unattended && !input_open {
+                    } else if unattended && (!input_open || prompt.only_a_person_may_answer()) {
                         // Nobody will type an answer: decide now, note it,
-                        // and let the turn continue.
+                        // and let the turn continue. A prompt only a person
+                        // may answer is decided — refused — while the pipe is
+                        // still open too: a line a program writes into it is
+                        // no person's answer (t-105031).
                         pending = decide_unattended(prompt, permission_mode, renderer);
                         pending_id = if pending.is_some() { published } else {
                             events::retire_prompt(published, ResolvedBy::Pane);

@@ -157,15 +157,49 @@ fn utc_offset_label(offset_secs: i64) -> String {
 /// zone, not UTC. This is the form that can be compared.
 #[must_use]
 pub fn local_weekday_clock(unix_secs: i64) -> String {
-    /// Sunday-first, matching [`local_weekday_clock`]'s epoch arithmetic below.
-    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let at = wall_clock(unix_secs, local_utc_offset_secs());
+    format!("{} {:02}:{:02}", at.weekday, at.hour, at.minute)
+}
 
-    let local = unix_secs + local_utc_offset_secs();
-    let days = local.div_euclid(86_400);
-    let seconds = local.rem_euclid(86_400);
+/// An instant as a wall clock shows it: the weekday, the date and the time of
+/// day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WallClock {
+    /// `Sun` … `Sat`.
+    pub weekday: &'static str,
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: i64,
+    pub minute: i64,
+}
+
+/// `unix_secs` on the wall clock `offset_secs` ahead of UTC. The one place
+/// that turns an instant and an offset into a weekday, a date and a time:
+/// [`local_weekday_clock`] reads the host's offset through it, and a card
+/// that names a schedule's coming runs reads the schedule's.
+#[must_use]
+pub fn wall_clock(unix_secs: i64, offset_secs: i64) -> WallClock {
+    /// Sunday first, as the arithmetic below counts them.
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const SECS_PER_DAY: i64 = 86_400;
+    const SECS_PER_HOUR: i64 = 3_600;
+    const SECS_PER_MINUTE: i64 = 60;
+
+    let local = unix_secs.saturating_add(offset_secs);
+    let days = local.div_euclid(SECS_PER_DAY);
+    let seconds = local.rem_euclid(SECS_PER_DAY);
+    let (year, month, day) = civil_from_unix_days(days);
     // The Unix epoch was a Thursday.
     let weekday = WEEKDAYS[usize::try_from((days + 4).rem_euclid(7)).unwrap_or(0)];
-    format!("{weekday} {:02}:{:02}", seconds / 3_600, (seconds % 3_600) / 60)
+    WallClock {
+        weekday,
+        year,
+        month,
+        day,
+        hour: seconds / SECS_PER_HOUR,
+        minute: (seconds % SECS_PER_HOUR) / SECS_PER_MINUTE,
+    }
 }
 
 /// Current UTC date as `YYYY-MM-DD`, from the system clock.
@@ -475,6 +509,27 @@ mod tests {
         assert!(
             local == yesterday || local == today || local == tomorrow,
             "local date must be within one day of UTC: {local} vs {yesterday}/{today}/{tomorrow}"
+        );
+    }
+
+    /// One instant on two wall clocks: the weekday, the date and the time of
+    /// day each shows, across a day's edge and before the epoch.
+    #[test]
+    fn an_instant_reads_as_the_weekday_date_and_time_a_wall_clock_shows() {
+        // 2026-11-11T14:30:00Z.
+        let instant = unix_secs_from_rfc3339("2026-11-11T14:30:00+00:00").expect("parses");
+        let utc = wall_clock(instant, 0);
+        assert_eq!((utc.weekday, utc.year, utc.month, utc.day, utc.hour, utc.minute), ("Wed", 2026, 11, 11, 14, 30));
+        // Nine hours ahead it is still that Wednesday; ten hours ahead of
+        // that it is Thursday.
+        let seoul = wall_clock(instant, 9 * 3_600);
+        assert_eq!((seoul.weekday, seoul.day, seoul.hour, seoul.minute), ("Wed", 11, 23, 30));
+        let later = wall_clock(instant + 10 * 3_600, 9 * 3_600);
+        assert_eq!((later.weekday, later.day, later.hour), ("Thu", 12, 9));
+        let before_epoch = wall_clock(-60, 0);
+        assert_eq!(
+            (before_epoch.weekday, before_epoch.year, before_epoch.month, before_epoch.day, before_epoch.hour, before_epoch.minute),
+            ("Wed", 1969, 12, 31, 23, 59)
         );
     }
 }

@@ -162,6 +162,16 @@ pub(super) fn permission_prompt_timeout() -> Option<std::time::Duration> {
 /// *transient* outcome on purpose: a mode-based denial is deterministic and
 /// tells the model never to retry, but an unanswered prompt only means nobody
 /// was at the keyboard, and the same call can succeed once approved.
+/// Whether an answered prompt leaves an allow rule behind: only a lasting
+/// allow does, and never on a prompt only a person may answer. Such a prompt
+/// offers no lasting allow, but a front that takes any decision — the IDE
+/// channel does not check an answer against the choices — can send one; it
+/// allows the one call and writes no rule, so the next call is asked about
+/// again and nothing lasting reaches the person's settings (t-105031).
+fn leaves_a_rule(decision: AsyncPermissionDecision, person_only: bool) -> bool {
+    decision == AsyncPermissionDecision::Allow && !person_only
+}
+
 fn permission_prompt_expired_reason(tool_name: &str, budget: std::time::Duration) -> String {
     let tool_name = core_types::tool_names::wire_tool_name(tool_name);
     format!(
@@ -2680,7 +2690,9 @@ where
                                 // "Always allow" grants a durable rule: it takes
                                 // effect for the rest of this session and is
                                 // queued for the host to persist to settings.
-                                Some(AsyncPermissionDecision::Allow) => {
+                                Some(AsyncPermissionDecision::Allow)
+                                    if leaves_a_rule(AsyncPermissionDecision::Allow, sync_request.person_only) =>
+                                {
                                     // The rule is for the call the person was
                                     // asked about: the one a wrapper carried,
                                     // when the model called through it.
@@ -2688,7 +2700,9 @@ where
                                         .grant_always(&sync_request.tool_name, &sync_request.input);
                                     PermissionOutcome::Allow
                                 }
-                                Some(AsyncPermissionDecision::AllowOnce) => PermissionOutcome::Allow,
+                                Some(AsyncPermissionDecision::Allow | AsyncPermissionDecision::AllowOnce) => {
+                                    PermissionOutcome::Allow
+                                }
                                 Some(AsyncPermissionDecision::Deny) => PermissionOutcome::Deny {
                                     reason: reason_for_deny.unwrap_or_else(|| {
                                         format!("user denied tool '{tool_label}'")
@@ -3632,5 +3646,22 @@ mod wire_name_tests {
         );
         assert!(reason.contains(&format!("'{}'", CoreTool::Bash.wire())), "{reason}");
         assert!(!reason.contains(&format!("'{}'", CoreTool::Bash.handler())), "{reason}");
+    }
+}
+
+#[cfg(test)]
+mod lasting_allow_tests {
+    use super::{leaves_a_rule, AsyncPermissionDecision};
+
+    /// Only a lasting allow leaves a rule, and never on a prompt only a
+    /// person may answer: a front that sends one there allows the one call.
+    #[test]
+    fn a_prompt_only_a_person_may_answer_leaves_no_rule_whatever_was_answered() {
+        assert!(leaves_a_rule(AsyncPermissionDecision::Allow, false));
+        assert!(!leaves_a_rule(AsyncPermissionDecision::Allow, true));
+        for person_only in [false, true] {
+            assert!(!leaves_a_rule(AsyncPermissionDecision::AllowOnce, person_only));
+            assert!(!leaves_a_rule(AsyncPermissionDecision::Deny, person_only));
+        }
     }
 }

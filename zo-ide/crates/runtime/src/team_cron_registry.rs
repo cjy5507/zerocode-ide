@@ -57,6 +57,46 @@ pub fn cron_zone() -> CronZone {
     }
 }
 
+/// The arguments of a `CronCreate` call.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CronCreateInput {
+    pub schedule: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub workflow: Option<serde_json::Value>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// What a `CronCreate` call registers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CronWork<'a> {
+    /// A turn opened on this prompt each time the schedule comes due.
+    Prompt(&'a str),
+    /// A workflow run each time it does: `{spec | library, input?}`.
+    Workflow(&'a serde_json::Value),
+}
+
+impl CronCreateInput {
+    /// What the call registers, or why it registers nothing: an expression
+    /// that does not read, a prompt and a workflow at once, or neither. The
+    /// one judgment of it — the tool registers by it and the schedule guard
+    /// asks a person by it ([`crate::schedule_guard`]), so a call the tool
+    /// would run is never one the guard did not see.
+    ///
+    /// # Errors
+    /// Why nothing is registered, in the words the tool refuses with.
+    pub fn work(&self) -> Result<CronWork<'_>, String> {
+        validate_cron_schedule(&self.schedule)?;
+        match (&self.workflow, self.prompt.trim().is_empty()) {
+            (Some(workflow), true) => Ok(CronWork::Workflow(workflow)),
+            (None, false) => Ok(CronWork::Prompt(&self.prompt)),
+            _ => Err("cron requires exactly one non-empty prompt or workflow".to_string()),
+        }
+    }
+}
+
 /// Validate the deliberately small cron subset Zo currently registers.
 ///
 /// Automatic scheduler execution is not wired yet, so accepting arbitrary strings would
@@ -1101,6 +1141,15 @@ impl CronRegistry {
     #[must_use]
     pub fn persistence_path(&self) -> Option<&Path> {
         self.persistence_path.as_deref()
+    }
+
+    /// The folder whose sessions read this registry — the one its file's
+    /// `.zo/registries/` stands in ([`registry_io::registry_path_in`]) — which
+    /// is where a schedule registered here runs. `None` for one kept in
+    /// memory.
+    #[must_use]
+    pub fn workspace(&self) -> Option<&Path> {
+        self.persistence_path.as_deref()?.ancestors().nth(3)
     }
 
     /// The entries whose `description` is exactly `name`, newest first. A
@@ -3001,5 +3050,39 @@ mod tests {
             .expect("ensure from inside");
         assert_eq!(outcome, CronEnsure::Unchanged);
         assert_eq!(CronRegistry::for_workspace(root.path()).find_named(name).len(), 1);
+    }
+
+    /// A registry kept for a folder says which, and one kept in memory says
+    /// none: the folder is where its schedules run.
+    #[test]
+    fn a_registry_names_the_folder_its_schedules_run_in() {
+        let root = tempfile::tempdir().expect("tempdir");
+        assert_eq!(CronRegistry::for_workspace(root.path()).workspace(), Some(root.path()));
+        assert_eq!(CronRegistry::new_in_memory().workspace(), None);
+    }
+
+    /// What a `CronCreate` call registers is judged in one place: a prompt
+    /// or a workflow, never both and never neither, on an expression that
+    /// reads.
+    #[test]
+    fn a_cron_call_registers_one_prompt_or_one_workflow_on_a_schedule_that_reads() {
+        let call = |value: serde_json::Value| -> CronCreateInput { serde_json::from_value(value).expect("the call's shape") };
+        let graph = serde_json::json!({ "library": "nightly" });
+        assert_eq!(
+            call(serde_json::json!({ "schedule": "0 9 * * 1-5", "prompt": " check " })).work(),
+            Ok(CronWork::Prompt(" check "))
+        );
+        assert_eq!(
+            call(serde_json::json!({ "schedule": "0 9 * * 1-5", "workflow": graph, "prompt": "  " })).work(),
+            Ok(CronWork::Workflow(&graph))
+        );
+        for nothing in [
+            serde_json::json!({ "schedule": "every morning", "prompt": "check" }),
+            serde_json::json!({ "schedule": "0 9 * * 1-5" }),
+            serde_json::json!({ "schedule": "0 9 * * 1-5", "prompt": "check", "workflow": graph }),
+            serde_json::json!({ "schedule": "0 9 * * 1-5", "workflow": null }),
+        ] {
+            assert!(call(nothing.clone()).work().is_err(), "{nothing}");
+        }
     }
 }

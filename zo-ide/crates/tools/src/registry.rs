@@ -766,6 +766,14 @@ impl GlobalToolRegistry {
         &self.context
     }
 
+    /// The folder this registry's schedules are kept for
+    /// (`CronRegistry::workspace`): where a schedule the `CronCreate` tool
+    /// registers will run.
+    #[must_use]
+    pub fn schedule_workspace(&self) -> Option<std::path::PathBuf> {
+        self.context.crons.workspace().map(std::path::Path::to_path_buf)
+    }
+
     /// Mutable access to the underlying tool context for in-process registry operations.
     #[must_use]
     pub fn context_mut(&mut self) -> &mut ToolContext {

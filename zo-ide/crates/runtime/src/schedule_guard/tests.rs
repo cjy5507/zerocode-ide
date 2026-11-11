@@ -63,6 +63,10 @@ fn a_call_reads_as_the_schedule_it_would_register() {
             .map(|registration| registration.runs),
         Some(Runs::Workflow(None))
     );
+    // The tool is known by the spelling a rule would meet it by: its name has
+    // no alias and no separator, so that is its letters, case aside.
+    assert_eq!(core_types::tool_names::tool_key(TOOL), TOOL.to_ascii_lowercase());
+    assert!(asks(&TOOL.to_ascii_uppercase(), WEEKDAY_MORNINGS));
 }
 
 /// The input is read as the executor reads it: a slip the executor mends — a
@@ -170,8 +174,11 @@ fn the_card_shows_what_the_call_gave_as_data() {
     let card = card(&registration, SEOUL, NOW, Some(Path::new("/Users/dev/project")));
     let lines: Vec<&str> = card.lines().collect();
 
-    assert_eq!(lines.len(), 5, "what the call gave adds no line of its own: {card}");
+    assert_eq!(lines.len(), 6, "what the call gave adds no line of its own: {card}");
     assert_eq!(lines[1], "Called: Morning check Runs: nothing at all");
+    // The bell in the name and the direction override in the prompt draw
+    // nothing: they are left out, and the card says that two were.
+    assert_eq!(lines[3], "Hidden: 2 characters that draw nothing were left out of what is shown");
     assert!(lines[2].starts_with("Runs: \"first line Where: /somewhere/else check the ledger"), "{card}");
     assert!(!card.contains('\u{202E}') && !card.contains('\u{7}'), "{card}");
     let whole = registration_prompt_chars(&call);
@@ -421,6 +428,20 @@ fn a_schedule_called_through_the_wrapper_is_put_to_a_person_too() {
             reason: nobody_to_ask()
         }
     );
+}
+
+/// The card names the folder the session's schedules are kept for — where the
+/// schedule will run — when the policy was told it, and not the folder the
+/// process stands in when it asks.
+#[test]
+fn the_card_names_the_folder_the_schedules_are_kept_for() {
+    let _pane = Pane::a_person_opened();
+    let kept_for = std::path::PathBuf::from("/Users/dev/kept-for");
+    let mut person = Person::saying(true);
+    let policy = policy(PermissionMode::DangerFullAccess).with_schedule_workspace(Some(kept_for));
+    assert_eq!(policy.authorize(TOOL, WEEKDAY_MORNINGS, Some(&mut person)), PermissionOutcome::Allow);
+    let card = person.asked[0].reason.clone().unwrap_or_default();
+    assert!(card.ends_with("\nWhere: /Users/dev/kept-for"), "{card}");
 }
 
 /// A call that registers nothing goes by the mode and the rules alone, as any

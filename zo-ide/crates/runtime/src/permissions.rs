@@ -112,6 +112,9 @@ pub struct PermissionPolicy {
     /// Allow rules granted live this session via [`Self::grant_always`] that
     /// have not yet been persisted to a settings file. Drained by the host.
     newly_granted: Vec<String>,
+    /// The folder the session's schedules are kept for
+    /// ([`Self::with_schedule_workspace`]), which a schedule's card names.
+    schedule_workspace: Option<std::path::PathBuf>,
 }
 
 impl PermissionPolicy {
@@ -127,6 +130,7 @@ impl PermissionPolicy {
             ask_rules: Vec::new(),
             ordered_rules: Vec::new(),
             newly_granted: Vec::new(),
+            schedule_workspace: None,
         }
     }
 
@@ -213,6 +217,25 @@ impl PermissionPolicy {
         for (tool_name, required_mode) in requirements {
             self.tool_requirements.insert(tool_name, required_mode);
         }
+    }
+
+    /// The folder the session's schedules are kept for — the one whose
+    /// sessions will open a schedule registered here — so the card a person
+    /// approves names where the schedule runs, and not where this process
+    /// happens to stand when it asks (a worktree it entered since).
+    #[must_use]
+    pub fn with_schedule_workspace(mut self, workspace: Option<std::path::PathBuf>) -> Self {
+        self.schedule_workspace = workspace;
+        self
+    }
+
+    /// The refusal for a call only a person may answer, where the caller has
+    /// nobody to ask at all — the enforcer a sub-agent's and a scheduled
+    /// workflow's tools go through. `None` for every other call. One place
+    /// says which calls those are, for the layers that cannot ask.
+    #[must_use]
+    pub fn refused_with_nobody_to_ask(&self, tool_name: &str, input: &str) -> Option<String> {
+        crate::schedule_guard::asks(tool_name, input).then(crate::schedule_guard::nobody_to_ask)
     }
 
     /// Whether a grade was ever set for `tool_name`: one that has none is
@@ -482,7 +505,7 @@ impl PermissionPolicy {
                 if let Some((carried, arguments)) = carried_call(tool_name, input) {
                     return self.authorize_with_context(&carried, &arguments, context, prompter);
                 }
-                match crate::schedule_guard::asked(tool_name, input) {
+                match crate::schedule_guard::asked(tool_name, input, self.schedule_workspace.as_deref()) {
                     Some(card) => self.authorize_asked_schedule(tool_name, input, context, card, prompter),
                     None => self.authorize_by_mode_and_rules(tool_name, input, context, prompter),
                 }

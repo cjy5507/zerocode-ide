@@ -18,7 +18,7 @@ use super::{
 use runtime::{
     task_registry::{TaskRegistry, TaskStatus},
     team_cron_registry::{
-        cron_zone, validate_cron_schedule, CronRegistry, TeamRegistry, AUTOMATIC_SCHEDULER_NOTE,
+        cron_zone, CronRegistry, CronWork, TeamRegistry, AUTOMATIC_SCHEDULER_NOTE,
         AUTOMATIC_SCHEDULER_STATUS,
     },
     PermissionMode,
@@ -55,16 +55,7 @@ pub(crate) struct TeamDeleteInput {
     pub team_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct CronCreateInput {
-    pub schedule: String,
-    #[serde(default)]
-    pub prompt: String,
-    #[serde(default)]
-    pub workflow: Option<Value>,
-    #[serde(default)]
-    pub description: Option<String>,
-}
+pub(crate) use runtime::team_cron_registry::CronCreateInput;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CronDeleteInput {
@@ -995,16 +986,14 @@ const CRON_AUTOMATIC_SCHEDULER_STATUS: &str = AUTOMATIC_SCHEDULER_STATUS;
 const CRON_AUTOMATIC_SCHEDULER_NOTE: &str = AUTOMATIC_SCHEDULER_NOTE;
 
 fn run_cron_create(crons: &CronRegistry, input: &CronCreateInput) -> Result<String, ToolError> {
-    validate_cron_schedule(&input.schedule).map_err(ToolError::InvalidInput)?;
-    let entry = match (&input.workflow, input.prompt.trim().is_empty()) {
-        (Some(workflow), true) => {
+    // What the call registers is judged in one place, which the schedule
+    // guard asks a person by (`CronCreateInput::work`).
+    let entry = match input.work().map_err(ToolError::InvalidInput)? {
+        CronWork::Workflow(workflow) => {
             let snapshot = crate::workflow_tools::prepare_scheduled_graph(workflow)?;
             crons.create_workflow(&input.schedule, &snapshot, input.description.as_deref())
         }
-        (None, false) => crons.create(&input.schedule, &input.prompt, input.description.as_deref()),
-        _ => return Err(ToolError::InvalidInput(
-            "cron requires exactly one non-empty prompt or workflow".to_string()
-        )),
+        CronWork::Prompt(prompt) => crons.create(&input.schedule, prompt, input.description.as_deref()),
     }.map_err(ToolError::Execution)?;
     let next_due_at = crons
         .next_due_at(&entry.cron_id, now_secs())
