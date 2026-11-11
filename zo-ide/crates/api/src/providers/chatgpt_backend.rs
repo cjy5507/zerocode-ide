@@ -1704,14 +1704,17 @@ impl std::fmt::Debug for ChatGptBackendClient {
     }
 }
 
+/// Whether a client sends exactly `bearer` — the answer a test needs from a
+/// client whose debug line names no token.
+#[cfg(test)]
 impl ChatGptBackendClient {
-    /// Whether this client sends exactly `bearer` — the answer a caller needs
-    /// from a client whose debug line names no token.
     #[must_use]
-    pub fn speaks_with_bearer(&self, bearer: &str) -> bool {
+    pub(crate) fn speaks_with_bearer(&self, bearer: &str) -> bool {
         self.access_token == bearer
     }
+}
 
+impl ChatGptBackendClient {
     #[must_use]
     pub fn new(access_token: impl Into<String>, account_id: Option<String>) -> Self {
         Self {
