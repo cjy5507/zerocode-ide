@@ -9245,7 +9245,7 @@ mod tests {
             ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
             let ids = BlockIdGen::default();
             let id = ids.next();
-            let mut say = |ui: &mut super::Ui, text: String| ui.block(RenderBlock::TextDelta { id, text, done: false });
+            let say = |ui: &mut super::Ui, text: String| ui.block(RenderBlock::TextDelta { id, text, done: false });
 
             // A first line, finished: it is in the transcript.
             say(&mut ui, "The first line.\n".to_string());
