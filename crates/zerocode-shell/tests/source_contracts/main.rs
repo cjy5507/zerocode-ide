@@ -35730,11 +35730,15 @@ mod tests {
         let installing = block_after(installer, "pub fn install_agent(");
         // Per FILE now, not per agent: Claude's hook lives in the home file
         // and one settings.json per account directory (`config_paths`), and
-        // the bail-out must hold at every one of them.
+        // the bail-out must hold at every one of them. What was read is kept
+        // beside the merge so an unchanged file is not written again — and
+        // the merge only ever starts from what was read.
         assert!(
-            installing.contains("let Some(mut config) = read_config(&file) else {")
+            installing.contains("let Some(read) = read_config(&file) else {")
                 && installing.contains("return unreadable(agent, &file)")
-                && installing.contains("for file in paths.config_paths(agent)"),
+                && installing.contains("for file in paths.config_paths(agent)")
+                && installing.contains("let mut config = read.clone();")
+                && installing.contains("write_config(&file, &read, &config)"),
             "the install path no longer bails on a config it could not read:\n{installing}"
         );
 
