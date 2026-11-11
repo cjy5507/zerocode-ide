@@ -1040,13 +1040,20 @@ impl ChannelCoordinates {
         text.push('\n');
         text.push_str(&self.session_id);
         text.push('\n');
-        write_atomic(path, text.as_bytes())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
+        // The token is a key to the child's channel: the file is born
+        // owner-only (its temporary file is created 0600 before a byte is
+        // written), never widened to the umask until a later chmod.
+        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(directory)?;
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "channel file path has no file name")
+        })?;
+        crate::secure_fs::write_atomic_owner_only_with(
+            directory,
+            Path::new(name),
+            text.as_bytes(),
+            crate::secure_fs::Durability::Published,
+        )
     }
 
     /// One JSON-RPC call over a fresh TCP connection, blocking, bounded by
@@ -2716,6 +2723,31 @@ mod tests {
             },
             handle,
         )
+    }
+
+    /// The channel file carries the token that opens the child's channel: it
+    /// is this user's alone, and no temporary file is left beside it.
+    #[cfg(unix)]
+    #[test]
+    fn a_channel_file_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let channel_file = directory.path().join("nested").join(CHANNEL_FILE);
+        let coordinates = ChannelCoordinates {
+            addr: "127.0.0.1:4321".to_string(),
+            token: Some("fixture-channel-token".to_string()),
+            session_id: "child-session".to_string(),
+        };
+        coordinates.write(&channel_file).expect("write channel file");
+        coordinates.write(&channel_file).expect("rewrite channel file");
+        let mode = std::fs::metadata(&channel_file).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the channel file is the owner's alone");
+        assert_eq!(ChannelCoordinates::read(&channel_file).expect("read"), coordinates);
+        let names: Vec<_> = std::fs::read_dir(channel_file.parent().expect("parent"))
+            .expect("list")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from(CHANNEL_FILE)], "no temporary file is left");
     }
 
     /// The receipt is read off the child's own answer: a turn id means the
