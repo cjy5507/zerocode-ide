@@ -287,10 +287,12 @@ function setActivityItem(name) {
   // which is why the beat is re-judged here.
   if (name === "checks") refreshChecks();
   syncChecksPoller();
-  // The same economy: fourteen directory walks, paid when somebody looks.
   // Orca refreshes this panel on mount and again on window focus
-  // (useAiVaultSessionRefresh); arrival is our mount.
-  if (name === "vault") void refreshVaultDock();
+  // (useAiVaultSessionRefresh); arrival is our mount. The ask is the one that
+  // looks at the disk again, and it does not wait for the look (t-103659):
+  // the list the window already holds is drawn at once, a walk reads what
+  // moved since, and the panel asks again for what it found.
+  if (name === "vault") void refreshVaultDock(true);
 }
 
 /* Which icon in that row is lit, and — the part that was missing — which one

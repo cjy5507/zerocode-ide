@@ -526,6 +526,9 @@ suite("vault", async ({ browser, origin }) => {
     await page.close();
   }
 });
+// The docked session history, held to counts: what it asks, how many cards it builds, what it says while a
+// walk looks at the disk (t-103659).
+suite("vault-dock", async ({ browser, origin, ok }) => (await import("./vault-dock.mjs")).testVaultDock(browser, origin, ok));
 suite("workers", testWorkers);
 // A pane on a release the catalog superseded says so, in one word (t-46882).
 suite("superseded-model", testSupersededModel);
@@ -28100,7 +28103,10 @@ ok(
     // defaults — not a filter it applied itself.
     vaultPane.asked.query.sort === "updated" &&
     vaultPane.asked.query.group === "project" &&
-    vaultPane.asked.query.hide_empty === false,
+    // Sessions nobody spoke in are hidden unless asked for (t-103659): the
+    // original's default shows them, and a machine's zo store filled the
+    // list with ids over 「대화 미리보기를 사용할 수 없습니다」.
+    vaultPane.asked.query.hide_empty === true,
   JSON.stringify(vaultPane),
 );
 
@@ -46551,6 +46557,10 @@ const vaultDock = await page.evaluate(async () => {
   // reach the backend as this checkout's path — a filter applied only to the
   // paint would lie the moment the ledger grows.
   seen.askedScope = window.__ASKED_VAULT__?.query?.scope_paths;
+  // And it comes as the panel being come to — the ask that looks at the disk
+  // again — with sessions nobody spoke in hidden unless asked for (t-103659).
+  seen.arrivalForce = window.__ASKED_VAULT__?.force;
+  seen.arrivalHidesEmpty = window.__ASKED_VAULT__?.query?.hide_empty;
   seen.activePath = activeWorktreePath;
   seen.sub = document.getElementById("vdock-sub").textContent;
   const cards = [...document.querySelectorAll(".vdock-card")];
@@ -46655,7 +46665,7 @@ const vaultDock = await page.evaluate(async () => {
   vaultDockShut.clear();
   vaultDockOpen.clear();
   vaultDockOff.clear();
-  vaultDockHideEmpty = false;
+  vaultDockHideEmpty = VAULT_HIDE_EMPTY_DEFAULT;
   document.getElementById("activity-files-tab").click();
   return seen;
 });
@@ -46680,7 +46690,8 @@ ok(
     vaultDock.viewRows.includes("모두") && vaultDock.viewRows.includes("Claude (2)") &&
     vaultDock.viewRows.includes("빈 세션 숨기기") &&
     vaultDock.viewRows.includes("보기 초기화") &&
-    vaultDock.askedHideEmpty === true &&
+    vaultDock.arrivalForce === true && vaultDock.arrivalHidesEmpty === true &&
+    vaultDock.askedHideEmpty === false &&
     JSON.stringify(vaultDock.askedOff) === JSON.stringify(["claude"]) &&
     Array.isArray(vaultDock.askedAll) && vaultDock.askedAll.length === 0 && vaultDock.allLit &&
     vaultDock.askedQuery === "needle" &&

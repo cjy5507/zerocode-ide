@@ -47025,6 +47025,10 @@ button.board-build-failure-part:focus-visible {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* The list keeps the person's place itself when a card above the view
+   * takes its real height (`vaultDockNear`); an engine that also anchors
+   * would move it twice, and the window's own engine does not anchor at all. */
+  overflow-anchor: none;
 }
 
 .vdock-group-head {
@@ -47084,6 +47088,15 @@ button.board-build-failure-part:focus-visible {
 
 .vdock-card:hover {
   background: var(--row-hover);
+}
+
+/* A session the list has not drawn yet (t-103659): an empty box as tall as a
+ * card, so the scroll bar says how long the list is while only the cards near
+ * the view are built. The height is the first card's, measured
+ * (`fillVaultDockView`); the fallback stands only until then, unseen. */
+.vdock-slot {
+  min-height: var(--vdock-slot-height, var(--control-height-sm));
+  border-bottom: var(--rule-width) solid var(--edge-rule);
 }
 
 .vdock-card-top {

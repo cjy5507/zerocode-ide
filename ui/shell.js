@@ -8925,9 +8925,47 @@ let vaultSort = "updated";
  * 그대로 있고, 고른 프로젝트가 없으면 범위가 전체로 물러선다(`vaultScopeAsked`). 원본의 기본값
  * `workspace`는 지금 있는 작업 공간 옆에 서는 독이 쓴다. */
 let vaultScope = "project";
-let vaultHideEmpty = false;
+/* A session nobody spoke in is not a row (t-103659): on one machine 64 of 354 zo sessions were a meta line and
+ * nothing else, each drawn as its id over 「대화 미리보기를 사용할 수 없습니다」. They are hidden unless asked
+ * for, the answer says how many (`hidden_empty`), and one line offers them. Both surfaces start here, and the
+ * dock's 보기 초기화 comes back to it. */
+const VAULT_HIDE_EMPTY_DEFAULT = true;
+let vaultHideEmpty = VAULT_HIDE_EMPTY_DEFAULT;
 let vaultLoading = false;
 let vaultPending = null;
+let vaultRetry = 0;
+
+/* How soon a surface asks again while the answer says a walk is still looking at the disk (`refreshing`). The
+ * command never waits for the walk — it answers from what it holds — so the window comes back for what the walk
+ * found, as it does for the usage ledgers (`USAGE_STATS_RETRY_MS`); sooner, because a walk is a look at what
+ * moved, not a count of everything. */
+const VAULT_REFRESH_RETRY_MS = 400;
+
+/* The timer of that next ask, or none when the answer is settled. */
+function vaultAsksAgain(answer, again) {
+  return answer?.refreshing ? setTimeout(again, VAULT_REFRESH_RETRY_MS) : 0;
+}
+
+/* The line that says sessions nobody spoke in are hidden, with the hand that shows them — or nothing when none
+ * is. Shared by the two surfaces; `show` is the surface's own way to ask again without the hiding. */
+function vaultHiddenEmptyNote(answer, show) {
+  if (!answer?.hidden_empty) return null;
+  const line = document.createElement("span");
+  line.textContent = t("vaultDock.hiddenEmpty", "대화 없는 세션 {{n}}개 숨김", { n: answer.hidden_empty });
+  const hand = document.createElement("button");
+  hand.type = "button";
+  hand.className = "vault-limit-more";
+  hand.textContent = t("vaultDock.showEmpty", "보기");
+  hand.onclick = show;
+  line.appendChild(hand);
+  return line;
+}
+
+/* What a card is called. A session nobody spoke in has no title — never its id — so the window says that in
+ * its own words. */
+function vaultTitle(session) {
+  return session.title || t("vaultDock.untitled", "이름 없는 세션");
+}
 
 function openVault() {
   openTab({ id: "vault", kind: "vault" });
@@ -8938,6 +8976,8 @@ function openVault() {
  * kept and only the query is re-asked, and the reload is what the refresh button
  * is for. */
 let vaultAnswer = null;
+/* What the stage list was last drawn from, as text — an answer that draws the same rows draws nothing. */
+let vaultDrawn = null;
 /* The agents switched OFF, which is the way the original stores this too
  * (`disabledAgents`): a vendor this window learns to read next month appears in
  * the list on its own, where a set of enabled ones would leave it out. */
@@ -8981,6 +9021,7 @@ async function refreshVault(force) {
   const asked = vaultScopeAsked(vaultScope);
   vaultScope = asked.scope;
   vaultLoading = true;
+  clearTimeout(vaultRetry);
   paintVaultView();
   try {
     vaultAnswer = await invoke("vault_sessions", {
@@ -9010,6 +9051,7 @@ async function refreshVault(force) {
     vaultPending = null;
     return refreshVault(pending);
   }
+  vaultRetry = vaultAsksAgain(vaultAnswer, () => void refreshVault());
 }
 
 /* A card being carried to a workspace.
@@ -9171,7 +9213,7 @@ function vaultRow(session) {
 
   const title = document.createElement("span");
   title.className = "vault-row-title";
-  title.textContent = session.title;
+  title.textContent = vaultTitle(session);
   body.appendChild(title);
 
   const meta = document.createElement("span");
@@ -9280,7 +9322,7 @@ async function resumeVaultSession(session, worktree) {
     // conversations would otherwise open five tabs all called `claude`, which is
     // the exact thing reopening a specific one is for. A tab for the same reason
     // the pane menu's 이어서 is one — a conversation reopened is somewhere to go.
-    mountTermTab(woke.term, { agent: session.title }, { placement: "tab" });
+    mountTermTab(woke.term, { agent: vaultTitle(session) }, { placement: "tab" });
   } catch (error) {
     showError(String(error));
   }
@@ -9434,24 +9476,39 @@ function paintVaultView(tab = tabs.find((held) => held.kind === "vault")) {
 
   if (!vaultAnswer) {
     host.replaceChildren();
+    vaultDrawn = null;
     count.textContent = vaultLoading ? t("vault.reading", "세션을 읽고 있습니다…") : "";
     note.hidden = true;
     return;
   }
-  host.replaceChildren();
-  for (const group of vaultAnswer.groups) host.appendChild(vaultGroupNode(group));
-  if (vaultAnswer.groups.length === 0) {
-    const line = document.createElement("p");
-    line.className = "vault-row-meta";
-    line.textContent = t("vault.empty", "세션이 없습니다");
-    host.appendChild(line);
+  // Nothing known yet and a walk looking: the first run on this machine. It
+  // says it is reading rather than that there is nothing.
+  const reading = vaultAnswer.refreshing === true && vaultAnswer.total === 0;
+  // The rows are drawn again only when they differ from the ones standing: an
+  // ask made while a walk looks comes back with the same list several times.
+  const drawn = `${locale}\n${JSON.stringify(vaultAnswer.groups)}\n${reading}`;
+  if (drawn !== vaultDrawn) {
+    vaultDrawn = drawn;
+    host.replaceChildren();
+    for (const group of vaultAnswer.groups) host.appendChild(vaultGroupNode(group));
+    if (vaultAnswer.groups.length === 0 && !reading) {
+      const line = document.createElement("p");
+      line.className = "vault-row-meta";
+      line.textContent = t("vault.empty", "세션이 없습니다");
+      host.appendChild(line);
+    }
   }
   // Both numbers, because they answer different questions: how many sessions
   // exist, and how many this search is showing.
-  count.textContent =
+  const counted =
     vaultAnswer.shown === vaultAnswer.total
       ? String(vaultAnswer.total)
       : `${vaultAnswer.shown} ${t("vault.of", "/")} ${vaultAnswer.total}`;
+  count.textContent = reading
+    ? t("vault.reading", "세션을 읽고 있습니다…")
+    : vaultAnswer.refreshing
+      ? t("vaultDock.refreshing", "{{count}} · 다시 읽는 중", { count: counted })
+      : counted;
 
   // What the scan could not do. Never hidden: a list that is a recent slice and
   // looks complete is the one failure this surface can hide.
@@ -9461,7 +9518,12 @@ function paintVaultView(tab = tabs.find((held) => held.kind === "vault")) {
     lines.push(vaultIssueText(issue));
   }
   note.textContent = lines.join(" · ");
-  note.hidden = lines.length === 0;
+  const hiddenEmpty = vaultHiddenEmptyNote(vaultAnswer, () => {
+    vaultHideEmpty = false;
+    void refreshVault();
+  });
+  if (hiddenEmpty) note.append(lines.length ? " · " : "", hiddenEmpty);
+  note.hidden = lines.length === 0 && !hiddenEmpty;
 }
 
 /* ---- the session history, docked in the right column (1-g77) ----
@@ -9486,8 +9548,13 @@ const vaultDockOpen = new Set();
  * off, and whether empty sessions hide. A pair separate from the stage view's
  * on purpose — the original persists view options per surface too. */
 const vaultDockOff = new Set();
-let vaultDockHideEmpty = false;
+let vaultDockHideEmpty = VAULT_HIDE_EMPTY_DEFAULT;
 let vaultDockPending = null;
+let vaultDockRetry = 0;
+/* The question the answer in hand was asked with, and the one the list was last drawn for. The same question
+ * answered again keeps the person's place in the list; another question starts from the top. */
+let vaultDockAsked = "";
+let vaultDockDrawnFor = "";
 
 async function refreshVaultDock(force) {
   if (vaultDockLoading) {
@@ -9497,21 +9564,26 @@ async function refreshVaultDock(force) {
   const asked = vaultScopeAsked(vaultDockScope);
   vaultDockScope = asked.scope;
   vaultDockLoading = true;
-  paintVaultDock();
+  clearTimeout(vaultDockRetry);
+  // The head only: the cards that stand stay until the answer says otherwise.
+  // (The list used to be drawn again here, from the answer about to be
+  // replaced — every keystroke built its two hundred cards twice.)
+  paintVaultDockHead();
+  // Orca's docked ordering is fixed (updated-first, grouped by project);
+  // the stage view is where THOSE are choices. The vendors and the empty
+  // sessions are the dock's own view menu (VaultViewMenu).
+  const question = {
+    query: vaultDockQuery,
+    disabled_agents: [...vaultDockOff],
+    sort: "updated",
+    group: "project",
+    hide_empty: vaultDockHideEmpty,
+    scope_paths: asked.paths,
+    limit: vaultSessionLimit,
+  };
   try {
-    // Orca's docked ordering is fixed (updated-first, grouped by project);
-    // the stage view is where THOSE are choices. The vendors and the empty
-    // sessions are the dock's own view menu (VaultViewMenu).
     vaultDockAnswer = await invoke("vault_sessions", {
-      query: {
-        query: vaultDockQuery,
-        disabled_agents: [...vaultDockOff],
-        sort: "updated",
-        group: "project",
-        hide_empty: vaultDockHideEmpty,
-        scope_paths: asked.paths,
-        limit: vaultSessionLimit,
-      },
+      query: question,
       /* Same walk as the panel's, and the same rule about re-reading it: a
        * scope switch is a question, the reload is an instruction. Two surfaces
        * over one store is the point — opening both used to cost two walks. */
@@ -9523,12 +9595,14 @@ async function refreshVaultDock(force) {
   } finally {
     vaultDockLoading = false;
   }
+  vaultDockAsked = JSON.stringify(question);
   paintVaultDock();
   if (vaultDockPending !== null) {
     const pending = vaultDockPending;
     vaultDockPending = null;
     return refreshVaultDock(pending);
   }
+  vaultDockRetry = vaultAsksAgain(vaultDockAnswer, () => void refreshVaultDock());
 }
 
 /* How long ago, in Orca's buckets (formatTimeAgo, AiVaultPanel-DoHZwnjG.js:
@@ -9567,7 +9641,7 @@ function vaultDockCard(session) {
   top.className = "vdock-card-top";
   const title = document.createElement("span");
   title.className = "vdock-card-title";
-  title.textContent = session.title;
+  title.textContent = vaultTitle(session);
   top.appendChild(title);
   const twist = document.createElement("span");
   twist.className = "vdock-twist";
@@ -9663,15 +9737,25 @@ function vaultDockCard(session) {
   // 카드 몸이 문이다(라이브 보고 "세션창 클릭 orca처럼"): 클릭이 인라인
   // 상세를 여닫는다(toggleSessionDetails) — 손 위의 클릭은 제 일만 한다.
   card.setAttribute("aria-expanded", vaultDockOpen.has(session.id) ? "true" : "false");
+  const children = vaultSubagents(session, vaultDockCard);
+  // The details open and fold where the card stands. (A press used to draw
+  // the whole list again to move one card.)
+  const stand = () => {
+    const open = vaultDockOpen.has(session.id);
+    card.setAttribute("aria-expanded", open ? "true" : "false");
+    twist.querySelector(".icon--twist")?.classList.toggle("is-open", open);
+    const detail = card.querySelector(":scope > .vdock-detail");
+    if (open && !detail) card.insertBefore(vaultDockDetail(session), children);
+    if (!open) detail?.remove();
+  };
   actsAsButton(card, (event) => {
     if (event.target.closest(".vdock-act") || event.target.closest(".vdock-detail")) return;
     if (vaultDockOpen.has(session.id)) vaultDockOpen.delete(session.id);
     else vaultDockOpen.add(session.id);
-    paintVaultDock();
+    stand();
   });
-  if (vaultDockOpen.has(session.id)) card.appendChild(vaultDockDetail(session));
-  const children = vaultSubagents(session, vaultDockCard);
   if (children) card.appendChild(children);
+  stand();
   return card;
 }
 
@@ -9769,9 +9853,108 @@ function vaultDockDetail(session) {
   return detail;
 }
 
+/* ---- the dock's list: only what is looked at is built (t-103659) ----
+ *
+ * An answer holds up to two hundred sessions and the column shows about a dozen. Every session gets a SLOT — an
+ * empty box as tall as a card — and a slot becomes its card when it comes near the view: at once for the ones the
+ * panel opens on, and as the list is scrolled, a group unfolded or the column resized for the rest
+ * (`IntersectionObserver`, the way the conversation page waits for its diff rows).
+ *
+ * A redraw keeps the card of a session that did not change. So when a walk comes back with one conversation
+ * moved, one card is built and the rest stand where they stood, at the height they had — nothing under the
+ * person's eyes jumps. Measured before (`ui/tests/vault-dock-perf.mjs`): every answer built every card, twice. */
+
+/* What the list has built, by session id: the card, and what it was built from. */
+let vaultDockCards = new Map();
+/* The slots still waiting, by their node: the session each will draw. */
+const vaultDockSlots = new Map();
+/* How far past the view, in views, a slot is turned into its card — one screen of look-ahead either way. */
+const VAULT_DOCK_LOOK_AHEAD = 1;
+
+const vaultDockNear = new IntersectionObserver(
+  (entries) => {
+    const list = el("vdock-list");
+    const edge = list.getBoundingClientRect().top;
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const was = entry.boundingClientRect;
+      const card = fillVaultDockSlot(entry.target);
+      // A slot above the view becomes a card of its own height. The list is moved by the difference, so what
+      // the person is reading stays where it is (the list opts out of the engine's own anchoring — see
+      // `.vdock-list` — so the two never both move it).
+      if (card && was.bottom <= edge) list.scrollTop += card.offsetHeight - was.height;
+    }
+  },
+  { root: el("vdock-list"), rootMargin: `${VAULT_DOCK_LOOK_AHEAD * 100}% 0px` },
+);
+
+/* What a card is drawn from, as text: the session, and what the drawing adds to it — the language, and the age
+ * it says (a card kept for an hour must not go on saying 「방금 전」). */
+function vaultDockCardKey(session) {
+  return `${locale}\n${vaultDockAge(session.updated_at ?? session.modified_at)}\n${JSON.stringify(session)}`;
+}
+
+/* The node that stands for one session: its card as it stood when nothing about it changed, else a slot. */
+function vaultDockSlot(session, standing) {
+  const key = vaultDockCardKey(session);
+  const held = vaultDockCards.get(session.id);
+  if (held?.key === key) {
+    standing.set(session.id, held);
+    return held.card;
+  }
+  const slot = document.createElement("div");
+  slot.className = "vdock-slot";
+  vaultDockSlots.set(slot, { session, key });
+  vaultDockNear.observe(slot);
+  return slot;
+}
+
+/* Turn a slot into its card, where it stands. */
+function fillVaultDockSlot(slot) {
+  const waiting = vaultDockSlots.get(slot);
+  if (!waiting) return null;
+  vaultDockSlots.delete(slot);
+  vaultDockNear.unobserve(slot);
+  const card = vaultDockCard(waiting.session);
+  vaultDockCards.set(waiting.session.id, { card, key: waiting.key });
+  slot.replaceWith(card);
+  return card;
+}
+
+/* Build the cards the panel opens on, before the frame is drawn — the observer answers a frame later, and a
+ * list that opens on empty boxes for a frame is a flicker. The first card built says how tall a slot is. */
+function fillVaultDockView(list) {
+  const view = list.getBoundingClientRect();
+  const ahead = view.height * VAULT_DOCK_LOOK_AHEAD;
+  for (const slot of list.querySelectorAll(".vdock-slot")) {
+    // A slot in a folded group has no box; the observer builds it when the group opens.
+    if (slot.offsetParent === null) continue;
+    const box = slot.getBoundingClientRect();
+    if (box.bottom < view.top - ahead) continue;
+    if (box.top > view.bottom + ahead) break;
+    const card = fillVaultDockSlot(slot);
+    // A card at rest, not one standing open on its details.
+    const atRest = card?.getAttribute("aria-expanded") === "false";
+    if (atRest && !list.style.getPropertyValue("--vdock-slot-height")) {
+      list.style.setProperty("--vdock-slot-height", `${card.offsetHeight}px`);
+    }
+  }
+}
+
+/* Where the person is reading: the first card that reaches into the view, and where it stands. A redraw puts
+ * that card back at the same place — the scroll offset alone would not, once a card above it changed height. */
+function vaultDockReading(list) {
+  const edge = list.getBoundingClientRect().top;
+  for (const card of list.querySelectorAll(".vdock-card")) {
+    const box = card.getBoundingClientRect();
+    if (box.bottom > edge) return { card, top: box.top };
+  }
+  return null;
+}
+
 /* One group: Orca's sticky header — chevron, the label, a count pill — over
  * its cards, folding on click (VaultGroupHeader, collapsedGroups). */
-function vaultDockGroup(group) {
+function vaultDockGroup(group, standing) {
   const wrap = document.createElement("div");
   wrap.className = "vdock-group";
   const head = document.createElement("button");
@@ -9788,7 +9971,7 @@ function vaultDockGroup(group) {
   const body = document.createElement("div");
   body.className = "vdock-group-body";
   body.hidden = shut;
-  for (const session of group.sessions) body.appendChild(vaultDockCard(session));
+  for (const session of group.sessions) body.appendChild(vaultDockSlot(session, standing));
   wrap.appendChild(body);
   head.onclick = () => {
     if (vaultDockShut.has(group.key)) vaultDockShut.delete(group.key);
@@ -9800,10 +9983,10 @@ function vaultDockGroup(group) {
   return wrap;
 }
 
-function paintVaultDock() {
+/* The dock's head: which scope is lit, and the line under the title — what is shown of how many, and, quietly,
+ * that a walk is looking at the disk again. Painted alone while an ask is out, so the list stays as it is. */
+function paintVaultDockHead() {
   const sub = el("vdock-sub");
-  const list = el("vdock-list");
-  const note = el("vdock-note");
   for (const scope of ["workspace", "project", "all"]) {
     const btn = el(`vdock-scope-${scope}`);
     const on = vaultDockScope === scope;
@@ -9815,18 +9998,41 @@ function paintVaultDock() {
   el("vdock-scope-workspace").disabled = !activeWorktreePath;
   el("vdock-scope-project").disabled = vaultScopePaths("project").length === 0;
 
+  const refreshing = vaultDockAnswer?.refreshing === true;
+  el("vdock-list").setAttribute("aria-busy", refreshing ? "true" : "false");
   if (!vaultDockAnswer) {
-    list.replaceChildren();
-    note.hidden = true;
     // Before the first scan the header makes the panel's offer instead of
     // counting nothing (`resumePastSessions`).
     sub.textContent = t("vaultDock.resume", "이전 세션 재개");
     return;
   }
-  sub.textContent = t("vaultDock.limitShown", "{{total}}개 중 {{shown}}개 표시", {
+  if (refreshing && vaultDockAnswer.total === 0) {
+    // Nothing known yet and a walk looking: the first run on this machine.
+    sub.textContent = t("vault.reading", "세션을 읽고 있습니다…");
+    return;
+  }
+  const counted = t("vaultDock.limitShown", "{{total}}개 중 {{shown}}개 표시", {
     shown: vaultDockAnswer.shown,
     total: vaultDockAnswer.matched ?? vaultDockAnswer.total,
   });
+  sub.textContent = refreshing
+    ? t("vaultDock.refreshing", "{{count}} · 다시 읽는 중", { count: counted })
+    : counted;
+}
+
+function paintVaultDock() {
+  const list = el("vdock-list");
+  const note = el("vdock-note");
+  paintVaultDockHead();
+
+  if (!vaultDockAnswer) {
+    list.replaceChildren();
+    vaultDockCards = new Map();
+    vaultDockSlots.clear();
+    vaultDockNear.disconnect();
+    note.hidden = true;
+    return;
+  }
 
   // The same honesty line as the stage view: what the walk cut or could not
   // read, above the list rather than under it (AiVaultScanIssueBanners sits
@@ -9847,11 +10053,28 @@ function paintVaultDock() {
     more.onclick = () => setVaultSessionLimit(vaultLimits?.choices.find(value => value > (vaultSessionLimit ?? vaultLimits.default)) ?? 0);
     note.appendChild(more);
   }
-  note.hidden = lines.length === 0 && !canShowMore;
+  const hiddenEmpty = vaultHiddenEmptyNote(vaultDockAnswer, () => {
+    vaultDockHideEmpty = false;
+    void refreshVaultDock();
+  });
+  if (hiddenEmpty) note.append(lines.length || canShowMore ? " · " : "", hiddenEmpty);
+  note.hidden = lines.length === 0 && !canShowMore && !hiddenEmpty;
 
-  list.replaceChildren();
-  for (const group of vaultDockAnswer.groups) list.appendChild(vaultDockGroup(group));
-  if (vaultDockAnswer.groups.length === 0) {
+  // The list, with every card that did not change kept where it stood: the
+  // groups are laid out again around them, and — when this is the same
+  // question answered again — the place the person was reading is put back.
+  const firstRun = vaultDockAnswer.refreshing === true && vaultDockAnswer.total === 0;
+  const sameQuestion = vaultDockAsked === vaultDockDrawnFor;
+  vaultDockDrawnFor = vaultDockAsked;
+  const at = sameQuestion ? list.scrollTop : 0;
+  const reading = sameQuestion ? vaultDockReading(list) : null;
+  const standing = new Map();
+  vaultDockSlots.clear();
+  vaultDockNear.disconnect();
+  const groups = vaultDockAnswer.groups.map((group) => vaultDockGroup(group, standing));
+  vaultDockCards = standing;
+  list.replaceChildren(...groups);
+  if (vaultDockAnswer.groups.length === 0 && !firstRun) {
     const empty = document.createElement("p");
     empty.className = "vdock-empty";
     empty.textContent =
@@ -9860,6 +10083,9 @@ function paintVaultDock() {
         : t("vaultDock.noMatch", "현재 필터와 일치하는 세션이 없습니다");
     list.appendChild(empty);
   }
+  list.scrollTop = at;
+  fillVaultDockView(list);
+  if (reading?.card.isConnected) list.scrollTop += reading.card.getBoundingClientRect().top - reading.top;
 }
 
 el("vdock-refresh").addEventListener("click", () => void refreshVaultDock(true));
@@ -9945,7 +10171,7 @@ function openVaultDockView(x, y, opener) {
     label: t("vaultDock.reset", "보기 초기화"),
     run: () => {
       vaultDockOff.clear();
-      vaultDockHideEmpty = false;
+      vaultDockHideEmpty = VAULT_HIDE_EMPTY_DEFAULT;
       return again();
     },
   });
