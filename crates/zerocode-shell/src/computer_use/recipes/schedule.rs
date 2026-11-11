@@ -14,6 +14,9 @@
 //! - the one job this road writes is a Flow the window walks itself: no
 //!   agent, no command and no precheck (`Automation::asked_flow`), which a
 //!   request has no word for;
+//! - a Flow that may spend — policy `guarded`, its money step pressed past
+//!   the gate alone — may be asked for too (the person's answer, 2026-11-12),
+//!   and its card says so in plain words, not by the policy's name alone;
 //! - it fires no closer together than [`ASKED_SCHEDULE_FLOOR_MINUTES`];
 //! - the folder it would run in is the caller's to name and cannot be cut or
 //!   cleaned and still be that folder, so a path the card's rule would show
@@ -30,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::{Map, Value, json};
 use zerocode_core::automation::{ASKED_SCHEDULE_FLOOR_MINUTES, Asked, flow_document_sha256};
 use zerocode_core::card_words::{self, WORD_MAX_CHARS};
-use zerocode_core::computer_flow::parse_flow;
+use zerocode_core::computer_flow::{Policy, parse_flow};
 use zerocode_core::computer_use::{COMPUTER_CLI, recipe_slug};
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::{Automation, Cron, LocalMinute, Schedule};
@@ -78,6 +81,9 @@ pub(crate) struct Request {
     pub flow_name: String,
     /// The Flow's policy, in its document's word.
     pub policy: &'static str,
+    /// Whether walking the Flow may spend money ([`spends`]): the card says
+    /// so in the person's words.
+    pub money: bool,
     /// The coming runs the card names, soonest first.
     pub next: Vec<LocalMinute>,
     /// How many letters that draw nothing were left out of the label and the
@@ -189,10 +195,22 @@ pub(crate) fn read(
         job,
         flow_name,
         policy: spec.policy.as_str(),
+        money: spends(spec.policy),
         next,
         hidden,
         document,
     })
+}
+
+/// Whether a Flow of `policy` may spend money when it is walked: its money
+/// step is pressed past the gate alone. Such a Flow may be scheduled by
+/// asking, and the card of the request says it. Every policy is answered
+/// here, so a new one is decided before a card can be silent about it.
+const fn spends(policy: Policy) -> bool {
+    match policy {
+        Policy::Dry => false,
+        Policy::Guarded => true,
+    }
 }
 
 /// The hash of a Flow's document as it stands under `recipes_root`, or `None`
@@ -263,13 +281,19 @@ pub(crate) fn card(request: &Request) -> (String, Value) {
         "workspace": job.workspace,
         "pane": pane,
         "hidden": request.hidden,
+        "money": request.money,
     });
     let sentence = format!(
-        "An agent in {pane} asks to schedule the Flow \"{flow}\" (policy {policy}) as \"{name}\": cron `{cron}`, in \"{workspace}\". The window would walk it by itself, with nobody watching. Allow it only if that is what you want; cancel it, or leave it, and nothing is scheduled.{left_out}",
+        "An agent in {pane} asks to schedule the Flow \"{flow}\" (policy {policy}) as \"{name}\": cron `{cron}`, in \"{workspace}\". The window would walk it by itself, with nobody watching. Allow it only if that is what you want; cancel it, or leave it, and nothing is scheduled.{spending}{left_out}",
         flow = request.flow_name,
         policy = request.policy,
         name = job.name,
         workspace = job.workspace,
+        spending = if request.money {
+            " This Flow may spend money: its money step is pressed with nobody there to stop it."
+        } else {
+            ""
+        },
         left_out = card_words::hidden_said(request.hidden)
             .map(|said| format!(" ({said}.)"))
             .unwrap_or_default(),
@@ -501,6 +525,22 @@ mod tests {
             serde_json::to_value(&job.schedule).expect("schedule")
         );
         assert_eq!(args["next"], json!(minutes(&request.next)));
+        // A Flow that may spend is said so on the card — in the window's
+        // sentence and to the page — and a dry one is not.
+        assert!(!request.money && args["money"] == false);
+        assert!(!sentence.contains("may spend money"), "{sentence}");
+        let spending = Request {
+            money: spends(Policy::Guarded),
+            policy: Policy::Guarded.as_str(),
+            ..request.clone()
+        };
+        let (sentence, args) = card(&spending);
+        assert_eq!(args["money"], true);
+        assert!(
+            sentence.contains("policy guarded") && sentence.contains("may spend money"),
+            "{sentence}"
+        );
+        assert!(!spends(Policy::Dry));
         // Without a label the job is listed under the Flow's own title.
         let unnamed = asked(
             root.path(),

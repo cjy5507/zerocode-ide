@@ -5705,6 +5705,8 @@ await test("the_card_for_an_asked_schedule_says_the_job_and_what_was_left_out", 
       plain: words(args),
       counted: words({ ...args, hidden: 3 }),
       note: t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count: 3 }),
+      spending: words({ ...args, policy: "guarded", money: true }),
+      moneyNote: t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다."),
       runs: args.next.map(localMinuteText),
     };
   });
@@ -5716,7 +5718,12 @@ await test("the_card_for_an_asked_schedule_says_the_job_and_what_was_left_out", 
     "the card did not say, once, how many letters were left out of the names",
     said,
   );
-  return "the card named the Flow, the job, when and where it runs and who asked; three hidden letters were said once";
+  assert(
+    said.moneyNote !== "" && !said.plain.includes(said.moneyNote) && said.spending.endsWith(said.moneyNote),
+    "a Flow that may spend money was not said so on its card, or a dry one was",
+    said,
+  );
+  return "the card named the Flow, the job, when and where it runs and who asked; three hidden letters were said once, and a Flow that may spend was said so";
 });
 
 // The folded 「세부 설정」 line is where a save's command is read before the

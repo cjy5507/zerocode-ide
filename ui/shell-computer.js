@@ -652,6 +652,10 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
         next: (args.next ?? []).map(localMinuteText).join(" · "),
       },
     ),
+    // A Flow whose walk may spend money (policy guarded): the card says it in plain words, not by the policy's name alone.
+    args.money === true
+      ? t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다.")
+      : "",
     // Letters that draw nothing, left out of those names by the backend: the card says how many there were.
     args.hidden > 0
       ? t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count: args.hidden })
