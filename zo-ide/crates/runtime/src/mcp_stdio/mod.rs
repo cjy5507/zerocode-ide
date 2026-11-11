@@ -1145,7 +1145,10 @@ impl McpServerManager {
     ///
     /// The key is the server's name and a hash of how it is started, so the
     /// same name with another command, argument or environment value is
-    /// another server.
+    /// another server. A project's server is started in the session's folder
+    /// and may be another program in another folder (`node ./mcp/server.js`),
+    /// so its folder is part of how it is started; with no folder to name,
+    /// such a server has no key and is asked every session.
     #[must_use]
     pub fn tool_listing_key(&self, server_name: &str) -> Option<String> {
         let server = self.servers.get(server_name)?;
@@ -1155,11 +1158,17 @@ impl McpServerManager {
         if is_stdio_remote_bridge(transport) {
             return None;
         }
+        let folder = if server.bootstrap.is_project_scoped {
+            Some(std::env::current_dir().ok()?)
+        } else {
+            None
+        };
         let launch = crate::mcp::stdio_launch_hash(
             server_name,
             &transport.command,
             &transport.args,
             &transport.env,
+            folder.as_deref(),
         );
         Some(format!("{}-{launch}", server.bootstrap.normalized_name))
     }
@@ -1233,7 +1242,11 @@ impl McpServerManager {
 
     /// Ask a server this session opened on a remembered listing what it
     /// offers now, and give back the route to call — the same one, unless the
-    /// server no longer has the tool, which is an unknown tool.
+    /// server no longer has the tool, which is an unknown tool, or has it
+    /// changed, which is a call not sent
+    /// ([`McpServerManagerError::ToolChanged`]): the arguments were written
+    /// for the tool as remembered and the call passed the permission that
+    /// tool asked for, and a tool that only read then may write now.
     ///
     /// The server's answer replaces the listing and its routes
     /// ([`Self::refresh_server_tools`]); where it differs from what was
@@ -1250,7 +1263,7 @@ impl McpServerManager {
         let Some(remembered) = self.listed_from_memory.get(&route.server_name).cloned() else {
             return Ok(route);
         };
-        let server_name = route.server_name;
+        let ToolRoute { server_name, raw_name } = route;
         let old_names = self.qualified_tool_names_for_server(&server_name);
         let tools = match Box::pin(self.refresh_server_tools(&server_name)).await {
             Ok(tools) => tools,
@@ -1261,8 +1274,18 @@ impl McpServerManager {
                 return Err(error);
             }
         };
+        // The tool being called, as the session listed it and as it is now.
+        let changed = remembered
+            .iter()
+            .find(|was| was.name == raw_name)
+            .is_some_and(|was| tools.iter().any(|now| now.tool.name == raw_name && now.tool != *was));
         if !tools.iter().map(|tool| &tool.tool).eq(remembered.iter()) {
             self.relisted.push(RelistedServer { server_name, old_names, tools });
+        }
+        if changed {
+            return Err(McpServerManagerError::ToolChanged {
+                qualified_name: qualified_tool_name.to_string(),
+            });
         }
         self.route_of(qualified_tool_name)
     }

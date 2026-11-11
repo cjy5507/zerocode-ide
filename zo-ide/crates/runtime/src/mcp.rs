@@ -124,19 +124,23 @@ pub fn scoped_mcp_config_hash(config: &ScopedMcpServerConfig) -> String {
 
 /// What tells one local server's launch from another's, for a tool listing
 /// remembered between sessions ([`crate::mcp_tool_listings`]): the server's
-/// name and how it is started — command, arguments, environment. A changed
-/// argument or environment value reads as another server, whose tools are
-/// asked afresh. A wrong match would cost one stale listing, which the first
-/// call corrects; nothing is granted on it.
+/// name and how it is started — command, arguments, environment, and for a
+/// server a project defines the `folder` it is started in, since
+/// `node ./mcp/server.js` is another program in another folder. A changed
+/// argument, environment value or folder reads as another server, whose
+/// tools are asked afresh. A wrong match would cost one stale listing, which
+/// the first call corrects before it is sent.
 #[must_use]
 pub(crate) fn stdio_launch_hash(
     server_name: &str,
     command: &str,
     args: &[String],
     env: &std::collections::BTreeMap<String, String>,
+    folder: Option<&std::path::Path>,
 ) -> String {
+    let folder = folder.map(|folder| format!("|in {}", folder.display())).unwrap_or_default();
     stable_hex_hash(&format!(
-        "listing|{server_name}|{command}|{}|{}",
+        "listing|{server_name}|{command}|{}|{}{folder}",
         render_command_signature(args.iter().map(String::as_str)),
         render_env_signature(env)
     ))
@@ -256,6 +260,19 @@ mod tests {
         mcp_server_signature, mcp_tool_name, normalize_name_for_mcp, render_command_signature,
         scoped_mcp_config_hash, unwrap_ccr_proxy_url,
     };
+
+    /// A server a project defines may be another program in another folder,
+    /// so the folder it starts in is part of what tells its launch apart.
+    #[test]
+    fn a_launch_hash_takes_the_folder_a_projects_server_starts_in() {
+        use std::path::Path;
+
+        let (args, env) = (vec!["./mcp/server.js".to_string()], BTreeMap::new());
+        let hash = |folder: Option<&Path>| super::stdio_launch_hash("local", "node", &args, &env, folder);
+        assert_ne!(hash(Some(Path::new("/work/a"))), hash(Some(Path::new("/work/b"))), "another folder is another server");
+        assert_ne!(hash(None), hash(Some(Path::new("/work/a"))), "and so is no folder");
+        assert_eq!(hash(Some(Path::new("/work/a"))), hash(Some(Path::new("/work/a"))));
+    }
 
     #[test]
     fn normalizes_server_names_for_mcp_tooling() {

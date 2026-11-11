@@ -85,7 +85,9 @@ impl ToolListings {
     ///
     /// The file is written beside its place and renamed over it, so a session
     /// reading meanwhile finds the old listing or the new one and never a
-    /// part of either.
+    /// part of either. The folder and the file are the person's alone, as
+    /// zo's other state is: a listing is what a session shows the model, and
+    /// what each tool's permission is read from until its first call.
     pub fn remember(
         &self,
         key: &str,
@@ -94,6 +96,7 @@ impl ToolListings {
         now: SystemTime,
     ) -> io::Result<()> {
         fs::create_dir_all(&self.dir)?;
+        core_types::paths::restrict_permissions_owner_only(&self.dir)?;
         let listing = Listing {
             version: LISTING_VERSION,
             server: server.to_string(),
@@ -102,7 +105,11 @@ impl ToolListings {
         };
         let text = serde_json::to_string(&listing).map_err(io::Error::other)?;
         let partial = self.dir.join(format!("{key}.{}.partial", std::process::id()));
-        fs::write(&partial, text)?;
+        core_types::paths::write_private_file(
+            &partial,
+            text.as_bytes(),
+            &core_types::paths::ParentDirPolicy::LeaveParent,
+        )?;
         fs::rename(&partial, self.file(key)).inspect_err(|_| {
             let _ = fs::remove_file(&partial);
         })
@@ -189,6 +196,20 @@ mod tests {
             .map(|entry| entry.expect("an entry").file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(files, ["alpha-1.json"]);
+        let _ = std::fs::remove_dir_all(&listings.dir);
+    }
+
+    /// The folder and a listing in it are the person's alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_and_its_folder_are_the_owners_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let listings = listings("private");
+        listings.remember("alpha-1", "alpha", &[tool("echo")], SystemTime::now()).expect("remember");
+        let mode = |path: &std::path::Path| std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode(&listings.dir), 0o700, "the folder");
+        assert_eq!(mode(&listings.dir.join("alpha-1.json")), 0o600, "the listing");
         let _ = std::fs::remove_dir_all(&listings.dir);
     }
 

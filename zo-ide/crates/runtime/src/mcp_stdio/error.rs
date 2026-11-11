@@ -59,6 +59,15 @@ pub enum McpServerManagerError {
     UnknownTool {
         qualified_name: String,
     },
+    /// The server offers this tool, but not as the session listed it: its
+    /// description, input shape or annotations changed since the listing the
+    /// session opened on. The call was not sent — its arguments were written
+    /// for the tool as remembered, and it passed the permission that tool
+    /// asked for. The session holds the tool as it is now, so the same call
+    /// made again is checked against that.
+    ToolChanged {
+        qualified_name: String,
+    },
     UnknownServer {
         server_name: String,
     },
@@ -133,6 +142,10 @@ impl std::fmt::Display for McpServerManagerError {
             Self::UnknownTool { qualified_name } => {
                 write!(f, "unknown MCP tool `{qualified_name}`")
             }
+            Self::ToolChanged { qualified_name } => write!(
+                f,
+                "MCP tool `{qualified_name}` changed on its server since this session listed it, so the call was not sent; the tool is listed as it is now — call it again"
+            ),
             Self::UnknownServer { server_name } => write!(f, "unknown MCP server `{server_name}`"),
         }
     }
@@ -149,6 +162,7 @@ impl std::error::Error for McpServerManagerError {
             | Self::Timeout { .. }
             | Self::DuplicateToolRoute { .. }
             | Self::UnknownTool { .. }
+            | Self::ToolChanged { .. }
             | Self::UnknownServer { .. } => None,
         }
     }
@@ -169,7 +183,7 @@ impl McpServerManagerError {
             | Self::InvalidResponse { method, .. }
             | Self::Timeout { method, .. } => lifecycle_phase_for_method(method),
             Self::ToolCallNotResent { cause, .. } => cause.lifecycle_phase(),
-            Self::DuplicateToolRoute { .. } | Self::UnknownTool { .. } => {
+            Self::DuplicateToolRoute { .. } | Self::UnknownTool { .. } | Self::ToolChanged { .. } => {
                 McpLifecyclePhase::ToolDiscovery
             }
             Self::UnknownServer { .. } => McpLifecyclePhase::ServerRegistration,
@@ -265,7 +279,7 @@ impl McpServerManagerError {
                 ("new_server".to_string(), new_server.clone()),
                 ("new_raw_name".to_string(), new_raw_name.clone()),
             ]),
-            Self::UnknownTool { qualified_name } => {
+            Self::UnknownTool { qualified_name } | Self::ToolChanged { qualified_name } => {
                 BTreeMap::from([("qualified_tool".to_string(), qualified_name.clone())])
             }
             Self::UnknownServer { server_name } => {

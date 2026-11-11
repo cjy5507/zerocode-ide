@@ -4107,6 +4107,93 @@ fn the_eager_pass_opens_on_remembered_listings_and_remembers_what_it_asks() {
     });
 }
 
+/// A tool the server still has under its name, changed since the listing the
+/// session opened on — here it was remembered as one that only reads. The
+/// first call finds out before it is sent, and is not sent: its arguments and
+/// the permission it passed were for the tool as remembered. The session is
+/// told what to advertise, and the same call made again goes through.
+#[test]
+fn a_tool_changed_under_its_name_is_not_sent_by_the_call_that_finds_out() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent").to_path_buf();
+        let log = root.join("alpha.log");
+        let servers = BTreeMap::from([(
+            "alpha".to_string(),
+            manager_server_config(&script_path, "alpha", &log),
+        )]);
+        let mut first = session(&servers, &root);
+        let listed = first.open_server_tools("alpha").await.expect("the first session lists");
+        let key = first.tool_listing_key("alpha").expect("a local server has a key");
+        first.shutdown().await.expect("shutdown");
+
+        // What the next session remembers of `echo` is not what the server
+        // offers: the remembered one says it only reads.
+        let mut remembered: Vec<_> = listed.iter().map(|tool| tool.tool.clone()).collect();
+        let echo = remembered.iter_mut().find(|tool| tool.name == "echo").expect("the server lists echo");
+        echo.annotations = Some(json!({ "readOnlyHint": true }));
+        listings_in(&root)
+            .remember(&key, "alpha", &remembered, SystemTime::now())
+            .expect("write the listing");
+
+        let mut second = session(&servers, &root);
+        let opened = second.open_server_tools("alpha").await.expect("the second session opens");
+        assert_eq!(
+            opened.iter().find(|tool| tool.raw_name == "echo").and_then(|tool| tool.tool.annotations.clone()),
+            Some(json!({ "readOnlyHint": true })),
+            "it opens on what was remembered"
+        );
+
+        let error = second
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "as it was"})))
+            .await
+            .expect_err("the tool is not the one the session listed");
+        assert!(matches!(error, McpServerManagerError::ToolChanged { .. }), "{error}");
+        assert_eq!(
+            asked(&log),
+            ["initialize", "tools/list", "initialize", "tools/list"],
+            "the server was asked, and the call was not sent"
+        );
+        let relisted = second.take_relisted();
+        assert_eq!(relisted.len(), 1, "the session is told what the server offers now");
+        assert_eq!(relisted[0].server_name, "alpha");
+
+        // The same call again is for the tool as it is now, and is sent.
+        second
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "as it is"})))
+            .await
+            .expect("the tool as the server has it");
+        assert_eq!(asked(&log).len(), 5);
+        assert_eq!(asked(&log)[4], "tools/call");
+        second.shutdown().await.expect("shutdown");
+        cleanup_script(&script_path);
+    });
+}
+
+/// A server a project defines is started in the session's folder, so that
+/// folder is part of its key: the same name and command under the person's
+/// own configuration is another listing.
+#[test]
+fn a_projects_server_is_keyed_with_the_folder_it_starts_in() {
+    let script_path = write_manager_mcp_server_script();
+    let root = script_path.parent().expect("script parent").to_path_buf();
+    let own = manager_server_config(&script_path, "local", &root.join("local.log"));
+    let mut of_the_project = own.clone();
+    of_the_project.scope = ConfigSource::Project;
+    let key_of = |config: &ScopedMcpServerConfig| {
+        session(&BTreeMap::from([("local".to_string(), config.clone())]), &root)
+            .tool_listing_key("local")
+            .expect("a local server has a key")
+    };
+    assert_ne!(key_of(&of_the_project), key_of(&own), "the folder is in the project server's key");
+    assert_eq!(key_of(&of_the_project), key_of(&of_the_project), "and the key is the same each time");
+    cleanup_script(&script_path);
+}
+
 /// A remote server and an interactive OAuth bridge are never left unstarted
 /// on a listing — there is nothing to file one under — and a local server is.
 #[test]
