@@ -13451,8 +13451,9 @@ el("auto-detail-edit").addEventListener("click", () => {
  * hand is carried past the question.
  *
  * The yes is held to the document the question was drawn from: the list read
- * that document once (`flow_stands`, its hash, and `flow_money`), both are
- * taken here before the question opens, and the hash goes back with the yes.
+ * that document once (`flow_stands`, its hash, with `flow_money` and
+ * `flow_about` — which document it is), all taken here before the question
+ * opens, and the hash goes back with the yes.
  * A document rewritten while the question stood is refused by the window, and
  * the list is read again so the next question is about what stands now. */
 async function approveAutomationFlowAgain(row) {
@@ -13465,6 +13466,7 @@ async function approveAutomationFlowAgain(row) {
       "Flow 「{{flow}}」의 문서가 승인한 뒤에 바뀌었습니다. 지금 문서대로 {{schedule}}에 사람 없이 도는 것을 다시 승인할까요? 문서는 Flow 탭에서 먼저 열어 볼 수 있습니다.",
       { flow: automationFlowName(row) ?? row.flow, schedule: automationScheduleText(row) },
     ),
+    flowAboutText(row.flow_about),
     row.flow_money === true
       ? t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다.")
       : "",

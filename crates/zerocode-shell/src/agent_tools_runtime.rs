@@ -223,6 +223,11 @@ pub(super) struct AutomationRow {
     /// walked — the question says so, as the card of a request does.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(super) flow_money: bool,
+    /// On a job that waits: which document that is, beyond its title — its
+    /// file's name, its steps, what it names and when it was last written
+    /// (`schedule::About`), said in the question as on the card of a request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) flow_about: Option<computer_use::recipes::schedule::About>,
 }
 
 /// A prompt that finished its journey into a shell, either way — or that is

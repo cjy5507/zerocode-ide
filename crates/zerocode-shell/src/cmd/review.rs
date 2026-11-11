@@ -305,7 +305,8 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
             // A job an agent asked for waits once its Flow reads differently
             // from the one the person allowed. One reading answers that and
             // what 「다시 승인」 will ask about: the row carries the hash of
-            // the very text it judged, and whether that text may spend.
+            // the very text it judged, whether that text may spend, and which
+            // document it is.
             let standing = automation
                 .asked
                 .as_ref()
@@ -322,6 +323,7 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
                 last_verdict,
                 flow_changed,
                 flow_money: waits_on.as_ref().is_some_and(|one| one.money),
+                flow_about: waits_on.as_ref().map(|one| one.about.clone()),
                 flow_stands: waits_on.map(|one| one.sha256),
                 automation,
             }

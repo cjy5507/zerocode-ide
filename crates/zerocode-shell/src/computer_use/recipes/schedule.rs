@@ -11,6 +11,11 @@
 //!   that draw nothing the rule left out of them;
 //! - the job is built before the card and the card is drawn from it
 //!   ([`Request`]), so what the person allowed is what is saved;
+//! - the card says which document it is about, beyond the title the document
+//!   gives itself ([`About`]): the file's own name, how many steps it walks,
+//!   the apps and hosts it names and when it was last written — a Flow an
+//!   agent saved a minute ago under a familiar title does not read as the one
+//!   the person knows;
 //! - the one job this road writes is a Flow the window walks itself: no
 //!   agent, no command and no precheck (`Automation::asked_flow`), which a
 //!   request has no word for;
@@ -34,10 +39,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use zerocode_core::automation::{ASKED_SCHEDULE_FLOOR_MINUTES, Asked, flow_document_sha256};
 use zerocode_core::card_words::{self, WORD_MAX_CHARS};
-use zerocode_core::computer_flow::{Policy, parse_flow};
+use zerocode_core::computer_flow::{FlowSpec, Policy, parse_flow};
+use zerocode_core::computer_recipe::recipe_lines;
 use zerocode_core::computer_use::{COMPUTER_CLI, recipe_slug};
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::{Automation, Cron, LocalMinute, Schedule};
@@ -50,6 +57,82 @@ use super::{recipe_title, show};
 pub(crate) const ASK_KEY: &str = "auto.asked.card";
 /// How many of the coming runs the card names.
 const CARD_RUNS: usize = 3;
+/// How many of the apps and hosts a document names the card repeats before it
+/// only counts the rest.
+const ABOUT_NAMES: usize = 4;
+
+/// Which document a card or a question is about, beyond the title the document
+/// gives itself — all of it off the one text the hash is of. What a document
+/// says of itself is data an agent may have written: the names are shown by
+/// the card's rule (`card_words`), and `hidden` counts the letters it left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct About {
+    /// The file's own name without `.md`: what the recipe store calls it.
+    pub slug: String,
+    /// How many steps it walks.
+    pub steps: usize,
+    /// The apps and hosts its fingerprint names, at most [`ABOUT_NAMES`].
+    pub names: Vec<String>,
+    /// How many more it names.
+    pub more: usize,
+    /// When the file was last written (epoch ms), when the file system says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_ms: Option<u64>,
+    /// Letters that draw nothing, left out of the names.
+    pub hidden: usize,
+}
+
+impl About {
+    /// What `spec` and `text` — one reading of the document at `file`, kept
+    /// under `slug` — say it is.
+    ///
+    /// # Errors
+    ///
+    /// When the steps do not read: a document that cannot be walked is not
+    /// one to ask about.
+    fn read(file: &Path, slug: &str, text: &str, spec: &FlowSpec) -> Result<Self, String> {
+        let steps = recipe_lines(text)?.len();
+        let named: Vec<&String> = spec
+            .fingerprint
+            .apps
+            .iter()
+            .chain(&spec.fingerprint.hosts)
+            .collect();
+        let shown: Vec<_> = named
+            .iter()
+            .take(ABOUT_NAMES)
+            .map(|name| card_words::shown_counting(name, WORD_MAX_CHARS))
+            .collect();
+        let modified_ms = std::fs::metadata(file)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|since| u64::try_from(since.as_millis()).ok());
+        Ok(Self {
+            slug: slug.to_string(),
+            steps,
+            more: named.len().saturating_sub(ABOUT_NAMES),
+            hidden: shown.iter().map(|name| name.hidden).sum(),
+            names: shown.into_iter().map(|name| name.text).collect(),
+            modified_ms,
+        })
+    }
+
+    /// The window's own words for it, for a page that does not know the card.
+    fn said(&self) -> String {
+        let named = if self.names.is_empty() {
+            String::new()
+        } else if self.more == 0 {
+            format!(", naming {}", self.names.join(", "))
+        } else {
+            format!(", naming {} and {} more", self.names.join(", "), self.more)
+        };
+        format!(
+            " The document is {}.md: {} step(s){named}.",
+            self.slug, self.steps
+        )
+    }
+}
 
 /// The turn to ask: held while a schedule's card stands, so a second request
 /// is refused instead of queued behind it — the person answers one such
@@ -181,9 +264,12 @@ pub(crate) struct Request {
     pub money: bool,
     /// The coming runs the card names, soonest first.
     pub next: Vec<LocalMinute>,
-    /// How many letters that draw nothing were left out of the label and the
-    /// Flow's title (`card_words::shown_counting`): the card says so.
+    /// How many letters that draw nothing were left out of the label, the
+    /// Flow's title and the names its document gives
+    /// (`card_words::shown_counting`): the card says so.
     pub hidden: usize,
+    /// Which document this is, beyond its title.
+    pub about: About,
     /// The Flow's document, read again once the person has answered.
     document: PathBuf,
 }
@@ -256,12 +342,15 @@ pub(crate) fn read(
         ));
     }
     let slug = recipe_slug(named);
+    let about = About::read(&document, &slug, &text, &spec).map_err(|why| {
+        ComputerUseError::invalid_argument(format!("the steps of '{named}' do not read: {why}"))
+    })?;
     let title = card_words::shown_counting(
         &recipe_title(&text).unwrap_or_else(|| slug.clone()),
         WORD_MAX_CHARS,
     );
     let label = word("label").map(|label| card_words::shown_counting(label, WORD_MAX_CHARS));
-    let hidden = title.hidden + label.as_ref().map_or(0, |label| label.hidden);
+    let hidden = title.hidden + label.as_ref().map_or(0, |label| label.hidden) + about.hidden;
     let flow_name = title.text;
     let name = label
         .map(|label| label.text)
@@ -293,6 +382,7 @@ pub(crate) fn read(
         money: spends(spec.policy),
         next,
         hidden,
+        about,
         document,
     })
 }
@@ -328,18 +418,22 @@ pub(crate) struct Standing {
     pub sha256: String,
     /// Whether walking it may spend money ([`spends`]): the question says so.
     pub money: bool,
+    /// Which document it is, beyond its title: the question says that too.
+    pub about: About,
 }
 
 /// The document of `slug` under `recipes_root` as it stands, read once.
-/// `None` when it cannot be read or no longer reads as a Flow: there is then
-/// nothing to allow — a walk would refuse it too.
+/// `None` when it cannot be read or no longer reads as a Flow with steps that
+/// read: there is then nothing to allow — a walk would refuse it too.
 #[must_use]
 pub(crate) fn standing(recipes_root: &Path, slug: &str) -> Option<Standing> {
-    let (_, text) = show(recipes_root, slug).ok()?;
+    let (file, text) = show(recipes_root, slug).ok()?;
     let spec = parse_flow(&text).ok().flatten()?;
+    let about = About::read(&file, &recipe_slug(slug), &text, &spec).ok()?;
     Some(Standing {
         sha256: flow_document_sha256(&text),
         money: spends(spec.policy),
+        about,
     })
 }
 
@@ -432,9 +526,11 @@ pub(crate) fn card(request: &Request) -> (String, Value) {
         "pane": pane,
         "hidden": request.hidden,
         "money": request.money,
+        "about": request.about,
     });
     let sentence = format!(
-        "An agent in {pane} asks to schedule the Flow \"{flow}\" (policy {policy}) as \"{name}\": cron `{cron}`, in \"{workspace}\". The window would walk it by itself, with nobody watching. Allow it only if that is what you want; cancel it, or leave it, and nothing is scheduled.{spending}{left_out}",
+        "An agent in {pane} asks to schedule the Flow \"{flow}\" (policy {policy}) as \"{name}\": cron `{cron}`, in \"{workspace}\". The window would walk it by itself, with nobody watching. Allow it only if that is what you want; cancel it, or leave it, and nothing is scheduled.{about}{spending}{left_out}",
+        about = request.about.said(),
         flow = request.flow_name,
         policy = request.policy,
         name = job.name,
@@ -566,6 +662,18 @@ mod tests {
         )
     }
 
+    /// What a card says a document is, when the file system's word is left out.
+    fn about(slug: &str, steps: usize, names: &[&str]) -> About {
+        About {
+            slug: slug.to_string(),
+            steps,
+            names: names.iter().map(ToString::to_string).collect(),
+            more: 0,
+            modified_ms: None,
+            hidden: 0,
+        }
+    }
+
     /// A recipe that was never stood up as a Flow.
     fn plain_document() -> String {
         format!(
@@ -685,22 +793,84 @@ mod tests {
             ("wallet-top-up", &spending),
             ("plain-steps", &plain),
         ]);
+        // When the file was written is the file system's to say: it says, and
+        // the rest is compared without it.
+        let stands = |slug: &str| {
+            standing(root.path(), slug).map(|mut one| {
+                assert!(one.about.modified_ms.take().is_some(), "{slug}");
+                one
+            })
+        };
         assert_eq!(
-            standing(root.path(), "wallet-qa"),
+            stands("wallet-qa"),
             Some(Standing {
                 sha256: flow_document_sha256(&flow),
                 money: false,
+                about: about("wallet-qa", 1, &["com.example.wallet", "shop.example.com"]),
             })
         );
         assert_eq!(
-            standing(root.path(), "wallet-top-up"),
+            stands("wallet-top-up"),
             Some(Standing {
                 sha256: flow_document_sha256(&spending),
                 money: true,
+                about: about("wallet-top-up", 3, &["shop.example.com"]),
             })
         );
         assert_eq!(standing(root.path(), "plain-steps"), None);
         assert_eq!(standing(root.path(), "nothing"), None);
+    }
+
+    /// Which document a card is about is read off the document itself: its
+    /// file's name, its steps, and the apps and hosts it names — the first
+    /// few by name, the rest counted — shown by the card's rule.
+    #[test]
+    fn a_card_says_which_document_it_is_about() {
+        let crowded = flow_document().replace(
+            "apps=com.example.wallet hosts=shop.example.com",
+            "apps=com.example.a,com.example.b,com.example.c hosts=one.example.com,two.example.com,three.example.com",
+        );
+        let (root, workspace) = stand(&[("wallet-qa", &flow_document()), ("crowded", &crowded)]);
+        let plain = asked(
+            root.path(),
+            Some(&workspace),
+            &[("name", "wallet-qa"), ("every", "daily")],
+        )
+        .expect("read");
+        assert!(plain.about.modified_ms.is_some());
+        assert_eq!(
+            About {
+                modified_ms: None,
+                ..plain.about.clone()
+            },
+            about("wallet-qa", 1, &["com.example.wallet", "shop.example.com"])
+        );
+        let (sentence, args) = card(&plain);
+        assert!(
+            sentence.contains("The document is wallet-qa.md: 1 step(s), naming com.example.wallet, shop.example.com."),
+            "{sentence}"
+        );
+        assert_eq!(args["about"]["slug"], "wallet-qa");
+        assert_eq!(args["about"]["steps"], 1);
+        assert_eq!(
+            args["about"]["names"],
+            json!(["com.example.wallet", "shop.example.com"])
+        );
+        assert_eq!(args["about"]["modified_ms"], json!(plain.about.modified_ms));
+
+        let many = asked(
+            root.path(),
+            Some(&workspace),
+            &[("name", "crowded"), ("every", "daily")],
+        )
+        .expect("read");
+        assert_eq!(many.about.names.len(), ABOUT_NAMES);
+        assert_eq!(many.about.more, 6 - ABOUT_NAMES);
+        let (sentence, _) = card(&many);
+        assert!(
+            sentence.contains(&format!("and {} more.", 6 - ABOUT_NAMES)),
+            "{sentence}"
+        );
     }
 
     /// 「다시 승인」 is the person's yes to the document the question was drawn
@@ -712,10 +882,12 @@ mod tests {
         let asked_about = Standing {
             sha256: flow_document_sha256(&flow_document()),
             money: false,
+            about: about("wallet-qa", 1, &["com.example.wallet", "shop.example.com"]),
         };
         let changed_again = Standing {
             sha256: flow_document_sha256(&spending_document()),
             money: true,
+            about: about("wallet-qa", 3, &["shop.example.com"]),
         };
         assert_eq!(
             allowed_again(Some(&asked_about), &asked_about.sha256),

@@ -652,6 +652,8 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
         next: (args.next ?? []).map(localMinuteText).join(" · "),
       },
     ),
+    // Which document this is, beyond the title it gives itself.
+    flowAboutText(args.about),
     // A Flow whose walk may spend money (policy guarded): the card says it in plain words, not by the policy's name alone.
     args.money === true
       ? t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다.")
@@ -663,6 +665,26 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
   ].filter(Boolean).join(" "),
   "computer.cover.gone": (args) => t("computer.cover.gone", "누르려던 창이 화면에 없습니다(최소화했거나 다른 데스크톱에 있음). 창이 보이게 한 뒤 「다 했어요」를 눌러 주세요.", args),
 });
+
+/* Which document a schedule's card, or 「다시 승인」, is about — beyond the
+ * title the document gives itself, which an agent may have written: the file's
+ * own name, how many steps it walks, the apps and hosts it names (the first
+ * few, the rest counted) and when the file was last written. A Flow saved a
+ * minute ago under a familiar title does not read as the one the person knows.
+ * The backend read all of it off the text the approval is held to
+ * (`schedule::About`); an older backend sends none, and nothing is said. */
+function flowAboutText(about) {
+  if (!about?.slug) return "";
+  const names = (about.names ?? []).join(", ");
+  return [
+    t("auto.asked.aboutFile", "문서 {{slug}}.md", { slug: about.slug }),
+    t("auto.asked.aboutSteps", "걸음 {{count}}개", { count: about.steps ?? 0 }),
+    names && (about.more > 0 ? `${names} +${about.more}` : names),
+    Number.isFinite(about.modified_ms)
+      ? t("auto.asked.aboutModified", "마지막으로 고친 때 {{when}}", { when: new Date(about.modified_ms).toLocaleString() })
+      : "",
+  ].filter(Boolean).join(" · ") + ".";
+}
 
 function computerHandoffText(handoff) {
   const say = COMPUTER_HANDOFF_WORDS[handoff.reasonKey];

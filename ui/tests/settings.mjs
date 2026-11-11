@@ -2853,6 +2853,7 @@ class StatefulBackend {
           row.asked = { ...row.asked, flow_sha256: args.seen };
           delete row.flow_stands;
           delete row.flow_money;
+          delete row.flow_about;
         }
         return clone(this.automations);
       }
@@ -5724,6 +5725,14 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     // it, says why, and the page reads the list again.
     backend.automations[0].flow_stands = "cc";
     backend.automations[0].flow_money = true;
+    backend.automations[0].flow_about = {
+      slug: "wallet-qa",
+      steps: 4,
+      names: ["shop.example.com"],
+      more: 0,
+      modified_ms: 1_794_000_100_000,
+      hidden: 0,
+    };
     await pageA.evaluate(() => {
       window.__askedSaid = [];
       window.__realShowError = window.showError;
@@ -5762,6 +5771,11 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     await pageA.waitForSelector("#ask-scrim:not([hidden])");
     const second = await pageA.evaluate(() => document.getElementById("ask-body").textContent);
     assert(second.includes("Wallet QA") && second.includes(money), "the question did not say this document may spend money", second);
+    assert(
+      second.includes("wallet-qa.md") && second.includes("shop.example.com") && !question.includes("wallet-qa.md"),
+      "the question did not say which document it is about, or said it of a row that carried none",
+      { second, question },
+    );
     await pageA.click("#ask-yes");
     const approved = await backend.waitForCall("A", "approve_automation_flow", again);
     assertEqual(
@@ -5841,6 +5855,20 @@ await test("the_card_for_an_asked_schedule_says_the_job_and_what_was_left_out", 
       spending: words({ ...args, policy: "guarded", money: true }),
       moneyNote: t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다."),
       runs: args.next.map(localMinuteText),
+      // Which document: its file's name, its steps, what it names (two more counted) and when it was written.
+      about: words({
+        ...args,
+        about: {
+          slug: "wallet-qa",
+          steps: 3,
+          names: ["com.example.wallet", "shop.example.com"],
+          more: 2,
+          modified_ms: 1_794_000_000_000,
+          hidden: 0,
+        },
+      }),
+      aboutSteps: t("auto.asked.aboutSteps", "걸음 {{count}}개", { count: 3 }),
+      aboutWhen: new Date(1_794_000_000_000).toLocaleString(),
     };
   });
   for (const shown of ["Wallet QA", "Morning wallet", "dry", "30 9 * * *", "/Users/dev/app", "term:7", ...said.runs]) {
@@ -5856,7 +5884,15 @@ await test("the_card_for_an_asked_schedule_says_the_job_and_what_was_left_out", 
     "a Flow that may spend money was not said so on its card, or a dry one was",
     said,
   );
-  return "the card named the Flow, the job, when and where it runs and who asked; three hidden letters were said once, and a Flow that may spend was said so";
+  assert(
+    said.aboutSteps.includes("3")
+      && ["wallet-qa.md", said.aboutSteps, "com.example.wallet, shop.example.com +2", said.aboutWhen].every((shown) => said.about.includes(shown))
+      && said.about.startsWith(`${said.plain} `)
+      && !said.plain.includes("wallet-qa.md"),
+    "the card did not say which document it is about — its file, its steps, what it names and when it was written — or said it with none sent",
+    said,
+  );
+  return "the card named the Flow, the job, when and where it runs and who asked; three hidden letters were said once, a Flow that may spend was said so, and the document was named by its file, steps, names and last change";
 });
 
 // The folded 「세부 설정」 line is where a save's command is read before the
