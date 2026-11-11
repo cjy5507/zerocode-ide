@@ -284,6 +284,128 @@ pub fn newest_line_holding(path: &Path, needle: &str, cap: u64) -> Option<String
     None
 }
 
+/// What Claude Code writes on the line that hands a compacted conversation its
+/// own summary, exactly as it writes it (this machine's transcripts, 2.1.3xx).
+pub const COMPACT_SUMMARY_MARK: &str = "\"isCompactSummary\":true";
+
+/// How much of a compaction summary a handover carries, in characters — about
+/// a thousand tokens, paid once by the agent that takes the work over.
+pub const COMPACT_SUMMARY_MAX_CHARS: usize = 4_000;
+
+/// The sections of Claude Code's compaction summary a handover keeps: what was
+/// asked, what went wrong and how it was fixed, how problems were worked
+/// through, and what stands next. The rest — key concepts, files with their
+/// code, every message the person wrote — is long, and the repository and the
+/// transcript already hold it. On 2026-11-12 one summary here ran 26,419
+/// characters, most of them code.
+const COMPACT_SUMMARY_KEEPS: [&str; 6] = [
+    "Primary Request and Intent",
+    "Errors and fixes",
+    "Problem Solving",
+    "Pending Tasks",
+    "Current Work",
+    "Optional Next Step",
+];
+
+/// The summary's other numbered sections. Only a heading named here or in
+/// [`COMPACT_SUMMARY_KEEPS`] starts a section: a summary's own numbered lists
+/// sit at the line's start too (`1. When job finishes: …` inside Pending
+/// Tasks, on this machine), and reading one as a heading would end the section
+/// it belongs to.
+const COMPACT_SUMMARY_DROPS: [&str; 3] = [
+    "Key Technical Concepts",
+    "Files and Code Sections",
+    "All user messages",
+];
+
+/// The kept sections of the compaction summary on one transcript line, or
+/// `None` when the line is not a compaction summary.
+///
+/// A summary whose numbered headings this does not recognise (another CLI
+/// version's shape) is kept whole up to the cap rather than dropped: a summary
+/// cut short still says more than none. Credential values are masked
+/// ([`crate::credential::mask_values`]) — the agent that reads this is often
+/// another provider's model.
+#[must_use]
+pub fn compact_summary_text(line: &str) -> Option<String> {
+    let row: serde_json::Value = serde_json::from_str(line).ok()?;
+    if row.get("type").and_then(serde_json::Value::as_str) != Some("user")
+        || row
+            .get("isCompactSummary")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return None;
+    }
+    let content = row.get("message")?.get("content")?;
+    let text = match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    let kept = kept_summary_sections(&text);
+    let chosen = if kept.trim().is_empty() { text } else { kept };
+    let masked = crate::credential::mask_values(chosen.trim());
+    if masked.is_empty() {
+        return None;
+    }
+    Some(match masked.char_indices().nth(COMPACT_SUMMARY_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &masked[..cut]),
+        None => masked,
+    })
+}
+
+/// The sections of `text` named in [`COMPACT_SUMMARY_KEEPS`], each from its
+/// numbered heading (`4. Errors and fixes:`) to the next known heading, in the
+/// order the summary has them. Empty when no kept heading is recognised.
+fn kept_summary_sections(text: &str) -> String {
+    let named =
+        |title: &str, names: &[&str]| names.iter().any(|name| name.eq_ignore_ascii_case(title));
+    let heading = |line: &str| -> Option<bool> {
+        let rest = line.trim_start();
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        let after = rest[digits..].strip_prefix(". ")?;
+        let (title, _) = after.split_once(':')?;
+        let title = title.trim();
+        if digits == 0 {
+            return None;
+        }
+        if named(title, &COMPACT_SUMMARY_KEEPS) {
+            Some(true)
+        } else if named(title, &COMPACT_SUMMARY_DROPS) {
+            Some(false)
+        } else {
+            None
+        }
+    };
+    let mut kept = String::new();
+    let mut keeping = false;
+    for line in text.lines() {
+        if let Some(keep) = heading(line) {
+            keeping = keep;
+        }
+        if keeping {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    kept
+}
+
+/// The kept sections of the newest compaction summary in the transcript at
+/// `path` ([`compact_summary_text`]), looking no further back than
+/// [`LOOK_BACK_BYTES`] — `None` when the conversation was never compacted that
+/// near its end, or by a CLI that writes no such line.
+#[must_use]
+pub fn latest_compact_summary(path: &Path) -> Option<String> {
+    newest_line_holding(path, COMPACT_SUMMARY_MARK, LOOK_BACK_BYTES)
+        .and_then(|line| compact_summary_text(&line))
+}
+
 /// The last assistant turn in the transcript at `path`, clamped for a card.
 ///
 /// A bounded read of the file's tail, scanned backwards line by line.
@@ -4929,5 +5051,113 @@ mod tests {
             prompt_line("편지는 <cross-session-message from= 으로 시작한다는데 맞아?").as_deref(),
             Some("편지는 <cross-session-message from= 으로 시작한다는데 맞아?")
         );
+    }
+
+    /// A compaction summary in Claude Code's shape: the preamble, nine
+    /// numbered sections, and numbered lists of the summary's own inside them.
+    fn compaction_line(summary: &str) -> String {
+        serde_json::json!({
+            "type": "user",
+            "isCompactSummary": true,
+            "message": { "role": "user", "content": summary },
+        })
+        .to_string()
+    }
+
+    const SUMMARY: &str = "This session is being continued from a previous conversation.\n\n\
+        Summary:\n\
+        1. Primary Request and Intent:\n   Add retries to the API client.\n\n\
+        2. Key Technical Concepts:\n   - exponential backoff\n\n\
+        3. Files and Code Sections:\n   - src/api/client.ts\n     ```ts\n     fn retry() {}\n     ```\n\n\
+        4. Errors and fixes:\n   - fetchWithTimeout swallowed network errors; surfaced them.\n\n\
+        5. Problem Solving:\n   Retrying POST was rejected: it is not idempotent.\n\n\
+        6. All user messages:\n   - \"only GET/PUT/DELETE\"\n\n\
+        7. Pending Tasks:\n\
+        1. When the job finishes: read its log.\n\
+        2. Then: hand the head over.\n\n\
+        8. Current Work:\n   Writing the retry test, token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789.\n\n\
+        9. Optional Next Step:\n   Run the client tests.";
+
+    /// A handover keeps what was asked, what broke, what was ruled out and
+    /// what stands next — and leaves out the concepts, the files with their
+    /// code and the person's messages. A numbered line of the summary's own
+    /// (`1. When the job finishes: …`) does not end the section it sits in.
+    #[test]
+    fn a_compaction_summary_keeps_the_sections_a_handover_needs() {
+        let kept = compact_summary_text(&compaction_line(SUMMARY)).expect("a summary");
+        for keeps in [
+            "1. Primary Request and Intent:",
+            "4. Errors and fixes:",
+            "Retrying POST was rejected",
+            "7. Pending Tasks:",
+            "2. Then: hand the head over.",
+            "8. Current Work:",
+            "9. Optional Next Step:",
+        ] {
+            assert!(kept.contains(keeps), "{keeps:?} missing from {kept}");
+        }
+        for drops in [
+            "This session is being continued",
+            "exponential backoff",
+            "fn retry()",
+            "only GET/PUT/DELETE",
+        ] {
+            assert!(!kept.contains(drops), "{drops:?} kept in {kept}");
+        }
+        assert!(
+            !kept.contains("abcdefghijklmnopqrstuvwxyz0123456789"),
+            "a credential value rode along: {kept}"
+        );
+    }
+
+    /// A summary in a shape this does not know is kept whole up to the cap,
+    /// and any summary stops at the cap; a line that is not a compaction
+    /// summary — the person's own words, an assistant line — is none.
+    #[test]
+    fn an_unknown_summary_shape_is_kept_whole_and_every_summary_stops_at_its_cap() {
+        let plain = compact_summary_text(&compaction_line("## Request\nFix the parser."))
+            .expect("a summary");
+        assert_eq!(plain, "## Request\nFix the parser.");
+        let long = format!(
+            "1. Current Work:\n{}",
+            "가".repeat(COMPACT_SUMMARY_MAX_CHARS * 2)
+        );
+        let cut = compact_summary_text(&compaction_line(&long)).expect("a summary");
+        assert_eq!(cut.chars().count(), COMPACT_SUMMARY_MAX_CHARS + 1);
+        assert!(cut.ends_with('…'));
+        let person = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": SUMMARY },
+        })
+        .to_string();
+        assert_eq!(compact_summary_text(&person), None);
+        let assistant =
+            compaction_line(SUMMARY).replace("\"type\":\"user\"", "\"type\":\"assistant\"");
+        assert_eq!(compact_summary_text(&assistant), None);
+    }
+
+    /// The newest summary in the file is the one read, past the bounded tail;
+    /// a transcript never compacted has none.
+    #[test]
+    fn the_latest_compaction_summary_is_read_past_the_tail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("session.jsonl");
+        let older = compaction_line("1. Current Work:\n   the older work");
+        let newer = compaction_line("1. Current Work:\n   the newer work");
+        let filler = format!(
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":"{}"}}}}"#,
+            "x".repeat(1_000)
+        );
+        let mut text = format!("{older}\n{newer}\n");
+        for _ in 0..2_000 {
+            text.push_str(&filler);
+            text.push('\n');
+        }
+        std::fs::write(&file, &text).expect("write");
+        let found = latest_compact_summary(&file).expect("the newest summary");
+        assert!(found.contains("the newer work"), "{found}");
+        let never = dir.path().join("never.jsonl");
+        std::fs::write(&never, format!("{filler}\n")).expect("write");
+        assert_eq!(latest_compact_summary(&never), None);
     }
 }

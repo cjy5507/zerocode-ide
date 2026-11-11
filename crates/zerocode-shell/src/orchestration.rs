@@ -10658,6 +10658,21 @@ fn walk_handovers(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_m
     walk_handover(&held.actor, &door, &plan, &capability, now_ms)
 }
 
+/// Where a handed-over worker left off: the recap its transcript's tail makes
+/// and, beside it, the kept sections of the newest compaction summary its CLI
+/// wrote ([`zerocode_core::transcript::latest_compact_summary`]) — the
+/// decisions and the approaches already ruled out, which last words cannot
+/// carry. Read while the pane still stands, by both roads that hand work over
+/// (the beat's walk and the person's press on the wall chip).
+pub(crate) fn predecessor_recap(
+    transcript: &str,
+    tail: &[String],
+) -> Option<zerocode_core::orchestration::HandoverRecap> {
+    let summary =
+        zerocode_core::transcript::latest_compact_summary(std::path::Path::new(transcript));
+    zerocode_core::orchestration::handover_recap_with_summary(transcript, tail, summary)
+}
+
 /// Walk one handover: reserve → ① WIP commit → ② `worker-stop` → ③
 /// `worker-start --retry-of … --inherit-checkout` → settle (§2.3).
 ///
@@ -10677,9 +10692,7 @@ pub(crate) fn walk_handover(
     capability: &str,
     now_ms: i64,
 ) -> Walked {
-    use zerocode_core::orchestration::{
-        HANDOVER_STEPS, HandoverStep, Text, handover_paragraph, handover_recap,
-    };
+    use zerocode_core::orchestration::{HANDOVER_STEPS, HandoverStep, Text, handover_paragraph};
     let began = std::time::Instant::now();
     let current_time =
         || now_ms.saturating_add(i64::try_from(began.elapsed().as_millis()).unwrap_or(i64::MAX));
@@ -10787,7 +10800,7 @@ pub(crate) fn walk_handover(
     // and, with it, the window's record of which transcript was its own.
     let recap = door
         .predecessor_tail(plan)
-        .and_then(|(transcript, tail)| handover_recap(&transcript, &tail));
+        .and_then(|(transcript, tail)| predecessor_recap(&transcript, &tail));
     if !authorized() {
         return revoked(stop);
     }

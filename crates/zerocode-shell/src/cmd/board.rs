@@ -1424,6 +1424,11 @@ pub(crate) fn continuation_source(state: State<'_, AppState>, term: TermId) -> C
             .map(|pty| continuation_capture(lock_pty(&pty).terminal().grid()))
             .filter(|text| !text.is_empty())
     };
+    // Read before the pane states are held: a look back through the file is
+    // bounded (`LOOK_BACK_BYTES`) but it is disk, and no lock waits on it.
+    let summary = transcript_path.as_deref().and_then(|path| {
+        zerocode_core::transcript::latest_compact_summary(std::path::Path::new(path))
+    });
     let states = state.pane_states();
     let held = states.get(&term);
     ContinuationSource {
@@ -1432,6 +1437,7 @@ pub(crate) fn continuation_source(state: State<'_, AppState>, term: TermId) -> C
         captured,
         you: held.and_then(|one| one.you.clone()),
         said: held.and_then(|one| one.said.clone()),
+        summary,
     }
 }
 

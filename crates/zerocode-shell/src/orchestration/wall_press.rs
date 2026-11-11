@@ -40,7 +40,7 @@
 use super::*;
 use zerocode_core::orchestration::{
     HandoverPlan, NotResumed, QuotaWallChip, RESUME_LINE, ResumePlan, WALL_RETRY_LINE, WallRefusal,
-    handover_paragraph, handover_recap, newest_wall, parse_on_quota_wall, person_turn_marker_at,
+    handover_paragraph, newest_wall, parse_on_quota_wall, person_turn_marker_at,
     person_wall_marker, resume_plan, wall_cause, wall_chip_for,
 };
 
@@ -540,7 +540,7 @@ pub(crate) fn hand_over(
     // pane and, with it, the window's record of which transcript was its own.
     let recap = LiveDoor { host, overrides }
         .predecessor_tail(&plan)
-        .and_then(|(transcript, tail)| handover_recap(&transcript, &tail));
+        .and_then(|(transcript, tail)| predecessor_recap(&transcript, &tail));
     let brief = format!(
         "{}{}",
         handover_paragraph(&plan, None, recap.as_ref(), now_ms),

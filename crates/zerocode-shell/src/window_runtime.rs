@@ -1081,6 +1081,13 @@ pub(super) struct ContinuationSource {
     pub(super) you: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) said: Option<String>,
+    /// The kept sections of the newest compaction summary in that transcript
+    /// ([`zerocode_core::transcript::latest_compact_summary`]): what was asked,
+    /// what broke and how it was fixed, what was ruled out and what stands
+    /// next — so the agent that continues does not start by reading the whole
+    /// file for them. Not Orca's: Orca hands over the path alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) summary: Option<String>,
 }
 
 /// The session a pane is on, if its agent has told us.
