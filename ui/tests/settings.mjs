@@ -5203,6 +5203,31 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     assert(started.want && started.name === started.want && started.closes, "the template did not fill the form", started);
     assertEqual([started.kind, started.picked, started.folded], ["agent", "", true], "the template left the form on another kind, or the picker on its choice");
     assert(started.closeWord && started.summary.includes(started.closeWord), "the folded details did not say what the template set", started);
+    // What a job runs besides its prompt is on screen whenever it is there: words
+    // put into the folded command or precheck — as an agent filling the form
+    // would put them, by value and an input event — open the fold, and its
+    // summary is the person's alone to close.
+    const ownCommands = await pageA.evaluate(() => {
+      const fold = document.getElementById("auto-details");
+      const typed = (id, words) => {
+        const field = document.getElementById(id);
+        field.value = words;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        return fold.open;
+      };
+      const opened = {};
+      for (const [id, words] of [["auto-command", "sh -c true"], ["auto-precheck", "test -f go"]]) {
+        opened[id] = typed(id, words);
+        typed(id, "");
+        fold.open = false;
+      }
+      return { ...opened, summaryIsThePersons: "personOnly" in fold.querySelector("summary").dataset };
+    });
+    assertEqual(
+      ownCommands,
+      { "auto-command": true, "auto-precheck": true, summaryIsThePersons: true },
+      "a command or a precheck put into the fold stayed out of sight, or an agent could close the fold",
+    );
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
       await setQualityTheme(pageA, theme);
       assertEqual(await axeViolations(pageA, AxeBuilder, "#auto-form"), [], `en/${theme} automation editor accessibility`);

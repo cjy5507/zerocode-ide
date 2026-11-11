@@ -488,6 +488,29 @@ fn saving_switching_and_running_an_automation_are_the_persons_alone() {
         taken < awaited && ingest.matches("{ hand });").count() == 2,
         "the hand is taken before anything is awaited and both commands carry it"
     );
+    // The press that saves has what it saves in view: a command of the job's
+    // own and the check before it sit in a fold, which opens as either gains
+    // words and whose summary an agent cannot close.
+    let fold = index
+        .find("id=\"auto-details\"")
+        .expect("the form folds its details");
+    let summary = &index[fold..];
+    let summary = &summary[summary.find("<summary").expect("the fold has a summary")..];
+    assert!(
+        summary[..summary.find('>').unwrap_or(0)].contains("data-person-only"),
+        "the fold's summary carries data-person-only"
+    );
+    let shown = block_after(&settings, "function showAutoOwnCommands() {");
+    assert!(
+        shown.contains("el(\"auto-command\").value.trim() || el(\"auto-precheck\").value.trim()")
+            && shown.contains("el(\"auto-details\").open = true"),
+        "the fold opens while the command or the precheck has words"
+    );
+    let wired = "for (const id of [\"auto-precheck\", \"auto-command\"]) {\n  el(id).addEventListener(\"input\", showAutoOwnCommands);\n  el(id).addEventListener(\"change\", showAutoOwnCommands);\n}";
+    assert!(
+        settings.contains(wired),
+        "words put into either field open the fold, whoever wrote them"
+    );
 }
 
 #[test]

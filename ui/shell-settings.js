@@ -13047,10 +13047,11 @@ function editAutomation(row, template = null) {
   // A template is a way to start: it is offered only while the job is new.
   paintAutoTemplatePick();
   el("auto-template-field").hidden = stored;
-  // The fold opens on the one detail that decides what runs — a command of the
-  // person's own; everything else in it is read from its summary line.
-  const advanced = document.querySelector(".auto-advanced");
-  if (advanced) advanced.open = autoDraft.command.trim() !== "";
+  // The fold opens on what the job runs besides its prompt — a command of its
+  // own, a check before it starts; everything else in it is read from its
+  // summary line.
+  el("auto-details").open = false;
+  showAutoOwnCommands();
   paintAutoDetailsSummary();
   showModal(el("auto-editor-scrim"));
 }
@@ -13244,8 +13245,21 @@ function paintPrecheckTimeout() {
   el("auto-precheck-timeout").disabled = el("auto-precheck").value.trim() === "";
 }
 
+/* A command of the job's own and the check run before it are what the job
+ * runs besides its prompt, so the fold that holds them stands open whenever
+ * either has words, whoever wrote them. An agent may fill this form and only
+ * the person saves it (`save_automation`): what the person's press saves is on
+ * screen, and the fold's summary is theirs alone to close. */
+function showAutoOwnCommands() {
+  if (el("auto-command").value.trim() || el("auto-precheck").value.trim()) el("auto-details").open = true;
+}
+
 el("auto-mode").addEventListener("change", paintAutoMode);
 el("auto-precheck").addEventListener("input", paintPrecheckTimeout);
+for (const id of ["auto-precheck", "auto-command"]) {
+  el(id).addEventListener("input", showAutoOwnCommands);
+  el(id).addEventListener("change", showAutoOwnCommands);
+}
 for (const id of ["auto-mode", "auto-reuse", "auto-close-done", "auto-grace", "auto-precheck", "auto-command"]) {
   el(id).addEventListener("input", paintAutoDetailsSummary);
   el(id).addEventListener("change", paintAutoDetailsSummary);
