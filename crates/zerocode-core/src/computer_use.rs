@@ -446,6 +446,16 @@ pub const COMPUTER_HANDOFF_TIMEOUT_MS: u64 = 600_000;
 /// How long the card for a schedule an agent asks for (`recipe-schedule`)
 /// stands. Silence past it is a no: nothing is written.
 pub const RECIPE_SCHEDULE_ASK_MS: u64 = 180_000;
+
+/// The flag a walk carries when the window starts it for a schedule an agent
+/// asked for, and its key in the command's parameters: the SHA-256, in hex, of
+/// the Flow document the person allowed. The walk judges the very text it read
+/// against it and refuses another — so what is walked is what was allowed, with
+/// no moment between a check and the walk for the document to change in. It
+/// only ever adds a refusal: anyone may say it, and gains nothing by it.
+pub const FLOW_SHA256_FLAG: &str = "flow-sha256";
+/// See [`FLOW_SHA256_FLAG`].
+pub const FLOW_SHA256_PARAM: &str = "flowSha256";
 /// How long a hand whose place is covered waits before it lists the windows
 /// again, when what stands in front looks like it is passing — a
 /// notification sliding in or out, a window being dragged (t-12979): a
@@ -4242,6 +4252,7 @@ fn parse_flags(
         ("l1", "l1"),
         ("after-text", "afterText"),
         ("flow-check", "flowCheck"),
+        (FLOW_SHA256_FLAG, FLOW_SHA256_PARAM),
         ("every", "every"),
         ("at", "at"),
         ("day", "day"),
@@ -4733,6 +4744,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::RecipeRun => &[
             "json",
             "name",
+            FLOW_SHA256_FLAG,
             "params",
             "tab",
             "start",
@@ -5284,6 +5296,17 @@ fn validate(
                 .ok_or("a recipe needs --name")?;
             if recipe_slug(name).is_empty() {
                 return Err("--name needs at least one letter or digit".into());
+            }
+            if params
+                .get(FLOW_SHA256_PARAM)
+                .and_then(Value::as_str)
+                .is_some_and(|held| {
+                    held.len() != 64 || !held.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+            {
+                return Err(format!(
+                    "--{FLOW_SHA256_FLAG} is a SHA-256 in hex: the document a scheduled walk is held to"
+                ));
             }
             // The words that stand a saved recipe up as a Flow are the screen's
             // own: an empty condition would be a check nothing can fail.
@@ -10019,6 +10042,39 @@ mod tests {
             .collect();
         let command = batch(&json!(clicks)).expect("twenty-one actions in one judgement");
         assert_eq!(batch_steps(&command).len(), 21);
+    }
+
+    /// A walk may be held to a document: the window says the SHA-256 of the
+    /// Flow the person allowed with the walk it starts for a schedule an agent
+    /// asked for, and what is not a SHA-256 in hex is refused.
+    #[test]
+    fn a_walk_may_be_held_to_the_sha256_of_a_document() {
+        let held = "ab".repeat(32);
+        let flag = format!("--{FLOW_SHA256_FLAG}");
+        let walk = parse_command(&words(&[
+            "recipe-run",
+            "--name",
+            "wallet-qa",
+            &flag,
+            &held,
+            "--json",
+        ]))
+        .expect("a held walk");
+        assert_eq!(walk.method, ComputerMethod::RecipeRun);
+        assert_eq!(walk.params[FLOW_SHA256_PARAM], json!(held));
+        let plain = parse_command(&words(&["recipe-run", "--name", "wallet-qa"])).expect("a walk");
+        assert!(plain.params.get(FLOW_SHA256_PARAM).is_none());
+        for refused in ["abc", &"zz".repeat(32), &"ab".repeat(33)] {
+            let error = parse_command(&words(&[
+                "recipe-run",
+                "--name",
+                "wallet-qa",
+                &flag,
+                refused,
+            ]))
+            .expect_err("not a SHA-256");
+            assert!(error.contains("SHA-256 in hex"), "{refused}: {error}");
+        }
     }
 
     /// `recipe-schedule` asks for a Flow by name and says when in one of two

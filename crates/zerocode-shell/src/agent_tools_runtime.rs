@@ -4253,6 +4253,19 @@ pub(super) fn run_recipe(
             return computer_cli_error(command.json, error_code::INVALID_ARGUMENT, &error.message);
         }
     };
+    // A walk the window started for a schedule an agent asked for is held to
+    // the document the person allowed. `text` is what is walked below, so it
+    // is what is judged: a document rewritten after the start's own look —
+    // `recipe-save` overwrites one without asking — is not walked once.
+    if let Err(error) = computer_use::recipes::schedule::held_to(
+        &text,
+        command
+            .params
+            .get(zerocode_core::computer_use::FLOW_SHA256_PARAM)
+            .and_then(serde_json::Value::as_str),
+    ) {
+        return computer_cli_error(command.json, &error.code, &error.message);
+    }
     let file = file.display().to_string();
     // The arena: the recorded folder answers every step and stands in for
     // the desk; the road and the desk are its, the folder the loop's.

@@ -34663,9 +34663,23 @@ fn a_scheduled_flow_with_no_agent_is_walked_through_the_windows_own_door() {
     );
 
     assert_eq!(
-        flow_run_argv("wallet-qa"),
+        flow_run_argv("wallet-qa", None),
         ["recipe-run", "--name", "wallet-qa", "--json"],
         "the words 「지금 걷기」 submits"
+    );
+    // A job an agent asked for: the walk carries the hash of the document
+    // the person allowed, and judges the text it reads against it.
+    let allowed = "ab".repeat(32);
+    assert_eq!(
+        flow_run_argv("wallet-qa", Some(&allowed)),
+        [
+            "recipe-run",
+            "--name",
+            "wallet-qa",
+            "--json",
+            "--flow-sha256",
+            allowed.as_str()
+        ],
     );
 
     let backend = shipped_backend();
@@ -34695,14 +34709,70 @@ fn a_scheduled_flow_with_no_agent_is_walked_through_the_windows_own_door() {
     assert!(
         walking.contains("crate::flow_console::computer_sender()")
             && walking.contains("sender.send(zerocode_hookd::ComputerRequest {")
-            && walking.contains("argv: flow_run_argv(slug),")
+            && walking.contains("argv: flow_run_argv(slug, held_to),")
             && walking.contains("pane: None,")
             && walking.contains("term: zerocode_core::NO_SHELL_TERM,"),
         "the scheduled walk takes another road than the window's Computer Use door, or claims a shell:\n{walking}"
+    );
+    // What holds a scheduled walk to the document the person allowed is the
+    // walk's own reading: the start hands it the approved hash, and the walk
+    // judges the text it read before it takes a step with it.
+    assert!(
+        walking.contains(".map(|asked| asked.flow_sha256.as_str());"),
+        "the walk of an asked job is not handed the hash the person allowed:\n{walking}"
+    );
+    let walk = block_after(backend, "fn run_recipe(");
+    let read = walk
+        .find("computer_use::recipes::show(&root, name)")
+        .expect("the walk reads the document");
+    let judged = walk
+        .find("computer_use::recipes::schedule::held_to(")
+        .expect("the walk judges the text it read");
+    let first_use = walk
+        .find("recipe_run::first_act(command, &text)")
+        .expect("the walk's first use of the text");
+    assert!(
+        read < judged && judged < first_use,
+        "the walk uses the document before it is held to the one that was allowed:\n{walk}"
+    );
+    // The document is found under the window's own data root — never the one
+    // the Computer Use door remembers from its first request, which a window
+    // just opened has not had: every asked job read as changed until then.
+    assert!(
+        walking.contains("document_sha256(state.local_data_root(), slug)")
+            && !walking.contains("evidence::root()"),
+        "the start looks for the Flow's document where a new window has no word of it:\n{walking}"
     );
     let closing = block_after(backend, "fn close_flow_run(");
     assert!(
         closing.contains("let _store = automation_store_domain();"),
         "closing a walk's row escaped the shared automation lock:\n{closing}"
+    );
+}
+
+/// The hash an approval is held against is read under the root it is handed —
+/// the window's own — so a window that has answered no Computer Use request
+/// yet still reads it. Read under the root that door remembers, every asked
+/// job said 「다시 승인 필요」 after a restart and failed at its minute (t-105044).
+#[test]
+fn a_flows_document_is_hashed_under_the_root_it_is_handed() {
+    let root = tempfile::tempdir().expect("a root");
+    let recipes = root.path().join(crate::computer_use::recipes::RECIPES_DIR);
+    std::fs::create_dir_all(&recipes).expect("the recipes folder");
+    std::fs::write(recipes.join("wallet-qa.md"), "# Wallet QA\n").expect("a document");
+    assert_eq!(
+        crate::cmd::review::flow_document_stands(root.path(), "wallet-qa"),
+        Some(zerocode_core::automation::flow_document_sha256(
+            "# Wallet QA\n"
+        ))
+    );
+    assert_eq!(
+        crate::cmd::review::flow_document_stands(root.path(), "nothing"),
+        None
+    );
+    let reading = block_after(shipped_backend(), "fn flow_document_stands(");
+    assert!(
+        !reading.contains("evidence::root()"),
+        "the document is looked for where a new window has no word of it:\n{reading}"
     );
 }

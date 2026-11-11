@@ -309,7 +309,7 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
                     automation
                         .flow
                         .as_deref()
-                        .and_then(flow_document_stands)
+                        .and_then(|slug| flow_document_stands(state.local_data_root(), slug))
                         .as_deref(),
                 );
             AutomationRow {
@@ -363,7 +363,7 @@ pub(crate) fn approve_automation_flow(
         .find(|held| held.id == id)
         .and_then(|held| held.flow)
         .ok_or_else(|| format!("자동화 {id}을(를) 찾지 못했습니다"))?;
-    let stands = flow_document_stands(&flow)
+    let stands = flow_document_stands(state.local_data_root(), &flow)
         .ok_or_else(|| format!("Flow 문서를 읽을 수 없습니다: {flow}"))?;
     approve_automation_flow_in(
         state.config_root(),
@@ -374,11 +374,13 @@ pub(crate) fn approve_automation_flow(
     Ok(list_automations(state))
 }
 
-/// The hash of a Flow's document as it stands, or `None` when it cannot be
-/// read: what an approval is held against (`recipes::schedule`).
-pub(crate) fn flow_document_stands(slug: &str) -> Option<String> {
-    let recipes = computer_use::evidence::root()?;
-    computer_use::recipes::schedule::document_sha256(&recipes, slug)
+/// The hash of a Flow's document as it stands under the window's data root,
+/// or `None` when it cannot be read: what an approval is held against
+/// (`recipes::schedule`). The root is the window's own (`AppState`), not the
+/// one the Computer Use door remembers from its first request: a window just
+/// opened has answered none, and every asked job read as changed until it did.
+pub(crate) fn flow_document_stands(local_data_root: &Path, slug: &str) -> Option<String> {
+    computer_use::recipes::schedule::document_sha256(local_data_root, slug)
 }
 
 /// The save behind [`save_automation`], for every writer of a job: the second

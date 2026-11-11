@@ -210,6 +210,25 @@ pub(crate) fn document_sha256(recipes_root: &Path, slug: &str) -> Option<String>
 pub(crate) const FLOW_CHANGED: &str =
     "승인한 뒤 Flow 문서가 바뀌었습니다 — 자동화 화면에서 다시 승인해 주세요";
 
+/// Whether `text` — a Flow's document as a walk read it, the very text it is
+/// about to walk — is the one the walk is held to: `held` is the SHA-256 the
+/// window says with the walk it starts for a schedule an agent asked for
+/// (`FLOW_SHA256_FLAG`), and `None` for every other walk. Judged here, on the
+/// walk's own reading, so no check stands a moment before the walk for the
+/// document to change in.
+///
+/// # Errors
+///
+/// When the walk is held to another document than the one it read.
+pub(crate) fn held_to(text: &str, held: Option<&str>) -> Result<(), ComputerUseError> {
+    match held {
+        Some(sha256) if flow_document_sha256(text) != sha256 => {
+            Err(ComputerUseError::invalid_argument(FLOW_CHANGED))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The next [`CARD_RUNS`] minutes the expression names after `now`.
 fn coming(cron: &Cron, now: LocalMinute) -> Vec<LocalMinute> {
     let mut from = now.epoch_minutes + 1;
@@ -705,6 +724,20 @@ mod tests {
             settle(waiting, Decision::Allowed, 1_794_000_000_000, save).expect_err("changed");
         assert!(changed.message.contains("changed while the card stood"));
         assert_eq!(saved.borrow().len(), 1);
+
+        // A walk is held to the document the person allowed by the text it
+        // read: the same text walks, another is refused, and a walk nobody
+        // held to a document walks what it reads.
+        let allowed = flow_document_sha256(&flow);
+        let rewritten = flow.replace("com.example.wallet", "com.example.other");
+        assert!(held_to(&flow, Some(&allowed)).is_ok());
+        assert_eq!(
+            held_to(&rewritten, Some(&allowed))
+                .expect_err("another document")
+                .message,
+            FLOW_CHANGED
+        );
+        assert!(held_to(&rewritten, None).is_ok());
 
         // The same hash is what a walk and the list hold the approval against.
         assert_eq!(

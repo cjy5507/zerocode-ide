@@ -937,11 +937,21 @@ pub(super) fn start_automation(
 }
 
 /// The words a scheduled Flow is walked with: the command the Flow page's
-/// 「지금 걷기」 submits, answered as JSON.
-pub(super) fn flow_run_argv(slug: &str) -> Vec<String> {
-    ["recipe-run", "--name", slug, "--json"]
+/// 「지금 걷기」 submits, answered as JSON — and, for a job an agent asked for,
+/// the SHA-256 of the document the person allowed (`held_to`), which the walk
+/// judges the text it reads against.
+pub(super) fn flow_run_argv(slug: &str, held_to: Option<&str>) -> Vec<String> {
+    let mut argv = ["recipe-run", "--name", slug, "--json"]
         .map(str::to_string)
-        .to_vec()
+        .to_vec();
+    if let Some(sha256) = held_to {
+        argv.push(format!(
+            "--{}",
+            zerocode_core::computer_use::FLOW_SHA256_FLAG
+        ));
+        argv.push(sha256.to_string());
+    }
+    argv
 }
 
 /// Start a Flow job that names no agent: the window walks the recipe itself.
@@ -979,9 +989,12 @@ fn start_flow_run(
     // A job an agent asked for walks the Flow the person allowed, and no other
     // (`computer_use::recipes::schedule`): once the document reads differently
     // the job waits for the person, and its row says why.
-    if automation
-        .flow_changed_since_approval(crate::cmd::review::flow_document_stands(slug).as_deref())
-    {
+    // This look is the early word — the row says why before a walk is asked
+    // for. What holds the walk to the document is the walk itself: it carries
+    // the approved hash (`held_to` below) and judges the text it reads.
+    if automation.flow_changed_since_approval(
+        computer_use::recipes::schedule::document_sha256(state.local_data_root(), slug).as_deref(),
+    ) {
         return Err(remember_automation_failure(
             state,
             automation,
@@ -1037,8 +1050,12 @@ fn start_flow_run(
         },
     );
     let (answer, waiting) = tokio::sync::oneshot::channel();
+    let held_to = automation
+        .asked
+        .as_ref()
+        .map(|asked| asked.flow_sha256.as_str());
     let sent = sender.send(zerocode_hookd::ComputerRequest {
-        argv: flow_run_argv(slug),
+        argv: flow_run_argv(slug, held_to),
         cwd: Some(root.display().to_string()),
         evidence,
         pane: None,
