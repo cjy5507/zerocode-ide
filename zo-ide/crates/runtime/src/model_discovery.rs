@@ -594,7 +594,7 @@ pub fn cache_dir() -> PathBuf {
 }
 
 #[cfg(not(test))]
-fn cache_home() -> PathBuf {
+pub(crate) fn cache_home() -> PathBuf {
     crate::default_config_home()
 }
 
@@ -602,7 +602,7 @@ fn cache_home() -> PathBuf {
 /// (what `conventional_config_home` names). It gets a directory of its process
 /// instead: the person's last refresh neither reaches it nor is written over.
 #[cfg(test)]
-fn cache_home() -> PathBuf {
+pub(crate) fn cache_home() -> PathBuf {
     let home = crate::default_config_home();
     if crate::conventional_config_home().as_deref() == Some(home.as_path()) {
         std::env::temp_dir().join(format!("zo-runtime-tests-{}", std::process::id()))

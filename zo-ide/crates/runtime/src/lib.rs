@@ -41,6 +41,7 @@ pub mod mcp_http_common;
 pub mod mcp_lifecycle_hardened;
 mod mcp_limits;
 pub mod mcp_oauth;
+pub mod mcp_tool_listings;
 pub mod mcp_sse;
 mod mcp_stdio;
 pub mod mcp_ws;
@@ -262,7 +263,7 @@ pub use mcp_stdio::{
     McpPromptMessage, McpReadResourceParams, McpReadResourceResult, McpResource,
     McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess, McpTool,
     McpToolCallContent, McpToolCallParams, McpToolCallResult, McpToolDiscoveryReport,
-    UnsupportedMcpServer,
+    RelistedServer, UnsupportedMcpServer,
 };
 pub use mcp_ws::{connect_mcp_ws, McpWsProcess};
 pub use model_inventory::{

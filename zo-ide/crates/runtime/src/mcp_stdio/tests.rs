@@ -347,6 +347,7 @@ fn write_manager_mcp_server_script() -> PathBuf {
             "LIST_TOOLS_DELAY_MS = int(os.environ.get('MCP_LIST_TOOLS_DELAY_MS', '0'))",
             "INITIALIZE_HANG_ALWAYS = os.environ.get('MCP_INITIALIZE_HANG_ALWAYS') == '1'",
             "SPAWN_LOG = os.environ.get('MCP_SPAWN_LOG')",
+            "TOOLS_FILE = os.environ.get('MCP_TOOLS_FILE')",
             "BARRIER_DIR = os.environ.get('MCP_LIST_BARRIER_DIR')",
             "BARRIER_COUNT = int(os.environ.get('MCP_LIST_BARRIER_COUNT', '0'))",
             "BARRIER_DEADLINE_MS = int(os.environ.get('MCP_LIST_BARRIER_DEADLINE_MS', '0'))",
@@ -463,6 +464,14 @@ fn write_manager_mcp_server_script() -> PathBuf {
             "                }",
             "            }",
             "        ]",
+            "        # A server whose tools change while its launch stays the same:",
+            "        # the names in TOOLS_FILE, once that file exists.",
+            "        if TOOLS_FILE and os.path.exists(TOOLS_FILE):",
+            "            with open(TOOLS_FILE, encoding='utf-8') as handle:",
+            "                tools = [",
+            "                    {'name': name, 'description': f'{name} of {LABEL}', 'inputSchema': {'type': 'object', 'properties': {}}}",
+            "                    for name in handle.read().split()",
+            "                ]",
             "        if GROW_TOOLS and tools_list_count >= 2:",
             "            tools.append({",
             "                'name': 'echo2',",
@@ -3752,4 +3761,392 @@ fn a_server_that_was_never_started_is_left_alone() {
         assert_eq!(empty.release_unused_servers().await, Vec::<String>::new());
         cleanup_script(&script_path);
     });
+}
+
+// -- tool listings remembered between sessions ---------------------------------
+
+/// Listings kept under `root`, each good for a day.
+fn listings_in(root: &Path) -> crate::mcp_tool_listings::ToolListings {
+    crate::mcp_tool_listings::ToolListings {
+        dir: root.join("listings"),
+        stands_for: crate::mcp_tool_listings::LISTING_STANDS_FOR,
+    }
+}
+
+/// What the fake server was asked, in order — nothing, when it never ran.
+fn asked(log: &Path) -> Vec<String> {
+    fs::read_to_string(log)
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn raw_names(tools: &[super::ManagedMcpTool]) -> Vec<&str> {
+    tools.iter().map(|tool| tool.raw_name.as_str()).collect()
+}
+
+/// A session that opens with listings remembered in `root`.
+fn session(
+    servers: &BTreeMap<String, ScopedMcpServerConfig>,
+    root: &Path,
+) -> McpServerManager {
+    let mut manager = McpServerManager::from_servers(servers);
+    manager.remember_tool_listings(listings_in(root));
+    manager
+}
+
+/// A session learns a server's tools by starting it. The next one opens on
+/// what was listed and starts nothing; its first call starts the server, asks
+/// what it offers now, and is sent; the calls after it ask nothing more.
+#[test]
+fn a_server_listed_by_an_earlier_session_is_not_started_until_its_first_call() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent").to_path_buf();
+        let log = root.join("alpha.log");
+        let servers = BTreeMap::from([(
+            "alpha".to_string(),
+            manager_server_config(&script_path, "alpha", &log),
+        )]);
+
+        // Nothing is remembered yet: the server is started and asked.
+        let mut first = session(&servers, &root);
+        let listed = first.open_server_tools("alpha").await.expect("the first session lists");
+        assert_eq!(raw_names(&listed), ["echo"]);
+        assert_eq!(asked(&log), ["initialize", "tools/list"]);
+        first.shutdown().await.expect("shutdown");
+
+        // The next session has the same tools and has started nothing.
+        let mut second = session(&servers, &root);
+        let opened = second.open_server_tools("alpha").await.expect("the second session opens");
+        assert_eq!(opened, listed);
+        assert_eq!(asked(&log), ["initialize", "tools/list"], "no server was started to list");
+        assert_eq!(
+            second.release_unused_servers().await,
+            Vec::<String>::new(),
+            "so there is none to stop"
+        );
+
+        // Its first call starts the server, asks it, and is sent.
+        let echoed = second
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "hello"})))
+            .await
+            .expect("the first call");
+        assert_eq!(
+            echoed
+                .result
+                .as_ref()
+                .and_then(|result| result.structured_content.as_ref())
+                .and_then(|value| value.get("echoed")),
+            Some(&json!("hello"))
+        );
+        assert_eq!(
+            asked(&log),
+            ["initialize", "tools/list", "initialize", "tools/list", "tools/call"]
+        );
+        assert!(second.take_relisted().is_empty(), "the server offers what was remembered");
+
+        second
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "again"})))
+            .await
+            .expect("the second call");
+        assert_eq!(asked(&log).len(), 6, "one more call and no more questions");
+        assert_eq!(asked(&log)[5], "tools/call");
+
+        second.shutdown().await.expect("shutdown");
+        cleanup_script(&script_path);
+    });
+}
+
+/// A server that offers something else than what was remembered. The first
+/// call that starts it finds out before it is sent: a tool the server no
+/// longer has is refused unsent, the routes and the next session's listing
+/// are the server's answer, and the session is told once what to advertise.
+#[test]
+fn the_first_call_finds_what_a_remembered_server_offers_now() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent").to_path_buf();
+        let log = root.join("alpha.log");
+        let tools_file = root.join("alpha.tools");
+        let servers = BTreeMap::from([(
+            "alpha".to_string(),
+            manager_server_config_with_env(
+                &script_path,
+                "alpha",
+                &log,
+                BTreeMap::from([(
+                    "MCP_TOOLS_FILE".to_string(),
+                    tools_file.to_string_lossy().into_owned(),
+                )]),
+            ),
+        )]);
+        let mut first = session(&servers, &root);
+        first.open_server_tools("alpha").await.expect("the first session lists");
+        first.shutdown().await.expect("shutdown");
+
+        // Between the sessions the server changes: `echo` goes, two tools come.
+        fs::write(&tools_file, "search fetch").expect("the server's new tools");
+
+        let mut second = session(&servers, &root);
+        let opened = second.open_server_tools("alpha").await.expect("the second session opens");
+        assert_eq!(raw_names(&opened), ["echo"], "it opens on what was remembered");
+
+        let error = second
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "gone"})))
+            .await
+            .expect_err("the server no longer has the tool");
+        assert!(matches!(error, McpServerManagerError::UnknownTool { .. }), "{error}");
+        assert_eq!(
+            asked(&log),
+            ["initialize", "tools/list", "initialize", "tools/list"],
+            "the server was asked, and the call was not sent"
+        );
+        let relisted = second.take_relisted();
+        assert_eq!(relisted.len(), 1);
+        assert_eq!(relisted[0].server_name, "alpha");
+        assert_eq!(relisted[0].old_names, [mcp_tool_name("alpha", "echo")]);
+        assert_eq!(raw_names(&relisted[0].tools), ["search", "fetch"]);
+        assert!(second.take_relisted().is_empty(), "the session is told once");
+
+        // What the server has now is routed, and called with no more questions.
+        second
+            .call_tool(&mcp_tool_name("alpha", "search"), Some(json!({"text": "now"})))
+            .await
+            .expect("a tool the server has now");
+        assert_eq!(asked(&log).len(), 5);
+        assert_eq!(asked(&log)[4], "tools/call");
+        second.shutdown().await.expect("shutdown");
+
+        // The third session opens on the server's answer, and starts nothing.
+        let mut third = session(&servers, &root);
+        let opened = third.open_server_tools("alpha").await.expect("the third session opens");
+        assert_eq!(raw_names(&opened), ["search", "fetch"]);
+        assert_eq!(asked(&log).len(), 5);
+
+        cleanup_script(&script_path);
+    });
+}
+
+/// A remembered server that cannot be started when its first call comes: the
+/// call fails unsent, and the listing is dropped — the next session asks the
+/// server instead of offering tools that cannot be called.
+#[test]
+fn a_remembered_server_that_cannot_start_fails_its_call_and_loses_its_listing() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent").to_path_buf();
+        let log = root.join("alpha.log");
+        let servers = BTreeMap::from([(
+            "alpha".to_string(),
+            manager_server_config(&script_path, "alpha", &log),
+        )]);
+        let mut first = session(&servers, &root);
+        first.open_server_tools("alpha").await.expect("the first session lists");
+        first.shutdown().await.expect("shutdown");
+        let key = first.tool_listing_key("alpha").expect("a local server has a key");
+        let now = std::time::SystemTime::now();
+        assert!(listings_in(&root).recall(&key, now).is_some(), "the listing was remembered");
+
+        // The server is gone from the machine; its launch is what it was.
+        fs::remove_file(&script_path).expect("remove the server");
+
+        let mut second = session(&servers, &root);
+        let opened = second.open_server_tools("alpha").await.expect("the second session opens");
+        assert_eq!(raw_names(&opened), ["echo"]);
+        second
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "x"})))
+            .await
+            .expect_err("a server that cannot start answers no call");
+        assert_eq!(asked(&log), ["initialize", "tools/list"], "nothing reached a server");
+        assert!(
+            listings_in(&root).recall(&key, now).is_none(),
+            "the next session asks the server"
+        );
+        assert!(second.take_relisted().is_empty());
+
+        second.shutdown().await.expect("shutdown");
+        cleanup_script(&script_path);
+    });
+}
+
+/// A listing is taken only for the launch it was made from and only while it
+/// stands: the same name started with another environment value is another
+/// server, and a listing too old is not taken. Both ask the server.
+#[test]
+fn a_changed_launch_and_a_listing_too_old_ask_the_server() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent").to_path_buf();
+        let log = root.join("alpha.log");
+        let servers = BTreeMap::from([(
+            "alpha".to_string(),
+            manager_server_config(&script_path, "alpha", &log),
+        )]);
+        let mut first = session(&servers, &root);
+        first.open_server_tools("alpha").await.expect("the first session lists");
+        first.shutdown().await.expect("shutdown");
+        assert_eq!(asked(&log).len(), 2);
+
+        let changed = BTreeMap::from([(
+            "alpha".to_string(),
+            manager_server_config_with_env(
+                &script_path,
+                "alpha",
+                &log,
+                BTreeMap::from([("MCP_LIST_TOOLS_DELAY_MS".to_string(), "1".to_string())]),
+            ),
+        )]);
+        let mut other = session(&changed, &root);
+        assert_ne!(
+            other.tool_listing_key("alpha"),
+            first.tool_listing_key("alpha"),
+            "another environment value is another launch"
+        );
+        other.open_server_tools("alpha").await.expect("the changed launch lists");
+        assert_eq!(asked(&log).len(), 4, "the changed launch was started and asked");
+        other.shutdown().await.expect("shutdown");
+
+        let mut late = McpServerManager::from_servers(&servers);
+        late.remember_tool_listings(crate::mcp_tool_listings::ToolListings {
+            dir: root.join("listings"),
+            stands_for: std::time::Duration::ZERO,
+        });
+        late.open_server_tools("alpha").await.expect("the late session lists");
+        assert_eq!(asked(&log).len(), 6, "a listing that no longer stands is not taken");
+        late.shutdown().await.expect("shutdown");
+
+        // And a session that remembers nothing asks, as every session used to.
+        let mut plain = McpServerManager::from_servers(&servers);
+        plain.open_server_tools("alpha").await.expect("a session without listings lists");
+        assert_eq!(asked(&log).len(), 8);
+        plain.shutdown().await.expect("shutdown");
+
+        cleanup_script(&script_path);
+    });
+}
+
+/// The eager pass — a headless session lists before its first request — opens
+/// on remembered listings as well: a server listed before costs it no start,
+/// one that was not is started, asked and remembered.
+#[test]
+fn the_eager_pass_opens_on_remembered_listings_and_remembers_what_it_asks() {
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let root = script_path.parent().expect("script parent").to_path_buf();
+        let alpha_log = root.join("alpha.log");
+        let beta_log = root.join("beta.log");
+        let alpha = ("alpha".to_string(), manager_server_config(&script_path, "alpha", &alpha_log));
+        let beta = ("beta".to_string(), manager_server_config(&script_path, "beta", &beta_log));
+
+        // Only alpha is listed by the first session.
+        let mut first = session(&BTreeMap::from([alpha.clone()]), &root);
+        let report = first.discover_tools_best_effort().await;
+        assert_eq!(report.tools.len(), 1);
+        assert!(report.failed_servers.is_empty(), "{:?}", report.failed_servers);
+        first.shutdown().await.expect("shutdown");
+
+        let mut second = session(&BTreeMap::from([alpha, beta]), &root);
+        let report = second.discover_tools_best_effort().await;
+        assert!(report.failed_servers.is_empty(), "{:?}", report.failed_servers);
+        let mut names: Vec<&str> = report.tools.iter().map(|tool| tool.qualified_name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, [mcp_tool_name("alpha", "echo"), mcp_tool_name("beta", "echo")]);
+        assert_eq!(asked(&alpha_log), ["initialize", "tools/list"], "alpha was not started again");
+        assert_eq!(asked(&beta_log), ["initialize", "tools/list"], "beta was started and asked");
+
+        // Both are routed: the remembered one starts on its call.
+        second
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({"text": "a"})))
+            .await
+            .expect("call the remembered server");
+        second
+            .call_tool(&mcp_tool_name("beta", "echo"), Some(json!({"text": "b"})))
+            .await
+            .expect("call the server that was asked");
+        assert_eq!(
+            asked(&alpha_log),
+            ["initialize", "tools/list", "initialize", "tools/list", "tools/call"]
+        );
+        assert_eq!(asked(&beta_log), ["initialize", "tools/list", "tools/call"]);
+        second.shutdown().await.expect("shutdown");
+
+        // The third session starts neither.
+        let mut third = session(
+            &BTreeMap::from([
+                ("alpha".to_string(), manager_server_config(&script_path, "alpha", &alpha_log)),
+                ("beta".to_string(), manager_server_config(&script_path, "beta", &beta_log)),
+            ]),
+            &root,
+        );
+        let report = third.discover_tools_best_effort().await;
+        assert_eq!(report.tools.len(), 2);
+        assert_eq!(asked(&alpha_log).len(), 5);
+        assert_eq!(asked(&beta_log).len(), 3);
+
+        cleanup_script(&script_path);
+    });
+}
+
+/// A remote server and an interactive OAuth bridge are never left unstarted
+/// on a listing — there is nothing to file one under — and a local server is.
+#[test]
+fn only_a_local_server_that_is_no_oauth_bridge_has_a_listing_key() {
+    let script_path = write_manager_mcp_server_script();
+    let root = script_path.parent().expect("script parent").to_path_buf();
+    let servers = BTreeMap::from([
+        (
+            "local".to_string(),
+            manager_server_config(&script_path, "local", &root.join("local.log")),
+        ),
+        (
+            "bridge".to_string(),
+            ScopedMcpServerConfig {
+                scope: ConfigSource::User,
+                keychain_grant: None,
+                config: McpServerConfig::Stdio(McpStdioServerConfig {
+                    command: "npx".to_string(),
+                    args: vec![
+                        "-y".to_string(),
+                        "mcp-remote".to_string(),
+                        "https://mcp.example.com/v1/sse".to_string(),
+                    ],
+                    env: BTreeMap::new(),
+                    tool_call_timeout_ms: None,
+                }),
+            },
+        ),
+        (
+            "remote".to_string(),
+            remote_http_server_config("https://mcp.example.com/mcp"),
+        ),
+    ]);
+    let manager = session(&servers, &root);
+
+    let key = manager.tool_listing_key("local").expect("a local server has a key");
+    assert!(key.starts_with("local-"), "the key names the server: {key}");
+    assert_eq!(manager.tool_listing_key("local"), Some(key), "and is the same each time");
+    assert_eq!(manager.tool_listing_key("bridge"), None);
+    assert_eq!(manager.tool_listing_key("remote"), None);
+    assert_eq!(manager.tool_listing_key("unknown"), None);
+    cleanup_script(&script_path);
 }

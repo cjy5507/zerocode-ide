@@ -122,6 +122,26 @@ pub fn scoped_mcp_config_hash(config: &ScopedMcpServerConfig) -> String {
     stable_hex_hash(&rendered)
 }
 
+/// What tells one local server's launch from another's, for a tool listing
+/// remembered between sessions ([`crate::mcp_tool_listings`]): the server's
+/// name and how it is started — command, arguments, environment. A changed
+/// argument or environment value reads as another server, whose tools are
+/// asked afresh. A wrong match would cost one stale listing, which the first
+/// call corrects; nothing is granted on it.
+#[must_use]
+pub(crate) fn stdio_launch_hash(
+    server_name: &str,
+    command: &str,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+) -> String {
+    stable_hex_hash(&format!(
+        "listing|{server_name}|{command}|{}|{}",
+        render_command_signature(args.iter().map(String::as_str)),
+        render_env_signature(env)
+    ))
+}
+
 fn render_command_signature<'a>(command: impl IntoIterator<Item = &'a str>) -> String {
     let mut rendered = String::from("[");
     let mut first = true;

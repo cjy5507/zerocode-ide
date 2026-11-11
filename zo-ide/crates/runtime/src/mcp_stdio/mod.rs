@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value as JsonValue;
 use tokio::time::timeout;
@@ -17,6 +17,7 @@ use crate::mcp_lifecycle_hardened::{
     McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase,
 };
 use crate::mcp_sse::McpSseProcess;
+use crate::mcp_tool_listings::ToolListings;
 use crate::mcp_ws::McpWsProcess;
 
 #[cfg(test)]
@@ -108,6 +109,30 @@ pub struct ManagedMcpTool {
     pub qualified_name: String,
     pub raw_name: String,
     pub tool: McpTool,
+}
+
+impl ManagedMcpTool {
+    /// A tool as `server_name` listed it — now, or when the listing was
+    /// remembered — under the name the model calls it by.
+    #[must_use]
+    pub fn listed(server_name: &str, tool: McpTool) -> Self {
+        Self {
+            server_name: server_name.to_string(),
+            qualified_name: mcp_tool_name(server_name, &tool.name),
+            raw_name: tool.name.clone(),
+            tool,
+        }
+    }
+}
+
+/// A server whose own answer differed from the listing a session opened on
+/// ([`McpServerManager::take_relisted`]): the names its tools were advertised
+/// under until then, and its tools now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelistedServer {
+    pub server_name: String,
+    pub old_names: Vec<String>,
+    pub tools: Vec<ManagedMcpTool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,6 +400,18 @@ pub struct McpServerManager {
     discover_server_timeout_override_ms: Option<u64>,
     /// Soft overall discovery scheduling budget (see [`MCP_DISCOVER_TOTAL_TIMEOUT_MS`]).
     discover_total_timeout_ms: u64,
+    /// Where tool listings are remembered between sessions, when the session
+    /// asked for that ([`Self::remember_tool_listings`]). `None` asks every
+    /// server every time, as before 2026-11-11.
+    listings: Option<ToolListings>,
+    /// The servers whose tools this session took from a remembered listing
+    /// and has not asked the server about, each with those tools. The first
+    /// tool call that reaches one asks it before the call is sent
+    /// ([`Self::call_tool`]).
+    listed_from_memory: BTreeMap<String, Vec<McpTool>>,
+    /// The servers whose own answer differed from what was remembered, for
+    /// the session to advertise ([`Self::take_relisted`]).
+    relisted: Vec<RelistedServer>,
 }
 
 impl McpServerManager {
@@ -416,6 +453,9 @@ impl McpServerManager {
             next_request_id: 1,
             discover_server_timeout_override_ms: None,
             discover_total_timeout_ms: MCP_DISCOVER_TOTAL_TIMEOUT_MS,
+            listings: None,
+            listed_from_memory: BTreeMap::new(),
+            relisted: Vec::new(),
         }
     }
 
@@ -515,6 +555,9 @@ impl McpServerManager {
             next_request_id: 1,
             discover_server_timeout_override_ms: self.discover_server_timeout_override_ms,
             discover_total_timeout_ms: self.discover_total_timeout_ms,
+            listings: self.listings.clone(),
+            listed_from_memory: BTreeMap::new(),
+            relisted: Vec::new(),
         })
     }
 
@@ -537,7 +580,25 @@ impl McpServerManager {
         if let Some(server) = detached.servers.remove(server_name) {
             self.servers.insert(server_name.to_string(), server);
         }
+        // Whether these tools were asked for or remembered comes back with
+        // the server.
+        self.listed_from_memory.remove(server_name);
+        self.listed_from_memory.append(&mut detached.listed_from_memory);
+        self.commit_server_tools(server_name, fresh)
+    }
 
+    /// Make `fresh` the tools routed to `server_name`: its stale routes are
+    /// dropped in a candidate index that keeps every other server's, and the
+    /// candidate is committed only once every fresh route has passed the
+    /// duplicate-name check, so a bad listing leaves no partial routes. The
+    /// discovered-tools cache follows ONLY when it already exists: a `None`
+    /// cache marks a degraded startup that must trigger a full re-discovery
+    /// later, and making it `Some` here would hide that.
+    fn commit_server_tools(
+        &mut self,
+        server_name: &str,
+        fresh: &[ManagedMcpTool],
+    ) -> Result<(), McpServerManagerError> {
         let mut next_index = self.tool_index.clone();
         next_index.retain(|_, route| route.server_name != server_name);
         Self::insert_tool_routes(&mut next_index, fresh)?;
@@ -611,6 +672,15 @@ impl McpServerManager {
         let total_budget = std::time::Duration::from_millis(self.discover_total_timeout_ms);
         let discovery_start = std::time::Instant::now();
         for server_name in server_names {
+            // A server whose listing is remembered is not started, and takes
+            // nothing from the budget.
+            if let Some(remembered) = self.remembered_tools(&server_name) {
+                let tools = Self::listed_tools(&server_name, &remembered);
+                if Self::take_into_pass(&mut next_index, &mut working_servers, &mut discovered_tools, &mut failed_servers, &server_name, tools) {
+                    self.listed_from_memory.insert(server_name, remembered);
+                }
+                continue;
+            }
             // The total budget bounds eager startup fairness. If there is not
             // enough remaining time to let a server's initialize request reach
             // its own timeout, do not start that server: starting it would mask
@@ -662,17 +732,8 @@ impl McpServerManager {
             .await;
             match outcome {
                 Ok(Ok(server_tools)) => {
-                    let mut candidate_index = next_index.clone();
-                    match Self::insert_tool_routes(&mut candidate_index, &server_tools) {
-                        Ok(()) => {
-                            next_index = candidate_index;
-                            working_servers.push(server_name.clone());
-                            discovered_tools.extend(server_tools);
-                        }
-                        Err(error) => {
-                            failed_servers.push(error.discovery_failure(&server_name));
-                        }
-                    }
+                    self.remember_tools(&server_name, &server_tools);
+                    Self::take_into_pass(&mut next_index, &mut working_servers, &mut discovered_tools, &mut failed_servers, &server_name, server_tools);
                 }
                 Ok(Err(error)) => {
                     self.clear_routes_for_server(&server_name);
@@ -693,6 +754,34 @@ impl McpServerManager {
 
         self.tool_index = next_index;
         self.assemble_discovery_report(discovered_tools, working_servers, failed_servers)
+    }
+
+    /// One server's tools into a discovery pass: its routes, its tools, and
+    /// its name among the working servers — unless one of its tool names is
+    /// already another server's, which fails the server instead. Says whether
+    /// the tools went in. Split out of [`Self::discover_tools_best_effort`],
+    /// where a remembered listing and a server's own answer both end here.
+    fn take_into_pass(
+        index: &mut BTreeMap<String, ToolRoute>,
+        working_servers: &mut Vec<String>,
+        discovered_tools: &mut Vec<ManagedMcpTool>,
+        failed_servers: &mut Vec<McpDiscoveryFailure>,
+        server_name: &str,
+        tools: Vec<ManagedMcpTool>,
+    ) -> bool {
+        let mut candidate_index = index.clone();
+        match Self::insert_tool_routes(&mut candidate_index, &tools) {
+            Ok(()) => {
+                *index = candidate_index;
+                working_servers.push(server_name.to_string());
+                discovered_tools.extend(tools);
+                true
+            }
+            Err(error) => {
+                failed_servers.push(error.discovery_failure(server_name));
+                false
+            }
+        }
     }
 
     /// Assemble the final [`McpToolDiscoveryReport`] from a discovery pass and
@@ -754,13 +843,12 @@ impl McpServerManager {
         qualified_tool_name: &str,
         arguments: Option<JsonValue>,
     ) -> Result<JsonRpcResponse<McpToolCallResult>, McpServerManagerError> {
-        let route = self
-            .tool_index
-            .get(qualified_tool_name)
-            .cloned()
-            .ok_or_else(|| McpServerManagerError::UnknownTool {
-                qualified_name: qualified_tool_name.to_string(),
-            })?;
+        let route = self.route_of(qualified_tool_name)?;
+        // A server this session left unstarted on a remembered listing is
+        // asked what it offers now, before the call that starts it is sent:
+        // it has done nothing yet that a failed start could lose, and a tool
+        // it no longer has is refused here instead of being sent.
+        let route = self.confirm_remembered_listing(route, qualified_tool_name).await?;
 
         // A tool call need not be idempotent, so it is never sent twice. Once
         // the request may have reached the server, a timeout or a dropped
@@ -1028,23 +1116,170 @@ impl McpServerManager {
             }
         };
 
-        // 2. Drop this server's stale routes in a candidate index, preserving
-        //    every other server. Commit only after all fresh routes pass the
-        //    duplicate-name check so a bad refresh cannot leave partial routes.
-        let mut next_index = self.tool_index.clone();
-        next_index.retain(|_, route| route.server_name != server_name);
-        Self::insert_tool_routes(&mut next_index, &fresh)?;
-        self.tool_index = next_index;
+        // 2. Route the fresh tools, and no partial set of them.
+        self.commit_server_tools(server_name, &fresh)?;
 
-        // 3. Keep the discovered-tools cache in sync ONLY when it already
-        //    exists. A `None` cache marks a degraded startup that must trigger a
-        //    full re-discovery later; fabricating `Some` here would mask that.
-        if let Some(cache) = self.discovered_tools_cache.as_mut() {
-            cache.retain(|tool| tool.server_name != server_name);
-            cache.extend(fresh.iter().cloned());
-        }
+        // 3. This is the server's own answer: it is what the next session
+        //    opens on, and nothing remembered is left to check against it.
+        self.listed_from_memory.remove(server_name);
+        self.remember_tools(server_name, &fresh);
 
         Ok(fresh)
+    }
+
+    // -- tool listings remembered between sessions ---------------------------
+
+    /// Keep what each local server lists in `listings`, and open later
+    /// sessions on it: a server whose listing still stands is not started
+    /// until its first call ([`crate::mcp_tool_listings`]).
+    pub fn remember_tool_listings(&mut self, listings: ToolListings) {
+        self.listings = Some(listings);
+    }
+
+    /// What a tool listing of `server_name` is remembered under, or `None`
+    /// for a server this manager never leaves unstarted on a listing: a
+    /// remote transport, which has no local process to spare, and an
+    /// interactive OAuth bridge, whose start can open a browser tab and is
+    /// better met when the session opens than in the middle of a call — the
+    /// two [`Self::release_unused_servers`] leaves running as well.
+    ///
+    /// The key is the server's name and a hash of how it is started, so the
+    /// same name with another command, argument or environment value is
+    /// another server.
+    #[must_use]
+    pub fn tool_listing_key(&self, server_name: &str) -> Option<String> {
+        let server = self.servers.get(server_name)?;
+        let McpClientTransport::Stdio(transport) = &server.bootstrap.transport else {
+            return None;
+        };
+        if is_stdio_remote_bridge(transport) {
+            return None;
+        }
+        let launch = crate::mcp::stdio_launch_hash(
+            server_name,
+            &transport.command,
+            &transport.args,
+            &transport.env,
+        );
+        Some(format!("{}-{launch}", server.bootstrap.normalized_name))
+    }
+
+    /// The tools `server_name` listed in an earlier session, when listings
+    /// are remembered, the server is one that may be left unstarted, and its
+    /// listing still stands.
+    fn remembered_tools(&self, server_name: &str) -> Option<Vec<McpTool>> {
+        let listings = self.listings.as_ref()?;
+        let key = self.tool_listing_key(server_name)?;
+        listings.recall(&key, SystemTime::now())
+    }
+
+    /// `tools`, as `server_name`'s managed tools.
+    fn listed_tools(server_name: &str, tools: &[McpTool]) -> Vec<ManagedMcpTool> {
+        tools
+            .iter()
+            .cloned()
+            .map(|tool| ManagedMcpTool::listed(server_name, tool))
+            .collect()
+    }
+
+    /// Remember what `server_name` has just listed, for the next session to
+    /// open on. A listing that cannot be written costs that session one
+    /// start and nothing else, so the failure is not this call's to report.
+    fn remember_tools(&self, server_name: &str, tools: &[ManagedMcpTool]) {
+        let Some(listings) = self.listings.as_ref() else {
+            return;
+        };
+        let Some(key) = self.tool_listing_key(server_name) else {
+            return;
+        };
+        let listed: Vec<McpTool> = tools.iter().map(|tool| tool.tool.clone()).collect();
+        let _ = listings.remember(&key, server_name, &listed, SystemTime::now());
+    }
+
+    /// Drop what is remembered of `server_name`'s tools.
+    fn forget_tools(&self, server_name: &str) {
+        if let (Some(listings), Some(key)) = (self.listings.as_ref(), self.tool_listing_key(server_name)) {
+            listings.forget(&key);
+        }
+    }
+
+    /// A server's tools as a session opens: the listing remembered from an
+    /// earlier session when one stands — routed without starting the server —
+    /// and the server's own answer otherwise ([`Self::refresh_server_tools`]).
+    pub async fn open_server_tools(
+        &mut self,
+        server_name: &str,
+    ) -> Result<Vec<ManagedMcpTool>, McpServerManagerError> {
+        let Some(remembered) = self.remembered_tools(server_name) else {
+            // Boxed: the whole discovery future would otherwise ride inside
+            // this one, and inside every future that awaits it.
+            return Box::pin(self.refresh_server_tools(server_name)).await;
+        };
+        let tools = Self::listed_tools(server_name, &remembered);
+        self.commit_server_tools(server_name, &tools)?;
+        self.listed_from_memory.insert(server_name.to_string(), remembered);
+        Ok(tools)
+    }
+
+    /// The route `qualified_tool_name` is called through.
+    fn route_of(&self, qualified_tool_name: &str) -> Result<ToolRoute, McpServerManagerError> {
+        self.tool_index
+            .get(qualified_tool_name)
+            .cloned()
+            .ok_or_else(|| McpServerManagerError::UnknownTool {
+                qualified_name: qualified_tool_name.to_string(),
+            })
+    }
+
+    /// Ask a server this session opened on a remembered listing what it
+    /// offers now, and give back the route to call — the same one, unless the
+    /// server no longer has the tool, which is an unknown tool.
+    ///
+    /// The server's answer replaces the listing and its routes
+    /// ([`Self::refresh_server_tools`]); where it differs from what was
+    /// remembered, the server is noted for the session to advertise
+    /// ([`Self::take_relisted`]). A server that cannot be started or asked
+    /// fails the call with that error, unsent; it is asked again by the next
+    /// call, and its listing is dropped so that the next session asks it
+    /// too. A server already asked this session is not asked twice.
+    async fn confirm_remembered_listing(
+        &mut self,
+        route: ToolRoute,
+        qualified_tool_name: &str,
+    ) -> Result<ToolRoute, McpServerManagerError> {
+        let Some(remembered) = self.listed_from_memory.get(&route.server_name).cloned() else {
+            return Ok(route);
+        };
+        let server_name = route.server_name;
+        let old_names = self.qualified_tool_names_for_server(&server_name);
+        let tools = match Box::pin(self.refresh_server_tools(&server_name)).await {
+            Ok(tools) => tools,
+            Err(error) => {
+                // The next session does not open on this listing: it asks
+                // the server, and says so where the server fails.
+                self.forget_tools(&server_name);
+                return Err(error);
+            }
+        };
+        if !tools.iter().map(|tool| &tool.tool).eq(remembered.iter()) {
+            self.relisted.push(RelistedServer { server_name, old_names, tools });
+        }
+        self.route_of(qualified_tool_name)
+    }
+
+    /// The servers this session opened on a remembered listing and has not
+    /// started: each is asked what it offers by the first call to it.
+    #[must_use]
+    pub fn listed_from_memory(&self) -> Vec<String> {
+        self.listed_from_memory.keys().cloned().collect()
+    }
+
+    /// The servers whose own answer differed from the listing this session
+    /// opened on, since the last time this was asked. Their routes are
+    /// already the new ones; what the model is shown is the session's to
+    /// change.
+    pub fn take_relisted(&mut self) -> Vec<RelistedServer> {
+        std::mem::take(&mut self.relisted)
     }
 
     fn clear_routes_for_server(&mut self, server_name: &str) {
@@ -1281,13 +1516,7 @@ impl McpServerManager {
             },
             |discovered_tools, page| {
                 for tool in page.tools {
-                    let qualified_name = mcp_tool_name(server_name, &tool.name);
-                    discovered_tools.push(ManagedMcpTool {
-                        server_name: server_name.to_string(),
-                        qualified_name,
-                        raw_name: tool.name.clone(),
-                        tool,
-                    });
+                    discovered_tools.push(ManagedMcpTool::listed(server_name, tool));
                 }
                 page.next_cursor
             },

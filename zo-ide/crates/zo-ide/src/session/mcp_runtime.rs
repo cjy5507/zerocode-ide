@@ -140,6 +140,11 @@ pub(crate) struct RuntimeMcpState {
     /// result as a multimodal block — the same channel `read_image` uses via the
     /// registry's `image_sink`. Drained by [`crate::CliToolExecutor::take_pending_images`].
     pending_images: PendingMcpImages,
+    /// The registry this session's MCP tools are advertised in, once
+    /// discovery has it. A server that answers differently from the
+    /// listing the session opened on is advertised again there
+    /// ([`Self::advertise_relisted`]).
+    advertised: Option<GlobalToolRegistry>,
 }
 
 impl RuntimeMcpState {
@@ -153,6 +158,7 @@ impl RuntimeMcpState {
             discovery_errors: BTreeMap::new(),
             discovery_in_progress: false,
             pending_images: Arc::new(Mutex::new(Vec::new())),
+            advertised: None,
         }
     }
 
@@ -170,13 +176,19 @@ impl RuntimeMcpState {
             discovery_errors: BTreeMap::new(),
             discovery_in_progress: false,
             pending_images: Arc::new(Mutex::new(Vec::new())),
+            advertised: None,
         }
     }
 
     pub(crate) fn new(runtime_config: &runtime::RuntimeConfig) -> Option<Self> {
-        let manager = McpServerManager::from_runtime_config(runtime_config);
+        let mut manager = McpServerManager::from_runtime_config(runtime_config);
         if manager.server_names().is_empty() && manager.unsupported_servers().is_empty() {
             return None;
+        }
+        // A local server whose tools an earlier session listed is not started
+        // to list them again; its first call starts it.
+        if opens_on_remembered_listings() {
+            manager.remember_tool_listings(runtime::mcp_tool_listings::ToolListings::in_zo_home());
         }
 
         // Defer tool discovery OFF the startup path. Connecting + listing each
@@ -193,6 +205,7 @@ impl RuntimeMcpState {
             discovery_errors: BTreeMap::new(),
             discovery_in_progress: false,
             pending_images: Arc::new(Mutex::new(Vec::new())),
+            advertised: None,
         })
     }
 
@@ -529,11 +542,14 @@ impl RuntimeMcpState {
         qualified_tool_name: &str,
         arguments: Option<serde_json::Value>,
     ) -> Result<String, runtime::ToolError> {
-        let response = run_mcp_call_bounded(
+        let outcome = run_mcp_call_bounded(
             qualified_tool_name,
             self.manager.call_tool(qualified_tool_name, arguments),
-        )?
-        .map_err(|error| bounded_tool_error(error.to_string()))?;
+        );
+        // The call may have started a server this session opened on a
+        // remembered listing, and found it offering something else.
+        self.advertise_relisted();
+        let response = outcome?.map_err(|error| bounded_tool_error(error.to_string()))?;
         if let Some(error) = response.error {
             return Err(bounded_tool_error(format!(
                 "MCP tool `{qualified_tool_name}` returned JSON-RPC error: {} ({})",
@@ -559,6 +575,33 @@ impl RuntimeMcpState {
                 .extend(images);
         }
         render_tool_call_result(qualified_tool_name, &result)
+    }
+
+    /// Show the model what a server offers now, where its own answer differed
+    /// from the listing this session opened on: the server's old tools leave
+    /// the registry and its new ones enter it, exactly as a discovery that
+    /// completes does ([`commit_discovered_unit`]). The manager routes the new
+    /// set already. A session with no registry here — a headless one, which
+    /// lists before it has one — keeps what it advertised, and the next
+    /// session opens on the server's new answer.
+    fn advertise_relisted(&mut self) {
+        let relisted = self.manager.take_relisted();
+        let Some(registry) = self.advertised.as_ref() else {
+            return;
+        };
+        for server in relisted {
+            let defs = splice_server_tools(
+                registry.runtime_tool_definitions(),
+                &server.old_names,
+                &server.tools,
+            );
+            let _ = registry.set_runtime_tools(defs);
+        }
+    }
+
+    /// The registry this session's MCP tools are advertised in.
+    fn advertise_in(&mut self, registry: GlobalToolRegistry) {
+        self.advertised = Some(registry);
     }
 
     pub(crate) fn list_resources_for_server(
@@ -763,14 +806,16 @@ pub(crate) struct DetachedDiscoveryUnit {
 }
 
 impl DetachedDiscoveryUnit {
-    /// Drive this server's full discovery (initialize → tools/list, with the
-    /// existing reset/OAuth/timeout/pagination logic) on the detached manager.
+    /// Learn this server's tools on the detached manager: from the listing an
+    /// earlier session remembered, when one stands — the server is then not
+    /// started — and otherwise by the full discovery (initialize → tools/list,
+    /// with the existing reset/OAuth/timeout/pagination logic).
     /// Async and **lock-free** — run concurrently with other units under one
     /// `buffer_unordered`.
     pub(crate) async fn discover(
         &mut self,
     ) -> Result<Vec<ManagedMcpTool>, DiscoveryFailure> {
-        let fresh = match self.manager.refresh_server_tools(&self.server).await {
+        let fresh = match self.manager.open_server_tools(&self.server).await {
             Ok(fresh) => fresh,
             Err(error) => {
                 return Err(DiscoveryFailure::classify(&error, &self.manager, &self.server));
@@ -1119,6 +1164,7 @@ pub(crate) fn discover_pending_mcp_tools_in_background(
                 let _finish = DiscoveryPassGuard(Arc::clone(&thread_mcp_state));
                 discover_pending_mcp_tools(&thread_mcp_state, &registry, &pending);
             }
+            say_which_servers_were_not_started(&thread_mcp_state);
             // The wait holds no claim on the session's servers: a session that
             // ends meanwhile takes them down itself, at once.
             let waiting = Arc::downgrade(&thread_mcp_state);
@@ -1132,6 +1178,24 @@ pub(crate) fn discover_pending_mcp_tools_in_background(
     }
 }
 
+/// Once discovery is done, name the servers it did not start because the
+/// listing an earlier session remembered stood in for asking them. Stderr
+/// reaches `zo-ide.log` on the TUI path; silent when every server was asked.
+fn say_which_servers_were_not_started(mcp_state: &Arc<Mutex<RuntimeMcpState>>) {
+    let unstarted = mcp_state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .manager
+        .listed_from_memory();
+    if !unstarted.is_empty() {
+        eprintln!(
+            "[zo] mcp: opened on the tools {} server(s) listed before ({}) — each starts on its first call",
+            unstarted.len(),
+            unstarted.join(", ")
+        );
+    }
+}
+
 /// How long a discovered server may go unused before it is stopped. Long
 /// enough for the turn that started discovery to reach for a server it was
 /// opened to use; short against a session that runs for hours.
@@ -1142,13 +1206,33 @@ const UNUSED_SERVER_GRACE: std::time::Duration = std::time::Duration::from_secs(
 /// not come back cleanly when it is started a second time.
 const KEEP_UNUSED_SERVERS_ENV: &str = "ZO_MCP_KEEP_UNUSED_SERVERS";
 
-/// [`UNUSED_SERVER_GRACE`], or `None` where [`KEEP_UNUSED_SERVERS_ENV`] is set.
-fn unused_server_grace() -> Option<std::time::Duration> {
-    let keep = std::env::var(KEEP_UNUSED_SERVERS_ENV).is_ok_and(|value| {
+/// The switch that starts every server to list its tools as each session
+/// opens, as before v1.1.143, instead of opening on the listing an earlier
+/// session remembered: any value but empty, `0` or `false`. For a server
+/// whose tools change between sessions without its launch changing, where a
+/// day-old listing is too old.
+const LIST_EVERY_SESSION_ENV: &str = "ZO_MCP_LIST_EVERY_SESSION";
+
+/// Whether the switch `name` is on: set to anything but empty, `0` or `false`.
+fn env_switch_is_on(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
         let value = value.trim();
         !(value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false"))
-    });
-    (!keep).then_some(UNUSED_SERVER_GRACE)
+    })
+}
+
+/// Whether a session opens on the tool listings earlier sessions remembered
+/// under zo's home: unless [`LIST_EVERY_SESSION_ENV`] is on — and never in
+/// this crate's unit tests, which would read and write the listings of
+/// whoever runs them. A test that means to remember hands its manager a
+/// folder of its own.
+fn opens_on_remembered_listings() -> bool {
+    !cfg!(test) && !env_switch_is_on(LIST_EVERY_SESSION_ENV)
+}
+
+/// [`UNUSED_SERVER_GRACE`], or `None` where [`KEEP_UNUSED_SERVERS_ENV`] is set.
+fn unused_server_grace() -> Option<std::time::Duration> {
+    (!env_switch_is_on(KEEP_UNUSED_SERVERS_ENV)).then_some(UNUSED_SERVER_GRACE)
 }
 
 /// Once `grace` has passed, stop the servers nothing has used. A session that
@@ -1263,6 +1347,13 @@ fn discover_pending_mcp_tools(
     registry: &GlobalToolRegistry,
     pending: &[String],
 ) {
+    // The registry these tools are advertised in is also where a server that
+    // later answers differently from its remembered listing is advertised
+    // again (`RuntimeMcpState::advertise_relisted`).
+    mcp_state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .advertise_in(registry.clone());
     let (stdio_units, remote_units) = detach_scheduled_discovery_units(mcp_state, pending);
 
     // Concurrent phase (no lock): drive each class's handshakes under one
@@ -1457,10 +1548,10 @@ fn mcp_annotation_flag(tool: &McpTool, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscoveryPassGuard, MCP_TOOL_CALL_TIMEOUT_ENV,
+        DiscoveryPassGuard, GlobalToolRegistry, MCP_TOOL_CALL_TIMEOUT_ENV,
         MCP_TOOL_CALL_TIMEOUT_SECS, RuntimeMcpState,
         RuntimeToolDefinition, begin_pending_discovery, detach_scheduled_discovery_units,
-        finish_pending_discovery, join_discovery_class_futures,
+        discover_pending_mcp_tools, finish_pending_discovery, join_discovery_class_futures,
         mcp_tool_call_timeout, mcp_tool_result_text, mcp_wrapper_tool_definitions, run_blocking,
         permission_mode_for_mcp_tool, release_unused_servers_after,
         render_tool_call_result, run_mcp_call_bounded,
@@ -1642,6 +1733,122 @@ mod tests {
         drop(state);
         release_unused_servers_after(&waiting, Some(std::time::Duration::ZERO));
         assert!(waiting.upgrade().is_none());
+    }
+
+    /// A local MCP server as a Python script, logging each request it is
+    /// sent to `alpha.log` under `root`. It offers `echo` until the file
+    /// `alpha.tools` is there, and the names in that file from then on — a
+    /// server whose tools change while its launch stays the same.
+    fn changing_server(root: &std::path::Path) -> runtime::ScopedMcpServerConfig {
+        let script = root.join("server.py");
+        let lines = [
+            "import json, os, sys",
+            "log, tools_file = os.environ['MCP_LOG_PATH'], os.environ['MCP_TOOLS_FILE']",
+            "for line in sys.stdin:",
+            "    if not line.strip():",
+            "        continue",
+            "    request = json.loads(line)",
+            "    if 'id' not in request:",
+            "        continue",
+            "    method = request['method']",
+            "    with open(log, 'a', encoding='utf-8') as handle:",
+            "        handle.write(method + '\\n')",
+            "    if method == 'initialize':",
+            "        result = {'protocolVersion': request['params']['protocolVersion'], 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'alpha', 'version': '1'}}",
+            "    elif method == 'tools/list':",
+            "        names = open(tools_file, encoding='utf-8').read().split() if os.path.exists(tools_file) else ['echo']",
+            "        result = {'tools': [{'name': name, 'description': name, 'inputSchema': {'type': 'object', 'properties': {}}} for name in names]}",
+            "    else:",
+            "        result = {'content': [{'type': 'text', 'text': 'done'}], 'isError': False}",
+            "    sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}) + '\\n')",
+            "    sys.stdout.flush()",
+            "",
+        ];
+        std::fs::write(&script, lines.join("\n")).expect("write the server script");
+        let path = |name: &str| root.join(name).to_string_lossy().into_owned();
+        runtime::ScopedMcpServerConfig {
+            scope: runtime::ConfigSource::User,
+            keychain_grant: None,
+            config: runtime::McpServerConfig::Stdio(runtime::McpStdioServerConfig {
+                command: "python3".to_string(),
+                args: vec![path("server.py")],
+                env: std::collections::BTreeMap::from([
+                    ("MCP_LOG_PATH".to_string(), path("alpha.log")),
+                    ("MCP_TOOLS_FILE".to_string(), path("alpha.tools")),
+                ]),
+                tool_call_timeout_ms: None,
+            }),
+        }
+    }
+
+    /// A session opens on the listing an earlier one remembered: its
+    /// discovery advertises those tools and starts no server. The first call
+    /// starts the server, which offers something else by now — the call to
+    /// the tool that is gone is refused, and the registry shows what the
+    /// server has.
+    #[test]
+    fn a_session_opens_on_a_remembered_listing_and_advertises_what_its_first_call_finds() {
+        let root = std::env::temp_dir().join(format!("zo-mcp-session-listing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the test folder");
+        let servers =
+            std::collections::BTreeMap::from([("alpha".to_string(), changing_server(&root))]);
+        let listings = runtime::mcp_tool_listings::ToolListings {
+            dir: root.join("listings"),
+            stands_for: runtime::mcp_tool_listings::LISTING_STANDS_FOR,
+        };
+        let asked = || -> Vec<String> {
+            std::fs::read_to_string(root.join("alpha.log"))
+                .map(|text| text.lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+        let advertised = |registry: &GlobalToolRegistry| -> Vec<String> {
+            registry.runtime_tool_definitions().into_iter().map(|def| def.name).collect()
+        };
+
+        // An earlier session lists the server; then the server changes.
+        let mut earlier = McpServerManager::from_servers(&servers);
+        earlier.remember_tool_listings(listings.clone());
+        run_blocking(earlier.open_server_tools("alpha")).expect("the earlier session lists");
+        run_blocking(earlier.shutdown()).expect("shutdown");
+        std::fs::write(root.join("alpha.tools"), "search").expect("the server's new tools");
+        assert_eq!(asked(), ["initialize", "tools/list"]);
+
+        // This session's discovery advertises what was remembered.
+        let mut manager = McpServerManager::from_servers(&servers);
+        manager.remember_tool_listings(listings);
+        let state = Arc::new(Mutex::new(RuntimeMcpState::from_manager_for_test(manager)));
+        let registry = GlobalToolRegistry::builtin();
+        let pending = begin_pending_discovery(&state).expect("a pending server");
+        discover_pending_mcp_tools(&state, &registry, &pending);
+        finish_pending_discovery(&state);
+        assert_eq!(advertised(&registry), [mcp_tool_name("alpha", "echo")]);
+        assert_eq!(asked(), ["initialize", "tools/list"], "no server was started to list");
+
+        // The first call starts the server and finds `echo` gone.
+        let refused = state
+            .lock()
+            .expect("state")
+            .call_tool(&mcp_tool_name("alpha", "echo"), Some(json!({})))
+            .expect_err("the server no longer has the tool");
+        assert!(refused.to_string().contains("echo"), "{refused}");
+        assert_eq!(advertised(&registry), [mcp_tool_name("alpha", "search")]);
+        assert_eq!(
+            asked(),
+            ["initialize", "tools/list", "initialize", "tools/list"],
+            "the server was asked and the call was not sent"
+        );
+
+        let done = state
+            .lock()
+            .expect("state")
+            .call_tool(&mcp_tool_name("alpha", "search"), Some(json!({})))
+            .expect("the tool the server has now");
+        assert!(done.contains("done"), "{done}");
+        assert_eq!(asked().len(), 5, "one call, and no more questions");
+
+        state.lock().expect("state").shutdown().expect("shutdown");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
