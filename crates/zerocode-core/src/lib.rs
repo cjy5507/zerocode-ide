@@ -37,6 +37,7 @@ pub mod build_progress;
 pub mod build_run;
 pub mod builds;
 pub mod capabilities;
+pub mod card_words;
 pub mod checks;
 pub mod civil;
 pub mod claude_theme;
