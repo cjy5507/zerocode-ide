@@ -2,7 +2,7 @@
  * real view, copy adapter and event listeners. Shared by the window gate and
  * a focused Chromium/WebKit runner: node ui/tests/terminal-selection.mjs. */
 import { testGridSelection, installTerminalWaits } from "./terminal-grid-selection.mjs";
-import { openWindowTestPage } from "./window-boot.mjs";
+import { runInBothEngines, startedAs } from "./both-engines.mjs";
 
 
 export async function testTerminalSelection(page, ok) {
@@ -178,24 +178,4 @@ export async function testTerminalSelection(page, ok) {
   for (const result of results) ok(result.name, result.pass, JSON.stringify(result.detail));
 }
 
-if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
-  const { chromium, createWindowServer } = await import("./window-boot.mjs");
-  const { createRequire } = await import("node:module");
-  const { webkit } = createRequire(import.meta.url)("playwright");
-  const { files, origin } = await createWindowServer();
-  try {
-    for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
-      const browser = await engine.launch();
-      try {
-        const { page, faults } = await openWindowTestPage(browser, origin);
-        const record = (test, pass, detail) => {
-          console.log(JSON.stringify({ engine: name, test, pass, detail: JSON.parse(detail) }));
-          if (!pass) process.exitCode = 1;
-        };
-        await testGridSelection(page, record);
-        await testTerminalSelection(page, record);
-        if (faults.length) throw new Error(faults.join("\n"));
-      } finally { await browser.close(); }
-    }
-  } finally { files.close(); }
-}
+if (startedAs(import.meta.url)) await runInBothEngines([testGridSelection, testTerminalSelection]);

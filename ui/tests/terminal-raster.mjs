@@ -4,7 +4,7 @@
  * read cell by cell). Shared by the window gate and a focused Chromium/WebKit
  * runner: node ui/tests/terminal-raster.mjs. */
 import { installTerminalWaits } from "./terminal-grid-selection.mjs";
-import { openWindowTestPage } from "./window-boot.mjs";
+import { runInBothEngines, startedAs } from "./both-engines.mjs";
 
 // Claude Code prints these on every tool result and spinner line. The mono
 // stack has no glyph for any of them, so each is drawn by a fallback face with
@@ -93,23 +93,4 @@ export async function testTerminalRaster(page, ok) {
     JSON.stringify({ cell: seen.cell, shifts: shifts.map((shift) => Math.round(shift * 100) / 100) }));
 }
 
-if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
-  const { chromium, createWindowServer } = await import("./window-boot.mjs");
-  const { createRequire } = await import("node:module");
-  const { webkit } = createRequire(import.meta.url)("playwright");
-  const { files, origin } = await createWindowServer();
-  try {
-    for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
-      const browser = await engine.launch();
-      try {
-        const { page, faults } = await openWindowTestPage(browser, origin);
-        const record = (test, pass, detail) => {
-          console.log(JSON.stringify({ engine: name, test, pass, detail: JSON.parse(detail) }));
-          if (!pass) process.exitCode = 1;
-        };
-        await testTerminalRaster(page, record);
-        if (faults.length) throw new Error(faults.join("\n"));
-      } finally { await browser.close(); }
-    }
-  } finally { files.close(); }
-}
+if (startedAs(import.meta.url)) await runInBothEngines([testTerminalRaster]);

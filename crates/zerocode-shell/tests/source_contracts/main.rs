@@ -3412,90 +3412,150 @@ mod tests {
     /// Counting the columns right is only half of it — the glyph still has to
     /// *cover* them. The mono stack has no Hangul, so Korean falls back to
     /// whatever face the OS picks, and that face's advance is its own: read
-    /// out of a real webview at 10.38px against a 7.225px Latin cell, which
-    /// is 1.44 columns rather than 2. Every Korean line therefore drew
+    /// out of a real webview at 12.11px against an 8.65px Latin cell, which
+    /// is 1.40 columns rather than 2. Every Korean line therefore drew
     /// narrower than the grid reserved and pulled the rest of the row left of
     /// its column — the same misalignment the column fix set out to end,
     /// wearing the other hat.
     ///
     /// The shortfall is measured rather than assumed, because which face
-    /// draws Hangul is the OS's answer and not ours. It is closed in two
-    /// moves, both on the run so that nothing costs anything per cell: the
-    /// glyph is first grown toward its two columns as far as the row height
-    /// allows (`WIDE_GLYPH_ROW_FILL` — the row is the one box a glyph must
-    /// never push), and what is still short stays as tracking with half of
-    /// it leading the run, so the syllable sits centered in its columns
-    /// rather than left with the whole gap after it (2026-09-10: Korean in
-    /// every pane read as spaced-out letters, 자 체 는).
+    /// draws Hangul is the OS's answer and not ours. It is closed in three
+    /// moves, all on the run so that nothing costs anything per cell: the
+    /// glyph is grown toward its two columns as far as the row's height
+    /// allows its ink (`WIDE_GLYPH_ROW_FILL` — the row is the one box a glyph
+    /// must never push), then widened toward them as far as it still reads
+    /// as itself (`WIDE_GLYPH_STRETCH_LIMIT`), and what is still short stays
+    /// as tracking with half of it leading the run, so the syllable sits
+    /// centered in its columns. Growing alone left 4.08px of tracking between
+    /// two syllables at 14px, and Korean in every pane read as spaced-out
+    /// letters (2026-09-10 자 체 는, 2026-11-11 사 이 드 바).
+    ///
+    /// And it is asked per glyph: an emoji or a Han character is drawn by
+    /// another face at another advance, and under the Hangul face's numbers
+    /// an emoji stood 8.77px past its two columns.
     #[test]
     fn a_wide_glyph_is_drawn_across_the_columns_it_claims() {
         let source = window_source();
-        let measured = block_after(source, "function measure()");
 
-        assert!(
-            measured.contains("const spread = 2 * cell.width"),
-            "the shortfall of a double-width glyph is never measured, so the \
-             renderer cannot know how far it falls short:\n{measured}"
-        );
         // The runs a row makes are decided in one place and dressed in
         // another — split so a repaint can compare the two answers and leave
         // the spans it did not change (`a_repaint_leaves_the_runs_it_did_not_change`).
-        // The tracking is carried on the run as a class. Its measured value
-        // sits once on the terminal, not as an inline value rewritten on
-        // every changed span, so both halves are pinned.
+        // A glyph's fit is carried on the run as classes, one question for a
+        // narrow glyph and a wide one alike, and the run breaks where the
+        // width or the fit does — or one span mixes glyphs that need a dress
+        // with glyphs that must not have it.
         let body = nested_block(source, "  function runsOf(cells, marks, selected = null) {");
         assert!(
-            body.contains("ls: wide && wideAdjusted(),")
-                && body.contains("classes += \"term-wide \";"),
+            body.contains("const pitch = glyphPitch(glyph, wide);")
+                && body.contains("if (pitch) classes += `${pitch} `;")
+                && body.contains("run.wide === wide && run.pitch === pitch"),
             "a run of wide glyphs is drawn at its face's own advance, so a \
-             Korean line lands left of its columns:\n{body}"
+             Korean line lands left of its columns — or narrow and wide cells \
+             share a run:\n{body}"
         );
-        let measured = block_after(source, "function measure()");
+        // The face that draws Hangul is fitted by MEASURING it dressed: its
+        // advance at the grown size and where its baseline lands are the
+        // engine's answers, not arithmetic. Its dress sits once on the
+        // terminal, not as inline values rewritten on every changed span.
+        let fitted = nested_block(
+            source,
+            "  function fitWide(advance, probe, band, line, wide, wideLine) {",
+        );
         assert!(
-            measured.contains(r#"["--term-cell-spread", "#)
-                && measured.contains(r#"["--term-wide-scale", "#)
-                && measured.contains(r#"["--term-wide-lead", "#)
-                && measured.contains("pre.style.setProperty(name, value);")
-                && !source.contains("span.style.letterSpacing"),
-            "the measured shortfall, the grown size and the centering lead \
-             never reach the terminal as its own custom properties — or are \
-             left on a span a narrow run later reuses:\n{measured}"
+            fitted.contains("WIDE_GLYPH_ROW_FILL")
+                && fitted.contains("wide.className = \"term-wide\";")
+                && fitted.contains("const grownWidth = parseFloat(getComputedStyle(wide).width);")
+                && fitted.contains("wideLine.getBoundingClientRect().bottom"),
+            "a wide glyph is grown without the row's height as the ceiling of \
+             its ink, or its grown advance and its baseline are assumed \
+             instead of measured:\n{fitted}"
         );
-        // The growth is capped by the row, and the grown face is measured
-        // again rather than assumed to scale linearly.
         assert!(
-            measured.contains("WIDE_GLYPH_ROW_FILL")
-                && measured.contains("wide.style.fontSize = `${scale}em`;")
-                && measured
-                    .contains("const grownWidth = parseFloat(getComputedStyle(wide).width);"),
-            "a wide glyph is grown without the row's height as its ceiling, or \
-             its grown advance is assumed instead of measured:\n{measured}"
+            fitted.contains(
+                "for (const [property, value] of wideDressVars(...dress)) pre.style.setProperty(property, value);"
+            ) && !source.contains("span.style.letterSpacing"),
+            "the measured dress never reaches the terminal as its own custom \
+             properties — or is left on a span a narrow run later reuses:\n{fitted}"
         );
-        // The run has to break where the width class does, or one span mixes
-        // glyphs that need the tracking with glyphs that must not have it.
+        // Grown as far as the row allows, then widened — never a picture —
+        // and no further than the limit.
+        let shaped = nested_block(source, "  function wideShape(advance, picture) {");
         assert!(
-            body.contains("run.wide === wide"),
-            "narrow and wide cells share a run, so the tracking lands on \
-             both:\n{body}"
+            shaped.contains("Math.min(columns / advance, cell.wide.grow)")
+                && shaped.contains("picture ? 1 :")
+                && shaped.contains("WIDE_GLYPH_STRETCH_LIMIT"),
+            "a wide glyph is no longer grown to the row's ceiling and then \
+             widened to the limit, or a picture is widened with it:\n{shaped}"
         );
-        // The stylesheet's half: the grown size, the centering lead with its
-        // negative tail (the next run starts on the grid's column), and a
-        // zero line-height so a grown glyph never grows the row's line box.
+        // Every other double-width glyph is asked for its own advance.
+        let asked = nested_block(source, "  function widePitch(glyph) {");
+        assert!(
+            asked.contains("const picture = PICTURE_GLYPH.test(glyph);")
+                && asked.contains("return fit.cls;")
+                && asked.contains("return wideClass(wideDress("),
+            "every wide glyph wears the Hangul face's numbers again, so an \
+             emoji stands past its two columns:\n{asked}"
+        );
+        // The dress, as the properties the stylesheet reads.
+        let dress = block_after(
+            source,
+            "function wideDressVars(size, stretch, spread, rise, drop) {",
+        );
+        for property in [
+            "--term-wide-scale",
+            "--term-wide-stretch",
+            "--term-wide-squash",
+            "--term-cell-spread",
+            "--term-wide-lead",
+            "--term-wide-rise",
+            "--term-wide-drop",
+        ] {
+            assert!(
+                dress.contains(&format!("[\"{property}\", ")),
+                "a wide run's dress lost `{property}`:\n{dress}"
+            );
+        }
+        // The stylesheet's half. The font-size carries the growth and the
+        // widening, so the layout gives each glyph the advance it is drawn
+        // at; the widening is pressed back out of the height alone, on a box
+        // that is the band a narrow run paints; the centering lead has its
+        // negative tail (the next run starts on the grid's column); and the
+        // run takes no part in the row's line box, so a grown glyph never
+        // grows the row.
         let styles = include_str!("../../../../ui/shell.css");
         let wide = block_after(styles, ".term .term-wide {");
         for rule in [
-            "letter-spacing: var(--term-cell-spread, 0px);",
+            "display: inline-block;",
+            "vertical-align: top;",
+            "height: calc(var(--term-band-height, 1em) * var(--term-wide-stretch, 1));",
+            "margin-top: var(--term-band-top, 0px);",
+            "margin-bottom: calc(-1 * (var(--term-band-top, 0px) + var(--term-band-height, 1em) * var(--term-wide-stretch, 1)));",
+            "padding-top: var(--term-wide-rise, 0px);",
             "font-size: var(--term-wide-scale, 1em);",
             "line-height: 0;",
+            "letter-spacing: var(--term-cell-spread, 0px);",
             "margin-left: var(--term-wide-lead, 0px);",
             "margin-right: calc(-1 * var(--term-wide-lead, 0px));",
+            "transform: var(--term-wide-squash, none);",
+            "transform-origin: 0 0;",
         ] {
             assert!(
                 wide.contains(rule),
                 "the wide run's stylesheet lost `{rule}` — the glyph is no \
-                 longer grown, centered, or kept out of the row's line box:\n{wide}"
+                 longer grown, widened, centered, or kept out of the row's \
+                 line box:\n{wide}"
             );
         }
+        // An underline under a wide run stands where a narrow run's does:
+        // both against the terminal's one gap.
+        assert!(
+            styles.contains(
+                ".term .underline { text-decoration: underline; text-underline-offset: var(--term-underline-offset); }"
+            ) && block_after(styles, ".term .term-wide.underline,").contains(
+                "text-underline-offset: calc((var(--term-underline-offset) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));"
+            ),
+            "a wide run's underline is drawn off its neighbour's again"
+        );
     }
 
     /// Every terminal command says which shell it means.

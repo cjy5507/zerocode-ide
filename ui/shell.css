@@ -15922,7 +15922,11 @@ body.is-dragging-pane {
 .term .dim { -webkit-text-fill-color: color-mix(in srgb, currentColor var(--term-dim-ink), transparent); }
 .term .dim-reverse { opacity: var(--term-dim-ink); }
 .term .italic { font-style: italic; }
-.term .underline { text-decoration: underline; }
+/* The gap is the terminal's own, not the face's: a double-width run is drawn
+ * at another size on a line of its own (`.term-wide`) and has to put its
+ * underline where the narrow run beside it does, which it can only do against
+ * a number both of them know. */
+.term .underline { text-decoration: underline; text-underline-offset: var(--term-underline-offset); }
 /* SGR 9 and SGR 5, which the grid had no fields for at all until now. A diff
  * or a todo list draws its removed and finished lines struck through, and
  * without this those lines read as ordinary text saying the opposite of what
@@ -15942,17 +15946,47 @@ body.is-dragging-pane {
   text-decoration-color: color-mix(in srgb, currentColor var(--term-dim-ink), transparent);
 }
 /* A run of double-width glyphs the fallback face draws short (shell-term.js
- * `measure`): grown toward its two columns as far as the row allows, the rest
- * of the shortfall as tracking with half of it leading the run, so each glyph
- * sits centered in its columns. The negative tail gives back the lead, so the
- * next run starts on the column the grid says. line-height 0: a grown glyph
- * must never grow the row's line box. */
+ * `measure`, `glyphPitch`; the numbers are the dress `wideDressVars` writes).
+ *
+ * The font-size is the glyph grown AND widened, so the layout gives each one
+ * the advance it is drawn at and nothing depends on how many a run holds; the
+ * widening is then pressed back out of the HEIGHT alone, which is the one way
+ * a glyph is made wider than its face draws it. A transform needs a box, so
+ * the run is an inline-block — and that box is the band a narrow run's
+ * background paints (`--term-band-*`, measured), made taller by the stretch
+ * so that pressed it is that band again: a selection or a background colour
+ * across Korean and Latin is one even strip, on the run's own columns.
+ *
+ * Its margins give all of that height back, so the run takes no part in the
+ * row's line box — a grown glyph must never grow the row. Inside it the line
+ * has no height either, and `--term-wide-rise` lets the baseline down to
+ * where the glyph's ink stands in the middle of the row.
+ *
+ * What is still short of two columns after both is tracking, half of it
+ * leading the run so each glyph sits centered in its columns; the negative
+ * tail gives the lead back, so the next run starts on the column the grid
+ * says. */
 .term .term-wide {
-  letter-spacing: var(--term-cell-spread, 0px);
+  display: inline-block;
+  box-sizing: border-box;
+  vertical-align: top;
+  height: calc(var(--term-band-height, 1em) * var(--term-wide-stretch, 1));
+  margin-top: var(--term-band-top, 0px);
+  margin-bottom: calc(-1 * (var(--term-band-top, 0px) + var(--term-band-height, 1em) * var(--term-wide-stretch, 1)));
+  padding-top: var(--term-wide-rise, 0px);
   font-size: var(--term-wide-scale, 1em);
   line-height: 0;
+  letter-spacing: var(--term-cell-spread, 0px);
   margin-left: var(--term-wide-lead, 0px);
   margin-right: calc(-1 * var(--term-wide-lead, 0px));
+  transform: var(--term-wide-squash, none);
+  transform-origin: 0 0;
+}
+/* Its underline goes where a narrow run's does: up by what the baseline was
+ * let down, and written before the height is pressed. */
+.term .term-wide.underline,
+.term .term-wide.term-link {
+  text-underline-offset: calc((var(--term-underline-offset) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));
 }
 .term .term-fg-default { color: var(--term-fg); }
 .term .term-fg-reverse-default { color: var(--term-bg-solid); }
@@ -16494,7 +16528,7 @@ body.is-dragging-pane {
 .term-link {
   cursor: text;
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: var(--term-underline-offset);
   text-decoration-color: transparent;
   transition: text-decoration-color var(--motion-fast) var(--ease-standard);
 }

@@ -1400,13 +1400,38 @@ function sameColor(a, b) {
  * drawn across two terminal columns and the cell in front of it already
  * advances both, so this column carries no glyph of its own. */
 const CONTINUATION = "\u0000";
-/* How far a double-width glyph may grow toward its two columns: its font-size
- * may reach this fraction of the row height and no more. The row is the one
- * box a glyph must never push — a Hangul syllable drawn taller than the row
- * would sit on the row below. At 14px/1.15 this allows 1.09×; the rest of
- * the shortfall stays as tracking, split around the glyph so it sits
- * centered in its columns rather than left with a gap after it. */
-const WIDE_GLYPH_ROW_FILL = 0.95;
+/* How far a double-width glyph may grow toward its two columns: its INK may
+ * take this fraction of the row height and no more, standing in the middle
+ * of the row. The row is the one box a glyph must never push — a Hangul
+ * syllable drawn taller than the row would sit on the row below — and the
+ * tenth left over is the air between two Korean lines. The ceiling used to
+ * be the font-size against the row (0.95), which stopped at 1.09× while the
+ * ink still had room: at 14px/1.15 the ink allows 1.14×. */
+const WIDE_GLYPH_ROW_FILL = 0.9;
+/* How much wider than its face draws it a double-width glyph may be made,
+ * once the row stops it growing. Growing alone cannot reach two columns: a
+ * fallback Hangul is about as wide as it is tall (0.865em in Apple SD Gothic
+ * Neo), and two cells of a mono face are wider than a row is high. Widened
+ * by a quarter a syllable reads as the wide cut of the same face; past a
+ * third it reads as another face, so what is still short after this stays as
+ * tracking, split around the glyph. At 14px/1.15 two columns ask for 1.25×. */
+const WIDE_GLYPH_STRETCH_LIMIT = 1.3;
+/* The glyph a double-width cell is measured with (`measure`): which face
+ * draws Hangul is the OS's answer to a stack with no Hangul in it. */
+const WIDE_PROBE_GLYPH = "가";
+/* The ink a double-width glyph is given room for: the plain syllable, then
+ * the shapes a face draws tallest and deepest — ㅎ's tick over a vowel below
+ * it, and a double final under a compound vowel (of all 11,172 syllables
+ * these two are the extremes in Apple SD Gothic Neo, by 0.13px and 0.36px
+ * over 가 at 14px). */
+const WIDE_INK_PROBE = `${WIDE_PROBE_GLYPH}홁퉜`;
+/* A picture is never stretched: an emoji drawn wider than its face draws it
+ * is a different picture. It is sized to its columns like any other glyph. */
+const PICTURE_GLYPH = /\p{Extended_Pictographic}/u;
+/* How many glyphs a probe run holds (`measure`): a computed width is rounded
+ * to four decimals, and a run of this many carries one glyph's advance to
+ * the layout's own precision. */
+const PROBE_RUN_GLYPHS = 20;
 /* The glyph a cell is measured with: the mono face's own advance, which a
  * narrow glyph's advance is compared against (`measure`, `glyphPitch`). */
 const CELL_PROBE_GLYPH = "W";
@@ -1444,26 +1469,89 @@ function glyphMeter() {
 const pitchClasses = new Map();
 let pitchSheet = null;
 
+/* One rule more in the sheet the glyph dresses share. */
+function writePitchRule(rule) {
+  if (pitchSheet === null) {
+    const holder = document.createElement("style");
+    document.head.appendChild(holder);
+    pitchSheet = holder.sheet;
+  }
+  pitchSheet.insertRule(rule, pitchSheet.cssRules.length);
+}
+
 function pitchClass(spread) {
   const units = Math.round(spread / PITCH_QUANTUM_PX);
   if (units === 0) return "";
   const held = pitchClasses.get(units);
   if (held !== undefined) return held;
   const name = `term-pitch-${units < 0 ? "n" : "p"}${Math.abs(units)}`;
-  if (pitchSheet === null) {
-    const holder = document.createElement("style");
-    document.head.appendChild(holder);
-    pitchSheet = holder.sheet;
-  }
   const px = units * PITCH_QUANTUM_PX;
   // Half the tracking leads the glyph so it sits centred in its column; the
   // negative tail gives the lead back, so the next run starts on its column.
-  pitchSheet.insertRule(
-    `.term .${name} { letter-spacing: ${px}px; margin-left: ${px / 2}px; margin-right: ${-px / 2}px; }`,
-    pitchSheet.cssRules.length,
-  );
+  writePitchRule(`.term .${name} { letter-spacing: ${px}px; margin-left: ${px / 2}px; margin-right: ${-px / 2}px; }`);
   pitchClasses.set(units, name);
   return name;
+}
+
+/* The step a double-width glyph's dress is written in. A row of such glyphs
+ * adds its sizes and trackings up, so the step is fine enough that a hundred
+ * of them at the largest terminal font still end within a layout unit of the
+ * unrounded sum — and it is a step at all so that two screens measuring the
+ * same face name the same class. */
+const WIDE_DRESS_QUANTUM = 1 / 65536;
+
+function wideSnap(value) {
+  return Math.round(value / WIDE_DRESS_QUANTUM) * WIDE_DRESS_QUANTUM;
+}
+
+/* A double-width glyph's dress, as the custom properties `.term .term-wide`
+ * reads (shell.css): `size` its font-size in em — grown AND widened, so its
+ * advance is laid out as wide as it is drawn — `stretch` how much of that is
+ * width alone and is pressed back out of its height, `spread` the tracking
+ * still short of two columns (half of it leads the glyph), `rise` how far the
+ * baseline is let down inside the run's box, `drop` how far below the narrow
+ * glyphs' line that puts it (an underline is drawn back up by it). */
+function wideDressVars(size, stretch, spread, rise, drop) {
+  return [
+    ["--term-wide-scale", `${size}em`],
+    ["--term-wide-stretch", `${stretch}`],
+    ["--term-wide-squash", stretch === 1 ? "none" : `scaleY(${1 / stretch})`],
+    ["--term-cell-spread", `${spread}px`],
+    ["--term-wide-lead", `${spread / 2}px`],
+    ["--term-wide-rise", `${rise}px`],
+    ["--term-wide-drop", `${drop}px`],
+  ];
+}
+
+/* A dress in whole steps. */
+function wideDress(size, stretch, spread, rise, drop) {
+  return [size, stretch, spread, rise, drop].map(wideSnap);
+}
+
+/* Whether a dress changes nothing: its face already draws the glyph across
+ * two columns, so a run of it is left the plain run it is. */
+function wideDressIdle([size, stretch, spread]) {
+  return size === 1 && stretch === 1 && spread === 0;
+}
+
+/* The classes a double-width run wears for a dress that is not the screen's
+ * own: `term-wide` and the rule that holds this dress's numbers over the
+ * screen's. A CLASS per distinct dress for the reason `pitchClass` gives; the
+ * face that draws Hangul needs none of them (its numbers sit on the terminal,
+ * `fitWide`), so there is one for each face with another advance — an emoji,
+ * a Han face. */
+const wideClasses = new Map();
+
+function wideClass(dress) {
+  if (wideDressIdle(dress)) return "";
+  const key = dress.join(" ");
+  const held = wideClasses.get(key);
+  if (held !== undefined) return held;
+  const name = `term-wide-${wideClasses.size}`;
+  writePitchRule(`.term .${name} { ${wideDressVars(...dress).map(([property, value]) => `${property}: ${value}`).join("; ")}; }`);
+  const classes = `term-wide ${name}`;
+  wideClasses.set(key, classes);
+  return classes;
 }
 
 /* The text a visible cell contributes. A continuation owns no glyph, while
@@ -1863,20 +1951,37 @@ function expandPackedRow(row) {
 const foldCollapsed = new Map();
 
 function makeTermView(host, pre, caret, owner = { address: () => null }) {
-  /* `spread` is what a double-width glyph is short by.
+  /* `wide` is how a double-width glyph is fitted to its two columns.
    *
    * A CJK syllable takes two terminal columns, but the mono stack has no
    * Hangul, so Korean falls back to a face with an advance of its own —
-   * measured on this machine at 10.38px against a 7.225px Latin cell, which
-   * is 1.44 columns, not 2. Left alone a Korean line draws narrower than the
+   * measured on this machine at 12.11px against an 8.65px Latin cell, which
+   * is 1.40 columns, not 2. Left alone a Korean line draws narrower than the
    * grid reserved for it and everything after it slides left of its column.
-   * The glyph is first grown toward its two columns as far as the row height
-   * allows (`wideScale`, see `WIDE_GLYPH_ROW_FILL`), and what is still short
-   * is closed with `letter-spacing` — one property on a run rather than a box
-   * around every cell — with half of it leading the run, so each syllable sits
-   * centered in its columns instead of left with the whole gap after it
-   * (2026-09-10: Korean in every pane read as spaced-out letters, 자 체 는). */
-  const cell = { width: 8, height: 18, spread: 0, wideScale: 1 };
+   * The glyph is grown toward its two columns as far as the row's height
+   * allows its ink (`WIDE_GLYPH_ROW_FILL`), then widened toward them as far
+   * as it still reads as itself (`WIDE_GLYPH_STRETCH_LIMIT`), and what is
+   * still short after both is tracking with half of it leading the glyph, so
+   * each syllable sits centered in its columns. All of it is one class on a
+   * run rather than a box around every cell.
+   *
+   * Growing alone left 4.08px of tracking between two syllables at 14px, and
+   * Korean in every pane still read as spaced-out letters (2026-09-10 자 체
+   * 는, 2026-11-11 사 이 드 바); grown and widened the same line leaves none.
+   *
+   * What `measure` learns about the face that draws `WIDE_PROBE_GLYPH`:
+   * `advance` its advance at the screen's font size, `grow` the largest size
+   * the row's height allows its ink, `lean` how much more of that ink stands
+   * above the baseline than hangs below, `line` where the narrow glyphs'
+   * baseline stands in the row, `top` and `height` the band a narrow run's
+   * background paints there, `sink` how far under its own top a wide
+   * run's baseline lands per em of its size, `worn` the dress written on the
+   * terminal for that glyph and `cls` the class a run of it wears to read it. */
+  const cell = {
+    width: 8,
+    height: 18,
+    wide: { advance: 0, grow: 1, lean: 0, line: 0, top: 0, height: 0, sink: 0, worn: "", cls: "" },
+  };
   /* The tracking class of each narrow glyph a FALLBACK face draws off the
    * cell's pitch ("" on pitch), for the metrics `cell` was last measured under.
    *
@@ -1887,9 +1992,20 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
    * 0.98px wider, so every glyph after either on the row stood off its column
    * (+0.51 cell after ⎿ in the live window, 2026-09-17; Terminal.app 0.00). */
   const glyphSpreads = new Map();
-  /* The CSS font a run of this screen is shaped in, as `measureText` takes it;
+  /* The classes of each double-width glyph, for the same metrics ("" when its
+   * face already draws it across two columns): the face that draws Hangul
+   * wears `cell.wide.cls`, and a glyph another face draws at another advance
+   * — an emoji, a Han character under a Japanese fallback — wears a dress of
+   * its own. Until this was asked per glyph every wide glyph wore the Hangul
+   * face's numbers, and an emoji 20px wide drew 8.77px past its two 8.65px
+   * columns, pushing the rest of its row a whole cell right (2026-11-11). */
+  const wideDresses = new Map();
+  /* The CSS font a run of this screen is shaped in, as `measureText` takes it
+   * (`glyphFontAt`), and the canvas's own width for the cell's glyph in it;
    * empty until a measurement has landed, when there is no cell to compare to. */
   let glyphFont = "";
+  let glyphFontPitch = 0;
+  let glyphFontAt = () => "";
   /* Where the caret last stood, so a frame that did not move it does not
    * rewind the blink — a shell printing output under a still cursor should
    * keep blinking like an idle one. */
@@ -2032,13 +2148,6 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     ].join("|");
   }
 
-  /* Whether a double-width run needs the wide treatment at all: a face whose
-   * Hangul already spans two columns (a CJK mono font in the stack) needs
-   * neither growing nor tracking. */
-  function wideAdjusted() {
-    return cell.spread !== 0 || cell.wideScale !== 1;
-  }
-
   function measuredRoom() {
     // CSS can report fixed dimensions under a hidden ancestor. Only a box
     // participating in layout can supply font metrics or a terminal grid.
@@ -2057,6 +2166,14 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     return { width, height, style };
   }
 
+  /* An empty inline-block: no width, no height, and its bottom edge is the
+   * baseline of the line it stands in — where that line is, as a box. */
+  function baselineMark() {
+    const mark = document.createElement("span");
+    mark.style.display = "inline-block";
+    return mark;
+  }
+
   function measure() {
     const under = metricsKey();
     if (under === measuredUnder) return;
@@ -2069,15 +2186,21 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const probe = document.createElement("div");
     probe.className = "term-row";
     const run = document.createElement("span");
-    run.textContent = CELL_PROBE_GLYPH.repeat(20);
-    probe.appendChild(run);
+    run.textContent = CELL_PROBE_GLYPH.repeat(PROBE_RUN_GLYPHS);
+    // A narrow run as the renderer leaves it — inline — and the line it
+    // stands on: the band its background paints and its baseline are what a
+    // double-width run's own box is set against.
+    const band = document.createElement("span");
+    band.textContent = CELL_PROBE_GLYPH;
+    const line = baselineMark();
     // The same measurement for a glyph the grid counts as two columns. It is
     // taken here rather than assumed, because which face draws Hangul is the
     // OS's answer to a stack with no Hangul in it, and that answer decides
     // how short the glyph falls.
     const wide = document.createElement("span");
-    wide.textContent = "가".repeat(20);
-    probe.appendChild(wide);
+    wide.textContent = WIDE_PROBE_GLYPH.repeat(PROBE_RUN_GLYPHS);
+    const wideLine = wide.appendChild(baselineMark());
+    probe.append(run, band, line, wide);
     // Inline-block, so the two runs have a computed width to read below —
     // an inline's computed width is "auto", and a RECT is the one measure a
     // cell must never be taken from: the float's `surface-enter` animation
@@ -2107,64 +2230,163 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const wideWidth = parseFloat(getComputedStyle(wide).width);
     const shaped = getComputedStyle(pre);
     if (stackHeight > 0 && runWidth > 0) {
-      cell.width = runWidth / 20;
+      cell.width = runWidth / PROBE_RUN_GLYPHS;
       cell.height = stackHeight / 16;
       // Recorded only when a measurement actually landed. A hidden host lays
       // nothing out and answers zero, and remembering THAT would leave a view
       // first measured behind another tab holding the default 8×18 forever.
       measuredUnder = under;
       // Every glyph's pitch was an answer about the old cell and the old face.
-      glyphFont = `${shaped.fontStyle} ${shaped.fontWeight} ${shaped.fontSize} ${shaped.fontFamily}`;
+      // Read out now: the computed style is live, and a glyph asked about in
+      // the middle of a paint must not ask the cascade anything.
+      const face = `${shaped.fontStyle} ${shaped.fontWeight}`;
+      const fontPx = parseFloat(shaped.fontSize);
+      const family = shaped.fontFamily;
+      glyphFontAt = (scale) => `${face} ${fontPx * scale}px ${family}`;
+      const meter = glyphMeter();
+      meter.font = glyphFontAt(1);
+      glyphFontPitch = meter.measureText(CELL_PROBE_GLYPH).width;
+      // No meter, no per-glyph answers: every glyph is left as its face draws it.
+      glyphFont = glyphFontPitch > 0 ? glyphFontAt(1) : "";
       glyphSpreads.clear();
-    }
-    if (wideWidth > 0) {
-      // Grow the glyph toward its two columns, capped by the row; then measure
-      // the grown glyph rather than assuming its advance scales linearly — a
-      // face's advance at another size is the face's answer, not arithmetic.
-      const fontPx = parseFloat(shaped.fontSize) || cell.height;
-      const scale = Math.min(
-        (2 * cell.width) / (wideWidth / 20),
-        (cell.height * WIDE_GLYPH_ROW_FILL) / fontPx,
-      );
-      wide.style.fontSize = `${scale}em`;
-      const grownWidth = parseFloat(getComputedStyle(wide).width);
-      const spread = 2 * cell.width - (grownWidth > 0 ? grownWidth : wideWidth * scale) / 20;
-      if (spread !== cell.spread || scale !== cell.wideScale) {
-        cell.spread = spread;
-        cell.wideScale = scale;
-        const vars = [
-          ["--term-cell-spread", spread === 0 ? "" : `${spread}px`],
-          ["--term-wide-scale", scale === 1 ? "" : `${scale}em`],
-          ["--term-wide-lead", spread === 0 ? "" : `${spread / 2}px`],
-        ];
-        for (const [name, value] of vars) {
-          if (value) pre.style.setProperty(name, value);
-          else pre.style.removeProperty(name);
-        }
-      }
+      wideDresses.clear();
+      if (wideWidth > 0) fitWide(wideWidth / PROBE_RUN_GLYPHS, probe, band, line, wide, wideLine);
     }
     stack.remove();
   }
 
-  /* The class that tracks `glyph` back onto the cell's pitch: how far its own
-   * advance falls short of one cell (negative when the face draws it wider),
-   * or "" for everything the mono face draws.
+  /* Fit the face that draws `WIDE_PROBE_GLYPH` to two columns (`cell.wide`).
    *
-   * Asked of the cascade through `measureText`, relative to the probe glyph in
-   * the same font, so the answer is in the run's units whatever the canvas
-   * rounds to; remembered until the metrics change. */
-  function glyphPitch(glyph) {
-    if (glyph.length === 1 && glyph.charCodeAt(0) < ASCII_END) return "";
-    const held = glyphSpreads.get(glyph);
+   * The positions are read as rects, which a CELL must never be (`measure`):
+   * each is taken against the probe row's own rect and scaled by what that
+   * row's rect says a row's height is, so a transform over the screen cancels
+   * out of every number kept. */
+  function fitWide(advance, probe, band, line, wide, wideLine) {
+    const fit = cell.wide;
+    const row = probe.getBoundingClientRect();
+    const unit = row.height > 0 ? cell.height / row.height : 1;
+    const drawn = band.getBoundingClientRect();
+    const top = (drawn.top - row.top) * unit;
+    const height = drawn.height * unit;
+    if (top !== fit.top || height !== fit.height) {
+      pre.style.setProperty("--term-band-top", `${top}px`);
+      pre.style.setProperty("--term-band-height", `${height}px`);
+    }
+    fit.advance = advance;
+    fit.top = top;
+    fit.height = height;
+    fit.line = (line.getBoundingClientRect().bottom - row.top) * unit;
+    // The ink of the tallest and the deepest syllable, from the cascade — or,
+    // from a canvas that does not say, the face's own box.
+    const meter = glyphMeter();
+    meter.font = glyphFontAt(1);
+    const box = meter.measureText(WIDE_INK_PROBE);
+    const inked = box.actualBoundingBoxAscent + box.actualBoundingBoxDescent > 0;
+    const above = inked ? box.actualBoundingBoxAscent : fit.line - top;
+    const below = inked ? box.actualBoundingBoxDescent : top + height - fit.line;
+    fit.grow = (cell.height * WIDE_GLYPH_ROW_FILL) / (above + below);
+    fit.lean = above - below;
+    // Dress the probe as a run of it will be dressed, then MEASURE it: a
+    // face's advance at another size is the face's answer, not arithmetic,
+    // and where its baseline lands under a box of another size is the
+    // engine's (it rounds a face's ascent to whole pixels at each size).
+    const [size, stretch] = wideShape(advance, false);
+    for (const [property, value] of wideDressVars(size, stretch, 0, 0, 0)) wide.style.setProperty(property, value);
+    wide.className = "term-wide";
+    const grownWidth = parseFloat(getComputedStyle(wide).width);
+    const grown = grownWidth > 0 ? grownWidth / PROBE_RUN_GLYPHS : advance * size;
+    const landed = (wideLine.getBoundingClientRect().bottom - row.top) * unit;
+    fit.sink = ((landed - top) * stretch) / size;
+    // The face's dress sits once on the terminal, where every run of it reads
+    // it — so a run already painted follows the next measurement without
+    // being painted again, also when that measurement finds a face that
+    // already draws Hangul across two columns (a CJK mono font in the stack):
+    // the dress is then one that changes nothing, and a run painted from
+    // there on wears no class at all.
+    const dress = wideDress(size, stretch, wideSpread(grown), ...wideSeat(size, stretch, landed));
+    const worn = dress.join(" ");
+    if (worn !== fit.worn) {
+      fit.worn = worn;
+      for (const [property, value] of wideDressVars(...dress)) pre.style.setProperty(property, value);
+    }
+    fit.cls = wideDressIdle(dress) ? "" : "term-wide";
+  }
+
+  /* The size and the stretch a double-width glyph of this advance wears: grown
+   * toward two columns as far as the row allows its ink, then — unless it is
+   * a picture — widened toward them as far as it still reads as itself. Both
+   * in whole steps of the dress, so the advance measured under them is the
+   * advance a run is laid out with. A glyph its face already draws across
+   * two columns is left at the size and the shape it has. */
+  function wideShape(advance, picture) {
+    const columns = 2 * cell.width;
+    if (Math.abs(columns - advance) < PITCH_SLACK_PX) return [1, 1];
+    const scale = Math.min(columns / advance, cell.wide.grow);
+    const stretch = picture ? 1 : wideSnap(Math.min(Math.max(columns / (scale * advance), 1), WIDE_GLYPH_STRETCH_LIMIT));
+    return [wideSnap(scale * stretch), stretch];
+  }
+
+  /* What a dressed glyph is still short of two columns by (negative when its
+   * face draws it wider): the tracking it carries. */
+  function wideSpread(grown) {
+    const spread = 2 * cell.width - grown;
+    return Math.abs(spread) < PITCH_SLACK_PX ? 0 : spread;
+  }
+
+  /* Where a dressed glyph's baseline goes: where its ink stands in the middle
+   * of the row, as much air above the tallest syllable as below the deepest.
+   * `landed` is where the baseline stands with nothing done. Answers the
+   * dress's `rise` and `drop` (`wideDressVars`). */
+  function wideSeat(size, stretch, landed) {
+    const wanted = (cell.height + (size / stretch) * cell.wide.lean) / 2;
+    return [Math.max((wanted - landed) * stretch, 0), wanted - cell.wide.line];
+  }
+
+  /* A glyph's advance in this screen's pixels, at `scale` times its font size.
+   *
+   * Asked of the cascade through `measureText`, relative to the cell's glyph
+   * in the same font, so the answer is in the run's units whatever the canvas
+   * rounds to. */
+  function glyphAdvance(glyph, scale) {
+    const meter = glyphMeter();
+    meter.font = scale === 1 ? glyphFont : glyphFontAt(scale);
+    return (cell.width * meter.measureText(glyph).width) / glyphFontPitch;
+  }
+
+  /* The class that tracks a narrow `glyph` back onto the cell's pitch: how far
+   * its own advance falls short of one cell (negative when the face draws it
+   * wider), or "" for everything the mono face draws. */
+  function narrowPitch(glyph) {
+    const spread = cell.width - glyphAdvance(glyph, 1);
+    return Math.abs(spread) < PITCH_SLACK_PX ? "" : pitchClass(spread);
+  }
+
+  /* The classes that fit a double-width `glyph` to its two columns: the one
+   * that reads the terminal's own dress when this glyph has the advance of
+   * the face `measure` fitted, a dress of its own when another face draws it
+   * at another. Its baseline is seated by the measured face's numbers, in
+   * proportion. */
+  function widePitch(glyph) {
+    const fit = cell.wide;
+    const advance = glyphAdvance(glyph, 1);
+    const picture = PICTURE_GLYPH.test(glyph);
+    if (!picture && Math.abs(advance - fit.advance) < PITCH_SLACK_PX) return fit.cls;
+    const [size, stretch] = wideShape(advance, picture);
+    const landed = fit.top + (fit.sink * size) / stretch;
+    return wideClass(wideDress(size, stretch, wideSpread(glyphAdvance(glyph, size)), ...wideSeat(size, stretch, landed)));
+  }
+
+  /* The class that puts `glyph` on the columns the grid gave it — one cell, or
+   * two for a `wide` one — or "" when its face already draws it there.
+   * Remembered until the metrics change. */
+  function glyphPitch(glyph, wide) {
+    if (!wide && glyph.length === 1 && glyph.charCodeAt(0) < ASCII_END) return "";
+    const answers = wide ? wideDresses : glyphSpreads;
+    const held = answers.get(glyph);
     if (held !== undefined) return held;
     if (glyphFont === "") return "";
-    const meter = glyphMeter();
-    meter.font = glyphFont;
-    const pitch = meter.measureText(CELL_PROBE_GLYPH).width;
-    const advance = meter.measureText(glyph).width;
-    const spread = pitch > 0 ? cell.width * (1 - advance / pitch) : 0;
-    const answer = Math.abs(spread) < PITCH_SLACK_PX ? "" : pitchClass(spread);
-    glyphSpreads.set(glyph, answer);
+    const answer = wide ? widePitch(glyph) : narrowPitch(glyph);
+    answers.set(glyph, answer);
     return answer;
   }
 
@@ -2239,9 +2461,10 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       // The grid already claimed the column behind a wide glyph, so its own
       // mark answers this — the view keeps no width table of its own.
       const wide = cells[i + 1] !== undefined && cells[i + 1].ch === CONTINUATION;
-      // And a narrow glyph drawn off the cell's pitch carries its own tracking,
-      // so a run holds glyphs of one pitch only.
-      const pitch = wide ? "" : glyphPitch(glyph);
+      // A glyph a fallback face draws off its columns carries its own fit —
+      // a narrow one its tracking, a wide one its size, stretch and tracking
+      // — so a run holds glyphs of one fit only.
+      const pitch = glyphPitch(glyph, wide);
       // A run also breaks where a mark starts or ends: a search hit and a link
       // are drawn on the run, so a run that straddles either edge would paint
       // the highlight over text that is not part of the match.
@@ -2294,7 +2517,6 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       if (linked) classes += "term-link ";
       if (fgPaint.cls) classes += `${fgPaint.cls} `;
       if (bgPaint.cls) classes += `${bgPaint.cls} `;
-      if (wide && wideAdjusted()) classes += "term-wide ";
       if (pitch) classes += `${pitch} `;
       // The selection is painted on the run, in the theme's two selection
       // tokens, inline — inline is what beats a palette class and a program's
@@ -2310,12 +2532,11 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
         href: mark?.href || linked,
         cls: classes.trim(),
         // A run of double-width glyphs is drawn short by its fallback face, so
-        // it carries the measured shortfall as tracking. One property on the
-        // run rather than a box per cell: each syllable still lands on its own
-        // column, and the next run starts on the column the grid says it does.
-        ls: wide && wideAdjusted(),
-        // The same, for a narrow glyph whose fallback face misses the cell
-        // (`glyphPitch`); it is dressed by its class, so `cls` compares it.
+        // it is fitted to its columns as a run rather than a box per cell:
+        // each syllable still lands on its own column, and the next run starts
+        // on the column the grid says it does. The same for a narrow glyph
+        // whose fallback face misses the cell. Either is dressed by its class
+        // (`glyphPitch`), so `cls` compares it.
         pitch,
         from: i,
         to: i + (wide ? 2 : 1),
@@ -2339,7 +2560,6 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       a.fg === b.fg &&
       a.bg === b.bg &&
       a.cls === b.cls &&
-      a.ls === b.ls &&
       a.href === b.href
     );
   }
