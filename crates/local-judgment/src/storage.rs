@@ -189,7 +189,8 @@ impl Store {
             &self.root,
             &format!("external-partial/{}.json", location.nonce),
         )?;
-        write_new(
+        // Whole or not at all: a stop mid-write leaves no half tracker.
+        replace(
             &tracker,
             &serde_json::to_vec(&location).map_err(|_| Error::Storage)?,
         )?;
@@ -233,14 +234,13 @@ impl Store {
                 return Err(Error::TooLarge);
             }
             let tracker = io(entry)?.path();
-            match self.clean_one_external(&tracker) {
-                // The folder it points into is not here now — the external
-                // disk the person chose, unplugged. The tracker stays for the
-                // open that finds the disk again; one absent disk does not
-                // stop the store, and every local-judgment command with it.
-                Err(Error::DestinationUnavailable) => {}
-                other => other?,
-            }
+            // A tracker that cannot be cleaned now stays for a later open:
+            // the folder it points into is not here (the external disk the
+            // person chose, unplugged), or it is not plainly ours to remove
+            // (a changed ownership record, a link, an oversized file). One
+            // such tracker does not stop the store, and every
+            // local-judgment command with it.
+            let _ = self.clean_one_external(&tracker);
         }
         Ok(())
     }

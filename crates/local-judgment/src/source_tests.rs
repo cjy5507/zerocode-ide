@@ -582,6 +582,36 @@ fn an_unplugged_or_half_written_tracker_does_not_stop_the_store_opening() {
     assert_eq!(fs::read_dir(&trackers).unwrap().count(), 0);
 }
 
+/// A tracker whose folder is not plainly ours — its ownership record
+/// changed — or that is itself too large to be a tracker stays where it is,
+/// and the folder with it; neither stops the store opening.
+#[test]
+fn a_tracker_that_cannot_be_cleaned_does_not_stop_the_store_opening() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("chosen");
+    fs::create_dir(&destination).unwrap();
+    let data = home.path().join("data");
+    let trackers = data.join("managed-judgment/external-partial");
+    let store = crate::storage::Store::open(&data).unwrap();
+    let stage = store
+        .model_stage(&super::tests::fixture_model(), Some(&destination))
+        .unwrap();
+    let partial = stage.path().to_owned();
+    std::mem::forget(stage);
+    drop(store);
+    fs::write(
+        partial.join("ownership.json"),
+        br#"{"fingerprint":"changed","nonce":"changed"}"#,
+    )
+    .unwrap();
+    fs::write(trackers.join("oversized.json"), vec![b' '; 17 * 1024]).unwrap();
+
+    crate::storage::Store::open(&data)
+        .expect("a tracker that cannot be cleaned stopped the store opening");
+    assert!(partial.exists(), "a folder not plainly ours was removed");
+    assert_eq!(fs::read_dir(&trackers).unwrap().count(), 2);
+}
+
 #[test]
 fn tampered_external_ownership_cannot_remove_any_installed_data() {
     let home = tempfile::tempdir().unwrap();
