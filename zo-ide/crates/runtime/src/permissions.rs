@@ -138,7 +138,7 @@ impl PermissionPolicy {
     pub fn grant_always(&mut self, tool_name: &str, input: &str) {
         let rule_str = match extract_permission_subject(input) {
             Some(subject) if !subject.trim().is_empty() => {
-                format!("{tool_name}({})", escape_rule_subject(subject.trim()))
+                format!("{tool_name}({})", escape_rule_subject(&literal_rule_content(subject.trim())))
             }
             _ => tool_name.to_string(),
         };
@@ -1101,6 +1101,31 @@ fn unescape_rule_content(content: &str) -> String {
         .replace(r"\\", r"\")
 }
 
+/// The rule content that matches exactly `subject`, as the person approved it.
+/// Rule grammar reads `*`, `?` or `[` as a glob and a trailing `:*` as a
+/// prefix, either of which allows more than the one command or path asked
+/// about (`rm -rf build/*` would allow `rm -rf build/x; curl …`). Such a
+/// subject is written as a glob whose every metacharacter sits in its own
+/// one-character class (`[*]`, `[?]`, `[[]`), which matches only itself.
+/// A subject with none of them stays the plain exact text it always was.
+fn literal_rule_content(subject: &str) -> String {
+    if !contains_glob_meta(subject) {
+        return subject.to_string();
+    }
+    let mut out = String::with_capacity(subject.len() + 8);
+    for ch in subject.chars() {
+        match ch {
+            '*' | '?' | '[' => {
+                out.push('[');
+                out.push(ch);
+                out.push(']');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Inverse of [`unescape_rule_content`] — escape a subject so it survives a
 /// round-trip through [`PermissionRule::parse`] when embedded in `tool(subject)`.
 fn escape_rule_subject(subject: &str) -> String {
@@ -1954,6 +1979,43 @@ mod tests {
         let mut whole = PermissionPolicy::new(PermissionMode::WorkspaceWrite);
         whole.grant_always("some_tool", "");
         assert_eq!(whole.take_newly_granted(), vec!["some_tool".to_string()]);
+    }
+
+    /// "Always allow" on a command that carries a glob character allows that
+    /// command and nothing else: the stored rule is no wider than the approval.
+    #[test]
+    fn grant_always_on_a_command_with_glob_characters_allows_only_that_command() {
+        for (command, wider) in [
+            // None of these is read-only, so only a rule can let them through.
+            ("cargo test build/*", "cargo test build/x && cargo publish"),
+            ("cargo test ?", "cargo test x"),
+            ("cargo test [ab]", "cargo test a"),
+            ("cargo test:*", "cargo test: && cargo publish"),
+            ("*", "cargo publish"),
+        ] {
+            let mut policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+                .with_tool_requirement("bash", PermissionMode::DangerFullAccess);
+            let input = serde_json::json!({ "command": command }).to_string();
+            policy.grant_always("bash", &input);
+            assert_eq!(
+                policy.authorize("bash", &input, None),
+                PermissionOutcome::Allow,
+                "the approved command {command:?} is allowed"
+            );
+            let wider_input = serde_json::json!({ "command": wider }).to_string();
+            assert!(
+                matches!(policy.authorize("bash", &wider_input, None), PermissionOutcome::Deny { .. }),
+                "approving {command:?} must not allow {wider:?}"
+            );
+            // The persisted rule reads back to the same narrow scope.
+            let saved = policy.take_newly_granted();
+            let rules = RuntimePermissionRuleConfig::new(saved, Vec::new(), Vec::new());
+            let reloaded = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+                .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+                .with_permission_rules(&rules);
+            assert_eq!(reloaded.authorize("bash", &input, None), PermissionOutcome::Allow);
+            assert!(matches!(reloaded.authorize("bash", &wider_input, None), PermissionOutcome::Deny { .. }));
+        }
     }
 
     #[test]
