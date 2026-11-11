@@ -19,10 +19,13 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 
+use crate::file_stamp::FileStamp;
 use crate::second_brain_graph::EdgeKind;
 
 /// The layout's number. A file written under another is built again.
-pub(super) const FORMAT: u32 = 1;
+/// 2: a file's record holds the stamp every reader in this crate compares
+/// (`FileStamp`) in place of a stamp of this module's own.
+pub(super) const FORMAT: u32 = 2;
 
 const MAGIC: [u8; 8] = *b"ZCSEARCH";
 /// The magic, the format, four spare bytes, fifteen numbers and the sum of
@@ -89,24 +92,6 @@ pub(super) fn word_hash(word: &[u8]) -> u64 {
     crate::launch_budget::fnv1a(word.iter().copied())
 }
 
-/// When a file was written and how long it is: what says it has not changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) struct Stamp {
-    pub secs: i64,
-    pub nanos: u32,
-    pub size: u64,
-}
-
-impl Stamp {
-    /// When the file was written, in milliseconds since the epoch: what the
-    /// knowledge graph calls a page's `modified_ms`.
-    pub(super) fn written_ms(self) -> i64 {
-        self.secs
-            .saturating_mul(1_000)
-            .saturating_add(i64::from(self.nanos / 1_000_000))
-    }
-}
-
 /// Where a passage lies in its file's text and the line it starts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct Place {
@@ -120,7 +105,9 @@ pub(super) struct Place {
 pub(super) struct DocRecord {
     /// Below its source's folder, `/`-separated.
     pub path: String,
-    pub stamp: Stamp,
+    /// What the walk saw of the file when it was read: a walk that sees
+    /// another reads it again.
+    pub stamp: FileStamp,
     pub title: String,
     pub tags: Vec<String>,
     /// Links as the file wrote them, in the order it wrote them.
@@ -545,9 +532,17 @@ fn read_at(source: &mut (impl Read + Seek), at: u64, len: usize) -> Result<Vec<u
 
 fn put_record(heap: &mut Vec<u8>, record: &DocRecord) {
     put_str(heap, &record.path);
-    heap.extend_from_slice(&record.stamp.secs.to_le_bytes());
-    put_u32(heap, record.stamp.nanos);
-    heap.extend_from_slice(&record.stamp.size.to_le_bytes());
+    let FileStamp {
+        len,
+        modified_ms,
+        changed_ms,
+        file: (device, inode),
+    } = record.stamp;
+    heap.extend_from_slice(&len.to_le_bytes());
+    heap.extend_from_slice(&modified_ms.to_le_bytes());
+    heap.extend_from_slice(&changed_ms.to_le_bytes());
+    heap.extend_from_slice(&device.to_le_bytes());
+    heap.extend_from_slice(&inode.to_le_bytes());
     put_str(heap, &record.title);
     put_varint(heap, record.tags.len() as u64);
     for tag in &record.tags {
@@ -562,10 +557,11 @@ fn put_record(heap: &mut Vec<u8>, record: &DocRecord) {
 
 fn read_record(at: &mut Reader<'_>) -> Result<DocRecord, Damaged> {
     let path = at.str()?.to_string();
-    let stamp = Stamp {
-        secs: i64::from_le_bytes(at.bytes(8)?.try_into().map_err(|_| Damaged)?),
-        nanos: at.u32()?,
-        size: at.u64()?,
+    let stamp = FileStamp {
+        len: at.u64()?,
+        modified_ms: at.i64()?,
+        changed_ms: at.i64()?,
+        file: (at.u64()?, at.u64()?),
     };
     let title = at.str()?.to_string();
     let tags = (0..at.count()?)
@@ -640,6 +636,10 @@ impl<'a> Reader<'a> {
         Ok(read_u64(self.bytes(8)?, 0))
     }
 
+    fn i64(&mut self) -> Result<i64, Damaged> {
+        Ok(i64::from_le_bytes(self.u64()?.to_le_bytes()))
+    }
+
     fn varint(&mut self) -> Result<u64, Damaged> {
         let mut value = 0_u64;
         for shift in (0..64).step_by(7) {
@@ -680,10 +680,11 @@ mod tests {
         DocInput {
             record: DocRecord {
                 path: path.to_string(),
-                stamp: Stamp {
-                    secs: 7,
-                    nanos: 9,
-                    size: 11,
+                stamp: FileStamp {
+                    len: 11,
+                    modified_ms: -7,
+                    changed_ms: 9,
+                    file: (13, 17),
                 },
                 title: format!("title of {path}"),
                 tags: vec!["one".to_string(), "two".to_string()],

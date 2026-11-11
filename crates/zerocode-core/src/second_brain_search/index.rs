@@ -1,7 +1,8 @@
 //! One folder's index on disk, kept in step with the folder.
 //!
 //! Every search walks the folder with `stat` alone and reads only the files
-//! whose time or size moved. What it finds is written as two index files:
+//! whose stamp moved (`FileStamp`: size, times and, where the host tells,
+//! which file it is). What it finds is written as two index files:
 //!
 //! - the **base**, built from every file once;
 //! - the **overlay**, built from the files that changed since, with the list
@@ -24,15 +25,16 @@ use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 use super::passages;
 use super::rank::{Corpus, Edge, Held};
-use super::segment::{self, Damaged, DocInput, DocRecord, Place, Segment, Stamp, WordHash};
+use super::segment::{self, Damaged, DocInput, DocRecord, Place, Segment, WordHash};
 use super::settings::{Kind, Source, Table};
 use crate::atomic_file::write_atomically;
+use crate::file_stamp::{FileStamp, stamp_of};
 use crate::held_file_lock::HeldFileLock;
 use crate::second_brain::WIKI_DIR;
 use crate::second_brain_graph::{FoundPage, LinkLookup, MAX_PAGE_LINKS, parse_page};
@@ -104,7 +106,7 @@ pub(super) struct Walked {
     /// Below the source's folder, `/`-separated.
     pub rel: String,
     pub path: PathBuf,
-    pub stamp: Stamp,
+    pub stamp: FileStamp,
 }
 
 /// The files of a source that the table lets in, by path, and whether
@@ -165,18 +167,6 @@ pub(super) fn walk(source: &Source, table: &Table) -> (Vec<Walked>, bool) {
     }
     files.sort_by(|left, right| left.rel.cmp(&right.rel));
     (files, capped)
-}
-
-fn stamp_of(metadata: &fs::Metadata) -> Stamp {
-    let since = metadata
-        .modified()
-        .ok()
-        .and_then(|at| at.duration_since(UNIX_EPOCH).ok());
-    Stamp {
-        secs: since.map_or(0, |held| i64::try_from(held.as_secs()).unwrap_or(i64::MAX)),
-        nanos: since.map_or(0, |held| held.subsec_nanos()),
-        size: metadata.len(),
-    }
 }
 
 /// The files that stand together as one generation of a layer's index.
@@ -410,7 +400,7 @@ fn plan<'a>(layer: &Layer, walked: &'a [Walked], table: &Table) -> Plan<'a> {
         })
         .map(|(row, _)| row)
         .collect();
-    let based: HashMap<&str, Stamp> = in_base
+    let based: HashMap<&str, FileStamp> = in_base
         .iter()
         .map(|record| (record.path.as_str(), record.stamp))
         .collect();

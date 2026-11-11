@@ -292,7 +292,7 @@ fn standing(layer: &Layer, source: &Source, ranked: Vec<Ranked>, limit: usize) -
             .filter(|edge| edge.kind == EdgeKind::Supersedes && edge.to == *doc)
             .map(|edge| Replacement {
                 page: edge.from,
-                written_ms: layer.record(edge.from).stamp.written_ms(),
+                written_ms: layer.record(edge.from).stamp.modified_ms,
                 slug: slug_of(source, &layer.record(edge.from).path),
             })
             .collect()
