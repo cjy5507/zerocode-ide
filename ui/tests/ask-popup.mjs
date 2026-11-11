@@ -659,6 +659,45 @@ async function computerHandoff(browser, origin, ok) {
       covered.why.includes("Safari") && covered.why.includes("다 했어요"),
       JSON.stringify(covered),
     );
+    // A schedule an agent asks for comes down the same road, and its card is
+    // an approval, not a thing done elsewhere: its own title, 「허락」 for the
+    // yes — never the 「다 했어요」 a hand presses by habit — and the job in the
+    // window's words.
+    const asked = await page.evaluate(async () => {
+      const T = window.__ASK_T__;
+      T.fire("computer:handoff", {
+        id: "handoff-3",
+        reason: "",
+        reasonKey: "auto.asked.card",
+        reasonArgs: {
+          flow: "Wallet QA",
+          name: "Morning wallet",
+          policy: "dry",
+          schedule: { cadence: "daily", time: "09:30", day_of_week: 1, custom: "" },
+          cron: "30 9 * * *",
+          next: [29_906_490],
+          workspace: "/Users/dev/app",
+          pane: "term:7",
+          hidden: 0,
+        },
+        timeoutMs: 180000,
+      });
+      await T.settle(260);
+      return T.look();
+    });
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(90);
+    const unallowed = await page.evaluate(() => window.__ASK_T__.answered.length);
+    await page.evaluate(() => [...document.querySelectorAll("#ask-choices button")].find((one) => one.textContent.trim() === "허락").click());
+    await page.waitForTimeout(90);
+    const allowed = await page.evaluate(() => window.__ASK_T__.answered.slice(-1)[0]);
+    ok(
+      "a schedule an agent asks for is an approval card: its own title, 「허락」 for the yes and the job in the window's words; Enter allows nothing and the click does",
+      asked.title === "예약을 허락할까요?" && asked.buttons.join() === "취소,허락"
+        && ["Wallet QA", "Morning wallet", "30 9 * * *", "「/Users/dev/app」", "term:7"].every((shown) => asked.why.includes(shown))
+        && unallowed === 2 && allowed?.id === "handoff-3" && allowed?.allow === true,
+      JSON.stringify({ asked, unallowed, allowed }),
+    );
     ok("the hand-over scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   });
 }

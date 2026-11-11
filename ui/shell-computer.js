@@ -645,7 +645,7 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
   "auto.asked.card": (args) => [
     t(
       "auto.asked.card",
-      "{{pane}} 판의 에이전트가 Flow 「{{flow}}」(정책 {{policy}})를 「{{name}}」 예약으로 등록하려고 합니다. 일정: {{schedule}} · 다음 실행: {{next}} · 워크스페이스: {{workspace}}. 허락하면 창이 지켜보는 사람 없이 이 Flow를 걷습니다. 허락하려면 「다 했어요」를 누르고, 아니면 취소하세요. 답하지 않으면 등록되지 않습니다.",
+      "{{pane}} 판의 에이전트가 Flow 「{{flow}}」(정책 {{policy}})를 「{{name}}」 예약으로 등록하려고 합니다. 일정: {{schedule}} · 다음 실행: {{next}} · 워크스페이스: 「{{workspace}}」. 허락하면 창이 지켜보는 사람 없이 이 Flow를 걷습니다. 허락하려면 「허락」을 누르고, 아니면 취소하세요. 답하지 않으면 등록되지 않습니다.",
       {
         ...args,
         schedule: `${automationScheduleText({ schedule: args.schedule, cron: args.cron })} (${args.cron})`,
@@ -819,9 +819,17 @@ registerAskKind("computer-handoff", {
   tone: "computer-handoff",
   view: (ask) => {
     const line = ask.payload.codeAsk;
+    // A schedule an agent asks for is an approval, not a thing the person
+    // does elsewhere: its card says so in its title and on its button, so a
+    // hand used to 「다 했어요」 does not allow a schedule by habit.
+    const schedule = ask.payload.reasonKey === "auto.asked.card";
     return {
       agent: t("computerUse.title", "컴퓨터 사용"),
-      title: line ? t("computer.handoff.codeTitle", "인증번호를 입력해 주세요") : t("computer.handoff.title", "사람이 할 차례"),
+      title: line
+        ? t("computer.handoff.codeTitle", "인증번호를 입력해 주세요")
+        : schedule
+          ? t("auto.asked.title", "예약을 허락할까요?")
+          : t("computer.handoff.title", "사람이 할 차례"),
       why: computerHandoffText(ask.payload),
       // Neither answer is the primary of the plain card: the primary is the
       // button Enter presses, and Enter answers nothing here. 「다 했어요」 says
@@ -837,7 +845,11 @@ registerAskKind("computer-handoff", {
           ]
         : [
             { label: t("computer.handoff.cancel", "취소"), allow: false, tone: "plain" },
-            { label: t("computer.handoff.done", "다 했어요"), allow: true, tone: "plain" },
+            {
+              label: schedule ? t("auto.asked.allow", "허락") : t("computer.handoff.done", "다 했어요"),
+              allow: true,
+              tone: "plain",
+            },
           ],
       initial: null,
       focus: line ? "ask-code-input" : null,

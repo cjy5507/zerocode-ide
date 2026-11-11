@@ -265,7 +265,7 @@ pub(crate) fn card(request: &Request) -> (String, Value) {
         "hidden": request.hidden,
     });
     let sentence = format!(
-        "An agent in {pane} asks to schedule the Flow \"{flow}\" (policy {policy}) as \"{name}\": cron `{cron}`, in {workspace}. The window would walk it by itself, with nobody watching. Allow it only if that is what you want; cancel it, or leave it, and nothing is scheduled.{left_out}",
+        "An agent in {pane} asks to schedule the Flow \"{flow}\" (policy {policy}) as \"{name}\": cron `{cron}`, in \"{workspace}\". The window would walk it by itself, with nobody watching. Allow it only if that is what you want; cancel it, or leave it, and nothing is scheduled.{left_out}",
         flow = request.flow_name,
         policy = request.policy,
         name = job.name,
