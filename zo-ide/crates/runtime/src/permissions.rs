@@ -229,10 +229,12 @@ impl PermissionPolicy {
         self
     }
 
-    /// The refusal for a call only a person may answer, where the caller has
-    /// nobody to ask at all — the enforcer a sub-agent's and a scheduled
-    /// workflow's tools go through. `None` for every other call. One place
-    /// says which calls those are, for the layers that cannot ask.
+    /// The refusal for a schedule zo asks for — a call only a person may
+    /// answer ([`crate::schedule_guard`]) — where the caller has nobody to
+    /// ask at all: the enforcer a sub-agent's and a scheduled workflow's
+    /// tools go through. `None` for every other call. A kill only a person
+    /// may allow is refused on the shell tools' own road
+    /// ([`crate::kill_guard::refused_where_nobody_can_ask`]).
     #[must_use]
     pub fn refused_with_nobody_to_ask(&self, tool_name: &str, input: &str) -> Option<String> {
         crate::schedule_guard::asks(tool_name, input).then(crate::schedule_guard::nobody_to_ask)

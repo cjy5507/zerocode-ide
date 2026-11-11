@@ -21984,3 +21984,87 @@ fn a_tool_found_later_is_judged_at_its_grade_on_the_streaming_turn_too() {
     });
     assert_only_the_read_only_tool_ran(&ran);
 }
+
+/// A prompt only a person may answer leaves no allow rule, whatever a front
+/// answers it with: a schedule's question answered with the lasting allow —
+/// which the question does not offer, and the IDE channel takes anyway —
+/// registers that one schedule and grants nothing. An ordinary prompt
+/// answered the same way still leaves its rule.
+#[test]
+fn a_lasting_allow_sent_to_a_person_only_prompt_allows_the_one_call_and_leaves_no_rule() {
+    struct Ran(Arc<Mutex<Vec<String>>>);
+    impl ToolExecutor for Ran {
+        fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
+            self.0.lock().expect("calls").push(tool_name.to_string());
+            Ok("ran".to_string())
+        }
+    }
+    struct OneCall {
+        name: &'static str,
+        input: String,
+        called: bool,
+    }
+    impl ApiClient for OneCall {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            if std::mem::replace(&mut self.called, true) {
+                return Ok(vec![AssistantEvent::TextDelta("done".into()), AssistantEvent::MessageStop]);
+            }
+            Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: "call-1".to_string(),
+                    name: self.name.to_string(),
+                    input: self.input.clone(),
+                },
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+    // What the prompter is asked does not depend on the pane the suite runs
+    // in: a pane the ledger summoned as a worker puts no question at all.
+    let _env = crate::test_env_lock();
+    let _pane = EnvVarGuard::unset(zerocode_core::agent_teams::TEAM_PANE_VAR);
+    let _leader = EnvVarGuard::unset(zerocode_core::agent_teams::TEAM_LEADER_VAR);
+
+    // The calls that ran and the rules left behind, when the front answers
+    // the one prompt with the lasting allow.
+    let answered_with_a_lasting_allow = |name: &'static str, input: &str, mode: PermissionMode| {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let policy = PermissionPolicy::new(mode).with_tool_requirement(name, PermissionMode::DangerFullAccess);
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            OneCall { name, input: input.to_string(), called: false },
+            Ran(Arc::clone(&ran)),
+            policy,
+            vec!["system".into()],
+        );
+        let cwd = temp_workspace("lasting-allow");
+        fs::create_dir_all(&cwd).expect("workspace");
+        runtime.set_workspace_cwd(cwd);
+        let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        tokio_runtime.block_on(async {
+            let (render_tx, _render_rx) = tokio::sync::mpsc::channel(256);
+            let prompter: Arc<dyn crate::permission::PermissionPrompter> = Arc::new(AllowAsyncPrompterForOverflow);
+            runtime
+                .run_turn_streaming_with_images("do it", Vec::new(), render_tx, prompter)
+                .await
+                .expect("the turn");
+        });
+        let ran = ran.lock().expect("calls").clone();
+        (ran, runtime.take_granted_permission_rules())
+    };
+
+    let (ran, rules) = answered_with_a_lasting_allow(
+        crate::schedule_guard::TOOL,
+        r#"{"schedule":"0 9 * * 1-5","prompt":"check"}"#,
+        PermissionMode::DangerFullAccess,
+    );
+    assert_eq!(ran, [crate::schedule_guard::TOOL], "the schedule the person was asked about is registered");
+    assert!(rules.is_empty(), "and no rule is left for the next one: {rules:?}");
+
+    let (ran, rules) = answered_with_a_lasting_allow("browser", "{}", PermissionMode::WorkspaceWrite);
+    assert_eq!(ran, ["browser"]);
+    assert_eq!(rules.len(), 1, "an ordinary prompt's lasting allow still leaves its rule: {rules:?}");
+}

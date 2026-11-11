@@ -740,6 +740,38 @@ pub fn run_pipe(
     run_pipe_with_env(cwd, home, sessions, state, base_url, args, input, &[])
 }
 
+/// [`run_pipe`] with the pipe held open: `input` is written at once, the pipe
+/// closes when `until` returns, and only then is the child waited for. For a
+/// scenario about what zo does while a pipe that carries no person is still
+/// open — nothing more is written into it.
+#[allow(clippy::too_many_arguments)]
+pub fn run_pipe_held_open(
+    cwd: &Path,
+    home: &Path,
+    sessions: &Path,
+    state: &Path,
+    base_url: &str,
+    args: &[&str],
+    input: &[u8],
+    until: impl FnOnce(),
+) -> io::Result<Output> {
+    let mut command = Command::new(zo_binary());
+    configure_command(&mut command, cwd, home, sessions, state, base_url, args);
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdin = child.stdin.take();
+    if let Some(mut stdin) = stdin.as_ref() {
+        stdin.write_all(input)?;
+        stdin.flush()?;
+    }
+    until();
+    drop(stdin);
+    child.wait_with_output()
+}
+
 /// [`run_pipe`] plus extra environment for the child — the door a scenario
 /// opens by env rather than by flag.
 #[allow(clippy::too_many_arguments)]

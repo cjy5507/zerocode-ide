@@ -22,7 +22,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use e2e::contract::{self, Rule};
-use e2e::harness::{find_bytes, history_rows_raw, run_pipe, run_pipe_with_env, visible_row_occupancy, PtyRun, Screen, SYNC_END};
+use e2e::harness::{
+    find_bytes, history_rows_raw, run_pipe, run_pipe_held_open, run_pipe_with_env, visible_row_occupancy, PtyRun, Screen,
+    SYNC_END,
+};
 use e2e::scripted::{user_text_contains, ScriptedAnthropicService, HELPER_RENDEZVOUS_DEADLINE};
 use mock_anthropic_service::{CapturedRequest, MockAnthropicService};
 use tempfile::TempDir;
@@ -9103,6 +9106,64 @@ async fn e2e_cron_aimed_at_the_next_minute_fires_within_five_seconds() {
     );
     run.wait_for("autonomous → cron", TEST_TIMEOUT);
     let _ = run.finish();
+}
+
+/// A plain run on a pipe has nobody at it, so a schedule zo asks for is
+/// refused at once — while the pipe is still open. The refusal goes back to
+/// the model with nothing more written into the pipe: a run that waited for a
+/// line there would take whatever a program wrote for a person's answer, and
+/// this scene would never see its second request. Nothing is registered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_piped_plain_run_refuses_a_schedule_while_its_pipe_is_open() {
+    let service = ScriptedAnthropicService::tool_calls(
+        &[(
+            "CronCreate",
+            serde_json::json!({
+                "schedule": "0 9 * * 1-5",
+                "prompt": "PIPED_SCHEDULE check the wallet",
+            }),
+        )],
+        "schedule refused",
+    )
+    .await
+    .expect("start the schedule script");
+    let layout = Layout::new();
+    let (cwd, home, sessions, state) =
+        (layout.cwd.clone(), layout.home.clone(), layout.sessions.clone(), layout.state.clone());
+    let base_url = service.base_url().to_string();
+    let (close, closed) = std::sync::mpsc::channel::<()>();
+    let run = tokio::task::spawn_blocking(move || {
+        run_pipe_held_open(
+            &cwd,
+            &home,
+            &sessions,
+            &state,
+            &base_url,
+            &["--plain", "--permission-mode", "danger-full-access"],
+            b"register the schedule\n",
+            move || {
+                let _ = closed.recv_timeout(Duration::from_secs(60));
+            },
+        )
+    });
+
+    // The call's refusal reaches the model while the pipe stands open.
+    let bodies = wait_for_requests(&service, 2, Instant::now() + TEST_TIMEOUT).await;
+    let refusal = parse_body(&bodies[1]);
+    assert!(
+        e2e::scripted::body_text_contains(&refusal, "no person said yes"),
+        "the schedule was not refused for want of a person:\n{}",
+        bodies[1]
+    );
+    let _ = close.send(());
+    let output = run.await.expect("the run's thread").expect("zo ran");
+
+    let said = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(said.contains("only a person may allow it"), "the run did not say what it decided:\n{said}");
+    assert!(
+        !layout.cwd.join(".zo/registries/crons.json").exists(),
+        "a schedule nobody approved was registered"
+    );
 }
 
 /// H₂: a 45-second `ScheduleWakeup` fires once, inside a 90-second window.
