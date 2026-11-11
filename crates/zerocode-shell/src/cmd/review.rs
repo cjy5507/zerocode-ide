@@ -302,12 +302,23 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
                 .and_then(|run| run.evidence_dir.as_deref())
                 .and_then(|dir| computer_use::evidence::read_verdict(Path::new(dir)))
                 .map(|(pass, _)| pass);
+            // A job an agent asked for waits once its Flow reads differently
+            // from the one the person allowed.
+            let flow_changed = automation.asked.is_some()
+                && automation.flow_changed_since_approval(
+                    automation
+                        .flow
+                        .as_deref()
+                        .and_then(flow_document_stands)
+                        .as_deref(),
+                );
             AutomationRow {
                 cron: automation.schedule.to_cron(),
                 leaves_evidence: zerocode_core::leaves_evidence(&automation),
                 next_run_at: next,
                 runs,
                 last_verdict,
+                flow_changed,
                 automation,
             }
         })
@@ -325,10 +336,49 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
 #[tauri::command(async)]
 pub(crate) fn save_automation(
     state: State<'_, AppState>,
-    automation: Automation,
+    mut automation: Automation,
 ) -> Result<Vec<AutomationRow>, String> {
+    // A job saved from the form is the person's own, whatever it was before:
+    // only the window's card writes who asked (`recipes::schedule`).
+    automation.asked = None;
     save_automation_in(state.config_root(), automation)?;
     Ok(list_automations(state))
+}
+
+/// 「다시 승인」: allow the Flow of a job an agent asked for as its document
+/// stands now. The person's alone (`PERSON_ONLY_COMMANDS`): it is the yes the
+/// card took, said again for a document that has changed since.
+///
+/// # Errors
+///
+/// When the job is gone, was written by the person, or its Flow's document
+/// cannot be read.
+#[tauri::command(async)]
+pub(crate) fn approve_automation_flow(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<AutomationRow>, String> {
+    let flow = stored_automations(state.config_root())
+        .into_iter()
+        .find(|held| held.id == id)
+        .and_then(|held| held.flow)
+        .ok_or_else(|| format!("자동화 {id}을(를) 찾지 못했습니다"))?;
+    let stands = flow_document_stands(&flow)
+        .ok_or_else(|| format!("Flow 문서를 읽을 수 없습니다: {flow}"))?;
+    approve_automation_flow_in(
+        state.config_root(),
+        &id,
+        &stands,
+        u64::try_from(now_epoch_ms()).unwrap_or_default(),
+    )?;
+    Ok(list_automations(state))
+}
+
+/// The hash of a Flow's document as it stands, or `None` when it cannot be
+/// read: what an approval is held against (`recipes::schedule`).
+pub(crate) fn flow_document_stands(slug: &str) -> Option<String> {
+    let recipes = computer_use::evidence::root()?;
+    computer_use::recipes::schedule::document_sha256(&recipes, slug)
 }
 
 /// The save behind [`save_automation`], for every writer of a job: the second

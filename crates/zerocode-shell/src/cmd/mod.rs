@@ -163,12 +163,12 @@ pub(crate) use build_buttons::{
 pub(crate) use build_order::{build_order_draft, build_order_preview, build_order_write};
 
 pub(crate) use review::{
-    automation_born_worktrees, clear_delivered_diff_notes, clear_diff_notes, delete_automation,
-    delete_diff_note, enable_automation, flow_delete, flow_list, flow_register, flow_set,
-    github_review_states, list_automation_runs, list_automations, list_diff_notes,
-    list_run_evidence, open_path_in_application, open_url, open_workspace_in_application,
-    pr_check_details, pr_checks, reveal_run_evidence, run_automation, save_automation,
-    save_diff_note,
+    approve_automation_flow, automation_born_worktrees, clear_delivered_diff_notes,
+    clear_diff_notes, delete_automation, delete_diff_note, enable_automation, flow_delete,
+    flow_list, flow_register, flow_set, github_review_states, list_automation_runs,
+    list_automations, list_diff_notes, list_run_evidence, open_path_in_application, open_url,
+    open_workspace_in_application, pr_check_details, pr_checks, reveal_run_evidence,
+    run_automation, save_automation, save_diff_note,
 };
 
 pub(crate) use api_routers::{

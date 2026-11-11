@@ -275,6 +275,7 @@ use browser_diagnose::*;
 use browser_guest_runtime::*;
 use browser_nav_state::*;
 use browser_runtime::*;
+use cmd::approve_automation_flow;
 use cmd::judgment_latest_request;
 use cmd::note_term_detached;
 use cmd::{
@@ -3325,6 +3326,7 @@ fn main() -> ExitCode {
             save_automation,
             delete_automation,
             enable_automation,
+            approve_automation_flow,
             run_automation,
             list_automation_runs,
             list_run_evidence,

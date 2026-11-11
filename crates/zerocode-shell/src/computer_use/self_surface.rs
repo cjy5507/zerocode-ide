@@ -176,6 +176,10 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "save_automation",
     "enable_automation",
     "run_automation",
+    // The yes to a job an agent asked for, said again for a Flow that changed
+    // since (`recipe-schedule`): the card's answer is `computer_confirm_answer`,
+    // the person's already.
+    "approve_automation_flow",
     // The vault's weekly review, which the window writes among those jobs
     // or takes away again.
     "set_second_brain_weekly_review",

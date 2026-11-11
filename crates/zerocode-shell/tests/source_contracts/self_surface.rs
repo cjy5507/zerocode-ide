@@ -450,6 +450,8 @@ fn saving_switching_and_running_an_automation_are_the_persons_alone() {
         // policy decides whether its money step is pressed.
         "set_second_brain_weekly_review",
         "flow_set",
+        // The yes to a job an agent asked for, said again once its Flow changed.
+        "approve_automation_flow",
     ] {
         assert!(person.contains(&name.to_string()), "{name} is the person's");
         assert!(

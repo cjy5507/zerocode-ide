@@ -489,6 +489,7 @@ fn saving_switching_and_running_an_automation_answer_only_the_persons_hand() {
         "enable_automation",
         "run_automation",
         "set_second_brain_weekly_review",
+        "approve_automation_flow",
     ]);
 }
 

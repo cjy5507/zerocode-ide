@@ -19,6 +19,7 @@
 //! current minute one this expression names?
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::launch::split_command_line;
 
@@ -66,8 +67,8 @@ impl Default for Schedule {
     fn default() -> Self {
         Self {
             cadence: Cadence::Daily,
-            time: "09:00".to_string(),
-            day_of_week: 1,
+            time: DEFAULT_TIME.to_string(),
+            day_of_week: DEFAULT_DAY_OF_WEEK,
             custom: String::new(),
         }
     }
@@ -95,6 +96,139 @@ impl Schedule {
             _ => format!("{minute} {hour} * * *"),
         }
     }
+}
+
+/// The time a schedule fires at when its request names none: the editor's own
+/// default.
+const DEFAULT_TIME: &str = "09:00";
+/// The day a weekly schedule fires on when its request names none: Monday,
+/// the editor's own default.
+const DEFAULT_DAY_OF_WEEK: u8 = 1;
+/// The days of the week, Sunday first — the cron numbering. A request spells
+/// one by its name, whole or its first three letters, or by its number.
+const DAY_NAMES: [&str; 7] = [
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+];
+/// How many letters of a day's name are enough to say it.
+const DAY_SHORT_LETTERS: usize = 3;
+
+impl Schedule {
+    /// The schedule a request spells in words (`recipe-schedule`): one of the
+    /// editor's cadences with its clock (`every`, `at`, `day`), or a cron
+    /// expression — one of the two, never both. Unlike a stored record, a
+    /// request is refused rather than clamped: the caller is still there to be
+    /// told.
+    ///
+    /// # Errors
+    ///
+    /// When the words name no schedule, two of them, a time that is not
+    /// `HH:MM`, a day that is no day, or a cron expression [`Cron`] refuses.
+    pub fn from_words(
+        every: Option<&str>,
+        at: Option<&str>,
+        day: Option<&str>,
+        cron: Option<&str>,
+    ) -> Result<Self, String> {
+        let cadence = match (every, cron) {
+            (Some(_), Some(_)) => {
+                return Err("--every and --cron are two ways to say when: say one".to_string());
+            }
+            (None, None) => {
+                return Err(
+                    "say when: --every hourly|daily|weekdays|weekly, or --cron '<minute hour day-of-month month day-of-week>'"
+                        .to_string(),
+                );
+            }
+            (None, Some(expression)) => {
+                if at.is_some() || day.is_some() {
+                    return Err(
+                        "--at and --day go with --every; a --cron says its own time".to_string()
+                    );
+                }
+                if Cron::parse(expression).is_none() {
+                    return Err(format!(
+                        "--cron is five fields of numbers, *, ranges, lists and steps (minute hour day-of-month month day-of-week): {expression}"
+                    ));
+                }
+                return Ok(Self {
+                    cadence: Cadence::Custom,
+                    custom: expression.trim().to_string(),
+                    ..Self::default()
+                });
+            }
+            (Some(word), None) => match word.trim().to_ascii_lowercase().as_str() {
+                "hourly" => Cadence::Hourly,
+                "daily" => Cadence::Daily,
+                "weekdays" => Cadence::Weekdays,
+                "weekly" => Cadence::Weekly,
+                _ => {
+                    return Err(format!(
+                        "--every is hourly, daily, weekdays or weekly: {word}"
+                    ));
+                }
+            },
+        };
+        let time = match at {
+            None => DEFAULT_TIME.to_string(),
+            Some(text) => {
+                let (hour, minute) = strict_time(text)
+                    .ok_or_else(|| format!("--at is HH:MM on a 24-hour clock: {text}"))?;
+                format!("{hour:02}:{minute:02}")
+            }
+        };
+        let day_of_week = match day {
+            None => DEFAULT_DAY_OF_WEEK,
+            Some(_) if cadence != Cadence::Weekly => {
+                return Err("--day goes with --every weekly".to_string());
+            }
+            Some(word) => day_of_week(word).ok_or_else(|| {
+                format!(
+                    "--day is one of {} (or 0-6, Sunday first): {word}",
+                    DAY_NAMES.map(|name| &name[..DAY_SHORT_LETTERS]).join(", ")
+                )
+            })?,
+        };
+        Ok(Self {
+            cadence,
+            time,
+            day_of_week,
+            custom: String::new(),
+        })
+    }
+}
+
+/// `HH:MM` as numbers, or `None`: one or two digits a side, an hour before 24
+/// and a minute before 60. What a request is held to; a stored record is read
+/// by [`parse_time`].
+fn strict_time(text: &str) -> Option<(u32, u32)> {
+    let (hour, minute) = text.trim().split_once(':')?;
+    let part = |digits: &str, below: u32| {
+        if !(1..=2).contains(&digits.len()) || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse::<u32>().ok().filter(|value| *value < below)
+    };
+    Some((part(hour, 24)?, part(minute, 60)?))
+}
+
+/// A day of the week as a request spells it — its English name, whole or its
+/// first three letters (`mon`, `monday`, never `monkey`), or its cron number
+/// — as the cron number, Sunday first.
+fn day_of_week(word: &str) -> Option<u8> {
+    let word = word.trim().to_ascii_lowercase();
+    if let Ok(number) = word.parse::<u8>() {
+        return (usize::from(number) < DAY_NAMES.len()).then_some(number);
+    }
+    let at = DAY_NAMES
+        .iter()
+        .position(|name| *name == word || name[..DAY_SHORT_LETTERS] == word)?;
+    u8::try_from(at).ok()
 }
 
 /// `HH:MM` as numbers, clamped. Anything unreadable is midnight — a stored
@@ -197,6 +331,40 @@ pub fn leaves_evidence(automation: &Automation) -> bool {
     }
 }
 
+/// Who asked for a job the person did not write, and what the person said yes
+/// to. The window writes it when its approval card is allowed
+/// (`recipe-schedule`) and nothing else does: a job made in the form carries
+/// none, and one saved from the form afterwards loses it — it is the
+/// person's own then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Asked {
+    /// The pane the request came from, as the window names its actors.
+    pub pane: String,
+    /// The agent in that pane, as the pane says it: shown and recorded, never
+    /// judged by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// When the person allowed it, unix milliseconds.
+    pub approved_at_ms: u64,
+    /// The SHA-256 of the Flow's document as it stood at that press, in hex.
+    /// A document that reads differently is one the person has not allowed:
+    /// the job waits for them instead of walking it.
+    pub flow_sha256: String,
+}
+
+/// What an approval is bound to ([`Asked::flow_sha256`]): the SHA-256 of the
+/// Flow's document, in hex.
+#[must_use]
+pub fn flow_document_sha256(document: &str) -> String {
+    format!("{:x}", Sha256::digest(document.as_bytes()))
+}
+
+/// The closest together a job an agent asks for may fire, in minutes. The
+/// cadences' tightest is hourly; a cron expression may go below that, down to
+/// this and no further — a walk nobody watches is not also one nobody could
+/// keep up with. The person's own form has no such floor.
+pub const ASKED_SCHEDULE_FLOOR_MINUTES: i64 = 15;
+
 /// One scheduled job.
 ///
 /// `workspace` is a path rather than an opaque id: this product addresses
@@ -274,6 +442,11 @@ pub struct Automation {
     /// field, whose floor is their last run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub armed_at: Option<i64>,
+    /// The request and the approval behind a job an agent asked for
+    /// ([`Asked`]). `None` is a job the person wrote, and every record written
+    /// before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<Asked>,
 }
 
 const fn yes() -> bool {
@@ -338,6 +511,54 @@ pub fn mark_flow_run_ended(
 }
 
 impl Automation {
+    /// The job the window writes when the person allows an agent's request to
+    /// schedule a Flow: the window walks it itself — no agent, no command and
+    /// no precheck, which a request has no way to name — in the checkout the
+    /// request came from. Everything else is what the form starts a job with.
+    #[must_use]
+    pub fn asked_flow(
+        id: String,
+        name: String,
+        workspace: String,
+        flow: String,
+        schedule: Schedule,
+        asked: Asked,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            enabled: true,
+            workspace,
+            workspace_mode: WorkspaceMode::Existing,
+            base_branch: None,
+            agent: None,
+            prompt: String::new(),
+            command: String::new(),
+            reuse_session: false,
+            schedule,
+            precheck: String::new(),
+            precheck_timeout_seconds: precheck_seconds(),
+            missed_run_grace_minutes: grace_minutes(),
+            evidence: EvidencePolicy::default(),
+            close_when_done: false,
+            flow: Some(flow),
+            last_run_at: None,
+            armed_at: None,
+            asked: Some(asked),
+        }
+    }
+
+    /// Whether the Flow this job was approved for reads differently now:
+    /// `document_sha256` is the hash of the Flow's document as it stands, or
+    /// `None` when it cannot be read — which is not the document the person
+    /// allowed either. Always `false` for a job the person wrote.
+    #[must_use]
+    pub fn flow_changed_since_approval(&self, document_sha256: Option<&str>) -> bool {
+        self.asked
+            .as_ref()
+            .is_some_and(|asked| document_sha256 != Some(asked.flow_sha256.as_str()))
+    }
+
     /// Whether the window walks this job's Flow itself, with no agent in
     /// between: it names a Flow, and neither an agent to hand the command to
     /// nor a command of the person's own.
@@ -1299,14 +1520,45 @@ impl Cron {
     /// a second implementation would.
     #[must_use]
     pub fn next_after(&self, from: LocalMinute) -> Option<LocalMinute> {
-        const MINUTES_IN_A_YEAR: i64 = 366 * 24 * 60;
         (0..MINUTES_IN_A_YEAR)
             .map(|ahead| LocalMinute {
                 epoch_minutes: from.epoch_minutes + ahead,
             })
             .find(|candidate| self.matches(*candidate))
     }
+
+    /// The fewest minutes between two firings in the year from `from`, or
+    /// `None` when the expression names at most one minute of it. The walk
+    /// [`Cron::next_after`] makes, so the two cannot disagree; it ends at the
+    /// first pair a minute apart, which nothing beats.
+    #[must_use]
+    pub fn shortest_gap_minutes(&self, from: LocalMinute) -> Option<i64> {
+        let mut last: Option<i64> = None;
+        let mut shortest: Option<i64> = None;
+        for ahead in 0..MINUTES_IN_A_YEAR {
+            let minute = from.epoch_minutes + ahead;
+            if !self.matches(LocalMinute {
+                epoch_minutes: minute,
+            }) {
+                continue;
+            }
+            if let Some(before) = last {
+                let gap = minute - before;
+                if shortest.is_none_or(|held| gap < held) {
+                    shortest = Some(gap);
+                    if gap == 1 {
+                        break;
+                    }
+                }
+            }
+            last = Some(minute);
+        }
+        shortest
+    }
 }
+
+/// How far ahead a [`Cron`] is searched: a year, leap day and all.
+const MINUTES_IN_A_YEAR: i64 = 366 * 24 * 60;
 
 #[cfg(test)]
 mod tests {
@@ -1776,6 +2028,7 @@ mod tests {
             missed_run_grace_minutes: 60,
             last_run_at: None,
             armed_at: None,
+            asked: None,
         }
     }
 
@@ -2782,5 +3035,134 @@ mod tests {
             vec!["job-0"]
         );
         assert_eq!(runs.len(), 2);
+    }
+
+    /// A request spells its schedule in words: a cadence with its clock, or a
+    /// cron expression — one of the two — and what does not read is refused,
+    /// not clamped the way a stored record is.
+    #[test]
+    fn a_request_spells_a_schedule_in_words_and_is_refused_where_it_does_not_read() {
+        let said = |every, at, day, cron| Schedule::from_words(every, at, day, cron);
+        let daily = said(Some("daily"), Some("7:05"), None, None).expect("daily");
+        assert_eq!(
+            (daily.cadence, daily.time.as_str(), daily.to_cron().as_str()),
+            (Cadence::Daily, "07:05", "5 7 * * *")
+        );
+        assert_eq!(
+            said(Some("Hourly"), Some("00:15"), None, None)
+                .expect("hourly")
+                .to_cron(),
+            "15 * * * *"
+        );
+        assert_eq!(
+            said(Some("weekdays"), None, None, None)
+                .expect("weekdays")
+                .to_cron(),
+            "0 9 * * 1-5"
+        );
+        for (day, number) in [
+            (None, 1),
+            (Some("fri"), 5),
+            (Some("Sunday"), 0),
+            (Some("6"), 6),
+        ] {
+            let weekly = said(Some("weekly"), Some("18:30"), day, None).expect("weekly");
+            assert_eq!(weekly.to_cron(), format!("30 18 * * {number}"), "{day:?}");
+        }
+        let custom = said(None, None, None, Some(" */20 9-17 * * 1-5 ")).expect("cron");
+        assert_eq!(
+            (custom.cadence, custom.to_cron().as_str()),
+            (Cadence::Custom, "*/20 9-17 * * 1-5")
+        );
+        for refused in [
+            said(None, None, None, None),
+            said(Some("daily"), None, None, Some("0 9 * * *")),
+            said(Some("fortnightly"), None, None, None),
+            said(Some("daily"), Some("24:00"), None, None),
+            said(Some("daily"), Some("9"), None, None),
+            said(Some("daily"), Some("09:5x"), None, None),
+            said(Some("daily"), None, Some("mon"), None),
+            said(Some("weekly"), None, Some("monkey"), None),
+            said(Some("weekly"), None, Some("7"), None),
+            said(None, Some("09:00"), None, Some("0 9 * * *")),
+            said(None, None, None, Some("@daily")),
+            said(None, None, None, Some("0 9 * *")),
+        ] {
+            assert!(refused.is_err(), "{refused:?}");
+        }
+    }
+
+    /// The closest two firings of an expression stand, over the year ahead:
+    /// what a floor on an asked job's schedule is held against.
+    #[test]
+    fn the_shortest_gap_is_the_closest_two_firings_of_the_year_ahead() {
+        let from = at(2026, 1, 1, 0, 0);
+        let gap = |text: &str| {
+            Cron::parse(text)
+                .expect("parses")
+                .shortest_gap_minutes(from)
+        };
+        assert_eq!(gap("*/5 * * * *"), Some(5));
+        assert_eq!(gap("0 * * * *"), Some(60));
+        assert_eq!(gap("0 9 * * *"), Some(24 * 60));
+        assert_eq!(gap("30 18 * * 5"), Some(7 * 24 * 60));
+        // A list need not be even: the two firings a minute apart decide.
+        assert_eq!(gap("0,1,30 9 * * *"), Some(1));
+        // The last minute of one hour and the first of the next.
+        assert_eq!(gap("0,59 * * * *"), Some(1));
+        // Weekdays: Friday to Monday is long, Monday to Tuesday is a day.
+        assert_eq!(gap("0 9 * * 1-5"), Some(24 * 60));
+        // A leap day is not in the year ahead of 2026 at all.
+        assert_eq!(gap("0 9 29 2 *"), None);
+        // The floor is below the tightest cadence, and above a minute.
+        const {
+            assert!(ASKED_SCHEDULE_FLOOR_MINUTES > 1 && ASKED_SCHEDULE_FLOOR_MINUTES <= 60);
+        }
+    }
+
+    /// The job behind an allowed request: the window walks its Flow itself,
+    /// it carries who asked and what was allowed, and it waits for the person
+    /// once the Flow's document reads differently. A record without the field
+    /// is a job the person wrote, and is written back without it.
+    #[test]
+    fn an_asked_flow_job_is_the_windows_walk_and_waits_once_its_flow_reads_differently() {
+        let asked = Asked {
+            pane: "term:7".into(),
+            agent: Some("codex".into()),
+            approved_at_ms: 1_794_000_000_000,
+            flow_sha256: "aa".repeat(32),
+        };
+        let mut job = Automation::asked_flow(
+            "job-1".into(),
+            "Wallet QA".into(),
+            "/repo".into(),
+            "Wallet QA".into(),
+            Schedule::from_words(Some("daily"), Some("09:30"), None, None).expect("daily"),
+            asked.clone(),
+        );
+        job.bind_flow().expect("binds");
+        assert!(job.runs_flow_directly());
+        assert_eq!(job.flow.as_deref(), Some("wallet-qa"));
+        assert_eq!(job.validate_for_save(), Ok(()));
+        assert!(
+            job.enabled && job.precheck.is_empty() && job.command.is_empty() && job.agent.is_none()
+        );
+        assert!(!job.flow_changed_since_approval(Some(asked.flow_sha256.as_str())));
+        assert!(job.flow_changed_since_approval(Some(&"bb".repeat(32))));
+        assert!(
+            job.flow_changed_since_approval(None),
+            "a document that cannot be read is not the one allowed"
+        );
+        let written = serde_json::to_value(&job).expect("writes");
+        assert_eq!(written["asked"]["pane"], "term:7");
+        let read: Automation = serde_json::from_value(written).expect("reads");
+        assert_eq!(read.asked, Some(asked));
+
+        let own = nightly();
+        assert!(!own.flow_changed_since_approval(None));
+        let written = serde_json::to_value(&own).expect("writes");
+        assert!(written.get("asked").is_none());
+        let read: Automation = serde_json::from_value(written).expect("reads");
+        assert_eq!(read.asked, None);
     }
 }

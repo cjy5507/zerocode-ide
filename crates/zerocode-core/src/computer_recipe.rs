@@ -103,6 +103,7 @@ pub const RECIPE_HOUSEKEEPING: &[ComputerMethod] = &[
     ComputerMethod::RecipeList,
     ComputerMethod::RecipeShow,
     ComputerMethod::RecipeRun,
+    ComputerMethod::RecipeSchedule,
 ];
 
 /// Which door a recipe line goes through: the desktop helper's CLI, the

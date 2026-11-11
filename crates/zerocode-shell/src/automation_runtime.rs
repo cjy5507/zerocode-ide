@@ -976,6 +976,24 @@ fn start_flow_run(
             AutomationFailureInput::new(AutomationFailureStage::Workspace, error, root.clone()),
         ));
     }
+    // A job an agent asked for walks the Flow the person allowed, and no other
+    // (`computer_use::recipes::schedule`): once the document reads differently
+    // the job waits for the person, and its row says why.
+    if automation
+        .flow_changed_since_approval(crate::cmd::review::flow_document_stands(slug).as_deref())
+    {
+        return Err(remember_automation_failure(
+            state,
+            automation,
+            claim,
+            at,
+            AutomationFailureInput::new(
+                AutomationFailureStage::LaunchPlan,
+                computer_use::recipes::schedule::FLOW_CHANGED.to_string(),
+                root.clone(),
+            ),
+        ));
+    }
     let Some(sender) = crate::flow_console::computer_sender() else {
         let error = "Computer Use 연결이 아직 준비되지 않았습니다".to_string();
         return Err(remember_automation_failure(
@@ -1608,6 +1626,32 @@ pub(super) fn set_automation_enabled_in(
         held.armed_at = Some(local_minute_now().epoch_minutes);
     }
     held.enabled = enabled;
+    write_automations(config_root, &rows)?;
+    domain.current_or_mint(id);
+    Ok(())
+}
+
+/// Allow again the Flow of a job an agent asked for, as its document stands
+/// now (`stands`, its hash): the approval moves to this document and this
+/// moment, and the job is armed — the firings it waited through are not ones
+/// it missed. A job the person wrote has no approval to move.
+pub(super) fn approve_automation_flow_in(
+    config_root: &Path,
+    id: &str,
+    stands: &str,
+    approved_at_ms: u64,
+) -> Result<(), String> {
+    let mut domain = automation_store_domain();
+    let mut rows = stored_automations(config_root);
+    let Some(held) = rows.iter_mut().find(|held| held.id == id) else {
+        return Err(format!("자동화 {id}을(를) 찾지 못했습니다"));
+    };
+    let Some(asked) = held.asked.as_mut() else {
+        return Err("직접 만든 자동화에는 다시 승인할 것이 없습니다".to_string());
+    };
+    asked.flow_sha256 = stands.to_string();
+    asked.approved_at_ms = approved_at_ms;
+    held.armed_at = Some(local_minute_now().epoch_minutes);
     write_automations(config_root, &rows)?;
     domain.current_or_mint(id);
     Ok(())

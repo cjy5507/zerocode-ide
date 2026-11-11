@@ -207,6 +207,11 @@ pub(super) struct AutomationRow {
     /// then says only when it last ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) last_verdict: Option<bool>,
+    /// Whether the Flow of a job an agent asked for reads differently from the
+    /// one the person allowed: the job waits for them, and the list says so.
+    /// Absent on a job that does not wait — every job the person wrote.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) flow_changed: bool,
 }
 
 /// A prompt that finished its journey into a shell, either way — or that is
@@ -7214,6 +7219,10 @@ pub(super) fn answer_computer_command_with(
         // The person's turn: the plain card, or the card with a line for a
         // one-time code, whose code the window types where the agent said.
         persons_turn_answer(&command, typer)
+    } else if command.method == ComputerMethod::RecipeSchedule {
+        // A schedule an agent asks for: the window's card, the person's answer
+        // on it, and only then the job.
+        desktop_schedule(&command, permission_window, workspace)
     } else if matches!(
         command.method,
         ComputerMethod::ReflexStart
@@ -7824,6 +7833,57 @@ fn recipe_seen_by(window: Option<&tauri::AppHandle>) -> computer_use::recipes::S
         .collect();
     let apps = computer_use::call("listApps", serde_json::json!({})).ok();
     computer_use::recipes::Seen::of(pages, apps.as_ref())
+}
+
+/// `recipe-schedule`: the request read and checked, the window's card, and —
+/// only on the person's yes — the job, through the door every writer of a job
+/// uses (`computer_use::recipes::schedule` holds every rule of it). Nothing is
+/// asked while the operator is stopped, while the person is answering another
+/// question, or while another schedule's card stands.
+fn desktop_schedule(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    window: Option<&tauri::AppHandle>,
+    workspace: Option<&Path>,
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    use computer_use::recipes::schedule;
+    use zerocode_core::computer_use_protocol::error_code;
+    if let Some(reason) = computer_use::guard::stopped_reason() {
+        return Err(computer_use::guard::refusal(&reason));
+    }
+    let person_asked = || {
+        computer_use::ComputerUseError::new(
+            error_code::PERSON_ASKED,
+            "the person is being asked about another step; ask for the schedule once they have answered",
+        )
+    };
+    if computer_use::confirm::asking() {
+        return Err(person_asked());
+    }
+    let _turn = schedule::Turn::take().ok_or_else(person_asked)?;
+    let (Some(root), Some(window)) = (computer_use::evidence::root(), window) else {
+        return Err(computer_use::ComputerUseError::new(
+            error_code::ACCESSIBILITY_ERROR,
+            RECIPES_ROOT_UNKNOWN,
+        ));
+    };
+    let request = schedule::read(
+        &command.params.as_object().cloned().unwrap_or_default(),
+        &root,
+        workspace,
+        crate::run_evidence::actor_pane(),
+        crate::automation_runtime::local_minute_now(),
+        uuid::Uuid::new_v4().to_string(),
+    )?;
+    let (sentence, args) = schedule::card(&request);
+    let decision = computer_use::confirm::handoff_said(
+        &sentence,
+        schedule::ASK_KEY,
+        args,
+        zerocode_core::computer_use::RECIPE_SCHEDULE_ASK_MS,
+    );
+    schedule::settle(request, decision, now_epoch_ms(), |job| {
+        crate::cmd::review::save_automation_in(window.state::<AppState>().config_root(), job)
+    })
 }
 
 /// Recipes (§7.2): saved from this session's steps (or a folder named), kept

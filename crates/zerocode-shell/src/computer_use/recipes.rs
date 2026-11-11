@@ -27,6 +27,7 @@ use crate::run_evidence::{Step, captures};
 use zerocode_core::computer_recipe::privacy;
 
 mod register;
+pub(crate) mod schedule;
 
 pub use register::{FlowDeleted, Registered, Seen, flow_delete, flow_register};
 
