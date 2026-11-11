@@ -442,7 +442,15 @@ fn deleting_and_registering_a_flow_from_the_card_are_the_persons_alone() {
 fn saving_switching_and_running_an_automation_are_the_persons_alone() {
     let person = person_only_commands();
     let registered = registered_commands();
-    for name in ["save_automation", "enable_automation", "run_automation"] {
+    for name in [
+        "save_automation",
+        "enable_automation",
+        "run_automation",
+        // The vault's weekly review is written among those jobs, and a Flow's
+        // policy decides whether its money step is pressed.
+        "set_second_brain_weekly_review",
+        "flow_set",
+    ] {
         assert!(person.contains(&name.to_string()), "{name} is the person's");
         assert!(
             registered.contains(&name.to_string()),
@@ -456,6 +464,7 @@ fn saving_switching_and_running_an_automation_are_the_persons_alone() {
         "auto-detail-run",
         "auto-detail-toggle",
         "second-brain-ingest-on",
+        "second-brain-weekly-review",
     ] {
         let at = index
             .find(&format!("id=\"{id}\""))
@@ -478,6 +487,11 @@ fn saving_switching_and_running_an_automation_are_the_persons_alone() {
         block_after(&settings, "function flowScheduleRow(job) {")
             .contains("toggle.dataset.personOnly = \"\""),
         "a Flow's schedule switch carries the person-only mark"
+    );
+    assert!(
+        block_after(&settings, "function buildFlowSegment(")
+            .contains("button.dataset.personOnly = \"\""),
+        "a Flow's policy and evidence buttons carry the person-only mark"
     );
     let ingest = block_after(&settings, "async function turnOnSecondBrainIngest() {");
     let taken = ingest

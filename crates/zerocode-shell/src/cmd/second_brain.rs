@@ -218,7 +218,8 @@ fn zo_cron(cwd: &Path, args: &[&str]) -> Result<serde_json::Value, String> {
 /// once that is written — a switch that reads "on" while no job stands would
 /// be the card promising a turn nobody opens. Either way the zo cron record
 /// the review used to be is retired, so it cannot also fire from a zo pane
-/// idle in the vault.
+/// idle in the vault. The person's alone (`PERSON_ONLY_COMMANDS`), as the
+/// jobs it is written among are.
 #[tauri::command]
 pub(crate) async fn set_second_brain_weekly_review(
     app: AppHandle,

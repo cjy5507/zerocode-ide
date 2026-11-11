@@ -4934,6 +4934,12 @@ await test("the_flow_card_draws_policy_and_evidence_from_the_core_enums_and_says
   await pageA.click('#flow-evidence-seg .segment-btn[data-value="verdict-only"]');
   const set = await backend.waitForCall("A", "flow_set", setAt);
   assertEqual(set.args, { slug: "wallet-transfer", policy: null, evidence: "verdict-only" }, "flow_set did not carry only the evidence change");
+  // What a Flow's runs keep, and its policy, are the person's to set: the press said so.
+  assertEqual(set.hand, "person", "the evidence button did not say the person pressed it");
+  assert(
+    await pageA.$$eval("#flow-policy-seg .segment-btn, #flow-evidence-seg .segment-btn", (nodes) => nodes.length > 0 && nodes.every((node) => "personOnly" in node.dataset)),
+    "a Flow's policy and evidence buttons lack the person-only mark",
+  );
   await renderSettled(pageA);
   assertEqual(await pageA.$eval("#flow-evidence-seg .segment-btn.is-active", (node) => node.dataset.value), "verdict-only", "the chosen evidence level did not stick");
 
@@ -14477,6 +14483,12 @@ await test("Second Brain detects, sets up, registers, and seeds its recurring wo
   await pageB.click("#second-brain-weekly-review");
   const turnedOn = await backend.waitForCall("B", "set_second_brain_weekly_review", switchOn);
   assertEqual(turnedOn.args, { enabled: true }, "the switch did not ask to write the review's job");
+  // The review's job is written among the automations: the switch is the person's.
+  assertEqual(turnedOn.hand, "person", "the weekly-review switch did not say the person flipped it");
+  assert(
+    await pageB.evaluate(() => "personOnly" in document.getElementById("second-brain-weekly-review").dataset),
+    "the weekly-review switch lacks the person-only mark",
+  );
   await backend.waitForCall("B", "second_brain_status", switchOn);
   const nextRun = await pageB.evaluate(() => localMinuteText(29_891_880));
   await pageB.waitForFunction((next) =>

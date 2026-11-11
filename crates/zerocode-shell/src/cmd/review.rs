@@ -811,7 +811,9 @@ pub(crate) fn flow_list(state: State<'_, AppState>) -> computer_use::recipes::Fl
 
 /// Change a Flow's policy and/or evidence level: the two Flow sections of the
 /// recipe document are rewritten (its steps left alone) with one atomic write,
-/// and the fresh roster is answered — the pattern `save_automation` uses.
+/// and the fresh roster is answered — the pattern `save_automation` uses. The
+/// person's alone (`PERSON_ONLY_COMMANDS`): the policy decides whether a walk
+/// rehearses its money step or presses it.
 #[tauri::command(async)]
 pub(crate) fn flow_set(
     state: State<'_, AppState>,

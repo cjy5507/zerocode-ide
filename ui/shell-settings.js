@@ -4568,6 +4568,8 @@ function buildFlowSegment(seg, values, chosen, field, slug) {
     button.setAttribute("aria-pressed", value === chosen ? "true" : "false");
     // A grammar word (dry, full, …): a technical token, shown as it is written.
     button.textContent = value;
+    // A Flow's policy and what its runs keep are the person's to set (`flow_set`).
+    button.dataset.personOnly = "";
     button.addEventListener("click", () => { if (value !== chosen) void flowSet(slug, { [field]: value }); });
     seg.append(button);
   }
@@ -4596,7 +4598,7 @@ async function flowSet(slug, change) {
       slug,
       policy: change.policy ?? null,
       evidence: change.evidence ?? null,
-    });
+    }, { hand: handNow() });
     flowSelected = slug;
     paintFlows();
   } catch (error) {
@@ -11541,6 +11543,7 @@ el("second-brain-weekly-review").addEventListener("change", (event) => {
     "second_brain_weekly_review",
     "set_second_brain_weekly_review",
     { enabled },
+    { hand: handNow() },
   ).then((snapshot) => {
     if (snapshot !== undefined) void refreshSecondBrain();
   });
@@ -12947,7 +12950,10 @@ function autoDetailsWords() {
   words.push(`${t("auto.grace", "놓친 실행 유예")} ${graceLabel(Number(el("auto-grace").value))}`);
   const precheck = el("auto-precheck").value.trim();
   words.push(`${t("auto.precheck", "사전 점검")} ${precheck || t("auto.none", "없음")}`);
-  if (el("auto-command").value.trim()) words.push(t("auto.customCommand", "사용자 명령"));
+  // The command itself, as the precheck above: what a save stores is read off
+  // this line even when the fold is closed.
+  const command = el("auto-command").value.trim();
+  if (command) words.push(`${t("auto.customCommand", "사용자 명령")} ${command}`);
   return words;
 }
 
