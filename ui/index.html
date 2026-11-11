@@ -2373,9 +2373,9 @@
                 <span class="auto-status" id="auto-detail-status"></span>
               </div>
               <div class="auto-detail-actions">
-                <button class="btn btn--primary" id="auto-detail-run" type="button"><svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg><span data-i18n="auto.runNow">지금 실행</span></button>
+                <button class="btn btn--primary" id="auto-detail-run" type="button" data-person-only><svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg><span data-i18n="auto.runNow">지금 실행</span></button>
                 <button class="btn" id="auto-detail-edit" type="button"><svg class="icon" aria-hidden="true"><use href="#i-pencil"></use></svg><span data-i18n="app.edit">편집</span></button>
-                <button class="btn" id="auto-detail-toggle" type="button"></button>
+                <button class="btn" id="auto-detail-toggle" type="button" data-person-only></button>
                 <button class="btn btn--halt" id="auto-detail-delete" type="button" data-i18n="app.delete">삭제</button>
               </div>
               <dl class="auto-facts">
@@ -2586,8 +2586,8 @@
           <footer class="auto-form-acts">
             <button class="btn" id="auto-cancel" type="button" data-i18n="app.cancel">취소</button>
             <button class="btn btn--halt" id="auto-delete" type="button" data-i18n="app.delete">삭제</button>
-            <button class="btn" id="auto-run" type="button" data-i18n="auto.runNow">지금 실행</button>
-            <button class="btn btn--primary" id="auto-save" type="submit" data-i18n="app.save">저장</button>
+            <button class="btn" id="auto-run" type="button" data-person-only data-i18n="auto.runNow">지금 실행</button>
+            <button class="btn btn--primary" id="auto-save" type="submit" data-person-only data-i18n="app.save">저장</button>
           </footer>
         </form>
       </div>
@@ -5823,7 +5823,7 @@
             </dl>
             <p class="integration-empty" id="second-brain-ingest-warning" role="status" aria-live="polite" hidden>
               <span id="second-brain-ingest-warning-text"></span>
-              <button class="integration-context-action" id="second-brain-ingest-on" type="button" data-i18n="settings.secondBrain.ingestTurnOn">켜기</button>
+              <button class="integration-context-action" id="second-brain-ingest-on" type="button" data-person-only data-i18n="settings.secondBrain.ingestTurnOn">켜기</button>
             </p>
             <!-- 산문 절반의 lint: 스킬의 주간 리뷰를 창 자동화로 돌린다(t-77377).
                  매주 일요일 06:00 볼트에서 zo 턴을 열고 끝나면 판을 닫으며,

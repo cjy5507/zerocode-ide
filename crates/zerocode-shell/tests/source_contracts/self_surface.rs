@@ -428,6 +428,68 @@ fn deleting_and_registering_a_flow_from_the_card_are_the_persons_alone() {
     );
 }
 
+/// A job that runs with nobody watching is the person's to save, to switch on
+/// or off and to run now (2026-11-11): the three commands stand on the second
+/// wall's list and are registered, and the controls that reach them wear the
+/// person-only mark (the first wall) — the form's save and run, the detail's
+/// run and switch, a row's switch and run, a Flow's schedule switch and the
+/// vault's own switch-on. An agent may look at the page and fill the form; it
+/// is told the window keeps these for the person, by the words every marked
+/// control answers with. The call that awaits before it invokes takes its
+/// press's hand first; that every call names a hand at all is the rule of
+/// `the_second_wall_reads_the_hand_the_page_says_and_no_clock`.
+#[test]
+fn saving_switching_and_running_an_automation_are_the_persons_alone() {
+    let person = person_only_commands();
+    let registered = registered_commands();
+    for name in ["save_automation", "enable_automation", "run_automation"] {
+        assert!(person.contains(&name.to_string()), "{name} is the person's");
+        assert!(
+            registered.contains(&name.to_string()),
+            "{name} is on the person-only list but not registered"
+        );
+    }
+    let index = ui_file("index.html");
+    for id in [
+        "auto-save",
+        "auto-run",
+        "auto-detail-run",
+        "auto-detail-toggle",
+        "second-brain-ingest-on",
+    ] {
+        let at = index
+            .find(&format!("id=\"{id}\""))
+            .unwrap_or_else(|| panic!("#{id} is on the page"));
+        let tag_start = index[..at].rfind('<').unwrap_or(at);
+        let tag_end = at + index[at..].find('>').unwrap_or(0);
+        assert!(
+            index[tag_start..tag_end].contains("data-person-only"),
+            "#{id} carries data-person-only"
+        );
+    }
+    let settings = ui_file("shell-settings.js");
+    let rows = block_after(&settings, "function paintAutomations() {");
+    assert!(
+        rows.contains("role=\"switch\" data-person-only></button>")
+            && rows.contains("run.dataset.personOnly = \"\""),
+        "a row's switch and its run button carry the person-only mark"
+    );
+    assert!(
+        block_after(&settings, "function flowScheduleRow(job) {")
+            .contains("toggle.dataset.personOnly = \"\""),
+        "a Flow's schedule switch carries the person-only mark"
+    );
+    let ingest = block_after(&settings, "async function turnOnSecondBrainIngest() {");
+    let taken = ingest
+        .find("const hand = handNow();")
+        .expect("the vault's switch-on takes its press's hand");
+    let awaited = ingest.find("await ").expect("it awaits");
+    assert!(
+        taken < awaited && ingest.matches("{ hand });").count() == 2,
+        "the hand is taken before anything is awaited and both commands carry it"
+    );
+}
+
 #[test]
 fn requiring_a_share_is_a_persisted_person_only_setting() {
     let person = person_only_commands();

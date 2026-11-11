@@ -474,9 +474,26 @@ fn an_agents_call_runs_no_person_only_command() {
 /// hand. The agent's road to a Flow is `recipe-save --flow-check`, a CLI verb.
 #[test]
 fn deleting_and_registering_a_flow_answer_only_the_persons_hand() {
+    answer_only_the_persons_hand(&["flow_delete", "flow_register"]);
+}
+
+/// A job that runs with nobody watching is the person's to stand up, to switch
+/// on or off and to run now (2026-11-11). The automation page is no settings
+/// pane and its form holds no secret, so an agent pressing in the window could
+/// fill the form and save a job carrying a command of its own: the three
+/// commands that make a job run answer the person's own hand and no other.
+#[test]
+fn saving_switching_and_running_an_automation_answer_only_the_persons_hand() {
+    answer_only_the_persons_hand(&["save_automation", "enable_automation", "run_automation"]);
+}
+
+/// Each of `commands` is refused by the window's invoke handler, by name, for
+/// an agent's press, a call from no event, a hand the page never says and the
+/// program road — and runs for the person's own hand.
+fn answer_only_the_persons_hand(commands: &[&str]) {
     use super::person_only_refusal;
 
-    for command in ["flow_delete", "flow_register"] {
+    for command in commands {
         for hand in [
             Some("agent"),
             Some("none"),

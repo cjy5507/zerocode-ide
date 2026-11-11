@@ -4445,6 +4445,8 @@ function flowScheduleRow(job) {
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "auto-row-toggle";
+  // Switching a job on or off is the person's (`enable_automation`).
+  toggle.dataset.personOnly = "";
   toggle.setAttribute("role", "switch");
   toggle.setAttribute("aria-checked", job.enabled ? "true" : "false");
   toggle.setAttribute("aria-label", job.enabled
@@ -4498,7 +4500,7 @@ function flowScheduleRow(job) {
 async function toggleFlowSchedule(job, toggle) {
   toggle.disabled = true;
   try {
-    automations = await invoke("enable_automation", { id: job.id, enabled: !job.enabled });
+    automations = await invoke("enable_automation", { id: job.id, enabled: !job.enabled }, { hand: handNow() });
     await refreshFlows();
   } catch (error) {
     showFlowError(error);
@@ -11454,14 +11456,17 @@ async function turnOnSecondBrainIngest() {
   const vault = secondBrainReport?.savedPath ?? "";
   if (ingest === null || !vault) return;
   const button = el("second-brain-ingest-on");
+  // The press's hand, taken before anything is awaited: both commands are the
+  // person's, and the agent list may be read first.
+  const hand = handNow();
   button.disabled = true;
   try {
     if (ingest.automationId) {
-      automations = await invoke("enable_automation", { id: ingest.automationId, enabled: true });
+      automations = await invoke("enable_automation", { id: ingest.automationId, enabled: true }, { hand });
     } else {
       if (agentRows.length === 0) await refreshAgents();
       const automation = newAutomationDraft({ ...AUTO_TEMPLATES["raw-ingest"](), workspace: vault });
-      automations = await invoke("save_automation", { automation });
+      automations = await invoke("save_automation", { automation }, { hand });
     }
     paintAutomations();
   } catch (error) {
@@ -11937,7 +11942,7 @@ function paintAutomations() {
       '<span class="auto-row-when" role="cell"></span>' +
       '<span class="auto-row-last" role="cell"></span>' +
       '</span>' +
-      '<button class="auto-row-toggle" type="button" role="switch"></button>' +
+      '<button class="auto-row-toggle" type="button" role="switch" data-person-only></button>' +
       '<span class="auto-row-actions" role="cell"></span>';
     item.querySelector(".auto-row-name").textContent = row.name || t("auto.untitled", "이름 없음");
     item.querySelector(".auto-row-schedule").textContent = automationScheduleText(row);
@@ -11985,7 +11990,7 @@ function paintAutomations() {
     toggle.addEventListener("click", (event) => {
       event.stopPropagation();
       toggle.disabled = true;
-      invoke("enable_automation", { id: row.id, enabled: !row.enabled })
+      invoke("enable_automation", { id: row.id, enabled: !row.enabled }, { hand: handNow() })
         .then((rows) => {
           automations = rows;
           paintAutomations();
@@ -11998,6 +12003,8 @@ function paintAutomations() {
     const run = document.createElement("button");
     run.className = "auto-row-action";
     run.type = "button";
+    // Running a job now is the person's (`run_automation`).
+    run.dataset.personOnly = "";
     run.dataset.tip = t("auto.runNow", "지금 실행");
     run.setAttribute("aria-label", run.dataset.tip);
     run.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-play"></use></svg>';
@@ -13109,7 +13116,7 @@ async function saveAutomation(event) {
     return;
   }
   try {
-    automations = await invoke("save_automation", { automation });
+    automations = await invoke("save_automation", { automation }, { hand: handNow() });
   } catch (error) {
     // Shown on the form rather than as a window-wide error: what is wrong is
     // a field the person is looking at — the schedule it cannot read, or an
@@ -13345,7 +13352,7 @@ function mountRunTab(run) {
 async function runAutomationNow(automation) {
   if (!automation) return;
   try {
-    const started = await invoke("run_automation", { id: automation.id });
+    const started = await invoke("run_automation", { id: automation.id }, { hand: handNow() });
     setAutoOpen(false);
     refreshAutomations();
     if (started?.worktree) void refreshWorktrees();
@@ -13357,7 +13364,7 @@ async function runAutomationNow(automation) {
 
 el("auto-run").addEventListener("click", () => {
   if (!autoDraft) return;
-  invoke("run_automation", { id: autoDraft.id })
+  invoke("run_automation", { id: autoDraft.id }, { hand: handNow() })
     .then((started) => {
       setAutoOpen(false);
       refreshAutomations();
@@ -13382,7 +13389,7 @@ el("auto-detail-toggle").addEventListener("click", async () => {
   const button = el("auto-detail-toggle");
   button.disabled = true;
   try {
-    automations = await invoke("enable_automation", { id: row.id, enabled: !row.enabled });
+    automations = await invoke("enable_automation", { id: row.id, enabled: !row.enabled }, { hand: handNow() });
     paintAutomations();
     paintAutomationDetail();
   } catch (error) {

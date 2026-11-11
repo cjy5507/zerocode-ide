@@ -5082,6 +5082,12 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     // The switch is the job's own: it goes through enable_automation, and the
     // row follows what the backend answered.
     from = backend.calls.length;
+    // Switching a job on or off is the person's alone: the switch wears the mark
+    // an agent pressing in the window is refused by.
+    assert(
+      await pageA.locator('.flow-schedule[data-id="job-off"] [role="switch"]').evaluate((node) => "personOnly" in node.dataset),
+      "a Flow's schedule switch lacks the person-only mark",
+    );
     await pageA.click('.flow-schedule[data-id="job-off"] [role="switch"]');
     assertEqual(
       (await backend.waitForCall("A", "enable_automation", from)).args,
@@ -5127,6 +5133,13 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
       "the form did not open on this Flow",
     );
     from = backend.calls.length;
+    // Saving a job, and running one now, are the person's alone too.
+    for (const id of ["auto-save", "auto-run"]) {
+      assert(
+        await pageA.locator(`#${id}`).evaluate((node) => "personOnly" in node.dataset),
+        `#${id} lacks the person-only mark`,
+      );
+    }
     await pageA.click("#auto-save");
     const saved = await backend.waitForCall("A", "save_automation", from);
     assertEqual(
