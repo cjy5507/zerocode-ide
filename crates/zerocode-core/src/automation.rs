@@ -156,9 +156,13 @@ impl Schedule {
                         "--cron is five fields of numbers, *, ranges, lists and steps (minute hour day-of-month month day-of-week): {expression}"
                     ));
                 }
+                // Kept as its five fields a space apart: the expression is
+                // shown on the card as it is kept, and a line break between
+                // two fields — any white space parts them — would be drawn
+                // there as one.
                 return Ok(Self {
                     cadence: Cadence::Custom,
-                    custom: expression.trim().to_string(),
+                    custom: expression.split_whitespace().collect::<Vec<_>>().join(" "),
                     ..Self::default()
                 });
             }
@@ -3073,6 +3077,14 @@ mod tests {
         assert_eq!(
             (custom.cadence, custom.to_cron().as_str()),
             (Cadence::Custom, "*/20 9-17 * * 1-5")
+        );
+        // Any white space parts two fields, and the expression is kept a space
+        // apart: a line break an asker put between them is not kept, so the
+        // card that shows the expression shows one line.
+        let broken = said(None, None, None, Some("0\n\n9\t* *  *")).expect("cron");
+        assert_eq!(
+            (broken.custom.as_str(), broken.to_cron().as_str()),
+            ("0 9 * * *", "0 9 * * *")
         );
         for refused in [
             said(None, None, None, None),
