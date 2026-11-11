@@ -2578,8 +2578,15 @@ where
                     // release lane's load, and this task renders and hears an
                     // Esc meanwhile. The policy and the call's dispatch then
                     // use this one reading.
+                    // A shell command the wrapper carries is read here as one
+                    // called by name, as the policy judges it.
+                    let carried = crate::permissions::carried_call(tool_name, &effective_input);
+                    let (judged_tool, judged_input) = carried.as_ref().map_or(
+                        (tool_name.as_str(), effective_input.as_str()),
+                        |(name, arguments)| (name.as_str(), arguments.as_str()),
+                    );
                     if let Some((shell, command)) =
-                        crate::permissions::shell_command(tool_name, &effective_input)
+                        crate::permissions::shell_command(judged_tool, judged_input)
                             .filter(|(shell, command)| crate::kill_guard::reads_the_table(*shell, command))
                     {
                         kill_judgment = tokio::task::spawn_blocking(move || {
@@ -2669,8 +2676,11 @@ where
                                 // effect for the rest of this session and is
                                 // queued for the host to persist to settings.
                                 Some(AsyncPermissionDecision::Allow) => {
+                                    // The rule is for the call the person was
+                                    // asked about: the one a wrapper carried,
+                                    // when the model called through it.
                                     self.permission_policy
-                                        .grant_always(tool_name, &effective_input);
+                                        .grant_always(&sync_request.tool_name, &sync_request.input);
                                     PermissionOutcome::Allow
                                 }
                                 Some(AsyncPermissionDecision::AllowOnce) => PermissionOutcome::Allow,

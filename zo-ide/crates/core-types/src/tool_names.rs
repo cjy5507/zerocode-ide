@@ -58,6 +58,57 @@ pub const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
 /// `edit_tool: apply_patch` (`api::harness_profile_for_model`).
 pub const APPLY_PATCH: &str = "apply_patch";
 
+/// The tool that runs another by name, which is how a tool that is not
+/// advertised gets called at all (`tools::capability`). It is an address and
+/// grants nothing: whatever judges a call — an executor's gates, the
+/// permission policy — judges the call it carries ([`carried_call`]).
+pub const CAPABILITY_INVOKE: &str = "CapabilityInvoke";
+
+/// Why a [`CAPABILITY_INVOKE`] input carries no call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoCarriedCall {
+    /// It has no `name`, an empty one, or one that is not a string.
+    NoName,
+    /// It names [`CAPABILITY_INVOKE`] itself.
+    Itself,
+    /// Its `input` is there and is not an object, but this instead.
+    InputNotAnObject(&'static str),
+}
+
+/// The call a [`CAPABILITY_INVOKE`] input carries: the tool it names, with the
+/// white space around the name dropped, and that tool's arguments — an empty
+/// object when none came. The one reading of the wrapper, so what is judged is
+/// what runs.
+///
+/// # Errors
+/// When the input names no tool, names the wrapper itself, or gives arguments
+/// that are not an object: nothing runs for such a call.
+pub fn carried_call(input: &Value) -> Result<(String, Value), NoCarriedCall> {
+    let name = input
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or(NoCarriedCall::NoName)?;
+    if name == CAPABILITY_INVOKE {
+        return Err(NoCarriedCall::Itself);
+    }
+    let arguments = match input.get("input") {
+        None | Some(Value::Null) => Value::Object(Map::new()),
+        Some(value @ Value::Object(_)) => value.clone(),
+        Some(other) => {
+            return Err(NoCarriedCall::InputNotAnObject(match other {
+                Value::Array(_) => "an array",
+                Value::String(_) => "a string",
+                Value::Number(_) => "a number",
+                Value::Bool(_) => "a boolean",
+                _ => "a non-object",
+            }))
+        }
+    };
+    Ok((name.to_string(), arguments))
+}
+
 /// Alias keys that are zo's own shorthand rather than another agent's name for
 /// the same tool: Claude Code's `Task` starts a sub-agent (zo's `Agent`),
 /// while zo reads `task` as `TaskCreate`.
@@ -454,5 +505,29 @@ mod tests {
         assert_eq!(handler_call("Bash", r#"{"command":"ls"}"#), Some(("bash", None)));
         assert_eq!(handler_call("read_file", r#"{"path":"a.rs"}"#), Some(("read_file", None)));
         assert_eq!(handler_call("Agent", "{}"), None);
+    }
+
+    /// The wrapper's input is read one way: the tool it names and that tool's
+    /// arguments, or why nothing runs for it.
+    #[test]
+    fn the_wrapper_carries_the_tool_it_names_and_that_tools_arguments() {
+        assert_eq!(
+            carried_call(&json!({"name": " bash ", "input": {"command": "ls"}})),
+            Ok(("bash".to_string(), json!({"command": "ls"})))
+        );
+        for no_arguments in [json!({"name": "Audit"}), json!({"name": "Audit", "input": null})] {
+            assert_eq!(carried_call(&no_arguments), Ok(("Audit".to_string(), json!({}))));
+        }
+        for no_name in [json!({}), json!({"name": "  "}), json!({"name": 7}), json!("bash")] {
+            assert_eq!(carried_call(&no_name), Err(NoCarriedCall::NoName), "{no_name}");
+        }
+        assert_eq!(
+            carried_call(&json!({"name": CAPABILITY_INVOKE, "input": {"name": "bash"}})),
+            Err(NoCarriedCall::Itself)
+        );
+        assert_eq!(
+            carried_call(&json!({"name": "bash", "input": "ls"})),
+            Err(NoCarriedCall::InputNotAnObject("a string"))
+        );
     }
 }

@@ -996,6 +996,60 @@ mod real_run {
         }
     }
 
+    /// Dispatch unwraps a call through `CapabilityInvoke` and runs the call it
+    /// carries, so the guard judges that call: a signal to the window is
+    /// refused unasked, and a kill that needs a person's yes is put to a
+    /// person, or refused with nobody to ask. A shell command inside the
+    /// wrapper used to be judged as the wrapper, which the guard does not
+    /// read: the question was never put, and the kill went ahead at the
+    /// shell's chokepoint, which leaves a question to this layer.
+    #[test]
+    fn kill_guard_authorize_judges_a_shell_command_the_wrapper_carries() {
+        use core_types::tool_names::CAPABILITY_INVOKE;
+
+        // 90: no other bait's marker begins with this one.
+        let env = GuardEnv::hold();
+        let bait = Bait::start(&env, 90);
+        env.window(bait.pid());
+        let carrying = |command: &str| {
+            serde_json::json!({ "name": "Bash", "input": { "command": command } }).to_string()
+        };
+        let aimed = carrying(&format!("pkill -f {}", bait.marker));
+        let unknown = carrying("kill \"$TARGET\"");
+        let policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement(CAPABILITY_INVOKE, PermissionMode::ReadOnly);
+
+        let mut person = Person::saying(true);
+        match policy.authorize(CAPABILITY_INVOKE, &aimed, Some(&mut person)) {
+            PermissionOutcome::Deny { reason } => {
+                assert!(reason.contains(&bait.pid().to_string()), "{reason}");
+            }
+            PermissionOutcome::Allow => panic!("the guard let `pkill` at the window through the wrapper"),
+        }
+        assert!(person.asked.is_empty(), "a refusal is not a question");
+
+        match policy.authorize(CAPABILITY_INVOKE, &unknown, None) {
+            PermissionOutcome::Deny { reason } => assert!(reason.contains("yes"), "{reason}"),
+            PermissionOutcome::Allow => panic!("an unasked kill ran through the wrapper with nobody to ask"),
+        }
+        let mut yes = Person::saying(true);
+        assert_eq!(
+            policy.authorize(CAPABILITY_INVOKE, &unknown, Some(&mut yes)),
+            PermissionOutcome::Allow,
+            "the person said yes"
+        );
+        let [question] = yes.asked.as_slice() else {
+            panic!("asked {} times", yes.asked.len());
+        };
+        assert!(question.person_only, "only a person may answer it");
+        assert_eq!(question.tool_name, "bash", "the question is about the command that runs");
+        assert!(
+            question.reason.as_deref().unwrap_or_default().contains("$TARGET"),
+            "the question names the call: {:?}",
+            question.reason
+        );
+    }
+
     /// Where the mode or a rule would run the call without asking — full
     /// access, the allow mode, an allow rule for it — a kill that needs a
     /// person's yes is refused unasked, as the window's hook refuses it

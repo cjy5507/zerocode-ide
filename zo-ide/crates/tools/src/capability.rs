@@ -20,10 +20,13 @@
 //! a check, which is the only way a wrapper like this stays safe as those
 //! checks change.
 
+use core_types::tool_names::{carried_call, NoCarriedCall};
 use serde_json::Value;
 
-/// The always-advertised indirection tool.
-pub const CAPABILITY_INVOKE: &str = "CapabilityInvoke";
+/// The always-advertised indirection tool. Named where every tool's name is,
+/// so the permission policy reads the wrapper by the same name and the same
+/// rule the executors unwrap it by.
+pub use core_types::tool_names::CAPABILITY_INVOKE;
 
 /// What an executor should run instead of a `CapabilityInvoke` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,7 +37,8 @@ pub struct CapabilityCall {
     pub input: String,
 }
 
-/// Read `{name, input}` off a `CapabilityInvoke` call.
+/// Read `{name, input}` off a `CapabilityInvoke` call
+/// ([`core_types::tool_names::carried_call`], the one reading of it).
 ///
 /// Errors are the model's to act on, so they say what to do: a missing name,
 /// a non-object `input`, or an attempt to nest the wrapper in itself.
@@ -43,44 +47,32 @@ pub struct CapabilityCall {
 /// When `name` is missing/empty/not a string, when `input` is present but not
 /// an object, or when `name` is `CapabilityInvoke` itself.
 pub fn unwrap_capability_invoke(input: &Value) -> Result<CapabilityCall, String> {
-    let name = input
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| {
+    match carried_call(input) {
+        Ok((name, arguments)) => Ok(CapabilityCall {
+            name,
+            input: arguments.to_string(),
+        }),
+        Err(NoCarriedCall::NoName) => Err(
             "CapabilityInvoke needs `name`: the exact name of the tool to run. Find it with \
              ToolSearch."
-                .to_string()
-        })?;
-    if name == CAPABILITY_INVOKE {
+                .to_string(),
+        ),
         // Not a stack-overflow guard alone — a nested call is always a
         // misunderstanding, and saying so is more useful than unwrapping it.
-        return Err(format!(
+        Err(NoCarriedCall::Itself) => Err(format!(
             "{CAPABILITY_INVOKE} cannot invoke itself; pass the name of the tool you want to run."
-        ));
-    }
-    let inner = match input.get("input") {
-        None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
-        Some(value @ Value::Object(_)) => value.clone(),
-        Some(other) => {
-            return Err(format!(
+        )),
+        Err(NoCarriedCall::InputNotAnObject(got)) => {
+            let name = input
+                .get("name")
+                .and_then(Value::as_str)
+                .map_or("", str::trim);
+            Err(format!(
                 "CapabilityInvoke `input` must be an object shaped by `{name}`'s own schema, got \
-                 {}.",
-                match other {
-                    Value::Array(_) => "an array",
-                    Value::String(_) => "a string",
-                    Value::Number(_) => "a number",
-                    Value::Bool(_) => "a boolean",
-                    _ => "a non-object",
-                }
+                 {got}."
             ))
         }
-    };
-    Ok(CapabilityCall {
-        name: name.to_string(),
-        input: inner.to_string(),
-    })
+    }
 }
 
 #[cfg(test)]

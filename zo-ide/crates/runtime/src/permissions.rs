@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use core_types::tool_names::{tool_key, wire_tool_name, CoreTool};
+use core_types::tool_names::{handler_call, tool_key, wire_tool_name, CoreTool, CAPABILITY_INVOKE};
 use serde_json::Value;
 use zerocode_core::shell_rule::kill::KillVerdict;
 
@@ -403,7 +403,10 @@ impl PermissionPolicy {
         self.authorize_by_mode_and_rules("bash", &input, &PermissionContext::default(), prompter)
     }
 
-    /// The decision for one call. A bash command that would send a signal is
+    /// The decision for one call. A call through the wrapper is judged as the
+    /// call it carries — `CapabilityInvoke` is an address and grants nothing.
+    ///
+    /// A bash command that would send a signal is
     /// judged by the kill guard first (t-80732): a signal to the window is
     /// refused whatever the mode, the rules or a hook say, and nobody is
     /// asked; one that needs a person's yes is put to the person, once and
@@ -480,6 +483,12 @@ impl PermissionPolicy {
                 }
             }
             Some(KillVerdict::Allow) | None => {
+                // The wrapper is an address and grants nothing: the call it
+                // carries is the one judged, by every line of this function,
+                // as if the model had named it.
+                if let Some((carried, arguments)) = carried_call(tool_name, input) {
+                    return self.authorize_with_context(&carried, &arguments, context, prompter);
+                }
                 self.authorize_by_mode_and_rules(tool_name, input, context, prompter)
             }
         }
@@ -1034,6 +1043,26 @@ pub(crate) fn shell_command(
 
 /// The `PowerShell` tool's name, as [`normalize_tool_name`] writes it.
 const POWERSHELL_TOOL: &str = "powershell";
+
+/// The call a call through the wrapper carries
+/// ([`core_types::tool_names::CAPABILITY_INVOKE`]), as a direct call of the
+/// same tool is stored: a core tool under its handler's name and fields.
+/// `None` for any other tool, and for a wrapper that carries nothing — the
+/// executor answers that one with what to send and runs nothing. The input is
+/// read as the executor reads it (`parse_tool_arguments`, a mended slip
+/// included), so what is judged is what runs.
+pub(crate) fn carried_call(tool_name: &str, input: &str) -> Option<(String, String)> {
+    if tool_name != CAPABILITY_INVOKE {
+        return None;
+    }
+    let wrapper = core_types::tool_input::parse_tool_arguments(input).ok()?;
+    let (name, arguments) = core_types::tool_names::carried_call(&wrapper).ok()?;
+    let arguments = arguments.to_string();
+    Some(match handler_call(&name, &arguments) {
+        Some((handler, respelled)) => (handler.to_string(), respelled.unwrap_or(arguments)),
+        None => (name, arguments),
+    })
+}
 
 // The spelling rule and the alias table live with the core tools' names in
 // `core_types::tool_names`, where the session's history reconciler reads them
@@ -2446,5 +2475,145 @@ mod tests {
                 action: "maybe".to_string()
             })
         );
+    }
+
+    /// A call through the wrapper, as a model sends it.
+    fn through_the_wrapper(name: &str, arguments: &serde_json::Value) -> String {
+        serde_json::json!({ "name": name, "input": arguments }).to_string()
+    }
+
+    /// The wrapper is an address and grants nothing: a call through it is
+    /// judged as the call it carries, to the letter of what a call by name
+    /// gets. It used to be judged as the wrapper itself — a tool any mode may
+    /// run and no rule names — so a write passed a read-only session and a
+    /// denied command passed its deny rule, since the foreground registry
+    /// carries no enforcer to judge the carried call a second time.
+    #[test]
+    fn a_call_through_the_wrapper_is_judged_as_the_call_it_carries() {
+        use core_types::tool_names::CAPABILITY_INVOKE;
+        use serde_json::json;
+
+        let rules = RuntimePermissionRuleConfig::new(
+            Vec::new(),
+            vec!["bash(rm -rf:*)".to_string(), "WebFetch".to_string()],
+            Vec::new(),
+        );
+        for mode in [
+            PermissionMode::ReadOnly,
+            PermissionMode::WorkspaceWrite,
+            PermissionMode::DangerFullAccess,
+            PermissionMode::Prompt,
+            PermissionMode::Allow,
+        ] {
+            let policy = PermissionPolicy::new(mode)
+                .with_tool_requirement(CAPABILITY_INVOKE, PermissionMode::ReadOnly)
+                .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+                .with_tool_requirement("read_file", PermissionMode::ReadOnly)
+                .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite)
+                .with_tool_requirement("browser", PermissionMode::DangerFullAccess)
+                .with_tool_requirement("WebFetch", PermissionMode::ReadOnly)
+                .with_permission_rules(&rules);
+            // The name and input a model sends, and the call zo stores for
+            // them: a core tool's under its handler's name and fields.
+            let calls = [
+                ("read_file", json!({"path": "notes.txt"}), "read_file", json!({"path": "notes.txt"})),
+                ("Read", json!({"file_path": "notes.txt"}), "read_file", json!({"path": "notes.txt"})),
+                ("Write", json!({"file_path": "notes.txt"}), "write_file", json!({"path": "notes.txt"})),
+                ("Bash", json!({"command": "git status --short"}), "bash", json!({"command": "git status --short"})),
+                ("bash", json!({"command": "rm -rf build"}), "bash", json!({"command": "rm -rf build"})),
+                ("browser", json!({}), "browser", json!({})),
+                ("WebFetch", json!({"url": "https://example.com"}), "WebFetch", json!({"url": "https://example.com"})),
+                ("NoSuchTool", json!({}), "NoSuchTool", json!({})),
+            ];
+            for (sent, arguments, stored, stored_arguments) in calls {
+                assert_eq!(
+                    policy.authorize(CAPABILITY_INVOKE, &through_the_wrapper(sent, &arguments), None),
+                    policy.authorize(stored, &stored_arguments.to_string(), None),
+                    "{mode:?}: `{sent}` through the wrapper, with nobody to ask"
+                );
+                let mut through = RecordingPrompter { seen: Vec::new(), allow: true };
+                let mut by_name = RecordingPrompter { seen: Vec::new(), allow: true };
+                assert_eq!(
+                    policy.authorize(CAPABILITY_INVOKE, &through_the_wrapper(sent, &arguments), Some(&mut through)),
+                    policy.authorize(stored, &stored_arguments.to_string(), Some(&mut by_name)),
+                    "{mode:?}: `{sent}` through the wrapper, with a person to ask"
+                );
+                assert_eq!(
+                    through.seen, by_name.seen,
+                    "{mode:?}: `{sent}`: the question is about the call that runs"
+                );
+            }
+        }
+
+        // The two the old judgment let through, said outright.
+        let read_only = PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement(CAPABILITY_INVOKE, PermissionMode::ReadOnly)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+        assert!(
+            matches!(
+                read_only.authorize(
+                    CAPABILITY_INVOKE,
+                    &through_the_wrapper("write_file", &json!({"path": "notes.txt", "content": "x"})),
+                    None
+                ),
+                PermissionOutcome::Deny { .. }
+            ),
+            "a read-only session writes nothing through the wrapper"
+        );
+        let denied = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement(CAPABILITY_INVOKE, PermissionMode::ReadOnly)
+            .with_permission_rules(&rules);
+        let PermissionOutcome::Deny { reason } = denied.authorize(
+            CAPABILITY_INVOKE,
+            &through_the_wrapper("bash", &json!({"command": "rm -rf build"})),
+            None,
+        ) else {
+            panic!("a deny rule did not meet the command the wrapper carried");
+        };
+        assert!(reason.contains("rm -rf"), "the rule is named: {reason}");
+    }
+
+    /// A wrapper that carries nothing is judged as the wrapper: the executor
+    /// answers it with what to send and runs nothing. The input is read as the
+    /// executor reads it, so a slip the executor mends does not hide the call
+    /// inside.
+    #[test]
+    fn a_wrapper_that_carries_nothing_is_the_wrapper_and_a_mended_one_is_read() {
+        use core_types::tool_names::CAPABILITY_INVOKE;
+
+        let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement(CAPABILITY_INVOKE, PermissionMode::ReadOnly)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+        for nothing in [
+            "{}",
+            "",
+            r#"{"name":"  "}"#,
+            r#"{"name":"CapabilityInvoke","input":{"name":"write_file","input":{"path":"a"}}}"#,
+            r#"{"name":"write_file","input":"path=a"}"#,
+        ] {
+            assert_eq!(super::carried_call(CAPABILITY_INVOKE, nothing), None, "{nothing}");
+            assert_eq!(
+                policy.authorize(CAPABILITY_INVOKE, nothing, None),
+                PermissionOutcome::Allow,
+                "{nothing}"
+            );
+        }
+        assert_eq!(super::carried_call("write_file", r#"{"name":"bash"}"#), None, "no other tool is a wrapper");
+
+        for mended in [
+            r#"{"name":"write_file","input":{"path":"a","content":"x"},}"#.to_string(),
+            "```json\n{\"name\":\"write_file\",\"input\":{\"path\":\"a\"}}\n```".to_string(),
+            serde_json::Value::String(r#"{"name":"write_file","input":{"path":"a"}}"#.to_string()).to_string(),
+        ] {
+            assert_eq!(
+                super::carried_call(CAPABILITY_INVOKE, &mended).map(|(name, _)| name).as_deref(),
+                Some("write_file"),
+                "{mended}"
+            );
+            assert!(
+                matches!(policy.authorize(CAPABILITY_INVOKE, &mended, None), PermissionOutcome::Deny { .. }),
+                "{mended}"
+            );
+        }
     }
 }
