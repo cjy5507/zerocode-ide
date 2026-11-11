@@ -12,8 +12,9 @@
 //! configuration — `zerocode-lane` trusts every loopback caller of that port,
 //! and a Serve mapping would make the tailnet a loopback caller.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -234,7 +235,7 @@ pub(crate) fn judge(
         }
     }
     let key = format!("{}:{https_port}", dns_name.to_ascii_lowercase());
-    if config.funnel.iter().any(|on| *on == key) {
+    if config.funnel.contains(&key) {
         return Exposure::Funnel;
     }
     let on_port: Vec<&Handler> = config
@@ -306,19 +307,42 @@ pub(crate) fn serve_off_args(https_port: u16) -> Vec<String> {
 }
 
 /// Run the CLI with a time limit; stdout on a zero exit, the CLI's own
-/// words otherwise.
+/// words otherwise. Both pipes are read while the child runs: `status
+/// --json` on a large tailnet is more than a pipe holds, and a child whose
+/// pipe is full never exits.
 pub(crate) fn run(cli: &Path, args: &[String]) -> Result<String, String> {
-    let mut child = Command::new(cli)
+    let mut child = crate::proc::quiet_command(cli)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("tailscale could not start: {error}"))?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
     let started = std::time::Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() < CLI_TIMEOUT => {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -329,14 +353,13 @@ pub(crate) fn run(cli: &Path, args: &[String]) -> Result<String, String> {
             }
             Err(error) => return Err(error.to_string()),
         }
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| error.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
-        let said = String::from_utf8_lossy(&output.stderr);
+        let said = String::from_utf8_lossy(&stderr);
         let said = said
             .lines()
             .find(|line| !line.trim().is_empty())

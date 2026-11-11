@@ -293,7 +293,7 @@ mod tests {
             salt(),
         )
         .expect("encrypts");
-        assert_eq!(body.len(), 145, "the RFC's Content-Length");
+        assert_eq!(body.len(), 144, "the RFC's Content-Length");
         assert_eq!(body, b(BODY));
     }
 

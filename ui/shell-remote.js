@@ -1915,7 +1915,7 @@ function remoteLinkDeviceNode(device) {
     "btn--halt remote-link-revoke",
     t("settings.remoteLink.revoke", "철회"),
     remoteLinkBusy,
-    () => void remoteLinkPress("phone_link_revoke", { id: device.id }),
+    () => void remoteLinkPress("phone_link_revoke", { id: device.id }, handNow()),
   ));
   row.appendChild(actions);
   return row;
@@ -1985,13 +1985,15 @@ function paintRemoteLink() {
   paintRemoteLinkCode();
 }
 
-async function remoteLinkPress(command, args = {}) {
+/* `hand` is the press's own (shell-boot.js `handNow`), taken where the press
+ * is answered: these five commands are the person's alone. */
+async function remoteLinkPress(command, args, hand) {
   if (remoteLinkBusy) return;
   remoteLinkBusy = true;
   remoteLinkError = null;
   paintRemoteLink();
   try {
-    remoteLinkStatus = await invoke(command, args, { hand: handNow() });
+    remoteLinkStatus = await invoke(command, args, { hand });
     if (!remoteLinkStatus?.listening) remoteLinkCode = null;
   } catch (error) {
     remoteLinkError = String(error);
@@ -2017,6 +2019,8 @@ async function refreshRemoteLink() {
 el("remote-link-refresh").addEventListener("click", () => void refreshRemoteLink());
 el("remote-link-toggle").addEventListener("click", () => void remoteLinkPress(
   remoteLinkStatus?.enabled ? "phone_link_disable" : "phone_link_enable",
+  {},
+  handNow(),
 ));
 el("remote-link-new-code").addEventListener("click", async () => {
   if (remoteLinkBusy) return;

@@ -19928,7 +19928,13 @@ mod tests {
             // resumes above — it must not divide the pane somebody is reading
             // — and it says `tab` to `spawnGrid` and to `mountTermTab`, then
             // takes the wire tab's own seat on the strip.
-            ("{ placement: \"tab\"", 16),
+            //
+            // Fifteen since the Remote Server row's 「영구 세션 열기」 went
+            // (2026-11-11): zo has no `attach`, so the tab it mounted opened
+            // nothing, and the row, its JS and `open_remote_server_session`
+            // left together. The remote rows that mount a terminal are SSH
+            // Host, Remote Workspace and the SSH-target actions.
+            ("{ placement: \"tab\"", 15),
         ] {
             assert_eq!(
                 window.matches(needle).count(),
