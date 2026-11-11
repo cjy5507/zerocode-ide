@@ -16329,7 +16329,7 @@ await test("모델 받기: 「받기만」은 파일만 받아 두고 판단 모
 
 await test("이 컴퓨터: 실행 엔진 줄은 이 앱이 고정한 판과 상태를 말하고, 옛 판이 깔려 있으면 「업데이트」를 달며, 공개된 새 판이 있으면 그 이름을 보인다", async () => withJudgmentStatus(async (page, provider) => {
   try {
-    const runtime = { id: "macos-aarch64-llama-cpp-cpu", engine: "llama_cpp", version: "b11669", home: "https://example.invalid/acme/engine", state: "outdated", downloadBytes: 37_351_536 };
+    const runtime = { id: "macos-aarch64-llama-cpp-cpu", engine: "llama_cpp", version: "b11669", installedVersion: null, home: "https://example.invalid/acme/engine", state: "outdated", downloadBytes: 37_351_536 };
     const paint = async (change) => {
       change(backend.managedModelState);
       backend.managedModelState.revision += 1;
@@ -16348,7 +16348,13 @@ await test("이 컴퓨터: 실행 엔진 줄은 이 앱이 고정한 판과 상�
     await paint((held) => { held.runtimes = [clone(runtime)]; held.models[0].engine = "llama_cpp"; });
     const line = page.locator(`#model-runtimes [data-runtime="${runtime.id}"]`);
     assert(await page.locator("#model-runtimes").isVisible() && await line.count() === 1, "the engine has no line");
-    assertEqual(await line.locator(".model-line-name").textContent(), "llama.cpp · b11669", "the line does not name the engine and the build this app pins");
+    // The name is the engine's; the versions are said apart under it — what
+    // is on this computer, and what this app would receive (the person,
+    // 2026-11-11: 「다운받은 버전도 보여줘야」; the pinned build beside the name
+    // read as the installed one while nothing was installed).
+    assertEqual(await line.locator(".model-line-name").textContent(), "llama.cpp", "the engine's name carries a version of its own");
+    const versions = () => line.locator("[data-runtime-versions]").textContent();
+    assertEqual(await versions(), "설치된 버전: 이전 버전 · 앱이 받을 버전: b11669", "an earlier pin's runtime does not say both versions");
     assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "outdated");
     assertEqual(await line.locator("[data-runtime-state]").textContent(), await page.evaluate(() => t("settings.models.runtime.outdated", "업데이트 있음")));
     assertEqual(await line.locator("[data-runtime-newer]").getAttribute("data-runtime-newer"), "v0.9.0", "the newest public release is not said");
@@ -16372,13 +16378,16 @@ await test("이 컴퓨터: 실행 엔진 줄은 이 앱이 고정한 판과 상�
     assertEqual(await line.locator("[data-runtime-update]").count(), 1, "the update did not come back with the model");
     // The pinned runtime, installed, with nothing newer published.
     backend.managedRuntimeNews = [{ id: runtime.id, engine: "llama_cpp", pinned: "b11669", latest: "b11669", newer: false }];
-    await paint((held) => { held.runtimes = [{ ...clone(runtime), state: "ready" }]; });
+    await paint((held) => { held.runtimes = [{ ...clone(runtime), state: "ready", installedVersion: "b11669" }]; });
     assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "ready");
+    assertEqual(await versions(), "설치된 버전: b11669", "an installed runtime does not say which build is installed");
     assertEqual(await line.locator("[data-runtime-update]").count(), 0, "an installed runtime still offers an update");
     assertEqual(await line.locator("[data-runtime-newer]").count(), 0, "the pinned build is said to be behind itself");
     // Not installed yet: said as coming with the first model, with no button.
     await paint((held) => { held.runtimes = [{ ...clone(runtime), state: "missing" }]; });
     assertEqual(await line.locator("[data-runtime-state]").getAttribute("data-runtime-state"), "missing");
+    assertEqual(await versions(), "설치된 버전: 없음 · 앱이 받을 버전: b11669", "a runtime not installed reads as if the pinned build were on this computer");
+    await receivePictures(page, "engine-missing");
     assertEqual(await line.locator("button").count(), 0, "a runtime not installed offers a button of its own");
     const lines = new Set();
     for (const locale of SETTINGS_QUALITY_SPEC.locales) {

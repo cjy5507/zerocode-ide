@@ -357,9 +357,21 @@ pub struct RuntimeRow {
     pub id: String,
     pub engine: EngineKind,
     pub version: Option<String>,
+    /// The public build installed on this computer: the pinned one when the
+    /// runtime is ready. `None` with nothing installed — and for a runtime of
+    /// an earlier pin, whose build its receipt does not name.
+    pub installed_version: Option<String>,
     pub home: Option<String>,
     pub state: &'static str,
     pub download_bytes: u64,
+}
+
+/// The public build a runtime in `state` has on this computer, given the one
+/// this app pins.
+fn installed_version(state: &str, pinned: Option<&str>) -> Option<String> {
+    (state == "ready")
+        .then(|| pinned.map(str::to_owned))
+        .flatten()
 }
 
 /// The newest release an engine's public home publishes, beside the build
@@ -1145,12 +1157,15 @@ impl Manager {
             .iter()
             .map(|profile| {
                 let release = profile.native.as_ref().and_then(|native| native.release());
+                let version = release.as_ref().map(|(_, tag)| tag.clone());
+                let state = self.runtime_state(profile);
                 RuntimeRow {
                     id: profile.id.clone(),
                     engine: profile.engine,
-                    version: release.as_ref().map(|(_, tag)| tag.clone()),
+                    installed_version: installed_version(state, version.as_deref()),
+                    version,
                     home: release.map(|(home, _)| home),
-                    state: self.runtime_state(profile),
+                    state,
                     download_bytes: profile.download_bytes(),
                 }
             })
@@ -4376,7 +4391,23 @@ mod cancellation_tests {
 
 #[cfg(test)]
 mod runtime_news_tests {
-    use super::latest_tag;
+    use super::{installed_version, latest_tag};
+
+    /// The page shows two versions apart — the one on this computer and the
+    /// one this app would receive — so a runtime that is not installed must
+    /// not lend the pinned build's name to 「installed」 (the person,
+    /// 2026-11-11: 「다운받은 버전도 보여줘야」).
+    #[test]
+    fn only_a_ready_runtime_has_the_pinned_build_installed() {
+        assert_eq!(
+            installed_version("ready", Some("b11669")),
+            Some("b11669".to_owned())
+        );
+        for state in ["missing", "outdated", "unverified"] {
+            assert_eq!(installed_version(state, Some("b11669")), None, "{state}");
+        }
+        assert_eq!(installed_version("ready", None), None);
+    }
 
     #[test]
     fn the_newest_release_is_read_only_from_its_homes_own_tag_address() {

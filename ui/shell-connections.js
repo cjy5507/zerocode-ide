@@ -2124,6 +2124,22 @@ const modelConnectionsController = {
       badge.dataset.state = standing.badge;
       badge.dataset.runtimeState = row.state;
       const extra = [];
+      // Two versions, said apart: the one on this computer, and — while that
+      // is not the pinned one — the one this app would receive.
+      const versions = [];
+      if (row.state === "ready") {
+        if (row.installedVersion) versions.push(t("settings.models.runtimeHas", "설치된 버전: {{version}}", { version: row.installedVersion }));
+      } else {
+        versions.push(row.state === "outdated"
+          ? t("settings.models.runtimeHasEarlier", "설치된 버전: 이전 버전")
+          : t("settings.models.runtimeHasNone", "설치된 버전: 없음"));
+        if (row.version) versions.push(t("settings.models.runtimeWill", "앱이 받을 버전: {{version}}", { version: row.version }));
+      }
+      if (versions.length) {
+        const said = modelNode("span", "model-line-note", versions.join(" · "));
+        said.dataset.runtimeVersions = "";
+        extra.push(said);
+      }
       if (row.state === "missing") extra.push(modelNode("span", "model-line-note", t("settings.models.runtimeLater", "모델을 처음 쓸 때 함께 설치합니다({{size}}).", { size: bytesLabel(row.downloadBytes) })));
       // A runtime is prepared through a model it runs: without one here,
       // it is installed — or an earlier pin's is replaced — when a model
@@ -2148,8 +2164,7 @@ const modelConnectionsController = {
         update.disabled ||= managedJudgmentController.busy || managedJudgmentController.operating();
         actions.push(update);
       }
-      const name = row.version ? t("settings.models.runtimeName", "{{engine}} · {{version}}", { engine: engine.name, version: row.version }) : engine.name;
-      const made = line(`runtime:${row.id}`, name, engine.about(), badge, extra, actions);
+      const made = line(`runtime:${row.id}`, engine.name, engine.about(), badge, extra, actions);
       made.dataset.runtime = row.id;
       return made;
     }));
