@@ -689,6 +689,32 @@ mod tests {
         );
     }
 
+    /// An index another release left — one whose rules for cutting a text
+    /// into words and passages may not be this one's — is not read as this
+    /// one's: it is built again, once.
+    #[test]
+    fn an_index_built_under_another_releases_rules_is_built_again() {
+        let vault = Vault::new();
+        vault.write("wiki/crane.md", "The crane lifts cargo.\n");
+        assert_eq!(freshness(&vault.ask("crane"), WIKI_DIR), Freshness::Built);
+        assert_eq!(freshness(&vault.ask("crane"), WIKI_DIR), Freshness::Fresh);
+
+        // The same files, as a release with other rules would have named them.
+        let manifest = vault
+            .index_files(WIKI_DIR)
+            .into_iter()
+            .find(|path| path.file_name().unwrap() == "manifest.json")
+            .expect("the manifest");
+        let written = fs::read_to_string(&manifest).unwrap();
+        let other = written.replace(&format!("|{}|", settings::RULES), "|0.0.0-other|");
+        fs::write(&manifest, other).unwrap();
+
+        let answer = vault.ask("crane");
+        assert_eq!(freshness(&answer, WIKI_DIR), Freshness::Built);
+        assert_eq!(slugs(&answer), ["wiki/crane"]);
+        assert_eq!(freshness(&vault.ask("crane"), WIKI_DIR), Freshness::Fresh);
+    }
+
     /// A changed file answers with what it says now, a removed file no longer
     /// answers, a new one does — and each time only what moved is read.
     #[test]

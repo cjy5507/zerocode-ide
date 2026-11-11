@@ -39,6 +39,14 @@ pub const RECORD_EXTENSIONS: [&str; 9] = [
     "xml", "json", "jsonl", "log", "html", "csv", "tsv", "yaml", "yml",
 ];
 
+/// The rules that cut a file into the words an index holds, by the release
+/// that carries them: how a text becomes words (`second_brain_related`),
+/// where a passage ends (`passages`) and what a page's name and links are
+/// (`second_brain_graph`). None of the three knows this index exists, so no
+/// number a person must remember to raise stands for them — the crate's own
+/// version does, and every release builds a vault's index once.
+pub(super) const RULES: &str = env!("CARGO_PKG_VERSION");
+
 const KEY_SOURCES: &str = "sources";
 const KEY_PATH: &str = "path";
 const KEY_LAYER: &str = "layer";
@@ -118,7 +126,7 @@ impl Table {
     /// spelling of its path, or moved, keeps its index.
     pub(super) fn fingerprint(&self) -> String {
         format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{RULES}|{}|{}|{}|{}|{}|{}|{}",
             segment::FORMAT,
             self.extensions
                 .iter()
