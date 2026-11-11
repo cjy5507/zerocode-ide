@@ -127,6 +127,80 @@ fn a_session_the_guard_does_not_stand_in_refuses_nothing() {
     with_session(true, || assert!(refused(Shell::Bash, "cliclick p").is_some()));
 }
 
+/* ---- design §3 · §7, 11-11 23:4x: the review's narrowing (t-104945) ----------- */
+
+/// The commands of `commands` the guard judges otherwise than `expected`,
+/// every one of them, so a failure names them all.
+fn judged_otherwise(commands: &[&str], expected: impl Fn(&str) -> Option<Caught>) -> Vec<String> {
+    commands
+        .iter()
+        .filter_map(|command| {
+            let (got, want) = (bash(command), expected(command));
+            (got != want).then(|| format!("{command:?}: got {got:?}, want {want:?}"))
+        })
+        .collect()
+}
+
+#[test]
+fn a_search_or_another_programs_flag_is_let_through() {
+    // Only an interpreter takes a one-line program by `-c` · `-e`; these
+    // flags of other programs name a pattern, a folder or a package.
+    let wrong = judged_otherwise(
+        &[
+            "grep -E 'SendKeys|SendInput' -rn src",
+            "rg -e CGEventPost crates/",
+            "git grep -e CGEventPost",
+            "sed -e 's/pyautogui/x/' f",
+            "grep -c pyautogui f",
+            "git -C ~/src/pyautogui status",
+            "pip install -e ./pyautogui",
+            "make -C pynput-demo",
+            "cat > x.py <<'EOF'\nimport pyautogui\npyautogui.click()\nEOF",
+        ],
+        |_| None,
+    );
+    assert!(wrong.is_empty(), "must be let through:\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn an_interpreter_is_read_on_its_flag_in_any_case_and_on_its_here_document() {
+    let one_liner = |name: &str| Some(Caught { kind: Kind::OneLiner, words: name.to_string() });
+    let wrong = judged_otherwise(
+        &[
+            "perl -E 'use Win32::API; SendInput(1)'",
+            "python3 - <<'EOF'\nimport pyautogui\npyautogui.click()\nEOF",
+        ],
+        |command| one_liner(if command.starts_with("perl") { "SendInput" } else { "pyautogui" }),
+    );
+    assert!(wrong.is_empty(), "must be caught:\n{}", wrong.join("\n"));
+}
+
+#[test]
+fn only_a_window_a_tab_or_a_document_is_opened_or_closed() {
+    let changes = |words: &str| Some(Caught { kind: Kind::AppWindows, words: words.to_string() });
+    let make_tab = r#"osascript -e 'tell application "Google Chrome" to make new tab at end of tabs of front window'"#;
+    let close_tab = r#"osascript -e 'tell application "Google Chrome" to close active tab of front window'"#;
+    let wrong = judged_otherwise(
+        &[
+            make_tab,
+            close_tab,
+            r#"osascript -e 'tell application "Finder" to make new folder at desktop'"#,
+            "osascript -e 'set f to open for access \"/tmp/x\"' -e 'close access f'",
+            r#"osascript -e 'open location "http://localhost:3000"'"#,
+        ],
+        |command| {
+            if command == make_tab {
+                changes("make new tab")
+            } else if command == close_tab {
+                changes("close")
+            } else {
+                None
+            }
+        },
+    );
+    assert!(wrong.is_empty(), "judged otherwise:\n{}", wrong.join("\n"));
+}
+
 /* ---- the table: every name has a command it catches -------------------------- */
 
 #[test]
