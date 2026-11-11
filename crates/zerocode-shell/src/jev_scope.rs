@@ -27,7 +27,7 @@ pub const ZO_PROJECTS_DIR: &str = "projects";
 pub const ZO_PROJECT_STATE_DIR: &str = "state";
 pub const JEV_LEDGER_DIR: &str = "smart-router";
 pub const ZO_SESSIONS_DIR: &str = "sessions";
-pub const SESSION_CWD_EXTENSION: &str = "cwd";
+pub use zerocode_core::zo_project::SESSION_CWD_EXTENSION;
 pub const LEDGER_EXTENSION: &str = "jsonl";
 
 /// The days a record counts as recent: zo's own window over every seat
@@ -410,18 +410,7 @@ fn recorded_workspace(project: &Path) -> Option<PathBuf> {
     sidecars.sort_by(|a, b| b.0.cmp(&a.0));
     sidecars
         .iter()
-        .find_map(|(_, sidecar)| read_session_cwd(sidecar))
-}
-
-/// The workspace one `.cwd` sidecar names (`{"cwd": …}`), when it names one.
-fn read_session_cwd(sidecar: &Path) -> Option<PathBuf> {
-    #[derive(Deserialize)]
-    struct Recorded {
-        cwd: String,
-    }
-    let recorded: Recorded = serde_json::from_str(&std::fs::read_to_string(sidecar).ok()?).ok()?;
-    let cwd = recorded.cwd.trim();
-    (!cwd.is_empty()).then(|| PathBuf::from(cwd))
+        .find_map(|(_, sidecar)| zerocode_core::zo_project::recorded_workspace(sidecar))
 }
 
 /// The workspace zo stored this session under, from the sidecar beside its
@@ -429,7 +418,7 @@ fn read_session_cwd(sidecar: &Path) -> Option<PathBuf> {
 /// started to find it (t-20088). `None` when the transcript's place is not
 /// known or no sidecar sits beside it: the caller keeps its own folder.
 pub(crate) fn session_workspace(transcript: &Path) -> Option<PathBuf> {
-    read_session_cwd(&transcript.with_extension(SESSION_CWD_EXTENSION))
+    zerocode_core::zo_project::recorded_workspace(&transcript.with_extension(SESSION_CWD_EXTENSION))
 }
 
 /// The folder this window knows whose zo state `project` is: the one zo

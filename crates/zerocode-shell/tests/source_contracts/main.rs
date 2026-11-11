@@ -31722,35 +31722,70 @@ mod tests {
 
         // The panel has two readers and the database one has no root to be
         // walked into, so it is called by name here or its sessions do not
-        // exist. This machine's own file holds 86 of them.
+        // exist. This machine's own file holds 86 of them. The command hands
+        // the reader to the walk, and the walk merges its rows into the same
+        // limit as the walked stores.
         let scanning = block_after(shipped, "async fn vault_sessions(");
+        let walking = include_str!("../../src/vault_walk.rs");
+        let (walking, _) = walking.split_once("#[cfg(test)]").unwrap_or((walking, ""));
         assert!(
             scanning.contains("vault_opencode_scan::scan(limit)")
-                && scanning.contains("vault::merge(walked, found.sessions, limit)"),
+                && walking.contains("vault::merge(found.sessions, rows.clone(), limit)"),
             "the vault stopped reading OpenCode's database, or stopped merging \
              it into the same limit as the walked stores:\n{scanning}"
         );
-        // And that walk is paid for ONCE. Fourteen directory trees and a
-        // database, on a surface that re-asks on every keystroke: what is held
-        // is consulted before anything reads the disk, and only the reload
-        // button refuses it.
+        // And the command never waits for the disk (t-103659; measured before
+        // on 2026-11-11: 10.6 s the first time a run opened the panel, and two
+        // git processes a project on every keystroke after). It answers from
+        // the walk that is held and reads no store itself; what a walk needs
+        // of the window — the roster, the database, git's list of workspaces
+        // — is gathered only for an ask that may start one.
         let spot = |needle: &str| {
             scanning
                 .find(needle)
                 .unwrap_or_else(|| panic!("`{needle}` is gone from `vault_sessions`"))
         };
         assert!(
-            spot("vault_walk::kept(force)") < spot("vault::scan(&home, limit)")
-                && scanning.contains("vault_walk::keep(walk.clone())"),
-            "the vault reads the disk without asking what it already has, or \
-             reads it and keeps nothing — either way a keystroke costs fourteen \
-             directory trees:\n{scanning}"
+            !scanning.contains("vault::scan")
+                && spot("vault_walk::may_walk(force)") < spot("vault_roster_snapshot(&state)")
+                && spot("vault_walk::may_walk(force)") < spot("vault_opencode_scan::scan(limit)")
+                && spot("vault_walk::may_walk(force)") < spot("managed_worktrees_under(")
+                && !scanning.contains("managed_worktrees(&state)")
+                && scanning.contains("vault_walk::answer(force, sources,"),
+            "the vault reads the disk, the database or git for an ask that is \
+             only a different question about the walk it holds — a keystroke \
+             pays for a walk:\n{scanning}"
+        );
+        // A walk runs on its own thread, one at a time, through what each file
+        // gave last time; only the first ask of a run and a forced one start
+        // it, and a query borrows the walk rather than copying a thousand
+        // sessions to show two hundred.
+        assert!(
+            walking.contains("if force || first {")
+                && walking.contains("self.kept.start(move || self.walk(sources, build));")
+                && walking.contains("&mut reading.index,")
+                && scanning.contains("vault::view_of(")
+                && !scanning.contains("vault::view("),
+            "a walk is started by a query, reads every file again, or is \
+             copied whole for each answer:\n{walking}"
+        );
+        // What is written down for the next run lies in the window's own data
+        // and nowhere else — never beside a session store — and only its owner
+        // can read it: it holds the first lines of conversations.
+        assert!(
+            scanning.contains("vault_walk::kept_file(state.local_data_root())")
+                && walking.contains("crate::durable_file::replace_bytes(kept_at, &bytes)")
+                && walking.matches("replace_bytes(").count() == 1
+                && !walking.contains("fs::write"),
+            "the walk is written somewhere other than the window's own data, \
+             or by a writer that leaves it readable to others:\n{walking}"
         );
         // The resume base is a SETTING, and settings are re-read per call.
         // Written into the walk that gets kept instead, a launch override
         // somebody edits would need a reload before a card believed it.
         assert!(
-            spot("vault_walk::keep(walk.clone())") < spot("resume_command_with_base"),
+            spot("vault_walk::answer(force, sources,") < spot("resume_command_with_base")
+                && !walking.contains("resume_command_with_base"),
             "the resume base is baked into the kept walk, so a settings change \
              stops reaching the cards:\n{scanning}"
         );

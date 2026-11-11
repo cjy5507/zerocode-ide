@@ -47,6 +47,14 @@ impl<T: Clone + Send + 'static> ScanCell<T> {
             .and_then(|held| held.as_ref().map(read))
     }
 
+    /// Hold an answer no scan of this run made — the one the last run wrote
+    /// down — so the pane opens on it while this run's first scan looks.
+    pub fn hold(&self, answer: T) {
+        if let Ok(mut held) = self.held.lock() {
+            *held = Some(answer);
+        }
+    }
+
     /// Whether a scan is running right now.
     #[must_use]
     pub fn running(&self) -> bool {

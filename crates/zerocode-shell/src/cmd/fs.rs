@@ -827,30 +827,25 @@ pub(crate) fn reveal_vault_session(path: String) -> Result<(), String> {
 /// not a limitation.
 ///
 /// The scan and the view are one command rather than two. A window that fetched a
-/// list and then filtered it would hold two hundred sessions in the webview and
+/// list and then filtered it would hold a thousand sessions in the webview and
 /// answer a keystroke with a JS sort; this way the window holds only what it
 /// draws, and the header counts come from the same function as the rows.
 ///
-/// `force` is the reload button, and only it. Every other ask — a keystroke, a
-/// grouping, a sort, a filter — changes the QUERY and nothing on disk, and is
-/// answered from the walk this process already has ([`vault_walk`]). The panel's
-/// own comment promised that from the day it was written; what it kept was the
-/// VIEW, which is the answer to one query, so the next keystroke walked
-/// fourteen directory trees again to ask a different one.
+/// The command never waits for the disk. It answers from the walk this process
+/// holds ([`vault_walk`]) — what the last run wrote down, until this run has
+/// looked — and says `refreshing` while a walk is looking; the window asks
+/// again, as it does of the usage ledgers. `force` is the panel being come to
+/// or its reload button, and only those start a walk. Every other ask — a
+/// keystroke, a grouping, a sort, a filter — changes the QUERY and nothing on
+/// disk, so it gathers nothing a walk needs: no roster, no git, no database.
+/// (Measured before, 2026-11-11: each of them listed the workspaces again,
+/// two git processes a project — 28 processes, 0.39 s a keystroke.)
 #[tauri::command]
 pub(crate) async fn vault_sessions(
     state: State<'_, AppState>,
     mut query: zerocode_core::vault::VaultQuery,
     force: bool,
 ) -> Result<zerocode_core::vault::VaultView, String> {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or("HOME이 설정되어 있지 않습니다")?;
-    // `scan` interprets its argument as HOME and Claude's source as
-    // `.claude/projects`. The app config root therefore resolves exactly to
-    // the isolated runtime, while the ordinary home remains the source for
-    // every other agent.
-    let app_home = state.config_root().to_path_buf();
     // The settings facts the rows need, read BEFORE the blocking hop: the
     // repository handle does not cross threads, and the bases are the same
     // for every session of an agent.
@@ -863,15 +858,6 @@ pub(crate) async fn vault_sessions(
             bases.insert(slug, base);
         }
     }
-    // The workspaces this window manages, so a card can be filed under the name
-    // the sidebar gives its checkout rather than under a bare directory. Read
-    // here for the reason the bases are: the catalog does not cross threads.
-    let worktrees = managed_worktrees(&state);
-    // The walk this process already has, unless the reload button asked for
-    // another one. A walk is fourteen directory trees over stores that can hold
-    // years of transcripts, plus a database — measured at ~400ms for two
-    // hundred sessions on a machine with about eight thousand of them — and a
-    // keystroke changes none of what is on disk.
     if query.limit.is_none() {
         query.limit = Some(
             load_settings(state.settings())?
@@ -879,66 +865,66 @@ pub(crate) async fn vault_sessions(
                 .vault_session_limit,
         );
     }
-    let kept = vault_walk::kept(force);
-    let roster = if kept.is_none() {
-        vault_roster_snapshot(&state)
+    // What a walk needs of this window, gathered only for an ask that may
+    // start one, and owned: the walk runs on a thread of its own, and neither
+    // the pane roster nor the project catalog crosses one.
+    let sources = if vault_walk::may_walk(force) {
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or("HOME이 설정되어 있지 않습니다")?;
+        // The walk reads Claude's store under the app config root — the home
+        // that resolves to the isolated runtime — and every other agent's
+        // under the ordinary home.
+        let config_root = state.config_root().to_path_buf();
+        let active_root = state.active().root.clone();
+        Some(vault_walk::Sources {
+            home,
+            app_home: config_root.clone(),
+            kept_at: vault_walk::kept_file(state.local_data_root()),
+            roster: vault_roster_snapshot(&state),
+            // OpenCode keeps its sessions in a database rather than in files,
+            // so it has no root to walk — see `zerocode_core::vault_opencode`.
+            // Handed over rather than read inside the walk because the reader
+            // is this crate's: core carries no `rusqlite`.
+            rows: Box::new(|limit: usize| {
+                let found = vault_opencode_scan::scan(limit);
+                (found.sessions, found.issues)
+            }),
+            // The workspaces this window manages, so a card can be filed under
+            // the name the sidebar gives its checkout rather than under a bare
+            // directory. Listed by the walk and kept with it.
+            worktrees: Box::new(move || managed_worktrees_under(&config_root, &active_root)),
+        })
     } else {
-        Vec::new()
+        None
     };
     tauri::async_runtime::spawn_blocking(move || {
-        let walk = kept.unwrap_or_else(|| {
-            let limit = zerocode_core::vault::Limits::DEFAULT.absolute_max;
-            let (mut walked, mut issues, system_truncated) =
-                zerocode_core::vault::scan(&home, limit);
-            walked.retain(|session| session.agent != "claude");
-            issues.retain(|issue| issue.agent != "claude");
-
-            let (app_walked, app_issues, app_truncated) =
-                zerocode_core::vault::scan(&app_home, limit);
-            let app_claude = app_walked
-                .into_iter()
-                .filter(|session| session.agent == "claude")
-                .collect();
-            issues.extend(
-                app_issues
-                    .into_iter()
-                    .filter(|issue| issue.agent == "claude"),
-            );
-            let (walked, claude_dropped) = zerocode_core::vault::merge(walked, app_claude, limit);
-            // OpenCode keeps its sessions in a database rather than in files, so
-            // it has no root to walk and cannot be found by the loop above — see
-            // `zerocode_core::vault_opencode`. Read here rather than inside the
-            // scan because the reader is this crate's: core carries no
-            // `rusqlite`.
-            let found = vault_opencode_scan::scan(limit);
-            issues.extend(found.issues);
-            let (mut sessions, dropped) =
-                zerocode_core::vault::merge(walked, found.sessions, limit);
-            zerocode_core::vault::read_roster_children(&mut sessions, &roster, &mut issues);
-            let walk = vault_walk::Walk {
-                sessions,
-                issues,
-                truncated: system_truncated || app_truncated || claude_dropped || dropped,
-            };
-            vault_walk::keep(walk.clone());
-            walk
-        });
-        let vault_walk::Walk {
-            mut sessions,
-            issues,
-            truncated,
-        } = walk;
+        let answer = vault_walk::answer(force, sources, env!("ZEROCODE_COMMIT"));
+        let walk = &answer.walk;
+        let mut view = zerocode_core::vault::view_of(
+            &walk.sessions,
+            &query,
+            walk.issues.clone(),
+            walk.truncated,
+            &walk.worktrees,
+        );
+        view.refreshing = answer.refreshing;
         // The card's command wears the resolved base. Rewritten here and not in
         // the scan because the scan is settings-blind on purpose — and on every
         // call rather than into the kept walk, so a launch override somebody
-        // edits in settings reaches the next card without a reload.
-        for session in &mut sessions {
+        // edits in settings reaches the next card without a reload. Only the
+        // cards the view shows: the walk stays as the scan left it.
+        for session in view
+            .groups
+            .iter_mut()
+            .flat_map(|group| group.sessions.iter_mut())
+        {
             if let Some(base) = bases.get(session.agent.as_str()) {
                 session.resume =
                     zerocode_core::vault::resume_command_with_base(session, Some(base));
             }
         }
-        zerocode_core::vault::view(sessions, &query, issues, truncated, &worktrees)
+        view
     })
     .await
     .map_err(|error| error.to_string())
@@ -946,15 +932,22 @@ pub(crate) async fn vault_sessions(
 
 /// The retained, session-owned roster is the authority for zo children.
 /// Worker ids come from the ledger's current seat, never from helper names.
+///
+/// The seats are read off the board snapshot the standing-order beat
+/// publishes, not asked of the ledger's actor: this runs every time the
+/// panel is come to now, on the thread that answers it.
 fn vault_roster_snapshot(state: &AppState) -> Vec<zerocode_core::vault::ChildTranscript> {
-    let workers = orchestration::ledger_agents();
+    let board = orchestration::board_ledger_snapshot();
     let sessions = state.pane_sessions().clone();
     let rosters = state.subagents();
     rosters
         .iter()
         .flat_map(|(term, rows)| {
             let parent = sessions.get(term);
-            let worker = workers.iter().find(|worker| worker.term == Some(*term));
+            let worker = board
+                .agents
+                .iter()
+                .find(|worker| worker.term == Some(*term));
             rows.iter().filter_map(move |row| {
                 let path = row.transcript.as_ref()?;
                 let parent = row

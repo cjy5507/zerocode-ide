@@ -908,7 +908,7 @@ fn measure_board_ledger_contention() {
             if cached {
                 std::hint::black_box(crate::ledger_agents());
             } else {
-                std::hint::black_box(super::ledger_agents());
+                std::hint::black_box(super::with_ledger_seats(super::ledger_agents_for_seats));
             }
             at.elapsed()
         });
@@ -1073,14 +1073,12 @@ fn all_ledger_image_readers_use_the_revision_cache() {
             "{reader} bypasses the revision cache"
         );
     }
-    // The background publisher and two fresh readers reach the same door. Named here
+    // The background publisher and a fresh reader reach the same door. Named here
     // rather than left out, because "does not call `Ledger::rebuild`" is
-    // satisfied by a reader that calls nothing at all.
-    for delegating in [
-        "refresh_board_ledger",
-        "ledger_agents",
-        "seated_live_workers_read",
-    ] {
+    // satisfied by a reader that calls nothing at all. (The board's rows had
+    // a fresh reader of their own, `ledger_agents`, until its last caller —
+    // the session history — took the published view, t-103659.)
+    for delegating in ["refresh_board_ledger", "seated_live_workers_read"] {
         let start = shipped
             .find(&format!("fn {delegating}()"))
             .unwrap_or_else(|| panic!("missing reader {delegating}"));

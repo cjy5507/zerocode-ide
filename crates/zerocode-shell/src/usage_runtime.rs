@@ -2193,11 +2193,21 @@ pub(super) fn usage_analytics_on(state: &State<'_, AppState>, provider: &str) ->
 /// person typed. Comparing the two unresolved is how a whole checkout's
 /// tokens end up filed under "not one of ours".
 pub(super) fn managed_worktrees(state: &AppState) -> Vec<zerocode_core::usage_stats::WorktreeRef> {
+    managed_worktrees_under(state.config_root(), &state.active().root)
+}
+
+/// [`managed_worktrees`] from the two paths it reads off the window, for a
+/// caller that lists on a thread the window's state does not cross to — the
+/// session vault's walk (`vault_walk`), which used to pay these two git
+/// processes a project on every keystroke.
+pub(super) fn managed_worktrees_under(
+    config_root: &Path,
+    active_root: &Path,
+) -> Vec<zerocode_core::usage_stats::WorktreeRef> {
     let mut refs = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut paths = stored_projects(state.config_root());
-    let here = state.active();
-    paths.push(here.root.to_string_lossy().into_owned());
+    let mut paths = stored_projects(config_root);
+    paths.push(active_root.to_string_lossy().into_owned());
     for path in paths {
         let Ok(canonical) = PathBuf::from(&path).canonicalize() else {
             continue;

@@ -2572,7 +2572,8 @@ pub(crate) struct LedgerPaneState {
 /// The ledger and this window's seat index, gathered once, for one reader.
 ///
 /// [`refresh_board_ledger`] builds both board readings from this pair, and
-/// internal fresh readers such as [`ledger_agents`] share the same ordering.
+/// internal fresh readers such as [`seated_live_workers_read`] share the same
+/// ordering.
 /// The main-thread commands read the published board view instead.
 ///
 /// Ask the actor for its ledger image BEFORE taking the teams lock. The actor
@@ -3072,23 +3073,6 @@ fn graph_overlay_snapshot_for_seats(
     }
 }
 
-/// Every worker the ledger still holds, seat or no seat — and the work a
-/// released worker finished, while it still stands.
-///
-/// Bounded by the ledger's OUTSTANDING rows, not its history: a released
-/// worker is a summons somebody answered and is not drawn. One run in this
-/// window holds sixty-five released rows beside two live ones. The one
-/// exception is the last worker of a checkout nobody holds any more
-/// ([`settled_workers`]) whose last attempt closed, in a run still in play,
-/// while that checkout stands on disk (t-10993): its pane went with the
-/// `worker_done`, but its work is still there waiting for a coordinator, and
-/// a board without it showed finished work by vanishing. That row is
-/// `settled`, seatless, and leaves when the checkout is reclaimed or the run
-/// goes quiet — five on this machine the day it was written.
-pub(crate) fn ledger_agents() -> Vec<LedgerAgent> {
-    with_ledger_seats(ledger_agents_for_seats).unwrap_or_default()
-}
-
 /// A small, owned board view published by the existing standing-order beat.
 /// A UI read never asks the actor, rebuilds a revision or takes the team table.
 #[derive(Default)]
@@ -3265,6 +3249,24 @@ fn wall_chip_seat(
     }
 }
 
+/// Every worker the ledger still holds, seat or no seat — and the work a
+/// released worker finished, while it still stands.
+///
+/// Bounded by the ledger's OUTSTANDING rows, not its history: a released
+/// worker is a summons somebody answered and is not drawn. One run in this
+/// window holds sixty-five released rows beside two live ones. The one
+/// exception is the last worker of a checkout nobody holds any more
+/// ([`settled_workers`]) whose last attempt closed, in a run still in play,
+/// while that checkout stands on disk (t-10993): its pane went with the
+/// `worker_done`, but its work is still there waiting for a coordinator, and
+/// a board without it showed finished work by vanishing. That row is
+/// `settled`, seatless, and leaves when the checkout is reclaimed or the run
+/// goes quiet — five on this machine the day it was written.
+///
+/// Read by the board's publisher ([`refresh_board_ledger`]) and by nothing
+/// that answers a command: every reader of these rows takes the published
+/// view ([`board_ledger_snapshot`]) — the session history was the last to
+/// ask afresh, each time its panel was come to (t-103659).
 fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<LedgerAgent> {
     // A wall's chip stands only while the wall does: one clock for the list.
     let now_ms = crate::now_epoch_ms();

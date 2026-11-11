@@ -21730,10 +21730,14 @@ fn vault_session_limit_uses_the_canonical_settings_document_and_kept_walk() {
         "vault.sessionLimit",
         "vaultSessionLimit = snapshot[\"vault.sessionLimit\"];",
     );
+    // The saved limit cuts the VIEW. The walk is the one that is held, read
+    // to the table's own cap whatever the view asks for.
     let scanning = block_after(shipped_backend(), "fn vault_sessions(");
-    assert!(scanning.contains("vault_walk::kept(force)"));
-    assert!(scanning.contains("Limits::DEFAULT.absolute_max"));
-    assert!(!scanning.contains("scan(&home, query"));
+    assert!(scanning.contains("vault_walk::answer(force, sources,"));
+    assert!(!scanning.contains("vault::scan"));
+    let walking = include_str!("vault_walk.rs");
+    assert!(walking.contains("let limit = Limits::DEFAULT.absolute_max;"));
+    assert!(!walking.contains("VaultQuery"));
 }
 
 /* ---- zo PushNotification over the channel (t-2943) ---- */
