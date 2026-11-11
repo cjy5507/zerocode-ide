@@ -110,7 +110,9 @@ use crate::file_stamp::FileStamp;
 /// (`crate::transcript`) so the vault's previews and the board's card lines
 /// cut at the same place.
 pub use crate::transcript::SUMMARY_CHARS;
-use crate::transcript::{clamp, message_text, naming_words, shown_words, typed_words};
+use crate::transcript::{
+    clamp, message_text, names_the_turn, naming_words, shown_words, typed_words,
+};
 use crate::vault_index::{Index, Outcome};
 
 /// One environment variable that can name where an agent keeps its sessions,
@@ -2387,7 +2389,16 @@ impl Parsed {
     /// line, or — from the user side — its name. Once it wants neither, a
     /// turn is only counted, and its text is not read out of the record.
     fn wants(&self, role: &str) -> bool {
-        self.preview.len() < PREVIEW_LINES || (role == USER && self.title.is_empty())
+        self.preview.len() < PREVIEW_LINES || (role == USER && !self.is_named())
+    }
+
+    /// Whether the title says what the conversation is about — the test a
+    /// prompt passes before it may name a pane ([`names_the_turn`]). A word
+    /// that only says go on, or the line this window types at an idle pane
+    /// when mail waits, names nothing: 32 zo cards on one machine were
+    /// called 「You have 1 orchestration message…」.
+    fn is_named(&self) -> bool {
+        names_the_turn(&self.title)
     }
 
     /// One turn of the conversation, counted and shown ([`Self::shows`]).
@@ -2407,7 +2418,9 @@ impl Parsed {
     /// machinery is no line and no name; the next one is tried. The first
     /// user turn that reads as words names the card, wherever it stands —
     /// three slash-command records used to fill the preview and leave the
-    /// card named by its id.
+    /// card named by its id — and a later turn that says what the
+    /// conversation is about takes the name from one that only said go on
+    /// ([`Self::is_named`]), as a pane's name does.
     pub(crate) fn shows(&mut self, role: &str, words: impl FnOnce() -> Option<String>) {
         if !self.wants(role) {
             return;
@@ -2419,10 +2432,11 @@ impl Parsed {
             let Some(asked) = asked_words(&words) else {
                 return;
             };
-            if self.title.is_empty() {
-                self.title = naming_words(&asked)
-                    .map(|name| clamp(&name))
-                    .unwrap_or_default();
+            if !self.is_named()
+                && let Some(name) = naming_words(&asked).map(|name| clamp(&name))
+                && (self.title.is_empty() || names_the_turn(&name))
+            {
+                self.title = name;
             }
             asked
         } else {
@@ -4689,6 +4703,39 @@ mod tests {
             let card = built(agent, parsed);
             assert_eq!(says(&card), (task, vec![("user", task)]), "{agent}");
         }
+    }
+
+    /// A card is named the way a pane is: by the first turn that says what
+    /// the conversation is about. A word that only says go on, and the line
+    /// the window types at an idle pane when mail waits, name it only while
+    /// nothing better has been said.
+    #[test]
+    fn a_turn_that_only_says_go_on_does_not_keep_the_name() {
+        let named = |turns: &[&str]| {
+            let text: Vec<String> = turns
+                .iter()
+                .map(|said| claude_user((*said).into()))
+                .collect();
+            built("claude", claude_session(&text.join("\n")).expect("parsed")).title
+        };
+        let pointer = crate::orchestration::pointer_text(1);
+        assert_eq!(
+            [
+                named(&["계속", "설정 화면의 모델 목록을 고친다"]),
+                named(&[
+                    pointer.as_str(),
+                    "ㄱ",
+                    "발행 레인의 빨강을 본다",
+                    "그 다음 일"
+                ]),
+                named(&["계속"]),
+            ],
+            [
+                "설정 화면의 모델 목록을 고친다",
+                "발행 레인의 빨강을 본다",
+                "계속"
+            ]
+        );
     }
 
     /// A session nobody spoke in has no name. It used to wear its id —

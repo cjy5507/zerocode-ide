@@ -32740,10 +32740,21 @@ mod tests {
         // for what a card shows of a turn and is named by (t-103659): the
         // frames and envelopes a CLI writes are known to the transcript
         // reader alone, and the vault peels nothing itself.
+        let shared = vault
+            .split_once("use crate::transcript::{")
+            .and_then(|(_, rest)| rest.split_once("};"))
+            .map_or("", |(names, _)| names);
         assert!(
-            vault.contains(
-                "use crate::transcript::{clamp, message_text, naming_words, shown_words, typed_words};"
-            ) && !vault.contains("fn message_text(")
+            [
+                "clamp",
+                "message_text",
+                "naming_words",
+                "shown_words",
+                "typed_words"
+            ]
+            .iter()
+            .all(|name| shared.contains(name))
+                && !vault.contains("fn message_text(")
                 && !vault.contains("fn untagged_title(")
                 && !vault
                     .split_once("#[cfg(test)]")
