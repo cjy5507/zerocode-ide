@@ -661,4 +661,37 @@ mod tests {
             "degraded MCP metadata is also skipped while the main lock is busy"
         );
     }
+
+    /// The executor answers what a tool declares from the registry as it
+    /// stands now: a tool an MCP server brought after the session's policy
+    /// was built is there, at the grade its server gave it, and a name the
+    /// registry has never held is not.
+    #[test]
+    fn the_executor_says_what_a_tool_that_joined_later_declares() {
+        let registry = GlobalToolRegistry::builtin();
+        let executor = CliToolExecutor::new(None, None, false, registry.clone(), None);
+        assert_eq!(executor.declared_mode("mcp__docs__search"), None, "before its server was found");
+
+        registry
+            .set_runtime_tools(vec![
+                tools::RuntimeToolDefinition {
+                    name: "mcp__docs__search".to_string(),
+                    description: None,
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    required_permission: runtime::PermissionMode::ReadOnly,
+                },
+                tools::RuntimeToolDefinition {
+                    name: "mcp__docs__purge".to_string(),
+                    description: None,
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    required_permission: runtime::PermissionMode::DangerFullAccess,
+                },
+            ])
+            .expect("the server's tools join the registry");
+        assert_eq!(executor.declared_mode("mcp__docs__search"), Some(runtime::PermissionMode::ReadOnly));
+        assert_eq!(executor.declared_mode("mcp__docs__purge"), Some(runtime::PermissionMode::DangerFullAccess));
+        assert_eq!(executor.declared_mode("mcp__docs__never"), None);
+        // A built-in keeps the grade it was built with.
+        assert_eq!(executor.declared_mode("read_file"), Some(runtime::PermissionMode::ReadOnly));
+    }
 }

@@ -21877,63 +21877,110 @@ mod wire_prefix_stability {
     }
 }
 
-/// A tool that joined the registry after the policy was built — an MCP tool
-/// whose server was discovered mid-session — is judged at the grade the
-/// executor's registry declares for it, through the wrapper it is called by
-/// and by its name: a read-only one runs in a read-only session, a
-/// destructive one does not, and one that declares nothing stays at the
-/// highest grade.
-#[test]
-fn a_tool_found_after_the_policy_was_built_is_judged_at_the_grade_it_declares() {
-    struct FoundLater(Arc<Mutex<Vec<String>>>);
-    impl ToolExecutor for FoundLater {
-        fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
-            self.0.lock().expect("calls").push(format!("{tool_name} {input}"));
-            Ok("ran".to_string())
-        }
+/// An executor whose registry holds tools the policy never heard of — MCP
+/// tools whose server was discovered after the policy was built — and what
+/// they declare: one reads, one destroys, one says nothing.
+struct FoundLater(Arc<Mutex<Vec<String>>>);
 
-        fn declared_mode(&self, tool_name: &str) -> Option<PermissionMode> {
-            match tool_name {
-                "mcp__docs__search" => Some(PermissionMode::ReadOnly),
-                "mcp__docs__purge" => Some(PermissionMode::DangerFullAccess),
-                _ => None,
-            }
+impl ToolExecutor for FoundLater {
+    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.0.lock().expect("calls").push(format!("{tool_name} {input}"));
+        Ok("ran".to_string())
+    }
+
+    fn declared_mode(&self, tool_name: &str) -> Option<PermissionMode> {
+        match tool_name {
+            "mcp__docs__search" => Some(PermissionMode::ReadOnly),
+            "mcp__docs__purge" => Some(PermissionMode::DangerFullAccess),
+            _ => None,
         }
     }
-    struct OneBatch(Option<Vec<AssistantEvent>>);
-    impl ApiClient for OneBatch {
-        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-            Ok(self.0.take().unwrap_or_else(|| {
-                vec![AssistantEvent::TextDelta("done".into()), AssistantEvent::MessageStop]
-            }))
+}
+
+/// The model's one batch of calls to them, then its answer.
+struct CallsToolsFoundLater(bool);
+
+impl ApiClient for CallsToolsFoundLater {
+    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        if std::mem::replace(&mut self.0, true) {
+            return Ok(vec![AssistantEvent::TextDelta("done".into()), AssistantEvent::MessageStop]);
         }
+        let through = |id: &str, name: &str| AssistantEvent::ToolUse {
+            id: id.to_string(),
+            name: core_types::tool_names::CAPABILITY_INVOKE.to_string(),
+            input: serde_json::json!({ "name": name, "input": { "query": "x" } }).to_string(),
+        };
+        Ok(vec![
+            through("call-1", "mcp__docs__search"),
+            through("call-2", "mcp__docs__purge"),
+            through("call-3", "mcp__docs__undeclared"),
+            AssistantEvent::ToolUse {
+                id: "call-4".to_string(),
+                name: "mcp__docs__search".to_string(),
+                input: r#"{"query":"y"}"#.to_string(),
+            },
+            AssistantEvent::MessageStop,
+        ])
     }
-    let through = |id: &str, name: &str| AssistantEvent::ToolUse {
-        id: id.to_string(),
-        name: core_types::tool_names::CAPABILITY_INVOKE.to_string(),
-        input: serde_json::json!({ "name": name, "input": { "query": "x" } }).to_string(),
-    };
-    let ran = Arc::new(Mutex::new(Vec::new()));
-    let api = OneBatch(Some(vec![
-        through("call-1", "mcp__docs__search"),
-        through("call-2", "mcp__docs__purge"),
-        through("call-3", "mcp__docs__undeclared"),
-        AssistantEvent::ToolUse {
-            id: "call-4".to_string(),
-            name: "mcp__docs__search".to_string(),
-            input: r#"{"query":"y"}"#.to_string(),
-        },
-        AssistantEvent::MessageStop,
-    ]));
+}
+
+/// A read-only session whose policy was built before those tools were found.
+fn a_read_only_session_that_finds_tools_later(ran: &Arc<Mutex<Vec<String>>>) -> ConversationRuntime<CallsToolsFoundLater, FoundLater> {
     let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
         .with_tool_requirement(core_types::tool_names::CAPABILITY_INVOKE, PermissionMode::ReadOnly);
     assert!(!policy.has_tool_requirement("mcp__docs__search"), "the policy was built before the tool was found");
-    let mut runtime =
-        ConversationRuntime::new(Session::new(), api, FoundLater(Arc::clone(&ran)), policy, vec!["system".into()]);
-    runtime.run_turn("search the docs", None).expect("the turn");
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        CallsToolsFoundLater(false),
+        FoundLater(Arc::clone(ran)),
+        policy,
+        vec!["system".into()],
+    );
+    let cwd = temp_workspace("tools-found-later");
+    fs::create_dir_all(&cwd).expect("workspace");
+    runtime.set_workspace_cwd(cwd);
+    runtime
+}
 
+/// The read-only tool ran through the wrapper and by its name, and nothing
+/// else did: not the one that destroys, not the one that declares nothing.
+fn assert_only_the_read_only_tool_ran(ran: &Arc<Mutex<Vec<String>>>) {
     let ran = ran.lock().expect("calls");
-    assert_eq!(ran.len(), 2, "the read-only tool ran both ways and nothing else did: {ran:?}");
+    assert_eq!(ran.len(), 2, "{ran:?}");
     assert!(ran[0].starts_with("CapabilityInvoke ") && ran[0].contains("mcp__docs__search"), "{ran:?}");
     assert!(ran[1].starts_with("mcp__docs__search "), "{ran:?}");
+}
+
+/// A tool that joined the registry after the policy was built is judged at
+/// the grade the executor's registry declares for it, through the wrapper it
+/// is called by and by its name: a read-only one runs in a read-only session,
+/// a destructive one does not, and one that declares nothing stays at the
+/// highest grade.
+#[test]
+fn a_tool_found_after_the_policy_was_built_is_judged_at_the_grade_it_declares() {
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = a_read_only_session_that_finds_tools_later(&ran);
+    runtime.run_turn("search the docs", None).expect("the turn");
+    assert_only_the_read_only_tool_ran(&ran);
+}
+
+/// The same on the streaming turn, which is the one every front runs: the
+/// grade is learned there before the call is judged too.
+#[test]
+fn a_tool_found_later_is_judged_at_its_grade_on_the_streaming_turn_too() {
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime = a_read_only_session_that_finds_tools_later(&ran);
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    tokio_runtime.block_on(async {
+        let (render_tx, _render_rx) = tokio::sync::mpsc::channel(256);
+        let prompter: Arc<dyn crate::permission::PermissionPrompter> = Arc::new(AllowAsyncPrompterForOverflow);
+        runtime
+            .run_turn_streaming_with_images("search the docs", Vec::new(), render_tx, prompter)
+            .await
+            .expect("the turn");
+    });
+    assert_only_the_read_only_tool_ran(&ran);
 }
