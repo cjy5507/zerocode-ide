@@ -568,17 +568,7 @@ pub fn upsert_project_trust_level(
     if updated == existing {
         return Ok(());
     }
-    replace_config(config_path, &updated)
-}
-
-/// Replace a `config.toml` whole: through a temp and a rename, so a stop or a
-/// full disk never leaves half of the person's Codex settings and a reading
-/// Codex never sees half a file; written through a link, which stays a link;
-/// keeping the mode the file had.
-fn replace_config(path: &Path, body: &str) -> std::io::Result<()> {
-    let target = crate::codex_install::write_path(path);
-    let mode = crate::private_file::mode_of(&target);
-    crate::private_file::write_atomically(&target, body.as_bytes(), mode)
+    crate::private_file::replace_keeping_mode(config_path, &updated)
 }
 
 /// Byte offset just past the header line's text (before its own line end) of
@@ -875,7 +865,7 @@ pub fn write_trust(home: &Home, entries: &[TrustEntry]) -> std::io::Result<bool>
     if next == existing {
         return Ok(false);
     }
-    replace_config(&path, &next)?;
+    crate::private_file::replace_keeping_mode(&path, &next)?;
     Ok(true)
 }
 
@@ -905,7 +895,7 @@ pub fn remove_trust_at(path: &std::path::Path, keys: &[String]) -> std::io::Resu
     if next == existing {
         return Ok(false);
     }
-    replace_config(path, &next)?;
+    crate::private_file::replace_keeping_mode(path, &next)?;
     Ok(true)
 }
 
@@ -1052,7 +1042,7 @@ pub fn sync(home: &Home, system_home: &Path) -> std::io::Result<Sync> {
     if existing.as_deref() == Some(next.as_str()) {
         return Ok(Sync::Unchanged);
     }
-    replace_config(&target, &next)?;
+    crate::private_file::replace_keeping_mode(&target, &next)?;
     Ok(how)
 }
 

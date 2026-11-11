@@ -63,6 +63,15 @@ pub(crate) fn apply_mode(path: &Path, mode: u32) -> io::Result<()> {
     }
 }
 
+/// Replace `path` whole with `body`, keeping the permissions it has: a
+/// settings file the person keeps at 0600 (its `env` may hold a key) stays
+/// 0600. A symlinked file is written through and stays a link
+/// ([`crate::codex_install::write_path`]); a missing file gets the default.
+pub(crate) fn replace_keeping_mode(path: &Path, body: &str) -> io::Result<()> {
+    let target = crate::codex_install::write_path(path);
+    write_atomically(&target, body.as_bytes(), mode_of(&target))
+}
+
 /// Through a sibling temp and a rename, so no reader ever sees half a file.
 /// The temp is born with `mode` on unix and gets it exactly (or, elsewhere,
 /// its owner-only ACL) before the rename; it is removed whatever step fails.

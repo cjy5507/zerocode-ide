@@ -167,8 +167,7 @@ pub fn install_agent(home: &Path, agent: AgentKind) -> HookStatus {
     if std::fs::read_to_string(&path).is_ok_and(|current| current == source) {
         return status_of(home, agent);
     }
-    let mode = crate::private_file::mode_of(&path);
-    if crate::private_file::write_atomically(&path, source.as_bytes(), mode).is_err() {
+    if crate::private_file::replace_keeping_mode(&path, &source).is_err() {
         return status(
             HookInstallState::Error,
             Some("플러그인을 쓰지 못했습니다".into()),

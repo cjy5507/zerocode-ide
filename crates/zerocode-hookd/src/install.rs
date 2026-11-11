@@ -336,21 +336,13 @@ fn write_config(path: &Path, config: &Map<String, Value>) -> std::io::Result<()>
     {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let mut text = serde_json::to_string_pretty(&Value::Object(config.clone()))
         .expect("a JSON map serializes");
     text.push('\n');
-    write_keeping_mode(path, &text)
-}
-
-/// Through a sibling temp and a rename: the agent may read its settings at
-/// any moment, and half a settings file is a parse error that turns off every
-/// hook the user wrote too. The file keeps the mode it had — a settings file
-/// the user keeps at 0600 (its `env` may hold a key) stays 0600.
-fn write_keeping_mode(path: &Path, text: &str) -> std::io::Result<()> {
-    crate::private_file::write_atomically(path, text.as_bytes(), crate::private_file::mode_of(path))
+    // Through a sibling temp and a rename: the agent may read its settings at
+    // any moment, and half a settings file is a parse error that turns off
+    // every hook the user wrote too.
+    crate::private_file::replace_keeping_mode(path, &text)
 }
 
 /// Does this hook definition (in any of the vendor shapes) run one of our
@@ -1160,13 +1152,10 @@ fn write_kimi(config_path: &Path, text: &str) -> std::io::Result<()> {
     if std::fs::read_to_string(config_path).is_ok_and(|current| current == text) {
         return Ok(());
     }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     if config_path.exists() {
         let _ = std::fs::copy(config_path, config_path.with_extension("toml.bak"));
     }
-    write_keeping_mode(config_path, text)
+    crate::private_file::replace_keeping_mode(config_path, text)
 }
 
 fn remove_kimi(paths: &InstallPaths, config_path: &Path) -> HookStatus {
@@ -1820,6 +1809,53 @@ mod tests {
                 mode(&config_path),
                 0o600,
                 "{agent:?} remove widened the file"
+            );
+        }
+    }
+
+    /// A settings file kept as a link (shared between homes, kept in a
+    /// dotfiles folder) stays a link: install and remove write through it,
+    /// keeping the mode of the file it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_config_stays_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let (home, paths) = paths();
+        for agent in [AgentKind::Claude, AgentKind::Kimi] {
+            let config_path = paths.config_path(agent);
+            std::fs::create_dir_all(config_path.parent().expect("parent")).expect("dir");
+            let real = home
+                .path()
+                .join("dotfiles")
+                .join(config_path.file_name().expect("name"));
+            std::fs::create_dir_all(real.parent().expect("parent")).expect("dir");
+            let seed = if agent == AgentKind::Kimi {
+                "model = \"k2\"\n"
+            } else {
+                "{\"env\":{\"EXAMPLE_KEY\":\"example-token\"}}"
+            };
+            std::fs::write(&real, seed).expect("seed");
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+            std::os::unix::fs::symlink(&real, &config_path).expect("link");
+
+            let installed = install_agent(&paths, agent);
+            assert_eq!(
+                installed.state,
+                HookInstallState::Installed,
+                "{installed:?}"
+            );
+            remove_agent(&paths, agent);
+
+            let meta = std::fs::symlink_metadata(&config_path).expect("lstat");
+            assert!(
+                meta.file_type().is_symlink(),
+                "{agent:?} replaced the link with a plain file"
+            );
+            let mode = std::fs::metadata(&real).expect("stat").permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o640,
+                "{agent:?} changed the linked file's mode"
             );
         }
     }
