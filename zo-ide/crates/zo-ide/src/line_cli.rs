@@ -35,9 +35,11 @@ zo line forget <job> · zo line restore <job>
   ones only fill a slot nothing else wants. --solo takes the first slot only
   (a whole suite), --quiet runs alone (a measurement). Nothing starts while
   the line is paused or the disk is below its floor. `run` exits as its
-  command did; `add` prints the job and returns, and the job's end is told to
-  --notify through the ledger; `wait` waits for an added job's end and exits
-  as its command did. Records live under zo's home (line/).
+  command did; `add` prints the job and its cap and returns, and the job's
+  end is told to --notify through the ledger; `wait` waits for an added job's
+  end and exits as its command did. A put whose command outran that cap last
+  time is warned; a job the line ends (its cap, a stop) says so as its log's
+  last line. Records live under zo's home (line/).
 ";
 
 /// How often a waiting job looks for its turn, and a running one for a stop.
@@ -202,15 +204,18 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
     match verb {
         Verb::Run(put) => {
             let job = put_in(&line, &put, cwd)?;
-            // The job's name and its log on stderr: the command's own output goes to stdout as it runs.
-            eprintln!("zo line: {} · {}", job.id, line.log_path(&job.id).display());
+            // The job's name, cap and log on stderr: the command's own output goes to stdout as it runs.
+            eprintln!("zo line: {} · cap {} · {}", job.id, cap_words(job.cap_secs), line.log_path(&job.id).display());
+            if let Some(warning) = cap_warning(&line, &job) {
+                eprintln!("{warning}");
+            }
             run_job(&line, &machine, &job.id, true).map(Ended::Ran)
         }
         Verb::Add(put) => {
             let job = put_in(&line, &put, cwd)?;
             spawn_waiter(&job.id)?;
             let places = line::places(&line.jobs(), &|owner| line.last_end(owner), line.turn());
-            said(&json!({ "job": job.id, "place": places.get(&job.id) }))
+            put_receipt(&line, &job, json!({ "job": job.id, "place": places.get(&job.id) }))
         }
         Verb::Wait(id) => run_job(&line, &machine, &id, false).map(Ended::Ran),
         Verb::List { all } => list(&line, cwd, all),
@@ -234,7 +239,8 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
             };
             line.save(&again).map_err(|error| error.to_string())?;
             spawn_waiter(&again.id)?;
-            said(&json!({ "job": again.id, "retry_of": id }))
+            // A retry keeps its job's cap: a job that ended past it is told so before it runs into it again.
+            put_receipt(&line, &again, json!({ "job": again.id, "retry_of": id }))
         }
         Verb::Withdraw(id) => change(&line, &id, |job| {
             if job.state != JobState::Waiting {
@@ -330,6 +336,45 @@ fn put_in(line: &Line, put: &Put, cwd: &Path) -> Result<Job, String> {
     };
     line.save(&job).map_err(|error| error.to_string())?;
     Ok(job)
+}
+
+/// A warning for a job put in under a cap its command has already outrun: the
+/// newest ended run of the same command in the same project ended past a cap
+/// no larger than this one, or ran longer than this one allows. A command the
+/// line never ran has nothing to go by, so the receipt names the cap instead.
+fn cap_warning(line: &Line, job: &Job) -> Option<String> {
+    let before = line
+        .jobs()
+        .into_iter()
+        .filter(|old| old.id != job.id && old.project == job.project && old.command == job.command)
+        .filter(|old| matches!(old.state, JobState::Passed | JobState::Failed | JobState::Capped))
+        .max_by_key(|old| old.ended_ms.unwrap_or(old.queued_ms))?;
+    let outran = if before.state == JobState::Capped && before.cap_secs >= job.cap_secs {
+        format!("ended past its cap of {} as {}", cap_words(before.cap_secs), before.id)
+    } else {
+        let ran_secs = before.ended_ms.zip(before.started_ms).map(|(end, start)| (end - start) / 1000)?;
+        if ran_secs <= i64::from(job.cap_secs) {
+            return None;
+        }
+        format!("ran {ran_secs} s as {}", before.id)
+    };
+    Some(format!(
+        "zo line: warning — {} runs under a cap of {}, and the same command {outran}; a longer --cap gives it room",
+        job.id,
+        cap_words(job.cap_secs)
+    ))
+}
+
+/// What `add` and `retry` say back: the job, its cap, and the warning when its
+/// command has outrun that cap before (on stderr too, for a reader of stdout
+/// that keeps only the job).
+fn put_receipt(line: &Line, job: &Job, mut receipt: serde_json::Value) -> Result<Ended, String> {
+    receipt["cap"] = json!(cap_words(job.cap_secs));
+    if let Some(warning) = cap_warning(line, job) {
+        eprintln!("{warning}");
+        receipt["warning"] = json!(warning);
+    }
+    said(&receipt)
 }
 
 /// Changes job `id` under the line's lock.
@@ -579,13 +624,17 @@ fn free_bytes(_folder: &Path) -> Option<u64> {
 fn execute(line: &Line, machine: &MachineRules, mut job: Job, foreground: bool) -> Result<i32, String> {
     let log_path = line.log_path(&job.id);
     let log = File::create(&log_path).map_err(|error| error.to_string())?;
+    // The same open file as the command's: what the line writes under its output follows it, and is
+    // not written over by it.
+    let closing = log.try_clone().map_err(|error| error.to_string())?;
     let mut command = command_of(&job);
     command.current_dir(&job.checkout).stdin(Stdio::null());
+    let mut tees = Vec::new();
     let mut child = if foreground {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command.spawn().map_err(|error| error.to_string())?;
-        tee(child.stdout.take(), &log, false);
-        tee(child.stderr.take(), &log, true);
+        tees.extend(tee(child.stdout.take(), &log, false));
+        tees.extend(tee(child.stderr.take(), &log, true));
         child
     } else {
         let err = log.try_clone().map_err(|error| error.to_string())?;
@@ -613,6 +662,18 @@ fn execute(line: &Line, machine: &MachineRules, mut job: Job, foreground: bool) 
     let fresh = line.job(&job.id).unwrap_or(job.clone());
     job.ended_by = fresh.ended_by;
     job.stop_asked = fresh.stop_asked;
+    if let Some(words) = ended_as.and_then(|ended| ended_by_the_line(&job, ended, started.elapsed())) {
+        // The copies finish the output the ended group left in its pipes first, so the closing line
+        // stands last; a pipe some escaped process still holds is not waited on past the grace.
+        let until = Instant::now() + GRACE;
+        while tees.iter().any(|copy| !copy.is_finished()) && Instant::now() < until {
+            std::thread::sleep(machine.look_every);
+        }
+        close_log(&closing, &log_path, &words);
+        if foreground {
+            eprintln!("{words}");
+        }
+    }
     job.state = ended_as.unwrap_or(if rc == 0 { JobState::Passed } else { JobState::Failed });
     job.rc = Some(rc);
     job.ended_ms = Some(now_ms());
@@ -651,12 +712,54 @@ fn end(child: &mut Child) -> Result<std::process::ExitStatus, String> {
     crate::build_runner::end_child(child, GRACE)
 }
 
+/// The line's own last word in the log of a command it ended: a log read on
+/// its own, or a receipt's bare code beside it, would pass for a failure of
+/// the command. A command that ended by itself says its own.
+fn ended_by_the_line(job: &Job, ended: JobState, took: Duration) -> Option<String> {
+    let secs = took.as_secs();
+    match ended {
+        JobState::Capped => Some(format!(
+            "zo line: ended past its cap of {} after {secs} s — the line stopped the command; the command did not fail",
+            cap_words(job.cap_secs)
+        )),
+        JobState::Stopped => Some(format!(
+            "zo line: stopped by {} after {secs} s — the command did not end by itself",
+            job.ended_by.as_deref().unwrap_or("its owner")
+        )),
+        _ => None,
+    }
+}
+
+/// Writes `words` as the log's last line, on a line of its own.
+fn close_log(mut log: &File, path: &Path, words: &str) {
+    let mut last = [0_u8; 1];
+    // An empty log has no last byte to read: it ends no line of output either.
+    let ends_a_line = File::open(path)
+        .and_then(|mut file| {
+            file.seek(SeekFrom::End(-1))?;
+            file.read_exact(&mut last)
+        })
+        .is_err()
+        || last[0] == b'\n';
+    let _ = writeln!(log, "{}{words}", if ends_a_line { "" } else { "\n" });
+}
+
+/// A cap in the words `--cap` reads: `2h`, `30m`, `90s`.
+fn cap_words(secs: u32) -> String {
+    match secs {
+        0 => "0s".to_owned(),
+        _ if secs.is_multiple_of(3600) => format!("{}h", secs / 3600),
+        _ if secs.is_multiple_of(60) => format!("{}m", secs / 60),
+        _ => format!("{secs}s"),
+    }
+}
+
 /// Copies a child's output to the job's log and this terminal, line by line.
-fn tee(output: Option<impl io::Read + Send + 'static>, log: &File, to_err: bool) {
+fn tee(output: Option<impl io::Read + Send + 'static>, log: &File, to_err: bool) -> Option<std::thread::JoinHandle<()>> {
     let (Some(output), Ok(mut log)) = (output, log.try_clone()) else {
-        return;
+        return None;
     };
-    std::thread::spawn(move || {
+    Some(std::thread::spawn(move || {
         let mut reader = BufReader::new(output);
         let mut line = Vec::new();
         while reader.read_until(b'\n', &mut line).is_ok_and(|read| read > 0) {
@@ -668,7 +771,7 @@ fn tee(output: Option<impl io::Read + Send + 'static>, log: &File, to_err: bool)
             }
             line.clear();
         }
-    });
+    }))
 }
 
 /// Tells the ledger how the job ended, when it named where: through
@@ -914,6 +1017,104 @@ mod tests {
         stopper.join().expect("stopped");
         assert_ne!(rc, 0);
         assert_eq!(line.job(&sleeper.id).expect("its record").state, JobState::Stopped);
+        let log = std::fs::read_to_string(line.log_path(&sleeper.id)).expect("its log");
+        let last = log.lines().last().unwrap_or_default();
+        assert!(last.starts_with("zo line: stopped by its owner after "), "the log says the line ended it: {log:?}");
+    }
+
+    /// A job its cap ends says so as its log's last line, on a line of its
+    /// own after the output it left, run in the background or here; its
+    /// record says capped and its receipt keeps the code the ledger reads.
+    #[cfg(unix)]
+    #[test]
+    fn a_capped_jobs_log_ends_with_the_lines_word_that_the_command_did_not_fail() {
+        let home = tempfile::tempdir().expect("a zo home");
+        let cwd = tempfile::tempdir().expect("a folder");
+        let line = Line::at(home.path());
+        line.make().expect("folders");
+        let machine = rules(&home.path().join(SLOTS_FOLDER));
+        for foreground in [false, true] {
+            let put = Put {
+                owner: Some(format!("w-{foreground}")),
+                cap_secs: Some(1),
+                command: words(&["sh", "-c", "echo begun; printf partial; sleep 30"]),
+                ..Put::default()
+            };
+            let job = put_in(&line, &put, cwd.path()).expect("put in");
+            let rc = run_job(&line, &machine, &job.id, foreground).expect("ran");
+            assert_ne!(rc, 0, "a capped job does not pass");
+            assert_eq!(line.job(&job.id).expect("its record").state, JobState::Capped);
+            let receipt = std::fs::read_to_string(line.log_path(&job.id).with_extension("rc")).expect("its receipt");
+            assert_eq!(receipt, format!("{rc}\n"), "the receipt stays the bare code");
+            let log = std::fs::read_to_string(line.log_path(&job.id)).expect("its log");
+            let lines: Vec<&str> = log.lines().collect();
+            assert_eq!(lines[..2], ["begun", "partial"], "the output first, its unended line ended (foreground {foreground}): {log:?}");
+            assert!(
+                lines[2].starts_with("zo line: ended past its cap of 1s after ") && lines[2].ends_with("the command did not fail"),
+                "foreground {foreground}: {log:?}"
+            );
+            assert_eq!(lines.len(), 3, "the line's word stands last: {log:?}");
+        }
+    }
+
+    #[test]
+    fn a_cap_reads_back_in_the_words_cap_takes() {
+        for secs in [90, 900, 1800, 3600, 3660, 7200] {
+            assert_eq!(cap_secs(&cap_words(secs)), Ok(secs), "{secs}");
+        }
+        assert_eq!(cap_words(1800), "30m");
+        assert_eq!(cap_words(7200), "2h");
+        assert_eq!(cap_words(3660), "61m");
+    }
+
+    /// A put whose command outran the cap it gets is warned in its receipt;
+    /// one with room, a command the line never ran, or another command is not;
+    /// every receipt names the cap.
+    #[test]
+    fn a_put_is_warned_when_the_same_command_outran_the_cap_it_gets() {
+        let home = tempfile::tempdir().expect("a zo home");
+        let cwd = tempfile::tempdir().expect("a folder");
+        let line = Line::at(home.path());
+        line.make().expect("folders");
+        let gate = Put { command: words(&["sh", "-c", "just verify"]), ..Put::default() };
+        let put = |put: &Put| put_in(&line, put, cwd.path()).expect("put in");
+        let ended = |job: &Job, state: JobState, started_ms: i64, ran_secs: u32| {
+            change(&line, &job.id, |job| {
+                job.state = state;
+                job.started_ms = Some(started_ms);
+                job.ended_ms = Some(started_ms + i64::from(ran_secs) * 1000);
+                Ok(())
+            })
+            .expect("ended");
+        };
+        let receipt = |job: &Job| -> serde_json::Value {
+            let Ok(Ended::Said(text)) = put_receipt(&line, job, json!({ "job": job.id })) else {
+                panic!("a receipt");
+            };
+            serde_json::from_str(&text).expect("json")
+        };
+
+        let first = put(&gate);
+        assert_eq!(cap_warning(&line, &first), None, "a command the line never ran has nothing to go by");
+        assert_eq!(receipt(&first)["cap"], cap_words(line::CAP_DEFAULT_SECS));
+        assert!(receipt(&first).get("warning").is_none());
+        let long_ago = now_ms() - 10_000_000;
+        ended(&first, JobState::Capped, long_ago, line::CAP_DEFAULT_SECS);
+
+        let again = put(&gate);
+        let warned = receipt(&again);
+        let warning = warned["warning"].as_str().expect("warned");
+        assert!(warning.contains(&first.id) && warning.contains("ended past its cap"), "{warning}");
+        assert!(warning.contains(&format!("a cap of {}", cap_words(line::CAP_DEFAULT_SECS))), "{warning}");
+
+        let roomy = put(&Put { cap_secs: Some(line::CAP_DEFAULT_SECS * 2), ..gate.clone() });
+        assert_eq!(cap_warning(&line, &roomy), None, "a run capped at a smaller cap says nothing of a larger one");
+        ended(&roomy, JobState::Passed, long_ago + 5_000_000, line::CAP_DEFAULT_SECS + 60);
+        let warning = cap_warning(&line, &put(&gate)).expect("the newest run outran the default");
+        assert!(warning.contains(&roomy.id) && warning.contains(&format!("ran {} s", line::CAP_DEFAULT_SECS + 60)), "{warning}");
+
+        let other = put(&Put { command: words(&["sh", "-c", "just lint"]), ..Put::default() });
+        assert_eq!(cap_warning(&line, &other), None, "another command's runs say nothing of this one");
     }
 
     #[cfg(unix)]
