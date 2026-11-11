@@ -5835,6 +5835,12 @@ impl App {
 
     async fn run_initial_prompt(&mut self, events: &mut TerminalEvents) {
         if let Some(prompt) = self.session_mut().take_initial_prompt() {
+            // The request given on the command line is the person's first
+            // words, said on screen as a typed one is. It went to the model
+            // unsaid: the screen showed the working row over nothing while
+            // the model was awaited, and the transcript opened on an answer
+            // to a request it did not hold (zo 1.1.142 and 1.1.143).
+            self.ui.user_cell(prompt.trim());
             let submission = Submission { text: prompt, image_paths: Vec::new() };
             Box::pin(self.run_turn_chain(Work::Turn(submission), events, None)).await;
         }
