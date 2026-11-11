@@ -4055,11 +4055,13 @@ fn main() -> ExitCode {
                 emulator::shutdown_all(handle);
                 codex_queue::shutdown_all();
                 cmd::managed_judgment::shutdown();
-                phone_link::shutdown();
                 capture_scrollback_at_exit(handle);
                 // 원장의 마지막 플러시 — 디바운스가 아직 자고 있어도 여기서
                 // 적힌다(Orca quit의 flushStatusPersistSync와 같은 자리).
                 write_last_statuses_now(handle);
+                // After both saves: taking the phone link's mapping down may
+                // wait on the Tailscale CLI, up to its own close limit.
+                phone_link::shutdown();
             }
             tauri::RunEvent::Exit => {
                 // Again, idempotently: a restart from the main thread skips

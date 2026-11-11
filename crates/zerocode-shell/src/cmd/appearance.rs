@@ -1248,6 +1248,9 @@ pub(crate) fn relaunch_window(app: AppHandle, door: Option<String>) {
     // the screens and statuses the next window restores from (t-7812 D) —
     // the restart below is followed by no exit event that would.
     crate::exit_runtime::relaunch(road, &crate::ExitSteps(&app));
+    // No exit event follows a restart, so the phone link's tailnet mapping
+    // comes down here or stands over a loopback port nobody holds.
+    crate::phone_link::shutdown();
     if let Some(staged) = app
         .try_state::<cmd::update::UpdateState>()
         .and_then(|held| held.staged())
