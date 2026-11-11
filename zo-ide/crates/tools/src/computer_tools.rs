@@ -625,10 +625,7 @@ impl ComputerRoad {
     }
 
     fn from_search_path(path: &std::ffi::OsStr, windows: bool) -> Result<Self, ToolError> {
-        let program_name = if windows { "zerocode-computer.cmd" } else { COMPUTER_SHIM };
-        std::env::split_paths(path)
-            .map(|dir| dir.join(program_name))
-            .find(|candidate| candidate.is_file())
+        zerocode_core::computer_use::computer_cli_on_path(path, windows)
             .map(|program| Self { program })
             .ok_or_else(|| {
                 ToolError::Execution(format!(

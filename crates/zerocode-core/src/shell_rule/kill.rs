@@ -20,19 +20,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::SHELL_COMMANDS;
-use super::parse::WRAPPER_COMMANDS;
-use super::script::{self, Command, Script, Word};
+use super::runs::{self, Walker, after_wrapper, program_name};
+use super::script::{Command, Word};
 use crate::hook::PANE_KEY_ENV;
 
 mod environ;
-
-/// How many times an `sh -c` or `eval` string is read inside another before
-/// the rest is called unreadable. Chosen, not measured: the incident nested
-/// none, a hand-written script rarely goes past two (`ssh … "bash -c '…'"`),
-/// and each level is read again in full, so the bound keeps a hostile string
-/// from costing the hook its 800 ms.
-const MAX_STRING_DEPTH: usize = 8;
 
 /// The most of a call or a process's name a reason quotes: two 80-column
 /// lines, so the agent's screen shows the reason without the command
@@ -52,10 +44,6 @@ pub const TABLE_READ_WALL: Duration = Duration::from_millis(800);
 
 /// How a reason names the window itself.
 const WINDOW_LABEL: &str = "the ZeroCode window";
-
-/// Wrappers that run the command after them and are not in
-/// [`WRAPPER_COMMANDS`], which the intent classifier reads.
-const RUNS_THE_NEXT_COMMAND: &[&str] = &["sudo", "command", "exec", "builtin"];
 
 /// One call of `kill`, `pkill` or `killall` the shell will make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,11 +430,9 @@ pub enum KillVerdict {
 /// the letters `kill` is not read at all.
 #[must_use]
 pub fn kill_calls(command: &str) -> Vec<KillCall> {
-    let mut calls = Vec::new();
-    if might_signal(command) {
-        calls_in(&script::read(command), &mut calls, 0);
-    }
-    calls
+    let mut calls = Calls(Vec::new());
+    runs::walk(command, &mut calls);
+    calls.0
 }
 
 /// Judge `calls` for the pane whose own process is `caller` (`None` when
@@ -655,73 +641,44 @@ pub fn might_signal(text: &str) -> bool {
         .any(|four| four.eq_ignore_ascii_case(b"kill"))
 }
 
-fn calls_in(script: &Script, calls: &mut Vec<KillCall>, depth: usize) {
-    if script.overflowed {
-        calls.push(KillCall {
+/// The calls a walk of one command finds ([`kill_calls`]).
+struct Calls(Vec<KillCall>);
+
+impl Walker for Calls {
+    const READS_FILLED_IN: bool = false;
+
+    fn worth_reading(&self, text: &str) -> bool {
+        might_signal(text)
+    }
+
+    /// A string handed to a shell, filled in at run time or nested too deep,
+    /// that names `kill`: a call whose targets are not known.
+    fn unread(&mut self, text: &str) {
+        self.0.push(KillCall {
+            written: text.trim().to_string(),
+            targets: vec![KillTarget::Unknown(text.trim().to_string())],
+        });
+    }
+
+    fn overflowed(&mut self) {
+        self.0.push(KillCall {
             written: "(nested too deep to read)".to_string(),
             targets: vec![KillTarget::Unknown(
                 "substitutions nested too deep to read".to_string(),
             )],
         });
     }
-    for pipeline in &script.pipelines {
-        for (at, command) in pipeline.iter().enumerate() {
-            for nested in command.scripts() {
-                calls_in(nested, calls, depth);
-            }
-            call_of(command, &pipeline[..at], calls, depth);
-        }
-    }
-}
 
-/// The call `command` makes, if it is one — through its wrappers, an
-/// `xargs` that feeds it the output of `upstream`, a shell's `-c` string or
-/// input, an `eval`.
-fn call_of(command: &Command, upstream: &[Command], calls: &mut Vec<KillCall>, depth: usize) {
-    let mut words = command.words.as_slice();
-    let mut fed = false;
-    loop {
-        let Some(program) = words.first().and_then(Word::literal).map(program_name) else {
-            return;
-        };
+    fn program(
+        &mut self,
+        program: &str,
+        words: &[Word],
+        _command: &Command,
+        upstream: &[Command],
+        fed: bool,
+    ) {
         let args = &words[1..];
-        if let Some(rest) = after_wrapper(&program, args) {
-            fed |= program == "xargs";
-            words = rest;
-            continue;
-        }
-        if SHELL_COMMANDS.contains(&program.as_str()) {
-            match shell_string(args) {
-                Some(word) => run_text(&word.text, word.expands(), calls, depth),
-                None if args
-                    .iter()
-                    .all(|word| word.literal().is_some_and(|text| text.starts_with('-'))) =>
-                {
-                    // A shell with no script file runs what it reads.
-                    for text in &command.here {
-                        run_text(text, false, calls, depth);
-                    }
-                    if command.here.is_empty()
-                        && !fed
-                        && let Some((text, expands)) = printed_by(upstream)
-                    {
-                        run_text(&text, expands, calls, depth);
-                    }
-                }
-                None => {}
-            }
-            return;
-        }
-        if program == "eval" {
-            let text = args
-                .iter()
-                .map(|word| word.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            run_text(&text, args.iter().any(Word::expands), calls, depth);
-            return;
-        }
-        let targets = match program.as_str() {
+        let targets = match program {
             "kill" => kill_targets(args),
             "pkill" => selected(args),
             "killall" => killall_targets(args),
@@ -737,137 +694,8 @@ fn call_of(command: &Command, upstream: &[Command], calls: &mut Vec<KillCall>, d
             String::new()
         };
         written.push_str(&written_words(words));
-        calls.push(KillCall { written, targets });
-        return;
+        self.0.push(KillCall { written, targets });
     }
-}
-
-/// A string the shell is handed as a script: read in its turn, or — when
-/// part of it is filled in at run time and it names `kill` — a call whose
-/// targets are not known.
-fn run_text(text: &str, expands: bool, calls: &mut Vec<KillCall>, depth: usize) {
-    if !might_signal(text) {
-        return;
-    }
-    if expands || depth >= MAX_STRING_DEPTH {
-        calls.push(KillCall {
-            written: text.trim().to_string(),
-            targets: vec![KillTarget::Unknown(text.trim().to_string())],
-        });
-        return;
-    }
-    calls_in(&script::read(text), calls, depth + 1);
-}
-
-/// The letters `echo` or `printf` hands a pipe, or the here-document a `cat`
-/// without a file hands it (`cat <<'EOF' | bash`), when that is all upstream.
-fn printed_by(upstream: &[Command]) -> Option<(String, bool)> {
-    let [source] = upstream else { return None };
-    let (program, args) = source.words.split_first()?;
-    let program = program_name(program.literal()?);
-    let args: Vec<&Word> = args
-        .iter()
-        .skip_while(|word| word.literal().is_some_and(|text| text.starts_with('-')))
-        .collect();
-    if program == "cat" {
-        // A file operand is what `cat` prints instead; `-` is its input.
-        return (args.is_empty() && !source.here.is_empty()).then(|| (source.here.concat(), false));
-    }
-    if program != "echo" && program != "printf" {
-        return None;
-    }
-    let text = args
-        .iter()
-        .map(|word| word.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    Some((text, args.iter().any(|word| word.expands())))
-}
-
-/// The program a command word runs: its last path part, ASCII case folded —
-/// a case-insensitive disk finds `PKILL` too.
-fn program_name(word: &str) -> String {
-    word.rsplit('/').next().unwrap_or(word).to_ascii_lowercase()
-}
-
-/// The words after a wrapper's own options and arguments, when `program`
-/// is a wrapper; `Some(&[])` for a wrapper that only looks a command up.
-fn after_wrapper<'w>(program: &str, args: &'w [Word]) -> Option<&'w [Word]> {
-    if !WRAPPER_COMMANDS.contains(&program) && !RUNS_THE_NEXT_COMMAND.contains(&program) {
-        return None;
-    }
-    let first = args.first().and_then(Word::literal);
-    if program == "command" && matches!(first, Some("-v" | "-V")) {
-        return Some(&[]);
-    }
-    let takes_value = wrapper_value_flags(program);
-    let mut at = 0;
-    while let Some(text) = args.get(at).and_then(Word::literal) {
-        if text == "--" {
-            at += 1;
-            break;
-        }
-        if text.len() < 2 || !text.starts_with('-') {
-            break;
-        }
-        at += 1;
-        if takes_value.contains(&text) {
-            at += 1;
-        }
-    }
-    match program {
-        "timeout" => {
-            if args
-                .get(at)
-                .and_then(Word::literal)
-                .is_some_and(|text| text.starts_with(|c: char| c.is_ascii_digit()))
-            {
-                at += 1;
-            }
-        }
-        "env" => {
-            while args.get(at).is_some_and(script::is_assignment) {
-                at += 1;
-            }
-        }
-        _ => {}
-    }
-    Some(args.get(at..).unwrap_or_default())
-}
-
-/// The options of a wrapper that take the next word as their value.
-fn wrapper_value_flags(wrapper: &str) -> &'static [&'static str] {
-    match wrapper {
-        "sudo" => &[
-            "-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D", "-R", "-T",
-        ],
-        "doas" => &["-u", "-C"],
-        "xargs" => &[
-            "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "-E", "-d", "-a",
-        ],
-        "nice" | "ionice" => &["-n", "-c", "-p"],
-        "timeout" => &["-s", "-k", "--signal", "--kill-after"],
-        "stdbuf" => &["-i", "-o", "-e"],
-        "env" => &["-u", "-C", "-P"],
-        "exec" => &["-a"],
-        _ => &[],
-    }
-}
-
-/// The script word of `sh -c '…'`: the first operand after options, when
-/// one of them carries `c`.
-fn shell_string(args: &[Word]) -> Option<&Word> {
-    let mut command_flag = false;
-    for word in args {
-        match word.literal() {
-            Some(text) if text.starts_with('-') && !text.starts_with("--") && text.len() > 1 => {
-                command_flag |= text.contains('c');
-            }
-            Some(text) if text.starts_with("--") => {}
-            _ => return command_flag.then_some(word),
-        }
-    }
-    None
 }
 
 /// The words of a call, for its reason.

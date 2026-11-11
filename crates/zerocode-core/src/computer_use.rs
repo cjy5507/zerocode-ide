@@ -19,6 +19,22 @@ pub const COMPUTER_USE_SKILL_NAME: &str = "computer-use";
 /// The program every Computer Use caller runs — the pane's shim, the name a
 /// recipe line starts with, and zo's road to the window.
 pub const COMPUTER_CLI: &str = "zerocode-computer";
+
+/// Where [`COMPUTER_CLI`] is on the search path `path`, the way a shell looks
+/// it up: the window puts it on every pane's `PATH`, so a session that finds
+/// it can reach Computer Use and one that does not cannot. `windows` names
+/// the `.cmd` launcher Windows runs instead.
+#[must_use]
+pub fn computer_cli_on_path(path: &std::ffi::OsStr, windows: bool) -> Option<std::path::PathBuf> {
+    let program = if windows {
+        format!("{COMPUTER_CLI}.cmd")
+    } else {
+        COMPUTER_CLI.to_string()
+    };
+    std::env::split_paths(path)
+        .map(|dir| dir.join(&program))
+        .find(|candidate| candidate.is_file())
+}
 // Protocol 2 requires the window-supplied guard table and its budget shape.
 pub const COMPUTER_USE_PROTOCOL_VERSION: u64 = 2;
 pub const COMPUTER_USE_DEADLINE_SECONDS: u64 = 65;
