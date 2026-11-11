@@ -4665,6 +4665,13 @@ async fn e2e_a_background_bash_completes_as_the_foreground_ran_cell() {
         .split_once("Run ")
         .and_then(|(_, rest)| rest.split("  ").next())
         .unwrap_or_else(|| panic!("the foreground row names its command: {:?}", control[0]));
+    // The control failed too, and says so: until the result formatter read
+    // the exit the bash tool words, a failed foreground command was drawn as
+    // one that passed, and this row was the start row's twin by accident.
+    assert!(
+        control[0].starts_with(&format!("✗ Run {command}")) && control[0].trim_end().ends_with("exit 1"),
+        "the foreground cell says its command failed: {control:#?}"
+    );
     assert!(
         transcript[completion_at].starts_with(&format!("✗ Run {command} {BACKGROUND_WORD}")),
         "the row is the foreground row's command plus one dim word: {transcript:#?}"
@@ -4677,9 +4684,10 @@ async fn e2e_a_background_bash_completes_as_the_foreground_ran_cell() {
         .unwrap_or_else(|| panic!("no completion cell: {transcript:#?}"));
     assert!(completion.iter().any(|row| row.trim() == "x"), "original command output remains: {completion:?}");
     assert_eq!(completion.iter().filter(|row| row.contains("background task") && row.contains("exited (code 1)")).count(), 1);
+    // The start is a call of its own, and it went through.
     let started_at = transcript
         .iter()
-        .position(|row| *row == control[0])
+        .position(|row| row.starts_with(&format!("✓ Run {command}")))
         .unwrap_or_else(|| panic!("the call that started the task has no cell: {transcript:#?}"));
     assert!(
         started_at < completion_at,
