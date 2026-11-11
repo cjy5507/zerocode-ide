@@ -16,11 +16,12 @@
 //! happened, how it ended, what it touched — not a full transcript: the
 //! transcript is the model's job, this is the *audit trail*.
 //!
-//! It also feeds the Dreamer (`crate::memory::dreamer`): [`read_all_digests`]
-//! maps every session's turn log into the curation brain's `TurnDigest`, and
-//! `TurnLogLessonSource` mines recurring tool failures from it. So the durable
-//! turn log is a real cross-session signal source, and curation no longer
-//! depends solely on the deep-gate producer.
+//! The Dreamer (`crate::memory::dreamer`) does not read it. It once did:
+//! [`read_all_digests`] maps every session's turn log into the curation
+//! brain's `TurnDigest`, and `TurnLogLessonSource` made a lesson of each tool
+//! that failed in two sessions — one sentence per tool name, which is how a
+//! tool behaves and not something to remember about a project. A pass leaves
+//! that reader alone now (`dream_at_cwd` says why).
 //!
 //! Following zo's pure-brain ↔ IO-seam convention, [`TurnRecord`] and
 //! [`TurnRecord::from_summary`] are pure and unit-tested; only [`append`] and

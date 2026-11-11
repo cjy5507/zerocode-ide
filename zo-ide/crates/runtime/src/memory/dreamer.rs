@@ -520,6 +520,25 @@ fn entry_is_expired(fields: EntryDecayFields, now_secs: u64) -> bool {
     now_secs > deadline
 }
 
+/// What the slug of a lesson the dreamer no longer writes opens with: the one
+/// sentence per failed tool name the turn trace was mined for, and the fixed
+/// sentences about zo's own `/goal` and `/loop` ([`dream_at_cwd`] says why
+/// neither is read now). An entry of these kinds that a pass wrote is
+/// archived by the next pass whatever its age — it would otherwise be
+/// recalled into requests for the rest of its ninety days.
+#[cfg(unix)]
+const RETIRED_SLUG_PREFIXES: [&str; 4] = [
+    "gotcha-recurring-tool-failure-",
+    "gotcha-goal-automation-",
+    "workflow-goal-automation-",
+    "workflow-loop-automation-",
+];
+
+#[cfg(unix)]
+fn slug_is_of_a_retired_lesson(slug: &str) -> bool {
+    RETIRED_SLUG_PREFIXES.iter().any(|prefix| slug.starts_with(prefix))
+}
+
 #[cfg(unix)]
 fn entry_is_decay_archive_candidate(
     memory: &crate::secure_fs::RetainedDir,
@@ -530,7 +549,9 @@ fn entry_is_decay_archive_candidate(
     if !has_matching_dreamer_owned_marker(memory, slug, body) {
         return false;
     }
-    if !entry_is_expired(parse_entry_decay_fields(body), now_secs) {
+    if !slug_is_of_a_retired_lesson(slug)
+        && !entry_is_expired(parse_entry_decay_fields(body), now_secs)
+    {
         return false;
     }
     if !memory_body_has_classification_metadata(body) {
@@ -2277,10 +2298,10 @@ impl LessonSource for JsonlLessonSource {
 
 /// Reads candidate observations from the externalized turn trace under
 /// `.zo/turns/` (written by `crate::turn_trace`), distilling recurring
-/// tool-failure gotchas via the pure [`lessons_from_turns`] brain. This is the
-/// second producer the doc's §12-2 calls for ("a coding agent remembers
-/// recurring failures"): it complements [`JsonlLessonSource`]'s green-accept
-/// workflow lessons, so the Dreamer mines friction *and* success signals.
+/// tool-failure gotchas via the pure [`lessons_from_turns`] brain.
+///
+/// No pass reads this source ([`dream_at_cwd`] says why): what it made was one
+/// sentence per failed tool name. It stays until its removal lands.
 ///
 /// [`lessons_from_turns`]: decision_core::dreamer::lessons_from_turns
 pub struct TurnLogLessonSource {
@@ -2331,6 +2352,10 @@ impl LessonSource for UserPatternLessonSource {
 }
 
 /// Reads goal/loop automation events and distills them into Dreamer observations.
+///
+/// No pass reads this source ([`dream_at_cwd`] says why): nothing writes the
+/// events, and their sentences are about zo's own automation. It stays until
+/// its removal lands.
 pub struct AutomationLessonSource {
     cwd: PathBuf,
 }
@@ -3574,17 +3599,21 @@ fn memory_index_summaries(memory_dir: &Path) -> Vec<(String, String)> {
 /// production [`PromotionPolicy::default`] gate. The one-call entry point a
 /// scheduler (cron) or `/dream` command invokes.
 ///
-/// Mines *both* externalized signal streams through a [`CompositeLessonSource`]:
-/// the `.zo/dream/` candidate logs (green-accept workflow lessons) and the
-/// `.zo/turns/` turn trace (recurring tool-failure gotchas). The curation
-/// gate dedups and ranks the merged pool, so adding a producer never changes
-/// the promotion contract.
+/// Mines two signal streams through a [`CompositeLessonSource`]: the
+/// `.zo/dream/` candidate logs (a project gate that ran green after edits)
+/// and the person's verified patterns. The curation gate dedups and ranks the
+/// merged pool, so adding a producer never changes the promotion contract.
+///
+/// Two streams it once mined are not read. The turn trace's failed tools made
+/// one sentence per tool name — "`bash` is error-prone here" — which is how a
+/// tool behaves, the thing the memory protocol tells a model never to record,
+/// and it was 243 of the 277 lessons one machine's passes had written
+/// (2026-11-11). Automation events had no writer, and their sentences were
+/// about zo's own `/goal` and `/loop`, not about the project.
 pub fn dream_at_cwd(cwd: &Path, active_model: Option<&str>) -> Result<DreamReport, DreamError> {
     let source = CompositeLessonSource::new(vec![
         Box::new(JsonlLessonSource::at_cwd(cwd)),
-        Box::new(TurnLogLessonSource::at_cwd(cwd)),
         Box::new(UserPatternLessonSource::at_cwd(cwd)),
-        Box::new(AutomationLessonSource::at_cwd(cwd)),
     ]);
     let dreamer = Dreamer::new(
         source,
@@ -3958,19 +3987,20 @@ pub fn maybe_auto_dream_on_compaction(
     maybe_auto_dream(cwd, min_interval, active_model)
 }
 
-/// The folders whose logs an automatic pass reads, each beside its read cursor.
-fn automatic_curation_dirs(cwd: &Path) -> [PathBuf; 4] {
-    let dream = dream_dir(cwd);
-    [dream.clone(), trace_base(cwd).join(ZO_DIR_NAME).join("turns"),
-        dream.join(AUTOMATION_DIR), user_pattern_dir(cwd)]
+/// The folders whose logs an automatic pass reads, each beside its read
+/// cursor: the ones [`dream_at_cwd`] mines, so a turn trace alone starts no
+/// pass.
+fn automatic_curation_dirs(cwd: &Path) -> [PathBuf; 2] {
+    [dream_dir(cwd), user_pattern_dir(cwd)]
 }
 
 /// Cheap file-presence prefilter for automatic curation. The actual
 /// promotion gate still rejects one-off noise, unsupported hypotheses, and
 /// transient tool output; this merely avoids opening every candidate/index
-/// file when neither producer has written any evidence at all.
+/// file when neither producer has written any evidence at all and the store
+/// holds nothing a pass would age off.
 fn has_automatic_curation_evidence(cwd: &Path) -> bool {
-    automatic_curation_dirs(cwd)
+    let a_log_has_lines = automatic_curation_dirs(cwd)
         .into_iter().any(|dir| {
             if !fs::symlink_metadata(&dir).is_ok_and(|metadata| metadata.file_type().is_dir()) {
                 return false;
@@ -3980,7 +4010,22 @@ fn has_automatic_curation_evidence(cwd: &Path) -> bool {
                     && entry.file_type().is_ok_and(|kind| kind.is_file())
                     && entry.metadata().is_ok_and(|metadata| metadata.len() > 0)
             }))
-        })
+        });
+    // Entries are aged off where the store's folder can be held open, which
+    // is where a pass has that second thing to do.
+    a_log_has_lines || (cfg!(unix) && owns_an_entry_to_age(cwd))
+}
+
+/// Whether the local store holds an entry a pass wrote. A pass is what ages
+/// those off and retires the kinds it no longer writes, so such a store is
+/// work for a pass though no log has a line. While the turn trace counted as
+/// evidence every project with a turn ran its passes; without this, one whose
+/// only lessons came from that trace would keep them for good.
+fn owns_an_entry_to_age(cwd: &Path) -> bool {
+    let markers = crate::memory::paths::memory_write_dir(cwd, true).join(DREAMER_OWNED_DIR);
+    fs::read_dir(markers).ok().is_some_and(|entries| {
+        entries.flatten().any(|entry| entry.path().extension().is_some_and(|extension| extension == "marker"))
+    })
 }
 
 /// Remove what an automatic pass stopped at its deadline left half-written:
@@ -4235,6 +4280,55 @@ mod retention_tests {
         let index = fs::read_to_string(memory_dir.join("MEMORY.md")).unwrap();
         assert!(!index.contains("](stale-lesson.md)"));
         assert!(index.contains("](fresh-lesson.md)"));
+    }
+
+    /// A lesson of a kind the dreamer no longer writes — a tool's failures,
+    /// zo's own automation — is archived by the next pass though it was
+    /// written today. A kind it still writes waits out its window, and a
+    /// person's own note under such a name is never the dreamer's to retire.
+    #[test]
+    #[cfg_attr(windows, ignore = "memory decay is Unix-only: decay_expired archives through retained directory handles and archives nothing on Windows (runtime/src/memory/dreamer.rs:2582)")]
+    fn decay_retires_the_kinds_of_lesson_the_dreamer_no_longer_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let memory_dir = tmp.path().join("memory");
+        let store = FsMemoryStore {
+            memory_dir: memory_dir.clone(),
+        };
+        let now = 200 * 86_400;
+        let kept = "workflow-verified-check-command-cargo-test";
+        let retired = [
+            "gotcha-recurring-tool-failure-bash",
+            "workflow-goal-automation-repaired-then-succeeded",
+        ];
+        for slug in retired.into_iter().chain([kept]) {
+            store
+                .write_entry(&MemoryWriteRequest {
+                    slug: slug.to_string(),
+                    summary: format!("summary for {slug}"),
+                    body: render_entry_body(&promoted(slug), now, None),
+                })
+                .unwrap();
+        }
+        let own = "gotcha-recurring-tool-failure-mine";
+        fs::write(memory_dir.join(format!("{own}.md")), "my own note\n").unwrap();
+        upsert_index(&memory_dir.join("MEMORY.md"), own, "my own note").unwrap();
+
+        let mut archived = store.decay_expired(now).unwrap();
+        archived.sort_unstable();
+        assert_eq!(archived, retired);
+        for slug in retired {
+            assert!(!memory_dir.join(format!("{slug}.md")).exists(), "{slug}");
+            assert!(
+                memory_dir.join(DECAY_ARCHIVE_DIR).join(format!("{slug}.md")).exists(),
+                "{slug}"
+            );
+        }
+        assert!(memory_dir.join(format!("{kept}.md")).exists());
+        assert!(memory_dir.join(format!("{own}.md")).exists());
+        let index = fs::read_to_string(memory_dir.join("MEMORY.md")).unwrap();
+        assert!(!index.contains("](gotcha-recurring-tool-failure-bash.md)"));
+        assert!(index.contains(&format!("]({kept}.md)")));
+        assert!(index.contains(&format!("]({own}.md)")));
     }
 
     #[test]

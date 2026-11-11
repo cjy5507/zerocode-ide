@@ -181,20 +181,6 @@ pub(super) enum TurnStopOrigin {
 }
 
 impl TurnStopOrigin {
-    const fn candidate_kind(self) -> decision_core::dreamer::CandidateKind {
-        match self {
-            Self::User => decision_core::dreamer::CandidateKind::UserCancelled,
-            Self::HostFailure => decision_core::dreamer::CandidateKind::TurnFailure,
-        }
-    }
-
-    const fn summary(self) -> &'static str {
-        match self {
-            Self::User => "turn cancelled by user or host",
-            Self::HostFailure => "turn failed because the host stopped consuming",
-        }
-    }
-
     const fn trace_outcome(self) -> crate::turn_trace::TurnOutcome {
         match self {
             Self::User => crate::turn_trace::TurnOutcome::Cancelled,
@@ -879,26 +865,6 @@ where
                 iteration,
                 self.session.session_goal.as_deref(),
             );
-            // Segment the candidate by error signature (bounded class + status
-            // + provider code), not by one fixed summary: the summary keys the
-            // candidate id, and a single "turn failed" bucket mixed every root
-            // cause into one candidate no advisor could act on. The evidence
-            // detail keeps the leading error text (bounded by the recorder) so
-            // the fusion root-cause advisor has concrete signals to cite.
-            let signature = decision_core::dreamer::error_signature_label(
-                error.failure_signature(),
-                &error.to_string(),
-            );
-            let _ = crate::memory::record_self_improve_pulse_if_enabled(
-                self.dream_automation_enabled,
-                &cwd,
-                decision_core::dreamer::CandidateKind::TurnFailure,
-                &self.session.session_id,
-                "turn",
-                &format!("turn failure: {signature}"),
-                &error.to_string(),
-                false,
-            );
         }
 
         let Some(session_tracer) = &self.session_tracer else {
@@ -924,16 +890,6 @@ where
                 iteration,
                 self.session.session_goal.as_deref(),
             );
-            let _ = crate::memory::record_self_improve_pulse_if_enabled(
-                self.dream_automation_enabled,
-                &cwd,
-                origin.candidate_kind(),
-                &self.session.session_id,
-                "turn",
-                origin.summary(),
-                reason,
-                false,
-            );
         }
 
         let Some(session_tracer) = &self.session_tracer else {
@@ -955,7 +911,7 @@ where
 
     /// Trace a host-side consumer failure and yield the matching streaming
     /// cancellation error. Explicit abort signals use `record_turn_cancelled`
-    /// instead, so only intentional cancellation becomes non-actionable.
+    /// instead, so only an intentional stop is traced as a cancellation.
     pub(super) fn cancel_turn(&mut self, iteration: usize, reason: &str) -> StreamingTurnError {
         self.record_turn_host_failure(iteration, reason);
         StreamingTurnError::Cancelled
@@ -1032,16 +988,6 @@ mod tests {
 
     #[test]
     fn stop_origin_keeps_user_cancellation_separate_from_host_failure() {
-        assert_eq!(
-            TurnStopOrigin::User.candidate_kind(),
-            decision_core::dreamer::CandidateKind::UserCancelled
-        );
-        assert!(!TurnStopOrigin::User.candidate_kind().is_actionable());
-        assert_eq!(
-            TurnStopOrigin::HostFailure.candidate_kind(),
-            decision_core::dreamer::CandidateKind::TurnFailure
-        );
-        assert!(TurnStopOrigin::HostFailure.candidate_kind().is_actionable());
         assert_eq!(
             TurnStopOrigin::User.trace_outcome(),
             crate::turn_trace::TurnOutcome::Cancelled

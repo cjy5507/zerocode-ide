@@ -42,12 +42,20 @@ use super::{
     TOOL_REPETITION_THRESHOLD, TRUNCATION_CONTINUATION_REMINDER,
 };
 
+/// Where a streaming turn was stopped stays on its record in the turn trace:
+/// the person's own stop is a cancelled turn, a host that stopped reading is a
+/// failed one. Neither writes a self-improvement candidate: nothing read that
+/// store, and a stop paid a lock and an fsync to add to it.
 #[test]
-#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), so a turn there records no candidate")]
-fn explicit_streaming_cancel_boundaries_preserve_typed_dreamer_origin() {
+fn explicit_streaming_cancel_boundaries_keep_their_origin_in_the_turn_trace() {
     let _lock = crate::test_env_lock();
     let cwd = temp_workspace("typed-streaming-cancel");
     fs::create_dir_all(&cwd).expect("cwd");
+    let outcome_of = |session_id: &str| {
+        crate::turn_trace::read_session(&cwd, session_id)
+            .last()
+            .map(|record| record.outcome)
+    };
 
     let user_session = Session::new();
     let user_session_id = user_session.session_id.clone();
@@ -63,18 +71,10 @@ fn explicit_streaming_cancel_boundaries_preserve_typed_dreamer_origin() {
         user_runtime.cancel_streaming_turn_by_user("explicit user cancel"),
         super::StreamingTurnError::Cancelled
     ));
-
-    let after_user = crate::memory::read_self_improve_candidates(&cwd);
-    assert_eq!(after_user.len(), 1);
     assert_eq!(
-        after_user[0].kind,
-        decision_core::dreamer::CandidateKind::UserCancelled
+        outcome_of(&user_session_id),
+        Some(crate::turn_trace::TurnOutcome::Cancelled)
     );
-    assert!(after_user[0]
-        .evidence
-        .iter()
-        .any(|evidence| evidence.session_id == user_session_id
-            && evidence.detail == "explicit user cancel"));
 
     let host_session = Session::new();
     let host_session_id = host_session.session_id.clone();
@@ -90,15 +90,15 @@ fn explicit_streaming_cancel_boundaries_preserve_typed_dreamer_origin() {
         host_runtime.cancel_streaming_turn_by_host("render host failed"),
         super::StreamingTurnError::Cancelled
     ));
+    assert_eq!(
+        outcome_of(&host_session_id),
+        Some(crate::turn_trace::TurnOutcome::Failed)
+    );
 
-    let after_host = crate::memory::read_self_improve_candidates(&cwd);
-    assert!(after_host.iter().any(|candidate| {
-        candidate.kind == decision_core::dreamer::CandidateKind::TurnFailure
-            && candidate.evidence.iter().any(|evidence| {
-                evidence.session_id == host_session_id
-                    && evidence.detail == "render host failed"
-            })
-    }));
+    assert!(
+        !cwd.join(".zo").join("dream").join("candidates").exists(),
+        "a stopped turn writes no self-improvement candidate"
+    );
     let _ = fs::remove_dir_all(cwd);
 }
 
@@ -16665,9 +16665,11 @@ fn run_turn_records_fallback_when_empty_recovery_also_exhausts() {
     );
 }
 
+/// A turn the provider failed is on record in the turn trace and nowhere
+/// else: it writes no self-improvement candidate, with dreaming on as much as
+/// with it off. Nothing read that store.
 #[test]
-#[cfg_attr(windows, ignore = "self-improve candidate storage is Unix-only: record_self_improve_candidate needs retained directory handles and returns Unsupported on Windows (runtime/src/memory/dreamer.rs:1052), so a turn there records no candidate")]
-fn run_turn_failure_candidates_respect_runtime_auto_dream_gate() {
+fn a_failed_turn_is_traced_and_writes_no_self_improvement_candidate() {
     struct FailingApi;
 
     impl ApiClient for FailingApi {
@@ -16676,56 +16678,32 @@ fn run_turn_failure_candidates_respect_runtime_auto_dream_gate() {
         }
     }
 
-    let disabled_dir = tempfile::tempdir().expect("tempdir");
-    let disabled_features = RuntimeFeatureConfig::default().with_auto_dream_enabled(false);
-    let mut disabled_runtime = ConversationRuntime::new_with_features(
-        Session::new(),
-        FailingApi,
-        StaticToolExecutor::new(),
-        PermissionPolicy::new(PermissionMode::DangerFullAccess),
-        vec!["system".to_string()],
-        &disabled_features,
-    );
-    disabled_runtime.set_workspace_cwd(disabled_dir.path().to_path_buf());
-
-    let error = disabled_runtime
-        .run_turn("hello", None)
-        .expect_err("API failures should propagate");
-    assert_eq!(error.to_string(), "upstream failed");
-    assert!(
-        crate::memory::read_self_improve_candidates(disabled_dir.path()).is_empty(),
-        "per-runtime autoDreamEnabled=false must suppress runtime-level candidate producers"
-    );
-    assert!(
-        !disabled_dir
-            .path()
-            .join(".zo")
-            .join("dream")
-            .join("candidates")
-            .exists(),
-        "disabled runtime candidate producer must not create a candidates directory"
-    );
-
-    let enabled_dir = tempfile::tempdir().expect("tempdir");
-    let mut enabled_runtime = ConversationRuntime::new_with_features(
-        Session::new(),
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session = Session::new();
+    let session_id = session.session_id.clone();
+    let mut runtime = ConversationRuntime::new_with_features(
+        session,
         FailingApi,
         StaticToolExecutor::new(),
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
         &RuntimeFeatureConfig::default(),
     );
-    enabled_runtime.set_workspace_cwd(enabled_dir.path().to_path_buf());
+    runtime.set_workspace_cwd(dir.path().to_path_buf());
 
-    let error = enabled_runtime
+    let error = runtime
         .run_turn("hello", None)
         .expect_err("API failures should propagate");
     assert_eq!(error.to_string(), "upstream failed");
-    let candidates = crate::memory::read_self_improve_candidates(enabled_dir.path());
-    assert_eq!(candidates.len(), 1);
     assert_eq!(
-        candidates[0].kind,
-        decision_core::dreamer::CandidateKind::TurnFailure
+        crate::turn_trace::read_session(dir.path(), &session_id)
+            .last()
+            .map(|record| record.outcome),
+        Some(crate::turn_trace::TurnOutcome::Failed)
+    );
+    assert!(
+        !dir.path().join(".zo").join("dream").join("candidates").exists(),
+        "a failed turn writes no self-improvement candidate"
     );
 }
 

@@ -2802,16 +2802,6 @@ where
         };
         if let Some(cwd) = self.trace_cwd() {
             let _ = crate::record_verified_check(&cwd, &self.session.session_id, Some(&check));
-            let _ = crate::memory::record_self_improve_pulse_if_enabled(
-                self.dream_automation_enabled,
-                &cwd,
-                decision_core::dreamer::CandidateKind::VerifiedAccept,
-                &self.session.session_id,
-                "deep_gate",
-                "deep gate accepted after objective check",
-                &check,
-                true,
-            );
         }
     }
 

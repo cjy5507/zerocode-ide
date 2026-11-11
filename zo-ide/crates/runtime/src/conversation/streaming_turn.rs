@@ -954,8 +954,8 @@ where
     }
 
     /// Abort a streaming turn because its host failed independently of the
-    /// user. Keeping this distinct prevents transport/render failures from being
-    /// filtered as non-actionable user cancellations by Dreamer.
+    /// user. Keeping this distinct leaves a transport/render failure in the
+    /// turn trace as a failed turn, not as a turn the person cancelled.
     pub fn cancel_streaming_turn_by_host(&mut self, reason: &str) -> StreamingTurnError {
         self.hook_abort_signal.abort_host();
         self.settle_streaming_abort(0, reason)
