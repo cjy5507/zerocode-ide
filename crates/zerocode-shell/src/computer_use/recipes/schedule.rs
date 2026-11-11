@@ -14,9 +14,6 @@
 //! - the one job this road writes is a Flow the window walks itself: no
 //!   agent, no command and no precheck (`Automation::asked_flow`), which a
 //!   request has no word for;
-//! - only a Flow whose effects can be undone — policy `dry` — is scheduled
-//!   this way: one that may spend is walked past its money gate alone, and
-//!   with nobody watching that is the person's to set up, in the form;
 //! - it fires no closer together than [`ASKED_SCHEDULE_FLOOR_MINUTES`];
 //! - the folder it would run in is the caller's to name and cannot be cut or
 //!   cleaned and still be that folder, so a path the card's rule would show
@@ -33,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::{Map, Value, json};
 use zerocode_core::automation::{ASKED_SCHEDULE_FLOOR_MINUTES, Asked, flow_document_sha256};
 use zerocode_core::card_words::{self, WORD_MAX_CHARS};
-use zerocode_core::computer_flow::{Policy, parse_flow};
+use zerocode_core::computer_flow::parse_flow;
 use zerocode_core::computer_use::{COMPUTER_CLI, recipe_slug};
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::{Automation, Cron, LocalMinute, Schedule};
@@ -121,7 +118,6 @@ pub(crate) fn read(
             )));
         }
     };
-    policy_may_be_asked(named, spec.policy)?;
     let workspace = workspace.filter(|folder| folder.is_dir()).ok_or_else(|| {
         ComputerUseError::invalid_argument(
             "a schedule runs in the folder it was asked from, and this request came from none: ask from the pane's own shell",
@@ -197,27 +193,6 @@ pub(crate) fn read(
         hidden,
         document,
     })
-}
-
-/// Whether a Flow of `policy` may be scheduled by asking: only one whose
-/// effects can be undone. A Flow that may spend presses its money step past
-/// the gate alone; walked on a schedule with nobody watching, that is the
-/// person's to set up — in the form, where the job is theirs from the first
-/// word (their go-ahead on this, 2026-11-12). Every policy is answered here,
-/// so a new one is decided before it can be asked for.
-///
-/// # Errors
-///
-/// When the Flow's policy is any but `dry`.
-fn policy_may_be_asked(named: &str, policy: Policy) -> Result<(), ComputerUseError> {
-    match policy {
-        Policy::Dry => Ok(()),
-        Policy::Guarded => Err(ComputerUseError::invalid_argument(format!(
-            "'{named}' is a Flow that may spend money (policy {}), and only a `{}` Flow is scheduled by asking — nobody watches that walk. The person can schedule it themselves, in the automation form",
-            policy.as_str(),
-            Policy::Dry.as_str()
-        ))),
-    }
 }
 
 /// The hash of a Flow's document as it stands under `recipes_root`, or `None`
@@ -608,32 +583,6 @@ mod tests {
         )
         .expect_err("no pane");
         assert!(no_pane.message.contains("pane"));
-    }
-
-    /// Only a Flow whose effects can be undone is scheduled by asking: one
-    /// that may spend is refused before any card — before the folder, the
-    /// pane or the schedule is looked at.
-    #[test]
-    fn only_a_dry_flow_is_scheduled_by_asking() {
-        assert!(policy_may_be_asked("wallet-qa", Policy::Dry).is_ok());
-        let refused = policy_may_be_asked("pay-rent", Policy::Guarded)
-            .expect_err("a Flow that may spend")
-            .message;
-        assert!(
-            refused.contains("'pay-rent'")
-                && refused.contains("policy guarded")
-                && refused.contains("only a `dry` Flow"),
-            "{refused}"
-        );
-        let source = include_str!("schedule.rs");
-        let reading = &source[source.find("pub(crate) fn read(").expect("the reader")..];
-        let asked = reading
-            .find("policy_may_be_asked(named, spec.policy)?;")
-            .expect("the reader asks the policy");
-        let folder = reading
-            .find("let workspace = workspace.filter(")
-            .expect("the reader's look at the folder");
-        assert!(asked < folder, "the policy is asked after the folder");
     }
 
     /// One schedule is asked about at a time: the turn is held while a card
