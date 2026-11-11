@@ -5683,6 +5683,42 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
   }
 });
 
+// The card an agent's request for a schedule raises (`recipe-schedule`): the
+// window's sentence in the page's language, filled from the job that would be
+// saved — and, when the backend left letters that draw nothing out of the
+// names, how many it left out.
+await test("the_card_for_an_asked_schedule_says_the_job_and_what_was_left_out", async () => {
+  const said = await pageA.evaluate(() => {
+    const args = {
+      flow: "Wallet QA",
+      name: "Morning wallet",
+      policy: "dry",
+      schedule: { cadence: "daily", time: "09:30", day_of_week: 1, custom: "" },
+      cron: "30 9 * * *",
+      next: [29_906_490, 29_907_930],
+      workspace: "/Users/dev/app",
+      pane: "term:7",
+      hidden: 0,
+    };
+    const words = COMPUTER_HANDOFF_WORDS["auto.asked.card"];
+    return {
+      plain: words(args),
+      counted: words({ ...args, hidden: 3 }),
+      note: t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count: 3 }),
+      runs: args.next.map(localMinuteText),
+    };
+  });
+  for (const shown of ["Wallet QA", "Morning wallet", "dry", "30 9 * * *", "/Users/dev/app", "term:7", ...said.runs]) {
+    assert(said.plain.includes(shown), "the card left out what the job would be", { shown, card: said.plain });
+  }
+  assert(
+    said.note.includes("3") && !said.plain.includes(said.note) && said.counted === `${said.plain} ${said.note}`,
+    "the card did not say, once, how many letters were left out of the names",
+    said,
+  );
+  return "the card named the Flow, the job, when and where it runs and who asked; three hidden letters were said once";
+});
+
 // The folded 「세부 설정」 line is where a save's command is read before the
 // press. A character that draws nothing or turns the reading direction could
 // make that line read as another command than the field holds: the line names

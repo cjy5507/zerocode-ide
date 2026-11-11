@@ -642,15 +642,21 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
   "emulator.realPhone.androidRemove": (args) => t("emulator.realPhone.androidRemove", "에이전트가 진짜 안드로이드 폰 「{{phone}}」에서 입력 도우미를 지우고 이 폰의 조작을 끄려고 합니다. 폰의 다른 것은 바뀌지 않습니다. 허락하면 「다 했어요」를 누르세요.", args),
   // A schedule an agent asks for (`recipe-schedule`): the sentence is the window's, and what the agent gave —
   // the name — is in it as data, cut and cleaned by the backend. When it runs is said the way the list says it.
-  "auto.asked.card": (args) => t(
-    "auto.asked.card",
-    "{{pane}} 판의 에이전트가 Flow 「{{flow}}」(정책 {{policy}})를 「{{name}}」 예약으로 등록하려고 합니다. 일정: {{schedule}} · 다음 실행: {{next}} · 워크스페이스: {{workspace}}. 허락하면 창이 지켜보는 사람 없이 이 Flow를 걷습니다. 허락하려면 「다 했어요」를 누르고, 아니면 취소하세요. 답하지 않으면 등록되지 않습니다.",
-    {
-      ...args,
-      schedule: `${automationScheduleText({ schedule: args.schedule, cron: args.cron })} (${args.cron})`,
-      next: (args.next ?? []).map(localMinuteText).join(" · "),
-    },
-  ),
+  "auto.asked.card": (args) => [
+    t(
+      "auto.asked.card",
+      "{{pane}} 판의 에이전트가 Flow 「{{flow}}」(정책 {{policy}})를 「{{name}}」 예약으로 등록하려고 합니다. 일정: {{schedule}} · 다음 실행: {{next}} · 워크스페이스: {{workspace}}. 허락하면 창이 지켜보는 사람 없이 이 Flow를 걷습니다. 허락하려면 「다 했어요」를 누르고, 아니면 취소하세요. 답하지 않으면 등록되지 않습니다.",
+      {
+        ...args,
+        schedule: `${automationScheduleText({ schedule: args.schedule, cron: args.cron })} (${args.cron})`,
+        next: (args.next ?? []).map(localMinuteText).join(" · "),
+      },
+    ),
+    // Letters that draw nothing, left out of those names by the backend: the card says how many there were.
+    args.hidden > 0
+      ? t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count: args.hidden })
+      : "",
+  ].filter(Boolean).join(" "),
   "computer.cover.gone": (args) => t("computer.cover.gone", "누르려던 창이 화면에 없습니다(최소화했거나 다른 데스크톱에 있음). 창이 보이게 한 뒤 「다 했어요」를 눌러 주세요.", args),
 });
 

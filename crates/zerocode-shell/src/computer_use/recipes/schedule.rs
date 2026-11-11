@@ -7,7 +7,8 @@
 //! - the card's sentence is the window's; what the agent gave — a label — and
 //!   what a document it wrote says — the Flow's title — are shown as data,
 //!   by the one rule every such card shows data by
-//!   (`zerocode_core::card_words`, [`said`]);
+//!   (`zerocode_core::card_words`), and the card says how many letters
+//!   that draw nothing the rule left out of them;
 //! - the job is built before the card and the card is drawn from it
 //!   ([`Request`]), so what the person allowed is what is saved;
 //! - the one job this road writes is a Flow the window walks itself: no
@@ -79,6 +80,9 @@ pub(crate) struct Request {
     pub policy: &'static str,
     /// The coming runs the card names, soonest first.
     pub next: Vec<LocalMinute>,
+    /// How many letters that draw nothing were left out of the label and the
+    /// Flow's title (`card_words::shown_counting`): the card says so.
+    pub hidden: usize,
     /// The Flow's document, read again once the person has answered.
     document: PathBuf,
 }
@@ -124,7 +128,7 @@ pub(crate) fn read(
     let folder = workspace.display().to_string();
     if card_words::shown(&folder, usize::MAX) != folder {
         return Err(ComputerUseError::invalid_argument(
-            "a schedule is not asked from this folder: its path holds what a card cannot show as it is — a control character, a mark that turns the reading direction, or white space other than single spaces. The person can schedule the Flow there themselves, in the automation form",
+            "a schedule is not asked from this folder: its path holds what a card cannot show as it is — a letter that draws nothing (a control character, a mark that turns the reading direction, a zero-width or variation mark) or white space other than single spaces. The person can schedule the Flow there themselves, in the automation form",
         ));
     }
     let pane = pane.ok_or_else(|| {
@@ -151,9 +155,15 @@ pub(crate) fn read(
         ));
     }
     let slug = recipe_slug(named);
-    let flow_name = said(&recipe_title(&text).unwrap_or_else(|| slug.clone()));
-    let name = word("label")
-        .map(said)
+    let title = card_words::shown_counting(
+        &recipe_title(&text).unwrap_or_else(|| slug.clone()),
+        WORD_MAX_CHARS,
+    );
+    let label = word("label").map(|label| card_words::shown_counting(label, WORD_MAX_CHARS));
+    let hidden = title.hidden + label.as_ref().map_or(0, |label| label.hidden);
+    let flow_name = title.text;
+    let name = label
+        .map(|label| label.text)
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| flow_name.clone());
     let mut job = Automation::asked_flow(
@@ -180,6 +190,7 @@ pub(crate) fn read(
         flow_name,
         policy: spec.policy.as_str(),
         next,
+        hidden,
         document,
     })
 }
@@ -215,15 +226,6 @@ fn coming(cron: &Cron, now: LocalMinute) -> Vec<LocalMinute> {
     found
 }
 
-/// A word that is not the window's own — a label an agent gave, a title a
-/// document says — as the card shows it and the record keeps it: the rule is
-/// `card_words::shown`, which zo's question for a schedule of its own shows
-/// its words by too, at the length a name gets.
-#[must_use]
-pub(crate) fn said(text: &str) -> String {
-    card_words::shown(text, WORD_MAX_CHARS)
-}
-
 /// The card for a request: the window's sentence, for a page that does not
 /// know [`ASK_KEY`], and what fills the page's own — every value read off the
 /// job that will be saved.
@@ -241,13 +243,17 @@ pub(crate) fn card(request: &Request) -> (String, Value) {
         "next": minutes(&request.next),
         "workspace": job.workspace,
         "pane": pane,
+        "hidden": request.hidden,
     });
     let sentence = format!(
-        "An agent in {pane} asks to schedule the Flow \"{flow}\" (policy {policy}) as \"{name}\": cron `{cron}`, in {workspace}. The window would walk it by itself, with nobody watching. Allow it only if that is what you want; cancel it, or leave it, and nothing is scheduled.",
+        "An agent in {pane} asks to schedule the Flow \"{flow}\" (policy {policy}) as \"{name}\": cron `{cron}`, in {workspace}. The window would walk it by itself, with nobody watching. Allow it only if that is what you want; cancel it, or leave it, and nothing is scheduled.{left_out}",
         flow = request.flow_name,
         policy = request.policy,
         name = job.name,
         workspace = job.workspace,
+        left_out = card_words::hidden_said(request.hidden)
+            .map(|said| format!(" ({said}.)"))
+            .unwrap_or_default(),
     );
     (sentence, args)
 }
@@ -576,6 +582,7 @@ mod tests {
     fn a_word_that_is_not_the_windows_is_cut_and_cleaned() {
         // The rule itself is `card_words`' and tested there; here, that a
         // name is held to it at a name's length.
+        let said = |text: &str| card_words::shown(text, WORD_MAX_CHARS);
         assert_eq!(said("  Morning\twallet\n check "), "Morning wallet check");
         assert_eq!(said("pay\u{202E}dleh\u{2066}x\u{2069}\u{200F}"), "paydlehx");
         assert_eq!(
@@ -598,6 +605,43 @@ mod tests {
             request.job.name, "Wallet QA",
             "a label of nothing is no label"
         );
+        // Letters that draw nothing are left out of the name, and the card
+        // says how many — in its sentence and in what fills the page's own.
+        assert_eq!(request.hidden, 2);
+        let (sentence, args) = card(&request);
+        assert_eq!(args["hidden"], 2);
+        assert!(
+            sentence.contains("2 characters that draw nothing were left out"),
+            "{sentence}"
+        );
+        let spelled = asked(
+            root.path(),
+            Some(&workspace),
+            &[
+                ("name", "wallet-qa"),
+                ("every", "daily"),
+                ("label", "Morning\u{200B}\u{E0041}\u{E0042} wallet"),
+            ],
+        )
+        .expect("read");
+        assert_eq!(
+            (spelled.job.name.as_str(), spelled.hidden),
+            ("Morning wallet", 3)
+        );
+        let plain = asked(
+            root.path(),
+            Some(&workspace),
+            &[
+                ("name", "wallet-qa"),
+                ("every", "daily"),
+                ("label", "Morning wallet"),
+            ],
+        )
+        .expect("read");
+        let (sentence, args) = card(&plain);
+        assert_eq!(plain.hidden, 0);
+        assert_eq!(args["hidden"], 0);
+        assert!(!sentence.contains("left out"), "{sentence}");
     }
 
     /// Only the person's yes writes the job, through the one save door, with
