@@ -323,20 +323,9 @@ pub(crate) fn user_message_style() -> Style {
 fn user_message_style_for_palette(
     terminal_palette: Option<palette::TerminalPalette>,
 ) -> Style {
-    let Some(terminal_palette) = terminal_palette else {
-        return Style::new();
-    };
-    let (top, alpha) = if terminal_palette.has_light_background() {
-        ((0, 0, 0), 0.04)
-    } else {
-        ((255, 255, 255), 0.12)
-    };
-    let background = super::shimmer::blend(top, terminal_palette.background(), alpha);
-    Style::new().bg(Color::Rgb(
-        background.0,
-        background.1,
-        background.2,
-    ))
+    terminal_palette.map_or_else(Style::new, |terminal_palette| {
+        Style::new().bg(palette::band_background(terminal_palette, super::style::current().style))
+    })
 }
 
 /// 유저 셀 — 셀 사이 빈 줄 하나와 본문. 터미널 팔레트가 있으면 본문은 codex

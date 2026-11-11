@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use super::ansi::{char_width, Color, Line, Span, Style};
+use super::ansi::{char_width, Line, Span, Style};
 use super::clipboard_paste::normalize_pasted_path;
 use super::effort_effect::{idle_border_style, EffortEffect, EffortTier};
 use super::palette;
@@ -912,17 +912,10 @@ fn append_history(history: &HistoryFile, text: &str) -> std::io::Result<()> {
 }
 
 fn composer_style_for_palette(terminal_palette: Option<palette::TerminalPalette>) -> Style {
-    let Some(terminal_palette) = terminal_palette else {
-        return Style::new();
-    };
-    let background = terminal_palette.background();
-    let (overlay, alpha) = if terminal_palette.has_light_background() {
-        ((0, 0, 0), 0.04)
-    } else {
-        ((255, 255, 255), 0.12)
-    };
-    let (red, green, blue) = palette::blend_rgb(overlay, background, alpha);
-    Style::new().bg(Color::Rgb(red, green, blue))
+    // The same band the person's words stand on once they are said.
+    terminal_palette.map_or_else(Style::new, |terminal_palette| {
+        Style::new().bg(palette::band_background(terminal_palette, super::style::current().style))
+    })
 }
 
 fn image_placeholder(number: usize) -> String {

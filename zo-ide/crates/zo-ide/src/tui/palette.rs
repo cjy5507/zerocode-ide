@@ -196,6 +196,29 @@ pub(crate) fn blend_rgb(
 const STATUS_LINE_COLOR_SATURATION_PERCENT: u16 = 85;
 const STATUS_LINE_COLOR_BRIGHTNESS_PERCENT: u16 = 100;
 
+/// The band the person's words and the composer stand on, in a terminal
+/// whose colours are known: its background moved a step toward its opposite.
+///
+/// The marks look takes the step a surface takes over its ground in Geist,
+/// the design system the window is drawn in — `gray-alpha-100`: 6 % of white
+/// on a dark ground, 5 % of black on a light one. The band then reads as the
+/// pane's own colour raised a little. Codex's 12 % made it a block of another
+/// grey beside the window's surfaces, and any cell a terminal draws a shade
+/// off — dim text whose ground it dims with the ink — stood out of it ("회색
+/// 바탕이 이상해 색이 안맞아", 2026-11-11). Codex's look keeps codex's steps.
+#[must_use]
+pub(crate) fn band_background(terminal_palette: TerminalPalette, style: super::style::TuiStyle) -> Color {
+    let marks = style == super::style::TuiStyle::Marks;
+    let (overlay, alpha) = match (terminal_palette.has_light_background(), marks) {
+        (true, true) => ((0, 0, 0), 0.05),
+        (true, false) => ((0, 0, 0), 0.04),
+        (false, true) => ((255, 255, 255), 0.06),
+        (false, false) => ((255, 255, 255), 0.12),
+    };
+    let (red, green, blue) = blend_rgb(overlay, terminal_palette.background(), alpha);
+    Color::Rgb(red, green, blue)
+}
+
 /// The band a code block stands on: the terminal's background moved a step
 /// toward its opposite — less than the band the person's words stand on.
 #[must_use]
@@ -550,6 +573,29 @@ pub fn user_marker() -> Style {
 mod tests {
     use super::{Color, ColorLevel, TerminalPalette, parse_osc_color, soften_status_line_style};
     use crate::tui::ansi::Style;
+
+    /// The band under the person's words takes Geist's surface step in the
+    /// marks look and codex's in codex's, on a dark ground and on a light one.
+    #[test]
+    fn the_band_takes_geists_step_in_the_marks_look_and_codexs_in_codexs() {
+        use crate::tui::style::TuiStyle;
+        let on = |background| TerminalPalette::new((128, 128, 128), background, ColorLevel::TrueColor);
+        let (black, white) = (on((0, 0, 0)), on((255, 255, 255)));
+        assert_eq!(super::band_background(black, TuiStyle::Marks), Color::Rgb(15, 15, 15), "6 % of white");
+        assert_eq!(super::band_background(black, TuiStyle::Codex), Color::Rgb(30, 30, 30), "12 % of white");
+        assert_eq!(super::band_background(white, TuiStyle::Marks), Color::Rgb(242, 242, 242), "5 % of black");
+        assert_eq!(super::band_background(white, TuiStyle::Codex), Color::Rgb(244, 244, 244), "4 % of black");
+        // The pane the complaint was about: the band stands between its
+        // ground and the block codex's step made of it.
+        let pane = on((29, 30, 37));
+        let (Color::Rgb(red, green, blue), Color::Rgb(was_red, was_green, was_blue)) =
+            (super::band_background(pane, TuiStyle::Marks), super::band_background(pane, TuiStyle::Codex))
+        else {
+            panic!("a band is an RGB colour");
+        };
+        assert_eq!((was_red, was_green, was_blue), (56, 57, 63), "the block the window drew");
+        assert!(29 < red && red < was_red && 30 < green && green < was_green && 37 < blue && blue < was_blue);
+    }
 
     #[test]
     fn parses_eight_and_sixteen_bit_osc_components() {
