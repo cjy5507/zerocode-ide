@@ -11,6 +11,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -224,7 +225,7 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
             let old = line.job(&id).map_err(|error| error.to_string())?;
             let now = now_ms();
             let again = Job {
-                id: line::new_id(now, salt()),
+                id: line::new_id(now, salt(now)),
                 state: JobState::Waiting,
                 queued_ms: now,
                 started_ms: None,
@@ -285,8 +286,13 @@ fn said(value: &serde_json::Value) -> Result<Ended, String> {
     serde_json::to_string(value).map(Ended::Said).map_err(|error| error.to_string())
 }
 
-fn salt() -> u32 {
-    std::process::id() ^ u32::try_from(now_ms() & 0xffff).unwrap_or(0)
+/// The chance part of a job id put in at `now`: the process, the moment, and
+/// how many ids this process made before it. Two jobs one process puts in
+/// within one millisecond would otherwise share an id, and the second's record
+/// would take the first's place.
+fn salt(now: i64) -> u32 {
+    static MADE: AtomicU32 = AtomicU32::new(0);
+    std::process::id() ^ u32::try_from(now & 0xffff).unwrap_or(0) ^ MADE.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Who acts: the worker or run the ledger named in this process's
@@ -311,7 +317,7 @@ fn project_of(cwd: &Path) -> String {
 fn put_in(line: &Line, put: &Put, cwd: &Path) -> Result<Job, String> {
     let now = now_ms();
     let job = Job {
-        id: line::new_id(now, salt()),
+        id: line::new_id(now, salt(now)),
         project: project_of(cwd),
         checkout: cwd.display().to_string(),
         owner: put.owner.clone().unwrap_or_else(who_asks),
@@ -1055,6 +1061,24 @@ mod tests {
             );
             assert_eq!(lines.len(), 3, "the line's word stands last: {log:?}");
         }
+    }
+
+    /// Jobs one process puts in within one millisecond keep an id each: a
+    /// shared id let the second record take the first's place (the stacked
+    /// v1.1.143 gate saw a warning name the wrong run).
+    #[test]
+    fn jobs_one_process_puts_in_at_once_keep_an_id_and_a_record_each() {
+        let now = now_ms();
+        assert_ne!(line::new_id(now, salt(now)), line::new_id(now, salt(now)));
+        let home = tempfile::tempdir().expect("a zo home");
+        let cwd = tempfile::tempdir().expect("a folder");
+        let line = Line::at(home.path());
+        line.make().expect("folders");
+        let put = Put { command: words(&["true"]), ..Put::default() };
+        let ids: std::collections::BTreeSet<String> =
+            (0..64).map(|_| put_in(&line, &put, cwd.path()).expect("put in").id).collect();
+        assert_eq!(ids.len(), 64, "every put has its own id");
+        assert_eq!(line.jobs().len(), 64, "and its own record");
     }
 
     #[test]
