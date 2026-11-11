@@ -32285,9 +32285,13 @@ select {
   margin: 0 0 var(--space-4);
   font-size: var(--text-xs);
   color: var(--ink-mist);
-  /* A reason of several lines is read line by line: zo's question for a
-   * schedule of its own says what it is called, what runs, when and where,
-   * a line each. */
+}
+
+/* A question's reason of several lines is read line by line: zo's question
+ * for a schedule of its own says what it is called, what runs, when and
+ * where, a line each. Only the question card's own reason — the other
+ * dialogs' notes share the class and are written across source lines. */
+#ask-why {
   white-space: pre-line;
 }
 
