@@ -1787,6 +1787,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mode =
             |path: &Path| std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
+        // A mode no common umask makes, so a write that forgot the file's
+        // mode cannot pass by luck.
+        const KEPT_MODE: u32 = 0o640;
         let (_home, paths) = paths();
         for agent in [AgentKind::Claude, AgentKind::Kimi] {
             let config_path = paths.config_path(agent);
@@ -1797,7 +1800,7 @@ mod tests {
                 "{\"env\":{\"EXAMPLE_KEY\":\"example-token\"}}"
             };
             std::fs::write(&config_path, seed).expect("seed");
-            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(KEPT_MODE))
                 .expect("chmod");
 
             let installed = install_agent(&paths, agent);
@@ -1808,14 +1811,14 @@ mod tests {
             );
             assert_eq!(
                 mode(&config_path),
-                0o600,
+                KEPT_MODE,
                 "{agent:?} install widened the file"
             );
 
             remove_agent(&paths, agent);
             assert_eq!(
                 mode(&config_path),
-                0o600,
+                KEPT_MODE,
                 "{agent:?} remove widened the file"
             );
         }

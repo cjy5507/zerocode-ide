@@ -1574,18 +1574,22 @@ mod tests {
     #[test]
     fn config_toml_is_replaced_whole_keeping_its_mode_and_link() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // A mode no common umask makes, so a write that forgot the file's
+        // mode cannot pass by luck.
+        const KEPT_MODE: u32 = 0o640;
         let dir = tempfile::tempdir().expect("temp");
         let mode =
             |path: &Path| std::fs::metadata(path).expect("stat").permissions().mode() & 0o777;
         let inode = |path: &Path| std::fs::metadata(path).expect("stat").ino();
-        let private = |path: &Path| {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod")
+        let kept = |path: &Path| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(KEPT_MODE))
+                .expect("chmod")
         };
 
         // The mirror's own file: trust written and synced.
         let home = Home::under(&dir.path().join("mirror"));
         assert!(write_trust(&home, &[entry("stop")]).expect("write"));
-        private(&home.config_path());
+        kept(&home.config_path());
         let before = inode(&home.config_path());
         assert!(write_trust(&home, &[entry("pre_tool_use")]).expect("write"));
         assert_ne!(
@@ -1593,7 +1597,7 @@ mod tests {
             before,
             "write_trust wrote in place"
         );
-        assert_eq!(mode(&home.config_path()), 0o600);
+        assert_eq!(mode(&home.config_path()), KEPT_MODE);
         let planted = std::fs::read_to_string(home.config_path()).expect("read");
 
         let system = dir.path().join("dot-codex");
@@ -1605,14 +1609,14 @@ mod tests {
             Sync::Unchanged
         ));
         assert_ne!(inode(&home.config_path()), before, "sync wrote in place");
-        assert_eq!(mode(&home.config_path()), 0o600);
+        assert_eq!(mode(&home.config_path()), KEPT_MODE);
 
         // The system home's file, kept behind a link: the trust residue leaves,
-        // the link stays a link and the file behind it keeps 0600.
+        // the link stays a link and the file behind it keeps its mode.
         let real = dir.path().join("dotfiles/config.toml");
         std::fs::create_dir_all(real.parent().expect("parent")).expect("mkdir");
         std::fs::write(&real, &planted).expect("seed");
-        private(&real);
+        kept(&real);
         let link = system.join("linked.toml");
         std::os::unix::fs::symlink(&real, &link).expect("link");
         let before = inode(&real);
@@ -1625,7 +1629,7 @@ mod tests {
             "the link was replaced by a file"
         );
         assert_ne!(inode(&real), before, "remove_trust_at wrote in place");
-        assert_eq!(mode(&real), 0o600);
+        assert_eq!(mode(&real), KEPT_MODE);
         assert!(
             !std::fs::read_to_string(&real)
                 .expect("read")
@@ -1640,6 +1644,6 @@ mod tests {
                 .is_symlink(),
             "the project trust replaced the link by a file"
         );
-        assert_eq!(mode(&real), 0o600, "the project trust widened the file");
+        assert_eq!(mode(&real), KEPT_MODE, "the project trust widened the file");
     }
 }
