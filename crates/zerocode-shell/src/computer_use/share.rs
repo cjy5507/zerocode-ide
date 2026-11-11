@@ -273,8 +273,10 @@ fn person_words_for(named: &str) -> Named {
 }
 
 /// The row a name means. A provider that does not narrow the list by `named`
-/// answers every app: then only a row it names exactly.
-fn listed_app<'a>(listed: &'a Value, named: &str) -> Option<&'a Value> {
+/// answers every app: then only a row it names exactly. A Flow's registration
+/// reads the same answer by the same rule (`recipes::register`), so the app a
+/// word is shared under and the app a Flow is bound to are one.
+pub(super) fn listed_app<'a>(listed: &'a Value, named: &str) -> Option<&'a Value> {
     let rows = listed.get("apps")?.as_array()?;
     if listed.get("named").and_then(Value::as_bool) == Some(true) {
         return rows.first();

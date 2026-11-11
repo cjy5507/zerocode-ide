@@ -130,7 +130,15 @@ fn forget_runs_of(root: &Path, slug: &str) -> usize {
 pub struct Seen {
     pub pages: Vec<(String, String)>,
     pub apps: Vec<SeenApp>,
+    /// Who to ask about a word the list does not name. The list names an app
+    /// in the person's language (「계산기」) and by its bundle id, while a recipe
+    /// may have typed the bundle's own name (`Calculator`), which the helper
+    /// answers to and no row carries. `None` where no helper answered.
+    pub named: Option<AppNamed>,
 }
+
+/// Which app a word names, if any.
+pub type AppNamed = fn(&str) -> Option<SeenApp>;
 
 /// One app the helper listed.
 #[derive(Debug, Clone)]
@@ -139,28 +147,53 @@ pub struct SeenApp {
     pub bundle_id: Option<String>,
 }
 
+impl SeenApp {
+    /// An app as a row of the helper's `listApps` answer names it.
+    fn of(row: &Value) -> Option<Self> {
+        Some(Self {
+            name: row.get("name")?.as_str()?.to_string(),
+            bundle_id: row
+                .get("bundleId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        })
+    }
+}
+
 impl Seen {
     /// What the window sees: its browser panes, and the helper's `listApps`
     /// answer when it gave one (a helper that did not answer leaves the words
-    /// as they were typed).
+    /// as they were typed) — and then the helper itself, for a word that list
+    /// does not name.
     #[must_use]
     pub fn of(pages: Vec<(String, String)>, listed_apps: Option<&Value>) -> Self {
         let apps = listed_apps
             .and_then(|listed| listed.get("apps")?.as_array())
             .into_iter()
             .flatten()
-            .filter_map(|row| {
-                Some(SeenApp {
-                    name: row.get("name")?.as_str()?.to_string(),
-                    bundle_id: row
-                        .get("bundleId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                })
-            })
+            .filter_map(SeenApp::of)
             .collect();
-        Self { pages, apps }
+        Self {
+            pages,
+            apps,
+            named: listed_apps.map(|_| named_by_the_helper as AppNamed),
+        }
     }
+}
+
+/// The app a word names, as the helper that will act says it: the share's own
+/// question (`listApps` narrowed by `named`), read by the share's own rule, so
+/// one app is one identity whichever word names it — the bundle's own name,
+/// the person's language, the bundle id. A round trip per word the list does
+/// not name, at a registration only (the share measured 5 ms for it, 11-03).
+fn named_by_the_helper(word: &str) -> Option<SeenApp> {
+    #[cfg(test)]
+    if !crate::computer_use::test_helper::standing() {
+        return None;
+    }
+    let listed =
+        crate::computer_use::call("listApps", serde_json::json!({ "named": word })).ok()?;
+    SeenApp::of(crate::computer_use::share::listed_app(&listed, word)?)
 }
 
 /// What registering did: the recipe now a Flow (or one already), and the check
@@ -267,21 +300,30 @@ fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
     (!value.starts_with("--") && recipe_placeholders(value).is_empty()).then_some(value)
 }
 
-/// The identities an `--app` word stands for: the word as typed, and — when the
-/// helper lists an app it names (by name or by bundle id) — the identity a run's
-/// answers will carry for it, its bundle id.
+/// The identities an `--app` word stands for: the word as typed, and the
+/// identity a run's answers will carry for the app it names, its bundle id —
+/// read from the row the helper listed under that name or that bundle id, or,
+/// for a word no row carries, from the helper's own say on the word. Without
+/// the second a recipe that typed `Calculator` where the list reads 「계산기」
+/// kept only the word, and every replay stopped at its first act, whose answer
+/// names the bundle id (2026-11-11).
 fn app_identities(app: &str, seen: &Seen) -> BTreeSet<String> {
     let mut identities = BTreeSet::from([app.to_string()]);
     let wanted = app.trim().to_lowercase();
-    let listed = seen.apps.iter().find(|row| {
-        row.name.to_lowercase() == wanted
-            || row
-                .bundle_id
-                .as_deref()
-                .is_some_and(|id| id.to_lowercase() == wanted)
-    });
+    let listed = seen
+        .apps
+        .iter()
+        .find(|row| {
+            row.name.to_lowercase() == wanted
+                || row
+                    .bundle_id
+                    .as_deref()
+                    .is_some_and(|id| id.to_lowercase() == wanted)
+        })
+        .cloned()
+        .or_else(|| seen.named.and_then(|named| named(app)));
     if let Some(row) = listed {
-        identities.insert(row.bundle_id.clone().unwrap_or_else(|| row.name.clone()));
+        identities.insert(row.bundle_id.unwrap_or(row.name));
     }
     identities
 }
@@ -924,6 +966,95 @@ mod tests {
         assert!(
             kept.contains(STARTER_HEADING),
             "the note stays when the card rewrites its sections"
+        );
+    }
+
+    /// The apps a one-step recipe acting in `word` is bound to once it is stood
+    /// up as a Flow, read back from the document.
+    fn bound_to(word: &str, seen: &Seen) -> BTreeSet<String> {
+        let (root, recipes) = folder();
+        let step = format!("zerocode-computer click --app {word} --role button --label 1");
+        std::fs::write(recipes.join("calc.md"), plain("Calc", &[step.as_str()])).unwrap();
+        flow_register(root.path(), "calc", Some("144"), seen).expect("registered");
+        let after = std::fs::read_to_string(recipes.join("calc.md")).unwrap();
+        parse_flow(&after).unwrap().unwrap().fingerprint.apps
+    }
+
+    /// The list names an app in the person's language. On a Korean Mac the app
+    /// `--app Calculator` acts in is listed as 「계산기」, so the word matched no
+    /// row and the Flow kept only the word — and every replay stopped at its
+    /// first act, whose answer names the bundle id (2026-11-11). The helper is
+    /// asked the share's own question, `listApps` narrowed by `named`, about a
+    /// word no row carries; a word the list names costs no second question.
+    #[test]
+    fn a_word_the_list_does_not_name_is_asked_of_the_helper() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let row =
+            serde_json::json!({ "name": "계산기", "bundleId": "com.apple.calculator", "pid": 8 });
+        let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+        let heard = Rc::clone(&asked);
+        let answered = row.clone();
+        let _helper = crate::computer_use::test_helper::stand(move |method, params| {
+            assert_eq!(method, "listApps");
+            let named = params["named"].as_str().unwrap_or_default().to_string();
+            // The app answers to its bundle's own name, as the real helper's does.
+            let rows = if named.eq_ignore_ascii_case("calculator") {
+                vec![answered.clone()]
+            } else {
+                Vec::new()
+            };
+            heard.borrow_mut().push(named);
+            Ok(serde_json::json!({ "apps": rows, "named": true }))
+        });
+        let seen = Seen::of(Vec::new(), Some(&serde_json::json!({ "apps": [row] })));
+        assert_eq!(
+            bound_to("Calculator", &seen),
+            BTreeSet::from(["Calculator".to_string(), "com.apple.calculator".to_string()]),
+            "the word, and the identity a run's answers carry"
+        );
+        assert_eq!(*asked.borrow(), ["Calculator"]);
+        asked.borrow_mut().clear();
+        assert!(bound_to("계산기", &seen).contains("com.apple.calculator"));
+        assert!(asked.borrow().is_empty(), "the list named it");
+    }
+
+    /// Whichever name the recipe typed — the bundle's own, the person's, the
+    /// bundle id — the Flow is bound to the bundle id; and where no helper
+    /// answered there is no one to ask, so the word stays as it was typed.
+    #[test]
+    fn a_flow_is_bound_to_the_bundle_id_whichever_name_the_recipe_typed() {
+        fn listed() -> SeenApp {
+            SeenApp {
+                name: "계산기".into(),
+                bundle_id: Some("com.apple.calculator".into()),
+            }
+        }
+        fn korean_helper(word: &str) -> Option<SeenApp> {
+            ["calculator", "계산기", "com.apple.calculator"]
+                .contains(&word.to_lowercase().as_str())
+                .then(listed)
+        }
+        let seen = Seen {
+            apps: vec![listed()],
+            named: Some(korean_helper),
+            ..Seen::default()
+        };
+        for word in ["Calculator", "계산기", "com.apple.calculator"] {
+            assert!(
+                bound_to(word, &seen).contains("com.apple.calculator"),
+                "{word} names the app a run's answers carry"
+            );
+        }
+        let unasked = Seen {
+            named: None,
+            ..seen
+        };
+        assert_eq!(
+            bound_to("Calculator", &unasked),
+            BTreeSet::from(["Calculator".to_string()]),
+            "the word as typed"
         );
     }
 
