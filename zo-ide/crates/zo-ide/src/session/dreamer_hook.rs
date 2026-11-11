@@ -99,7 +99,7 @@ pub(crate) fn run_on_session_end(
         .name("dreamer-session-end".to_string())
         .spawn(move || {
             // Match the forge automatic path: the runtime helper supplies the
-            // composite `.zo/dream`/turn/user-pattern/automation source,
+            // composite source (`.zo/dream` and the person's patterns),
             // FsMemoryStore, and PromotionPolicy::default(). Its interval is
             // the production six-hour automatic-dream window.
             let result = runtime::maybe_auto_dream(
@@ -123,8 +123,8 @@ pub(crate) fn run_on_session_end(
         Ok(Ok(Some(report))) => {
             // The counts, not just the fact: "completed" alone left a log that
             // could not tell a pass that promoted three lessons from one that
-            // promoted none.
-            log_status(session_id, &format!("completed {}", report.summary_line()));
+            // promoted none. Every count, where the person's line gives two.
+            log_status(session_id, &format!("completed {}", report.audit_line()));
             Some(report)
         }
         Ok(Ok(None)) => {
@@ -160,8 +160,8 @@ pub(crate) fn spawn_on_idle(
         let reply = idle_pass(runtime::memory::auto_dream_program(), &cwd, &session_id, &model);
         settle(&attempt, &reply, crate::autonomy::scheduler::now_unix_ms());
         match reply {
-            PassReply::Ran { summary, promoted } => {
-                log_status(&session_id, &format!("idle {summary}"));
+            PassReply::Ran { summary, audit, promoted } => {
+                log_status(&session_id, &format!("idle {audit}"));
                 crate::dream::record_pass(summary, promoted);
             }
             PassReply::Failed => log_status(&session_id, "idle_failed"),
@@ -175,7 +175,14 @@ pub(crate) fn spawn_on_idle(
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub(crate) enum PassReply {
-    Ran { summary: String, promoted: Vec<String> },
+    /// `summary` is the person's line and `audit` the log's
+    /// (`DreamReport::summary_line` and `audit_line`).
+    Ran {
+        summary: String,
+        #[serde(default)]
+        audit: String,
+        promoted: Vec<String>,
+    },
     NotDue { until_ms: u64 },
     NoEvidence,
     Disabled,
@@ -188,6 +195,7 @@ impl PassReply {
         match result {
             Ok(AutoDream::Ran(report)) => Self::Ran {
                 summary: report.summary_line(),
+                audit: report.audit_line(),
                 promoted: crate::dream::promoted_slugs(report),
             },
             Ok(AutoDream::NotDueUntil(until)) => Self::NotDue { until_ms: unix_ms(*until) },
@@ -419,7 +427,7 @@ mod tests {
         }
 
         let ran = IdleDreamer::new(true, 0, minute);
-        pass(&ran, minute, &PassReply::Ran { summary: String::new(), promoted: Vec::new() });
+        pass(&ran, minute, &PassReply::Ran { summary: String::new(), audit: String::new(), promoted: Vec::new() });
         assert_eq!(ran.next_wakeup(true), Some(minute + 6 * 60 * minute));
     }
 

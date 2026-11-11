@@ -7,7 +7,7 @@
 //!
 //! 여기는 그 증거를 **프로세스 안에** 붙잡아 두는 자리다. 판단은 하지 않는다:
 //! 문안은 엔진의 [`DreamReport::summary_line`] 이 이미 가지고 있고
-//! (승격 몇 · 이미 최신 몇 · 건너뛴 몇), 아무것도 승격되지 않았다는 판단도
+//! (남긴 것 몇 · 한 세션 더 기다리는 것 몇, 없으면 「nothing new」), 아무것도 승격되지 않았다는 판단도
 //! 엔진의 [`DreamReport::is_noop`] 이 든다. 이 모듈이 더하는 것은 **언제**와
 //! **무엇을**(승격된 슬러그) 뿐이다.
 //!
@@ -77,6 +77,17 @@ pub fn last_pass_line() -> Option<String> {
     }
 }
 
+/// 모델에게 알릴 줄 — 남긴 교훈이 있는 패스의 카드 줄, 없으면 `None`.
+///
+/// 「nothing new」는 모델이 쓸 수 있는 말이 아니다: 그 한 줄을 알림으로 싣는
+/// 토큰만 든다. 사람의 카드([`last_pass_line`])는 그 패스도 보여 준다 —
+/// 드리머가 살아 있는지가 카드가 답할 물음이라서.
+#[must_use]
+pub fn last_kept_line() -> Option<String> {
+    let kept = lock().as_ref().is_some_and(|pass| !pass.promoted.is_empty());
+    if kept { last_pass_line() } else { None }
+}
+
 /// 세션 종료 요약에 덧붙일 줄 — 승격된 것이 없으면 `None`.
 ///
 /// 종료 요약은 사람이 창을 닫는 순간에 지나가는 두 줄이라 자리값이 비싸다.
@@ -119,7 +130,10 @@ fn now_millis() -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_pass_line, named_slugs, record, session_end_line, LastPass, MAX_NAMED_SLUGS};
+    use super::{
+        last_kept_line, last_pass_line, named_slugs, record, session_end_line, LastPass,
+        MAX_NAMED_SLUGS,
+    };
     use runtime::memory::{AppliedPromotion, DreamReport, WriteOutcome};
 
     /// 상태가 프로세스 전역이라 이 모듈의 테스트는 한 줄로 세운다.
@@ -164,10 +178,11 @@ mod tests {
         ]));
 
         let card = last_pass_line().expect("a finished pass has a card line");
-        assert!(card.starts_with("dreamer: promoted 2"), "{card}");
+        assert!(card.starts_with("dreamer: kept 2 lessons"), "{card}");
         assert!(card.contains("(now)"), "{card}");
         assert!(card.ends_with(": gate-order, pty-lane-flush"), "{card}");
-        assert_eq!(session_end_line().as_deref(), Some("dreamer: promoted 2, skipped 0"));
+        assert_eq!(session_end_line().as_deref(), Some("dreamer: kept 2 lessons"));
+        assert_eq!(last_kept_line(), last_pass_line(), "a pass that kept something is told to the model as the card says it");
     }
 
     /// 이미 최신이라 손대지 않은 항목뿐인 패스는 승격이 아니다: 종료 요약은
@@ -179,8 +194,8 @@ mod tests {
 
         assert!(session_end_line().is_none());
         let card = last_pass_line().expect("the card still says the pass ran");
-        assert!(card.contains("already current"), "{card}");
-        assert!(!card.contains(':') || !card.ends_with("gate-order"), "{card}");
+        assert_eq!(card, "dreamer: nothing new (now)");
+        assert!(last_kept_line().is_none(), "nothing kept is nothing to tell the model");
     }
 
     /// 빈 패스(계획은 돌았고 승격은 없음)도 카드에는 남는다 — 드리머가 살아
@@ -193,7 +208,7 @@ mod tests {
         assert!(session_end_line().is_none());
         assert_eq!(
             last_pass_line().as_deref(),
-            Some("dreamer: promoted 0, skipped 0 (now)")
+            Some("dreamer: nothing new (now)")
         );
     }
 

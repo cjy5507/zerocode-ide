@@ -1161,7 +1161,7 @@ mod card_tests {
     /// 빈 채로 라벨 폭만 넓어지고, 그만큼 모든 행의 값이 오른쪽으로 밀린다.
     #[test]
     fn the_dreamer_row_stands_outside_the_label_column() {
-        let dream = "dreamer: promoted 2, unchanged 1 (2m ago): zo-gate, orc-verbs";
+        let dream = "dreamer: kept 2 lessons (2m ago): zo-gate, orc-verbs";
         let rows: Vec<String> = card_rows(&report(Vec::new()), Some(dream))
             .iter()
             .map(Line::plain)

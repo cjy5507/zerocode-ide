@@ -995,7 +995,7 @@ impl PlainSession {
             autonomy.goal.reminder_state(),
             had_goal_reminder,
         );
-        sync_dreamer_model_reminder(&mut runtime, crate::dream::last_pass_line().as_deref());
+        sync_dreamer_model_reminder(&mut runtime, crate::dream::last_kept_line().as_deref());
         let agent_completion_receiver = register_for_surface(options.headless);
 
         let idle_dreamer = crate::autonomy::dreaming::IdleDreamer::new(
@@ -3189,7 +3189,7 @@ mod tests {
 
     #[test]
     fn the_last_dreamer_pass_uses_the_once_until_persisted_model_seam() {
-        let line = "dreamer: promoted 2, skipped 0 (now): gate-order, pty-lane-flush";
+        let line = "dreamer: kept 2 lessons (now): gate-order, pty-lane-flush";
         let reminder = dreamer_model_reminder(Some(line)).expect("a pass gets a reminder");
         assert!(reminder.starts_with("[zo:dreamer-last-pass]"));
         assert!(reminder.contains(line), "the model sees the exact status line");

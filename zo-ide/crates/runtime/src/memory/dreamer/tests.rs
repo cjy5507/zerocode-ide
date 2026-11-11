@@ -3384,3 +3384,59 @@ fn an_identical_dreamer_promotion_is_unchanged_at_the_store() {
         WriteOutcome::Unchanged
     );
 }
+
+/// The person's line says what a pass kept and what waits for a second
+/// session, and nothing of what was known already; the log's line counts
+/// everything. A pass with nothing left to learn used to read "promoted 0,
+/// skipped 21" and was taken for a dreamer that does not work.
+#[test]
+fn a_pass_reads_as_what_it_kept_and_what_waits_for_a_second_session() {
+    use super::{AppliedPromotion, DreamReport};
+    use decision_core::dreamer::{CurationPlan, SkipReason, SkippedLesson};
+
+    let wrote = |slug: &str, outcome| AppliedPromotion { slug: slug.to_string(), outcome };
+    let left = |reason| SkippedLesson { slug: "left".to_string(), summary: "left".to_string(), reason };
+    let known = || left(SkipReason::AlreadyKnown);
+    let once = || left(SkipReason::NotRepeatedEnough { distinct_sessions: 1, required: 2 });
+    let report = |applied: Vec<AppliedPromotion>, skipped: Vec<SkippedLesson>| DreamReport {
+        applied,
+        plan: CurationPlan { promote: Vec::new(), skipped },
+    };
+
+    let learned_out = report(Vec::new(), (0..21).map(|_| known()).collect());
+    assert_eq!(learned_out.summary_line(), "dreamer: nothing new");
+    assert_eq!(
+        learned_out.audit_line(),
+        "dreamer: wrote 0, unchanged 0, skipped 21 (known 21, same sentence 0, one session 0, \
+         unverified 0, low confidence 0, over budget 0)"
+    );
+
+    assert_eq!(
+        report(Vec::new(), vec![once(), once(), known()]).summary_line(),
+        "dreamer: 2 lessons waiting for a second session"
+    );
+    assert_eq!(
+        report(vec![wrote("a", WriteOutcome::Created)], Vec::new()).summary_line(),
+        "dreamer: kept 1 lesson"
+    );
+    let mixed = report(
+        vec![
+            wrote("a", WriteOutcome::Created),
+            wrote("b", WriteOutcome::Updated),
+            wrote("c", WriteOutcome::Unchanged),
+        ],
+        vec![once()],
+    );
+    assert_eq!(mixed.summary_line(), "dreamer: kept 2 lessons, 1 more waiting for a second session");
+    assert_eq!(
+        mixed.audit_line(),
+        "dreamer: wrote 2, unchanged 1, skipped 1 (known 0, same sentence 0, one session 1, \
+         unverified 0, low confidence 0, over budget 0)"
+    );
+    assert_eq!(
+        report(vec![wrote("c", WriteOutcome::Unchanged)], Vec::new()).summary_line(),
+        "dreamer: nothing new",
+        "an entry that needed no write is nothing kept"
+    );
+}
+

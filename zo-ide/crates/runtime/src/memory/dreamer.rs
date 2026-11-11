@@ -47,7 +47,7 @@ use decision_core::dreamer::{
     AdvisorRole, ApplyGateDecision, ApplyGateInput, AutomationDigest, CandidateEvidence,
     CandidateKind, CandidateStatus, CurationPlan, DreamFusionReport, LessonKind,
     LessonObservation, PatchCheckResult, PatchRisk, PromotionPolicy, QuarantinePatchRun,
-    SelfImproveCandidate,
+    SelfImproveCandidate, SkipReason,
 };
 
 /// Directory under `.zo/` where sessions drop candidate-lesson logs and the
@@ -229,29 +229,64 @@ impl DreamReport {
         self.applied.is_empty()
     }
 
-    /// One-line human summary for logs/notifications.
+    /// One line for the person: what the pass kept, and what it holds until a
+    /// second session shows the same thing.
+    ///
+    /// It says nothing of what a person can do nothing with — a lesson
+    /// already in memory, an entry that needed no write, a second lesson with
+    /// the same sentence. Counted aloud, those read as work that failed:
+    /// "promoted 0, skipped 21" was a pass with nothing left to learn, and it
+    /// was taken for a dreamer that does not work. [`Self::audit_line`] keeps
+    /// every count, for a log.
     #[must_use]
     pub fn summary_line(&self) -> String {
-        let unchanged = self
-            .applied
-            .iter()
-            .filter(|applied| applied.outcome == WriteOutcome::Unchanged)
-            .count();
-        let promoted = self.applied.len() - unchanged;
-        if unchanged == 0 {
-            format!(
-                "dreamer: promoted {promoted}, skipped {}",
-                self.plan.skipped.len()
-            )
-        } else {
-            // A lesson that needed no write is its own count — "promoted 5"
-            // for five untouched entries reads as churn that did not happen.
-            format!(
-                "dreamer: promoted {promoted}, {unchanged} already current, skipped {}",
-                self.plan.skipped.len()
-            )
+        let kept = self.written();
+        let waiting = self.skipped_for(|reason| matches!(reason, SkipReason::NotRepeatedEnough { .. }));
+        match (kept, waiting) {
+            (0, 0) => "dreamer: nothing new".to_string(),
+            (0, _) => format!("dreamer: {} waiting for a second session", lessons(waiting)),
+            (_, 0) => format!("dreamer: kept {}", lessons(kept)),
+            _ => format!("dreamer: kept {}, {waiting} more waiting for a second session", lessons(kept)),
         }
     }
+
+    /// The pass in counts, for a log: what it wrote, what needed no write, and
+    /// every candidate it left with the reason it was left.
+    #[must_use]
+    pub fn audit_line(&self) -> String {
+        format!(
+            "dreamer: wrote {}, unchanged {}, skipped {} (known {}, same sentence {}, one session {}, \
+             unverified {}, low confidence {}, over budget {})",
+            self.written(),
+            self.applied.len() - self.written(),
+            self.plan.skipped.len(),
+            self.skipped_for(|reason| matches!(reason, SkipReason::AlreadyKnown)),
+            self.skipped_for(|reason| matches!(reason, SkipReason::SameSummaryTemplate { .. })),
+            self.skipped_for(|reason| matches!(reason, SkipReason::NotRepeatedEnough { .. })),
+            self.skipped_for(|reason| matches!(reason, SkipReason::Unverified)),
+            self.skipped_for(|reason| matches!(reason, SkipReason::BelowConfidenceFloor { .. })),
+            self.skipped_for(|reason| matches!(reason, SkipReason::BudgetExhausted)),
+        )
+    }
+
+    /// How many lessons the pass wrote: an entry that needed no write is not
+    /// one — "kept 5" for five untouched entries reads as churn that did not
+    /// happen.
+    fn written(&self) -> usize {
+        self.applied
+            .iter()
+            .filter(|applied| applied.outcome != WriteOutcome::Unchanged)
+            .count()
+    }
+
+    fn skipped_for(&self, is: impl Fn(&SkipReason) -> bool) -> usize {
+        self.plan.skipped.iter().filter(|skipped| is(&skipped.reason)).count()
+    }
+}
+
+/// `count` lessons, in words: "1 lesson", "3 lessons".
+fn lessons(count: usize) -> String {
+    if count == 1 { "1 lesson".to_string() } else { format!("{count} lessons") }
 }
 
 /// The Dreamer orchestrator: binds a [`LessonSource`], a [`MemoryStore`], and a

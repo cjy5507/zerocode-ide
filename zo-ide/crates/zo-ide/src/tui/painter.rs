@@ -3273,7 +3273,7 @@ mod tests {
     #[test]
     fn lifted_turn_cost() {
         use std::time::Instant;
-        const FLOOR: [&str; 7] = ["", "", "╭─────╮", "│› Ask zo to do anything", "╰─────╯", "  dreamer: promoted 0", "  ⏵⏵ Full Access"];
+        const FLOOR: [&str; 7] = ["", "", "╭─────╮", "│› Ask zo to do anything", "╰─────╯", "  dreamer: nothing new", "  ⏵⏵ Full Access"];
         let turn = |lift: bool| {
             let mut painter = Painter::new(Vec::new(), 201, 71, 0, true);
             let size = |painter: &mut Painter<Vec<u8>>, upper: usize, height: usize| {

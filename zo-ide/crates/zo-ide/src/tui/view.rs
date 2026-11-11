@@ -2734,9 +2734,9 @@ mod tests {
 
     #[test]
     fn the_dreamer_turn_footer_is_one_dim_bounded_line() {
-        let dream = "dreamer: promoted 2, skipped 0 (now): gate-order, pty-lane-flush";
+        let dream = "dreamer: kept 2 lessons (now): gate-order, pty-lane-flush";
         let line = dreamer_footer(dream, 44);
-        assert!(line.plain().starts_with("  dreamer: promoted 2"));
+        assert!(line.plain().starts_with("  dreamer: kept 2 lessons"));
         assert!(line.width() <= 44, "footer must stay within the pane");
         assert!(
             line.spans.iter().all(|span| span.style.dim),
