@@ -291,6 +291,10 @@ async function tool(browser, origin, ok) {
         && explicit.buttons.join() === "허용,거부" && explicit.why === null,
       JSON.stringify(explicit),
     );
+    // The prompt above still stands: refused here, so the next one opens alone
+    // instead of waiting behind it.
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(90);
     // A question only the person may answer (zo's `person_only` on the frame):
     // Enter is no answer — neither an allow nor a refusal — and the person
     // picks one. The frame is the shape zo sends: two choices, the field last.
