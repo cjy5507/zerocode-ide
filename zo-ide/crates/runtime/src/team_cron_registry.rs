@@ -1144,7 +1144,7 @@ impl CronRegistry {
     }
 
     /// The folder whose sessions read this registry — the one its file's
-    /// `.zo/registries/` stands in ([`registry_io::registry_path_in`]) — which
+    /// `.zo/registries/` stands in (`registry_io::registry_path_in`) — which
     /// is where a schedule registered here runs. `None` for one kept in
     /// memory.
     #[must_use]

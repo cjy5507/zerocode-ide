@@ -597,7 +597,7 @@ pub struct Dialog {
     pub options: Vec<String>,
     /// The row drawn as chosen, which a bare Enter answers with. `None` while
     /// no row is chosen: Enter answers nothing then, and the dialog says how
-    /// to choose ([`CHOOSE_FOOTER`]).
+    /// to choose (`CHOOSE_FOOTER`).
     pub selected: Option<usize>,
     pub footer: String,
 }
