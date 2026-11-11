@@ -513,6 +513,69 @@ fn saving_switching_and_running_an_automation_are_the_persons_alone() {
     );
 }
 
+/// A hand is read at the person's press, never in a form's `submit`
+/// (2026-11-11). The browser submits as the press's default action, after the
+/// press has been dispatched, and `handNow` answers `none` there — so a
+/// person-only command called from `submit` is refused for the person's own
+/// press (the automation's save was, the day it became person-only, and a
+/// GitLab token's sign-in before it). No `submit` listener in the page reads a
+/// hand or names a person-only command; the two forms whose submission runs
+/// one read the hand at the button's click and at Enter in a one-line field,
+/// and their `submit` only keeps the page where it is. What a listener calls
+/// is not followed here: the words it holds itself are.
+#[test]
+fn a_forms_submit_never_reads_the_hand_of_a_person_only_command() {
+    let person_only = person_only_commands();
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+    let listens = "addEventListener(\"submit\"";
+    let mut listeners = 0;
+    for entry in std::fs::read_dir(&ui).expect("ui reads") {
+        let path = entry.expect("ui entry").path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if !name.ends_with(".js") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        for (at, _) in text.match_indices(listens) {
+            listeners += 1;
+            let listener = enclosing_call(&text, at + "addEventListener(".len());
+            assert!(
+                !listener.contains("handNow("),
+                "{name}: a submit listener reads a hand: {listener}"
+            );
+            for command in &person_only {
+                assert!(
+                    !listener.contains(&format!("\"{command}\"")),
+                    "{name}: a submit listener runs {command}: {listener}"
+                );
+            }
+        }
+    }
+    assert!(listeners > 5, "the page's submit listeners were read");
+    let settings = ui_file("shell-settings.js");
+    let by_press = block_after(&settings, "function submitByPress(form, button, send) {");
+    assert!(
+        by_press.contains("form.addEventListener(\"submit\", (event) => event.preventDefault());")
+            && by_press.contains("button.addEventListener(\"click\", press);")
+            && by_press.contains("if (!button.disabled && form.reportValidity()) send(handNow());")
+            && by_press.contains("event.isComposing"),
+        "the press reads the hand, and submit only keeps the page where it is"
+    );
+    for wired in [
+        "submitByPress(el(\"auto-form\"), el(\"auto-save\"), (hand) => void saveAutomation(hand));",
+        "submitByPress(paste, send, (hand) => void connectGitlabHost(host, field, said, send, hand));",
+    ] {
+        assert!(
+            settings.contains(wired),
+            "a form saves by its press: {wired}"
+        );
+    }
+}
+
 #[test]
 fn requiring_a_share_is_a_persisted_person_only_setting() {
     let person = person_only_commands();

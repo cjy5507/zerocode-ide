@@ -23845,7 +23845,7 @@ mod tests {
             "a new schedule does not start on a real catalog agent, or editing \
              drops the agent already stored in the draft:\n{editing}"
         );
-        let sending = block_after(window, "async function saveAutomation(event) {");
+        let sending = block_after(window, "async function saveAutomation(hand) {");
         assert!(
             sending.contains("agent: el(\"auto-agent\").value || null,"),
             "the form does not carry its agent, so a choice made on it is \

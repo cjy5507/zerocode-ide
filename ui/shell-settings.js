@@ -13062,8 +13062,36 @@ function closeAutoForm() {
   el("auto-form").hidden = true;
 }
 
-async function saveAutomation(event) {
-  event.preventDefault();
+/* A form whose submission runs a command that is the person's alone reads the
+ * hand at the press — its button's click, or Enter in one of its one-line
+ * fields — and never in `submit`. The browser submits as the press's default
+ * action, after the press has been dispatched, and a hand read there is
+ * nobody's (`handNow`): the window would refuse the person's own press. So
+ * `submit` only keeps the page where it is, and `send(hand)` runs once for a
+ * press that would have submitted a form the browser finds valid — not while
+ * its button is switched off, as the browser's own submission is not. Enter
+ * while an input method is composing confirms the composition, as it always
+ * did; an Enter this handler leaves alone (a box, a list, a field that took
+ * the key for itself) goes the browser's way, whose press of the form's
+ * button is the click read here. */
+function submitByPress(form, button, send) {
+  const press = (event) => {
+    event.preventDefault();
+    if (!button.disabled && form.reportValidity()) send(handNow());
+  };
+  form.addEventListener("submit", (event) => event.preventDefault());
+  button.addEventListener("click", press);
+  form.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+    const field = event.target;
+    if (!(field instanceof HTMLInputElement) || field.type === "checkbox" || field.type === "radio") return;
+    // One key, one press: a held Enter sends once (`stopRepeatedPress`).
+    if (event.repeat) event.preventDefault();
+    else press(event);
+  });
+}
+
+async function saveAutomation(hand) {
   if (!autoDraft) return;
   const automation = {
     ...autoDraft,
@@ -13117,7 +13145,7 @@ async function saveAutomation(event) {
     return;
   }
   try {
-    automations = await invoke("save_automation", { automation }, { hand: handNow() });
+    automations = await invoke("save_automation", { automation }, { hand });
   } catch (error) {
     // Shown on the form rather than as a window-wide error: what is wrong is
     // a field the person is looking at — the schedule it cannot read, or an
@@ -13277,7 +13305,7 @@ for (const button of document.querySelectorAll("[data-auto-template]")) {
     editAutomation(null, make ? make() : null);
   });
 }
-el("auto-form").addEventListener("submit", saveAutomation);
+submitByPress(el("auto-form"), el("auto-save"), (hand) => void saveAutomation(hand));
 el("auto-cancel").addEventListener("click", closeAutoForm);
 el("auto-editor-close").addEventListener("click", closeAutoForm);
 el("auto-editor-scrim").addEventListener("click", (event) => {
@@ -16559,10 +16587,8 @@ function gitlabHostRow(host) {
   said.hidden = true;
   said.setAttribute("role", "status");
   paste.append(field, send);
-  paste.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void connectGitlabHost(host, field, said, send, handNow());
-  });
+  // 손은 누름에서 읽는다 — `submit` 안에서 읽으면 아무의 손도 아니다(`submitByPress`).
+  submitByPress(paste, send, (hand) => void connectGitlabHost(host, field, said, send, hand));
   row.append(acts, paste, said, older);
   return row;
 }

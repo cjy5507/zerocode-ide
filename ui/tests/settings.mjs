@@ -1064,12 +1064,15 @@ class StatefulBackend {
     return this.calls.findLast((call) => call.window_id === id && call.command === command) ?? null;
   }
 
-  record(windowId, command, args) {
+  record(windowId, command, args, hand = null) {
     const call = {
       at: this.calls.length,
       window_id: windowId,
       command,
       args: clone(args ?? {}),
+      // Whose hand the page said made the call (`zerocode-hand`, shell-boot.js
+      // `invoke`): the window runs a person-only command for `person` alone.
+      hand,
     };
     this.calls.push(call);
     const waiting = this.waiters.filter(
@@ -1997,8 +2000,8 @@ class StatefulBackend {
     return answer;
   }
 
-  async invoke(windowId, command, args = {}) {
-    this.record(windowId, command, args);
+  async invoke(windowId, command, args = {}, hand = null) {
+    this.record(windowId, command, args, hand);
     const before = this.beforeHolds.get(command);
     if (before) {
       this.beforeHolds.delete(command);
@@ -2797,6 +2800,14 @@ class StatefulBackend {
         }
         return clone(this.automations);
       }
+      // 「지금 실행」: the run it started. It names no terminal and no Flow, so the
+      // page has nothing to bring forward — the scene reads whose hand asked.
+      case "run_automation":
+        return { id: `run-${args.id}`, automation_id: args.id, term: null, worktree: null, flow: null };
+      // A pasted GitLab token: these scenes' host signs nobody in, and the row
+      // says the refusal — the scene reads whose hand asked.
+      case "gitlab_token_login":
+        throw new Error("refused: this host signs nobody in");
       case "save_automation": {
         const automation = args.automation;
         this.automations = [
@@ -3965,7 +3976,7 @@ try {
 const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
 await context.exposeBinding("__SETTINGS_INVOKE__", (source, request) => {
   backend.attach(request.window_id, source.page);
-  return backend.invoke(request.window_id, request.command, request.args ?? {});
+  return backend.invoke(request.window_id, request.command, request.args ?? {}, request.hand ?? null);
 });
 
 const installTauri = async (page, windowId) => {
@@ -3980,10 +3991,11 @@ const installTauri = async (page, windowId) => {
     };
     window.__TAURI__ = {
       core: {
-        invoke: (command, args = {}) => window.__SETTINGS_INVOKE__({
+        invoke: (command, args = {}, options = undefined) => window.__SETTINGS_INVOKE__({
           window_id: id,
           command,
           args,
+          hand: options?.headers?.["zerocode-hand"] ?? null,
         }),
       },
       event: {
@@ -5089,11 +5101,9 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
       "a Flow's schedule switch lacks the person-only mark",
     );
     await pageA.click('.flow-schedule[data-id="job-off"] [role="switch"]');
-    assertEqual(
-      (await backend.waitForCall("A", "enable_automation", from)).args,
-      { id: "job-off", enabled: true },
-      "the switch named another job or another state",
-    );
+    const switched = await backend.waitForCall("A", "enable_automation", from);
+    assertEqual(switched.args, { id: "job-off", enabled: true }, "the switch named another job or another state");
+    assertEqual(switched.hand, "person", "the switch did not say the person pressed it");
     await pageA.waitForFunction(
       () => document.querySelector('.flow-schedule[data-id="job-off"] [role="switch"]')?.getAttribute("aria-checked") === "true",
       undefined,
@@ -5142,6 +5152,9 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
     }
     await pageA.click("#auto-save");
     const saved = await backend.waitForCall("A", "save_automation", from);
+    // The save is read at the press: in the form's `submit` the hand is nobody's,
+    // and the window refuses the person's own save.
+    assertEqual(saved.hand, "person", "the save did not say the person pressed it");
     assertEqual(
       [saved.args.automation.flow, saved.args.automation.prompt, saved.args.automation.agent],
       ["wallet-qa", "", null],
@@ -5346,6 +5359,202 @@ await test("a_flows_schedules_are_listed_switched_and_added_on_the_flow_side", a
       setSettingsOpen(false);
     });
     await closeFlowSide(pageA);
+  }
+});
+
+// Saving a job, switching it and running it now are the person's alone
+// (`PERSON_ONLY_COMMANDS`), so every press that asks for one says whose hand
+// made it — and the window refuses the person's own press when the page reads
+// that hand where it is nobody's. A form's `submit` is such a place: the
+// browser dispatches it after the press that set it off, and the day the three
+// became person-only the save was read there. Real pointer and key events, in
+// the gate's engine and in the app's own (`SETTINGS_ENGINE=webkit`); a pasted
+// GitLab token goes the same way and is read here too.
+await test("a_job_is_saved_switched_and_run_by_the_persons_own_press", async () => {
+  const held = {
+    automations: backend.automations,
+    flows: backend.flows.flows,
+    recipes: backend.flows.recipes,
+  };
+  const job = (id, name, extra) => ({
+    id,
+    name,
+    enabled: true,
+    workspace: BOOT_BASE.project_root,
+    workspace_mode: "existing",
+    base_branch: null,
+    agent: "codex",
+    prompt: "Read the repository.",
+    command: "",
+    reuse_session: false,
+    close_when_done: false,
+    evidence: "prompt",
+    leaves_evidence: false,
+    schedule: { cadence: "daily", time: "09:30", day_of_week: 1, custom: "" },
+    precheck: "",
+    precheck_timeout_seconds: 60,
+    missed_run_grace_minutes: 60,
+    last_run_at: null,
+    next_run_at: 29_001_440,
+    runs: 0,
+    ...extra,
+  });
+  backend.flows.flows = [{
+    slug: "wallet-qa",
+    name: "Wallet QA",
+    policy: "dry",
+    evidence: "full",
+    fingerprint: { apps: [], hosts: ["shop.example.com"] },
+    checks: { n: 3, required: 2 },
+    last: { at: 5000, pass: true, dir: "/s/1" },
+    file: "/r/wallet-qa.md",
+  }];
+  backend.flows.recipes = [];
+  backend.automations = [
+    job("hand-flow", "Hand wallet QA", { flow: "wallet-qa" }),
+    job("hand-plain", "Hand repo audit", {}),
+  ];
+  // What each press said, in the order pressed; one object so a red run names
+  // every press that was not the person's, not only the first.
+  const said = {};
+  const pressed = async (name, command, press) => {
+    const from = backend.calls.length;
+    await press();
+    said[name] = (await backend.waitForCall("A", command, from)).hand;
+    return from;
+  };
+  const openSchedules = async () => {
+    await pageA.evaluate(() => {
+      setAutoOpen(true);
+      setAutoPage("schedules");
+    });
+    await pageA.waitForFunction(
+      () => automations.some((one) => one.id === "hand-plain"),
+      undefined,
+      { timeout: UI_TIMEOUT },
+    );
+  };
+  const row = () => pageA.locator("#auto-list .auto-row", { hasText: "Hand repo audit" });
+  const openList = async () => {
+    await openSchedules();
+    // On the list, as 「뒤로」 leaves it.
+    await pageA.evaluate(() => {
+      autoSelectedId = null;
+      autoRuns = [];
+      paintAutomations();
+      paintAutomationDetail();
+    });
+    await row().waitFor({ timeout: UI_TIMEOUT });
+  };
+  const openEditor = async () => {
+    await openSchedules();
+    await pageA.evaluate(() => editAutomation(automations.find((one) => one.id === "hand-plain")));
+    await pageA.waitForSelector("#auto-editor-scrim:not([hidden])");
+  };
+  // 「지금 실행」 puts the page away once the run answered: the next step opens it
+  // again only after that.
+  const pageAway = () => pageA.waitForSelector("#auto-view", { state: "hidden", timeout: UI_TIMEOUT });
+  const editorClosed = async () => {
+    await pageA.waitForSelector("#auto-editor-scrim", { state: "hidden", timeout: UI_TIMEOUT });
+    await renderSettled(pageA);
+  };
+  const saves = (from) => backend.calls.slice(from)
+    .filter((call) => call.window_id === "A" && call.command === "save_automation").length;
+  const tokenField = "#hand-gitlab-stand .task-host-token";
+  const tokenRefused = () => pageA.waitForSelector('#hand-gitlab-stand .task-host-said[data-state="error"]', { timeout: UI_TIMEOUT });
+  try {
+    // The list: a row's switch and its 「지금 실행」.
+    await openList();
+    await pressed("rowSwitch", "enable_automation", () => row().locator(".auto-row-toggle").click());
+    await renderSettled(pageA);
+    await pressed("rowRun", "run_automation", async () => {
+      await row().hover();
+      await row().locator(".auto-row-action").first().click();
+    });
+    await pageAway();
+
+    // The job's own page: its switch and its run.
+    await openSchedules();
+    await pageA.evaluate(() => selectAutomation("hand-plain"));
+    await pageA.waitForSelector("#auto-detail-toggle", { timeout: UI_TIMEOUT });
+    await pressed("detailSwitch", "enable_automation", () => pageA.click("#auto-detail-toggle"));
+    await renderSettled(pageA);
+    await pressed("detailRun", "run_automation", () => pageA.click("#auto-detail-run"));
+    await pageAway();
+
+    // The form: its run, and its save by Enter in the name and by the button.
+    // One press saves once — the key is not also the browser's submission.
+    await openEditor();
+    await pressed("editorRun", "run_automation", () => pageA.click("#auto-run"));
+    await pageAway();
+    await openEditor();
+    const byEnter = await pressed("saveByEnter", "save_automation", () => pageA.locator("#auto-name").press("Enter"));
+    await editorClosed();
+    said.savesByEnter = saves(byEnter);
+    await openEditor();
+    const byClick = await pressed("saveByClick", "save_automation", () => pageA.click("#auto-save"));
+    await editorClosed();
+    said.savesByClick = saves(byClick);
+
+    // The Flow side: a schedule's switch, and what the Flow's runs keep.
+    await openFlowSide(pageA);
+    await pageA.waitForSelector('.flow-schedule[data-id="hand-flow"] [role="switch"]', { timeout: UI_TIMEOUT });
+    const switchedAt = await pressed("flowScheduleSwitch", "enable_automation", () => pageA.click('.flow-schedule[data-id="hand-flow"] [role="switch"]'));
+    // The switch reads the Flows again; the card is pressed once it stands.
+    await backend.waitForCall("A", "flow_list", switchedAt);
+    await renderSettled(pageA);
+    await pressed("flowEvidence", "flow_set", () => pageA.click('#flow-evidence-seg .segment-btn[data-value="verdict-only"]'));
+    await renderSettled(pageA);
+    await closeFlowSide(pageA);
+
+    // A pasted GitLab token: the same shape of form, and a credential.
+    await pageA.evaluate(() => {
+      const stand = document.createElement("div");
+      stand.id = "hand-gitlab-stand";
+      stand.style.cssText = "position:fixed;top:0;left:0;z-index:2147483647;padding:8px;background:Canvas;color:CanvasText";
+      stand.append(gitlabHostRow({
+        host: "gitlab.example.com",
+        address: "gitlab.example.com",
+        signed_in: false,
+        repos: [{ name: "acme/app" }],
+        api_protocol: "https",
+        git_protocol: "https",
+      }));
+      document.body.append(stand);
+    });
+    await pageA.fill(tokenField, "pasted");
+    await pressed("tokenByClick", "gitlab_token_login", () => pageA.click('#hand-gitlab-stand .task-host-paste button[type="submit"]'));
+    await tokenRefused();
+    await pageA.fill(tokenField, "pasted");
+    await pageA.evaluate(() => { document.querySelector("#hand-gitlab-stand .task-host-said").dataset.state = ""; });
+    await pressed("tokenByEnter", "gitlab_token_login", () => pageA.locator(tokenField).press("Enter"));
+    await tokenRefused();
+
+    assertEqual(said, {
+      rowSwitch: "person",
+      rowRun: "person",
+      detailSwitch: "person",
+      detailRun: "person",
+      editorRun: "person",
+      saveByEnter: "person",
+      savesByEnter: 1,
+      saveByClick: "person",
+      savesByClick: 1,
+      flowScheduleSwitch: "person",
+      flowEvidence: "person",
+      tokenByClick: "person",
+      tokenByEnter: "person",
+    }, "a press of the person's own did not say so, and the window would refuse it");
+    return "thirteen presses, each the person's and each sent once";
+  } finally {
+    await pageA.evaluate(() => {
+      document.getElementById("hand-gitlab-stand")?.remove();
+      closeAutoForm();
+    });
+    await closeFlowSide(pageA);
+    backend.automations = held.automations;
+    backend.flows.flows = held.flows;
+    backend.flows.recipes = held.recipes;
   }
 });
 
@@ -14453,6 +14662,7 @@ await test("세컨드 브레인 카드의 매일 취합 줄은 꺼지거나 하�
   const enabled = await backend.waitForCall("B", "enable_automation", turnedAt);
   assertEqual(enabled.args, { id: "ingest-1", enabled: true },
     "the switch turned on something other than the vault's ingest");
+  assertEqual(enabled.hand, "person", "turning the ingest on did not say the person pressed it");
   await backend.waitForCall("B", "second_brain_status", turnedAt);
   await warningIs(false);
   const on = await ingestLine();
@@ -14492,6 +14702,7 @@ await test("세컨드 브레인 카드의 매일 취합 줄은 꺼지거나 하�
   const madeAt = backend.calls.length;
   await pageB.click("#second-brain-ingest-on");
   const made = await backend.waitForCall("B", "save_automation", madeAt);
+  assertEqual(made.hand, "person", "making the ingest job did not say the person pressed it");
   const job = made.args.automation;
   assert(job.workspace === vault && job.prompt.includes("raw/") && job.enabled === true
     && job.schedule.cadence === "daily" && job.schedule.time === "19:00",
