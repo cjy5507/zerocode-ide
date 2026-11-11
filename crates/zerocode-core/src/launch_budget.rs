@@ -103,7 +103,7 @@ impl Default for Limits {
 }
 
 /// FNV-1a over a byte stream.
-fn fnv1a(bytes: impl Iterator<Item = u8>) -> u64 {
+pub(crate) fn fnv1a(bytes: impl Iterator<Item = u8>) -> u64 {
     bytes.fold(FNV_OFFSET, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
     })
