@@ -97,7 +97,7 @@ struct Shift {
     lo: usize,
     hi: usize,
     by: usize,
-    /// 참이면 내용이 위로 올라간다(줄바꿈), 아니면 아래로(역인덱스).
+    /// 참이면 내용이 위로 올라간다(줄 삭제), 아니면 아래로(역인덱스).
     up: bool,
 }
 
@@ -1382,10 +1382,15 @@ impl<W: Write> Painter<W> {
         let (lo, hi) = (self.top + shift.lo as u16, self.top + shift.hi as u16);
         set_scroll_region(&mut self.frame, lo + 1, hi + 1);
         if shift.up {
-            cup(&mut self.frame, 0, hi);
-            for _ in 0..shift.by {
-                self.frame.push('\n');
-            }
+            // Lines are deleted on the region's first row and the rows under
+            // them move up. A line feed on the region's last row shows the
+            // same screen, but tmux keeps the rows a line feed pushes out of
+            // any region — not only one that starts on the first row — so a
+            // head's rows stood above the session's first row for whoever
+            // scrolled back (zo 1.1.142 in tmux, 2026-11-11). A deleted line
+            // is kept by no terminal.
+            cup(&mut self.frame, 0, lo);
+            delete_lines(&mut self.frame, shift.by);
         } else {
             cup(&mut self.frame, 0, lo);
             for _ in 0..shift.by {
@@ -1540,6 +1545,22 @@ fn cup_len(col: u16, row: u16) -> usize {
 fn set_scroll_region(out: &mut String, top: u16, bottom: u16) {
     use std::fmt::Write as _;
     let _ = write!(out, "\u{1b}[{top};{bottom}r");
+}
+
+/// `ESC[{count}M` — delete `count` lines at the cursor's row: the rows under
+/// them, to the scroll region's last, move up.
+fn delete_lines(out: &mut String, count: usize) {
+    use std::fmt::Write as _;
+    let _ = write!(out, "\u{1b}[{count}M");
+}
+
+/// Whether `frame` deletes lines ([`delete_lines`]) — how rows are moved up.
+#[cfg(test)]
+fn deletes_lines(frame: &str) -> bool {
+    frame
+        .split("\u{1b}[")
+        .skip(1)
+        .any(|rest| rest.trim_start_matches(|ch: char| ch.is_ascii_digit()).starts_with('M'))
 }
 
 #[cfg(test)]
@@ -2143,6 +2164,10 @@ mod tests {
         col: usize,
         top_margin: usize,
         bottom_margin: usize,
+        /// tmux's rule: a row a line feed pushes out of any scroll region is
+        /// kept as history, not only a row leaving a region that starts on
+        /// the first screen row.
+        any_region_feeds_history: bool,
     }
 
     impl Screen {
@@ -2156,7 +2181,13 @@ mod tests {
                 col: 0,
                 top_margin: 0,
                 bottom_margin: rows - 1,
+                any_region_feeds_history: false,
             }
+        }
+
+        /// A screen that keeps history as tmux does.
+        fn like_tmux(cols: u16, rows: u16) -> Self {
+            Self { any_region_feeds_history: true, ..Self::new(cols, rows) }
         }
 
         fn feed(&mut self, bytes: &str) {
@@ -2259,6 +2290,16 @@ mod tests {
                     self.row = 0;
                     self.col = 0;
                 }
+                // Delete lines: the rows under the cursor's move up inside
+                // the scroll region, and no terminal keeps the ones deleted.
+                Some('M') => {
+                    if (self.top_margin..=self.bottom_margin).contains(&self.row) {
+                        for _ in 0..arg(0, 1).min(self.bottom_margin - self.row + 1) {
+                            self.rows.remove(self.row);
+                            self.rows.insert(self.bottom_margin, vec![' '; self.cols]);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -2266,7 +2307,7 @@ mod tests {
         fn line_feed(&mut self) {
             if self.row == self.bottom_margin {
                 let gone = self.rows.remove(self.top_margin);
-                if self.top_margin == 0 {
+                if self.top_margin == 0 || self.any_region_feeds_history {
                     self.scrollback.push(Self::text(&gone));
                 }
                 self.rows.insert(self.bottom_margin, vec![' '; self.cols]);
@@ -2311,7 +2352,7 @@ mod tests {
     /// Whether a frame moved rows: a line feed outside a history line's
     /// `\r\n`, or a reverse index.
     fn scrolled(frame: &str) -> bool {
-        frame.contains("\u{1b}M") || frame.replace("\r\n", "").contains('\n')
+        frame.contains("\u{1b}M") || frame.replace("\r\n", "").contains('\n') || super::deletes_lines(frame)
     }
 
     /// A tool cell tall enough to fill the screen — an edit's diff in a split
@@ -3084,6 +3125,54 @@ mod tests {
         assert_eq!(&visible[first + 17..first + 20], &["a", "b", "c"], "{}", shown(&visible));
         assert!(visible[first + 20..first + 26].iter().all(String::is_empty), "{}", shown(&visible));
         assert_eq!(&visible[first + 26..first + 30], &composer, "{}", shown(&visible));
+    }
+
+    /// Work that folds in a lifted head leaves its status row four or more
+    /// rows higher, and the terminal moves it there by deleting lines: a
+    /// terminal that keeps what a line feed pushes out of any scroll region —
+    /// tmux — keeps none of the work as history.
+    #[test]
+    fn work_that_folds_in_a_lifted_head_leaves_no_row_in_a_terminal_that_keeps_region_rows() {
+        const STATUS: &str = "working · 13s · esc to interrupt";
+        let mut painter = painter(40, 0);
+        let mut screen = Screen::like_tmux(40, 40);
+        painter.set_height(3);
+        painter.paint(&lines(COMPOSER));
+        screen.feed(&drain(&mut painter));
+        painter.insert_history(&lines(["you: run them"]));
+        screen.feed(&drain(&mut painter));
+        // Nine rows of work and the status row under the words, then the
+        // composer's three.
+        let working: Vec<String> = (0..9)
+            .map(|n| format!("ran step {n} and said what it printed"))
+            .chain([STATUS.to_owned()])
+            .chain(COMPOSER.map(String::from))
+            .collect();
+        painter.set_lifted_height(10, 13);
+        painter.paint(&lines(working));
+        screen.feed(&drain(&mut painter));
+
+        // The work folds: four rows are said where it stood, and what is left
+        // of the head's upper part is a gap and the status row.
+        painter.insert_history(&lines(["worked · 9 steps", "  ran step 6", "  ran step 7", "  ran step 8"]));
+        let folded: Vec<String> = ["", STATUS].into_iter().chain(COMPOSER).map(String::from).collect();
+        painter.set_lifted_height(2, 5);
+        painter.paint(&lines(folded));
+        let frame = painter.frame.clone();
+        assert!(super::deletes_lines(&frame), "the status row was moved, not written again: {frame:?}");
+        assert!(!frame.replace("\r\n", "").contains('\n'), "and by no line feed: {frame:?}");
+        screen.feed(&drain(&mut painter));
+
+        assert!(screen.scrollback.is_empty(), "none of the work is history: {:?}", screen.scrollback);
+        let visible = screen.transcript();
+        assert_eq!(
+            &visible[1..8],
+            &["you: run them", "worked · 9 steps", "  ran step 6", "  ran step 7", "  ran step 8", "", STATUS],
+            "{}",
+            shown(&visible)
+        );
+        assert!(visible[8..37].iter().all(String::is_empty), "no row of the work is left: {}", shown(&visible));
+        assert_eq!(&visible[37..40], &COMPOSER, "{}", shown(&visible));
     }
 
     /// A popup is one block over a lifted head: its rows are painted as they

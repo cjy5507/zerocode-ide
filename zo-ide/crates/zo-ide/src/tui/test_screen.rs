@@ -183,6 +183,17 @@ impl TestScreen {
             'K' => self.erase_in_line(values.first().copied().unwrap_or(0)),
             'J' => self.erase_in_display(values.first().copied().unwrap_or(0)),
             'm' => self.sgr(params),
+            // Delete lines: the rows under the cursor's move up inside the
+            // scroll region, and no terminal keeps the ones deleted.
+            'M' => {
+                if (self.top_margin..=self.bottom_margin).contains(&self.row) {
+                    for _ in 0..arg(0, 1).min(self.bottom_margin - self.row + 1) {
+                        self.grid.remove(self.row);
+                        let blank = self.erased();
+                        self.grid.insert(self.bottom_margin, vec![blank; self.cols]);
+                    }
+                }
+            }
             'r' => {
                 if params.is_empty() {
                     self.top_margin = 0;

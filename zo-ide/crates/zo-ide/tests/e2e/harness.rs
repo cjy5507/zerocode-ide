@@ -1061,6 +1061,16 @@ impl Screen {
                 self.row = 0;
                 self.col = 0;
             }
+            // Delete lines: the rows under the cursor's move up inside the
+            // scroll region, and no terminal keeps the ones deleted.
+            Some('M') => {
+                if (self.top_margin..=self.bottom_margin).contains(&self.row) {
+                    for _ in 0..arg(0, 1).min(self.bottom_margin - self.row + 1) {
+                        self.rows.remove(self.row);
+                        self.rows.insert(self.bottom_margin, Vec::new());
+                    }
+                }
+            }
             _ => {}
         }
     }

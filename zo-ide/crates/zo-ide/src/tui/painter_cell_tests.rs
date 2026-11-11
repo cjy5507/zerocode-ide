@@ -310,8 +310,12 @@ fn rows_that_only_moved_up_cost_the_row_that_came_in() {
     let scrolled = rig.frame(&numbered(1..13), Some((1, 23)));
     assert_eq!(scrolled.matches("line ").count(), 1, "only the row that came in is written: {scrolled:?}");
     assert!(scrolled.len() < 160, "{} bytes: {scrolled:?}", scrolled.len());
+    assert!(
+        super::deletes_lines(&scrolled) && !scrolled.contains('\n'),
+        "the rows moved up by a deleted line — a line feed would hand the row that left to tmux's history: {scrolled:?}"
+    );
     rig.assert_shows(&numbered(1..13));
-    assert!(rig.screen.scrollback.is_empty(), "a region below the first row keeps nothing");
+    assert!(rig.screen.scrollback.is_empty(), "a deleted line is kept by no terminal");
     assert_eq!(rig.screen.cursor(), (1, 23));
 }
 
@@ -353,7 +357,10 @@ fn a_shift_that_saves_less_than_it_costs_is_not_taken() {
     let mut rig = Rig::new(5);
     rig.frame(&plain_rows(&["a", "b", "c", "d", "e"]), Some((1, 23)));
     let step = rig.frame(&plain_rows(&["b", "c", "d", "e", "f"]), Some((1, 23)));
-    assert!(!step.contains('\n'), "five one-letter rows are cheaper written than scrolled: {step:?}");
+    assert!(
+        !step.contains('\n') && !super::deletes_lines(&step),
+        "five one-letter rows are cheaper written than scrolled: {step:?}"
+    );
     rig.assert_shows(&plain_rows(&["b", "c", "d", "e", "f"]));
 }
 
@@ -362,7 +369,10 @@ fn a_page_turn_has_no_row_to_keep_and_scrolls_nothing() {
     let mut rig = Rig::new(12);
     rig.frame(&numbered(0..12), Some((1, 23)));
     let turned = rig.frame(&numbered(30..42), Some((1, 23)));
-    assert!(!turned.contains('\n') && !turned.contains("\u{1b}M"), "{turned:?}");
+    assert!(
+        !turned.contains('\n') && !turned.contains("\u{1b}M") && !super::deletes_lines(&turned),
+        "{turned:?}"
+    );
     rig.assert_shows(&numbered(30..42));
 }
 
