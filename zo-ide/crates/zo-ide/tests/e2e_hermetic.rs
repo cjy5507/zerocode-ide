@@ -7524,6 +7524,63 @@ async fn e2e_marks_work_in_progress_stands_under_the_words_and_the_composer_on_t
     let _ = run.finish();
 }
 
+/// A turn that only answers ends as a turn at work does, in the marks look:
+/// on its one row, `✓ Done in`, one blank row under the answer. Before, such
+/// a turn ended on a row of conversation actions set flush under the answer's
+/// last line, and a turn with one tool call on `✓ Done in`. The answer's
+/// emphasis closes against a Korean particle, so the row keeps no asterisk
+/// ("출력이 이상해", 2026-11-11).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_marks_a_turn_that_only_answers_ends_on_its_done_row_and_korean_emphasis_closes() {
+    const ROWS: usize = 40;
+    const COMPOSER: &str = "Ask zo to do anything";
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("TOML is **\"readable\"**이며 comments are allowed.")
+        .await
+        .expect("start text script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[(zo_ide::tui::style::STYLE_ENV, "marks")],
+    )
+    .expect("spawn zo in PTY");
+    let screen_of = |bytes: &[u8]| {
+        let mut screen = Screen::new(ROWS);
+        screen.feed(bytes);
+        screen.visible()
+    };
+    let row_of = |visible: &[String], words: &str| visible.iter().position(|row| row.contains(words));
+
+    run.wait_for_screen(COMPOSER, ROWS, TEST_TIMEOUT);
+    run.send(b"What is TOML good at\r").expect("send the prompt");
+    run.wait_until(0, TEST_TIMEOUT, |bytes| {
+        let visible = screen_of(bytes);
+        row_of(&visible, "Done in").is_some() && row_of(&visible, "esc to interrupt").is_none()
+    });
+    let visible = screen_of(&run.snapshot_output());
+    let answer = row_of(&visible, "readable").expect("the answer");
+    let done = row_of(&visible, "Done in").expect("the turn's end row");
+    assert!(
+        visible[answer].contains("TOML is \"readable\"") && !visible[answer].contains('*'),
+        "the emphasis closed and left no asterisk: {:?}",
+        visible[answer]
+    );
+    assert!(
+        done == answer + 2 && visible[answer + 1].trim().is_empty(),
+        "the end row stands one blank row under the answer: {visible:#?}"
+    );
+    assert!(
+        visible[done].contains("/find") && row_of(&visible, "/find search").is_none(),
+        "the conversation actions ride in the end row, with no row of their own: {visible:#?}"
+    );
+    let _ = run.finish();
+}
+
 /// The same pane closed while zo idles. An idle zo's loop wakes for nothing
 /// but its tend, `IDLE_TEND` (thirty seconds) after the last, so the terminal
 /// stream has to look on its own: zo ends inside the same bound as mid-turn.

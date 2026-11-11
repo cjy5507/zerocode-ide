@@ -7517,13 +7517,18 @@ impl App {
         // `turnHintsInDivider`: a work turn's divider names the actions, and
         // the row of its own goes. A turn with no divider keeps the row.
         let look = super::style::current();
-        let actions_ride = answered
-            && ui.had_work_activity
-            && (look.hints_in_divider || look.style == super::style::TuiStyle::Marks);
+        let marks = look.style == super::style::TuiStyle::Marks;
+        // The marks look ends every answered turn on its one row, a turn
+        // that only answered included: left to the row of actions, such a
+        // turn ended on `/find search · /diff changes · /rewind restore`
+        // set flush under its last line — under a code block it read as
+        // more code — while a turn with one tool call ended on `✓ Done in`.
+        let ends_on_a_row = ui.had_work_activity || (answered && marks);
+        let actions_ride = answered && ends_on_a_row && (look.hints_in_divider || marks);
         if answered && !actions_ride {
             ui.history(&shortcuts::conversation_actions(ui.width()));
         }
-        if ui.had_work_activity {
+        if ends_on_a_row {
             let elapsed_seconds = started.elapsed().as_secs();
             let separator = ui.turn_summary(elapsed_seconds, &riding_actions(actions_ride));
             ui.refresh_status_line();
