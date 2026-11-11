@@ -1541,8 +1541,10 @@ pub(in crate::session) mod tests {
         let stale = ProviderClient::GeminiCodeAssist(api::GeminiCodeAssistClient::new(
             "live-stale-google-token",
         ));
-        let before = format!("{stale:?}");
-        assert!(before.contains("live-stale-google-token"));
+        assert!(matches!(
+            &stale,
+            ProviderClient::GeminiCodeAssist(client) if client.speaks_with_bearer("live-stale-google-token")
+        ));
 
         let recovered = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1551,14 +1553,19 @@ pub(in crate::session) mod tests {
             .block_on(recover_oauth_client_after_401(&stale, AuthRoute::Auto))
             .expect("non-anthropic recovery should rebuild a client");
 
-        let after = format!("{recovered:?}");
         assert!(
-            after.contains("stored-rebuilt-google-token"),
-            "non-Anthropic 401 must rebuild from the provider loader, not no-op the stale bearer: {after}"
+            matches!(
+                &recovered,
+                ProviderClient::GeminiCodeAssist(client) if client.speaks_with_bearer("stored-rebuilt-google-token")
+            ),
+            "non-Anthropic 401 must rebuild from the provider loader, not no-op the stale bearer: {recovered:?}"
         );
         assert!(
-            !after.contains("live-stale-google-token"),
-            "the stale bearer must be dropped by the rebuild: {after}"
+            !matches!(
+                &recovered,
+                ProviderClient::GeminiCodeAssist(client) if client.speaks_with_bearer("live-stale-google-token")
+            ),
+            "the stale bearer must be dropped by the rebuild: {recovered:?}"
         );
         std::fs::remove_dir_all(config_home).ok();
     }
