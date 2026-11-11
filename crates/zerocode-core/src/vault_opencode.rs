@@ -105,9 +105,15 @@ pub const PREVIEW_PARTS: usize = PREVIEW_LINES;
 /// that type whose `text` is missing or blank is a part with nothing to show.
 #[must_use]
 pub fn part_text(data: &str) -> Option<String> {
+    part_words(data).map(|words| clamp(&words))
+}
+
+/// [`part_text`] whole, before a card's line is cut from it: a worker's
+/// prompt says what its task is far past where a line ends.
+fn part_words(data: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
     let text = value.get("text")?.as_str()?;
-    (!text.trim().is_empty()).then(|| clamp(text))
+    (!text.trim().is_empty()).then(|| text.to_string())
 }
 
 /// The card the panel draws for one database row.
@@ -149,18 +155,16 @@ pub fn card(db_path: &str, row: &SessionRow, lines: &[Line]) -> VaultSession {
 
 /// The conversation lines a card shows, oldest first — see the module note on
 /// why this end of the conversation.
+///
+/// Shown the way a walked store's turns are (`Parsed::shows`): a line the
+/// user side wrote is what was asked, without the frames a CLI put around it.
 #[must_use]
 pub fn preview(lines: &[Line]) -> Vec<PreviewMessage> {
-    lines
-        .iter()
-        .filter_map(|line| {
-            Some(PreviewMessage {
-                role: line.role.clone(),
-                text: part_text(&line.data)?,
-            })
-        })
-        .take(PREVIEW_LINES)
-        .collect()
+    let mut shown = Parsed::default();
+    for line in lines {
+        shown.shows(&line.role, || part_words(&line.data));
+    }
+    shown.preview
 }
 
 /// An epoch stamp as the panel's ISO string, and `None` for the zero that

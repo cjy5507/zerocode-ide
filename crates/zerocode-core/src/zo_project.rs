@@ -5,7 +5,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A short, stable, filesystem-safe key derived from the workspace path so
 /// concurrent runs in different repos never share scratch state.
@@ -39,5 +39,61 @@ pub fn project_slug(cwd: &Path) -> String {
         hash
     } else {
         format!("{stem}-{hash}")
+    }
+}
+
+/// How the workspace record beside a zo transcript is named: zo writes
+/// `<session>.cwd` next to `<session>.jsonl` when it creates the session
+/// (`runtime::session_control::SESSION_CWD_EXTENSION` in zo-ide, held to it
+/// by the window's `jev_scope` test; spelled once more here because this
+/// crate cannot depend on zo).
+pub const SESSION_CWD_EXTENSION: &str = "cwd";
+
+/// The workspace one `.cwd` sidecar names (`{"cwd": …}`), when it names one.
+///
+/// The one reader of that file: the transcript itself says no folder, so the
+/// session vault's card, the seat dashboard and a reopened pane all learn
+/// where a zo conversation ran from here.
+#[must_use]
+pub fn recorded_workspace(sidecar: &Path) -> Option<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Recorded {
+        cwd: String,
+    }
+    let recorded: Recorded = serde_json::from_str(&std::fs::read_to_string(sidecar).ok()?).ok()?;
+    let cwd = recorded.cwd.trim();
+    (!cwd.is_empty()).then(|| PathBuf::from(cwd))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sidecar_names_the_workspace_it_recorded() {
+        let dir = tempfile::tempdir().expect("temp");
+        let sidecar = dir.path().join("session-1.cwd");
+        std::fs::write(&sidecar, r#"{"cwd":"/Users/dev/acme"}"#).expect("write");
+        assert_eq!(
+            recorded_workspace(&sidecar),
+            Some(PathBuf::from("/Users/dev/acme"))
+        );
+    }
+
+    #[test]
+    fn a_sidecar_that_names_nothing_is_no_workspace() {
+        let dir = tempfile::tempdir().expect("temp");
+        let blank = dir.path().join("blank.cwd");
+        std::fs::write(&blank, r#"{"cwd":"  "}"#).expect("write");
+        let torn = dir.path().join("torn.cwd");
+        std::fs::write(&torn, "{").expect("write");
+        assert_eq!(
+            [
+                recorded_workspace(&blank),
+                recorded_workspace(&torn),
+                recorded_workspace(&dir.path().join("absent.cwd")),
+            ],
+            [None, None, None]
+        );
     }
 }

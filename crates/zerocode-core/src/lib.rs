@@ -161,6 +161,7 @@ pub mod usage_stats_opencode;
 pub mod user_preferences;
 pub mod usual;
 pub mod vault;
+pub mod vault_index;
 pub mod vault_opencode;
 pub mod worker_placement;
 pub mod worker_transcript;

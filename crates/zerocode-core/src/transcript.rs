@@ -377,7 +377,7 @@ fn codex_turn_edge(line: &str) -> Option<TurnEdge> {
 ///
 /// A closed list rather than "anything in angle brackets": somebody pasting
 /// `<div>` into a prompt meant to paste `<div>`.
-const MACHINE_ENVELOPES: [&str; 9] = [
+const MACHINE_ENVELOPES: [&str; 13] = [
     "task-notification",
     "system-reminder",
     "local-command-caveat",
@@ -390,6 +390,15 @@ const MACHINE_ENVELOPES: [&str; 9] = [
     // names an agent after it would be reading the same machinery aloud.
     "local-command-stdout",
     "user-prompt-submit-hook",
+    // What Codex writes into a rollout under the user's role, in its own
+    // voice (measured on 2026-11-11, the user-role records of 60 rollouts on
+    // one machine: the folder and date of the turn in 56 of them, the plugins
+    // it suggests in 20, a turn it cut short and a page it opened in one
+    // each). A session card previewed them as what the person said.
+    "environment_context",
+    "recommended_plugins",
+    "turn_aborted",
+    "external_codex_apps_open_page",
 ];
 
 /// The envelope that carries a slash command's arguments: the one a person
@@ -566,6 +575,92 @@ fn past_a_slash_command(words: &str) -> &str {
         return words;
     }
     &named[name_ends..]
+}
+
+/// `text` without the machine envelopes that stand closed inside it, wherever
+/// they stand. An envelope that never closes stays: past the head of a turn
+/// ([`past_the_envelopes`]) a tag with no end is somebody's own word.
+fn without_envelopes_inside(text: &str) -> std::borrow::Cow<'_, str> {
+    let mut kept: Option<String> = None;
+    let mut rest = text;
+    loop {
+        // The first envelope in what is left that opens and closes.
+        let found = MACHINE_ENVELOPES
+            .iter()
+            .filter_map(|tag| {
+                let at = rest.find(&format!("<{tag}>"))?;
+                let close = format!("</{tag}>");
+                let end = at + rest[at..].find(&close)? + close.len();
+                Some((at, end))
+            })
+            .min();
+        let Some((at, end)) = found else {
+            break;
+        };
+        kept.get_or_insert_with(|| String::with_capacity(text.len()))
+            .push_str(&rest[..at]);
+        rest = &rest[end..];
+    }
+    match kept {
+        None => std::borrow::Cow::Borrowed(text),
+        Some(mut kept) => {
+            kept.push_str(rest);
+            std::borrow::Cow::Owned(kept)
+        }
+    }
+}
+
+/// What a card SHOWS of one thing the user side of a conversation said: the
+/// words, without the frames around what was pasted
+/// ([`without_pasted_frames`]) and without the machine envelopes — the ones
+/// that lead it, as a prompt is read ([`prompt_words`]), and the ones a CLI
+/// tucked in after the words. `None` when the whole turn was machinery.
+///
+/// The one reading of a stored turn for a list: a session card's title and
+/// its preview lines both ask here ([`crate::vault`]), so the window draws
+/// what it is handed and strips nothing itself.
+#[must_use]
+pub fn shown_words(said: &str) -> Option<String> {
+    let unframed = without_pasted_frames(said);
+    let words = without_envelopes_inside(past_the_envelopes(&unframed));
+    let words = words.trim();
+    (!words.is_empty()).then(|| words.to_string())
+}
+
+/// The words a card may be NAMED by, out of one thing the user side said:
+/// what it shows ([`shown_words`]), with any wrapper tag a CLI still dressed
+/// it in peeled off the front and its closing half off the tail —
+/// `<teammate-message from=…>` and whatever the next CLI invents. `None`
+/// when nothing readable is left, so the caller tries the next turn.
+///
+/// Only a name is peeled this far. A preview keeps a tag no table knows: it
+/// may be the person's own, and a name is the one line that must not read as
+/// plumbing ("세션 내용도 orca처럼 나와야하는데 태그가 붙어서 보임", 1-g101).
+#[must_use]
+pub fn naming_words(said: &str) -> Option<String> {
+    let shown = shown_words(said)?;
+    let mut rest = shown.trim_start();
+    while rest.starts_with('<') {
+        let Some(end) = rest.find('>') else { break };
+        rest = rest[end + 1..].trim_start();
+    }
+    // And the closing halves off the tail, so a message that is one whole
+    // envelope names itself by its inside alone. Only `</…>` groups at the
+    // very end — a `<` standing MID-sentence is often the person's own
+    // ("a < b", `Vec<String>`), and mangling real words to hide a tag would
+    // be the worse trade.
+    let mut tail = rest.trim_end();
+    while tail.ends_with('>') {
+        let Some(open) = tail.rfind("</") else { break };
+        if tail[open..].find('>') != Some(tail[open..].len() - 1) {
+            break;
+        }
+        tail = tail[..open].trim_end();
+    }
+    // Still `<`-headed after the peel — an unclosed wrapper — is not a name;
+    // the caller moves to the next user line, the retained scanner's own
+    // stance on `<`-headed content.
+    (!tail.is_empty() && !tail.starts_with('<')).then(|| tail.to_string())
 }
 
 /// The words that only tell an agent to go on — in the five languages the
@@ -804,10 +899,17 @@ fn typed_prompt(line: &str) -> Option<String> {
     let content = message
         .and_then(|held| held.get("content"))
         .or_else(|| record.get("content"))?;
+    typed_words(content)
+}
+
+/// The words in a user turn's `content`: the string, or its `text` parts.
+/// Typed words are `text` parts; a tool's result rides the same role, and is
+/// nothing a person said.
+#[must_use]
+pub fn typed_words(content: &serde_json::Value) -> Option<String> {
     if let Some(text) = content.as_str() {
         return Some(text.to_string());
     }
-    // Typed words are `text` parts; a tool's result rides the same role.
     let words: Vec<&str> = content
         .as_array()?
         .iter()
@@ -4574,5 +4676,110 @@ mod tests {
         writeln!(writing, "{COMPLETE}\n{SETTINGS}").expect("close");
         drop(writing);
         assert_eq!(codex_turn_open(&file), Some(false));
+    }
+
+    /* ---- what a card shows and is named by (t-103659) ---- */
+
+    /// What a card shows of a stored user turn is the words: no frame around
+    /// what was pasted, no machine envelope before the words or after them.
+    #[test]
+    fn a_card_shows_the_words_without_the_frames_a_cli_wrote() {
+        for (said, shown) in [
+            (
+                "<pasted_content id=\"8a76\">\nfix the sidebar\n</pasted_content id=\"8a76\">",
+                "fix the sidebar",
+            ),
+            (
+                "<command-name>/review</command-name>\n<command-args>the diff</command-args>\nand say why",
+                "and say why",
+            ),
+            // A reminder the CLI tucked in after the words, and one between.
+            (
+                "fix it\n<system-reminder>\nremember the rules\n</system-reminder>",
+                "fix it",
+            ),
+            (
+                "before<task-notification>done</task-notification>after",
+                "beforeafter",
+            ),
+            // An envelope's name a person wrote, never closed: their word.
+            (
+                "why does <system-reminder> show up in my prompt",
+                "why does <system-reminder> show up in my prompt",
+            ),
+            // A tag no table knows stays in what is shown.
+            ("<div>keep me</div>", "<div>keep me</div>"),
+        ] {
+            assert_eq!(shown_words(said).as_deref(), Some(shown), "{said:?}");
+        }
+    }
+
+    /// A turn that was all machinery shows nothing: a slash command's
+    /// records, a background task's notice, and what Codex writes about the
+    /// turn's folder under the user's role.
+    #[test]
+    fn a_turn_that_was_all_machinery_shows_nothing() {
+        for said in [
+            "<local-command-caveat>Caveat: generated by the user</local-command-caveat>",
+            "<command-name>/clear</command-name>\n<command-message>clear</command-message>",
+            "<task-notification>\n<task-id>7</task-id>\n</task-notification>",
+            "<environment_context>\n  <cwd>/Users/dev/acme</cwd>\n</environment_context>",
+            "<recommended_plugins>\nnone\n</recommended_plugins>",
+            "<system-reminder>never closed",
+            "   ",
+        ] {
+            assert_eq!(shown_words(said), None, "{said:?}");
+        }
+    }
+
+    /// A card's NAME is what the person said, never the wrapper a CLI put in
+    /// front of it — and a message that is nothing but wrapper yields the
+    /// words inside, or no name at all.
+    #[test]
+    fn a_name_sheds_the_tags_a_cli_dressed_the_words_in() {
+        for (said, named) in [
+            ("fix the tests", "fix the tests"),
+            // A `<` inside the person's own sentence is the person's — untouched.
+            (
+                "compare a < b in Vec<String>",
+                "compare a < b in Vec<String>",
+            ),
+            (
+                "<teammate-message from=\"lead\"><attachment>1 # Orca 소스 지도",
+                "1 # Orca 소스 지도",
+            ),
+            ("<div>keep me</div>", "keep me"),
+        ] {
+            assert_eq!(naming_words(said).as_deref(), Some(named), "{said:?}");
+        }
+        for nothing in [
+            "  <a><b>  ",
+            "<unclosed",
+            "",
+            "<local-command-caveat>Caveat: generated by the user</local-command-caveat>",
+        ] {
+            assert_eq!(naming_words(nothing), None, "{nothing:?}");
+        }
+    }
+
+    /// Typed words are a string or `text` parts. A tool's result rides the
+    /// user's role and is nothing a person typed.
+    #[test]
+    fn a_tools_result_is_nothing_a_person_typed() {
+        let typed = serde_json::json!([
+            {"type": "text", "text": "look at"},
+            {"type": "text", "text": "this"},
+        ]);
+        let result = serde_json::json!([
+            {"type": "tool_result", "tool_use_id": "t1", "content": "total 8"},
+        ]);
+        assert_eq!(
+            [
+                typed_words(&serde_json::json!("hello")),
+                typed_words(&typed),
+                typed_words(&result),
+            ],
+            [Some("hello".into()), Some("look at this".into()), None]
+        );
     }
 }

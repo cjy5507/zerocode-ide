@@ -31822,14 +31822,28 @@ mod tests {
         );
 
         // The walk is bounded three ways and does not follow links, because these
-        // directories are not ours and a link in one is not hypothetical.
+        // directories are not ours and a link in one is not hypothetical. It
+        // reads the listing's own entry type — a link is neither a folder to
+        // open nor a plain file to keep — and asks the disk nothing more about
+        // an entry (it used to stat every one: 169,127 on one machine to keep
+        // 2,946, t-103659). The one question about a kept file does not follow
+        // a link either.
         let walking = block_after(rules, "fn walk(");
         assert!(
             walking.contains("depth > MAX_DEPTH")
                 && walking.contains("found.len() >= MAX_CANDIDATE_FILES")
-                && walking.contains("symlink_metadata")
-                && walking.contains("is_symlink()"),
-            "the session walk lost a bound or started following links:\n{walking}"
+                && walking.contains("entry.file_type()")
+                && walking.contains("kind.is_dir()")
+                && walking.contains("!kind.is_file()")
+                && !walking.contains("metadata("),
+            "the session walk lost a bound, started following links, or asks \
+             the disk about every entry again:\n{walking}"
+        );
+        let asking = block_after(rules, "fn at(agent: &'static AgentSource");
+        assert!(
+            asking.contains("std::fs::symlink_metadata(&path)")
+                && !asking.contains("fs::metadata("),
+            "a kept file is asked about through a link:\n{asking}"
         );
         assert!(
             block_after(rules, "fn read_head(").contains("MAX_HEAD_BYTES"),
@@ -32687,11 +32701,21 @@ mod tests {
         let window = window_source();
 
         // ONE extraction, and the vault reads through it — two readers of the
-        // same vendor files is how previews and cards drift apart.
+        // same vendor files is how previews and cards drift apart. The same
+        // for what a card shows of a turn and is named by (t-103659): the
+        // frames and envelopes a CLI writes are known to the transcript
+        // reader alone, and the vault peels nothing itself.
         assert!(
-            vault.contains("use crate::transcript::{clamp, message_text}")
-                && !vault.contains("fn message_text("),
-            "the vault grew its own copy of the message extraction"
+            vault.contains(
+                "use crate::transcript::{clamp, message_text, naming_words, shown_words, typed_words};"
+            ) && !vault.contains("fn message_text(")
+                && !vault.contains("fn untagged_title(")
+                && !vault
+                    .split_once("#[cfg(test)]")
+                    .map_or(vault, |(rules, _)| rules)
+                    .contains("pasted_content"),
+            "the vault grew its own copy of the message extraction, or its own \
+             reading of the frames a CLI writes"
         );
 
         // The reader is bounded and read-only: these are the vendors' files.

@@ -4,8 +4,14 @@ use std::fs::Metadata;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+use serde::{Deserialize, Serialize};
+
 /// A file's size, times and identity: what a look compares, never reads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+///
+/// It can be written down beside what was read of the file (the session
+/// vault's index keeps one per transcript, [`crate::vault_index`]), so the
+/// next look — in another run of the window — reads only what moved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileStamp {
     pub len: u64,
     pub modified_ms: i64,

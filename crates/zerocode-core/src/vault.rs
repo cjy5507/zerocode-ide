@@ -105,11 +105,13 @@ pub const MAX_CANDIDATE_FILES: usize = 4000;
 /// between a panel that opens and one that stalls the window.
 pub const MAX_HEAD_BYTES: usize = 256 * 1024;
 
+use crate::file_stamp::FileStamp;
 /// How long a title or preview line is kept. Lives with the shared extraction
 /// (`crate::transcript`) so the vault's previews and the board's card lines
 /// cut at the same place.
 pub use crate::transcript::SUMMARY_CHARS;
-use crate::transcript::{clamp, message_text};
+use crate::transcript::{clamp, message_text, naming_words, shown_words, typed_words};
+use crate::vault_index::{Index, Outcome};
 
 /// One environment variable that can name where an agent keeps its sessions,
 /// and the tail under it.
@@ -152,6 +154,11 @@ pub struct AgentSource {
     pub file_prefix: Option<&'static str>,
     /// A path segment the file must be under (`agent-transcripts`).
     pub path_segment: Option<&'static str>,
+    /// How many folders under the root [`Self::path_segment`] stands, when
+    /// the store's layout fixes it: the walk then opens no other folder at
+    /// that level. `None` walks every folder, which is right for a layout
+    /// nobody measured.
+    pub segment_level: Option<usize>,
     /// Transcripts under this directory belong beneath their owning session.
     pub child_dir: Option<&'static str>,
     /// How the file is read.
@@ -243,6 +250,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         // The containing session directory identifies the parent.
         child_dir: Some("subagents"),
         format: Format::ClaudeLines,
@@ -259,6 +267,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::CodexRollout,
     },
@@ -271,6 +280,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: Some("agent-transcripts"),
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -286,6 +296,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -301,6 +312,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -316,6 +328,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -348,6 +361,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -363,6 +377,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: Some("summary.json"),
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -375,6 +390,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: Some("session_"),
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -387,6 +403,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: Some("metadata.json"),
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -402,6 +419,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -414,6 +432,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -429,6 +448,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::Unread,
     },
@@ -448,6 +468,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: Some("transcript.jsonl"),
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::AntigravityTranscript,
     },
@@ -460,6 +481,7 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: Some("transcript.jsonl"),
         file_prefix: None,
         path_segment: None,
+        segment_level: None,
         child_dir: None,
         format: Format::AntigravityTranscript,
     },
@@ -488,6 +510,11 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
         file_name: None,
         file_prefix: Some("session-"),
         path_segment: Some("sessions"),
+        // `projects/<slug>/sessions/` — measured whole on 2026-11-11: 1,000
+        // session files in 215 `sessions` folders, every one at this level,
+        // beside 153,588 entries of state, memory and artifacts the walk
+        // used to open on the way.
+        segment_level: Some(1),
         child_dir: None,
         format: Format::ZoLines,
     },
@@ -738,7 +765,7 @@ impl VaultSession {
                 || self
                     .preview
                     .iter()
-                    .any(|line| line.role == "user" || line.role == "assistant"))
+                    .any(|line| line.role == USER || line.role == ASSISTANT))
     }
 
     /// The time a sort uses: the requested field, falling back to the file's
@@ -1113,6 +1140,14 @@ pub struct VaultView {
     /// slice rather than everything. A truncated list that says it is complete
     /// is the failure this flag exists to prevent.
     pub truncated: bool,
+    /// Sessions the query matched and [`VaultQuery::hide_empty`] kept out of
+    /// the list: nobody spoke in them. Said as a number so the panel can say
+    /// it in one line and show them when asked.
+    pub hidden_empty: usize,
+    /// Whether a scan is looking at the disk while this answer is read: the
+    /// list is what was known, and the window asks again. Set by whoever
+    /// holds the walk; a view made from sessions alone is not refreshing.
+    pub refreshing: bool,
 }
 
 /// One agent in the filter list, with how many sessions it brought.
@@ -1168,18 +1203,33 @@ pub fn view(
     truncated: bool,
     worktrees: &[crate::usage_stats::WorktreeRef],
 ) -> VaultView {
+    view_of(&sessions, query, issues, truncated, worktrees)
+}
+
+/// [`view`] over sessions somebody else keeps.
+///
+/// A keystroke asks this of the whole kept walk — a thousand sessions with
+/// their helpers and previews — and shows two hundred of them at most. Only
+/// the cards that are shown are copied; the walk stays where it is held.
+pub fn view_of(
+    sessions: &[VaultSession],
+    query: &VaultQuery,
+    issues: Vec<ScanIssue>,
+    truncated: bool,
+    worktrees: &[crate::usage_stats::WorktreeRef],
+) -> VaultView {
     let total = sessions.len();
-    let agents = agent_rows(&sessions);
+    let agents = agent_rows(sessions);
     let parsed = parse_query(&query.query);
-    let mut kept: Vec<VaultSession> = sessions
-        .into_iter()
+    let mut hidden_empty = 0usize;
+    let mut kept: Vec<&VaultSession> = sessions
+        .iter()
         .filter(|session| {
             !query
                 .disabled_agents
                 .iter()
                 .any(|off| off == &session.agent)
         })
-        .filter(|session| !query.hide_empty || session.resumable())
         .filter(|session| {
             if query.scope_paths.is_empty() {
                 return true;
@@ -1193,6 +1243,12 @@ pub fn view(
                 .any(|scope| inside_or_equal(scope, cwd))
         })
         .filter(|session| matches(session, &parsed))
+        // Last, so the number hidden is of what the query otherwise shows.
+        .filter(|session| {
+            let hidden = query.hide_empty && !session.resumable();
+            hidden_empty += usize::from(hidden);
+            !hidden
+        })
         .collect();
 
     // Newest first, and the id breaks a tie so the order does not wobble between
@@ -1213,7 +1269,7 @@ pub fn view(
     let mut order: Vec<String> = Vec::new();
     let mut groups: BTreeMap<String, VaultGroup> = BTreeMap::new();
     for session in kept {
-        let (key, label) = group_identity(&session, query.group, worktrees);
+        let (key, label) = group_identity(session, query.group, worktrees);
         if !groups.contains_key(&key) {
             order.push(key.clone());
             groups.insert(
@@ -1229,7 +1285,7 @@ pub fn view(
             .get_mut(&key)
             .expect("the group was just inserted")
             .sessions
-            .push(session);
+            .push(session.clone());
     }
 
     let mut ordered: Vec<VaultGroup> = order
@@ -1247,6 +1303,8 @@ pub fn view(
         matched,
         limits: Limits::DEFAULT,
         truncated,
+        hidden_empty,
+        refreshing: false,
     }
 }
 
@@ -1450,14 +1508,83 @@ enum Keep {
     Listed,
 }
 
-/// A candidate file: where it is, whose it is, and when it changed.
+/// A candidate file: where it is, whose it is, and how it lies now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Candidate {
     agent: &'static AgentSource,
     path: PathBuf,
     modified: std::time::SystemTime,
+    /// What the index is asked by: a file whose stamp has not moved is not
+    /// opened ([`crate::vault_index`]).
+    stamp: FileStamp,
     /// Set for a Codex file found under a non-default home.
     codex_home: Option<String>,
+}
+
+impl Candidate {
+    /// The file at `path` as it lies now, or nothing when it cannot be asked
+    /// about. One question of the disk per file the walk kept.
+    fn at(agent: &'static AgentSource, path: PathBuf, home: &Path) -> Option<Self> {
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        let codex_home = (agent.format == Format::CodexRollout)
+            .then(|| codex_home_of(&path, home))
+            .flatten();
+        Some(Self {
+            agent,
+            modified: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+            stamp: crate::file_stamp::stamp_of(&meta),
+            codex_home,
+            path,
+        })
+    }
+}
+
+/// One home the scan looks under, and the agents whose stores there it reads.
+///
+/// The window reads two: the person's home for every agent but one, and its
+/// own data folder for the agent it runs under an isolated runtime. A store
+/// the scan is not asked about is not walked — it used to be walked, read and
+/// parsed, and its cards then thrown away.
+#[derive(Clone, Copy)]
+pub struct Home<'a> {
+    pub dir: &'a Path,
+    /// Whether this home's store of an agent is one to read.
+    pub reads: fn(&AgentSource) -> bool,
+}
+
+impl<'a> Home<'a> {
+    /// A home whose every store is read.
+    #[must_use]
+    pub fn whole(dir: &'a Path) -> Self {
+        Self {
+            dir,
+            reads: |_| true,
+        }
+    }
+}
+
+/// What one scan did, in counts — what a test holds the scan to, where a
+/// time would only say how busy the machine was.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ScanCount {
+    /// Folders opened by the walk.
+    pub dirs: usize,
+    /// Session files the walk kept, before the candidate cap.
+    pub files: usize,
+    /// Files opened and parsed.
+    pub read: usize,
+    /// Files not opened: their card came from the index.
+    pub kept: usize,
+}
+
+/// What a scan found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scan {
+    pub sessions: Vec<VaultSession>,
+    pub issues: Vec<ScanIssue>,
+    /// True when a bound cut the list: see [`VaultView::truncated`].
+    pub truncated: bool,
+    pub count: ScanCount,
 }
 
 /// Walk every agent's store and read what can be read.
@@ -1480,58 +1607,69 @@ pub fn scan_with(
     limit: usize,
     override_home: &dyn Fn(&AgentSource) -> Option<PathBuf>,
 ) -> (Vec<VaultSession>, Vec<ScanIssue>, bool) {
+    let found = scan_homes(
+        &[Home::whole(home)],
+        limit,
+        override_home,
+        &mut Index::default(),
+    );
+    (found.sessions, found.issues, found.truncated)
+}
+
+/// The scan over several homes at once, through what the last scan kept.
+///
+/// `index` is what each file gave when it was last read
+/// ([`crate::vault_index`]). A file whose stamp has not moved is not opened;
+/// one that moved, or was never seen, is read and kept; one the walk no
+/// longer finds is forgotten. An empty index reads everything, which is the
+/// first scan — and [`scan_with`].
+pub fn scan_homes(
+    homes: &[Home<'_>],
+    limit: usize,
+    override_home: &dyn Fn(&AgentSource) -> Option<PathBuf>,
+    index: &mut Index,
+) -> Scan {
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut issues: Vec<ScanIssue> = Vec::new();
-    let mut truncated = false;
+    let mut walked = Walked::default();
 
-    for source in &AGENT_SOURCES {
-        let mut unread = 0usize;
-        let mut unread_at: Option<PathBuf> = None;
-        for root in roots(source, home, override_home(source).as_deref()) {
-            if !root.is_dir() {
-                continue;
+    for home in homes {
+        for source in AGENT_SOURCES.iter().filter(|source| (home.reads)(source)) {
+            let mut unread = 0usize;
+            let mut unread_at: Option<PathBuf> = None;
+            for root in roots(source, home.dir, override_home(source).as_deref()) {
+                if !root.is_dir() {
+                    continue;
+                }
+                let mut found: Vec<PathBuf> = Vec::new();
+                walk(&root, source, Keep::Listed, 0, &mut found, &mut walked);
+                for path in found {
+                    // One conversation found both ways — compressed, and plain
+                    // beside it because a resume wrote it back — is one card: the
+                    // plain file is the one its CLI writes to now.
+                    if crate::record_file::is_compressed(&path) && path.with_extension("").is_file()
+                    {
+                        continue;
+                    }
+                    // An agent we can find but not read is counted, not faked.
+                    if source.format == Format::Unread {
+                        unread += 1;
+                        unread_at = unread_at.or_else(|| Some(root.clone()));
+                        continue;
+                    }
+                    candidates.extend(Candidate::at(source, path, home.dir));
+                }
             }
-            let mut found: Vec<PathBuf> = Vec::new();
-            walk(&root, source, Keep::Listed, 0, &mut found, &mut truncated);
-            for path in found {
-                // One conversation found both ways — compressed, and plain
-                // beside it because a resume wrote it back — is one card: the
-                // plain file is the one its CLI writes to now.
-                if crate::record_file::is_compressed(&path) && path.with_extension("").is_file() {
-                    continue;
-                }
-                // An agent we can find but not read is counted, not faked.
-                if source.format == Format::Unread {
-                    unread += 1;
-                    unread_at = unread_at.or_else(|| Some(root.clone()));
-                    continue;
-                }
-                let Ok(meta) = std::fs::metadata(&path) else {
-                    continue;
-                };
-                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                let codex_home = if source.slug == "codex" {
-                    codex_home_of(&path, home)
-                } else {
-                    None
-                };
-                candidates.push(Candidate {
-                    agent: source,
-                    path,
-                    modified,
-                    codex_home,
+            if unread > 0 {
+                issues.push(ScanIssue {
+                    agent: source.slug.to_string(),
+                    path: unread_at
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    reason: "unread-format".to_string(),
+                    count: unread,
                 });
             }
-        }
-        if unread > 0 {
-            issues.push(ScanIssue {
-                agent: source.slug.to_string(),
-                path: unread_at
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                reason: "unread-format".to_string(),
-                count: unread,
-            });
         }
     }
 
@@ -1545,8 +1683,7 @@ pub fn scan_with(
         .iter()
         .filter(|candidate| candidate.agent.format == Format::ZoLines)
         .filter_map(|candidate| {
-            let name = candidate.path.file_name()?.to_str()?;
-            let stem = name.strip_suffix(".vault.jsonl")?;
+            let stem = zo_vault_stem(&candidate.path)?;
             Some(candidate.path.with_file_name(format!("{stem}.jsonl")))
         })
         .collect();
@@ -1558,18 +1695,39 @@ pub fn scan_with(
     // multiplier is slack for the files that turn out to hold no session.
     candidates.sort_by(|left, right| right.modified.cmp(&left.modified));
     candidates.dedup_by(|left, right| left.path == right.path);
+    let mut count = ScanCount {
+        dirs: walked.dirs,
+        files: candidates.len(),
+        ..ScanCount::default()
+    };
     let candidate_limit = Limits::DEFAULT
         .absolute_max
         .saturating_mul(CANDIDATE_MULTIPLIER);
-    truncated |= candidates.len() > candidate_limit;
+    let mut truncated = walked.truncated || candidates.len() > candidate_limit;
     candidates.truncate(candidate_limit);
 
     let mut sessions: Vec<VaultSession> = Vec::new();
-    for candidate in candidates {
-        match read_session(&candidate) {
-            Ok(Some(session)) => sessions.push(session),
-            Ok(None) => {}
-            Err(why) => issues.push(ScanIssue {
+    for candidate in &candidates {
+        let outcome = match index.kept(&candidate.path, candidate.stamp) {
+            Some(kept) => {
+                count.kept += 1;
+                kept.clone()
+            }
+            None => {
+                count.read += 1;
+                let read = match read_session(candidate) {
+                    Ok(Some(session)) => Outcome::Card(Box::new(session)),
+                    Ok(None) => Outcome::NotASession,
+                    Err(why) => Outcome::Unreadable(why),
+                };
+                index.keep(&candidate.path, candidate.stamp, read.clone());
+                read
+            }
+        };
+        match outcome {
+            Outcome::Card(session) => sessions.push(*session),
+            Outcome::NotASession => {}
+            Outcome::Unreadable(why) => issues.push(ScanIssue {
                 agent: candidate.agent.slug.to_string(),
                 path: candidate.path.to_string_lossy().into_owned(),
                 reason: why,
@@ -1577,11 +1735,42 @@ pub fn scan_with(
             }),
         }
     }
+    index.settle(
+        &candidates
+            .iter()
+            .map(|candidate| candidate.path.as_path())
+            .collect(),
+    );
 
-    // The same conversation reached through two roots is one card.
+    truncated |= assemble(&mut sessions, &mut issues, limit);
+    Scan {
+        sessions,
+        issues: fold_issues(issues),
+        truncated,
+        count,
+    }
+}
+
+/// What the last scan kept, as the list it would be — from the index alone,
+/// with no file opened and no folder walked.
+///
+/// The panel's first answer after the window starts: the cards as they were
+/// last read, in the order and under the limit a scan gives them, while a
+/// scan looks at what moved since.
+#[must_use]
+pub fn sessions_of(index: &Index, limit: usize) -> (Vec<VaultSession>, bool) {
+    let mut sessions: Vec<VaultSession> = index.cards().cloned().collect();
+    let truncated = assemble(&mut sessions, &mut Vec::new(), limit);
+    (sessions, truncated)
+}
+
+/// The cards of a scan made into its list: one card for a conversation
+/// reached through two roots, helpers under the session that started them,
+/// newest first, cut to `limit`. Answers whether the cut dropped any.
+fn assemble(sessions: &mut Vec<VaultSession>, issues: &mut Vec<ScanIssue>, limit: usize) -> bool {
     sessions.sort_by(|left, right| left.id.cmp(&right.id));
     sessions.dedup_by(|left, right| left.id == right.id);
-    attach_children(&mut sessions, &mut issues);
+    attach_children(sessions, issues);
     sessions.sort_by(|left, right| {
         right
             .modified_at
@@ -1589,9 +1778,9 @@ pub fn scan_with(
             .then_with(|| left.id.cmp(&right.id))
     });
     let limit = limit.min(Limits::DEFAULT.absolute_max);
-    truncated |= sessions.len() > limit;
+    let dropped = sessions.len() > limit;
     sessions.truncate(limit);
-    (sessions, fold_issues(issues), truncated)
+    dropped
 }
 
 /// A child transcript named by the session-owned roster snapshot.
@@ -1636,6 +1825,7 @@ pub fn read_roster_children(
                     agent: source,
                     path: child.path.clone(),
                     modified: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    stamp: crate::file_stamp::stamp_of(&meta),
                     codex_home: None,
                 })
             });
@@ -1794,11 +1984,11 @@ fn codex_home_of(path: &Path, home: &Path) -> Option<String> {
 /// listing cannot be ruled out, so the caller names nothing from it.
 pub fn session_files(source: &AgentSource, roots: &[PathBuf]) -> Option<Vec<PathBuf>> {
     let mut found = Vec::new();
-    let mut truncated = false;
+    let mut walked = Walked::default();
     for root in roots {
-        walk(root, source, Keep::Written, 0, &mut found, &mut truncated);
+        walk(root, source, Keep::Written, 0, &mut found, &mut walked);
     }
-    (!truncated).then_some(found)
+    (!walked.truncated).then_some(found)
 }
 
 /// The session files that may carry `id`, listed the way the store places ids
@@ -1894,13 +2084,35 @@ pub fn session_meta_id(first_line: &str) -> Option<String> {
     crate::provider_session::is_usable_session_id(id).then(|| id.to_string())
 }
 
+/// What a walk counted on the way.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Walked {
+    /// Folders opened.
+    dirs: usize,
+    /// Whether [`MAX_CANDIDATE_FILES`] stopped it.
+    truncated: bool,
+}
+
+impl AgentSource {
+    /// Whether the walk opens the folder `name`, standing `level` folders
+    /// under the store's root: every folder, except at the level the store's
+    /// layout puts its required segment ([`Self::segment_level`]), where only
+    /// that one can lead to a session file.
+    fn opens(&self, level: usize, name: &std::ffi::OsStr) -> bool {
+        match (self.segment_level, self.path_segment) {
+            (Some(at), Some(segment)) if at == level => name == segment,
+            _ => true,
+        }
+    }
+}
+
 fn walk(
     dir: &Path,
     source: &AgentSource,
     keep: Keep,
     depth: usize,
     found: &mut Vec<PathBuf>,
-    truncated: &mut bool,
+    walked: &mut Walked,
 ) {
     if depth > MAX_DEPTH {
         return;
@@ -1908,24 +2120,32 @@ fn walk(
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    walked.dirs += 1;
     for entry in entries.flatten() {
         if found.len() >= MAX_CANDIDATE_FILES {
-            *truncated = true;
+            walked.truncated = true;
             return;
         }
-        let path = entry.path();
-        // `symlink_metadata`, so a link is seen as a link and skipped rather
-        // than followed into a loop or out of the store entirely.
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        // The entry's own type, which the listing carries: a link is seen as
+        // a link and skipped rather than followed into a loop or out of the
+        // store entirely — and nothing is asked of the disk about an entry
+        // the walk will not keep (it used to stat every one: 153,588 under
+        // one zo store to keep 1,000).
+        let Ok(kind) = entry.file_type() else {
             continue;
         };
-        if meta.file_type().is_symlink() {
+        if kind.is_dir() {
+            if source.opens(depth, &entry.file_name()) {
+                walk(&entry.path(), source, keep, depth + 1, found, walked);
+            }
             continue;
         }
-        if meta.is_dir() {
-            walk(&path, source, keep, depth + 1, found, truncated);
+        // A plain file only: a link is not followed, and a pipe or a socket
+        // wearing a session's name is not a session.
+        if !kind.is_file() {
             continue;
         }
+        let path = entry.path();
         let kept = match keep {
             Keep::Written => wanted(source, &path),
             Keep::Listed => listed(source, &path),
@@ -1934,6 +2154,27 @@ fn walk(
             found.push(path);
         }
     }
+}
+
+/// How zo names the distilled twin of a session's plain log:
+/// `<session>.vault.jsonl` beside `<session>.jsonl`.
+const ZO_VAULT_TAIL: &str = ".vault.jsonl";
+
+/// The session a zo vault twin is named for, when `path` is one.
+fn zo_vault_stem(path: &Path) -> Option<&str> {
+    path.file_name()?.to_str()?.strip_suffix(ZO_VAULT_TAIL)
+}
+
+/// Where a zo session's workspace record lies: `<session>.cwd` beside the
+/// plain log and beside its vault twin alike.
+fn zo_workspace_record(path: &Path) -> PathBuf {
+    let session = zo_vault_stem(path)
+        .or_else(|| crate::record_file::record_stem(path))
+        .unwrap_or_default();
+    path.with_file_name(format!(
+        "{session}.{}",
+        crate::zo_project::SESSION_CWD_EXTENSION
+    ))
 }
 
 /// The head of a file, as text, bounded — decompressed first when its CLI
@@ -1980,11 +2221,7 @@ fn read_session(candidate: &Candidate) -> Result<Option<VaultSession>, String> {
     // 'session-…-0.vault'` names a session that does not exist.
     if session.session_id.trim().is_empty()
         && candidate.agent.format == Format::ZoLines
-        && let Some(id) = candidate
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".vault.jsonl"))
+        && let Some(id) = zo_vault_stem(&candidate.path)
     {
         session.session_id = id.to_string();
     }
@@ -1993,6 +2230,15 @@ fn read_session(candidate: &Candidate) -> Result<Option<VaultSession>, String> {
     // after a file, on every visit, for every project.
     if session.not_a_session {
         return Ok(None);
+    }
+    // Neither of zo's shapes says where the conversation ran; zo writes that
+    // beside the transcript when it creates the session. Read here, the card
+    // is filed under its folder and resumes there — measured on 2026-11-11,
+    // every one of 1,000 zo session files on one machine had the record, and
+    // all of them stood under 「알 수 없는 위치」.
+    if session.cwd.is_none() && candidate.agent.format == Format::ZoLines {
+        session.cwd = crate::zo_project::recorded_workspace(&zo_workspace_record(&candidate.path))
+            .map(|cwd| cwd.to_string_lossy().into_owned());
     }
 
     if session.session_id.trim().is_empty() {
@@ -2056,14 +2302,18 @@ pub fn card(
     codex_home: Option<String>,
     parsed: Parsed,
 ) -> VaultSession {
+    // Named by what was asked: the title its store gave, or the first thing
+    // the user side said that reads as words. Never by the id — a session
+    // nobody spoke in has no name, and the window says so in its own words
+    // rather than drawing `session-1790000000000-0` as if it were one.
     let title = if parsed.title.trim().is_empty() {
         parsed
             .preview
             .iter()
-            .filter(|line| line.role == "user")
-            .find_map(|line| untagged_title(&line.text))
+            .filter(|line| line.role == USER)
+            .find_map(|line| naming_words(&line.text))
             .map(|words| clamp(&words))
-            .unwrap_or_else(|| parsed.session_id.clone())
+            .unwrap_or_default()
     } else {
         clamp(&parsed.title)
     };
@@ -2096,43 +2346,6 @@ pub fn card(
     built
 }
 
-/// The words a card may be NAMED by, out of one user message.
-///
-/// Wrapper tags a CLI prepended — `<local-command-caveat>…`,
-/// `<teammate-message from=…>`, `<command-name>…` — are peeled off the front,
-/// and what remains is the person's part; `None` when nothing readable is
-/// left, so the caller can try the next user line. The PREVIEW keeps the raw
-/// words: the tag there is honest context, and Orca's own list shows it
-/// (실측 #11 — its preview lines carry `<codex_internal_context …`). Orca
-/// also lets such a tag stand AS the title, and that is the one part not
-/// followed: it was named broken in exactly these words — "세션 내용도
-/// orca처럼 나와야하는데 태그가 붙어서 보임" — so the title alone is peeled
-/// (기록된 개선, 1-g101).
-fn untagged_title(words: &str) -> Option<String> {
-    let mut rest = words.trim_start();
-    while rest.starts_with('<') {
-        let Some(end) = rest.find('>') else { break };
-        rest = rest[end + 1..].trim_start();
-    }
-    // And the closing halves off the tail, so a message that is one whole
-    // envelope names itself by its inside alone. Only `</…>` groups at the
-    // very end — a `<` standing MID-sentence is often the person's own
-    // ("a < b", `Vec<String>`), and mangling real words to hide a tag would
-    // be the worse trade.
-    let mut tail = rest.trim_end();
-    while tail.ends_with('>') {
-        let Some(open) = tail.rfind("</") else { break };
-        if tail[open..].find('>') != Some(tail[open..].len() - 1) {
-            break;
-        }
-        tail = tail[..open].trim_end();
-    }
-    // Still `<`-headed after the peel — an unclosed wrapper — is not a name;
-    // the caller moves to the next user line, the retained scanner's own
-    // stance on `<`-headed content.
-    (!tail.is_empty() && !tail.starts_with('<')).then(|| tail.to_string())
-}
-
 /// What a parser gets out of one session, before the scan fills in the rest.
 ///
 /// Public because a second reader fills it: OpenCode's sessions are rows in a
@@ -2163,6 +2376,78 @@ pub struct Parsed {
 
 /// How many conversation lines a card keeps.
 pub const PREVIEW_LINES: usize = 3;
+
+/// The two roles a card shows (`CONVERSATION_ROLES`) — a tool result is not
+/// something a person said.
+const USER: &str = "user";
+const ASSISTANT: &str = "assistant";
+
+impl Parsed {
+    /// Whether the card still wants words of a turn in `role`: a preview
+    /// line, or — from the user side — its name. Once it wants neither, a
+    /// turn is only counted, and its text is not read out of the record.
+    fn wants(&self, role: &str) -> bool {
+        self.preview.len() < PREVIEW_LINES || (role == USER && self.title.is_empty())
+    }
+
+    /// One turn of the conversation, counted and shown ([`Self::shows`]).
+    /// `words` reads the turn's text out of its record, and is asked only
+    /// while the card still wants words.
+    fn said(&mut self, role: &str, words: impl FnOnce() -> Option<String>) {
+        self.message_count += 1;
+        self.shows(role, words);
+    }
+
+    /// One turn, shown while the card still wants words ([`Self::wants`]) —
+    /// for a reader whose store counts the turns itself (a database row).
+    ///
+    /// The user side is shown as what was asked ([`asked_words`]): the task a
+    /// worker's briefing hands over rather than the briefing, the words
+    /// rather than the frames a CLI wrote around them. A turn that was all
+    /// machinery is no line and no name; the next one is tried. The first
+    /// user turn that reads as words names the card, wherever it stands —
+    /// three slash-command records used to fill the preview and leave the
+    /// card named by its id.
+    pub(crate) fn shows(&mut self, role: &str, words: impl FnOnce() -> Option<String>) {
+        if !self.wants(role) {
+            return;
+        }
+        let Some(words) = words() else {
+            return;
+        };
+        let shown = if role == USER {
+            let Some(asked) = asked_words(&words) else {
+                return;
+            };
+            if self.title.is_empty() {
+                self.title = naming_words(&asked)
+                    .map(|name| clamp(&name))
+                    .unwrap_or_default();
+            }
+            asked
+        } else {
+            words
+        };
+        if self.preview.len() < PREVIEW_LINES {
+            self.preview.push(PreviewMessage {
+                role: role.to_string(),
+                text: clamp(&shown),
+            });
+        }
+    }
+}
+
+/// What a card shows of one thing the user side said.
+///
+/// Two readings that already exist, in order: the task's own words out of a
+/// worker's prompt ([`crate::jev::file_pick::task_words`] — everything a
+/// summoned worker is told before `Now do this:` is the same in every
+/// prompt, and 553 of 623 Claude cards on one machine were named by its
+/// first sentence), then the words without the frames and envelopes a CLI
+/// wrote ([`shown_words`]).
+fn asked_words(said: &str) -> Option<String> {
+    shown_words(&crate::jev::file_pick::task_words(said))
+}
 
 /// Claude's store: one JSON object per line.
 ///
@@ -2202,7 +2487,7 @@ fn claude_session(text: &str) -> Option<Parsed> {
         }
 
         let kind = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if kind != "user" && kind != "assistant" {
+        if kind != USER && kind != ASSISTANT {
             continue;
         }
         let Some(message) = record.get("message") else {
@@ -2214,15 +2499,16 @@ fn claude_session(text: &str) -> Option<Parsed> {
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
         }
-        parsed.message_count += 1;
-        if parsed.preview.len() < PREVIEW_LINES
-            && let Some(text) = message_text(message.get("content"))
-        {
-            parsed.preview.push(PreviewMessage {
-                role: kind.to_string(),
-                text: clamp(&text),
-            });
-        }
+        // The user side is its typed words — a tool's result rides the same
+        // role and is nothing a person said ([`typed_words`]).
+        parsed.said(kind, || {
+            let content = message.get("content");
+            if kind == USER {
+                content.and_then(typed_words)
+            } else {
+                message_text(content)
+            }
+        });
     }
     Some(parsed)
 }
@@ -2277,18 +2563,10 @@ fn codex_session(text: &str) -> Option<Parsed> {
         // role, content:[{text}]}}`. Only the two conversation roles count.
         let payload = record.get("payload").unwrap_or(&record);
         let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        if role != "user" && role != "assistant" {
+        if role != USER && role != ASSISTANT {
             continue;
         }
-        parsed.message_count += 1;
-        if parsed.preview.len() < PREVIEW_LINES
-            && let Some(text) = message_text(payload.get("content"))
-        {
-            parsed.preview.push(PreviewMessage {
-                role: role.to_string(),
-                text: clamp(&text),
-            });
-        }
+        parsed.said(role, || message_text(payload.get("content")));
     }
     Some(parsed)
 }
@@ -2344,18 +2622,10 @@ fn zo_session(text: &str) -> Option<Parsed> {
             continue;
         };
         let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        if role != "user" && role != "assistant" {
+        if role != USER && role != ASSISTANT {
             continue;
         }
-        parsed.message_count += 1;
-        if parsed.preview.len() < PREVIEW_LINES
-            && let Some(words) = message_text(message.get("blocks"))
-        {
-            parsed.preview.push(PreviewMessage {
-                role: role.to_string(),
-                text: clamp(&words),
-            });
-        }
+        parsed.said(role, || message_text(message.get("blocks")));
     }
     if !spoke {
         parsed.not_a_session = true;
@@ -2397,38 +2667,27 @@ fn antigravity_session(text: &str) -> Option<Parsed> {
         }
         let kind = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let role = match kind {
-            "USER_INPUT" => "user",
+            "USER_INPUT" => USER,
             "PLANNER_RESPONSE"
                 if record.get("source").and_then(|v| v.as_str()) == Some("MODEL") =>
             {
-                "assistant"
+                ASSISTANT
             }
             _ => continue,
         };
-        parsed.message_count += 1;
-        let Some(words) = record
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|content| {
-                if role == "user" {
-                    user_request_in(content)
-                } else {
-                    content.to_string()
-                }
-            })
-            .filter(|words| !words.trim().is_empty())
-        else {
-            continue;
-        };
-        if role == "user" && parsed.title.is_empty() {
-            parsed.title = clamp(&words);
-        }
-        if parsed.preview.len() < PREVIEW_LINES {
-            parsed.preview.push(PreviewMessage {
-                role: role.to_string(),
-                text: clamp(&words),
-            });
-        }
+        parsed.said(role, || {
+            record
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|content| {
+                    if role == USER {
+                        user_request_in(content)
+                    } else {
+                        content.to_string()
+                    }
+                })
+                .filter(|words| !words.trim().is_empty())
+        });
     }
     Some(parsed)
 }
@@ -2669,36 +2928,6 @@ mod tests {
         assert_eq!(answer.shown, 50);
         assert_eq!(answer.total, 250);
         assert!(answer.truncated);
-    }
-
-    /// A card's NAME is what the person said, never the wrapper a CLI put in
-    /// front of it — and a message that is nothing but wrapper yields the
-    /// words inside. Previews are untouched by design (the raw tag there is
-    /// honest context, and Orca's own list shows it).
-    #[test]
-    fn a_title_sheds_the_tags_a_cli_dressed_the_words_in() {
-        assert_eq!(
-            untagged_title("fix the tests"),
-            Some("fix the tests".into())
-        );
-        assert_eq!(
-            untagged_title(
-                "<local-command-caveat>Caveat: generated by the user</local-command-caveat>"
-            ),
-            Some("Caveat: generated by the user".into())
-        );
-        // A `<` inside the person's own sentence is the person's — untouched.
-        assert_eq!(
-            untagged_title("compare a < b in Vec<String>"),
-            Some("compare a < b in Vec<String>".into())
-        );
-        assert_eq!(
-            untagged_title("<teammate-message from=\"lead\"><attachment>1 # Orca 소스 지도"),
-            Some("1 # Orca 소스 지도".into())
-        );
-        assert_eq!(untagged_title("  <a><b>  "), None);
-        assert_eq!(untagged_title("<unclosed"), None);
-        assert_eq!(untagged_title(""), None);
     }
 
     /// Every agent's resume spelling, because a wrong one is not a smaller
@@ -4024,6 +4253,461 @@ mod tests {
         assert_eq!(
             roots(claude, Path::new("/h"), Some(Path::new("/elsewhere"))),
             vec![PathBuf::from("/h/.claude/projects")]
+        );
+    }
+
+    /* ---- the scan through its index (t-103659) ---- */
+
+    /// One Claude conversation of one user line, under `home`'s own store.
+    fn write_claude(home: &Path, id: &str, words: &str) {
+        let project = home.join(".claude/projects/-w-a");
+        std::fs::create_dir_all(&project).expect("mkdir");
+        std::fs::write(
+            project.join(format!("{id}.jsonl")),
+            format!(
+                r#"{{"type":"user","cwd":"/w/a","sessionId":"{id}","message":{{"role":"user","content":"{words}"}}}}"#
+            ),
+        )
+        .expect("write");
+    }
+
+    fn scan_through(home: &Path, index: &mut Index) -> Scan {
+        scan_homes(&[Home::whole(home)], DEFAULT_SCAN_LIMIT, &|_| None, index)
+    }
+
+    /// The first scan opens every file. The next opens none of them: a file
+    /// that has not moved gives what it gave. Held by counts, because a time
+    /// would only say how busy the machine was.
+    #[test]
+    fn a_second_scan_opens_no_file_that_has_not_moved() {
+        let dir = tempfile::tempdir().expect("temp");
+        for id in ["a", "b", "c"] {
+            write_claude(dir.path(), id, "first ask");
+        }
+        let mut index = Index::default();
+        let first = scan_through(dir.path(), &mut index);
+        assert_eq!((first.count.read, first.count.kept), (3, 0));
+
+        let second = scan_through(dir.path(), &mut index);
+        assert_eq!(
+            (second.count.read, second.count.kept),
+            (0, 3),
+            "a scan opened a file whose stamp had not moved"
+        );
+        assert_eq!(second.sessions, first.sessions);
+    }
+
+    /// One conversation went on: that file is opened, and only that one.
+    #[test]
+    fn a_scan_opens_only_the_file_that_moved() {
+        let dir = tempfile::tempdir().expect("temp");
+        for id in ["a", "b", "c"] {
+            write_claude(dir.path(), id, "first ask");
+        }
+        let mut index = Index::default();
+        scan_through(dir.path(), &mut index);
+
+        write_claude(dir.path(), "b", "a second and longer ask");
+        let after = scan_through(dir.path(), &mut index);
+        assert_eq!((after.count.read, after.count.kept), (1, 2));
+        let moved = after
+            .sessions
+            .iter()
+            .find(|one| one.session_id == "b")
+            .expect("the conversation that went on");
+        assert_eq!(moved.title, "a second and longer ask");
+    }
+
+    /// A file that is gone is forgotten, so the list it gave does not come
+    /// back from the index.
+    #[test]
+    fn a_file_that_is_gone_leaves_the_index() {
+        let dir = tempfile::tempdir().expect("temp");
+        for id in ["a", "b"] {
+            write_claude(dir.path(), id, "first ask");
+        }
+        let mut index = Index::default();
+        scan_through(dir.path(), &mut index);
+        std::fs::remove_file(dir.path().join(".claude/projects/-w-a/b.jsonl")).expect("remove");
+        let after = scan_through(dir.path(), &mut index);
+        assert_eq!(
+            (
+                after.sessions.len(),
+                index.len(),
+                sessions_of(&index, DEFAULT_SCAN_LIMIT).0.len()
+            ),
+            (1, 1, 1)
+        );
+    }
+
+    /// What the index holds is the list the scan gave, with nothing opened:
+    /// the panel's first answer after the window starts.
+    #[test]
+    fn the_index_alone_gives_the_list_the_scan_gave() {
+        let dir = tempfile::tempdir().expect("temp");
+        write_claude(dir.path(), "parent", "the ask");
+        let helpers = dir.path().join(".claude/projects/-w-a/parent/subagents");
+        std::fs::create_dir_all(&helpers).expect("mkdir");
+        std::fs::write(
+            helpers.join("helper.jsonl"),
+            r#"{"type":"user","sessionId":"helper","message":{"role":"user","content":"sub"}}"#,
+        )
+        .expect("write");
+        let mut index = Index::default();
+        let scanned = scan_through(dir.path(), &mut index);
+        assert_eq!(scanned.sessions[0].children.len(), 1);
+        assert_eq!(
+            sessions_of(&index, DEFAULT_SCAN_LIMIT),
+            (scanned.sessions, false)
+        );
+    }
+
+    /// A home is walked only for the agents it is asked about. The window
+    /// reads one agent from its own data and the rest from the person's
+    /// home; the person's store of that one agent used to be walked, read
+    /// and parsed, and its cards thrown away (92 files on one machine).
+    #[test]
+    fn a_store_the_scan_is_not_asked_about_is_not_read() {
+        let dir = tempfile::tempdir().expect("temp");
+        let (home, app) = (dir.path().join("home"), dir.path().join("app"));
+        write_claude(&home, "persons-own", "not the window's");
+        write_claude(&app, "windows-own", "the window's");
+        let rollouts = home.join(".codex/sessions/2026/05/31");
+        std::fs::create_dir_all(&rollouts).expect("mkdir");
+        std::fs::write(
+            rollouts.join("rollout-1.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"ccc","cwd":"/w/b"}}"#,
+        )
+        .expect("write");
+
+        let found = scan_homes(
+            &[
+                Home {
+                    dir: &home,
+                    reads: |source| source.slug != "claude",
+                },
+                Home {
+                    dir: &app,
+                    reads: |source| source.slug == "claude",
+                },
+            ],
+            DEFAULT_SCAN_LIMIT,
+            &|_| None,
+            &mut Index::default(),
+        );
+        let mut ids: Vec<&str> = found
+            .sessions
+            .iter()
+            .map(|one| one.session_id.as_str())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["ccc", "windows-own"]);
+        assert_eq!(
+            (found.count.files, found.count.read),
+            (2, 2),
+            "the person's own store of the agent the window keeps was read"
+        );
+    }
+
+    /// A zo store keeps a project's sessions in one folder and everything
+    /// else — state, memory, artifacts — beside it. The walk opens the root,
+    /// each project and its `sessions`, and no other folder (measured before:
+    /// 8,476 folders opened and 153,449 entries asked about to keep 997).
+    #[test]
+    fn the_walk_opens_only_the_folder_a_zo_project_keeps_sessions_in() {
+        let dir = tempfile::tempdir().expect("temp");
+        let project = dir.path().join(".zo/projects/Users-w-a-0f3a");
+        std::fs::create_dir_all(project.join("sessions")).expect("mkdir");
+        std::fs::write(
+            project.join("sessions/session-1-0.jsonl"),
+            concat!(
+                r#"{"session_id":"session-1-0","type":"session_meta"}"#,
+                "\n",
+                r#"{"message":{"blocks":[{"text":"ask","type":"text"}],"role":"user"},"type":"message"}"#,
+                "\n",
+            ),
+        )
+        .expect("write");
+        // What the walk used to open on the way, and a file wearing a
+        // session's name where zo keeps no session.
+        for beside in [
+            "state/agents/a/b",
+            "memory.local",
+            "artifacts/integrity",
+            "state/sessions",
+        ] {
+            std::fs::create_dir_all(project.join(beside)).expect("mkdir");
+        }
+        std::fs::write(project.join("state/sessions/session-9-0.jsonl"), "{}").expect("write");
+
+        let found = scan_through(dir.path(), &mut Index::default());
+        let zo: Vec<&str> = found
+            .sessions
+            .iter()
+            .filter(|one| one.agent == "zo")
+            .map(|one| one.session_id.as_str())
+            .collect();
+        assert_eq!(zo, ["session-1-0"]);
+        assert_eq!(
+            found.count.dirs, 3,
+            "the walk opened a folder zo keeps no session in"
+        );
+    }
+
+    /// Neither of zo's shapes says where the conversation ran. zo writes that
+    /// beside the transcript, and the card is filed under it and resumes there
+    /// — for the plain log and for its vault twin alike.
+    #[test]
+    fn a_zo_card_reads_its_workspace_from_the_record_beside_it() {
+        let dir = tempfile::tempdir().expect("temp");
+        let sessions_dir = dir.path().join(".zo/projects/Users-w-a-0f3a/sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("mkdir");
+        let said =
+            r#"{"message":{"blocks":[{"text":"ask","type":"text"}],"role":"user"},"type":"TYPE"}"#;
+        std::fs::write(
+            sessions_dir.join("session-1-0.jsonl"),
+            format!(
+                "{}\n{}\n",
+                r#"{"session_id":"session-1-0","type":"session_meta"}"#,
+                said.replace("TYPE", "message")
+            ),
+        )
+        .expect("write");
+        std::fs::write(
+            sessions_dir.join("session-2-0.vault.jsonl"),
+            format!("{}\n", said.replace("TYPE", "vault")),
+        )
+        .expect("write");
+        std::fs::write(
+            sessions_dir.join("session-1-0.cwd"),
+            r#"{"cwd":"/w/plain"}"#,
+        )
+        .expect("write");
+        std::fs::write(sessions_dir.join("session-2-0.cwd"), r#"{"cwd":"/w/twin"}"#)
+            .expect("write");
+
+        let found = scan_through(dir.path(), &mut Index::default());
+        let mut placed: Vec<(&str, Option<&str>, Option<&str>)> = found
+            .sessions
+            .iter()
+            .map(|one| {
+                (
+                    one.session_id.as_str(),
+                    one.cwd.as_deref(),
+                    one.resume.as_deref(),
+                )
+            })
+            .collect();
+        placed.sort_unstable();
+        assert_eq!(
+            placed,
+            [
+                (
+                    "session-1-0",
+                    Some("/w/plain"),
+                    Some("cd '/w/plain' && zo --resume 'session-1-0'")
+                ),
+                (
+                    "session-2-0",
+                    Some("/w/twin"),
+                    Some("cd '/w/twin' && zo --resume 'session-2-0'")
+                ),
+            ]
+        );
+    }
+
+    /// A session nobody spoke in is kept out of the list when the panel asks,
+    /// and counted — so one line can say how many, and show them.
+    #[test]
+    fn hidden_empty_sessions_are_counted_among_what_the_query_shows() {
+        let spoke = session("claude", "spoke", Some("/w/a"), "2026-01-02T00:00:00Z");
+        let mut blank = session("claude", "blank", Some("/w/a"), "2026-01-01T00:00:00Z");
+        blank.message_count = 0;
+        blank.preview.clear();
+        let mut elsewhere = blank.clone();
+        elsewhere.id = "claude:elsewhere:/f/elsewhere.jsonl".into();
+        elsewhere.cwd = Some("/w/b".into());
+        let sessions = [spoke, blank, elsewhere];
+        let asked = |hide_empty: bool| {
+            let seen = view_of(
+                &sessions,
+                &VaultQuery {
+                    hide_empty,
+                    scope_paths: vec!["/w/a".into()],
+                    ..Default::default()
+                },
+                Vec::new(),
+                false,
+                &[],
+            );
+            (seen.shown, seen.matched, seen.hidden_empty, seen.total)
+        };
+        // The blank one outside the scope is not among what was hidden.
+        assert_eq!([asked(true), asked(false)], [(1, 1, 1, 3), (2, 2, 0, 3)]);
+    }
+
+    /* ---- what a card says (t-103659) ---- */
+
+    /// One Claude record: something the user side wrote.
+    fn claude_user(content: serde_json::Value) -> String {
+        serde_json::json!({
+            "type": "user", "sessionId": "s", "cwd": "/w/a",
+            "message": {"role": "user", "content": content},
+        })
+        .to_string()
+    }
+
+    /// What a summoned worker is typed: the window's briefing, the words it
+    /// hands over on, then the task — all of it inside the frame the CLI
+    /// writes around a paste.
+    fn worker_prompt(task: &str) -> String {
+        format!(
+            "<pasted_content id=\"8c3a\">\nYou are a worker in this window's orchestration, \
+             carrying task 지어낸 과업 (t-1). When your work is done, write this JSON …\n\n\
+             {}\n\n{task}\n</pasted_content id=\"8c3a\">",
+            crate::orchestration::BRIEFING_HANDS_OVER
+        )
+    }
+
+    fn built(agent: &str, parsed: Parsed) -> VaultSession {
+        card(
+            agent,
+            "/f/s.jsonl".into(),
+            "2026-01-01T00:00:00.000Z".into(),
+            None,
+            parsed,
+        )
+    }
+
+    /// The title and the preview lines of a card, as a person reads them.
+    fn says(card: &VaultSession) -> (&str, Vec<(&str, &str)>) {
+        (
+            card.title.as_str(),
+            card.preview
+                .iter()
+                .map(|line| (line.role.as_str(), line.text.as_str()))
+                .collect(),
+        )
+    }
+
+    /// A worker's card is named by its task. The briefing every worker is
+    /// typed is the same in every prompt and named 553 of 623 Claude cards
+    /// on one machine 「You are a worker in this window's…」.
+    #[test]
+    fn a_workers_card_is_named_by_its_task_and_not_by_the_briefing() {
+        let task = "사이드바의 줄 높이를 고친다. 시험을 먼저 쓴다.";
+        let parsed = claude_session(&claude_user(worker_prompt(task).into())).expect("parsed");
+        let card = built("claude", parsed);
+        assert_eq!(says(&card), (task, vec![("user", task)]));
+    }
+
+    /// Records a CLI wrote in the user's role are no line and no name: a
+    /// slash command's three, a tool's result, a reminder tucked in after
+    /// the words. The first turn that reads as words names the card, however
+    /// many of those stand before it — and every one is still counted.
+    #[test]
+    fn records_a_cli_wrote_are_no_line_and_no_name() {
+        let text = [
+            claude_user("<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>".into()),
+            claude_user("<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>".into()),
+            claude_user("<local-command-stdout></local-command-stdout>".into()),
+            claude_user(serde_json::json!([{"type": "tool_result", "tool_use_id": "t1", "content": "total 8"}])),
+            claude_user("정말 물은 말\n<system-reminder>기억할 것</system-reminder>".into()),
+            serde_json::json!({
+                "type": "assistant", "sessionId": "s",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "답"}]},
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        let card = built("claude", claude_session(&text).expect("parsed"));
+        assert_eq!(
+            (says(&card), card.message_count),
+            (
+                (
+                    "정말 물은 말",
+                    vec![("user", "정말 물은 말"), ("assistant", "답")]
+                ),
+                6
+            )
+        );
+    }
+
+    /// Every store's card, read from a made-up conversation whose first user
+    /// turn wears a frame: none of them shows the frame, in its name or in
+    /// its preview.
+    #[test]
+    fn no_agents_card_shows_a_frame_a_cli_wrote() {
+        let task = "지어낸 과업의 첫 줄";
+        let framed = worker_prompt(task);
+        let claude = claude_session(&claude_user(framed.clone().into())).expect("claude");
+        let codex = codex_session(
+            &[
+                r#"{"type":"session_meta","payload":{"id":"c","cwd":"/w/a"}}"#.to_string(),
+                serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "<environment_context>\n  <cwd>/w/a</cwd>\n</environment_context>"}]}})
+                .to_string(),
+                serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": framed}]}})
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .expect("codex");
+        let zo = zo_session(
+            &[
+                r#"{"session_id":"session-1-0","type":"session_meta"}"#.to_string(),
+                serde_json::json!({"type": "message", "message": {"role": "user",
+                    "blocks": [{"type": "text", "text": framed}]}})
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .expect("zo");
+        let antigravity = antigravity_session(
+            &serde_json::json!({"type": "USER_INPUT", "created_at": "2026-01-01T00:00:00Z",
+                "content": format!("<USER_REQUEST>\n{framed}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nlocal time\n</ADDITIONAL_METADATA>")})
+            .to_string(),
+        )
+        .expect("antigravity");
+        let opencode = crate::vault_opencode::preview(&[crate::vault_opencode::Line {
+            role: "user".to_string(),
+            data: serde_json::json!({"type": "text", "text": framed}).to_string(),
+        }]);
+        let opencode = Parsed {
+            session_id: "o".into(),
+            preview: opencode,
+            ..Parsed::default()
+        };
+        for (agent, parsed) in [
+            ("claude", claude),
+            ("codex", codex),
+            ("zo", zo),
+            ("antigravity", antigravity),
+            ("opencode", opencode),
+        ] {
+            let card = built(agent, parsed);
+            assert_eq!(says(&card), (task, vec![("user", task)]), "{agent}");
+        }
+    }
+
+    /// A session nobody spoke in has no name. It used to wear its id —
+    /// `session-1790000000000-0` — as if that were one.
+    #[test]
+    fn a_session_nobody_spoke_in_is_not_named_by_its_id() {
+        let text = [
+            r#"{"session_id":"session-1790000000000-0","type":"session_meta"}"#,
+            r#"{"message":{"blocks":[{"text":"환경 안내","type":"text"}],"role":"system"},"type":"message"}"#,
+        ]
+        .join("\n");
+        let card = built("zo", zo_session(&text).expect("parsed"));
+        assert_eq!(
+            (
+                card.title.as_str(),
+                card.resumable(),
+                card.session_id.as_str()
+            ),
+            ("", false, "session-1790000000000-0")
         );
     }
 }

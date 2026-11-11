@@ -255,7 +255,10 @@ pub fn dedupe(turns: Vec<SourceTurn>) -> Vec<SourceTurn> {
 }
 
 /// A worktree this app manages, as the attribution needs to see it.
-#[derive(Clone, Debug)]
+///
+/// It can be written down: the session vault keeps the last list beside its
+/// index, so the panel names its groups before git has been asked again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeRef {
     pub repo_id: String,
     pub worktree_id: String,
