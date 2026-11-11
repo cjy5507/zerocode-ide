@@ -807,8 +807,12 @@ mod tests {
         assert!(neighbours.contains(&("imports".to_owned(), at("src/util.rs"))));
         assert!(neighbours.contains(&("tests".to_owned(), at("tests/graph_suite.rs"))));
 
-        let window = read(json!({ "path": "src/graph.rs", "offset": 1 }));
+        // A window further in is a drill-in; a read from line 1 is a read
+        // from the top, as one from 0 or with no offset is.
+        let window = read(json!({ "path": "src/graph.rs", "offset": 2 }));
         assert!(window["file"]["neighbours"].is_null());
+        let from_line_one = read(json!({ "path": "src/graph.rs", "offset": 1 }));
+        assert!(from_line_one["file"]["neighbours"].is_array());
     }
 
     /// With `file`, the answer is that definition's references; a file that

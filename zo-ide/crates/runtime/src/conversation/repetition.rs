@@ -452,7 +452,11 @@ fn read_file_request_window(input: &str) -> Option<ReadFileRequestWindow> {
         return None;
     };
     let path = map.get("path")?.as_str()?.to_string();
-    let start = map.get("offset").and_then(json_u64).unwrap_or(0);
+    // The call's `offset` is a line number; the window is in lines skipped.
+    let start = map
+        .get("offset")
+        .and_then(json_u64)
+        .map_or(0, core_types::tool_input::read_start_index);
     let end = map
         .get("limit")
         .and_then(json_u64)
@@ -1468,5 +1472,29 @@ mod wire_name_tests {
             assert!(reminder.contains(&shown), "{reminder}");
             assert!(!reminder.contains(stored), "{reminder}");
         }
+    }
+}
+
+#[cfg(test)]
+mod read_window_tests {
+    use super::{insert_read_file_range, read_file_range_is_covered, read_file_request_window};
+
+    /// A read's window is the lines its call means: `offset` is the line it
+    /// starts at, and 0 is the start too. So a read from line 1 after a read
+    /// from 0 asks for lines read already, and the page after them — asked
+    /// for by either way of counting — does not.
+    #[test]
+    fn a_reads_window_is_the_lines_its_offset_names() {
+        let window = |offset: u64| {
+            read_file_request_window(&format!(r#"{{"path":"x.rs","offset":{offset},"limit":100}}"#))
+                .expect("a window")
+                .range
+        };
+        assert_eq!(window(0), window(1));
+        let mut read = Vec::new();
+        insert_read_file_range(&mut read, window(0));
+        assert!(read_file_range_is_covered(&read, window(1)), "lines 1-100 were read");
+        assert!(!read_file_range_is_covered(&read, window(101)), "lines 101-200 were not");
+        assert!(!read_file_range_is_covered(&read, window(100)), "nor all of lines 100-199");
     }
 }

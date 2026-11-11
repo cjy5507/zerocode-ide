@@ -21,8 +21,23 @@ pub(crate) const READ_FILE_TOOL_NAME: &str = "read_file";
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReadFileInput {
     pub path: String,
+    /// How many lines to skip. A call's JSON gives the line to start at
+    /// instead — counted from 1, `0` the start too — and reading the JSON
+    /// turns it into this count ([`skipped_lines`]). So a call from the model
+    /// and a shell read zo runs as this tool (`sed -n '120,160p'`, which
+    /// names its first line) mean the same lines by the same number.
+    #[serde(default, deserialize_with = "skipped_lines")]
     pub offset: Option<usize>,
     pub limit: Option<usize>,
+}
+
+/// A read's `offset` as its JSON gives it — a line number — read into the
+/// count of lines to skip (`core_types::tool_input::read_start_index`).
+fn skipped_lines<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<usize>::deserialize(deserializer)?.map(core_types::tool_input::read_start_index))
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,7 +130,12 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "offset": { "type": "integer", "minimum": 0 },
+                    // The line to start at, counted from 1 — the minimum is
+                    // where the schema says so, at no cost: the tool bucket
+                    // has five tokens of head under its budget, and words
+                    // here would be billed on every request. A call that
+                    // gives 0 still starts at the top (`skipped_lines`).
+                    "offset": { "type": "integer", "minimum": 1 },
                     "limit": { "type": "integer", "minimum": 1 }
                 },
                 "required": ["path"],
@@ -3967,5 +3987,38 @@ mod search_input_tests {
         assert!(read.contains("[thinking]"), "{read}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod read_offset_tests {
+    use core_types::tool_names::CoreTool;
+
+    /// The read tool a model is sent says where its `offset` starts counting:
+    /// from 1. It said from 0, which named a count of lines to skip, and a
+    /// model that asked for line 1 lost the first line.
+    #[test]
+    fn the_read_tool_a_model_is_sent_counts_its_offset_from_1() {
+        let definitions = crate::GlobalToolRegistry::builtin().definitions(None);
+        let read = definitions
+            .iter()
+            .find(|definition| definition.name == CoreTool::Read.wire())
+            .expect("the read tool is sent");
+        assert_eq!(read.input_schema["properties"]["offset"]["minimum"], 1, "{}", read.input_schema);
+    }
+
+    /// A read's JSON gives the line to start at, and the input holds the
+    /// lines to skip: line 1 and 0 skip none, line 3 skips two, and a read
+    /// that names no offset has none.
+    #[test]
+    fn a_reads_json_offset_is_read_as_a_line_number() {
+        let offset = |input: serde_json::Value| {
+            serde_json::from_value::<super::ReadFileInput>(input).expect("a read's input").offset
+        };
+        assert_eq!(offset(serde_json::json!({ "path": "a.rs", "offset": 0 })), Some(0));
+        assert_eq!(offset(serde_json::json!({ "path": "a.rs", "offset": 1 })), Some(0));
+        assert_eq!(offset(serde_json::json!({ "path": "a.rs", "offset": 3 })), Some(2));
+        assert_eq!(offset(serde_json::json!({ "path": "a.rs" })), None);
+        assert_eq!(offset(serde_json::json!({ "path": "a.rs", "offset": null })), None);
     }
 }

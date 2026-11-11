@@ -20,6 +20,8 @@
 pub enum DedicatedRead {
     ReadFile {
         path: String,
+        /// The first line read, counted from 1 — as the read tool's own
+        /// `offset` is, and as `sed` names it.
         offset: Option<usize>,
         limit: Option<usize>,
     },
@@ -716,6 +718,21 @@ mod redirected_read_tests {
 #[cfg(test)]
 mod tests {
     use super::{dedicated_read_for, is_agent_wait, is_polling_wait, DedicatedRead};
+
+    /// A sed window read as the read tool reads it starts at sed's first
+    /// line and ends at its last. It began a line late: the tool read the
+    /// number as lines to skip, so `sed -n '2,3p'` returned lines 3-4.
+    #[test]
+    fn a_sed_window_is_read_from_its_first_line() {
+        let read = dedicated_read_for("sed -n '2,3p' notes.txt").expect("a read");
+        let input: crate::file_tools::ReadFileInput =
+            serde_json::from_value(read.input()).expect("the read tool's input");
+        assert_eq!(
+            (input.offset, input.limit),
+            (Some(1), Some(2)),
+            "one line skipped and two read: lines 2-3"
+        );
+    }
 
     #[test]
     fn plain_reads_become_the_tool_built_for_them() {

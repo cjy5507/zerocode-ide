@@ -945,7 +945,8 @@ fn extract_read_range(value: &Value) -> Option<(u64, u64)> {
     ) {
         return Some((start, start.saturating_add(num.saturating_sub(1)).max(start)));
     }
-    // Zo `read_file` *input* params: a 0-based `offset` and a `limit` line
+    // Zo `read_file` *input* params: an `offset` — the line to start at,
+    // counted from 1, `0` the start too (`read_start_index`) — and a `limit` line
     // count. A windowed read carries both, so two windows of one file (a model
     // paging a large file 80 lines at a time) get distinct `(start, end)` ranges
     // instead of collapsing to the bare path — the "read the same file 4 times"
@@ -956,7 +957,7 @@ fn extract_read_range(value: &Value) -> Option<(u64, u64)> {
         let start = value
             .get("offset")
             .and_then(Value::as_u64)
-            .unwrap_or(0)
+            .map_or(0, core_types::tool_input::read_start_index)
             .saturating_add(1);
         return Some((start, start.saturating_add(limit.saturating_sub(1)).max(start)));
     }
@@ -1219,19 +1220,29 @@ mod tests {
 
     #[test]
     fn read_range_maps_offset_limit_so_windowed_reads_are_distinguishable() {
-        // Zo's `read_file` carries a 0-based `offset` + `limit` line count. The
-        // preview must surface a 1-based `(start, end)` window so the collapsed
-        // tool group can show `path:start-end` — two windows of one file no longer
-        // collapse to identical rows.
+        // Zo's `read_file` carries an `offset` — the line it starts at — and a
+        // `limit` line count. The preview surfaces the `(start, end)` window the
+        // read returns, so the collapsed tool group can show `path:start-end` —
+        // two windows of one file no longer collapse to identical rows.
         let win = preview_tool_input(
             "read_file",
-            &json!({ "path": "src/App.tsx", "offset": 80, "limit": 80 }),
+            &json!({ "path": "src/App.tsx", "offset": 81, "limit": 80 }),
         );
         assert!(
             matches!(&win, ToolPreview::Read { range: Some((81, 160)), .. }),
-            "offset 80 + limit 80 → 1-based lines 81-160, got {win:?}"
+            "offset 81 + limit 80 → lines 81-160, got {win:?}"
         );
-        // limit with no offset starts at line 1.
+        // A read asked from line 1 names line 1 — it showed `:2-81`, and the
+        // read it named had skipped the file's first line (zo 1.1.143).
+        let from_one = preview_tool_input(
+            "read_file",
+            &json!({ "path": "a.rs", "offset": 1, "limit": 80 }),
+        );
+        assert!(
+            matches!(&from_one, ToolPreview::Read { range: Some((1, 80)), .. }),
+            "offset 1 + limit 80 → lines 1-80, got {from_one:?}"
+        );
+        // Offset 0 starts at line 1 too.
         let head = preview_tool_input(
             "read_file",
             &json!({ "path": "a.rs", "offset": 0, "limit": 80 }),

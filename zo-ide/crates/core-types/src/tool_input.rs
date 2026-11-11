@@ -95,6 +95,31 @@ fn without_code_fence(text: &str) -> &str {
     body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
 
+/// How many lines a read skips for the `offset` a model gave it.
+///
+/// A model's `offset` is the line it starts at, counted from 1 as the lines
+/// it is shown are, and `0` is the start too. It was read as a count of lines
+/// to skip, so a model that asked for a file "from line 1" — `offset: 1` —
+/// never saw the file's first line, in any file it read that way (zo 1.1.143,
+/// 2026-11-12: a read asked with `offset: 1, limit: 100` showed `:2-101`).
+/// Read as a line number, neither way of counting loses a line: a model that
+/// pages by lines skipped reads one line twice.
+///
+/// Every reader of a read call's `offset` goes through here — the tool, the
+/// row that names the lines read, the guard that knows a window was read
+/// before — so the three agree on which lines a call means.
+#[must_use]
+pub fn read_start_index<N>(offset: N) -> N
+where
+    N: Copy + PartialOrd + From<u8> + std::ops::Sub<Output = N>,
+{
+    if offset > N::from(0) {
+        offset - N::from(1)
+    } else {
+        offset
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_tool_arguments;
@@ -154,5 +179,17 @@ mod tests {
         let refused = parse_tool_arguments(r#"{"command":"rm -rf build"#);
 
         assert!(refused.is_err(), "{refused:?}");
+    }
+
+    /// A read's `offset` is a line number counted from 1, and 0 is the start
+    /// too: the first line is skipped by neither.
+    #[test]
+    fn a_reads_offset_is_a_line_number_and_zero_is_the_start_too() {
+        use super::read_start_index;
+        assert_eq!(read_start_index(0usize), 0);
+        assert_eq!(read_start_index(1usize), 0);
+        assert_eq!(read_start_index(2usize), 1);
+        assert_eq!(read_start_index(101u64), 100);
+        assert_eq!(read_start_index(u64::MAX), u64::MAX - 1);
     }
 }
