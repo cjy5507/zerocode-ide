@@ -15685,10 +15685,12 @@ ok(
 );
 
 /* And the record that leaves is the one the form was showing — id and all, so
- * a save is an edit of that job rather than a second copy of it. */
+ * a save is an edit of that job rather than a second copy of it. The save is
+ * its button's press here and below: a `submit` nobody pressed carries
+ * nobody's hand, and the form sends nothing on one (`submitByPress`). */
 const saved = await page.evaluate(async () => {
   document.getElementById("auto-name").value = "  주간 정리본  ";
-  document.getElementById("auto-form").dispatchEvent(new Event("submit"));
+  document.getElementById("auto-save").click();
   await new Promise((done) => setTimeout(done, 150));
   return {
     sent: window.__SAVED__,
@@ -15736,7 +15738,7 @@ const pickedAgent = await page.evaluate(async () => {
   const held = field.value;
   const options = [...field.options].map((one) => `${one.value}:${one.textContent}`);
   field.value = "claude";
-  document.getElementById("auto-form").dispatchEvent(new Event("submit"));
+  document.getElementById("auto-save").click();
   await new Promise((done) => setTimeout(done, 150));
   const chosen = window.__SAVED__?.agent;
   // And back to the first option, which is absence rather than a word the
@@ -15748,7 +15750,11 @@ const pickedAgent = await page.evaluate(async () => {
   // fixture with neither agent nor command describes a job the backend now
   // correctly refuses.
   document.getElementById("auto-command").value = "./scripts/nightly-check";
-  document.getElementById("auto-form").dispatchEvent(new Event("submit"));
+  // No press saves this record: the form holds the picker required for a job
+  // that sends a prompt, and its button's press asks the browser whether the
+  // form is valid before it sends. What an empty picker sends is read off the
+  // save itself, as the press would call it.
+  void saveAutomation(handNow());
   await new Promise((done) => setTimeout(done, 150));
   return {
     held,
@@ -45383,7 +45389,9 @@ const taskSourcesGitlab = await page.evaluate(async () => {
   seen.tokenPage = opened.at(-1);
   const first = rows()[0];
   first.querySelector(".task-host-token").value = "bad";
-  first.querySelector(".task-host-paste").requestSubmit();
+  // 「연결」 is its button's press: the paste form sends nothing on a `submit`
+  // nobody pressed (`submitByPress`).
+  first.querySelector('.task-host-paste button[type="submit"]').click();
   await wait(120);
   seen.bad = {
     said: first.querySelector(".task-host-said").textContent,
@@ -45393,7 +45401,7 @@ const taskSourcesGitlab = await page.evaluate(async () => {
   glab = { installed: true, authenticated: false, hosts: ["192.0.2.14"] };
   hosts[0].signed_in = true;
   rows()[0].querySelector(".task-host-token").value = "glpat-example";
-  rows()[0].querySelector(".task-host-paste").requestSubmit();
+  rows()[0].querySelector('.task-host-paste button[type="submit"]').click();
   await wait(400);
   seen.list = {
     login: logins.at(-1),
