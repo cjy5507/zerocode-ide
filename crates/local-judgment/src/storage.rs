@@ -233,22 +233,37 @@ impl Store {
                 return Err(Error::TooLarge);
             }
             let tracker = io(entry)?.path();
-            let location: Location = serde_json::from_slice(&bounded_read(&tracker, 16 * 1024)?)
-                .map_err(|_| Error::Integrity)?;
-            let partial = location_path(&location, true)?;
-            if partial.exists() {
-                owned_location(&partial, &location)?;
-                io(fs::remove_dir_all(&partial))?;
+            match self.clean_one_external(&tracker) {
+                // The folder it points into is not here now — the external
+                // disk the person chose, unplugged. The tracker stays for the
+                // open that finds the disk again; one absent disk does not
+                // stop the store, and every local-judgment command with it.
+                Err(Error::DestinationUnavailable) => {}
+                other => other?,
             }
-            let destination = location_path(&location, false)?;
-            let registered = child(&self.root, &format!("locations/{}", location.model_id))?;
-            if destination.exists() && !registered.exists() {
-                owned_location(&destination, &location)?;
-                io(fs::remove_dir_all(destination))?;
-            }
-            io(fs::remove_file(tracker))?;
         }
         Ok(())
+    }
+
+    fn clean_one_external(&self, tracker: &Path) -> Result<()> {
+        let Ok(location) = serde_json::from_slice::<Location>(&bounded_read(tracker, 16 * 1024)?)
+        else {
+            // Half a tracker, from a stop in the middle of writing it: it
+            // names no folder, so there is nothing it could ever clean.
+            return io(fs::remove_file(tracker));
+        };
+        let partial = location_path(&location, true)?;
+        if partial.exists() {
+            owned_location(&partial, &location)?;
+            io(fs::remove_dir_all(&partial))?;
+        }
+        let destination = location_path(&location, false)?;
+        let registered = child(&self.root, &format!("locations/{}", location.model_id))?;
+        if destination.exists() && !registered.exists() {
+            owned_location(&destination, &location)?;
+            io(fs::remove_dir_all(destination))?;
+        }
+        io(fs::remove_file(tracker))
     }
 
     pub fn registered_catalogs(&self) -> Result<Vec<Catalog>> {

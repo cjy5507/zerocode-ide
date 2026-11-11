@@ -540,6 +540,48 @@ fn restart_cleans_owned_external_partial_data_without_adopting_the_parent() {
     );
 }
 
+/// A tracker that points into a folder not here now — the external disk the
+/// person chose, unplugged — does not stop the store opening. It stays for
+/// the open that finds the disk again, and that open cleans up. A tracker a
+/// stop left half-written names nothing and is dropped. Either one used to
+/// fail every open, and with it every local-judgment command.
+#[test]
+fn an_unplugged_or_half_written_tracker_does_not_stop_the_store_opening() {
+    let home = tempfile::tempdir().unwrap();
+    let destination = home.path().join("chosen");
+    fs::create_dir(&destination).unwrap();
+    let data = home.path().join("data");
+    let trackers = data.join("managed-judgment/external-partial");
+    let store = crate::storage::Store::open(&data).unwrap();
+    let stage = store
+        .model_stage(&super::tests::fixture_model(), Some(&destination))
+        .unwrap();
+    let partial = stage.path().to_owned();
+    std::mem::forget(stage);
+    drop(store);
+
+    let unplugged = home.path().join("unplugged");
+    fs::rename(&destination, &unplugged).unwrap();
+    crate::storage::Store::open(&data).expect("an unplugged disk stopped the store opening");
+    assert_eq!(
+        fs::read_dir(&trackers).unwrap().count(),
+        1,
+        "the tracker was lost"
+    );
+
+    fs::rename(&unplugged, &destination).unwrap();
+    crate::storage::Store::open(&data).unwrap();
+    assert!(
+        !partial.exists(),
+        "the disk came back and its partial stayed"
+    );
+    assert_eq!(fs::read_dir(&trackers).unwrap().count(), 0);
+
+    fs::write(trackers.join("half.json"), b"{\"model_id\":").unwrap();
+    crate::storage::Store::open(&data).expect("a half-written tracker stopped the store opening");
+    assert_eq!(fs::read_dir(&trackers).unwrap().count(), 0);
+}
+
 #[test]
 fn tampered_external_ownership_cannot_remove_any_installed_data() {
     let home = tempfile::tempdir().unwrap();
