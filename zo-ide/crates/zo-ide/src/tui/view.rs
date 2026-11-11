@@ -1710,7 +1710,7 @@ pub struct Frame<'a> {
     pub tail_owns_slot: bool,
     /// The active cell is an answer being written: when it is taller than
     /// the rows it may take, its newest rows are the ones kept
-    /// ([`clip_newest`]) — the words arriving now, not the ones read already.
+    /// (`clip_newest`) — the words arriving now, not the ones read already.
     pub active_keeps_newest: bool,
     pub dialog: Option<&'a Dialog>,
     /// 떠 있는 `AskUserQuestion` 오버레이. 보기가 있으면 뷰포트를 통째로 쓰고,

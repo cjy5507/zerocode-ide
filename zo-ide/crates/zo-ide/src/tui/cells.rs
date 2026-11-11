@@ -1343,7 +1343,7 @@ impl MarkdownStream {
     /// No rows for a line whose shape is not settled until it ends — a table
     /// row (a row re-lays every row above it), a line that opens a code
     /// fence, a line inside one (its colour is its block's) — nor for a block
-    /// past [`UNFINISHED_MAX_SOURCE`].
+    /// past `UNFINISHED_MAX_SOURCE`.
     pub fn refresh_unfinished(&mut self) {
         if self.unfinished_line == UnfinishedLine::Waits || self.kind != MarkdownStreamKind::Answer {
             return;
