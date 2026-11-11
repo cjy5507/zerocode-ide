@@ -40,6 +40,8 @@ pub const ZO_SETTINGS_SCHEMA_NAME: &str = "SettingsSchema";
 /// the writer that records a name in it, and the message that explains the
 /// gate all name this constant.
 pub const TRUSTED_MCP_SERVERS_FILE: &str = mcp_keys::TRUSTED_SERVERS_FILE;
+/// The settings key that turns the desk guard off ([`crate::desk_guard`]).
+const DESK_GUARD_KEY: &str = crate::desk_guard::SETTING;
 
 /// Origin of a loaded settings file in the configuration precedence chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -199,6 +201,11 @@ pub struct RuntimeFeatureConfig {
     /// `session_recall`. Defaults on; the hint never recalls anything itself, so
     /// disabling it only silences the affordance.
     recall_hint_enabled: bool,
+    /// Settings `deskGuard`: whether a shell command of the model's that
+    /// moves the person's screen is refused ([`crate::desk_guard`],
+    /// t-104888). Defaults on; only a person's own settings turn it off — a
+    /// repository's `.zo/settings.json` cannot.
+    desk_guard: bool,
     checkpoint_durable: bool,
     /// Settings `tui.inlineMode`: render the interactive TUI in the primary
     /// screen and emit settled transcript content into native scrollback.
@@ -236,6 +243,7 @@ impl Default for RuntimeFeatureConfig {
             team_inbox_digest_enabled: true,
             team_inbox_digest_max_updates: 8,
             recall_hint_enabled: true,
+            desk_guard: true,
             checkpoint_durable: false,
             tui_inline_mode: None,
             second_brain: RuntimeSecondBrainConfig::default(),
@@ -941,6 +949,9 @@ impl ConfigLoader {
                 if !project_lsp_opt_in {
                     value.remove("lspServers");
                 }
+                // The desk guard is a person's to turn off (t-104888): a
+                // repository cannot lift it for whoever opens it.
+                value.remove(DESK_GUARD_KEY);
             }
             validate_optional_hooks_config(&value, &entry.path)?;
             if !strict_mcp {
@@ -1069,6 +1080,7 @@ impl ConfigLoader {
             )?,
             team_inbox_digest_max_updates: parse_team_inbox_digest_max_updates(&merged_value)?,
             recall_hint_enabled: parse_enabled_flag(&merged_value, "recallHintEnabled")?,
+            desk_guard: parse_enabled_flag(&merged_value, DESK_GUARD_KEY)?,
             checkpoint_durable: parse_checkpoint_durable(&merged_value)?,
             tui_inline_mode: parse_tui_inline_mode(&merged_value)?,
             second_brain: parse_second_brain_config(&merged_value)?,
@@ -2649,6 +2661,12 @@ impl RuntimeConfig {
         self.feature_config.checkpoint_durable()
     }
 
+    /// See [`RuntimeFeatureConfig::desk_guard`].
+    #[must_use]
+    pub fn desk_guard(&self) -> bool {
+        self.feature_config.desk_guard()
+    }
+
     /// `None` when the user never pinned a presentation mode — see
     /// [`RuntimeFeatureConfig::tui_inline_mode`].
     #[must_use]
@@ -2829,6 +2847,14 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn recall_hint_enabled(&self) -> bool {
         self.recall_hint_enabled
+    }
+
+    /// Settings `deskGuard`: whether the desk guard refuses a shell command
+    /// of the model's that moves the person's screen ([`crate::desk_guard`]).
+    /// On unless a person's own settings say `false`.
+    #[must_use]
+    pub fn desk_guard(&self) -> bool {
+        self.desk_guard
     }
 
     #[must_use]

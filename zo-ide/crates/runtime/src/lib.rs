@@ -17,6 +17,7 @@ mod conversation;
 pub use conversation::step_rubric_words;
 pub use conversation::claim_check;
 mod convert_messages;
+pub mod desk_guard;
 pub mod file_neighbours;
 pub mod file_pick;
 pub mod file_ops;
