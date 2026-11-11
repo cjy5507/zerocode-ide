@@ -22,12 +22,16 @@
 //!   cleaned and still be that folder, so a path the card's rule would show
 //!   differently is refused before any card;
 //! - a no and a silence write nothing, and a Flow document that changed while
-//!   the card stood is not the one that was allowed ([`settle`]).
+//!   the card stood is not the one that was allowed ([`settle`]);
+//! - after two answers in a row that were not a yes, requests rest: for
+//!   [`ASKED_REST_MINUTES`] every one is refused before any card ([`Rest`]),
+//!   so a card that keeps coming back does not get pressed to make it stop.
 //!
 //! The window cannot tell a job somebody wrote straight into its saved file
 //! from one it was asked for; this road closes the asking, not the file.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Map, Value, json};
@@ -70,6 +74,97 @@ impl Drop for Turn {
     fn drop(&mut self) {
         ASKING.store(false, Ordering::SeqCst);
     }
+}
+
+/// How many answers in a row that were not a yes — a no, or a silence — it
+/// takes before requests rest. One is let pass: a no pressed by mistake is
+/// mended by asking once more.
+pub(crate) const ASKED_NOS_BEFORE_REST: u32 = 2;
+/// How long requests rest after that many (the person's answer, 2026-11-12).
+pub(crate) const ASKED_REST_MINUTES: i64 = 10;
+
+/// The answers that were not a yes, in a row, and the rest they bring. Kept
+/// for the whole window and not per pane: the pane a request names is the
+/// caller's own word (`run_evidence::actor_pane`), and a rest kept by that
+/// name is stepped around by naming another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Rest {
+    /// Nos and silences since the last yes or the last rest.
+    nos: u32,
+    /// Until when requests are refused before any card (epoch ms).
+    until_ms: i64,
+}
+
+impl Rest {
+    /// How long a request made at `now_ms` still has to wait, when requests
+    /// rest: it is refused before any card.
+    #[must_use]
+    pub(crate) fn left_ms(self, now_ms: i64) -> Option<i64> {
+        (now_ms < self.until_ms).then_some(self.until_ms - now_ms)
+    }
+
+    /// What an answer given at `now_ms` makes of it: a yes forgets every no;
+    /// the no or the silence that makes [`ASKED_NOS_BEFORE_REST`] in a row
+    /// starts the rest, and the count starts over after it.
+    #[must_use]
+    pub(crate) fn after(self, decision: Decision, now_ms: i64) -> Self {
+        match decision {
+            Decision::Allowed => Self::default(),
+            Decision::Refused | Decision::TimedOut => {
+                let nos = self.nos + 1;
+                if nos >= ASKED_NOS_BEFORE_REST {
+                    Self {
+                        nos: 0,
+                        until_ms: now_ms + ASKED_REST_MINUTES * 60_000,
+                    }
+                } else {
+                    Self { nos, ..self }
+                }
+            }
+        }
+    }
+}
+
+static REST: Mutex<Rest> = Mutex::new(Rest {
+    nos: 0,
+    until_ms: 0,
+});
+
+/// Refuse a request made while requests rest ([`Rest`]) — before the request
+/// is read, so nothing is shown and nothing about it is answered.
+///
+/// # Errors
+///
+/// When the person's last two answers were not a yes and the rest they
+/// brought is not over.
+pub(crate) fn rested(now_epoch_ms: i64) -> Result<(), ComputerUseError> {
+    let rest = *REST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match rest.left_ms(now_epoch_ms) {
+        None => Ok(()),
+        Some(left_ms) => Err(ComputerUseError::new(
+            error_code::CONFIRMATION_REFUSED,
+            resting_said(left_ms),
+        )),
+    }
+}
+
+/// What a request refused for the rest is told: how long is left, and what to
+/// do instead of asking again.
+fn resting_said(left_ms: i64) -> String {
+    let minutes = (left_ms + 59_999) / 60_000;
+    format!(
+        "the person's last {ASKED_NOS_BEFORE_REST} answers to a schedule request were a no or a silence, so no schedule is asked for during the next {minutes} minute(s). Do not ask again: tell the person what you wanted to schedule and why — they can add it themselves in the automation form"
+    )
+}
+
+/// Keep the person's answer to a request's card ([`Rest::after`]).
+pub(crate) fn answered(decision: Decision, now_epoch_ms: i64) {
+    let mut rest = REST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *rest = rest.after(decision, now_epoch_ms);
 }
 
 /// A request read and checked: the job as it will be saved — which is what the
@@ -534,6 +629,49 @@ mod tests {
             "{:?}",
             parse_flow(&spending)
         );
+    }
+
+    /// One no is let pass — a no pressed by mistake is mended by asking once
+    /// more. The second answer in a row that is not a yes starts the rest:
+    /// for ten minutes a request is refused before any card, and told how long
+    /// is left. A yes in between forgets the no before it.
+    #[test]
+    fn requests_rest_after_two_answers_in_a_row_that_were_not_a_yes() {
+        let start = 1_794_000_000_000_i64;
+        let rest = Rest::default();
+        assert_eq!(rest.left_ms(start), None);
+
+        let once = rest.after(Decision::Refused, start);
+        assert_eq!(once.left_ms(start), None, "one no already rested requests");
+
+        // A silence counts as a no does.
+        let twice = once.after(Decision::TimedOut, start + 1_000);
+        let whole = ASKED_REST_MINUTES * 60_000;
+        assert_eq!(twice.left_ms(start + 1_000), Some(whole));
+        assert_eq!(twice.left_ms(start + 1_000 + whole - 1), Some(1));
+        assert_eq!(twice.left_ms(start + 1_000 + whole), None);
+        // After the rest the count starts over: one more no does not rest again.
+        let later = start + 1_000 + whole;
+        assert_eq!(twice.after(Decision::Refused, later).left_ms(later), None);
+
+        // A yes forgets the no before it.
+        let mended = once.after(Decision::Allowed, start + 2_000);
+        assert_eq!(mended, Rest::default());
+        assert_eq!(
+            mended
+                .after(Decision::Refused, start + 3_000)
+                .left_ms(start + 3_000),
+            None
+        );
+
+        // What a rested request is told: the minutes left, rounded up, and
+        // what to do instead.
+        let said = resting_said(whole - 30_000);
+        assert!(
+            said.contains("next 10 minute(s)") && said.contains("Do not ask again"),
+            "{said}"
+        );
+        assert!(resting_said(1).contains("next 1 minute(s)"));
     }
 
     /// One reading of a Flow's document gives the hash an approval is held

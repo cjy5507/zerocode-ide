@@ -34776,6 +34776,30 @@ fn a_flows_document_is_hashed_under_the_root_it_is_handed() {
     );
 }
 
+/// A request for a schedule is refused for the rest before it is read or
+/// shown, and every answer on its card is kept for the next request: the rest
+/// is asked about once the turn is held and before the request is read, and
+/// the answer is kept before it is settled — whatever settling makes of it.
+#[test]
+fn a_schedule_request_asks_about_the_rest_before_it_is_read_and_keeps_every_answer() {
+    let asking = block_after(shipped_backend(), "fn desktop_schedule(");
+    let at = |what: &str| {
+        asking
+            .find(what)
+            .unwrap_or_else(|| panic!("`{what}` is gone from desktop_schedule:\n{asking}"))
+    };
+    let turn = at("schedule::Turn::take()");
+    let rested = at("schedule::rested(now_epoch_ms())?;");
+    let read = at("schedule::read(");
+    let card = at("computer_use::confirm::handoff_said(");
+    let answered = at("schedule::answered(decision, now_epoch_ms());");
+    let settled = at("schedule::settle(");
+    assert!(
+        turn < rested && rested < read && read < card && card < answered && answered < settled,
+        "a request is read or shown before the rest is asked about, or an answer is settled before it is kept:\n{asking}"
+    );
+}
+
 /// A Flow as `recipe-save --flow-check` leaves one, under the policy named.
 fn asked_flow_document(policy: &str) -> String {
     format!(

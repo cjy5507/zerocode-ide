@@ -7863,7 +7863,8 @@ fn recipe_seen_by(window: Option<&tauri::AppHandle>) -> computer_use::recipes::S
 /// only on the person's yes — the job, through the door every writer of a job
 /// uses (`computer_use::recipes::schedule` holds every rule of it). Nothing is
 /// asked while the operator is stopped, while the person is answering another
-/// question, or while another schedule's card stands.
+/// question, while another schedule's card stands, or while requests rest
+/// after two answers in a row that were not a yes.
 fn desktop_schedule(
     command: &zerocode_core::computer_use::ComputerCommand,
     window: Option<&tauri::AppHandle>,
@@ -7884,6 +7885,9 @@ fn desktop_schedule(
         return Err(person_asked());
     }
     let _turn = schedule::Turn::take().ok_or_else(person_asked)?;
+    // Two answers in a row that were not a yes: requests rest, and this one is
+    // refused before it is read or shown.
+    schedule::rested(now_epoch_ms())?;
     let (Some(root), Some(window)) = (computer_use::evidence::root(), window) else {
         return Err(computer_use::ComputerUseError::new(
             error_code::ACCESSIBILITY_ERROR,
@@ -7905,6 +7909,7 @@ fn desktop_schedule(
         args,
         zerocode_core::computer_use::RECIPE_SCHEDULE_ASK_MS,
     );
+    schedule::answered(decision, now_epoch_ms());
     schedule::settle(request, decision, now_epoch_ms(), |job| {
         crate::cmd::review::save_automation_in(window.state::<AppState>().config_root(), job)
     })
