@@ -36,8 +36,8 @@ use zerocode_core::computer_flow::{
 };
 use zerocode_core::computer_recipe::{
     Plan, RECIPE_CHECKS, RecipeLine, RecipeStop, RecipeTool, TabBindingError, TabBindings,
-    preflight, recipe_landing_box, recipe_line_argv, recipe_line_holds_ms, recipe_lines,
-    recipe_step_argv,
+    browser_tab_target, is_tab_alias, preflight, recipe_landing_box, recipe_line_argv,
+    recipe_line_holds_ms, recipe_lines, recipe_step_argv,
 };
 use zerocode_core::computer_use::{
     COMPUTER_CLI, ComputerCommand, ComputerMethod, FLOW_BASELINE_PROBE_MS, FLOW_VERIFY_MS, Next,
@@ -69,8 +69,8 @@ pub trait Desk {
     fn pause(&mut self, pause: Duration);
     /// The pages the window's browser panes show — `(label, url)` — from the
     /// window's own records, never a webview asked (the URL crash of
-    /// 2026-09-07): what a Flow's fingerprint is matched against, and what a
-    /// browser act is bound to before it is sent.
+    /// 2026-09-07): where a Flow's fingerprint is matched against the tabs
+    /// the walk aims at, and what a browser act is bound to before it is sent.
     fn pages(&mut self) -> Vec<(String, String)>;
 }
 
@@ -184,9 +184,7 @@ fn resolve_tabs(
     argv: &[String],
     desk: &RefCell<impl Desk>,
 ) -> Result<Vec<String>, Refused> {
-    let aliased = tool == RecipeTool::Browser
-        && zerocode_core::computer_recipe::browser_tab_target(argv)
-            .is_some_and(zerocode_core::computer_recipe::is_tab_alias);
+    let aliased = tool == RecipeTool::Browser && browser_tab_target(argv).is_some_and(is_tab_alias);
     let pages = if aliased {
         desk.borrow_mut().pages()
     } else {
@@ -715,8 +713,9 @@ pub fn run(
             },
         };
     if let Some(spec) = &flow {
+        let aimed = aimed_tabs(&decided.planned, &spec.checks, &tabs.borrow());
         spec.fingerprint
-            .matches(&live_fingerprint(&mut *desk.borrow_mut()))
+            .matches(&live_fingerprint(&mut *desk.borrow_mut(), &aimed))
             .map_err(|stale| Refused {
                 code: error_code::FLOW_STALE,
                 message: stale.said(),
@@ -849,13 +848,52 @@ pub fn run(
     Ok(report)
 }
 
+/// The browser tabs a walk is about to use: the label each line it will run
+/// and each check names, an alias read through this run's bindings. A tab the
+/// recipe opens for itself has no label before the walk; its page is asked
+/// about act by act (`browser_act_outside`), as every browser act is.
+fn aimed_tabs(
+    planned: &[(RecipeLine, Plan)],
+    checks: &[Check],
+    tabs: &TabBindings,
+) -> std::collections::BTreeSet<String> {
+    let lines = planned.iter().filter_map(|(line, plan)| match plan {
+        Plan::Run(argv) => Some((line.tool, argv.as_slice())),
+        Plan::Skip(_) | Plan::Stop(_) => None,
+    });
+    let checks = checks
+        .iter()
+        .map(|check| (check.tool, check.argv.as_slice()));
+    lines
+        .chain(checks)
+        .filter(|(tool, _)| *tool == RecipeTool::Browser)
+        .filter_map(|(_, argv)| browser_tab_target(argv))
+        .filter_map(|word| {
+            if is_tab_alias(word) {
+                tabs.labels().get(word).map(String::as_str)
+            } else {
+                Some(word)
+            }
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// The live fingerprint before the first act: the hosts of the pages the
-/// window's panes show (the apps are read from each act's answer as the
-/// walk goes), on this build's protocol.
-fn live_fingerprint(desk: &mut impl Desk) -> Fingerprint {
+/// walk's own tabs show (`aimed`; the apps are read from each act's answer
+/// as the walk goes), on this build's protocol. A window holds many agents'
+/// panes at once, and a page some other pane shows is not this walk's
+/// environment: read as one, a tab opened for other work made a Flow with no
+/// browser step stale (measured 2026-11-11, a scheduled walk refused over
+/// another pane's local page).
+fn live_fingerprint(
+    desk: &mut impl Desk,
+    aimed: &std::collections::BTreeSet<String>,
+) -> Fingerprint {
     let pages: Vec<Value> = desk
         .pages()
         .into_iter()
+        .filter(|(label, _)| aimed.contains(label))
         .map(|(_, url)| json!({ "url": url }))
         .collect();
     Fingerprint::observe(&[Value::Array(pages)])
@@ -3150,6 +3188,92 @@ mod tests {
             "{}",
             report["flow"]
         );
+    }
+
+    /// A Flow's start check reads the tabs the walk aims at and no others: a
+    /// window holds many agents' panes, and a page some other pane shows is
+    /// not this walk's environment — a Flow with no browser step was refused
+    /// over one (2026-11-11). The walk's own tabs are the labels its lines
+    /// and its checks name, an alias through this run's bindings, and one of
+    /// those on a host the recording never saw still refuses the run before
+    /// its first act.
+    #[test]
+    fn a_flow_run_is_stale_only_for_the_tabs_it_aims_at() {
+        fn walked(
+            text: &str,
+            command: &ComputerCommand,
+            bench: &Bench,
+        ) -> (Result<Value, Refused>, usize) {
+            let mut sent = 0;
+            let outcome = run(
+                &walk_of(command, text),
+                |tool, _, _| {
+                    sent += 1;
+                    if tool == RecipeTool::Browser {
+                        browser_said("클릭 이벤트를 보냈습니다")
+                    } else {
+                        ok()
+                    }
+                },
+                |_, _, _| {},
+                |_| {},
+                bench.desk(false, None),
+                || true,
+            );
+            (outcome, sent)
+        }
+        let on_the_desktop = flow(vec![check(
+            1,
+            CheckKind::State,
+            true,
+            RecipeTool::Computer,
+            &["wait-for", "--app", "Mail", "--text", "Done"],
+        )]);
+        let other_work = ("browser-9", "http://127.0.0.1:5173/preview");
+
+        // No browser step and no browser check: no pane is this walk's.
+        let text = flow_doc(&[(RecipeTool::Computer, "key --key a")], &on_the_desktop);
+        let (report, _) = walked(&text, &command(&[]), &Bench::new().showing(&[other_work]));
+        let report = report.expect("another pane's page is not this walk's environment");
+        assert_eq!(report["done"], true, "{report}");
+        assert_eq!(report["flow"]["verdict"]["pass"], true, "{report}");
+
+        // Its own tab on the recorded host, beside another pane's page.
+        let text = flow_doc(
+            &[(RecipeTool::Browser, "click browser-1 #pay")],
+            &on_the_desktop,
+        );
+        let beside =
+            || Bench::new().showing(&[("browser-1", "https://stg.example/pay"), other_work]);
+        let (report, _) = walked(&text, &command(&[]), &beside());
+        assert_eq!(report.expect("the recorded host walks")["done"], true);
+
+        // An alias is aimed at through the label this run bound to it.
+        let text = flow_doc(&[(RecipeTool::Browser, "click $tab #pay")], &on_the_desktop);
+        let bound = command(&["--tab", "browser-1"]);
+        let (report, _) = walked(&text, &bound, &beside());
+        assert_eq!(report.expect("the bound tab is on its host")["done"], true);
+        let elsewhere = Bench::new().showing(&[("browser-1", "https://other.example/login")]);
+        let (refused, sent) = walked(&text, &bound, &elsewhere);
+        let refused = refused.expect_err("the bound tab left the recorded hosts");
+        assert_eq!(refused.code, error_code::FLOW_STALE);
+        assert!(refused.message.contains("other.example"), "{refused:?}");
+        assert_eq!(sent, 0, "nothing moved");
+
+        // A check's tab is the walk's too: its verdict is read there.
+        let read_on_a_page = flow(vec![check(
+            1,
+            CheckKind::State,
+            true,
+            RecipeTool::Browser,
+            &["find", "browser-2", "Done"],
+        )]);
+        let text = flow_doc(&[(RecipeTool::Computer, "key --key a")], &read_on_a_page);
+        let judged_elsewhere = Bench::new().showing(&[("browser-2", "https://other.example/done")]);
+        let (refused, sent) = walked(&text, &command(&[]), &judged_elsewhere);
+        let refused = refused.expect_err("the page the verdict is read on left the recording");
+        assert_eq!(refused.code, error_code::FLOW_STALE);
+        assert_eq!(sent, 0, "nothing moved");
     }
 
     /// The environment is bound act by act: a browser press aimed at a pane
