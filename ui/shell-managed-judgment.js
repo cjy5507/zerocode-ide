@@ -634,7 +634,13 @@ const managedJudgmentController = {
     return this.snapshot?.appliedModelId === model.id && server?.modelId === model.id && server.state === "ready" && server.checked === true;
   },
 
+  /* Repainting the local model panel keeps the page where the person scrolled it
+   * (`keepingSettingsScroll`). */
   render() {
+    keepingSettingsScroll(() => this.repaint());
+  },
+
+  repaint() {
     judgmentModelSourceController.render();
     judgmentProviderController.renderStatus();
     const snapshot = this.snapshot;

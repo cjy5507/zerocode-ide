@@ -56,6 +56,59 @@ const MODEL_RUNTIME_STATES = Object.freeze({
  * before it asks again. */
 const RUNTIME_NEWS_EVERY_MS = 60 * 60 * 1000;
 
+/* A repaint of the model page keeps what the person is looking at where it
+ * is. The settings pane scrolls whole (`.settings-frame`), and the engine the
+ * app runs on — WebKit — does not anchor a scroller the way Chromium does:
+ * a row that appears, leaves or grows above the viewport pushes everything
+ * under it. While a model or an engine was being received, rows and notes
+ * came and went on every step and the page jumped under the pointer (the
+ * person, 2026-11-11: 「스크롤이 팅기는 현상」).
+ *
+ * The anchor is the named part that crosses the top of the viewport — a
+ * group, a row, a panel — found again by its name after the paint, because a
+ * repaint builds its rows anew. Where Chromium has already anchored, the
+ * part has not moved and nothing is written. */
+const SETTINGS_ANCHORS = "[data-connection-group], [data-connection-id], [data-runtime], .model-receive, .settings-card, .settings-fold";
+
+function settingsAnchorName(node) {
+  if (node.dataset.connectionId) return `[data-connection-id="${CSS.escape(node.dataset.connectionId)}"]`;
+  if (node.dataset.runtime) return `[data-runtime="${CSS.escape(node.dataset.runtime)}"]`;
+  if (node.dataset.connectionGroup) return `[data-connection-group="${CSS.escape(node.dataset.connectionGroup)}"]`;
+  return node.id ? `#${CSS.escape(node.id)}` : null;
+}
+
+function keepingSettingsScroll(paint) {
+  const frame = document.querySelector(".settings-frame");
+  if (!frame || frame.scrollTop <= 0) return paint();
+  const top = frame.scrollTop;
+  const edge = frame.getBoundingClientRect().top;
+  // The innermost named part standing across the viewport's top edge, or —
+  // with the edge in a gap — the first one under it.
+  let anchor = null;
+  for (const node of frame.querySelectorAll(SETTINGS_ANCHORS)) {
+    const name = settingsAnchorName(node);
+    if (!name || node.getClientRects().length === 0) continue;
+    const rect = node.getBoundingClientRect();
+    if (rect.bottom <= edge) continue;
+    if (rect.top <= edge) anchor = { name, at: rect.top };
+    else {
+      anchor ??= { name, at: rect.top };
+      break;
+    }
+  }
+  try {
+    return paint();
+  } finally {
+    const again = anchor ? frame.querySelector(anchor.name) : null;
+    if (again && again.getClientRects().length > 0) {
+      const moved = again.getBoundingClientRect().top - anchor.at;
+      if (Math.abs(moved) >= 1) frame.scrollTop += moved;
+    } else if (frame.scrollTop < top) {
+      frame.scrollTop = top;
+    }
+  }
+}
+
 /* What a failure a command answered is, in the table's states: a door's
  * token (`no_key`, `unauthorized`, `transport`, `schema_…`, `http_503`…) or
  * the router probe's own reading of its request (api_routers.rs
@@ -1157,9 +1210,11 @@ const modelConnectionsController = {
   /* ---- drawing ------------------------------------------------------------ */
 
   render() {
-    this.renderSetup();
-    this.renderDaily();
-    this.renderConnections();
+    keepingSettingsScroll(() => {
+      this.renderSetup();
+      this.renderDaily();
+      this.renderConnections();
+    });
   },
 
   /* One model, on one line: its name, how it is reached, a reason when it

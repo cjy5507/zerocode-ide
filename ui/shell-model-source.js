@@ -681,7 +681,13 @@ const judgmentModelSourceController = {
     folder.disabled = locked;
   },
 
+  /* Repainting the receive panel keeps the page where the person scrolled it
+   * (`keepingSettingsScroll`). */
   render() {
+    keepingSettingsScroll(() => this.repaint());
+  },
+
+  repaint() {
     this.init();
     this.track();
     const locked = this.locked();

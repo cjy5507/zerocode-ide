@@ -244,6 +244,7 @@ const ORCA_SETTINGS_CONTRACT = Object.freeze(JSON.parse(
 ));
 
 let chromium;
+let webkit;
 let AxeBuilder;
 try {
   const require = createRequire(import.meta.url);
@@ -261,7 +262,7 @@ try {
     if (!root) throw new Error("no global npm root");
     entry = require.resolve(resolve(root, "playwright"));
   }
-  ({ chromium } = require(entry));
+  ({ chromium, webkit } = require(entry));
   const axeEntry = require.resolve("@axe-core/playwright");
   const axeModule = require(axeEntry);
   AxeBuilder = axeModule.default ?? axeModule;
@@ -3950,7 +3951,10 @@ const origin = `http://127.0.0.1:${files.address().port}`;
 
 let browser;
 try {
-  browser = await chromium.launch();
+  // The gate runs on Chromium. `SETTINGS_ENGINE=webkit` runs the scenes that
+  // ask about the app's own engine (a filtered run: the gate's budgets and
+  // axe passes are Chromium's).
+  browser = await (process.env.SETTINGS_ENGINE === "webkit" ? webkit : chromium).launch();
 } catch (error) {
   console.error("FAIL  Chromium is required for the settings browser gate.");
   console.error("      Install it with: npx playwright install chromium");
@@ -16336,6 +16340,54 @@ await test("모델 받기: 주소나 ID는 바로 파일 목록으로 가고, �
     assertEqual(untranslated, [], "the line for a repository with no model is untranslated");
     return "ID → list → the one receivable file inspected · .gguf address → inspected directly · unopened ID → search, and 「not found」 when that finds nothing · unreadable address → said, not searched · no model file → said";
   } finally {
+    forgetReceiveFixtures();
+  }
+}));
+
+await test("모델: 위쪽에 줄이 생기고 사라져도 보고 있던 자리가 밀리지 않는다 (WebKit에서 팅기던 것, 2026-11-11)", async () => withJudgmentStatus(async (page) => {
+  try {
+    await openModelReceive(page);
+    await page.setViewportSize({ width: 1280, height: 640 });
+    await renderSettled(page);
+    // The person is working in 「모델 받기」: its field stands a little under
+    // the top of the viewport, with the group's rows scrolled out above.
+    const look = () => page.evaluate(() => {
+      const frame = document.querySelector(".settings-frame");
+      return { field: Math.round(document.getElementById("judgment-source-repository").getBoundingClientRect().top), top: Math.round(frame.scrollTop) };
+    });
+    await page.evaluate(() => {
+      const frame = document.querySelector(".settings-frame");
+      const field = document.getElementById("judgment-source-repository");
+      frame.scrollTop += field.getBoundingClientRect().top - frame.getBoundingClientRect().top - 90;
+    });
+    const before = await look();
+    assert(before.top > 100, "the page did not scroll down to the receive panel", before);
+    const rows = () => page.locator('[data-connection-group="local"] [data-group-lines] > .model-line').count();
+    const rowsBefore = await rows();
+    // A model is received: its row appears among the group's rows, above
+    // the panel — and, received, leaves again. Chromium anchors the scroller
+    // by itself; WebKit, the app's engine, pushed the panel down and up.
+    const seen = [];
+    const step = async (change) => {
+      const held = backend.managedModelState;
+      change(held);
+      held.revision += 1;
+      await backend.emitManaged(backend.managedJudgmentSettings());
+      await renderSettled(page);
+      seen.push((await look()).field);
+    };
+    await step((held) => { held.models.push({ ...clone(held.models[0]), id: "fixture-second", label: "Fixture Second", installed: true }); });
+    assertEqual(await rows(), rowsBefore + 1, "the received model has no row above the panel");
+    await step((held) => { held.operation = { id: "fixture-progress", kind: "download", modelId: "fixture-second", state: "running", receivedBytes: 31 * 1024 * 1024, totalBytes: 183 * 1024 * 1024, error: null }; });
+    await step((held) => { held.operation = null; held.models.pop(); });
+    assertEqual(await rows(), rowsBefore);
+    assertEqual(seen.filter((at) => Math.abs(at - before.field) > 1), [], `the field moved from ${before.field}px as rows above it came and went`);
+    return `field held at ${before.field}px over ${seen.length} repaints (scrolled ${before.top}px)`;
+  } finally {
+    const held = backend.managedModelState;
+    held.operation = null;
+    held.models = held.models.filter((model) => model.id !== "fixture-second");
+    await page.setViewportSize({ width: 1280, height: 860 });
     forgetReceiveFixtures();
   }
 }));
