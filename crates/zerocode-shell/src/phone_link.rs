@@ -393,9 +393,11 @@ impl Link {
             ports.push(https);
         }
         if let Some(port) = listening {
-            ports.extend(tailscale::HTTPS_PORTS.into_iter().filter(|https| {
-                !ports.contains(https) && tailscale::ours_stands(&serve, &name, *https, port)
-            }));
+            for https in tailscale::HTTPS_PORTS {
+                if !ports.contains(&https) && tailscale::ours_stands(&serve, &name, https, port) {
+                    ports.push(https);
+                }
+            }
         }
         take_down(&cli, &ports, |cli, args| {
             tailscale::run_within(cli, args, limit)
