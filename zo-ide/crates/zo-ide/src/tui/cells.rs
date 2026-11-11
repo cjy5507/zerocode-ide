@@ -976,14 +976,22 @@ pub struct MarkdownStream {
     /// heading — Anthropic thinking — so the caller commits it as a thinking
     /// cell ([`super::thinking::cell`]) rather than codex's summary cell.
     headerless_thinking: bool,
-    /// The line still being written is drawn as far as it has come
-    /// ([`Self::showing_unfinished`]); codex's silence until the newline
-    /// otherwise.
-    shows_unfinished: bool,
+    /// Whether the line still being written is drawn as far as it has come
+    /// ([`Self::showing_unfinished`]).
+    unfinished_line: UnfinishedLine,
     /// The unfinished line's rows as [`Self::refresh_unfinished`] last
     /// rendered them, and what they were rendered from: a frame that brings
     /// no new text draws them again unread.
     unfinished: Option<UnfinishedRows>,
+}
+
+/// What a stream does with the line still being written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnfinishedLine {
+    /// Nothing of it until its newline — codex's silence.
+    Waits,
+    /// It is drawn as far as it has come.
+    Shows,
 }
 
 /// The rows of a line still being written ([`MarkdownStream::refresh_unfinished`]),
@@ -1031,7 +1039,7 @@ impl MarkdownStream {
             kind: MarkdownStreamKind::Answer,
             reasoning_transcript: None,
             headerless_thinking: false,
-            shows_unfinished: false,
+            unfinished_line: UnfinishedLine::Waits,
             unfinished: None,
         }
     }
@@ -1048,7 +1056,7 @@ impl MarkdownStream {
     /// time ([`Self::tick`]).
     #[must_use]
     pub fn showing_unfinished(mut self, shows: bool) -> Self {
-        self.shows_unfinished = shows;
+        self.unfinished_line = if shows { UnfinishedLine::Shows } else { UnfinishedLine::Waits };
         self
     }
 
@@ -1205,7 +1213,7 @@ impl MarkdownStream {
 
     /// 커밋 애니메이션 한 틱 — 이번에 스크롤백으로 갈 행들.
     pub fn tick(&mut self, now: Instant) -> Vec<Line> {
-        if self.shows_unfinished {
+        if self.unfinished_line == UnfinishedLine::Shows {
             // The rows stood in the live cell while their line was written:
             // they go into the scrollback as they are, in this frame, where
             // the cadence below would take them off the screen and type them
@@ -1302,7 +1310,7 @@ impl MarkdownStream {
     /// 올 때까지 화면은 `Working` 만 보여 준다.
     #[must_use]
     pub fn tail(&self) -> Vec<Line> {
-        if self.shows_unfinished {
+        if self.unfinished_line == UnfinishedLine::Shows {
             // Every row that is not in the scrollback yet — a queued row
             // stays on screen until the tick that hands it over — and then
             // the line still being written.
@@ -1337,7 +1345,7 @@ impl MarkdownStream {
     /// fence, a line inside one (its colour is its block's) — nor for a block
     /// past [`UNFINISHED_MAX_SOURCE`].
     pub fn refresh_unfinished(&mut self) {
-        if !self.shows_unfinished || self.kind != MarkdownStreamKind::Answer {
+        if self.unfinished_line == UnfinishedLine::Waits || self.kind != MarkdownStreamKind::Answer {
             return;
         }
         let fresh = self.unfinished.as_ref().is_some_and(|drawn| {
