@@ -172,12 +172,21 @@ impl Book {
     }
 }
 
+/// The Unicode direction controls (embeddings, overrides, isolates, marks):
+/// in a phone's name they would reorder what the device list shows.
+fn turns_direction(one: char) -> bool {
+    matches!(
+        one,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 /// A name a phone gave itself, made safe to keep and to draw: printable
-/// characters only, trimmed, bounded, never empty.
+/// characters only, no direction controls, trimmed, bounded, never empty.
 pub(crate) fn clean_name(name: &str) -> String {
     let kept: String = name
         .chars()
-        .filter(|one| !one.is_control())
+        .filter(|one| !one.is_control() && !turns_direction(*one))
         .take(MAX_NAME_CHARS)
         .collect();
     let kept = kept.trim();
@@ -202,14 +211,21 @@ pub(crate) fn load(path: &Path) -> Book {
 }
 
 /// Write the book beside itself and rename it into place, readable by this
-/// user alone.
+/// user alone. A staging file left by a write that died is removed first:
+/// `mode` applies only to a file being created, and one left behind keeps
+/// whatever rights it had.
 pub(crate) fn save(path: &Path, book: &Book) -> std::io::Result<()> {
     let bytes = serde_json::to_vec_pretty(book).map_err(std::io::Error::other)?;
     let staged = path.with_extension("json.tmp");
+    if let Err(error) = std::fs::remove_file(&staged)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error);
+    }
     {
         use std::io::Write as _;
         let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
@@ -387,6 +403,11 @@ mod tests {
         assert_eq!(clean_name("  \u{7}\n "), "Phone");
         assert_eq!(clean_name("iPhone\u{0}"), "iPhone");
         assert_eq!(clean_name(&"x".repeat(100)).chars().count(), 40);
+        assert_eq!(
+            clean_name("\u{202E}enohPi\u{2066}x\u{2069}\u{200F}"),
+            "enohPix",
+            "a name cannot turn the device list's text around"
+        );
     }
 
     #[test]
@@ -452,11 +473,21 @@ mod tests {
         let mut book = Book {
             enabled: true,
             port: Some(4321),
-            https_port: Some(8443),
+            https_port: Some(10443),
             devices: Vec::new(),
         };
         book.pair("p", "fixture-x", "d1".into(), 5);
+        // A staging file a dead write left, readable by everyone.
+        let staged = path.with_extension("json.tmp");
+        std::fs::write(&staged, b"left").expect("staged");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+        }
         save(&path, &book).expect("save");
+        assert!(!staged.exists(), "the staging file is renamed into place");
         assert_eq!(load(&path), book);
         #[cfg(unix)]
         {

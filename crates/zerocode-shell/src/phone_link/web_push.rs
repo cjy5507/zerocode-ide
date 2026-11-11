@@ -178,11 +178,41 @@ pub(crate) fn vapid_authorization(
     Some(format!("vapid t={token}, k={public}"))
 }
 
-/// The origin of a push endpoint — the JWT's `aud`. Only `https` endpoints
-/// are push services; anything else is refused before a request is made.
+/// The push services a subscription may name, by host: the one name, or
+/// (leading dot) any name under it. The window posts to nothing else — a
+/// paired phone cannot make it post to this machine's tailnet name, another
+/// Serve site or a LAN address.
+const PUSH_SERVICES: &[&str] = &[
+    ".push.apple.com",
+    "fcm.googleapis.com",
+    ".push.services.mozilla.com",
+    ".notify.windows.com",
+];
+
+fn push_service(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    PUSH_SERVICES.iter().any(|service| {
+        if service.starts_with('.') {
+            host.len() > service.len() && host.ends_with(service)
+        } else {
+            host == *service
+        }
+    })
+}
+
+/// The origin of a push endpoint — the JWT's `aud`. Only an `https` endpoint
+/// on a known push service's name, on its default port and with no user in
+/// it, is a push service; anything else is refused before a request is made.
 pub(crate) fn audience_of(endpoint: &str) -> Option<String> {
     let parsed = url::Url::parse(endpoint).ok()?;
-    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+    let url::Host::Domain(host) = parsed.host()? else {
+        return None;
+    };
+    let plain = parsed.scheme() == "https"
+        && parsed.port().is_none()
+        && parsed.username().is_empty()
+        && parsed.password().is_none();
+    if !plain || !push_service(host) {
         return None;
     }
     Some(parsed.origin().ascii_serialization())
@@ -329,7 +359,7 @@ mod tests {
         let signer = sender();
         let value = vapid_authorization(
             &signer,
-            "https://push.example.test/send/abc?x=1",
+            "https://web.push.apple.com/send/abc?x=1",
             "mailto:phone@host.example.test",
             1_000,
         )
@@ -347,7 +377,7 @@ mod tests {
         assert_eq!(header["typ"], "JWT");
         let claims: serde_json::Value =
             serde_json::from_slice(&decode(parts[1]).expect("claims")).expect("json");
-        assert_eq!(claims["aud"], "https://push.example.test");
+        assert_eq!(claims["aud"], "https://web.push.apple.com");
         assert_eq!(claims["exp"], 1_000 + VAPID_LIFETIME_SECS);
         assert_eq!(claims["sub"], "mailto:phone@host.example.test");
         let signature_bytes = decode(parts[2]).expect("signature");
@@ -367,7 +397,28 @@ mod tests {
             audience_of("https://web.push.apple.com/QGx").as_deref(),
             Some("https://web.push.apple.com")
         );
-        assert_eq!(audience_of("http://push.example.test/x"), None);
+        assert_eq!(audience_of("http://web.push.apple.com/x"), None);
+        for service in [
+            "https://web.push.apple.com/QGuQ",
+            "https://fcm.googleapis.com/fcm/send/abc",
+            "https://updates.push.services.mozilla.com/wpush/v2/abc",
+            "https://wns2-par02p.notify.windows.com/w/?token=abc",
+        ] {
+            assert!(audience_of(service).is_some(), "{service}");
+        }
+        for elsewhere in [
+            "https://host.example.test/api/pair",
+            "https://push.apple.com/x",
+            "https://web.push.apple.com.example.test/x",
+            "https://evilpush.apple.com/x",
+            "https://fcm.googleapis.com.example.test/x",
+            "https://fcm.googleapis.com:8443/x",
+            "https://user@fcm.googleapis.com/x",
+            "https://192.0.2.7/x",
+            "https://[::1]/x",
+        ] {
+            assert_eq!(audience_of(elsewhere), None, "{elsewhere}");
+        }
         assert_eq!(audience_of("not a url"), None);
     }
 

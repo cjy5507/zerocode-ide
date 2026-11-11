@@ -167,6 +167,11 @@ pub(crate) trait Window: Send + Sync {
     fn now_ms(&self) -> i64;
     fn status(&self) -> StatusView;
     fn panes(&self) -> Vec<PaneView>;
+    /// A phone has just paired: the window tells the person, by the name the
+    /// phone gave and the time. Anything on this machine can reach the
+    /// listener from loopback and claim the owner's login, so the person is
+    /// the one who notices a phone that is not theirs.
+    fn paired(&self, _name: &str, _at_ms: i64) {}
 }
 
 /// Which Host headers are this machine.
@@ -209,6 +214,9 @@ pub(crate) struct Core {
     pub(crate) owner: Mutex<Option<String>>,
     /// The VAPID public key, base64url, for the phone's `subscribe`.
     pub(crate) vapid_public: Mutex<Option<String>>,
+    /// Held across the copy and the write of one save, so two saves land in
+    /// the order their copies were taken and never share the staging file.
+    saving: Mutex<()>,
 }
 
 impl Core {
@@ -220,13 +228,24 @@ impl Core {
             hosts: Mutex::new(Hosts::default()),
             owner: Mutex::new(None),
             vapid_public: Mutex::new(None),
+            saving: Mutex::new(()),
         }
     }
 
-    pub(crate) fn save(&self, book: &Book) {
-        if let Some(path) = &self.book_path
-            && let Err(error) = book::save(path, book)
-        {
+    /// Write the book as it stands now. Callers change the book under its
+    /// own lock and let go of it first: the copy is taken here, under the
+    /// save lock, so a later save always writes a later book.
+    pub(crate) fn save(&self) {
+        let Some(path) = &self.book_path else {
+            return;
+        };
+        let Ok(_saving) = self.saving.lock() else {
+            return;
+        };
+        let Some(snapshot) = self.book.lock().ok().map(|book| book.clone()) else {
+            return;
+        };
+        if let Err(error) = book::save(path, &snapshot) {
             eprintln!("zerocode-shell: phone link book not saved: {error}");
         }
     }
@@ -324,9 +343,8 @@ impl Core {
         let stale = now.saturating_sub(device.last_seen_ms) >= SEEN_WRITE_MS;
         device.last_seen_ms = now;
         if stale {
-            let snapshot = book.clone();
             drop(book);
-            self.save(&snapshot);
+            self.save();
         }
         Some(id)
     }
@@ -364,14 +382,19 @@ impl Core {
             return Response::error(500, "random");
         };
         let id = uuid::Uuid::new_v4().to_string();
-        let snapshot = {
+        let named = {
             let Ok(mut book) = self.book.lock() else {
                 return Response::error(500, "book");
             };
             book.pair(&ask.name, &token, id.clone(), now);
-            book.clone()
+            book.devices
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.name.clone())
+                .unwrap_or_default()
         };
-        self.save(&snapshot);
+        self.save();
+        window.paired(&named, now);
         let vapid = self.vapid_public.lock().ok().and_then(|held| held.clone());
         Response::json(
             200,
@@ -402,7 +425,7 @@ impl Core {
         {
             return Response::error(400, "subscription");
         }
-        let snapshot = {
+        {
             let Ok(mut book) = self.book.lock() else {
                 return Response::error(500, "book");
             };
@@ -414,23 +437,21 @@ impl Core {
                 p256dh: subscription.keys.p256dh,
                 auth: subscription.keys.auth,
             });
-            book.clone()
-        };
-        self.save(&snapshot);
+        }
+        self.save();
         Response::json(200, &json!({ "push": true }))
     }
 
     fn unsubscribe(&self, device: &str) -> Response {
-        let snapshot = {
+        {
             let Ok(mut book) = self.book.lock() else {
                 return Response::error(500, "book");
             };
             if let Some(row) = book.devices.iter_mut().find(|row| row.id == device) {
                 row.push = None;
             }
-            book.clone()
-        };
-        self.save(&snapshot);
+        }
+        self.save();
         Response::json(200, &json!({ "push": false }))
     }
 }
@@ -584,6 +605,8 @@ mod tests {
     struct FakeWindow {
         now: i64,
         panes: Vec<PaneView>,
+        /// What the window was told of new phones.
+        told: Mutex<Vec<(String, i64)>>,
     }
 
     impl Window for FakeWindow {
@@ -599,6 +622,9 @@ mod tests {
         fn panes(&self) -> Vec<PaneView> {
             self.panes.clone()
         }
+        fn paired(&self, name: &str, at_ms: i64) {
+            self.told.lock().unwrap().push((name.to_string(), at_ms));
+        }
     }
 
     fn window() -> FakeWindow {
@@ -613,6 +639,7 @@ mod tests {
                 waiting: Some("permission"),
                 since_ms: 900,
             }],
+            told: Mutex::new(Vec::new()),
         }
     }
 
@@ -673,7 +700,59 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_slice(&answer.body).unwrap();
         assert_eq!(value["vapidPublicKey"], "fixture-vapid");
+        assert_eq!(
+            window.told.lock().unwrap().last(),
+            Some(&("Fixture phone".to_string(), window.now)),
+            "the window is told of the phone it just paired"
+        );
         value["token"].as_str().unwrap().to_string()
+    }
+
+    /// Saves from many threads land in order: the file ends as the book does.
+    #[test]
+    fn concurrent_saves_leave_the_last_book_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = book::book_path(dir.path());
+        let core = std::sync::Arc::new(Core::new(Some(path.clone()), Book::default()));
+        let writers: Vec<_> = (0..8_u16)
+            .map(|round| {
+                let core = std::sync::Arc::clone(&core);
+                std::thread::spawn(move || {
+                    for step in 0..20_u16 {
+                        core.book.lock().unwrap().port = Some(round * 100 + step);
+                        core.save();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        // No save after the joins: the last one any writer made must already
+        // hold the book's last state.
+        assert_eq!(book::load(&path), *core.book.lock().unwrap());
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn a_refused_pairing_tells_the_window_nothing() {
+        let core = core();
+        let window = window();
+        core.pairing
+            .lock()
+            .unwrap()
+            .issue_exact("ABCD2345", window.now);
+        let wrong = core.handle(
+            &window,
+            &from_tailnet(
+                "POST",
+                "/api/pair",
+                &[("tailscale-user-login", OWNER)],
+                r#"{"code":"WRONG234","name":"Fixture phone"}"#,
+            ),
+        );
+        assert_eq!(wrong.status, 403);
+        assert!(window.told.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -881,17 +960,30 @@ mod tests {
                 "POST",
                 "/api/push/subscribe",
                 &[("authorization", &bearer)],
-                r#"{"endpoint":"http://push.example.test/x","keys":{"p256dh":"a","auth":"b"}}"#,
+                r#"{"endpoint":"http://web.push.apple.com/x","keys":{"p256dh":"a","auth":"b"}}"#,
             ),
         );
         assert_eq!(bad.status, 400);
+        let elsewhere = core.handle(
+            &window,
+            &from_tailnet(
+                "POST",
+                "/api/push/subscribe",
+                &[("authorization", &bearer)],
+                r#"{"endpoint":"https://host.example.test:8443/api/pair","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#,
+            ),
+        );
+        assert_eq!(
+            elsewhere.status, 400,
+            "a push service is the only place the window posts to"
+        );
         let good = core.handle(
             &window,
             &from_tailnet(
                 "POST",
                 "/api/push/subscribe",
                 &[("authorization", &bearer)],
-                r#"{"endpoint":"https://push.example.test/x","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#,
+                r#"{"endpoint":"https://web.push.apple.com/x","keys":{"p256dh":"BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4","auth":"BTBZMqHH6r4Tts7J_aSIgg"}}"#,
             ),
         );
         assert_eq!(good.status, 200);

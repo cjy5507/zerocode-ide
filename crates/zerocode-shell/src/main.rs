@@ -4055,6 +4055,7 @@ fn main() -> ExitCode {
                 emulator::shutdown_all(handle);
                 codex_queue::shutdown_all();
                 cmd::managed_judgment::shutdown();
+                phone_link::shutdown();
                 capture_scrollback_at_exit(handle);
                 // 원장의 마지막 플러시 — 디바운스가 아직 자고 있어도 여기서
                 // 적힌다(Orca quit의 flushStatusPersistSync와 같은 자리).
@@ -4177,6 +4178,8 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
 
     fn end_panes(&self) {
         cmd::managed_judgment::shutdown();
+        // The tailnet mapping the phone link made goes with the window.
+        phone_link::shutdown();
         // Out of the pool, one by one: the last hold on each lets go and
         // the lane ends its child (`PtyLane`'s own drop). Their seats are
         // asleep by now, so the ledger settles nothing as they go.

@@ -1850,9 +1850,13 @@ function remoteLinkProblemWords(problem) {
       return t("settings.remoteLink.hookExposed", "에이전트 훅 브리지 포트가 Serve나 Funnel에 올라가 있어 켤 수 없습니다. 그 매핑을 먼저 지우세요.");
     case "port-taken":
     case "no-free-port":
-      return t("settings.remoteLink.portTaken", "쓸 수 있는 HTTPS 포트(8443·10443·9443)를 다른 Serve 매핑이 모두 쓰고 있습니다.");
+      return t("settings.remoteLink.portTaken", "쓸 수 있는 HTTPS 포트(10443·9443)를 다른 Serve 매핑이 모두 쓰고 있습니다.");
     case "refused":
       return t("settings.remoteLink.funnel", "이 포트에 Funnel(인터넷 공개)이 켜져 있어 폰 기능을 껐습니다.");
+    case "listener-shared":
+      return t("settings.remoteLink.shared", "폰 리스너 포트를 다른 Serve 매핑도 가리키고 있어 폰 기능을 껐습니다. 그 매핑을 지우고 다시 켜세요.");
+    case "port-moved":
+      return t("settings.remoteLink.portMoved", "폰 기능이 쓰던 HTTPS 포트를 지금은 쓸 수 없어 꺼 두었습니다. 끄고 다시 켜면 빈 포트를 고릅니다.");
     default:
       return problem ? String(problem) : null;
   }
@@ -1870,7 +1874,8 @@ function remoteLinkRoad(status) {
     return { state: "disconnected", summary: t("settings.remoteLink.off", "꺼짐"), words: remoteLinkProblemWords("tailscale-https"), can: false };
   }
   if (status.exposure === "hookExposed") {
-    return { state: "error", summary: t("settings.remoteLink.refused", "거절됨"), words: remoteLinkProblemWords("hook-exposed"), can: false };
+    // Refused, never stuck: an enabled link can still be turned off here.
+    return { state: "error", summary: t("settings.remoteLink.refused", "거절됨"), words: remoteLinkProblemWords("hook-exposed"), can: status.enabled };
   }
   if (status.exposure === "funnel") {
     return { state: "error", summary: t("settings.remoteLink.refused", "거절됨"), words: remoteLinkProblemWords("refused"), can: status.enabled };
@@ -2017,6 +2022,28 @@ async function refreshRemoteLink() {
 }
 
 el("remote-link-refresh").addEventListener("click", () => void refreshRemoteLink());
+
+/* A phone paired (phone_link.rs `PAIRED_EVENT`). Anything on this machine can
+ * reach the listener from loopback, so the person is the one who knows the
+ * phone is theirs: the window says its name and time until they look. */
+listen("phone-link:paired", (event) => {
+  const name = String(event.payload?.name ?? "");
+  const at = Number(event.payload?.atMs) || Date.now();
+  const time = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // Sticky: it goes when the person opens the device list from it.
+  const note = toast(t("settings.remoteLink.paired", "새 폰이 연결됐습니다: {{name}} · {{time}}", { name, time }), "", {
+    sticky: true,
+    action: {
+      label: t("settings.remoteLink.pairedOpen", "기기 보기"),
+      run: () => {
+        closing(note, () => note.remove());
+        setSettingsOpen(true);
+        showSettingsPane("remote-link");
+      },
+    },
+  });
+  if (settingsPane === "remote-link" && !settingsView.hidden) void refreshRemoteLink();
+});
 el("remote-link-toggle").addEventListener("click", () => void remoteLinkPress(
   remoteLinkStatus?.enabled ? "phone_link_disable" : "phone_link_enable",
   {},

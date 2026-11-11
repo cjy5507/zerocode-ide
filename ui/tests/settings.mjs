@@ -2552,7 +2552,7 @@ class StatefulBackend {
           listening: true,
           exposure: "ours",
           pushReady: true,
-          url: "https://host.example.test:8443/",
+          url: "https://host.example.test:10443/",
         };
         return clone(this.phoneLink);
       case "phone_link_disable": {
@@ -2562,7 +2562,7 @@ class StatefulBackend {
       }
       case "phone_link_new_code": return {
         code: "ABCD2345",
-        url: "https://host.example.test:8443/pair#ABCD2345",
+        url: "https://host.example.test:10443/pair#ABCD2345",
         expiresMs: Date.now() + 10 * 60 * 1000,
         qrSvg: '<?xml version="1.0" standalone="yes"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4"><path fill="currentColor" d="M0 0h1v1H0z"/></svg>',
       };
@@ -10954,7 +10954,7 @@ await test("Remote link turns the phone link on, shows a one-time QR, and revoke
   await pageA.waitForFunction(() =>
     document.querySelector("#remote-link-summary")?.dataset.state === "connected");
   assert(
-    (await pageA.locator("#remote-link-road-desc").innerText()).includes("https://host.example.test:8443/"),
+    (await pageA.locator("#remote-link-road-desc").innerText()).includes("https://host.example.test:10443/"),
     "the tailnet address was not shown once the link was on",
   );
 
@@ -10977,13 +10977,27 @@ await test("Remote link turns the phone link on, shows a one-time QR, and revoke
   await pageA.waitForFunction(() =>
     document.querySelectorAll("#remote-link-devices [data-device-id]").length === 0);
 
+  // A phone pairing is told to the person, by its name, until they look —
+  // anything on this machine can reach the listener from loopback.
+  const pairedAt = backend.calls.length;
+  await pageA.evaluate(() => window.__SETTINGS_TEST_EMIT__("phone-link:paired", {
+    name: "Fixture phone",
+    atMs: Date.now(),
+  }));
+  const notice = pageA.locator(".toast", { hasText: "Fixture phone" });
+  await notice.waitFor({ state: "visible" });
+  await backend.waitForCall("A", "phone_link_status", pairedAt);
+  await notice.locator(".toast-action").click();
+  await pageA.waitForFunction(() => settingsPane === "remote-link" && !settingsView.hidden);
+  await notice.waitFor({ state: "detached" });
+
   const offAt = backend.calls.length;
   await pageA.locator("#remote-link-toggle").click();
   await backend.waitForCall("A", "phone_link_disable", offAt);
   await pageA.waitForFunction(() =>
     document.querySelector("#remote-link-summary")?.dataset.state === "disconnected");
   assert(await pageA.locator("#remote-link-pair").isHidden(), "the QR outlived the link");
-  return "tailnet-only status + one-time QR + revoke + off";
+  return "tailnet-only status + one-time QR + revoke + pairing notice + off";
 });
 
 await test("macOS Permissions exposes one closed native inventory and a private-LAN-only test", async () => {
