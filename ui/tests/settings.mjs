@@ -5551,7 +5551,7 @@ await test("a_job_is_saved_switched_and_run_by_the_persons_own_press", async () 
       tokenByClick: "person",
       tokenByEnter: "person",
     }, "a press of the person's own did not say so, and the window would refuse it");
-    return "thirteen presses, each the person's and each sent once";
+    return "eleven presses, each the person's, and a save sent once by Enter and once by the button";
   } finally {
     await pageA.evaluate(() => {
       document.getElementById("hand-gitlab-stand")?.remove();
