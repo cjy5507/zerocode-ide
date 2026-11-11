@@ -634,9 +634,7 @@ fn is_public_ip(ip: IpAddr) -> bool {
             }
             let s = v6.segments();
             let v4_from = |high: u16, low: u16| {
-                let [a, b] = high.to_be_bytes();
-                let [c, d] = low.to_be_bytes();
-                IpAddr::V4(std::net::Ipv4Addr::new(a, b, c, d))
+                IpAddr::V4(std::net::Ipv4Addr::from((u32::from(high) << 16) | u32::from(low)))
             };
             // NAT64 well-known prefix 64:ff9b::/96: a translator forwards it
             // to the IPv4 address in its low 32 bits.
