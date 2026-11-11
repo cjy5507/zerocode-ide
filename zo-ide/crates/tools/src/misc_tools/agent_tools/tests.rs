@@ -1646,8 +1646,7 @@ fn zo_process_comm_requires_exact_basename() {
 }
 
 /// A fractional number is a number: a schema that asks for one without a
-/// bound accepts `0.8`, so the agent's StructuredOutput is kept. A bound on a
-/// fraction still fails closed, since its exact decimal is already lost.
+/// bound accepts `0.8`, so the agent's `StructuredOutput` is kept.
 #[test]
 fn structured_output_accepts_a_fraction_where_no_bound_applies() {
     let schema = serde_json::json!({
@@ -1661,10 +1660,28 @@ fn structured_output_accepts_a_fraction_where_no_bound_applies() {
     assert!(!structured_schema_valid(&schema, &serde_json::json!({"confidence": "0.8"})));
     let integer = serde_json::json!({ "type": "integer" });
     assert!(!structured_schema_valid(&integer, &serde_json::json!(0.8)));
-    for bound in STRUCTURED_NUMBER_CONSTRAINTS {
-        let bounded = serde_json::json!({ "type": "number", bound: 1 });
-        assert!(!structured_schema_valid(&bounded, &serde_json::json!(0.8)), "{bound} fails closed");
-    }
+}
+
+/// A confidence bounded to `[0, 1]` — the commonest numeric schema — takes
+/// `0.8`: a fraction compares with integer bounds as `f64`, integers compare
+/// exactly as before, and `multipleOf` still refuses a fraction.
+#[test]
+fn structured_output_compares_a_fraction_with_its_bounds() {
+    let valid = |schema: serde_json::Value, value: serde_json::Value| structured_schema_valid(&schema, &value);
+    let unit = || serde_json::json!({ "type": "number", "minimum": 0, "maximum": 1 });
+    assert!(valid(unit(), serde_json::json!(0.8)));
+    assert!(valid(unit(), serde_json::json!(5e-1)), "exponent form");
+    assert!(valid(unit(), serde_json::json!(0.0)) && valid(unit(), serde_json::json!(1.0)), "the bounds themselves");
+    assert!(!valid(unit(), serde_json::json!(1.2)));
+    assert!(!valid(unit(), serde_json::json!(-0.1)));
+    let open = || serde_json::json!({ "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 });
+    assert!(valid(open(), serde_json::json!(0.5)));
+    assert!(!valid(open(), serde_json::json!(0.0)) && !valid(open(), serde_json::json!(1.0)), "an open bound refuses itself");
+    let big = || serde_json::json!({ "type": "integer", "maximum": 9_007_199_254_740_993_u64 });
+    assert!(valid(big(), serde_json::json!(9_007_199_254_740_993_u64)), "integers past f64 compare exactly");
+    assert!(!valid(big(), serde_json::json!(9_007_199_254_740_994_u64)));
+    assert!(!valid(serde_json::json!({ "type": "number", "multipleOf": 1 }), serde_json::json!(0.8)));
+    assert!(valid(serde_json::json!({ "type": "integer", "multipleOf": 3 }), serde_json::json!(9)));
 }
 
 /// `comm` is the rest of the `ps` line: a zo installed under a folder with a

@@ -4559,19 +4559,12 @@ fn structured_schema_is_supported(schema: &serde_json::Value) -> bool {
             return false;
         }
     }
-    for key in [
-        "minimum",
-        "maximum",
-        "exclusiveMinimum",
-        "exclusiveMaximum",
-        "multipleOf",
-    ] {
-        if schema.get(key).is_some_and(|value| exact_json_number(value).is_none()) {
-            return false;
-        }
+    let mut number_keys = STRUCTURED_NUMBER_BOUNDS.iter().map(|(key, _)| *key).chain([STRUCTURED_MULTIPLE_OF]);
+    if number_keys.any(|key| schema.get(key).is_some_and(|value| exact_json_number(value).is_none())) {
+        return false;
     }
     if schema
-        .get("multipleOf")
+        .get(STRUCTURED_MULTIPLE_OF)
         .and_then(exact_json_number)
         .is_some_and(|value| value <= 0)
     {
@@ -4615,10 +4608,18 @@ fn usize_as_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-/// The schema keywords that constrain a number's value, which the validator
-/// checks only on integers it can read exactly.
-const STRUCTURED_NUMBER_CONSTRAINTS: [&str; 5] =
-    ["minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf"];
+/// The schema keywords that bound a number, each with the orderings of the
+/// value against the bound that it refuses.
+const STRUCTURED_NUMBER_BOUNDS: [(&str, &[std::cmp::Ordering]); 4] = [
+    ("minimum", &[std::cmp::Ordering::Less]),
+    ("exclusiveMinimum", &[std::cmp::Ordering::Less, std::cmp::Ordering::Equal]),
+    ("maximum", &[std::cmp::Ordering::Greater]),
+    ("exclusiveMaximum", &[std::cmp::Ordering::Greater, std::cmp::Ordering::Equal]),
+];
+
+/// The schema keyword asking for a multiple, checked only on integers read
+/// exactly.
+const STRUCTURED_MULTIPLE_OF: &str = "multipleOf";
 
 fn exact_json_number(value: &serde_json::Value) -> Option<i128> {
     let number = value.as_number()?;
@@ -4634,6 +4635,17 @@ fn exact_decimal_cmp(left: &i128, right: &i128) -> std::cmp::Ordering {
 
 fn exact_multiple_of(value: &i128, divisor: &i128) -> bool {
     *divisor > 0 && value % divisor == 0
+}
+
+/// `value` against `bound`: exactly when both are integers, else as `f64`.
+/// `serde_json` has already read a fraction as `f64`; that rounding keeps
+/// order, so only two numbers landing on one `f64` can compare equal wrongly.
+/// `None` when either is not a number.
+fn json_number_cmp(value: &serde_json::Value, bound: &serde_json::Value) -> Option<std::cmp::Ordering> {
+    match (exact_json_number(value), exact_json_number(bound)) {
+        (Some(value), Some(bound)) => Some(exact_decimal_cmp(&value, &bound)),
+        _ => value.as_f64()?.partial_cmp(&bound.as_f64()?),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4756,29 +4768,20 @@ fn structured_schema_valid(schema: &serde_json::Value, value: &serde_json::Value
             }
         }
         serde_json::Value::Number(_) => {
-            let Some(number) = exact_json_number(value) else {
-                // serde_json has already reduced non-integer JSON numbers to
-                // f64, so their original decimal/exponent precision cannot be
-                // recovered. A numeric constraint on one therefore fails
-                // closed; with none, any number the `type` check let through
-                // is valid.
-                return !STRUCTURED_NUMBER_CONSTRAINTS
-                    .iter()
-                    .any(|key| schema.contains_key(*key));
-            };
-            if schema.get("minimum").is_some_and(|bound| {
-                exact_json_number(bound).is_none_or(|bound| number < bound)
-            }) || schema.get("exclusiveMinimum").is_some_and(|bound| {
-                exact_json_number(bound).is_none_or(|bound| number <= bound)
-            }) || schema.get("maximum").is_some_and(|bound| {
-                exact_json_number(bound).is_none_or(|bound| number > bound)
-            }) || schema.get("exclusiveMaximum").is_some_and(|bound| {
-                exact_json_number(bound).is_none_or(|bound| number >= bound)
+            if STRUCTURED_NUMBER_BOUNDS.iter().any(|(key, refused)| {
+                schema.get(*key).is_some_and(|bound| {
+                    json_number_cmp(value, bound).is_none_or(|order| refused.contains(&order))
+                })
             }) {
                 return false;
             }
-            if schema.get("multipleOf").is_some_and(|bound| {
-                exact_json_number(bound).is_none_or(|bound| !exact_multiple_of(&number, &bound))
+            // A fraction's decimal digits are gone once it is an f64, so a
+            // multiple is judged on integers only; a fraction fails closed.
+            if schema.get(STRUCTURED_MULTIPLE_OF).is_some_and(|divisor| {
+                match (exact_json_number(value), exact_json_number(divisor)) {
+                    (Some(value), Some(divisor)) => !exact_multiple_of(&value, &divisor),
+                    _ => true,
+                }
             }) {
                 return false;
             }
