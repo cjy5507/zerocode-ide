@@ -3553,6 +3553,9 @@ mod tests {
             styles.contains("\n.term .underline { text-decoration: underline; }\n")
                 && block_after(styles, ".term .term-wide.term-link {").contains(
                     "text-underline-offset: calc((var(--term-underline-offset) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));"
+                )
+                && block_after(styles, ".term .term-wide.underline {").contains(
+                    "text-underline-offset: calc((var(--term-underline-auto-gap) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));"
                 ),
             "a wide link's underline is drawn off its neighbour's again, or \
              an SGR underline no longer stands where the engine puts it"

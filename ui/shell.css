@@ -15978,11 +15978,19 @@ body.is-dragging-pane {
   transform: var(--term-wide-squash, none);
   transform-origin: 0 0;
 }
-/* A link's underline goes where a narrow link's does: up by what the baseline
- * was let down, and written before the height is pressed — against the gap
- * both of them know (`--term-underline-offset`). An SGR 4 underline has no
- * such number: a narrow run's gap is the engine's own, so a wide run keeps
- * the engine's too, under its own baseline. */
+/* Its underline goes where a narrow run's does: up by what the baseline was
+ * let down, and written before the height is pressed. A link's gap is the
+ * terminal's own number (`--term-underline-offset`). An SGR 4 underline's is
+ * the engine's, which a stylesheet cannot ask for, so the wide run is told
+ * what the engines leave (`--term-underline-auto-gap`) — and the narrow rule
+ * stays the engine's: a Latin screen draws its underlines where it always
+ * did. Left to the engine under its own, lower baseline, a wide run's
+ * underline stood a pixel under its neighbour's and every blank in an
+ * underlined Korean line read as a notch. The link's rule is the later one:
+ * an underlined link is a link. */
+.term .term-wide.underline {
+  text-underline-offset: calc((var(--term-underline-auto-gap) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));
+}
 .term .term-wide.term-link {
   text-underline-offset: calc((var(--term-underline-offset) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));
 }
