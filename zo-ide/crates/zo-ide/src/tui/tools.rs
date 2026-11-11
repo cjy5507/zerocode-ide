@@ -88,7 +88,7 @@ pub enum ToolKind {
     Explore(Vec<Explored>),
     /// Edit·Write: an `Edit`, `Create` or `Delete` row and its diff.
     Edit { path: String },
-    /// `TodoWrite` / `TaskList` result. `Updated Plan` with an uncapped checklist.
+    /// `TodoWrite` result. `Updated Plan` with an uncapped checklist.
     Plan(Vec<TodoResultItem>),
     /// Web search/fetch activity: a `Search` row whose target is the query
     /// on the web.

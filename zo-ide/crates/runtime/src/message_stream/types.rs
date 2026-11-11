@@ -565,7 +565,7 @@ pub enum ToolResultBody {
         /// `true` if the adapter truncated the listing.
         truncated: bool,
     },
-    /// `TodoWrite` / `TaskList` checklist snapshot, rendered Claude-Code-style
+    /// `TodoWrite` checklist snapshot, rendered Claude-Code-style
     /// as a titled block of checkbox rows instead of raw (truncated) JSON.
     Todos(Vec<TodoResultItem>),
     /// MCP tool result we have no special handler for.

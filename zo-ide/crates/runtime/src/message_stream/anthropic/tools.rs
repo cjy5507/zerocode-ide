@@ -284,7 +284,12 @@ pub fn format_tool_result(name: &str, output: &Value, is_error: bool) -> ToolRes
         None => {}
     }
     match name {
-        "TodoWrite" | "TaskList" => {
+        // `TaskList` is not here. It lists the session's background tasks
+        // (`task_id`, `status`, `kind`, a prompt) and none of them is a
+        // checklist item: read as a checklist every row was dropped, and the
+        // call stood on the screen as `Updated Plan · (no steps provided)` — a
+        // plan nobody had updated, and no tasks whether there were any or not.
+        "TodoWrite" => {
             format_todos_result(output).unwrap_or_else(|| format_generic_result(name, output))
         }
         "Agent" | "SpawnMultiAgent" | "Workflow" | "Task" => {
@@ -372,12 +377,11 @@ fn format_delegation_result(name: &str, value: &Value) -> Option<ToolResultBody>
     })
 }
 
-/// Parse a `TodoWrite` / `TaskList` result into a typed checklist body so the
-/// TUI renders a Claude-Code-style titled block instead of raw (and upstream
-/// truncated) JSON. Reads the writer's `newTodos` array
-/// (`tools::task_tools::TodoWriteOutput`); a `TaskList` `tasks` array is also
-/// accepted. Returns `None` when neither shape is present so the caller falls
-/// back to the generic renderer.
+/// Parse a `TodoWrite` result into a typed checklist body so the TUI renders
+/// a Claude-Code-style titled block instead of raw (and upstream truncated)
+/// JSON. Reads the writer's `newTodos` array
+/// (`tools::task_tools::TodoWriteOutput`). Returns `None` when that shape is
+/// not present so the caller falls back to the generic renderer.
 fn format_todos_result(output: &Value) -> Option<ToolResultBody> {
     let array = todos_result_array(output)?;
     let items: Vec<TodoResultItem> = array.iter().filter_map(parse_todo_result_item).collect();
@@ -390,7 +394,6 @@ fn todos_result_array(output: &Value) -> Option<&[Value]> {
     output
         .get("newTodos")
         .or_else(|| output.get("new_todos"))
-        .or_else(|| output.get("tasks"))
         .or_else(|| output.get("todos"))
         .and_then(Value::as_array)
         .map(Vec::as_slice)
@@ -1551,6 +1554,36 @@ mod tests {
             matches!(body, ToolResultBody::Todos(ref items) if items.len() == 1),
             "a wrapped TodoWrite result must retain its typed checklist body: {body:?}"
         );
+    }
+
+    /// `TaskList` reads the session's background tasks. They are not a plan:
+    /// read as one, every row was dropped (a task has no `content`) and the
+    /// call stood on the screen as `Updated Plan · (no steps provided)`,
+    /// direct or behind `CapabilityInvoke`, with tasks or with none.
+    #[test]
+    fn a_task_list_is_shown_as_what_it_returned_and_not_as_an_updated_plan() {
+        let some = r#"{"count":1,"tasks":[{"task_id":"task_1","status":"running","kind":"background_process","prompt":"cargo build","description":"build"}]}"#;
+        let none = r#"{"count":0,"tasks":[]}"#;
+        for raw in [some, none] {
+            let direct = format_tool_result_from_raw("TaskList", raw, false);
+            let wrapped = format_indirected_tool_result(
+                "CapabilityInvoke",
+                "TaskList",
+                format_tool_result_from_raw("CapabilityInvoke", raw, false),
+                false,
+            );
+            for body in [direct, wrapped] {
+                assert!(
+                    !matches!(body, ToolResultBody::Todos(_)),
+                    "a task list is not a checklist: {body:?}"
+                );
+            }
+        }
+        let ToolResultBody::Generic { content, .. } = format_tool_result_from_raw("TaskList", some, false)
+        else {
+            panic!("a task list is shown by the generic renderer");
+        };
+        assert!(content.contains("task_1") && content.contains("running"), "{content}");
     }
 
     /// Defect: the agent detail pane showed rows of bare `{}`. An unrecognised
