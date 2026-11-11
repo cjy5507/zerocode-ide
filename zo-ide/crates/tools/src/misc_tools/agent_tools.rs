@@ -4615,6 +4615,11 @@ fn usize_as_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+/// The schema keywords that constrain a number's value, which the validator
+/// checks only on integers it can read exactly.
+const STRUCTURED_NUMBER_CONSTRAINTS: [&str; 5] =
+    ["minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf"];
+
 fn exact_json_number(value: &serde_json::Value) -> Option<i128> {
     let number = value.as_number()?;
     number
@@ -4754,8 +4759,12 @@ fn structured_schema_valid(schema: &serde_json::Value, value: &serde_json::Value
             let Some(number) = exact_json_number(value) else {
                 // serde_json has already reduced non-integer JSON numbers to
                 // f64, so their original decimal/exponent precision cannot be
-                // recovered. Numeric constraints therefore fail closed.
-                return false;
+                // recovered. A numeric constraint on one therefore fails
+                // closed; with none, any number the `type` check let through
+                // is valid.
+                return !STRUCTURED_NUMBER_CONSTRAINTS
+                    .iter()
+                    .any(|key| schema.contains_key(*key));
             };
             if schema.get("minimum").is_some_and(|bound| {
                 exact_json_number(bound).is_none_or(|bound| number < bound)

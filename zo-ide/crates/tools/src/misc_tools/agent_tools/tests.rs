@@ -1645,6 +1645,28 @@ fn zo_process_comm_requires_exact_basename() {
     assert!(!is_zo_process_comm("/usr/local/bin/forge"));
 }
 
+/// A fractional number is a number: a schema that asks for one without a
+/// bound accepts `0.8`, so the agent's StructuredOutput is kept. A bound on a
+/// fraction still fails closed, since its exact decimal is already lost.
+#[test]
+fn structured_output_accepts_a_fraction_where_no_bound_applies() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "required": ["confidence"],
+        "properties": { "confidence": { "type": "number" } },
+        "additionalProperties": false
+    });
+    assert!(structured_schema_valid(&schema, &serde_json::json!({"confidence": 0.8})));
+    assert!(structured_schema_valid(&schema, &serde_json::json!({"confidence": -2.5e3})));
+    assert!(!structured_schema_valid(&schema, &serde_json::json!({"confidence": "0.8"})));
+    let integer = serde_json::json!({ "type": "integer" });
+    assert!(!structured_schema_valid(&integer, &serde_json::json!(0.8)));
+    for bound in STRUCTURED_NUMBER_CONSTRAINTS {
+        let bounded = serde_json::json!({ "type": "number", bound: 1 });
+        assert!(!structured_schema_valid(&bounded, &serde_json::json!(0.8)), "{bound} fails closed");
+    }
+}
+
 /// `comm` is the rest of the `ps` line: a zo installed under a folder with a
 /// space in its name (`Application Support`) is still a zo.
 #[test]
