@@ -659,6 +659,13 @@ struct Ui {
     /// A finished thinking block stands as one row
     /// ([`thinking::one_line`]) — the marks look's first step of `/thinking`.
     thinking_line: bool,
+    /// The thinking block being written shows its newest words under the
+    /// working row ([`Ui::absorb_thinking_tail`]), and a wait on the model is
+    /// named from its second second — the marks look's.
+    thinking_tail: bool,
+    /// The newest words of the turn's thinking so far, bounded
+    /// ([`thinking::TAIL_KEEP_BYTES`]); empty once the answer or a call began.
+    thinking_said: String,
     /// When the thinking block that is open began.
     reasoning_started: Option<Instant>,
     /// What the working row said the open thinking block was about — its
@@ -1710,6 +1717,15 @@ impl Ui {
                 self.reasoning_about = None;
             }
         }
+        // Until the block has a heading of its own the row says the one thing
+        // known of it, where it said `Working` as for any other wait.
+        if self.thinking_tail {
+            if let Some(status) = self.status.as_mut() {
+                if status.header == Status::DEFAULT_HEADER {
+                    status.set_header(Some(super::strings::THINKING));
+                }
+            }
+        }
         let Some((_, Some(buffer))) = &self.reasoning_scan else {
             return;
         };
@@ -1729,6 +1745,43 @@ impl Ui {
                 status.set_header(Some(&heading));
             }
         }
+    }
+
+    /// The newest words of the thinking being written, onto the rows under
+    /// the working row ([`thinking::live_tail`]).
+    ///
+    /// A model that reasons for half a minute before its first word left the
+    /// screen on one row whose clock was the only thing that moved, and it
+    /// read as a turn that had stopped (zo 1.1.143, a model at high effort:
+    /// sixteen to fifty-eight seconds, 2026-11-12). The words are only shown
+    /// here: the block is said as it always was when it ends. They stay
+    /// between one block and the next — a summary that comes in parts is one
+    /// train of thought — and go when the answer or a call begins. Hidden
+    /// thinking (`/thinking`) shows none.
+    fn absorb_thinking_tail(&mut self, text: &str, done: bool) {
+        if !self.thinking_tail || !self.flags.show_thinking {
+            return;
+        }
+        self.thinking_said.push_str(text);
+        // A block's end is a break between words: the next block's first word
+        // does not run into this one's last.
+        if done && !self.thinking_said.is_empty() {
+            self.thinking_said.push('\n');
+        }
+        thinking::bound_scan(&mut self.thinking_said, thinking::TAIL_KEEP_BYTES);
+        if !text.is_empty() {
+            self.refresh_status_details();
+        }
+    }
+
+    /// The thinking's words leave the rows under the working row: the answer
+    /// or a call began.
+    fn end_thinking_tail(&mut self) {
+        if self.thinking_said.is_empty() {
+            return;
+        }
+        self.thinking_said.clear();
+        self.refresh_status_details();
     }
 
     /// `/thinking`: show or hide thinking cells from here on. Screen-only,
@@ -1921,6 +1974,12 @@ impl Ui {
             // row, right above this one; said again here it was one command
             // on two rows.
             details.extend(self.tool_status_detail.iter().cloned());
+        }
+        if details.is_empty() && !self.thinking_said.is_empty() {
+            // Four fifths of the rows' room: a row wraps at a word, so words
+            // that fill two rows to the column can take a third.
+            let columns = super::view::status_detail_columns(self.width()) * thinking::TAIL_ROWS * 4 / 5;
+            details.extend(thinking::live_tail(&self.thinking_said, columns));
         }
         if let Some(status) = self.status.as_mut() {
             status.set_details_max_lines(details.len().max(STATUS_DETAILS_DEFAULT_MAX_LINES));
@@ -4784,6 +4843,7 @@ impl Ui {
             }
             RenderBlock::TextDelta { id, text, done } => {
                 self.note_stream_content();
+                self.end_thinking_tail();
                 self.open_text(id.0);
                 let text = self.absorb_passport_label(&text, done);
                 self.transcript_answer.push_str(&text);
@@ -4808,6 +4868,7 @@ impl Ui {
                 // heading is the answer to "what is it doing", and hiding the
                 // thinking body must not also hide that.
                 self.absorb_reasoning_heading(id.0, &text, done);
+                self.absorb_thinking_tail(&text, done);
                 // The `turns` view folds thinking with the rest of the work:
                 // its heading is on the working row, the block in Ctrl+T.
                 if !self.flags.show_thinking || self.folding() {
@@ -4830,6 +4891,7 @@ impl Ui {
                 ..
             } => {
                 self.note_stream_content();
+                self.end_thinking_tail();
                 if status == ToolCallStatus::Pending || self.tools.contains_key(&tool_call_id.0) {
                     return;
                 }
@@ -5655,6 +5717,8 @@ impl App {
                 work_under_transcript: super::style::current().work_under_transcript,
                 fold: turns::TurnFold::default(),
                 thinking_line: super::style::current().thinking_line,
+                thinking_tail: super::style::current().style == super::style::TuiStyle::Marks,
+                thinking_said: String::new(),
                 reasoning_started: None,
                 reasoning_about: None,
                 start_notes: Vec::new(),
@@ -7264,7 +7328,12 @@ impl App {
         ui.published_activity = PublishedActivity::Never;
         ui.set_subagent_progress(Vec::new());
         ui.set_route_fact(None);
-        ui.status = Some(Status::working(Duration::ZERO));
+        let mut status = Status::working(Duration::ZERO);
+        if ui.thinking_tail {
+            status.name_the_wait_after(super::view::WAIT_NAMED_AFTER);
+        }
+        ui.status = Some(status);
+        ui.thinking_said.clear();
         ui.publish_working_activity(turn_scaffold.ide);
         ui.draw_with_queue(|| block_rx.len());
 
@@ -7936,6 +8005,8 @@ fn test_ui() -> Ui {
         work_under_transcript: false,
         fold: turns::TurnFold::default(),
         thinking_line: false,
+        thinking_tail: false,
+        thinking_said: String::new(),
         reasoning_started: None,
         reasoning_about: None,
         start_notes: Vec::new(),
@@ -9069,6 +9140,54 @@ mod tests {
             took: None,
         }]);
         assert!(!ui.work_opens_dense(false), "held work becomes a fold, which keeps its gap row here");
+    }
+
+    /// While the model thinks, the rows under the working row show the
+    /// thinking's newest words and the row says `Thinking`: fragments join as
+    /// they were written, one block's words lead into the next block's, and
+    /// all of it goes when the answer begins. A look that does not ask for
+    /// it shows neither, as before.
+    #[test]
+    fn thinking_shows_under_the_working_row_as_it_comes_and_goes_when_the_answer_begins() {
+        use runtime::message_stream::BlockId;
+
+        fn reason(ui: &mut super::Ui, id: BlockId, text: &str, done: bool) {
+            ui.block(RenderBlock::Reasoning { id, text: text.to_string(), signature: None, done });
+        }
+        fn shown(ui: &super::Ui) -> String {
+            let rows = ui.status.as_ref().map(|status| status.detail_lines(100)).unwrap_or_default();
+            rows.iter().map(Line::plain).collect::<Vec<_>>().join(" ")
+        }
+        fn header(ui: &super::Ui) -> String {
+            ui.status.as_ref().map(|status| status.header.clone()).unwrap_or_default()
+        }
+
+        let ids = BlockIdGen::default();
+        let mut ui = test_ui();
+        ui.thinking_tail = true;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        assert!(shown(&ui).is_empty());
+
+        let first = ids.next();
+        reason(&mut ui, first, "I should read the par", false);
+        assert_eq!(header(&ui), "Thinking", "a block with no heading yet says it is thinking");
+        assert!(shown(&ui).contains("I should read the par"), "{}", shown(&ui));
+        reason(&mut ui, first, "ser before I change it", false);
+        assert!(shown(&ui).contains("read the parser before I change it"), "{}", shown(&ui));
+
+        reason(&mut ui, first, "", true);
+        let second = ids.next();
+        reason(&mut ui, second, "Then the checker", false);
+        assert!(shown(&ui).contains("change it Then the checker"), "{}", shown(&ui));
+
+        ui.block(RenderBlock::TextDelta { id: ids.next(), text: "Here is what I found\n".to_string(), done: false });
+        assert!(shown(&ui).is_empty(), "the answer began: {}", shown(&ui));
+
+        let mut as_before = test_ui();
+        as_before.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        reason(&mut as_before, ids.next(), "I should read the parser", false);
+        assert!(shown(&as_before).is_empty(), "{}", shown(&as_before));
+        assert_eq!(header(&as_before), crate::tui::view::Status::DEFAULT_HEADER);
     }
 
     /// The `turns` view folds each call as it finishes: commands that come

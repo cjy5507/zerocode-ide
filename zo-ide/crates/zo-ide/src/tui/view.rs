@@ -47,6 +47,19 @@ fn details_prefix() -> &'static str {
     super::style::glyphs().result_first
 }
 
+/// The display columns a detail row under the working row has for its words
+/// on a pane `width` wide ([`Status::detail_lines`]).
+#[must_use]
+pub fn status_detail_columns(width: usize) -> usize {
+    width.saturating_sub(details_prefix().chars().count()).max(1)
+}
+
+/// How long after a request leaves the marks look names the wait
+/// ([`Status::name_the_wait_after`]): long enough that a model which answers
+/// at once never shows the phrase, short enough that a turn waiting on one
+/// says so before it reads as stopped.
+pub const WAIT_NAMED_AFTER: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusDetailsCapitalization {
     CapitalizeFirst,
@@ -371,6 +384,14 @@ impl Status {
 
     pub fn note_activity_event(&mut self) {
         self.last_event_at = self.elapsed;
+    }
+
+    /// Name what the turn waits on from `after` of a request's leaving, where
+    /// the limits table would wait longer: the row then says `waiting for the
+    /// model` beside its clock, not the clock alone. Never later than the
+    /// table says.
+    pub fn name_the_wait_after(&mut self, after: Duration) {
+        self.stream_phase_after = self.stream_phase_after.min(after);
     }
 
     /// Lower the quiet threshold so a test can reach `quiet` in seconds
@@ -3203,6 +3224,29 @@ mod tests {
         status.elapsed += Duration::from_secs(60);
         let line = status.line(120).plain();
         assert!(!line.contains("waiting") && !line.contains("reconnecting"), "{line}");
+    }
+
+    /// A wait named early says so from the request's second second, where
+    /// the limits table waits fifteen: a turn waiting on the model says what
+    /// it waits on before it reads as stopped. The bar is only ever lowered.
+    #[test]
+    fn a_wait_named_early_is_said_from_its_second_second() {
+        use runtime::message_stream::types::StreamPhase;
+
+        let mut status = Status::working(Duration::ZERO);
+        status.name_the_wait_after(super::WAIT_NAMED_AFTER);
+        status.note_stream_phase(StreamPhase::RequestSent { attempt: 1 });
+        status.elapsed = Duration::from_secs(1);
+        let line = status.line(120).plain();
+        assert!(!line.contains("waiting"), "a request out one second is not yet a wait: {line}");
+        status.elapsed = super::WAIT_NAMED_AFTER;
+        let line = status.line(120).plain();
+        assert!(line.contains("waiting for the model 2s"), "{line}");
+
+        status.name_the_wait_after(Duration::from_secs(600));
+        let line = status.line(120).plain();
+        assert!(line.contains("waiting for the model 2s"), "the bar is never raised: {line}");
+        assert_eq!(super::status_detail_columns(80) + super::details_prefix().chars().count(), 80);
     }
 
     /// A live cell taller than the rows above the bottom pane keeps its first

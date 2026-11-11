@@ -43,6 +43,14 @@ pub const LIVE_HEADING_MAX_COLUMNS: usize = 48;
 /// length costs a bounded scan per delta.
 pub const SCAN_KEEP_BYTES: usize = 4096;
 
+/// The thinking text kept for [`live_tail`]: its newest words. Two rows of
+/// the widest pane hold fewer, and the buffer is halved from the front past
+/// this, so a block of any length costs a bounded read per delta.
+pub const TAIL_KEEP_BYTES: usize = 2048;
+
+/// The rows under the working row a thinking block's newest words may take.
+pub const TAIL_ROWS: usize = 2;
+
 /// Body rows a thinking cell keeps in a bare terminal before `… +N lines` —
 /// codex's tool-output preview cap, so the two previews read as one rule.
 pub const THINKING_PREVIEW_ROWS: usize = super::tools::OUTPUT_MAX_ROWS;
@@ -198,6 +206,45 @@ fn fit(text: String, max_columns: usize) -> String {
     out
 }
 
+/// The newest words of a thinking block that is still being written, as the
+/// rows under the working row show them: prose on one line with the emphasis
+/// marks taken out, no wider than `max_columns` display columns, led by an
+/// ellipsis when earlier words were left out. `None` while nothing was said.
+///
+/// The heading on the working row says what the block is about; these are
+/// its words as they come, so a model that reasons for half a minute before
+/// its first word shows that it is doing so.
+#[must_use]
+pub fn live_tail(text: &str, max_columns: usize) -> Option<String> {
+    let said = text.split_whitespace().collect::<Vec<_>>().join(" ").replace("**", "").replace('`', "");
+    let said = said.trim();
+    if said.is_empty() || max_columns < 2 {
+        return None;
+    }
+    if said.width() <= max_columns {
+        return Some(said.to_string());
+    }
+    // The newest columns that fit beside the ellipsis, from the end back.
+    let room = max_columns - 1;
+    let mut used = 0usize;
+    let mut cut = said.len();
+    for (index, ch) in said.char_indices().rev() {
+        let width = UnicodeWidthStr::width(ch.encode_utf8(&mut [0u8; 4]) as &str);
+        if used + width > room {
+            break;
+        }
+        used += width;
+        cut = index;
+    }
+    let newest = &said[cut..];
+    // From a word's start, when that keeps at least half of what fits.
+    let from_a_word = newest
+        .find(char::is_whitespace)
+        .filter(|boundary| *boundary * 2 <= newest.len())
+        .map_or(newest, |boundary| newest[boundary..].trim_start());
+    Some(format!("…{from_a_word}"))
+}
+
 /// Halve `buffer` from the front, on a character boundary, once it grows past
 /// `keep` bytes. The tail is where the newest sentence is.
 pub fn bound_scan(buffer: &mut String, keep: usize) {
@@ -301,8 +348,10 @@ fn indent_marker(row: Line) -> Line {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::{
-        bound_scan, cell, first_bold_heading, leading_bold_heading, live_heading,
+        bound_scan, cell, first_bold_heading, leading_bold_heading, live_heading, live_tail,
         LIVE_HEADING_MAX_COLUMNS,
     };
     use crate::tui::ansi::Line;
@@ -485,5 +534,35 @@ mod tests {
         let mut ids = FoldIds::default();
         assert!(cell(vec![Line::empty()], FoldMode::Bare, &mut ids).is_empty());
         assert!(cell(Vec::new(), FoldMode::Markers, &mut ids).is_empty());
+    }
+
+    /// The newest words of a block still being written: all of them while
+    /// they fit, and past that the newest, from a word's start, behind an
+    /// ellipsis — never wider than the room, a Korean letter's two columns
+    /// counted. Line breaks and emphasis marks are not words.
+    #[test]
+    fn the_live_tail_is_the_newest_words_that_fit() {
+        assert_eq!(live_tail("", 40), None);
+        assert_eq!(live_tail(" \n ", 40), None);
+        assert_eq!(
+            live_tail("I should read the parser first", 40).as_deref(),
+            Some("I should read the parser first")
+        );
+        assert_eq!(
+            live_tail("**Reading the parser**\n\nI should read `lex.rs`\nfirst", 60).as_deref(),
+            Some("Reading the parser I should read lex.rs first")
+        );
+
+        let long = "first the lexer then the parser then the checker and at last the emitter";
+        let tail = live_tail(long, 30).expect("words");
+        assert!(tail.starts_with('…') && tail.ends_with("at last the emitter"), "{tail}");
+        assert!(tail.width() <= 30, "{tail}");
+        let newest = tail.trim_start_matches('…');
+        assert!(long.contains(&format!(" {newest}")), "it starts at a word: {tail}");
+
+        let korean = "먼저 파서를 읽고 그다음 검사기를 본 뒤에 마지막으로 출력기를 고친다";
+        let tail = live_tail(korean, 24).expect("words");
+        assert!(tail.width() <= 24, "{tail} is {} columns", tail.width());
+        assert!(tail.starts_with('…') && tail.ends_with("출력기를 고친다"), "{tail}");
     }
 }
