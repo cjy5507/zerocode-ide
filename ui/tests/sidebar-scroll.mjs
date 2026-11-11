@@ -508,10 +508,12 @@ function rowsHeld(taken, from, to) {
     // every other tick; at rest it pays the debt with one write, which moves nothing. That debt is the person's
     // scroll the browser cut, not a move of the rows: counted as one here, it read as a 79 px jump on WebKit only
     // (t-103178). Only one tick cut short (review t-103290 N6): a wheel came in this frame or the one before it, the
-    // scroll stands at its end and did not go back, and the scroll and the debt together are no more than one tick —
+    // scroll stands at its end and did not go back, and the scroll and the debt together are exactly one tick —
     // however many wheels came, so a tick counted for one frame is not forgiven again in the next. The frame before
     // counts because WebKit's clock gives whole ms and the cut tick's wheel came 1-2 ms after the frame before: counted
-    // only between the two frames, one WebKit run in seven missed the cut tick (a 79 px residual).
+    // only between the two frames, one WebKit run in seven missed the cut tick (a 79 px residual). Exactly, because the
+    // cut tick's scroll and debt fill it to the pixel (21 px + 79 px): a bound of "no more than one tick" also forgave a
+    // debt that left the tick short, and a jump of up to one row (44 px) could hide in that gap (review t-103588 M3).
     const before = frames[at - 2]?.at ?? was.at - WRITE_WINDOW_MS;
     const wheeled = taken.events
       .filter((event) => event.type === "wheel" && event.at > before && event.at <= now.at)
@@ -519,7 +521,7 @@ function rowsHeld(taken, from, to) {
     const rose = (now.debt ?? 0) - (was.debt ?? 0);
     const went = now.top - was.top;
     const cut = wrote === 0 && wheeled > 0 && rose > 0 && Math.abs(now.top - now.max) <= 0.5 &&
-      went >= -0.5 && went + rose <= STEP + 0.5
+      went >= -0.5 && Math.abs(went + rose - STEP) <= 0.5
       ? rose
       : 0;
     const scrolled = now.top - was.top - wrote + cut;
