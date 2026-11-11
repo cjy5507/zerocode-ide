@@ -290,6 +290,17 @@ impl ToolExecutor for CliToolExecutor {
         }))
     }
 
+    /// The grade the registry holds for `tool_name` now — a tool an MCP
+    /// server brought after the session's policy was built included.
+    fn declared_mode(&self, tool_name: &str) -> Option<runtime::PermissionMode> {
+        self.tool_registry
+            .permission_specs(None)
+            .ok()?
+            .into_iter()
+            .find(|(name, _)| name == tool_name)
+            .map(|(_, mode)| mode)
+    }
+
     fn execute_result(&mut self, tool_name: &str, input: &str) -> Result<ToolExecutionResult, ToolError> {
         // `CapabilityInvoke` is an address, not a privilege: unwrap it here, at
         // the very top, and re-enter this same function with the inner name.

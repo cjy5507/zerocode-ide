@@ -73,6 +73,31 @@ impl<C, T> ConversationRuntime<C, T> {
     }
 }
 
+impl<C, T: ToolExecutor> ConversationRuntime<C, T> {
+    /// Before a call is judged, a tool the policy holds no grade for is given
+    /// the one the executor's registry declares for it.
+    ///
+    /// The policy's table is built when the session starts; an MCP tool whose
+    /// server is discovered or re-listed afterwards enters the registry
+    /// alone, and a name the table lacks is judged at the highest grade. That
+    /// was unseen while a call through `CapabilityInvoke` — the way such a
+    /// tool is called, since it is not advertised — was judged as the wrapper.
+    /// Judged as the call it carries, a read-only MCP tool would be asked
+    /// about in every turn and refused in a read-only one. Learned here, on
+    /// the turn's own task, the table follows the registry without a lock,
+    /// and a tool that declares nothing stays at the highest grade.
+    pub(super) fn learn_declared_mode(&mut self, tool_name: &str, input: &str) {
+        let carried = crate::permissions::carried_call(tool_name, input);
+        let name = carried.as_ref().map_or(tool_name, |(name, _)| name.as_str());
+        if self.permission_policy.has_tool_requirement(name) {
+            return;
+        }
+        if let Some(mode) = self.tool_executor.declared_mode(name) {
+            self.permission_policy.set_tool_requirements([(name.to_string(), mode)]);
+        }
+    }
+}
+
 /// Predicate the host installs to mark tools whose execution may block. This is
 /// retained as compatibility metadata for dynamic plugin/MCP registrations; the
 /// live streaming path uses [`ConcurrentDispatchFn`] for every ordinary tool
@@ -103,6 +128,15 @@ pub trait ToolExecutor {
         _input: &str,
     ) -> Result<Option<ResolvedToolCall>, ToolError> {
         Ok(None)
+    }
+
+    /// The permission mode `tool_name` declares it needs, where the
+    /// executor's registry knows the tool and the policy may not: one that
+    /// joined after the policy was built — an MCP server whose discovery
+    /// ended, or whose listing changed, mid-session. `None` when the executor
+    /// has no word on it.
+    fn declared_mode(&self, _tool_name: &str) -> Option<crate::PermissionMode> {
+        None
     }
 
     /// Out-of-band images (`media_type`, base64) staged by the most recent

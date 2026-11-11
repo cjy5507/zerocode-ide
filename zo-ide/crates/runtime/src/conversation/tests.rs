@@ -21876,3 +21876,64 @@ mod wire_prefix_stability {
         );
     }
 }
+
+/// A tool that joined the registry after the policy was built — an MCP tool
+/// whose server was discovered mid-session — is judged at the grade the
+/// executor's registry declares for it, through the wrapper it is called by
+/// and by its name: a read-only one runs in a read-only session, a
+/// destructive one does not, and one that declares nothing stays at the
+/// highest grade.
+#[test]
+fn a_tool_found_after_the_policy_was_built_is_judged_at_the_grade_it_declares() {
+    struct FoundLater(Arc<Mutex<Vec<String>>>);
+    impl ToolExecutor for FoundLater {
+        fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+            self.0.lock().expect("calls").push(format!("{tool_name} {input}"));
+            Ok("ran".to_string())
+        }
+
+        fn declared_mode(&self, tool_name: &str) -> Option<PermissionMode> {
+            match tool_name {
+                "mcp__docs__search" => Some(PermissionMode::ReadOnly),
+                "mcp__docs__purge" => Some(PermissionMode::DangerFullAccess),
+                _ => None,
+            }
+        }
+    }
+    struct OneBatch(Option<Vec<AssistantEvent>>);
+    impl ApiClient for OneBatch {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(self.0.take().unwrap_or_else(|| {
+                vec![AssistantEvent::TextDelta("done".into()), AssistantEvent::MessageStop]
+            }))
+        }
+    }
+    let through = |id: &str, name: &str| AssistantEvent::ToolUse {
+        id: id.to_string(),
+        name: core_types::tool_names::CAPABILITY_INVOKE.to_string(),
+        input: serde_json::json!({ "name": name, "input": { "query": "x" } }).to_string(),
+    };
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let api = OneBatch(Some(vec![
+        through("call-1", "mcp__docs__search"),
+        through("call-2", "mcp__docs__purge"),
+        through("call-3", "mcp__docs__undeclared"),
+        AssistantEvent::ToolUse {
+            id: "call-4".to_string(),
+            name: "mcp__docs__search".to_string(),
+            input: r#"{"query":"y"}"#.to_string(),
+        },
+        AssistantEvent::MessageStop,
+    ]));
+    let policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+        .with_tool_requirement(core_types::tool_names::CAPABILITY_INVOKE, PermissionMode::ReadOnly);
+    assert!(!policy.has_tool_requirement("mcp__docs__search"), "the policy was built before the tool was found");
+    let mut runtime =
+        ConversationRuntime::new(Session::new(), api, FoundLater(Arc::clone(&ran)), policy, vec!["system".into()]);
+    runtime.run_turn("search the docs", None).expect("the turn");
+
+    let ran = ran.lock().expect("calls");
+    assert_eq!(ran.len(), 2, "the read-only tool ran both ways and nothing else did: {ran:?}");
+    assert!(ran[0].starts_with("CapabilityInvoke ") && ran[0].contains("mcp__docs__search"), "{ran:?}");
+    assert!(ran[1].starts_with("mcp__docs__search "), "{ran:?}");
+}

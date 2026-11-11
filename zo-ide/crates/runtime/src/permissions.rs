@@ -215,6 +215,13 @@ impl PermissionPolicy {
         }
     }
 
+    /// Whether a grade was ever set for `tool_name`: one that has none is
+    /// judged at the highest ([`Self::required_mode_for`]).
+    #[must_use]
+    pub fn has_tool_requirement(&self, tool_name: &str) -> bool {
+        self.tool_requirements.contains_key(tool_name)
+    }
+
     #[must_use]
     pub fn with_permission_rules(mut self, config: &RuntimePermissionRuleConfig) -> Self {
         self.allow_rules = config

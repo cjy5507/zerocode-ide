@@ -3227,6 +3227,7 @@ where
                     pre_hook_result.permission_reason().map(ToOwned::to_owned),
                 );
 
+                self.learn_declared_mode(tool_name, effective_input.as_ref());
                 let permission_outcome = if let Some(outcome) =
                     pre_hook_denial_outcome(&pre_hook_result, tool_name)
                 {

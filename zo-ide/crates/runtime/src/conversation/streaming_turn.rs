@@ -2562,6 +2562,7 @@ where
                     pre_hook_result.permission_reason().map(ToOwned::to_owned),
                 );
 
+                self.learn_declared_mode(tool_name, &effective_input);
                 let mut kill_judgment = None;
                 let permission_outcome = if let Some(outcome) =
                     pre_hook_denial_outcome(&pre_hook_result, tool_name)
@@ -2616,15 +2617,19 @@ where
                                 .deny_reason
                                 .clone()
                                 .or_else(|| sync_request.reason.clone());
-                            let tool_label = tool_name.to_owned();
+                            // What the person is asked about is the call
+                            // the policy judged — the one a wrapper carried,
+                            // when the model called through it — so the hook,
+                            // the notification and a refusal name that call.
+                            let tool_label = sync_request.tool_name.clone();
                             // The user is about to see a permission prompt:
                             // fire PermissionRequest plus Notification (the
                             // event Claude Code uses for OS-level pings).
                             self.fire_lifecycle_hook(
                                 HookEvent::PermissionRequest,
                                 &serde_json::json!({
-                                    "tool_name": tool_name,
-                                    "input": effective_input.as_str(),
+                                    "tool_name": sync_request.tool_name,
+                                    "input": sync_request.input,
                                     "reason": sync_request.reason,
                                 }),
                             );
@@ -2633,9 +2638,9 @@ where
                                 &serde_json::json!({
                                     "message": format!(
                                         "Zo needs permission to run `{}`",
-                                        core_types::tool_names::wire_tool_name(tool_name)
+                                        core_types::tool_names::wire_tool_name(&sync_request.tool_name)
                                     ),
-                                    "tool_name": tool_name,
+                                    "tool_name": sync_request.tool_name,
                                 }),
                             );
                             // `None` = the prompt ceiling expired with nobody
