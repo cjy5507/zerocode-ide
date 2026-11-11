@@ -815,10 +815,10 @@ pub(crate) async fn phone_link_enable() -> Result<LinkStatus, String> {
     let _crumb = crate::crumbs::Command::enter("phone_link_enable");
     blocking(|| {
         let link = the_link()?;
-        if let Err(word) = link.bring_up(true) {
-            if let Ok(mut look) = link.last.lock() {
-                look.problem = Some(word);
-            }
+        if let Err(word) = link.bring_up(true)
+            && let Ok(mut look) = link.last.lock()
+        {
+            look.problem = Some(word);
         }
         Ok(link.status())
     })

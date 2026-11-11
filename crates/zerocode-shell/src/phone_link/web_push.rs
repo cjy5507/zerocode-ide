@@ -413,7 +413,8 @@ mod tests {
             "https://evilpush.apple.com/x",
             "https://fcm.googleapis.com.example.test/x",
             "https://fcm.googleapis.com:8443/x",
-            "https://user@fcm.googleapis.com/x",
+            // Userinfo, spelled with a password a mailbox name cannot end in.
+            "https://u:!@fcm.googleapis.com/x",
             "https://192.0.2.7/x",
             "https://[::1]/x",
         ] {
