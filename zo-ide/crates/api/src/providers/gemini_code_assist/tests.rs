@@ -3538,3 +3538,13 @@ fn a_tool_reaches_gemini_with_every_portable_keyword_as_written() {
     assert_eq!(declaration["name"], "Read");
     assert_eq!(declaration["parameters"], crate::tool_schema::every_portable_keyword());
 }
+
+/// A `{client:?}` in a panic or a log names no Google login.
+#[test]
+fn a_code_assist_clients_debug_line_carries_no_token() {
+    let client = GeminiCodeAssistClient::new("fixture-google-access-token");
+    let line = format!("{client:?}");
+    assert!(!line.contains("fixture-google-access-token"), "the token never prints: {line}");
+    assert!(client.speaks_with_bearer("fixture-google-access-token"));
+    assert!(!client.speaks_with_bearer("another-token"));
+}

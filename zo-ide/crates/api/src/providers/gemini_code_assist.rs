@@ -584,7 +584,7 @@ fn clear_refresh_failure() {
     LAST_REFRESH_FAILURE_UNIX.store(0, Ordering::Relaxed);
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GeminiCodeAssistClient {
     http: reqwest::Client,
     access_token: String,
@@ -595,7 +595,28 @@ pub struct GeminiCodeAssistClient {
     max_backoff: Duration,
 }
 
+/// A client's debug line names how it retries, never with what bearer: the
+/// access token is a Google login, and a `{client:?}` in a panic or a log must
+/// not carry it.
+impl std::fmt::Debug for GeminiCodeAssistClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiCodeAssistClient")
+            .field("access_token", &"<redacted>")
+            .field("max_retries", &self.max_retries)
+            .field("initial_backoff", &self.initial_backoff)
+            .field("max_backoff", &self.max_backoff)
+            .finish_non_exhaustive()
+    }
+}
+
 impl GeminiCodeAssistClient {
+    /// Whether this client sends exactly `bearer` — the answer a caller needs
+    /// from a client whose debug line names no token.
+    #[must_use]
+    pub fn speaks_with_bearer(&self, bearer: &str) -> bool {
+        self.access_token == bearer
+    }
+
     /// A client for a bare bearer. Its project is remembered for this process
     /// only; a client built from a saved login ([`Self::from_oauth`]) also
     /// finds the one an earlier process resolved.

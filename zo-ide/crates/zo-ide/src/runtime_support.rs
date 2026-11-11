@@ -3234,8 +3234,10 @@ mod oauth_refresh_tests {
             effort_band_ceiling: None,
             session_tracer: None,
         };
-        let before = format!("{:?}", client.client);
-        assert!(before.contains("live-google-token"));
+        let speaks_with = |client: &AnthropicRuntimeClient, bearer: &str| {
+            matches!(&client.client, ProviderClient::GeminiCodeAssist(live) if live.speaks_with_bearer(bearer))
+        };
+        assert!(speaks_with(&client, "live-google-token"));
 
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3243,12 +3245,10 @@ mod oauth_refresh_tests {
             .expect("tokio runtime")
             .block_on(refresh_oauth_if_near_expiry(&mut client, true));
 
-        let after = format!("{:?}", client.client);
-        assert_eq!(
-            after, before,
+        assert!(
+            speaks_with(&client, "live-google-token"),
             "fresh non-Anthropic OAuth must not rebuild the live client before every turn"
         );
-        assert!(!after.contains("stored-fresh-google-token"));
         std::fs::remove_dir_all(config_home).ok();
     }
 
@@ -3303,10 +3303,9 @@ mod oauth_refresh_tests {
             .expect("tokio runtime")
             .block_on(refresh_oauth_if_near_expiry(&mut client, true));
 
-        let after = format!("{:?}", client.client);
         assert!(
-            after.contains("stored-expired-google-token"),
-            "expired non-Anthropic OAuth should rebuild the live client: {after}"
+            matches!(&client.client, ProviderClient::GeminiCodeAssist(live) if live.speaks_with_bearer("stored-expired-google-token")),
+            "expired non-Anthropic OAuth should rebuild the live client"
         );
         std::fs::remove_dir_all(config_home).ok();
     }

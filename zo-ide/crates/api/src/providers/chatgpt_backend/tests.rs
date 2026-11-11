@@ -6024,3 +6024,18 @@ fn a_tool_reaches_the_responses_api_with_every_portable_keyword_as_written() {
     assert_eq!(wire["name"], "Read");
     assert_eq!(wire["parameters"], crate::tool_schema::every_portable_keyword());
 }
+
+/// A `{client:?}` — in a panic, a log, or the stream's own debug line — names
+/// no login: neither the access token nor the account it belongs to.
+#[test]
+fn a_chatgpt_clients_debug_line_carries_no_token() {
+    let client = super::ChatGptBackendClient::new(
+        "fixture-chatgpt-access-token",
+        Some("fixture-account-id".to_string()),
+    );
+    let line = format!("{client:?}");
+    assert!(!line.contains("fixture-chatgpt-access-token"), "the token never prints: {line}");
+    assert!(!line.contains("fixture-account-id"), "the account never prints: {line}");
+    assert!(client.speaks_with_bearer("fixture-chatgpt-access-token"));
+    assert!(!client.speaks_with_bearer("another-token"));
+}
