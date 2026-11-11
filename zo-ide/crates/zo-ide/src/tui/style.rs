@@ -166,6 +166,11 @@ pub struct Look {
     /// what it was about — until `/thinking` asks for it whole. The marks
     /// look's, when `showThinking` says nothing.
     pub thinking_line: bool,
+    /// The work in progress — the running step, the working row — is said
+    /// right under the transcript's last row while the composer keeps the
+    /// floor, so a turn reads from the person's words down while it runs.
+    /// The marks look's; codex's whole bottom pane stands on the floor.
+    pub work_under_transcript: bool,
 }
 
 impl Look {
@@ -213,6 +218,7 @@ impl Look {
                 .then(|| preferences.max_prose_width.unwrap_or(DEFAULT_PROSE_WIDTH))
                 .filter(|columns| *columns > 0),
             thinking_line: marks && preferences.show_thinking.is_none(),
+            work_under_transcript: marks,
         }
     }
 }

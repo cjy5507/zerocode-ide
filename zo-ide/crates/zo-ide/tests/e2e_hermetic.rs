@@ -7429,6 +7429,101 @@ async fn e2e_a_pane_closed_mid_turn_ends_zo_without_a_hang_up_signal() {
     let _ = resumed.finish();
 }
 
+/// A turn reads from the person's words down while it runs. In the marks
+/// look — the interactive front's own, which this suite otherwise leaves to
+/// codex's — the running step and the working row stand right under the words
+/// they answer, and only the composer keeps the floor. Before, the whole
+/// bottom pane stood on the floor: a conversation shorter than the pane showed
+/// its work at the bottom with every row under the person's words empty
+/// ("위에 부분이 비어있고 밑에만 나오자나", 2026-11-11). The turn over, its
+/// work stands folded where it ran and the answer under it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_marks_work_in_progress_stands_under_the_words_and_the_composer_on_the_floor() {
+    const ROWS: usize = 40;
+    const COMPOSER: &str = "Ask zo to do anything";
+    let layout = Layout::new();
+    let hold = layout.root.path().join("hold");
+    fs::create_dir(&hold).expect("make the held command's folder");
+    let service = ScriptedAnthropicService::held_tool(&hold, "the held command landed")
+        .await
+        .expect("start held-tool script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[(zo_ide::tui::style::STYLE_ENV, "marks")],
+    )
+    .expect("spawn zo in PTY");
+    let screen_of = |bytes: &[u8]| {
+        let mut screen = Screen::new(ROWS);
+        screen.feed(bytes);
+        screen.visible()
+    };
+    let row_of = |visible: &[String], words: &str| visible.iter().position(|row| row.contains(words));
+    let blank = |rows: &[String]| rows.iter().all(|row| row.trim().is_empty());
+
+    run.wait_for_screen(COMPOSER, ROWS, TEST_TIMEOUT);
+    run.send(b"Run the held command and tell me when it lands\r")
+        .expect("send the tool prompt");
+    wait_for_path(&hold.join("started"), TEST_TIMEOUT);
+    // The command is held, so the screen rests on a turn at work: the words
+    // said, the working row, and an empty composer.
+    run.wait_until(0, TEST_TIMEOUT, |bytes| {
+        let visible = screen_of(bytes);
+        ["Run the held command", "esc to interrupt", COMPOSER]
+            .iter()
+            .all(|words| row_of(&visible, words).is_some())
+    });
+    let visible = screen_of(&run.snapshot_output());
+    let words = row_of(&visible, "Run the held command").expect("the person's words");
+    let working = row_of(&visible, "esc to interrupt").expect("the working row");
+    let composer = row_of(&visible, COMPOSER).expect("the composer");
+    assert!(
+        working > words && working - words <= 8,
+        "the working row stands {} rows under the words it answers: {visible:#?}",
+        working.saturating_sub(words)
+    );
+    assert!(
+        !visible[words + 2].trim().is_empty(),
+        "the running step stands right under the words, after one row at most: {visible:#?}"
+    );
+    assert!(
+        composer >= ROWS - 4,
+        "the composer left the floor for row {composer} of {ROWS}: {visible:#?}"
+    );
+    assert!(
+        composer - working >= 15 && blank(&visible[working + 1..composer - 1]),
+        "the rows between the work and the composer are the blank ones: {visible:#?}"
+    );
+
+    fs::write(hold.join("release"), b"").expect("let the held command go");
+    run.wait_for_screen("the held command landed", ROWS, TEST_TIMEOUT);
+    // The turn's end frame: nobody is working, and the composer is empty.
+    run.wait_until(0, TEST_TIMEOUT, |bytes| {
+        let visible = screen_of(bytes);
+        row_of(&visible, "esc to interrupt").is_none() && row_of(&visible, "Worked").is_some()
+    });
+    let visible = screen_of(&run.snapshot_output());
+    let words = row_of(&visible, "Run the held command").expect("the person's words");
+    let worked = row_of(&visible, "Worked").expect("the turn's folded work");
+    let answer = row_of(&visible, "the held command landed").expect("the answer");
+    let composer = row_of(&visible, COMPOSER).expect("the composer");
+    assert!(
+        worked > words && worked - words <= 3,
+        "the work folded where it ran, right under the words: {visible:#?}"
+    );
+    assert!(answer > worked, "the answer stands under the work: {visible:#?}");
+    assert!(
+        composer >= ROWS - 4,
+        "the composer left the floor for row {composer} of {ROWS}: {visible:#?}"
+    );
+    let _ = run.finish();
+}
+
 /// The same pane closed while zo idles. An idle zo's loop wakes for nothing
 /// but its tend, `IDLE_TEND` (thirty seconds) after the last, so the terminal
 /// stream has to look on its own: zo ends inside the same bound as mid-turn.

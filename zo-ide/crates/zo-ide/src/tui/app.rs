@@ -651,6 +651,9 @@ struct Ui {
     /// How finished turns stand: folded, or a row a step. The look's choice
     /// when the session opens; `ctrl+o` turns it.
     view: super::style::ConversationView,
+    /// The work in progress is said right under the transcript while the
+    /// composer keeps the floor ([`Ui::place`]) — the look's choice.
+    work_under_transcript: bool,
     /// The turn's work the `turns` view is holding for its one cell.
     fold: turns::TurnFold,
     /// A finished thinking block stands as one row
@@ -2224,36 +2227,68 @@ impl Ui {
             max_rows: max_rows as usize,
             max_height: usize::from(self.painter.max_height()),
         };
-        let (rows, cursor) = view::build(&frame);
-        self.place(&rows, cursor, whole);
+        let built = view::build_parts(&frame);
+        let dense = self.work_opens_dense(tail_owns_slot);
+        self.place(built, whole, dense);
+    }
+
+    /// Whether the work in the viewport stands on the row right under the
+    /// transcript's last, with no gap row above it — where the cell it
+    /// becomes is committed: any cell under the person's band, whose last row
+    /// is blank already ([`Self::push_history`]), and a tool cell under a
+    /// tool cell ([`Self::commit_tool_rows`]). With the gap it would stand a
+    /// row lower than it lands, and jump when it is said.
+    fn work_opens_dense(&self, tail_owns_slot: bool) -> bool {
+        match self.history_tail {
+            HistoryTail::UserBand => true,
+            HistoryTail::ToolCell => !tail_owns_slot && !self.fold.is_pending() && self.tool_cell.is_some(),
+            HistoryTail::Other => false,
+        }
     }
 
     /// Put the built rows on the screen: the head sized for them — as a popup
     /// over the rows above it when `whole` — then painted and the cursor set.
-    fn place(&mut self, rows: &[Line], cursor: Option<(u16, u16)>, whole: bool) {
-        let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+    ///
+    /// Where the look asks for it ([`Ui::work_under_transcript`]) the rows
+    /// that say the work in progress stand under the transcript's last row —
+    /// without the gap row they open with when `dense` — and the rest keeps
+    /// the floor: a turn reads from the person's words down while it runs,
+    /// the way it stands once it is said.
+    fn place(&mut self, built: view::Built, whole: bool, dense: bool) {
+        let view::Built { mut rows, mut cursor, work_rows } = built;
         if whole {
+            let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
             // History goes under the popup first; then the popup goes back up
             // over the rows that are there now.
             self.flush_history();
             self.painter.set_popup_height(height);
         } else {
+            let mut work = if self.work_under_transcript { work_rows } else { 0 };
+            if work > 0 && dense && rows.first().is_some_and(|row| *row == Line::empty()) {
+                rows.remove(0);
+                work -= 1;
+                cursor = cursor.map(|(col, row)| (col, row.saturating_sub(1)));
+            }
+            let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
+            let work = u16::try_from(work).unwrap_or(u16::MAX);
             // The head is sized first, so a finished cell's lines push it back
             // down onto the floor — see `history`. History under a head that
             // covers the screen folds it to one row on the floor first, so the
             // size is asked for again: the second call is a no-op otherwise,
             // and after a fold it grows the head back from the floor, so the
             // rows painted and the cursor placed below agree with `height`.
-            self.painter.set_height(height);
+            // With work to lift, the second call also takes back whatever
+            // rows the history left under itself.
+            self.painter.set_lifted_height(work, height);
             self.flush_history();
-            self.painter.set_height(height);
+            self.painter.set_lifted_height(work, height);
             // Nobody working: the rows a mid-turn shrink left under the
             // footer go back above it, and the composer rests on the floor.
             if self.status.is_none() {
                 self.painter.settle_on_the_floor();
             }
         }
-        self.painter.paint(rows);
+        self.painter.paint(&rows);
         let cursor = cursor.map(|(col, row)| self.painter.absolute(col, row));
         self.painter.end(cursor);
     }
@@ -5608,6 +5643,7 @@ impl App {
                 sessions: None,
                 start: None,
                 view: super::style::current().view,
+                work_under_transcript: super::style::current().work_under_transcript,
                 fold: turns::TurnFold::default(),
                 thinking_line: super::style::current().thinking_line,
                 reasoning_started: None,
@@ -7883,6 +7919,7 @@ fn test_ui() -> Ui {
         sessions: None,
         start: None,
         view: super::style::ConversationView::Full,
+        work_under_transcript: false,
         fold: turns::TurnFold::default(),
         thinking_line: false,
         reasoning_started: None,
@@ -8985,6 +9022,38 @@ mod tests {
         assert!(first > worked, "{said:#?}");
         assert!(said.iter().any(|row| row.contains("paragraph 8")), "{said:#?}");
         assert!(!ui.fold.is_pending(), "nothing is held once an answer passed");
+    }
+
+    /// The work in the viewport opens on the row right under the transcript
+    /// where the cell it becomes is committed without its gap row — under
+    /// the person's band, and a tool cell under a tool cell. Anywhere else
+    /// the gap row stays, as the committed cell keeps it.
+    #[test]
+    fn work_under_the_band_or_a_tool_cell_opens_without_its_gap_row() {
+        let mut ui = test_ui();
+        assert!(!ui.work_opens_dense(false), "under any other row the gap row stays");
+        ui.history_tail = super::HistoryTail::UserBand;
+        assert!(ui.work_opens_dense(false), "the band closes on a blank row of its own");
+        assert!(ui.work_opens_dense(true), "and a stream's tail is said under it as closely");
+        ui.history_tail = super::HistoryTail::ToolCell;
+        assert!(!ui.work_opens_dense(false), "no tool cell is in the viewport");
+        let ids = BlockIdGen::default();
+        ui.block(tool_call(&ids, "toolu_read", "read_file", &json!({ "path": "src/parser.rs" })));
+        assert!(ui.work_opens_dense(false), "a tool cell under a tool cell leaves its gap row off");
+        assert!(!ui.work_opens_dense(true), "a stream's tail under a tool cell keeps it");
+        ui.view = super::super::style::ConversationView::Turns;
+        ui.fold.take_steps(vec![crate::tui::turns::Step {
+            kind: crate::tui::turns::StepKind::Read,
+            verb: "Read".to_string(),
+            target: "src/lib.rs".to_string(),
+            change: None,
+            ok: true,
+            declined: false,
+            failure: None,
+            started: std::time::Instant::now(),
+            took: None,
+        }]);
+        assert!(!ui.work_opens_dense(false), "held work becomes a fold, which keeps its gap row here");
     }
 
     /// The full view commits a row a step, as it always did.

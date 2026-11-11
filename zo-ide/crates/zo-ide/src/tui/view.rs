@@ -1710,6 +1710,28 @@ pub struct Frame<'a> {
 /// 프레임을 줄들과 커서 좌표로 편다. 커서가 `None` 이면 숨긴다.
 #[must_use]
 pub fn build(frame: &Frame<'_>) -> (Vec<Line>, Option<(u16, u16)>) {
+    let built = build_parts(frame);
+    (built.rows, built.cursor)
+}
+
+/// A built frame: its rows, the cursor in them, and where the work ends.
+#[derive(Debug)]
+pub struct Built {
+    pub rows: Vec<Line>,
+    /// `None` hides the cursor.
+    pub cursor: Option<(u16, u16)>,
+    /// How many of `rows`, from the first, say the work in progress — the
+    /// active cell and the working row. The rest is the composer's: pending
+    /// input, the field, the footer. Zero for a surface that takes the whole
+    /// viewport, and for an idle bottom pane.
+    pub work_rows: usize,
+}
+
+/// [`build`], with the count of rows that are the work in progress — what
+/// the caller may stand under the transcript while the rest keeps the floor
+/// ([`super::painter::Painter::set_lifted_height`]).
+#[must_use]
+pub fn build_parts(frame: &Frame<'_>) -> Built {
     build_with_focus(frame, palette::COMMAND_TOKEN)
 }
 
@@ -1755,29 +1777,38 @@ fn build_question(
     (rows, Some((col, composer_row + row)))
 }
 
-fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16, u16)>) {
+fn build_with_focus(frame: &Frame<'_>, focus: Color) -> Built {
+    // A surface that takes the viewport is one block: none of its rows is
+    // the work in progress.
+    let whole = |(rows, cursor): (Vec<Line>, Option<(u16, u16)>)| Built { rows, cursor, work_rows: 0 };
     if let Some(dialog) = frame.dialog {
-        return (dialog.lines_with_focus(frame.width, focus), None);
+        return whole((dialog.lines_with_focus(frame.width, focus), None));
     }
     if let Some(picker) = frame.picker {
-        return (picker.lines_with_focus(frame.width, frame.max_rows, focus), None);
+        return whole((picker.lines_with_focus(frame.width, frame.max_rows, focus), None));
     }
     if let Some(sessions) = frame.sessions {
-        return (sessions.lines(frame.width, frame.max_rows), None);
+        return whole((sessions.lines(frame.width, frame.max_rows), None));
     }
     if let Some(pager) = frame.pager {
-        return (pager.to_vec(), None);
+        return whole((pager.to_vec(), None));
     }
     if let Some(question) = frame.question {
-        return keep_caret_in_view(build_question(frame, question, focus), frame.max_height);
+        return whole(keep_caret_in_view(build_question(frame, question, focus), frame.max_height));
     }
     if let Some(page) = frame.warnings {
-        return (page.to_vec(), None);
+        return whole((page.to_vec(), None));
     }
     if let Some(built) = frame.start.and_then(|page| build_start_page(frame, page, focus)) {
-        return keep_caret_in_view(built, frame.max_height);
+        return whole(keep_caret_in_view(built, frame.max_height));
     }
-    keep_caret_in_view(build_bottom_pane(frame, focus), frame.max_height)
+    let (rows, cursor, work_rows) = build_bottom_pane(frame, focus);
+    let built = rows.len();
+    let (rows, cursor) = keep_caret_in_view((rows, cursor), frame.max_height);
+    // Rows cut to keep the caret in view come off the top, so the work loses
+    // them first.
+    let work_rows = work_rows.saturating_sub(built - rows.len());
+    Built { rows, cursor, work_rows }
 }
 
 /// The start page's rows, or `None` when the pane cannot hold it — the bottom
@@ -1860,8 +1891,10 @@ fn keep_caret_in_view(
 }
 
 /// The bottom pane — status, the `?` card, pending input, the composer and
-/// the two footer rows — with the active cell above it.
-fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16, u16)>) {
+/// the two footer rows — with the active cell above it. The count is the
+/// rows, from the first, that are the work in progress: the active cell and
+/// the status rows ([`Built::work_rows`]).
+fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16, u16)>, usize) {
     // The bottom pane first — its height decides how many rows the active
     // cell above it may take (`clip_active`).
     let mut rows: Vec<Line> = Vec::new();
@@ -1870,6 +1903,7 @@ fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16
         rows.push(status.line(frame.width));
         rows.extend(status.detail_lines(frame.width));
     }
+    let status_rows = rows.len();
     let mut below: Vec<Line> = vec![Line::empty()];
     if let Some(pending_input) = frame.pending_input.filter(|lines| !lines.is_empty()) {
         below.extend(
@@ -1911,12 +1945,12 @@ fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16
     rows.extend(below);
     // 활성 셀이 먼저 — codex 는 그 위에 빈 줄 하나(`top: 1`)를 띄운다.
     let Some(active) = frame.active.filter(|active| !active.is_empty()) else {
-        return (rows, Some((col, composer_row + row)));
+        return (rows, Some((col, composer_row + row)), status_rows);
     };
     // 아래 창이 이미 화면을 채웠다 — 긴 초안이 남는 높이를 다 쓴 때다. 활성 셀 위의 빈 줄
     // 하나도 놓을 자리가 없고, 놓으면 푸터의 마지막 줄이 화면 밑으로 밀려난다.
     if rows.len() >= frame.max_height {
-        return (rows, Some((col, composer_row + row)));
+        return (rows, Some((col, composer_row + row)), status_rows);
     }
     let budget = frame.max_rows.saturating_sub(rows.len() + 1);
     let mut head: Vec<Line> = Vec::with_capacity(budget + 1);
@@ -1927,8 +1961,9 @@ fn build_bottom_pane(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16
             .map(|line| line.truncated(frame.width)),
     );
     let composer_row = composer_row + u16::try_from(head.len()).unwrap_or(u16::MAX);
+    let work_rows = head.len() + status_rows;
     head.extend(rows);
-    (head, Some((col, composer_row + row)))
+    (head, Some((col, composer_row + row)), work_rows)
 }
 
 /// A session that may run anything says so first, in the warn tint
@@ -2924,6 +2959,61 @@ mod tests {
         assert_eq!(plain[2], "  └ Read README.md");
         assert_eq!(plain[3], "");
         assert_eq!(plain[4], "• Working (1s • esc to interrupt)");
+    }
+
+    /// The rows that say the work in progress are counted from the first:
+    /// the active cell under its gap row, then the working row under its own.
+    /// The caller may stand them under the transcript while the rest keeps
+    /// the floor. An idle pane has none, a stream's tail owns them without a
+    /// working row, a surface that takes the viewport is one block, and rows
+    /// cut to keep the caret in view come off the work.
+    #[test]
+    fn the_rows_of_work_in_progress_are_counted_from_the_first() {
+        use super::build_parts;
+        let composer = Composer::new();
+        let status = Status::working(Duration::from_secs(1));
+        let active = vec![
+            Line::from_text("• Exploring"),
+            Line::from_text("  └ Read README.md"),
+        ];
+        let plain = |rows: &[Line]| rows.iter().map(Line::plain).collect::<Vec<_>>();
+
+        assert_eq!(build_parts(&frame(&composer, None)).work_rows, 0, "an idle pane is the composer's alone");
+
+        let working = build_parts(&frame(&composer, Some(&status)));
+        assert_eq!(working.work_rows, 2, "a gap row and the working row: {:?}", plain(&working.rows));
+        assert!(working.rows[1].plain().contains("Working"), "{:?}", plain(&working.rows));
+
+        let mut running = frame(&composer, Some(&status));
+        running.active = Some(&active);
+        let built = build_parts(&running);
+        assert_eq!(built.work_rows, 5, "gap, the cell's two rows, gap, the working row: {:?}", plain(&built.rows));
+        assert!(built.rows[4].plain().contains("Working"), "{:?}", plain(&built.rows));
+        let (rows, cursor) = build(&running);
+        assert_eq!((plain(&rows), cursor), (plain(&built.rows), built.cursor), "the same rows either way");
+
+        let mut tail = frame(&composer, Some(&status));
+        tail.active = Some(&active[..1]);
+        tail.tail_owns_slot = true;
+        assert_eq!(build_parts(&tail).work_rows, 2, "a gap row and the tail");
+
+        let page = vec![Line::from_text("a page")];
+        let mut paged = frame(&composer, Some(&status));
+        paged.pager = Some(&page);
+        assert_eq!(build_parts(&paged).work_rows, 0, "a surface that takes the viewport is one block");
+
+        for max_height in 3..12 {
+            let mut short = frame(&composer, Some(&status));
+            short.max_height = max_height;
+            let built = build_parts(&short);
+            let working_at = built.rows.iter().position(|row| row.plain().contains("Working"));
+            assert_eq!(
+                built.work_rows,
+                working_at.map_or(0, |at| at + 1),
+                "on {max_height} rows the work ends with the working row: {:?}",
+                plain(&built.rows)
+            );
+        }
     }
 
     /// 스트림 꼬리가 칸을 쥐면 Working 줄은 물러난다(codex 는 꼬리를 세울 때

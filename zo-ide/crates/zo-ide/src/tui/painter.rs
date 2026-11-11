@@ -214,6 +214,22 @@ pub struct Painter<W: Write> {
     /// model-picker e2e guards), and history pushing the head down or a head
     /// growing in place spends it first.
     slack: u16,
+    /// The head in two parts, when the last sizing asked for that — see
+    /// [`Self::set_lifted_height`]. `None` is the one block every other
+    /// caller sizes.
+    lift: Option<Lift>,
+}
+
+/// A head whose first rows stand directly under the transcript while the rest
+/// stands on the floor — [`Painter::set_lifted_height`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Lift {
+    /// How many of the rows handed to [`Painter::paint`] are the part under
+    /// the transcript.
+    upper: u16,
+    /// The blank rows the head holds between its two parts: the band, kept
+    /// inside the head for as long as it is lifted.
+    apart: u16,
 }
 
 /// Lines the ring keeps — several screens, so a resize can refill the rows
@@ -236,6 +252,9 @@ struct Popup {
     /// Where the head was, and how tall, before the popup went up.
     base_top: u16,
     base_height: u16,
+    /// The two parts that head stood in. A popup is one block, so the lift
+    /// waits here and comes back with the head.
+    lift: Option<Lift>,
 }
 
 impl<W: Write> Painter<W> {
@@ -281,6 +300,7 @@ impl<W: Write> Painter<W> {
             gap: top - first,
             reached: top == first,
             slack: 0,
+            lift: None,
         }
     }
 
@@ -425,6 +445,15 @@ impl<W: Write> Painter<W> {
             .saturating_sub(self.known_above);
         self.cols = cols.max(1);
         self.rows = rows.max(MIN_ROWS);
+        // A head in two parts is one block again for the rebuild: the rows it
+        // held blank are the band's, and the frame that follows lifts it from
+        // wherever the transcript ends on the new screen. A signal that
+        // changed no size leaves it as it stands.
+        if self.rows != old_rows || self.cols != old_cols {
+            if let Some(lift) = self.lift.take() {
+                self.height = self.height.saturating_sub(lift.apart);
+            }
+        }
         let height = self.height.min(self.max_height());
         // With no height yet the floor is the last row, as at `new`.
         self.top = self.rows.saturating_sub(height.max(1)).max(1);
@@ -498,7 +527,56 @@ impl<W: Write> Painter<W> {
         if self.popup.is_some() {
             self.close_popup();
         }
+        self.size(height.min(self.max_height()).max(1), None);
+    }
+
+    /// Size the head for `height` rows of which the first `upper` are said
+    /// right under the transcript — a running step, the working row — while
+    /// the rest stands on the floor: the composer and what is under it.
+    ///
+    /// The head stays one block: it covers every row from the transcript's
+    /// last down to the floor and holds the rows between its two parts blank
+    /// (`Lift::apart`). The band is inside it for that long. History takes
+    /// those rows back as it needs them ([`Self::insert_history`]), so the
+    /// part under the transcript moves down a row for each row said, the way
+    /// a row being written does, and the part on the floor never moves — not
+    /// for a cell that folds either, whose rows join the blank ones instead
+    /// of leaving the footer above the floor. Sized back as one block
+    /// ([`Self::set_height`]), it gives the rows above its floor part to the
+    /// band again.
+    ///
+    /// Before this the whole head stood on the floor, and a conversation
+    /// shorter than the pane showed its work at the bottom with every row
+    /// under the person's words empty ("위에 부분이 비어있고 밑에만
+    /// 나오자나", 2026-11-11).
+    ///
+    /// With no `upper` rows this is [`Self::set_height`]; with rows that
+    /// already fill the room under the transcript the two parts touch, and
+    /// growth scrolls the region above the head as it always did.
+    pub fn set_lifted_height(&mut self, upper: u16, height: u16) {
+        if upper == 0 {
+            self.set_height(height);
+            return;
+        }
+        if self.popup.is_some() {
+            self.close_popup();
+        }
         let height = height.min(self.max_height()).max(1);
+        // Everything under the transcript: the band, the head, and the rows
+        // a shrink or a popup left under its footer.
+        let room = self.rows - (self.top - self.gap);
+        let apart = room.saturating_sub(height);
+        self.size(height + apart, Some(Lift { upper: upper.min(height), apart }));
+        // It stands on the floor now, whatever was under it before.
+        self.slack = 0;
+    }
+
+    /// [`Self::set_height`] and [`Self::set_lifted_height`], once the popup
+    /// is down and the height is one the screen can hold: `height` counts the
+    /// blank rows of `lift`.
+    fn size(&mut self, height: u16, lift: Option<Lift>) {
+        let was_lifted = self.lift.is_some();
+        self.lift = lift;
         if height == self.height {
             return;
         }
@@ -508,14 +586,25 @@ impl<W: Write> Painter<W> {
         let on_the_floor = self.top + old_height == self.rows;
         if height < old_height {
             let covered = old_height >= self.max_height();
-            if on_the_floor && (!self.reached || covered) {
+            if on_the_floor && (!self.reached || covered || was_lifted) {
                 // The band is a margin again: the rows the head gives up are
                 // blank under a transcript that either never reached it or
-                // left the screen while it covered it.
-                self.reached = false;
+                // left the screen while it covered it — or they are the rows
+                // a lifted head stood in above its floor part, which stays
+                // where it is.
+                if !was_lifted || covered {
+                    self.reached = false;
+                }
                 let given_up = old_height - height;
                 let new_top = self.top + given_up;
                 for row in self.top..new_top {
+                    // A lifted head gives up mostly rows it held blank, and
+                    // the cache says which: those cost nothing.
+                    if was_lifted
+                        && self.rendered.get(usize::from(row)).is_some_and(|shown| shown.payload == BLANK_PAYLOAD)
+                    {
+                        continue;
+                    }
                     cup(&mut self.frame, 0, row);
                     self.frame.push_str("\u{1b}[K");
                 }
@@ -554,8 +643,24 @@ impl<W: Write> Painter<W> {
                 self.reached = true;
             }
             // `height <= rows - 1`, so the head's new top is at least row one.
+            let old_top = self.top;
             self.top -= deficit;
             self.known_above = self.known_above.min(self.top - self.gap);
+            // The rows taken are blank on screen — the band's, and the ones
+            // the scroll brought up. A head that holds some of them blank
+            // knows it, so painting them writes nothing; one block writes
+            // every row it takes, as it always did.
+            if lift.is_some_and(|lift| lift.apart > 0) {
+                let cols = usize::from(self.cols);
+                for row in self
+                    .rendered
+                    .iter_mut()
+                    .take(usize::from(old_top))
+                    .skip(usize::from(self.top))
+                {
+                    *row = Row::blank(cols);
+                }
+            }
         } else {
             // Short of the floor with room under it: the rows the head takes
             // are cleared and forgotten, and it grows down in place.
@@ -608,9 +713,14 @@ impl<W: Write> Painter<W> {
     pub fn set_popup_height(&mut self, height: u16) {
         let height = height.min(self.max_height()).max(1);
         let new_top = self.rows.saturating_sub(height).max(1);
-        let mut base = self
-            .popup
-            .unwrap_or(Popup { base_top: self.top, base_height: self.height });
+        let mut base = self.popup.unwrap_or(Popup {
+            base_top: self.top,
+            base_height: self.height,
+            lift: self.lift,
+        });
+        // A popup is one block: the rows it is handed are painted as they
+        // come, and the head's two parts come back when it closes.
+        self.lift = None;
         self.open();
         // Rows above the head the ring cannot put back are scrolled away for
         // the room instead — the same road every growth took before, and the
@@ -682,6 +792,7 @@ impl<W: Write> Painter<W> {
         }
         self.top = base.base_top;
         self.height = base.base_height;
+        self.lift = base.lift;
         // The base viewport was drawn over: every row of it repaints next
         // frame, and what the popup left under it goes.
         for row in self.rendered.iter_mut().skip(usize::from(self.top)) {
@@ -873,6 +984,19 @@ impl<W: Write> Painter<W> {
         if self.popup.is_some() {
             self.close_popup();
         }
+        // A head in two parts holds the band's rows blank between them, and
+        // these lines take back the ones they need: the head's first row
+        // comes down by as many, so the lines are written where its upper
+        // part stood and that part is painted again under them — the part on
+        // the floor does not move. Lines past the blank rows scroll the
+        // region above a head whose two parts now touch.
+        if let Some(lift) = self.lift.as_mut() {
+            let back = count.min(lift.apart);
+            lift.apart -= back;
+            self.top += back;
+            self.height -= back;
+            self.gap += back;
+        }
         // History arriving while a full-screen viewport is up — a picker just
         // closed and the resumed transcript is being replayed before the next
         // frame has sized the composer — has nowhere to go: the region above
@@ -929,7 +1053,9 @@ impl<W: Write> Painter<W> {
             }
             self.known_above = self.known_above.saturating_add(count - walk);
         }
-        if self.gap == 0 {
+        // The rows a lifted head still holds blank are the band's: the
+        // transcript has not reached the part on the floor while one is left.
+        if self.gap == 0 && self.lift.is_none_or(|lift| lift.apart == 0) {
             self.reached = true;
         }
         self.frame.push_str(SCROLL_REGION_RESET);
@@ -1074,9 +1200,16 @@ impl<W: Write> Painter<W> {
         payloads.resize_with(height, String::new);
         // 루프 밖에 한 번. 안에 두면 행마다 새로 세운다.
         let blank = Line::empty();
+        let lift = self.lift;
         for (index, payload) in payloads.iter_mut().enumerate() {
-            let line = rows.get(index).unwrap_or(&blank);
             payload.clear();
+            // A row with no line — past the rows handed in, or between a
+            // lifted head's two parts — is the blank payload itself: a lifted
+            // head is mostly such rows, every frame.
+            let Some(line) = lifted_row(rows, lift, index) else {
+                payload.push_str(BLANK_PAYLOAD);
+                continue;
+            };
             payload.push_str("\u{1b}[0m\u{1b}[K");
             if self.color {
                 write_spans(line, payload);
@@ -1100,7 +1233,7 @@ impl<W: Write> Painter<W> {
             if skipped {
                 continue;
             }
-            let line = rows.get(index).unwrap_or(&blank);
+            let line = lifted_row(rows, lift, index).unwrap_or(&blank);
             #[allow(clippy::cast_possible_truncation)] // height 는 u16 이다.
             let screen_row = self.top + index as u16;
             self.write_row(row, screen_row, line, payload, &mut reset_sent);
@@ -1280,9 +1413,15 @@ impl<W: Write> Painter<W> {
         self.at = None;
     }
 
-    /// 뷰포트 안 `(col, row)` 상대 좌표를 화면 절대 좌표로.
+    /// 뷰포트 안 `(col, row)` 상대 좌표를 화면 절대 좌표로. `row` 는 [`Self::paint`] 에
+    /// 넘긴 줄들의 색인이다 — 둘로 나뉜 머리에서는 바닥 쪽 줄이 그 사이의 빈 행만큼 아래에
+    /// 있다.
     pub const fn absolute(&self, col: u16, row: u16) -> (u16, u16) {
-        (col, self.top + row)
+        let apart = match self.lift {
+            Some(lift) if row >= lift.upper => lift.apart,
+            _ => 0,
+        };
+        (col, self.top + row + apart)
     }
 
     /// `/clear` — visible screen and scrollback are one terminal operation.
@@ -1295,7 +1434,11 @@ impl<W: Write> Painter<W> {
         self.open();
         self.frame
             .push_str("\u{1b}[r\u{1b}[0m\u{1b}[H\u{1b}[2J\u{1b}[3J\u{1b}[H");
-        // The head stays on the floor; the whole screen above it is the band.
+        // The head stays on the floor; the whole screen above it is the band
+        // — a lifted head's blank rows with it, until the next frame sizes it.
+        if let Some(lift) = self.lift.take() {
+            self.height = self.height.saturating_sub(lift.apart);
+        }
         self.top = self.rows.saturating_sub(self.height.max(1)).max(1);
         self.gap = self.top - 1;
         self.reached = false;
@@ -1325,6 +1468,21 @@ impl<W: Write> Painter<W> {
         payload.push_str(RESET);
         payload.push_str("\u{1b}[?25h");
         self.write(&payload);
+    }
+}
+
+/// The line the head's row `index` shows: the rows handed to
+/// [`Painter::paint`] in order, with the blank rows of a lifted head between
+/// its two parts. `None` is a blank row.
+fn lifted_row(rows: &[Line], lift: Option<Lift>, index: usize) -> Option<&Line> {
+    let Some(lift) = lift else {
+        return rows.get(index);
+    };
+    let (upper, apart) = (usize::from(lift.upper), usize::from(lift.apart));
+    if index < upper {
+        rows.get(index)
+    } else {
+        index.checked_sub(apart).filter(|&below| below >= upper).and_then(|below| rows.get(below))
     }
 }
 
@@ -1390,7 +1548,7 @@ mod cell_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{Painter, SYNC_BEGIN};
+    use super::{Painter, BLANK_PAYLOAD, SYNC_BEGIN};
     use crate::tui::ansi::{Line, Span, Style};
 
     fn painter(rows: u16, cursor_row: u16) -> Painter<Vec<u8>> {
@@ -2739,6 +2897,363 @@ mod tests {
         painter.leave();
         let out = String::from_utf8(std::mem::take(&mut painter.out)).expect("utf-8");
         assert!(out.ends_with("\u{1b}[r\u{1b}[5;1H\u{1b}[J\u{1b}[0m\u{1b}[?25h"), "{out:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // A head in two parts: the work under the transcript, the composer on
+    // the floor (2026-11-11: "위에 부분이 비어있고 밑에만 나오자나").
+    // ------------------------------------------------------------------
+
+    const COMPOSER: [&str; 3] = ["composer", "footer", "keys"];
+    const WORK: [&str; 5] = ["run cargo test", "working", "composer", "footer", "keys"];
+
+    /// A 24-row screen with one row said on it and a turn under way: two
+    /// rows of work lifted over the composer's three.
+    fn lifted() -> (Painter<Vec<u8>>, Screen) {
+        let mut painter = painter(24, 0);
+        let mut screen = Screen::new(40, 24);
+        painter.set_height(3);
+        painter.paint(&lines(COMPOSER));
+        screen.feed(&drain(&mut painter));
+        painter.insert_history(&lines(["you: fix the parser"]));
+        screen.feed(&drain(&mut painter));
+        painter.set_lifted_height(2, 5);
+        let frame = painter.frame.clone();
+        assert!(!scrolled(&frame), "lifting moved no row: {frame:?}");
+        assert!(
+            painter.rendered[2..21].iter().all(|row| row.payload == BLANK_PAYLOAD),
+            "the band's rows are known to be blank, so painting them writes nothing"
+        );
+        painter.paint(&lines(WORK));
+        let frame = painter.frame.clone();
+        assert!(!frame.contains("composer"), "the composer was where it is: {frame:?}");
+        screen.feed(&drain(&mut painter));
+        (painter, screen)
+    }
+
+    /// The work stands on the rows right under the transcript's last, the
+    /// composer on the screen's last rows, and every row between is blank —
+    /// with nothing scrolled, nothing in scrollback, and the cursor's row
+    /// counted past the blank rows.
+    #[test]
+    fn a_lifted_head_says_its_work_under_the_transcript_and_keeps_the_composer_on_the_floor() {
+        let (painter, screen) = lifted();
+        assert!(screen.scrollback.is_empty(), "{:?}", screen.scrollback);
+        let visible = screen.transcript();
+        assert_eq!(&visible[1..4], &["you: fix the parser", "run cargo test", "working"], "{}", shown(&visible));
+        assert!(visible[4..21].iter().all(String::is_empty), "the rows between are blank: {}", shown(&visible));
+        assert_eq!(&visible[21..24], &COMPOSER, "{}", shown(&visible));
+        assert_eq!((painter.top, painter.height, painter.gap), (2, 22, 0), "the head holds the band");
+        assert!(!painter.reached, "the transcript has not reached the part on the floor");
+        assert_eq!(painter.absolute(0, 1), (0, 3), "a row of the work");
+        assert_eq!(painter.absolute(3, 2), (3, 21), "the composer's row, past the blank ones");
+    }
+
+    /// Rows said under a lifted head go where its work stood, and the work is
+    /// painted again right under them: the composer is not written, the head
+    /// is not pushed, and nothing scrolls while a blank row is left.
+    #[test]
+    fn history_under_a_lifted_head_moves_its_work_down_and_leaves_the_composer() {
+        let (mut painter, mut screen) = lifted();
+        painter.insert_history(&lines(["r1", "r2"]));
+        let frame = painter.frame.clone();
+        assert!(
+            frame.starts_with("\u{1b}[?2026h\u{1b}[1;4r\u{1b}[2;1H\r\n"),
+            "the rows are written from the row above the work: {frame:?}"
+        );
+        assert!(!scrolled(&frame), "the blank rows took them: {frame:?}");
+        painter.set_lifted_height(2, 5);
+        painter.paint(&lines(WORK));
+        let frame = painter.frame.clone();
+        assert!(!frame.contains("composer"), "the composer did not move: {frame:?}");
+        screen.feed(&drain(&mut painter));
+
+        assert!(screen.scrollback.is_empty(), "{:?}", screen.scrollback);
+        let visible = screen.transcript();
+        assert_eq!(
+            &visible[1..6],
+            &["you: fix the parser", "r1", "r2", "run cargo test", "working"],
+            "{}",
+            shown(&visible)
+        );
+        assert!(visible[6..21].iter().all(String::is_empty), "{}", shown(&visible));
+        assert_eq!(&visible[21..24], &COMPOSER, "{}", shown(&visible));
+        assert_eq!((painter.top, painter.height, painter.gap, painter.known_above), (4, 20, 0, 3));
+        assert!(!painter.reached, "fifteen blank rows are left");
+    }
+
+    /// Past the blank rows the two parts touch, and history scrolls the
+    /// region above the head as it does for one block: what leaves the screen
+    /// is the transcript's first row, and the transcript has reached the head.
+    #[test]
+    fn history_past_a_lifted_heads_blank_rows_scrolls_the_transcript() {
+        let (mut painter, mut screen) = lifted();
+        painter.insert_history(&lines((1..=18).map(|n| format!("s{n}"))));
+        painter.set_lifted_height(2, 5);
+        painter.paint(&lines(WORK));
+        screen.feed(&drain(&mut painter));
+
+        assert_eq!(screen.scrollback, vec![""], "seventeen rows fit; the eighteenth pushed the anchor row out");
+        let visible = screen.transcript();
+        assert_eq!(visible[1], "you: fix the parser", "{}", shown(&visible));
+        assert_eq!(&visible[2..20], &(1..=18).map(|n| format!("s{n}")).collect::<Vec<_>>()[..], "{}", shown(&visible));
+        assert_eq!(&visible[20..25], &WORK, "the two parts touch: {}", shown(&visible));
+        assert_eq!((painter.top, painter.height, painter.gap), (19, 5, 0));
+        assert!(painter.reached);
+    }
+
+    /// The turn over, the head is one block again: it gives the rows above
+    /// its composer back to the band, clearing only the two that said
+    /// something, and the composer is not written.
+    #[test]
+    fn a_lifted_head_sized_as_one_block_gives_its_rows_back_to_the_band() {
+        let (mut painter, mut screen) = lifted();
+        painter.set_height(3);
+        let frame = painter.frame.clone();
+        assert_eq!(frame.matches("\u{1b}[K").count(), 2, "the rows of work, and no blank one: {frame:?}");
+        assert!(!scrolled(&frame), "{frame:?}");
+        painter.paint(&lines(COMPOSER));
+        let frame = painter.frame.clone();
+        assert!(!frame.contains("composer"), "the composer stayed on the floor: {frame:?}");
+        screen.feed(&drain(&mut painter));
+
+        let visible = screen.transcript();
+        assert_eq!(visible[1], "you: fix the parser", "{}", shown(&visible));
+        assert!(visible[2..21].iter().all(String::is_empty), "the band is blank again: {}", shown(&visible));
+        assert_eq!(&visible[21..24], &COMPOSER, "{}", shown(&visible));
+        assert_eq!((painter.top, painter.height, painter.gap), (21, 3, 19));
+        assert_eq!(painter.absolute(3, 0), (3, 21), "one block: no rows to count past");
+    }
+
+    /// Under a transcript that reached the head, work that folds leaves its
+    /// rows blank inside the head: the composer keeps the floor, where one
+    /// block kept its top and floated the footer above rows it gave up. The
+    /// rows said next move the work down and still not the composer, and the
+    /// turn's end leaves the composer where it stood all along.
+    #[test]
+    fn work_that_folds_under_a_reached_transcript_leaves_the_composer_on_the_floor() {
+        let mut painter = painter(30, 5);
+        let mut screen = Screen::new(40, 30);
+        let composer = ["composer", "footer", "keys", "hints"];
+        painter.set_height(4);
+        painter.paint(&lines(composer));
+        painter.insert_history(&lines((1..=21).map(|n| format!("t{n}"))));
+        assert_eq!((painter.top, painter.gap), (26, 0), "precondition: the transcript reached the head");
+        painter.paint(&lines(composer));
+        screen.feed(&drain(&mut painter));
+        // Eight commands run under a blank row: nine rows of work.
+        let running: Vec<String> = (0..9).map(|n| format!("cmd {n}")).chain(composer.map(String::from)).collect();
+        painter.set_lifted_height(9, 13);
+        assert_eq!((painter.top, painter.height, painter.gap), (17, 13, 0), "no blank row to take: the region scrolled");
+        painter.paint(&lines(running));
+        screen.feed(&drain(&mut painter));
+        // They fold to two rows; the model is still working.
+        let folded: Vec<String> = ["folded", "working"].into_iter().chain(composer).map(String::from).collect();
+        painter.set_lifted_height(2, 6);
+        assert_eq!(painter.frame, "", "the head is as tall as it was: sizing wrote nothing");
+        assert_eq!((painter.top, painter.height, painter.gap, painter.slack), (17, 13, 0, 0));
+        painter.paint(&lines(folded.clone()));
+        let frame = painter.frame.clone();
+        assert!(!frame.contains("composer"), "the composer did not move: {frame:?}");
+        screen.feed(&drain(&mut painter));
+        let visible = screen.transcript();
+        let first = screen.scrollback.len();
+        assert_eq!(&visible[first + 17..first + 19], &["folded", "working"], "{}", shown(&visible));
+        assert!(visible[first + 19..first + 26].iter().all(String::is_empty), "{}", shown(&visible));
+        assert_eq!(&visible[first + 26..first + 30], &composer, "{}", shown(&visible));
+        // The model's next three rows.
+        painter.insert_history(&lines(["a", "b", "c"]));
+        let frame = painter.frame.clone();
+        assert!(!frame.contains("\u{1b}M"), "the head was not pushed: {frame:?}");
+        painter.set_lifted_height(2, 6);
+        painter.paint(&lines(folded));
+        let frame = painter.frame.clone();
+        assert!(!frame.contains("composer"), "{frame:?}");
+        screen.feed(&drain(&mut painter));
+        assert_eq!((painter.top, painter.height, painter.gap), (20, 10, 0));
+        // The turn is over.
+        painter.set_height(4);
+        assert_eq!((painter.top, painter.height, painter.gap, painter.slack), (26, 4, 6, 0));
+        painter.settle_on_the_floor();
+        painter.paint(&lines(composer));
+        let frame = painter.frame.clone();
+        assert!(!frame.contains("composer") && !frame.contains("\u{1b}M"), "it was on the floor already: {frame:?}");
+        screen.feed(&drain(&mut painter));
+        let visible = screen.transcript();
+        let first = screen.scrollback.len();
+        assert_eq!(&visible[first + 17..first + 20], &["a", "b", "c"], "{}", shown(&visible));
+        assert!(visible[first + 20..first + 26].iter().all(String::is_empty), "{}", shown(&visible));
+        assert_eq!(&visible[first + 26..first + 30], &composer, "{}", shown(&visible));
+    }
+
+    /// A popup is one block over a lifted head: its rows are painted as they
+    /// come, and when it closes the head stands in its two parts again.
+    #[test]
+    fn a_popup_over_a_lifted_head_gives_the_two_parts_back() {
+        let (mut painter, mut screen) = lifted();
+        let popup: Vec<String> = (0..8).map(|n| format!("pick {n}")).collect();
+        painter.set_popup_height(8);
+        painter.paint(&lines(popup.clone()));
+        assert_eq!(painter.absolute(2, 1), (2, 17), "a popup's rows are counted as they come");
+        screen.feed(&drain(&mut painter));
+        let visible = screen.transcript();
+        assert_eq!(visible[1], "you: fix the parser", "{}", shown(&visible));
+        assert!(visible[2..16].iter().all(String::is_empty), "{}", shown(&visible));
+        assert_eq!(&visible[16..24], &popup[..], "{}", shown(&visible));
+
+        painter.set_lifted_height(2, 5);
+        painter.paint(&lines(WORK));
+        screen.feed(&drain(&mut painter));
+        let visible = screen.transcript();
+        assert_eq!(&visible[1..4], &["you: fix the parser", "run cargo test", "working"], "{}", shown(&visible));
+        assert!(visible[4..21].iter().all(String::is_empty), "{}", shown(&visible));
+        assert_eq!(&visible[21..24], &COMPOSER, "{}", shown(&visible));
+        assert_eq!((painter.top, painter.height, painter.gap), (2, 22, 0));
+    }
+
+    /// A resize rebuilds the screen around one block; the frame that follows
+    /// lifts it from where the transcript ends on the new screen. A signal
+    /// that changed no size leaves the two parts where they stand.
+    #[test]
+    fn a_resized_screen_lifts_the_head_again_from_the_transcripts_end() {
+        let (mut painter, _) = lifted();
+        painter.resize(40, 30);
+        assert_eq!((painter.top, painter.height, painter.gap), (25, 5, 23), "one block on the new floor");
+        painter.set_lifted_height(2, 5);
+        painter.paint(&lines(WORK));
+        // The resize cleared the screen and printed it again: a fresh screen
+        // of the new size shows what the person sees.
+        let mut screen = Screen::new(40, 30);
+        screen.feed(&drain(&mut painter));
+        let visible = screen.transcript();
+        assert_eq!(&visible[1..4], &["you: fix the parser", "run cargo test", "working"], "{}", shown(&visible));
+        assert!(visible[4..27].iter().all(String::is_empty), "{}", shown(&visible));
+        assert_eq!(&visible[27..30], &COMPOSER, "{}", shown(&visible));
+        assert_eq!((painter.top, painter.height, painter.gap), (2, 28, 0));
+
+        painter.resize(40, 30);
+        assert_eq!((painter.top, painter.height, painter.gap), (2, 28, 0), "nothing changed size");
+        painter.paint(&lines(WORK));
+        screen.feed(&drain(&mut painter));
+        let visible = screen.transcript();
+        assert_eq!(&visible[1..4], &["you: fix the parser", "run cargo test", "working"], "{}", shown(&visible));
+        assert_eq!(&visible[27..30], &COMPOSER, "{}", shown(&visible));
+    }
+
+    /// With no row to hold blank — the transcript fills the screen — a lifted
+    /// head is the one block it was: the same bytes, row for row.
+    #[test]
+    fn a_lifted_head_with_no_room_under_the_transcript_paints_as_one_block() {
+        let frames = |lift: bool| {
+            let mut painter = painter(12, 0);
+            painter.set_height(3);
+            painter.paint(&lines(COMPOSER));
+            painter.insert_history(&lines((1..=8).map(|n| format!("r{n}"))));
+            let _ = drain(&mut painter);
+            let size = |painter: &mut Painter<Vec<u8>>, upper: u16, height: u16| {
+                if lift {
+                    painter.set_lifted_height(upper, height);
+                } else {
+                    painter.set_height(height);
+                }
+            };
+            size(&mut painter, 2, 5);
+            painter.paint(&lines(WORK));
+            let grown = drain(&mut painter);
+            painter.insert_history(&lines(["said"]));
+            size(&mut painter, 2, 5);
+            painter.paint(&lines(WORK));
+            (grown, drain(&mut painter), (painter.top, painter.height, painter.gap, painter.reached))
+        };
+        assert_eq!(frames(true), frames(false));
+    }
+
+    /// What lifting costs: one turn painted as one block on the floor and as
+    /// two parts, on the pane a person works in (201×71) — bytes written,
+    /// time a frame, and the row buffers the painter keeps.
+    ///
+    /// ```sh
+    /// cargo test -p zo-ide --lib lifted_turn_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// The turn: six steps held for a fold while the working row changes
+    /// every frame, the fold said, an answer of twenty rows committed a row
+    /// at a time under its tail, and the turn's end — sized the way
+    /// `app::Ui::place` sizes it (size, history, size, paint).
+    #[ignore = "measurement, not a contract"]
+    #[test]
+    fn lifted_turn_cost() {
+        use std::time::Instant;
+        const FLOOR: [&str; 7] = ["", "", "╭─────╮", "│› Ask zo to do anything", "╰─────╯", "  dreamer: promoted 0", "  ⏵⏵ Full Access"];
+        let turn = |lift: bool| {
+            let mut painter = Painter::new(Vec::new(), 201, 71, 0, true);
+            let size = |painter: &mut Painter<Vec<u8>>, upper: usize, height: usize| {
+                let (upper, height) = (u16::try_from(upper).expect("rows"), u16::try_from(height).expect("rows"));
+                if lift {
+                    painter.set_lifted_height(upper, height);
+                } else {
+                    painter.set_height(height);
+                }
+            };
+            painter.set_height(7);
+            painter.paint(&lines(FLOOR));
+            painter.insert_history(&lines((0..12).map(|n| format!("an earlier row {n}"))));
+            let _ = drain(&mut painter);
+            let (mut bytes, mut count, mut buffers) = (0, 0_u32, 0);
+            let began = Instant::now();
+            let mut step = |painter: &mut Painter<Vec<u8>>, work: Vec<String>, said: &[Line]| {
+                let upper = work.len();
+                let rows = lines(work.into_iter().chain(FLOOR.map(String::from)));
+                size(painter, upper, rows.len());
+                if !said.is_empty() {
+                    painter.insert_history(said);
+                }
+                size(painter, upper, rows.len());
+                painter.paint(&rows);
+                bytes += drain(painter).len();
+                count += 1;
+                // The row buffers at their largest: a string a row of the head.
+                let held: usize = painter.payloads.iter().map(|row| row.capacity() + std::mem::size_of::<String>()).sum();
+                buffers = buffers.max(held);
+            };
+            for tick in 0..180_usize {
+                let done = tick / 30;
+                let mut work: Vec<String> = (done.saturating_sub(3)..done).map(|n| format!("    Read src/file{n}.rs")).collect();
+                work.push(format!("⏺ Read(src/file{done}.rs)"));
+                work.extend([String::new(), format!("✻ Working ({tick}s · {done} steps · esc to interrupt)")]);
+                step(&mut painter, work, &[]);
+            }
+            let fold = lines(["", "⏺ Worked for 6s · 6 steps", "  ⎿ Read 6 files"]);
+            step(&mut painter, vec![String::new(), "⏺ The".to_string()], &fold);
+            for row in 0..20 {
+                for typed in 1..=3 {
+                    let tail = vec![String::new(), format!("  answer row {row} ").repeat(typed)];
+                    let said = if typed == 3 { lines([format!("  answer row {row} ").repeat(3)]) } else { Vec::new() };
+                    step(&mut painter, tail, &said);
+                }
+            }
+            painter.set_height(7);
+            painter.settle_on_the_floor();
+            painter.paint(&lines(FLOOR));
+            bytes += drain(&mut painter).len();
+            (bytes, began.elapsed().as_nanos() / u128::from(count), count, buffers)
+        };
+        // The first runs warm the allocator; the least of the rest is the cost.
+        let least = |lift: bool| (0..20).map(|_| turn(lift)).min_by_key(|run| run.1).expect("a run");
+        for (name, lift) in [("one block", false), ("two parts", true)] {
+            let (bytes, per_frame, count, buffers) = least(lift);
+            eprintln!("{name}: {bytes} bytes over {count} frames, {per_frame} ns/frame, {buffers} bytes of row buffers at most");
+        }
+    }
+
+    /// `/clear` under a lifted head leaves one block on the floor of an empty
+    /// screen, as it leaves any head.
+    #[test]
+    fn clear_terminal_under_a_lifted_head_leaves_one_block_on_the_floor() {
+        let (mut painter, _) = lifted();
+        painter.clear_terminal();
+        assert_eq!((painter.top, painter.height, painter.gap), (19, 5, 18));
+        assert_eq!(painter.absolute(0, 4), (0, 23), "one block: no rows to count past");
     }
 }
 
