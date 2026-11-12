@@ -82,11 +82,15 @@ The lane reads the `.pub` beside the key and the scratch's
 ## The Google sign-in client (once, on the lane machine)
 
 The window's Google login and zo's `/login google` use one installed-app OAuth
-client. Its secret left the source in v1.1.146 (audit 40-26): the window and zo
+client. Its secret left the source (audit 40-26; v1.1.146 and v1.1.147 still shipped
+with the value inside): the window and zo
 read it at compile time from `ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET`, and only the
 lane's own builds are given it — build-app (with the zo it stages), build-zo,
 the legacy cross builds and the signed updater build. No gate is. Its one home
-is the login keychain, as a generic password:
+is the login keychain, as a generic password (after a build that carries the value,
+the release build folders `$RELEASE_HOME/target/root-release` and `zo-release` still
+hold it as text in their dep-info `.d` and fingerprint files, because rustc writes
+the `option_env!` value on an `# env-dep:` line):
 
     security add-generic-password -U -a "$USER" -s dev.zerocode.release.google-oauth-client-secret -T /usr/bin/security -w
 

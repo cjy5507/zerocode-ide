@@ -129,6 +129,9 @@ APP_ZO=Resources/bin/zo                           # the zo the app carries, unde
 # not in the source since audit 40-26 (t-105752). A build reads it from this variable at compile
 # time (option_env!), and the lane gives it ONLY to the builds it installs and publishes — never
 # to a gate. Its one home is the login keychain, as a generic password under this service name.
+# After a build that carries the value, the release build folders ($RELEASE_HOME/target/root-release
+# and zo-release) still hold it as text in their dep-info (.d) and fingerprint files: rustc writes
+# the option_env! value on an `# env-dep:` line.
 GOOGLE_OAUTH_SECRET_ENV=ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET
 GOOGLE_OAUTH_SECRET_ITEM=dev.zerocode.release.google-oauth-client-secret
 SECURITY_BIN=/usr/bin/security
@@ -795,7 +798,8 @@ superseded_by() {
 }
 # ------------------------------------------------- the Google sign-in client --
 # Its secret lives in the login keychain ($GOOGLE_OAUTH_SECRET_ITEM, a generic password) and
-# nowhere else: no file, no log, no status.json, no argument. The lane is a launchd job in the
+# nowhere else we write: no file, no log, no status.json, no argument (the one leftover is rustc's own
+# `# env-dep:` line in the release build folders' dep-info (.d) and fingerprint files). The lane is a launchd job in the
 # person's gui domain (install-launchd.sh), so it reads that keychain while it is unlocked, and an
 # item added with `-T /usr/bin/security` is read by `security` with no prompt. macOS only, like
 # the lane: Linux and Windows have no such keychain and run no lane. The dry twin never calls
