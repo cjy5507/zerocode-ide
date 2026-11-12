@@ -28298,6 +28298,32 @@ fn pasted_line(words: &str, len: usize) -> String {
     )
 }
 
+/// What `work` gave, and what it cost this thread in CPU, in ms: the time a read's own work
+/// took, however loaded the machine. Wall time on a loaded machine is what everything else did
+/// too: beside a from-scratch build, a read of the long transcript took 1,223.5 ms of wall time
+/// against 116–136 ms in the runs around it (2026-11-12). Wall time where the platform gives no
+/// thread clock.
+fn thread_cpu_ms<T>(work: impl FnOnce() -> T) -> (T, f64) {
+    #[cfg(unix)]
+    {
+        let now = || {
+            let mut at = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            // SAFETY: clock_gettime writes only through the one pointer it is handed.
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut at) };
+            at.tv_sec as f64 * 1000.0 + at.tv_nsec as f64 / 1_000_000.0
+        };
+        let before = now();
+        let got = work();
+        (got, now() - before)
+    }
+    #[cfg(not(unix))]
+    {
+        let started = std::time::Instant::now();
+        let got = work();
+        (got, started.elapsed().as_secs_f64() * 1000.0)
+    }
+}
+
 /// The middle of a sorted list of timings.
 fn median_ms(mut took: Vec<f64>) -> f64 {
     took.sort_by(f64::total_cmp);
@@ -28370,7 +28396,7 @@ fn a_read_inside_a_long_line_goes_through_it_once() {
 /// pasted — 3 MiB and 12 MiB, read whole, and 40 MiB, past the cap. A page's
 /// first read and one 「이전 기록 더 보기」 read keep their budgets, and every
 /// read on up past the long lines keeps the cap and a step, makes its way up
-/// and takes nothing twice — in bytes and in time (t-84136).
+/// and takes nothing twice — in bytes and in the CPU time it took (t-84136).
 #[test]
 fn a_long_transcript_with_long_lines_is_read_within_its_bounds() {
     use crate::cmd::terminal::{BackReach, FIRST_REACH, PAGE_REACH, transcript_log_back};
@@ -28401,24 +28427,26 @@ fn a_long_transcript_with_long_lines_is_read_within_its_bounds() {
             file: std::fs::File::open(&path).expect("opened"),
             read: 0,
         };
-        let started = std::time::Instant::now();
-        let log = transcript_log_back(
-            &mut file,
-            size,
-            end,
-            reach,
-            zerocode_core::transcript::Detail::Clipped,
-        )
-        .expect("a read back");
-        (log, file.read, started.elapsed().as_secs_f64() * 1000.0)
+        let (log, ms) = thread_cpu_ms(|| {
+            transcript_log_back(
+                &mut file,
+                size,
+                end,
+                reach,
+                zerocode_core::transcript::Detail::Clipped,
+            )
+            .expect("a read back")
+        });
+        (log, file.read, ms)
     };
     let long = |log: &crate::shell_runtime::SubagentLog| {
         log.turns.iter().any(|one| one.turn.text.starts_with("long-"))
     };
-    // Bytes read, and the time it took against them: a read's time follows
+    // Bytes read, and the CPU time it took against them: a read's time follows
     // what it read, however long the file — the lines it took cost their
     // reading as turns, a line it passed over only its reading (343159e4d took
     // 3.5 s to pass over 32 MiB, copying what it held again at every step).
+    // CPU, not wall time: a machine under load slows the clock, not the work.
     let in_time = |ms: f64, bytes: u64, taken: bool| {
         let per_mib = if taken { 120.0 } else { 10.0 };
         ms <= 250.0 + per_mib * bytes as f64 / mib as f64
@@ -28429,13 +28457,13 @@ fn a_long_transcript_with_long_lines_is_read_within_its_bounds() {
     println!("first read: {:.2} MiB, {ms:.1} ms, {} turns", bytes as f64 / mib as f64, first.turns.len());
     assert!(!first.turns.is_empty() && !long(&first) && !first.skipped);
     assert!(bytes <= FIRST_REACH.budget + FIRST_REACH.step, "the first read took {bytes} bytes");
-    assert!(in_time(ms, bytes, true), "the first read took {ms:.1} ms for {bytes} bytes");
+    assert!(in_time(ms, bytes, true), "the first read took {ms:.1} ms of CPU for {bytes} bytes");
 
     let (earlier, bytes, ms) = read(first.start, PAGE_REACH);
     println!("one read earlier: {:.2} MiB, {ms:.1} ms, {} said turns", bytes as f64 / mib as f64, said_in(&earlier.turns));
     assert!(earlier.start < first.start && said_in(&earlier.turns) == crate::shell_runtime::TRANSCRIPT_SAID_TURNS);
     assert!(bytes <= PAGE_REACH.budget + PAGE_REACH.step, "one read earlier took {bytes} bytes");
-    assert!(in_time(ms, bytes, true), "one read earlier took {ms:.1} ms for {bytes} bytes");
+    assert!(in_time(ms, bytes, true), "one read earlier took {ms:.1} ms of CPU for {bytes} bytes");
 
     // On up, past the three long lines, to the blocks above the longest.
     let mut from = earlier.start;
@@ -28462,7 +28490,7 @@ fn a_long_transcript_with_long_lines_is_read_within_its_bounds() {
         assert!(bytes <= bound, "a read back from {from} took {bytes} bytes, past {bound}");
         assert!(
             in_time(ms, bytes, !log.turns.is_empty()),
-            "a read back from {from} took {ms:.1} ms for {bytes} bytes"
+            "a read back from {from} took {ms:.1} ms of CPU for {bytes} bytes"
         );
         taken.extend(log.turns.iter().filter(|one| one.turn.text.starts_with("long-")).map(|one| {
             one.turn.text.split_whitespace().next().unwrap_or_default().to_string()
