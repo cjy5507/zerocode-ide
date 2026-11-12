@@ -101,6 +101,25 @@ export async function testRoomHand(browser, origin, ok) {
         && agent.every((one) => one.hand === "agent"),
       JSON.stringify(agent),
     );
+    // 사람이 키를 친 뒤, keydown 없이 에이전트의 걸음이 터미널에 글을 넣는다: 마지막
+    // 키의 손(사람)이 아니라 지금의 손(에이전트)이다.
+    await cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 });
+    await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 });
+    const stale = await page.evaluate(async () => {
+      agentPressing = true;
+      try {
+        routeText("에이전트가 넣은 글");
+      } finally {
+        agentPressing = false;
+      }
+      await new Promise((done) => setTimeout(done, 80));
+      return window.__ROOM_HANDS__.splice(0);
+    });
+    ok(
+      "an agent's step that types with no keydown of its own carries the agent's hand, not the last key's",
+      stale.length > 0 && stale.every((one) => one.command === "term_text" && one.hand === "agent"),
+      JSON.stringify(stale),
+    );
     ok("the scenes raised no renderer errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

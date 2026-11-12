@@ -886,7 +886,9 @@ function noteTyped() {
  * settle flushes its word, after that key's event is over — on a composition
  * event or a timer, where `handNow()` says `none`. The person's Korean is
  * the person's all the same: the terminal's text and keys carry the hand of
- * the keydown that began them, read first, before any handler. */
+ * the keydown that began them, read first, before any handler — through
+ * `flowHand`, so an agent's step that reaches them with no keydown of its own
+ * is the agent's, not the last key's. */
 let typingHand = "none";
 
 document.addEventListener("keydown", () => {
@@ -919,7 +921,7 @@ function routeText(text) {
   if (target.kind === "term") {
     noteTyped();
     noteTypedInto(target.term);
-    invoke("term_text", { term: target.term, text, human: true }, { hand: typingHand }).catch(() => {});
+    invoke("term_text", { term: target.term, text, human: true }, { hand: flowHand(typingHand) }).catch(() => {});
   } else {
     invoke("text_input", { id: target.id, text }).catch(() => {});
   }
@@ -955,7 +957,7 @@ function routeKeyPress(target, press) {
   if (target.kind === "term") {
     noteTyped();
     noteTypedInto(target.term);
-    invoke("term_key", { term: target.term, press }, { hand: typingHand }).catch(() => {});
+    invoke("term_key", { term: target.term, press }, { hand: flowHand(typingHand) }).catch(() => {});
   } else {
     invoke("key_input", { id: target.id, press }).catch(() => {});
   }
