@@ -39,7 +39,7 @@ use telemetry::{MemoryTelemetrySink, SessionTracer, TelemetryEvent};
 use super::{
     fingerprint_tool_call, is_truncation_stop_reason, original_has_candidate_spec_literals,
     record_tool_fingerprint, GATE_CHANGED_FILES_CALLS, MAX_TRUNCATION_CONTINUATIONS, QuotaEscape,
-    TOOL_REPETITION_THRESHOLD, TRUNCATION_CONTINUATION_REMINDER,
+    TOOL_REPETITION_THRESHOLD, TRUNCATION_CONTINUATION_REMINDER, TURN_END_SNAPSHOT_CALLS,
 };
 
 /// Where a streaming turn was stopped stays on its record in the turn trace:
@@ -8367,6 +8367,104 @@ fn changed_files_snapshot_runs_and_feeds_the_turn_end_hook_context() {
     assert!(
         payload.contains("\"files_changed_count\""),
         "the TurnEnd hook context must carry files_changed_count; got: {payload}"
+    );
+}
+
+/// The streaming turn — the one every interactive turn runs — spawns its
+/// `TurnEnd` `git diff` only when a `TurnEnd` hook will read it, as the sync loop
+/// already did (audit 25-01). Counted at `changed_files_snapshot_async`, on a
+/// current-thread runtime so the count lands on this test's own thread. The
+/// leg with a hook is the control: the count can move, and still does there.
+#[test]
+fn streaming_turn_runs_the_turn_end_git_snapshot_only_for_a_turn_end_hook() {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use crate::message_stream::types::{BlockId, RenderBlock};
+    use crate::permission::{
+        PermissionDecision as AsyncPermissionDecision, PermissionError,
+        PermissionPrompter as AsyncPermissionPrompter,
+        PermissionRequest as AsyncPermissionRequest,
+    };
+
+    struct AllowAsyncPrompter;
+    impl AsyncPermissionPrompter for AllowAsyncPrompter {
+        fn decide<'a>(
+            &'a self,
+            _request: AsyncPermissionRequest,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<AsyncPermissionDecision, PermissionError>> + Send + 'a>,
+        > {
+            Box::pin(async { Ok(AsyncPermissionDecision::Allow) })
+        }
+    }
+
+    struct StopApi;
+    impl ApiClient for StopApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    struct StopAsyncClient;
+    impl AsyncApiClient for StopAsyncClient {
+        fn stream_async<'a>(
+            &'a self,
+            _request: ApiRequest,
+            _render_tx: tokio::sync::mpsc::Sender<RenderBlock>,
+            _text_block_id: BlockId,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Ok(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            })
+        }
+    }
+
+    fn snapshots_in_one_turn(feature_config: &RuntimeFeatureConfig) -> usize {
+        let mut runtime = ConversationRuntime::new_with_features(
+            Session::new(),
+            StopApi,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+            feature_config,
+        )
+        .with_async_api_client(Arc::new(StopAsyncClient));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        TURN_END_SNAPSHOT_CALLS.with(|c| c.set(0));
+        rt.block_on(async {
+            let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+            let _drain = tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+            let prompter: Arc<dyn AsyncPermissionPrompter> = Arc::new(AllowAsyncPrompter);
+            runtime
+                .run_turn_streaming_maybe_deep("finish", Vec::new(), render_tx, prompter)
+                .await
+                .expect("streaming turn should finish");
+        });
+        TURN_END_SNAPSHOT_CALLS.with(std::cell::Cell::get)
+    }
+
+    assert_eq!(
+        snapshots_in_one_turn(&RuntimeFeatureConfig::default()),
+        0,
+        "a turn with no TurnEnd hook spawned the git snapshot nobody reads"
+    );
+    let with_hook = RuntimeFeatureConfig::default()
+        .with_hooks(RuntimeHookConfig::default().with_turn_end(vec![shell_snippet("true")]));
+    assert_eq!(
+        snapshots_in_one_turn(&with_hook),
+        1,
+        "a TurnEnd hook must still be handed the changed files"
     );
 }
 

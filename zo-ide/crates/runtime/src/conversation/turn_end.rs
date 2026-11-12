@@ -156,6 +156,13 @@ thread_local! {
     /// own thread — so parallel tests never perturb each other's count.
     pub(crate) static GATE_CHANGED_FILES_CALLS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// Test-only seam: counts [`changed_files_snapshot_async`] entries on the
+    /// thread that awaits it — the streaming turn's TurnEnd `git diff`. Counted
+    /// before the `spawn_blocking` hop, because the git run itself lands on
+    /// another thread. A test that reads it drives the turn on a
+    /// current-thread runtime, so the turn is awaited on the test's own thread.
+    pub(crate) static TURN_END_SNAPSHOT_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Async wrapper that runs [`changed_files_snapshot`] on a blocking thread.
@@ -168,6 +175,8 @@ thread_local! {
 /// [`command_is_green`](super::deep_gate) and `bounded_git_diff_for_paths` are
 /// offloaded: the turn task yields while git runs, keeping the event loop live.
 pub(crate) async fn changed_files_snapshot_async() -> Vec<String> {
+    #[cfg(test)]
+    TURN_END_SNAPSHOT_CALLS.with(|c| c.set(c.get() + 1));
     tokio::task::spawn_blocking(changed_files_snapshot)
         .await
         .unwrap_or_default()

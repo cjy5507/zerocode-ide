@@ -137,7 +137,9 @@ use reminders::{
 };
 // Spec-literal-gate seams the `#[cfg(test)] mod tests` reaches through `super::`.
 #[cfg(test)]
-use turn_end::{original_has_candidate_spec_literals, GATE_CHANGED_FILES_CALLS};
+use turn_end::{
+    original_has_candidate_spec_literals, GATE_CHANGED_FILES_CALLS, TURN_END_SNAPSHOT_CALLS,
+};
 // Repetition-guard items the `#[cfg(test)] mod tests` reaches through `super::`.
 #[cfg(test)]
 use repetition::{

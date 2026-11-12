@@ -2922,12 +2922,20 @@ where
             };
             // TurnEnd (Stop) hook — same contract and bound as the sync loop
             // (`run_turn`). Hook commands run synchronously with the shared 5s
-            // timeout; with no TurnEnd rules configured this is a no-op, so the
-            // render loop only ever pauses when the user opted into a gate.
+            // timeout, so the render loop only ever pauses when the user opted
+            // into a gate. The `git diff` snapshot exists only to feed such a
+            // hook: with no TurnEnd rules configured it is skipped, as the sync
+            // loop skips it, rather than spawning git on every turn.
             let followup = if repeat {
                 None
             } else {
-                let files_changed = changed_files_snapshot_async().await;
+                let has_turn_end_hook =
+                    self.hook_runner.lifecycle_command_count(HookEvent::TurnEnd) > 0;
+                let files_changed = if has_turn_end_hook {
+                    changed_files_snapshot_async().await
+                } else {
+                    Vec::new()
+                };
                 let context = build_turn_end_hook_context(
                     &summary,
                     loop_count,
