@@ -1079,6 +1079,8 @@ mod tests {
     fn allowing_again_is_held_to_the_document_the_question_was_asked_about() {
         let asked_about = Standing {
             sha256: flow_document_sha256(&flow_document()),
+            title: "Wallet QA".to_string(),
+            policy: "dry",
             money: false,
             about: about(
                 "wallet-qa",
@@ -1086,11 +1088,15 @@ mod tests {
                 &["shop.example.com"],
                 &["com.example.wallet"],
             ),
+            hidden: 0,
         };
         let changed_again = Standing {
             sha256: flow_document_sha256(&spending_document()),
+            title: "Wallet top-up".to_string(),
+            policy: "guarded",
             money: true,
             about: about("wallet-qa", 3, &["shop.example.com"], &[]),
+            hidden: 0,
         };
         assert_eq!(
             allowed_again(Some(&asked_about), &asked_about.sha256),
