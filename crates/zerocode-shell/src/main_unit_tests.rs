@@ -34714,6 +34714,20 @@ fn a_scheduled_flow_with_no_agent_is_walked_through_the_windows_own_door() {
             && roads.contains("Asking::Unwatched\n"),
         "the walk's road does not read that nobody is watching it"
     );
+    // The browser's presses have no helper to hand one back: the walk's road
+    // runs each browser step as one nobody is watching, and both press roads
+    // tell the page the words that hold a press back.
+    assert!(
+        roads.contains("computer_use::confirm::unwatched(stepping),"),
+        "a browser step of a job's walk is run as any other"
+    );
+    let door = include_str!("cmd/browser.rs");
+    assert_eq!(
+        door.matches("crate::computer_use::confirm::held_by_an_unwatched_walk()")
+            .count(),
+        2,
+        "a press by selector and a press by point both ask whether nobody is watching"
+    );
     let pressing = block_after(shipped_backend(), "fn call_with_confirmation_asker(");
     assert!(
         pressing.contains("let policy = asking.guards(confirm::policy());")
@@ -35061,6 +35075,44 @@ fn asked_flow_document(policy: &str) -> String {
          1. `zerocode-computer wait-for --app \"Sample Wallet\" --text Balance` — event, required\n",
         zerocode_core::computer_use::COMPUTER_USE_PROTOCOL_VERSION
     )
+}
+
+/// A browser press of a walk nobody is watching is told the words every
+/// kind is held by — a payment, a transfer, a deletion, whatever the person's
+/// settings ask about — and any other press is told nothing. What the page
+/// answers for a control that said one of them is said to the person with
+/// the kind and the control's own words, shown by the card's rule.
+#[tokio::test]
+async fn a_browser_press_nobody_watches_is_told_the_words_that_hold_it() {
+    use crate::computer_use::confirm::{held_by_an_unwatched_walk, unwatched};
+
+    assert_eq!(held_by_an_unwatched_walk(), None, "a press somebody asked for");
+    let held = unwatched(async { held_by_an_unwatched_walk() })
+        .await
+        .expect("nobody is watching");
+    let kinds: Vec<&str> = held
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|row| row["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(kinds, ["payment", "transfer", "delete"]);
+    assert!(
+        held[0]["words"]
+            .as_array()
+            .is_some_and(|words| words.contains(&serde_json::json!("결제"))),
+        "{held}"
+    );
+    assert_eq!(held_by_an_unwatched_walk(), None, "the step is over");
+
+    let said = cmd::browser::page_failure(&serde_json::json!({
+        "ok": false, "code": cmd::browser::HELD_PRESS, "kind": "delete", "said": "계정\u{202E} 삭제",
+    }));
+    assert!(
+        said.contains("「계정 삭제」") && said.contains("삭제 누름") && said.contains("다음 걸음부터"),
+        "{said}"
+    );
+    assert!(cmd::browser::UNSENT_PAGE_CODES.contains(&cmd::browser::HELD_PRESS));
 }
 
 /// A refused save, and a refused 「다시 승인」, are answered with the

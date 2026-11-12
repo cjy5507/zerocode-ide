@@ -853,6 +853,13 @@ fn looks_like_credential(value: &str) -> bool {
 const PERSONS_ENTRY: &str =
     zerocode_core::computer_use_protocol::validate::SecretEntryVerdict::PersonsEntry.as_str();
 
+/// The code a press script answers when a walk nobody is watching reached a
+/// control that says it pays, moves money or deletes (`zcHeldPress`): nothing
+/// was sent to the page.
+pub(crate) const HELD_PRESS: &str = "held_press";
+/// How much of what such a control said its refusal repeats.
+const HELD_PRESS_SAID_CHARS: usize = 80;
+
 pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
     match reply
         .get("code")
@@ -863,6 +870,22 @@ pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
             return format!(
                 "비밀번호 칸입니다 — 사람이 입력합니다; 사용자가 이 칸의 비밀을 주었을 때만 `type <label> <css> {}`로 씁니다",
                 zerocode_core::agent_browser::TYPE_VALUE_STDIN_FLAG
+            );
+        }
+        HELD_PRESS => {
+            // What the control said is the page's own words: shown by the
+            // card's rule, and beside the kind the gate read it as.
+            let word = |key: &str| reply.get(key).and_then(serde_json::Value::as_str);
+            let kind = match word("kind").and_then(zerocode_core::computer_use::ConfirmKind::parse)
+            {
+                Some(zerocode_core::computer_use::ConfirmKind::Payment) => "결제",
+                Some(zerocode_core::computer_use::ConfirmKind::Transfer) => "이체",
+                Some(zerocode_core::computer_use::ConfirmKind::Delete) => "삭제",
+                None => "결제 · 이체 · 삭제",
+            };
+            return format!(
+                "「{}」 단추는 {kind} 누름이라 누르지 않았습니다 — 지켜보는 사람 없이 도는 걸음은 결제 · 이체 · 삭제를 누르지 않습니다. 사람이 직접 누른 뒤 다음 걸음부터 다시 돌리세요",
+                zerocode_core::card_words::shown(word("said").unwrap_or_default(), HELD_PRESS_SAID_CHARS)
             );
         }
         "invalid_selector" => "셀렉터가 올바르지 않습니다",
@@ -918,7 +941,8 @@ pub(crate) fn page_value(reply: serde_json::Value) -> Result<serde_json::Value, 
 /// `KEY_PRESS_BODY` and `POINT_PRESS_BODY` to that; any other failure (the
 /// script's own throw, an option missing after the focus, an input the page
 /// cancelled) may come after an event the page already heard.
-pub(crate) const UNSENT_PAGE_CODES: [&str; 13] = [
+pub(crate) const UNSENT_PAGE_CODES: [&str; 14] = [
+    HELD_PRESS,
     "invalid_selector",
     "selector_not_found",
     "element_not_visible",
@@ -1127,6 +1151,29 @@ const zcEncode = (answer, cap = 64000) => {
   }
 };
 const zcFail = (code) => zcEncode({ ok: false, code });
+// A walk nobody is watching makes no press that pays, moves money or deletes.
+// `held` is sent only with such a walk's presses: the confirmation gate's
+// rows of words, each with its kind. What the control says of itself — its
+// text, a button's value, its label, its title, the alt of a picture in it —
+// is read before anything moves, off the button or the link the pressed
+// element stands in; one that says such a word is answered unpressed, with
+// the kind and the words it said. A control that says nothing is not held:
+// this is a net of words, not a proof.
+const zcHeldPress = (element, held) => {
+  if (!held || !element) return null;
+  const control = (element.closest && element.closest("button, a, [role=button], input, summary")) || element;
+  const named = (node, name) => (node.getAttribute ? node.getAttribute(name) : null);
+  const pictures = control.querySelectorAll ? [...control.querySelectorAll("img[alt], [aria-label]")] : [];
+  const said = [
+    control.innerText || control.textContent,
+    /^(button|submit|reset|image)$/i.test(control.type || "") ? control.value : null,
+    named(control, "aria-label"), named(control, "title"),
+    ...pictures.map((part) => named(part, "alt") || named(part, "aria-label")),
+  ].filter((words) => typeof words === "string").join(" ").replace(/\s+/g, " ").trim();
+  const folded = said.toLowerCase();
+  const row = held.find((one) => one.words.some((word) => folded.includes(word)));
+  return row ? zcEncode({ ok: false, code: "held_press", kind: row.kind, said: said.slice(0, 80) }) : null;
+};
 // A password field is the platform's own fact — the input's type, or the
 // `current-password` a form declares — never a label's word: the one rule
 // the typing holds its keys by, a look and a form read call a field secret
@@ -4395,6 +4442,11 @@ async fn press(
 ) -> Result<BrowserInputReport, BrowserRefusal> {
     checked_selector(selector).map_err(BrowserRefusal::Unsent)?;
     let mut request = serde_json::json!({ "selector": selector, "blockRoots": block_roots() });
+    // On a walk nobody is watching the page is told which words hold a press
+    // back (`confirm::held_by_an_unwatched_walk`); any other press carries none.
+    if let Some(held) = crate::computer_use::confirm::held_by_an_unwatched_walk() {
+        request["held"] = held;
+    }
     let body = match expect {
         Some(expect) => {
             request["expect"] = expect;
@@ -4442,6 +4494,10 @@ if (expect && zcEpoch() !== expect.epoch) return zcFail("document_replaced");
 if (expect && expect.value !== null && zcValueDigest(element) !== expect.value) {
   return zcFail("value_changed");
 }
+// A payment, a transfer or a deletion is left unpressed on a walk nobody is
+// watching (`zcHeldPress`) — judged before the control is so much as scrolled to.
+const heldPress = zcHeldPress(element, request.held);
+if (heldPress) return heldPress;
 element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
 if (!zcVisible(element)) return zcFail("element_not_visible");
 if (element.matches && element.matches(":disabled")) return zcFail("element_disabled");
@@ -4533,11 +4589,15 @@ pub(crate) async fn automate_click_at(
         Ok(()),
         || browser_pane_of(app, state, label),
         |(), pane| async move {
-            let request = serde_json::json!({
+            let mut request = serde_json::json!({
                 "x": point.x,
                 "y": point.y,
                 "blockRoots": block_roots(),
             });
+            // As a press by selector (`press`): held on a walk nobody watches.
+            if let Some(held) = crate::computer_use::confirm::held_by_an_unwatched_walk() {
+                request["held"] = held;
+            }
             let reply = page_json(
                 &pane,
                 automation_script(&request, POINT_PRESS_BODY),
@@ -4669,6 +4729,10 @@ for (;;) {
   }
 }
 if (!hit) return zcFail("point_outside");
+// As a press by selector: nothing is sent to a control that says it pays,
+// moves money or deletes, on a walk nobody is watching (`zcHeldPress`).
+const heldPress = zcHeldPress(hit, request.held);
+if (heldPress) return heldPress;
 const view = doc.defaultView || window;
 const common = { bubbles: true, cancelable: true, composed: true, view, clientX: x, clientY: y,
   button: 0, buttons: 0 };

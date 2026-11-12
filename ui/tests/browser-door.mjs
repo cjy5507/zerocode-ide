@@ -64,6 +64,7 @@ const FIXTURE = `<!doctype html><title>door fixture</title>
 <form class="twin"><input class="who" id="who-seen"><button class="go" id="go-seen">Search</button></form>
 <button class="ghost gone" id="ghost-a">a</button><button class="ghost" hidden id="ghost-b">b</button>
 <button class="faint clear" id="faint">c</button>
+<button class="pay" id="pay"><span class="pay-words">지금 결제하기</span></button><a class="drop" id="drop" href="#" title="Delete account">x</a>
 <p id="log"></p>
 <script>
   for (const button of document.querySelectorAll("button")) {
@@ -160,6 +161,30 @@ await test("click presses the visible twin and refuses when every match is hidde
   const ghost = await run({ selector: ".ghost" }, CLICK_BODY);
   assert(!ghost.ok && ghost.code === "element_not_visible", "an all-hidden match is not refused as not visible", ghost);
   return `pressed ${log} refused ${ghost.code}`;
+});
+
+await test("a press told the held words leaves a control that says it pays or deletes unpressed", async () => {
+  // What a walk nobody is watching is told (`confirm::held_by_an_unwatched_walk`).
+  const held = [
+    { kind: "payment", words: ["결제", "pay"] },
+    { kind: "transfer", words: ["이체", "transfer"] },
+    { kind: "delete", words: ["삭제", "delete"] },
+  ];
+  const before = await page.evaluate(() => document.getElementById("log").textContent);
+  // By the words of the button the pressed element stands in, and by a title.
+  const pay = await run({ selector: ".pay-words", held }, CLICK_BODY);
+  const drop = await run({ selector: ".drop", held }, CLICK_BODY);
+  const after = await page.evaluate(() => document.getElementById("log").textContent);
+  assert(!pay.ok && pay.code === "held_press" && pay.kind === "payment" && pay.said === "지금 결제하기", "a payment was not held", pay);
+  assert(!drop.ok && drop.code === "held_press" && drop.kind === "delete", "a deletion named by its title was not held", drop);
+  assert(after === before, "a held control was sent an event", { before, after });
+  // A control that says none of them is pressed as ever, and so is the same
+  // payment button on a press that is told no words.
+  const plain = await run({ selector: ".go", held }, CLICK_BODY);
+  const watched = await run({ selector: ".pay" }, CLICK_BODY);
+  const log = await page.evaluate(() => document.getElementById("log").textContent);
+  assert(plain.ok && watched.ok && log === `${before}go-seen;pay;`, "a plain press, or a watched one, was held", { plain, watched, log });
+  return `held ${pay.kind}, ${drop.kind}; pressed ${log.slice(before.length)}`;
 });
 
 /* A Flow asks the same question after its page changes. Reusing detached

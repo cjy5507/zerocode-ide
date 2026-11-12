@@ -127,6 +127,36 @@ impl Asking {
     }
 }
 
+tokio::task_local! {
+    /// Stands around a browser step of a walk nobody is watching
+    /// ([`unwatched`]).
+    static NOBODY_WATCHES: ();
+}
+
+/// Run `step` — a browser step of a walk the window started for a job — as
+/// one nobody is watching: a press it makes is told the words a payment, a
+/// transfer and a deletion are held by ([`held_by_an_unwatched_walk`]). The
+/// browser's presses have no helper to match a label for them and nobody to
+/// ask, so the page itself reads what the control says before it presses.
+pub async fn unwatched<T>(step: impl std::future::Future<Output = T>) -> T {
+    NOBODY_WATCHES.scope((), step).await
+}
+
+/// What a browser press is told on a walk nobody is watching: every kind the
+/// confirmation gate knows, with its words — whatever the person's settings
+/// ask about, as on that walk's desktop presses ([`Asking::guards`]). `None`
+/// for every other press.
+#[must_use]
+pub fn held_by_an_unwatched_walk() -> Option<Value> {
+    NOBODY_WATCHES.try_with(|_| ()).ok()?;
+    Some(Value::Array(
+        ConfirmKind::ALL
+            .into_iter()
+            .map(|kind| serde_json::json!({ "kind": kind.as_str(), "words": kind.words() }))
+            .collect(),
+    ))
+}
+
 /// What the person said, or did not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]

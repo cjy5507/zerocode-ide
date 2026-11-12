@@ -939,6 +939,24 @@ fn a_pages_unsent_refusals_come_before_its_first_event() {
             && unsent.len() == 13,
         "{unsent:?}"
     );
+    // The fourteenth is named by its constant: the press a walk nobody is
+    // watching leaves to the person. Both press scripts answer it before
+    // their first event too — through `zcHeldPress`, not `zcFail`.
+    assert!(table.contains("\n    HELD_PRESS,\n") && table.contains("[&str; 14]"));
+    for (opens, sends) in [
+        ("pub(crate) const CLICK_BODY: &str", "scrollIntoView("),
+        ("pub(crate) const POINT_PRESS_BODY: &str", "dispatchEvent("),
+    ] {
+        let script = raw_body(BROWSER, opens);
+        let held = script
+            .find("const heldPress = zcHeldPress(")
+            .unwrap_or_else(|| panic!("{opens} no longer reads what the control says"));
+        assert!(
+            held < script.find(sends).unwrap()
+                && script.contains("if (heldPress) return heldPress;"),
+            "{opens}: a held press is judged after the page was sent something"
+        );
+    }
     for (opens, sends) in [
         (
             "pub(crate) const CLICK_BODY: &str",

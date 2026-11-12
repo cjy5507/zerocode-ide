@@ -3524,13 +3524,24 @@ pub(super) async fn computer_loop(
                                     )
                                 }
                                 zerocode_core::computer_recipe::RecipeTool::Browser => {
-                                    tauri::async_runtime::block_on(browser_step(
+                                    let stepping = browser_step(
                                         &app,
                                         pane.as_deref(),
                                         dir.as_deref(),
                                         step,
                                         logged,
-                                    ))
+                                    );
+                                    // The browser's presses have no helper
+                                    // to hand one back: on a walk nobody is
+                                    // watching the page reads the control
+                                    // before it presses (`confirm::unwatched`).
+                                    if unwatched {
+                                        tauri::async_runtime::block_on(
+                                            computer_use::confirm::unwatched(stepping),
+                                        )
+                                    } else {
+                                        tauri::async_runtime::block_on(stepping)
+                                    }
                                 }
                                 zerocode_core::computer_recipe::RecipeTool::Emulator => {
                                     tauri::async_runtime::block_on(emulator_step(
