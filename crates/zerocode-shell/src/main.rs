@@ -3670,6 +3670,7 @@ fn main() -> ExitCode {
             orchestration::set_workers_refuse_prompts(
                 boot_settings.harness.workers.refuse_prompts,
             );
+            orchestration::peer_room::set_peer_mail(boot_settings.harness.mail.peers);
             // The readiness probe reads the account stores under this root
             // and no other; until it is named, every door answers unknown.
             readiness_runtime::configure_root(managed.config_root());

@@ -398,6 +398,7 @@ pub(crate) fn set_harness_settings(
     crate::landing_watch_sweep::set_enabled(harness.alerts.landing);
     crate::launch_budget_door::set_limits(harness.launches);
     crate::orchestration::set_workers_refuse_prompts(harness.workers.refuse_prompts);
+    crate::orchestration::peer_room::set_peer_mail(harness.mail.peers);
     Ok(snapshot)
 }
 

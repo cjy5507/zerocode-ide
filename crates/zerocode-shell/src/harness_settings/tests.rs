@@ -82,6 +82,7 @@ fn the_record_round_trips_through_the_settings_document() {
         workers: Workers {
             refuse_prompts: true,
         },
+        mail: Mail { peers: false },
     };
     let text = serde_json::to_string(&harness).expect("serializes");
     let back: HarnessSettings = serde_json::from_str(&text).expect("reads back");
@@ -123,4 +124,26 @@ fn a_worker_refuses_unwatched_prompts_only_on_a_plain_yes() {
     .expect("a settings record");
     assert!(whole.workers.refuse_prompts && !whole.alerts.landing);
     assert_eq!(whole.gate, Settings::default());
+}
+
+/// The panes' mail is on for a person who never chose (사람 결정 2026-11-12),
+/// and only a plain `false` turns it off — a bad word turns nothing off.
+#[test]
+fn the_panes_mail_is_on_unless_the_person_said_a_plain_off() {
+    assert!(HarnessSettings::default().mail.peers);
+    let read = |sent: serde_json::Value| {
+        HarnessSettings::parse(&sent)
+            .expect("a settings record")
+            .mail
+            .peers
+    };
+    assert!(read(serde_json::json!({})));
+    assert!(read(serde_json::json!({"mail": {"peers": "no"}})));
+    assert!(read(serde_json::json!({"mail": {"peers": true}})));
+    assert!(!read(serde_json::json!({"mail": {"peers": false}})));
+    // And a stored record written before the switch existed reads it on.
+    let stored: HarnessSettings =
+        serde_json::from_value(serde_json::json!({"alerts": {"landing": false}}))
+            .expect("an older record");
+    assert!(stored.mail.peers);
 }

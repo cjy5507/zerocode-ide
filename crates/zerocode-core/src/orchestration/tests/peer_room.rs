@@ -603,3 +603,220 @@ fn every_room_verb_that_reaches_a_pane_hands_the_project_door_that_pane() {
         assert!(door.run.is_some(), "{line:?}: judged in the room");
     }
 }
+
+/// `run-list` says which run is the room, so a coordinator reading it learns
+/// the room answers mail only before it tries to sit in it; every other row
+/// reads as it always did.
+#[test]
+fn run_list_says_which_run_is_the_room() {
+    let mut bench = Bench::new();
+    let launcher = on();
+    // A run of this project, so the pane listing below sees it.
+    let made = typed(
+        &mut bench,
+        &launcher,
+        agent_teams::LEADER_PANE,
+        Some(A),
+        &["run-create", "--name", "work"],
+    );
+    let work = answered(&made)["runId"]
+        .as_str()
+        .expect("a run")
+        .to_string();
+    answered(&send(
+        &mut bench,
+        &launcher,
+        LONE,
+        "pane:team-1/%8",
+        "open-it",
+    ));
+    let room = the_room(&bench).id.clone();
+    let listed = answered(&typed(&mut bench, &launcher, LONE, Some(A), &["run-list"]));
+    assert_eq!(
+        row_id(&listed, &work),
+        Some(work.as_str()),
+        "the work run is listed: {listed}"
+    );
+    let row = |id: &str| {
+        listed["runs"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .find(|row| row["runId"] == id)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        row(&room)["room"]["answers"][0],
+        room::PEERS_VERB,
+        "{listed}"
+    );
+    assert!(row(&work).get("room").is_none(), "{listed}");
+}
+
+/// The id of the row of `listed` that is `id`, when the list holds it.
+fn row_id<'a>(listed: &'a serde_json::Value, id: &str) -> Option<&'a str> {
+    listed["runs"]
+        .as_array()?
+        .iter()
+        .find_map(|row| row["runId"].as_str().filter(|held| *held == id))
+}
+
+fn rooms(bench: &Bench) -> usize {
+    bench
+        .ledger
+        .runs()
+        .iter()
+        .filter(|run| run.is_room())
+        .count()
+}
+
+/// A pane whose folder the window does not know is sent with an empty
+/// project: its letter is refused with the reason, and no room is opened —
+/// not one per letter, not one nobody can read (review t-105450, 1).
+#[test]
+fn a_pane_whose_project_is_unknown_opens_no_room() {
+    let mut bench = Bench::new();
+    let launcher = on();
+    for _ in 0..2 {
+        let line = [
+            "send",
+            "--to",
+            "pane:team-1/%8",
+            "--type",
+            "status",
+            "--body",
+            "x",
+        ];
+        let why = refused(&typed(&mut bench, &launcher, LONE, Some(""), &line));
+        assert!(why.contains(room::PROJECT_UNKNOWN), "{why}");
+    }
+    assert_eq!(rooms(&bench), 0);
+}
+
+/// A first letter the room refuses leaves no room behind: a refused verb
+/// changes nothing (review t-105450, 2).
+#[test]
+fn a_refused_first_letter_leaves_no_room() {
+    let mut bench = Bench::new();
+    let launcher = on();
+    for line in [
+        vec!["send", "--type", "status", "--body", "no-to"],
+        vec![
+            "send", "--to", "@all", "--type", "status", "--body", "crowd",
+        ],
+        vec![
+            "send",
+            "--to",
+            "pane:team-1/%8",
+            "--type",
+            "worker_done",
+            "--body",
+            "{}",
+        ],
+        vec!["ask", "--body", "nobody named"],
+    ] {
+        refused(&typed(&mut bench, &launcher, LONE, Some(A), &line));
+        assert_eq!(rooms(&bench), 0, "{line:?} left a room behind");
+    }
+    // And a room that holds letters is never taken back by a later refusal.
+    answered(&send(&mut bench, &launcher, LONE, "pane:team-1/%8", "kept"));
+    refused(&typed(
+        &mut bench,
+        &launcher,
+        LONE,
+        Some(A),
+        &["send", "--type", "status", "--body", "x"],
+    ));
+    assert_eq!(rooms(&bench), 1);
+}
+
+/// The person's switch holds a letter that names the room by `--run` as much
+/// as one the room was found for (review t-105450, 3).
+#[test]
+fn the_switch_off_holds_a_letter_that_names_the_room() {
+    let mut bench = Bench::new();
+    answered(&send(&mut bench, &on(), LONE, "pane:team-1/%8", "while-on"));
+    let room = the_room(&bench).id.clone();
+    let off = Catalog(&["claude"]);
+    for line in [
+        vec![
+            "send",
+            "--run",
+            &room,
+            "--to",
+            "pane:team-1/%8",
+            "--type",
+            "status",
+            "--body",
+            "x",
+        ],
+        vec![
+            "ask",
+            "--run",
+            &room,
+            "--to",
+            "pane:team-1/%8",
+            "--body",
+            "x",
+        ],
+    ] {
+        let why = refused(&typed(&mut bench, &off, OTHER, Some(A), &line));
+        assert!(why.contains(MAIL_OFF), "{line:?}: {why}");
+    }
+    // What the room holds can still be read.
+    let read = answered(&typed(
+        &mut bench,
+        &off,
+        "%8",
+        Some(A),
+        &["check", "--run", &room],
+    ));
+    assert!(
+        read["messages"]
+            .as_array()
+            .is_some_and(|held| !held.is_empty()),
+        "{read}"
+    );
+}
+
+/// Every verb of the table that is not mail is refused in a room, by the
+/// table rather than a hand-written list — a verb added later is held too.
+/// The gate-reuse verbs that need a server's job context are refused before
+/// any run is looked at, which holds them out of the room as well.
+#[test]
+fn every_verb_of_the_table_outside_the_rooms_is_refused_in_a_room() {
+    let mut bench = Bench::new();
+    let launcher = on();
+    answered(&send(
+        &mut bench,
+        &launcher,
+        LONE,
+        "pane:team-1/%8",
+        "open-it",
+    ));
+    let room = the_room(&bench).id.clone();
+    let mut let_through = Vec::new();
+    for (verb, _, _) in crate::orchestration::VERBS {
+        if room::ROOM_VERBS.contains(verb) {
+            continue;
+        }
+        for line in [
+            vec![*verb, "--run", room.as_str()],
+            vec![*verb, room.as_str()],
+        ] {
+            let planned = typed(&mut bench, &launcher, LONE, Some(A), &line);
+            let why = &planned.reply.stderr;
+            if planned.reply.exit_code == 0
+                || !(why.contains("this project's room") || why.contains("out_of_scope"))
+            {
+                let_through.push(format!(
+                    "{line:?}: {}",
+                    planned.reply.stdout.chars().take(80).collect::<String>()
+                ));
+            }
+        }
+    }
+    assert!(let_through.is_empty(), "{let_through:#?}");
+    assert!(the_room(&bench).tasks.is_empty() && the_room(&bench).workers.is_empty());
+}

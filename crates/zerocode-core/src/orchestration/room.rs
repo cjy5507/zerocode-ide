@@ -50,9 +50,16 @@ pub const ROOM_VERBS: &[&str] = &[PEERS_VERB, "send", "ask", "reply", "check"];
 /// The name a room run is made under, so `run-list` says what it is.
 pub const ROOM_NAME: &str = "room";
 
-/// The refusal while the person's switch is off.
-pub const MAIL_OFF: &str = "agent-to-agent mail is off in this window (설정 「에이전트 판끼리 편지」) \
-     — nothing was sent; the person turns it on, or a coordinator's run carries the letter";
+/// The refusal while the person's switch is off — said in the ledger's words;
+/// the window names its own setting.
+pub const MAIL_OFF: &str = "agent-to-agent mail is off in this window's settings — nothing was \
+     sent; the person turns it on, and a coordinator's run still carries letters";
+
+/// The refusal for a pane whose project the window does not know: a room is
+/// one per project, and a letter with no project to file it under would be
+/// read by nobody.
+pub const PROJECT_UNKNOWN: &str = "this pane's project is not known — the window has no folder \
+     for it, and a room is one per project; nothing was sent";
 
 /// The run is its project's room — when it was opened.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -105,14 +112,17 @@ impl Ledger {
             .map(|run| run.id.as_str())
     }
 
-    /// Open `root`'s room, said to be opened by `seat`.
-    fn open_room(&mut self, root: &str, seat: &str, now_ms: i64) -> String {
-        let id = self.create_run(ROOM_NAME, now_ms);
-        self.state_run_project(&id, root, seat, now_ms);
-        if let Some(run) = self.run_mut(&id) {
-            run.room = Some(RoomMark { since_ms: now_ms });
+    /// Open `root`'s room, said to be opened by `seat` — never for a root
+    /// that could not be a project's, so no room stands without one.
+    fn open_room(&mut self, root: &str, seat: &str, now_ms: i64) -> Option<String> {
+        if root.is_empty() || root.len() > super::project_scope::PROJECT_ROOT_MAX {
+            return None;
         }
-        id
+        let id = self.create_run(ROOM_NAME, now_ms);
+        let placed = self.state_run_project(&id, root, seat, now_ms);
+        let run = self.run_mut(&id)?;
+        run.room = Some(RoomMark { since_ms: now_ms });
+        placed.then_some(id)
     }
 
     fn is_room(&self, run_id: &str) -> bool {
@@ -141,7 +151,7 @@ pub(super) fn acting_room<'a>(ledger: &'a Ledger, argv: &[String], root: &str) -
 /// project before anything is filed.
 pub(super) fn first_letter_seat(argv: &[String]) -> Option<String> {
     let (verb, rest) = argv.split_first()?;
-    if !matches!(verb.as_str(), "send" | "ask") {
+    if !writes(verb) {
         return None;
     }
     let words = super::split_words(rest, super::BOOL_FLAGS);
@@ -151,16 +161,24 @@ pub(super) fn first_letter_seat(argv: &[String]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The verbs that write a room letter, and so may open the room.
+fn writes(verb: &str) -> bool {
+    matches!(verb, "send" | "ask")
+}
+
 /// Where a pane no run holds writes: its project's room, named onto `words`
 /// as `--run` before anything reads them, so a retry is fingerprinted with
-/// the room it went to.
+/// the room it went to. Answers the room it named.
 ///
 /// Only for [`ROOM_VERBS`], only when the caller named no run and none holds
-/// it, and only for a pane in a known project. `send` and `ask` open the room
-/// when there is none yet; a look at a room nobody opened is the old
-/// 「no run in use」, because there is nothing to read.
+/// it. `send` and `ask` open the room when there is none yet — refused while
+/// the person's switch is off, and for a pane whose project the window does
+/// not know; a look at a room nobody opened is the old 「no run in use」,
+/// because there is nothing to read. A room this opened for a letter that is
+/// then refused is taken back ([`take_back`]).
 ///
-/// And first, the refusal: a verb outside [`ROOM_VERBS`] that names a room.
+/// And first, the refusal: a verb outside [`ROOM_VERBS`] that names a room,
+/// or that a room would answer for its caller.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn route(
     ledger: &mut Ledger,
@@ -171,41 +189,63 @@ pub(super) fn route(
     seat: &str,
     project: Option<&str>,
     now_ms: i64,
-) -> Result<(), String> {
-    refused_here(ledger, verb, words)?;
+) -> Result<Option<String>, String> {
+    let standing = standing_in(ledger, caller, seat);
+    refused_here(ledger, verb, words, standing.as_deref())?;
     if verb == PEERS_VERB
         || !ROOM_VERBS.contains(&verb)
         || words.value("--run").is_some()
-        || standing_in(ledger, caller, seat).is_some()
+        || standing.is_some()
     {
-        return Ok(());
+        return Ok(None);
     }
-    let Some(root) = project else {
-        return Ok(());
-    };
-    let writes = matches!(verb, "send" | "ask");
-    if writes && !launcher.peer_mail_on() {
+    if writes(verb) && !launcher.peer_mail_on() {
         return Err(MAIL_OFF.to_string());
     }
-    let room = match ledger.room_of(root) {
+    let root = project.filter(|root| !root.is_empty());
+    let room = match root.and_then(|root| ledger.room_of(root)) {
         Some(room) => room.to_string(),
-        None if writes => ledger.open_room(root, seat, now_ms),
-        None => return Ok(()),
+        None if !writes(verb) => return Ok(None),
+        None => root
+            .and_then(|root| ledger.open_room(root, seat, now_ms))
+            .ok_or_else(|| PROJECT_UNKNOWN.to_string())?,
     };
-    words.values.push(("--run".to_string(), room));
-    Ok(())
+    words.values.push(("--run".to_string(), room.clone()));
+    Ok(Some(room))
+}
+
+/// A refused verb changes nothing: a room the refused call opened — the runs
+/// past `runs_before`, a room that holds no letter — is taken back. Its id is
+/// not given again (`mint` only counts up), and nobody was told it.
+pub(super) fn take_back(ledger: &mut Ledger, runs_before: usize) {
+    while ledger.runs.len() > runs_before
+        && ledger
+            .runs
+            .last()
+            .is_some_and(|run| run.is_room() && run.messages().is_empty())
+    {
+        ledger.runs.pop();
+    }
 }
 
 /// A verb outside [`ROOM_VERBS`] that names a room — by `--run`, or as the
-/// run id it takes first (`run-use`, `run-show`) — is refused.
-fn refused_here(ledger: &Ledger, verb: &str, words: &Words) -> Result<(), String> {
+/// run id it takes first (`run-use`, `run-show`) — or whose caller a room
+/// holds, is refused. Nothing binds a pane to a room today; this keeps the
+/// rule in one place if something ever does.
+fn refused_here(
+    ledger: &Ledger,
+    verb: &str,
+    words: &Words,
+    standing: Option<&str>,
+) -> Result<(), String> {
     if ROOM_VERBS.contains(&verb) {
         return Ok(());
     }
     let named = words
         .value("--run")
         .into_iter()
-        .chain(words.positional.first().map(String::as_str));
+        .chain(words.positional.first().map(String::as_str))
+        .chain(standing.filter(|_| words.value("--run").is_none()));
     for id in named {
         if ledger.is_room(id) {
             return Err(format!(
@@ -222,14 +262,21 @@ fn refused_here(ledger: &Ledger, verb: &str, words: &Words) -> Result<(), String
 /// `pane:` address. A completion, a dispatch, a gate or a handover is work a
 /// coordinator's run carries; a group is a crowd nobody listed; and the
 /// room's own `run:` address is the operator voice nobody holds here.
+///
+/// And the person's switch, wherever the room was named from: a pane that
+/// writes `--run <room>` is held by it as much as one the room was found for.
 pub(super) fn send_allowed(
     ledger: &Ledger,
+    launcher: &dyn Launcher,
     run_id: &str,
     kind: MessageKind,
     to: Option<&str>,
 ) -> Result<(), String> {
     if !ledger.is_room(run_id) {
         return Ok(());
+    }
+    if !launcher.peer_mail_on() {
+        return Err(MAIL_OFF.to_string());
     }
     if !matches!(kind, MessageKind::Status | MessageKind::Question) {
         return Err(format!(
@@ -245,9 +292,17 @@ pub(super) fn send_allowed(
 /// or working in a run reads its mail there, so a question filed in the room
 /// under its pane address would wait for an answer from nobody — `send` it,
 /// and the letter reaches it where it reads.
-pub(super) fn ask_allowed(ledger: &Ledger, run_id: &str, to: Option<&str>) -> Result<(), String> {
+pub(super) fn ask_allowed(
+    ledger: &Ledger,
+    launcher: &dyn Launcher,
+    run_id: &str,
+    to: Option<&str>,
+) -> Result<(), String> {
     if !ledger.is_room(run_id) {
         return Ok(());
+    }
+    if !launcher.peer_mail_on() {
+        return Err(MAIL_OFF.to_string());
     }
     one_pane(to)?;
     let seat = to.and_then(|to| to.strip_prefix(PANE_ADDRESS_PREFIX));

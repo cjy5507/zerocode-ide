@@ -8199,6 +8199,12 @@ impl Ledger {
         actor: Option<&str>,
         now_ms: i64,
     ) -> Result<Seated, String> {
+        // A room has no chair, by design ([`room`]): nobody sits in it.
+        if self.run(run_id).is_some_and(Run::is_room) {
+            return Err(format!(
+                "{run_id} is this project's room — it has no coordinator seat"
+            ));
+        }
         let carries_a_worker = seat
             .split_once('/')
             .is_some_and(|(team, pane)| self.seat_ever_held_a_worker((team, pane)));
@@ -23155,22 +23161,28 @@ pub fn plan_in_project(
     job: Option<&gate_reuse::JobContext>,
     project: Option<&str>,
 ) -> Decided {
+    let runs_before = ledger.runs().len();
     match plan_inner(
         ledger, team, launcher, argv, pane, now_ms, actor, receipts, job, project,
     ) {
         Ok(decided) => decided,
-        Err(why) => Decided {
-            answered_from: None,
-            effect: Effect::None,
-            reply: refused(why),
-            prepared_worker_start: None,
-            prepared_worker_reseat: None,
-            prepared_remote_start: None,
-            releasing: None,
-            waiting: None,
-            receipt: None,
-            requires_durability: false,
-        },
+        Err(why) => {
+            /* A refused verb changes nothing — and a room is the one run a
+             * letter opens on its way to being judged ([`room::route`]). */
+            room::take_back(ledger, runs_before);
+            Decided {
+                answered_from: None,
+                effect: Effect::None,
+                reply: refused(why),
+                prepared_worker_start: None,
+                prepared_worker_reseat: None,
+                prepared_remote_start: None,
+                releasing: None,
+                waiting: None,
+                receipt: None,
+                requires_durability: false,
+            }
+        }
     }
 }
 
@@ -23453,10 +23465,21 @@ fn plan_inner(
      * onto the words here, before the retry below fingerprints them, so a
      * retried letter is matched with the room it went to. And a verb that
      * is not mail is refused in a room, whoever names one. */
-    room::route(
+    let routed = room::route(
         ledger, launcher, verb, &mut words, &caller, &seat, project, now_ms,
     )?;
     let words = words;
+    /* The project door again, for the room it named: the first check above
+     * read the argv as typed, which names no run, so the run a carried copy
+     * or a redirected letter lands in is judged here (t-98182 L2). */
+    if let Some(room) = routed {
+        let named: Vec<String> = argv
+            .iter()
+            .cloned()
+            .chain(["--run".to_string(), room])
+            .collect();
+        project_scope::require_project(ledger, &named, &team.id, pane, Some(actor), project)?;
+    }
 
     if let Some(request) = words.value(RETRY_REQUEST) {
         let asked = ReceiptKey::of(request, actor, verb, &words);
@@ -24053,6 +24076,19 @@ fn plan_inner(
                             "armedMs": auto.armed_ms,
                         })),
                     })
+                })
+                .map(|mut row| {
+                    /* Said only of a room ([`room`]), so every other row reads
+                     * as it always did: a coordinator reading the list learns
+                     * that this run is the project's mail room — mail only,
+                     * nobody's chair — before it tries to sit in it. */
+                    if row["runId"]
+                        .as_str()
+                        .is_some_and(|id| ledger.run(id).is_some_and(Run::is_room))
+                    {
+                        row["room"] = serde_json::json!({ "answers": room::ROOM_VERBS });
+                    }
+                    row
                 })
                 .collect();
             said(serde_json::json!({ "runs": runs, "nextCursor": next }))
@@ -25879,7 +25915,7 @@ fn plan_inner(
                         .filter(|held| !held.is_empty())
                         .ok_or("ask needs --body, or --resume <questionId>")?
                         .to_string();
-                    room::ask_allowed(ledger, &run_id, words.value("--to"))?;
+                    room::ask_allowed(ledger, launcher, &run_id, words.value("--to"))?;
                     // A question goes to the coordinator unless it is
                     // addressed elsewhere — and never to a group: one
                     // question takes ONE answer, and a crowd asked together
@@ -26241,7 +26277,7 @@ fn plan_inner(
                     kind.as_str()
                 ));
             }
-            room::send_allowed(ledger, &run_id, kind, words.value("--to"))?;
+            room::send_allowed(ledger, launcher, &run_id, kind, words.value("--to"))?;
             // What a worker is carrying, so it does not have to say it back.
             // Every fact an agent repeats is a fact it can repeat wrong, and a
             // `worker_done` naming the wrong dispatch closes somebody else's
@@ -26537,9 +26573,18 @@ fn plan_inner(
                         task: None,
                         dispatch: None,
                     };
+                    /* A reply written in a room keeps the room's signature in
+                     * the copy, as a room letter's copy does
+                     * ([`send_in_run`]): what the pane is in the asking run is
+                     * no voice it wrote with. */
+                    let in_room = room::signs_as_pane(ledger, &run_id);
                     let carried = asker_run.map(|asker| {
+                        let from = match in_room {
+                            true => draft.from.clone(),
+                            false => sender(ledger, &team.leader_pane, &asker, (&team.id, pane)),
+                        };
                         let copy = Draft {
-                            from: sender(ledger, &team.leader_pane, &asker, (&team.id, pane)),
+                            from,
                             to: format!("{RUN_ADDRESS_PREFIX}{asker}"),
                             ..draft.clone()
                         };
@@ -27081,13 +27126,12 @@ fn sender(ledger: &Ledger, leader_pane: &str, run_id: &str, seat: (&str, &str)) 
      * pane the person opened the operator voice a worker obeys. Reading
      * follows signing ([`inbox_of`]), so the pane reads its own address
      * there too. */
-    if room::signs_as_pane(ledger, run_id) {
+    // Found once: the window asks this for every pane on every beat.
+    let run = ledger.run(run_id);
+    if run.is_some_and(Run::is_room) {
         return pane_address(seat);
     }
-    if let Some(worker) = ledger
-        .run(run_id)
-        .and_then(|run| run.worker_in_pane(seat.0, seat.1))
-    {
+    if let Some(worker) = run.and_then(|run| run.worker_in_pane(seat.0, seat.1)) {
         return worker_address(&worker.id);
     }
     /* The seat is a ledger fact where the run has one (t-2512). A run with
@@ -27108,7 +27152,7 @@ fn sender(ledger: &Ledger, leader_pane: &str, run_id: &str, seat: (&str, &str)) 
      * existed keep the rule the road always had. */
     let seat_key = format!("{}/{}", seat.0, seat.1);
     let leader_shaped = seat.1 == leader_pane && !ledger.seat_ever_held_a_worker(seat);
-    let signs_as_run = match ledger.run(run_id).and_then(|run| run.coordinator.as_ref()) {
+    let signs_as_run = match run.and_then(|run| run.coordinator.as_ref()) {
         Some(chair) if chair.is_held() => chair.seat == seat_key,
         Some(chair) => leader_shaped && chair.seat == seat_key,
         None => leader_shaped,

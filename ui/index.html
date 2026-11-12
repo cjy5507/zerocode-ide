@@ -4610,6 +4610,16 @@
               <option value="refuse" data-i18n="settings.harness.promptsRefuse">거절하고 계속</option>
             </select>
           </label>
+          <label class="settings-field" data-field="md" for="harness-mail-peers">
+            <span class="settings-label" data-i18n="settings.harness.peerMail">에이전트 판끼리 편지</span>
+            <span class="settings-hint" id="harness-mail-peers-hint" data-i18n="settings.harness.peerMailHint">
+              켜면 이 창에서 연 에이전트 판(Claude Code · Codex · Antigravity · zo)이 같은 프로젝트의 다른 판에게 원장으로 편지를 보낼 수 있습니다. 판은 zerocode-orc peers로 서로를 찾습니다. 편지가 한 판을 깨우는 것은 사람이 그 판에 마지막으로 입력한 뒤 세 번까지이고, 답장은 깨우지 않습니다. 다른 프로젝트의 판에게는 보내지 못하고, 워커에게 가는 편지는 그 실행의 코디네이터에게 갑니다. 끄면 새 편지는 거절되고, 이미 온 편지는 읽을 수 있습니다.
+            </span>
+            <select class="settings-input" id="harness-mail-peers" aria-describedby="harness-mail-peers-hint">
+              <option value="on" data-i18n="settings.harness.peerMailOn">켬</option>
+              <option value="off" data-i18n="settings.harness.peerMailOff">끔</option>
+            </select>
+          </label>
           <div class="settings-subhead">
             <h3 class="settings-subhead-title" data-i18n="settings.harness.launchesTitle">에이전트 호출 한도</h3>
             <p class="settings-subhead-desc" data-i18n="settings.harness.launchesAbout">

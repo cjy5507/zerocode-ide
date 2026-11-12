@@ -205,6 +205,14 @@ row the window has not placed yet is in NO checkout group, and an empty
 checkout group's refusal says how many such unreported rows it is not
 counting — absence of the fact is never a fact of absence.
 
+A pane the person opened, with no run, writes to the other agent panes of its
+project through the project's room: `peers` lists them, `send --to
+pane:<team>/<pane>` (a status or a question) and `reply` reach one, and a plain
+`check` reads what came. In a room every pane signs as its own `pane:`
+address, a group or a `run:` address is refused, and a letter for a worker is
+filed for its run's coordinator instead (SKILL.md, 「Writing to another agent
+pane」).
+
 A worker can live on ANOTHER machine: `worker-start --on <server> --task
 <id>` claims the task here and seats the pane over there — the far window
 runs the summons through its own rules, your dispatch settles here when its

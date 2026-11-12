@@ -41,8 +41,26 @@ pub(crate) struct Workers {
     pub(crate) refuse_prompts: bool,
 }
 
-/// The gate's half, the ledger's half, its alerts and the workers' standing
-/// orders, as stored.
+/// Whether the agent panes a person opened may write to each other through
+/// their project's room (2026-11-12, `zerocode_core::orchestration::room`).
+/// `peers`: on for a person who never chose — the person asked for it, and
+/// chose 「기본 켬 · 사람 입력 뒤 3번」 for how often a room letter may wake a
+/// pane (`orchestration::peer_room`). Off, a room letter is refused with the
+/// reason; what a room already holds can still be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Mail {
+    pub(crate) peers: bool,
+}
+
+impl Default for Mail {
+    fn default() -> Self {
+        Self { peers: true }
+    }
+}
+
+/// The gate's half, the ledger's half, its alerts, the workers' standing
+/// orders and the panes' mail, as stored.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct HarnessSettings {
@@ -50,6 +68,7 @@ pub(crate) struct HarnessSettings {
     pub(crate) launches: Limits,
     pub(crate) alerts: Alerts,
     pub(crate) workers: Workers,
+    pub(crate) mail: Mail,
 }
 
 impl HarnessSettings {
@@ -85,11 +104,20 @@ impl HarnessSettings {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
         };
+        // Like the alerts: only a plain `false` turns the panes' mail off.
+        let mail = Mail {
+            peers: value
+                .get("mail")
+                .and_then(|held| held.get("peers"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+        };
         Ok(Self {
             gate: Settings::parse(&value.get("gate").cloned().unwrap_or_default()),
             launches,
             alerts,
             workers,
+            mail,
         })
     }
 }

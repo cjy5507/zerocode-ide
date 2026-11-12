@@ -6097,6 +6097,8 @@ function harnessFromFields() {
     // And only an explicit 「거절하고 계속」 has a summoned worker refuse a
     // permission prompt nobody is watching: a prompt is the person's to answer.
     workers: { refuse_prompts: el("harness-workers-prompts").value === "refuse" },
+    // Agent panes write to each other unless the person said a plain 「끔」.
+    mail: { peers: el("harness-mail-peers").value !== "off" },
   };
 }
 
@@ -6108,10 +6110,11 @@ function setHarnessField(id, value) {
 
 function paintHarnessSettings() {
   if (!harnessSettings) return;
-  const { gate, launches, alerts, workers } = harnessSettings;
+  const { gate, launches, alerts, workers, mail } = harnessSettings;
   setHarnessField("harness-gate-mode", gate.mode);
   setHarnessField("harness-alerts-landing", alerts?.landing === false ? "off" : "on");
   setHarnessField("harness-workers-prompts", workers?.refuse_prompts === true ? "refuse" : "ask");
+  setHarnessField("harness-mail-peers", mail?.peers === false ? "off" : "on");
   for (const [key, id] of Object.entries(HARNESS_GATE_FIELDS)) setHarnessField(id, gate[key]);
   for (const [key, id] of Object.entries(HARNESS_LAUNCH_FIELDS)) setHarnessField(id, launches[key]);
 }
@@ -6161,6 +6164,7 @@ for (const id of [
   "harness-gate-mode",
   "harness-alerts-landing",
   "harness-workers-prompts",
+  "harness-mail-peers",
   ...Object.values(HARNESS_GATE_FIELDS),
   ...Object.values(HARNESS_LAUNCH_FIELDS),
 ]) {

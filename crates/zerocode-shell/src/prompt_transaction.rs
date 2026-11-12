@@ -352,8 +352,14 @@ pub(super) fn human_write<E>(
         crate::human_input::keyed(term);
     }
     let text = std::str::from_utf8(bytes).ok();
-    if text.is_some_and(zerocode_core::ask::is_potential_submit_input) {
+    let submitted = text.is_some_and(zerocode_core::ask::is_potential_submit_input);
+    if submitted {
         crate::human_input::entered(term);
+    }
+    // The person's input here renews what room letters may wake this pane
+    // (`orchestration::peer_room`).
+    if words || submitted {
+        crate::orchestration::peer_room::person_at(term);
     }
     Ok(words || (theirs_before && text.is_some_and(zerocode_core::ask::is_submit_enter)))
 }

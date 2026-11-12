@@ -35,6 +35,7 @@ mod gate_snapshot;
 pub(crate) mod hand_in_keep;
 pub(crate) mod inbox;
 mod mail_triage;
+pub(crate) mod peer_room;
 mod project_scope;
 pub(crate) mod release_reap;
 pub(crate) mod restart_census;
@@ -4447,6 +4448,19 @@ impl Launcher for LiveCatalog {
     /// requires of everything the actor asks under the ledger.
     fn workers_refuse_unwatched_prompts(&self) -> bool {
         workers_refuse_prompts()
+    }
+
+    /// The person's 「에이전트 판끼리 편지」 switch, read off its cell.
+    fn peer_mail_on(&self) -> bool {
+        peer_room::peer_mail()
+    }
+
+    /// The agent panes of `project` as the mail pass last read them.
+    fn live_panes(
+        &self,
+        project: Option<&str>,
+    ) -> Option<Vec<zerocode_core::orchestration::room::PeerPane>> {
+        peer_room::live_panes(project)
     }
 
     fn command_for_resume(
@@ -9223,6 +9237,8 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         .unwrap_or_else(|held| held.into_inner())
         .clone();
     let on_their_way = host.prompts_on_their_way();
+    // The agent panes `peers` lists, from the facts just copied out.
+    peer_room::note_panes(host, &turns, &attention);
     /// Advice one pass decided to type: the pane, and the line.
     struct Pointing {
         run: String,
@@ -9742,6 +9758,16 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * (t-52566): a zo's `SessionStart` reads as rest a breath
                  * before that continuation begins its turn. */
                 if host.wake_words_pending(term) || owed.contains(&term) {
+                    continue;
+                }
+                /* A letter written in a project's room wakes a pane within the
+                 * person's budget, and a room reply wakes nobody
+                 * ([`peer_room::held_back`]). Nothing is marked: the letter
+                 * stays filed for the pane's next `check`, and the person's
+                 * next input there lets the pointer go on the next beat. */
+                if let Some(newest) = run.newest_pending(&address)
+                    && peer_room::held_back(&rows, &run.id, newest, term).is_some()
+                {
                     continue;
                 }
                 /* The first two conditions, and the line between them: a door

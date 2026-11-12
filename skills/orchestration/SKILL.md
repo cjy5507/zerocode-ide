@@ -87,6 +87,10 @@ Each line is the short form of a paragraph below or in a reference file.
    hand-in closes the attempt.
 9. **Ask your coordinator, not the person.** A prompt nobody watches blocks
    the pane. Use `ask` and wait for its answer.
+10. **Panes write to each other through the room, inside one project.** Find
+    the agent panes of this project with `zerocode-orc peers` and `send` to
+    one's `pane:` address. Never use Claude's SendMessage, or any CLI's own
+    messaging, to write to a session of another project.
 
 ## Reaching it
 
@@ -362,6 +366,31 @@ at `pending` until every task it names has completed, and `task-list --ready`
 is then the list of work that can actually start. The chain's whole value is
 that each stage can be verified before the next begins — do not resolve a
 dependency on an unverified stage.
+
+## Writing to another agent pane
+
+The agent panes the person opened in this window write to each other through
+the ledger, whatever CLI each one runs. `zerocode-orc peers` lists the agent
+panes of this project: each one's `pane:<team>/<pane>` address, agent, folder,
+whether it is working, idle or waiting on the person, and the run it sits in.
+A pane no run holds writes with `send --to pane:<team>/<pane> --type
+status|question --body-file <file>` and reads with a plain `check`; its letters
+go through the project's room, a run nobody coordinates and nobody signs as.
+
+- Only panes of this project, only through the room. A room letter to a pane
+  of another project is refused; do not reach one by Claude's SendMessage or
+  any other CLI's own messaging either.
+- Facts and findings go straight to the pane that needs them. A decision goes
+  to a coordinator or the person.
+- A letter for a worker goes to its run's coordinator, which decides whether
+  the worker hears it; a run with no coordinator sitting refuses it.
+- The room carries mail only — `peers`, `send`, `ask`, `reply`, `check`. A
+  task, a worker or a gate needs a run (`run-create`).
+- `ask` only a pane no run holds. A pane that coordinates or works in a run
+  reads its mail there: `send` it a question instead.
+- A room letter wakes a pane at most three times after the person last typed
+  in that pane, and a reply wakes nobody — `check` when you expect an
+  answer. The person turns room mail off in settings (에이전트 판끼리 편지).
 
 ## Handing off without a run
 

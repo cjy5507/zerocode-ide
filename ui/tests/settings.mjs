@@ -428,7 +428,8 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
     "gate": { "mode": "notify", "task_usd": null, "day_usd": null },
     "launches": { "concurrent": 4, "per_hour": 300, "per_day": 2000 },
     "alerts": { "landing": true },
-    "workers": { "refuse_prompts": false }
+    "workers": { "refuse_prompts": false },
+    "mail": { "peers": true }
   },
   "worktree_prefs": { "branch_prefix": "git-username" },
   "notifications": { "enabled": true, "agent_attention": true, "agent_completion": "long" },
@@ -1818,6 +1819,8 @@ class StatefulBackend {
           alerts: { landing: asked.alerts?.landing !== false },
           // And only a plain `true` has a summoned worker refuse an unwatched prompt.
           workers: { refuse_prompts: asked.workers?.refuse_prompts === true },
+          // And only a plain `false` turns the panes' mail off.
+          mail: { peers: asked.mail?.peers !== false },
         };
         keys = ["harness"];
         break;
@@ -12965,6 +12968,8 @@ await test("the harness card shows what a person set and what the window counted
       alertsHint: field("harness-alerts-landing-hint")?.textContent ?? null,
       prompts: field("harness-workers-prompts")?.value ?? null,
       promptsHint: field("harness-workers-prompts-hint")?.textContent ?? null,
+      peers: field("harness-mail-peers")?.value ?? null,
+      peersHint: field("harness-mail-peers-hint")?.textContent ?? null,
       status: field("harness-status")?.textContent ?? null,
     };
   });
@@ -12979,7 +12984,7 @@ await test("the harness card shows what a person set and what the window counted
   assert(
     shown.mode === "notify" && shown.task === "" && shown.day === "" &&
       shown.concurrent === "4" && shown.perHour === "300" && shown.perDay === "2000" &&
-      shown.alerts === "on" && shown.prompts === "ask",
+      shown.alerts === "on" && shown.prompts === "ask" && shown.peers === "on",
     "the card does not show the document's gate and ceilings", shown,
   );
   assert(
@@ -13003,6 +13008,7 @@ await test("the harness card shows what a person set and what the window counted
         launches: { concurrent: 4, per_hour: 300, per_day: 2000 },
         alerts: { landing: true },
         workers: { refuse_prompts: false },
+        mail: { peers: true },
       },
     },
     "a budget was sent as something other than the whole record with the number typed",
@@ -13017,6 +13023,7 @@ await test("the harness card shows what a person set and what the window counted
       launches: { concurrent: 4, per_hour: 300, per_day: null },
       alerts: { landing: true },
       workers: { refuse_prompts: false },
+      mail: { peers: true },
     },
     "a blank ceiling is no ceiling, and the budget saved before it stays",
   );
@@ -13067,6 +13074,22 @@ await test("the harness card shows what a person set and what the window counted
   );
   await reopenSettings(pageB, "B", "provider-accounts");
   assertEqual((await card()).prompts, "refuse", "the card does not show the stored choice when it is opened again");
+  // Agent panes write to each other until the person says otherwise (사람 결정 2026-11-12): what the
+  // switch lets through, how often a letter may wake a pane and what stays out are said beside it,
+  // and turning it off is one saved word that moves nothing else.
+  assert(
+    /같은 프로젝트/.test(shown.peersHint ?? "") && /세 번/.test(shown.peersHint ?? "") &&
+      /다른 프로젝트/.test(shown.peersHint ?? "") && /코디네이터/.test(shown.peersHint ?? ""),
+    "the switch does not say whom it reaches, how often it wakes and what it keeps out", shown.peersHint,
+  );
+  const quiet = await gestureAndWait(pageB, "B", "set_harness_settings", () =>
+    pageB.selectOption("#harness-mail-peers", "off"));
+  assertEqual(quiet.args.harness.mail, { peers: false }, "the switch did not send the panes' mail as off");
+  assertEqual(quiet.args.harness.workers, { refuse_prompts: true }, "the switch moved the workers beside it");
+  await waitForSettingsIdle(pageB);
+  assertEqual(backend.settings.harness.mail, { peers: false }, "the stored document does not hold the panes' mail off");
+  await reopenSettings(pageB, "B", "provider-accounts");
+  assertEqual((await card()).peers, "off", "the card does not show the switch off when it is opened again");
   await backend.externalPatch({ locale: previousLocale }, ["locale"]);
   await renderSettled(pageB);
 });
