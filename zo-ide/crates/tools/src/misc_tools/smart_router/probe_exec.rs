@@ -778,17 +778,21 @@ mod tests {
     /// from the session's model alone: what else the machine has connected
     /// does not move it. A `fable` session's turn went to OpenAI's fast model
     /// on a machine that held an OpenAI login as well (v1.1.145).
+    ///
+    /// The session ids are made up — a family's opening word and nothing a
+    /// catalog, a discovery cache or a developer's own provider could list —
+    /// and the crate's environment lock is held, which has taken the
+    /// developer's providers away.
     #[test]
     fn the_probe_asks_the_fast_model_of_the_sessions_own_provider() {
+        let _held = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let asked = |parent: &str| probe_model(parent).map(|model| api::resolve_model_alias(&model));
         let haiku = api::resolve_model_alias("haiku");
-        for anthropic in ["fable", "claude-fable-5-1", "opus", "sonnet"] {
-            assert_eq!(asked(anthropic), Some(haiku.clone()), "{anthropic}");
-        }
-        for openai in ["gpt-5.6-sol", "gpt-5.5-codex"] {
-            assert_eq!(asked(openai).as_deref(), Some("gpt-5.6-luna"), "{openai}");
-        }
-        let google = asked("gemini-3.1-pro-preview");
+        assert_eq!(asked("claude-zq-probe-session"), Some(haiku), "an Anthropic session");
+        assert_eq!(asked("gpt-zq-probe-session").as_deref(), Some("gpt-5.6-luna"), "an OpenAI session");
+        let google = asked("gemini-zq-probe-session");
         assert!(
             google.as_deref().is_some_and(|model| model.starts_with("gemini")),
             "a Gemini session asks a Gemini model: {google:?}"
@@ -799,6 +803,9 @@ mod tests {
     /// ask, and a batch for it asks nobody: each task's slot says why.
     #[test]
     fn a_session_with_no_fast_model_of_its_own_asks_nobody() {
+        let _held = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for own in ["zq-model-nobody-lists", "zq-relay/some-model"] {
             assert_eq!(probe_model(own), None, "{own}");
             assert!(!probe_has_a_model(own), "{own}");

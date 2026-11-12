@@ -66,6 +66,14 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
         // on an expired blob, fire a real token-endpoint refresh — hanging in
         // sandboxed runs and mutating live credentials in unsandboxed ones.
         std::env::set_var("ZO_DISABLE_KEYCHAIN", "1");
+        // Nor the developer's own providers. A pane of the ZeroCode window
+        // exports them (`ZO_CUSTOM_PROVIDERS`), and a model one of them
+        // declares is read as that provider's and has no fast model of its
+        // own: a test of what a session is asked on would turn on whose
+        // machine ran it. A test that wants such providers declares them
+        // under this lock, and puts back what it found.
+        std::env::remove_var(api::CUSTOM_PROVIDERS_ENV);
+        api::refresh_custom_providers_from_env();
         // A sub-agent turn a test runs roots its traces (`.zo/turns`,
         // `.zo/dream`) at `ZO_TRACE_ROOT`, else at the process cwd — the
         // crate's folder, where `.gitignore` hides them (244 session logs by
