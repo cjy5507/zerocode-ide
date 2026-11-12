@@ -18,8 +18,11 @@
 //! the next runs it names — and where.
 //!
 //! A schedule zo asks for runs no closer together than the floor the window
-//! holds an asked schedule to (`CronCreateInput::work`): a tighter one
-//! registers nothing, so nobody is asked about it.
+//! holds an asked schedule to (`CronCreateInput::work`). A call that would
+//! register nothing — a tighter schedule, an expression that does not read, a
+//! prompt and a workflow at once or neither — is refused in the tool's own
+//! words before anybody is asked (`registers_nothing`): a yes to it would
+//! register nothing, so no mode puts that question to a person.
 //!
 //! The shell is not a second road to the store. `zo cron ensure` is the
 //! person's own — typed by them, or sent by the window on their click — and a
@@ -30,9 +33,21 @@
 //! and the `PowerShell` tool.
 //!
 //! What this is not: a boundary. The refusal reads the names a command spells
-//! out, by the reading the kill guard uses: a script file, a verb filled in
-//! at run time, or an edit of the store's file gets past it. The guard closes
-//! the asking, not the file.
+//! out, by the reading the kill guard uses, and these kinds get past it:
+//! - a script file, another interpreter, or a program that runs a command for
+//!   the shell (`find -exec`, a task runner, `zo line add`);
+//! - zo under another name: an alias, a variable, `cargo run`;
+//! - the word `cron` split by quotes or a backslash, which the first look for
+//!   that word in the command's letters passes over;
+//! - a verb filled in at run time inside a string handed to a shell
+//!   (`bash -c "zo cron $VERB"`): the reading drops what is filled in and
+//!   takes the next word for the verb, so the call passes when no word
+//!   follows, or when the one that does is a verb that registers nothing. At
+//!   the top of a command such a verb is refused, since the empty word keeps
+//!   its place;
+//! - an edit of the store's file.
+//!
+//! The guard closes the asking, not the file.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -78,8 +93,12 @@ const SHELL_VERB_THAT_REGISTERS: &str = "ensure";
 
 /// The verbs under [`SHELL_VERBS_UNDER`] that register nothing: one reads the
 /// store, the other takes a record out. Any other word there is refused as
-/// the one that registers — a verb the command does not spell out among them.
+/// the one that registers — a verb the command does not spell out among them
+/// — save the words that only print the usage ([`SHELL_USAGE_WORDS`]).
 const SHELL_VERBS_THAT_REGISTER_NOTHING: &[&str] = &["show", "remove"];
+
+/// The words under [`SHELL_VERBS_UNDER`] that print the usage and do nothing.
+const SHELL_USAGE_WORDS: &[&str] = &["-h", "--help"];
 
 /// What a call would register, as it reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,12 +168,15 @@ pub fn nobody_to_ask() -> String {
 }
 
 /// The refusal for a shell `command` of the model's that would register a
-/// schedule past the question — `zo cron ensure`, wherever in the command the
-/// shell would run it — with the tool to ask through instead. `None` for any
-/// other command: `zo cron show` and `zo cron remove` register nothing. Asked
-/// by every layer that judges a model's command, after the kill guard and the
-/// desk guard; no mode, rule or hook answers it, since the question it sends
-/// the model to is one only a person answers.
+/// schedule past the question — `zo cron ensure`, where the shell would run
+/// it and the reading reaches it (the module says what it does not reach) —
+/// with the tool to ask through instead. `None` for any other command:
+/// `zo cron show` and `zo cron remove` register nothing, and `-h` prints the
+/// usage. A word after `cron` that is none of these is refused as the verb
+/// that registers; at the top of a command that includes a verb the shell
+/// fills in when it runs. Asked by every layer that judges a model's command,
+/// after the kill guard and the desk guard; no mode, rule or hook answers it,
+/// since the question it sends the model to is one only a person answers.
 #[must_use]
 pub fn refused_in_a_shell(command: &str) -> Option<String> {
     let ran = runs::programs_run(command, |text| text.contains(SHELL_VERBS_UNDER));
@@ -168,22 +190,42 @@ pub fn refused_in_a_shell(command: &str) -> Option<String> {
         )
     };
     Some(format!(
-        "refused to run: this command registers a schedule from a shell ({spelled}), past the          question a person answers. Ask for the schedule with the {TOOL} tool (`schedule`,          `prompt` or `workflow`, `description`): it puts the schedule to a person. {NOT_THE_MODE}"
+        "refused to run: this command registers a schedule from a shell ({spelled}), past the \
+         question a person answers. Ask for the schedule with the {TOOL} tool (`schedule`, \
+         `prompt` or `workflow`, `description`): it puts the schedule to a person. {NOT_THE_MODE}"
     ))
 }
 
 /// The verb by which `run` would write the schedule store: the word after
 /// [`SHELL_VERBS_UNDER`] when the program is [`SHELL_PROGRAM`] and that word
-/// is not one that registers nothing. `zo cron` with no verb prints its usage.
+/// neither registers nothing nor only prints the usage. `zo cron` with no
+/// word after it prints its usage too.
 fn registering_verb(run: &ProgramRun) -> Option<&str> {
     let program = run.program.strip_suffix(".exe").unwrap_or(&run.program);
     let [under, verb, ..] = run.args.as_slice() else {
         return None;
     };
+    let verb = verb.as_str();
     (program == SHELL_PROGRAM
         && under.as_str() == SHELL_VERBS_UNDER
-        && !SHELL_VERBS_THAT_REGISTER_NOTHING.contains(&verb.as_str()))
-    .then_some(verb.as_str())
+        && !SHELL_VERBS_THAT_REGISTER_NOTHING.contains(&verb)
+        && !SHELL_USAGE_WORDS.contains(&verb))
+    .then_some(verb)
+}
+
+/// Why `tool_name` called with `input` would register nothing, when it is
+/// the tool that registers a schedule and its input reads: an expression
+/// that does not read, a prompt and a workflow at once or neither, runs
+/// closer together than the floor ([`CronCreateInput::work`], the tool's own
+/// judgment and words). The policy refuses such a call with this before the
+/// mode and the rules are asked, so no person is put a question whose yes
+/// registers nothing. `None` for any other tool, for a call that registers,
+/// and for an input the tool cannot read at all, which is the tool's to
+/// answer.
+#[must_use]
+pub(crate) fn registers_nothing(tool_name: &str, input: &str) -> Option<String> {
+    let why = call(tool_name, input)?.work().err()?;
+    Some(format!("refused, since it would register nothing: {why}. {NOT_THE_MODE}"))
 }
 
 /// Whether `tool_name` is the tool that registers a schedule, in any
@@ -199,10 +241,7 @@ fn registers_schedules(tool_name: &str) -> bool {
 /// judgment ([`CronCreateInput::work`]) — so a call the tool would run is
 /// never one the guard did not see.
 fn registration(tool_name: &str, input: &str) -> Option<Registration> {
-    if !registers_schedules(tool_name) {
-        return None;
-    }
-    let call: CronCreateInput = serde_json::from_value(parse_tool_arguments(input).ok()?).ok()?;
+    let call = call(tool_name, input)?;
     let runs = match call.work().ok()? {
         CronWork::Workflow(workflow) => Runs::Workflow(workflow_name(workflow)),
         CronWork::Prompt(prompt) => Runs::Prompt(prompt.trim().to_string()),
@@ -212,6 +251,17 @@ fn registration(tool_name: &str, input: &str) -> Option<Registration> {
         runs,
         label: call.description,
     })
+}
+
+/// The arguments `tool_name` called with `input` hands the tool that
+/// registers a schedule, read as the executor reads them
+/// (`parse_tool_arguments`, a mended slip included); `None` for any other
+/// tool and for an input the tool cannot read.
+fn call(tool_name: &str, input: &str) -> Option<CronCreateInput> {
+    if !registers_schedules(tool_name) {
+        return None;
+    }
+    serde_json::from_value(parse_tool_arguments(input).ok()?).ok()
 }
 
 /// The name a scheduled workflow gives: the library entry it names, or its own

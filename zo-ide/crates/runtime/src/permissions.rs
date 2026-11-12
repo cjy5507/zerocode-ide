@@ -438,7 +438,8 @@ impl PermissionPolicy {
     /// The decision for one call. A call through the wrapper is judged as the
     /// call it carries — `CapabilityInvoke` is an address and grants nothing —
     /// and a schedule zo asks for is a person's to approve in every mode
-    /// ([`crate::schedule_guard`]).
+    /// ([`crate::schedule_guard`]) — one that would register nothing is
+    /// refused with why, and nobody is asked.
     ///
     /// A bash command that would send a signal is
     /// judged by the kill guard first (t-80732): a signal to the window is
@@ -511,7 +512,13 @@ impl PermissionPolicy {
                 }
                 match crate::schedule_guard::asked(tool_name, input, self.schedule_workspace.as_deref()) {
                     Some(card) => self.authorize_asked_schedule(tool_name, input, context, card, prompter),
-                    None => self.authorize_by_mode_and_rules(tool_name, input, context, prompter),
+                    None => match crate::schedule_guard::registers_nothing(tool_name, input) {
+                        // A yes to it would register nothing, so nobody is
+                        // asked in any mode: the model is told why, in the
+                        // words the tool would refuse the call with.
+                        Some(reason) => PermissionOutcome::Deny { reason },
+                        None => self.authorize_by_mode_and_rules(tool_name, input, context, prompter),
+                    },
                 }
             }
         }

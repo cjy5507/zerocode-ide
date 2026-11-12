@@ -268,6 +268,31 @@ mod tests {
         assert!(parse(&args(&[])).unwrap_err().contains("zo cron ensure"));
     }
 
+    /// The schedule guard refuses a session's shell command by the word after
+    /// `cron` (`runtime::schedule_guard`), and those words are this command's:
+    /// the verb that registers is refused, the verbs that register nothing
+    /// and the words that print the usage pass, and a word this command does
+    /// not know is refused, on the side of asking.
+    #[test]
+    fn the_schedule_guard_refuses_this_commands_registering_verb_and_no_other_word_of_it() {
+        let rest = "--description nightly --schedule '0 3 * * *' --prompt sweep";
+        let refused = |word: &str| runtime::schedule_guard::refused_in_a_shell(&format!("zo cron {word} {rest}")).is_some();
+        let reads = |word: &str| parse(&args(&[word, "--description", "x", "--schedule", "0 3 * * *", "--prompt", "p"]));
+        assert_eq!(reads("ensure").map(|request| request.verb), Ok(Verb::Ensure));
+        assert!(refused("ensure"));
+        for (word, verb) in [("show", Verb::Show), ("remove", Verb::Remove)] {
+            assert_eq!(reads(word).map(|request| request.verb), Ok(verb), "{word}");
+            assert!(!refused(word), "{word} registers nothing");
+        }
+        for usage in ["-h", "--help"] {
+            assert_eq!(reads(usage), Err(USAGE.to_string()), "{usage} prints the usage");
+            assert!(!refused(usage), "{usage} prints the usage");
+        }
+        let unknown = "replace";
+        assert!(reads(unknown).is_err_and(|message| message.starts_with("unknown `zo cron` verb")));
+        assert!(refused(unknown), "a word this command does not know is not passed");
+    }
+
     /// The person's own road has no floor: a schedule tighter than one zo may
     /// ask for is theirs to register, here.
     #[test]

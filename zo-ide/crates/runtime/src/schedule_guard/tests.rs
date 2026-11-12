@@ -444,18 +444,64 @@ fn the_card_names_the_folder_the_schedules_are_kept_for() {
     assert!(card.ends_with("\nWhere: /Users/dev/kept-for"), "{card}");
 }
 
-/// A call that registers nothing goes by the mode and the rules alone, as any
-/// other call does: nobody is asked about a schedule that does not read.
+/// A call that would register nothing — an expression that does not read, a
+/// prompt and a workflow at once, runs closer together than the floor — is
+/// refused with why before the mode and the rules are asked: in a mode that
+/// would have asked about the tool, a person is not put a question whose yes
+/// registers nothing. With a prompter, without one, and through the wrapper.
 #[test]
-fn a_call_that_registers_nothing_goes_by_the_mode_and_the_rules() {
+fn a_call_that_would_register_nothing_is_refused_with_why_and_nobody_is_asked() {
     let _pane = Pane::a_person_opened();
+    let nothing = [
+        r#"{"schedule":"every morning","prompt":"check"}"#,
+        r#"{"schedule":"0 9 * * 1-5","prompt":"check","workflow":{"library":"nightly"}}"#,
+        r#"{"schedule":"0 9 * * 1-5"}"#,
+        r#"{"schedule":"*/5 * * * *","prompt":"poll"}"#,
+    ];
+    for mode in [
+        PermissionMode::Prompt,
+        PermissionMode::WorkspaceWrite,
+        PermissionMode::DangerFullAccess,
+    ] {
+        let policy = policy(mode)
+            .with_tool_requirement(core_types::tool_names::CAPABILITY_INVOKE, PermissionMode::ReadOnly);
+        for input in nothing {
+            let why = serde_json::from_str::<crate::team_cron_registry::CronCreateInput>(input)
+                .expect("the call's shape")
+                .work()
+                .expect_err("registers nothing");
+            let refusal = format!("refused, since it would register nothing: {why}. {}", super::NOT_THE_MODE);
+            let wrapped = serde_json::json!({
+                "name": TOOL,
+                "input": serde_json::from_str::<serde_json::Value>(input).expect("json"),
+            })
+            .to_string();
+            for (tool, input) in [(TOOL, input), (core_types::tool_names::CAPABILITY_INVOKE, wrapped.as_str())] {
+                let mut person = Person::saying(true);
+                assert_eq!(
+                    policy.authorize(tool, input, Some(&mut person)),
+                    PermissionOutcome::Deny {
+                        reason: refusal.clone()
+                    },
+                    "{mode:?} {tool} {input}"
+                );
+                assert!(person.asked.is_empty(), "{mode:?} {tool}: a yes would register nothing, so nobody is asked");
+                assert_eq!(
+                    policy.authorize(tool, input, None),
+                    PermissionOutcome::Deny {
+                        reason: refusal.clone()
+                    },
+                    "{mode:?} {tool}: with nobody to ask"
+                );
+            }
+            assert!(!refusal.contains("  "), "{refusal:?}");
+        }
+    }
+    // An input the tool cannot read at all is the tool's to answer: it goes
+    // by the mode and the rules, as any other call does.
     let mut person = Person::saying(false);
     assert_eq!(
-        policy(PermissionMode::DangerFullAccess).authorize(
-            TOOL,
-            r#"{"schedule":"every morning","prompt":"check"}"#,
-            Some(&mut person)
-        ),
+        policy(PermissionMode::DangerFullAccess).authorize(TOOL, r#"{"prompt":"check"}"#, Some(&mut person)),
         PermissionOutcome::Allow
     );
     assert!(person.asked.is_empty());
@@ -491,25 +537,31 @@ fn the_enforcer_refuses_a_schedule_in_every_mode() {
 /* ---- the floor --------------------------------------------------------------------- */
 
 /// A schedule whose runs come closer together than the floor registers
-/// nothing — the tool refuses it in the floor's words — so nobody is asked
-/// about it, and the call goes by the mode and the rules as any call that
-/// registers nothing does.
+/// nothing, so the guard has no card for it — and the policy refuses it in
+/// the floor's words, whatever the mode. One at the floor is a person's to
+/// approve.
 #[test]
-fn a_schedule_under_the_floor_registers_nothing_so_nobody_is_asked() {
+fn a_schedule_under_the_floor_registers_nothing_and_is_refused_in_the_floors_words() {
     let _pane = Pane::a_person_opened();
-    for tight in [
-        r#"{"schedule":"* * * * *","prompt":"poll"}"#,
-        r#"{"schedule":"*/5 * * * *","prompt":"poll"}"#,
-        r#"{"schedule":"0,1 9 * * *","prompt":"poll"}"#,
-        r#"{"schedule":"*/10 * * * *","workflow":{"library":"nightly"}}"#,
+    for (tight, gap) in [
+        (r#"{"schedule":"* * * * *","prompt":"poll"}"#, 1),
+        (r#"{"schedule":"*/5 * * * *","prompt":"poll"}"#, 5),
+        (r#"{"schedule":"0,1 9 * * *","prompt":"poll"}"#, 1),
+        (r#"{"schedule":"*/10 * * * *","workflow":{"library":"nightly"}}"#, 10),
     ] {
         assert_eq!(registration(TOOL, tight), None, "{tight}");
         assert!(!asks(TOOL, tight), "{tight}");
         let mut person = Person::saying(true);
-        assert_eq!(
-            policy(PermissionMode::DangerFullAccess).authorize(TOOL, tight, Some(&mut person)),
-            PermissionOutcome::Allow,
-            "{tight}: the tool is what refuses it"
+        let PermissionOutcome::Deny { reason } =
+            policy(PermissionMode::DangerFullAccess).authorize(TOOL, tight, Some(&mut person))
+        else {
+            panic!("{tight}: a schedule under the floor was let through");
+        };
+        assert!(
+            reason.contains(&format!(
+                "runs no closer together than 15 minutes; this one has runs {gap} minutes apart."
+            )),
+            "{reason}"
         );
         assert!(person.asked.is_empty(), "{tight}: nothing would be registered");
     }
@@ -551,7 +603,13 @@ fn registering_commands() -> Vec<String> {
 fn a_shell_command_that_registers_a_schedule_is_refused_wherever_the_shell_would_run_it() {
     for command in registering_commands() {
         let refused = refused_in_a_shell(&command).unwrap_or_else(|| panic!("passed: {command}"));
-        assert!(refused.starts_with("refused to run: this command registers a schedule from a shell (`zo cron ensure`)"), "{refused}");
+        assert!(
+            refused.starts_with(
+                "refused to run: this command registers a schedule from a shell (`zo cron ensure`), past the question a person answers. Ask for the schedule with the CronCreate tool (`schedule`, `prompt` or `workflow`, `description`): it puts the schedule to a person. Permission audit:"
+            ),
+            "{refused}"
+        );
+        assert!(!refused.contains("  "), "the sentence runs on, with no gap in it: {refused:?}");
         assert!(refused.contains(&format!("with the {TOOL} tool")), "{refused}");
         assert!(refused.contains("Permission audit:"), "{refused}");
         assert!(refused.contains("do not register the schedule another way"), "{refused}");
@@ -577,6 +635,30 @@ fn a_cron_verb_the_command_does_not_spell_out_is_refused_as_the_one_that_registe
     }
 }
 
+/// What the reading does not reach passes, as the module says. A verb the
+/// shell fills in is refused at the top of a command; inside a string handed
+/// to a shell the reading drops it and takes the next word for the verb, so
+/// it is refused when a word follows that registers something to the guard's
+/// eye and passes when none follows. The word `cron` split by quotes or a
+/// backslash, and zo under a name the shell fills in, pass.
+#[test]
+fn the_kinds_the_reading_does_not_reach_pass_as_the_module_says() {
+    let rest = "--description nightly --schedule '0 3 * * *' --prompt sweep";
+    assert!(refused_in_a_shell(&format!("zo cron \"$VERB\" {rest}")).is_some(), "at the top of a command");
+    assert!(
+        refused_in_a_shell(&format!("bash -c \"zo cron $VERB {rest}\"")).is_some(),
+        "in a shell's string, the word after the gap is read as the verb"
+    );
+    for passes in [
+        "bash -c \"zo cron $VERB\"".to_string(),
+        format!("zo cr\"on\" ensure {rest}"),
+        format!("zo c\\ron ensure {rest}"),
+        format!("\"$ZO\" cron ensure {rest}"),
+    ] {
+        assert_eq!(refused_in_a_shell(&passes), None, "{passes}");
+    }
+}
+
 /// A command that registers nothing is not the guard's: the verbs that read
 /// the store or take a record out, `zo cron` alone, another `zo` verb, the
 /// words as an argument of something else, and a program that only shares
@@ -587,6 +669,8 @@ fn a_shell_command_that_registers_nothing_passes() {
         "zo cron show --description nightly",
         "zo cron remove --description nightly --cwd /Users/dev/work",
         "zo cron",
+        "zo cron --help",
+        "zo cron -h",
         "zo vault search cron ensure",
         "zo line add -- cargo test cron",
         "echo zo cron ensure --description nightly",

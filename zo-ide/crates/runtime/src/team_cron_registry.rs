@@ -115,7 +115,9 @@ pub const ASKED_SCHEDULE_FLOOR_MINUTES: u64 =
 /// floor: what the floor is, and whose the tighter schedule is.
 fn closer_than_the_floor(gap: u64) -> String {
     format!(
-        "a schedule zo asks for runs no closer together than {ASKED_SCHEDULE_FLOOR_MINUTES} minutes;          this one has runs {gap} apart. A tighter one is the person's to register themselves,          from their own terminal; ask for {ASKED_SCHEDULE_FLOOR_MINUTES} minutes or more,          and do not register it another way"
+        "a schedule zo asks for runs no closer together than {ASKED_SCHEDULE_FLOOR_MINUTES} minutes; \
+         this one has runs {gap} minutes apart. A tighter one is the person's to register \
+         themselves, from their own terminal; ask for {ASKED_SCHEDULE_FLOOR_MINUTES} minutes or more"
     )
 }
 
@@ -3221,9 +3223,9 @@ mod tests {
         for (schedule, gap) in [("* * * * *", 1), ("*/5 * * * *", 5), ("0,1 9 * * *", 1), ("0,59 0,23 * * *", 1)] {
             let refused = call(schedule).work().expect_err(schedule);
             assert!(refused.contains("no closer together than 15 minutes"), "{refused}");
-            assert!(refused.contains(&format!("runs {gap} apart")), "{refused}");
-            assert!(refused.contains("the person's to register themselves"), "{refused}");
-            assert!(refused.contains("do not register it another way"), "{refused}");
+            assert!(refused.contains(&format!("this one has runs {gap} minutes apart.")), "{refused}");
+            assert!(refused.contains("A tighter one is the person's to register themselves, from"), "{refused}");
+            assert!(!refused.contains("  "), "the sentence runs on, with no gap in it: {refused:?}");
         }
         for schedule in ["*/15 * * * *", "0 * * * *", "0 9 * * 1-5", "0 0 29 2 *"] {
             assert_eq!(call(schedule).work(), Ok(CronWork::Prompt("check")), "{schedule}");
