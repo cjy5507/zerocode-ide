@@ -18,6 +18,7 @@ arboard = "3"
 base64.workspace = true
 commands = { path = "../commands" }
 core-types = { path = "../core-types" }
+decision-core = { path = "../decision-core" }
 futures-util.workspace = true
 plugins = { path = "../plugins" }
 runtime = { path = "../runtime" }

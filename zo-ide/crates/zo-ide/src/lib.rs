@@ -27,6 +27,7 @@ pub mod build_runner;
 pub mod line_cli;
 pub mod conversation_support;
 pub mod cron_cli;
+pub mod dream_lessons_cli;
 pub mod decision_shadow_cli;
 pub mod jev_cli;
 pub mod mcp_cli;

@@ -21,11 +21,20 @@ impl FastModel {
     /// # Errors
     /// When no client can be built for it: no credential, an unknown model.
     pub fn for_parent(parent_model: Option<&str>) -> Result<Self, String> {
-        // The cheap-model choice is a family alias (`haiku`); the wire wants
-        // the release id, the same way the sub-agent client resolves it.
-        let model = api::resolve_model_alias(&crate::fanout::decompose_model(parent_model));
+        let model = Self::named_for(parent_model);
         let client = crate::misc_tools::build_provider_client_for_agent(&model)?;
         Ok(Self { model, client })
+    }
+
+    /// The fast model [`Self::for_parent`] would dial for `parent_model`, by
+    /// name alone: no client is built and no credential is read. The same
+    /// provider's, always — a provider with no fast tier answers on the
+    /// parent's own model.
+    #[must_use]
+    pub fn named_for(parent_model: Option<&str>) -> String {
+        // The cheap-model choice is a family alias (`haiku`); the wire wants
+        // the release id, the same way the sub-agent client resolves it.
+        api::resolve_model_alias(&crate::fanout::decompose_model(parent_model))
     }
 
     /// The model a reply is attributed to.

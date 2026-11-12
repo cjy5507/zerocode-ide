@@ -151,6 +151,7 @@ const ANSWERED_BEFORE_A_SESSION: &[(&str, Answer)] = &[
     ("settings", run_settings),
     ("vault", run_vault),
     ("auto-dream", run_auto_dream),
+    ("dream-lessons", run_dream_lessons),
 ];
 
 fn run_doctor(_: &[String]) -> Answered {
@@ -445,6 +446,13 @@ fn run_management(args: &[String], handler: fn(&[String], &std::path::Path) -> R
     match handler(args, &std::env::current_dir()?) {
         Ok(text) => { println!("{text}"); Ok(success(name)) }
         Err(error) => { eprintln!("zo {name}: {error}"); Ok(("management-refused", 1)) }
+    }
+}
+
+fn run_dream_lessons(args: &[String]) -> Answered {
+    match zo_ide::dream_lessons_cli::run(args) {
+        Ok(text) => { println!("{text}"); Ok(success("dream-lessons")) }
+        Err(error) => { eprintln!("zo dream-lessons: {error}"); Ok(("dream-lessons-refused", 1)) }
     }
 }
 
