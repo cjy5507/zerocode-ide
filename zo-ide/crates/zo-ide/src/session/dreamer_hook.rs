@@ -158,9 +158,13 @@ pub(crate) fn spawn_on_idle(
     let session_id = session.id.clone();
     let transcript = session.path.clone();
     let model = model.to_string();
+    // A person is at this session when its input is a terminal — the line the
+    // run loop draws for what only a person may answer. A run fed by a pipe
+    // (`-p`) is spoken to by a program, and is not asked what its words teach.
+    let attended = tools::stdin_is_terminal();
     let _ = thread::Builder::new().name("dreamer-idle".to_string()).spawn(move || {
         let reply = idle_pass(runtime::memory::auto_dream_program(), &cwd, &session_id, &model, || {
-            super::said_lessons_pass::ask_before_a_pass(&cwd, &session_id, &transcript, &model)
+            super::said_lessons_pass::ask_before_a_pass(&cwd, &session_id, &transcript, &model, attended)
         });
         settle(&attempt, &reply, crate::autonomy::scheduler::now_unix_ms());
         match reply {

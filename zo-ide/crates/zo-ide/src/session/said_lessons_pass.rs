@@ -13,8 +13,9 @@
 //! the request goes out on the login this session already holds, as the fold
 //! of an over-cap tool result does, and a slow provider costs the lessons and
 //! not the pass. Only the idle pass asks — a pass at a compaction or at the
-//! session's end has no time for it — and a pane the ledger summoned as a
-//! worker never does: what is said there is a briefing. It asks when a pass
+//! session's end has no time for it — and neither a pane the ledger summoned
+//! as a worker nor a run fed by a pipe (`-p`) ever does: what is said there
+//! is a briefing, or a program's lines, not a person's habits. It asks when a pass
 //! is due by the clock, whether or not the project has anything yet for a
 //! pass to read (`dreamer_hook::idle_pass`): a project's first lesson has to
 //! come from somewhere.
@@ -68,12 +69,20 @@ impl Asking {
 }
 
 /// Before an idle pass that is due: ask what this session's words teach,
-/// where the person turned that on. `transcript` is the session's own file,
-/// as the session that calls this holds it. Returns what became of it, and
-/// says it in the log by its counts — never by a lesson's words.
-pub(crate) fn ask_before_a_pass(cwd: &Path, session_id: &str, transcript: &Path, model: &str) -> Asking {
+/// where the person turned that on and is at this session (`attended`: its
+/// input is a terminal — a run fed by a pipe is spoken to by a program).
+/// `transcript` is the session's own file, as the session that calls this
+/// holds it. Returns what became of it, and says it in the log by its counts
+/// — never by a lesson's words.
+pub(crate) fn ask_before_a_pass(
+    cwd: &Path,
+    session_id: &str,
+    transcript: &Path,
+    model: &str,
+    attended: bool,
+) -> Asking {
     let now = now_secs();
-    let asking = if !turned_on(cwd) {
+    let asking = if !attended || !turned_on(cwd) {
         Asking::Off
     } else if asked_a_moment_ago(cwd, session_id, now) {
         // Known from the mark alone: the session's file is not read to learn
@@ -238,12 +247,13 @@ mod tests {
 
     /// With the setting absent, or set anywhere but the person's own file,
     /// nothing is looked at: no session is read, nothing is marked, and no
-    /// asker is reached. The same in a pane the ledger summoned.
+    /// asker is reached. The same in a pane the ledger summoned, and in a
+    /// run fed by a pipe.
     #[test]
     fn off_unless_the_person_turned_it_on_and_never_in_a_summoned_workers_pane() {
         in_a_home("off", None, |cwd| {
             assert!(!turned_on(cwd));
-            assert_eq!(ask_before_a_pass(cwd, "s-0", &cwd.join("no-such-session.jsonl"), "model-x"), Asking::Off);
+            assert_eq!(ask_before_a_pass(cwd, "s-0", &cwd.join("no-such-session.jsonl"), "model-x", true), Asking::Off);
             assert_eq!(Asking::Off.audit(), None);
             assert!(!patterns_file(cwd).parent().expect("folder").exists(), "nothing was written");
         });
@@ -257,14 +267,16 @@ mod tests {
             let a_persons_pane = turned_on(cwd);
             // Turned on, the session's file is read — and one that is not there is not asked about.
             let nowhere = cwd.join("no-such-session.jsonl");
-            let unread = ask_before_a_pass(cwd, "s-0", &nowhere, "model-x");
+            let unread = ask_before_a_pass(cwd, "s-0", &nowhere, "model-x", true);
+            // A run fed by a pipe is not asked, whatever the setting says.
+            let piped = ask_before_a_pass(cwd, "s-0", &nowhere, "model-x", false);
             // A session asked about a moment ago is not read at all.
             let just_asked = runtime::memory::SaidAsked { asked_at_secs: now_secs(), sent: Vec::new() };
             assert!(mark_said_asked(cwd, "s-9", &just_asked));
-            let too_soon = ask_before_a_pass(cwd, "s-9", &nowhere, "model-x");
+            let too_soon = ask_before_a_pass(cwd, "s-9", &nowhere, "model-x", true);
             std::env::set_var(pane, "%3");
             std::env::set_var(leader, "%1");
-            let a_workers_pane = (turned_on(cwd), ask_before_a_pass(cwd, "s-0", &nowhere, "model-x"));
+            let a_workers_pane = (turned_on(cwd), ask_before_a_pass(cwd, "s-0", &nowhere, "model-x", true));
             for (name, value) in before {
                 match value {
                     Some(value) => std::env::set_var(name, value),
@@ -273,6 +285,7 @@ mod tests {
             }
             assert!(a_persons_pane);
             assert_eq!(unread, Asking::Unread);
+            assert_eq!(piped, Asking::Off, "a program's lines are not a person's habits");
             assert_eq!(too_soon, Asking::NotWorthIt, "its mark says it is too soon, before its file is opened");
             assert_eq!(a_workers_pane, (false, Asking::Off), "a summoned worker's pane never asks");
         });
