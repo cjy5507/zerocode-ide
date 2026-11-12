@@ -8995,9 +8995,10 @@ fn the_terminal_wears_the_options_orca_ships() {
         "bold no longer follows Orca's floor, offset, and cap:\n{bold_weight}"
     );
 
-    // A block caret, one cell wide, blinking on a hard-edged second — and
-    // the width is written from the MEASURED cell, never guessed from the
-    // font size, which is wrong for every fallback face.
+    // A block caret, one cell wide (two over a double-width glyph), blinking
+    // on a hard-edged second — and the width is written from the MEASURED
+    // cell, never guessed from the font size, which is wrong for every
+    // fallback face.
     let caret = block_after(&styles, ".term-caret {");
     let caret_paint = block_after(&styles, ".term-caret::after {");
     assert!(
@@ -9008,7 +9009,7 @@ fn the_terminal_wears_the_options_orca_ships() {
         "the caret stopped being a blinking block:\n{caret}"
     );
     assert!(
-        window.contains("caret.style.width = `${cell.width}px`;"),
+        window.contains("caret.style.width = `${(cursorWide ? 2 : 1) * cell.width}px`;"),
         "the caret went back to a width nobody measured"
     );
     assert!(
