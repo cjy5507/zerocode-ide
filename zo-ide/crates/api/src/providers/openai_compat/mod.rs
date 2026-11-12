@@ -10,7 +10,7 @@ use crate::types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
     ImageSource, InputContentBlock, InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest,
     MessageResponse, MessageStartEvent, MessageStopEvent, OutputContentBlock, ReasoningRequest,
-    StreamEvent, ToolChoice, ToolDefinition, ToolLedgerView, Usage,
+    StreamEvent, ToolChoice, ToolDefinition, ToolLedgerView, ToolResultContentBlock, Usage,
 };
 
 use super::PromptCacheStrategy;
@@ -201,6 +201,13 @@ impl OpenAiCompatConfig {
             connection_stamp: None,
             supports_reasoning_effort: false,
         }
+    }
+
+    /// Whether this is an endpoint the person declared in settings
+    /// ([`Self::from_user`]) and not one of zo's own: only those have no
+    /// environment variable for their base URL.
+    pub(crate) const fn is_declared_by_the_person(&self) -> bool {
+        self.base_url_env.is_empty()
     }
 
     /// Build a process-lifetime config for a user-defined
@@ -1628,9 +1635,14 @@ fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatC
             }));
         }
     }
+    // A picture a tool returned cannot ride in its `tool` message (that is text
+    // only): it waits until the step's run of `tool` messages has ended and
+    // then goes out in a user message of its own — see `ToolPictures`.
+    let mut tool_pictures = ToolPictures::for_request(request, &config);
     for message in &request.messages {
-        messages.extend(translate_message(message, config.supports_vision));
+        translate_message(message, config.supports_vision, &mut tool_pictures, &mut messages);
     }
+    tool_pictures.show(&mut messages);
 
     let mut payload = json!({
         // The catalog decides the served id. It normally answers "the same id",
@@ -1732,7 +1744,94 @@ fn apply_prompt_cache_controls(
     }
 }
 
-fn translate_message(message: &InputMessage, supports_vision: bool) -> Vec<Value> {
+/// Label of the user message that carries the pictures tool results returned
+/// (see [`ToolPictures`]) — the same bracketed form as the other lines zo, not
+/// the person, writes into a turn.
+const TOOL_PICTURES_LABEL: &str = "[zo:tool-images]";
+
+/// The pictures the tool results of one step returned, on their way to a model
+/// that reads pictures.
+///
+/// A Chat `tool` message is text, so a picture in a tool result reached the
+/// model as the seventeen characters `[image image/png]` — on every endpoint,
+/// the ones that take `image_url` parts included. The tool had answered that
+/// the picture was staged, so the model waited for it, tried another tool, and
+/// went on to rebuild the picture from its bytes (a chess board read back with
+/// PIL: 30 requests where a harness that shows the picture needs 16).
+///
+/// The one place this wire takes a picture is a user message, and the `tool`
+/// messages answering one assistant message have to stand together right
+/// behind it. So the pictures wait until that run has ended — at the next
+/// message that is not a `tool` message, or at the end of the history — and go
+/// out as one user message: a line saying whose they are, then the pictures in
+/// the order of their results. The `tool` messages keep their text, the
+/// placeholder included, so the model can tell which result each came with.
+///
+/// Off — nothing collected, the request byte for byte what it was — for an
+/// endpoint that takes no `image_url`, for a model whose catalog row says it
+/// reads no pictures, and for zo's own endpoints (xAI, OpenAI, Google). There
+/// `supports_vision` is said of the endpoint, not of each model behind it — no
+/// catalog row describes an xAI model — and a picture a tool returns is nobody's
+/// choice the way a pasted one is: a model that reads none would refuse the
+/// request and end the turn. On an endpoint the person declared, the setting
+/// is their word for the models they put behind it.
+///
+/// How many pictures a request carries is decided before this, where the
+/// history is lowered (`runtime::picture_budget`): a picture that was left out
+/// there arrives here as text and is not collected.
+struct ToolPictures<'a> {
+    carried: bool,
+    waiting: Vec<&'a ImageSource>,
+}
+
+impl<'a> ToolPictures<'a> {
+    fn for_request(request: &MessageRequest, config: &OpenAiCompatConfig) -> Self {
+        Self {
+            carried: config.supports_vision
+                && config.is_declared_by_the_person()
+                && super::model_supports_vision(&request.model),
+            waiting: Vec::new(),
+        }
+    }
+
+    /// The pictures of one tool result, once its `tool` message is written.
+    fn collect(&mut self, content: &'a [ToolResultContentBlock]) {
+        if !self.carried {
+            return;
+        }
+        self.waiting.extend(content.iter().filter_map(|block| match block {
+            ToolResultContentBlock::Image { source } => Some(source),
+            ToolResultContentBlock::Text { .. } | ToolResultContentBlock::Json { .. } => None,
+        }));
+    }
+
+    /// Write the waiting pictures ahead of whatever follows the run of `tool`
+    /// messages. Nothing waiting, nothing written.
+    fn show(&mut self, messages: &mut Vec<Value>) {
+        let note = match self.waiting.len() {
+            0 => return,
+            1 => format!("{TOOL_PICTURES_LABEL} The image returned by the tool call above."),
+            count => format!(
+                "{TOOL_PICTURES_LABEL} The {count} images returned by the tool calls above, in the order of their results."
+            ),
+        };
+        let mut content = vec![json!({ "type": "text", "text": note })];
+        content.extend(self.waiting.drain(..).map(openai_image_content));
+        messages.push(json!({
+            "role": "user",
+            "content": content,
+        }));
+    }
+}
+
+/// Lower one message onto the end of `translated`. A message that is not a
+/// `tool` message first lets the pictures waiting in `tool_pictures` out.
+fn translate_message<'a>(
+    message: &'a InputMessage,
+    supports_vision: bool,
+    tool_pictures: &mut ToolPictures<'a>,
+    translated: &mut Vec<Value>,
+) {
     if message.role == "assistant" {
         let mut text = String::new();
         let mut tool_calls = Vec::new();
@@ -1765,9 +1864,9 @@ fn translate_message(message: &InputMessage, supports_vision: bool) -> Vec<Value
                 | InputContentBlock::RedactedThinking { .. } => {}
             }
         }
-        if text.is_empty() && tool_calls.is_empty() {
-            Vec::new()
-        } else {
+        // An assistant message that lowers to nothing is not on the wire, so it
+        // ends no run of `tool` messages either.
+        if !text.is_empty() || !tool_calls.is_empty() {
             let mut message = json!({
                 "role": "assistant",
                 "content": (!text.is_empty()).then_some(text),
@@ -1778,10 +1877,10 @@ fn translate_message(message: &InputMessage, supports_vision: bool) -> Vec<Value
             if !tool_calls.is_empty() {
                 message["tool_calls"] = Value::Array(tool_calls);
             }
-            vec![message]
+            tool_pictures.show(translated);
+            translated.push(message);
         }
     } else {
-        let mut translated = Vec::new();
         let mut pending_user_blocks = Vec::new();
         for block in &message.content {
             match block {
@@ -1797,12 +1896,13 @@ fn translate_message(message: &InputMessage, supports_vision: bool) -> Vec<Value
                     else {
                         unreachable!("tool result block must project to tool result ledger view");
                     };
-                    flush_openai_user_message(&mut translated, &mut pending_user_blocks, supports_vision);
+                    flush_openai_user_message(translated, &mut pending_user_blocks, supports_vision, tool_pictures);
                     translated.push(json!({
                         "role": "tool",
                         "tool_call_id": tool_use_id,
                         "content": super::flatten_tool_result_content(content),
                     }));
+                    tool_pictures.collect(content);
                 }
                 InputContentBlock::ToolUse { .. }
                 | InputContentBlock::Document { .. }
@@ -1810,8 +1910,7 @@ fn translate_message(message: &InputMessage, supports_vision: bool) -> Vec<Value
                 | InputContentBlock::RedactedThinking { .. } => {}
             }
         }
-        flush_openai_user_message(&mut translated, &mut pending_user_blocks, supports_vision);
-        translated
+        flush_openai_user_message(translated, &mut pending_user_blocks, supports_vision, tool_pictures);
     }
 }
 
@@ -1819,10 +1918,14 @@ fn flush_openai_user_message(
     messages: &mut Vec<Value>,
     blocks: &mut Vec<&InputContentBlock>,
     supports_vision: bool,
+    tool_pictures: &mut ToolPictures<'_>,
 ) {
     if blocks.is_empty() {
         return;
     }
+    // A user message is about to be written: the run of `tool` messages before
+    // it is over, and the pictures of that run go first.
+    tool_pictures.show(messages);
 
     let has_image = supports_vision
         && blocks

@@ -376,6 +376,298 @@ fn request_translation_splits_user_text_around_ordered_tool_results() {
     assert_eq!(messages[3], json!({"role": "user", "content": "after"}));
 }
 
+fn chat_request(model: &str, messages: Vec<InputMessage>) -> MessageRequest {
+    MessageRequest {
+        model: model.to_string(),
+        max_tokens: 64,
+        messages,
+        system: None,
+        tools: None,
+        tool_choice: None,
+        stream: false,
+        thinking: None,
+        output_config: None,
+        effort: None,
+        effort_band_ceiling: None,
+    }
+}
+
+fn png(data: &str) -> ToolResultContentBlock {
+    ToolResultContentBlock::Image {
+        source: ImageSource {
+            kind: "base64".to_string(),
+            media_type: "image/png".to_string(),
+            data: data.to_string(),
+        },
+    }
+}
+
+fn result_of(call: &str, content: Vec<ToolResultContentBlock>) -> InputContentBlock {
+    InputContentBlock::ToolResult {
+        tool_use_id: call.to_string(),
+        content,
+        is_error: false,
+        cache_control: None,
+    }
+}
+
+fn message_of(role: &str, content: Vec<InputContentBlock>) -> InputMessage {
+    InputMessage {
+        role: role.to_string(),
+        content,
+        thought_signature: None,
+        reasoning_replay: None,
+    }
+}
+
+/// An assistant message that calls `read_file` once per id in `calls`.
+fn step_calling(calls: &[&str]) -> InputMessage {
+    message_of(
+        "assistant",
+        calls
+            .iter()
+            .map(|call| InputContentBlock::ToolUse {
+                id: (*call).to_string(),
+                name: "read_file".to_string(),
+                input: json!({"path": "board.png"}),
+                cache_control: None,
+            })
+            .collect(),
+    )
+}
+
+/// A custom endpoint whose operator said it takes `image_url` parts.
+fn endpoint_that_reads_pictures() -> OpenAiCompatConfig {
+    let mut config = OpenAiCompatConfig::from_user("VLM", "https://vlm.example/v1", None, false);
+    config.supports_vision = true;
+    config
+}
+
+fn roles(payload: &serde_json::Value) -> Vec<&str> {
+    payload["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .map(|message| message["role"].as_str().expect("role"))
+        .collect()
+}
+
+/// The picture message of a step: the label line, then one `image_url` part per
+/// picture, in the order given.
+fn pictures_message(line: &str, data: &[&str]) -> serde_json::Value {
+    let mut content = vec![json!({"type": "text", "text": line})];
+    content.extend(data.iter().map(|data| {
+        json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{data}")}})
+    }));
+    json!({"role": "user", "content": content})
+}
+
+/// The step every test below lowers: two calls in one assistant message, the
+/// first answered with a picture, the second with text.
+fn a_step_whose_first_result_is_a_picture() -> Vec<InputMessage> {
+    vec![
+        InputMessage::user_text("what is on the board?"),
+        step_calling(&["call_a", "call_b"]),
+        message_of(
+            "user",
+            vec![
+                result_of(
+                    "call_a",
+                    vec![
+                        ToolResultContentBlock::Json { value: json!({"staged": true}) },
+                        png("AAAA"),
+                    ],
+                ),
+                result_of("call_b", vec![ToolResultContentBlock::Text { text: "ok".to_string() }]),
+            ],
+        ),
+    ]
+}
+
+#[test]
+fn a_tools_picture_follows_the_run_of_tool_messages_it_came_with() {
+    // The newest thing in the history is the step's results — the request the
+    // model reads the picture in. Both `tool` messages stand together behind
+    // the assistant message that called them; the picture comes after the run,
+    // and the result it came with keeps its text.
+    let payload = build_chat_completion_request(
+        &chat_request("vlm-1", a_step_whose_first_result_is_a_picture()),
+        endpoint_that_reads_pictures(),
+    );
+
+    assert_eq!(roles(&payload), ["user", "assistant", "tool", "tool", "user"]);
+    let messages = payload["messages"].as_array().expect("messages array");
+    assert_eq!(
+        messages[2],
+        json!({"role": "tool", "tool_call_id": "call_a", "content": "{\"staged\":true}\n[image image/png]"})
+    );
+    assert_eq!(messages[3], json!({"role": "tool", "tool_call_id": "call_b", "content": "ok"}));
+    assert_eq!(
+        messages[4],
+        pictures_message("[zo:tool-images] The image returned by the tool call above.", &["AAAA"])
+    );
+}
+
+#[test]
+fn pictures_of_results_lowered_as_separate_messages_wait_for_the_whole_run() {
+    // One step's results can arrive as one message or as one message each. A
+    // picture written after ITS result would split the run (`tool`, `user`,
+    // `tool`), which a Chat endpoint refuses: the assistant message's calls must
+    // be answered by `tool` messages standing together.
+    let payload = build_chat_completion_request(
+        &chat_request(
+            "vlm-1",
+            vec![
+                step_calling(&["call_a", "call_b"]),
+                message_of("user", vec![result_of("call_a", vec![png("AAAA")])]),
+                message_of("user", vec![result_of("call_b", vec![png("BBBB")])]),
+                message_of(
+                    "assistant",
+                    vec![InputContentBlock::Text { text: "Both read.".to_string(), cache_control: None }],
+                ),
+            ],
+        ),
+        endpoint_that_reads_pictures(),
+    );
+
+    assert_eq!(roles(&payload), ["assistant", "tool", "tool", "user", "assistant"]);
+    assert_eq!(
+        payload["messages"][3],
+        pictures_message(
+            "[zo:tool-images] The 2 images returned by the tool calls above, in the order of their results.",
+            &["AAAA", "BBBB"],
+        )
+    );
+}
+
+#[test]
+fn an_assistant_message_that_lowers_to_nothing_does_not_end_the_run() {
+    // Reasoning blocks never go to this wire, so an assistant message holding
+    // only those is not in the request — and must not let a picture out between
+    // two `tool` messages either.
+    let payload = build_chat_completion_request(
+        &chat_request(
+            "vlm-1",
+            vec![
+                step_calling(&["call_a", "call_b"]),
+                message_of("user", vec![result_of("call_a", vec![png("AAAA")])]),
+                message_of(
+                    "assistant",
+                    vec![InputContentBlock::Thinking {
+                        thinking: "…".to_string(),
+                        signature: "sig".to_string(),
+                    }],
+                ),
+                message_of(
+                    "user",
+                    vec![result_of("call_b", vec![ToolResultContentBlock::Text { text: "ok".to_string() }])],
+                ),
+            ],
+        ),
+        endpoint_that_reads_pictures(),
+    );
+
+    assert_eq!(roles(&payload), ["assistant", "tool", "tool", "user"]);
+    assert_eq!(
+        payload["messages"][3],
+        pictures_message("[zo:tool-images] The image returned by the tool call above.", &["AAAA"])
+    );
+}
+
+#[test]
+fn an_endpoint_that_takes_no_pictures_gets_the_request_it_always_got() {
+    // A custom endpoint reads no pictures until its operator says so, and one
+    // `image_url` part makes such a server refuse the whole request. Its request
+    // is what it was before tool pictures were carried: no part, no extra
+    // message, the placeholder in the result's text.
+    let config = OpenAiCompatConfig::from_user("DeepSeek", "https://api.deepseek.com/v1", None, false);
+    assert!(!config.supports_vision, "custom providers default vision off");
+
+    let payload = build_chat_completion_request(
+        &chat_request("deepseek-chat", a_step_whose_first_result_is_a_picture()),
+        config,
+    );
+
+    assert_eq!(roles(&payload), ["user", "assistant", "tool", "tool"]);
+    assert_eq!(
+        payload["messages"][2],
+        json!({"role": "tool", "tool_call_id": "call_a", "content": "{\"staged\":true}\n[image image/png]"})
+    );
+    let body = payload.to_string();
+    assert!(!body.contains("image_url"), "{body}");
+    assert!(!body.contains("[zo:tool-images]"), "{body}");
+}
+
+#[test]
+fn results_without_a_picture_lower_as_they_always_did_on_an_endpoint_that_reads_pictures() {
+    let payload = build_chat_completion_request(
+        &chat_request(
+            "vlm-1",
+            vec![
+                step_calling(&["call_a", "call_b"]),
+                message_of(
+                    "user",
+                    vec![
+                        result_of("call_a", vec![ToolResultContentBlock::Json { value: json!({"lines": 3}) }]),
+                        result_of("call_b", vec![ToolResultContentBlock::Text { text: "ok".to_string() }]),
+                        InputContentBlock::Text { text: "after".to_string(), cache_control: None },
+                    ],
+                ),
+            ],
+        ),
+        endpoint_that_reads_pictures(),
+    );
+
+    let messages = payload["messages"].as_array().expect("messages array");
+    assert_eq!(
+        messages[1..],
+        [
+            json!({"role": "tool", "tool_call_id": "call_a", "content": "{\"lines\":3}"}),
+            json!({"role": "tool", "tool_call_id": "call_b", "content": "ok"}),
+            json!({"role": "user", "content": "after"}),
+        ]
+    );
+}
+
+#[test]
+fn a_model_that_reads_no_pictures_is_not_sent_a_tools_picture() {
+    // The endpoint takes `image_url`, the model does not (its catalog row says
+    // `no_vision`): the picture stays the placeholder in the result's text.
+    assert!(!crate::providers::model_supports_vision("gpt-5.3-codex-spark"));
+    let payload = build_chat_completion_request(
+        &chat_request("gpt-5.3-codex-spark", a_step_whose_first_result_is_a_picture()),
+        endpoint_that_reads_pictures(),
+    );
+
+    assert_eq!(roles(&payload), ["user", "assistant", "tool", "tool"]);
+    assert!(!payload.to_string().contains("image_url"));
+}
+
+#[test]
+fn zos_own_endpoints_are_not_sent_a_tools_picture() {
+    // xAI, OpenAI and Google take `image_url`, but that is said of the endpoint
+    // and not of each model behind it (no catalog row describes an xAI model).
+    // A picture a tool returns is nobody's choice the way a pasted one is, so
+    // there it stays the placeholder it always was; only an endpoint the person
+    // declared as reading pictures is sent one.
+    for (config, model) in [
+        (OpenAiCompatConfig::xai(), "grok-3"),
+        (OpenAiCompatConfig::openai(), "gpt-5.5"),
+        (OpenAiCompatConfig::google(), "gemini-3.6-flash"),
+    ] {
+        assert!(config.supports_vision, "{model}: the endpoint itself takes pictures");
+        assert!(!config.is_declared_by_the_person(), "{model}");
+        let payload = build_chat_completion_request(
+            &chat_request(model, a_step_whose_first_result_is_a_picture()),
+            config,
+        );
+
+        assert_eq!(roles(&payload), ["user", "assistant", "tool", "tool"], "{model}");
+        assert!(!payload.to_string().contains("image_url"), "{model}");
+    }
+    assert!(endpoint_that_reads_pictures().is_declared_by_the_person());
+}
+
 #[test]
 fn request_translation_preserves_user_image_blocks() {
     let payload = build_chat_completion_request(
