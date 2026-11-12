@@ -5,8 +5,12 @@
 //! place `cargo-turn.sh` held; `add` puts it in and returns at once, and a
 //! waiter of its own runs it and tells the ledger how it ended. The rest look
 //! and act: `list`, `log`, `retry`, `withdraw`, `front`, `stop`, `pause`,
-//! `resume`, `forget` and `restore` — the board's buttons run these.
+//! `resume`, `forget` and `restore` — the board's buttons run these. Cargo
+//! builds in its slot's own folder, kept from job to job (`slot_target`).
 
+mod slot_target;
+
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
@@ -35,7 +39,11 @@ zo line forget <job> · zo line restore <job>
   ago goes first; --first jobs go before plain ones (two to one) and --last
   ones only fill a slot nothing else wants. --solo takes the first slot only
   (a whole suite), --quiet runs alone (a measurement). Nothing starts while
-  the line is paused or the disk is below its floor. `run` exits as its
+  the line is paused or the disk is below its floor; near it, the folders of
+  idle slots go first. Cargo builds in the slot's own folder (zo's home,
+  build-slots/targets/<slot>), the job's workspace crates removed from it
+  before and after, so only registry crates carry over; a job that names its
+  CARGO_TARGET_DIR builds there, untouched. `run` exits as its
   command did; `add` prints the job and its cap and returns, and the job's
   end is told to --notify through the ledger; `wait` waits for an added job's
   end and exits as its command did. A put whose command outran that cap last
@@ -201,7 +209,14 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
             .max(1),
     )
     .unwrap_or(1);
-    let machine = MachineRules { slots, at_once, floor_gib: line::DISK_FLOOR_DEFAULT_GIB, look_every: LOOK_EVERY };
+    let machine = MachineRules {
+        slots,
+        at_once,
+        floor_gib: line::DISK_FLOOR_DEFAULT_GIB,
+        look_every: LOOK_EVERY,
+        env: |name| std::env::var_os(name),
+        free: free_bytes,
+    };
     match verb {
         Verb::Run(put) => {
             let job = put_in(&line, &put, cwd)?;
@@ -427,6 +442,10 @@ struct MachineRules {
     at_once: u32,
     floor_gib: u64,
     look_every: Duration,
+    /// The environment a job runs in: this process's.
+    env: fn(&str) -> Option<OsString>,
+    /// The free bytes of the disk a folder is on.
+    free: fn(&Path) -> Option<u64>,
 }
 
 /// Waits for job `id`'s turn, runs it, and records how it ended — or, when
@@ -438,9 +457,13 @@ fn run_job(line: &Line, machine: &MachineRules, id: &str, foreground: bool) -> R
         match take_turn(line, machine, id)? {
             Turn::Mine(held) => break held,
             Turn::Ended(rc) => return Ok(rc),
-            Turn::Wait => std::thread::sleep(machine.look_every),
+            Turn::Wait => {
+                slot_target::sweep(&machine.slots);
+                std::thread::sleep(machine.look_every);
+            }
         }
     };
+    slot_target::sweep(&machine.slots);
     let job = line.job(id).map_err(|error| error.to_string())?;
     let rc = execute(line, machine, job, foreground);
     drop(held);
@@ -478,10 +501,16 @@ fn take_turn(line: &Line, machine: &MachineRules, id: &str) -> Result<Turn, Stri
     let pause = lift_ended_pause(line);
     let (free, taken) = slot_files(machine)?;
     let running_slots: Vec<u32> = jobs.iter().filter(|job| job.state == JobState::Running).filter_map(|job| job.slot).collect();
+    let disk_free = (machine.free)(line.root());
+    if slot_target::near_floor(disk_free, machine.floor_gib) {
+        // No job runs in a slot this process holds: its folder can go, and is removed outside the lock.
+        let idle: Vec<u32> = free.iter().map(|(slot, _)| *slot).collect();
+        slot_target::let_idle_go(&machine.slots, &idle, now_ms());
+    }
     let state = Machine {
         taken: taken.into_iter().filter(|slot| !running_slots.contains(slot)).collect(),
         slots: machine.at_once,
-        disk_low: disk_low(line.root(), machine.floor_gib),
+        disk_low: disk_low(disk_free, machine.floor_gib),
         paused: pause.is_some(),
     };
     let turn = line.turn();
@@ -607,9 +636,9 @@ fn alive(_pid: u32) -> bool {
     true
 }
 
-/// Free disk under `folder` below `floor_gib`.
-fn disk_low(folder: &Path, floor_gib: u64) -> bool {
-    free_bytes(folder).is_some_and(|free| free < floor_gib.saturating_mul(1 << 30))
+/// `free` bytes of disk below `floor_gib`.
+fn disk_low(free: Option<u64>, floor_gib: u64) -> bool {
+    free.is_some_and(|free| free < floor_gib.saturating_mul(1 << 30))
 }
 
 #[cfg(unix)]
@@ -635,6 +664,10 @@ fn execute(line: &Line, machine: &MachineRules, mut job: Job, foreground: bool) 
     let closing = log.try_clone().map_err(|error| error.to_string())?;
     let mut command = command_of(&job);
     command.current_dir(&job.checkout).stdin(Stdio::null());
+    let ready = job.slot.and_then(|slot| slot_target::ready(&machine.slots, slot, Path::new(&job.checkout), &machine.env, &log));
+    if let Some(ready) = &ready {
+        ready.apply(&mut command);
+    }
     let mut tees = Vec::new();
     let mut child = if foreground {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -695,6 +728,9 @@ fn execute(line: &Line, machine: &MachineRules, mut job: Job, foreground: bool) 
     line.prune();
     purge_trash(line, now_ms());
     notify(&job, started.elapsed());
+    if let Some(ready) = ready {
+        ready.done();
+    }
     Ok(receipt)
 }
 
@@ -945,7 +981,15 @@ mod tests {
 
     #[cfg(unix)]
     fn rules(slots: &Path) -> MachineRules {
-        MachineRules { slots: slots.to_path_buf(), at_once: 2, floor_gib: 0, look_every: Duration::from_millis(20) }
+        MachineRules {
+            slots: slots.to_path_buf(),
+            at_once: 2,
+            floor_gib: 0,
+            look_every: Duration::from_millis(20),
+            // The job names its own build folder unless a test says otherwise: these runs make none.
+            env: |name| (name == "CARGO_TARGET_DIR").then(|| OsString::from("own")),
+            free: |_| None,
+        }
     }
 
     #[cfg(unix)]
@@ -1177,5 +1221,97 @@ mod tests {
         assert!(line.job(&held.id).is_err());
         restore(&line, &held.id).expect("restored");
         assert!(line.job(&held.id).is_ok());
+    }
+
+    #[cfg(unix)]
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("folders");
+        std::fs::write(path, text).expect("written");
+    }
+
+    /// A checkout of one cargo workspace with one crate, `foo-bar`, in a repository of its own.
+    #[cfg(unix)]
+    fn workspace() -> tempfile::TempDir {
+        let checkout = tempfile::tempdir().expect("a checkout");
+        let root = checkout.path();
+        std::fs::create_dir_all(root.join(".git")).expect("a repository");
+        write(&root.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/foo-bar\"]\nresolver = \"2\"\n");
+        write(&root.join("crates/foo-bar/Cargo.toml"), "[package]\nname = \"foo-bar\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        write(&root.join("crates/foo-bar/src/lib.rs"), "pub fn one() {}\n");
+        checkout
+    }
+
+    /// A job put in from a cargo workspace builds in its slot's folder, without incremental state: the
+    /// workspace crates another checkout left there are gone before it starts, its own are gone after it,
+    /// and a registry crate's build stays for the next job. Its log says where it built.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_from_a_workspace_builds_in_its_slots_folder_its_workspace_crates_removed_before_and_after() {
+        let home = tempfile::tempdir().expect("a zo home");
+        let checkout = workspace();
+        let line = Line::at(home.path());
+        line.make().expect("folders");
+        let slots = home.path().join(SLOTS_FOLDER);
+        let machine = MachineRules { env: |_| None, ..rules(&slots) };
+        for slot in [0, 1] {
+            let folder = slot_target::folder(&slots, slot);
+            write(&folder.join("debug/.fingerprint/foo-bar-1111/lib-foo_bar"), "another checkout's");
+            write(&folder.join("debug/.fingerprint/serde-3333/lib-serde"), "a registry crate's");
+        }
+        let job = put(&line, checkout.path(), "w-1", &[
+            "echo \"dir=$CARGO_TARGET_DIR inc=$CARGO_INCREMENTAL\"; ls \"$CARGO_TARGET_DIR/debug/.fingerprint\"; \
+             mkdir -p \"$CARGO_TARGET_DIR/debug/.fingerprint/foo-bar-9999\"",
+        ]);
+        assert_eq!(run_job(&line, &machine, &job.id, false), Ok(0));
+        let slot = line.job(&job.id).expect("its record").slot.expect("its slot");
+        let folder = slot_target::folder(&slots, slot);
+        let log = std::fs::read_to_string(line.log_path(&job.id)).expect("its log");
+        let lines: Vec<&str> = log.lines().collect();
+        assert!(lines[0].starts_with(&format!("zo line: cargo builds in {} — ", folder.display())), "{log}");
+        assert_eq!(lines[1..], [format!("dir={} inc=0", folder.display()).as_str(), "serde-3333"], "{log}");
+        let records: Vec<String> = std::fs::read_dir(folder.join("debug/.fingerprint"))
+            .expect("the folder's records")
+            .map(|entry| entry.expect("a record").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(records, ["serde-3333"], "the job's own workspace crate is gone after it");
+    }
+
+    /// A job whose environment names its own `CARGO_TARGET_DIR` — the release lane's gates, lane-env —
+    /// builds there: the line sets nothing on it and makes no folder for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_job_that_names_its_own_build_folder_gets_nothing_from_the_line() {
+        let home = tempfile::tempdir().expect("a zo home");
+        let checkout = workspace();
+        let line = Line::at(home.path());
+        line.make().expect("folders");
+        let slots = home.path().join(SLOTS_FOLDER);
+        let machine = MachineRules { env: |name| (name == "CARGO_TARGET_DIR").then(|| OsString::from("/lane/target")), ..rules(&slots) };
+        let job = put(&line, checkout.path(), "w-1", &["echo \"dir=${CARGO_TARGET_DIR-unset} inc=${CARGO_INCREMENTAL-unset}\""]);
+        assert_eq!(run_job(&line, &machine, &job.id, false), Ok(0));
+        let own = |name: &str| std::env::var(name).unwrap_or_else(|_| "unset".to_owned());
+        let log = std::fs::read_to_string(line.log_path(&job.id)).expect("its log");
+        assert_eq!(log, format!("dir={} inc={}\n", own("CARGO_TARGET_DIR"), own("CARGO_INCREMENTAL")), "the runner's own, as it was");
+        assert!(!slots.join("targets").exists(), "no folder is made");
+    }
+
+    /// Near its disk floor the line lets the folders of idle slots go before a job starts — the job still
+    /// runs above the floor.
+    #[cfg(unix)]
+    #[test]
+    fn near_the_disk_floor_idle_slots_folders_go_before_a_job_starts() {
+        let home = tempfile::tempdir().expect("a zo home");
+        let cwd = tempfile::tempdir().expect("a folder");
+        let line = Line::at(home.path());
+        line.make().expect("folders");
+        let slots = home.path().join(SLOTS_FOLDER);
+        let machine = MachineRules { floor_gib: 16, free: |_| Some(17 << 30), ..rules(&slots) };
+        for slot in [0, 1] {
+            write(&slot_target::folder(&slots, slot).join("debug/deps/libserde-3333.rlib"), "");
+        }
+        let job = put(&line, cwd.path(), "w-1", &["echo ran"]);
+        assert_eq!(run_job(&line, &machine, &job.id, false), Ok(0));
+        let left: Vec<_> = std::fs::read_dir(slots.join("targets")).expect("the folders' folder").collect();
+        assert!(left.is_empty(), "both idle slots' folders went: {left:?}");
     }
 }

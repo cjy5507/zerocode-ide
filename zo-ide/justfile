@@ -54,7 +54,7 @@ test-twice:
 # 프로파일이다. 기계가 한가할 때 돌린다: 부하가 시간 칸을 흔든다.
 tui-bench *ARGS:
     cargo build --release -p zo-ide
-    python3 tools/tui-bench/tui_bench.py --zo target/release/zo {{ARGS}}
+    python3 tools/tui-bench/tui_bench.py --zo "${CARGO_TARGET_DIR:-target}/release/zo" {{ARGS}}
 
 # rustdoc 게이트 — 공개 문서가 비공개 항목을 [`이렇게`] 가리키면 링크가 풀리지
 # 않고 rustdoc 이 `private_intra_doc_links` 를 낸다. 루트 크레이트들은 그 자리를

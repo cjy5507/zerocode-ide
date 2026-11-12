@@ -2293,7 +2293,9 @@ def main() -> int:
     screens_parser.add_argument("--show", action="store_true", help="print each screen too")
     parser.add_argument("--clis", default="zo,claude,codex,gemini",
                         help="which CLIs, in order (zo,claude,codex,gemini)")
-    parser.add_argument("--zo", default="target/release/zo", help="the zo binary to measure")
+    # Where cargo built it: a build line job builds in its slot's folder (`zo line`), named in CARGO_TARGET_DIR.
+    built = os.path.join(os.environ.get("CARGO_TARGET_DIR") or "target", "release", "zo")
+    parser.add_argument("--zo", default=built, help="the zo binary to measure")
     parser.add_argument("--zo-label", default="zo", help="the column name of --zo")
     parser.add_argument("--zo-extra", action="append", default=[],
                         help="another zo build as BINARY:LABEL (a before/after pair)")
