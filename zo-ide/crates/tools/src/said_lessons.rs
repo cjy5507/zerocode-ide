@@ -59,12 +59,15 @@ pub struct Asked {
 
 /// Ask the fast model of `session_model`'s provider what `digest` teaches,
 /// beside the `pending` candidates earlier sessions left, and read the reply.
+/// Only a fast model is asked: where the provider has none, nothing is sent —
+/// the person agreed to their provider's fast model, not to the session's own.
 ///
 /// # Errors
-/// In words for a log: no client for the model, a request that failed or
-/// outlasted `within`, or a reply with no answer of the asked shape.
+/// In words for a log: a provider with no fast model, no client for the
+/// model, a request that failed or outlasted `within`, or a reply with no
+/// answer of the asked shape.
 pub fn ask(digest: &Digest, pending: &[Pending], session_model: &str, within: Duration) -> Result<Asked, String> {
-    let fast = FastModel::for_parent(Some(session_model))?;
+    let fast = FastModel::for_fast_tier(Some(session_model))?;
     let reply = fast.reply(
         &[said_lessons::INSTRUCTIONS.to_string()],
         &said_lessons::request(pending, digest),

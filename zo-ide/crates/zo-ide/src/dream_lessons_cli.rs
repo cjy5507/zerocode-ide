@@ -149,10 +149,13 @@ fn preview(
     dry_run: bool,
     ask: impl FnOnce(&Digest, &str) -> Result<(Vec<Offered>, usize), String>,
 ) -> Preview {
-    let asked_model = session_model.as_deref().map(|model| FastModel::named_for(Some(model)));
+    let asked_model = session_model.as_deref().and_then(|model| FastModel::fast_tier_named_for(Some(model)));
     let outcome = match session_model.as_deref() {
         _ if digest.len() < NEW_SAID_TO_ASK => Outcome::NotAsked(TOO_LITTLE_SAID),
         None => Outcome::NotAsked(NO_MODEL),
+        // Only a fast model is asked, as a pass asks: nothing goes to the
+        // session's own model where its provider has no fast one.
+        Some(_) if asked_model.is_none() => Outcome::NotAsked(tools::fast_model::NO_FAST_TIER),
         Some(_) if dry_run => Outcome::NotAsked(DRY_RUN),
         Some(model) => match ask(digest, model) {
             Ok((taken, dropped)) => Outcome::Asked { taken, dropped },
@@ -202,7 +205,8 @@ impl Preview {
         );
         let _ = match (&self.session_model, &self.asked_model) {
             (Some(ran_on), Some(asked)) => writeln!(text, "ran on {ran_on}; the fast model asked is {asked}"),
-            _ => writeln!(text, "no model answered in it"),
+            (Some(ran_on), None) => writeln!(text, "ran on {ran_on}; its provider has no fast model"),
+            (None, _) => writeln!(text, "no model answered in it"),
         };
         let _ = match &self.outcome {
             Outcome::NotAsked(why) => writeln!(text, "not asked: {why}"),
@@ -238,6 +242,10 @@ mod tests {
         Digest::of(&said, DigestLimits::default())
     }
 
+    /// A model the catalog knows by name, so its provider and that provider's
+    /// fast tier are the catalog's answer and not this machine's logins.
+    const A_CATALOG_MODEL: &str = "claude-sonnet-4-6";
+
     fn never_asked(_: &Digest, _: &str) -> Result<(Vec<Offered>, usize), String> {
         panic!("a request was made")
     }
@@ -247,26 +255,43 @@ mod tests {
     /// model and the size.
     #[test]
     fn a_preview_sends_nothing_where_a_pass_would_not_ask_or_on_a_dry_run() {
-        let short = preview(&digest(&["one", "two"]), Some("claude-opus-5-5".into()), false, never_asked);
+        let short = preview(&digest(&["one", "two"]), Some(A_CATALOG_MODEL.into()), false, never_asked);
         assert_eq!(short.outcome, Outcome::NotAsked(TOO_LITTLE_SAID));
         let three = digest(&["Answer in Korean", "Never push to main", "Run the gate first"]);
         let no_model = preview(&three, None, false, never_asked);
         assert_eq!(no_model.outcome, Outcome::NotAsked(NO_MODEL));
         assert_eq!(no_model.asked_model, None);
-        let dry = preview(&three, Some("claude-opus-5-5".into()), true, never_asked);
+        let dry = preview(&three, Some(A_CATALOG_MODEL.into()), true, never_asked);
         assert_eq!(dry.outcome, Outcome::NotAsked(DRY_RUN));
         assert_eq!(dry.shown, 3);
         assert_eq!(dry.chars, three.chars());
         let asked_model = dry.asked_model.clone().expect("the model that would be asked");
         assert_eq!(
             api::detect_provider_kind(&asked_model),
-            api::detect_provider_kind("claude-opus-5-5"),
+            api::detect_provider_kind(A_CATALOG_MODEL),
             "the same provider's: {asked_model}"
         );
         let json = dry.json("s-1");
         assert_eq!(json["asked"], false);
         assert_eq!(json["not_asked"], DRY_RUN);
         assert_eq!(json["written"], "nothing");
+    }
+
+    /// A session whose provider has no fast model is not asked: the question
+    /// goes to a fast model or nowhere.
+    #[test]
+    fn a_preview_sends_nothing_to_a_provider_with_no_fast_model() {
+        let three = digest(&["Answer in Korean", "Never push to main", "Run the gate first"]);
+        // The catalog's xAI row has no fast tier (`tools::fanout`'s own test).
+        let model = "grok-3";
+        if FastModel::fast_tier_named_for(Some(model)).is_some() {
+            // The model routes elsewhere on this machine: nothing to show here.
+            return;
+        }
+        let shown = preview(&three, Some(model.into()), false, never_asked);
+        assert_eq!(shown.outcome, Outcome::NotAsked(tools::fast_model::NO_FAST_TIER));
+        assert_eq!(shown.asked_model, None);
+        assert!(shown.text("s-1").contains("its provider has no fast model"), "{}", shown.text("s-1"));
     }
 
     /// A session a pass would ask about is asked once, on the session's own
@@ -281,11 +306,11 @@ mod tests {
             text: "Never push to main".to_string(),
             said: 2,
         }];
-        let shown = preview(&three, Some("model-x".into()), false, |digest, model| {
+        let shown = preview(&three, Some(A_CATALOG_MODEL.into()), false, |digest, model| {
             asked_with.push((digest.len(), model.to_string()));
             Ok((taken.clone(), 1))
         });
-        assert_eq!(asked_with, [(3, "model-x".to_string())]);
+        assert_eq!(asked_with, [(3, A_CATALOG_MODEL.to_string())]);
         assert_eq!(shown.outcome, Outcome::Asked { taken, dropped: 1 });
         let text = shown.text("s-1");
         assert!(text.contains("asked: 1 lesson(s) taken, 1 offered and not taken"), "{text}");
@@ -295,7 +320,7 @@ mod tests {
         assert_eq!(json["taken"][0]["kind"], "constraint");
         assert_eq!(json["dropped"], 1);
 
-        let failed = preview(&three, Some("model-x".into()), false, |_, _| Err("timed out after 45s".to_string()));
+        let failed = preview(&three, Some(A_CATALOG_MODEL.into()), false, |_, _| Err("timed out after 45s".to_string()));
         assert_eq!(failed.outcome, Outcome::Failed("timed out after 45s".to_string()));
         assert_eq!(failed.json("s-1")["error"], "timed out after 45s");
     }
@@ -328,7 +353,7 @@ mod tests {
             text: "Never push to main".to_string(),
             said: 2,
         }];
-        let shown = preview(&three, Some("model-x".into()), false, |_, _| Ok((again.clone(), 0)));
+        let shown = preview(&three, Some(A_CATALOG_MODEL.into()), false, |_, _| Ok((again.clone(), 0)));
         assert!(
             shown.text("s-2").contains("- [constraint] Never push to main (from [2], candidate c1 shown again)"),
             "{}",

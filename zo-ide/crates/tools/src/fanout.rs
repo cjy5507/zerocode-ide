@@ -414,6 +414,19 @@ pub(crate) fn decompose_model(parent_model: Option<&str>) -> String {
     decompose_model_on(parent, api::detect_provider_kind(parent))
 }
 
+/// The Fast-tier model of the provider `parent_model` runs on — the pick
+/// [`decompose_model`] makes — or `None` where that provider's catalog has no
+/// Fast tier. [`decompose_model`] answers with the parent itself there; a
+/// caller that was promised a fast model, and not the session's own, asks
+/// this.
+pub(crate) fn fast_tier_model(parent_model: Option<&str>) -> Option<String> {
+    let parent = parent_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(api::ANTHROPIC_LATEST_MODEL_ALIAS);
+    fast_tier_triage_model(parent, api::detect_provider_kind(parent))
+}
+
 /// [`decompose_model`] once the parent's provider is known: the catalog's pick
 /// for that provider, else the parent itself.
 fn decompose_model_on(parent: &str, provider: api::ProviderKind) -> String {
@@ -1321,6 +1334,21 @@ mod tests {
         // No active model (non-live harness) → the Anthropic head's fast tier.
         assert_eq!(decompose_model(None), anthropic_fast);
         assert_eq!(decompose_model(Some("  ")), anthropic_fast);
+    }
+
+    /// Where a provider has a Fast tier, [`fast_tier_model`] names the model
+    /// [`decompose_model`] would dial; it is how a caller learns that the
+    /// model named is a fast one and not the session's own.
+    #[test]
+    fn fast_tier_model_is_the_decomposition_pick_where_the_provider_has_one() {
+        for parent in ["opus", "claude-sonnet-4-6", "haiku", "gpt-5.5", "gpt-5.6-luna"] {
+            assert_eq!(
+                super::fast_tier_model(Some(parent)).as_deref(),
+                Some(decompose_model(Some(parent)).as_str()),
+                "{parent}"
+            );
+        }
+        assert_eq!(super::fast_tier_model(None), Some(decompose_model(None)));
     }
 
     #[test]

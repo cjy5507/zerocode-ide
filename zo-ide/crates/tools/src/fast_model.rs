@@ -9,6 +9,9 @@
 
 use std::time::Duration;
 
+/// Why [`FastModel::for_fast_tier`] dialled nothing.
+pub const NO_FAST_TIER: &str = "the session's provider has no fast model";
+
 /// The fast-tier model of the provider a session runs on.
 pub struct FastModel {
     model: String,
@@ -35,6 +38,26 @@ impl FastModel {
         // The cheap-model choice is a family alias (`haiku`); the wire wants
         // the release id, the same way the sub-agent client resolves it.
         api::resolve_model_alias(&crate::fanout::decompose_model(parent_model))
+    }
+
+    /// The fast-tier model of `parent_model`'s provider, by name alone, or
+    /// `None` where that provider has no fast tier — where
+    /// [`Self::named_for`] names the parent's own model.
+    #[must_use]
+    pub fn fast_tier_named_for(parent_model: Option<&str>) -> Option<String> {
+        crate::fanout::fast_tier_model(parent_model).map(|model| api::resolve_model_alias(&model))
+    }
+
+    /// [`Self::for_parent`] for a caller that may only ask a fast model: a
+    /// question the person agreed to send to their provider's fast model is
+    /// not sent to the session's own where the provider has none.
+    ///
+    /// # Errors
+    /// When the provider has no fast tier, or no client can be built for it.
+    pub fn for_fast_tier(parent_model: Option<&str>) -> Result<Self, String> {
+        let model = Self::fast_tier_named_for(parent_model).ok_or(NO_FAST_TIER)?;
+        let client = crate::misc_tools::build_provider_client_for_agent(&model)?;
+        Ok(Self { model, client })
     }
 
     /// The model a reply is attributed to.
