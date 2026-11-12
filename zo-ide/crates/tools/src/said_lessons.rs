@@ -18,10 +18,14 @@ use runtime::ConversationMessage;
 
 use crate::fast_model::FastModel;
 
-/// The longest one question may take on the wall clock. It is asked while
-/// nobody waits on it, and a model that is not answering by now is not
-/// worth a pass's time.
+/// The longest a question a person asked for may take on the wall clock
+/// (`zo dream-lessons preview`): they are waiting on it, and a model that is
+/// not answering by now will not.
 pub const ASK_WITHIN: Duration = Duration::from_secs(45);
+
+/// The longest a question an idle pass asks may take. Nobody waits on it and
+/// the pass comes after it: a slow provider costs the lessons, not the pass.
+pub const PASS_ASK_WITHIN: Duration = Duration::from_secs(20);
 
 /// Room for the answer: three lessons of one line each, their quotes, and the
 /// JSON around them.
@@ -58,14 +62,14 @@ pub struct Asked {
 ///
 /// # Errors
 /// In words for a log: no client for the model, a request that failed or
-/// outlasted [`ASK_WITHIN`], or a reply with no answer of the asked shape.
-pub fn ask(digest: &Digest, pending: &[Pending], session_model: &str) -> Result<Asked, String> {
+/// outlasted `within`, or a reply with no answer of the asked shape.
+pub fn ask(digest: &Digest, pending: &[Pending], session_model: &str, within: Duration) -> Result<Asked, String> {
     let fast = FastModel::for_parent(Some(session_model))?;
     let reply = fast.reply(
         &[said_lessons::INSTRUCTIONS.to_string()],
         &said_lessons::request(pending, digest),
         ANSWER_MAX_TOKENS,
-        ASK_WITHIN,
+        within,
     )?;
     let read = said_lessons::read_reply(&reply, digest, pending)
         .map_err(|_| "the reply held no answer of the asked shape".to_string())?;

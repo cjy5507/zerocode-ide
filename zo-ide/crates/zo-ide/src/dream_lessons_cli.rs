@@ -11,18 +11,26 @@
 //! `--dry-run` sends nothing either: it says which model would be asked and
 //! how much it would be shown.
 //!
+//! A lesson is kept only when a second session shows a candidate an earlier
+//! one left, which a model says by answering with the candidate's id. So a
+//! preview can be handed candidates (`--candidates <file>`, read and never
+//! written): the lessons earlier previews took, as a runner carries them
+//! from one session of a project to the next. Its output says which of them
+//! this session showed again.
+//!
 //! ```text
-//! zo dream-lessons preview <session id|name|path> [--dry-run] [--json]
+//! zo dream-lessons preview <session id|name|path> [--candidates <file>] [--dry-run] [--json]
 //! ```
 
 use core_types::Session;
-use decision_core::said_lessons::{Digest, Offered, NEW_SAID_TO_ASK};
+use decision_core::dreamer::LessonKind;
+use decision_core::said_lessons::{line_allowed, Digest, Offered, Pending, NEW_SAID_TO_ASK};
 use serde_json::{json, Value};
 use tools::fast_model::FastModel;
-use tools::said_lessons::{ask, digest_of, model_of};
+use tools::said_lessons::{ask, digest_of, model_of, ASK_WITHIN};
 
 pub const USAGE: &str = "\
-zo dream-lessons preview <session id|name|path> [--dry-run] [--json]
+zo dream-lessons preview <session id|name|path> [--candidates <file>] [--dry-run] [--json]
 
   What the dreamer would ask about one session and take from the answer,
   shown and not kept: nothing is written to memory, the vault or the
@@ -30,6 +38,8 @@ zo dream-lessons preview <session id|name|path> [--dry-run] [--json]
   each message, and the end of what the assistant had said before it) to the
   fast model of the provider the session ran on — one request. --dry-run
   sends nothing: it names the model and the size of what would be shown.
+  --candidates is a JSON list of {\"id\", \"kind\", \"text\"} — lessons earlier
+  sessions left — shown beside the session; the file is read, never written.
 ";
 
 /// What became of one preview.
@@ -66,12 +76,14 @@ const DRY_RUN: &str = "a dry run sends nothing";
 /// # Errors
 /// The usage for words it does not know, or why the session could not be read.
 pub fn run(args: &[String]) -> Result<String, String> {
-    let (mut dry_run, mut as_json, mut words) = (false, false, Vec::new());
-    for arg in args {
+    let (mut dry_run, mut as_json, mut candidates, mut words) = (false, false, None, Vec::new());
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => return Ok(USAGE.to_string()),
             "--dry-run" => dry_run = true,
             "--json" => as_json = true,
+            "--candidates" => candidates = Some(args.next().ok_or("--candidates needs a file")?),
             flag if flag.starts_with("--") => return Err(format!("unknown word {flag:?}\n{USAGE}")),
             word => words.push(word),
         }
@@ -79,18 +91,51 @@ pub fn run(args: &[String]) -> Result<String, String> {
     let ["preview", reference] = words.as_slice() else {
         return Err(USAGE.to_string());
     };
+    let pending = match candidates {
+        Some(file) => candidates_in(&std::fs::read_to_string(file).map_err(|error| format!("{file}: {error}"))?)?,
+        None => Vec::new(),
+    };
     let handle = crate::session_registry::resolve_session_reference(reference).map_err(|error| error.to_string())?;
     let session = Session::load_from_path(&handle.path).map_err(|error| error.to_string())?;
     let digest = digest_of(&session.messages);
     let session_model = model_of(&session.messages).map(str::to_string);
     let preview = preview(&digest, session_model, dry_run, |digest, model| {
-        ask(digest, &[], model).map(|asked| (asked.read.taken, asked.read.dropped))
+        ask(digest, &pending, model, ASK_WITHIN).map(|asked| (asked.read.taken, asked.read.dropped))
     });
     Ok(if as_json {
         preview.json(&session.session_id).to_string()
     } else {
         preview.text(&session.session_id)
     })
+}
+
+/// The candidates a `--candidates` file holds: a JSON list of
+/// `{"id", "kind", "text"}`, each of a kind a reply may offer and a line the
+/// store would take.
+///
+/// # Errors
+/// Which entry does not read, and why.
+fn candidates_in(file: &str) -> Result<Vec<Pending>, String> {
+    let list: Vec<Value> = serde_json::from_str(file).map_err(|error| format!("the candidates do not read: {error}"))?;
+    list.iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let word = |key: &str| entry.get(key).and_then(Value::as_str).map(str::trim).filter(|word| !word.is_empty());
+            let kind = word("kind").and_then(|name| {
+                [LessonKind::Preference, LessonKind::Constraint, LessonKind::Workflow]
+                    .into_iter()
+                    .find(|kind| kind.as_str() == name)
+            });
+            match (word("id"), kind, word("text").filter(|text| line_allowed(text))) {
+                (Some(id), Some(kind), Some(text)) => Ok(Pending {
+                    id: id.to_string(),
+                    kind,
+                    text: text.to_string(),
+                }),
+                _ => Err(format!("candidate {} needs an id, a kind (preference, constraint or workflow) and one line of text", index + 1)),
+            }
+        })
+        .collect()
 }
 
 /// The preview of a session whose digest is `digest`: asked through `ask`
@@ -142,6 +187,7 @@ impl Preview {
                 "kind": lesson.kind.as_str(),
                 "text": lesson.text,
                 "said": lesson.said,
+                "same_as": lesson.same_as,
             })).collect::<Vec<_>>(),
             "written": "nothing",
         })
@@ -162,7 +208,8 @@ impl Preview {
             Outcome::Asked { taken, dropped } => {
                 text.push_str(&format!("asked: {} lesson(s) taken, {dropped} offered and not taken\n", taken.len()));
                 for lesson in taken {
-                    text.push_str(&format!("- [{}] {} (from [{}])\n", lesson.kind.as_str(), lesson.text, lesson.said));
+                    let again = lesson.same_as.as_deref().map_or(String::new(), |id| format!(", candidate {id} shown again"));
+                    text.push_str(&format!("- [{}] {} (from [{}]{again})\n", lesson.kind.as_str(), lesson.text, lesson.said));
                 }
             }
         }
@@ -174,7 +221,6 @@ impl Preview {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use decision_core::dreamer::LessonKind;
     use decision_core::said_lessons::{DigestLimits, Said};
 
     fn digest(said: &[&str]) -> Digest {
@@ -250,12 +296,50 @@ mod tests {
         assert_eq!(failed.json("s-1")["error"], "timed out after 45s");
     }
 
+    /// Candidates are read from a file's JSON, each of a kind a reply may
+    /// offer; a lesson that names one says so in what is printed.
+    #[test]
+    fn candidates_read_from_json_and_a_candidate_shown_again_is_said() {
+        let read = candidates_in(
+            r#"[{"id":"c1","kind":"constraint","text":"Never push to main"},
+                {"id":"c2","kind":"preference","text":" Answer in Korean "}]"#,
+        )
+        .expect("two candidates");
+        assert_eq!(read.len(), 2);
+        assert_eq!((read[1].id.as_str(), read[1].kind, read[1].text.as_str()), ("c2", LessonKind::Preference, "Answer in Korean"));
+        for bad in [
+            r#"[{"id":"c1","kind":"gotcha","text":"bash is error-prone"}]"#,
+            r#"[{"id":"c1","kind":"preference"}]"#,
+            r#"[{"kind":"preference","text":"x"}]"#,
+            r#"{"id":"c1"}"#,
+        ] {
+            assert!(candidates_in(bad).is_err(), "{bad}");
+        }
+        assert_eq!(candidates_in("[]"), Ok(Vec::new()));
+
+        let three = digest(&["Work on a branch", "main is protected here", "Open a hand-in"]);
+        let again = vec![Offered {
+            same_as: Some("c1".to_string()),
+            kind: LessonKind::Constraint,
+            text: "Never push to main".to_string(),
+            said: 2,
+        }];
+        let shown = preview(&three, Some("model-x".into()), false, |_, _| Ok((again.clone(), 0)));
+        assert!(
+            shown.text("s-2").contains("- [constraint] Never push to main (from [2], candidate c1 shown again)"),
+            "{}",
+            shown.text("s-2")
+        );
+        assert_eq!(shown.json("s-2")["taken"][0]["same_as"], "c1");
+    }
+
     #[test]
     fn the_words_it_does_not_know_get_the_usage() {
         let args = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert!(run(&args(&[])).unwrap_err().contains("zo dream-lessons preview"));
         assert!(run(&args(&["preview"])).unwrap_err().contains("zo dream-lessons preview"));
         assert!(run(&args(&["preview", "x", "--keep"])).unwrap_err().contains("unknown word"));
+        assert!(run(&args(&["preview", "x", "--candidates"])).unwrap_err().contains("needs a file"));
         assert_eq!(run(&args(&["--help"])).as_deref(), Ok(USAGE));
     }
 }
