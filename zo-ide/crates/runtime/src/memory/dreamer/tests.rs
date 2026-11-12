@@ -2339,9 +2339,9 @@ raw-extra",
     });
 }
 
-/// A lesson the person's own words taught is one line of three kinds; it
-/// waits while one session alone has shown it, and what a session was asked
-/// about is kept by its marks, the newest ones.
+/// A lesson the person's own words taught is one line of three kinds; the
+/// patterns say how many sessions have shown each, and what a session was
+/// asked about is kept by its marks, the newest ones.
 #[test]
 fn said_lessons_wait_for_a_second_session_and_what_was_asked_about_is_kept() {
     let env_lock = crate::test_env_lock();
@@ -2351,7 +2351,7 @@ fn said_lessons_wait_for_a_second_session_and_what_was_asked_about_is_kept() {
     fs::create_dir_all(&cwd).unwrap();
 
     with_config_home(&env_lock, &config_home, || {
-        assert!(super::said_lessons_waiting(&cwd, 10).is_empty(), "no store yet");
+        assert!(super::said_lessons_known(&cwd, 10).is_empty(), "no store yet");
         assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Preference, "Answer in Korean"));
         assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Constraint, " Never push to main "));
         assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Workflow, "Run the gate before a hand-in"));
@@ -2364,13 +2364,17 @@ fn said_lessons_wait_for_a_second_session_and_what_was_asked_about_is_kept() {
         assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Preference, "Answer in Korean"));
         assert!(super::record_said_lesson(&cwd, "s2", LessonKind::Workflow, "Run the gate before a hand-in"));
 
-        let waiting = super::said_lessons_waiting(&cwd, 10);
+        let known = super::said_lessons_known(&cwd, 10);
         assert_eq!(
-            waiting.iter().map(|lesson| (lesson.kind, lesson.text.as_str())).collect::<Vec<_>>(),
-            [(LessonKind::Constraint, "Never push to main"), (LessonKind::Preference, "Answer in Korean")],
-            "one session alone has shown these two, newest first; the third has two sessions"
+            known.iter().map(|lesson| (lesson.kind, lesson.text.as_str(), lesson.sessions)).collect::<Vec<_>>(),
+            [
+                (LessonKind::Workflow, "Run the gate before a hand-in", 2),
+                (LessonKind::Constraint, "Never push to main", 1),
+                (LessonKind::Preference, "Answer in Korean", 1),
+            ],
+            "newest first; one session showing a line twice is one session"
         );
-        assert_eq!(super::said_lessons_waiting(&cwd, 1).len(), 1, "at most the limit");
+        assert_eq!(super::said_lessons_known(&cwd, 1).len(), 1, "at most the limit");
 
         let report = dream_at_cwd(&cwd, None).unwrap();
         assert_eq!(report.applied.len(), 1, "{:?}", report.applied);

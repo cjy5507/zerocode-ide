@@ -6,6 +6,8 @@
 //! reading takes is recorded in the person's patterns as a candidate
 //! (`runtime::memory::record_said_lesson`). The pass that follows reads those
 //! patterns as it always did, and keeps a lesson a second session has shown.
+//! The lessons the patterns already hold ride along with the question, kept
+//! ones too, so a session that shows one again names it.
 //!
 //! It is asked here, in the session's own process, and not in the pass's:
 //! the request goes out on the login this session already holds, as the fold
@@ -22,11 +24,12 @@ use std::path::Path;
 
 use decision_core::said_lessons::{worth_asking, Digest, DigestLimits, Offered, Pending};
 use runtime::memory::{
-    mark_said_asked, record_said_lesson, said_asked, said_lessons_waiting, said_words_mark,
+    mark_said_asked, record_said_lesson, said_asked, said_lessons_known, said_words_mark,
 };
 use runtime::ConversationMessage;
 
-/// The most candidates earlier sessions left that one question shows.
+/// The most lessons earlier sessions left that one question shows, the
+/// newest: those that wait for a second session, and those already kept.
 const PENDING_SHOWN: usize = 24;
 
 /// What became of the question before one idle pass.
@@ -133,13 +136,13 @@ pub(crate) fn ask_about(
     if !mark_said_asked(cwd, session_id, &asked) {
         return Asking::Unmarked;
     }
-    let pending: Vec<Pending> = said_lessons_waiting(cwd, PENDING_SHOWN)
+    let pending: Vec<Pending> = said_lessons_known(cwd, PENDING_SHOWN)
         .into_iter()
         .enumerate()
-        .map(|(index, waiting)| Pending {
+        .map(|(index, known)| Pending {
             id: format!("c{}", index + 1),
-            kind: waiting.kind,
-            text: waiting.text,
+            kind: known.kind,
+            text: known.text,
         })
         .collect();
     match ask(&Digest::of(&new, DigestLimits::default()), &pending) {
@@ -282,10 +285,10 @@ mod tests {
             let text = &shown.borrow()[0];
             assert!(text.starts_with("[1] the person: Answer in Korean from now on\n"), "{text}");
             assert!(text.contains("[3] the assistant had said: done: Never push to main here\n"), "{text}");
-            let waiting = said_lessons_waiting(cwd, 10);
+            let known = said_lessons_known(cwd, 10);
             assert_eq!(
-                waiting.iter().map(|lesson| (lesson.kind, lesson.text.as_str())).collect::<Vec<_>>(),
-                [(LessonKind::Constraint, "Never push to main"), (LessonKind::Preference, "Answer in Korean")],
+                known.iter().map(|lesson| (lesson.kind, lesson.text.as_str(), lesson.sessions)).collect::<Vec<_>>(),
+                [(LessonKind::Constraint, "Never push to main", 1), (LessonKind::Preference, "Answer in Korean", 1)],
                 "both wait for a second session, newest first"
             );
 
@@ -331,7 +334,7 @@ mod tests {
             assert_eq!(same_session, Asking::Asked { taken: 1, recorded: 1 });
             let report = runtime::memory::dream_at_cwd(cwd, None).expect("a pass");
             assert!(report.applied.is_empty(), "one session alone keeps nothing: {:?}", report.applied);
-            assert_eq!(said_lessons_waiting(cwd, 10).len(), 1, "it still waits");
+            assert_eq!(said_lessons_known(cwd, 10)[0].sessions, 1, "it still waits");
 
             // Another session shows it: the pass keeps it.
             let second = ask_about(cwd, "s-2", &session(&["Work on a branch", "main is protected here", "Open a hand-in"]), now + 7_200, |_, pending| {
@@ -340,7 +343,7 @@ mod tests {
                 Ok(vec![Offered { same_as: Some("c1".to_string()), kind: pending[0].kind, text: pending[0].text.clone(), said: 2 }])
             });
             assert_eq!(second, Asking::Asked { taken: 1, recorded: 1 });
-            assert!(said_lessons_waiting(cwd, 10).is_empty(), "two sessions have shown it");
+            assert_eq!(said_lessons_known(cwd, 10)[0].sessions, 2, "two sessions have shown it");
             let report = runtime::memory::dream_at_cwd(cwd, None).expect("a pass");
             let [kept] = report.applied.as_slice() else {
                 panic!("kept {:?}", report.applied);
@@ -349,6 +352,18 @@ mod tests {
             let body = std::fs::read_to_string(runtime::memory::paths::memory_write_dir(cwd, true).join(format!("{}.md", kept.slug)))
                 .expect("the entry the pass wrote");
             assert!(body.contains("Never push to main"), "{body}");
+
+            // Kept, it still rides along: a third session that shows it names
+            // it, and is not left to say it in new words the gate would keep
+            // as a second lesson.
+            let third = ask_about(cwd, "s-3", &session(&["No direct pushes", "Use a branch", "Then a hand-in"]), now + 10_800, |_, pending| {
+                assert_eq!(pending.len(), 1, "the kept lesson is shown beside the session");
+                Ok(vec![Offered { same_as: Some("c1".to_string()), kind: pending[0].kind, text: pending[0].text.clone(), said: 1 }])
+            });
+            assert_eq!(third, Asking::Asked { taken: 1, recorded: 1 });
+            assert_eq!(said_lessons_known(cwd, 10).len(), 1, "one lesson, shown by three sessions");
+            let report = runtime::memory::dream_at_cwd(cwd, None).expect("a pass");
+            assert!(report.applied.is_empty(), "nothing is kept twice: {:?}", report.applied);
         });
     }
 }

@@ -2300,26 +2300,30 @@ pub fn record_said_lesson(cwd: &Path, session_id: &str, kind: LessonKind, lesson
     user_pattern_kind_allowed(kind) && record_user_pattern(cwd, session_id, kind, lesson)
 }
 
-/// A lesson in the person's patterns that one session alone has shown: the
-/// gate has not kept it, and a second session that shows it would.
+/// A lesson in the person's patterns, and how many sessions have shown it:
+/// one a single session has shown waits, and the gate keeps it once a second
+/// does ([`dream_at_cwd`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaitingLesson {
+pub struct KnownLesson {
     pub kind: LessonKind,
     /// Its one line, by which the store knows it.
     pub text: String,
+    /// The distinct sessions that have shown it.
+    pub sessions: usize,
 }
 
-/// The lessons in `cwd`'s patterns that one session alone has shown, newest
-/// first, at most `limit`: what a session is asked beside, so that showing
-/// one again is said by naming it and not in new words the store would take
-/// for another lesson.
+/// The lessons `cwd`'s patterns hold, newest first, at most `limit`: what a
+/// session is asked beside. Showing one again is then said by naming it and
+/// not in new words the store would take for another lesson — which holds
+/// for a lesson the gate has kept as much as for one that waits, or the same
+/// lesson would be kept twice in two wordings.
 #[must_use]
-pub fn said_lessons_waiting(cwd: &Path, limit: usize) -> Vec<WaitingLesson> {
+pub fn said_lessons_known(cwd: &Path, limit: usize) -> Vec<KnownLesson> {
     let Ok(lines) = fs::read_to_string(user_pattern_dir(cwd).join(USER_PATTERN_FILE)) else {
         return Vec::new();
     };
     // In the order first recorded: a signature, its lesson, the sessions that showed it.
-    let mut shown: Vec<(String, WaitingLesson, std::collections::BTreeSet<String>)> = Vec::new();
+    let mut shown: Vec<(String, KnownLesson, std::collections::BTreeSet<String>)> = Vec::new();
     for record in lines
         .lines()
         .filter_map(|line| serde_json::from_str::<UserPatternRecord>(line).ok())
@@ -2332,9 +2336,10 @@ pub fn said_lessons_waiting(cwd: &Path, limit: usize) -> Vec<WaitingLesson> {
             }
             None => shown.push((
                 obs.signature,
-                WaitingLesson {
+                KnownLesson {
                     kind: obs.kind,
                     text: obs.summary,
+                    sessions: 0,
                 },
                 std::collections::BTreeSet::from([obs.session_id]),
             )),
@@ -2343,9 +2348,11 @@ pub fn said_lessons_waiting(cwd: &Path, limit: usize) -> Vec<WaitingLesson> {
     shown
         .into_iter()
         .rev()
-        .filter(|(_, _, sessions)| sessions.len() == 1)
         .take(limit)
-        .map(|(_, lesson, _)| lesson)
+        .map(|(_, lesson, sessions)| KnownLesson {
+            sessions: sessions.len(),
+            ..lesson
+        })
         .collect()
 }
 
