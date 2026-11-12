@@ -881,6 +881,18 @@ function noteTyped() {
   typedSerial += 1;
 }
 
+/* The hand of the key the current run of typing came from (review
+ * t-105587). The input method commits its text, and the window's own Hangul
+ * settle flushes its word, after that key's event is over — on a composition
+ * event or a timer, where `handNow()` says `none`. The person's Korean is
+ * the person's all the same: the terminal's text and keys carry the hand of
+ * the keydown that began them, read first, before any handler. */
+let typingHand = "none";
+
+document.addEventListener("keydown", () => {
+  typingHand = handNow();
+}, true);
+
 function routeText(text) {
   const emulator = emulatorKeyboardTarget();
   if (emulator) {
@@ -907,7 +919,7 @@ function routeText(text) {
   if (target.kind === "term") {
     noteTyped();
     noteTypedInto(target.term);
-    invoke("term_text", { term: target.term, text, human: true }).catch(() => {});
+    invoke("term_text", { term: target.term, text, human: true }, { hand: typingHand }).catch(() => {});
   } else {
     invoke("text_input", { id: target.id, text }).catch(() => {});
   }
@@ -943,7 +955,7 @@ function routeKeyPress(target, press) {
   if (target.kind === "term") {
     noteTyped();
     noteTypedInto(target.term);
-    invoke("term_key", { term: target.term, press }).catch(() => {});
+    invoke("term_key", { term: target.term, press }, { hand: typingHand }).catch(() => {});
   } else {
     invoke("key_input", { id: target.id, press }).catch(() => {});
   }

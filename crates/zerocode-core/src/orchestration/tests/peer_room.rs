@@ -942,3 +942,62 @@ fn a_room_reply_is_refused_while_the_switch_is_off() {
     ));
     assert!(why.contains(MAIL_OFF), "{why}");
 }
+
+/// A reply in the room to a letter a live coordinator wrote there leaves a
+/// copy in the coordinator's run — and the copy carries the room too
+/// (review t-105587).
+#[test]
+fn a_room_replys_copy_in_the_writers_run_carries_the_room() {
+    let mut bench = Bench::new();
+    let run = bench.json("run-create --name work")["runId"]
+        .as_str()
+        .expect("a run")
+        .to_string();
+    let launcher = on();
+    answered(&send(
+        &mut bench,
+        &launcher,
+        LONE,
+        "pane:team-1/%8",
+        "open-it",
+    ));
+    let room = the_room(&bench).id.clone();
+    let to_other = format!("pane:team-1/{OTHER}");
+    let line = [
+        "send",
+        "--run",
+        room.as_str(),
+        "--to",
+        &to_other,
+        "--type",
+        "status",
+        "--body",
+        "from-the-chair",
+    ];
+    let written = answered(&typed(
+        &mut bench,
+        &launcher,
+        agent_teams::LEADER_PANE,
+        Some(A),
+        &line,
+    ));
+    let letter = written["messageId"].as_str().expect("a letter").to_string();
+    let replied = answered(&typed(
+        &mut bench,
+        &launcher,
+        OTHER,
+        Some(A),
+        &["reply", "--to-message", &letter, "--body", "noted"],
+    ));
+    assert_eq!(replied["deliveredTo"]["runId"], run.as_str(), "{replied}");
+    let copy = replied["deliveredTo"]["messageId"]
+        .as_str()
+        .expect("a copy");
+    let held = bench
+        .ledger
+        .run(&run)
+        .and_then(|held| held.message(copy))
+        .expect("the copy");
+    assert_eq!(held.room.as_deref(), Some(room.as_str()));
+    assert_eq!(held.from, to_other, "the copy keeps the room's signature");
+}

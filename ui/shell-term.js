@@ -397,11 +397,15 @@ document.addEventListener("keydown", (event) => {
  * existing backend paste commands. Those commands own bracketed-paste and
  * control-sequence sanitizing; JavaScript never writes clipboard text to a PTY
  * directly. */
-async function pasteTextAt(target, text) {
+async function pasteTextAt(target, text, hand) {
   if (!target || text === "") return false;
   hideTerminalPointerForInput(target);
   try {
-    if (target.kind === "term") await invoke("term_paste", { term: target.term, text });
+    // A paste that awaited the clipboard says the hand it started with: the
+    // backend renews a room's wake budget for the person's alone (review
+    // t-105587).
+    const options = hand === undefined ? undefined : { hand: flowHand(hand) };
+    if (target.kind === "term") await invoke("term_paste", { term: target.term, text }, options);
     else await invoke("paste_input", { id: target.id, text });
     return true;
   } catch {
@@ -582,12 +586,15 @@ async function pasteClipboardVia(to) {
 
 async function pasteClipboardAt(target) {
   // Held before the read: focus/tab changes while the native clipboard call is
-  // pending must not redirect text into the terminal that became active later.
+  // pending must not redirect text into the terminal that became active later
+  // — and so is the hand that asked for the paste, which the read's await
+  // would otherwise leave behind.
   const captured = target ? { ...target } : null;
   if (!captured) return false;
+  const started = handNow();
   return pasteClipboardVia({
-    text: (text) => pasteTextAt(captured, text),
-    image: (path) => pasteTextAt(captured, path),
+    text: (text) => pasteTextAt(captured, text, started),
+    image: (path) => pasteTextAt(captured, path, started),
   });
 }
 

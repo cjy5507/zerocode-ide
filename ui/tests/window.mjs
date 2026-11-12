@@ -78,6 +78,7 @@ import { testSidebarAria } from "./sidebar-aria.mjs";
 import { testPanelRails, testRailsAtBoot } from "./panel-rails.mjs";
 import { testQuestionCloseRows } from "./question-close-rows.mjs";
 import { testPasteRoad } from "./paste-road.mjs";
+import { testRoomHand } from "./room-hand.mjs";
 import { testTermMouseMotion } from "./term-mouse-motion.mjs";
 import { testFaultReportStorm } from "./fault-report-storm.mjs";
 import { testStartupProjects } from "./startup-projects.mjs";
@@ -452,6 +453,7 @@ suite("sidebar-aria", testSidebarAria);
 suite("question-close-rows", testQuestionCloseRows);
 // A paste never stops the window's main thread (t-19409).
 suite("paste-road", ({ browser, origin, ok }) => testPasteRoad(browser, origin, ok));
+suite("room-hand", ({ browser, origin, ok }) => testRoomHand(browser, origin, ok));
 // A pointer over a program that asked for motion is reported once per cell (t-20972).
 suite("term-mouse-motion", ({ browser, origin, ok }) => testTermMouseMotion(browser, origin, ok));
 suite("fault-report-storm", ({ browser, origin, ok }) => testFaultReportStorm(browser, origin, ok));

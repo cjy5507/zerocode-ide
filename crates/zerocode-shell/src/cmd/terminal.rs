@@ -2216,10 +2216,7 @@ pub(crate) fn term_text(
         })?;
         // Committed text the person's hand made renews what a room may wake
         // this pane for; an agent's press does not (review t-105562, 2).
-        let hand = crate::computer_use::self_surface::hand_said(request.headers());
-        if crate::prompt_transaction::renews_the_room(hand, text.as_bytes()) {
-            crate::orchestration::peer_room::person_at(term);
-        }
+        crate::prompt_transaction::renew_the_room(request.headers(), term, text.as_bytes());
         if theirs {
             let seat = orchestration::pane_taken_over(term, "ime", now_epoch_ms());
             tell_window_taken(&app, term, seat.as_deref());
@@ -2255,9 +2252,8 @@ pub(crate) fn term_key(
     })?;
     // The person's own words or Enter renew what a room may wake this pane
     // for; an agent's press and a chip's key do not (review t-105562, 2).
-    let hand = crate::computer_use::self_surface::hand_said(request.headers());
-    if road.is_none() && crate::prompt_transaction::renews_the_room(hand, &bytes) {
-        crate::orchestration::peer_room::person_at(term);
+    if road.is_none() {
+        crate::prompt_transaction::renew_the_room(request.headers(), term, &bytes);
     }
     // A DELIVERED key from this road is a person's hand — paste delivery and
     // every programmatic write take other roads — and a hand that puts the
@@ -2598,9 +2594,8 @@ pub(crate) fn term_paste(
     // A paste the person's hand made renews what a room may wake this pane
     // for; one an agent pressed from a window button does not (review
     // t-105562, 2).
-    let hand = crate::computer_use::self_surface::hand_said(request.headers());
-    if road.is_none() && crate::prompt_transaction::renews_the_room(hand, text.as_bytes()) {
-        crate::orchestration::peer_room::person_at(term);
+    if road.is_none() {
+        crate::prompt_transaction::renew_the_room(request.headers(), term, text.as_bytes());
     }
     // A person's paste is their words as much as a typed key is, and takes a
     // worker's pane over the same way (t-57712).

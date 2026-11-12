@@ -329,9 +329,12 @@ pub(super) fn reply_allowed(
     }
 }
 
-/// Whether `message`, filed in `run`, is a room's: written in a room, or an
-/// answer in a thread a room letter began — a coordinator's reply to the copy
-/// of a room letter is a room reply though it was written in its own run.
+/// Whether `message`, filed in `run`, is a room's: written in a room, or the
+/// answer to a room letter's writer in the thread that letter began — a
+/// coordinator's reply to the copy of a room letter is a room reply though it
+/// was written in its own run. Only an answer TO the room letter's writer: a
+/// worker's word filed under that thread with `--thread-id` and sent to its
+/// coordinator is not a room's (review t-105587).
 #[must_use]
 pub fn of_a_room(run: &super::Run, message: &super::Message) -> bool {
     message.room.is_some()
@@ -339,7 +342,7 @@ pub fn of_a_room(run: &super::Run, message: &super::Message) -> bool {
             .thread
             .as_deref()
             .and_then(|root| run.message(root))
-            .is_some_and(|root| root.room.is_some())
+            .is_some_and(|root| root.room.is_some() && message.to == root.from)
 }
 
 fn one_pane(to: Option<&str>) -> Result<(), String> {

@@ -6,6 +6,7 @@ use super::support::block_after;
 
 const ORCHESTRATION: &str = include_str!("../../src/orchestration.rs");
 const TERMINAL: &str = include_str!("../../src/cmd/terminal.rs");
+const TRANSACTION: &str = include_str!("../../src/prompt_transaction.rs");
 
 /// The mail pass asks the room's budget before any road points at a pane —
 /// the channel notice, the hook's shelf, and the composer below them.
@@ -26,9 +27,10 @@ fn the_mail_pass_asks_the_rooms_budget_before_any_road_points() {
     }
 }
 
-/// Each command the person's typing, committed text and paste arrive by reads
-/// whose hand made the call, and renews the room's budget only for the
-/// person's — never for an agent's press of a window button.
+/// Each command the person's typing, committed text and paste arrive by
+/// renews the room's budget through the one door, with the call's own
+/// headers; that door reads whose hand made the call before it renews — so
+/// an agent's press of a window button renews nothing.
 #[test]
 fn the_persons_input_commands_renew_the_room_only_for_the_persons_hand() {
     for command in [
@@ -38,18 +40,22 @@ fn the_persons_input_commands_renew_the_room_only_for_the_persons_hand() {
     ] {
         let body = block_after(TERMINAL, command);
         assert!(
-            body.contains("hand_said(request.headers())"),
-            "`{command}` no longer reads whose hand made the call"
-        );
-        let renews = body
-            .find("renews_the_room(hand,")
-            .unwrap_or_else(|| panic!("`{command}` no longer asks renews_the_room"));
-        let renewed = body
-            .find("peer_room::person_at(term)")
-            .unwrap_or_else(|| panic!("`{command}` never renews the room's budget"));
-        assert!(
-            renews < renewed,
-            "`{command}` renews before it asks whose hand"
+            body.contains("renew_the_room(request.headers(), term,"),
+            "`{command}` no longer renews the room through its own headers"
         );
     }
+    let door = block_after(TRANSACTION, "pub(crate) fn renew_the_room(");
+    let read = door
+        .find("hand_said(headers)")
+        .expect("the door no longer reads whose hand made the call");
+    let judged = door
+        .find("renews_the_room(hand,")
+        .expect("the door no longer asks renews_the_room");
+    let renewed = door
+        .find("peer_room::person_at(term)")
+        .expect("the door never renews the room's budget");
+    assert!(
+        read < judged && judged < renewed,
+        "the door renews before it asks whose hand"
+    );
 }

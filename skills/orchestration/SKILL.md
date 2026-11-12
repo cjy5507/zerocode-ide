@@ -374,8 +374,9 @@ the ledger, whatever CLI each one runs. `zerocode-orc peers` lists the agent
 panes of this project: each one's `pane:<team>/<pane>` address, agent, folder,
 whether it is working, idle or waiting on the person, and the run it sits in.
 A pane no run holds writes with `send --to pane:<team>/<pane> --type
-status|question --body-file <file>` and reads with a plain `check`; its letters
-go through the project's room, a run nobody coordinates and nobody signs as.
+status|question --body-file <file>` and reads with a plain `check`, then
+`check --ack <deliveryId>` once read; its letters go through the project's
+room, a run nobody coordinates and nobody signs as.
 
 - Only panes of this project, only through the room. A room letter to a pane
   of another project is refused; do not reach one by Claude's SendMessage or

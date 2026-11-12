@@ -369,6 +369,16 @@ pub(crate) fn renews_the_room(hand: Option<&str>, bytes: &[u8]) -> bool {
             || std::str::from_utf8(bytes).is_ok_and(zerocode_core::ask::is_potential_submit_input))
 }
 
+/// The one door the person's input commands renew a project's room through
+/// (`term_key`, `term_text`, `term_paste`): the call's own hand, read off its
+/// headers, and the bytes it wrote.
+pub(crate) fn renew_the_room(headers: &tauri::http::HeaderMap, term: TermId, bytes: &[u8]) {
+    let hand = crate::computer_use::self_surface::hand_said(headers);
+    if renews_the_room(hand, bytes) {
+        crate::orchestration::peer_room::person_at(term);
+    }
+}
+
 /// Whether these bytes put words on the line (t-57712): printable text with
 /// no escape in it — a printable key, committed IME text, a paste inside or
 /// outside its brackets (a paste's own escapes are already inert,

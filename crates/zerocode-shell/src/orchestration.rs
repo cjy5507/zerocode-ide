@@ -9770,7 +9770,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * ([`peer_room::held_back`]). Nothing is marked: the letter
                  * stays filed for the pane's next `check`, and the person's
                  * next input there lets the pointer go on the next beat. */
-                if peer_room::held_back(&rows, &run.id, &address, term, rooms_open).is_some() {
+                if peer_room::held_back(run, &address, term, rooms_open).is_some() {
                     continue;
                 }
                 /* The first two conditions, and the line between them: a door
