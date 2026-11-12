@@ -64,6 +64,12 @@ pub const APPLY_PATCH: &str = "apply_patch";
 /// permission policy — judges the call it carries ([`carried_call`]).
 pub const CAPABILITY_INVOKE: &str = "CapabilityInvoke";
 
+/// The field of a [`CAPABILITY_INVOKE`] input that names the tool it carries.
+const CARRIED_NAME: &str = "name";
+
+/// The field that holds that tool's arguments.
+const CARRIED_INPUT: &str = "input";
+
 /// Why a [`CAPABILITY_INVOKE`] input carries no call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoCarriedCall {
@@ -85,7 +91,7 @@ pub enum NoCarriedCall {
 /// that are not an object: nothing runs for such a call.
 pub fn carried_call(input: &Value) -> Result<(String, Value), NoCarriedCall> {
     let name = input
-        .get("name")
+        .get(CARRIED_NAME)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -93,7 +99,7 @@ pub fn carried_call(input: &Value) -> Result<(String, Value), NoCarriedCall> {
     if name == CAPABILITY_INVOKE {
         return Err(NoCarriedCall::Itself);
     }
-    let arguments = match input.get("input") {
+    let arguments = match input.get(CARRIED_INPUT) {
         None | Some(Value::Null) => Value::Object(Map::new()),
         Some(value @ Value::Object(_)) => value.clone(),
         Some(other) => {
@@ -115,8 +121,8 @@ pub fn carried_call(input: &Value) -> Result<(String, Value), NoCarriedCall> {
 #[must_use]
 pub fn carrying(name: &str, arguments: Value) -> Value {
     let mut wrapper = Map::new();
-    wrapper.insert("name".to_string(), Value::String(name.to_string()));
-    wrapper.insert("input".to_string(), arguments);
+    wrapper.insert(CARRIED_NAME.to_string(), Value::String(name.to_string()));
+    wrapper.insert(CARRIED_INPUT.to_string(), arguments);
     Value::Object(wrapper)
 }
 

@@ -133,17 +133,32 @@ impl<'a> ToldCall<'a> {
     /// A pre-tool hook's result as the conversation reads it. The hook was
     /// told of the carried call, so an input it rewrote is that call's: it
     /// goes back into the wrapper the conversation holds, and what is judged
-    /// and run next is the rewritten call. One that does not read as JSON
-    /// carries no call, and nothing runs for it.
+    /// and run next is the rewritten call.
+    ///
+    /// The wrapper carries a tool's arguments, which are an object. A hook
+    /// that rewrote them to anything else — a string, `null`, words that are
+    /// not JSON — left no call to judge or run, and `null` would otherwise
+    /// read as "no arguments" and run the tool bare. That is the hook's
+    /// failure and is said as one, so the model does not take the refusal for
+    /// a slip of its own and send the same call again.
     pub(super) fn answered(&self, result: crate::hooks::HookRunResult) -> crate::hooks::HookRunResult {
         if !self.carried {
             return result;
         }
-        result.map_updated_input(|rewritten| {
-            let arguments = core_types::tool_input::parse_tool_arguments(&rewritten)
-                .unwrap_or(Value::String(rewritten));
-            core_types::tool_names::carrying(&self.name, arguments).to_string()
-        })
+        let Some(rewritten) = result.updated_input() else {
+            return result;
+        };
+        match core_types::tool_input::parse_tool_arguments(rewritten) {
+            Ok(arguments @ Value::Object(_)) => {
+                let wrapper = core_types::tool_names::carrying(&self.name, arguments).to_string();
+                result.map_updated_input(|_| wrapper)
+            }
+            _ => crate::hooks::HookRunResult::failed(format!(
+                "a PreToolUse hook rewrote the input of `{}` to something that is not a JSON object, \
+                 so the call was not run",
+                core_types::tool_names::wire_tool_name(&self.name)
+            )),
+        }
     }
 }
 

@@ -3426,7 +3426,7 @@ where
                         // Enforcer-layer denials surface as tool errors here;
                         // fold same-class repeats like the policy-layer arm.
                         if is_error {
-                            output = self.fold_repeated_mode_denial(&p.tool_name, output);
+                            output = self.fold_repeated_mode_denial(&told_name, output);
                         }
                         self.note_surface_execution(
                             &p.tool_name,
@@ -3473,8 +3473,12 @@ where
                         }
                     }
                     PermissionOutcome::Deny { reason } => {
-                        let body =
-                            self.fold_repeated_mode_denial(&p.tool_name, denial_result_body(reason));
+                        // Folded under the call that was refused, not the
+                        // wrapper it came through.
+                        let body = self.fold_repeated_mode_denial(
+                            &ToldCall::of(&p.tool_name, p.effective_input.as_ref()).name,
+                            denial_result_body(reason),
+                        );
                         ConversationMessage::tool_result(
                             p.tool_use_id.as_str(),
                             p.tool_name.as_str(),

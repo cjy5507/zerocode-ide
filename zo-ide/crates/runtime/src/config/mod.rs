@@ -3146,6 +3146,15 @@ impl RuntimeHookConfig {
         self
     }
 
+    /// [`Self::with_pre_tool_use_rule`] for a hook that runs after a call
+    /// that failed.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_post_tool_use_failure_rule(mut self, matcher: &str, command: impl Into<String>) -> Self {
+        self.post_tool_use_failure.push(HookRule::new(HookMatcher::parse(matcher), command));
+        self
+    }
+
     #[must_use]
     pub fn with_timeout_seconds(mut self, timeout_seconds: u64) -> Self {
         self.timeout_seconds = Some(timeout_seconds);

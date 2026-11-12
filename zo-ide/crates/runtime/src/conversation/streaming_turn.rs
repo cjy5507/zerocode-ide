@@ -3061,8 +3061,10 @@ where
                                 ));
                             }
                         }
+                        // Folded under the call that was refused: two
+                        // tools refused through the wrapper are two rows.
                         let body = self.fold_repeated_mode_denial(
-                            &p.tool_name,
+                            &ToldCall::of(&p.tool_name, &p.effective_input).name,
                             super::denial_result_body(reason),
                         );
                         ConversationMessage::tool_result(
@@ -3553,7 +3555,7 @@ where
         // Enforcer-layer denials surface as tool errors here; fold same-class
         // repeats on the model-facing result like the policy-layer deny arm.
         if is_error {
-            output = self.fold_repeated_mode_denial(&p.tool_name, output);
+            output = self.fold_repeated_mode_denial(&told_name, output);
         }
         // Append (after rendering, so the user-facing body stays clean) only to
         // the model-facing result, nudging the agent out of a tight

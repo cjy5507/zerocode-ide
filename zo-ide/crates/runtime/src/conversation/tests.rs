@@ -22252,6 +22252,66 @@ fn a_hook_after_the_call_is_told_of_the_call_the_wrapper_carried() {
         .is_denied());
 }
 
+/// A hook that runs after a call that failed is told of the carried call
+/// too: the two seams of that hook.
+#[test]
+fn a_hook_after_a_failed_call_is_told_of_the_call_the_wrapper_carried() {
+    let hooks = RuntimeHookConfig::new(Vec::new(), Vec::new(), Vec::new())
+        .with_post_tool_use_failure_rule("Bash", shell_snippet("printf 'blocked by hook'; exit 2"));
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime =
+        a_session_that_calls_through_the_wrapper("Bash", serde_json::json!({ "command": "ls" }), hooks, &ran);
+    let through = |name: &str| core_types::tool_names::carrying(name, serde_json::json!({})).to_string();
+    let wrapper = core_types::tool_names::CAPABILITY_INVOKE;
+    assert!(runtime.run_post_tool_use_failure_hook(wrapper, &through("Bash"), "out").is_denied());
+    assert!(!runtime.run_post_tool_use_failure_hook(wrapper, &through("mcp__docs__search"), "out").is_denied());
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    assert!(tokio_runtime
+        .block_on(runtime.run_post_tool_use_failure_hook_async(wrapper, &through("Bash"), "out"))
+        .is_denied());
+    assert!(!tokio_runtime
+        .block_on(runtime.run_post_tool_use_failure_hook_async(wrapper, &through("mcp__docs__search"), "out"))
+        .is_denied());
+}
+
+/// A hook that rewrote a carried call's input to something that is not an
+/// object left no call: the result is the hook's failure — which refuses the
+/// call, in words that name the hook — and not a wrapper that would run the
+/// tool with no arguments. An object goes back into the wrapper, and a call
+/// by name is left as the hook wrote it.
+#[test]
+fn a_rewrite_of_a_carried_call_that_is_not_an_object_is_the_hooks_failure() {
+    use crate::hooks::HookRunResult;
+    let wrapper = core_types::tool_names::carrying("Bash", serde_json::json!({ "command": "ls" })).to_string();
+    let carried = super::tool::ToldCall::of(core_types::tool_names::CAPABILITY_INVOKE, &wrapper);
+    for not_an_object in ["null", r#""ls""#, "[1]", "7", "true", "not json at all"] {
+        let answered = carried.answered(HookRunResult::rewriting(not_an_object));
+        assert!(answered.is_failed(), "{not_an_object}");
+        assert_eq!(answered.updated_input(), None, "{not_an_object}: nothing is left to run");
+        assert_eq!(
+            answered.messages(),
+            ["a PreToolUse hook rewrote the input of `Bash` to something that is not a JSON object, so the call was not run"],
+            "{not_an_object}"
+        );
+        let refused = super::pre_hook_denial_outcome(&answered, &carried.name).expect("a refusal");
+        assert!(matches!(refused, PermissionOutcome::Deny { .. }), "{not_an_object}");
+    }
+    let rewrapped = carried.answered(HookRunResult::rewriting(r#"{"command":"git status"}"#));
+    assert!(!rewrapped.is_failed());
+    assert_eq!(
+        rewrapped.updated_input().map(|text| serde_json::from_str::<serde_json::Value>(text).expect("json")),
+        Some(core_types::tool_names::carrying("bash", serde_json::json!({ "command": "git status" })))
+    );
+    // Nothing was rewritten: the result is as it came.
+    assert_eq!(carried.answered(HookRunResult::empty()), HookRunResult::empty());
+    // A call by name is the tool's own to read, whatever a hook wrote.
+    let by_name = super::tool::ToldCall::of("bash", r#"{"command":"ls"}"#);
+    assert_eq!(by_name.answered(HookRunResult::rewriting("null")).updated_input(), Some("null"));
+}
+
 /// The gate that keeps a planning model from editing is not passed by editing
 /// through the wrapper: the call it carries is the one the gate reads. On
 /// both roads; with the gate down, the same call runs.
