@@ -19,12 +19,28 @@ runs the command with what the lane's launchd job has and nothing else: HOME
 and `LAUNCHD_PATH` (no TERM, COLORTERM, LANG or TMPDIR), no controlling
 terminal and stdin at its end, and launchd's open-file limit (`launchctl limit
 maxfiles`, 256). What lane.sh exports to its gates goes along too — the
-table's `CARGO_INCREMENTAL` (0) and the repository's own `node_modules` as
-`NODE_PATH` — unless the caller set its own; so does a caller's
+table's `CARGO_INCREMENTAL` (0) and `WINDOW_SHARDS`, and the repository's own
+`node_modules` as `NODE_PATH` — unless the caller set its own; so does a caller's
 `CARGO_TARGET_DIR`. `NODE_PATH` reaches only `require`: the harnesses' ES
 `import`s need a `node_modules` beside the code, so a worktree without one
 links the repository's, as the lane links its scratch's. A test red in the lane and green in a pane is
 run this way first. `tests/test_lane.py LaneEnv` pins it.
+
+## The window harness, split (2026-11-12)
+
+The lane's gates run the window harness (`ui/tests/window.mjs`) across
+`WINDOW_SHARDS` browsers at once (`ui/tests/window-shards.mjs`), the value
+lane.sh takes from `RELEASE_WINDOW_SHARDS` or its own default: on main
+1ebcbba2c it took 1,723 s in one browser (v1.1.144's gate-root) and 444–454 s
+split four ways, 6312/6312 three times. Only the lane asks — `just verify`
+elsewhere is one browser, and a solo judgment names its suites and is never
+split. A run started with `RELEASE_WINDOW_SHARDS=1` goes back to one browser
+without a commit (`RELEASE_WINDOW_SHARDS=1 RELEASE_PUBLISH=1 tools/release/lane.sh
+<sha>`; the launchd job takes it from `install-launchd.sh --env`). A share
+prints its lines when it ends, so the gate's log is quiet for about the first
+share's length: past `QUIET_FLOOR_SECS` the board says 「멈춘 듯」, and the
+recipe is ended red only past its cap (`QUIET_CAP_FLOOR_SECS` at the least).
+`tests/test_lane.py` pins the value reaching both gates and the override.
 
 ## The version (one hand: `bump.sh`)
 
