@@ -269,6 +269,44 @@ fn a_session_with_no_fast_model_of_its_own_is_not_probed() {
     }
 }
 
+/// The turn's gate says why such a session was not probed, in the ledger a
+/// person reads a day later: the same easy turn with a reader armed is
+/// `admitted` in a session on a built-in model and `no_fast_tier` in one with
+/// no fast model of its own. Without the gate's own question the probe's
+/// executor would still ask nobody, and the ledger would say `admitted`.
+#[test]
+fn the_gate_says_a_session_with_no_fast_model_of_its_own_was_not_probed() {
+    use super::probe_gate::{ProbeGate, ProbeGateRow, PROBE_GATE_LEDGER};
+    use super::shadow_ledger::{read_shadow_rows, shadow_ledger_path};
+
+    let judgment = answering(answer(1, 0.9));
+    let chat = probe();
+    let _machine = Machine::new(json!({}), &judgment, &chat);
+    let cwd = std::env::current_dir().expect("a working directory");
+    // The gate writes a change of answer only, and remembers its last one
+    // for the process: this case starts from none.
+    super::probe_gate::forget(&cwd);
+    let gates = || read_shadow_rows::<ProbeGateRow>(&shadow_ledger_path(&cwd, PROBE_GATE_LEDGER));
+
+    let _ = turn(&unique("이 설정값이 뭔지 알려줘"), true);
+    let admitted = gates();
+    assert_eq!(admitted.last().map(|row| row.gate), Some(ProbeGate::Admitted), "premise: {admitted:?}");
+
+    let _ = super::assess_turn_probed(
+        &unique("이 설정값이 뭔지 알려줘"),
+        "zq-model-nobody-lists",
+        AssessmentReaders { verify_leg: true },
+        "turn-9@1",
+    );
+
+    let written = gates();
+    super::probe_gate::forget(&cwd);
+    let last = written.last().expect("a gate row");
+    assert_eq!(last.gate, ProbeGate::NoFastTier, "{written:?}");
+    assert_eq!(last.was, Some(ProbeGate::Admitted), "{written:?}");
+    assert_eq!(chat.requests().len(), 1, "the built-in session's probe, and nothing after it");
+}
+
 /// Where the probe's gate declines the turn, an abstaining answer leaves the
 /// keyword tables standing — no probe is bought for a band the gate refused.
 #[test]
