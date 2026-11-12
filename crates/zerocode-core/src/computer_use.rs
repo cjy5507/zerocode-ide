@@ -456,12 +456,17 @@ pub const RECIPE_SCHEDULE_ASK_MS: u64 = 180_000;
 pub const FLOW_SHA256_FLAG: &str = "flow-sha256";
 /// See [`FLOW_SHA256_FLAG`].
 pub const FLOW_SHA256_PARAM: &str = "flowSha256";
-/// The flag a walk carries when the window starts it for a job — a schedule's
-/// walk, with nobody watching — and its key in the command's parameters. Such
-/// a walk makes no press that is a payment, a transfer or a deletion, whatever
-/// the person's settings ask about: the press is handed back unpressed and the
-/// walk stops there. It only ever adds a refusal: anyone may say it, and gains
-/// nothing by it.
+/// The flag a walk carries when the window itself starts it for a job — at
+/// the job's time or by 「지금 실행」, with nobody watching — and its key in
+/// the command's parameters. On such a walk a desktop press the helper reads
+/// as a payment, a transfer or a deletion is handed back unpressed, whatever
+/// the person's settings ask about, and the walk stops there. It only ever
+/// adds a refusal: anyone may say it, and gains nothing by it.
+///
+/// What it does not reach: a job that names an agent or a command is walked
+/// by that agent in its pane, without this flag and by the person's settings;
+/// a step on the emulator reads the person's settings too; and a key is not a
+/// press this guard reads.
 pub const WALK_UNWATCHED_FLAG: &str = "unwatched";
 /// See [`WALK_UNWATCHED_FLAG`].
 pub const WALK_UNWATCHED_PARAM: &str = "unwatched";
