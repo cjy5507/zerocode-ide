@@ -34809,7 +34809,9 @@ fn a_form_save_keeps_the_approval_of_the_job_that_was_allowed() {
         approved_at_ms: 1,
         flow_sha256: zerocode_core::automation::flow_document_sha256(&allowed),
     };
-    let job = zerocode_core::Automation::asked_flow(
+    // As the card's road stores one: bound to its Flow, its prompt the
+    // command that walks it (`schedule::read`).
+    let mut job = zerocode_core::Automation::asked_flow(
         "asked-1".to_string(),
         "Asked wallet QA".to_string(),
         "/Users/dev/app".to_string(),
@@ -34818,6 +34820,9 @@ fn a_form_save_keeps_the_approval_of_the_job_that_was_allowed() {
             .expect("a schedule"),
         approval.clone(),
     );
+    job.bind_flow().expect("the job binds to its Flow");
+    assert!(job.validate_for_save().is_ok(), "the fixture is no job the door would save");
+    let job = job;
     let stored = || {
         stored_automations(config.path())
             .into_iter()
@@ -34970,7 +34975,7 @@ fn a_form_save_keeps_the_approval_of_the_job_that_was_allowed() {
     let door = block_after(shipped_backend(), "fn save_automation_in(");
     let locked = door.find("automation_store_domain()").expect("the lock");
     let judged = door
-        .find("approval_a_form_save_keeps(held, &automation, standing)?;")
+        .find("approval_a_form_save_keeps(stored, &automation, standing)?;")
         .expect("the judgment");
     let written = door.find("write_automations(config_root, &rows)?;").expect("the write");
     assert!(

@@ -494,15 +494,17 @@ pub(crate) fn save_automation_in(
     let automation_id = automation.id.clone();
     let mut domain = automation_store_domain();
     let mut rows = stored_automations(config_root);
+    // What a form's save keeps of the stored job's approval is judged here,
+    // under the store's lock, against the job as it is stored.
+    if let Approval::FromForm(standing) = approval {
+        let stored = rows.iter().find(|row| row.id == automation.id);
+        automation.asked = approval_a_form_save_keeps(stored, &automation, standing)?;
+    }
     // And which agent, on the same terms the editor offers: a first save may
     // only name one this build knows, while an edit keeps the unrecognised id
     // it was already carrying. The rule and its reasoning live in
     // `zerocode_core::automation::agent_may_be_saved`.
     let held = rows.iter().find(|row| row.id == automation.id);
-    // Judged here, under the store's lock, against the job as it is stored.
-    if let Approval::FromForm(standing) = approval {
-        automation.asked = approval_a_form_save_keeps(held, &automation, standing)?;
-    }
     if !agent_may_be_saved(automation.agent.as_deref(), held) {
         return Err(format!(
             "이 창이 모르는 에이전트입니다: {}",
