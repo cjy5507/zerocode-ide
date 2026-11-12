@@ -2849,7 +2849,9 @@ class StatefulBackend {
       case "approve_automation_flow": {
         const row = this.automations.find((held) => held.id === args.id);
         if (row && args.seen !== row.flow_stands) {
-          throw new Error("묻는 동안 Flow 문서가 다시 바뀌었습니다 — 문서를 확인한 뒤 다시 승인해 주세요");
+          // As the window answers a refused press (`AutomationRefusal`): its
+          // sentence, and the code the screen says it by.
+          throw { said: "the window's own sentence", code: "flow_changed_under_question" };
         }
         if (row) {
           row.flow_changed = false;
@@ -2857,6 +2859,8 @@ class StatefulBackend {
           delete row.flow_stands;
           delete row.flow_money;
           delete row.flow_about;
+          delete row.flow_title;
+          delete row.flow_hidden;
         }
         return clone(this.automations);
       }
@@ -5755,6 +5759,13 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     // it, says why, and the page reads the list again.
     backend.automations[0].flow_stands = "cc";
     backend.automations[0].flow_money = true;
+    // The rewritten document gives itself another title. The Flow side's
+    // list, read earlier, still says 「Wallet QA」: the question is to name
+    // the Flow by the reading the yes is held to.
+    backend.automations[0].flow_title = "Wallet QA rewritten";
+    // Two letters left out in all — one of them from that title, which
+    // `flow_about` does not count.
+    backend.automations[0].flow_hidden = 2;
     // It names as much as a document may: three sites and three apps shown,
     // each as long as the card's rule lets a name be, and more of each counted.
     const longName = (word) => `${word}.`.repeat(20).slice(0, 80);
@@ -5763,7 +5774,7 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
       steps: 4,
       hosts: { shown: ["a", "b", "c"].map((word) => longName(`${word}-shop.example.com`)), count: 5 },
       apps: { shown: ["x", "y", "z"].map((word) => longName(`com.example.${word}`)), count: 4 },
-      hidden: 2,
+      hidden: 1,
     };
     await pageA.evaluate(() => {
       window.__askedSaid = [];
@@ -5784,10 +5795,14 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
       { timeout: UI_TIMEOUT },
     );
     said.push(...await pageA.evaluate(() => window.__askedSaid));
+    // Said in the screen's own words for the code the window answered with —
+    // the catalog's, in the language the person chose — not in the window's
+    // sentence.
+    const refusedWords = await pageA.evaluate(() => t("auto.refused.flowChangedUnderQuestion", "묻는 동안 Flow 문서가 다시 바뀌었습니다 — 문서를 확인한 뒤 다시 승인해 주세요"));
     assert(
-      said.length === 1 && said[0].includes("다시 바뀌었습니다"),
-      "a yes to a document rewritten under the question was not refused out loud",
-      said,
+      said.length === 1 && said[0] === refusedWords,
+      "a yes to a document rewritten under the question was not refused out loud, or not in the screen's own words",
+      { said, refusedWords },
     );
     assert(backend.count("A", "list_automations") > reread, "the list was not read again after the refusal");
     const still = await pageA.evaluate(() => ({
@@ -5803,6 +5818,11 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     await pageA.waitForSelector("#ask-scrim:not([hidden])");
     const second = await pageA.evaluate(() => document.getElementById("ask-body").textContent);
     assert(second.includes("Wallet QA") && second.includes(money), "the question did not say this document may spend money", second);
+    assert(
+      second.includes("「Wallet QA rewritten」") && !question.includes("Wallet QA rewritten"),
+      "the question named the Flow by the Flow side's list, not by the title read with the hash its yes hands back",
+      { second, question },
+    );
     const words = await pageA.evaluate(() => ({
       hosts: t("auto.asked.aboutHosts", "문서가 적은 사이트 {{count}}곳: {{names}}", { count: 5, names: "" }).split(":")[0],
       apps: t("auto.asked.aboutApps", "문서가 적은 앱 {{count}}개: {{names}}", { count: 4, names: "" }).split(":")[0],

@@ -224,10 +224,20 @@ pub(super) struct AutomationRow {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(super) flow_money: bool,
     /// On a job that waits: which document that is, beyond its title — its
-    /// file's name, its steps, what it names and when it was last written
-    /// (`schedule::About`), said in the question as on the card of a request.
+    /// file's name, its steps and what it names (`schedule::About`), said in
+    /// the question as on the card of a request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) flow_about: Option<computer_use::recipes::schedule::About>,
+    /// On a job that waits: the title that document gives itself, as the
+    /// card's rule shows it — the name 「다시 승인」 asks by. It comes off the
+    /// reading the yes is held to (`flow_stands`), not off a Flow list the
+    /// page read at another time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) flow_title: Option<String>,
+    /// On a job that waits: how many letters that draw nothing were left out
+    /// of that title and of what `flow_about` shows; the question says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) flow_hidden: Option<usize>,
 }
 
 /// A prompt that finished its journey into a shell, either way — or that is

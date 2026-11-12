@@ -35036,6 +35036,107 @@ fn asked_flow_document(policy: &str) -> String {
     )
 }
 
+/// A refused save, and a refused 「다시 승인」, are answered with the
+/// window's sentence and — for the three refusals the automation screen says
+/// in the language the person chose — the code that screen finds its words
+/// by. They were one Korean sentence under every language (t-105495, 알아 둘
+/// 것 8). Any other refusal is said as the window wrote it. The screen holds
+/// words for every code, its own Korean is the window's sentence, and each
+/// key stands in the catalog's four other languages.
+#[test]
+fn a_refused_press_on_the_automation_screen_is_said_in_the_persons_language() {
+    use crate::cmd::review::{AutomationRefusal, REFUSALS_THE_SCREEN_SAYS};
+
+    let table = block_after(
+        window_source(),
+        "const AUTOMATION_REFUSALS = Object.freeze({",
+    );
+    for (sentence, code) in REFUSALS_THE_SCREEN_SAYS {
+        let refused = AutomationRefusal::from(sentence.to_string());
+        assert_eq!(
+            serde_json::to_value(&refused).expect("an answer"),
+            serde_json::json!({ "said": sentence, "code": code }),
+        );
+        let opens = format!("{code}: () => t(\"auto.refused.");
+        let row = table
+            .lines()
+            .find(|line| line.trim_start().starts_with(&opens))
+            .unwrap_or_else(|| panic!("the screen has no words for {code}:\n{table}"));
+        assert!(
+            row.trim_end()
+                .ends_with(&format!(", \"{sentence}\"),")),
+            "the screen's Korean for {code} is not the window's sentence:\n{row}"
+        );
+        let key = row.split('"').nth(1).expect("the catalog key");
+        assert_eq!(
+            window_source()
+                .matches(&format!("\n    \"{key}\": \""))
+                .count(),
+            4,
+            "{key} does not stand in each of the catalog's four other languages"
+        );
+    }
+    let other = AutomationRefusal::from("프롬프트를 입력해 주세요".to_string());
+    assert_eq!(
+        serde_json::to_value(&other).expect("an answer"),
+        serde_json::json!({ "said": "프롬프트를 입력해 주세요" }),
+        "a refusal the screen has no words for was given a code"
+    );
+
+    // Both presses answer with it, and the screen asks its catalog at each of
+    // the three places it says such a refusal.
+    for command in ["fn save_automation(", "fn approve_automation_flow("] {
+        assert!(
+            block_after(shipped_backend(), command)
+                .contains(") -> Result<Vec<AutomationRow>, AutomationRefusal> {"),
+            "{command} answers a refusal as a bare sentence"
+        );
+    }
+    let page = window_source();
+    assert!(
+        page.contains("showError(automationRefusalText(error));")
+            && page.contains("say(el(\"auto-error\"), () => automationRefusalText(error));")
+            && page.contains("secondBrainError = automationRefusalText(error);"),
+        "a press on the automation screen says a refusal without asking the catalog"
+    );
+}
+
+/// 「다시 승인」 names the Flow by the title the list read together with the
+/// hash the yes hands back — not by the Flow side's own list, which the page
+/// reads at another time (t-105495, 막지 않는 문제 5). And what a card and
+/// that question both say — that the Flow may spend, how many letters were
+/// left out — is written in the window once.
+#[test]
+fn the_question_names_the_flow_by_the_reading_its_yes_is_held_to() {
+    let listing = block_after(
+        shipped_backend(),
+        "fn list_automations(state: State<'_, AppState>)",
+    );
+    assert!(
+        listing.contains("flow_title: waits_on.as_ref().map(|one| one.title.clone()),")
+            && listing.contains("flow_hidden: waits_on.as_ref().map(|one| one.hidden),")
+            && listing.contains("flow_stands: waits_on.map(|one| one.sha256),"),
+        "the list does not hand the question the title of the reading it hashed:\n{listing}"
+    );
+    let asking = block_after(
+        window_source(),
+        "async function approveAutomationFlowAgain(row) {",
+    );
+    assert!(
+        asking.contains("flow: row.flow_title ?? automationFlowName(row) ?? row.flow,")
+            && asking.contains("flowMoneyText(row.flow_money),")
+            && asking.contains("flowHiddenText(row.flow_hidden),"),
+        "「다시 승인」 names the Flow by another reading, or says a sentence of its own:\n{asking}"
+    );
+    for key in ["auto.asked.money", "auto.asked.hidden"] {
+        assert_eq!(
+            window_source().matches(&format!("t(\"{key}\", ")).count(),
+            1,
+            "{key} is written in the window more than once"
+        );
+    }
+}
+
 /// 「다시 승인」 moves an approval only to the document the person was asked
 /// about (t-105044, question 7). The list reads the document and the question
 /// is drawn from that reading; the press hands its hash back. A document

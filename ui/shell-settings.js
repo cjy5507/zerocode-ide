@@ -11540,7 +11540,7 @@ async function turnOnSecondBrainIngest() {
     }
     paintAutomations();
   } catch (error) {
-    secondBrainError = String(error);
+    secondBrainError = automationRefusalText(error);
     paintSecondBrain();
     return;
   } finally {
@@ -13236,7 +13236,7 @@ async function saveAutomation(hand) {
     // Shown on the form rather than as a window-wide error: what is wrong is
     // a field the person is looking at — the schedule it cannot read, or an
     // agent it does not know, which are the two things the backend refuses.
-    say(el("auto-error"), () => String(error));
+    say(el("auto-error"), () => automationRefusalText(error));
     el("auto-error").hidden = false;
     return;
   }
@@ -13532,18 +13532,17 @@ async function approveAutomationFlowAgain(row) {
     t(
       "auto.approveAgainBody",
       "Flow 「{{flow}}」의 문서가 승인한 뒤에 바뀌었습니다. 지금 문서대로 {{schedule}}에 사람 없이 도는 것을 다시 승인할까요? 문서는 Flow 탭에서 먼저 열어 볼 수 있습니다.",
-      { flow: automationFlowName(row) ?? row.flow, schedule: automationScheduleText(row) },
+      // The Flow is named by the title the list read with the hash
+      // (`flow_title`): the Flow side's own list is read at another time, and
+      // the question is about the document the yes is held to.
+      { flow: row.flow_title ?? automationFlowName(row) ?? row.flow, schedule: automationScheduleText(row) },
     ),
     // What may spend comes before anything the document says of itself: the
     // box this is read in is a few lines high, and those words are as long as
     // the document makes them.
-    row.flow_money === true
-      ? t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다.")
-      : "",
+    flowMoneyText(row.flow_money),
     flowAboutText(row.flow_about),
-    row.flow_about?.hidden > 0
-      ? t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count: row.flow_about.hidden })
-      : "",
+    flowHiddenText(row.flow_hidden),
   ].filter(Boolean).join(" ");
   const confirmed = await askConfirm({
     title: t("auto.approveAgain", "다시 승인"),
@@ -13562,9 +13561,28 @@ async function approveAutomationFlowAgain(row) {
     paintAutomations();
     paintAutomationDetail();
   } catch (error) {
-    showError(error);
+    showError(automationRefusalText(error));
     void refreshAutomations();
   }
+}
+
+/* The window's refusals of a press on this screen that the screen says in the
+ * language the person chose. The window answers a refused save or 「다시
+ * 승인」 with its own sentence and, for these, a code (`AutomationRefusal`,
+ * cmd/review.rs); each asks the catalog by its own literal key. */
+const AUTOMATION_REFUSALS = Object.freeze({
+  flow_changed_under_question: () => t("auto.refused.flowChangedUnderQuestion", "묻는 동안 Flow 문서가 다시 바뀌었습니다 — 문서를 확인한 뒤 다시 승인해 주세요"),
+  flow_not_a_flow: () => t("auto.refused.flowNotAFlow", "Flow 문서를 읽을 수 없거나 더는 Flow가 아닙니다 — Flow 탭에서 문서를 확인해 주세요"),
+  waiting_job_stays_a_flow: () => t("auto.refused.waitingJobStaysAFlow", "다시 승인을 기다리는 예약은 Flow를 걷는 예약으로만 저장할 수 있습니다 — 먼저 「다시 승인」을 누르거나, 지우고 새로 만들어 주세요"),
+});
+
+/* What a refused save or 「다시 승인」 says: the screen's own words for a
+ * refusal it has a code for, and the window's sentence for every other. */
+function automationRefusalText(error) {
+  const code = typeof error?.code === "string" ? error.code : "";
+  return Object.prototype.hasOwnProperty.call(AUTOMATION_REFUSALS, code)
+    ? AUTOMATION_REFUSALS[code]()
+    : String(error?.said ?? error);
 }
 
 el("auto-detail-approve").addEventListener("click", () => void approveAutomationFlowAgain(selectedAutomation()));

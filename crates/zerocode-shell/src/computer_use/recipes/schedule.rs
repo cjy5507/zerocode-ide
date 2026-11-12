@@ -190,6 +190,9 @@ impl Drop for Turn {
 pub(crate) const ASKED_NOS_BEFORE_REST: u32 = 2;
 /// How long requests rest after that many (the person's answer, 2026-11-12).
 pub(crate) const ASKED_REST_MINUTES: i64 = 10;
+/// The milliseconds in a minute: the rest is kept in the first and said in
+/// the second.
+const MS_PER_MINUTE: i64 = 60_000;
 
 /// The answers that were not a yes, in a row, and the rest they bring. Kept
 /// for the whole window and not per pane: the pane a request names is the
@@ -224,7 +227,7 @@ impl Rest {
                 if nos >= ASKED_NOS_BEFORE_REST {
                     Self {
                         nos: 0,
-                        until_ms: now_ms + ASKED_REST_MINUTES * 60_000,
+                        until_ms: now_ms + ASKED_REST_MINUTES * MS_PER_MINUTE,
                     }
                 } else {
                     Self { nos, ..self }
@@ -270,7 +273,8 @@ pub(crate) fn rested() -> Result<(), ComputerUseError> {
 /// What a request refused for the rest is told: how long is left, and what to
 /// do instead of asking again.
 fn resting_said(left_ms: i64) -> String {
-    let minutes = (left_ms + 59_999) / 60_000;
+    // A started minute is said as a whole one.
+    let minutes = (left_ms + MS_PER_MINUTE - 1) / MS_PER_MINUTE;
     format!(
         "the person's last {ASKED_NOS_BEFORE_REST} answers to a schedule request were a no or a silence, so no schedule is asked for during the next {minutes} minute(s). Do not ask again: tell the person what you wanted to schedule and why — they can add it themselves in the automation form"
     )
@@ -326,19 +330,21 @@ pub(crate) fn read(
     let word = |key: &str| params.get(key).and_then(Value::as_str);
     let named = word("name").unwrap_or_default();
     let (document, text) = show(recipes_root, named)?;
-    let spec = match parse_flow(&text) {
-        Ok(Some(spec)) => spec,
-        Ok(None) => {
-            return Err(ComputerUseError::invalid_argument(format!(
+    let slug = recipe_slug(named);
+    // The reading every road that asks about a Flow shares ([`Standing::of`]):
+    // what the card says of the document is what the list and 「다시 승인」
+    // would say of it.
+    let stands = Standing::of(&slug, &text).map_err(|why| {
+        ComputerUseError::invalid_argument(match why {
+            NotStanding::Recipe => format!(
                 "'{named}' is a recipe, not a Flow — only a Flow is judged after it runs. Stand it up first: `{COMPUTER_CLI} recipe-save --name <name> --flow-check <text the screen shows when it worked>`"
-            )));
-        }
-        Err(why) => {
-            return Err(ComputerUseError::invalid_argument(format!(
-                "the Flow section of '{named}' does not read: {why}"
-            )));
-        }
-    };
+            ),
+            NotStanding::Flow(said) => {
+                format!("the Flow section of '{named}' does not read: {said}")
+            }
+            NotStanding::Steps(said) => format!("the steps of '{named}' do not read: {said}"),
+        })
+    })?;
     let workspace = workspace.filter(|folder| folder.is_dir()).ok_or_else(|| {
         ComputerUseError::invalid_argument(
             "a schedule runs in the folder it was asked from, and this request came from none: ask from the pane's own shell",
@@ -375,21 +381,12 @@ pub(crate) fn read(
             "this schedule names no minute in the year ahead",
         ));
     }
-    let slug = recipe_slug(named);
-    let about = About::read(&slug, &text, &spec).map_err(|why| {
-        ComputerUseError::invalid_argument(format!("the steps of '{named}' do not read: {why}"))
-    })?;
-    let title = card_words::shown_counting(
-        &recipe_title(&text).unwrap_or_else(|| slug.clone()),
-        WORD_MAX_CHARS,
-    );
     let label = word("label").map(|label| card_words::shown_counting(label, WORD_MAX_CHARS));
-    let hidden = title.hidden + label.as_ref().map_or(0, |label| label.hidden) + about.hidden;
-    let flow_name = title.text;
+    let hidden = stands.hidden + label.as_ref().map_or(0, |label| label.hidden);
     let name = label
         .map(|label| label.text)
         .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| flow_name.clone());
+        .unwrap_or_else(|| stands.title.clone());
     let mut job = Automation::asked_flow(
         id,
         name,
@@ -401,7 +398,7 @@ pub(crate) fn read(
             agent: None,
             // Written when the person answers ([`settle`]).
             approved_at_ms: 0,
-            flow_sha256: flow_document_sha256(&text),
+            flow_sha256: stands.sha256,
         },
     );
     // Checked as the save door will check it, so no card is shown for a job
@@ -411,12 +408,12 @@ pub(crate) fn read(
         .map_err(ComputerUseError::invalid_argument)?;
     Ok(Request {
         job,
-        flow_name,
-        policy: spec.policy.as_str(),
-        money: spends(spec.policy),
+        flow_name: stands.title,
+        policy: stands.policy,
+        money: stands.money,
         next,
         hidden,
-        about,
+        about: stands.about,
         document,
     })
 }
@@ -450,10 +447,58 @@ pub(crate) fn document_sha256(recipes_root: &Path, slug: &str) -> Option<String>
 pub(crate) struct Standing {
     /// The hash of the text that was read (`flow_document_sha256`).
     pub sha256: String,
+    /// The title the document gives itself — its file's own name when it
+    /// gives none — as the card's rule shows it. What is asked names the Flow
+    /// by the reading it is held to, not by a list read at another time.
+    pub title: String,
+    /// The Flow's policy, in its document's word.
+    pub policy: &'static str,
     /// Whether walking it may spend money ([`spends`]): the question says so.
     pub money: bool,
     /// Which document it is, beyond its title: the question says that too.
     pub about: About,
+    /// Letters that draw nothing, left out of the title, the file's name and
+    /// the names the document gives (`card_words::shown_counting`): what is
+    /// asked says how many.
+    pub hidden: usize,
+}
+
+/// Why a document does not stand as a Flow to ask about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NotStanding {
+    /// A recipe that was never stood up as a Flow.
+    Recipe,
+    /// Its Flow section does not read.
+    Flow(String),
+    /// Its steps do not read.
+    Steps(String),
+}
+
+impl Standing {
+    /// What `text` — one reading of the document kept under `slug` — stands
+    /// as. The card of a request, the list, 「다시 승인」 and a form's save
+    /// all read a Flow here, so none of them says of a document what another
+    /// would not.
+    fn of(slug: &str, text: &str) -> Result<Self, NotStanding> {
+        let spec = match parse_flow(text) {
+            Ok(Some(spec)) => spec,
+            Ok(None) => return Err(NotStanding::Recipe),
+            Err(why) => return Err(NotStanding::Flow(why)),
+        };
+        let about = About::read(slug, text, &spec).map_err(NotStanding::Steps)?;
+        let title = card_words::shown_counting(
+            &recipe_title(text).unwrap_or_else(|| slug.to_string()),
+            WORD_MAX_CHARS,
+        );
+        Ok(Self {
+            sha256: flow_document_sha256(text),
+            title: title.text,
+            policy: spec.policy.as_str(),
+            money: spends(spec.policy),
+            hidden: title.hidden + about.hidden,
+            about,
+        })
+    }
 }
 
 /// The document of `slug` under `recipes_root` as it stands, read once.
@@ -462,13 +507,7 @@ pub(crate) struct Standing {
 #[must_use]
 pub(crate) fn standing(recipes_root: &Path, slug: &str) -> Option<Standing> {
     let (_, text) = show(recipes_root, slug).ok()?;
-    let spec = parse_flow(&text).ok().flatten()?;
-    let about = About::read(&recipe_slug(slug), &text, &spec).ok()?;
-    Some(Standing {
-        sha256: flow_document_sha256(&text),
-        money: spends(spec.policy),
-        about,
-    })
+    Standing::of(&recipe_slug(slug), &text).ok()
 }
 
 /// What 「다시 승인」 is refused with when the document is no longer the one
@@ -791,7 +830,7 @@ mod tests {
 
         // A silence counts as a no does.
         let twice = once.after(Decision::TimedOut, start + 1_000);
-        let whole = ASKED_REST_MINUTES * 60_000;
+        let whole = ASKED_REST_MINUTES * MS_PER_MINUTE;
         assert_eq!(twice.left_ms(start + 1_000), Some(whole));
         assert_eq!(twice.left_ms(start + 1_000 + whole - 1), Some(1));
         assert_eq!(twice.left_ms(start + 1_000 + whole), None);
@@ -834,6 +873,8 @@ mod tests {
             standing(root.path(), "wallet-qa"),
             Some(Standing {
                 sha256: flow_document_sha256(&flow),
+                title: "Wallet QA".to_string(),
+                policy: "dry",
                 money: false,
                 about: about(
                     "wallet-qa",
@@ -841,18 +882,89 @@ mod tests {
                     &["shop.example.com"],
                     &["com.example.wallet"]
                 ),
+                hidden: 0,
             })
         );
         assert_eq!(
             standing(root.path(), "wallet-top-up"),
             Some(Standing {
                 sha256: flow_document_sha256(&spending),
+                title: "Wallet top-up".to_string(),
+                policy: "guarded",
                 money: true,
                 about: about("wallet-top-up", 3, &["shop.example.com"], &[]),
+                hidden: 0,
             })
         );
         assert_eq!(standing(root.path(), "plain-steps"), None);
         assert_eq!(standing(root.path(), "nothing"), None);
+    }
+
+    /// The card of a request and the list read a document the same way: one
+    /// reading ([`Standing::of`]) gives the hash, the title, whether it may
+    /// spend and which document it is, to both. The title is the document's
+    /// own word — shown by the card's rule, its letters that draw nothing
+    /// counted — and a document that gives none is named by its file.
+    #[test]
+    fn a_request_and_the_list_say_the_same_of_one_document() {
+        let spending = spending_document();
+        let marked = flow_document().replace("# Wallet QA", "# Wallet\u{200B}\u{202E} QA");
+        let untitled = flow_document().replace("# Wallet QA\n\n", "");
+        let (root, workspace) = stand(&[
+            ("wallet-top-up", &spending),
+            ("marked", &marked),
+            ("untitled", &untitled),
+        ]);
+        for slug in ["wallet-top-up", "marked", "untitled"] {
+            let stands = standing(root.path(), slug).expect("a Flow");
+            let request = asked(
+                root.path(),
+                Some(&workspace),
+                &[("name", slug), ("every", "daily")],
+            )
+            .expect("read");
+            let held = request.job.asked.as_ref().expect("who asked");
+            assert_eq!(
+                (
+                    held.flow_sha256.as_str(),
+                    request.flow_name.as_str(),
+                    request.policy,
+                    request.money,
+                    &request.about,
+                    request.hidden,
+                ),
+                (
+                    stands.sha256.as_str(),
+                    stands.title.as_str(),
+                    stands.policy,
+                    stands.money,
+                    &stands.about,
+                    stands.hidden,
+                ),
+                "{slug}"
+            );
+        }
+        let marked = standing(root.path(), "marked").expect("a Flow");
+        assert_eq!((marked.title.as_str(), marked.hidden), ("Wallet QA", 2));
+        assert_eq!(
+            standing(root.path(), "untitled").expect("a Flow").title,
+            "untitled"
+        );
+        // One reading, in the source too: the card's road parses no Flow and
+        // reads no title of its own.
+        let source = include_str!("schedule.rs");
+        let road = source
+            .split_once("pub(crate) fn read(")
+            .and_then(|(_, rest)| rest.split_once("\nconst fn spends("))
+            .map(|(road, _)| road)
+            .expect("the card's road");
+        assert!(
+            road.contains("Standing::of(&slug, &text)")
+                && !road.contains("parse_flow(")
+                && !road.contains("recipe_title(")
+                && !road.contains("About::read("),
+            "the card's road reads the document a second way"
+        );
     }
 
     /// Which document a card is about is read off the document itself: its

@@ -324,6 +324,8 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
                 flow_changed,
                 flow_money: waits_on.as_ref().is_some_and(|one| one.money),
                 flow_about: waits_on.as_ref().map(|one| one.about.clone()),
+                flow_title: waits_on.as_ref().map(|one| one.title.clone()),
+                flow_hidden: waits_on.as_ref().map(|one| one.hidden),
                 flow_stands: waits_on.map(|one| one.sha256),
                 automation,
             }
@@ -343,7 +345,7 @@ pub(crate) fn list_automations(state: State<'_, AppState>) -> Vec<AutomationRow>
 pub(crate) fn save_automation(
     state: State<'_, AppState>,
     automation: Automation,
-) -> Result<Vec<AutomationRow>, String> {
+) -> Result<Vec<AutomationRow>, AutomationRefusal> {
     // What the page says of an approval is never read: the door decides what
     // of the stored job's approval this save keeps (`Approval::FromForm`).
     let root = state.local_data_root();
@@ -365,6 +367,44 @@ pub(crate) enum Approval<'a> {
     /// [`approval_a_form_save_keeps`] answers from the stored job, reading
     /// its Flow's document through this (`flow_standing`).
     FromForm(&'a dyn Fn(&str) -> Option<computer_use::recipes::schedule::Standing>),
+}
+
+/// What a refused press on the automation screen is answered with: the
+/// window's sentence, and — for a refusal that screen says in the language
+/// the person chose (`AUTOMATION_REFUSALS`, ui/shell-settings.js) — the code
+/// it is said by. A refusal with no code is said as the window wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct AutomationRefusal {
+    pub said: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+}
+
+/// The refusals the automation screen says in its own words, each beside the
+/// code the screen finds those words by.
+pub(crate) const REFUSALS_THE_SCREEN_SAYS: [(&str, &str); 3] = [
+    (
+        computer_use::recipes::schedule::FLOW_CHANGED_UNDER_QUESTION,
+        "flow_changed_under_question",
+    ),
+    (
+        computer_use::recipes::schedule::FLOW_NOT_A_FLOW,
+        "flow_not_a_flow",
+    ),
+    (WAITING_JOB_STAYS_A_FLOW, "waiting_job_stays_a_flow"),
+];
+
+impl From<String> for AutomationRefusal {
+    /// The doors behind these commands refuse in the window's sentences
+    /// (`save_automation_in`, `approve_automation_flow_in`); the code is found
+    /// here, where the answer leaves for the page.
+    fn from(said: String) -> Self {
+        let code = REFUSALS_THE_SCREEN_SAYS
+            .iter()
+            .find(|(sentence, _)| *sentence == said)
+            .map(|(_, code)| *code);
+        Self { said, code }
+    }
 }
 
 /// What a waiting job's save is refused with when it would stop being a job
@@ -439,7 +479,7 @@ pub(crate) fn approve_automation_flow(
     state: State<'_, AppState>,
     id: String,
     seen: String,
-) -> Result<Vec<AutomationRow>, String> {
+) -> Result<Vec<AutomationRow>, AutomationRefusal> {
     let root = state.local_data_root();
     approve_automation_flow_in(
         state.config_root(),

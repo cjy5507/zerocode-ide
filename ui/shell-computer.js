@@ -654,15 +654,11 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
     ),
     // A Flow whose walk may spend money (policy guarded): the card says it in plain words, not by the policy's name alone —
     // and before anything the document says of itself, which is as long as the document makes it.
-    args.money === true
-      ? t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다.")
-      : "",
+    flowMoneyText(args.money),
     // Which document this is, beyond the title it gives itself.
     flowAboutText(args.about),
     // Letters that draw nothing, left out of those names by the backend: the card says how many there were.
-    args.hidden > 0
-      ? t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count: args.hidden })
-      : "",
+    flowHiddenText(args.hidden),
   ].filter(Boolean).join(" "),
   "computer.cover.gone": (args) => t("computer.cover.gone", "누르려던 창이 화면에 없습니다(최소화했거나 다른 데스크톱에 있음). 창이 보이게 한 뒤 「다 했어요」를 눌러 주세요.", args),
 });
@@ -696,6 +692,24 @@ function flowAboutText(about) {
     hosts ? t("auto.asked.aboutHosts", "문서가 적은 사이트 {{count}}곳: {{names}}", hosts) : "",
     apps ? t("auto.asked.aboutApps", "문서가 적은 앱 {{count}}개: {{names}}", apps) : "",
   ].filter(Boolean).join(" · ") + ".";
+}
+
+/* That walking a Flow may spend money, as a schedule's card and 「다시 승인」
+ * both say it — one sentence, written here once, so the two cannot come to
+ * say it differently. Nothing for a Flow that spends nothing. */
+function flowMoneyText(money) {
+  return money === true
+    ? t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다.")
+    : "";
+}
+
+/* How many letters that draw nothing the backend left out of the names a card
+ * or 「다시 승인」 shows — said by both, written here once. Nothing when it
+ * left none out. */
+function flowHiddenText(count) {
+  return count > 0
+    ? t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count })
+    : "";
 }
 
 function computerHandoffText(handoff) {
