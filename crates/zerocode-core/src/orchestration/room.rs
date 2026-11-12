@@ -13,20 +13,20 @@
 //!
 //! 1. **Mail and nothing else.** A room answers [`ROOM_VERBS`] only. A task,
 //!    a worker, a gate or a handover needs a run somebody coordinates, so a
-//!    verb that names a room for any of them is refused ([`refused_here`]).
+//!    verb that names a room for any of them is refused (`refused_here`).
 //!    A room has no chair, and no chair must not read as "anybody may open
 //!    work".
 //! 2. **Nobody speaks as the room.** In a run with no coordinator record the
 //!    ledger signs a leader-shaped pane as `run:` — the operator voice a
 //!    worker obeys. A room has no coordinator record by design, so in a room
 //!    every pane signs and reads as its own `pane:` address
-//!    ([`super::sender`]), and a letter to the room's `run:` address is
-//!    refused ([`send_allowed`]).
+//!    (`sender`), and a letter to the room's `run:` address is
+//!    refused (`send_allowed`).
 //! 3. **A worker's letter goes through its coordinator.** A worker works from
 //!    one briefing, and a letter from a pane beside it is a request its
 //!    coordinator never saw. So a room letter to a pane working as a worker
 //!    is filed in that run's `run:` inbox, saying whom it was for
-//!    ([`worker_letter`]), and refused when that run has no live coordinator
+//!    (`worker_letter`), and refused when that run has no live coordinator
 //!    to read it.
 //! 4. **The person's switch.** The window says whether 「에이전트 판끼리 편지」
 //!    is on ([`super::Launcher::peer_mail_on`]); off, a room letter is

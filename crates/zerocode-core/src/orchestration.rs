@@ -16784,7 +16784,7 @@ pub trait Launcher {
     }
 
     /// The agent panes the window has open in the project rooted at
-    /// `project`, for `peers` ([`room::peers`]). `None` is nobody looked, on
+    /// `project`, for `peers` (`room::peers`). `None` is nobody looked, on
     /// [`Self::presence`]'s rule; the window holds the rows to that project.
     fn live_panes(&self, _project: Option<&str>) -> Option<Vec<room::PeerPane>> {
         None
