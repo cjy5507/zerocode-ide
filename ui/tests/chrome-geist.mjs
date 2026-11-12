@@ -576,8 +576,10 @@ async function testTabMenuFold(browser, origin, ok) {
       };
     });
     const at1000 = await read();
-    ok("at 1000 px the tabs fold to marks and no tab menu stands (시안 17)",
-      !at1000.opener && at1000.tabs.length === 2 && at1000.tabs.every((tab) => tab.shown), JSON.stringify(at1000));
+    // Since 2026-11-12 a strip of two or more tabs keeps its menu at every width: the way to every tab by name.
+    ok("at 1000 px the tabs fold to marks and the 「탭 N」 menu stands whole after them (시안 17)",
+      at1000.opener && at1000.openerWhole && at1000.openerWords === "탭 2" && at1000.tabs.length === 2 && at1000.tabs.every((tab) => tab.shown),
+      JSON.stringify(at1000));
 
     await page.setViewportSize({ width: 760, height: 900 });
     await frames(page);

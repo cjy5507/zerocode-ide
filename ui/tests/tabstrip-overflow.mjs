@@ -11,7 +11,10 @@ import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.
  * the strip never scrolled (scrollWidth == clientWidth) and the controls on
  * the right stood 9600px off screen; even five tabs left the bar at 1083px
  * once the window narrowed to 1024 or less. These are the numbers the bar must
- * now keep at every width and tab count. */
+ * now keep at every width and tab count. 2026-11-12 (「많아지면 문제임」) added
+ * what a crowded strip must still give: a name for each tab it names, the ＋
+ * on screen, a close that lands on its own tab, and a waiting tab that says so
+ * from out of sight. */
 
 const WIDTHS = [1280, 1024, 800, 720];
 const COUNTS = [5, 20, 60];
@@ -28,16 +31,18 @@ async function grow(page, from, to) {
 }
 
 /* Everything one case is judged on. A tab counts as seen only when its box
- * lies inside the strip clear of whichever fade is armed on that side. */
+ * lies inside the tab list — the strip's scroller — clear of whichever fade is
+ * armed on that side. */
 function measure() {
   const strip = el("tabstrip");
+  const list = strip.querySelector(".tab-list");
   const box = (node) => node.getBoundingClientRect();
-  const fade = parseFloat(getComputedStyle(strip).scrollPaddingLeft) || 0;
+  const fade = parseFloat(getComputedStyle(list).scrollPaddingLeft) || 0;
   const seen = (node) => {
-    const view = box(strip);
+    const view = box(list);
     const it = box(node);
-    const leftFade = strip.scrollLeft > 0 ? fade : 0;
-    const rightFade = strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1 ? fade : 0;
+    const leftFade = list.scrollLeft > 0 ? fade : 0;
+    const rightFade = list.scrollLeft + list.clientWidth < list.scrollWidth - 1 ? fade : 0;
     return it.left >= view.left + leftFade - 1 && it.right <= view.right - rightFade + 1;
   };
   const nodes = [...strip.querySelectorAll(".tab")];
@@ -46,8 +51,17 @@ function measure() {
     setActiveTab(pick.dataset.tab);
     shown[name] = seen(strip.querySelector(`.tab[data-tab="${CSS.escape(pick.dataset.tab)}"]`));
   }
+  const root = getComputedStyle(document.documentElement);
+  const token = (name) => root.getPropertyValue(name).trim();
   const right = box(document.querySelector(".titlebar-right"));
   const label = nodes[0].querySelector(".tab-label");
+  const nameOf = (node) => node.querySelector(".tab-label");
+  // Named: neither the window's fold nor the crowd's has taken its name off the eye.
+  const named = nodes.filter((node) => !node.hasAttribute("data-folded") && getComputedStyle(nameOf(node)).clipPath === "none");
+  const folded = nodes.filter((node) => node.hasAttribute("data-folded"));
+  const inView = (node) => box(node).left >= box(list).left - 1 && box(node).right <= box(list).right + 1;
+  const add = strip.querySelector(".tab-new");
+  const addShown = getComputedStyle(add).display !== "none";
   return {
     tabs: nodes.length,
     barHeight: Math.round(box(document.querySelector(".titlebar")).height),
@@ -57,22 +71,37 @@ function measure() {
     pageWidth: document.documentElement.scrollWidth,
     viewport: innerWidth,
     stageTop: Math.round(box(document.querySelector(".stage")).top),
-    scrolls: strip.scrollWidth > strip.clientWidth,
-    narrowest: Math.round(Math.min(...nodes.map((node) => box(node).width))),
-    minWidth: parseFloat(getComputedStyle(nodes[0]).minWidth),
-    // A narrow strip folds the tabs not on stage to their mark (t-78107, 시안 17); the one on stage keeps the floor.
-    floor: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--tab-min-width")),
+    scrolls: list.scrollWidth > list.clientWidth,
+    // The window's own folds (t-78107, 시안 17), read off the tokens they fold at.
+    windowFold: matchMedia(`(max-width: ${token("--fold-sidebar-rail")})`).matches,
+    menuFold: matchMedia(`(max-width: ${token("--fold-tab-menu")})`).matches,
+    floor: parseFloat(token("--tab-min-width")),
+    crowdWidth: parseFloat(token("--tab-crowd-width")),
+    namedNarrowest: named.length ? Math.round(Math.min(...named.map((node) => box(node).width))) : null,
+    // Each name the strip shows is whole, or has at least three Hangul characters' room.
+    namesKept: named.every((node) => nameOf(node).scrollWidth <= nameOf(node).clientWidth + 1 || box(nameOf(node)).width >= 36),
+    crowdFolded: folded.length,
+    foldedWidths: [...new Set(folded.map((node) => Math.round(box(node).width)))],
+    // The 1000 px fold: every tab off stage keeps its spoken name but not its place on the eye.
+    windowFolded: nodes.filter((node) => !node.classList.contains("is-active"))
+      .every((node) => getComputedStyle(nameOf(node)).clipPath !== "none"),
     front: Math.round(box(strip.querySelector(".tab.is-active")).width),
-    narrow: strip.getBoundingClientRect().width <= 560,
-    folded: nodes.filter((node) => !node.classList.contains("is-active"))
-      .every((node) => getComputedStyle(node.querySelector(".tab-label")).clipPath !== "none"),
-    // Under 760 px the strip is the tab in front and one menu of them all (시안 17).
-    menu: getComputedStyle(strip.querySelector(".tab-menu")).display !== "none",
+    // A tab sized to its name may stand under the floor when the whole name fits in less.
+    frontNameWhole: ((name) => name.scrollWidth <= name.clientWidth + 1)(strip.querySelector(".tab.is-active .tab-label")),
     frontOnly: nodes.filter((node) => node.getClientRects().length > 0).length === 1,
     frontClose: box(strip.querySelector(".tab.is-active").querySelector(".tab-close, .tab-pin")).width > 0,
     ellipsis: getComputedStyle(label).textOverflow === "ellipsis",
-    closeKept: nodes.every((node) => node.querySelector(".tab-close, .tab-pin") &&
-      box(node.querySelector(".tab-close, .tab-pin")).width > 0),
+    closeKept: nodes.filter((node) => !node.hasAttribute("data-folded")).every((node) =>
+      node.querySelector(".tab-close, .tab-pin") && box(node.querySelector(".tab-close, .tab-pin")).width > 0),
+    // A press on the centre of a close lands on that close's own tab — in a crowded strip it stood 8 px past the
+    // tab's edge, and the neighbour took the press (2026-11-12).
+    closeOwn: named.filter(inView).every((node) => {
+      const it = box(node.querySelector(".tab-close, .tab-pin"));
+      return document.elementFromPoint(it.left + it.width / 2, it.top + it.height / 2)?.closest(".tab") === node;
+    }),
+    // The ＋ stands after the list, on screen, never scrolled off with the tabs (it stood 685 px past the strip at
+    // twenty tabs in a 1440 px window).
+    addOnScreen: addShown ? box(add).left >= box(strip).left - 1 && box(add).right <= box(strip).right + 1 && box(add).right <= innerWidth : null,
     shown,
   };
 }
@@ -107,16 +136,20 @@ export async function testTabstripOverflow(browser, origin, ok) {
             m.rightInside && m.rightWidth === base.rightWidth, JSON.stringify(m));
           ok(`the tab in front is never behind the fade (${tag})`,
             m.shown.last && m.shown.first && m.shown.middle, JSON.stringify(m.shown));
-          if (m.menu) {
-            ok(`under 760 px the strip is the tab in front, at its floor, and the menu of every tab (${tag})`,
-              m.frontOnly && m.front >= m.floor && m.ellipsis && m.frontClose, JSON.stringify(m));
-          } else if (m.scrolls && !m.narrow) {
-            ok(`tabs shrink to their floor before the strip scrolls (${tag})`,
-              m.narrowest === m.minWidth && m.ellipsis && m.closeKept, JSON.stringify(m));
-          } else if (m.narrow) {
-            ok(`a narrow strip folds the tabs not on stage to their mark and keeps the floor for the one in front (${tag})`,
-              m.folded && m.front >= m.floor && m.ellipsis && m.closeKept, JSON.stringify(m));
+          if (m.menuFold) {
+            ok(`under 760 px the strip is the tab in front, at its floor or with its whole name, and the menu of every tab (${tag})`,
+              m.frontOnly && (m.front >= m.floor || m.frontNameWhole) && m.ellipsis && m.frontClose, JSON.stringify(m));
+          } else if (m.windowFold) {
+            ok(`a 1000 px window folds the tabs not on stage to their mark and keeps the floor for the one in front (${tag})`,
+              m.windowFolded && (m.front >= m.floor || m.frontNameWhole) && m.ellipsis && m.closeKept, JSON.stringify(m));
+          } else if (m.scrolls || m.crowdFolded > 0) {
+            ok(`a crowded strip keeps each name it shows at the floor or wider and folds its quiet tabs to their mark first (${tag})`,
+              m.namedNarrowest >= m.floor && m.namesKept && m.crowdFolded > 0 && m.foldedWidths.every((one) => one === m.crowdWidth) &&
+                m.ellipsis && m.closeKept && (!m.scrolls || m.crowdFolded === m.tabs - 1),
+              JSON.stringify(m));
           }
+          ok(`the ＋ stands on screen after the tabs (${tag})`, m.addOnScreen === true, JSON.stringify(m));
+          ok(`a press on a close lands on its own tab (${tag})`, m.closeOwn, JSON.stringify(m));
           if (count === 60 && (width === 800 || width === 720)) {
             await page.screenshot({ path: `${shots}/${theme}-60-${width}.png` });
           }
@@ -133,23 +166,23 @@ export async function testTabstripOverflow(browser, origin, ok) {
       await page.keyboard.press("Shift+Tab");
       await page.keyboard.up("Control");
       const keyed = await page.evaluate(() => {
-        const strip = el("tabstrip");
-        const node = strip.querySelector(".tab.is-active");
-        const fade = parseFloat(getComputedStyle(strip).scrollPaddingLeft);
+        const list = el("tabstrip").querySelector(".tab-list");
+        const node = list.querySelector(".tab.is-active");
+        const fade = parseFloat(getComputedStyle(list).scrollPaddingLeft);
         const it = node.getBoundingClientRect();
-        const view = strip.getBoundingClientRect();
-        return { moved: node !== strip.querySelector(".tab"), left: it.left - view.left, right: view.right - it.right, fade };
+        const view = list.getBoundingClientRect();
+        return { moved: node !== list.querySelector(".tab"), left: it.left - view.left, right: view.right - it.right, fade };
       });
       ok(`Control+Shift+Tab lands on a tab clear of the fade (${theme})`,
         keyed.moved && keyed.left >= keyed.fade - 1 && keyed.right >= -1, JSON.stringify(keyed));
 
       // A repaint with the same tab in front keeps where the person scrolled.
       const kept = await page.evaluate(() => {
-        const strip = el("tabstrip");
-        strip.scrollLeft = 300;
-        const before = strip.scrollLeft;
+        const list = el("tabstrip").querySelector(".tab-list");
+        list.scrollLeft = 300;
+        const before = list.scrollLeft;
         renderTabs();
-        return { before, after: strip.scrollLeft };
+        return { before, after: list.scrollLeft };
       });
       ok(`the strip's scroll survives a repaint (${theme})`, kept.after === kept.before, JSON.stringify(kept));
 
@@ -157,13 +190,14 @@ export async function testTabstripOverflow(browser, origin, ok) {
       // neighbour to the left.
       const drag = await page.evaluate(() => {
         const strip = el("tabstrip");
+        const list = strip.querySelector(".tab-list");
         const all = strip.querySelectorAll(".tab");
         // A tab from the middle of sixty, brought in front and scrolled to
-        // the strip's middle, so it and its left neighbour are both in reach.
+        // the list's middle, so it and its left neighbour are both in reach.
         setActiveTab(all[30].dataset.tab);
         const it = all[30].getBoundingClientRect();
-        const view = strip.getBoundingClientRect();
-        strip.scrollLeft += it.left + it.width / 2 - (view.left + view.width / 2);
+        const view = list.getBoundingClientRect();
+        list.scrollLeft += it.left + it.width / 2 - (view.left + view.width / 2);
         const node = strip.querySelector(".tab.is-active");
         const prev = node.previousElementSibling;
         const a = node.getBoundingClientRect();
@@ -181,6 +215,32 @@ export async function testTabstripOverflow(browser, origin, ok) {
       }, drag.id);
       ok(`dragging a tab still reorders the strip at sixty tabs (${theme})`,
         order.count === 60 && order.at === drag.was - 1, JSON.stringify({ ...order, drag }));
+      // A tab that waits on the person, scrolled out of sight, still says so: the menu after the list wears the
+      // you-ring and its tip says why, and the ring goes once the tab is in view again (2026-11-12).
+      await page.setViewportSize({ width: 1280, height: 860 });
+      await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+      const away = await page.evaluate(async () => {
+        const tell = (name, payload) => { for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload }); };
+        const term = await openTermTab({ placement: "tab" });
+        paneAgents.set(term, "claude");
+        tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: "s-out-of-sight" });
+        setActiveTab(el("tabstrip").querySelector(".tab").dataset.tab);
+        renderTabs();
+        await window.__PAINTED__();
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        const strip = el("tabstrip");
+        const list = strip.querySelector(".tab-list");
+        const menu = strip.querySelector(".tab-menu");
+        const ringShown = () => getComputedStyle(menu.querySelector(".tab-menu-ring")).display !== "none";
+        const seen = { waiting: Boolean(list.querySelector(".tab.is-waiting")), far: menu.classList.contains("is-waiting"), ring: ringShown(), tip: menu.dataset.tip };
+        list.scrollLeft = list.scrollWidth;
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        seen.near = menu.classList.contains("is-waiting");
+        seen.ringNear = ringShown();
+        return seen;
+      });
+      ok(`a tab that waits on you out of sight rings the tab menu, and stops once it is in view (${theme})`,
+        away.waiting && away.far && away.ring && away.tip !== "이 판의 탭 모두" && !away.near && !away.ringNear, JSON.stringify(away));
       ok(`the crowded strip raises no browser errors (${theme})`, faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();

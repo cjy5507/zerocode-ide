@@ -947,8 +947,8 @@
   --tabstrip-height: 32px;
 
   /* A tab is padded by 6px, not 12 (`px-1.5`,
-   * `file-preview-BNViqF3u.js:4851`). At `--space-3` the label inside an
-   * 88px-minimum tab lost a quarter of its measure to gutters, which is why
+   * `file-preview-BNViqF3u.js:4851`). At `--space-3` the label inside a
+   * minimum-width tab lost a quarter of its measure to gutters, which is why
    * names truncated here that do not truncate in Orca. */
   --tab-inset: 6px;
 
@@ -956,10 +956,15 @@
    * stop at `1.5rem`, :24493~24506). A strip that simply clips reads as
    * broken; one that fades reads as continuing. */
   --tab-fade: 1.5rem;
-  --tab-min-width: 88px;
-  --tab-max-width: 280px;
-  --tab-basis: 180px;
-  --tab-basis-wide: 220px;
+  /* A tab is as wide as its name, between these. The floor keeps a name: at
+   * 88 px a tab's mark, dot, age and close took 90 px of it and the name got
+   * none (2026-11-12, twelve tabs in a 1440 px window); at 120 px about four
+   * Hangul characters stand. The cap is where a long name ellipsizes. */
+  --tab-min-width: 120px;
+  --tab-max-width: 200px;
+  /* A quiet tab folded to its mark in a crowded strip (`fitStrip`): the 12 px
+   * glyph with a press target around it. */
+  --tab-crowd-width: 32px;
 
   /* The thicker mark that says "this one" — under the active tab, down the
    * edge of a changed line. One measure so those never disagree. Orca marks

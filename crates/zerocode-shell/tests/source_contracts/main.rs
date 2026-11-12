@@ -2817,15 +2817,16 @@ mod tests {
                 && nodes.contains("gap: var(--agent-graph-team-gap)"),
             "the graph stopped spending its team geometry:\n{nodes}"
         );
-        // The active tab is a lit panel, not just brighter text. Titanium uses
-        // a 5% lift and a 42% marker: enough to navigate, quieter than state.
-        // The whole rule, not a block lookup: `.tab.is-active` also appears
-        // inside the `:hover` group above it, and a prefix search finds that
-        // one first.
+        // The active tab is a lit panel, not just brighter text, under a 42%
+        // marker: enough to navigate, quieter than state. The fill is the
+        // row-selected veil rather than a colour mixed into the deck — under
+        // blur mode the bar is glass a step lighter than the deck, and the
+        // deck mix made the tab in front darker than its neighbours
+        // (2026-11-12). The whole rule, not a block lookup: `.tab.is-active`
+        // also appears inside the `:hover` group above it, and a prefix
+        // search finds that one first.
         assert!(
-            styles.contains(
-                ".tab.is-active {\n  background: color-mix(in srgb, var(--ink-chalk) 5%, var(--surface-deck));\n}"
-            ),
+            styles.contains(".tab.is-active {\n  background: var(--row-selected);\n}"),
             "the active tab has no fill of its own again"
         );
         let mark = block_after_css(&styles, ".tab.is-active::after {");

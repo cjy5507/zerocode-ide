@@ -162,6 +162,7 @@ body button {
 }
 
 .sr,
+.tab[data-folded] .tab-label,
 .knowledge-view.is-tier-compact .knowledge-stat,
 .knowledge-view.is-tier-tiny .knowledge-stat {
   position: absolute;
@@ -416,7 +417,12 @@ kbd {
   display: none;
 }
 
+/* One line, whatever the tabs beside it ask of the bar: as a flex item it
+ * gave up width to a crowded strip and broke under the word mark (a 1440 px
+ * window with seven tabs stood it two lines tall, 19 → 37 px). */
 .branch {
+  flex: none;
+  white-space: nowrap;
   font-size: var(--text-2xs);
   color: var(--ink-mist);
 }
@@ -440,6 +446,9 @@ kbd {
   align-self: stretch;
   min-width: 0;
   margin-left: var(--space-3);
+  /* The strip's own end is a handle — it carries the drag surface — so a
+   * strip full of tabs still leaves the window something to be held by. */
+  padding-right: var(--space-5);
   background: none;
   border-bottom: 0;
 }
@@ -8167,8 +8176,12 @@ body.is-dragging-pane {
 }
 
 /* The leaf's tab strip. Every measure is Orca's own, read out of its bundle
- * (docs/reverse/orca-ui-inventory.md 1-e). Overflow is a scroll and nothing
- * else — Orca has no tab menu, and neither does this. */
+ * (docs/reverse/orca-ui-inventory.md 1-e). The strip itself does not scroll:
+ * its tab list does, and the menu, the pill and the ＋ stand after the list
+ * (t-88672), so a strip of sixty tabs never carries the way to open a
+ * sixty-first off screen or under the fade (2026-11-12, 「많아지면 문제임」:
+ * the ＋ stood 685 px past the strip's edge at twenty tabs in a 1440 px
+ * window). */
 .tabstrip {
   display: flex;
   align-items: stretch;
@@ -8180,34 +8193,46 @@ body.is-dragging-pane {
    * as a band between two surfaces rather than as the top of the document. */
   border-top: var(--rule-width) solid var(--edge-rule);
   border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+/* The tablist: the tabs' owner for a screen reader and the strip's one
+ * scroller. It is as wide as its tabs and gives way to the controls after it.
+ * `position: relative` makes it the tabs' offset parent, which is what
+ * `paintStripEdges` reads them against. */
+.tab-list {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  flex: 0 1 auto;
+  min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
-  /* The fade's width, as the strip's own scroll padding: a tab brought into
+  /* The fade's width, as the list's own scroll padding: a tab brought into
    * view (`revealActiveTab`) stops clear of the mask, not under it. */
   scroll-padding-inline: var(--tab-fade);
-  /* What overflows FADES rather than being cut. With the scrollbar hidden
-   * (below) a clipped strip gives no sign that there is more to the right —
-   * the last tab simply ends mid-word and reads as a rendering fault. The
-   * stop is Orca's own 1.5rem, and the mask is only armed on the side that
-   * actually overflows by being symmetric: at scroll 0 the left fade covers
-   * nothing. */
+  /* What overflows FADES rather than being cut. With the scrollbar hidden a
+   * clipped list gives no sign that there is more — the last tab simply ends
+   * mid-word and reads as a rendering fault. The stop is Orca's own 1.5rem,
+   * armed only on a side that has tabs past it (`paintStripEdges`): a fade
+   * over a list scrolled to its start dimmed the first tab's state dot. */
   mask-image: linear-gradient(
     to right,
     transparent 0,
-    #000 var(--tab-fade),
-    #000 calc(100% - var(--tab-fade)),
+    #000 var(--tab-fade-start, 0px),
+    #000 calc(100% - var(--tab-fade-end, 0px)),
     transparent 100%
   );
 }
 
-/* The tablist is the tabs' owner for a screen reader and nothing to the eye:
- * its tabs lay out as the strip's own items, with the menu, the pill and the
- * new-tab button after them (t-88672). */
-.tab-list {
-  display: contents;
+.tab-list.is-scrolled {
+  --tab-fade-start: var(--tab-fade);
 }
 
-.tabstrip::-webkit-scrollbar {
+.tab-list.has-more {
+  --tab-fade-end: var(--tab-fade);
+}
+
+.tab-list::-webkit-scrollbar {
   display: none;
 }
 
@@ -8223,7 +8248,11 @@ body.is-dragging-pane {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex: 1 1 var(--tab-basis);
+  /* As wide as its name, up to the cap, and shrinking to the floor before the
+   * list scrolls (2026-11-12). Sharing the strip out evenly gave a 2560 px
+   * window seven 280 px tabs with their names in the first third, and a
+   * 1440 px window nine 115 px tabs with one letter of name each. */
+  flex: 0 1 auto;
   min-width: var(--tab-min-width);
   max-width: var(--tab-max-width);
   /* 6px, not 12 (`px-1.5`). At `--space-3` a quarter of an 88px minimum tab
@@ -8243,21 +8272,18 @@ body.is-dragging-pane {
   user-select: none;
 }
 
-@media (min-width: 1280px) {
-  .tab {
-    flex-basis: var(--tab-basis-wide);
-  }
-}
-
 .tab:hover,
 .tab.is-active {
   color: var(--ink-chalk);
 }
 
-/* The active tab is a lit panel, not just brighter text. Five percent of the
- * titanium ink is enough to lift it while keeping a long strip continuous. */
+/* The active tab is a lit panel, not just brighter text — the row-selected
+ * veil every list in the window uses for "this one". A veil, not a colour
+ * mixed into the deck: under blur mode the title bar is glass a step lighter
+ * than the deck, and an opaque deck mix made the tab in front the one tab
+ * DARKER than its neighbours (2026-11-12 capture: 21 against 25). */
 .tab.is-active {
-  background: color-mix(in srgb, var(--ink-chalk) 5%, var(--surface-deck));
+  background: var(--row-selected);
 }
 
 /* The active tab is marked by a rule beneath it, and on the lane's tab that
@@ -8279,8 +8305,10 @@ body.is-dragging-pane {
   background: var(--lane, var(--ink-chalk));
 }
 
+/* The name sizes to its words, so the tab is as wide as what it says; the
+ * close control takes whatever slack the floor leaves. */
 .tab-label {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8334,13 +8362,20 @@ body.is-dragging-pane {
  * not a mark beside a name in a dense column — it is the whole of what a tab
  * says about state, read across a strip at a glance, and 5px was under the
  * size at which a colour reads as a colour. */
-.tab-dot {
+.tab-dot,
+/* The tab menu's ring is the same mark, saying the same sentence for a tab
+ * that is out of sight: one waits on you behind the fold or the scroll. */
+.tab-menu-ring {
   flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--lane, var(--ink-mist));
   visibility: hidden;
+}
+
+.tab-menu:not(.is-waiting) .tab-menu-ring {
+  display: none;
 }
 
 .tab.is-waiting .tab-dot,
@@ -8374,7 +8409,9 @@ body.is-dragging-pane {
   background: var(--signal-ready);
 }
 
-.tab.is-waiting .tab-dot {
+.tab.is-waiting .tab-dot,
+.tab-menu.is-waiting .tab-menu-ring {
+  visibility: visible;
   background: none;
   box-shadow: inset 0 0 0 var(--status-dot-ring) var(--signal-you);
 }
@@ -8414,16 +8451,28 @@ body.is-dragging-pane {
   }
 }
 
-/* The age rides right after the name, so the label sizes to its words and
- * the close control takes the slack. `has-age` is the paint's word for it —
- * a `:has()` here was asked again on every tab of the strip each repaint. */
-.tab.has-age .tab-label {
-  flex: 0 1 auto;
+/* A crowded strip folds its quiet tabs to their mark (2026-11-12, 「많아지면
+ * 문제임」). When every tab already stands at the floor and the list still
+ * overflows, `fitStrip` folds the tabs nothing is happening in — no work, no
+ * wait, no bell, no unsaved edit, not pinned, not coloured, not on stage —
+ * the farthest from the tab on stage first, so the tabs that are saying
+ * something keep their names. The name stays the tab's spoken name and its
+ * tip; the 「탭 N」 menu lists it by name. Past the window's own fold
+ * (`--fold-sidebar-rail`) the fold above already took every name off stage. */
+.tab[data-folded] {
+  flex: none;
+  justify-content: center;
+  width: var(--tab-crowd-width);
+  min-width: 0;
+  padding: 0;
+}
+
+.tab[data-folded] :is(.tab-dot, .tab-age, .tab-close) {
+  display: none;
 }
 
 .tab-age {
   flex: none;
-  margin-inline-end: auto;
   color: var(--ink-mist);
   font: var(--type-label-12-mono);
   font-variant-numeric: tabular-nums;
@@ -8433,7 +8482,8 @@ body.is-dragging-pane {
   display: none;
 }
 
-/* The close control is quiet until it can be used — but it KEEPS ITS PLACE.
+/* The close control is quiet until it can be used — but it KEEPS ITS PLACE,
+ * at the tab's end, inside the tab.
  *
  * `opacity: 0` on a control that is `display`-sized by its own glyph still
  * reserves the box, and this one did; what did not hold was the colour. Orca
@@ -8448,6 +8498,7 @@ body.is-dragging-pane {
   flex: none;
   width: 16px;
   height: 16px;
+  margin-inline-start: auto;
   padding: 0;
   border: 0;
   border-radius: var(--radius-sm);
@@ -8459,6 +8510,21 @@ body.is-dragging-pane {
   opacity: 0;
 }
 
+/* A tab that tells its agent's age shows the age where the close would be,
+ * and the close over it when the tab is pointed at or reached by the keyboard
+ * — one place at the tab's end, every tab alike (2026-11-12, 「x 클릭등
+ * 불일치」: the close showed on the tab in front and nowhere else, and in a
+ * crowded strip its box stood 8 px past the tab's edge, so a press on its
+ * centre landed on the neighbour). */
+.tab.has-age .tab-close {
+  position: absolute;
+  inset-inline-end: var(--tab-inset);
+}
+
+.tab.has-age:is(:hover, :focus-within) .tab-age {
+  visibility: hidden;
+}
+
 /* The pin, where the close would be — always visible: the point of the
  * glyph is telling a pinned tab from a plain one at a glance, and Orca
  * draws it unconditionally (Pin, size-3, muted). */
@@ -8466,6 +8532,7 @@ body.is-dragging-pane {
   display: flex;
   flex: none;
   align-items: center;
+  margin-inline-start: auto;
   padding: 0 2px;
   color: var(--ink-mist);
 }
@@ -8476,7 +8543,7 @@ body.is-dragging-pane {
 }
 
 .tab:hover .tab-close,
-.tab.is-active .tab-close {
+.tab:focus-within .tab-close {
   opacity: 1;
 }
 
@@ -8573,6 +8640,13 @@ body.is-dragging-pane {
   transform: rotate(90deg);
 }
 
+/* A strip of two or more tabs keeps its menu at any width (2026-11-12): the
+ * way to every tab by name — the folded, the scrolled-off — stands after the
+ * list, beside the ＋, never under the fade. */
+.tabstrip.has-many .tab-menu {
+  display: flex;
+}
+
 /* 2차 A (t-78107, 시안 17): under `--fold-tab-menu` the strip is the tab on
  * stage and its menu; under `--fold-tab-only` the + folds into that menu as
  * its last row and the title bar gives the strip the room its other controls
@@ -8601,6 +8675,11 @@ body.is-dragging-pane {
 @media (max-width: 640px) {
   .titlebar {
     gap: var(--space-2);
+  }
+
+  /* The handle at the strip's end gives its room back to the tab on stage. */
+  .titlebar > .tabstrip {
+    padding-right: var(--space-2);
   }
 
   .titlebar-nav,
@@ -8633,6 +8712,9 @@ body.is-dragging-pane {
     gap: var(--space-1);
   }
 
+  /* The list the tab stands in fills with it: sized to its tabs, it would
+   * hand the tab none of the room the bar gives. */
+  .tab-list,
   .tab.is-front {
     flex: 1 1 0;
   }

@@ -5151,7 +5151,7 @@ function tabMenuButton(pane, group) {
   opener.setAttribute("aria-expanded", "false");
   // Enter and Space on it open its menu; they are not the staged terminal's.
   opener.dataset.keyboardOwner = "true";
-  opener.innerHTML = `<span class="tab-menu-count"></span>${icon("chevron")}`;
+  opener.innerHTML = `<span class="tab-menu-ring" aria-hidden="true"></span><span class="tab-menu-count"></span>${icon("chevron")}`;
   const open = () => {
     focusedPane = group;
     if (!sidebarMenu.hidden && menuOpener === opener) return closeSidebarMenu();
@@ -5194,11 +5194,21 @@ function tabMenuRows(pane, group, opener) {
 function paintTabMenuButton(pane, group, count) {
   const opener = tabMenuButton(pane, group);
   const words = t("terminal.tabMenu", "탭 {{n}}", { n: count });
-  const said = opener.firstElementChild;
+  const said = opener.querySelector(".tab-menu-count");
   if (said.textContent !== words) said.textContent = words;
-  const tip = t("terminal.tabMenuTip", "이 판의 탭 모두");
-  if (opener.dataset.tip !== tip) opener.dataset.tip = tip;
+  paintTabMenuWait(opener, count);
   return opener;
+}
+
+/* The menu's tip and spoken name, with whether a tab out of sight waits on
+ * the person — the ring on the menu says it to the eye (`paintStripEdges`). */
+function paintTabMenuWait(opener, count) {
+  const tip = opener.classList.contains("is-waiting")
+    ? t("terminal.tabMenuWaiting", "이 판의 탭 모두 · 안 보이는 탭이 답을 기다림")
+    : t("terminal.tabMenuTip", "이 판의 탭 모두");
+  if (opener.dataset.tip !== tip) opener.dataset.tip = tip;
+  const name = `${t("terminal.tabMenu", "탭 {{n}}", { n: count })} · ${tip}`;
+  if (opener.getAttribute("aria-label") !== name) opener.setAttribute("aria-label", name);
 }
 
 /* The strip, reconciled rather than rebuilt.
@@ -5214,21 +5224,125 @@ function paintTabMenuButton(pane, group, count) {
  * changed — pinned, or a different kind — is built again. */
 /* A strip that changes width moves every tab — its tabs fold and unfold at
  * a width (t-78107, 시안 17) — and the tab in front can land behind the fade
- * with no change of tab to reveal it again. One observer for every strip. */
+ * with no change of tab to reveal it again. One observer for every strip. The
+ * strip's width does not follow its tabs (it fills the bar, or its leaf), so
+ * the fold it asks for never resizes what it observes. */
 const tabStripWatch = new ResizeObserver((entries) => {
-  for (const { target } of entries) {
+  for (const { target, contentRect } of entries) {
     const pane = [...groups.values()].find((one) => one.strip === target);
     if (!pane) continue;
+    pane.stripWidth = Math.round(contentRect.width);
+    fitStrip(pane);
     pane.revealedTab = null;
     revealActiveTab(pane);
+    scheduleStripEdges(pane);
   }
 });
+
+/* The measures the fit works in. They are tokens, read once: the floor every
+ * named tab can shrink to, the width of a folded one, and the window fold
+ * under which every tab off stage has already given up its name. */
+let tabFitMeasures = null;
+function tabStripMeasures() {
+  if (tabFitMeasures !== null) return tabFitMeasures;
+  const root = getComputedStyle(document.documentElement);
+  tabFitMeasures = {
+    floor: parseFloat(root.getPropertyValue("--tab-min-width")),
+    folded: parseFloat(root.getPropertyValue("--tab-crowd-width")),
+    windowFold: matchMedia(`(max-width: ${root.getPropertyValue("--fold-sidebar-rail").trim()})`),
+  };
+  return tabFitMeasures;
+}
+
+/* A tab nothing is happening in: no work, no wait, no bell, no unsaved edit,
+ * nothing that names it (a pin, a declared colour), and not on stage. Only
+ * these fold in a crowded strip. */
+const TAB_QUIET = ".tab:not(.is-streaming, .is-waiting, .is-blocked, .is-bell, .is-unsaved, .has-color, .is-pinned, .is-front, .is-active)";
+
+/* A crowded strip folds its quiet tabs to their mark (2026-11-12). Every named
+ * tab stands between the floor and the cap, so the list overflows only once
+ * each sits at the floor — and from there each fold gives back exactly
+ * floor − folded width. How many to fold is arithmetic on one read of the
+ * room, not a fold-and-measure loop, and it is asked again only when what
+ * decides it changed: the tabs and which are quiet, the controls after the
+ * list, the strip's width. The farthest from the tab on stage fold first, so
+ * its neighbours keep their names. */
+function fitStrip(pane) {
+  const { strip, list } = pane;
+  const { floor, folded, windowFold } = tabStripMeasures();
+  const nodes = [...list.children];
+  const quiet = nodes.map((node) => node.matches(TAB_QUIET));
+  const tail = [...strip.children].filter((node) => node !== list && !node.hidden);
+  const key = [
+    windowFold.matches ? "window-fold" : pane.stripWidth ?? 0,
+    quiet.map((one) => (one ? "q" : "l")).join(""),
+    tail.map((node) => node.textContent).join("|"),
+    strip.classList.contains("has-many"),
+  ].join("/");
+  if (key === pane.fitKey) return;
+  pane.fitKey = key;
+  let fold = 0;
+  if (!windowFold.matches && nodes.length > 0) {
+    const style = getComputedStyle(strip);
+    const room = tail.reduce(
+      (left, node) => left - node.offsetWidth,
+      strip.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+    );
+    const over = nodes.length * floor - room;
+    if (over > 0) fold = Math.ceil(over / (floor - folded));
+  }
+  const front = nodes.findIndex((node) => node.classList.contains("is-front"));
+  const folding = new Set(
+    nodes
+      .map((node, at) => ({ node, at }))
+      .filter(({ at }) => quiet[at])
+      .sort((a, b) => Math.abs(b.at - front) - Math.abs(a.at - front))
+      .slice(0, fold)
+      .map(({ node }) => node),
+  );
+  // An attribute, not a class: `paintTabNode` writes the class list whole on
+  // every render, and a fold kept there would be undone by the next paint.
+  for (const node of nodes) {
+    const want = folding.has(node);
+    if (node.hasAttribute("data-folded") !== want) node.toggleAttribute("data-folded", want);
+  }
+}
+
+/* The list's edges, after a scroll or a render, at most once a frame: the fade
+ * is armed only on a side with tabs past it, and the menu wears the you-ring
+ * while a tab out of sight waits on the person — "who needs me now" is never
+ * answered by a tab scrolled off the strip. */
+function scheduleStripEdges(pane) {
+  if (pane.edgeFrame) return;
+  pane.edgeFrame = requestAnimationFrame(() => {
+    pane.edgeFrame = 0;
+    paintStripEdges(pane);
+  });
+}
+
+function paintStripEdges(pane) {
+  const { list } = pane;
+  const start = list.scrollLeft;
+  const end = start + list.clientWidth;
+  const scrolled = start > 0;
+  const more = end < list.scrollWidth - 1;
+  if (list.classList.contains("is-scrolled") !== scrolled) list.classList.toggle("is-scrolled", scrolled);
+  if (list.classList.contains("has-more") !== more) list.classList.toggle("has-more", more);
+  const unseen = (node) => node.offsetLeft < start || node.offsetLeft + node.offsetWidth > end;
+  const waiting = (scrolled || more) && [...list.querySelectorAll(".tab.is-waiting")].some(unseen);
+  const menu = pane.tabMenu;
+  if (menu && menu.classList.contains("is-waiting") !== waiting) {
+    menu.classList.toggle("is-waiting", waiting);
+    paintTabMenuWait(menu, list.children.length);
+  }
+}
 
 function renderPane(pane, group) {
   const strip = pane.strip;
   const list = pane.list;
   if (!pane.stripWatched) {
     tabStripWatch.observe(strip);
+    list.addEventListener("scroll", () => scheduleStripEdges(pane), { passive: true });
     pane.stripWatched = true;
   }
   const held = (pane.tabNodes ??= new Map());
@@ -5285,7 +5399,11 @@ function renderPane(pane, group) {
   if (strip.lastElementChild !== add || add.previousElementSibling !== pill || pill.previousElementSibling !== menu) {
     strip.append(menu, pill, add);
   }
+  const many = wanted.length >= 2;
+  if (strip.classList.contains("has-many") !== many) strip.classList.toggle("has-many", many);
+  fitStrip(pane);
   revealActiveTab(pane);
+  scheduleStripEdges(pane);
   // Every strip in the tree stays visible: a group with no tabs has already
   // folded out of the tree (`collapseStageGroup`), so the only empty strip
   // left is the last group standing — the stage itself, which carries the
@@ -5297,21 +5415,21 @@ function renderPane(pane, group) {
  * scrolls, and a tab picked by the keyboard, or born at the far end, must not
  * be selected somewhere behind the fade. It moves only when the active tab
  * CHANGES — a repaint with the same tab in front leaves wherever the person
- * scrolled to alone. The margin is the fade's own width (`--tab-fade`), read
- * back as the strip's `scroll-padding`, so a revealed tab stands clear of the
- * mask rather than under it. */
+ * scrolled to alone. The scroller is the tab list; the margin is the fade's
+ * own width (`--tab-fade`), read back as the list's `scroll-padding`, so a
+ * revealed tab stands clear of the mask rather than under it. */
 function revealActiveTab(pane) {
-  const strip = pane.strip;
-  const node = strip.querySelector(".tab.is-active");
+  const list = pane.list;
+  const node = list.querySelector(".tab.is-active");
   const id = node?.dataset.tab ?? null;
   if (id === pane.revealedTab) return;
   pane.revealedTab = id;
-  if (!node || strip.scrollWidth <= strip.clientWidth) return;
-  const fade = parseFloat(getComputedStyle(strip).scrollPaddingLeft) || 0;
+  if (!node || list.scrollWidth <= list.clientWidth) return;
+  const fade = parseFloat(getComputedStyle(list).scrollPaddingLeft) || 0;
   const box = node.getBoundingClientRect();
-  const view = strip.getBoundingClientRect();
-  if (box.left < view.left + fade) strip.scrollLeft -= view.left + fade - box.left;
-  else if (box.right > view.right - fade) strip.scrollLeft += box.right - (view.right - fade);
+  const view = list.getBoundingClientRect();
+  if (box.left < view.left + fade) list.scrollLeft -= view.left + fade - box.left;
+  else if (box.right > view.right - fade) list.scrollLeft += box.right - (view.right - fade);
 }
 
 /* Dragging a tab to reorder it, measured from Orca rather than guessed.
