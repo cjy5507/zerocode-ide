@@ -1,20 +1,26 @@
-/* ---- 지식 그래프의 우주 보기 (t-12443, 승인된 시안 v4 「실제 우주」) ----------------------
+/* ---- 지식 그래프의 우주 보기 — 빛의 그물 (사람의 11-12 요청, t-12443의 「실제 우주」를 잇는다) ---------
  *
- * 사람이 고른 그림이다(09-28 18:3x, 「지금 화면 좋아」): 주제는 은하, 작은 묶음은 성단, 홀로 선
- * 쪽은 떠돌이 별, 쪽 하나는 이름 있는 별이다. 별의 밝기는 연결 수이고 빛깔은 최근 고침이며, 주제
- * 사이의 굵은 연결은 흐르는 필라멘트다. 시안(docs/design/knowledge-graph-3d-v4/, 디자이너 w-12381)의
- * 셰이더와 수를 그대로 옮긴다 — 지어낸 수는 없다. 시안과 다른 것은 자료다: 시안은 지어낸 볼트를
- * 그렸고, 이 파일은 창의 모델(`knowledgeModel`)과 평면 지도의 배치(`knowledgeLayout`)에서 우주를
- * 짓는다. 은하의 자리는 평면 지도의 원반 자리 그대로이고(x·z) 높이만 더한다 — 외운 지도가 흔들리지
- * 않는다(6차 설계 §4-a).
+ * 사람이 고른 그림은 「실제 우주」였다(09-28 18:3x). 그 우주는 은하의 모양을 지어 그렸고 — 나선 팔 · 먼지 · 이름
+ * 없는 별 — 쪽 사이의 링크는 올려야만 보였다. 11-12에 사람이 다시 청했다: 「보기 편하고 … 지금 컨셉이 아니어도
+ * 좋아」. 그래서 이 판의 빛은 전부 자료에서 온다:
  *
- * 어디서 서는가. 전체 지도에서, WebGL2가 서는 판에서, 사람이 3D를 고른 동안(고른 적이 없으면 표의
- * 기본 줄, `KNOWLEDGE_DIMENSIONS`). 주변 탐색·관계 편집·점 끌기는 평면의 일이다(설계 §4-f). 평면
- * 지도는 이 판 아래에서 그대로 살고(두 페인터 중 하나), 우주가 서 있는 동안만 가려진다.
+ *   · 쪽 하나는 별이다. 크기는 연결 수, 빛깔은 제 군집, 최근에 고친 쪽은 더 번진다.
+ *   · 군집은 그 군집의 허브에서 퍼지는 나무다. 허브가 가운데, 허브와 바로 이어진 쪽이 그 둘레, 그 쪽에 이어진
+ *     쪽이 그 밖이다 — 가지는 지어낸 선이 아니라 진짜 링크다(`knowledgeUniverseBurst`).
+ *   · 군집 사이의 링크는 한 올 한 올 두 군집의 문을 지나는 다발로 묶인다. 굵은 다발이 필라멘트이고, 빛은 링크가
+ *     가리키는 쪽으로 흐른다.
+ *   · 나무에 들지 않은 군집 안의 링크는 가까이 가면 보이고, 쪽을 올리거나 고르면 그 쪽의 링크 전부가 켜진다.
  *
- * 그리는 일은 있을 때만 한다. 비행·미끄러짐·움직임(아주 느린 회전과 필라멘트의 흐름) 중에만 프레임을
- * 잇고, 쉬면 한 장도 그리지 않는다. 판이 가려지면 멈춘다. 떠날 때는 GPU의 것(기하·텍스처·프로그램·
- * 렌더 타깃·문맥)을 전부 놓는다. */
+ * 군집의 자리는 평면 지도의 원반 자리 그대로이고(x·z) 높이만 더한다 — 외운 지도가 흔들리지 않는다(6차 설계
+ * §4-a). 카메라 · 손 · 이름표 · 떠오름과 내려앉음은 t-12443의 것을 그대로 쓴다.
+ *
+ * 어디서 서는가. 전체 지도에서, WebGL2가 서는 판에서, 사람이 3D를 고른 동안(고른 적이 없으면 표의 기본 줄,
+ * `KNOWLEDGE_DIMENSIONS`). 주변 탐색·관계 편집·점 끌기는 평면의 일이다(설계 §4-f). 평면 지도는 이 판 아래에서
+ * 그대로 살고(두 페인터 중 하나), 우주가 서 있는 동안만 가려진다.
+ *
+ * 그리는 일은 있을 때만 한다. 비행·미끄러짐 중에는 화면의 박자로, 쉬는 동안의 움직임(아주 느린 회전과 빛의
+ * 흐름)은 `ambient-gap`의 박자로만 잇고, 움직임을 끄면 한 장도 그리지 않는다. 판이 가려지면 멈춘다. 떠날
+ * 때는 GPU의 것(기하·텍스처·프로그램·렌더 타깃·문맥)을 전부 놓는다. */
 
 /* 전체 지도의 두 얼굴. 표의 순서가 머리의 순서이고, `first`가 사람이 고른 적 없는 판의 기본이다 —
  * 기본값은 이 한 줄에만 산다. 3D는 WebGL2가 서는 판에서만 설 수 있다(`knowledgeDimensionNow`). */
@@ -25,9 +31,9 @@ const KNOWLEDGE_DIMENSIONS = Object.freeze([
 const KNOWLEDGE_DIMENSION_FIRST = KNOWLEDGE_DIMENSIONS.find((row) => row.first === true)?.id
   ?? KNOWLEDGE_DIMENSIONS[0].id;
 
-/* 시안의 수 — 값은 tokens.css의 `--knowledge-3d-*` 한 곳에 있고 판마다 한 번 읽는다
- * (`knowledgeUniverseTuning`). 이름은 시안의 자리를 따른다(PORTING.md §3, index.html의 `computeHome`·
- * `flyTo`·`frame`·손). 셰이더 안의 모양 상수(빛의 식)는 셰이더의 글자 그대로다. */
+/* 판의 수 — 값은 tokens.css의 `--knowledge-3d-*` 한 곳에 있고 판마다 한 번 읽는다
+ * (`knowledgeUniverseTuning`). 카메라 · 손 · 이름표의 수는 t-12443의 것이다. 셰이더가 읽는 모양의 수는 아래
+ * 표들(`KNOWLEDGE_UNIVERSE_STAR` · `_EDGE` · `_AURA` · `_BURST` · `_CURVE`)에 한 번씩 산다. */
 const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   /* 시야각(도)과 앞뒤 자름 — 뒤 자름은 우주가 넓어져도 배경 별이 잘리지 않게 닿는 거리의 배수까지. */
   fov: "--knowledge-3d-fov",
@@ -69,149 +75,116 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   glidePitchShare: "--knowledge-3d-glide-pitch-share",
   glideWindow: "--knowledge-3d-glide-window",
   keyTurn: "--knowledge-3d-key-turn",
-  /* 쉬는 동안 돌기: 쉰 시간, 도는 빠르기(rad/s), 올라서는 빠르기. 한 프레임의 시간 상한과 첫 프레임. */
+  /* 쉬는 동안 돌기: 쉰 시간, 도는 빠르기(rad/s), 올라서는 빠르기. 한 프레임의 시간 상한과 첫 프레임. 쉬는
+   * 동안의 움직임만 남은 판이 다음 장까지 기다리는 시간(ms) — 화면의 박자(120 Hz면 8 ms)로 그릴 까닭이 없다. */
   idleDelay: "--knowledge-3d-idle-delay",
   idleSpin: "--knowledge-3d-idle-spin",
   idleRamp: "--knowledge-3d-idle-ramp",
   frameMost: "--knowledge-3d-frame-most",
   frameFirst: "--knowledge-3d-frame-first",
+  ambientGap: "--knowledge-3d-ambient-gap",
   /* 문을 연 판·처음 자리로 돌아간 판·움직임을 켠 판이 이미 쉰 것으로 치는 시간. */
   openRest: "--knowledge-3d-open-rest",
   homeRest: "--knowledge-3d-home-rest",
   wakeRest: "--knowledge-3d-wake-rest",
-  /* 비행(ms): 떠오름·내려앉음·보통·처음 자리. */
-  /* 날아가기(시안 `select`·`focusTopic`·`showFlow`): 쪽은 거리 max(`fly-page-dist`, R × `fly-page-reach`)에
-   * 은하를 거의 정면으로(`face-page`), 은하는 R × `fly-galaxy-reach` + `fly-galaxy-pad`(`face-galaxy`), 흐름은 두
-   * 은하 사이 거리 × `fly-flow-reach` + `fly-flow-pad`에 pitch `fly-flow-pitch`. 정면의 pitch는 `face-pitch-*` 안. */
+  /* 날아가기: 쪽은 거리 max(`fly-page-dist`, R × `fly-page-reach`)에, 군집은 R × `fly-galaxy-reach` +
+   * `fly-galaxy-pad`에, 필라멘트는 두 군집 사이 거리 × `fly-flow-reach` + `fly-flow-pad`에 pitch `fly-flow-pitch`로
+   * 옆에서. 군집과 쪽은 지금 보는 방향 그대로 다가간다 — 나무는 어느 쪽에서 봐도 같은 꼴이다. */
   flyPage: "--knowledge-3d-fly-page",
   flyPageDist: "--knowledge-3d-fly-page-dist",
   flyPageReach: "--knowledge-3d-fly-page-reach",
-  facePage: "--knowledge-3d-face-page",
-  faceGalaxy: "--knowledge-3d-face-galaxy",
-  facePitchLow: "--knowledge-3d-face-pitch-low",
-  facePitchHigh: "--knowledge-3d-face-pitch-high",
   flyGalaxyReach: "--knowledge-3d-fly-galaxy-reach",
   flyGalaxyPad: "--knowledge-3d-fly-galaxy-pad",
   flyFlow: "--knowledge-3d-fly-flow",
   flyFlowReach: "--knowledge-3d-fly-flow-reach",
   flyFlowPad: "--knowledge-3d-fly-flow-pad",
   flyFlowPitch: "--knowledge-3d-fly-flow-pitch",
+  /* 비행(ms): 떠오름·내려앉음·첫 그림(별이 허브에서 퍼지는 시간)·보통·처음 자리. */
   rise: "--knowledge-3d-rise",
   fold: "--knowledge-3d-fold",
+  birth: "--knowledge-3d-birth",
   fly: "--knowledge-3d-fly",
   homeMs: "--knowledge-3d-home-ms",
   noticeMs: "--knowledge-3d-notice-ms",
-  /* 평면 자리에서 세계로: 은하 반지름 = √쪽 × `world-root` × (쪽 / `world-pages`)^`world-spread`. */
+  /* 평면 자리에서 세계로: 군집 반지름 = √쪽 × `world-root` × (쪽 / `world-pages`)^`world-spread`. */
   worldRoot: "--knowledge-3d-world-root",
   worldPages: "--knowledge-3d-world-pages",
   worldSpread: "--knowledge-3d-world-spread",
-  /* 높이의 반폭 — 닿는 거리에 대한 몫(은하 ±0.17, 성단 ±0.21, 떠돌이 ±0.25). */
+  /* 높이의 반폭 — 닿는 거리에 대한 몫(큰 군집, 작은 군집, 떠돌이 별). */
   liftGalaxy: "--knowledge-3d-lift-galaxy",
   liftCluster: "--knowledge-3d-lift-cluster",
   liftOrphan: "--knowledge-3d-lift-orphan",
-  /* 이름 있는 별: 밝기 = ((1 + 연결) / (1 + 가운데값))^지수, 빛깔 = 오늘 1 → `age-span`일 0(로그, 무릎
-   * `age-scale`일). */
+  /* 별: 크기의 바탕 = ((1 + 연결) / (1 + 가운데값))^지수(천장 `star-ratio-cap`), 최근 = 오늘 1 → `age-span`일 0
+   * (로그, 무릎 `age-scale`일). */
   starLumExp: "--knowledge-3d-star-lum-exp",
-  /* 연결 비의 천장 — 허브의 비가 시안(850쪽 최대 13.5)보다 크게 나는 볼트에서 가까이 가기 전부터 빛살이 크기
-   * 천장에 닿지 않게(디자이너 m-12546의 2). */
   starRatioCap: "--knowledge-3d-star-ratio-cap",
   starAgeScale: "--knowledge-3d-star-age-scale",
   starAgeSpan: "--knowledge-3d-star-age-span",
-  /* 이름 있는 별의 빛깔: 고친 때의 흑체 색을 제 휘도에서 벌리는 배수(1은 흑체 그대로), 속에 섞는 흰빛의 몫. */
-  starChroma: "--knowledge-3d-star-chroma",
-  starCoreWhite: "--knowledge-3d-star-core-white",
-  /* 은하 짓기(시안 `universe`, 디자이너 답 m-12467의 1): 이름 있는 군집 중 순위 앞에서부터 은하가 되는 수의
-   * 상한과 그 문턱(쪽 수 ≥ max(`galaxy-least`, `galaxy-share` × 쪽 / `world-pages`)), 성운을 두르는 성단의 수. */
+  /* 큰 군집(명판을 달고 필라멘트를 잇는 줄): 이름 있는 군집 중 순위 앞에서부터의 상한과 문턱(쪽 수 ≥
+   * max(`galaxy-least`, `galaxy-share` × 쪽 / `world-pages`)). 색 칸이 없는 군집의 빛은 `quiet-share`만큼만. */
   galaxyMax: "--knowledge-3d-galaxy-max",
   galaxyLeast: "--knowledge-3d-galaxy-least",
   galaxyShare: "--knowledge-3d-galaxy-share",
-  nebulaMax: "--knowledge-3d-nebula-max",
-  /* 반지름: 은하 = 평면 원반 × `galaxy-radius`, 성단 = 원반 × (`cluster-sphere` / `world-root`) × `cluster-grow`
-   * + `cluster-pad`. */
+  quietShare: "--knowledge-3d-quiet-share",
+  /* 붐빔 — 화면에서 재는 수다(`KNOWLEDGE_UNIVERSE_CROWD`): 별의 속은 제 자리(제 군집의 별 사이 간격과 형제 사이 간격
+   * 가운데 좁은 쪽)의 `crowd-ratio`를 넘지 않고, 더 줄 수 없는 만큼과 가지의 겹침(화면 1 px을 지나는 가지의 수가
+   * `crowd-lines`를 넘는 몫)은 빛을 그 비의 `crowd-fade` 제곱으로 줄인다(바닥 `crowd-least`). 판이 작든 볼트가 크든
+   * 군집은 덩어리가 되지 않고, 다가가면 별이 제 크기로 돌아온다. */
+  crowdRatio: "--knowledge-3d-crowd-ratio",
+  crowdLines: "--knowledge-3d-crowd-lines",
+  crowdFade: "--knowledge-3d-crowd-fade",
+  crowdLeast: "--knowledge-3d-crowd-least",
+  /* 반지름: 큰 군집 = √쪽 × `world-root` × 몫 × `galaxy-radius`, 작은 군집 = √쪽 × 몫 × `cluster-sphere` ×
+   * `cluster-grow` + `cluster-pad`. */
   galaxyRadius: "--knowledge-3d-galaxy-radius",
   clusterSphere: "--knowledge-3d-cluster-sphere",
   clusterGrow: "--knowledge-3d-cluster-grow",
   clusterPad: "--knowledge-3d-cluster-pad",
-  /* 기울기: 처음 시점 쪽으로 기울인 축(몫 `normal-lean`)에서 `tilt-least` + 씨앗 × `tilt-span` rad. */
+  /* 나무가 선 방향: 처음 시점 쪽으로 기울인 축(몫 `normal-lean`)에서 `tilt-least` + 씨앗 × `tilt-span` rad. */
   normalLean: "--knowledge-3d-normal-lean",
   tiltLeast: "--knowledge-3d-tilt-least",
   tiltSpan: "--knowledge-3d-tilt-span",
-  /* 형태: 팔 수(넓은 판은 `arms-every`의 나머지 셋째), 감김(기본·막대·나선의 바닥과 폭), 막대, 팽대부(기본·막대·
-   * 나선의 바닥과 폭·타원), 먼지(기본·불규칙). */
-  arms: "--knowledge-3d-arms",
-  armsWide: "--knowledge-3d-arms-wide",
-  armsEvery: "--knowledge-3d-arms-every",
-  winding: "--knowledge-3d-winding",
-  windingBar: "--knowledge-3d-winding-bar",
-  windingLeast: "--knowledge-3d-winding-least",
-  windingSpan: "--knowledge-3d-winding-span",
-  bar: "--knowledge-3d-bar",
-  bulge: "--knowledge-3d-bulge",
-  bulgeBar: "--knowledge-3d-bulge-bar",
-  bulgeLeast: "--knowledge-3d-bulge-least",
-  bulgeSpan: "--knowledge-3d-bulge-span",
-  bulgeElliptical: "--knowledge-3d-bulge-elliptical",
-  dust: "--knowledge-3d-dust",
-  dustIrregular: "--knowledge-3d-dust-irregular",
-  /* 형태 규칙의 수: 막대 나선 순위의 상한, 불규칙(끝에서 몇, 은하가 몇 이상일 때), 타원(순위 몇부터, 몇마다,
-   * 활동이 몇 밑일 때), 활동의 창(날). */
-  barredRanks: "--knowledge-3d-barred-ranks",
-  irregularLast: "--knowledge-3d-irregular-last",
-  irregularLeast: "--knowledge-3d-irregular-least",
-  ellipticalFrom: "--knowledge-3d-elliptical-from",
-  ellipticalEvery: "--knowledge-3d-elliptical-every",
-  ellipticalActivity: "--knowledge-3d-elliptical-activity",
+  /* 군집의 활동 — 최근 며칠 안에 고친 쪽의 몫(둘레 빛의 세기와 인스펙터의 한 줄). */
   activityDays: "--knowledge-3d-activity-days",
-  /* 몸의 이름 없는 별 수: 은하 = `decor-least` + `decor-grow` × √(쪽 / 가장 큰 군집의 쪽), 성단, 배경. */
-  decorLeast: "--knowledge-3d-decor-least",
-  decorGrow: "--knowledge-3d-decor-grow",
-  decorCluster: "--knowledge-3d-decor-cluster",
+  /* 배경 별의 수. */
   decorSky: "--knowledge-3d-decor-sky",
-  /* 원반·핵·성운의 사각형 반지름(R의 배수, 시안 `bb`): 원반, 핵, 타원의 핵, 성단의 성운 셋. */
-  disk: "--knowledge-3d-disk",
-  core: "--knowledge-3d-core",
-  coreElliptical: "--knowledge-3d-core-elliptical",
-  nebulaOuter: "--knowledge-3d-nebula-outer",
-  nebulaMid: "--knowledge-3d-nebula-mid",
-  nebulaInner: "--knowledge-3d-nebula-inner",
-  /* 은하 빛깔 = `galaxy-tint-base` + (1 − base) × 선형(색 칸의 어두운 테마 값)을 색 없는 군집의 휘도로 맞춘 것. */
+  /* 군집의 빛깔 = `galaxy-tint-base` + (1 − base) × 선형(색 칸의 어두운 테마 값)을 색 없는 군집의 휘도로 맞춘 것. */
   galaxyTintBase: "--knowledge-3d-galaxy-tint-base",
-  /* 필라멘트(시안 `buildScene`): 두 은하 사이 선이 몇 개부터인가, 몇 쌍까지인가(셰이더 배열의 크기까지), 입자 수
-   * = `filament-least-points` + `filament-grow-points` × √(n / 가장 굵은 n). */
+  /* 필라멘트: 두 큰 군집 사이 링크가 몇 개부터인가, 굵은 차례로 몇 쌍까지인가. 그 밖의 쌍의 링크는 올리거나
+   * 고를 때만 켜진다. */
   filamentLeast: "--knowledge-3d-filament-least",
   filamentMost: "--knowledge-3d-filament-most",
-  filamentLeastPoints: "--knowledge-3d-filament-least-points",
-  filamentGrowPoints: "--knowledge-3d-filament-grow-points",
-  /* 빛 번짐 사다리의 단 수와 세기(문턱 없음), 합성의 노출(테마마다). 톤 매핑이 색 비율을 지키는 몫(0은 채널마다의
-   * ACES, 1은 가장 센 채널로 잰 ACES), 종이 위 먹빛에 싣는 색의 배수(1은 v4의 8%, 휘도는 그대로). */
+  /* 켜진 링크(올린 쪽 · 고른 쪽 · 경로)가 이 수를 넘으면 한 올의 빛을 (수의 비)^`lit-fade`로 줄인다 — 허브를 올려도
+   * 판이 하얗게 날지 않는다. 줄어드는 바닥. */
+  litFull: "--knowledge-3d-lit-full",
+  litFade: "--knowledge-3d-lit-fade",
+  litLeast: "--knowledge-3d-lit-least",
+  /* 빛 번짐 사다리의 단 수(문턱 없음) — 세기와 합성의 노출은 테마마다 다르다(`KNOWLEDGE_UNIVERSE_THEMED`). 톤 매핑이
+   * 색 비율을 지키는 몫(0은 채널마다의 ACES, 1은 가장 센 채널로 잰 ACES), 종이 위 먹빛에 싣는 색의 배수(휘도는 그대로). */
   bloomLevels: "--knowledge-3d-bloom-levels",
-  bloomStrength: "--knowledge-3d-bloom-strength",
   toneKeep: "--knowledge-3d-tone-keep",
   inkChroma: "--knowledge-3d-ink-chroma",
-  /* 이름표(시안 `updateLabels`·`galaxyAnchor`·`showTip`, PORTING §2.7) — 들림이 이 값을 넘은 판에서만 선다. 명판:
-   * 은하 가장자리 고리(반지름의 몫·점 수·보여야 할 점 수)의 화면에서 가장 낮은 곳 아래 틈만큼, 판 가장자리
+  /* 이름표 — 들림이 이 값을 넘은 판에서만 선다. 명판: 군집의 화면 위 원(반지름의 `plate-ring`)에서 가장 낮은 곳 아래 틈만큼, 판 가장자리
    * 여백과 위·아래 띠, 둘레의 틈, 큰 명판을 입는 순위의 수, 가까이(처음 거리의 몫 밑) 가면 고른 것만. */
   labelLift: "--knowledge-3d-label-lift",
   plateRing: "--knowledge-3d-plate-ring",
-  platePoints: "--knowledge-3d-plate-points",
-  plateSeen: "--knowledge-3d-plate-seen",
   plateGap: "--knowledge-3d-plate-gap",
   plateEdge: "--knowledge-3d-plate-edge",
   plateTop: "--knowledge-3d-plate-top",
   plateBottom: "--knowledge-3d-plate-bottom",
   plateRoom: "--knowledge-3d-plate-room",
   plateLarge: "--knowledge-3d-plate-large",
-  /* 「가까이」의 문턱 = max(처음 거리 × `close-in`, (은하로 날아온 거리 5.2R + 40) × `close-in-fly`) — R은 고른 은하(없으면
-   * 고른 쪽이 든 은하)의 반지름. 날아온 자리는 은하의 크기와 상관없이 가깝고, 조금 더 물러나면 먼 모습이다
-   * (디자이너 m-12642). */
+  /* 「가까이」의 문턱 = max(처음 거리 × `close-in`, (군집으로 날아온 거리) × `close-in-fly`) — 날아온 자리는
+   * 군집의 크기와 상관없이 가깝고, 조금 더 물러나면 먼 모습이다(디자이너 m-12642). */
   closeIn: "--knowledge-3d-close-in",
   closeInFly: "--knowledge-3d-close-in-fly",
-  /* 쪽 이름: 풀, 쉴 때 이름을 다는 가장 밝은 별의 수, 후보 수와 화면 반지름 문턱, 초점의 이웃·찾은 것의 덤, 후보를
-   * 고르는 위·아래 띠, 별에서 비킨 거리(반지름의 몫·최소·여백), 판 가장자리 여백, 놓는 위·아래 띠, 한 줄의 높이. */
+  /* 쪽 이름: 풀, 쉴 때 이름을 다는 가장 큰 별의 수, 고른 군집 가까이의 이름 수, 쪽이 초점일 때의 이름 수, 후보 수와 화면 반지름 문턱, 초점의
+   * 이웃·찾은 것의 덤, 후보를 고르는 위·아래 띠, 별에서 비킨 거리(반지름의 몫·최소·여백), 판 가장자리 여백, 놓는
+   * 위·아래 띠, 한 줄의 높이. */
   labels: "--knowledge-3d-labels",
   labelsRest: "--knowledge-3d-labels-rest",
-  /* 고른 은하 가까이(쪽 초점도 찾기도 없을 때)의 이름 수 — 후보는 그 은하의 쪽 전부다(디자이너 m-12670). */
   labelsClose: "--knowledge-3d-labels-close",
+  labelsFocus: "--knowledge-3d-labels-focus",
   labelsCandidates: "--knowledge-3d-labels-candidates",
   labelLeast: "--knowledge-3d-label-least",
   labelNeighbour: "--knowledge-3d-label-neighbour",
@@ -241,74 +214,240 @@ const KNOWLEDGE_UNIVERSE_TOKENS = Object.freeze({
   tipGap: "--knowledge-3d-tip-gap",
 });
 
-/* 테마마다 다른 수 — 테마가 바뀌면 다시 읽는다(`knowledgeUniverseInks`). */
+/* 테마마다 다른 수 — 테마가 바뀌면 다시 읽는다(`knowledgeUniverseInks`): 합성의 노출, 빛 번짐의 세기, 별의 번짐의 몫.
+ * 종이 위에서는 번짐이 빛이 아니라 얼룩이다 — 밝은 테마는 번짐 둘을 줄여 별 사이의 종이를 비운다. */
 const KNOWLEDGE_UNIVERSE_THEMED = Object.freeze({
   exposure: "--knowledge-3d-exposure",
+  bloom: "--knowledge-3d-bloom-strength",
+  halo: "--knowledge-3d-halo",
 });
 
-/* 셰이더와 묶인 수 — 한 표(시안 `buildScene`·`materials.decor`, 디자이너 답 m-12467의 1). 은하·성단은 텍스처
- * 한 장의 줄이고(`texels` × `rows`, RGBA32F), 장식 입자의 번호 = 무리 × `groupSpan` + 차례가 float에서
- * 정확하려면 2^24 밑이어야 한다: 무리 0–127 은하·성단, 128 배경 별, 130부터 필라멘트. 떠돌이 별의 초점은
- * 어느 줄도 아닌 번호다. */
+/* 셰이더와 묶인 수 — 한 표. 군집은 텍스처 한 장의 줄이다(`texels` × `rows`, RGBA32F): 텍셀 0 = 우주의 가운데와
+ * 반지름, 1 = 평면의 가운데와 반지름, 2 = 빛깔과 빛의 몫, 3 = 활동과 쪽 수. 떠돌이 별의 초점은 어느 줄도 아닌 번호다. */
 const KNOWLEDGE_UNIVERSE_SHAPE = Object.freeze({
-  texels: 8,
+  texels: 4,
   rows: 128,
-  groupSpan: 65536,
-  skyGroup: 128,
-  bundleGroup: 130,
-  bundles: 48,
   noGalaxy: 999,
-  /* 별자리 선: 선 하나의 마디 수, 두 끝의 줄 번호를 한 수에 싣는 밑(줄 128과 떠돌이 번호 128보다 크게 — 시안은
-   * 줄 32에 64를 썼다), 선마다의 흐름 위상을 짓는 합동식(시안 그대로). */
-  lineSegments: 16,
-  linePack: 256,
+  /* 배경 별 가운데 먼 은하의 얼룩으로 그리는 수(시안의 48). */
+  skySmudges: 48,
+  /* 다발 한 올의 마디 수 — 4차 곡선을 이만큼의 곧은 조각으로 그린다. */
+  fiberSegments: 24,
+  /* 링크마다의 흐름 위상을 짓는 합동식(t-12443의 것 그대로 — 같은 볼트는 같은 위상이다). */
   lineSeed: 12345,
   lineMultiplier: 16807,
   lineModulus: 2147483647,
-  /* 쪽 자리 텍스처 한 줄의 폭(시안 `TW`). */
+  /* 쪽 자리 텍스처 한 줄의 폭. */
   nodeWide: 1024,
-  /* 이 깊이(w) 밑은 카메라 뒤다 — 투영하지 않는다(시안 `projectAll`). */
+  /* 이 깊이(w) 밑은 카메라 뒤다 — 투영하지 않는다. */
   behind: 0.1,
+  /* 형제가 없는 별(군집의 허브 · 떠돌이 별)의 형제 사이 간격 — 어느 화면보다 넓다(`KNOWLEDGE_UNIVERSE_CROWD`). */
+  roomy: 1e9,
 });
 
-/* 별의 크기 — 셰이더(`materials.stars`)와 고르기(`starSizeCss`)가 같은 수를 읽는다: 흐름 = 광도 ×
- * clamp((기준 거리 / 거리)², 바닥, 천장), 크기 = clamp(배율 × 흐름^지수, 가장 작게, 가장 크게) CSS px. 고르기의 반지름은
- * max(크기의 반 × `pickShare`, `pickLeast` px), 겹치면 가까운 별이 먼저(깊이 × `pickDepth`). */
+/* 별의 크기 — 셰이더(`materials.stars`)와 고르기(`starSize`)가 같은 수를 읽는다. 속의 반지름(CSS px) =
+ * clamp(`coreLeast` + `coreGrow` × 바탕^`corePower`, `coreMin`, `coreMost`) × clamp(기준 거리 / 거리, `nearLeast`,
+ * `nearMost`). 올리거나 고른 별은 `hotGrow`배(적어도 `hotLeast`), 찾은 별은 적어도 `hitLeast`. 번짐의 반지름 = 속 ×
+ * (`haloLeast` + `haloHub` × 허브의 몫) + `haloPad`. 허브의 몫 = smoothstep(`hubFrom`, `hubTo`, 바탕). 번짐의 세기 =
+ * (`glow` + `glowHub` × 허브의 몫 + `glowFresh` × 최근²) × 테마의 몫(토큰 `halo`). 속의 흰빛 = `white` + `whiteHub` × 허브의 몫. 보통의 별은
+ * `dim` + (1 − `dim`) × smoothstep(`dimFrom`, `dimTo`, 바탕)만큼 빛난다. 초점이 있는 판의 초점 밖 별은 `away`, 안의
+ * 별은 `held`배이고 밖의 별은 빛깔도 `awayGrey`만큼 잿빛이다. 붐비는 자리의 별은 속이 제 자리의 몫(토큰
+ * `crowd-ratio`)까지 작아지되 `crowdSize`배 밑으로는 줄지 않고, 번짐은 줄어든 몫만큼 여려진다 — 허브일수록 덜 주되
+ * 제 형제 사이 간격은 넘지 않는다(`KNOWLEDGE_UNIVERSE_CROWD`). 가까이 가도 속은 `coreCeil` px, 점 하나의 반지름은
+ * 기기 픽셀 `spriteMost`를 넘지 않는다(점 크기의 상한은 드라이버마다 다르다). 속의 가장자리는 `edge` px로 풀리고,
+ * 번짐은 exp(-r² / (`haloFall` × 반지름²))로 여려져 `haloRim`부터 끝까지 0이다. 고른 별의 고리는 속 밖 `ringGap` px에
+ * 폭 `ringWide`, 세기 `ringInk`, 흰빛 `ringWhite`; 찾은 별의 고리는 반지름의 `hitRing`에 폭 `hitWide`, 세기 `hitInk` ±
+ * `hitBlink`(1초에 `hitBeat` rad). 고르기의 반지름은 max(속 × `pickShare`, `pickLeast` px), 겹치면 가까운 별이 먼저
+ * (깊이 × `pickDepth`). */
 const KNOWLEDGE_UNIVERSE_STAR = Object.freeze({
-  fluxLeast: 0.15,
-  fluxMost: 6,
-  sizeScale: 4,
-  sizePower: 0.38,
-  sizeLeast: 2.6,
-  sizeMost: 34,
-  pickShare: 0.8,
+  coreLeast: 1.05,
+  coreGrow: 1.1,
+  corePower: 0.36,
+  coreMin: 1,
+  coreMost: 5.4,
+  coreCeil: 10,
+  spriteMost: 64,
+  nearLeast: 0.45,
+  nearMost: 1.6,
+  hotGrow: 1.35,
+  hotLeast: 3.4,
+  hitLeast: 3,
+  hitPad: 3,
+  haloLeast: 2.1,
+  haloHub: 2.6,
+  haloPad: 2,
+  hubFrom: 2,
+  hubTo: 24,
+  glow: 0.13,
+  glowHub: 0.4,
+  glowFresh: 0.34,
+  white: 0.18,
+  whiteHub: 0.3,
+  dim: 0.62,
+  dimFrom: 0.1,
+  dimTo: 3,
+  crowdSize: 0.5,
+  away: 0.12,
+  awayGrey: 0.7,
+  held: 1.25,
+  edge: 0.6,
+  haloFall: 0.16,
+  haloRim: 0.7,
+  ringGap: 3,
+  ringWide: 0.8,
+  ringInk: 0.9,
+  ringWhite: 0.7,
+  hitRing: 0.8,
+  hitWide: 1.2,
+  hitInk: 0.72,
+  hitBlink: 0.38,
+  hitBeat: 4,
+  pickShare: 1.6,
   pickLeast: 6,
   pickDepth: 0.0004,
 });
 
-/* 필라멘트의 곡선 — 장식 셰이더의 필라멘트 가지와 이름표 자리(`knowledgeUniverseFilamentPoint`, 시안
- * `filamentPoint`)가 같은 수를 이 표에서 읽는다: 두 은하의 반지름 × `reachShare`만큼 안에서 시작하고 끝나되 시작은
- * `startMost`, 끝은 `endLeast`를 넘지 않고, 옆으로 길이 × `side`(bend 다섯 단계), 위로 길이 × `up`만큼 휜다. 거의
- * 수직인 쌍(옆 방향의 길이 < `upright`)의 옆은 x축이다. */
-const KNOWLEDGE_UNIVERSE_CURVE = Object.freeze({
-  reachShare: 0.55,
-  startMost: 0.42,
-  endLeast: 0.58,
-  side: 0.1,
-  up: 0.04,
-  upright: 0.001,
+/* 링크의 빛 — 가지(나무의 링크) · 현(나무에 들지 않은 군집 안의 링크와 떠돌이 별의 링크) · 올(군집 사이의 링크)이
+ * 같은 수를 이 표에서 읽는다.
+ *   가지: `branch` × 끝의 무게(부모 쪽 `trunkFrom` + `trunkGrow` × 줄기의 몫, 자식 쪽 `twigFrom` + `twigGrow` × 몫;
+ *     줄기의 몫 = min(1, `trunkLeast` + (1 − `trunkLeast`) × √((딸린 쪽 − 1) / (군집의 쪽 × `trunkShare`)))).
+ *   현: `chord` — 카메라가 처음 거리의 `closeNear`배 안에 들면 다 켜지고 `closeFar`배 밖에서는 꺼진다.
+ *   올: `fiber` × 가늚(다발의 링크 n이 `fiberFull`을 넘으면 한 올이 (full / n)^`fiberFade`로 가늘다, 바닥 `fiberLeast` —
+ *     굵은 다발일수록 밝되 판을 덮지 않는다), 두 끝에서 `fiberEnds`까지 여리다(`endsFrom`…`endsTo`). 링크가 `fiberMost`를 넘는
+ *     다발은 고르게 뽑은 `fiberMost`올이 다발 전체의 빛을 나눠 든다(n × 가늚 / `fiberMost`) — 수백 올을 겹쳐 그리지 않는다.
+ *     쉴 때 빛을 들지 않는 올(굵은 다발에 들지 않았거나 뽑히지 않은 올)은 꺼져 있고, 제 군집이 초점이면 `fiberFaint`로 켜진다.
+ *   켜진 링크(올린 쪽 · 고른 쪽의 링크, 경로): `lit` × 판의 줄임(`lit-full`), 흰빛 `litWhite` — 추론된 링크는 `inferred`배, 경로는
+ *     `path`배. 빛의 머리는 링크가 가리키는 쪽으로 `pulseSpeed`(1/s)로 달리고 꼬리는 길이의 `pulseTail`, 세기는
+ *     `pulse`배다. 다발의 올은 쉴 때도 `fiberPulse`배의 머리가 흐른다(`fiberSpeed`).
+ *   초점: 군집이 초점이면 그 군집의 것은 `focusOn`배, 남의 것은 `focusOff`배. 쪽이 초점이면(올림 · 고름) 그 쪽의
+ *     군집의 가지와 현만 `focusHome`배로 남고 다발은 전부 `focusOff`배다 — 켜진 링크가 먼저 읽힌다. 군집 없는
+ *     초점(찾기 · 시간 창)은 전부 `focusRest`배.
+ *   거리: 빛은 clamp(기준 거리 / 거리, `nearLeast`, `nearMost`)배, 카메라 코앞(`veilFrom`…`veilTo`)의 링크는 걷힌다. */
+const KNOWLEDGE_UNIVERSE_EDGE = Object.freeze({
+  branch: 0.19,
+  trunkFrom: 0.55,
+  trunkGrow: 0.9,
+  twigFrom: 0.16,
+  twigGrow: 0.7,
+  trunkLeast: 0.35,
+  trunkShare: 0.2,
+  chord: 0.04,
+  closeNear: 0.22,
+  closeFar: 0.5,
+  fiber: 0.034,
+  fiberFull: 24,
+  fiberFade: 0.55,
+  fiberLeast: 0.18,
+  fiberMost: 64,
+  fiberEnds: 0.1,
+  endsFrom: 0.02,
+  endsTo: 0.3,
+  fiberFaint: 0.012,
+  fiberPulse: 0.3,
+  fiberSpeed: 0.11,
+  fiberTail: 0.16,
+  lit: 0.7,
+  litWhite: 0.35,
+  inferred: 0.5,
+  path: 1.6,
+  pulse: 1.4,
+  pulseSpeed: 0.34,
+  pulseTail: 0.3,
+  focusOn: 1.25,
+  focusOff: 0.14,
+  focusHome: 0.7,
+  focusRest: 0.4,
+  nearLeast: 0.5,
+  nearMost: 1.6,
+  veilFrom: 4,
+  veilTo: 22,
 });
 
-/* 선형 빛의 휘도 무게(sRGB 원색, Rec. 709) — 은하 빛깔의 밝기를 맞출 때(`knowledgeUniverseTint`)와 셰이더가 별
- * 빛깔·종이 위 먹빛의 색만 벌리고 휘도는 그대로 둘 때 같은 무게를 읽는다. */
+/* 군집 둘레의 빛 — 군집마다 카메라를 보는 사각형 하나: 반지름 = 군집 × `reach`, 세기 = (`base` + `active` × 활동) ×
+ * 빛의 몫, 가운데에서 `fall`로 여려지고 `rimFrom`부터 끝까지 0으로. 초점 군집은 `focusOn`배, 남은 `focusOff`배. */
+const KNOWLEDGE_UNIVERSE_AURA = Object.freeze({
+  reach: 1.5,
+  base: 0.026,
+  active: 0.04,
+  fall: 2.6,
+  rimFrom: 0.72,
+  focusOn: 1,
+  focusOff: 0.3,
+});
+
+/* 군집의 나무(`knowledgeUniverseBurst`) — 허브에서 너비 우선으로 퍼진다. 가지의 길이 = `decay`^깊이 × (`leaf` +
+ * `leafLinks` × log2(1 + 그 쪽의 연결) + `branch` × √((딸린 쪽 − 1) / 군집의 쪽)) × 흔들림(`wobbleLeast`…+`wobbleSpan`).
+ * 허브의 자식은 온 구에, 그 밖의 자식은 부모가 온 방향을 축으로 한 원뿔 안에 황금각으로 선다 — 원뿔의 반각 =
+ * min(`capMost`, `capLeast` + `capGrow` × √자식 수). 다 놓은 뒤 가장 먼 쪽이 반지름의 `fill`에 닿게 맞춘다. 씨앗의
+ * 덧수 둘(자식들이 도는 위상, 길이의 흔들림)은 쪽의 열쇠에 더한다 — 쪽 하나가 늘어도 남의 가지가 돌지 않는다. */
+const KNOWLEDGE_UNIVERSE_BURST = Object.freeze({
+  decay: 0.56,
+  leaf: 0.26,
+  leafLinks: 0.07,
+  branch: 1,
+  wobbleLeast: 0.85,
+  wobbleSpan: 0.3,
+  capLeast: 0.4,
+  capGrow: 0.13,
+  capMost: 1.3,
+  fill: 0.96,
+  seedPhase: 7,
+  seedWobble: 31,
+});
+
+/* 다발의 길 — 올의 셰이더와 이름표 자리(`knowledgeUniverseFilamentPoint`)가 같은 수를 이 표에서 읽는다. 한 올은
+ * 다섯 점의 4차 곡선이다: 제 별, 제 군집의 문, 다발의 허리, 저쪽 군집의 문, 저쪽 별. 문은 가운데에서 저쪽
+ * 군집 쪽으로 min(반지름 × `gate`, 사이 거리 × `gateMost`)만큼 나간 자리이고, 허리는 두 문의 가운데에서 옆으로
+ * 길이 × `side` × 휨(다섯 단계), 위로 길이 × `up`만큼 휜다. 거의 수직인 쌍(옆 방향의 길이 < `upright`)의 옆은
+ * x축이다. 휨의 단계와 흐름의 위상은 쌍의 두 줄 번호에서 짓는다(t-12443의 수). */
+const KNOWLEDGE_UNIVERSE_CURVE = Object.freeze({
+  gate: 0.95,
+  gateMost: 0.3,
+  side: 0.1,
+  up: 0.05,
+  upright: 0.001,
+  bendLow: 7,
+  bendHigh: 3,
+  bendSteps: 5,
+});
+
+/* 첫 그림 — 문을 연 판에서 별들이 제 군집의 가운데(허브)에서 제 자리로 퍼진다(`uBirth` 0 → 1, 길이는 토큰
+ * `birth`). 군집마다 줄 번호의 해시 × `stagger`만큼 늦게 떠나고, 떠난 뒤에는 세제곱으로 느려지며 앉는다. 링크와 둘레
+ * 빛은 `ink`배 빠르게 켜진다. 평면에서 떠오르는 판은 떠오름이 그 일을 한다. */
+const KNOWLEDGE_UNIVERSE_BIRTH = Object.freeze({
+  stagger: 0.6,
+  ink: 1.5,
+});
+
+/* 붐빔 — 별 하나의 자리(CSS px)는 둘 가운데 좁은 쪽이다.
+ *   군집의 간격: 군집 안에서 별 하나가 차지하는 화면의 한 변 = √(π r² / 쪽), r = 군집의 화면 반지름(반지름 × 초점 거리 /
+ *     군집 가운데의 깊이). 카메라가 군집 안으로 들어가면 가운데의 깊이는 반지름의 `near`배로 친다.
+ *   형제 사이 간격(`map.room` — 나무가 자리를 놓을 때 적는다, `knowledgeUniverseBurst`): 부모의 자식 k가 길이 ℓ의 갓
+ *     (반각 θ) 위에 고르게 서므로, 앞에서 본 갓의 원반(π ℓ² sin²θ — 허브의 자식은 온 구라 π ℓ²)을 k로 나눈 한 변 =
+ *     ℓ sinθ √(π / k). 화면에서는 × 초점 거리 / 그 별의 깊이. 형제가 없는 별(군집의 허브 · 떠돌이 별)은 `roomy`다.
+ * 셰이더(`gapOf` · `aRoom`)와 고르기 · 이름표(`rowGaps` · `starSize`)가 같은 식을 쓴다. 자리로 재는 셋:
+ *   별: 속의 반지름 ≤ 자리 × `crowd-ratio`(토큰). 줄어드는 몫은 `KNOWLEDGE_UNIVERSE_STAR.crowdSize`가 바닥이고, 그 바닥에
+ *     걸려 더 줄지 못한 만큼은 빛으로 줄인다.
+ *   허브: 연결이 많은 별은 제 크기를 지키되 속의 반지름이 형제 사이 간격의 `hub`배를 넘지 않는다 — 허브가 많은 군집에서
+ *     허브끼리 겹쳐 한 덩어리가 되지 않는다. 군집의 허브(부모 없는 쪽)는 언제나 제 크기다.
+ *   가지: 화면 1 px을 지나는 가지의 수 ∝ √(π × 쪽) / 군집의 간격. 이 수가 `crowd-lines`(토큰)를 넘는 몫만큼 잔가지의
+ *     빛이 준다 — 줄기(딸린 쪽이 많은 가지)는 줄지 않는다.
+ * 빛을 맞춘 장면(2,650쪽)에서 잰 수: 판 1,365 × 1,137의 군집 간격은 약 10 px이고 별의 57%에서 자리의 몫이 바닥 밑이다.
+ * 옆 패널이 열린 판(735 × 602)은 약 5.4 px · 93%다 — 멀리서는 작은 점이고, 다가가면 제 크기로 돌아온다. */
+const KNOWLEDGE_UNIVERSE_CROWD = Object.freeze({
+  near: 0.5,
+  hub: 0.5,
+});
+
+/* 선형 빛의 휘도 무게(sRGB 원색, Rec. 709) — 군집 빛깔의 밝기를 맞출 때(`knowledgeUniverseTint`)와 합성 셰이더가
+ * 종이 위 먹빛의 색만 벌리고 휘도는 그대로 둘 때 같은 무게를 읽는다. */
 const KNOWLEDGE_UNIVERSE_LUMA = Object.freeze([0.2126, 0.7152, 0.0722]);
 const KNOWLEDGE_UNIVERSE_LUMA_GLSL = `vec3(${KNOWLEDGE_UNIVERSE_LUMA.map(knowledgeUniverseFloat).join(", ")})`;
 
-/* 쪽 이름 후보의 차례 — 초점의 별은 언제나 먼저, 쉴 때의 밝은 별은 제 차례대로(시안 `updateLabels`의 1e6·1e5). */
+/* 쪽 이름 후보의 차례 — 초점의 별은 언제나 먼저, 쉴 때의 큰 별은 제 차례대로. */
 const KNOWLEDGE_UNIVERSE_LABEL_FIRST = Object.freeze({ focus: 1e6, bright: 1e5 });
 
-/* 무대 위에 늘 서 있는 상자 — 이름표는 이 밑에 서지 않는다(시안의 고정 UI 상자 자리). 앱에서는 배율 상자와 열린
- * 범례이고, 놓는 프레임마다 잰다. */
+/* 무대 위에 늘 서 있는 상자 — 이름표는 이 밑에 서지 않는다. 앱에서는 배율 상자와 열린 범례이고, 놓는
+ * 프레임마다 잰다. */
 const KNOWLEDGE_UNIVERSE_COVERS = Object.freeze([".knowledge-zoom", ".knowledge-legend"]);
 
 /* 셰이더에 싣는 수 — GLSL은 정수 글자를 실수로 읽지 않으므로 소수점을 붙인다. */
@@ -316,57 +455,18 @@ function knowledgeUniverseFloat(value) {
   return Number.isInteger(value) ? value.toFixed(1) : String(value);
 }
 
-/* 은하의 형태 번호 — 셰이더가 텍셀 1의 w로 읽는다(시안 `kg-data.js`의 `TYPE`). */
-const KNOWLEDGE_UNIVERSE_TYPES = Object.freeze({ spiral: 0, barred: 1, elliptical: 2, irregular: 3, cluster: 4 });
-/* 형태의 낱말 — 번호가 곧 자리다(시안 `TYPE_NAME`). */
-const KNOWLEDGE_UNIVERSE_TYPE_WORDS = Object.freeze([
-  Object.freeze({ key: "knowledge.galaxySpiral", word: "나선 은하" }),
-  Object.freeze({ key: "knowledge.galaxyBarred", word: "막대 나선 은하" }),
-  Object.freeze({ key: "knowledge.galaxyElliptical", word: "타원 은하" }),
-  Object.freeze({ key: "knowledge.galaxyIrregular", word: "불규칙 은하" }),
-  Object.freeze({ key: "knowledge.galaxyCluster", word: "산개 성단" }),
-]);
+/* 표 하나를 셰이더의 `#define`으로 — 이름은 머리말 + 대문자 열쇠다(`STAR_CORE_LEAST`). 셰이더의 글자에는 수가
+ * 없고 이 이름만 있다: 표를 고치면 그림과 고르기가 함께 바뀐다. */
+function knowledgeUniverseDefines(prefix, table) {
+  return Object.entries(table).map(([key, value]) =>
+    `#define ${prefix}_${key.replace(/[A-Z]/gu, (letter) => `_${letter}`).toUpperCase()} ${knowledgeUniverseFloat(value)}`)
+    .join("\n");
+}
 
-/* 인스펙터의 우주 절(디자이너 m-12467의 6): 필라멘트 몇 줄, 「얼마 전」의 문턱(시안 `ageText`: 하루 밑은 오늘, 두 주
- * 밑은 날, 두 달 밑은 주, 한 해 밑은 달, 그 위는 해). */
+/* 인스펙터의 우주 절: 필라멘트와 큰 별 몇 줄, 「얼마 전」의 문턱(하루 밑은 오늘, 두 주 밑은 날, 두 달 밑은 주,
+ * 한 해 밑은 달, 그 위는 해). */
 const KNOWLEDGE_UNIVERSE_LISTED = 6;
 const KNOWLEDGE_UNIVERSE_AGE = Object.freeze({ today: 1, days: 14, weeks: 60, months: 365, week: 7, month: 30, year: 365 });
-
-/* 이름 있는 별의 자리 — 시안 `universe` 3의 모양 수. 셰이더의 몸 입자와 같은 식이라 모양을 정하는 수이고,
- * 셰이더 안의 수처럼 이 표 한 곳에 산다: 핵(쪽의 몫·반지름·두께), 팔(안쪽·폭·거듭제곱·흔들림·각의 흔들림·
- * 두께·로그의 바닥), 막대의 흔들림, 타원(반지름·거듭제곱·눌림·두께), 불규칙(덩어리 수·돌림·안쪽·걸음·퍼짐·두께),
- * 성단(반지름·거듭제곱). */
-const KNOWLEDGE_UNIVERSE_SEATS = Object.freeze({
-  coreShare: 0.05,
-  coreRadius: 0.07,
-  coreLift: 0.05,
-  armInner: 0.13,
-  armSpan: 0.8,
-  armPower: 0.85,
-  armJitter: 0.14,
-  armAngle: 0.34,
-  armLift: 0.05,
-  armFloor: 0.1,
-  barJitter: 0.12,
-  ellipticalRadius: 0.72,
-  ellipticalPower: 0.75,
-  ellipticalFlat: 0.8,
-  ellipticalLift: 0.6,
-  clumps: 4,
-  clumpTurn: 1.9,
-  clumpInner: 0.12,
-  clumpStep: 0.2,
-  clumpSpread: 0.26,
-  clumpLift: 0.14,
-  clusterRadius: 0.75,
-  clusterPower: 0.65,
-  /* 필라멘트 쌍마다의 휨(옆으로 다섯 단계)과 흐름의 위상 — 쌍의 두 줄 번호에서(시안 `uBundle2`). */
-  bendLow: 7,
-  bendHigh: 3,
-  bendSteps: 5,
-  phaseLow: 13,
-  phaseSteps: 7,
-});
 
 /* 판마다 한 번 읽는 수 — 테마와 무관하다(색은 따로 읽는다). */
 const knowledgeUniverseTunings = new WeakMap();
@@ -391,7 +491,7 @@ let knowledgeUniverseFailed = false;
 /* 사람이 3D를 누른 판 — 다음에 서는 우주는 평면 자리에서 떠오른다(z가 나는 전환). 문을 연 판은
  * 곧바로 처음 자리에 선다. */
 let knowledgeUniverseRising = false;
-/* 사람의 「움직임」(시안 `setMotion`, 디자이너 m-12467의 5) — 쉬고 9초 뒤의 느린 돌기와 필라멘트의 흐름·별의 반짝임이
+/* 사람의 「움직임」(시안 `setMotion`, 디자이너 m-12467의 5) — 쉬고 9초 뒤의 느린 돌기와 링크를 따라 흐르는 빛이
  * 한 단추에 묶인다. 이 창에서 한 번 고르면 다음에 서는 우주도 따른다. 움직임을 줄이라는 판에서는 늘 멈춘다. */
 let knowledgeUniverseMotion = true;
 
@@ -411,6 +511,13 @@ function knowledgeDimensionNow() {
 function knowledgeUniverseWanted(view, layout) {
   return knowledgeMode === KNOWLEDGE_MODES[0].id && knowledgeDimensionNow() === "3d"
     && layout !== undefined && layout.count > 0 && !view.hidden;
+}
+
+/* 우주가 평면 지도를 덮고 있는가 — 서 있고(`is-universe`: 떠오르는 동안과 내려앉는 동안도 평면의 층은 가려져
+ * 있다) 문맥을 쥐고 있는 동안. 그동안 평면의 손은 그리지 않고 그리기 버퍼를 돌려준다(`paintKnowledgeFrame`). */
+function knowledgeUniverseCovers(view) {
+  const universe = knowledgeUniverses.get(view);
+  return universe !== undefined && !universe.lost && view.classList.contains("is-universe");
 }
 
 /* 머리의 「2D | 3D」. 눌린 쪽은 지금 서 있는 얼굴이다(주변 탐색은 평면). 우주를 그릴 수 없는 판에서
@@ -475,7 +582,7 @@ function leaveKnowledgeUniverse(view) {
 }
 
 /* 그림의 문(`paintKnowledgeView`)이 끝에 부른다: 우주가 서야 하면 세우고(처음이면 짓는다), 아니면
- * 놓는다. 세운 우주는 위상이 바뀐 판에서 다시 짓고, 그 밖에는 옷(고름·밝힘·찾기)만 고친다. */
+ * 놓는다. 세운 우주는 위상이나 가림(접은 목차 · 일지)이 바뀐 판에서 다시 짓고, 그 밖에는 옷(고름·밝힘·찾기)만 고친다. */
 function paintKnowledgeUniverse(view, layout) {
   paintKnowledgeDimension(view);
   const wanted = knowledgeUniverseWanted(view, layout);
@@ -508,7 +615,7 @@ function paintKnowledgeUniverse(view, layout) {
     paintKnowledgeUniverseInspector(view, layout);
     return;
   }
-  if (universe.layout !== layout && !universe.build(layout)) {
+  if ((universe.layout !== layout || universe.seenStamp !== layout.drawnStamp) && !universe.build(layout)) {
     leaveKnowledgeUniverse(view);
     knowledgeUniverseFailed = true;
     paintKnowledgeDimension(view);
@@ -565,9 +672,10 @@ function knowledgeUniverseAgo(ms, nowMs) {
   return words.format(-Math.round((days / A.year) * 10) / 10, "year");
 }
 
-/* 인스펙터의 우주 절 — 우주가 서 있는 동안만: 가장 굵은 필라멘트(보낸 은하 → 받는 은하) 여섯, 그리고 고른 은하의
- * 형태·쪽 수·최근 두 주에 고친 몫과 그 은하의 필라멘트. 「아름다운 3D, 글자로는 0」이라는 비판에 대한 글자의
- * 답이다(디자이너 m-12467의 6). 줄은 단추이고 누르면 그 흐름으로 난다(`knowledgeUniverseFlow`). */
+/* 인스펙터의 우주 절 — 우주가 서 있는 동안만: 가장 굵은 필라멘트(보낸 군집 → 받는 군집) 여섯, 그리고 고른 군집의
+ * 쪽 수와 나무의 꼴(허브에 바로 이어진 쪽 · 그 가운데 가지를 친 쪽 · 가장 먼 걸음) · 최근 두 주에 고친 몫, 그 군집의 필라멘트와 큰 별. 「아름다운
+ * 3D, 글자로는 0」이라는 비판에 대한 글자의 답이다(디자이너 m-12467의 6). 줄은 단추이고 누르면 그 흐름으로 난다
+ * (`knowledgeUniverseFlow`). */
 function paintKnowledgeUniverseInspector(view, layout) {
   const overview = view.querySelector(".knowledge-overview");
   if (overview === null) return;
@@ -577,18 +685,18 @@ function paintKnowledgeUniverseInspector(view, layout) {
   let galaxy = overview.querySelector(".knowledge-overview-galaxy");
   if (flows === null) {
     flows = knowledgeListSection("knowledge-overview-filaments", "knowledge.filaments",
-      t("knowledge.filaments", "가장 굵은 필라멘트 (보낸 은하 → 받는 은하)"));
+      t("knowledge.filaments", "가장 굵은 필라멘트 (보낸 군집 → 받는 군집)"));
     galaxy = document.createElement("section");
     galaxy.className = "knowledge-overview-galaxy";
     const head = document.createElement("h4");
     head.className = "knowledge-inspector-head";
     const about = document.createElement("p");
     about.className = "knowledge-overview-galaxy-about";
-    /* 은하의 두 목록(시안 은하 카드): 그 은하의 굵은 필라멘트, 그리고 밝은 별 — 「어느 쪽이 중심인가」를 글자로
-     * 답하는 줄(디자이너 m-12627). 별 줄을 누르면 그 쪽이 골라진다(인스펙터의 `[data-knowledge-key]` 손). */
+    /* 군집의 두 목록: 그 군집의 굵은 필라멘트, 그리고 큰 별 — 「어느 쪽이 중심인가」를 글자로 답하는 줄(디자이너
+     * m-12627). 별 줄을 누르면 그 쪽이 골라진다(인스펙터의 `[data-knowledge-key]` 손). */
     galaxy.append(head, about,
       knowledgeListSection("knowledge-overview-galaxy-flows", "knowledge.galaxyFilaments", t("knowledge.galaxyFilaments", "굵은 필라멘트")),
-      knowledgeListSection("knowledge-overview-galaxy-stars", "knowledge.brightStars", t("knowledge.brightStars", "밝은 별")));
+      knowledgeListSection("knowledge-overview-galaxy-stars", "knowledge.brightStars", t("knowledge.brightStars", "큰 별")));
     overview.querySelector(".knowledge-overview-counts")?.after(galaxy, flows);
   }
   const rank = knowledgeClusterPicked;
@@ -607,12 +715,12 @@ function paintKnowledgeUniverseInspector(view, layout) {
     map.filaments.slice(0, KNOWLEDGE_UNIVERSE_LISTED).map(row));
   if (galaxy.hidden) return;
   const picked = map.galaxy[rank];
-  const shape = KNOWLEDGE_UNIVERSE_TYPE_WORDS[picked.type];
   writeTextContent(galaxy.querySelector(".knowledge-inspector-head"), t("knowledge.galaxyAbout",
-    "{{name}} · {{shape}} · {{pages}}쪽", { name: knowledgeClusterWord(layout, rank), shape: t(shape.key, shape.word),
-      pages: layout.communitySize[rank] }));
+    "{{name}} · {{pages}}쪽", { name: knowledgeClusterWord(layout, rank), pages: layout.communitySize[rank] }));
   writeTextContent(galaxy.querySelector(".knowledge-overview-galaxy-about"), t("knowledge.galaxyRecent",
-    "최근 2주에 고친 쪽 {{percent}}", { percent: `${Math.round(picked.activity * 100)}%` }));
+    "허브에 바로 이어진 쪽 {{direct}}(가지를 친 쪽 {{branches}}) · 가장 먼 쪽까지 {{steps}}걸음 · 최근 2주에 고친 쪽 {{percent}}",
+    { direct: picked.direct, branches: picked.branches, steps: picked.deepest,
+      percent: `${Math.round(picked.activity * 100)}%` }));
   const own = map.filaments.filter((one) => one.from === rank || one.to === rank).slice(0, KNOWLEDGE_UNIVERSE_LISTED);
   const ownFlows = galaxy.querySelector(".knowledge-overview-galaxy-flows");
   ownFlows.hidden = own.length === 0;
@@ -625,7 +733,7 @@ function paintKnowledgeUniverseInspector(view, layout) {
       model.degree[at] / brightMost)));
 }
 
-/* 필라멘트 줄을 눌렀다(시안 `showFlow`): 보낸 은하를 고르고 그 흐름을 옆에서 보는 자리로 난다. */
+/* 필라멘트 줄을 눌렀다: 보낸 군집을 고르고 그 흐름을 옆에서 보는 자리로 난다. */
 function knowledgeUniverseFlow(view, from, to) {
   const universe = knowledgeUniverses.get(view);
   if (universe === undefined || universe.map === null) return;
@@ -648,7 +756,7 @@ function buildKnowledgeUniverseControls() {
   motion.dataset.i18n = "knowledge.universeMotion";
   motion.textContent = t("knowledge.universeMotion", "움직임");
   motion.dataset.i18nTitle = "knowledge.universeMotionTip";
-  motion.dataset.tip = t("knowledge.universeMotionTip", "쉬는 동안 천천히 돌고 필라멘트가 흐릅니다");
+  motion.dataset.tip = t("knowledge.universeMotionTip", "쉬는 동안 천천히 돌고 링크를 따라 빛이 흐릅니다");
   motion.onclick = () => {
     const view = motion.closest(".knowledge-view");
     if (view !== null) setKnowledgeUniverseMotion(view, !knowledgeUniverseMotion);
@@ -667,8 +775,8 @@ function setKnowledgeUniverseMotion(view, on) {
   knowledgeUniverses.get(view)?.setMotion(on);
 }
 
-/* 필라멘트 위의 한 점(시안 `filamentPoint`) — 장식 셰이더가 그리는 곡선과 같은 식이라 필라멘트 수가 그 빛 위에
- * 선다. `share`는 0(보낸 은하) → 1(받는 은하). */
+/* 필라멘트 위의 한 점 — 올의 셰이더가 그리는 다발의 등뼈(두 군집의 가운데를 두 끝으로 한 4차 곡선)와 같은 식이라
+ * 필라멘트 수가 그 빛 위에 선다. `share`는 0(보낸 군집) → 1(받는 군집). */
 function knowledgeUniverseFilamentPoint(one, two, bend, share) {
   const C = KNOWLEDGE_UNIVERSE_CURVE;
   const dx = two.x - one.x;
@@ -691,16 +799,21 @@ function knowledgeUniverseFilamentPoint(one, two, bend, share) {
   const qx = -sz * uy;
   const qy = sz * ux - sx * uz;
   const qz = sx * uy;
-  const start = Math.min(C.startMost, (one.radius * C.reachShare) / length);
-  const end = Math.max(C.endLeast, 1 - (two.radius * C.reachShare) / length);
-  const along = start + (end - start) * share;
-  const arc = Math.sin(Math.PI * along);
-  const side = bend * length * C.side * arc;
-  const up = length * C.up * arc;
-  return [one.x + dx * along + sx * side + qx * up, one.y + dy * along + qy * up, one.z + dz * along + sz * side + qz * up];
+  const leave = Math.min(one.radius * C.gate, length * C.gateMost);
+  const arrive = Math.min(two.radius * C.gate, length * C.gateMost);
+  const side = bend * (one.rank < two.rank ? 1 : -1) * length * C.side;
+  const up = length * C.up;
+  const gates = [[one.x + ux * leave, one.y + uy * leave, one.z + uz * leave],
+    [two.x - ux * arrive, two.y - uy * arrive, two.z - uz * arrive]];
+  const waist = [(gates[0][0] + gates[1][0]) / 2 + sx * side + qx * up, (gates[0][1] + gates[1][1]) / 2 + qy * up,
+    (gates[0][2] + gates[1][2]) / 2 + sz * side + qz * up];
+  const rest = 1 - share;
+  const weights = [rest ** 4, 4 * rest ** 3 * share, 6 * rest ** 2 * share ** 2, 4 * rest * share ** 3, share ** 4];
+  const points = [[one.x, one.y, one.z], gates[0], waist, gates[1], [two.x, two.y, two.z]];
+  return [0, 1, 2].map((axis) => points.reduce((sum, point, at) => sum + point[axis] * weights[at], 0));
 }
 
-/* 은하의 가장 굵은 필라멘트(시안 `strongestFlow`) — 명판의 둘째 줄: 이 은하가 더 많이 보냈으면 →, 받았으면 ←. */
+/* 군집의 가장 굵은 필라멘트 — 명판의 둘째 줄: 이 군집이 더 많이 보냈으면 →, 받았으면 ←. */
 function knowledgeUniverseStrongest(map, row) {
   let best = null;
   for (const one of map.filaments) {
@@ -712,14 +825,15 @@ function knowledgeUniverseStrongest(map, row) {
   return best;
 }
 
-/* 범례의 우주 네 줄(시안 index.html 157–160, 디자이너 m-12627) — 우주가 서 있는 동안만 보이고 평면의 줄은 가려진다
- * (CSS `.knowledge-view.is-universe`). 표본은 시안의 기호: 별빛, 고친 때의 빛깔, 필라멘트, 올린 쪽의 선. */
+/* 범례의 우주 줄 — 우주가 서 있는 동안만 보이고 평면의 줄은 가려진다(CSS `.knowledge-view.is-universe`). 표본은
+ * 그림의 기호 그대로다: 별의 크기, 최근 고친 쪽의 번짐, 가지, 필라멘트, 올린 쪽의 링크. */
 const KNOWLEDGE_UNIVERSE_LEGEND = Object.freeze([
-  Object.freeze({ marks: ["star"], words: [{ key: "knowledge.legendBrightness", word: "밝기 = 연결 수" }] }),
-  Object.freeze({ marks: ["temp"], words: [{ key: "knowledge.legendRecent", word: "푸를수록 최근에 고친 쪽" }] }),
+  Object.freeze({ marks: ["star"], words: [{ key: "knowledge.legendBrightness", word: "별의 크기 = 연결 수" }] }),
+  Object.freeze({ marks: ["fresh"], words: [{ key: "knowledge.legendRecent", word: "빛이 번질수록 최근에 고친 쪽" }] }),
+  Object.freeze({ marks: ["branch"], words: [{ key: "knowledge.legendBranch", word: "가지 = 허브에서 이어진 링크" }] }),
   Object.freeze({ marks: ["filament"],
-    words: [{ key: "knowledge.legendFilament", word: "필라멘트 = 주제 사이 연결 · 빛은 보낸 쪽 → 받는 쪽" }] }),
-  Object.freeze({ marks: ["solid", "dots"], words: [{ key: "knowledge.legendPointed", word: "올린 쪽의 연결" },
+    words: [{ key: "knowledge.legendFilament", word: "필라멘트 = 군집 사이 링크의 다발 · 빛은 링크가 가리키는 쪽으로" }] }),
+  Object.freeze({ marks: ["solid", "faint"], words: [{ key: "knowledge.legendPointed", word: "올린 쪽의 링크" },
     { key: "knowledge.legendInferred", word: "추론" }] }),
 ]);
 
@@ -740,24 +854,41 @@ function appendKnowledgeUniverseLegend(list) {
   }
 }
 
-/* ---- 셰이더 — 시안의 글자 그대로 -----------------------------------------------------
+/* ---- 셰이더 ---------------------------------------------------------------------------
  *
- * 글은 index.html(09-28 18:38)의 것을 한 자도 바꾸지 않고 옮겼다. 재질은 시안처럼 `ShaderMaterial`이다 —
- * three.js가 WebGL2에서 GLSL 300 es로 옮겨 싣는다(`attribute`·`varying`·`gl_FragColor`를 제 머리의 정의로).
- * 바뀐 것은 디자이너가 정한 자리뿐이다(PORTING.md §4, 우편 m-12467): 은하 줄 128, 장식 무리의 문턱(배경 별
- * 128·필라멘트 130부터), 초점 센티널 999 — 그 수는 `KNOWLEDGE_UNIVERSE_SHAPE` 한 곳에서 글자에 들어간다.
- * 필라멘트 곡선의 수(`KNOWLEDGE_UNIVERSE_CURVE`)와 별 크기의 수(`KNOWLEDGE_UNIVERSE_STAR`)도 같은 값을 표에서
- * 읽는다 — 이름표 자리와 고르기가 같은 표를 읽기 때문이다. 사람이 색이 더 분명하기를 바라 네 자리가 토큰의
- * 수를 읽는다(t-14081): 합성의 톤 매핑이 색 비율을 지키는 몫, 종이 위 먹빛의 색, 이름 있는 별의 채도와 속의 흰빛 —
- * 그 토큰이 v4의 값(0 · 1 · 1 · 0.22)이면 글은 v4와 같게 그린다. */
+ * 재질은 `ShaderMaterial`이다 — three.js가 WebGL2에서 GLSL 300 es로 옮겨 싣는다(`attribute`·`varying`·
+ * `gl_FragColor`를 제 머리의 정의로). 모양의 수는 글자에 없다: 표(`KNOWLEDGE_UNIVERSE_STAR` · `_EDGE` · `_AURA` ·
+ * `_CURVE`)가 `#define`으로 들어가고(`knowledgeUniverseDefines`), 고르기와 이름표 자리가 같은 표를 읽는다. 배경 별과
+ * 후처리(빛 번짐 · 톤 매핑)는 t-12443이 시안에서 옮긴 글자 그대로다.
+ *
+ * 섞기는 미리 곱한 알파다(ONE, ONE_MINUS_SRC_ALPHA): 모든 빛이 α = 0으로 더해진다 — 깊이도 정렬도 없다. */
 
-/* 은하 텍셀 읽기·정수 해시·별 색(Wikipedia 분광형 표의 D65 색을 선형으로)·나선 팔 밭 — 시안 `GAL`. */
+/* 군집 텍셀 읽기 · 정수 해시 · 군집의 별 사이 간격(`gapOf` — `KNOWLEDGE_UNIVERSE_CROWD`, `uCrowd` = 토큰의 ratio ·
+ * lines · fade · least) · 첫 그림의 자리(`born` — 제 군집의 가운데에서 제 자리로) · 배경 별의 색(Wikipedia 분광형 표의
+ * D65 색을 선형으로). */
 const KNOWLEDGE_UNIVERSE_GAL = `
+${knowledgeUniverseDefines("BIRTH", KNOWLEDGE_UNIVERSE_BIRTH)}
+${knowledgeUniverseDefines("CROWD", KNOWLEDGE_UNIVERSE_CROWD)}
 uniform highp sampler2D tGal;
 vec4 gal(int c, int t){ return texelFetch(tGal, ivec2(t, c), 0); }
 uint hu(uint x){ x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }
 float hf(uint s){ return float(hu(s) >> 8u) * (1.0 / 16777216.0); }
-float gauss(float a, float b){ return sqrt(-2.0 * log(max(a, 1e-6))) * cos(6.2831853 * b); }
+uniform float uFocal; uniform vec4 uCrowd;
+float gapOf(int c, float lift){
+  vec4 G0 = gal(c, 0);
+  float w = max((projectionMatrix * viewMatrix * vec4(mix(gal(c, 1).xyz, G0.xyz, lift), 1.0)).w, G0.w * CROWD_NEAR);
+  float r = G0.w * uFocal / w;
+  return sqrt(3.14159265 * r * r / max(gal(c, 3).y, 1.0));
+}
+uniform float uBirth;
+vec3 born(vec3 p, float row){
+  if (uBirth > 0.999 || row < -0.5) return p;
+  int c = int(row + 0.5);
+  float late = hf(uint(c) * 2654435761u) * BIRTH_STAGGER;
+  float g = clamp(uBirth * (1.0 + BIRTH_STAGGER) - late, 0.0, 1.0);
+  vec3 home = gal(c, 0).xyz;
+  return home + (p - home) * (1.0 - pow(1.0 - g, 3.0));
+}
 vec3 starColor(float t){
   t = clamp(t, 0.0, 1.0) * 6.0;
   vec3 M = vec3(1.0, 0.493, 0.167), K = vec3(1.0, 0.731, 0.499), G = vec3(1.0, 0.867, 0.782), F = vec3(0.974, 0.933, 1.0);
@@ -768,313 +899,220 @@ vec3 starColor(float t){
   if (t < 4.0) return mix(F, A, t - 3.0);
   if (t < 5.0) return mix(A, B, t - 4.0);
   return mix(B, O, t - 5.0);
-}
-float armField(float r, float th, float arms, float K, float th0){
-  float lg = log(max(r, 0.1) / 0.1);
-  return pow(0.5 + 0.5 * cos(arms * (th - th0 - K * lg)), 4.0) * smoothstep(0.08, 0.26, r);
 }`;
 
-/* 값 노이즈 fbm 4옥타브 — 시안 `NOISE`(성운과 불규칙 은하의 무늬). */
-const KNOWLEDGE_UNIVERSE_NOISE = `
-float h3(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
-float vnoise(vec3 p){ vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-  float a = h3(i), b = h3(i + vec3(1.0, 0.0, 0.0)), c = h3(i + vec3(0.0, 1.0, 0.0)), d = h3(i + vec3(1.0, 1.0, 0.0));
-  float e = h3(i + vec3(0.0, 0.0, 1.0)), f1 = h3(i + vec3(1.0, 0.0, 1.0)), g = h3(i + vec3(0.0, 1.0, 1.0)), h = h3(i + vec3(1.0, 1.0, 1.0));
-  return mix(mix(mix(a, b, f.x), mix(c, d, f.x), f.y), mix(mix(e, f1, f.x), mix(g, h, f.x), f.y), f.z); }
-float fbm(vec3 p){ float a = 0.5, s = 0.0; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p = p * 2.03 + 1.7; a *= 0.5; } return s; }`;
-
-/* 은하의 원반(기울어진 사각형 하나에 풀리지 않은 별빛·팔·먼지 띠·막대)과 핵의 빛, 성단의 반사 성운 — 시안
- * `materials.glows`. */
-const KNOWLEDGE_UNIVERSE_GLOWS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
-      attribute vec4 aBB; uniform float uLift; uniform float uFocusGal;
-      varying vec2 vQ; varying float vType; varying vec4 vP1; varying vec4 vP2; varying vec3 vTint; varying vec3 vW; varying vec3 vN; varying float vVar; varying float vFoc; varying float vNear;
-      void main(){
-        int c = int(aBB.x + 0.5);
-        vec4 G0 = gal(c, 0), G1 = gal(c, 1), G2 = gal(c, 2), G3 = gal(c, 3), G4 = gal(c, 4), G5 = gal(c, 5), G6 = gal(c, 6);
-        vec3 center = mix(G4.xyz, G0.xyz, uLift);
-        float R = G0.w * aBB.z;
-        vNear = mix(0.3, 1.0, smoothstep(1.6, 5.5, length(cameraPosition - center) / max(G0.w, 1.0)));
-        vec3 w;
-        if (aBB.y < 0.5) { vec3 N = G1.xyz, Ux = G2.xyz, V = cross(N, Ux); w = center + (Ux * position.x + V * position.y) * R * uLift; vN = N; }
-        else {
-          vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]); vec3 up = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
-          w = center + (right * position.x + up * position.y) * R * uLift; vN = vec3(0.0);
-        }
-        vQ = position.xy * aBB.z; vType = aBB.y; vVar = aBB.w;
-        vP1 = vec4(G2.w, G3.x, G6.y, G3.y); vP2 = vec4(G3.z, G3.w, G5.w, G1.w);
-        vTint = G5.rgb; vW = w;
-        vFoc = uFocusGal < -0.5 ? 1.0 : (abs(float(c) - uFocusGal) < 0.5 ? 1.12 : 0.3);
-        gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
-      }`;
-
-const KNOWLEDGE_UNIVERSE_GLOWS_FRAG = `${KNOWLEDGE_UNIVERSE_NOISE}
-      uniform float uLift; uniform float uTime;
-      varying vec2 vQ; varying float vType; varying vec4 vP1; varying vec4 vP2; varying vec3 vTint; varying vec3 vW; varying vec3 vN; varying float vVar; varying float vFoc; varying float vNear;
-      void main(){
-        vec2 q = vQ; float r = length(q);
-        vec3 o = vec3(0.0); float alpha = 0.0;
-        if (vType < 0.5) {
-          float arms = vP1.x, K = vP1.y, th0 = vP1.z, bar = vP1.w, act = vP2.y, dust = vP2.z, gtype = vP2.w;
-          float th = atan(q.y, q.x);
-          float lg = log(max(r, 0.1) / 0.1);
-          float ph = arms * (th - th0 - K * lg);
-          float edge = 1.0 - smoothstep(0.7, 1.12, r);
-          float disk = exp(-r / 0.3) * edge;
-          float armR = exp(-r / 0.55) * edge;
-          float arm = pow(0.5 + 0.5 * cos(ph), 3.0) * smoothstep(0.06, 0.22, r);
-          float lane = pow(0.5 + 0.5 * cos(ph + 0.85), 12.0) * smoothstep(0.12, 0.3, r) * (1.0 - smoothstep(0.6, 0.95, r)) * dust;
-          float barL = 0.0;
-          if (gtype > 0.5 && gtype < 1.5) { float cs = cos(th0), sn = sin(th0); vec2 b = vec2(cs * q.x + sn * q.y, -sn * q.x + cs * q.y); barL = exp(-pow(abs(b.x) / max(bar, 0.01), 3.0) - pow(b.y / 0.05, 2.0)); }
-          if (gtype > 2.5) { arm = smoothstep(0.35, 0.8, fbm(vec3(q * 3.2, th0))); lane = 0.0; }
-          vec3 warm = vec3(1.0, 0.86, 0.7), cool = vec3(0.6, 0.73, 1.0);
-          vec3 light = warm * (disk * 0.22 + barL * 0.6) + mix(warm, cool, 0.75) * armR * arm * (0.5 + 0.8 * act);
-          light += vec3(1.0, 0.26, 0.4) * armR * arm * arm * act * 0.4;
-          light *= 1.0 - lane * 0.85;
-          float facing = abs(dot(normalize(cameraPosition - vW), vN));
-          o = light * vTint * 0.9 / max(facing, 0.35);
-          alpha = min(0.55, lane * disk * 2.6);
-        } else if (vType < 1.5) {
-          float gtype = vP2.w;
-          float I = gtype > 1.5 && gtype < 2.5 ? exp(-pow(r / 0.2, 0.75) * 2.3) * 1.25 : exp(-pow(r / 0.06, 0.8) * 2.0) * 1.9;
-          I *= 1.0 - smoothstep(0.75, 1.0, r / max(vVar, 0.5));
-          o = vec3(1.0, 0.8, 0.6) * vTint * I;
-        } else {
-          float n = fbm(vec3(q * (1.5 + vVar * 0.6) + vVar * 7.3, vVar * 3.1 + uTime * 0.004));
-          float m = smoothstep(0.38, 0.95, n) * exp(-r * r * 2.4);
-          vec3 cc = mix(vec3(0.3, 0.48, 1.0), vec3(1.0, 0.32, 0.5), step(1.5, vVar) * min(1.0, vP2.y * 3.0));
-          o = cc * m * 0.1;
-        }
-        o *= vFoc * uLift * uLift * (vType < 1.5 ? vNear : 1.0);
-        alpha *= vFoc * uLift;
-        gl_FragColor = vec4(o, alpha);
-      }`;
-
-/* 이름 없는 별·먼지·H II 매듭·필라멘트의 가스·무한히 먼 배경 별 — 한 드로우, 번호에서 셰이더가 짓는다(입자마다
- * float 하나) — 시안 `materials.decor`. 무리의 문턱과 필라멘트 배열의 크기만 `KNOWLEDGE_UNIVERSE_SHAPE`에서 든다. */
-const KNOWLEDGE_UNIVERSE_DECOR_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
-      uniform float uTime; uniform float uLift; uniform float uPx; uniform float uDpr; uniform float uRef; uniform float uFocus; uniform float uFlow; uniform float uFocusGal;
-      uniform vec4 uBundle[${KNOWLEDGE_UNIVERSE_SHAPE.bundles}]; uniform vec4 uBundle2[${KNOWLEDGE_UNIVERSE_SHAPE.bundles}];
-      varying vec3 vCol; varying float vA; varying float vKind;
-      void main(){
-        float code = position.x;
-        float grp = floor(code / ${KNOWLEDGE_UNIVERSE_SHAPE.groupSpan}.0 + 1e-4);
-        float j = code - grp * ${KNOWLEDGE_UNIVERSE_SHAPE.groupSpan}.0;
-        uint s = hu(uint(code + 0.5) * 747796405u + 2891336453u);
-        float r0 = hf(s), r1 = hf(s + 11u), r2 = hf(s + 23u), r3 = hf(s + 37u), r4 = hf(s + 41u), r5 = hf(s + 53u), r6 = hf(s + 67u);
-        vec3 world = vec3(0.0); vec3 col = vec3(1.0); float inten = 0.0; float px = 1.6; float ext = 0.0; float dustA = 0.0; float kind = 0.0; float extR = 1.0; float extMax = 64.0;
-        vA = 0.0; vKind = 0.0;
-        float lift2 = uLift * uLift;
-        if (grp > ${KNOWLEDGE_UNIVERSE_SHAPE.bundleGroup - 0.5}) {
-          int b = int(grp - ${KNOWLEDGE_UNIVERSE_SHAPE.bundleGroup}.0 + 0.5);
-          vec4 B0 = uBundle[b], B1 = uBundle2[b];
-          int ga = int(B0.x + 0.5), gb = int(B0.y + 0.5);
-          vec4 CA = gal(ga, 0), CB = gal(gb, 0);
-          vec3 d = CB.xyz - CA.xyz; float L = max(length(d), 1.0); vec3 dir = d / L;
-          vec3 side = cross(dir, vec3(0.0, 1.0, 0.0)); side = length(side) < ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.upright)} ? vec3(1.0, 0.0, 0.0) : normalize(side);
-          vec3 up2 = cross(side, dir);
-          float t = fract(r0 + uTime * (4.0 + 4.0 * r1) / L);
-          float ta = min(${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.startMost)}, CA.w * ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.reachShare)} / L), tb = max(${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.endLeast)}, 1.0 - CB.w * ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.reachShare)} / L);
-          float tt = mix(ta, tb, t);
-          float arc = sin(3.14159265 * tt);
-          vec3 P = CA.xyz + d * tt + side * (B1.x * L * ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.side)} * arc) + up2 * (L * ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_CURVE.up)} * arc);
-          float strong = B0.z * B0.z;
-          float w = (0.6 + 6.0 * pow(B0.z, 1.5)) * (0.45 + 0.55 * arc) * (0.65 + 0.35 * sin(tt * (9.0 + 5.0 * B1.y) + B1.y * 6.0));
-          float gr = sqrt(-2.0 * log(max(r2, 1e-4))) * 0.5, ang = 6.2831853 * r3;
-          world = P + (side * cos(ang) + up2 * sin(ang)) * gr * w;
-          float fade = smoothstep(0.0, 0.1, t) * smoothstep(1.0, 0.86, t);
-          inten = (0.035 + 0.22 * strong) * fade;
-          col = mix(gal(ga, 5).rgb, gal(gb, 5).rgb, tt) * vec3(0.68, 0.78, 1.0);
-          if (r4 < 0.05) { inten *= 5.0; px = 2.6; col = mix(col, vec3(1.0), 0.45); }
-          else if (r4 < 0.3) { kind = 1.0; ext = 0.8 + 3.0 * B0.z; extMax = 20.0; inten = (0.01 + 0.05 * strong) * fade; col = mix(col, vec3(0.45, 0.58, 1.0), 0.35); }
-          float onB = (abs(B0.x - uFocusGal) < 0.5 || abs(B0.y - uFocusGal) < 0.5) ? 1.0 : 0.0;
-          inten *= uFocusGal < -0.5 ? 1.0 : mix(0.15, 1.9, onB);
-          inten *= lift2;
-        } else if (grp > ${KNOWLEDGE_UNIVERSE_SHAPE.skyGroup - 0.5}) {
-          float z = r0 * 2.0 - 1.0, ph = 6.2831853 * r1, rr = sqrt(max(0.0, 1.0 - z * z));
-          vec3 dir = vec3(rr * cos(ph), z, rr * sin(ph));
-          vec4 clip = projectionMatrix * vec4(mat3(viewMatrix) * dir, 0.0);
-          if (clip.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vCol = vec3(0.0); return; }
-          clip.z = clip.w * 0.9999;
-          gl_Position = clip;
-          float m = pow(r2, 9.0);
-          float I = (0.045 + 0.07 * r3 + 2.4 * m) * lift2 * (uFocus > 0.5 ? 0.55 : 1.0);
-          if (j < 48.0) { vKind = 3.0; vCol = vec3(1.0, 0.88, 0.76) * (0.05 + 0.05 * r3) * lift2; vA = r5 * 3.1416; gl_PointSize = (4.0 + 6.0 * r4) * uDpr; return; }
-          vCol = starColor(0.08 + 0.84 * r4) * I;
-          gl_PointSize = (1.15 + 2.2 * sqrt(m)) * uDpr;
-          return;
-        } else {
-          int c = int(grp + 0.5);
-          vec4 G0 = gal(c, 0), G1 = gal(c, 1), G2 = gal(c, 2), G3 = gal(c, 3), G4 = gal(c, 4), G5 = gal(c, 5), G6 = gal(c, 6);
-          float R = G0.w; int type = int(G1.w + 0.5);
-          vec3 N = G1.xyz, Ux = G2.xyz, V = cross(N, Ux);
-          float arms = G2.w, K = G3.x, bar = G3.y, bulge = G3.z, act = G3.w, dust = G5.w, count = G6.x, th0 = G6.y;
-          float f = (j + 0.5) / max(count, 1.0);
-          vec3 l = vec3(0.0);
-          float spin = uTime;
-          extR = R;
-          if (type <= 1) {
-            float fDust = 0.14 * dust / 0.6, fBulge = fDust + bulge, fYoung = fBulge + 0.2 + 0.12 * act, fHII = fYoung + 0.025 + 0.07 * act, fHalo = fHII + 0.03;
-            if (f < fDust) {
-              float r = clamp(0.1 + 0.34 * -log(1.0 - r1 * 0.93), 0.1, 0.95);
-              float a = th0 + floor(r2 * arms) * 6.2831853 / arms + K * log(max(r, 0.1) / 0.1) - 0.26 + gauss(r3, r4) * 0.06;
-              l = vec3(cos(a) * r, sin(a) * r, gauss(r5, r6) * 0.012);
-              kind = 2.0; dustA = 0.3 * (1.0 - smoothstep(0.6, 0.95, r)); ext = 0.07; col = vec3(0.0);
-            } else if (f < fBulge) {
-              float r = 0.2 * pow(r1, 1.8);
-              float z = r2 * 2.0 - 1.0, ph = 6.2831853 * r3 + spin * 0.05 / (0.05 + r), q = sqrt(max(0.0, 1.0 - z * z));
-              l = vec3(q * cos(ph) * r, q * sin(ph) * r, z * r * 0.62);
-              col = starColor(0.12 + 0.2 * r4); inten = 0.5 + 0.9 * r5 * r5; px = 1.6;
-            } else if (f < fYoung) {
-              float r = clamp(0.12 + 0.36 * -log(1.0 - r1 * 0.9), 0.12, 1.0);
-              float a;
-              if (type == 1 && r < bar) a = th0 + floor(r2 * 2.0) * 3.14159265 + gauss(r3, r4) * 0.06;
-              else a = th0 + floor(r2 * arms) * 6.2831853 / arms + K * log(max(r, 0.1) / 0.1) + gauss(r3, r4) * 0.11;
-              l = vec3(cos(a) * r, sin(a) * r, gauss(r5, r6) * 0.01);
-              col = starColor(0.62 + 0.36 * r5); inten = (0.32 + 0.9 * pow(r6, 3.0)) * (0.7 + 0.8 * act); px = 1.5 + r6;
-            } else if (f < fHII) {
-              uint ks = hu(uint(c) * 9781u + uint(floor(j / 7.0)) * 6271u);
-              float kr = clamp(0.18 + 0.3 * -log(1.0 - hf(ks) * 0.9), 0.15, 0.92);
-              float ka = th0 + floor(hf(ks + 3u) * arms) * 6.2831853 / arms + K * log(kr / 0.1) + (hf(ks + 5u) - 0.5) * 0.12;
-              l = vec3(cos(ka) * kr, sin(ka) * kr, 0.0) + vec3(gauss(r1, r2), gauss(r3, r4), gauss(r5, r6) * 0.3) * 0.018;
-              kind = 1.0; col = vec3(1.0, 0.28, 0.42); inten = 0.16 + 0.2 * act; ext = 0.028;
-            } else if (f < fHalo) {
-              float r = 0.3 + 0.9 * r1;
-              float z = r2 * 2.0 - 1.0, ph = 6.2831853 * r3, q = sqrt(max(0.0, 1.0 - z * z));
-              l = vec3(q * cos(ph), q * sin(ph), z * 0.7) * r;
-              col = starColor(0.08 + 0.15 * r4); inten = 0.1 + 0.12 * r5;
-            } else {
-              float r = clamp(0.03 + 0.3 * -log(1.0 - r1 * 0.96), 0.03, 1.05);
-              float a = 6.2831853 * r2 + spin * 0.035 / (0.08 + r);
-              if (type == 1 && r < bar && r3 < 0.35) a = th0 + floor(r4 * 2.0) * 3.14159265 + gauss(r5, r6) * 0.07;
-              l = vec3(cos(a) * r, sin(a) * r, gauss(r5, r6) * 0.02 * (1.0 - 0.5 * r));
-              float arm = armField(r, a, arms, K, th0);
-              col = starColor(0.2 + 0.3 * r4 + 0.25 * arm); inten = (0.13 + 0.3 * r5) * (0.35 + 1.6 * arm); px = 1.3 + 0.6 * r6;
-            }
-          } else if (type == 2) {
-            float r = 0.85 * pow(r1, 1.7);
-            float z = r2 * 2.0 - 1.0, ph = 6.2831853 * r3 + spin * 0.02 / (0.1 + r), q = sqrt(max(0.0, 1.0 - z * z));
-            l = vec3(q * cos(ph) * r, q * sin(ph) * r * 0.78, z * r * 0.6);
-            col = starColor(0.1 + 0.22 * r4); inten = (0.3 + 0.55 * r5 * r5) * (1.0 - 0.6 * r); px = 1.4 + 0.5 * r6;
-          } else if (type == 3) {
-            float clump = floor(r1 * 4.0);
-            float ca = th0 + clump * 1.9, cr = 0.12 + 0.2 * clump;
-            l = vec3(cos(ca) * cr, sin(ca) * cr, 0.0) + vec3(gauss(r2, r3), gauss(r4, r5), gauss(r6, r1) * 0.35) * 0.2;
-            bool hii = r6 < 0.1;
-            col = hii ? vec3(1.0, 0.28, 0.42) : starColor(0.45 + 0.5 * r4);
-            inten = hii ? 0.2 : 0.25 + 0.6 * r5 * r5; kind = hii ? 1.0 : 0.0; ext = hii ? 0.05 : 0.0;
-          } else if (type == 4) {
-            float r = 0.9 * pow(r1, 1.4);
-            float z = r2 * 2.0 - 1.0, ph = 6.2831853 * r3, q = sqrt(max(0.0, 1.0 - z * z));
-            l = vec3(q * cos(ph), q * sin(ph), z) * r;
-            col = starColor(0.55 + 0.45 * r4); inten = 0.25 + 1.1 * pow(r5, 4.0); px = 1.4 + 0.8 * r6;
-          }
-          world = mix(G4.xyz, G0.xyz + (Ux * l.x + V * l.y + N * l.z) * R, uLift);
-          col *= G5.rgb;
-          float foc = uFocusGal < -0.5 ? 1.0 : (abs(float(c) - uFocusGal) < 0.5 ? 1.15 : 0.3);
-          inten *= foc * lift2;
-          dustA *= foc * uLift;
-        }
-        vec4 clip = projectionMatrix * viewMatrix * vec4(world, 1.0);
-        gl_Position = clip;
-        float dist = max(clip.w, 1.0);
-        if (ext > 0.0) {
-          float sz = ext * extR * uPx / dist, sc = clamp(sz, 1.5 * uDpr, extMax * uDpr), keep = min(1.0, (sz * sz) / (sc * sc)) * min(1.0, sc / sz + 0.35);
-          gl_PointSize = sc; vCol = col * inten * keep; vA = dustA * keep;
-        } else {
-          gl_PointSize = px * uDpr;
-          vCol = col * inten * clamp(pow(uRef / dist, 2.0), 0.1, 4.0);
-          vA = 0.0;
-        }
-        vKind = kind;
-      }`;
-
-const KNOWLEDGE_UNIVERSE_DECOR_FRAG = `varying vec3 vCol; varying float vA; varying float vKind;
-      void main(){
-        vec2 p = gl_PointCoord - 0.5;
-        float r2 = dot(p, p) * 4.0;
-        float inside = step(r2, 1.0);
-        vec4 o;
-        if (vKind < 0.5) o = vec4(vCol * exp(-r2 * 4.5), 0.0);
-        else if (vKind < 1.5) o = vec4(vCol * exp(-r2 * 3.5) * (1.0 - r2), 0.0);
-        else if (vKind < 2.5) { float s = max(0.0, 1.0 - r2); o = vec4(0.0, 0.0, 0.0, vA * s * s); }
-        else { float ca = cos(vA), sa = sin(vA); vec2 q = mat2(ca, -sa, sa, ca) * p; o = vec4(vCol * exp(-(q.x * q.x * 4.0 + q.y * q.y * 26.0) * 4.0), 0.0); }
-        gl_FragColor = o * inside;
-      }`;
-
-/* 이름 있는 별(쪽): 밝기 = 연결 수(등급 척도), 색 = 최근 고침(흑체 색을 제 휘도에서 `star-chroma`배로 벌린 것),
- * 밝은 별은 빛살, 찾은 별은 조준 고리 — 시안 `materials.stars`. */
-const KNOWLEDGE_UNIVERSE_STARS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
-      attribute vec3 aPos2; attribute vec4 aStar; attribute float aState;
-      uniform float uLift; uniform float uDpr; uniform float uRef; uniform float uFocus; uniform float uStarChroma;
-      varying vec3 vCol; varying float vI; varying float vS; varying float vState; varying float vSpike;
-      void main(){
-        vec3 w = mix(aPos2, position, uLift);
-        vec4 clip = projectionMatrix * viewMatrix * vec4(w, 1.0);
-        gl_Position = clip;
-        float st = aState;
-        float flux = aStar.x * clamp(pow(uRef / max(clip.w, 1.0), 2.0), ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_STAR.fluxLeast)}, ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_STAR.fluxMost)});
-        if (st > 1.5 && st < 2.5) flux = max(flux * 2.0, 4.0);
-        float size = clamp(${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_STAR.sizeScale)} * pow(flux, ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_STAR.sizePower)}), ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_STAR.sizeLeast)}, ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_STAR.sizeMost)});
-        if (st > 2.5) size = max(size, 24.0);
-        gl_PointSize = size * uDpr;
-        vS = size * uDpr; vState = st;
-        float focus = uFocus > 0.5 ? (st > 0.5 ? 1.3 : 0.14) : 1.0;
-        vI = min(flux, 6.0) * 0.55 * focus;
-        vSpike = smoothstep(3.0, 9.0, flux) + ((st > 1.5 && st < 2.5) ? 0.8 : 0.0);
-        vec3 c = starColor(aStar.y);
-        c = max(mix(vec3(dot(c, ${KNOWLEDGE_UNIVERSE_LUMA_GLSL})), c, uStarChroma), 0.0);
-        if (uFocus > 0.5 && st < 0.5) c = mix(c, vec3(dot(c, vec3(0.3, 0.59, 0.11))), 0.7);
-        vCol = c;
-      }`;
-
-const KNOWLEDGE_UNIVERSE_STARS_FRAG = `uniform float uTime; uniform float uDpr; uniform float uStarWhite;
-      varying vec3 vCol; varying float vI; varying float vS; varying float vState; varying float vSpike;
-      void main(){
-        vec2 p = (gl_PointCoord - 0.5) * vS;
-        float r = length(p);
-        float px = uDpr;
-        float core = exp(-r * r / (2.2 * px * px));
-        float halo = 1.0 / (1.0 + r * r / ((0.1 * vS + px) * (0.1 * vS + px)) * 2.5) * (1.0 - smoothstep(0.32 * vS, 0.5 * vS, r));
-        vec2 q = mat2(0.97, 0.24, -0.24, 0.97) * p;
-        float len = 0.2 * vS;
-        float sp = (exp(-abs(q.y) / (0.55 * px)) * exp(-abs(q.x) / len) + exp(-abs(q.x) / (0.55 * px)) * exp(-abs(q.y) / len)) * vSpike;
-        float ring = vState > 2.5 ? exp(-pow((r - 0.38 * vS) / (1.2 * px), 2.0)) * (0.65 + 0.35 * sin(uTime * 4.0)) : 0.0;
-        vec3 o = (mix(vCol, vec3(1.0), uStarWhite) * core * 1.6 + vCol * (halo * 0.5 + sp * 0.55)) * vI + vec3(0.6, 0.82, 1.0) * ring * 1.1;
-        gl_FragColor = vec4(o, 0.0);
-      }`;
-
-/* 쪽의 자리 — 번호에서 텍셀 하나(평면과 우주 사이를 `uLift`로) — 시안 `NODE_AT`. */
+/* 쪽의 자리 — 번호에서 텍셀 하나(평면과 우주 사이를 `uLift`로). w는 그 쪽의 줄(군집) 번호이고 떠돌이 별은 -1이다. */
 const KNOWLEDGE_UNIVERSE_NODE_AT = `
 uniform highp sampler2D tNode3; uniform highp sampler2D tNode2; uniform int uTexW; uniform float uLift;
 vec4 nodeAt(int i){ ivec2 c = ivec2(i % uTexW, i / uTexW); vec4 p3 = texelFetch(tNode3, c, 0); if (uLift > 0.999) return p3; return mix(texelFetch(tNode2, c, 0), p3, uLift); }`;
 
-/* 별자리 선: 올리거나 고른 쪽의 연결만(주제를 고르면 선 대신 그 은하의 필라멘트가 밝아진다). 빛은 보낸 쪽에서
- * 받는 쪽으로 흐른다 — 시안 `materials.lines`. 두 끝의 줄 번호를 푸는 밑만 `KNOWLEDGE_UNIVERSE_SHAPE`에서 든다. */
-const KNOWLEDGE_UNIVERSE_LINES_VERT = `${KNOWLEDGE_UNIVERSE_NODE_AT}
-      attribute vec4 aEdge;
-      varying float vT; varying float vKind; varying float vPhase; varying float vCross;
+/* 군집 둘레의 빛 — 군집마다 카메라를 보는 사각형 하나. 활동이 많은 군집이 더 번진다. */
+const KNOWLEDGE_UNIVERSE_AURA_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
+${knowledgeUniverseDefines("AURA", KNOWLEDGE_UNIVERSE_AURA)}
+      attribute float aRow; uniform float uLift; uniform float uFocusGal;
+      varying vec2 vQ; varying vec3 vInk;
       void main(){
-        float t = position.x;
-        int ia = int(aEdge.x + 0.5); int ib = int(aEdge.y + 0.5);
-        float packed = floor(aEdge.z * 0.5 + 0.01); float ca = mod(packed, ${KNOWLEDGE_UNIVERSE_SHAPE.linePack}.0), cb = floor(packed / ${KNOWLEDGE_UNIVERSE_SHAPE.linePack}.0 + 0.001);
-        vec3 A = nodeAt(ia).xyz, B = nodeAt(ib).xyz;
-        vec3 p = mix(A, B, t);
-        float cross = abs(ca - cb) > 0.5 ? 1.0 : 0.0;
-        p.y += sin(3.14159265 * t) * length(B - A) * 0.1 * cross * uLift;
-        gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
-        vT = t; vKind = mod(aEdge.z, 2.0); vPhase = aEdge.w; vCross = cross;
+        int c = int(aRow + 0.5);
+        vec4 G0 = gal(c, 0), G1 = gal(c, 1), G2 = gal(c, 2), G3 = gal(c, 3);
+        vec3 center = mix(G1.xyz, G0.xyz, uLift);
+        vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]); vec3 up = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+        vec3 w = center + (right * position.x + up * position.y) * (G0.w * AURA_REACH);
+        float foc = uFocusGal < -0.5 ? 1.0 : (abs(float(c) - uFocusGal) < 0.5 ? AURA_FOCUS_ON : AURA_FOCUS_OFF);
+        vQ = position.xy;
+        vInk = G2.rgb * ((AURA_BASE + AURA_ACTIVE * G3.x) * G2.a * foc * uLift * uLift * min(1.0, uBirth * BIRTH_INK));
+        gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
       }`;
 
-const KNOWLEDGE_UNIVERSE_LINES_FRAG = `uniform float uTime; uniform float uFlow; uniform float uDark;
-      varying float vT; varying float vKind; varying float vPhase; varying float vCross;
+const KNOWLEDGE_UNIVERSE_AURA_FRAG = `${knowledgeUniverseDefines("AURA", KNOWLEDGE_UNIVERSE_AURA)}
+      varying vec2 vQ; varying vec3 vInk;
       void main(){
-        float a = 0.2 + 0.08 * vCross;
-        if (vKind > 0.5) a *= step(fract(vT * 60.0), 0.5) * 1.4;
-        float head = fract(uTime * 0.14 + vPhase);
-        float behind = fract(head - vT);
-        float glow = behind < 0.22 ? pow(1.0 - behind / 0.22, 2.0) : 0.0;
-        vec3 c = vec3(0.62, 0.78, 1.0) * (a + glow * 0.95 * uFlow);
-        gl_FragColor = vec4(c, 0.0);
+        float r2 = dot(vQ, vQ);
+        float fall = exp(-r2 * AURA_FALL) * (1.0 - smoothstep(AURA_RIM_FROM, 1.0, sqrt(r2)));
+        gl_FragColor = vec4(vInk * fall, 0.0);
+      }`;
+
+/* 무한히 먼 배경 별 — 번호에서 셰이더가 짓는다(별마다 float 하나). t-12443이 시안에서 옮긴 글자다: 씨앗의 밑
+ * (`SKY_SEED`)도 그때의 무리 번호 그대로라 같은 하늘이 선다. */
+const KNOWLEDGE_UNIVERSE_SKY_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
+#define SKY_SEED 8388608.0
+#define SKY_SMUDGES ${knowledgeUniverseFloat(KNOWLEDGE_UNIVERSE_SHAPE.skySmudges)}
+      uniform float uLift; uniform float uDpr; uniform float uFocus;
+      varying vec3 vCol; varying float vA; varying float vKind;
+      void main(){
+        float j = position.x;
+        uint s = hu(uint(SKY_SEED + j + 0.5) * 747796405u + 2891336453u);
+        float r0 = hf(s), r1 = hf(s + 11u), r2 = hf(s + 23u), r3 = hf(s + 37u), r4 = hf(s + 41u), r5 = hf(s + 53u);
+        float lift2 = uLift * uLift;
+        float z = r0 * 2.0 - 1.0, ph = 6.2831853 * r1, rr = sqrt(max(0.0, 1.0 - z * z));
+        vec3 dir = vec3(rr * cos(ph), z, rr * sin(ph));
+        vec4 clip = projectionMatrix * vec4(mat3(viewMatrix) * dir, 0.0);
+        vA = 0.0; vKind = 0.0;
+        if (clip.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vCol = vec3(0.0); return; }
+        clip.z = clip.w * 0.9999;
+        gl_Position = clip;
+        float m = pow(r2, 9.0);
+        float I = (0.045 + 0.07 * r3 + 2.4 * m) * lift2 * (uFocus > 0.5 ? 0.55 : 1.0);
+        if (j < SKY_SMUDGES) { vKind = 1.0; vCol = vec3(1.0, 0.88, 0.76) * (0.05 + 0.05 * r3) * lift2; vA = r5 * 3.1416; gl_PointSize = (4.0 + 6.0 * r4) * uDpr; return; }
+        vCol = starColor(0.08 + 0.84 * r4) * I;
+        gl_PointSize = (1.15 + 2.2 * sqrt(m)) * uDpr;
+      }`;
+
+const KNOWLEDGE_UNIVERSE_SKY_FRAG = `varying vec3 vCol; varying float vA; varying float vKind;
+      void main(){
+        vec2 p = gl_PointCoord - 0.5;
+        float r2 = dot(p, p) * 4.0;
+        float inside = step(r2, 1.0);
+        vec3 o;
+        if (vKind < 0.5) o = vCol * exp(-r2 * 4.5);
+        else { float ca = cos(vA), sa = sin(vA); vec2 q = mat2(ca, -sa, sa, ca) * p; o = vCol * exp(-(q.x * q.x * 4.0 + q.y * q.y * 26.0) * 4.0); }
+        gl_FragColor = vec4(o * inside, 0.0);
+      }`;
+
+/* 별(쪽): 또렷한 속과 번짐. 크기 = 연결 수, 빛깔 = 군집, 번짐 = 허브의 몫과 최근 고침. 올리거나 고른 별은 가는 고리,
+ * 찾은 별은 깜박이는 조준 고리. `aStar` = (크기의 바탕, 최근 0…1, 줄 번호 또는 -1, 빛의 몫), `aRoom` = 형제 사이 간격
+ * (세계의 길이 — `KNOWLEDGE_UNIVERSE_CROWD`). */
+const KNOWLEDGE_UNIVERSE_STARS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}
+${knowledgeUniverseDefines("STAR", KNOWLEDGE_UNIVERSE_STAR)}
+      attribute vec3 aPos2; attribute vec4 aStar; attribute float aState; attribute float aRoom;
+      uniform float uLift; uniform float uDpr; uniform float uRef; uniform float uFocus; uniform vec3 uNeutral; uniform float uHalo;
+      varying vec3 vCol; varying float vI; varying float vCore; varying float vSprite; varying float vState; varying float vGlow; varying float vWhite;
+      void main(){
+        if (aStar.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vCol = vec3(0.0); vI = 0.0; vCore = 0.0; vSprite = 1.0; vState = 0.0; vGlow = 0.0; vWhite = 0.0; return; }
+        vec3 w = mix(aPos2, born(position, aStar.z), uLift);
+        vec4 clip = projectionMatrix * viewMatrix * vec4(w, 1.0);
+        gl_Position = clip;
+        float st = aState;
+        float near = clamp(uRef / max(clip.w, 1.0), STAR_NEAR_LEAST, STAR_NEAR_MOST);
+        float lum = aStar.x;
+        float core = min(clamp(STAR_CORE_LEAST + STAR_CORE_GROW * pow(lum, STAR_CORE_POWER), STAR_CORE_MIN, STAR_CORE_MOST) * near, STAR_CORE_CEIL);
+        float hub = smoothstep(STAR_HUB_FROM, STAR_HUB_TO, lum);
+        float size = 1.0; float over = 1.0;
+        if (aStar.z > -0.5) {
+          float room = aRoom * uFocal / max(clip.w, 1.0);
+          float want = uCrowd.x * min(gapOf(int(aStar.z + 0.5), uLift), room) / core;
+          size = clamp(want, STAR_CROWD_SIZE, 1.0);
+          over = mix(clamp(pow(min(1.0, want / size), uCrowd.z), uCrowd.w, 1.0), 1.0, hub);
+          size = mix(size, clamp(CROWD_HUB * room / core, size, 1.0), hub);
+        }
+        if (st < 1.5) core *= size;
+        if (st > 1.5 && st < 2.5) core = max(core * STAR_HOT_GROW, STAR_HOT_LEAST);
+        if (st > 2.5) core = max(core, STAR_HIT_LEAST);
+        float sprite = min(core * (STAR_HALO_LEAST + STAR_HALO_HUB * hub) + STAR_HALO_PAD + (st > 2.5 ? STAR_HIT_PAD : 0.0), STAR_SPRITE_MOST / uDpr);
+        gl_PointSize = 2.0 * sprite * uDpr;
+        vCore = core * uDpr; vSprite = sprite * uDpr; vState = st;
+        vGlow = (STAR_GLOW + STAR_GLOW_HUB * hub + STAR_GLOW_FRESH * aStar.y * aStar.y) * size * over * uHalo;
+        vWhite = STAR_WHITE + STAR_WHITE_HUB * hub;
+        float focus = uFocus > 0.5 ? (st > 0.5 ? STAR_HELD : STAR_AWAY) : 1.0;
+        vI = focus * (STAR_DIM + (1.0 - STAR_DIM) * smoothstep(STAR_DIM_FROM, STAR_DIM_TO, lum)) * aStar.w * (st > 0.5 ? 1.0 : over);
+        vec3 c = aStar.z < -0.5 ? uNeutral : gal(int(aStar.z + 0.5), 2).rgb;
+        if (uFocus > 0.5 && st < 0.5) c = mix(c, vec3(dot(c, ${KNOWLEDGE_UNIVERSE_LUMA_GLSL})), STAR_AWAY_GREY);
+        vCol = c;
+      }`;
+
+const KNOWLEDGE_UNIVERSE_STARS_FRAG = `${knowledgeUniverseDefines("STAR", KNOWLEDGE_UNIVERSE_STAR)}
+      uniform float uTime; uniform float uDpr;
+      varying vec3 vCol; varying float vI; varying float vCore; varying float vSprite; varying float vState; varying float vGlow; varying float vWhite;
+      void main(){
+        vec2 p = (gl_PointCoord - 0.5) * 2.0 * vSprite;
+        float r = length(p);
+        float disc = 1.0 - smoothstep(vCore - STAR_EDGE * uDpr, vCore + STAR_EDGE * uDpr, r);
+        float halo = exp(-(r * r) / (STAR_HALO_FALL * vSprite * vSprite)) * vGlow * (1.0 - smoothstep(STAR_HALO_RIM * vSprite, vSprite, r));
+        float ring = 0.0;
+        if (vState > 2.5) ring = exp(-pow((r - STAR_HIT_RING * vSprite) / (STAR_HIT_WIDE * uDpr), 2.0)) * (STAR_HIT_INK + STAR_HIT_BLINK * sin(uTime * STAR_HIT_BEAT));
+        else if (vState > 1.5) ring = exp(-pow((r - (vCore + STAR_RING_GAP * uDpr)) / (STAR_RING_WIDE * uDpr), 2.0)) * STAR_RING_INK;
+        vec3 o = (mix(vCol, vec3(1.0), vWhite) * disc + vCol * halo) * vI + mix(vCol, vec3(1.0), STAR_RING_WHITE) * ring;
+        gl_FragColor = vec4(o, 0.0);
+      }`;
+
+/* 곧은 링크(가지 · 현 · 떠돌이 별의 링크) — 끝점마다 `position` = (제 쪽 번호, 줄 번호 또는 -1, 무게: 가지는 그 끝의
+ * 밝기, 현은 음수), `aFlow` = (끝 0|1, 흐름의 위상, 추론 0|1), `aLit` = 0 쉼 · 1 켜짐 · 2 경로. */
+const KNOWLEDGE_UNIVERSE_THREADS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}${KNOWLEDGE_UNIVERSE_NODE_AT}
+${knowledgeUniverseDefines("EDGE", KNOWLEDGE_UNIVERSE_EDGE)}
+      attribute vec3 aFlow; attribute float aLit;
+      uniform float uRef; uniform float uFocus; uniform float uFocusGal; uniform float uFocusPage; uniform float uLitGain; uniform vec3 uNeutral;
+      varying vec3 vRest; varying vec3 vPulse; varying vec3 vLit; varying float vT; varying float vPhase;
+      void main(){
+        vec4 seat = nodeAt(int(position.x + 0.5));
+        vec4 clip = projectionMatrix * viewMatrix * vec4(born(seat.xyz, seat.w), 1.0);
+        gl_Position = clip;
+        float near = clamp(uRef / max(clip.w, 1.0), EDGE_NEAR_LEAST, EDGE_NEAR_MOST);
+        float gain = smoothstep(EDGE_VEIL_FROM, EDGE_VEIL_TO, clip.w) * uLift * uLift * min(1.0, uBirth * BIRTH_INK);
+        float row = position.y;
+        vec4 ink = row < -0.5 ? vec4(uNeutral, 1.0) : gal(int(row + 0.5), 2);
+        float crowd = 1.0;
+        if (row > -0.5) {
+          int c = int(row + 0.5);
+          crowd = clamp(pow(uCrowd.y * gapOf(c, uLift) / sqrt(3.14159265 * max(gal(c, 3).y, 1.0)), uCrowd.z), uCrowd.w, 1.0);
+          crowd = mix(crowd, 1.0, smoothstep(EDGE_TRUNK_FROM + EDGE_TRUNK_GROW * EDGE_TRUNK_LEAST, EDGE_TRUNK_FROM + EDGE_TRUNK_GROW, position.z));
+        }
+        float rest = (position.z < 0.0 ? EDGE_CHORD * (1.0 - smoothstep(EDGE_CLOSE_NEAR, EDGE_CLOSE_FAR, clip.w / uRef)) : EDGE_BRANCH * position.z) * crowd;
+        float foc = 1.0;
+        if (uFocusGal > -0.5) foc = abs(row - uFocusGal) < 0.5 ? (uFocusPage > 0.5 ? EDGE_FOCUS_HOME : EDGE_FOCUS_ON) : EDGE_FOCUS_OFF;
+        else if (uFocus > 0.5) foc = EDGE_FOCUS_REST;
+        vRest = ink.rgb * (rest * ink.a * foc * near * gain);
+        vPulse = vec3(0.0);
+        float lit = aLit > 1.5 ? EDGE_PATH : (aLit > 0.5 ? 1.0 : 0.0);
+        vLit = mix(ink.rgb, vec3(1.0), EDGE_LIT_WHITE) * (EDGE_LIT * uLitGain * lit * (aFlow.z > 0.5 ? EDGE_INFERRED : 1.0) * gain);
+        vT = aFlow.x; vPhase = aFlow.y;
+      }`;
+
+/* 다발의 올(군집 사이의 링크) — 인스턴스 하나가 링크 하나다: `aFiber` = (보낸 쪽, 받는 쪽, 무게: 굵은 다발의 올은
+ * 가늚, 그 밖은 음수, 휨), `aFiberFlow` = (흐름의 위상, 추론 0|1), `aFiberLit` = 0 쉼 · 1 켜짐 · 2 경로. 길은
+ * `KNOWLEDGE_UNIVERSE_CURVE`의 다섯 점이다. 빛이 없는 올(굵은 다발의 것도 켜진 것도 초점 군집의 것도 아닌 올)은 자리를
+ * 읽기 전에 판 밖으로 보낸다 — 1만 쪽 볼트의 올 대부분이 그렇다. */
+const KNOWLEDGE_UNIVERSE_FIBERS_VERT = `${KNOWLEDGE_UNIVERSE_GAL}${KNOWLEDGE_UNIVERSE_NODE_AT}
+${knowledgeUniverseDefines("EDGE", KNOWLEDGE_UNIVERSE_EDGE)}
+${knowledgeUniverseDefines("CURVE", KNOWLEDGE_UNIVERSE_CURVE)}
+      attribute vec4 aFiber; attribute vec2 aFiberFlow; attribute float aFiberLit;
+      uniform float uRef; uniform float uFocus; uniform float uFocusGal; uniform float uFocusPage; uniform float uLitGain;
+      varying vec3 vRest; varying vec3 vPulse; varying vec3 vLit; varying float vT; varying float vPhase;
+      void main(){
+        float t = position.x;
+        bool dark = aFiber.z < 0.0 && aFiberLit < 0.5;
+        if (dark && (uFocusPage > 0.5 || uFocusGal < -0.5)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vRest = vec3(0.0); vPulse = vec3(0.0); vLit = vec3(0.0); vT = 0.0; vPhase = 0.0; return; }
+        vec4 NA = nodeAt(int(aFiber.x + 0.5)), NB = nodeAt(int(aFiber.y + 0.5));
+        int ra = int(NA.w + 0.5), rb = int(NB.w + 0.5);
+        float mine = (uFocusPage < 0.5 && (abs(float(ra) - uFocusGal) < 0.5 || abs(float(rb) - uFocusGal) < 0.5)) ? 1.0 : 0.0;
+        if (dark && mine < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vRest = vec3(0.0); vPulse = vec3(0.0); vLit = vec3(0.0); vT = 0.0; vPhase = 0.0; return; }
+        vec4 GA = gal(ra, 0), GB = gal(rb, 0);
+        vec3 ca = mix(gal(ra, 1).xyz, GA.xyz, uLift), cb = mix(gal(rb, 1).xyz, GB.xyz, uLift);
+        vec3 d = cb - ca; float L = max(length(d), 1.0); vec3 dir = d / L;
+        vec3 side = cross(dir, vec3(0.0, 1.0, 0.0)); side = length(side) < CURVE_UPRIGHT ? vec3(1.0, 0.0, 0.0) : normalize(side);
+        vec3 up2 = cross(side, dir);
+        vec3 gateA = ca + dir * min(GA.w * CURVE_GATE, L * CURVE_GATE_MOST), gateB = cb - dir * min(GB.w * CURVE_GATE, L * CURVE_GATE_MOST);
+        vec3 waist = (gateA + gateB) * 0.5 + (side * (aFiber.w * (ra < rb ? 1.0 : -1.0) * L * CURVE_SIDE) + up2 * (L * CURVE_UP)) * uLift;
+        float s = 1.0 - t;
+        vec3 P = born(NA.xyz, NA.w) * (s * s * s * s) + gateA * (4.0 * s * s * s * t) + waist * (6.0 * s * s * t * t) + gateB * (4.0 * s * t * t * t) + born(NB.xyz, NB.w) * (t * t * t * t);
+        vec4 clip = projectionMatrix * viewMatrix * vec4(P, 1.0);
+        gl_Position = clip;
+        float near = clamp(uRef / max(clip.w, 1.0), EDGE_NEAR_LEAST, EDGE_NEAR_MOST);
+        float gain = smoothstep(EDGE_VEIL_FROM, EDGE_VEIL_TO, clip.w) * uLift * uLift * min(1.0, uBirth * BIRTH_INK);
+        float rest = aFiber.z < 0.0 ? EDGE_FIBER_FAINT * mine : EDGE_FIBER * aFiber.z;
+        float foc = 1.0;
+        if (uFocusGal > -0.5) foc = mine > 0.5 ? EDGE_FOCUS_ON : EDGE_FOCUS_OFF;
+        else if (uFocus > 0.5) foc = EDGE_FOCUS_REST;
+        float ends = EDGE_FIBER_ENDS + (1.0 - EDGE_FIBER_ENDS) * smoothstep(EDGE_ENDS_FROM, EDGE_ENDS_TO, t) * smoothstep(1.0 - EDGE_ENDS_FROM, 1.0 - EDGE_ENDS_TO, t);
+        vec4 IA = gal(ra, 2), IB = gal(rb, 2);
+        vec3 ink = mix(IA.rgb, IB.rgb, t);
+        float body = mix(IA.a, IB.a, t) * foc * ends * near * gain;
+        vRest = ink * (rest * body);
+        vPulse = ink * (rest > 0.0 ? EDGE_FIBER_PULSE * body : 0.0);
+        float lit = aFiberLit > 1.5 ? EDGE_PATH : (aFiberLit > 0.5 ? 1.0 : 0.0);
+        vLit = mix(ink, vec3(1.0), EDGE_LIT_WHITE) * (EDGE_LIT * uLitGain * lit * (aFiberFlow.y > 0.5 ? EDGE_INFERRED : 1.0) * gain);
+        vT = t; vPhase = aFiberFlow.x;
+      }`;
+
+/* 링크의 조각 — 가지 · 현 · 올이 함께 쓴다. 쉬는 빛에 다발의 흐름(올만)과 켜진 링크의 달리는 머리를 더한다. */
+const KNOWLEDGE_UNIVERSE_EDGE_FRAG = `${knowledgeUniverseDefines("EDGE", KNOWLEDGE_UNIVERSE_EDGE)}
+      uniform float uTime; uniform float uFlow;
+      varying vec3 vRest; varying vec3 vPulse; varying vec3 vLit; varying float vT; varying float vPhase;
+      float head(float speed, float tail){
+        float behind = fract(fract(uTime * speed + vPhase) - vT);
+        return behind < tail ? pow(1.0 - behind / tail, 2.0) : 0.0;
+      }
+      void main(){
+        vec3 o = vRest + vPulse * (head(EDGE_FIBER_SPEED, EDGE_FIBER_TAIL) * uFlow) + vLit * (1.0 + EDGE_PULSE * head(EDGE_PULSE_SPEED, EDGE_PULSE_TAIL) * uFlow);
+        gl_FragColor = vec4(o, 0.0);
       }`;
 
 /* 후처리: 빛 번짐 사다리(Jimenez 2014 — 13탭 내리기 + 3×3 텐트 올리기, 첫 단은 Karis 평균) → 톤 매핑 —
@@ -1157,8 +1195,7 @@ function knowledgeUniverseSpread(layout, pages) {
 
 /* 평면 자리를 세계로 옮기는 수: 평면 원반의 √쪽 당 반지름(`cluster-pitch`)을 시안의 r2 계수(`world-root` × 몫)로.
  * 원반을 넓히는 `cluster-spread`(t-12029)로는 나누지 않는다 — 넓힌 뒤 틈이 줄어든 원반의 자리를 그대로 옮기면 이웃
- * 은하가 겹친다; 틈 150을 이완한 자리를 v4의 은하 크기로 옮겨야 이웃 은하의 거리/반지름 합이 v4처럼 1.4를 넘는다
- * (디자이너 m-12586). 반지름은 원반에서가 아니라 쪽 수에서 v4의 식으로 셈한다(`knowledgeUniverseMap`). */
+ * 군집이 겹친다(디자이너 m-12586). 반지름은 원반에서가 아니라 쪽 수에서 셈한다(`knowledgeUniverseMap`). */
 function knowledgeUniverseScale(layout, pages) {
   const U = knowledgeUniverseTuning(layout.view);
   return (U.worldRoot * knowledgeUniverseSpread(layout, pages)) / Math.max(1e-6, layout.tuning.clusterPitch);
@@ -1172,9 +1209,9 @@ function knowledgeUniverseLuminance(rgb) {
   return KNOWLEDGE_UNIVERSE_LUMA.reduce((sum, weight, channel) => sum + weight * rgb[channel], 0);
 }
 
-/* 은하 빛깔(텍셀 5) — 색 칸 토큰의 어두운 테마 값(선형, 가장 센 채널을 1로)을 흰빛과 `galaxy-tint-base`만큼 섞고, 그
+/* 군집의 빛깔(텍셀 2) — 색 칸 토큰의 어두운 테마 값(선형, 가장 센 채널을 1로)을 흰빛과 `galaxy-tint-base`만큼 섞고, 그
  * 휘도를 색 없는 군집의 고정값에 맞춘다(t-14081): 빛깔은 범례 칩·이름표 점과 같은 토큰의 색상에 그 채도의 (1 − base)를
- * 싣고 — 색 칸마다 같은 몫이다 —, 밝기는 색과 상관없이 색 없는 은하와 같다(자홍·보라처럼 휘도가 낮은 색의 은하가
+ * 싣고 — 색 칸마다 같은 몫이다 —, 밝기는 색과 상관없이 색 없는 군집과 같다(자홍·보라처럼 휘도가 낮은 색의 군집이
  * 어두워지지 않는다). 색 칸이 없으면 고정값. */
 function knowledgeUniverseTint(U, inks, hue) {
   if (hue < 0) return inks.neutral;
@@ -1185,7 +1222,7 @@ function knowledgeUniverseTint(U, inks, hue) {
   return mixed.map((value) => value * scale);
 }
 
-/* 색과 테마마다의 수 — CSS에게 묻는다(평면의 GL 손과 같은 문). 은하 빛깔의 원천 여덟은 계산된 색으로 읽고
+/* 색과 테마마다의 수 — CSS에게 묻는다(평면의 GL 손과 같은 문). 군집 빛깔의 원천 여덟은 계산된 색으로 읽고
  * (`color-mix`까지 풀리게 견본의 `color`로), 선형으로 옮긴다. 테마가 바뀌면 다시 묻는다. */
 function knowledgeUniverseInks(view, probe) {
   const style = getComputedStyle(view);
@@ -1206,20 +1243,132 @@ function knowledgeUniverseInks(view, probe) {
   return { theme, dark: theme === "dark", tints, paper, neutral, ...themed };
 }
 
-/* 우주의 자료 — 평면 지도의 군집과 원반에서(시안 `universe`, PORTING.md §2.2·§4).
+/* 군집 하나의 나무 — 그 군집의 허브(연결이 가장 많은 쪽, `list[0]`)에서 군집 안의 링크를 너비 우선으로 따라 퍼진다.
+ * 한 켜를 연결이 많은 차례로 훑어 허브가 먼저 자식을 얻는다. 가려진 쪽(`hold.shown`이 0 — 평면 지도가 접은 목차 ·
+ * 일지)은 지나지 않는다. 자리는 반지름 1의 틀 안에서 놓고(`hold.local`),
+ * 부르는 쪽이 가장 먼 쪽(`far`)으로 나눠 군집의 반지름에 맞춘다. 군집 안에서 어느 쪽과도 이어지지 않은 쪽은
+ * 허브의 잎 자리에 서되 가지는 없다(`hold.loose`) — 가지는 진짜 링크만이다. 자식마다 형제 사이 간격도 같은 틀의
+ * 길이로 적는다(`hold.room` — `KNOWLEDGE_UNIVERSE_CROWD`).
  *
- * 군집은 평면 지도가 이미 가른 것(Louvain 순위)이다. 이름 있는 군집 중 앞에서부터 은하, 그 뒤는 성단(텍스처
- * 줄이 닿는 데까지), 이름 없는 군집과 줄 밖은 떠돌이 별이다. 은하의 자리는 평면 원반의 자리(x·z)에 높이만
- * 더한 것이고, 씨앗(높이·기울기·팔 위상)은 순위가 아니라 군집의 대표 쪽 열쇠에서 뽑는다 — 쪽 하나가 늘어
- * 순위가 바뀌어도 은하가 뒤집히지 않는다. 이름 있는 별은 움직이지 않는다: 차례 0(연결이 가장 많은 쪽)이
- * 핵에 가장 가깝고, 나머지는 셰이더의 팔 식과 같은 식으로 팔 위에 앉는다. */
+ * 답: 가장 먼 쪽의 거리, 허브에 바로 이어진 쪽의 수와 그 가운데 가지를 친 쪽(딸린 쪽이 있는 자식)의 수, 가장 깊은
+ * 걸음. */
+function knowledgeUniverseBurst(model, community, rank, list, hold) {
+  const B = KNOWLEDGE_UNIVERSE_BURST;
+  const { parent, depth, sub, local, heading, loose, seeds, shown, room } = hold;
+  if (list.length === 0) return { far: 1e-6, direct: 0, branches: 0, deepest: 0 };
+  const root = list[0];
+  const size = list.length;
+  const order = [root];
+  depth[root] = 0;
+  let level = [root];
+  while (level.length > 0) {
+    const next = [];
+    level.sort((one, two) => model.degree[two] - model.degree[one] || one - two);
+    for (const from of level) {
+      for (let slot = model.start[from]; slot < model.start[from + 1]; slot += 1) {
+        const to = model.neighbour[slot];
+        if (community[to] !== rank || depth[to] >= 0 || (shown !== null && shown[to] === 0)) continue;
+        depth[to] = depth[from] + 1;
+        parent[to] = from;
+        next.push(to);
+        order.push(to);
+      }
+    }
+    level = next;
+  }
+  for (const at of list) {
+    if (depth[at] >= 0) continue;
+    depth[at] = 1;
+    parent[at] = root;
+    loose[at] = 1;
+    order.push(at);
+  }
+  const kids = new Map();
+  for (let at = order.length - 1; at >= 1; at -= 1) {
+    const child = order[at];
+    sub[child] += 1;
+    sub[parent[child]] += sub[child];
+    const held = kids.get(parent[child]);
+    if (held === undefined) kids.set(parent[child], [child]);
+    else held.push(child);
+  }
+  sub[root] += 1;
+  let far = 0;
+  let direct = 0;
+  let branches = 0;
+  let deepest = 0;
+  for (const from of order) {
+    deepest = Math.max(deepest, depth[from]);
+    const mine = kids.get(from);
+    if (mine === undefined) continue;
+    /* 자식의 차례는 열쇠의 씨앗 — 딸린 쪽이 많은 가지들이 한쪽에 몰리지 않고, 쪽 하나가 늘어도 차례가 흔들리지 않는다. */
+    mine.sort((one, two) => seeds[one] - seeds[two] || one - two);
+    const first = from === root;
+    const ax = heading[from * 3];
+    const ay = heading[from * 3 + 1];
+    const az = heading[from * 3 + 2];
+    /* 온 방향에 수직인 두 축. */
+    let px = ay;
+    let py = -ax;
+    const across = Math.hypot(px, py);
+    if (across < KNOWLEDGE_UNIVERSE_CURVE.upright) {
+      px = 1;
+      py = 0;
+    } else {
+      px /= across;
+      py /= across;
+    }
+    const qx = -az * py;
+    const qy = az * px;
+    const qz = ax * py - ay * px;
+    const half = Math.min(B.capMost, B.capLeast + B.capGrow * Math.sqrt(mine.length));
+    const cap = first ? -1 : Math.cos(half);
+    const share = (first ? 1 : Math.sin(half)) * Math.sqrt(Math.PI / mine.length);
+    const phase = knowledgeUniverseHash(seeds[from] + B.seedPhase) * Math.PI * 2;
+    const reach = B.decay ** depth[from];
+    for (let at = 0; at < mine.length; at += 1) {
+      const child = mine[at];
+      const z = 1 - (1 - cap) * ((at + 0.5) / mine.length);
+      const ring = Math.sqrt(Math.max(0, 1 - z * z));
+      const turn = at * KNOWLEDGE_GOLDEN_ANGLE + phase;
+      const cx = ring * Math.cos(turn);
+      const cy = ring * Math.sin(turn);
+      const dx = first ? cx : px * cx + qx * cy + ax * z;
+      const dy = first ? z : py * cx + qy * cy + ay * z;
+      const dz = first ? cy : qz * cy + az * z;
+      const length = reach * (B.leaf + B.leafLinks * Math.log2(1 + model.degree[child])
+        + B.branch * Math.sqrt((sub[child] - 1) / size))
+        * (B.wobbleLeast + B.wobbleSpan * knowledgeUniverseHash(seeds[child] + B.seedWobble));
+      room[child] = length * share;
+      heading[child * 3] = dx;
+      heading[child * 3 + 1] = dy;
+      heading[child * 3 + 2] = dz;
+      local[child * 3] = local[from * 3] + dx * length;
+      local[child * 3 + 1] = local[from * 3 + 1] + dy * length;
+      local[child * 3 + 2] = local[from * 3 + 2] + dz * length;
+      far = Math.max(far, Math.hypot(local[child * 3], local[child * 3 + 1], local[child * 3 + 2]));
+      if (first && loose[child] === 0) direct += 1;
+      if (first && sub[child] > 1) branches += 1;
+    }
+  }
+  return { far: Math.max(far, 1e-6), direct, branches, deepest };
+}
+
+/* 우주의 자료 — 평면 지도의 군집과 원반에서.
+ *
+ * 군집은 평면 지도가 이미 가른 것(Louvain 순위)이다. 이름 있는 군집이 줄이고(텍스처 줄이 닿는 데까지), 그 가운데
+ * 앞에서부터 큰 군집(명판 · 필라멘트), 이름 없는 군집과 줄 밖은 떠돌이 별이다. 군집의 자리는 평면 원반의 자리
+ * (x·z)에 높이만 더한 것이고, 씨앗(높이·기울기)은 순위가 아니라 군집의 대표 쪽 열쇠에서 뽑는다 — 쪽 하나가 늘어
+ * 순위가 바뀌어도 군집이 뒤집히지 않는다. 쪽의 자리는 그 군집의 나무(`knowledgeUniverseBurst`)다.
+ *
+ * 평면 지도가 가린 쪽(`layout.drawn`이 0 — 접은 목차 · 일지)은 우주에도 서지 않는다: 어느 군집의 쪽도 아니고, 그
+ * 쪽의 링크는 세지도 그리지도 켜지도 않는다. 가림이 바뀌면(`layout.drawnStamp`) 우주를 다시 짓는다. */
 function knowledgeUniverseMap(layout, inks) {
   const U = knowledgeUniverseTuning(layout.view);
   const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
-  const TYPE = KNOWLEDGE_UNIVERSE_TYPES;
-  const SEAT = KNOWLEDGE_UNIVERSE_SEATS;
-  const { model, count, community, communitySize, namedCount, communityHomeX, communityHomeY, communityHomeR,
-    communityCore, communityHue } = layout;
+  const CURVE = KNOWLEDGE_UNIVERSE_CURVE;
+  const { model, count, community, communitySize, namedCount, communityHomeX, communityHomeY, communityCore,
+    communityHue } = layout;
   let pages = 0;
   for (let at = 0; at < count; at += 1) if (model.kinds[at] === "page") pages += 1;
   const scale = knowledgeUniverseScale(layout, pages);
@@ -1228,7 +1377,7 @@ function knowledgeUniverseMap(layout, inks) {
   const least = Math.max(U.galaxyLeast, Math.round((U.galaxyShare * pages) / U.worldPages));
   let galaxies = 0;
   while (galaxies < Math.min(rows, U.galaxyMax) && communitySize[galaxies] >= least) galaxies += 1;
-  /* 닿는 거리 — 은하 원반의 가장 먼 끝(시안 `layout`의 reach는 주제만 센다). 은하가 없는 볼트는 줄 전부. */
+  /* 닿는 거리 — 큰 군집의 가장 먼 끝. 큰 군집이 없는 볼트는 줄 전부. */
   let reach = 0;
   const reachRows = galaxies > 0 ? galaxies : rows;
   for (let rank = 0; rank < reachRows; rank += 1) {
@@ -1237,8 +1386,12 @@ function knowledgeUniverseMap(layout, inks) {
   }
   reach = Math.max(1, reach);
   /* 줄마다 쪽을 모은다 — 연결이 많은 차례로(같으면 열쇠 순), 차례 0이 허브다. */
+  const shown = layout.drawn === null ? null : Uint8Array.from(layout.drawn);
+  const shownEdge = layout.drawnEdge === null ? null : Uint8Array.from(layout.drawnEdge);
   const members = Array.from({ length: rows }, () => []);
-  for (let at = 0; at < count; at += 1) if (community[at] < rows) members[community[at]].push(at);
+  for (let at = 0; at < count; at += 1) {
+    if (community[at] < rows && (shown === null || shown[at] === 1)) members[community[at]].push(at);
+  }
   for (const list of members) {
     list.sort((left, right) => model.degree[right] - model.degree[left]
       || (model.keys[left] < model.keys[right] ? -1 : 1));
@@ -1253,14 +1406,7 @@ function knowledgeUniverseMap(layout, inks) {
     }
     activity[row] = members[row].length > 0 ? recent / members[row].length : 0;
   }
-  /* 타원의 문턱 — 고정 토큰과 은하 활동의 가운데값(짝수면 가운데 둘의 평균) 중 큰 쪽: 바쁜 볼트에서도 그 안에서
-   * 조용한 주제가 타원이 된다(디자이너 m-12546의 3). */
-  const busy = Array.from(activity.subarray(0, galaxies)).sort((left, right) => left - right);
-  const middleBusy = busy.length === 0 ? 0 : busy.length % 2 === 1 ? busy[busy.length >> 1]
-    : (busy[busy.length / 2 - 1] + busy[busy.length / 2]) / 2;
-  const quietBelow = Math.max(U.ellipticalActivity, middleBusy);
-  /* 법선의 바탕: 처음 시점 쪽으로 `normal-lean`만큼 기울인 위쪽 — 처음 화면에서 모든 은하의 안이 보이고, 돌면
-   * 옆모습이 된다. */
+  /* 나무가 선 축의 바탕: 처음 시점 쪽으로 `normal-lean`만큼 기울인 위쪽. */
   const camera = [Math.cos(U.homePitch) * Math.sin(U.homeYaw), Math.sin(U.homePitch),
     Math.cos(U.homePitch) * Math.cos(U.homeYaw)];
   let bx = camera[0] * U.normalLean;
@@ -1288,51 +1434,25 @@ function knowledgeUniverseMap(layout, inks) {
   };
   const pos3 = new Float32Array(count * 3);
   const rowOf = new Int32Array(count).fill(-1);
+  /* 나무의 살림 — 쪽마다 부모(없으면 -1), 걸음, 딸린 쪽 수(저 포함), 틀 안의 자리와 온 방향, 가지 없는 잎, 열쇠의 씨앗,
+   * 형제 사이 간격(틀의 길이로 적고 아래에서 군집의 반지름에 맞춘다). */
+  const hold = { parent: new Int32Array(count).fill(-1), depth: new Int32Array(count).fill(-1), sub: new Int32Array(count),
+    local: new Float32Array(count * 3), heading: new Float32Array(count * 3), loose: new Uint8Array(count),
+    seeds: new Uint32Array(count), shown, room: new Float32Array(count).fill(SHAPE.roomy) };
+  for (let at = 0; at < count; at += 1) hold.seeds[at] = knowledgeHash(model.keys[at]);
   const galaxy = [];
-  const biggest = Math.max(1, communitySize[0] ?? 1);
   for (let row = 0; row < rows; row += 1) {
     const rank = row;
+    const list = members[row];
     const core = communityCore[rank];
-    const seed = knowledgeHash(model.keys[core >= 0 ? core : members[row][0]]);
+    const seed = core >= 0 ? hold.seeds[core] : hold.seeds[list[0] ?? 0];
     const h1 = knowledgeUniverseHash(seed + 1);
     const h2 = knowledgeUniverseHash(seed + 101);
     const h3 = knowledgeUniverseHash(seed + 211);
-    const h4 = knowledgeUniverseHash(seed + 307);
-    const isGalaxy = row < galaxies;
-    let type = TYPE.cluster;
-    let arms = U.arms;
-    let winding = U.winding;
-    let bar = 0;
-    let bulge = U.bulge;
-    let dust = U.dust;
-    let radius;
-    let height;
-    if (isGalaxy) {
-      if (rank < U.barredRanks) {
-        type = TYPE.barred;
-        bar = U.bar;
-        winding = U.windingBar;
-        bulge = U.bulgeBar;
-      } else if (galaxies >= U.irregularLeast && rank >= galaxies - U.irregularLast) {
-        type = TYPE.irregular;
-        dust = U.dustIrregular;
-      } else if (rank >= U.ellipticalFrom && rank % U.ellipticalEvery === 0 && activity[row] < quietBelow) {
-        type = TYPE.elliptical;
-        bulge = U.bulgeElliptical;
-        dust = 0;
-      } else {
-        type = TYPE.spiral;
-        arms = rank % U.armsEvery === U.armsEvery - 1 ? U.armsWide : U.arms;
-        winding = U.windingLeast + h3 * U.windingSpan;
-        bulge = U.bulgeLeast + h4 * U.bulgeSpan;
-      }
-      radius = U.galaxyRadius * U.worldRoot * Math.sqrt(communitySize[rank]) * spread;
-      height = (h1 - 0.5) * 2 * U.liftGalaxy * reach;
-    } else {
-      radius = U.clusterSphere * Math.sqrt(communitySize[rank]) * spread * U.clusterGrow + U.clusterPad;
-      dust = 0;
-      height = (h1 - 0.5) * 2 * U.liftCluster * reach;
-    }
+    const large = row < galaxies;
+    const radius = large ? U.galaxyRadius * U.worldRoot * Math.sqrt(communitySize[rank]) * spread
+      : U.clusterSphere * Math.sqrt(communitySize[rank]) * spread * U.clusterGrow + U.clusterPad;
+    const height = (h1 - 0.5) * 2 * (large ? U.liftGalaxy : U.liftCluster) * reach;
     /* 기울기: 바탕에서 씨앗 방향으로 `tilt-least` + 씨앗 × `tilt-span` rad. */
     const tilt = U.tiltLeast + h2 * U.tiltSpan;
     const phi = h3 * Math.PI * 2;
@@ -1352,94 +1472,38 @@ function knowledgeUniverseMap(layout, inks) {
     const ul = Math.hypot(ux, uy) || 1;
     ux /= ul;
     uy /= ul;
-    const uz = 0;
-    const vx = ny * uz - nz * uy;
-    const vy = nz * ux - nx * uz;
+    const vx = -nz * uy;
+    const vy = nz * ux;
     const vz = nx * uy - ny * ux;
-    const theta0 = h4 * Math.PI * 2;
-    const size = members[row].length;
-    const decor = type === TYPE.cluster ? U.decorCluster
-      : Math.round(U.decorLeast + U.decorGrow * Math.sqrt(communitySize[rank] / biggest));
     const cx = communityHomeX[rank] * scale;
     const cz = communityHomeY[rank] * scale;
     const hue = communityHue[rank];
     const tint = knowledgeUniverseTint(U, inks, hue);
+    const weight = hue >= 0 ? 1 : U.quietShare;
     put(row, 0, cx, height, cz, radius);
-    put(row, 1, nx, ny, nz, type);
-    put(row, 2, ux, uy, uz, arms);
-    put(row, 3, winding, bar, bulge, activity[row]);
-    /* 텍셀 4(평면 자리)는 평면 카메라의 눌림을 따라 `knowledgeUniverseFlat`이 채운다. */
-    put(row, 5, tint[0], tint[1], tint[2], dust);
-    put(row, 6, decor, theta0, knowledgeUniverseHash(seed + 401), 0);
-    galaxy.push({ rank, type, radius, x: cx, y: height, z: cz, normal: [nx, ny, nz], across: [ux, uy, uz],
-      along: [vx, vy, vz], arms, winding, bar, bulge, activity: activity[row], decor, theta0, hue, size });
-    /* 이름 있는 별의 자리(시안 `universe` 3). 흔들림은 쪽마다 제 열쇠의 씨앗에서 — 쪽 하나가 늘어도 남의 별이
-     * 옮지 않는다. */
-    const nCore = Math.max(1, Math.round(size * SEAT.coreShare));
-    for (let order = 0; order < size; order += 1) {
-      const at = members[row][order];
+    /* 텍셀 1(평면 자리)은 평면 카메라의 눌림을 따라 `placeSeats`가 채운다. */
+    put(row, 2, tint[0], tint[1], tint[2], weight);
+    put(row, 3, activity[row], list.length, 0, 0);
+    const burst = knowledgeUniverseBurst(model, community, rank, list, hold);
+    const fit = (radius * KNOWLEDGE_UNIVERSE_BURST.fill) / burst.far;
+    for (const at of list) {
       rowOf[at] = row;
-      const jitter = knowledgeUniverseRandom(knowledgeHash(model.keys[at]));
-      const t = (order + 0.5) / size;
-      let x = 0;
-      let y = 0;
-      let h = 0;
-      if (type === TYPE.spiral || type === TYPE.barred) {
-        if (order < nCore) {
-          const r = radius * SEAT.coreRadius * Math.sqrt((order + 0.5) / nCore);
-          const a = order * KNOWLEDGE_GOLDEN_ANGLE;
-          x = Math.cos(a) * r;
-          y = Math.sin(a) * r;
-          h = (jitter() - 0.5) * radius * SEAT.coreLift;
-        } else {
-          const u = (order - nCore + 0.5) / Math.max(1, size - nCore);
-          const r = radius * (SEAT.armInner + SEAT.armSpan * u ** SEAT.armPower) * (1 + (jitter() - 0.5) * SEAT.armJitter);
-          const arm = (order - nCore) % arms;
-          let a;
-          if (type === TYPE.barred && r < radius * bar) {
-            a = theta0 + (arm % 2) * Math.PI + (jitter() - 0.5) * SEAT.barJitter;
-          } else {
-            a = theta0 + (arm * Math.PI * 2) / arms
-              + winding * Math.log(Math.max(r, radius * SEAT.armFloor) / (radius * SEAT.armFloor))
-              + (jitter() + jitter() - 1) * SEAT.armAngle;
-          }
-          x = Math.cos(a) * r;
-          y = Math.sin(a) * r;
-          h = (jitter() - 0.5) * radius * SEAT.armLift;
-        }
-      } else if (type === TYPE.elliptical) {
-        const r = radius * SEAT.ellipticalRadius * t ** SEAT.ellipticalPower;
-        const a = order * KNOWLEDGE_GOLDEN_ANGLE;
-        const yy = 1 - 2 * t;
-        const ring = Math.sqrt(Math.max(0, 1 - yy * yy));
-        x = Math.cos(a) * ring * r;
-        y = Math.sin(a) * ring * r * SEAT.ellipticalFlat;
-        h = yy * r * SEAT.ellipticalLift;
-      } else if (type === TYPE.irregular) {
-        const clump = order % SEAT.clumps;
-        const ca = theta0 + clump * SEAT.clumpTurn;
-        const cr = radius * (SEAT.clumpInner + SEAT.clumpStep * clump);
-        x = Math.cos(ca) * cr + (jitter() + jitter() - 1) * radius * SEAT.clumpSpread;
-        y = Math.sin(ca) * cr + (jitter() + jitter() - 1) * radius * SEAT.clumpSpread;
-        h = (jitter() - 0.5) * radius * SEAT.clumpLift;
-      } else {
-        const r = radius * SEAT.clusterRadius * t ** SEAT.clusterPower;
-        const a = order * KNOWLEDGE_GOLDEN_ANGLE;
-        const yy = 1 - 2 * t;
-        const ring = Math.sqrt(Math.max(0, 1 - yy * yy));
-        x = Math.cos(a) * ring * r;
-        y = Math.sin(a) * ring * r;
-        h = yy * r;
-      }
-      pos3[at * 3] = cx + ux * x + vx * y + nx * h;
-      pos3[at * 3 + 1] = height + uy * x + vy * y + ny * h;
-      pos3[at * 3 + 2] = cz + uz * x + vz * y + nz * h;
+      const lx = hold.local[at * 3] * fit;
+      const ly = hold.local[at * 3 + 1] * fit;
+      const lz = hold.local[at * 3 + 2] * fit;
+      pos3[at * 3] = cx + ux * lx + nx * ly + vx * lz;
+      pos3[at * 3 + 1] = height + uy * lx + ny * ly + vy * lz;
+      pos3[at * 3 + 2] = cz + nz * ly + vz * lz;
+      if (hold.parent[at] >= 0) hold.room[at] *= fit;
     }
+    galaxy.push({ rank, large, radius, x: cx, y: height, z: cz, activity: activity[row], hue, weight, size: list.length,
+      hub: list[0] ?? -1, direct: burst.direct, branches: burst.branches, deepest: burst.deepest });
   }
-  /* 필라멘트(시안 `buildScene`과 `kg-data.js`의 flows): 두 은하 사이의 선(선언·추론 모두)을 보낸 쪽 → 받는 쪽으로
-   * 세고, 합이 `filament-least` 이상인 쌍을 굵은 차례로 셰이더 배열이 담는 데까지. 빛은 많이 보낸 쪽에서 흐른다. */
+  /* 필라멘트: 두 큰 군집 사이의 링크(선언·추론 모두)를 보낸 쪽 → 받는 쪽으로 세고, 합이 `filament-least` 이상인 쌍을
+   * 굵은 차례로 `filament-most`쌍까지. 빛은 많이 보낸 쪽에서 흐른다. */
   const flows = new Map();
   for (let at = 0; at < model.edgeCount; at += 1) {
+    if (shownEdge !== null && shownEdge[at] === 0) continue;
     const a = rowOf[model.from[at]];
     const b = rowOf[model.to[at]];
     if (a < 0 || b < 0 || a === b || a >= galaxies || b >= galaxies) continue;
@@ -1454,18 +1518,161 @@ function knowledgeUniverseMap(layout, inks) {
   }
   const chosen = [...flows.values()].filter((flow) => flow.n >= U.filamentLeast)
     .sort((left, right) => right.n - left.n || left.a - right.a || left.b - right.b)
-    .slice(0, Math.min(U.filamentMost, SHAPE.bundles));
+    .slice(0, U.filamentMost);
   const most = chosen[0]?.n ?? 1;
   const filaments = chosen.map((flow) => {
     const forward = flow.ab >= flow.ba;
-    const strength = Math.sqrt(flow.n / most);
     return { a: flow.a, b: flow.b, n: flow.n, ab: flow.ab, ba: flow.ba,
-      from: forward ? flow.a : flow.b, to: forward ? flow.b : flow.a, sent: Math.max(flow.ab, flow.ba), strength,
-      points: Math.round(U.filamentLeastPoints + U.filamentGrowPoints * strength),
-      bend: ((flow.a * SEAT.bendLow + flow.b * SEAT.bendHigh) % SEAT.bendSteps) / 2 - 1,
-      phase: ((flow.a * SEAT.phaseLow + flow.b) % SEAT.phaseSteps) / SEAT.phaseSteps };
+      from: forward ? flow.a : flow.b, to: forward ? flow.b : flow.a, sent: Math.max(flow.ab, flow.ba),
+      strength: Math.sqrt(flow.n / most), bend: knowledgeUniverseBend(flow.a, flow.b) };
   });
-  return { scale, reach, rows, galaxies, pages, gal, pos3, rowOf, galaxy, members, filaments };
+  return { scale, reach, rows, galaxies, pages, gal, pos3, rowOf, galaxy, members, filaments,
+    parent: hold.parent, depth: hold.depth, sub: hold.sub, loose: hold.loose, room: hold.room, shown, shownEdge, stamp: layout.drawnStamp };
+}
+
+/* 한 쌍의 휨(옆으로 다섯 단계, -1…1) — 쌍의 두 줄 번호에서. 굵은 다발이든 한 올뿐인 쌍이든 같은 식이다. */
+function knowledgeUniverseBend(low, high) {
+  const C = KNOWLEDGE_UNIVERSE_CURVE;
+  return ((low * C.bendLow + high * C.bendHigh) % C.bendSteps) / 2 - 1;
+}
+
+/* 링크를 그림의 두 통으로 나눈다 — 곧은 링크(가지 · 현)와 다발의 올. 평면 지도가 가리지 않은 링크는 모두 어느 한
+ * 통에 든다: 쉴 때 보이지 않는 링크도 올리거나 고르면 켜져야 하기 때문이다(`refreshStates`). 가려진 링크(접은
+ * 목차 · 일지의 것)는 어느 통에도 없다.
+ *
+ *   가지: 군집 안의 링크 중 나무의 부모–자식을 잇는 것(자식마다 하나 — 같은 둘을 잇는 둘째 링크는 현이다).
+ *   현: 그 밖의 군집 안 링크와 떠돌이 별에 닿는 링크. 빛깔은 제 군집(떠돌이 별끼리는 색 없음).
+ *   올: 서로 다른 두 군집의 쪽을 잇는 링크. 굵은 다발(`map.filaments`)의 올만 쉴 때 보이고 — 링크가 `fiberMost`를 넘는
+ *     다발은 그 가운데 고르게 뽑은 올만 —, 그 무게는 다발의 가늚이다.
+ *
+ * 답의 `threadOf` · `fiberOf`는 링크 번호 → 그 통의 자리(없으면 -1), `branches`는 가지의 수(곧은 링크의 통에서
+ * 앞쪽), `thick`은 쉬는 빛을 드는 올의 수(올의 통에서 앞쪽), `declared` · `inferred`는 쪽마다의 두 갈래 수다. */
+function knowledgeUniverseEdges(model, map) {
+  const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
+  const E = KNOWLEDGE_UNIVERSE_EDGE;
+  const edgeCount = model.edgeCount;
+  const count = map.rowOf.length;
+  const guessedCode = KNOWLEDGE_EDGE_PROVENANCE_CODE.inferred;
+  const pairs = new Map();
+  map.filaments.forEach((one) => pairs.set(one.a * SHAPE.rows + one.b, one));
+  const threadOf = new Int32Array(edgeCount).fill(-1);
+  const fiberOf = new Int32Array(edgeCount).fill(-1);
+  const declared = new Int32Array(count);
+  const inferred = new Int32Array(count);
+  const claimed = new Uint8Array(count);
+  /* 링크마다: 흐름의 위상, 추론인가, 가지라면 그 자식(아니면 -1). */
+  const phases = new Float32Array(edgeCount);
+  const guesses = new Uint8Array(edgeCount);
+  const childOf = new Int32Array(edgeCount).fill(-1);
+  const shownEdge = map.shownEdge;
+  /* 통 안의 차례 — 곧은 링크는 가지가 앞이고 올은 굵은 다발의 것이 앞이다: 쉬는 판은 그 앞쪽만 싣는다(`branches` ·
+   * `thick`, `spanLinks`). 현과 그 밖의 올은 뒤에 선다. */
+  const chords = [];
+  const thin = [];
+  const met = new Map();
+  let threads = 0;
+  let fibers = 0;
+  let seed = SHAPE.lineSeed;
+  for (let at = 0; at < edgeCount; at += 1) {
+    const from = model.from[at];
+    const to = model.to[at];
+    const guessed = model.provenance[at] === guessedCode
+      || (model.provenance[at] === KNOWLEDGE_PROVENANCE_UNKNOWN && model.kind[at] === KNOWLEDGE_EDGE_CODE.mentions);
+    guesses[at] = guessed ? 1 : 0;
+    const tally = guessed ? inferred : declared;
+    tally[from] += 1;
+    tally[to] += 1;
+    seed = (seed * SHAPE.lineMultiplier) % SHAPE.lineModulus;
+    phases[at] = seed / SHAPE.lineModulus;
+    if (shownEdge !== null && shownEdge[at] === 0) continue;
+    const a = map.rowOf[from];
+    const b = map.rowOf[to];
+    if (a >= 0 && b >= 0 && a !== b) {
+      /* 굵은 다발의 올 가운데 쉬는 빛을 드는 것 — 다발의 링크가 `fiberMost`를 넘으면 차례대로 고르게 뽑는다. */
+      const key = Math.min(a, b) * SHAPE.rows + Math.max(a, b);
+      const pair = pairs.get(key);
+      if (pair === undefined) {
+        thin.push(at);
+        continue;
+      }
+      const nth = met.get(key) ?? 0;
+      met.set(key, nth + 1);
+      const picks = Math.min(pair.n, E.fiberMost);
+      if (Math.floor(((nth + 1) * picks) / pair.n) !== Math.floor((nth * picks) / pair.n)) fiberOf[at] = fibers++;
+      else thin.push(at);
+      continue;
+    }
+    /* 가지인가 — 부모와 자식을 잇는 첫 링크. */
+    let child = -1;
+    if (a >= 0 && a === b) {
+      if (map.parent[to] === from && map.loose[to] === 0 && claimed[to] === 0) child = to;
+      else if (map.parent[from] === to && map.loose[from] === 0 && claimed[from] === 0) child = from;
+    }
+    if (child < 0) {
+      chords.push(at);
+      continue;
+    }
+    claimed[child] = 1;
+    childOf[at] = child;
+    threadOf[at] = threads++;
+  }
+  const branches = threads;
+  for (const at of chords) threadOf[at] = threads++;
+  const thick = fibers;
+  for (const at of thin) fiberOf[at] = fibers++;
+  const seat = new Float32Array(threads * 2 * 3);
+  const flow = new Float32Array(threads * 2 * 3);
+  const fiber = new Float32Array(fibers * 4);
+  const fiberFlow = new Float32Array(fibers * 2);
+  for (let at = 0; at < edgeCount; at += 1) {
+    if (threadOf[at] < 0 && fiberOf[at] < 0) continue;
+    const from = model.from[at];
+    const to = model.to[at];
+    const a = map.rowOf[from];
+    const b = map.rowOf[to];
+    const phase = phases[at];
+    const guessed = guesses[at];
+    if (fiberOf[at] >= 0) {
+      const low = Math.min(a, b);
+      const high = Math.max(a, b);
+      const pair = pairs.get(low * SHAPE.rows + high);
+      const slot = fiberOf[at];
+      fiber[slot * 4] = from;
+      fiber[slot * 4 + 1] = to;
+      fiber[slot * 4 + 2] = slot >= thick ? -1
+        : (pair.n * Math.max(E.fiberLeast, Math.min(1, (E.fiberFull / pair.n) ** E.fiberFade))) / Math.min(pair.n, E.fiberMost);
+      fiber[slot * 4 + 3] = knowledgeUniverseBend(low, high);
+      fiberFlow[slot * 2] = phase;
+      fiberFlow[slot * 2 + 1] = guessed;
+      continue;
+    }
+    const child = childOf[at];
+    let fromWeight = -1;
+    let toWeight = -1;
+    if (child >= 0) {
+      const trunk = Math.min(1, E.trunkLeast + (1 - E.trunkLeast)
+        * Math.sqrt((map.sub[child] - 1) / Math.max(1, map.galaxy[a].size * E.trunkShare)));
+      const near = E.trunkFrom + E.trunkGrow * trunk;
+      const end = E.twigFrom + E.twigGrow * trunk;
+      fromWeight = child === to ? near : end;
+      toWeight = child === to ? end : near;
+    }
+    const row = a >= 0 ? a : b;
+    const slot = threadOf[at] * 6;
+    seat[slot] = from;
+    seat[slot + 1] = row;
+    seat[slot + 2] = fromWeight;
+    seat[slot + 3] = to;
+    seat[slot + 4] = row;
+    seat[slot + 5] = toWeight;
+    flow[slot] = 0;
+    flow[slot + 1] = phase;
+    flow[slot + 2] = guessed;
+    flow[slot + 3] = 1;
+    flow[slot + 4] = phase;
+    flow[slot + 5] = guessed;
+  }
+  return { threads, fibers, thick, branches, seat, flow, fiber, fiberFlow, threadOf, fiberOf, declared, inferred };
 }
 
 /* ---- 한 판의 우주 ---------------------------------------------------------------------- */
@@ -1499,18 +1706,30 @@ function makeKnowledgeUniverse(view) {
     starStateAttr: null,
     /* 우주의 자료(`knowledgeUniverseMap`)와 그 텍스처, 색(`knowledgeUniverseInks`)과 견본, 후처리의 살림. */
     map: null,
+    /* 이 우주를 지은 때의 가림(`layout.drawnStamp`) — 바뀌면 다시 짓는다. */
+    seenStamp: null,
     galTexture: null,
-    decorCount: 0,
+    skyCount: 0,
     filaments: [],
-    /* 쪽 자리 텍스처 둘과 별자리 선의 살림(시안 `tNode3`·`tNode2`·`focusEdges`), 화면 투영(고르기·이름표). */
+    /* 쪽 자리 텍스처 둘, 링크의 두 통(`knowledgeUniverseEdges`)과 그 켜짐(곧은 링크는 끝점마다, 올은 인스턴스마다),
+     * 지금 켜 둔 링크의 번호들 — 초점이 바뀌면 그것만 끄고 새로 켠다. */
     node3: null,
     node2: null,
     nodeTextures: [],
-    edgeData: null,
-    focusEdges: null,
-    focusAttr: null,
-    lineGeometry: null,
-    lineObject: null,
+    edges: null,
+    threadLit: null,
+    threadLitAttr: null,
+    fiberLit: null,
+    fiberLitAttr: null,
+    fiberGeometry: null,
+    threadGeometry: null,
+    /* 카메라에서 가장 가까운 별의 깊이(`project`) — 현이 보일 만큼 가까운 별이 있는지를 잰다(`spanLinks`). */
+    nearest: 0,
+    litList: null,
+    litCount: 0,
+    /* 세계의 1이 깊이 1에서 차지하는 CSS px(`placeCamera`) — 군집의 화면 반지름을 잰다. 군집마다 별 사이 간격(`rowGaps`). */
+    focal: 1,
+    gaps: null,
     proj: null,
     projVersion: -1,
     viewProjection: null,
@@ -1522,7 +1741,7 @@ function makeKnowledgeUniverse(view) {
     pickQueued: false,
     /* 고른 쪽의 자리 — `refreshStates`가 적고 이름표가 읽는다. */
     selectedSeat: -1,
-    /* 이름표(시안 `buildTopicCards`·`updateLabels`): 은하마다 명판, 쪽 이름의 풀, 굵은 필라멘트의 수, 올린 별의 팁.
+    /* 이름표(시안 `buildTopicCards`·`updateLabels`): 큰 군집마다 명판, 쪽 이름의 풀, 굵은 필라멘트의 수, 올린 별의 팁.
      * 자리는 camVersion이 바뀐 프레임에만 다시 놓고(`labelVersion`), 겹침은 이미 놓인 상자들(`boxes`)로 막는다.
      * 명판의 크기는 한 번 재고(`measured`), 쪽 이름의 넓이는 쪽마다 한 번 잰다(`nameWidths`). */
     plates: [],
@@ -1569,10 +1788,14 @@ function makeKnowledgeUniverse(view) {
     lastTouch: -1e9,
     dragging: false,
     tween: { on: false, t0: 0, dur: 1, from: {}, to: {}, done: null },
+    /* 첫 그림(`bear`) — 별이 허브에서 퍼지는 동안. */
+    birth: { on: false, t0: 0 },
     glide: { on: false, vx: 0, vy: 0 },
     spin: 1,
     time: 0,
     raf: 0,
+    /* 쉬는 동안의 움직임만 남은 판이 다음 장을 기다리는 타이머(`ambient-gap`). */
+    wait: 0,
     lastNow: 0,
     frames: 0,
     width: 1,
@@ -1598,7 +1821,7 @@ function makeKnowledgeUniverse(view) {
       canvas.setAttribute("role", "img");
       const labels = document.createElement("div");
       labels.className = "knowledge-universe-labels";
-      /* 색을 묻는 견본 하나 — 은하 빛깔의 원천과 종이를 계산된 색으로 읽는다(`knowledgeUniverseInks`). */
+      /* 색을 묻는 견본 하나 — 군집 빛깔의 원천과 종이를 계산된 색으로 읽는다(`knowledgeUniverseInks`). */
       const probe = document.createElement("span");
       probe.className = "knowledge-universe-probe";
       probe.setAttribute("aria-hidden", "true");
@@ -1635,28 +1858,25 @@ function makeKnowledgeUniverse(view) {
        * 싣는다, ui/vendor/build-three.mjs). 비는 판 크기가 정한다(`resize`). */
       const camera = new THREE.PerspectiveCamera(U.fov, 1, U.near, U.far);
       this.camera = camera;
-      /* 모든 재질이 함께 보는 값(시안 `U`): 평면↔우주의 몫, 시간, 초점과 초점 은하, 흐름, 세로 픽셀/초점 거리,
-       * 기기 픽셀, 밝기 기준 거리(처음 자리 거리), 테마, 은하 텍셀, 쪽 자리 둘과 그 폭, 필라멘트 둘. */
-      const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
+      /* 모든 재질이 함께 보는 값: 평면↔우주의 몫, 시간, 초점과 초점 군집(쪽의 초점인가), 흐름, 첫 그림의 몫, 기기 픽셀, 밝기 기준 거리(처음 자리
+       * 거리), 켜진 링크의 줄임, 색 없는 빛깔, 초점 거리(CSS px)와 붐빔의 토큰 넷, 군집 텍셀, 쪽 자리 둘과 그 폭. */
       this.uniforms = {
         uLift: { value: 1 }, uTime: { value: 0 }, uFocus: { value: 0 }, uFlow: { value: 1 }, uFocusGal: { value: -1 },
-        uPx: { value: 800 }, uDpr: { value: 1 }, uRef: { value: 360 }, uDark: { value: 1 },
-        uStarChroma: { value: U.starChroma }, uStarWhite: { value: U.starCoreWhite },
+        uFocusPage: { value: 0 }, uBirth: { value: 1 }, uDpr: { value: 1 }, uRef: { value: 360 }, uLitGain: { value: 1 }, uNeutral: { value: new THREE.Vector3(1, 1, 1) },
+        uFocal: { value: 1 }, uHalo: { value: 1 }, uCrowd: { value: new THREE.Vector4(U.crowdRatio, U.crowdLines, U.crowdFade, U.crowdLeast) },
         tGal: { value: null }, tNode3: { value: null }, tNode2: { value: null }, uTexW: { value: 1 },
-        uBundle: { value: Array.from({ length: SHAPE.bundles }, () => new THREE.Vector4()) },
-        uBundle2: { value: Array.from({ length: SHAPE.bundles }, () => new THREE.Vector4()) },
       };
-      /* 섞기: 미리 곱한 알파(ONE, ONE_MINUS_SRC_ALPHA) — 빛(α=0)은 더하고, 먼지(rgb=0, α>0)는 뒤를 가린다
-       * (시안 `mat`). */
+      /* 섞기: 미리 곱한 알파(ONE, ONE_MINUS_SRC_ALPHA) — 빛(α=0)은 더한다(시안 `mat`). */
       const material = (vertexShader, fragmentShader) => new THREE.ShaderMaterial({
         uniforms: this.uniforms, vertexShader, fragmentShader, transparent: true, depthTest: false, depthWrite: false,
         blending: THREE.NormalBlending, premultipliedAlpha: true,
       });
       this.materials = {
-        glows: material(KNOWLEDGE_UNIVERSE_GLOWS_VERT, KNOWLEDGE_UNIVERSE_GLOWS_FRAG),
-        decor: material(KNOWLEDGE_UNIVERSE_DECOR_VERT, KNOWLEDGE_UNIVERSE_DECOR_FRAG),
+        aura: material(KNOWLEDGE_UNIVERSE_AURA_VERT, KNOWLEDGE_UNIVERSE_AURA_FRAG),
+        sky: material(KNOWLEDGE_UNIVERSE_SKY_VERT, KNOWLEDGE_UNIVERSE_SKY_FRAG),
+        threads: material(KNOWLEDGE_UNIVERSE_THREADS_VERT, KNOWLEDGE_UNIVERSE_EDGE_FRAG),
+        fibers: material(KNOWLEDGE_UNIVERSE_FIBERS_VERT, KNOWLEDGE_UNIVERSE_EDGE_FRAG),
         stars: material(KNOWLEDGE_UNIVERSE_STARS_VERT, KNOWLEDGE_UNIVERSE_STARS_FRAG),
-        lines: material(KNOWLEDGE_UNIVERSE_LINES_VERT, KNOWLEDGE_UNIVERSE_LINES_FRAG),
       };
       this.floatTargets = renderer.extensions.has("EXT_color_buffer_float")
         || renderer.extensions.has("EXT_color_buffer_half_float");
@@ -1691,7 +1911,7 @@ function makeKnowledgeUniverse(view) {
         fragmentShader: KNOWLEDGE_UNIVERSE_UP_FRAG,
       });
       const comp = pass({
-        uniforms: { tScene: { value: null }, tBloom: { value: null }, uBloom: { value: U.bloomStrength },
+        uniforms: { tScene: { value: null }, tBloom: { value: null }, uBloom: { value: 0 },
           uExposure: { value: 1 }, uDark: { value: 1 }, uPaper: { value: new THREE.Vector3() }, uTime: { value: 0 },
           uKeep: { value: U.toneKeep }, uInk: { value: U.inkChroma } },
         fragmentShader: KNOWLEDGE_UNIVERSE_COMP_FRAG,
@@ -1734,19 +1954,20 @@ function makeKnowledgeUniverse(view) {
       post.mips.length = 0;
     },
 
-    /* 색이 바뀌었다(처음·테마): 합성의 테마·노출·종이, 그리고 은하 빛깔(텍셀 5). */
+    /* 색이 바뀌었다(처음·테마): 합성의 테마·노출·종이, 색 없는 빛깔, 그리고 군집 빛깔(텍셀 2). */
     applyInks() {
       const inks = this.inks;
       const comp = this.post.comp.uniforms;
       comp.uDark.value = inks.dark ? 1 : 0;
       comp.uExposure.value = inks.exposure;
       comp.uPaper.value.set(inks.paper[0], inks.paper[1], inks.paper[2]);
-      this.uniforms.uDark.value = inks.dark ? 1 : 0;
+      this.uniforms.uNeutral.value.set(inks.neutral[0], inks.neutral[1], inks.neutral[2]);
+      this.uniforms.uHalo.value = inks.halo;
       if (this.map === null) return;
       const U = this.tune;
       const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
       for (const row of this.map.galaxy) {
-        const at = (row.rank * SHAPE.texels + 5) * 4;
+        const at = (row.rank * SHAPE.texels + 2) * 4;
         const tint = knowledgeUniverseTint(U, inks, row.hue);
         for (let channel = 0; channel < 3; channel += 1) this.map.gal[at + channel] = tint[channel];
       }
@@ -1808,7 +2029,7 @@ function makeKnowledgeUniverse(view) {
             * U.glidePitchShare;
           this.invalidate();
         }
-        if (this.clickable && event.type === "pointerup") this.press();
+        if (this.clickable && event.type === "pointerup") this.press(event.shiftKey);
       };
       on(host, "pointerup", release);
       on(host, "pointercancel", release);
@@ -1902,19 +2123,21 @@ function makeKnowledgeUniverse(view) {
       const SHAPE = KNOWLEDGE_UNIVERSE_SHAPE;
       const map = knowledgeUniverseMap(layout, this.inks);
       this.map = map;
+      this.seenStamp = map.stamp;
       this.scale = map.scale;
       this.reach = map.reach;
       this.pos3 = map.pos3;
       this.pos2 = new Float32Array(count * 3);
-      /* 은하 매개변수 텍스처 — 은하마다 텍셀 8개, 줄 128(RGBA32F, NEAREST). 셰이더가 번호로 읽는다. */
+      this.filaments = map.filaments;
+      /* 군집 텍스처 — 군집마다 텍셀 넷, 줄 128(RGBA32F, NEAREST). 셰이더가 번호로 읽는다. */
       const galTexture = new THREE.DataTexture(map.gal, SHAPE.texels, SHAPE.rows, THREE.RGBAFormat, THREE.FloatType);
       galTexture.minFilter = THREE.NearestFilter;
       galTexture.magFilter = THREE.NearestFilter;
       galTexture.needsUpdate = true;
       this.galTexture = galTexture;
       this.uniforms.tGal.value = galTexture;
-      /* 이름 있는 별: 밝기 = ((1 + 연결) / (1 + 가운데값))^지수, 빛깔 = 최근 고침(오늘 1 → 1년 0, 로그). 고친 때를
-       * 모르는 쪽은 오래된 것으로 친다(디자이너 답 m-12467). 가운데값은 볼트 전체의 것이다. */
+      /* 별: 크기의 바탕 = ((1 + 연결) / (1 + 가운데값))^지수(천장까지), 최근 = 최근 고침(오늘 1 → 1년 0, 로그), 줄 번호,
+       * 빛의 몫. 고친 때를 모르는 쪽은 오래된 것으로 친다(디자이너 답 m-12467). 가운데값은 볼트 전체의 것이다. */
       const sorted = Int32Array.from(model.degree).sort();
       const middle = count > 0 ? sorted[count >> 1] : 0;
       const nowMs = model.nowMs;
@@ -1922,14 +2145,17 @@ function makeKnowledgeUniverse(view) {
       for (let at = 0; at < count; at += 1) {
         const days = model.modified[at] > 0 ? Math.max(0, (nowMs - model.modified[at]) / 86_400_000)
           : U.starAgeSpan;
+        const row = map.rowOf[at];
         star[at * 4] = Math.min((1 + model.degree[at]) / (1 + middle), U.starRatioCap) ** U.starLumExp;
         star[at * 4 + 1] = Math.max(0, Math.min(1,
           1 - Math.log1p(days / U.starAgeScale) / Math.log1p(U.starAgeSpan / U.starAgeScale)));
-        star[at * 4 + 2] = map.rowOf[at];
+        star[at * 4 + 2] = row;
+        /* 가려진 쪽의 별은 빛이 없다 — 셰이더가 그리지 않고, 고르기와 이름표도 건너뛴다(`project`). */
+        star[at * 4 + 3] = map.shown !== null && map.shown[at] === 0 ? 0 : row >= 0 ? map.galaxy[row].weight : U.quietShare;
       }
       this.placeSeats();
-      /* 그리는 차례(시안 `renderOrder`): 원반·성운 0 → 장식 입자 1 → 이름 있는 별 2 → 별자리 선 3. 장면에 넣는
-       * 차례가 그 차례다(정렬은 끈다). */
+      /* 그리는 차례: 둘레 빛 0 → 배경 별 1 → 곧은 링크 2 → 다발의 올 3 → 별 4. 장면에 넣는 차례가 그 차례다
+       * (정렬은 끈다). */
       const add = (object, order, key) => {
         object.frustumCulled = false;
         object.renderOrder = order;
@@ -1938,74 +2164,21 @@ function makeKnowledgeUniverse(view) {
         this.built.objects.push(object);
         return object;
       };
-      /* 원반·핵·성운(시안 `bb`): 나선·막대·불규칙은 원반과 핵, 타원은 핵 하나, 성단은 성운 셋 — 성운은 앞
-       * `nebula-max` 성단에만(fbm 조각이 가장 비싸다, 디자이너 답 m-12467). */
-      const TYPE = KNOWLEDGE_UNIVERSE_TYPES;
-      const glows = [];
-      let clusters = 0;
-      for (const row of map.galaxy) {
-        if (row.type === TYPE.cluster) {
-          if (clusters < U.nebulaMax) {
-            glows.push(row.rank, 2, U.nebulaOuter, 0, row.rank, 2, U.nebulaMid, 1, row.rank, 2, U.nebulaInner, 2);
-          }
-          clusters += 1;
-        } else if (row.type === TYPE.elliptical) {
-          glows.push(row.rank, 1, U.coreElliptical, 1);
-        } else {
-          glows.push(row.rank, 0, U.disk, 0, row.rank, 1, U.core, 1);
-        }
-      }
-      const glowGeometry = new THREE.InstancedBufferGeometry();
-      glowGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]), 3));
-      glowGeometry.setIndex([0, 1, 2, 0, 2, 3]);
-      glowGeometry.setAttribute("aBB", new THREE.InstancedBufferAttribute(new Float32Array(glows), 4));
-      glowGeometry.instanceCount = glows.length / 4;
-      this.built.geometries.push(glowGeometry);
-      add(new THREE.Mesh(glowGeometry, this.materials.glows), 0, "glows");
-      /* 몸의 이름 없는 별(시안 `buildScene`의 장식 입자): 번호 = 무리 × `groupSpan` + 차례 — 줄마다 제 장식 수만큼,
-       * 그 뒤 배경 별. 필라멘트의 번호는 그 뒤에 선다(④). */
-      let total = U.decorSky;
-      for (const row of map.galaxy) total += row.decor;
-      for (const filament of map.filaments) total += filament.points;
-      const codes = new Float32Array(total);
-      let code = 0;
-      for (const row of map.galaxy) {
-        for (let step = 0; step < row.decor; step += 1) codes[code++] = row.rank * SHAPE.groupSpan + step;
-      }
-      for (let step = 0; step < U.decorSky; step += 1) codes[code++] = SHAPE.skyGroup * SHAPE.groupSpan + step;
-      /* 필라멘트의 입자와 셰이더의 두 배열(시안 `uBundle`·`uBundle2`): 보낸 은하, 받는 은하, 굵기 √(n/가장 굵은 n),
-       * 보낸 쪽의 몫 / 휨, 흐름의 위상. 빈 칸은 0이다. */
-      this.filaments = map.filaments;
-      map.filaments.forEach((filament, index) => {
-        for (let step = 0; step < filament.points; step += 1) codes[code++] = (SHAPE.bundleGroup + index) * SHAPE.groupSpan + step;
-      });
-      this.uniforms.uBundle.value.forEach((slot, index) => {
-        const filament = map.filaments[index];
-        if (filament === undefined) slot.set(0, 0, 0, 0);
-        else slot.set(filament.from, filament.to, filament.strength, filament.sent / filament.n);
-      });
-      this.uniforms.uBundle2.value.forEach((slot, index) => {
-        const filament = map.filaments[index];
-        if (filament === undefined) slot.set(0, 0, 0, 0);
-        else slot.set(filament.bend, filament.phase, 0, 0);
-      });
-      const decorGeometry = new THREE.BufferGeometry();
-      decorGeometry.setAttribute("position", new THREE.BufferAttribute(codes, 1));
-      this.built.geometries.push(decorGeometry);
-      this.decorCount = total;
-      add(new THREE.Points(decorGeometry, this.materials.decor), 1, "decor");
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.BufferAttribute(this.pos3, 3));
-      geometry.setAttribute("aPos2", new THREE.BufferAttribute(this.pos2, 3));
-      geometry.setAttribute("aStar", new THREE.BufferAttribute(star, 4));
-      this.starState = new Float32Array(count);
-      this.starStateAttr = new THREE.BufferAttribute(this.starState, 1);
-      this.starStateAttr.setUsage(THREE.DynamicDrawUsage);
-      geometry.setAttribute("aState", this.starStateAttr);
-      this.built.geometries.push(geometry);
-      this.starGeometry = geometry;
-      add(new THREE.Points(geometry, this.materials.stars), 2, "stars");
-      /* 쪽 자리 텍스처 둘(우주·평면, RGBA32F NEAREST) — 별자리 선이 번호로 읽는다(시안 `tNode3`·`tNode2`). */
+      const auraGeometry = new THREE.InstancedBufferGeometry();
+      auraGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]), 3));
+      auraGeometry.setIndex([0, 1, 2, 0, 2, 3]);
+      auraGeometry.setAttribute("aRow", new THREE.InstancedBufferAttribute(Float32Array.from(map.galaxy, (row) => row.rank), 1));
+      auraGeometry.instanceCount = map.galaxy.length;
+      this.built.geometries.push(auraGeometry);
+      add(new THREE.Mesh(auraGeometry, this.materials.aura), 0, "aura").visible = map.galaxy.length > 0;
+      const sky = new Float32Array(U.decorSky);
+      for (let step = 0; step < sky.length; step += 1) sky[step] = step;
+      const skyGeometry = new THREE.BufferGeometry();
+      skyGeometry.setAttribute("position", new THREE.BufferAttribute(sky, 1));
+      this.built.geometries.push(skyGeometry);
+      this.skyCount = sky.length;
+      add(new THREE.Points(skyGeometry, this.materials.sky), 1, "sky");
+      /* 쪽 자리 텍스처 둘(우주·평면, RGBA32F NEAREST) — 링크가 번호로 읽는다. */
       const wide = SHAPE.nodeWide;
       const tall = Math.max(1, Math.ceil(count / wide));
       this.node3 = new Float32Array(wide * tall * 4);
@@ -2022,61 +2195,70 @@ function makeKnowledgeUniverse(view) {
       this.uniforms.tNode2.value = this.nodeTextures[1];
       this.uniforms.uTexW.value = wide;
       this.fillNodes();
-      /* 별자리 선의 자료(시안): 선마다 (보낸 쪽, 받는 쪽, 추론이면 1 + 2 × (보낸 쪽 줄 + 밑 × 받는 쪽 줄), 흐름
-       * 위상). 떠돌이 별의 줄은 줄 수(`rows`)로 적는다 — 어느 은하와도 다르다. */
-      const edgeCount = model.edgeCount;
-      const inferred = KNOWLEDGE_EDGE_PROVENANCE_CODE.inferred;
-      this.edgeData = new Float32Array(edgeCount * 4);
-      /* 팁의 「선언 · 추론」 — 쪽마다 제 선을 두 갈래로 센다(합이 연결 수다). */
-      this.declared = new Int32Array(count);
-      this.inferred = new Int32Array(count);
-      let seed = SHAPE.lineSeed;
-      const rowFor = (seat) => (map.rowOf[seat] >= 0 ? map.rowOf[seat] : SHAPE.rows);
-      for (let at = 0; at < edgeCount; at += 1) {
-        const from = model.from[at];
-        const to = model.to[at];
-        const guessed = model.provenance[at] === inferred
-          || (model.provenance[at] === KNOWLEDGE_PROVENANCE_UNKNOWN && model.kind[at] === KNOWLEDGE_EDGE_CODE.mentions);
-        const tally = guessed ? this.inferred : this.declared;
-        tally[from] += 1;
-        tally[to] += 1;
-        this.edgeData[at * 4] = from;
-        this.edgeData[at * 4 + 1] = to;
-        this.edgeData[at * 4 + 2] = (guessed ? 1 : 0) + 2 * (rowFor(from) + SHAPE.linePack * rowFor(to));
-        seed = (seed * SHAPE.lineMultiplier) % SHAPE.lineModulus;
-        this.edgeData[at * 4 + 3] = seed / SHAPE.lineModulus;
-      }
-      /* 초점의 선만 담는 인스턴스 통 — 가장 많은 연결 + 경로(쪽 수를 넘지 않는다). */
-      let widest = 1;
-      for (let at = 0; at < count; at += 1) widest = Math.max(widest, model.degree[at]);
-      this.focusEdges = new Float32Array((widest + count) * 4);
-      this.focusAttr = new THREE.InstancedBufferAttribute(this.focusEdges, 4);
-      this.focusAttr.setUsage(THREE.DynamicDrawUsage);
-      const segments = SHAPE.lineSegments;
+      /* 링크의 두 통 — 곧은 링크는 끝점 둘, 올은 인스턴스 하나에 마디 `fiberSegments`. 켜짐만 프레임 사이에 바뀐다. */
+      const edges = knowledgeUniverseEdges(model, map);
+      this.edges = edges;
+      this.declared = edges.declared;
+      this.inferred = edges.inferred;
+      /* 켜 둔 링크의 장부 — 초점 쪽의 링크와 경로의 링크가 겹칠 수 있어 링크 수의 두 배까지 든다. */
+      this.litList = new Int32Array(Math.max(1, model.edgeCount * 2));
+      this.litCount = 0;
+      this.threadLit = new Float32Array(edges.threads * 2);
+      this.threadLitAttr = new THREE.BufferAttribute(this.threadLit, 1);
+      this.threadLitAttr.setUsage(THREE.DynamicDrawUsage);
+      const threadGeometry = new THREE.BufferGeometry();
+      threadGeometry.setAttribute("position", new THREE.BufferAttribute(edges.seat, 3));
+      threadGeometry.setAttribute("aFlow", new THREE.BufferAttribute(edges.flow, 3));
+      threadGeometry.setAttribute("aLit", this.threadLitAttr);
+      this.threadGeometry = threadGeometry;
+      this.built.geometries.push(threadGeometry);
+      add(new THREE.LineSegments(threadGeometry, this.materials.threads), 2, "threads").visible = edges.threads > 0;
+      const segments = SHAPE.fiberSegments;
       const base = new Float32Array(segments * 2 * 3);
       for (let step = 0; step < segments; step += 1) {
         base[step * 6] = step / segments;
         base[step * 6 + 3] = (step + 1) / segments;
       }
-      const lineGeometry = new THREE.InstancedBufferGeometry();
-      lineGeometry.setAttribute("position", new THREE.BufferAttribute(base, 3));
-      lineGeometry.setAttribute("aEdge", this.focusAttr);
-      lineGeometry.instanceCount = 0;
-      this.built.geometries.push(lineGeometry);
-      this.lineGeometry = lineGeometry;
-      this.lineObject = add(new THREE.LineSegments(lineGeometry, this.materials.lines), 3, "lines");
-      this.lineObject.visible = false;
+      this.fiberLit = new Float32Array(edges.fibers);
+      this.fiberLitAttr = new THREE.InstancedBufferAttribute(this.fiberLit, 1);
+      this.fiberLitAttr.setUsage(THREE.DynamicDrawUsage);
+      const fiberGeometry = new THREE.InstancedBufferGeometry();
+      fiberGeometry.setAttribute("position", new THREE.BufferAttribute(base, 3));
+      fiberGeometry.setAttribute("aFiber", new THREE.InstancedBufferAttribute(edges.fiber, 4));
+      fiberGeometry.setAttribute("aFiberFlow", new THREE.InstancedBufferAttribute(edges.fiberFlow, 2));
+      fiberGeometry.setAttribute("aFiberLit", this.fiberLitAttr);
+      fiberGeometry.instanceCount = edges.thick;
+      this.fiberGeometry = fiberGeometry;
+      this.built.geometries.push(fiberGeometry);
+      add(new THREE.LineSegments(fiberGeometry, this.materials.fibers), 3, "fibers").visible = edges.fibers > 0;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(this.pos3, 3));
+      geometry.setAttribute("aPos2", new THREE.BufferAttribute(this.pos2, 3));
+      geometry.setAttribute("aStar", new THREE.BufferAttribute(star, 4));
+      geometry.setAttribute("aRoom", new THREE.BufferAttribute(map.room, 1));
+      this.starState = new Float32Array(count);
+      this.starStateAttr = new THREE.BufferAttribute(this.starState, 1);
+      this.starStateAttr.setUsage(THREE.DynamicDrawUsage);
+      geometry.setAttribute("aState", this.starStateAttr);
+      this.built.geometries.push(geometry);
+      this.starGeometry = geometry;
+      add(new THREE.Points(geometry, this.materials.stars), 4, "stars");
       this.proj = new Float32Array(count * 4);
+      this.gaps = new Float32Array(Math.max(1, map.rows));
       this.projVersion = -1;
       this.viewProjection = new THREE.Matrix4();
       this.hover = -1;
-      /* 쉬는 먼 자리에서 이름을 다는 별 — 연결이 가장 많은 쪽들(같으면 자리 순, 시안 `G.bright`). 제목이 제 은하의
-       * 이름과 같은 별(이름 없는 군집은 허브 제목이 이름이다)은 명판과 두 번 서지 않게 건너뛴다(디자이너 m-12642). */
+      /* 쉬는 먼 자리에서 이름을 다는 별 — 연결이 가장 많은 쪽들(같으면 자리 순). 제목이 제 군집의 이름과 같은 별(이름
+       * 없는 군집은 허브 제목이 이름이다)은 명판과 두 번 서지 않게 건너뛴다(디자이너 m-12642). */
       const sameAsGalaxy = (seat) => map.rowOf[seat] >= 0
         && knowledgeShortWord(model.titles[seat], KNOWLEDGE_COMMUNITY.labelMax) === knowledgeClusterWord(layout, map.rowOf[seat]);
-      this.bright = Array.from({ length: count }, (unused, at) => at)
-        .sort((one, two) => model.degree[two] - model.degree[one] || one - two)
-        .filter((seat) => !sameAsGalaxy(seat)).slice(0, U.labelsRest);
+      const byLinks = Array.from({ length: count }, (unused, at) => at)
+        .sort((one, two) => model.degree[two] - model.degree[one] || one - two);
+      this.bright = [];
+      for (const seat of byLinks) {
+        if (this.bright.length >= U.labelsRest) break;
+        if ((map.shown === null || map.shown[seat] === 1) && !sameAsGalaxy(seat)) this.bright.push(seat);
+      }
       this.applyInks();
       this.computeHome();
       this.buildLabels();
@@ -2094,8 +2276,8 @@ function makeKnowledgeUniverse(view) {
     },
 
     /* 평면 자리(떠오르기 전)와 떠돌이 별의 자리. 평면 자리는 평면 지도가 그린 자리(좁은 판의 세로 눌림까지)이고,
-     * 은하 몸은 평면에서 제 원반의 가운데로 모인다(텍셀 4). 떠돌이 별은 평면 자리 그대로에 높이만 — 앉기가 끝난
-     * 판에서 한 번 더 옮긴다(`dress`). */
+     * 군집의 둘레 빛은 평면에서 제 원반의 가운데로 모인다(텍셀 1). 떠돌이 별은 평면 자리 그대로에 높이만 — 앉기가
+     * 끝난 판에서 한 번 더 옮긴다(`dress`). */
     placeSeats() {
       const layout = this.layout;
       const map = this.map;
@@ -2117,7 +2299,7 @@ function makeKnowledgeUniverse(view) {
         this.pos3[at * 3 + 2] = y[at] * s;
       }
       for (const row of map.galaxy) {
-        const at = (row.rank * SHAPE.texels + 4) * 4;
+        const at = (row.rank * SHAPE.texels + 1) * 4;
         map.gal[at] = layout.communityHomeX[row.rank] * s;
         map.gal[at + 1] = flat;
         map.gal[at + 2] = (middleY + (layout.communityHomeY[row.rank] - middleY) * yScale) * s;
@@ -2133,17 +2315,18 @@ function makeKnowledgeUniverse(view) {
       }
     },
 
-    /* 쪽 자리 텍스처를 채운다 — 우주의 자리(텍셀 = x, y, z, 1)와 평면의 자리. */
+    /* 쪽 자리 텍스처를 채운다 — 우주의 자리(텍셀 = x, y, z, 줄 번호)와 평면의 자리. 떠돌이 별의 줄은 -1이다. */
     fillNodes() {
       if (this.node3 === null) return;
       const count = this.layout.count;
+      const rowOf = this.map.rowOf;
       for (let at = 0; at < count; at += 1) {
         for (let axis = 0; axis < 3; axis += 1) {
           this.node3[at * 4 + axis] = this.pos3[at * 3 + axis];
           this.node2[at * 4 + axis] = this.pos2[at * 3 + axis];
         }
-        this.node3[at * 4 + 3] = 1;
-        this.node2[at * 4 + 3] = 1;
+        this.node3[at * 4 + 3] = rowOf[at];
+        this.node2[at * 4 + 3] = rowOf[at];
       }
       for (const texture of this.nodeTextures) texture.needsUpdate = true;
     },
@@ -2188,9 +2371,21 @@ function makeKnowledgeUniverse(view) {
       } else {
         Object.assign(this, this.home, { lift: 1 });
         this.camVersion += 1;
+        this.bear();
       }
       this.refreshStates();
+      /* 이 판이 덮는 동안 평면의 손은 그리기 버퍼를 돌려준다(`knowledgeUniverseCovers`). */
+      knowledgePainters.get(this.view)?.park?.();
       this.invalidate();
+    },
+
+    /* 문을 연 판의 첫 그림 — 별들이 제 군집의 가운데에서 제 자리로 퍼진다(`KNOWLEDGE_UNIVERSE_BIRTH`). 움직임을 줄인
+     * 판은 곧바로 선다. */
+    bear() {
+      const still = knowledgeMotionReduced() || !(U.birth > 0);
+      this.birth.on = !still;
+      this.birth.t0 = performance.now();
+      this.uniforms.uBirth.value = still ? 1 : 0;
     },
 
     /* 평면으로 내려앉는다(시안 `setMode("2d")`) — 끝나면 부르는 쪽이 놓는다. 움직임을 줄인 판과 문맥을
@@ -2254,48 +2449,39 @@ function makeKnowledgeUniverse(view) {
       this.camVersion += 1;
     },
 
-    /* 은하를 거의 정면에서 보는 자세(시안 `faceOn`): 법선과 지금 시선의 사이, pitch는 `face-pitch-*` 안. */
-    faceOn(row, mix) {
-      if (row === null || row === undefined) return { yaw: this.yaw, pitch: this.pitch };
-      const cos = Math.cos(this.pitch);
-      let x = row.normal[0] + mix * cos * Math.sin(this.yaw);
-      let y = row.normal[1] + mix * Math.sin(this.pitch);
-      let z = row.normal[2] + mix * cos * Math.cos(this.yaw);
-      const length = Math.hypot(x, y, z) || 1;
-      x /= length;
-      y /= length;
-      z /= length;
-      return { yaw: Math.atan2(x, z), pitch: Math.max(U.facePitchLow, Math.min(U.facePitchHigh, Math.asin(y))) };
-    },
-
-    /* 누름(시안 `pointerup`의 고르기): 별이면 그 쪽을 고른다 — 평면 지도와 같은 고름이라 인스펙터가 카드를 열고,
-     * 고름이 바뀐 것을 `dress`가 보고 그 별로 난다. 빈 곳이면 고름과 고른 군집을 놓는다(시안 `clearSelection`). */
-    press() {
+    /* 누름: 별이면 그 쪽을 고른다 — 평면 지도와 같은 고름이라 인스펙터가 카드를 열고, 고름이 바뀐 것을 `dress`가 보고
+     * 그 별로 난다. 고른 쪽이 있을 때 Shift로 누른 다른 별은 그 둘 사이의 경로다(평면 지도의 손 그대로 — 경로의
+     * 링크가 그물을 따라 켜진다). 빈 곳이면 경로·고름·고른 군집을 놓는다. */
+    press(shift = false) {
       if (this.folding || this.map === null) return;
       const seat = this.pickAt(this.pointer.x, this.pointer.y);
       if (seat >= 0) {
-        selectKnowledgeNode(this.view, this.layout.model.keys[seat]);
+        const key = this.layout.model.keys[seat];
+        if (shift && knowledgeSelectedKey !== null && key !== knowledgeSelectedKey) {
+          void runKnowledgeShortestPath(this.view, this.layout, knowledgeSelectedKey, key);
+          return;
+        }
+        clearKnowledgePath(this.view, this.layout);
+        selectKnowledgeNode(this.view, key);
         return;
       }
+      clearKnowledgePath(this.view, this.layout);
       if (knowledgeClusterPicked >= 0) toggleKnowledgeCluster(this.view, knowledgeClusterPicked);
       if (knowledgeSelectedKey !== null) selectKnowledgeNode(this.view, null);
     },
 
-    /* 쪽으로 난다(시안 `select`) — 그 별에, 그 은하를 거의 정면으로. */
+    /* 쪽으로 난다 — 그 별에, 제 군집이 판에 드는 거리까지. 보는 방향은 그대로다. */
     flyToStar(seat) {
       const row = this.map.rowOf[seat] >= 0 ? this.map.galaxy[this.map.rowOf[seat]] : null;
-      const face = this.faceOn(row, U.facePage);
       this.flyTo({ tx: this.pos3[seat * 3], ty: this.pos3[seat * 3 + 1], tz: this.pos3[seat * 3 + 2],
-        dist: Math.max(U.flyPageDist, (row?.radius ?? 0) * U.flyPageReach), yaw: face.yaw, pitch: face.pitch }, U.flyPage);
+        dist: Math.max(U.flyPageDist, (row?.radius ?? 0) * U.flyPageReach) }, U.flyPage);
     },
 
-    /* 은하로 난다(시안 `focusTopic`). */
+    /* 군집으로 난다 — 그 나무가 판에 가득 차는 거리까지. */
     flyToGalaxy(rank) {
       const row = this.map.galaxy[rank];
       if (row === undefined) return;
-      const face = this.faceOn(row, U.faceGalaxy);
-      this.flyTo({ tx: row.x, ty: row.y, tz: row.z, dist: row.radius * U.flyGalaxyReach + U.flyGalaxyPad,
-        yaw: face.yaw, pitch: face.pitch }, U.fly);
+      this.flyTo({ tx: row.x, ty: row.y, tz: row.z, dist: row.radius * U.flyGalaxyReach + U.flyGalaxyPad }, U.fly);
     },
 
     /* 필라멘트 하나를 옆에서 보는 자리로 난다(시안 `showFlow`). */
@@ -2308,15 +2494,25 @@ function makeKnowledgeUniverse(view) {
         yaw: Math.atan2(b.z - a.z, -(b.x - a.x)) + Math.PI, pitch: U.flyFlowPitch }, U.flyFlow);
     },
 
-    /* 별 하나의 화면 크기(CSS px, 시안 `starSizeCss`) — 셰이더와 같은 표(`KNOWLEDGE_UNIVERSE_STAR`). */
+    /* 별 하나의 쉬는 속의 지름(CSS px) — 셰이더와 같은 표(`KNOWLEDGE_UNIVERSE_STAR`). */
     starSize(seat, depth) {
       const S = KNOWLEDGE_UNIVERSE_STAR;
       const lum = this.starGeometry.attributes.aStar.array[seat * 4];
-      const flux = lum * Math.max(S.fluxLeast, Math.min(S.fluxMost, (this.uniforms.uRef.value / Math.max(depth, 1)) ** 2));
-      return Math.max(S.sizeLeast, Math.min(S.sizeMost, S.sizeScale * flux ** S.sizePower));
+      const near = Math.max(S.nearLeast, Math.min(S.nearMost, this.uniforms.uRef.value / Math.max(depth, 1)));
+      const row = this.map.rowOf[seat];
+      const core = Math.min(S.coreCeil, Math.max(S.coreMin, Math.min(S.coreMost, S.coreLeast + S.coreGrow * lum ** S.corePower)) * near);
+      if (row < 0) return 2 * core;
+      /* 붐비는 군집의 별은 작다 — 속이 별 사이 간격의 몫을 넘지 않게, 허브일수록 덜(셰이더와 같은 식). */
+      const step = Math.max(0, Math.min(1, (lum - S.hubFrom) / (S.hubTo - S.hubFrom)));
+      const hub = step * step * (3 - 2 * step);
+      const room = (this.map.room[seat] * this.focal) / Math.max(depth, 1);
+      const size = Math.max(S.crowdSize, Math.min(1, (U.crowdRatio * Math.min(this.gaps[row], room)) / core));
+      const most = Math.max(size, Math.min(1, (KNOWLEDGE_UNIVERSE_CROWD.hub * room) / core));
+      return 2 * core * (size + (most - size) * hub);
     },
 
-    /* 이름 있는 별을 화면에 투영한다(시안 `projectAll`) — 카메라가 움직인 뒤에만. 칸마다 x, y, 반지름, 깊이(뒤는 -1). */
+    /* 이름 있는 별을 화면에 투영한다(시안 `projectAll`) — 카메라가 움직인 뒤에만. 칸마다 x, y, 반지름, 깊이(뒤는 -1).
+     * 가장 가까운 별의 깊이도 함께 적는다(`nearest` — `spanLinks`). */
     project(seat = -1) {
       if (this.projVersion !== this.camVersion) {
         this.placeCamera();
@@ -2325,11 +2521,19 @@ function makeKnowledgeUniverse(view) {
           .elements;
         const { pos2, pos3, proj, lift, width, height } = this;
         const count = this.layout.count;
+        const shown = this.map.shown;
+        this.rowGaps(matrix);
+        let nearest = Number.POSITIVE_INFINITY;
         for (let at = 0; at < count; at += 1) {
+          if (shown !== null && shown[at] === 0) {
+            proj[at * 4 + 3] = -1;
+            continue;
+          }
           const x = pos2[at * 3] + (pos3[at * 3] - pos2[at * 3]) * lift;
           const y = pos2[at * 3 + 1] + (pos3[at * 3 + 1] - pos2[at * 3 + 1]) * lift;
           const z = pos2[at * 3 + 2] + (pos3[at * 3 + 2] - pos2[at * 3 + 2]) * lift;
           const depth = matrix[3] * x + matrix[7] * y + matrix[11] * z + matrix[15];
+          if (depth < nearest) nearest = depth;
           if (depth <= KNOWLEDGE_UNIVERSE_SHAPE.behind) {
             proj[at * 4 + 3] = -1;
             continue;
@@ -2339,9 +2543,28 @@ function makeKnowledgeUniverse(view) {
           proj[at * 4 + 2] = this.starSize(at, depth) * 0.5;
           proj[at * 4 + 3] = depth;
         }
+        this.nearest = nearest;
       }
       if (seat < 0) return null;
       return { x: this.proj[seat * 4], y: this.proj[seat * 4 + 1], r: this.proj[seat * 4 + 2], depth: this.proj[seat * 4 + 3] };
+    },
+
+    /* 군집마다 별 사이 간격(CSS px) — 셰이더의 `gapOf`와 같은 식(`KNOWLEDGE_UNIVERSE_CROWD`). 카메라가 움직인 뒤에만. */
+    rowGaps(matrix) {
+      const map = this.map;
+      const gal = map.gal;
+      const texels = KNOWLEDGE_UNIVERSE_SHAPE.texels;
+      const lift = this.lift;
+      for (const row of map.galaxy) {
+        const at = row.rank * texels * 4;
+        const x = gal[at + 4] + (gal[at] - gal[at + 4]) * lift;
+        const y = gal[at + 5] + (gal[at + 1] - gal[at + 5]) * lift;
+        const z = gal[at + 6] + (gal[at + 2] - gal[at + 6]) * lift;
+        const depth = Math.max(matrix[3] * x + matrix[7] * y + matrix[11] * z + matrix[15],
+          row.radius * KNOWLEDGE_UNIVERSE_CROWD.near);
+        const reach = (row.radius * this.focal) / depth;
+        this.gaps[row.rank] = Math.sqrt((Math.PI * reach * reach) / Math.max(1, row.size));
+      }
     },
 
     /* 포인터 아래의 별(시안 `pickAt`) — 맞힘 반지름 안에서 가깝고 앞선 것. */
@@ -2388,7 +2611,7 @@ function makeKnowledgeUniverse(view) {
       this.showTip(seat);
     },
 
-    /* 올린 별의 팁(시안 `showTip`): 제목, 은하, 연결(선언·추론), 고친 때. 포인터의 오른쪽 위에 서고 판 끝에서는 안으로
+    /* 올린 별의 팁(시안 `showTip`): 제목, 군집, 연결(선언·추론), 고친 때. 포인터의 오른쪽 위에 서고 판 끝에서는 안으로
      * 든다. 쪽 이름은 그 상자를 비켜 선다(`placeLabels`). */
     showTip(seat) {
       const tip = this.tip;
@@ -2418,7 +2641,7 @@ function makeKnowledgeUniverse(view) {
       this.tipBox = [x, y, tip.offsetWidth, tip.offsetHeight];
     },
 
-    /* 이름표를 짓는다(시안 `buildTopicCards`) — 은하마다 명판(누르면 그 은하를 고른다), 쪽 이름의 풀, 굵은
+    /* 이름표를 짓는다(시안 `buildTopicCards`) — 큰 군집마다 명판(누르면 그 군집을 고른다), 쪽 이름의 풀, 굵은
      * 필라멘트의 수, 팁. 우주의 그림을 새로 지을 때마다. */
     buildLabels() {
       const layer = this.labels;
@@ -2618,29 +2841,16 @@ function makeKnowledgeUniverse(view) {
       return true;
     },
 
-    /* 은하 가장자리 고리의 점들을 투영해 화면에서 가장 낮은 곳(명판 자리)과 가장 높은 곳(비켜 설 자리)을 찾는다
-     * (시안 `galaxyAnchor`). 고리의 점이 충분히 보이고 가운데가 앞에 있어야 명판이 선다. */
+    /* 군집의 화면 위 원에서 가장 낮은 곳(명판 자리)과 가장 높은 곳(비켜 설 자리) — 나무는 구라서 가운데와 화면
+     * 반지름이면 된다. 가운데가 카메라 앞에 있어야 명판이 선다. */
     anchor(row) {
       const k = this.map.galaxy[row];
-      const ring = k.radius * U.plateRing;
-      let low = Number.NEGATIVE_INFINITY;
-      let high = Number.POSITIVE_INFINITY;
-      let seen = 0;
-      for (let step = 0; step < U.platePoints; step += 1) {
-        const angle = (step / U.platePoints) * Math.PI * 2;
-        const c = Math.cos(angle) * ring;
-        const s = Math.sin(angle) * ring;
-        if (!this.screenAt(k.x + k.across[0] * c + k.along[0] * s, k.y + k.across[1] * c + k.along[1] * s,
-          k.z + k.across[2] * c + k.along[2] * s)) continue;
-        seen += 1;
-        low = Math.max(low, this.spot[1]);
-        high = Math.min(high, this.spot[1]);
-      }
       const front = this.screenAt(k.x, k.y, k.z);
+      const reach = front ? (k.radius * U.plateRing * this.focal) / this.spot[2] : 0;
       this.anchorX[row] = this.spot[0];
-      this.anchorLow[row] = low;
-      this.anchorHigh[row] = high;
-      this.anchorSeen[row] = front && seen >= U.plateSeen ? 1 : 0;
+      this.anchorLow[row] = this.spot[1] + reach;
+      this.anchorHigh[row] = this.spot[1] - reach;
+      this.anchorSeen[row] = front ? 1 : 0;
     },
 
     /* 자리는 `transform` 하나 — 온 픽셀이 바뀐 때만 쓴다. */
@@ -2672,7 +2882,7 @@ function makeKnowledgeUniverse(view) {
       this.labelVersion = -1;
     },
 
-    /* 이름표를 놓는다(시안 `updateLabels`) — 카메라나 초점이 바뀐 프레임에만. 차례: 무대의 상자 → 은하 명판(고른 것
+    /* 이름표를 놓는다(시안 `updateLabels`) — 카메라나 초점이 바뀐 프레임에만. 차례: 무대의 상자 → 군집 명판(고른 것
      * 먼저, 그다음 순위) → 필라멘트 수(멀리서 쉴 때만) → 팁의 상자 → 쪽 이름(쉴 때는 연결이 가장 많은 별들,
      * 가까이 가거나 초점이 있으면 화면에서 크게 보이는 별부터). 먼저 놓인 것을 뒤의 것이 비켜 선다. */
     placeLabels() {
@@ -2689,11 +2899,11 @@ function makeKnowledgeUniverse(view) {
       const picked = knowledgeClusterPicked >= 0 && knowledgeClusterPicked < map.rows ? knowledgeClusterPicked : -1;
       const selected = this.selectedSeat;
       const focusSeat = this.hover >= 0 ? this.hover : selected;
-      /* 고른 은하(없으면 고른 쪽의 은하) — 크게 서는 명판이고, 「가까이」의 문턱이 그 반지름을 따른다. */
+      /* 고른 군집(없으면 고른 쪽의 군집) — 크게 서는 명판이고, 「가까이」의 문턱이 그 반지름을 따른다. */
       const keep = picked >= 0 ? picked : selected >= 0 ? map.rowOf[selected] : -1;
       const flown = keep >= 0 ? (map.galaxy[keep].radius * U.flyGalaxyReach + U.flyGalaxyPad) * U.closeInFly : 0;
       const closeIn = this.dist < Math.max(this.home.dist * U.closeIn, flown);
-      /* 은하 명판 — 고른 은하가 먼저, 그다음 순위. 고른(또는 고른 쪽의) 은하는 크게 선다. */
+      /* 군집 명판 — 고른 군집이 먼저, 그다음 순위. 고른(또는 고른 쪽의) 군집은 크게 선다. */
       const galaxies = map.galaxies;
       const order = this.order;
       for (let row = 0; row < galaxies; row += 1) {
@@ -2739,7 +2949,7 @@ function makeKnowledgeUniverse(view) {
           plate.element.setAttribute("aria-pressed", String(pressed));
         }
       }
-      /* 굵은 필라멘트의 선 수와 흐름 방향(보낸 은하 → 받는 은하) — 멀리서, 아무 초점도 없이 쉴 때만. */
+      /* 굵은 필라멘트의 링크 수와 흐름 방향(보낸 군집 → 받는 군집) — 멀리서, 아무 초점도 없이 쉴 때만. */
       const flowsShown = !closeIn && this.hover < 0 && selected < 0 && picked < 0 && this.hits === 0;
       for (const tag of this.flowTags) {
         let on = false;
@@ -2774,7 +2984,7 @@ function makeKnowledgeUniverse(view) {
       const room = candidates.length;
       let found = 0;
       let most = this.names.length;
-      /* 고른 은하 가까이, 쪽 초점도 찾기도 없으면(디자이너 m-12670): 후보는 그 은하의 쪽 전부이고 이름은
+      /* 고른 군집 가까이, 쪽 초점도 찾기도 없으면(디자이너 m-12670): 후보는 그 군집의 쪽 전부이고 이름은
        * `labels-close`개까지 — 연결이 많은 차례(`members`)가 곧 화면에서 큰 차례에 가깝다(크기 = 광도 × 깊이). 화면
        * 크기 상위 40만 보면 핵 둘레에 몰린 허브들이 서로를 막아 다섯만 섰다. */
       const galaxyClose = closeIn && picked >= 0 && focusSeat < 0 && this.hits === 0;
@@ -2783,6 +2993,8 @@ function makeKnowledgeUniverse(view) {
         found = candidates.length;
         most = Math.min(most, U.labelsClose);
       } else if (closeIn || focusSeat >= 0 || this.hits > 0) {
+        /* 쪽이 초점이면 그 이웃의 이름은 `labels-focus`개까지 — 링크 수백의 허브를 골라도 이름이 판을 덮지 않는다. */
+        if (focusSeat >= 0) most = Math.min(most, U.labelsFocus);
         for (let seat = 0; seat < layout.count; seat += 1) {
           if (proj[seat * 4 + 3] < 0) continue;
           const sx = proj[seat * 4];
@@ -2871,9 +3083,9 @@ function makeKnowledgeUniverse(view) {
       for (let at = used; at < this.names.length; at += 1) this.showLabel(this.names[at], false);
     },
 
-    /* 초점(시안 `refreshStates`): 별마다 상태(0 보통 · 1 이웃/고른 주제/시간 창 안 · 2 올림/고름/경로 · 3 찾은 것),
-     * 초점 은하, 초점 쪽(과 경로)의 선만. 상태는 평면 지도와 같은 자리(고른 쪽·고른 군집·찾기·시간 창·경로)에서
-     * 읽는다 — 올림만 우주의 것이다. */
+    /* 초점: 별마다 상태(0 보통 · 1 이웃/고른 군집/시간 창 안 · 2 올림/고름/경로 · 3 찾은 것), 초점 군집, 켜지는
+     * 링크(초점 쪽의 것과 경로). 상태는 평면 지도와 같은 자리(고른 쪽·고른 군집·찾기·시간 창·경로)에서 읽는다 —
+     * 올림만 우주의 것이다. */
     refreshStates() {
       if (this.map === null || this.starState === null) return;
       const layout = this.layout;
@@ -2920,25 +3132,61 @@ function makeKnowledgeUniverse(view) {
       this.uniforms.uFocus.value = focus;
       const galaxy = topic >= 0 ? topic : focusSeat >= 0 ? map.rowOf[focusSeat] : -1;
       this.uniforms.uFocusGal.value = galaxy >= 0 ? galaxy : focusSeat >= 0 ? KNOWLEDGE_UNIVERSE_SHAPE.noGalaxy : -1;
-      const room = this.focusEdges.length / 4;
-      let lines = 0;
-      const put = (edge) => {
-        if (lines >= room) return;
-        for (let slot = 0; slot < 4; slot += 1) this.focusEdges[lines * 4 + slot] = this.edgeData[edge * 4 + slot];
-        lines += 1;
-      };
+      this.uniforms.uFocusPage.value = focusSeat >= 0 ? 1 : 0;
+      /* 켜진 링크 — 초점 쪽의 링크 전부, 그리고 경로. 앞에 켠 것만 끄고 새로 켠다(링크 전부를 다시 쓰지 않는다). */
+      const before = this.litCount;
+      for (let at = 0; at < before; at += 1) this.lightEdge(this.litList[at], 0);
+      this.litCount = 0;
       if (focusSeat >= 0) {
-        for (let slot = model.start[focusSeat]; slot < model.start[focusSeat + 1]; slot += 1) put(model.throughEdge[slot]);
+        for (let slot = model.start[focusSeat]; slot < model.start[focusSeat + 1]; slot += 1) {
+          this.lightEdge(model.throughEdge[slot], 1);
+        }
       }
       if (layout.pathShown) {
-        for (let edge = 0; edge < model.edgeCount; edge += 1) if (layout.pathEdge[edge] === 1) put(edge);
+        for (let edge = 0; edge < model.edgeCount; edge += 1) if (layout.pathEdge[edge] === 1) this.lightEdge(edge, 2);
       }
-      this.lineGeometry.instanceCount = lines;
-      this.lineObject.visible = lines > 0;
-      this.focusAttr.needsUpdate = true;
+      this.uniforms.uLitGain.value = Math.max(U.litLeast, Math.min(1, (U.litFull / Math.max(1, this.litCount)) ** U.litFade));
+      /* 굵은 다발에 들지 않은 올은 켜졌거나 제 군집이 초점일 때만 보인다 — 그 밖의 판은 굵은 다발의 올만 싣는다. */
+      this.fiberGeometry.instanceCount = topic >= 0 || focusSeat >= 0 || layout.pathShown ? this.edges.fibers : this.edges.thick;
+      this.spanLinks();
+      if (before > 0 || this.litCount > 0) {
+        this.threadLitAttr.needsUpdate = true;
+        this.fiberLitAttr.needsUpdate = true;
+      }
       this.starStateAttr.needsUpdate = true;
       this.camVersion += 1;
       this.invalidate();
+    },
+
+    /* 곧은 링크를 얼마나 실을까 — 현(가지가 아닌 링크)은 켜졌거나 그 끝의 별이 카메라의 `closeFar` 안에 든 판에서만
+     * 빛난다. 켜진 링크가 없고 다 떠오르고 다 퍼진 판에서 가장 가까운 별도 그 문턱 밖이면 가지만 싣는다. */
+    spanLinks() {
+      if (this.threadGeometry === null || this.edges === null) return;
+      let all = this.litCount > 0 || this.lift < 1 || this.birth.on;
+      if (!all) {
+        this.project();
+        all = this.nearest < KNOWLEDGE_UNIVERSE_EDGE.closeFar * this.uniforms.uRef.value;
+      }
+      this.threadGeometry.setDrawRange(0, (all ? this.edges.threads : this.edges.branches) * 2);
+    },
+
+    /* 링크 하나를 켜거나 끈다(0 쉼 · 1 켜짐 · 2 경로) — 제 통의 자리에. 켠 것은 적어 둔다. 가려진 링크는 자리가 없다. */
+    lightEdge(edge, value) {
+      const edges = this.edges;
+      const thread = edges.threadOf[edge];
+      const fiber = edges.fiberOf[edge];
+      if (thread >= 0) {
+        this.threadLit[thread * 2] = value;
+        this.threadLit[thread * 2 + 1] = value;
+      } else if (fiber >= 0) {
+        this.fiberLit[fiber] = value;
+      } else {
+        return;
+      }
+      if (value > 0 && this.litCount < this.litList.length) {
+        this.litList[this.litCount] = edge;
+        this.litCount += 1;
+      }
     },
 
     goHome() {
@@ -2992,14 +3240,30 @@ function makeKnowledgeUniverse(view) {
         && this.host?.isConnected === true;
     },
 
+    /* 다음 한 장을 청한다 — 손·비행·옷이 부른다. 쉬는 박자를 기다리던 판은 그 기다림을 거두고 곧바로 그린다. */
     invalidate() {
+      if (this.wait !== 0) {
+        clearTimeout(this.wait);
+        this.wait = 0;
+      }
       if (this.raf !== 0 || !this.showing()) return;
       this.raf = requestAnimationFrame((now) => this.frame(now));
     },
 
+    /* 쉬는 동안의 움직임(느린 회전 · 빛의 흐름 · 조준 고리)만 남았다 — 다음 장은 `ambient-gap` 뒤에. */
+    linger() {
+      if (this.raf !== 0 || this.wait !== 0 || !this.showing()) return;
+      this.wait = setTimeout(() => {
+        this.wait = 0;
+        this.invalidate();
+      }, U.ambientGap);
+    },
+
     halt() {
       if (this.raf !== 0) cancelAnimationFrame(this.raf);
+      clearTimeout(this.wait);
       this.raf = 0;
+      this.wait = 0;
       this.lastNow = 0;
     },
 
@@ -3014,7 +3278,8 @@ function makeKnowledgeUniverse(view) {
       this.invalidate();
     },
 
-    /* 한 장(시안 `frame`). 비행·미끄러짐·움직임 중에만 다음 장을 청한다 — 쉬면 멈춘다. */
+    /* 한 장(시안 `frame`). 비행·미끄러짐 중에는 화면의 박자로, 쉬는 동안의 움직임만 남으면 `ambient-gap`의 박자로
+     * 다음 장을 청한다 — 쉬면 멈춘다. */
     frame(now) {
       this.raf = 0;
       if (!this.showing()) {
@@ -3024,6 +3289,7 @@ function makeKnowledgeUniverse(view) {
       const dt = this.lastNow ? Math.min(U.frameMost, (now - this.lastNow) / 1000) : U.frameFirst;
       this.lastNow = now;
       let busy = false;
+      let ambient = false;
       if (this.tween.on) {
         const progress = Math.min(1, (performance.now() - this.tween.t0) / this.tween.dur);
         this.applyTween(progress);
@@ -3034,6 +3300,12 @@ function makeKnowledgeUniverse(view) {
           done?.();
           if (this.renderer === null) return;
         }
+        busy = true;
+      }
+      if (this.birth.on) {
+        const progress = Math.min(1, (performance.now() - this.birth.t0) / U.birth);
+        this.uniforms.uBirth.value = progress;
+        this.birth.on = progress < 1;
         busy = true;
       }
       if (this.glide.on && !this.dragging) {
@@ -3056,23 +3328,25 @@ function makeKnowledgeUniverse(view) {
         } else {
           this.spin = 0;
         }
-        busy = true;
+        ambient = true;
       } else if (this.hits > 0 && !knowledgeMotionReduced() && !this.folding) {
         /* 찾은 별의 조준 고리는 움직임을 끈 판에서도 깜박인다 — 움직임을 줄이라는 판에서만 멈춘다(시안 `frame`). */
         this.time += dt;
-        busy = true;
+        ambient = true;
       }
       this.uniforms.uTime.value = this.time;
       this.uniforms.uFlow.value = this.moving() ? 1 : 0;
       this.uniforms.uLift.value = this.lift;
       this.placeCamera();
+      this.spanLinks();
       this.render();
-      /* 이름표는 우주가 다 떠오른 판에서만(시안 `frame`: 들림 > 0.98) — 떠오르고 내려앉는 동안은 숨는다. */
-      if (this.lift > U.labelLift) this.placeLabels();
+      /* 이름표는 우주가 다 떠오르고 다 퍼진 판에서만(시안 `frame`: 들림 > 0.98) — 떠오르고 내려앉고 퍼지는 동안은 숨는다. */
+      if (this.lift > U.labelLift && !this.birth.on) this.placeLabels();
       else this.hideLabels();
       this.paintZoom();
       this.frames += 1;
-      if (busy) this.invalidate();
+      if (busy || this.dragging) this.invalidate();
+      else if (ambient) this.linger();
       else this.lastNow = 0;
     },
 
@@ -3082,8 +3356,8 @@ function makeKnowledgeUniverse(view) {
         this.tz + this.dist * cos * Math.cos(this.yaw));
       this.camera.lookAt(this.tx, this.ty, this.tz);
       this.camera.updateMatrixWorld();
-      this.uniforms.uPx.value = (this.height * this.renderer.getPixelRatio())
-        / (2 * Math.tan((THREE.MathUtils.DEG2RAD * this.camera.fov) / 2));
+      this.focal = this.height / (2 * Math.tan((THREE.MathUtils.DEG2RAD * this.camera.fov) / 2));
+      this.uniforms.uFocal.value = this.focal;
       this.uniforms.uDpr.value = this.renderer.getPixelRatio();
     },
 
@@ -3120,7 +3394,7 @@ function makeKnowledgeUniverse(view) {
       const comp = post.comp.uniforms;
       comp.tScene.value = post.target.texture;
       comp.tBloom.value = post.mips[0]?.texture ?? post.target.texture;
-      comp.uBloom.value = post.mips.length > 0 ? this.tune.bloomStrength : 0;
+      comp.uBloom.value = post.mips.length > 0 ? this.inks.bloom : 0;
       comp.uTime.value = this.uniforms.uTime.value;
       post.quad.material = post.comp;
       renderer.setRenderTarget(null);
@@ -3150,7 +3424,8 @@ function makeKnowledgeUniverse(view) {
     },
 
     /* 문맥을 잃었다: 평면으로 돌아와 한 줄로 말한다. 우주는 그대로 쥐고 있다가 문맥이 돌아오면 다시
-     * 선다(시안의 문맥 잃음). */
+     * 선다(시안의 문맥 잃음). 덮여 있는 동안 쉬던 평면의 손은 여기서 한 장을 다시 그린다 — 그리기 버퍼를 돌려준
+     * 채로는 빈 판이 드러난다. */
     loseContext() {
       this.lost = true;
       this.halt();
@@ -3158,6 +3433,8 @@ function makeKnowledgeUniverse(view) {
       this.view.classList.remove("is-universe");
       this.say(t("knowledge.universeLost", "그래픽 장치가 우주 그림을 놓아 평면 지도로 보여 줍니다 — 돌아오면 다시 섭니다"));
       paintKnowledgeDimension(this.view);
+      const layout = knowledgeLayouts.get(this.view);
+      if (layout !== undefined) paintKnowledgeFrame(this.view, layout);
     },
 
     regainContext() {
@@ -3185,8 +3462,15 @@ function makeKnowledgeUniverse(view) {
       this.map = null;
       this.node3 = null;
       this.node2 = null;
-      this.lineGeometry = null;
-      this.lineObject = null;
+      this.edges = null;
+      this.threadLit = null;
+      this.threadLitAttr = null;
+      this.fiberLit = null;
+      this.fiberLitAttr = null;
+      this.fiberGeometry = null;
+      this.threadGeometry = null;
+      this.litList = null;
+      this.litCount = 0;
       if (this.labels !== null) this.labels.textContent = "";
       this.plates = [];
       this.names = [];

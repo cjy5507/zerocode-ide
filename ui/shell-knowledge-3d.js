@@ -1625,7 +1625,8 @@ function makeKnowledgeGlPainter() {
      * 숨어 있는 동안 아무도 그것을 합성하지 않는다. 문맥·셰이더·자리 텍스처·카메라는 그대로다 —
      * 다시 보이는 판의 첫 그림(`paintFrame`)이 판의 크기를 다시 맞춘다. */
     park() {
-      this.renderer?.setSize(1, 1, false);
+      if (this.renderer === null || (this.canvas.width === 1 && this.canvas.height === 1)) return;
+      this.renderer.setSize(1, 1, false);
     },
 
     /* 놓는다 — 기하(버퍼·VAO)·재질(프로그램)·텍스처·렌더러·문맥·리스너·오버레이 전부.

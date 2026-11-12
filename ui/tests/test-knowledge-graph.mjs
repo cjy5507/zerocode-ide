@@ -14,7 +14,7 @@ import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { measureKnowledgeSupplyParity, measureKnowledgeSupplyScene, testKnowledgeSupply } from "./knowledge-supply.mjs";
 import { testKnowledgeUniverse, testKnowledgeUniverseBodies, testKnowledgeUniverseColour, testKnowledgeUniverseFilaments,
   testKnowledgeUniverseFocus, testKnowledgeUniverseGalaxies, testKnowledgeUniverseInspector, testKnowledgeUniverseLabels,
-  testKnowledgeUniverseMotion, testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
+  testKnowledgeUniverseMotion, testKnowledgeUniverseNav, testKnowledgeUniverseUnable } from "./knowledge-universe.mjs";
 import { seedUniverseVault } from "./knowledge-universe-fixture.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -5434,7 +5434,7 @@ const fourteenTopics = topicVault({ sizes: [40, 36, 32, 30, 28, 26, 24, 22, 20, 
 /* 군집 사이 선은 묶어서(t-12029, 승인된 시안 v2 「bundle」). 다섯 주제(30·24·20·16·12쪽)에 주제 사이 선
  * 12·9·3·2·1·1가닥과 고아 넷. 쉬는 전체 지도에서 두 손 모두: 그려진 선은 한 군집 안의 선뿐이고(군집을 건너는
  * 낱낱의 선은 가운데를 덮지 않는다), 묶음은 선이 8가닥 이상인 쌍에만 한 줄씩이며 굵기가 그 수를 말한다
- * (0.9 + √n × 0.55 px). 「강한 묶음」 목록은 선이 많은 순. 한 군집을 고르거나 그 이름판에 포인터를 올리면 그
+ * (1 + √n × 0.26 px — 11-12에 가늘게), 쉬는 줄은 제가 잇는 두 군집의 색 사이를 흐른다. 「강한 묶음」 목록은 선이 많은 순. 한 군집을 고르거나 그 이름판에 포인터를 올리면 그
  * 군집을 건너는 낱낱의 선이 돌아오고 그 군집에 닿는 묶음은 제 잉크를 입는다. 짚은 점의 선은 군집을 건너도
  * 선다. 주변 탐색에는 묶음이 없고 선은 그대로다. */
 const bundleVault = topicVault({ sizes: [30, 24, 20, 16, 12],
@@ -5485,8 +5485,17 @@ const bundles = await glPage.evaluate(async ({ spec, starts }) => {
       const wanted = [...pairs].filter(([, count]) => count >= 8).map(([pair, count]) => `${pair}:${count}`).sort();
       const readTies = () => [...view.querySelectorAll(".knowledge-underlay .knowledge-tie")]
         .filter((line) => getComputedStyle(line).display !== "none")
-        .map((line) => ({ at: Number(line.dataset.tie), width: Number(line.getAttribute("stroke-width")),
-          mine: line.classList.contains("is-mine"), curved: /Q/u.test(line.getAttribute("d") ?? "") }));
+        .map((line) => {
+          /* 쉬는 줄은 제가 잇는 두 군집의 색 사이를 흐르는 그라데이션을 입는다(11-12) — 그 두 끝의 색을 함께 읽는다. */
+          const inkId = /url\(#(knowledge-tie-ink-\d+)\)/u.exec(line.getAttribute("style") ?? "")?.[1] ?? null;
+          const ink = inkId === null ? null : view.querySelector(`#${inkId}`);
+          return { at: Number(line.dataset.tie), width: Number(line.getAttribute("stroke-width")),
+            mine: line.classList.contains("is-mine"), curved: /Q/u.test(line.getAttribute("d") ?? ""),
+            inks: ink === null ? null : [...ink.querySelectorAll("stop")].map((stop) => stop.getAttribute("style") ?? "") };
+        });
+      /* 군집의 색 칸 — 줄의 두 끝이 입어야 할 잉크(색 칸이 없는 군집은 묶음의 잉크). */
+      const inkOf = (rank) => (layout.communityHue[rank] >= 0 ? `stop-color: var(--knowledge-hue-${layout.communityHue[rank]})`
+        : "stop-color: var(--knowledge-tie-ink)");
       const rest = drawnLines();
       const tiesAtRest = readTies();
       const listed = [...view.querySelectorAll(".knowledge-overview-ties .knowledge-inspector-row")]
@@ -5536,6 +5545,9 @@ const bundles = await glPage.evaluate(async ({ spec, starts }) => {
         widthsOk: tiesAtRest.every((one) => Math.abs(one.width
           - (layout.tuning.tieWidth + Math.sqrt(layout.ties[one.at].count) * layout.tuning.tieGrow)) < 0.01),
         curved: tiesAtRest.every((one) => one.curved),
+        restInked: tiesAtRest.every((one) => one.inks !== null && one.inks.length === 2
+          && one.inks[0] === inkOf(layout.ties[one.at].left) && one.inks[1] === inkOf(layout.ties[one.at].right)),
+        mineBare: tiesPicked.filter((one) => one.mine).every((one) => one.inks === null),
         least: layout.tuning.tieLeast, widthBase: layout.tuning.tieWidth, grow: layout.tuning.tieGrow,
         listed: listed.map((row) => layout.ties[row.tie]?.count ?? -1),
         listedWords: listed.every((row) => row.words.includes("↔")),
@@ -5568,12 +5580,12 @@ const bundles = await glPage.evaluate(async ({ spec, starts }) => {
     knowledgePainterKind = null;
   }
 }, { spec: bundleVault.spec, starts: bundleVault.starts });
-ok("the overview bundles the lines between clusters: at rest only a cluster's own lines stand, one tie per pair of eight lines or more speaks the count in its width, the strong ties list them, and picking or pointing at a cluster brings its lines back — on both hands",
+ok("the overview bundles the lines between clusters: at rest only a cluster's own lines stand, one tie per pair of eight lines or more speaks the count in its width and runs between its two clusters' colours, the strong ties list them, and picking or pointing at a cluster brings its lines back in that cluster's ink — on both hands",
   () => !bundles.thrown && bundles.rows.length === 2 && bundles.rows.every((row) => row.topics === 5 && row.named >= 5
-    && row.least === 8 && row.widthBase === 0.9 && row.grow === 0.55
+    && row.least === 8 && row.widthBase === 1 && row.grow === 0.26
     && row.restBetween === 0 && row.restDrawn === row.intra
     && row.wanted.length === 2 && JSON.stringify(row.drawnTies) === JSON.stringify(row.wanted)
-    && row.widthsOk && row.curved
+    && row.widthsOk && row.curved && row.restInked && row.mineBare
     && row.listed.length === row.wanted.length && row.listed.every((count, at, all) => at === 0 || all[at - 1] >= count)
     && row.listedWords
     && row.pickedDrawn === row.pickedWanted && row.pickedMine.length >= 1 && row.pickedMine.every(Boolean)
@@ -6500,6 +6512,7 @@ await step(6124, () => testKnowledgeUniverse(glPage, ok));
 await step(6125, () => testKnowledgeUniverseGalaxies(glPage, ok));
 await step(6126, () => testKnowledgeUniverseColour(glPage, ok));
 await step(6127, () => testKnowledgeUniverseBodies(glPage, ok));
+await step(6133, () => testKnowledgeUniverseNav(glPage, ok));
 await step(6128, () => testKnowledgeUniverseFilaments(glPage, ok));
 await step(6129, () => testKnowledgeUniverseFocus(glPage, ok));
 await step(6130, () => testKnowledgeUniverseInspector(glPage, ok));

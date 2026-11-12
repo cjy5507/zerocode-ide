@@ -1403,12 +1403,15 @@ function buildKnowledgeView() {
   underlay.setAttribute("aria-hidden", "true");
   const ties = document.createElementNS(SVG_NS, "g");
   ties.setAttribute("class", "knowledge-ties");
+  /* 묶음마다의 그라데이션(11-12) — 한 줄은 제가 잇는 두 군집의 색으로 물든다. */
+  const tieInks = document.createElementNS(SVG_NS, "defs");
+  tieInks.setAttribute("class", "knowledge-tie-inks");
   /* 놀라운 연결(t-12029)의 곡선과 번호, 그리고 곡선마다의 그라데이션. */
   const bridgeInks = document.createElementNS(SVG_NS, "defs");
   bridgeInks.setAttribute("class", "knowledge-bridge-inks");
   const bridges = document.createElementNS(SVG_NS, "g");
   bridges.setAttribute("class", "knowledge-bridges");
-  underlay.append(bridgeInks, ties, bridges);
+  underlay.append(bridgeInks, tieInks, ties, bridges);
   canvas.append(underlay, picture);
 
   /* 배율의 세 단추. 낱말은 에이전트 그래프의 것을 그대로 쓴다 — 같은 동작에
@@ -5309,6 +5312,16 @@ function paintKnowledgeFrame(view, layout, { cameraOnly = false } = {}) {
    * 원반을 잰 뒤에 긋는다(`clusterReach`는 그 손의 프레임이 채운다). */
   knowledgeTies(layout);
   const camera = knowledgeCamera(view, layout);
+  /* 우주가 평면 지도를 덮고 있는 동안에는 평면의 손이 쉰다(11-12) — 가려진 그림을 올림 · 고름 · 찾기 · 앉기마다 다시
+   * 그릴 까닭이 없고, GL 손이 쥔 그리기 버퍼(판 1,365 × 1,137 · dpr 2에서 약 25 MB)도 그동안 돌려준다. 카메라와 세로
+   * 눌림은 그대로 잰다 — 우주가 떠오르고 내려앉는 자세가 그 수를 읽는다. 우주가 떠나면 그 문
+   * (`leaveKnowledgeUniverse`)이 이 프레임을 다시 불러 평면이 제 크기로 선다. */
+  if (knowledgeUniverseCovers(view)) {
+    knowledgeSeatDrawY(layout, camera);
+    knowledgePainters.get(view)?.park?.();
+    dressKnowledgeUniverse(view);
+    return;
+  }
   knowledgePainterFor(view).paintFrame(layout, camera, { cameraOnly });
   paintKnowledgeTies(view, layout, camera);
   paintKnowledgeBridges(view, layout, camera);
@@ -5327,12 +5340,18 @@ function paintKnowledgeFrame(view, layout, { cameraOnly = false } = {}) {
  * 곡선 하나이고 휨은 틈의 `tieBend`, 배율 1에서 `tieBendMax` px까지라 확대해도 모양이 같다. 두 원반이 화면에서
  * `tieRoom` px보다 가까우면 긋지 않는다(그 틈에 선 줄은 원반의 테두리와 구별되지 않는다). 굵기는 쌍의 수에서
  * (`tieWidth` + √n × `tieGrow`), 옅기는 가장 굵은 쌍에 대한 몫에서 나오고 확대할수록 물러선다. 이름판에 올라
- * 섰거나 고른 군집에 닿는 줄은 그 군집의 잉크(`is-mine`), 목록에서 짚은 줄은 밝은 잉크(`is-hot`)이고, 그 밖에
+ * 섰거나 고른 군집에 닿는 줄은 그 군집의 잉크(`is-mine`), 목록에서 짚은 줄은 밝은 잉크(`is-hot`)이고, 쉬는 줄은 제가
+ * 잇는 두 군집의 색 사이를 흐른다(줄마다의 그라데이션 — 우주의 다발과 같은 빛깔, 색 칸이 없는 군집 쪽은 묶음의 잉크). 그 밖에
  * 사람이 무엇을 묻고 있으면(짚기·고르기·찾기·경로) 모든 줄이 물러선다 — 묶음은 지도의 바탕이지 답이 아니다.
  * 주변 탐색에는 줄이 없다. 줄은 수십이라 프레임마다 쓰고, 값이 같은 속성은 다시 쓰지 않는다. */
 function paintKnowledgeTies(view, layout, camera) {
   const host = view.querySelector(".knowledge-ties");
   if (host === null) return;
+  const inks = view.querySelector(".knowledge-tie-inks");
+  const hueInk = (rank) => {
+    const hue = layout.communityHue[rank];
+    return hue >= 0 ? `var(--knowledge-hue-${hue})` : "var(--knowledge-tie-ink)";
+  };
   writeAttribute(host.ownerSVGElement, "viewBox", `${camera.x} ${camera.y} ${camera.wide} ${camera.tall}`);
   const ties = layout.ring === null ? layout.ties : [];
   const tuning = layout.tuning;
@@ -5388,12 +5407,34 @@ function paintKnowledgeTies(view, layout, camera) {
     writeAttribute(line, "stroke-width", width.toFixed(2));
     writeAttribute(line, "stroke-opacity", alpha.toFixed(3));
     writeAttribute(line, "data-tie", String(at));
+    /* 줄의 잉크 — 왼쪽 군집의 색에서 오른쪽 군집의 색으로. 올리거나 고른 줄 · 짚은 줄은 스타일시트의 잉크를 입는다. */
+    let ink = inks.children[drawn];
+    if (!ink) {
+      ink = document.createElementNS(SVG_NS, "linearGradient");
+      ink.setAttribute("gradientUnits", "userSpaceOnUse");
+      ink.id = `knowledge-tie-ink-${drawn}`;
+      ink.append(document.createElementNS(SVG_NS, "stop"), document.createElementNS(SVG_NS, "stop"));
+      writeAttribute(ink.lastElementChild, "offset", "1");
+      inks.appendChild(ink);
+    }
+    writeAttribute(ink, "x1", startX.toFixed(digits));
+    writeAttribute(ink, "y1", startY.toFixed(digits));
+    writeAttribute(ink, "x2", endX.toFixed(digits));
+    writeAttribute(ink, "y2", endY.toFixed(digits));
+    writeAttribute(ink.firstElementChild, "style", `stop-color: ${hueInk(tie.left)}`);
+    writeAttribute(ink.lastElementChild, "style", `stop-color: ${hueInk(tie.right)}`);
+    if (mine || hot) {
+      if (line.hasAttribute("style")) line.removeAttribute("style");
+    } else {
+      writeAttribute(line, "style", `stroke: url(#${ink.id})`);
+    }
     const hue = mine ? layout.communityHue[spot] : -1;
     if (hue >= 0) writeAttribute(line, "data-hue", String(hue));
     else if (line.hasAttribute("data-hue")) line.removeAttribute("data-hue");
     drawn += 1;
   }
   while (host.children.length > drawn) host.lastElementChild.remove();
+  while (inks.children.length > drawn) inks.lastElementChild.remove();
   layout.tiesDrawn = drawn;
 }
 

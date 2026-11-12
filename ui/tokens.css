@@ -1870,16 +1870,19 @@
   /* 기기 픽셀의 상한. 레티나에서 2배까지만 그린다 — 3배 판에서 만 쪽의 채우는
      픽셀은 두 배 반이 되고 눈이 얻는 것은 없다. */
   --knowledge-3d-pixel-cap: 2;
-  /* ---- 우주 보기의 수 (t-12443, 승인된 시안 v4 「실제 우주」 — PORTING.md §3) ----
-   * 값은 시안의 것 그대로다(index.html의 `computeHome`·`flyTo`·`frame`·손, kg-data.js의 `layout`·`universe`).
-   * 각은 rad, 시간은 ms(프레임의 시간만 s), 거리는 세계 단위(96쪽 주제의 원반 반지름 ≈ 26), 손은 px당 몫. */
+  /* ---- 우주 보기의 수 (t-12443의 카메라 · 손 · 이름표, 11-12의 「빛의 그물」) ----
+   * 카메라 · 손 · 비행 · 이름표의 값은 승인된 시안 v4의 것 그대로다(index.html의 `computeHome`·`flyTo`·`frame`·손).
+   * 각은 rad, 시간은 ms(프레임의 시간만 s), 거리는 세계 단위(96쪽 군집의 반지름 ≈ 21), 손은 px당 몫. 별 · 링크 ·
+   * 둘레 빛의 모양 수는 셰이더와 고르기가 함께 읽는 표(ui/shell-knowledge-universe.js)에 있다. */
   --knowledge-3d-fov: 34;
   --knowledge-3d-near: 2;
   --knowledge-3d-far: 8000;
   --knowledge-3d-far-reach: 20;
   --knowledge-3d-dpr-cap: 1.5;
   --knowledge-3d-home-yaw: 0.62;
-  --knowledge-3d-home-pitch: 0.5;
+  /* 처음 자리의 내려다보는 각 — v4는 0.5(29°)였다: 옆에서 보는 자세라 뒤 군집이 앞 군집에 가렸다. 나무는 구라서
+   * 위에서 볼수록 군집이 지도처럼 갈라 선다(11-12). */
+  --knowledge-3d-home-pitch: 0.8;
   --knowledge-3d-home-fit: 1.08;
   --knowledge-3d-home-pad: 10;
   --knowledge-3d-home-least: 110;
@@ -1912,6 +1915,9 @@
   --knowledge-3d-idle-ramp: 0.5;
   --knowledge-3d-frame-most: 0.05;
   --knowledge-3d-frame-first: 0.016667;
+  /* 쉬는 동안의 움직임(느린 회전 · 빛의 흐름)만 남은 판이 다음 장까지 기다리는 ms — 그 뒤의 첫 화면 박자에 그리므로
+   * 60 Hz에서 약 30장/초, 120 Hz에서도 그 언저리다. 손과 비행은 기다리지 않는다. */
+  --knowledge-3d-ambient-gap: 24;
   --knowledge-3d-open-rest: 7000;
   --knowledge-3d-home-rest: 6000;
   --knowledge-3d-wake-rest: 8000;
@@ -1919,17 +1925,17 @@
   --knowledge-3d-fly-page: 1150;
   --knowledge-3d-fly-page-dist: 90;
   --knowledge-3d-fly-page-reach: 4.2;
-  --knowledge-3d-face-page: 0.9;
-  --knowledge-3d-face-galaxy: 0.45;
-  --knowledge-3d-face-pitch-low: 0.16;
-  --knowledge-3d-face-pitch-high: 1.3;
-  --knowledge-3d-fly-galaxy-reach: 5.2;
+  /* 군집으로 날 때의 거리 — v4의 원반(반지름 0.98)에서는 5.2였다. 나무는 반지름이 0.8이라 같은 수면 더 다가선다:
+   * 둘레의 다발이 함께 보이게 조금 물러선다. */
+  --knowledge-3d-fly-galaxy-reach: 6.4;
   --knowledge-3d-fly-galaxy-pad: 40;
   --knowledge-3d-fly-flow: 1200;
   --knowledge-3d-fly-flow-reach: 1.5;
   --knowledge-3d-fly-flow-pad: 70;
   --knowledge-3d-fly-flow-pitch: 0.46;
   --knowledge-3d-rise: 1500;
+  /* 문을 연 판의 첫 그림 — 별이 제 군집의 허브에서 제 자리로 퍼지는 시간(움직임을 줄인 판은 0). */
+  --knowledge-3d-birth: 1200;
   --knowledge-3d-fold: 1300;
   --knowledge-3d-crossfade: 220ms;
   --knowledge-3d-fly: 1100;
@@ -1946,65 +1952,42 @@
   --knowledge-3d-star-ratio-cap: 13.5;
   --knowledge-3d-star-age-scale: 3;
   --knowledge-3d-star-age-span: 365;
-  /* 이름 있는 별의 빛깔(t-14081, 사람의 말 09-29 「별의 색상이 조금 명확했으면」): 고친 때의 흑체 색을 제 휘도에서
-   * 벌리는 배수(1은 흑체 그대로 — 오래된 쪽은 더 붉게, 최근 쪽은 더 푸르게, 가운데의 흰빛은 그대로)와 별 속에
-   * 섞는 흰빛의 몫(v4 0.22 — 밝은 별의 가운데가 흰색으로 날았다). 범례의 뜻(푸를수록 최근)은 같다. */
-  --knowledge-3d-star-chroma: 1.6;
-  --knowledge-3d-star-core-white: 0.03;
   /* 우주의 무대 — 시안의 `.stage` 바탕. 밝은 테마는 아래 블록이 종이색으로. */
   --knowledge-3d-stage: rgb(2 3 6);
-  /* 은하 짓기(시안 `universe`·`buildScene`, 디자이너 답 m-12467의 1·3). 은하 = 이름 있는 군집 중 앞에서부터
-   * 최대 `galaxy-max`개이면서 쪽 수 ≥ max(`galaxy-least`, `galaxy-share` × 쪽/850), 성운은 앞 `nebula-max` 성단에만. */
+  /* 큰 군집(명판을 달고 필라멘트를 잇는 줄) = 이름 있는 군집 중 앞에서부터 최대 `galaxy-max`개이면서 쪽 수 ≥
+   * max(`galaxy-least`, `galaxy-share` × 쪽/850). 색 칸이 없는 군집(순위 아홉째부터)과 떠돌이 별은 빛의
+   * `quiet-share`만 낸다 — 색으로 갈리는 여덟이 먼저 읽힌다. */
   --knowledge-3d-galaxy-max: 18;
   --knowledge-3d-galaxy-least: 8;
   --knowledge-3d-galaxy-share: 12;
-  --knowledge-3d-nebula-max: 12;
-  --knowledge-3d-galaxy-radius: 0.98;
+  --knowledge-3d-quiet-share: 0.4;
+  /* 붐빔 — 화면에서 잰다: 별의 속은 제 자리(제 군집의 별 사이 간격과 형제 사이 간격 가운데 좁은 쪽, px)의
+   * `crowd-ratio`를 넘지 않고, 화면 1 px을 지나는 가지의 수가 `crowd-lines`를 넘는 몫과 별이 더 줄지 못한 몫은 빛을 그
+   * 비의 `crowd-fade` 제곱으로 줄인다(바닥 `crowd-least`). 빛을 맞춘 판(1,365 × 1,137 · 2,675쪽)의 군집 간격은 약
+   * 10 px · 가지 3.0이다. */
+  --knowledge-3d-crowd-ratio: 0.24;
+  --knowledge-3d-crowd-lines: 3.2;
+  --knowledge-3d-crowd-fade: 0.85;
+  --knowledge-3d-crowd-least: 0.18;
+  /* 반지름의 몫 — v4의 은하는 납작한 원반이라 0.98이었다. 나무는 구라서 이웃과 겹치지 않게 조금 줄인다. */
+  --knowledge-3d-galaxy-radius: 0.8;
   --knowledge-3d-cluster-sphere: 2.1;
   --knowledge-3d-cluster-grow: 1.25;
   --knowledge-3d-cluster-pad: 2;
   --knowledge-3d-normal-lean: 0.75;
   --knowledge-3d-tilt-least: 0.25;
   --knowledge-3d-tilt-span: 0.55;
-  --knowledge-3d-arms: 2;
-  --knowledge-3d-arms-wide: 3;
-  --knowledge-3d-arms-every: 4;
-  --knowledge-3d-winding: 2;
-  --knowledge-3d-winding-bar: 2.4;
-  --knowledge-3d-winding-least: 1.5;
-  --knowledge-3d-winding-span: 1.3;
-  --knowledge-3d-bar: 0.3;
-  --knowledge-3d-bulge: 0.14;
-  --knowledge-3d-bulge-bar: 0.16;
-  --knowledge-3d-bulge-least: 0.09;
-  --knowledge-3d-bulge-span: 0.07;
-  --knowledge-3d-bulge-elliptical: 1;
-  --knowledge-3d-dust: 0.6;
-  --knowledge-3d-dust-irregular: 0.15;
-  --knowledge-3d-barred-ranks: 2;
-  --knowledge-3d-irregular-last: 2;
-  --knowledge-3d-irregular-least: 6;
-  --knowledge-3d-elliptical-from: 9;
-  --knowledge-3d-elliptical-every: 3;
-  --knowledge-3d-elliptical-activity: 0.12;
   --knowledge-3d-activity-days: 14;
-  --knowledge-3d-decor-least: 800;
-  --knowledge-3d-decor-grow: 2600;
-  --knowledge-3d-decor-cluster: 150;
   --knowledge-3d-decor-sky: 6000;
-  /* 원반·핵·성운의 사각형 반지름(R의 배수, 시안 `bb`) — 원반, 핵, 타원의 핵, 성단의 성운 셋. */
-  --knowledge-3d-disk: 1.25;
-  --knowledge-3d-core: 0.42;
-  --knowledge-3d-core-elliptical: 1.15;
-  --knowledge-3d-nebula-outer: 1.7;
-  --knowledge-3d-nebula-mid: 1.3;
-  --knowledge-3d-nebula-inner: 0.95;
-  /* 필라멘트(시안 `buildScene`) — 두 은하 사이 선이 몇 개부터, 몇 쌍까지, 입자 수 = least + grow × √(n / 가장 굵은 n). */
+  /* 필라멘트 — 두 큰 군집 사이 링크가 몇 개부터, 굵은 차례로 몇 쌍까지. 그 밖의 쌍의 링크는 올리거나 고를 때만 켜진다. */
   --knowledge-3d-filament-least: 8;
   --knowledge-3d-filament-most: 48;
-  --knowledge-3d-filament-least-points: 60;
-  --knowledge-3d-filament-grow-points: 900;
-  /* 은하 빛깔 = base + (1 − base) × 선형(원천)을 색 없는 군집의 고정값과 같은 휘도로 맞춘 것 — 색은 군집의 것이고
+  /* 켜진 링크(올린 쪽 · 고른 쪽 · 경로)가 `lit-full`개를 넘으면 한 올의 빛을 (full / 수)^`lit-fade`로 줄인다(바닥 `lit-least`) —
+   * 링크 수백의 허브를 올려도 판이 하얗게 날지 않는다. */
+  --knowledge-3d-lit-full: 40;
+  --knowledge-3d-lit-fade: 0.8;
+  --knowledge-3d-lit-least: 0.1;
+  /* 군집 빛깔 = base + (1 − base) × 선형(원천)을 색 없는 군집의 고정값과 같은 휘도로 맞춘 것 — 색은 군집의 것이고
    * 밝기는 색과 상관없이 같다. 원천은 색 칸의 어두운 테마 값이다 — 밝은 테마는 합성에서 음화로 뒤집으므로 두
    * 테마에서 같은 빛깔을 쓴다(PORTING.md §4). v4는 치우침을 시안의 가장 센 것(0.2)에 맞춘 0.8이었고(m-12570), 은하가
    * 거의 모두 흰빛이라 군집이 색으로 갈리지 않았다(사람의 말 09-29) — 이제 원천 색의 채도를 반 넘게 싣는다(t-14081).
@@ -2019,23 +2002,23 @@
   --knowledge-3d-tint-5: var(--knowledge-hue-5);
   --knowledge-3d-tint-6: var(--knowledge-hue-6);
   --knowledge-3d-tint-7: var(--knowledge-hue-7);
-  /* 빛 번짐 사다리(단 수·세기, 문턱 없음)와 합성의 노출. 밝은 테마의 종이(시안 uPaper — 선형 0.8·0.77·0.7). */
-  --knowledge-3d-bloom-levels: 5;
-  --knowledge-3d-bloom-strength: 0.16;
+  /* 빛 번짐 사다리(단 수·세기, 문턱 없음), 합성의 노출, 별의 번짐의 몫 — 세기 · 노출 · 번짐의 몫은 테마마다 다르다.
+   * 밝은 테마의 종이(시안 uPaper — 선형 0.8·0.77·0.7). */
+  --knowledge-3d-bloom-levels: 4;
+  --knowledge-3d-bloom-strength: 0.2;
   --knowledge-3d-exposure: 1;
+  --knowledge-3d-halo: 1;
   --knowledge-3d-paper: rgb(231 227 218);
   /* 톤 매핑이 색 비율을 지키는 몫(t-14081): 0은 채널마다의 ACES(v4 — 밝은 핵과 별의 가운데가 흰색으로 날았다),
    * 1은 가장 센 채널로 잰 ACES를 세 채널에 같게 곱한 것(색상·채도 그대로). 종이 위 먹빛에 싣는 색의 배수: 1은 v4의
    * 8%이고, 휘도는 그대로 두고 색만 벌린다 — 종이 위 글자·선의 대비는 v4와 같다. */
   --knowledge-3d-tone-keep: 1;
   --knowledge-3d-ink-chroma: 6;
-  /* 이름표(시안 `updateLabels`·`galaxyAnchor`·`showTip`, PORTING §2.7) — 들림이 이 값을 넘은 판에서만 선다.
-   * 명판: 은하 가장자리 고리(반지름의 몫 · 점 수 · 보여야 할 점 수)의 화면에서 가장 낮은 곳 아래 틈만큼, 판
-   * 가장자리 여백과 위 · 아래 띠, 둘레의 틈, 큰 명판을 입는 순위의 수, 가까이(처음 거리의 몫 밑) 가면 고른 것만. */
+  /* 이름표(시안 `updateLabels`·`showTip`, PORTING §2.7) — 들림이 이 값을 넘은 판에서만 선다. 명판: 군집의 화면 위
+   * 원(반지름의 `plate-ring`)에서 가장 낮은 곳 아래 틈만큼, 판 가장자리 여백과 위 · 아래 띠, 둘레의 틈, 큰 명판을
+   * 입는 순위의 수, 가까이(처음 거리의 몫 밑) 가면 고른 것만. */
   --knowledge-3d-label-lift: 0.98;
   --knowledge-3d-plate-ring: 0.8;
-  --knowledge-3d-plate-points: 12;
-  --knowledge-3d-plate-seen: 7;
   --knowledge-3d-plate-gap: 6;
   --knowledge-3d-plate-edge: 4;
   --knowledge-3d-plate-top: 40;
@@ -2050,12 +2033,13 @@
   --knowledge-3d-labels: 30;
   --knowledge-3d-labels-rest: 5;
   --knowledge-3d-labels-close: 12;
+  --knowledge-3d-labels-focus: 14;
   --knowledge-3d-labels-candidates: 40;
   --knowledge-3d-label-least: 2.2;
   --knowledge-3d-label-neighbour: 30;
   --knowledge-3d-label-hit: 40;
   --knowledge-3d-label-scan: 50;
-  --knowledge-3d-label-off: 0.45;
+  --knowledge-3d-label-off: 1.2;
   --knowledge-3d-label-off-least: 5;
   --knowledge-3d-label-off-pad: 4;
   --knowledge-3d-label-edge: 6;
@@ -2105,10 +2089,8 @@
    * 가운데 · 빛 머리), 올린 쪽의 선. 고친 때의 빛깔은 합성이 그리는 가장 밝은 별의 색이다(`star-chroma`까지, t-14081). */
   --knowledge-3d-legend-star-core: rgb(255 255 255);
   --knowledge-3d-legend-star-glow: rgb(207 224 255 / 40%);
-  --knowledge-3d-legend-star-ray: rgb(223 233 255);
-  --knowledge-3d-legend-old: rgb(255 160 0);
-  --knowledge-3d-legend-mid: rgb(255 231 214);
-  --knowledge-3d-legend-new: rgb(141 174 255);
+  /* 범례의 여린 링크(추론) — 켜진 링크의 표본에 대한 불투명도. */
+  --knowledge-3d-legend-faint: 0.5;
   --knowledge-3d-legend-flow: rgb(157 182 255 / 53%);
   --knowledge-3d-legend-flow-mid: rgb(201 214 255);
   --knowledge-3d-legend-flow-head: rgb(255 255 255);
@@ -2313,10 +2295,10 @@
      다른 것을 묻는 동안(짚기·고르기·찾기)은 quiet를 곱하고, 올리거나 고른 군집에 닿는 줄은 그 군집의
      잉크로 mine, 목록에서 짚은 줄은 hot(굵기 + hot-width). listed는 「강한 묶음」 목록의 줄 수. */
   --knowledge-tie-least: 8;
-  --knowledge-tie-width: 0.9;
-  --knowledge-tie-grow: 0.55;
-  --knowledge-tie-alpha: 0.16;
-  --knowledge-tie-lift: 0.3;
+  --knowledge-tie-width: 1;
+  --knowledge-tie-grow: 0.26;
+  --knowledge-tie-alpha: 0.26;
+  --knowledge-tie-lift: 0.4;
   --knowledge-tie-inset: 3;
   --knowledge-tie-bend: 0.35;
   --knowledge-tie-bend-max: 72;
@@ -3567,10 +3549,14 @@
   --knowledge-highlight: var(--ink-figure);
   /* 우주 보기의 무대(t-12443) — 시안의 밝은 테마 바탕(음화 인쇄의 종이 곁). */
   --knowledge-3d-stage: rgb(233 228 216);
-  /* 밝은 테마의 노출(시안 `applyLight`), 그리고 은하 빛깔의 원천을 어두운 테마 값으로 — 이 블록이 원천을 덮는
+  /* 밝은 테마의 노출 · 빛 번짐 · 별의 번짐: 종이 위에서는 번짐이 얼룩이라 둘을 줄이고(0.2 → 0.08, 1 → 0.3), 노출은
+   * 별이 한 점씩 먹빛으로 서는 값이다 — 시안 `applyLight`의 1.25는 v4의 은하 먼지에 맞춘 수라 쪽마다의 별에서는 군집이
+   * 색 덩어리가 됐다. 그리고 은하 빛깔의 원천을 어두운 테마 값으로 — 이 블록이 원천을 덮는
    * 셋(레인 3·준비·멈춤 신호)만 그 어두운 값을 적고, 나머지는 덮지 않은 레인을 그대로 가리킨다. 준비·멈춤의 어두운
    * 값은 다크 블록의 Geist green-900 #62c073 · red-900 #ff6166이다(t-67607) — 그 둘이 움직이면 여기도 함께 고친다. */
-  --knowledge-3d-exposure: 1.25;
+  --knowledge-3d-exposure: 0.9;
+  --knowledge-3d-bloom-strength: 0.08;
+  --knowledge-3d-halo: 0.3;
   --knowledge-3d-tint-0: var(--git-graph-lane-1);
   --knowledge-3d-tint-1: var(--git-graph-lane-2);
   --knowledge-3d-tint-2: rgb(206 145 120);
@@ -3583,10 +3569,6 @@
   --knowledge-3d-flow-arrow: rgb(45 95 168);
   --knowledge-3d-legend-star-core: rgb(28 33 48);
   --knowledge-3d-legend-star-glow: rgb(28 33 48 / 27%);
-  --knowledge-3d-legend-star-ray: rgb(28 33 48);
-  --knowledge-3d-legend-old: rgb(159 70 0);
-  --knowledge-3d-legend-mid: rgb(128 101 89);
-  --knowledge-3d-legend-new: rgb(43 94 173);
   --knowledge-3d-legend-flow: rgb(28 33 48 / 33%);
   --knowledge-3d-legend-flow-mid: rgb(28 33 48 / 67%);
   --knowledge-3d-legend-flow-head: rgb(28 33 48);

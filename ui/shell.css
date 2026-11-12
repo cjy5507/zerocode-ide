@@ -52345,7 +52345,7 @@ button.board-build-failure-part:focus-visible {
   font-style: normal;
 }
 
-/* 순위 뒤의 은하는 작은 명판 — 이름만, 안개색으로. */
+/* 순위 뒤의 군집은 작은 명판 — 이름만, 안개색으로. */
 .knowledge-universe-plate.is-minor:not(.is-full) .knowledge-universe-plate-name {
   color: var(--ink-mist);
   font-size: var(--text-2xs);
@@ -52473,7 +52473,8 @@ button.board-build-failure-part:focus-visible {
   border-radius: var(--radius-sm);
 }
 
-/* 범례의 우주 네 줄(시안 CSS 41–54) — 우주가 서 있는 동안만, 그리고 그동안 평면의 줄은 가린다. */
+/* 범례의 우주 줄 — 우주가 서 있는 동안만, 그리고 그동안 평면의 줄은 가린다. 표본은 그림의 기호다: 작은 별과 큰 별,
+   번지는 별, 허브에서 나온 가지, 빛이 흐르는 다발, 켜진 링크와 여린(추론) 링크. */
 .knowledge-view:not(.is-universe) .knowledge-legend-list > [data-legend-universe],
 .knowledge-view.is-universe .knowledge-legend-list > li:not([data-legend-universe]) {
   display: none;
@@ -52486,40 +52487,28 @@ button.board-build-failure-part:focus-visible {
 }
 
 .knowledge-legend-universe.kind-star {
-  width: 11px;
+  width: 22px;
   height: 11px;
-  border-radius: var(--radius-pill);
-  background: radial-gradient(circle, var(--knowledge-3d-legend-star-core) 0 18%, var(--knowledge-3d-legend-star-glow) 30%,
-    transparent 70%);
+  background:
+    radial-gradient(circle at 3px 50%, var(--knowledge-3d-legend-star-core) 0 1.5px, transparent 2px),
+    radial-gradient(circle at 15px 50%, var(--knowledge-3d-legend-star-core) 0 4px, transparent 4.5px);
 }
 
-.knowledge-legend-universe.kind-star::before,
-.knowledge-legend-universe.kind-star::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  background: var(--knowledge-3d-legend-star-ray);
-  opacity: 0.8;
-  transform: translate(-50%, -50%);
-}
-
-.knowledge-legend-universe.kind-star::before {
+.knowledge-legend-universe.kind-fresh {
   width: 13px;
-  height: 1px;
-}
-
-.knowledge-legend-universe.kind-star::after {
-  width: 1px;
   height: 13px;
+  border-radius: var(--radius-pill);
+  background: radial-gradient(circle, var(--knowledge-3d-legend-star-core) 0 22%, var(--knowledge-3d-legend-star-glow) 32%,
+    transparent 72%);
 }
 
-.knowledge-legend-universe.kind-temp {
-  width: 34px;
-  height: 6px;
-  border-radius: 3px;
-  background: linear-gradient(90deg, var(--knowledge-3d-legend-old), var(--knowledge-3d-legend-mid) 45%,
-    var(--knowledge-3d-legend-new));
+.knowledge-legend-universe.kind-branch {
+  width: 24px;
+  height: 7px;
+  background:
+    radial-gradient(circle at 3.5px 50%, var(--knowledge-3d-legend-star-core) 0 3px, transparent 3.5px),
+    radial-gradient(circle at 22px 50%, var(--knowledge-3d-legend-star-core) 0 1.5px, transparent 2px),
+    linear-gradient(90deg, var(--knowledge-3d-legend-flow-mid), var(--knowledge-3d-legend-flow)) 4px 50% / 18px 1px no-repeat;
 }
 
 .knowledge-legend-universe.kind-filament {
@@ -52543,17 +52532,18 @@ button.board-build-failure-part:focus-visible {
 }
 
 .knowledge-legend-universe.kind-solid,
-.knowledge-legend-universe.kind-dots {
+.knowledge-legend-universe.kind-faint {
   width: 22px;
   height: 1.5px;
 }
 
 .knowledge-legend-universe.kind-solid {
-  background: var(--ink-mist);
+  background: var(--ink-chalk);
 }
 
-.knowledge-legend-universe.kind-dots {
-  background: repeating-linear-gradient(90deg, var(--ink-mist) 0 2px, transparent 2px 5px);
+.knowledge-legend-universe.kind-faint {
+  background: var(--ink-mist);
+  opacity: var(--knowledge-3d-legend-faint);
 }
 
 /* 색을 묻는 견본. 그려지지는 않지만 계산은 된다 — `display: none`이면 브라우저가
