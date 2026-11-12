@@ -670,11 +670,26 @@ pub(crate) struct Flow {
 /// 「다시 로그인」 pressed right after a sign-in would simply refuse.
 ///
 /// A live listener still conflicts, which `SO_REUSEADDR` does not change —
-/// so the caller also gets a short retry for the one case that produces one:
-/// a window reloaded mid-sign-in leaves an abandoned wait holding the seat
-/// until its next poll.
+/// so the seat is retried for a short while, for the one case that produces
+/// one: a window reloaded mid-sign-in leaves an abandoned wait holding the
+/// seat until its next poll.
 fn bind_callback_seat() -> std::io::Result<TcpListener> {
-    bind_seat(CALLBACK_PORT)
+    take_seat(CALLBACK_PORT, SEAT_TRIES)
+}
+
+/// [`bind_seat`] up to `tries` times, [`SEAT_WAIT`] apart; the last refusal
+/// is the answer when none of them binds.
+fn take_seat(port: u16, tries: u32) -> std::io::Result<TcpListener> {
+    let mut tried = 1;
+    loop {
+        match bind_seat(port) {
+            Err(_) if tried < tries => {
+                tried += 1;
+                std::thread::sleep(SEAT_WAIT);
+            }
+            answer => return answer,
+        }
+    }
 }
 
 /// The bind itself, with the port named — so a gate can measure the
@@ -696,27 +711,10 @@ impl Flow {
     /// Take the seat and mint this attempt's secrets.
     pub(crate) fn open() -> Result<Self, String> {
         let attempt = Attempt::new()?;
-        let mut refused = None;
-        let mut listener = None;
-        for tried in 0..SEAT_TRIES {
-            match bind_callback_seat() {
-                Ok(bound) => {
-                    listener = Some(bound);
-                    break;
-                }
-                Err(error) => {
-                    refused = Some(error);
-                    if tried + 1 < SEAT_TRIES {
-                        std::thread::sleep(SEAT_WAIT);
-                    }
-                }
-            }
-        }
-        let listener = listener.ok_or_else(|| {
-            let error = refused.map_or_else(String::new, |error| format!(" ({error})"));
+        let listener = bind_callback_seat().map_err(|error| {
             format!(
                 "로그인 대기 포트 {CALLBACK_PORT}을(를) 열지 못했습니다 — \
-                 zo 로그인이 진행 중일 수 있습니다{error}"
+                 zo 로그인이 진행 중일 수 있습니다 ({error})"
             )
         })?;
         listener
@@ -1342,8 +1340,18 @@ mod tests {
         drop(accepted);
         drop(first);
         drop(client);
-        if let Err(error) = bind_seat(port) {
-            panic!("the seat could not be retaken while the last one lingered: {error}");
+        // Through the seat's own retry, given longer than a sign-in gets: a
+        // machine running two test binaries at once has refused this bind for
+        // a moment after the close. Two seconds is still far below TIME_WAIT
+        // (2 × MSL: 30 s on macOS, 60 s on Linux), so a seat that could only
+        // be retaken by waiting TIME_WAIT out still fails here.
+        let started = Instant::now();
+        if let Err(error) = take_seat(port, SEAT_TRIES * 4) {
+            panic!(
+                "the seat could not be retaken while the last one lingered: {error} \
+                 (still refused after {:?})",
+                started.elapsed()
+            );
         }
     }
 
