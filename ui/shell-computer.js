@@ -679,18 +679,22 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
  * none, and nothing is said. */
 function flowAboutText(about) {
   if (!about?.slug) return "";
-  const named = (key, fallback, names) => {
+  // One kind of name, as the sentence takes it: how many the document names
+  // in all, and the first few with the rest counted.
+  const named = (names) => {
     const count = names?.count ?? 0;
-    if (count === 0) return "";
+    if (count === 0) return null;
     const shown = names.shown ?? [];
     const more = count - shown.length;
-    return t(key, fallback, { count, names: more > 0 ? `${shown.join(", ")} +${more}` : shown.join(", ") });
+    return { count, names: more > 0 ? `${shown.join(", ")} +${more}` : shown.join(", ") };
   };
+  const hosts = named(about.hosts);
+  const apps = named(about.apps);
   return [
     t("auto.asked.aboutFile", "문서 {{slug}}.md", { slug: about.slug }),
     t("auto.asked.aboutSteps", "걸음 {{count}}개", { count: about.steps ?? 0 }),
-    named("auto.asked.aboutHosts", "문서가 적은 사이트 {{count}}곳: {{names}}", about.hosts),
-    named("auto.asked.aboutApps", "문서가 적은 앱 {{count}}개: {{names}}", about.apps),
+    hosts ? t("auto.asked.aboutHosts", "문서가 적은 사이트 {{count}}곳: {{names}}", hosts) : "",
+    apps ? t("auto.asked.aboutApps", "문서가 적은 앱 {{count}}개: {{names}}", apps) : "",
   ].filter(Boolean).join(" · ") + ".";
 }
 
