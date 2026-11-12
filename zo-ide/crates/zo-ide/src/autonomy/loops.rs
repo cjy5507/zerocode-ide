@@ -247,11 +247,11 @@ impl LoopRegistry {
             }
             LoopCommand::StartWatch { glob, prompt } => {
                 let (options, prompt) = parse_options(&prompt, &self.limits)?;
-                let seen = watch_fingerprint(cwd, &glob);
-                self.start(
+                let scan = watch_scan(cwd, &glob);
+                let started = self.start(
                     Trigger::Watch {
                         glob,
-                        last_seen: seen,
+                        last_seen: Some(scan.fingerprint),
                     },
                     prompt,
                     options,
@@ -259,7 +259,12 @@ impl LoopRegistry {
                         self.limits.poll_interval_secs.saturating_mul(1_000),
                     )),
                     LoopSource::Command,
-                )?
+                )?;
+                match scan.unreadable {
+                    0 => started,
+                    1 => format!("{started} · 1 unreadable path is not watched"),
+                    count => format!("{started} · {count} unreadable paths are not watched"),
+                }
             }
             LoopCommand::StartUntil { check, prompt } => {
                 let (options, prompt) = parse_options(&prompt, &self.limits)?;
@@ -388,7 +393,7 @@ impl LoopRegistry {
             return Ok(None);
         };
         if let Trigger::Watch { glob, last_seen } = &mut spec.trigger {
-            let seen = watch_fingerprint(cwd, glob);
+            let seen = Some(watch_scan(cwd, glob).fingerprint);
             if seen == *last_seen {
                 spec.next_at_unix_ms = Some(
                     now_unix_ms.saturating_add(poll_interval_secs.saturating_mul(1_000)),
@@ -1177,10 +1182,23 @@ fn trigger_label(trigger: &Trigger) -> String {
     }
 }
 
-fn watch_fingerprint(cwd: &Path, glob: &str) -> Option<u64> {
+/// One look at a `/loop watch` tree: the fingerprint of the files that match,
+/// and how many paths under it could not be read.
+struct WatchScan {
+    fingerprint: u64,
+    unreadable: usize,
+}
+
+/// A folder or entry that cannot be read is left out and counted, so one
+/// locked folder does not blind the watch to every file that can be read.
+fn watch_scan(cwd: &Path, glob: &str) -> WatchScan {
     let mut hasher = DefaultHasher::new();
-    hash_matching_tree(cwd, cwd, glob, &mut hasher).ok()?;
-    Some(hasher.finish())
+    let mut unreadable = 0;
+    hash_matching_tree(cwd, cwd, glob, &mut hasher, &mut unreadable);
+    WatchScan {
+        fingerprint: hasher.finish(),
+        unreadable,
+    }
 }
 
 fn hash_matching_tree(
@@ -1188,29 +1206,45 @@ fn hash_matching_tree(
     directory: &Path,
     pattern: &str,
     hasher: &mut DefaultHasher,
-) -> io::Result<()> {
-    let mut entries = std::fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+    unreadable: &mut usize,
+) {
+    let Ok(listing) = std::fs::read_dir(directory) else {
+        *unreadable += 1;
+        return;
+    };
+    let mut entries = Vec::new();
+    for entry in listing {
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(_) => *unreadable += 1,
+        }
+    }
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
         let relative = path.strip_prefix(root).unwrap_or(&path);
-        let file_type = entry.file_type()?;
+        let Ok(file_type) = entry.file_type() else {
+            *unreadable += 1;
+            continue;
+        };
         if file_type.is_dir() {
             if !matches!(entry.file_name().to_str(), Some(".git" | "target" | "node_modules")) {
-                hash_matching_tree(root, &path, pattern, hasher)?;
+                hash_matching_tree(root, &path, pattern, hasher, unreadable);
             }
         } else if file_type.is_file() && wildcard_match(pattern.as_bytes(), relative.to_string_lossy().as_bytes()) {
             relative.hash(hasher);
-            entry
-                .metadata()?
-                .modified()
+            let metadata = entry.metadata();
+            if metadata.is_err() {
+                *unreadable += 1;
+            }
+            metadata
                 .ok()
+                .and_then(|metadata| metadata.modified().ok())
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map(|duration| duration.as_nanos())
                 .hash(hasher);
         }
     }
-    Ok(())
 }
 
 fn wildcard_match(pattern: &[u8], text: &[u8]) -> bool {
@@ -1284,6 +1318,46 @@ mod tests {
                 .is_none()
         );
         assert_eq!(loops.phase("loop-1"), Some(LoopPhase::Completed));
+    }
+
+    /// One folder `/loop watch` cannot read used to blank the whole
+    /// fingerprint, and a blank never differs from a blank, so the loop never
+    /// ran again however the readable files changed. The locked folder is now
+    /// left out, the start notice says so once, and a new matching file runs
+    /// the loop.
+    #[cfg(unix)]
+    #[test]
+    fn a_watch_with_a_folder_it_cannot_read_still_runs_on_the_files_it_can() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transcript = temp.path().join("s.jsonl");
+        let tree = temp.path().join("tree");
+        let locked = tree.join("locked");
+        std::fs::create_dir_all(&locked).expect("locked folder");
+        std::fs::write(tree.join("a.txt"), "a").expect("first file");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock the folder");
+        let unlock = || std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+        if std::fs::read_dir(&locked).is_ok() {
+            // A user the permission bits do not stop (root) reads it anyway.
+            unlock().expect("unlock the folder");
+            return;
+        }
+
+        let limits = AutonomyLimits::default();
+        let poll_ms = limits.poll_interval_secs * 1_000;
+        let mut loops = LoopRegistry::load(&transcript, false, limits);
+        let notice = loops
+            .apply(command("/loop watch *.txt rerun the check"), 1_000, &tree)
+            .expect("start");
+        let quiet = loops.dispatch_due(1_000 + poll_ms, &tree).expect("dispatch");
+        std::fs::write(tree.join("b.txt"), "b").expect("second file");
+        let changed = loops.dispatch_due(1_000 + 2 * poll_ms, &tree).expect("dispatch");
+        unlock().expect("unlock the folder");
+
+        assert_eq!(notice, "loop: loop-1 started · 1 unreadable path is not watched");
+        assert!(quiet.is_none(), "nothing changed yet");
+        assert!(changed.is_some(), "a new matching file runs the loop");
     }
 
     #[test]
