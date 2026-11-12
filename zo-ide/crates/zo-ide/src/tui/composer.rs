@@ -133,6 +133,8 @@ pub struct Composer {
     /// 히스토리를 훑는 중이면 그 인덱스와, 훑기 전 편집 중이던 원문.
     browsing: Option<usize>,
     draft: String,
+    /// 훑기 전 원고에 붙어 있던 이미지 — 원고로 돌아오면 [`Self::draft`] 와 함께 되돌린다.
+    draft_images: Vec<LocalImage>,
     images: Vec<LocalImage>,
     /// 초안이 화면에 다 들어가지 못할 때 상자 위로 밀려난 초안 행의 수. 캐럿이 보이는
     /// 행들 안에서 움직이는 동안은 그대로 두고, 밖으로 나갈 때만 옮긴다 — codex 의
@@ -504,6 +506,7 @@ impl Composer {
         let index = match self.browsing {
             None => {
                 self.draft = self.text.clone();
+                self.draft_images = std::mem::take(&mut self.images);
                 self.history.len() - 1
             }
             Some(0) => return,
@@ -524,7 +527,7 @@ impl Composer {
             self.browsing = None;
             self.text = std::mem::take(&mut self.draft);
             self.cursor = self.text.len();
-            self.images.clear();
+            self.images = std::mem::take(&mut self.draft_images);
             return;
         }
         self.browsing = Some(index + 1);
@@ -1264,6 +1267,48 @@ mod tests {
         assert_eq!(composer.text(), "first");
         composer.history_next();
         assert_eq!(composer.text(), "draft");
+    }
+
+    /// ↑ into the history and ↓ back hands the draft its images again: the
+    /// round trip used to leave `[Image #1]` as bare text with nothing attached.
+    #[test]
+    fn history_round_trip_keeps_the_drafts_images() {
+        let mut composer = Composer::new();
+        composer.insert_str("first");
+        assert_eq!(composer.submit().text, "first");
+        composer.attach_image("/tmp/one.png".into());
+        composer.insert_str(" look at this");
+
+        composer.history_prev();
+        assert_eq!(composer.text(), "first");
+        assert!(!composer.has_images(), "a row from the history carries no image");
+        composer.history_next();
+        assert_eq!(composer.text(), "[Image #1] look at this");
+
+        let submission = composer.submit();
+        assert_eq!(submission.text, "[Image #1] look at this");
+        assert_eq!(submission.image_paths, vec![PathBuf::from("/tmp/one.png")]);
+    }
+
+    /// A row picked from the history is sent as it was, with no image — the
+    /// draft's images wait for the draft and do not ride on the row.
+    #[test]
+    fn a_history_row_sent_while_browsing_carries_no_image() {
+        let mut composer = Composer::new();
+        composer.insert_str("first");
+        assert_eq!(composer.submit().text, "first");
+        composer.attach_image("/tmp/one.png".into());
+
+        composer.history_prev();
+        let submission = composer.submit();
+        assert_eq!(submission.text, "first");
+        assert!(submission.image_paths.is_empty());
+
+        composer.insert_str("next");
+        composer.history_prev();
+        composer.history_next();
+        assert_eq!(composer.text(), "next");
+        assert!(!composer.has_images(), "an image left behind earlier does not come back on a later draft");
     }
 
     #[test]
