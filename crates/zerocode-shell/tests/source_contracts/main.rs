@@ -3581,17 +3581,32 @@ mod tests {
         }
         // A link under a wide run is underlined where a narrow link is: both
         // against the link's one gap. An SGR 4 underline is the engine's own,
-        // as it was — a Latin screen draws its underlines where it always did.
+        // as it was — a Latin screen draws its underlines where it always did
+        // — and a wide run's is that same line: a blank in the row's face,
+        // pressed back out of the run, never a gap set against the engine's.
+        let wide_line = block_after(
+            styles,
+            ".term .term-wide.underline:not(.term-link)::after {",
+        );
         assert!(
             styles.contains("\n.term .underline { text-decoration: underline; }\n")
                 && block_after(styles, ".term .term-wide.term-link {").contains(
                     "text-underline-offset: calc((var(--term-underline-offset) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));"
                 )
-                && block_after(styles, ".term .term-wide.underline {").contains(
-                    "text-underline-offset: calc((var(--term-underline-auto-gap) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));"
-                ),
+                && block_after(styles, ".term .term-wide.underline:not(.term-link) {")
+                    .contains("text-decoration-line: none;")
+                && [
+                    "font-size: var(--term-font-size);",
+                    "line-height: var(--term-leading);",
+                    "letter-spacing: 100vw;",
+                    "text-decoration-line: underline;",
+                    "transform: scaleY(var(--term-wide-stretch, 1));",
+                ]
+                .iter()
+                .all(|rule| wide_line.contains(rule))
+                && !styles.contains("--term-underline-auto-gap"),
             "a wide link's underline is drawn off its neighbour's again, or \
-             an SGR underline no longer stands where the engine puts it"
+             a wide run's SGR underline is no longer the narrow run's own line"
         );
         // The two numbers the fit turns on, as the person chose them of four
         // drawn side by side (2026-11-12): raised, Korean reads as packed and

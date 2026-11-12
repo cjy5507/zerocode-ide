@@ -53,11 +53,29 @@ const FIXTURE_SLACK_PX = 0.005;
 // all riding in one run (t-103682's delta review: a rounding a blank carries
 // adds up along the line).
 const RIDING_WORDS = 21;
+// Font sizes the underline is read at: the default, and two past 20px, where an
+// engine's own underline gap may grow (t-103682's review, 5).
+const UNDERLINE_SIZES = [null, 22, 24];
+// How many rows of one underlined line the alignment is read on. A row
+// stands 1.15 font sizes under the one before it, so ten of them meet the
+// device's pixels at as many fractions as a row can: an engine that rounds a
+// pressed box onto those pixels (WebKit) misses on some rows and not others,
+// and which ones moves with where the screen starts — the count does not.
+const UNDERLINE_ROWS = 10;
+// The ink and the ground of the painted underlined rows: the run's own colour
+// is what tells its line from a ground that is not the screen's.
+const UNDERLINE_PAINT = { fg: [250, 250, 250], bg: [0, 0, 160] };
+// One-syllable words across the row with a blank between each two, after two
+// underlined narrow blanks — 77 of its 80 columns in one run.
+const ACROSS_WORDS = 26;
+// The fewest columns into that run the last blank read must stand — far past
+// the one cell the line's single blank is before its tracking carries it.
+const ACROSS_READ_LEAST_COLS = 20;
 
 const WIDE_RIG = "__WIDE_GLYPH_RIG__";
 
 async function standRig(page) {
-  return page.evaluate(async ({ WIDE_RIG, WIDE_KINDS, BAR_COLOURS, RIDING_WORDS }) => {
+  return page.evaluate(async ({ WIDE_RIG, WIDE_KINDS, BAR_COLOURS, RIDING_WORDS, UNDERLINE_PAINT, ACROSS_WORDS, UNDERLINE_ROWS }) => {
     const priorAnswers = { ...window.__ANSWER__ };
     window.__ANSWER__.term_snapshot = () => null;
     window.__ANSWER__.term_resize = () => null;
@@ -78,6 +96,8 @@ async function standRig(page) {
     const riders = ["가나", "다라"];
     const bar = (at) => ({ ch: "|", style: { fg: { indexed: BAR_COLOURS[at % BAR_COLOURS.length] } } });
     const dressed = { bg: { indexed: 4 }, underline: true };
+    const painted = { fg: { rgb: UNDERLINE_PAINT.fg }, bg: { rgb: UNDERLINE_PAINT.bg } };
+    const lined = { ...painted, underline: true };
     const rowsOf = () => [
       // 0: a Hangul run between two narrow runs — its footprint on the grid.
       pad([...narrowCells("ab "), ...wideCells(hangul), ...narrowCells(" cd")]),
@@ -102,6 +122,24 @@ async function standRig(page) {
       // 12: one-syllable words with a blank between each two, then a bar: every
       // blank rides in the one run, and the bar still lands on its column.
       pad([...Array.from({ length: RIDING_WORDS }, (_, at) => [...(at ? narrowCells(" ") : []), ...wideCells("가")]).flat(), bar(0)]),
+      pad([]),
+      // 14: underlined narrow blanks, two syllables with a blank riding between
+      // them and painted blanks with no underline, all on a painted ground: the
+      // run's line shows over its ground and stops at its last column.
+      pad([...narrowCells("  ", lined), ...wideCells("한", lined), ...narrowCells(" ", lined), ...wideCells("글", lined),
+        ...narrowCells("  ", painted)]),
+      pad([]),
+      // 16: underlined narrow blanks, then one run across the row: the line
+      // reaches the last blank riding in it that the screen shows.
+      pad([...narrowCells("  ", lined),
+        ...Array.from({ length: ACROSS_WORDS }, (_, at) => [...(at ? narrowCells(" ", lined) : []), ...wideCells("가", lined)]).flat()]),
+      pad([]),
+      // 18 on: an underline over narrow blanks, two syllables with a blank riding
+      // between them, and narrow blanks again, row after row. Under the riding
+      // blank the wide run's underline stands alone — a grown syllable's ink
+      // reaches below it.
+      ...Array.from({ length: UNDERLINE_ROWS }, () => pad([...narrowCells("    ", { underline: true }), ...wideCells("한", { underline: true }),
+        ...narrowCells(" ", { underline: true }), ...wideCells("글", { underline: true }), ...narrowCells("    ", { underline: true })])),
     ];
     // `cursor` puts the caret on a cell; left out, it stands hidden on the last row.
     const feed = async (cursor = null) => {
@@ -161,7 +199,7 @@ async function standRig(page) {
       },
     };
     await feed();
-  }, { WIDE_RIG, WIDE_KINDS, BAR_COLOURS, RIDING_WORDS });
+  }, { WIDE_RIG, WIDE_KINDS, BAR_COLOURS, RIDING_WORDS, UNDERLINE_PAINT, ACROSS_WORDS, UNDERLINE_ROWS });
 }
 
 /* The rows as they stand under the window's own font. */
@@ -274,6 +312,108 @@ async function readCaret(page) {
     await rig.feed();
     return seen;
   }, { WIDE_RIG });
+}
+
+/* The line drawn between each pair of columns in `spans` of a picture of
+ * `clip`: the top and the bottom of the pixel rows that carry ink there, inset
+ * a fifth of a cell from each column edge, in CSS pixels — or null where
+ * nothing is. Ink is what differs from the picture's first pixel, the screen's
+ * ground, or — given `ink`, over a painted ground — what stands near that colour. */
+async function readLines(page, clip, cell, spans, ink = null) {
+  const png = (await page.screenshot({ clip })).toString("base64");
+  return page.evaluate(async ({ png, clip, cell, spans, ink, INK_CONTRAST }) => {
+    const bytes = Uint8Array.from(atob(png), (ch) => ch.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const context = canvas.getContext("2d");
+    context.drawImage(bitmap, 0, 0);
+    const { data } = context.getImageData(0, 0, bitmap.width, bitmap.height);
+    const scale = bitmap.width / clip.width;
+    const apart = (at, rgb) => Math.max(Math.abs(data[at] - rgb[0]), Math.abs(data[at + 1] - rgb[1]), Math.abs(data[at + 2] - rgb[2]));
+    const ground = [data[0], data[1], data[2]];
+    const inked = (x, y) => {
+      const at = (y * bitmap.width + x) * 4;
+      return ink === null ? apart(at, ground) > INK_CONTRAST : apart(at, ink) < INK_CONTRAST;
+    };
+    return spans.map(([from, to]) => {
+      const x0 = Math.floor((from + 0.2) * cell * scale);
+      const x1 = Math.ceil((to - 0.2) * cell * scale);
+      const rows = [];
+      for (let y = 0; y < bitmap.height; y += 1) {
+        for (let x = x0; x < x1; x += 1) if (inked(x, y)) { rows.push(y); break; }
+      }
+      return rows.length === 0 ? null : { top: rows[0] / scale, bottom: (rows[rows.length - 1] + 1) / scale };
+    });
+  }, { png, clip, cell, spans, ink, INK_CONTRAST });
+}
+
+/* The underline of rows 18 on at each of `UNDERLINE_SIZES`: under each row's
+ * narrow blanks before and after, and under the blank riding in its wide run
+ * (column 6) — each the underline alone — with the size of a device pixel. */
+async function readUnderlines(page) {
+  const seen = [];
+  try {
+    for (const size of UNDERLINE_SIZES) {
+      const at = await page.evaluate(async ({ WIDE_RIG, size, UNDERLINE_ROWS }) => {
+        const rig = window[WIDE_RIG];
+        const root = document.documentElement;
+        rig.heldSize ??= root.style.getPropertyValue("--term-font-size");
+        if (size !== null) root.style.setProperty("--term-font-size", `${size}px`);
+        else if (rig.heldSize) root.style.setProperty("--term-font-size", rig.heldSize);
+        else root.style.removeProperty("--term-font-size");
+        await rig.settle();
+        return {
+          size: parseFloat(getComputedStyle(rig.view.pre).fontSize),
+          pixel: 1 / devicePixelRatio,
+          cell: rig.view.cell.width,
+          clips: Array.from({ length: UNDERLINE_ROWS }, (_, at) => {
+            const row = rig.rowAt(18 + at).getBoundingClientRect();
+            return { x: row.left, y: row.top, width: 13 * rig.view.cell.width, height: row.height };
+          }),
+        };
+      }, { WIDE_RIG, size, UNDERLINE_ROWS });
+      const rows = [];
+      for (const clip of at.clips) {
+        const [narrow, wide, after] = await readLines(page, clip, at.cell, [[0, 4], [6, 7], [9, 13]]);
+        rows.push({ narrow, wide, after });
+      }
+      seen.push({ size: at.size, pixel: at.pixel, rows });
+    }
+  } finally {
+    await page.evaluate(async (WIDE_RIG) => {
+      const rig = window[WIDE_RIG];
+      if (rig.heldSize) document.documentElement.style.setProperty("--term-font-size", rig.heldSize);
+      else document.documentElement.style.removeProperty("--term-font-size");
+      await rig.settle();
+    }, WIDE_RIG);
+  }
+  return seen;
+}
+
+/* Rows 14 and 16 at the default size, on a painted ground: the line under the
+ * blank riding in a short run beside the one under the narrow blanks before
+ * it, and none under the blanks just past the run; and the line under the
+ * last blank riding in a run across the row that the screen shows — a test
+ * screen is narrower than 80 columns — beside the one under the narrow blanks
+ * that open the row. */
+async function readUnderlineReach(page) {
+  const at = await page.evaluate((WIDE_RIG) => {
+    const rig = window[WIDE_RIG];
+    const shown = rig.view.pre.getBoundingClientRect().right;
+    const clip = (index) => {
+      const row = rig.rowAt(index).getBoundingClientRect();
+      return { x: row.left, y: row.top, width: Math.min(rig.COLS * rig.view.cell.width, shown - row.left), height: row.height };
+    };
+    return { cell: rig.view.cell.width, pixel: 1 / devicePixelRatio, short: clip(14), across: clip(16) };
+  }, WIDE_RIG);
+  // The riding blanks of row 16 stand at columns 4, 7, 10, …: the last whole one on screen.
+  const shownCols = Math.floor(at.across.width / at.cell);
+  const lastBlank = Math.min(3 * (ACROSS_WORDS - 2) + 4, 3 * Math.floor((shownCols - 5) / 3) + 4);
+  const [narrow, wide, past] = await readLines(page, at.short, at.cell, [[0, 2], [4, 5], [7, 9]], UNDERLINE_PAINT.fg);
+  const [opening, last] = await readLines(page, at.across, at.cell, [[0, 2], [lastBlank, lastBlank + 1]], UNDERLINE_PAINT.fg);
+  return { pixel: at.pixel, narrow, wide, past, opening, last, lastBlank, shownCols };
 }
 
 /* Where the ink of a picture of the ink row stands: its top and bottom in CSS
@@ -400,11 +540,15 @@ export async function testWideGlyphs(page, ok) {
   let ink;
   let changes;
   let caret;
+  let underlines;
+  let reach;
   try {
     rows = await readRows(page);
     const picture = await page.screenshot({ clip: rows.clip });
     ink = await readInk(page, picture.toString("base64"), rows.clip, rows.cell);
     caret = await readCaret(page);
+    underlines = await readUnderlines(page);
+    reach = await readUnderlineReach(page);
     changes = await readChanges(page);
   } finally {
     await page.evaluate((WIDE_RIG) => window[WIDE_RIG]?.leave(), WIDE_RIG);
@@ -449,6 +593,25 @@ export async function testWideGlyphs(page, ok) {
       && Math.abs(caret.copy.tracking - caret.run.tracking) < 0.01 && caret.copy.transform === caret.run.transform
       && ["left", "top", "height"].every((side) => Math.abs(caret.copy[side] - caret.run[side]) < COLUMN_SLACK_PX),
     JSON.stringify(caret));
+
+  // How far a line stands from the one beside it, in device pixels by edge:
+  // 0 the same pixel rows, 1 one device pixel off, 2 further or not drawn.
+  const offBy = (seen, beside, pixel) => {
+    if (seen === null || beside === null) return 2;
+    const most = Math.max(Math.abs(seen.top - beside.top), Math.abs(seen.bottom - beside.bottom));
+    return most < pixel / 2 ? 0 : most < 1.5 * pixel ? 1 : 2;
+  };
+  ok("an underline under a wide run stands where the one under the blanks beside it does on most rows and never a device pixel further, at the default size and past 20px",
+    underlines.every(({ pixel, rows: lines }) => {
+      const off = lines.map(({ narrow, wide, after }) => Math.max(offBy(wide, narrow, pixel), offBy(wide, after, pixel)));
+      return off.every((step) => step < 2) && 2 * off.filter((step) => step === 0).length > off.length;
+    }),
+    JSON.stringify(underlines));
+
+  ok("an underlined wide run's line shows over a painted ground, reaches the last blank riding in a run across the row, and stops where the run ends",
+    reach.narrow !== null && reach.past === null && reach.lastBlank - 2 >= ACROSS_READ_LEAST_COLS
+      && [[reach.wide, reach.narrow], [reach.last, reach.opening]].every(([seen, beside]) => offBy(seen, beside, reach.pixel) < 2),
+    JSON.stringify(reach));
 
   ok("a picture is sized to its columns and never stretched",
     rows.pictures.length > 0 && rows.pictures.every((seen) => seen.stretch === 1 && seen.transform === "none"),

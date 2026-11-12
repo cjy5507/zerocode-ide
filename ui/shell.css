@@ -16070,19 +16070,60 @@ body.is-dragging-pane {
   transform: var(--term-wide-squash, none);
   transform-origin: 0 0;
 }
-/* Its underline goes where a narrow run's does: up by what the baseline was
- * let down, and written before the height is pressed. A link's gap is the
- * terminal's own number (`--term-underline-offset`). An SGR 4 underline's is
- * the engine's, which a stylesheet cannot ask for, so the wide run is told
- * what the engines leave (`--term-underline-auto-gap`) — and the narrow rule
- * stays the engine's: a Latin screen draws its underlines where it always
- * did. Left to the engine under its own, lower baseline, a wide run's
- * underline stood a pixel under its neighbour's and every blank in an
- * underlined Korean line read as a notch. The link's rule is the later one:
- * an underlined link is a link. */
-.term .term-wide.underline {
-  text-underline-offset: calc((var(--term-underline-auto-gap) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));
+/* An SGR 4 underline under a wide run is the narrow one's own line, not a
+ * number set against it. Drawn by the run, it was drawn in the grown face and
+ * pressed with the glyphs — the engine's gap and thickness for the grown size,
+ * snapped before the press — so it stood a pixel off its neighbour's at 1x at
+ * the default size, thicker in WebKit, and higher or lower by engine past
+ * 20px; no gap the run could be given lines both of its edges up (measured
+ * 2026-11-12/13, both engines, 1x and 2x, 13 to 24px).
+ *
+ * So the run draws none. One blank in the row's own face and line height,
+ * its tracking carrying it past the run's last column and the run's box
+ * cutting it there, stands on the row's top and is pressed back out by the
+ * run's stretch: the engine lays that line as it lays a narrow run's — on the
+ * same pixel rows, as thick, on every row in Chromium. WebKit puts a pressed
+ * box on the device's pixels, so there the line still stands one device pixel
+ * off on some rows (4 of 30 read at 1x, 8 of 30 at 2x), where the run's own
+ * line missed on nearly every row and often by more. Tracking and not
+ * word-spacing, which WebKit does not underline.
+ * The run is its box and its layer even where it is not pressed (a face that
+ * only needs tracking), so the line never measures from the row or falls
+ * behind the screen's ground; behind the glyphs, in the run's decoration
+ * colour (`.dim.underline`, a selection). A strike stays the run's. The
+ * narrow rule is never touched: a Latin screen draws its underlines where it
+ * always did. */
+.term .term-wide.underline:not(.term-link) {
+  position: relative;
+  isolation: isolate;
+  text-decoration-line: none;
 }
+.term .term-wide.underline.strike:not(.term-link) {
+  text-decoration-line: line-through;
+}
+.term .term-wide.underline:not(.term-link)::after {
+  content: " ";
+  position: absolute;
+  z-index: -1;
+  top: calc(-1 * var(--term-band-top, 0px) * var(--term-wide-stretch, 1));
+  left: calc(-1 * var(--term-wide-lead, 0px));
+  width: 100%;
+  overflow: hidden;
+  font-size: var(--term-font-size);
+  line-height: var(--term-leading);
+  letter-spacing: 100vw;
+  word-spacing: 0;
+  text-decoration-line: underline;
+  text-decoration-color: inherit;
+  text-decoration-style: inherit;
+  transform: scaleY(var(--term-wide-stretch, 1));
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+/* A link's gap is the terminal's own number (`--term-underline-offset`), so a
+ * wide link is set against it: up by what the baseline was let down, and
+ * written before the height is pressed. The link's rule is the later one: an
+ * underlined link is a link. */
 .term .term-wide.term-link {
   text-underline-offset: calc((var(--term-underline-offset) - var(--term-wide-drop, 0px)) * var(--term-wide-stretch, 1));
 }

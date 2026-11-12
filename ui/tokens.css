@@ -1486,12 +1486,6 @@
    * its own and must still put a link's underline beside its neighbour's
    * (shell.css `.term-wide.term-link`). */
   --term-underline-offset: 2px;
-  /* The gap an engine leaves under the baseline for an underline whose offset
-   * is `auto`: WebKit's and Chromium's alike at a terminal's font sizes (one
-   * pixel, until half the line's thickness is more). No stylesheet can ask
-   * for it, and a double-width run needs it to stand an SGR 4 underline beside
-   * a narrow run's — which keeps the engine's own and is never given this. */
-  --term-underline-auto-gap: 1px;
   /* Body weight, as a variable rather than a rule, because it is one of the
    * terminal settings a person can change (1-en) and the settings screen
    * writes them onto the root. The defaults are Orca's
