@@ -34677,8 +34677,8 @@ fn a_scheduled_flow_with_no_agent_is_walked_through_the_windows_own_door() {
 
     assert_eq!(
         flow_run_argv("wallet-qa", None),
-        ["recipe-run", "--name", "wallet-qa", "--json"],
-        "the words 「지금 걷기」 submits"
+        ["recipe-run", "--name", "wallet-qa", "--json", "--unwatched"],
+        "the words 「지금 걷기」 submits, and that nobody is watching this walk"
     );
     // A job an agent asked for: the walk carries the hash of the document
     // the person allowed, and judges the text it reads against it.
@@ -34690,9 +34690,36 @@ fn a_scheduled_flow_with_no_agent_is_walked_through_the_windows_own_door() {
             "--name",
             "wallet-qa",
             "--json",
+            "--unwatched",
             "--flow-sha256",
             allowed.as_str()
         ],
+    );
+    // Every walk the window starts for a job says so, and that is what the
+    // walk's road reads: its desktop presses are handed back with every kind
+    // guarded, whatever the person's settings ask about (t-105495's follow-up,
+    // 2026-11-12 — a question switched off in the settings left a schedule's
+    // walk free to press a payment or a deletion with nobody there).
+    let said = zerocode_core::computer_use::parse_command(&flow_run_argv("wallet-qa", None))
+        .expect("the words read");
+    assert_eq!(
+        said.params[zerocode_core::computer_use::WALK_UNWATCHED_PARAM],
+        serde_json::json!(true)
+    );
+    let looped = block_after(shipped_backend(), "async fn computer_loop(");
+    let roads = &looped[looped.find("RecipeRoads::new(").expect("the walk's roads")..];
+    assert!(
+        looped.contains(".get(zerocode_core::computer_use::WALK_UNWATCHED_PARAM)")
+            && roads.contains("if unwatched {\n")
+            && roads.contains("Asking::Unwatched\n"),
+        "the walk's road does not read that nobody is watching it"
+    );
+    let pressing = block_after(shipped_backend(), "fn call_with_confirmation_asker(");
+    assert!(
+        pressing.contains("let policy = asking.guards(confirm::policy());")
+            && pressing.contains("if asking.hands_back() {")
+            && !pressing.contains("let policy = confirm::policy();"),
+        "a press reads the person's settings alone, on a walk nobody is watching too"
     );
 
     let backend = shipped_backend();

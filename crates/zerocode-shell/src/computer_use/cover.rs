@@ -626,7 +626,7 @@ pub(crate) fn press_mark_here(
     let mut pause = std::thread::sleep;
     let mut person = |line: &Said| match asking {
         Asking::Person => ask_the_person(line),
-        Asking::HandBack => Decision::Refused,
+        Asking::HandBack | Asking::Unwatched => Decision::Refused,
     };
     let wall = crate::project_runtime::now_epoch_ms;
     press_mark(

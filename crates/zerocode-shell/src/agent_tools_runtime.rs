@@ -3495,6 +3495,14 @@ pub(super) async fn computer_loop(
                             run_evidence::fenced_dir(&root, evidence.as_deref())
                                 .or_else(session_folder_adopted)
                         });
+                        // A walk the window started for a job says nobody is
+                        // watching it (`WALK_UNWATCHED_FLAG`): its guarded
+                        // presses are handed back whatever the settings ask.
+                        let unwatched = command
+                            .params
+                            .get(zerocode_core::computer_use::WALK_UNWATCHED_PARAM)
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
                         // One set of roads for both walks: a recipe's steps
                         // and a goal walk's presses reach a screen the same
                         // way, so neither can acquire a road of its own.
@@ -3507,7 +3515,11 @@ pub(super) async fn computer_loop(
                                         evidence.as_deref(),
                                         step,
                                         logged,
-                                        Asking::HandBack,
+                                        if unwatched {
+                                            Asking::Unwatched
+                                        } else {
+                                            Asking::HandBack
+                                        },
                                         cwd.as_deref().map(Path::new),
                                     )
                                 }
@@ -7779,7 +7791,9 @@ pub(super) fn call_with_confirmation_asker(
     };
     let verb = command.method;
     let mut params = command.params.clone();
-    let policy = confirm::policy();
+    // The person's settings say which kinds are guarded — except on a walk
+    // nobody is watching, where every kind is (`Asking::guards`).
+    let policy = asking.guards(confirm::policy());
     let refusal = |decision: Decision, kind: ConfirmKind, label: &str| {
         let (code, why) = match decision {
             Decision::TimedOut => (error_code::CONFIRMATION_TIMEOUT, "nobody answered in time"),
@@ -7807,7 +7821,7 @@ pub(super) fn call_with_confirmation_asker(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("(declared)")
                 .to_string();
-            if asking == Asking::HandBack {
+            if asking.hands_back() {
                 // Handed back unpressed, in the helper's own words, so the
                 // caller reads it as the press it found (parse_confirmation_required).
                 return Err(computer_use::ComputerUseError::new(

@@ -936,14 +936,20 @@ pub(super) fn start_automation(
     }))
 }
 
-/// The words a scheduled Flow is walked with: the command the Flow page's
-/// 「지금 걷기」 submits, answered as JSON — and, for a job an agent asked for,
-/// the SHA-256 of the document the person allowed (`held_to`), which the walk
-/// judges the text it reads against.
+/// The words a job's Flow is walked with: the command the Flow page's
+/// 「지금 걷기」 submits, answered as JSON, and that nobody is watching this
+/// walk (`WALK_UNWATCHED_FLAG`) — so a payment, a transfer or a deletion is
+/// handed back unpressed whatever the person's settings ask about. For a job
+/// an agent asked for it also carries the SHA-256 of the document the person
+/// allowed (`held_to`), which the walk judges the text it reads against.
 pub(super) fn flow_run_argv(slug: &str, held_to: Option<&str>) -> Vec<String> {
     let mut argv = ["recipe-run", "--name", slug, "--json"]
         .map(str::to_string)
         .to_vec();
+    argv.push(format!(
+        "--{}",
+        zerocode_core::computer_use::WALK_UNWATCHED_FLAG
+    ));
     if let Some(sha256) = held_to {
         argv.push(format!(
             "--{}",
@@ -958,10 +964,13 @@ pub(super) fn flow_run_argv(slug: &str, held_to: Option<&str>) -> Vec<String> {
 ///
 /// The walk is one request on the window's own Computer Use door — the
 /// dispatcher, sequence gate, runner and evidence writer every other walk
-/// takes — so what guards a walk guards this one: required sharing, the
-/// question before a payment or a delete, the money gate, the person's hand.
-/// Each of those waits is bounded, so a walk nobody is there to answer stops
-/// with its reason instead of holding the queue.
+/// takes — so what guards a walk guards this one: required sharing, the money
+/// gate, the person's hand. Nobody is watching it, and it says so
+/// ([`flow_run_argv`]): a desktop press the helper reads as a payment, a
+/// transfer or a deletion is handed back unpressed — whatever the person's
+/// settings ask about — and the walk stops at that step, saying the press is
+/// the person's. No question is put to anybody. Each wait a walk does make is
+/// bounded, so it stops with its reason instead of holding the queue.
 ///
 /// There is no shell: the run's row carries [`zerocode_core::NO_SHELL_TERM`],
 /// its folder is handed to the walk as its evidence, and the answer closes the

@@ -456,6 +456,15 @@ pub const RECIPE_SCHEDULE_ASK_MS: u64 = 180_000;
 pub const FLOW_SHA256_FLAG: &str = "flow-sha256";
 /// See [`FLOW_SHA256_FLAG`].
 pub const FLOW_SHA256_PARAM: &str = "flowSha256";
+/// The flag a walk carries when the window starts it for a job — a schedule's
+/// walk, with nobody watching — and its key in the command's parameters. Such
+/// a walk makes no press that is a payment, a transfer or a deletion, whatever
+/// the person's settings ask about: the press is handed back unpressed and the
+/// walk stops there. It only ever adds a refusal: anyone may say it, and gains
+/// nothing by it.
+pub const WALK_UNWATCHED_FLAG: &str = "unwatched";
+/// See [`WALK_UNWATCHED_FLAG`].
+pub const WALK_UNWATCHED_PARAM: &str = "unwatched";
 /// How long a hand whose place is covered waits before it lists the windows
 /// again, when what stands in front looks like it is passing — a
 /// notification sliding in or out, a window being dragged (t-12979): a
@@ -4300,6 +4309,7 @@ fn parse_flags(
         (WALK_OVERLAP_FLAG, WALK_OVERLAP_PARAM),
         (WALK_RESCUE_FLAG, WALK_RESCUE_PARAM),
         (WALK_REPLAY_FLAG, WALK_REPLAY_PARAM),
+        (WALK_UNWATCHED_FLAG, WALK_UNWATCHED_PARAM),
         ("renew", "renew"),
         ("ask-code", "askCode"),
     ] {
@@ -4460,6 +4470,7 @@ fn takes_no_value(name: &str) -> bool {
             | WALK_OVERLAP_FLAG
             | WALK_RESCUE_FLAG
             | WALK_REPLAY_FLAG
+            | WALK_UNWATCHED_FLAG
             | EMULATOR_PREVIEW_FLAG
     )
 }
@@ -4745,6 +4756,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "json",
             "name",
             FLOW_SHA256_FLAG,
+            WALK_UNWATCHED_FLAG,
             "params",
             "tab",
             "start",
@@ -10064,6 +10076,17 @@ mod tests {
         assert_eq!(walk.params[FLOW_SHA256_PARAM], json!(held));
         let plain = parse_command(&words(&["recipe-run", "--name", "wallet-qa"])).expect("a walk");
         assert!(plain.params.get(FLOW_SHA256_PARAM).is_none());
+        // A walk the window starts for a job says nobody is watching it; a
+        // walk that does not say so is not one, and only a walk can say it.
+        assert!(plain.params.get(WALK_UNWATCHED_PARAM).is_none());
+        let unwatched = format!("--{WALK_UNWATCHED_FLAG}");
+        let job = parse_command(&words(&["recipe-run", "--name", "wallet-qa", &unwatched]))
+            .expect("a job's walk");
+        assert_eq!(job.params[WALK_UNWATCHED_PARAM], json!(true));
+        assert!(
+            parse_command(&words(&["recipe-show", "--name", "wallet-qa", &unwatched])).is_err(),
+            "a verb that walks nothing took the walk's flag"
+        );
         for refused in ["abc", &"zz".repeat(32), &"ab".repeat(33)] {
             let error = parse_command(&words(&[
                 "recipe-run",
