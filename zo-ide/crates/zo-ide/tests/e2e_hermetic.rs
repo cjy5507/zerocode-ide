@@ -9850,6 +9850,58 @@ async fn e2e_a_broad_allow_saved_by_an_older_zo_is_narrowed_before_the_first_ses
     assert_eq!(fs::read_to_string(kept).expect("kept"), before);
 }
 
+/// t-105746: the notice of the narrowing reaches the person in the TUI. The
+/// first TUI start narrows the broad rule and says so once at start — the rule
+/// as it was and the name of the kept copy — and the second start says
+/// nothing. Without `App::boot` taking the notice, the first start is silent
+/// and this goes red.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_the_narrowing_notice_is_said_once_at_the_next_tui_start() {
+    let layout = Layout::new();
+    let git = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&layout.cwd)
+        .status()
+        .expect("git runs");
+    assert!(git.success(), "the workspace is a git repository");
+    let settings = layout.cwd.join(".zo").join("settings.local.json");
+    fs::create_dir_all(settings.parent().expect("the .zo folder")).expect("make .zo");
+    fs::write(&settings, "{\"permissions\":{\"allow\":[\"bash(printf narrowed-*)\"]}}")
+        .expect("the person's local settings");
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start mock service");
+    // The line wraps at the PTY's width; read the screen with no spaces.
+    let squashed = |text: &str| text.split_whitespace().collect::<String>();
+
+    let mut run = pty(&layout, &service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.wait_for("zo narrowed", TEST_TIMEOUT);
+    let first = squashed(&history_text(&run.finish()));
+    let folder = fs::read_dir(layout.state.join("projects"))
+        .expect("the project's zo state")
+        .filter_map(Result::ok)
+        .map(|project| project.path().join("state").join("allow-always-narrow"))
+        .find(|folder| folder.is_dir())
+        .expect("the narrowing's folder");
+    let kept = fs::read_dir(&folder)
+        .expect("the folder")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("settings.local.json.before-narrowing-"))
+        .expect("the original is kept");
+    assert_eq!(first.matches("zonarrowed1\"alwaysallow\"rule").count(), 1, "said once:\n{first}");
+    assert!(first.contains("`bash(printfnarrowed-*)`"), "the rule as it was:\n{first}");
+    assert!(first.contains(&kept), "where the original is kept ({kept}):\n{first}");
+    assert!(!folder.join("notice.json").exists(), "the notice is taken once said");
+
+    let mut run = pty(&layout, &service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let second = squashed(&history_text(&run.finish()));
+    assert!(!second.contains("zonarrowed"), "the second start says nothing:\n{second}");
+}
+
 /// t-68408: two zo sessions in one folder never hand each other their plans.
 /// The first writes a plan and leaves it in progress; the second, opened in the
 /// same folder, runs a tool and writes a plan of its own, and is handed none

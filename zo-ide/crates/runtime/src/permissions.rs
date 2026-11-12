@@ -1299,43 +1299,75 @@ fn is_literal_rule_content(content: &str) -> bool {
     true
 }
 
+/// What narrowing does to one allow rule an older zo may have saved as a glob
+/// ([`narrowed_allow_rule`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AllowRuleNarrowing {
+    /// Left as it is: not a glob, a glob the person writes on purpose, or
+    /// already in the literal form.
+    Keep,
+    /// Rewritten as the literal command it was approved for.
+    Narrow(String),
+    /// Taken out: its glob never matched its own text (`bash(rm [ab])` meets
+    /// `rm a`, not `rm [ab]`), so the command approved was never allowed by
+    /// it. Writing that text literally would allow it for the first time;
+    /// taking the rule out allows nothing new, and the next "always allow"
+    /// saves it the way it is saved today.
+    Drop,
+}
+
 /// The allow rule `tool(subject)` as "always allow" writes it since it stopped
 /// storing globs (t-104618 Z4): the subject taken as the literal command the
-/// person approved. `Ok(None)` leaves the rule as it is — a rule the parser
-/// does not read as a glob (a bare tool name, `tool(*)`, a `prefix:*` rule, an
-/// exact subject, a pattern that does not compile), and a glob already in the
-/// literal form. `Err` is a rewrite that would not read back as a glob meeting
-/// the approved text; the caller then changes nothing.
-pub(crate) fn narrowed_allow_rule(rule: &str) -> Result<Option<String>, String> {
+/// person approved. [`AllowRuleNarrowing::Keep`] for a rule the parser does
+/// not read as a glob (a bare tool name, `tool(*)`, a `prefix:*` rule, an
+/// exact subject, a pattern that does not compile) and for a glob already in
+/// the literal form; [`AllowRuleNarrowing::Drop`] for a glob that does not
+/// match its own text. Neither rewrite allows a command the rule did not
+/// allow before. `Err` is a rewrite that would not read back as a glob
+/// meeting the approved text; the caller then changes nothing.
+pub(crate) fn narrowed_allow_rule(rule: &str) -> Result<AllowRuleNarrowing, String> {
     let trimmed = rule.trim();
     let (tool, Some(content)) = split_rule(trimmed) else {
-        return Ok(None);
+        return Ok(AllowRuleNarrowing::Keep);
     };
-    if !matches!(parse_rule_matcher(content), PermissionRuleMatcher::Glob(_)) {
-        return Ok(None);
-    }
+    let PermissionRuleMatcher::Glob(saved) = parse_rule_matcher(content) else {
+        return Ok(AllowRuleNarrowing::Keep);
+    };
     let approved = unescape_rule_content(content.trim());
+    // Before the own-text check: the literal form does not match its own
+    // text either (`[*]` meets `*`, not `[*]`), and it is what is kept.
     if is_literal_rule_content(&approved) {
-        return Ok(None);
+        return Ok(AllowRuleNarrowing::Keep);
+    }
+    // The same match the policy makes (`PermissionRule::matches`).
+    if !saved.matches(&approved) {
+        return Ok(AllowRuleNarrowing::Drop);
     }
     let narrowed = format!("{tool}({})", escape_rule_subject(&literal_rule_content(&approved)));
     match PermissionRule::parse(&narrowed).matcher {
-        PermissionRuleMatcher::Glob(pattern) if pattern.matches(&approved) => Ok(Some(narrowed)),
+        PermissionRuleMatcher::Glob(pattern) if pattern.matches(&approved) => {
+            Ok(AllowRuleNarrowing::Narrow(narrowed))
+        }
         _ => Err(format!("rule `{trimmed}` does not read back as `{narrowed}` meeting its own text")),
     }
 }
 
 /// [`narrowed_allow_rule`] for an ordered spec: only a `…=allow` spec is
-/// narrowed, and its `=allow` is kept as written. A deny or ask spec, and a
-/// spec with no action, is left alone.
-pub(crate) fn narrowed_ordered_allow_rule(spec: &str) -> Result<Option<String>, String> {
+/// narrowed or taken out, and its `=allow` is kept as written. A deny or ask
+/// spec, and a spec with no action, is kept.
+pub(crate) fn narrowed_ordered_allow_rule(spec: &str) -> Result<AllowRuleNarrowing, String> {
     let Some((rule_part, action_part)) = split_decision_rule(spec.trim()) else {
-        return Ok(None);
+        return Ok(AllowRuleNarrowing::Keep);
     };
     if PermissionRuleAction::parse(action_part) != Some(PermissionRuleAction::Allow) {
-        return Ok(None);
+        return Ok(AllowRuleNarrowing::Keep);
     }
-    Ok(narrowed_allow_rule(rule_part)?.map(|narrowed| format!("{narrowed}={action_part}")))
+    Ok(match narrowed_allow_rule(rule_part)? {
+        AllowRuleNarrowing::Narrow(narrowed) => {
+            AllowRuleNarrowing::Narrow(format!("{narrowed}={action_part}"))
+        }
+        other => other,
+    })
 }
 
 /// Inverse of [`unescape_rule_content`] — escape a subject so it survives a
@@ -1488,9 +1520,9 @@ fn extract_permission_subject(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        narrowed_allow_rule, narrowed_ordered_allow_rule, PermissionContext, PermissionMode,
-        PermissionOutcome, PermissionOverride, PermissionPolicy, PermissionPromptDecision,
-        PermissionPrompter, PermissionRequest,
+        narrowed_allow_rule, narrowed_ordered_allow_rule, AllowRuleNarrowing, PermissionContext,
+        PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
+        PermissionPromptDecision, PermissionPrompter, PermissionRequest,
     };
     use crate::config::RuntimePermissionRuleConfig;
 
@@ -2232,71 +2264,80 @@ mod tests {
     }
 
     /// A glob allow rule saved before "always allow" wrote its subject
-    /// literally is rewritten as that literal subject; every other shape of
-    /// rule — and a rule already in the literal form — is left alone.
+    /// literally is rewritten as that literal subject; a glob that never met
+    /// its own text is taken out; every other shape of rule — and a rule
+    /// already in the literal form — is left alone.
     #[test]
     fn a_broad_allow_rule_narrows_to_its_own_text_and_nothing_else_moves() {
+        let narrow = |rule: &str| AllowRuleNarrowing::Narrow(rule.to_string());
         for (rule, expected) in [
-            ("bash(cargo test build/*)", Some("bash(cargo test build/[*])")),
-            ("Bash(cargo test ?)", Some("Bash(cargo test [?])")),
-            ("bash(cargo test [ab])", Some("bash(cargo test [[]ab])")),
-            (r"bash(echo \(a\) *)", Some(r"bash(echo \(a\) [*])")),
-            ("bash(ls [*].rs *)", Some("bash(ls [[][*]].rs [*])")),
+            ("bash(cargo test build/*)", narrow("bash(cargo test build/[*])")),
+            ("Bash(cargo test ?)", narrow("Bash(cargo test [?])")),
+            (r"bash(echo \(a\) *)", narrow(r"bash(echo \(a\) [*])")),
+            ("bash(rm [!a]*)", narrow("bash(rm [[]!a][*])")),
+            ("bash(**)", narrow("bash([*][*])")),
+            // A class that never met its own text: the approved command was
+            // never allowed by it, so it is taken out, not written literally.
+            ("bash(cargo test [ab])", AllowRuleNarrowing::Drop),
+            ("bash(rm [!a])", AllowRuleNarrowing::Drop),
+            ("bash([ -f package.json ] && npm install)", AllowRuleNarrowing::Drop),
+            ("edit_file(app/[id]/page.tsx)", AllowRuleNarrowing::Drop),
+            ("bash(ls [*].rs *)", AllowRuleNarrowing::Drop),
+            ("bash(a[b]c*)", AllowRuleNarrowing::Drop),
             // What the person writes on purpose, and what is not a glob.
-            ("bash(git status:*)", None),
-            ("bash(*)", None),
-            ("bash()", None),
-            ("bash", None),
-            ("bash(git log)", None),
-            ("bash(ls [)", None),
+            ("bash(git status:*)", AllowRuleNarrowing::Keep),
+            ("bash(*)", AllowRuleNarrowing::Keep),
+            ("bash()", AllowRuleNarrowing::Keep),
+            ("bash", AllowRuleNarrowing::Keep),
+            ("bash(git log)", AllowRuleNarrowing::Keep),
+            ("bash(ls [)", AllowRuleNarrowing::Keep),
             // Already narrow: the literal form "always allow" writes today.
-            ("bash(ls [*].rs)", None),
-            ("bash(cargo test [?] [[])", None),
+            ("bash(ls [*].rs)", AllowRuleNarrowing::Keep),
+            ("bash(cargo test [?] [[])", AllowRuleNarrowing::Keep),
         ] {
-            assert_eq!(
-                narrowed_allow_rule(rule).expect("narrows"),
-                expected.map(str::to_string),
-                "{rule}"
-            );
+            assert_eq!(narrowed_allow_rule(rule).expect("narrows"), expected, "{rule}");
         }
     }
 
-    /// Narrowing is a fixed point: what it writes is never narrowed again,
-    /// so a second run cannot double-wrap a class and stop the rule matching.
+    /// Narrowing is a fixed point: what it writes is kept as it is, so a
+    /// second run cannot double-wrap a class (or take the rule out).
     #[test]
     fn a_narrowed_allow_rule_is_never_narrowed_twice() {
         for rule in [
             "bash(cargo test build/*)",
             "bash(rm [!a]*)",
             "bash(**)",
-            "bash(ls [*].rs *)",
-            "bash(a[b]c*)",
             "bash(x ? y)",
+            "bash(a]b *)",
         ] {
-            let once = narrowed_allow_rule(rule)
-                .expect("narrows")
-                .unwrap_or_else(|| panic!("{rule} is broad"));
-            assert_eq!(narrowed_allow_rule(&once).expect("reads"), None, "{rule} → {once}");
+            let AllowRuleNarrowing::Narrow(once) = narrowed_allow_rule(rule).expect("narrows") else {
+                panic!("{rule} is broad");
+            };
+            assert_eq!(
+                narrowed_allow_rule(&once).expect("reads"),
+                AllowRuleNarrowing::Keep,
+                "{rule} → {once}"
+            );
         }
     }
 
-    /// The ordered form narrows only `…=allow` and keeps the action as written.
+    /// The ordered form narrows or takes out only `…=allow`, and keeps the
+    /// action as written.
     #[test]
     fn an_ordered_allow_spec_narrows_and_deny_or_ask_specs_do_not() {
+        let narrow = |rule: &str| AllowRuleNarrowing::Narrow(rule.to_string());
         for (spec, expected) in [
-            ("bash(cargo test build/*)=allow", Some("bash(cargo test build/[*])=allow")),
-            ("bash(FOO=1 make *)=allow", Some("bash(FOO=1 make [*])=allow")),
-            ("bash(rm *)=deny", None),
-            ("bash(git push *)=ask", None),
-            ("bash(git status:*)=allow", None),
-            ("bash(ls [*].rs)=allow", None),
-            ("bash(ls *)", None),
+            ("bash(cargo test build/*)=allow", narrow("bash(cargo test build/[*])=allow")),
+            ("bash(FOO=1 make *)=allow", narrow("bash(FOO=1 make [*])=allow")),
+            ("bash(rm [ab])=allow", AllowRuleNarrowing::Drop),
+            ("bash(rm [ab])=deny", AllowRuleNarrowing::Keep),
+            ("bash(rm *)=deny", AllowRuleNarrowing::Keep),
+            ("bash(git push *)=ask", AllowRuleNarrowing::Keep),
+            ("bash(git status:*)=allow", AllowRuleNarrowing::Keep),
+            ("bash(ls [*].rs)=allow", AllowRuleNarrowing::Keep),
+            ("bash(ls *)", AllowRuleNarrowing::Keep),
         ] {
-            assert_eq!(
-                narrowed_ordered_allow_rule(spec).expect("narrows"),
-                expected.map(str::to_string),
-                "{spec}"
-            );
+            assert_eq!(narrowed_ordered_allow_rule(spec).expect("narrows"), expected, "{spec}");
         }
     }
 
@@ -2304,9 +2345,11 @@ mod tests {
     /// one the glob let through (`cargo test build/x && cargo publish`).
     #[test]
     fn a_narrowed_allow_rule_allows_the_approved_command_only() {
-        let narrowed = narrowed_allow_rule("bash(cargo test build/*)")
-            .expect("narrows")
-            .expect("broad");
+        let AllowRuleNarrowing::Narrow(narrowed) =
+            narrowed_allow_rule("bash(cargo test build/*)").expect("narrows")
+        else {
+            panic!("broad");
+        };
         let policy = |rule: &str| {
             PermissionPolicy::new(PermissionMode::WorkspaceWrite)
                 .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
@@ -2324,6 +2367,48 @@ mod tests {
             policy(&narrowed).authorize("bash", &wider, None),
             PermissionOutcome::Deny { .. }
         ));
+    }
+
+    /// Narrowing never allows a command that was not allowed before. In the
+    /// ordered form the last match wins, so writing `bash(rm [ab])` literally
+    /// would let `rm [ab]` past the earlier deny; the rule is taken out
+    /// instead, and `rm [ab]` is refused before and after alike.
+    #[test]
+    fn a_class_rule_that_never_met_its_text_is_taken_out_and_allows_nothing_new() {
+        let specs = ["bash(rm *)=deny", "bash(rm [ab])=allow", "bash(rm build/*)=allow"];
+        let narrowed = specs
+            .iter()
+            .filter_map(|spec| match narrowed_ordered_allow_rule(spec).expect("narrows") {
+                AllowRuleNarrowing::Keep => Some((*spec).to_string()),
+                AllowRuleNarrowing::Narrow(rule) => Some(rule),
+                AllowRuleNarrowing::Drop => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(narrowed, ["bash(rm *)=deny", "bash(rm build/[*])=allow"]);
+        let policy = |rules: Vec<String>| {
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+                .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+                .with_permission_rules(
+                    &RuntimePermissionRuleConfig::new(Vec::new(), Vec::new(), Vec::new())
+                        .with_rules(rules),
+                )
+        };
+        let before = policy(specs.iter().map(|spec| (*spec).to_string()).collect());
+        let after = policy(narrowed);
+        let decide = |policy: &PermissionPolicy, command: &str| {
+            policy.authorize("bash", &serde_json::json!({ "command": command }).to_string(), None)
+        };
+        let refused = |outcome: PermissionOutcome| matches!(outcome, PermissionOutcome::Deny { .. });
+        // The text approved for the class rule: refused before and after.
+        assert!(refused(decide(&before, "rm [ab]")), "rm [ab] before");
+        assert!(refused(decide(&after, "rm [ab]")), "rm [ab] after");
+        // What the old globs let through is refused now; nothing is allowed
+        // after that was refused before.
+        for command in ["rm a", "rm build/x && rm -rf ~"] {
+            assert_eq!(decide(&before, command), PermissionOutcome::Allow, "{command} before");
+            assert!(refused(decide(&after, command)), "{command} after");
+        }
+        assert_eq!(decide(&after, "rm build/*"), PermissionOutcome::Allow);
     }
 
     #[test]

@@ -809,7 +809,9 @@ impl ConfigLoader {
     /// first narrows, once per project, the "always allow" rules an older zo
     /// saved wider than the command approved
     /// ([`narrow_broad_allow_always_rules`]), so the very session that narrows
-    /// reads the narrowed rules. The narrowing never fails the load.
+    /// reads the narrowed rules. A second zo starting in the same project
+    /// waits for the first (at most two seconds) and then reads what it
+    /// wrote. The narrowing never fails the load.
     pub fn load_for_session(&self) -> Result<RuntimeConfig, ConfigError> {
         let _ = narrow_broad_allow_always_rules(&self.cwd);
         self.load()
