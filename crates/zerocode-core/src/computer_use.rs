@@ -467,9 +467,23 @@ pub const FLOW_SHA256_PARAM: &str = "flowSha256";
 /// by that agent in its pane, without this flag and by the person's settings;
 /// a step on the emulator reads the person's settings too; and a key is not a
 /// press this guard reads.
+///
+/// In the browser the same walk's `click` — by selector, by number or by
+/// point — leaves a control that says of itself that it pays, moves money or
+/// deletes unpressed ([`WALK_HELD_PRESS_SAID`]). That is a net of words: a
+/// form sent by Enter, a script the walk evaluates, and a control that says
+/// nothing of itself pass through it.
 pub const WALK_UNWATCHED_FLAG: &str = "unwatched";
 /// See [`WALK_UNWATCHED_FLAG`].
 pub const WALK_UNWATCHED_PARAM: &str = "unwatched";
+/// The clause the browser door's refusal of such a press carries, word for
+/// word. The door refuses in sentences, with no code of its own, so the walk
+/// knows a press left to the person by this clause and stops at it as it does
+/// at a desktop press handed back: the step is the person's last step, and
+/// the walk goes on after it — never from it, which would press the control
+/// the next time round with nobody's guard on.
+pub const WALK_HELD_PRESS_SAID: &str =
+    "지켜보는 사람 없이 도는 걸음은 결제 · 이체 · 삭제를 누르지 않습니다";
 /// How long a hand whose place is covered waits before it lists the windows
 /// again, when what stands in front looks like it is passing — a
 /// notification sliding in or out, a window being dragged (t-12979): a

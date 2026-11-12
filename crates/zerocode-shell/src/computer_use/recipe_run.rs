@@ -952,6 +952,9 @@ pub fn verdict_of(report: &Value) -> Option<(bool, Option<String>)> {
 /// failed.
 fn stop_for(tool: RecipeTool, code: &str, check: bool) -> RecipeStop {
     match (tool, code) {
+        // A browser press a walk nobody is watching left to the person
+        // (`browser_envelope`): theirs, as a desktop press handed back is.
+        (RecipeTool::Browser, error_code::CONFIRMATION_REQUIRED) => RecipeStop::PersonsLastStep,
         // Browser and emulator checks are judged in the oracle pass;
         // a refusal in the ordinary steps means that step failed.
         (RecipeTool::Browser | RecipeTool::Emulator, _) => RecipeStop::StepFailed,
@@ -978,10 +981,17 @@ fn browser_envelope(answer: &TeamAnswer) -> Value {
             .unwrap_or_else(|| json!({ "said": said }));
         json!({ "ok": true, "result": result })
     } else {
-        json!({
-            "ok": false,
-            "error": { "code": error_code::UNANSWERED, "message": answer.stderr.trim() },
-        })
+        // One refusal is not a failed step: a press the door left to the
+        // person on a walk nobody is watching. It says so in a fixed clause
+        // (`WALK_HELD_PRESS_SAID`), and the walk reads the step as the
+        // person's last step — so it goes on after that step and not from it.
+        let message = answer.stderr.trim();
+        let code = if message.contains(zerocode_core::computer_use::WALK_HELD_PRESS_SAID) {
+            error_code::CONFIRMATION_REQUIRED
+        } else {
+            error_code::UNANSWERED
+        };
+        json!({ "ok": false, "error": { "code": code, "message": message } })
     }
 }
 
@@ -2381,6 +2391,64 @@ mod tests {
             assert_eq!(report["stop"]["kind"], kind, "{code}");
             assert_eq!(report["stop"]["code"], code);
             assert_eq!(report["next"], next, "{code}");
+        }
+    }
+
+    /// A browser press the door left to the person — a walk nobody is
+    /// watching reached a control that says it pays — stops the walk as the
+    /// person's last step, and the walk goes on AFTER it, as after a desktop
+    /// press handed back. Read as any refused step, `next` named the held
+    /// step itself, and running again from it pressed the payment with no
+    /// guard on (the independent check t-105889, B1). Any other refusal of
+    /// the door is still a failed step, to be run again.
+    #[test]
+    fn a_browser_press_left_to_the_person_is_the_persons_last_step() {
+        use super::bench::{browser_refused, browser_said, mixed_doc};
+        let held = crate::cmd::browser::page_failure(&json!({
+            "ok": false, "code": crate::cmd::browser::HELD_PRESS, "kind": "payment", "said": "지금 결제하기",
+        }));
+        for (why, kind, code, next) in [
+            (
+                held.as_str(),
+                "persons_last_step",
+                error_code::CONFIRMATION_REQUIRED,
+                3,
+            ),
+            (
+                "셀렉터와 맞는 요소가 없습니다",
+                "step_failed",
+                error_code::UNANSWERED,
+                2,
+            ),
+        ] {
+            let bench = Bench::new().showing(&[("browser-1", "https://example.test")]);
+            let text = mixed_doc(&[
+                (RecipeTool::Computer, "key --key tab"),
+                (RecipeTool::Browser, "click browser-1 #pay"),
+                (RecipeTool::Computer, "key --key tab"),
+            ]);
+            let mut clicks = 0;
+            let report = run_lines(
+                &command(&[]),
+                ("f.md", &text),
+                DEADLINE,
+                |argv, _| match argv[0].as_str() {
+                    "key" => ok(),
+                    "click" => {
+                        clicks += 1;
+                        browser_refused(why)
+                    }
+                    _ => browser_said("ok"),
+                },
+                |_, _, _| {},
+                bench.desk(false, None),
+                || true,
+            )
+            .expect("walked");
+            assert_eq!(clicks, 1, "{kind}: the press is asked for once");
+            assert_eq!(report["stop"]["kind"], kind);
+            assert_eq!(report["stop"]["code"], code, "{kind}");
+            assert_eq!(report["next"], next, "{kind}");
         }
     }
 

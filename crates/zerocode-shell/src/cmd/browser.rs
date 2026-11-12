@@ -884,8 +884,9 @@ pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
                 None => "결제 · 이체 · 삭제",
             };
             return format!(
-                "「{}」 단추는 {kind} 누름이라 누르지 않았습니다 — 지켜보는 사람 없이 도는 걸음은 결제 · 이체 · 삭제를 누르지 않습니다. 사람이 직접 누른 뒤 다음 걸음부터 다시 돌리세요",
-                zerocode_core::card_words::shown(word("said").unwrap_or_default(), HELD_PRESS_SAID_CHARS)
+                "「{}」 단추는 {kind} 누름이라 누르지 않았습니다 — {}. 사람이 직접 누른 뒤 다음 걸음부터 다시 돌리세요",
+                zerocode_core::card_words::shown(word("said").unwrap_or_default(), HELD_PRESS_SAID_CHARS),
+                zerocode_core::computer_use::WALK_HELD_PRESS_SAID
             );
         }
         "invalid_selector" => "셀렉터가 올바르지 않습니다",
