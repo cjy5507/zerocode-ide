@@ -143,11 +143,17 @@ fn executor() -> tokio::runtime::Runtime {
 /// Opening a real session marks this process as a session host permanently.
 /// Run the assertion body in its own test process so that marker, provider
 /// caches, and startup workers cannot affect unrelated library tests.
+///
+/// The child starts in the package folder, where cargo starts the binary,
+/// not in this process's current folder: a test running beside this one may
+/// have moved that into a temporary folder it is about to delete, and the
+/// child's [`World`] reads its current folder first thing.
 fn isolated_process(name: &str) -> bool {
     const CHILD: &str = "ZO_AUTOMATIC_WORK_TEST";
     if std::env::var(CHILD).ok().as_deref() == Some(name) { return false; }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &format!("session::automatic_work_tests::{name}"), "--nocapture", "--test-threads=1"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env(CHILD, name).output().expect("start isolated host integration test");
     assert!(output.status.success(), "isolated host test failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
