@@ -2195,14 +2195,18 @@ pub fn shortcut_card() -> Vec<String> {
     ]
 }
 
-/// 마지막 두 경로 조각만 남긴 cwd — 캡처의 푸터도 긴 경로를 줄여 쓴다.
+/// 집 폴더(`HOME`) 아래의 cwd 는 `~/…` 로 줄이고, 그 밖의 경로는 그대로 둔다 —
+/// 푸터와 상태 줄이 쓴다. 집 폴더 이름으로 시작할 뿐인 옆 폴더(`<home>2/…`)는
+/// 집 아래가 아니다: 줄인 자리 바로 뒤가 경로 구분자이거나 끝이어야 한다.
 #[must_use]
 pub fn short_cwd(cwd: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
-    if !home.is_empty() && cwd.starts_with(&home) {
-        return format!("~{}", &cwd[home.len()..]);
+    match cwd.strip_prefix(home.as_str()) {
+        Some(rest) if !home.is_empty() && rest.chars().next().is_none_or(std::path::is_separator) => {
+            format!("~{rest}")
+        }
+        _ => cwd.to_string(),
     }
-    cwd.to_string()
 }
 
 #[cfg(test)]
@@ -2256,6 +2260,20 @@ mod tests {
             max_rows: 39,
             max_height: 39,
         }
+    }
+
+    /// The footer's cwd is `~/…` only under the home folder itself: a
+    /// sibling whose name starts with the home folder's name stays whole —
+    /// it used to come out as `~2/…`.
+    #[test]
+    fn the_short_cwd_shortens_only_paths_under_the_home_folder() {
+        let _lock = crate::test_env_lock();
+        let home = std::env::var("HOME").expect("the test harness sets a home");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(super::short_cwd(&home), "~");
+        assert_eq!(super::short_cwd(&format!("{home}{sep}project")), format!("~{sep}project"));
+        let sibling = format!("{home}2{sep}project");
+        assert_eq!(super::short_cwd(&sibling), sibling);
     }
 
     /// zo paints its footer through the frame, not through `footer()` alone
