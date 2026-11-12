@@ -490,9 +490,17 @@ impl Standing {
             &recipe_title(text).unwrap_or_else(|| slug.to_string()),
             WORD_MAX_CHARS,
         );
+        // A title of nothing but letters that draw nothing shows as no title
+        // at all: the Flow is then named by its file, as one that gives none
+        // is, and the letters left out are still counted.
+        let shown = if title.text.is_empty() {
+            card_words::shown(slug, WORD_MAX_CHARS)
+        } else {
+            title.text
+        };
         Ok(Self {
             sha256: flow_document_sha256(text),
-            title: title.text,
+            title: shown,
             policy: spec.policy.as_str(),
             money: spends(spec.policy),
             hidden: title.hidden + about.hidden,
@@ -910,12 +918,15 @@ mod tests {
         let spending = spending_document();
         let marked = flow_document().replace("# Wallet QA", "# Wallet\u{200B}\u{202E} QA");
         let untitled = flow_document().replace("# Wallet QA\n\n", "");
+        // A title that is one letter that draws nothing (t-105889, T1).
+        let blank = flow_document().replace("# Wallet QA", "# \u{200B}");
         let (root, workspace) = stand(&[
             ("wallet-top-up", &spending),
             ("marked", &marked),
             ("untitled", &untitled),
+            ("blank-title", &blank),
         ]);
-        for slug in ["wallet-top-up", "marked", "untitled"] {
+        for slug in ["wallet-top-up", "marked", "untitled", "blank-title"] {
             let stands = standing(root.path(), slug).expect("a Flow");
             let request = asked(
                 root.path(),
@@ -949,6 +960,12 @@ mod tests {
         assert_eq!(
             standing(root.path(), "untitled").expect("a Flow").title,
             "untitled"
+        );
+        let blank = standing(root.path(), "blank-title").expect("a Flow");
+        assert_eq!(
+            (blank.title.as_str(), blank.hidden),
+            ("blank-title", 1),
+            "a title that draws nothing left the Flow unnamed"
         );
         // One reading, in the source too: the card's road parses no Flow and
         // reads no title of its own.
