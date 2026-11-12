@@ -14045,12 +14045,18 @@ mod zo_channel_bearer {
 /// says so with the marker the window takes the question down on, not in
 /// the transport's own words (t-51007). A zo that exited left its card on
 /// screen, and every press — Escape too — came back refused.
+///
+/// The port is a silent quiet one, leased for the whole test: nothing
+/// listens on it, so the connect is refused, and no other test is given it.
+/// A port given back by a closed listener on port 0 was taken by a
+/// neighbour's in a loaded gate (144, 2026-11-12), which answered and reset:
+/// "Connection reset by peer" instead of a refusal. A socket bound and never
+/// listened on does not do instead: macOS drops a connect to it unanswered,
+/// and the answer waits out its timeout ("Operation timed out").
 #[test]
 fn an_answer_whose_channel_refuses_the_connection_is_unreachable() {
-    let gone = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback channel");
-        listener.local_addr().expect("its address").to_string()
-    };
+    let silent = crate::test_host::quiet_ports::QuietPort::silent();
+    let gone = silent.addr().to_string();
 
     let answered = answer_prompt(
         zo_channel_entry(gone, Some("bearer-of-a-zo-that-exited".to_string())),
