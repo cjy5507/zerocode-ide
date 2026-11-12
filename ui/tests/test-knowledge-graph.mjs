@@ -2401,6 +2401,97 @@ ok("provenance: three toggles default on, a hidden road drops its lines and keep
     && JSON.stringify(provenanceLens.overview) === JSON.stringify(["measured=0", "declared=2", "inferred=2"]),
   JSON.stringify(provenanceLens));
 
+/* Test 11d-2: 관계의 낱말은 읽힐 틈이 있을 때만 선다(`paintKnowledgeEdgeLabels`).
+ *
+ * 허브 하나에 `depends_on` 잎 열넷. 낱말은 제 선의 가운데에 서므로, 멀리서 보면 낱말 열넷이 허브 둘레 한곳에
+ * 겹쳐 얼룩이 됐다(실제 볼트 모양의 좁은 판에서 본 흠). 배율 셋에서 같은 것을 다시 센다: 선 낱말끼리 상자가
+ * 겹치지 않고, 선 낱말은 제 선의 두 끝이 아닌 밝은 점을 덮지 않으며(제 선보다 긴 낱말은 어떤 점도), 서는
+ * 낱말의 수는 그 규칙을 따로 센 수와 같다. 멀리서는 몇만 서고, 다가가면 전부 선다. */
+const wordRoom = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  knowledgeSelectedKey = null;
+  knowledgeQuery = "";
+  knowledgeProvenanceHidden.clear();
+  const leaves = 14;
+  window.__VAULT__ = {
+    pages: leaves + 1,
+    customEdges: Array.from({ length: leaves }, (_, at) => ({ from: 0, to: at + 1, kind: "depends_on" })),
+  };
+  dropTab("knowledge");
+  document.getElementById("nav-knowledge").click();
+  await wait(400);
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const layout = knowledgeLayouts.get(view);
+  const model = layout.model;
+  const tuning = layout.tuning;
+  const fit = layout.zoom;
+  const at = (zoom) => {
+    layout.zoom = zoom;
+    layout.zoomTaken = true;
+    paintKnowledgeFrame(view, layout);
+    litKnowledge(view, layout, "wiki/Page-0000.md");
+    const words = [...view.querySelectorAll(".knowledge-edge-label")];
+    const boxes = words.map((one) => one.getBoundingClientRect());
+    let overlaps = 0;
+    for (let one = 0; one < boxes.length; one += 1) {
+      for (let other = one + 1; other < boxes.length; other += 1) {
+        const a = boxes[one];
+        const b = boxes[other];
+        if (a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) overlaps += 1;
+      }
+    }
+    /* 따로 세기: 긴 선부터, 먼저 선 상자에 닿지 않고, 제 끝이 아닌 밝은 점(제 선보다 긴 낱말은 어떤 점)을 덮지
+     * 않는 것만. */
+    const tall = tuning.edgeLabelPx * layout.inverse;
+    const wide = knowledgeLabelEm("depends_on", tuning) * tall;
+    const padX = tuning.labelPadX * layout.inverse;
+    const padY = tuning.labelPadY * layout.inverse;
+    const lines = [];
+    for (let edge = 0; edge < model.edgeCount; edge += 1) {
+      if (!layout.lit.has(edge)) continue;
+      lines.push({ edge,
+        long: Math.hypot(layout.x[model.to[edge]] - layout.x[model.from[edge]],
+          layout.drawY[model.to[edge]] - layout.drawY[model.from[edge]]),
+        midX: (layout.x[model.from[edge]] + layout.x[model.to[edge]]) / 2,
+        midY: (layout.drawY[model.from[edge]] + layout.drawY[model.to[edge]]) / 2 });
+    }
+    lines.sort((one, other) => other.long - one.long || one.edge - other.edge);
+    const stood = [];
+    let covering = 0;
+    for (const line of lines) {
+      if (stood.some((other) => Math.abs(line.midX - other.midX) < wide + padX * 2
+        && Math.abs(line.midY - other.midY) < tall + padY * 2)) continue;
+      let covers = false;
+      for (let point = 0; point < model.count && !covers; point += 1) {
+        covers = point !== model.from[line.edge] && point !== model.to[line.edge]
+          && (line.long < wide || layout.litNodes.has(point))
+          && Math.abs(layout.x[point] - line.midX) < wide / 2 + padX
+          && Math.abs(layout.drawY[point] - line.midY) < tall / 2 + padY;
+      }
+      if (covers) { covering += 1; continue; }
+      stood.push(line);
+    }
+    const seen = { zoom: Number(zoom.toFixed(3)), lit: layout.lit.size, points: layout.litNodes.size,
+      words: words.length, recount: stood.length, covering, overlaps };
+    litKnowledge(view, layout, null);
+    return seen;
+  };
+  const far = at(fit * 0.12);
+  const rest = at(fit);
+  const near = at(fit * 6);
+  layout.zoom = fit;
+  layout.zoomTaken = false;
+  paintKnowledgeFrame(view, layout);
+  return { leaves, far, rest, near };
+});
+ok("a relation's word stands only where it can be read — never two in one place, never over a lit page that is not its own line's end, a word longer than its line only on free ground, few from afar and all of them close up",
+  [wordRoom.far, wordRoom.rest, wordRoom.near].every((seen) => seen.lit === wordRoom.leaves
+    && seen.points === wordRoom.leaves + 1 && seen.words === seen.recount && seen.overlaps === 0)
+    && wordRoom.far.words < wordRoom.leaves / 2
+    && wordRoom.near.words === wordRoom.leaves && wordRoom.near.covering === 0
+    && wordRoom.rest.words >= wordRoom.far.words,
+  JSON.stringify(wordRoom));
+
 /* Test 11e(t-5966 G4): HTML로 내보내기. 단추 하나가 지금 렌즈의 부분그래프 — 점의 자리·쉬는 옷·
  * 선의 관계·근거·잉크 — 를 백엔드의 한 문(`second_brain_export_html`)에 건네고, 영수증을 토스트로
  * 말한다. 「타입 관계만」이 켜진 판에서는 그 렌즈가 남긴 점과 선만 실린다. */

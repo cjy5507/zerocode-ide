@@ -5608,6 +5608,18 @@ function paintKnowledgeRingLabel(layout, at, node) {
  * 그림의 크기가 아니다. `mentions`는 본문의 대괄호일 뿐 이름이 아니므로 낱말을
  * 얻지 못한다.
  *
+ * 낱말은 **읽힐 틈이 있을 때만** 선다. 낱말은 제 선의 가운데에 서므로, 허브 하나를 고르면 가까운 이웃으로 가는
+ * 짧은 선들의 낱말이 한곳에 겹쳐 얼룩이 되고 고른 쪽과 그 이웃을 덮었다(실제 볼트 모양의 좁은 판에서
+ * `depends_on` 다섯이 한 덩어리). 그래서 긴 선부터 서고, 낱말의 상자가
+ *   · 먼저 선 낱말에 닿거나,
+ *   · 지금 밝은 점(짚거나 고른 쪽과 그 이웃, 경로의 점)을 덮거나,
+ *   · 제 선보다 긴 낱말인데 그려진 점을 하나라도 덮으면
+ * 서지 않는다 — 어느 것이든 제 선의 두 끝은 뺀다. 제 선보다 짧은 낱말은 물러선 점 위에 서도 된다(먼 군집으로
+ * 가는 긴 선의 가운데는 흔히 남의 군집 위이고, 낱말은 바탕색 테두리로 읽힌다). 제 선보다 긴 낱말은 선을 덮어
+ * 어느 선의 이름인지 말하지 못하므로 빈 땅에서만 선다 — 작은 볼트의 짧은 선 하나에 홀로 서는 낱말이 그것이다.
+ * 서지 못한 관계는 카드의 관계 줄이 말하고, 다가가면 점 사이가 벌어져 낱말이 선다. 점을 훑는 것은 낱말끼리의
+ * 물음을 넘긴 후보뿐이고, 덮인 점 하나를 찾으면 멈춘다.
+ *
  * 클래스는 **붙이기 전에** 쓴다. 이 층은 호버가 세는 그림(`.knowledge-picture`)
  * 안에 살고, 붙인 뒤에 class를 쓰면 그 쓰기가 호버 한 번의 값에 얹힌다 —
  * 하네스가 이웃 + 선 + 1을 재고 있는 바로 그 수다. */
@@ -5621,6 +5633,15 @@ function paintKnowledgeEdgeLabels(view, layout) {
   const held = layout.edgeLabels;
   const wanted = [];
   const drawnEdge = layout.drawnEdge;
+  const tuning = layout.tuning;
+  /* 화면 1px이 그래프 좌표로 얼마인가 — 첫 프레임 전에는 밝은 선이 없으니 1이어도 닿지 않는다. */
+  const inverse = layout.inverse > 0 ? layout.inverse : 1;
+  const tall = tuning.edgeLabelPx * inverse;
+  /* 낱말의 상자는 이름표의 상자와 같은 여백을 두른다(`--knowledge-label-pad-*`) — 글자가 닿을 듯 선 두 낱말도 얼룩이다. */
+  const padX = tuning.labelPadX * inverse;
+  const padY = tuning.labelPadY * inverse;
+  const drawn = layout.drawn;
+  const asked = [];
   for (let at = 0; at < model.edgeCount; at += 1) {
     /* 낱말을 얻는 것은 **방향이 있는** 관계뿐이다(3차). `related`는 색이 이미
      * 말하고 방향이 없어 낱말이 더하는 것이 없다 — 실제 볼트에서 허브 하나를
@@ -5630,6 +5651,42 @@ function paintKnowledgeEdgeLabels(view, layout) {
       && model.kind[at] !== KNOWLEDGE_EDGE_CODE.mentions
       && model.kind[at] !== KNOWLEDGE_EDGE_CODE.related;
     if (!shown) continue;
+    const wide = knowledgeLabelEm(knowledgeEdgeWord(model.kind[at]), tuning) * tall;
+    const long = Math.hypot(
+      layout.x[model.to[at]] - layout.x[model.from[at]],
+      layout.drawY[model.to[at]] - layout.drawY[model.from[at]],
+    );
+    asked.push({ at, long, wide, short: long < wide });
+  }
+  /* 긴 선부터 — 길이가 같으면 선의 번호로, 같은 그림은 언제나 같은 낱말을 세운다. */
+  asked.sort((one, other) => other.long - one.long || one.at - other.at);
+  const stood = [];
+  const pathNode = layout.focusEdgeCount > 0 ? layout.pathNode : null;
+  for (const { at, wide, short } of asked) {
+    const midX = (layout.x[model.from[at]] + layout.x[model.to[at]]) / 2;
+    const midY = (layout.drawY[model.from[at]] + layout.drawY[model.to[at]]) / 2;
+    let clear = true;
+    for (const other of stood) {
+      if (Math.abs(midX - other.midX) * 2 < wide + other.wide + padX * 4
+        && Math.abs(midY - other.midY) < tall + padY * 2) {
+        clear = false;
+        break;
+      }
+    }
+    if (!clear) continue;
+    const halfX = wide / 2 + padX;
+    const halfY = tall / 2 + padY;
+    const from = model.from[at];
+    const to = model.to[at];
+    for (let point = 0; point < model.count; point += 1) {
+      if (Math.abs(layout.x[point] - midX) >= halfX || Math.abs(layout.drawY[point] - midY) >= halfY) continue;
+      if (point === from || point === to || (drawn !== null && drawn[point] === 0)) continue;
+      if (!short && !layout.litNodes.has(point) && (pathNode === null || pathNode[point] !== 1)) continue;
+      clear = false;
+      break;
+    }
+    if (!clear) continue;
+    stood.push({ midX, midY, wide });
     let word = held.get(at);
     if (word === undefined) {
       word = document.createElementNS(SVG_NS, "text");
@@ -5648,8 +5705,6 @@ function paintKnowledgeEdgeLabels(view, layout) {
     }
     /* 점의 제목과 같은 손: 자리는 그래프 좌표로, 크기는 배율의 역수로. 이것이
      * 없으면 낱말이 그림과 함께 커져 배율 두 배에서 판을 뒤덮는다. */
-    const midX = (layout.x[model.from[at]] + layout.x[model.to[at]]) / 2;
-    const midY = (layout.drawY[model.from[at]] + layout.drawY[model.to[at]]) / 2;
     writeAttribute(
       word,
       "transform",
