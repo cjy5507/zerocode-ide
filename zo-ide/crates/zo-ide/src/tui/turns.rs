@@ -38,9 +38,10 @@ use super::strings;
 /// How many rows of a text block are held before it is taken for an answer.
 pub const HELD_ROWS: usize = 4;
 /// How many rows of the work so far the viewport shows above whatever is
-/// live, at least and at most ([`live_room`]).
+/// live, at least and at most ([`live_room`]). The most counts the blank row
+/// that stands between one step's rows and the text that leads into the next.
 pub const LIVE_ROWS_MIN: usize = 3;
-pub const LIVE_ROWS_MAX: usize = 12;
+pub const LIVE_ROWS_MAX: usize = 16;
 
 /// How many rows of the work so far a pane `pane_rows` tall shows: half of
 /// it, between [`LIVE_ROWS_MIN`] and [`LIVE_ROWS_MAX`]. The rows become one
@@ -190,18 +191,45 @@ impl TurnFold {
         self.steps.len()
     }
 
+    /// Whether a blank row stands above the row at `at`: it opens a text that
+    /// follows a step. The text and the steps under it stay together, and
+    /// one such group stands apart from the next ("너무 붙어있어",
+    /// 2026-11-12).
+    fn opens_a_group(&self, at: usize) -> bool {
+        at > 0 && matches!(self.live[at], Shown::Said(_)) && matches!(self.live[at - 1], Shown::Step(_))
+    }
+
     /// The viewport's rows for the work so far, in at most `room` rows: each
     /// finished step under the one before it, dim, hung under the look's mark
     /// — a step that follows a text hangs under that text — and the texts
-    /// that led into them. Every row stays until the fold is said; when there
-    /// are more than `room`, the newest stay and the first row counts the
-    /// rest. How many steps there are in all is the working row's to say.
+    /// that led into them, a blank row above each text that follows a step.
+    /// Every row stays until the fold is said; when there are more than
+    /// `room`, the newest stay and the first row counts the rest. How many
+    /// steps there are in all is the working row's to say.
+    ///
+    /// `width` is the pane's, not the reading width: a step's row is cut, not
+    /// wrapped, and a row cut at the prose column on a pane twice as wide
+    /// loses half a command to an empty half ("글이 짤리는 현상", 2026-11-12).
+    /// The texts were wrapped to the reading width where they were said.
     #[must_use]
     pub fn live_rows(&self, width: usize, room: usize) -> Vec<Line> {
         let glyphs = super::style::glyphs();
         let room = room.max(1);
-        let earlier = if self.live.len() > room { self.live.len() - (room - 1) } else { 0 };
-        let mut rows = Vec::with_capacity(self.live.len().min(room));
+        // A row and, above one that opens a group, its blank row.
+        let cost = |at: usize| 1 + usize::from(self.opens_a_group(at));
+        let all: usize = (0..self.live.len()).map(cost).sum();
+        // The first row shown: all of them when they fit, else the newest
+        // that fit under the row that counts the rest.
+        let mut earlier = 0;
+        if all > room {
+            let mut used = 1;
+            earlier = self.live.len();
+            while earlier > 0 && used + cost(earlier - 1) <= room {
+                used += cost(earlier - 1);
+                earlier -= 1;
+            }
+        }
+        let mut rows = Vec::with_capacity(all.min(room));
         // Whether the row above is one a step hangs under with no mark of
         // its own: another step, or the count of the rows not shown.
         let mut hangs = false;
@@ -210,9 +238,12 @@ impl TurnFold {
             rows.push(Line::new(counted).truncated(width));
             hangs = true;
         }
-        for shown in &self.live[earlier..] {
+        for (at, shown) in self.live.iter().enumerate().skip(earlier) {
             match shown {
                 Shown::Said(row) => {
+                    if self.opens_a_group(at) {
+                        rows.push(Line::empty());
+                    }
                     rows.push(row.clone().truncated(width));
                     hangs = false;
                 }
@@ -270,7 +301,10 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
     if steps.is_empty() {
         return Vec::new();
     }
-    let width = super::style::current().reading_width(width);
+    // The head row ends where prose ends: its key rides on that column. The
+    // rows under it name a file or a command and are cut, not wrapped — at
+    // the pane's edge, so a wide pane does not cut what it has room for.
+    let column = super::style::current().reading_width(width);
     let glyphs = super::style::glyphs();
     let mut body: Vec<Vec<Span>> = Vec::new();
     body.extend(looked_row(steps));
@@ -284,7 +318,7 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
         body.push(row);
     }
 
-    let mut out = vec![Line::empty(), Line::new(head_row(steps, width, now)).truncated(width)];
+    let mut out = vec![Line::empty(), Line::new(head_row(steps, column, now)).truncated(column)];
     for (index, mut row) in body.into_iter().enumerate() {
         let lead = if index == 0 { glyphs.result_first } else { glyphs.result_rest };
         row.insert(0, Span::dim(lead));
@@ -567,7 +601,9 @@ mod tests {
 
     /// A short text a call followed stays where it stood, quiet, and the
     /// steps after it hang under it; its blank rows are left out, and the
-    /// fold's cell does not say it.
+    /// fold's cell does not say it. A text that follows a step opens the next
+    /// group: one blank row stands above it, and none between a text and the
+    /// steps under it.
     #[test]
     fn a_preamble_stays_among_the_steps_it_led_into() {
         let mut fold = TurnFold::default();
@@ -589,14 +625,46 @@ mod tests {
                 "• I will read the parser first.",
                 "  └ Read src/parser.rs",
                 "    Ran cargo test",
+                "",
                 "• Now the fix.",
                 "  └ Edit src/parser.rs",
             ]
         );
         assert!(rows[0].spans.iter().all(|span| span.style.dim), "a preamble is quiet once its call began");
+        // The blank row is counted with the row it stands above: in four
+        // rows the newest group stays whole under the count of the three
+        // rows not shown, and no blank row is left hanging at the top.
+        assert_eq!(
+            plain(&fold.live_rows(80, 4)),
+            ["  └ … 3 earlier", "", "• Now the fix.", "  └ Edit src/parser.rs"]
+        );
+        // With no room for the group's blank row and its text, the step alone.
+        assert_eq!(plain(&fold.live_rows(80, 3)), ["  └ … 4 earlier", "    Edit src/parser.rs"]);
         let (cell, held) = fold.flush(80, Instant::now());
         assert!(held.is_empty());
         assert!(!plain(&cell).iter().any(|row| row.contains("the fix") || row.contains("parser first")), "{cell:#?}");
+    }
+
+    /// A step's row is cut at the pane's edge, not at the prose column: on a
+    /// pane 200 wide a command of 150 columns is shown whole, and one wider
+    /// than the pane is cut there. The fold's cell names its commands the
+    /// same way under a head row that keeps to the column ("글이 짤리는
+    /// 현상", 2026-11-12 — rows cut at 100 on a pane with 200).
+    #[test]
+    fn a_steps_row_is_cut_at_the_panes_edge() {
+        let command = format!("git -C /Users/dev/app show HEAD:{}", "crates/app/src/session/".repeat(5));
+        assert!(command.chars().count() > 120 && command.chars().count() < 180, "{}", command.len());
+        let mut fold = TurnFold::default();
+        fold.take_steps(vec![Step {
+            took: Some(Duration::from_millis(2_600)),
+            ..step(StepKind::Run, "Run", &command)
+        }]);
+        let wide = plain(&fold.live_rows(200, LIVE_ROWS_MAX));
+        assert_eq!(wide, [format!("  └ Run {command}  2.6s")]);
+        let narrow = plain(&fold.live_rows(60, LIVE_ROWS_MAX));
+        assert!(narrow[0].ends_with('…') && narrow[0].chars().count() == 60, "{narrow:?}");
+        let (cell, _) = fold.flush(200, Instant::now());
+        assert!(plain(&cell).iter().any(|row| row.contains(&command)), "{cell:#?}");
     }
 
     #[test]

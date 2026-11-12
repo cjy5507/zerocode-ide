@@ -1281,13 +1281,18 @@ const LIVE_TAIL_ROWS: usize = 4;
 /// `<glyph> <Verb>(<target>)`, the result still on the last column.
 fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width: usize) -> Line {
     let look = super::style::current();
-    // The result ends where prose ends, not at the far edge of a wide pane.
-    let width = look.reading_width(width);
     let marks = look.style == super::style::TuiStyle::Marks;
+    let closing = usize::from(marks);
+    // The result ends where prose ends, not at the far edge of a wide pane —
+    // unless the target does not fit there: then the row takes what the pane
+    // has, and gives up its column before it gives up its words.
+    let column = look.reading_width(width);
+    let wanted: usize = target.iter().map(Span::width).sum();
+    let short = wanted.saturating_sub(target_budget(verb, &result, column).saturating_sub(closing));
+    let width = width.min(column + short);
     let opened = if marks { format!("{verb}(") } else { format!("{verb} ") };
     let mut spans = vec![glyph, Span::raw(" "), Span::bold(opened)];
     let result_width: usize = result.iter().map(Span::width).sum();
-    let closing = usize::from(marks);
     let target = Line::new(target).truncated(target_budget(verb, &result, width).saturating_sub(closing));
     spans.extend(target.spans);
     if marks {

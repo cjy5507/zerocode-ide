@@ -327,7 +327,8 @@ pub fn one_line(
         spans.push(Span::dim(" · "));
         spans.push(Span::new(about.to_string(), Style::new().dim().italic()));
     }
-    vec![Line::empty(), Line::new(spans).truncated(super::style::current().reading_width(width))]
+    // One row, cut and not wrapped: at the pane's edge, not the prose column.
+    vec![Line::empty(), Line::new(spans).truncated(width)]
 }
 
 /// `  … +N lines` under the title while the fold is closed — the tool

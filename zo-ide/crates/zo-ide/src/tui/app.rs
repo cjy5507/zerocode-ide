@@ -2139,7 +2139,7 @@ impl Ui {
         // another, so the work shows while it runs and no row of it goes
         // away before the fold is said.
         let room = turns::live_room(usize::from(self.painter.max_height()));
-        let mut rows = self.fold.live_rows(super::style::current().reading_width(width), room);
+        let mut rows = self.fold.live_rows(width, room);
         let held = self.fold.held();
         if !held.is_empty() {
             rows.extend(held.iter().cloned());
@@ -9088,6 +9088,47 @@ mod tests {
 
     fn says(ui: &mut super::Ui, ids: &BlockIdGen, words: &str) {
         ui.block(RenderBlock::TextDelta { id: ids.next(), text: format!("{words}\n"), done: true });
+    }
+
+    /// Under the marks look prose keeps to the reading width — 100 columns.
+    /// A finished step's row in the viewport is cut, not wrapped, and it is
+    /// cut at the pane's edge: on a pane of 200 a command of 150 columns is
+    /// shown whole. It was cut at 100 with half the pane empty ("글이
+    /// 짤리는 현상", 2026-11-12).
+    #[test]
+    fn the_marks_look_cuts_a_live_steps_row_at_the_panes_edge() {
+        use runtime::message_stream::types::ToolResultBody;
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !super::super::style::in_fresh_run(&format!(
+            "{module}::the_marks_look_cuts_a_live_steps_row_at_the_panes_edge"
+        )) {
+            return;
+        }
+        super::super::style::init(&crate::preferences::Preferences::default());
+        assert_eq!(super::super::style::current().reading_width(200), super::super::style::DEFAULT_PROSE_WIDTH);
+        let mut ui = test_ui();
+        ui.view = super::super::style::ConversationView::Turns;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        let ids = BlockIdGen::default();
+        let command = format!("git -C /Users/dev/app show HEAD:{}", "crates/app/src/session/".repeat(5));
+        assert!(command.len() > 120 && command.len() < 180, "{}", command.len());
+        says(&mut ui, &ids, "I will look at the hook.");
+        ui.block(tool_call(&ids, "toolu_run", "bash", &json!({ "command": command })));
+        ui.block(RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId("toolu_run".to_string()),
+            is_error: false,
+            body: ToolResultBody::Text { content: "ok\n".to_string(), truncated: false },
+        });
+        // The next words send the finished call to the fold; the viewport
+        // shows it above them.
+        says(&mut ui, &ids, "Next.");
+        assert!(ui.fold.has_steps(), "the finished call went to the fold");
+        let live: Vec<String> = ui.active_cell(200).0.iter().map(Line::plain).collect();
+        assert!(live.iter().any(|row| row.contains(&command)), "the command was cut on a pane with room for it: {live:#?}");
+        // On a pane narrower than the command it is cut at that pane's edge.
+        let narrow: Vec<String> = ui.active_cell(80).0.iter().map(Line::plain).collect();
+        assert!(narrow.iter().any(|row| row.contains("Run git -C") && row.ends_with('…')), "{narrow:#?}");
     }
 
     /// The `turns` view: finished calls are held for one cell, a short text

@@ -49,6 +49,31 @@ fn a_finished_read_is_drawn_as_a_call_with_its_result_at_the_edge() {
     assert_eq!(rows[0], format!("{head}{}{result}", " ".repeat(gap)));
 }
 
+/// The result ends where prose ends — the reading width, 100 columns — on a
+/// pane wider than that. A target that does not fit there is not cut there:
+/// the row takes what the pane has, and is cut only at the pane's edge
+/// ("글이 짤리는 현상", 2026-11-12 — a row cut at 100 on a pane of 200).
+#[test]
+fn a_tool_row_gives_up_its_column_before_it_cuts_its_target() {
+    if !style::in_fresh_run(&path("a_tool_row_gives_up_its_column_before_it_cuts_its_target")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let column = style::DEFAULT_PROSE_WIDTH;
+    // A short target: the result stands on the prose column, as before.
+    let short = plain(&read_row("src/app.py").lines(200, Duration::ZERO));
+    assert!(short[0].ends_with("12 lines") && short[0].chars().count() == column, "{short:?}");
+    // A target of 150 columns on a pane of 200: shown whole, result after it.
+    let long = format!("{}app.py", "crates/app/src/session/".repeat(6));
+    assert!(long.len() > 130 && long.len() < 160, "{}", long.len());
+    let wide = plain(&read_row(&long).lines(200, Duration::ZERO));
+    assert_eq!(wide[0], format!("⏺ Read({long}) 12 lines"));
+    // The same target on a pane of 120: cut at the pane's edge, not at 100.
+    let tight = plain(&read_row(&long).lines(120, Duration::ZERO));
+    assert!(tight[0].contains('…') && tight[0].ends_with("12 lines"), "{tight:?}");
+    assert_eq!(tight[0].chars().count(), 120, "{tight:?}");
+}
+
 #[test]
 fn the_file_a_tool_row_names_opens_from_the_row() {
     if !style::in_fresh_run(&path("the_file_a_tool_row_names_opens_from_the_row")) {
