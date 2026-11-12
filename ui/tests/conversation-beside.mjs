@@ -10,8 +10,12 @@
 import { afterTurns, openAfterScene } from "./conversation-after.mjs";
 import { foldConversations, openWindowTestPage } from "./window-boot.mjs";
 
-/* A window whose pane has the room: the page keeps a column beside the panel. */
+/* The window the person passed the draft at: with both side columns open its
+ * pane has the room for the panel by a few px. */
 const WIDE = { context: { viewport: { width: 1920, height: 1080 } } };
+/* A window whose pane has the room to spare: the scene stands here, so a side
+ * column that grows moves the one check that asks about 1920 and nothing else. */
+const ROOMY = { width: 2240, height: 1080 };
 /* The harness's own window, whose pane has not. */
 const NARROW = { width: 1280, height: 860 };
 
@@ -107,6 +111,13 @@ export async function testConversationBeside(browser, origin, ok) {
     await foldConversations(page);
     await settle(page);
     const term = await page.evaluate(() => activePaneOf(currentTab()));
+    const approved = await page.evaluate(readBeside);
+    ok("beside: at the window the draft was passed at — 1920 wide, both side columns open — the pane has the room for the panel",
+      Number.isFinite(approved.width) && Number.isFinite(approved.column) && approved.page.width - approved.width >= approved.column,
+      JSON.stringify({ page: approved.page, panel: approved.width, column: approved.column, spare: approved.page.width - approved.width - approved.column }));
+    await page.setViewportSize(ROOMY);
+    await settle(page);
+    await settle(page);
     const start = await page.evaluate(readBeside);
     ok("beside: the scene's pane has the room — its page is as wide as the panel and the column it must keep, and no panel stands before a press",
       Number.isFinite(start.width) && Number.isFinite(start.column) && start.page.width - start.width >= start.column &&
@@ -275,7 +286,7 @@ export async function testConversationBeside(browser, origin, ok) {
     await page.locator(".pane-chat .helper-turn.is-latest .chat-result-all").click();
     await settle(page);
     const inline = await page.evaluate(readBeside);
-    await page.setViewportSize(WIDE.context.viewport);
+    await page.setViewportSize(ROOMY);
     await settle(page);
     await settle(page);
     const wide = await page.evaluate(readBeside);
