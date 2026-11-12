@@ -65,6 +65,7 @@ mod workspace_scope_guard;
 mod workspace_checkpoint;
 mod worktree_tools;
 pub use worktree_tools::prepare_start_worktree;
+pub use file_tools::sniff_image_mime;
 
 // Public API.
 pub use tool_digest::{configure_tool_digest, ToolDigestMode, TOOL_DIGEST_ENV};

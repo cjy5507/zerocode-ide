@@ -892,7 +892,8 @@ pub(crate) fn stage_image(
 /// Detect a supported image media type from magic bytes. Returns `None` for
 /// anything the Anthropic image API does not accept, so the tool fails loudly
 /// rather than staging an unusable blob.
-pub(crate) fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+#[must_use]
+pub fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
         [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, ..] => Some("image/png"),
         [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),

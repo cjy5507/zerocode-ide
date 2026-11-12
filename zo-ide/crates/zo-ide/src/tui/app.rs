@@ -1035,10 +1035,30 @@ fn load_submission_images(paths: &[PathBuf]) -> Result<Vec<(String, String)>, St
         .iter()
         .map(|path| {
             std::fs::read(path)
-                .map(|bytes| ("image/png".to_string(), base64::engine::general_purpose::STANDARD.encode(bytes)))
+                .map(|bytes| {
+                    (
+                        submission_image_media_type(path, &bytes).to_string(),
+                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                    )
+                })
                 .map_err(|error| format!("could not read pasted image {}: {error}", path.display()))
         })
         .collect()
+}
+
+/// The media type a pasted image is sent under: what its first bytes say
+/// (`tools::sniff_image_mime`, the one the `read_image` tool uses), else what
+/// its name says among the formats this build decodes, else PNG — the
+/// clipboard's own form, and what every attachment was labelled before.
+fn submission_image_media_type(path: &Path, bytes: &[u8]) -> &'static str {
+    tools::sniff_image_mime(bytes)
+        .or_else(|| {
+            image::ImageFormat::from_path(path)
+                .ok()
+                .filter(image::ImageFormat::reading_enabled)
+                .map(|format| format.to_mime_type())
+        })
+        .unwrap_or_else(|| image::ImageFormat::Png.to_mime_type())
 }
 
 /// The row a finished turn ended on, kept so a redraw of the conversation
@@ -8133,6 +8153,47 @@ mod tests {
     fn an_idle_screen_asks_for_no_frames() {
         let ui = test_ui();
         assert!(!ui.animating(), "an idle screen asked the frame ticker to run");
+    }
+
+    /// A pasted JPEG, GIF or WebP goes to the model under its own media type.
+    /// Every attachment used to be labelled `image/png`, whatever it held.
+    #[test]
+    fn a_pasted_image_is_sent_under_the_media_type_of_its_bytes() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let pixel = image::RgbImage::from_pixel(1, 1, image::Rgb([0, 0, 0]));
+        let mut composer = crate::tui::composer::Composer::new();
+        for (name, format) in [
+            ("photo.jpg", image::ImageFormat::Jpeg),
+            ("moving.gif", image::ImageFormat::Gif),
+            ("still.webp", image::ImageFormat::WebP),
+            ("screen.png", image::ImageFormat::Png),
+        ] {
+            let path = directory.path().join(name);
+            pixel.save_with_format(&path, format).expect("write the test image");
+            assert!(
+                composer.handle_paste_image_path(path.to_str().expect("UTF-8 path")),
+                "{name} attaches as an image"
+            );
+        }
+        let submission = composer.submit();
+        let images = super::load_submission_images(&submission.image_paths).expect("read the attachments");
+        let sent: Vec<&str> = images.iter().map(|(media_type, _)| media_type.as_str()).collect();
+        assert_eq!(sent, ["image/jpeg", "image/gif", "image/webp", "image/png"]);
+    }
+
+    /// Bytes no format claims fall back to the file's name, and a name no
+    /// decoder here knows falls back to PNG, as before.
+    #[test]
+    fn an_image_its_bytes_do_not_name_is_labelled_by_its_name_then_as_png() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let named = directory.path().join("cut.jpeg");
+        let unnamed = directory.path().join("cut.bin");
+        for path in [&named, &unnamed] {
+            std::fs::write(path, b"no known header").expect("write the test file");
+        }
+        let images = super::load_submission_images(&[named, unnamed]).expect("read the attachments");
+        let sent: Vec<&str> = images.iter().map(|(media_type, _)| media_type.as_str()).collect();
+        assert_eq!(sent, ["image/jpeg", "image/png"]);
     }
 
     /// 턴 내내 프레임마다 도는 팝업 판정은 컴포저가 `/fast` 를 띄울 수 있을
