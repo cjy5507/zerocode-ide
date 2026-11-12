@@ -17111,7 +17111,7 @@ mod tests {
         );
         let routing = block_after(window, "function routeText(text) {");
         let keying = block_after(window, "function routeKeyPress(target, press) {");
-        let paste = block_after(window, "async function pasteTextAt(target, text) {");
+        let paste = block_after(window, "async function pasteTextAt(target, text, hand) {");
         assert!(
             routing.contains("hideTerminalPointerForInput(target);")
                 && keying.contains("hideTerminalPointerForInput(target);")
@@ -17221,8 +17221,9 @@ mod tests {
             .expect("paste no longer goes through the one background read");
         assert!(
             capture_at < via_at
-                && at.contains("text: (text) => pasteTextAt(captured, text)")
-                && at.contains("image: (path) => pasteTextAt(captured, path)"),
+                && at.contains("const started = handNow();")
+                && at.contains("text: (text) => pasteTextAt(captured, text, started)")
+                && at.contains("image: (path) => pasteTextAt(captured, path, started)"),
             "the paste target is read after the async clipboard gap:\n{at}"
         );
         let reading = block_after(window, "async function pasteClipboardVia(to) {");
@@ -17276,7 +17277,7 @@ mod tests {
                 "{name} reads clipboardData in code: a slow pasteboard owner would hold the main thread"
             );
         }
-        let routing = block_after(window, "async function pasteTextAt(target, text) {");
+        let routing = block_after(window, "async function pasteTextAt(target, text, hand) {");
         assert!(
             routing.contains(r#"invoke("term_paste"#)
                 && routing.contains(r#"invoke("paste_input"#)
@@ -24123,7 +24124,11 @@ mod tests {
         );
         let routing = block_after(window, "function routeText(text) {");
         assert!(
-            routing.contains("invoke(\"term_text\", { term: target.term, text, human: true })"),
+            // And it says whose hand it is, past a composition's or a
+            // timer's gap (the room's wake budget, review t-105587).
+            routing.contains(
+                "invoke(\"term_text\", { term: target.term, text, human: true }, { hand: flowHand(typingHand) })"
+            ),
             "keyboard text does not identify itself at the shared terminal road:\n{routing}"
         );
     }

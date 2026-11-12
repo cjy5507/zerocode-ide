@@ -105,6 +105,8 @@ export async function testRoomHand(browser, origin, ok) {
     // 키의 손(사람)이 아니라 지금의 손(에이전트)이다.
     await cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 });
     await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 });
+    await settle();
+    await hands(); // the Shift's own key, the person's — not this scene's question
     const stale = await page.evaluate(async () => {
       agentPressing = true;
       try {
