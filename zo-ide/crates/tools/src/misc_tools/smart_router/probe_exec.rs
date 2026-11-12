@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use api::{InputMessage, MessageRequest, OutputContentBlock};
-use runtime::{parse_probe_response, probe_prompt, ModelInventory, ProbeAssessment};
+use runtime::{parse_probe_response, probe_prompt, ProbeAssessment};
 
 use crate::misc_tools::agent_tools::{build_provider_client_for_agent, shared_agent_runtime};
 
@@ -377,8 +377,9 @@ fn parked_ms_for(kind: api::ProviderKind) -> u64 {
 /// provider's login those words left for that provider's account. Measured on
 /// v1.1.144 and v1.1.145: a turn of a `fable` session, and a helper's task in
 /// a `sonnet` session and in one on a person's own provider, went to OpenAI's
-/// fast model first. The connected inventory is no longer read here.
-fn probe_model(_connected: &ModelInventory, parent_model: &str) -> Option<String> {
+/// fast model first. What is connected beside the session's provider is not
+/// read at all: the callers build no model list for the probe.
+fn probe_model(parent_model: &str) -> Option<String> {
     crate::fanout::fast_tier_model(Some(parent_model))
 }
 
@@ -386,7 +387,7 @@ fn probe_model(_connected: &ModelInventory, parent_model: &str) -> Option<String
 /// ([`probe_model`]): the turn's gate asks before it admits the probe, so a
 /// session with none is told as a decline and builds nothing.
 pub(super) fn probe_has_a_model(parent_model: &str) -> bool {
-    crate::fanout::fast_tier_model(Some(parent_model)).is_some()
+    probe_model(parent_model).is_some()
 }
 
 /// Every task that lost its probe to a session with no fast tier of its own:
@@ -415,7 +416,6 @@ fn skip_misses(slots: &mut [Option<ProbeSlot>], misses: &[(usize, u64)], road: P
 /// Run (or recall) the routing readers for one task. Returns `None` on any
 /// failure — the caller stays on the deterministic classification.
 pub(super) fn route_probe_assessment(
-    inventory: &ModelInventory,
     parent_model: &str,
     description: &str,
     prompt: &str,
@@ -423,7 +423,7 @@ pub(super) fn route_probe_assessment(
     attempt: &str,
     admitted: Admitted,
 ) -> Option<ProbeAssessment> {
-    route_probe_assessment_judged(inventory, parent_model, description, prompt, facts, attempt, admitted)
+    route_probe_assessment_judged(parent_model, description, prompt, facts, attempt, admitted)
         .map(|probed| probed.assessment)
 }
 
@@ -439,7 +439,6 @@ pub(super) struct ProbedTask {
 /// [`route_probe_assessment`] with the seat that answered kept beside the
 /// verdict — the status row's word for a judged turn (t-5872).
 pub(super) fn route_probe_assessment_judged(
-    inventory: &ModelInventory,
     parent_model: &str,
     description: &str,
     prompt: &str,
@@ -448,7 +447,6 @@ pub(super) fn route_probe_assessment_judged(
     admitted: Admitted,
 ) -> Option<ProbedTask> {
     probe_and_shadow_judged(
-        inventory,
         parent_model,
         &[(description, prompt)],
         &[facts],
@@ -472,14 +470,12 @@ pub(super) fn route_probe_assessment_judged(
 /// Record-only mode fires after the chat probe, detached, and never changes the
 /// returned assessments.
 pub(super) fn route_probe_assessments(
-    inventory: &ModelInventory,
     parent_model: &str,
     tasks: &[(&str, &str)],
     attempt: &str,
     admitted: Admitted,
 ) -> Vec<Option<ProbeAssessment>> {
     probe_and_shadow(
-        inventory,
         parent_model,
         tasks,
         &[],
@@ -495,7 +491,6 @@ pub(super) fn route_probe_assessments(
 /// fired, and to give it a shorter wall. On the active road the batch handed
 /// back is the control sample's, when the batch drew one.
 pub(super) fn probe_and_shadow(
-    inventory: &ModelInventory,
     parent_model: &str,
     tasks: &[(&str, &str)],
     facts: &[runtime::RoutingFacts],
@@ -504,7 +499,7 @@ pub(super) fn probe_and_shadow(
     admitted: Admitted,
 ) -> (Vec<Option<ProbeAssessment>>, Option<tokio::task::JoinHandle<()>>) {
     let (probed, shadow) =
-        probe_and_shadow_judged(inventory, parent_model, tasks, facts, attempt, shadow_deadline, admitted);
+        probe_and_shadow_judged(parent_model, tasks, facts, attempt, shadow_deadline, admitted);
     (
         probed
             .into_iter()
@@ -523,7 +518,6 @@ pub(super) fn probe_and_shadow(
 /// allows and the judgment records, detached — asked about every task the
 /// batch names, the ones the probe was not asked about included.
 fn probe_and_shadow_judged(
-    inventory: &ModelInventory,
     parent_model: &str,
     tasks: &[(&str, &str)],
     facts: &[runtime::RoutingFacts],
@@ -552,7 +546,7 @@ fn probe_and_shadow_judged(
             .zip(&active.assessments)
             .map(|(task, assessment)| if assessment.is_some() || !admitted.probe { ("", "") } else { *task })
             .collect();
-        let fallback = probe_slots(inventory, parent_model, &fallback_tasks, attempt, ProbeUse::Routing);
+        let fallback = probe_slots(parent_model, &fallback_tasks, attempt, ProbeUse::Routing);
         let results = active
             .assessments
             .into_iter()
@@ -570,12 +564,12 @@ fn probe_and_shadow_judged(
         // clock, for the rows the judge compares.
         let control = active
             .control
-            .map(|batch| super::decision_shadow::fire_control(batch, inventory, parent_model));
+            .map(|batch| super::decision_shadow::fire_control(batch, parent_model));
         return (results, control);
     }
     let probed_tasks: Vec<(&str, &str)> =
         tasks.iter().map(|task| if admitted.probe { *task } else { ("", "") }).collect();
-    let slots = probe_slots(inventory, parent_model, &probed_tasks, attempt, ProbeUse::Routing);
+    let slots = probe_slots(parent_model, &probed_tasks, attempt, ProbeUse::Routing);
     let shadow = super::decision_shadow::fire(tasks, facts, &slots, attempt, shadow_deadline);
     let results = slots
         .iter()
@@ -594,7 +588,6 @@ fn probe_and_shadow_judged(
 /// shadow's control sample, which makes the same call for a row rather than
 /// a route.
 pub(super) fn probe_slots(
-    inventory: &ModelInventory,
     parent_model: &str,
     tasks: &[(&str, &str)],
     attempt: &str,
@@ -658,7 +651,7 @@ pub(super) fn probe_slots(
     if misses.is_empty() {
         return slots;
     }
-    let Some(model) = probe_model(inventory, parent_model) else {
+    let Some(model) = probe_model(parent_model) else {
         // No fast tier that is the session's own: nobody is asked, and the
         // words stay where the session's own requests go.
         skip_misses(&mut slots, &misses, road);
@@ -787,8 +780,7 @@ mod tests {
     /// on a machine that held an OpenAI login as well (v1.1.145).
     #[test]
     fn the_probe_asks_the_fast_model_of_the_sessions_own_provider() {
-        let connected = ModelInventory::new("claude-fable-5-1", Vec::new());
-        let asked = |parent: &str| probe_model(&connected, parent).map(|model| api::resolve_model_alias(&model));
+        let asked = |parent: &str| probe_model(parent).map(|model| api::resolve_model_alias(&model));
         let haiku = api::resolve_model_alias("haiku");
         for anthropic in ["fable", "claude-fable-5-1", "opus", "sonnet"] {
             assert_eq!(asked(anthropic), Some(haiku.clone()), "{anthropic}");
@@ -807,14 +799,12 @@ mod tests {
     /// ask, and a batch for it asks nobody: each task's slot says why.
     #[test]
     fn a_session_with_no_fast_model_of_its_own_asks_nobody() {
-        let connected = ModelInventory::new("zq-model-nobody-lists", Vec::new());
         for own in ["zq-model-nobody-lists", "zq-relay/some-model"] {
-            assert_eq!(probe_model(&connected, own), None, "{own}");
+            assert_eq!(probe_model(own), None, "{own}");
             assert!(!probe_has_a_model(own), "{own}");
         }
         let prompt = format!("zq a task nobody is asked about {}", std::process::id());
         let slots = probe_slots(
-            &connected,
             "zq-model-nobody-lists",
             &[("zq", prompt.as_str())],
             "turn-zq@1",
@@ -848,13 +838,11 @@ mod live_path_tests {
     /// tax row is skipped (an attempt nobody declared writes none), and the
     /// probe path under test is otherwise identical.
     fn route_probe_assessment_for_tests(
-        inventory: &super::ModelInventory,
         parent_model: &str,
         description: &str,
         prompt: &str,
     ) -> Option<super::ProbeAssessment> {
         super::route_probe_assessment(
-            inventory,
             parent_model,
             description,
             prompt,
@@ -869,9 +857,7 @@ mod live_path_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard};
 
-    use runtime::{
-        ModelInventory, RouteConfidence, RouteTaskComplexity, RouteTaskIntent, RouteTaskRisk,
-    };
+    use runtime::{RouteConfidence, RouteTaskComplexity, RouteTaskIntent, RouteTaskRisk};
 
     use super::PROBE_BASE_URL_ENV;
 
@@ -1089,10 +1075,6 @@ mod live_path_tests {
         format!("data: {delta}\n\ndata: {completed}\n\ndata: [DONE]\n\n")
     }
 
-    fn inventory() -> ModelInventory {
-        ModelInventory::new("gpt-5.5-codex", Vec::new())
-    }
-
     #[test]
     fn live_probe_fuses_a_four_field_assessment_including_intent() {
         let mock = MockCodex::sse(responses_sse(
@@ -1101,7 +1083,6 @@ mod live_path_tests {
         let _env = ProbeEnv::pointing_at(mock.addr);
 
         let assessment = route_probe_assessment_for_tests(
-            &inventory(),
             "gpt-5.5-codex",
             "e2e-intent",
             "redesign the settings screen",
@@ -1140,7 +1121,6 @@ mod live_path_tests {
         let _env = ProbeEnv::pointing_at(mock.addr);
 
         let assessment = route_probe_assessment_for_tests(
-            &inventory(),
             "gpt-5.5-codex",
             "e2e-legacy",
             "rename one config key",
@@ -1168,7 +1148,6 @@ mod live_path_tests {
         let _env = ProbeEnv::pointing_at(mock.addr);
 
         let assessment = route_probe_assessment_for_tests(
-            &inventory(),
             "gpt-5.5-codex",
             "e2e-rejected",
             "anything at all",
@@ -1206,7 +1185,7 @@ mod live_path_tests {
             PROBE_CONTROL_EVERY,
         };
         use super::super::{probe_and_shadow, task_fingerprint, ProbeSlot};
-        use super::{inventory, responses_sse, MockCodex, ProbeEnv, PROBE_BILLED_INPUT_TOKENS};
+        use super::{responses_sse, MockCodex, ProbeEnv, PROBE_BILLED_INPUT_TOKENS};
 
         /// A wall far past any scripted delay, for the cases not about time.
         const UNHURRIED: Duration = Duration::from_secs(8);
@@ -1443,7 +1422,6 @@ mod live_path_tests {
         fn funnel(tasks: &[(&str, &str)], deadline: Duration) -> (Vec<Option<ProbeAssessment>>, Duration) {
             let started = Instant::now();
             let (results, shadow) = probe_and_shadow(
-                &inventory(),
                 "gpt-5.5-codex",
                 tasks,
                 &[],
@@ -2154,7 +2132,6 @@ mod live_path_tests {
                 let before = env.rows().len();
                 let started = Instant::now();
                 let (_, shadow) = probe_and_shadow(
-                    &inventory(),
                     "gpt-5.5-codex",
                     &[("", task.as_str())],
                     &[],

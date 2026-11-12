@@ -923,16 +923,12 @@ async fn run_shadow_batch(batch: ShadowBatch) {
 /// Fire an active batch's control sample, detached, and hand back its task.
 ///
 /// Called by the funnel once routing is settled, because the probe needs
-/// what the funnel has and the shadow does not: the inventory and the
-/// parent model the probe's own model is resolved from. The same detach as
+/// what the funnel has and the shadow does not: the parent model the
+/// probe's own model is resolved from. The same detach as
 /// [`fire`]; the batch's ledger was resolved by the active road before it
 /// wrote its rows.
-pub(super) fn fire_control(
-    batch: ControlBatch,
-    inventory: &runtime::ModelInventory,
-    parent_model: &str,
-) -> tokio::task::JoinHandle<()> {
-    shared_agent_runtime().spawn(run_control_batch(batch, inventory.clone(), parent_model.to_string()))
+pub(super) fn fire_control(batch: ControlBatch, parent_model: &str) -> tokio::task::JoinHandle<()> {
+    shared_agent_runtime().spawn(run_control_batch(batch, parent_model.to_string()))
 }
 
 /// Run the chat probe for the sampled tasks and append one control row each
@@ -940,11 +936,7 @@ pub(super) fn fire_control(
 /// control road), then [`append_shadow_row`] as every other row. Nothing is
 /// judged here: the rows hold no request the seat was asked, and the judge
 /// reads them at its next boundary.
-async fn run_control_batch(
-    batch: ControlBatch,
-    inventory: runtime::ModelInventory,
-    parent_model: String,
-) {
+async fn run_control_batch(batch: ControlBatch, parent_model: String) {
     let ControlBatch { ledger, attempt, shots } = batch;
     let words: Vec<(String, String)> =
         shots.iter().map(|shot| (shot.description.clone(), shot.prompt.clone())).collect();
@@ -954,7 +946,7 @@ async fn run_control_batch(
     let probed = tokio::task::spawn_blocking(move || {
         let tasks: Vec<(&str, &str)> =
             words.iter().map(|(description, prompt)| (description.as_str(), prompt.as_str())).collect();
-        super::probe_exec::probe_slots(&inventory, &parent_model, &tasks, &billed, ProbeUse::Control)
+        super::probe_exec::probe_slots(&parent_model, &tasks, &billed, ProbeUse::Control)
     })
     .await
     .unwrap_or_default();

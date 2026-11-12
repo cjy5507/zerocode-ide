@@ -596,7 +596,6 @@ pub(crate) fn smart_parent_model_for_agent_with_auto_type(
     let probe = spawn_is_read(&context, probes)
         .then(|| {
             super::probe_exec::route_probe_assessment(
-                &context.inventory,
                 parent_model,
                 &input.description,
                 &input.prompt,
@@ -703,7 +702,6 @@ pub(crate) fn apply_smart_models_to_spawn_input_with_auto_types(
                 })
                 .collect();
             super::probe_exec::route_probe_assessments(
-                &context.inventory,
                 parent_model,
                 &tasks,
                 &crate::misc_tools::agent_tools::served_turn_attempt(

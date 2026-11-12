@@ -570,9 +570,7 @@ pub fn assess_turn_probed(
         }
         return deterministic;
     }
-    let inventory = runtime::connected_model_inventory(parent_model);
     let Some(probed) = super::probe_exec::route_probe_assessment_judged(
-        &inventory,
         parent_model,
         "",
         user_text,
