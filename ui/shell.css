@@ -46583,7 +46583,9 @@ button.board-build-failure-part:focus-visible {
 :root[data-surface="popout"] body {
   /* The titlebar and the status bar are the main window's chrome; this window
    * wears the operating system's own frame instead (there is no close button
-   * inside it, and the OS frame is the only way out). */
+   * inside it, and the OS frame is the only way out). With no bar, what stands
+   * under the bar (the Computer Use dock) stands at the top. */
+  --titlebar-height: 0px;
   grid-template-rows: minmax(0, 1fr);
 }
 
@@ -61117,10 +61119,12 @@ button.jev-token:hover {
  * the hand-over) stand in the ask popup in the middle of the window. Every
  * colour is a token; the stop is halt, the working dot breathes. The band and
  * the work screen panel below it (t-59372) stand in one dock that takes no
- * clicks itself, so the window beside them stays in reach. */
+ * clicks itself, so the window beside them stays in reach. It stands just
+ * under the title bar, not on it: centred on the bar it covered the middle
+ * of the tab strip for as long as the operator worked (2026-11-12). */
 .computer-dock {
   position: fixed;
-  top: var(--space-3);
+  top: calc(var(--titlebar-height) + var(--space-2));
   left: 50%;
   transform: translateX(-50%);
   z-index: 60;
