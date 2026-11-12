@@ -48,7 +48,7 @@ pub const PEERS_VERB: &str = "peers";
 pub const ROOM_VERBS: &[&str] = &[PEERS_VERB, "send", "ask", "reply", "check"];
 
 /// Room letters two panes may write each other, both ways together, between
-/// two of the person's inputs in either pane ([`pair_allowed`]): a question
+/// two of the person's inputs in either pane (`pair_allowed`): a question
 /// and its answer five times over. The wake budget keeps a resting pane from
 /// being woken; this keeps two panes already turning — an `ask` answered,
 /// asked back, answered — from talking on with nobody watching.

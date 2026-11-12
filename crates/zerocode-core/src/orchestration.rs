@@ -16819,7 +16819,7 @@ pub trait Launcher {
 
     /// When the person last typed in the pane at `seat` (`team/pane`), or
     /// when the window opened if not since — the start of what a room lets
-    /// two panes say to each other ([`room::pair_allowed`]). `None` is nobody
+    /// two panes say to each other (`room::pair_allowed`). `None` is nobody
     /// knows, which counts every letter the pair ever wrote.
     fn person_input_ms(&self, _seat: &str) -> Option<i64> {
         None
