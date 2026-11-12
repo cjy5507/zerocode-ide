@@ -368,10 +368,37 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
-        assert_eq!(
-            read_login_shell_path(&fake.to_string_lossy(), SPAWN_TIMEOUT),
-            vec!["/fake/bin".to_string(), "/other/bin".to_string()]
-        );
+        // The window's own deadline is not what this part proves — the stuck
+        // shell below does — and it is too short for a test binary sharing a
+        // loaded machine: in a whole zerocode-shell run (load 18, 2026-11-13)
+        // this read hit SPAWN_TIMEOUT at 5.03 s, while the same fake shell
+        // run straight after answered at once. The read returns when the
+        // shell exits, so a long deadline costs nothing when it answers.
+        let deadline = SPAWN_TIMEOUT * 12;
+        // `read_login_shell_path` answers nothing alike for a spawn that
+        // failed, a wait that failed, a deadline that passed and output
+        // without its markers, so a miss says how long the read took and what
+        // the same shell gives when run directly — which of those it was.
+        let started = std::time::Instant::now();
+        let read = read_login_shell_path(&fake.to_string_lossy(), deadline);
+        if read != ["/fake/bin", "/other/bin"] {
+            let took = started.elapsed();
+            let direct = match crate::proc::quiet_command(&fake)
+                .args(["-ilc", "true"])
+                .output()
+            {
+                Ok(output) => format!(
+                    "{} with {:?}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout)
+                ),
+                Err(error) => format!("a spawn error: {error}"),
+            };
+            panic!(
+                "the fake shell's PATH was read as {read:?} after {took:?} \
+                 (deadline {deadline:?}); run directly it gives {direct}"
+            );
+        }
 
         // A shell that never answers is killed at the deadline and reports
         // nothing — the window must not hang on somebody's broken rc file.
