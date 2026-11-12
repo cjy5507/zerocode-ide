@@ -7096,6 +7096,12 @@ fn an_unmarked_stall_is_asked_about_once_and_recorded_beside_the_silence() {
         Some(zerocode_core::stall_cause::Cause::ALL.len()),
         "one probability per cause the rubric offers"
     );
+    // A recording seat's answer is a row, never an order, and the row says so.
+    assert_eq!(
+        row[zerocode_core::jev::summary::APPLIED.canonical],
+        false,
+        "{row}"
+    );
     assert_eq!(row["requests"], 1);
     assert!(
         row["redactedLines"]
@@ -7118,6 +7124,61 @@ fn an_unmarked_stall_is_asked_about_once_and_recorded_beside_the_silence() {
         1,
         "shadow changed what the coordinator hears"
     );
+}
+
+/// Under a person's `on` the answer is the sweep's reading of the silence:
+/// its row says `applied`, the week counts it as one acted on, and the next
+/// beat hands the coordinator the cause it named. Under `shadow` the same
+/// answer is a row and nothing more (the case above). The seat wrote no
+/// `applied` at all until 2026-11-12, so its week counted nothing as acted on
+/// and the screen read a seat a person left on as one only recording.
+#[test]
+fn an_answer_the_sweep_acts_on_says_applied_on_its_row() {
+    use crate::quota_wall::tests::{CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION};
+    use zerocode_core::jev::{JevMode, summary};
+    use zerocode_core::orchestration::STALL_JUDGED_REASON;
+    let stood = StoppedWorker::stand(96_460, "", Vec::new());
+    let endpoint = crate::systemone::tests::Endpoint::serving(
+        "HTTP/1.1 200 OK",
+        a_cause_answer("finished_without_report"),
+        0,
+    );
+    let home = stood.asks_jev(&endpoint, JevMode::On, "/wt");
+    *stood.host.screen.lock().unwrap() = a_finished_screen_under_a_long_scrollback();
+    stood.stops_on(
+        &[CLAUDE_PLAIN_RECORD, CLAUDE_TURN_DURATION],
+        stood.began + 9_000,
+    );
+    for beat in [10_000, 11_000, 12_000] {
+        tick(&stood.host, &[], stood.began + beat);
+    }
+
+    let rows = StoppedWorker::stall_rows(&home);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["outcome"], "answered");
+    assert_eq!(rows[0]["mode"], JevMode::On.key());
+    assert_eq!(
+        rows[0][summary::APPLIED.canonical],
+        true,
+        "an answer the sweep takes says so on its row: {}",
+        rows[0]
+    );
+    assert_eq!(
+        summary::summarize(&rows, 0).applied,
+        1,
+        "the week counts the answer as one acted on"
+    );
+    let judged: Vec<serde_json::Value> = stood
+        .news("went_quiet", stood.began + 12_001)
+        .into_iter()
+        .filter(|body| body["reason"] == STALL_JUDGED_REASON)
+        .collect();
+    assert_eq!(
+        judged.len(),
+        1,
+        "the reading its row calls applied reached the coordinator once: {judged:?}"
+    );
+    assert_eq!(judged[0]["cause"], "finished_without_report");
 }
 
 /// Nothing is asked where nothing should be: a person's `off`, and a silence

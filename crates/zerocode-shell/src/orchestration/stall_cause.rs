@@ -245,6 +245,19 @@ fn settle(wire: &Wire, question: Question) -> (Value, Option<Waiting>) {
             row["cause"] = json!(choice.cause.word());
             row["probabilities"] = json!(choice.probabilities);
             row["confidence"] = json!(choice.confidence);
+            // Whether the sweep takes this answer as its reading of the
+            // silence — the test `acting_cause` and `acting_judgments` put to
+            // it on the beats that follow, read here off the wire the question
+            // went down. What the sweep then does with the reading (the
+            // coordinator's notice, a typed continuation) waits for a beat
+            // that still finds the worker quiet; what followed is the label's
+            // to say. A seat that never wrote this counted no answer as acted
+            // on, and one a person left `on` read as only recording
+            // (2026-11-12).
+            row[summary::APPLIED.canonical] = json!(
+                act_line_when_acting(wire)
+                    .is_some_and(|line| STALL.acts_on(choice.confidence, line))
+            );
             let waiting = Waiting {
                 key: silence.key(),
                 run: silence.run,
@@ -263,6 +276,17 @@ fn settle(wire: &Wire, question: Question) -> (Value, Option<Waiting>) {
     }
 }
 
+/// The line an answer must reach for the sweep to act on it, when the seat
+/// ACTS — a person's `on`, or `auto` raised by the judge its own ledger
+/// recorded; `None` while it only records. The line is the one its labels
+/// drew (t-9468), and `Some(None)` is a seat acting on every answer while
+/// they drew none. One reading for the row that says `applied` ([`settle`])
+/// and the two that act ([`acting_cause`], [`acting_judgments`]), so a row
+/// cannot say an answer was taken that the sweep would have left.
+fn act_line_when_acting(wire: &Wire) -> Option<Option<u16>> {
+    crate::systemone::applies(wire, &STALL).then(|| crate::systemone::act_line(wire, &STALL))
+}
+
 /// The cause the seat named for `dispatch`, when the seat ACTS — a person's
 /// `on`, or `auto` raised by the judge its own ledger recorded — and the
 /// attempt is still the silence it was asked about. `None` otherwise: a
@@ -273,12 +297,8 @@ pub(super) fn acting_cause(
     dispatch: &str,
 ) -> Option<stall_cause::Cause> {
     let wire = host.jev_wire()?;
-    if !crate::systemone::applies(&wire, &STALL) {
-        return None;
-    }
-    // Only an answer its act line lets act — the line its labels drew
-    // (t-9468), every answer while they drew none.
-    let line = crate::systemone::act_line(&wire, &STALL);
+    // Only an answer its act line lets act.
+    let line = act_line_when_acting(&wire)?;
     let held = book.lock().unwrap_or_else(|held| held.into_inner());
     held.answered
         .get(dispatch)
@@ -309,13 +329,9 @@ pub(super) fn acting_judgments(
     book: &Arc<Mutex<StallBook>>,
     quiet: impl Iterator<Item = (String, String, i64)>,
 ) -> Vec<zerocode_core::orchestration::StallJudged> {
-    let Some(wire) = host.jev_wire() else {
+    let Some(line) = host.jev_wire().and_then(|wire| act_line_when_acting(&wire)) else {
         return Vec::new();
     };
-    if !crate::systemone::applies(&wire, &STALL) {
-        return Vec::new();
-    }
-    let line = crate::systemone::act_line(&wire, &STALL);
     let held = book.lock().unwrap_or_else(|held| held.into_inner());
     quiet
         .filter_map(|(worker, dispatch, since_ms)| {
