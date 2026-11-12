@@ -345,10 +345,58 @@ pub(crate) fn save_automation(
     mut automation: Automation,
 ) -> Result<Vec<AutomationRow>, String> {
     // A job saved from the form is the person's own, whatever it was before:
-    // only the window's card writes who asked (`recipes::schedule`).
-    automation.asked = None;
+    // only the window's card writes who asked (`recipes::schedule`) — except
+    // one that waits to be allowed again, which a save does not release.
+    let root = state.local_data_root();
+    automation.asked = approval_a_form_save_keeps(state.config_root(), &automation, |slug| {
+        flow_standing(root, slug)
+    })?;
     save_automation_in(state.config_root(), automation)?;
     Ok(list_automations(state))
+}
+
+/// What of the stored job's approval a save from the form keeps: nothing —
+/// the job becomes the person's own — unless the stored job WAITS, its Flow
+/// reading differently from the one the person allowed. That wait is the
+/// question 「다시 승인」 asks, about the document as it stands; a save that
+/// dropped the approval answered it without asking, and the changed Flow
+/// walked on the next minute (t-105044, 알아 둘 것 3). A waiting job keeps
+/// its approval through a save — its name, its schedule, its switch may
+/// change, and it still waits — and 「다시 승인」 alone releases it.
+///
+/// `saved` is the job as the form sent it; what it says of an approval is
+/// never read. `standing` reads a Flow's document (`flow_standing`).
+///
+/// # Errors
+///
+/// When a waiting job would be saved as another kind of job — one that names
+/// an agent or a command, or no Flow: there would be nothing left to allow
+/// again, and the job would wait for ever.
+pub(crate) fn approval_a_form_save_keeps(
+    config_root: &Path,
+    saved: &Automation,
+    standing: impl FnOnce(&str) -> Option<computer_use::recipes::schedule::Standing>,
+) -> Result<Option<zerocode_core::automation::Asked>, String> {
+    let Some(held) = stored_automations(config_root)
+        .into_iter()
+        .find(|held| held.id == saved.id)
+    else {
+        return Ok(None);
+    };
+    let Some(asked) = held.asked.clone() else {
+        return Ok(None);
+    };
+    let stands = held.flow.as_deref().and_then(standing);
+    if !held.flow_changed_since_approval(stands.as_ref().map(|one| one.sha256.as_str())) {
+        return Ok(None);
+    }
+    if !saved.runs_flow_directly() {
+        return Err(
+            "다시 승인을 기다리는 예약은 Flow를 걷는 예약으로만 저장할 수 있습니다 — 먼저 「다시 승인」을 누르거나, 지우고 새로 만들어 주세요"
+                .to_string(),
+        );
+    }
+    Ok(Some(asked))
 }
 
 /// 「다시 승인」: allow the Flow of a job an agent asked for, as the document
