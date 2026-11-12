@@ -2492,6 +2492,88 @@ ok("a relation's word stands only where it can be read — never two in one plac
     && wordRoom.rest.words >= wordRoom.far.words,
   JSON.stringify(wordRoom));
 
+/* Test 11d-3: 전체 지도에서 색 없는 군집의 잎은 물러선다(`--knowledge-quiet-weight`, shell.css).
+ *
+ * 선이 없는 여섯 쪽 — 군집이 없으니 모두 색 없는 잎이다. 전체 지도에서 그 점의 채움은 안개색을 토큰의 몫만큼만
+ * 든 잉크(나머지는 바탕)이고 바탕과 3:1을 지킨다. 주변 탐색(`is-local`)의 옷에서는 그 잉크가 걸리지 않는다
+ * (그 판의 채움은 그라데이션이라 색으로 견주지 않고, 규칙이 거는 `--knowledge-tint`가 비었는지를 본다). 대표
+ * 지식과 중심의 단에는 어느 판에서도 걸리지 않는다. GL 손이 읽는 견본도 같은 답을 낸다. */
+const quietInk = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  knowledgeSelectedKey = null;
+  knowledgeQuery = "";
+  window.__VAULT__ = { pages: 6, customEdges: [] };
+  dropTab("knowledge");
+  document.getElementById("nav-knowledge").click();
+  await wait(300);
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const picture = view.querySelector(".knowledge-picture:not(.knowledge-gl-swatch)");
+  const bytes = (word) => {
+    const into = new Float32Array(4);
+    knowledgeGlColor(word, into, 0);
+    return [into[0], into[1], into[2]].map((one) => Math.round(one * 255));
+  };
+  const probe = document.createElement("div");
+  view.appendChild(probe);
+  const inkOf = (name) => {
+    probe.style.color = `var(${name})`;
+    return bytes(getComputedStyle(probe).color);
+  };
+  const mist = inkOf("--ink-mist");
+  const ground = inkOf("--knowledge-ground");
+  probe.remove();
+  const weight = Number.parseFloat(getComputedStyle(view).getPropertyValue("--knowledge-quiet-weight")) / 100;
+  const want = mist.map((one, at) => Math.round(one * weight + ground[at] * (1 - weight)));
+  const quiet = "g.knowledge-node.is-page:not([data-hue])[data-tier=\"leaf\"] .knowledge-dot";
+  const dot = picture.querySelector(quiet);
+  const node = dot?.parentNode ?? null;
+  const tintOf = () => (node === null ? null : getComputedStyle(node).getPropertyValue("--knowledge-tint").trim());
+  const wasLocal = picture.classList.contains("is-local");
+  const global = dot === null ? null : bytes(getComputedStyle(dot).fill);
+  const tintGlobal = tintOf();
+  /* 같은 점을 다른 단으로 입혀 본다 — 규칙은 잎에만 걸린다. */
+  const tiers = {};
+  for (const tier of ["major", "core"]) {
+    node.dataset.tier = tier;
+    tiers[tier] = tintOf();
+  }
+  node.dataset.tier = "leaf";
+  picture.classList.add("is-local");
+  const tintLocal = tintOf();
+  picture.classList.toggle("is-local", wasLocal);
+  /* GL 손의 견본 — 판이 서 있을 때만 있다(작은 볼트는 SVG 손이 그린다). */
+  const swatchOf = (host) => {
+    const one = host?.querySelector(quiet) ?? null;
+    return one === null ? null : bytes(getComputedStyle(one).fill);
+  };
+  const swatchGlobal = swatchOf(document.querySelector("svg.knowledge-gl-swatch:not(.is-local):not(.is-tracing)"));
+  const swatchLocal = swatchOf(document.querySelector("svg.knowledge-gl-swatch.is-local:not(.is-focused)"));
+  const light = (rgb) => {
+    const [r, g, b] = rgb.map((one) => {
+      const part = one / 255;
+      return part <= 0.04045 ? part / 12.92 : ((part + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (one, other) => {
+    const [high, low] = [light(one), light(other)].sort((a, b) => b - a);
+    return (high + 0.05) / (low + 0.05);
+  };
+  return { weight, mist, ground, want, global, tintGlobal, tintLocal, tiers, swatchGlobal, swatchLocal,
+    contrast: global === null ? null : Number(contrast(global, ground).toFixed(2)) };
+});
+{
+  const near = (one, other) => one !== null && other !== null && one.every((part, at) => Math.abs(part - other[at]) <= 2);
+  ok("on the whole map a leaf of a cluster without a colour steps back — its ink is the token's share of the mist ink over the ground and keeps 3:1 against it; the rule reaches no other tier and not the neighbourhood, and the GL hand's swatch answers the same",
+    quietInk.weight > 0 && quietInk.weight <= 1
+      && near(quietInk.global, quietInk.want) && (quietInk.weight === 1 || !near(quietInk.global, quietInk.mist))
+      && quietInk.tintGlobal !== "" && quietInk.tintLocal === ""
+      && quietInk.tiers.major === "" && quietInk.tiers.core === ""
+      && (quietInk.swatchGlobal === null || near(quietInk.swatchGlobal, quietInk.want))
+      && quietInk.contrast >= 3,
+    JSON.stringify(quietInk));
+}
+
 /* Test 11e(t-5966 G4): HTML로 내보내기. 단추 하나가 지금 렌즈의 부분그래프 — 점의 자리·쉬는 옷·
  * 선의 관계·근거·잉크 — 를 백엔드의 한 문(`second_brain_export_html`)에 건네고, 영수증을 토스트로
  * 말한다. 「타입 관계만」이 켜진 판에서는 그 렌즈가 남긴 점과 선만 실린다. */
@@ -5848,7 +5930,9 @@ await step(5359, () => glPage.setViewportSize(spreadSeat));
 }
 
 /* 색이 다시 주제를 가른다(t-12029, 승인된 시안 v2 「colour」). 열넷의 주제에서 두 손 모두: 가장 큰 여덟만 여덟 칸을
- * 하나씩 입고 나머지는 색이 없다. 잎은 제 군집의 색 그대로(안개색을 섞지 않는다), 색 없는 군집의 쪽은 안개색이다
+ * 하나씩 입고 나머지는 색이 없다. 잎은 제 군집의 색 그대로(안개색을 섞지 않는다), 색 없는 군집의 잎은 안개색을
+ * `--knowledge-quiet-weight`의 몫만큼 든다(나머지는 바탕 — 시안 v2에서는 안개색 그대로였고, 실제 볼트 모양의
+ * 좁은 판에서 회색 군집이 색 군집보다 먼저 읽혀 2026-11-13에 낮췄다; 토큰이 100%면 시안 그대로다)
  * (SVG의 칠을 픽셀로). 모든 이름 있는 군집이 원반을 갖고(색 없는 군집은 안개색 원반 — GL은 예전에 그 원반을 아예
  * 그리지 않았다), 쉬는 원반에는 테두리가 없으며 밝힌 군집의 원반에만 선다(두 손). 범례는 색 여덟과 「작은 주제
  * n」 한 줄. */
@@ -5874,15 +5958,19 @@ const colours = await glPage.evaluate(async ({ spec }) => {
       const root = getComputedStyle(view);
       let leafChecked = 0;
       let leafMiss = 0;
+      const mist = rgb(root.getPropertyValue("--ink-mist").trim());
+      const ground = rgb(root.getPropertyValue("--knowledge-ground").trim());
+      const share = Number.parseFloat(root.getPropertyValue("--knowledge-quiet-weight")) / 100;
+      const quietLeaf = mist.map((one, part) => Math.round(one * share + ground[part] * (1 - share)));
       if (hand === "svg") {
         for (let at = 0; at < layout.count; at += 1) {
           if (layout.model.kinds[at] !== "page" || layout.tier[at] !== 0 || layout.community[at] >= named) continue;
           const dot = layout.nodeEls[at]?.querySelector(".knowledge-dot");
           if (!dot) continue;
           const own = hue[layout.community[at]];
-          const want = own >= 0 ? root.getPropertyValue(`--knowledge-hue-${own}`) : root.getPropertyValue("--ink-mist");
+          const want = own >= 0 ? rgb(root.getPropertyValue(`--knowledge-hue-${own}`).trim()) : quietLeaf;
           leafChecked += 1;
-          if (!near(rgb(getComputedStyle(dot).fill), rgb(want.trim()))) leafMiss += 1;
+          if (!near(rgb(getComputedStyle(dot).fill), want)) leafMiss += 1;
         }
       }
       /* 원반: 이름 있는 군집마다 하나, 쉬는 테두리 없음, 밝힌 군집에만 테두리. */
@@ -5920,7 +6008,7 @@ const colours = await glPage.evaluate(async ({ spec }) => {
     knowledgePainterKind = null;
   }
 }, { spec: fourteenTopics.spec });
-ok("colour sorts the topics again: the eight largest clusters wear the eight hues and the rest are quiet grey, leaves wear their cluster's full ink, every cluster has a flat disc whose edge stands only when lit, and the legend says eight colours and the smaller topics — on both hands",
+ok("colour sorts the topics again: the eight largest clusters wear the eight hues and the rest are quiet grey, leaves wear their cluster's full ink and a quiet cluster's leaves the token's share of the mist ink, every cluster has a flat disc whose edge stands only when lit, and the legend says eight colours and the smaller topics — on both hands",
   () => !colours.thrown && colours.rows.length === 2 && colours.rows.every((row) => row.named > 8 && row.huesOk
     && row.discs === row.named && row.restRims === 0 && row.pickedRims === 1
     && JSON.stringify(row.keys) === JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7])

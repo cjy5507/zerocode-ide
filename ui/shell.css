@@ -52712,6 +52712,21 @@ button.board-build-failure-part:focus-visible {
   fill: color-mix(in srgb, var(--knowledge-tint, var(--ink-mist)) 62%, var(--knowledge-ground));
 }
 
+/* 전체 지도에서 색 없는 군집(「작은 주제」)의 잎은 한 걸음 물러선다.
+ *
+ * 색 칸은 여덟이고 실제 볼트의 군집은 스물이 넘는다 — 남는 군집의 쪽은 안개색 그대로였고, 안개색은 바탕과의
+ * 대비가 여덟 색보다 커서(어두운 판에서는 가장 밝고 밝은 판에서는 가장 어둡다) 눈이 작은 주제부터 읽었다
+ * (실제 볼트 모양의 좁은 판에서 본 것: 회색 군집 열여섯이 색 군집 여덟을 덮었다). 그래서 그 군집의 잎 — 점의
+ * 거의 전부 — 의 잉크를 바탕 쪽으로 섞는다(`--knowledge-quiet-weight`). 대표 지식과 중심은 그대로 둔다: 그
+ * 둘의 채움은 이미 바탕과 섞여 있어(위의 62% · 78%) 한 번 더 섞으면 바탕과의 대비가 3:1 밑으로 내려간다 —
+ * 잎이 물러선 그림에서 그 둘은 제 주제의 자리를 알리는 점으로 남는다. 주변 탐색(`is-local`)에서는 섞지
+ * 않는다 — 그 화면의 쪽은 모두 지금 읽는 것이다. 다른 종류의 점(유령 · 원본 · 코드 · 공급망)은 제 규칙의
+ * 잉크를 쓴다. GL 손은 견본에서 이 색을 읽는다(`knowledgeGlPalette` — 색 없는 잎의 견본이 같은 선택자에
+ * 걸린다). */
+.knowledge-picture:not(.is-local) .knowledge-node.is-page[data-tier="leaf"]:not([data-hue]) {
+  --knowledge-tint: color-mix(in srgb, var(--ink-mist) var(--knowledge-quiet-weight), var(--knowledge-ground));
+}
+
 /* 아직 쓰지 않은 페이지: 채우지 않은 점선 테두리. 형태로도 구분되므로 색을
  * 못 보는 눈에도 「없는 페이지」가 보인다(§8). 가리키기는 원 안 전체가 받는다(t-12029) — 채우지 않은 원은
  * 칠한 점선 조각만 포인터에 닿고, 전체 지도의 유령이 반지름 2.2 px가 된 뒤로 그 가운데는 짚히지 않았다(GL은

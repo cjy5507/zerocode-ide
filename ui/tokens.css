@@ -1815,6 +1815,10 @@
    * centre); scale and pad in graph units — the nebula belongs to the
    * picture, so it zooms with it. */
   --knowledge-nebula-core: 0.045;
+  /* 전체 지도에서 색 없는 군집의 잎(가장 작은 단의 쪽)이 드는 안개색의 몫 — 나머지는 바탕이다. 색 있는 여덟
+     주제가 먼저 읽히게(`.knowledge-node.is-page[data-tier="leaf"]:not([data-hue])`, shell.css). 100%면 전의
+     그림이다. 60%에서 잎은 바탕과 3:1을 넘는다(어두운 판 3.4:1 · 밝은 판 3.2:1) — 더 낮추면 넘지 못한다. */
+  --knowledge-quiet-weight: 60%;
   --knowledge-nebula-scale: 1;
   --knowledge-nebula-pad: 18;
   /* 원반의 테두리 한 올 — 사람이 그 군집을 밝힐 때만 선다(t-12029): 쉬는 지도의 경계는 원반의 옅은 한 겹과
