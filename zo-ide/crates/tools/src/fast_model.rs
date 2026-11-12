@@ -1,11 +1,18 @@
 //! One request to the session provider's fast-tier model, outside any turn.
 //!
-//! Two features ask a small question of a small model while the session does
-//! something else: the fold of an over-cap tool result (`tool_digest`), and
-//! the lessons a pass draws from what the person said (`zo auto-dream`). Both
-//! dial the model the way a sub-agent is dialled and hold the request to a
-//! wall clock, and neither may be load-bearing: every failure here is a
-//! `String` the caller turns into "do without".
+//! Two features ask a small model something while the session does something
+//! else: the fold of an over-cap tool result (`tool_digest`), and the lessons
+//! a pass draws from what the person said (`zo auto-dream`). Both dial the
+//! model the way a sub-agent is dialled and hold the request to a wall clock,
+//! and neither may be load-bearing: every failure here is a `String` the
+//! caller turns into "do without".
+//!
+//! Both hand over what the session holds — a tool's whole output, the
+//! person's own words — so there is one way in, and it names a model only
+//! where the provider the session runs on has a fast tier of its own. A
+//! session on a person's own endpoint, on a local model, or on a name the
+//! catalog does not know has none, and is asked nothing: its "fast model"
+//! would be a built-in provider's, on that provider's account.
 
 use std::time::Duration;
 
@@ -19,43 +26,30 @@ pub struct FastModel {
 }
 
 impl FastModel {
-    /// The fast model for a session whose own model is `parent_model`.
-    ///
-    /// # Errors
-    /// When no client can be built for it: no credential, an unknown model.
-    pub fn for_parent(parent_model: Option<&str>) -> Result<Self, String> {
-        let model = Self::named_for(parent_model);
-        let client = crate::misc_tools::build_provider_client_for_agent(&model)?;
-        Ok(Self { model, client })
-    }
-
-    /// The fast model [`Self::for_parent`] would dial for `parent_model`, by
-    /// name alone: no client is built and no credential is read. The same
-    /// provider's, always — a provider with no fast tier answers on the
-    /// parent's own model.
-    #[must_use]
-    pub fn named_for(parent_model: Option<&str>) -> String {
-        // The cheap-model choice is a family alias (`haiku`); the wire wants
-        // the release id, the same way the sub-agent client resolves it.
-        api::resolve_model_alias(&crate::fanout::decompose_model(parent_model))
-    }
-
-    /// The fast-tier model of `parent_model`'s provider, by name alone, or
-    /// `None` where that provider has no fast tier — where
-    /// [`Self::named_for`] names the parent's own model.
+    /// The fast-tier model of the provider a session on `parent_model` runs
+    /// on, by name alone — no client is built and no credential is read — or
+    /// `None` where that provider has no fast tier that is its own.
     #[must_use]
     pub fn fast_tier_named_for(parent_model: Option<&str>) -> Option<String> {
+        // The cheap-model choice is a family alias (`haiku`); the wire wants
+        // the release id, the same way the sub-agent client resolves it.
         crate::fanout::fast_tier_model(parent_model).map(|model| api::resolve_model_alias(&model))
     }
 
-    /// [`Self::for_parent`] for a caller that may only ask a fast model: a
-    /// question the person agreed to send to their provider's fast model is
-    /// not sent to the session's own where the provider has none.
+    /// The fast model for a session whose own model is `parent_model`.
     ///
     /// # Errors
-    /// When the provider has no fast tier, or no client can be built for it.
+    /// With [`NO_FAST_TIER`] when the provider has no fast tier; otherwise
+    /// when no client can be built for it: no credential, an unknown model.
     pub fn for_fast_tier(parent_model: Option<&str>) -> Result<Self, String> {
-        let model = Self::fast_tier_named_for(parent_model).ok_or(NO_FAST_TIER)?;
+        Self::dialling(Self::fast_tier_named_for(parent_model).ok_or(NO_FAST_TIER)?)
+    }
+
+    /// The client for `model`, a name [`Self::fast_tier_named_for`] gave.
+    ///
+    /// # Errors
+    /// When no client can be built for it: no credential, an unknown model.
+    pub(crate) fn dialling(model: String) -> Result<Self, String> {
         let client = crate::misc_tools::build_provider_client_for_agent(&model)?;
         Ok(Self { model, client })
     }

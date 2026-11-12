@@ -164,6 +164,13 @@ zo-ide/
 `~/.zo/projects/<slug>/sessions/*.jsonl`(턴마다 영속), `~/.zo/projects/<slug>/state/agents/`(헬퍼 명부 — 세션 소유 registry + 채택 미러, t-2511 착지),
 `~/.zo/cache/`(모델 카탈로그·프롬프트 캐시 원장), `~/.zo/logs/zo-ide.log`.
 
+zo가 값싼 모델에 맡기는 일 가운데 셋은 세션이 쓰는 공급자 안에 머문다: 한도를 넘긴 도구 출력 접기(`toolDigest`, 기본 켜짐), 병렬 과업 나누기, 교훈 뽑기(`dreamLessons`, 기본 꺼짐).
+접기와 교훈 뽑기는 그 공급자에 제 빠른 모델이 있을 때만 그 모델에 묻는다.
+사용자 지정 공급자(`providers`, 내장 DeepSeek 포함), 로컬 모델, 카탈로그가 모르는 이름의 세션에는 제 빠른 모델이 없다. 그런 세션은 접지 않고 넘친 출력의 앞뒤를 자르며, 교훈을 묻지 않는다.
+과업 나누기는 그런 세션에서 세션의 제 모델로 묻는다.
+접기는 `"toolDigest": "off"` 또는 `ZO_TOOL_DIGEST=off`로 끈다.
+스마트 라우터의 판정은 이 규칙 밖이다. 도우미를 띄울 때의 난이도 판정(`smart.autoClassifier`, 기본 `probed`)은 도우미의 과업 글을 연결된 공급자 전체에서 고른 빠른 모델에 보내며, 세션의 공급자가 아닐 수 있다. `"smart": {"autoClassifier": "off"}`로 끈다.
+
 ## 검증과 배포
 ```bash
 cd zo-ide && just verify                    # fmt · clippy · 유닛 · 헤르메틱 e2e · 골든 · 하네스 예산

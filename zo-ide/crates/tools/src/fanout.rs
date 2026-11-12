@@ -400,49 +400,55 @@ fn non_empty_env(key: &str) -> Option<String> {
 }
 
 /// The model the decomposition agent runs on. Decomposition is one cheap
-/// reply, so it goes to the parent's provider's Fast-tier model as the
-/// connected catalog ranks it (see [`fast_tier_triage_model`]) — the same
-/// rule for every provider, no per-family literal — and a provider whose
-/// catalog has no Fast tier inherits the active model, so we never dial a
-/// provider with another company's model id. A parentless call (a bare
-/// harness) triages for the catalog's Anthropic head.
+/// reply, so it goes to the Fast-tier model of the provider the session runs
+/// on, as the connected catalog ranks it (see [`fast_tier_model`]) — the same
+/// rule for every provider, no per-family literal. A session whose provider
+/// has no Fast tier that is its own runs it on the session's model: a
+/// provider is never dialled with another company's model id, and what a
+/// session sends never goes to an account the session is not on. A parentless
+/// call (a bare harness) triages for the catalog's Anthropic head.
+///
+/// A model a person's own provider serves is such a session, and so is a name
+/// the catalog does not know — whatever built-in provider the wire one speaks
+/// or the logins the machine holds would read them as. Until v1.1.145 both
+/// were given that provider's catalog model, dialled on that provider's
+/// account: a session on a person's own endpoint sent its over-cap tool
+/// output and the request it was asked to split to OpenAI.
 pub(crate) fn decompose_model(parent_model: Option<&str>) -> String {
-    let parent = parent_model
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or(api::ANTHROPIC_LATEST_MODEL_ALIAS);
-    decompose_model_on(parent, api::detect_provider_kind(parent))
+    fast_tier_model(parent_model).unwrap_or_else(|| session_model(parent_model).to_string())
 }
 
-/// The Fast-tier model of the provider `parent_model` runs on — the pick
-/// [`decompose_model`] makes — or `None` where that provider has no Fast tier
-/// that is its own. [`decompose_model`] answers with the parent itself there;
-/// a caller that was promised the session's provider's fast model, and not
-/// another model or another account, asks this.
-///
-/// `None` as well for a model a person's own provider serves
-/// (`<provider>/<model>`) and for a name the catalog does not know. Both are
-/// read as a built-in provider — the first by the wire it speaks, the second
-/// by whichever login the machine holds — and the pick would be that
-/// provider's catalog model, dialled on that provider's account: not where
-/// the session's words went.
-pub(crate) fn fast_tier_model(parent_model: Option<&str>) -> Option<String> {
-    let parent = parent_model
+/// The model a session is on, as its caller names it; a bare harness that
+/// names none stands on the catalog's Anthropic head.
+fn session_model(parent_model: Option<&str>) -> &str {
+    parent_model
         .map(str::trim)
         .filter(|model| !model.is_empty())
-        .unwrap_or(api::ANTHROPIC_LATEST_MODEL_ALIAS);
+        .unwrap_or(api::ANTHROPIC_LATEST_MODEL_ALIAS)
+}
+
+/// The Fast-tier model of the provider `parent_model` runs on, or `None`
+/// where that provider has no Fast tier that is its own. [`decompose_model`]
+/// answers with the parent itself there; a caller that may only ask a fast
+/// model — one that hands over more than a short question, or was promised
+/// the session's provider's fast model and no other — asks this.
+///
+/// `None` as well for a model a person's own provider serves
+/// (`<provider>/<model>`, or an id it declares) and for a name the catalog
+/// does not know. Both are *read* as a built-in provider — the first by the
+/// wire it speaks, the second by whichever login the machine holds — and the
+/// pick would be that provider's catalog model, dialled on that provider's
+/// account: not where the session's words went. The person's own provider is
+/// asked first, before any reading of the name: an id it declares may be
+/// spelled like a built-in family's (`gpt-…`, `claude-…`).
+pub(crate) fn fast_tier_model(parent_model: Option<&str>) -> Option<String> {
+    let parent = session_model(parent_model);
     if api::custom_provider_for_model(parent).is_some()
         || api::metadata_for_model(&api::resolve_model_alias(parent)).is_none()
     {
         return None;
     }
     fast_tier_triage_model(parent, api::detect_provider_kind(parent))
-}
-
-/// [`decompose_model`] once the parent's provider is known: the catalog's pick
-/// for that provider, else the parent itself.
-fn decompose_model_on(parent: &str, provider: api::ProviderKind) -> String {
-    fast_tier_triage_model(parent, provider).unwrap_or_else(|| parent.to_string())
 }
 
 /// Decomposition/triage's model, derived from the connected catalog instead
@@ -1318,8 +1324,11 @@ mod tests {
         let anthropic_fast = api::resolve_model_alias("haiku");
         assert_eq!(anthropic_fast, "claude-haiku-4-5-20251001", "fixture: the catalog's fast row");
         assert_eq!(decompose_model(Some("opus")), anthropic_fast);
-        assert_eq!(decompose_model(Some("opus-4.6")), anthropic_fast);
         assert_eq!(decompose_model(Some("claude-sonnet-4-6")), anthropic_fast);
+        // `opus-4.6` has no catalog row and no family prefix, so nothing here
+        // can say whose model it is: it is asked on itself, where it used to
+        // be read as Anthropic's by the login the machine holds.
+        assert_eq!(decompose_model(Some("opus-4.6")), "opus-4.6");
         assert_eq!(decompose_model(Some("haiku")), anthropic_fast);
         // OpenAI/GPT active model → the catalog's current highest-release-rank
         // Fast-tier model — inventory-derived, never a Claude id. Phase 8:
@@ -1337,12 +1346,11 @@ mod tests {
         assert_eq!(decompose_model(Some("gpt-5.6-sol")), "gpt-5.6-luna");
         assert_eq!(decompose_model(Some("gpt-5.6-terra")), "gpt-5.6-luna");
         assert_eq!(decompose_model(Some("gpt-5.6-luna")), "gpt-5.6-luna");
-        // Unknown/non-GPT providers still inherit the active provider model
-        // (xAI's catalog has no Fast-tier entry, so the inventory-derived
-        // lookup returns `None` and the caller keeps the verbatim model).
-        // The provider is given, not detected: grok routes only on a machine
-        // with an adapter gate or an xAI-side credential.
-        assert_eq!(decompose_model_on("grok-3", api::ProviderKind::Xai), "grok-3");
+        // A provider with no Fast tier of its own keeps the session's model.
+        // xAI's catalog has no Fast-tier entry; and where no adapter gate or
+        // xAI-side credential makes grok a known name, it is one the catalog
+        // does not know — the same answer either way.
+        assert_eq!(decompose_model(Some("grok-3")), "grok-3");
         // No active model (non-live harness) → the Anthropic head's fast tier.
         assert_eq!(decompose_model(None), anthropic_fast);
         assert_eq!(decompose_model(Some("  ")), anthropic_fast);
@@ -1366,13 +1374,79 @@ mod tests {
     /// A name the catalog does not know has no fast tier that is its own,
     /// whatever login the machine holds: the pick would be made for the
     /// provider that login belongs to, and dialled on its account. The same
-    /// for a model spelled as a person's own provider serves it.
+    /// for a model spelled as a person's own provider serves it. What is
+    /// asked of such a session's "fast model" is asked of its own.
     #[test]
     fn fast_tier_model_is_none_for_a_name_the_catalog_does_not_know() {
         for unknown in ["zq-model-nobody-lists", "zq-relay/some-model", "  "] {
             let expected = if unknown.trim().is_empty() { Some(decompose_model(None)) } else { None };
             assert_eq!(super::fast_tier_model(Some(unknown)), expected, "{unknown:?}");
         }
+        for unknown in ["zq-model-nobody-lists", "zq-relay/some-model"] {
+            assert_eq!(decompose_model(Some(unknown)), unknown);
+        }
+    }
+
+    /// The custom-provider catalog as the test found it, put back on drop.
+    struct OwnProviders(Option<std::ffi::OsString>);
+
+    impl OwnProviders {
+        /// Declare `providers` (the `ZO_CUSTOM_PROVIDERS` JSON) for this process.
+        fn declared(providers: &str) -> Self {
+            let before = std::env::var_os(api::CUSTOM_PROVIDERS_ENV);
+            std::env::set_var(api::CUSTOM_PROVIDERS_ENV, providers);
+            api::refresh_custom_providers_from_env();
+            Self(before)
+        }
+    }
+
+    impl Drop for OwnProviders {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(before) => std::env::set_var(api::CUSTOM_PROVIDERS_ENV, before),
+                None => std::env::remove_var(api::CUSTOM_PROVIDERS_ENV),
+            }
+            api::refresh_custom_providers_from_env();
+        }
+    }
+
+    /// A session on a person's own provider is never handed a built-in
+    /// provider's fast model, however its model is spelled. The ids are
+    /// chosen to read as OpenAI's and Anthropic's own when nobody declares
+    /// them — which is what the first half shows, and what made a session on
+    /// a person's endpoint send its tool output to OpenAI (measured on
+    /// v1.1.144: 1,500 of 1,500 rows of a `bash` result).
+    #[test]
+    fn a_model_a_persons_own_provider_serves_keeps_to_that_provider() {
+        let _env = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let openai_fast = decompose_model(Some("gpt-5.5"));
+        let anthropic_fast = decompose_model(Some("opus"));
+
+        // Undeclared, the names are built-in families' by their spelling.
+        {
+            let _none = OwnProviders::declared("[]");
+            assert_eq!(decompose_model(Some("gpt-oss-120b")), openai_fast);
+            assert_eq!(decompose_model(Some("claude-zq-gateway")), anthropic_fast);
+        }
+
+        let _own = OwnProviders::declared(
+            r#"[{"name":"zqown","base_url":"https://own.invalid/v1","models":["gpt-oss-120b","claude-zq-gateway","zq-own-model"],"requires_auth":false}]"#,
+        );
+        for served in [
+            "gpt-oss-120b",
+            "claude-zq-gateway",
+            "zq-own-model",
+            "zqown/zq-own-model",
+            "zqown/gpt-oss-120b",
+        ] {
+            assert_eq!(super::fast_tier_model(Some(served)), None, "{served}");
+            assert_eq!(decompose_model(Some(served)), served, "{served}");
+        }
+        // A built-in model keeps its provider's fast tier beside it.
+        assert_eq!(decompose_model(Some("gpt-5.5")), openai_fast);
+        assert_eq!(decompose_model(Some("opus")), anthropic_fast);
     }
 
     #[test]
