@@ -99,7 +99,7 @@ use streaming::{
 };
 use tool::{
     is_concurrency_safe, is_long_running, sleep_tool_cut_short, sleep_tool_execution_input,
-    tool_execution_input, unblock_tool_execute,
+    tool_execution_input, unblock_tool_execute, ToldCall,
 };
 use repetition::{ReadFileRange, SurfaceRepetitionState, ToolBatchRepetitionHardStops};
 // Turn-stop policy (cost breaker vs behavior heuristic). Shared with the
@@ -3228,11 +3228,14 @@ where
                 );
 
                 self.learn_declared_mode(tool_name, effective_input.as_ref());
+                // What the gates ahead of the policy and a refusal name is the
+                // call a wrapper carries, as the policy judges it.
+                let told_name = ToldCall::of(tool_name, effective_input.as_ref()).name.into_owned();
                 let permission_outcome = if let Some(outcome) =
-                    pre_hook_denial_outcome(&pre_hook_result, tool_name)
+                    pre_hook_denial_outcome(&pre_hook_result, &told_name)
                 {
                     outcome
-                } else if let Some(reason) = self.architect_edit_gate_denial(tool_name) {
+                } else if let Some(reason) = self.architect_edit_gate_denial(&told_name) {
                     // Architect contract backstop — sync mirror of the
                     // streaming path's gate, so headless/sub-agent hosts that
                     // arm the gate get identical enforcement.
@@ -3256,7 +3259,7 @@ where
                 if let PermissionOutcome::Deny { reason } = &permission_outcome {
                     self.fire_lifecycle_hook(
                         HookEvent::PermissionDenied,
-                        &serde_json::json!({ "tool_name": tool_name, "reason": reason }),
+                        &serde_json::json!({ "tool_name": told_name, "reason": reason }),
                     );
                 }
                 prepared.push(PreparedSyncTool {

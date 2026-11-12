@@ -109,6 +109,17 @@ pub fn carried_call(input: &Value) -> Result<(String, Value), NoCarriedCall> {
     Ok((name.to_string(), arguments))
 }
 
+/// The [`CAPABILITY_INVOKE`] input that carries a call of `name` with
+/// `arguments`: what [`carried_call`] reads back. Written beside its reading,
+/// so a call taken out of the wrapper and put back is the same wrapper.
+#[must_use]
+pub fn carrying(name: &str, arguments: Value) -> Value {
+    let mut wrapper = Map::new();
+    wrapper.insert("name".to_string(), Value::String(name.to_string()));
+    wrapper.insert("input".to_string(), arguments);
+    Value::Object(wrapper)
+}
+
 /// Alias keys that are zo's own shorthand rather than another agent's name for
 /// the same tool: Claude Code's `Task` starts a sub-agent (zo's `Agent`),
 /// while zo reads `task` as `TaskCreate`.
@@ -521,6 +532,11 @@ mod tests {
         for no_name in [json!({}), json!({"name": "  "}), json!({"name": 7}), json!("bash")] {
             assert_eq!(carried_call(&no_name), Err(NoCarriedCall::NoName), "{no_name}");
         }
+        assert_eq!(
+            carried_call(&carrying("bash", json!({"command": "ls"}))),
+            Ok(("bash".to_string(), json!({"command": "ls"}))),
+            "a call put into the wrapper is the call read out of it"
+        );
         assert_eq!(
             carried_call(&json!({"name": CAPABILITY_INVOKE, "input": {"name": "bash"}})),
             Err(NoCarriedCall::Itself)

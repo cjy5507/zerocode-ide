@@ -45,6 +45,7 @@ use super::{
     REFUSAL_CONTEXT_CLEANED_WARN, STEERING_ECHO_PREFIX,
     TRUNCATION_CONTINUATION_REMINDER,
 };
+use super::tool::ToldCall;
 use crate::message_stream::types::WireModel;
 use crate::conversation::error::ToolTextKind;
 use crate::message_stream::ToolResultBody;
@@ -2573,12 +2574,15 @@ where
                 );
 
                 self.learn_declared_mode(tool_name, &effective_input);
+                // What the gates ahead of the policy and a refusal name is the
+                // call a wrapper carries, as the policy judges it.
+                let told_name = ToldCall::of(tool_name, &effective_input).name.into_owned();
                 let mut kill_judgment = None;
                 let permission_outcome = if let Some(outcome) =
-                    pre_hook_denial_outcome(&pre_hook_result, tool_name)
+                    pre_hook_denial_outcome(&pre_hook_result, &told_name)
                 {
                     outcome
-                } else if let Some(reason) = self.architect_edit_gate_denial(tool_name) {
+                } else if let Some(reason) = self.architect_edit_gate_denial(&told_name) {
                     // Architect contract backstop: a reserved foreground model
                     // editing directly is redirected to delegation before the
                     // ordinary permission policy runs.
@@ -2724,7 +2728,7 @@ where
                 if let PermissionOutcome::Deny { reason } = &permission_outcome {
                     self.fire_lifecycle_hook(
                         HookEvent::PermissionDenied,
-                        &serde_json::json!({ "tool_name": tool_name, "reason": reason }),
+                        &serde_json::json!({ "tool_name": told_name, "reason": reason }),
                     );
                 }
 
@@ -3033,8 +3037,10 @@ where
                         // a quiet hint and fold later mode denials out of the
                         // transcript; exceptional denials stay warnings.
                         let mode_denial_seen = !self.mode_denial_counts.is_empty();
+                        // The banner names the call that was refused, not
+                        // the wrapper it came through.
                         if let Some((level, text)) = permission_denial_notice(
-                            &p.tool_name,
+                            &ToldCall::of(&p.tool_name, &p.effective_input).name,
                             reason,
                             mode_denial_seen,
                         ) {

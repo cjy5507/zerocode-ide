@@ -3130,6 +3130,23 @@ impl RuntimeHookConfig {
     }
 
     #[must_use]
+    /// A pre-tool hook that runs only for the tools `matcher` names, as a
+    /// settings file writes one. For tests: a host's hooks come from settings.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_pre_tool_use_rule(mut self, matcher: &str, command: impl Into<String>) -> Self {
+        self.pre_tool_use.push(HookRule::new(HookMatcher::parse(matcher), command));
+        self
+    }
+
+    /// [`Self::with_pre_tool_use_rule`] for a hook that runs after the call.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_post_tool_use_rule(mut self, matcher: &str, command: impl Into<String>) -> Self {
+        self.post_tool_use.push(HookRule::new(HookMatcher::parse(matcher), command));
+        self
+    }
+
     pub fn with_timeout_seconds(mut self, timeout_seconds: u64) -> Self {
         self.timeout_seconds = Some(timeout_seconds);
         self

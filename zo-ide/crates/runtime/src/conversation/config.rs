@@ -21,6 +21,7 @@ use super::{
     MemoryRetriever, PermissionMode, PermissionPolicy, RuntimeError, Session, SteeringQueue,
     TemporaryAllowGrant, ToolExecutor, UsageTracker,
 };
+use super::tool::ToldCall;
 use crate::tool_cancel::ToolCancelSignal;
 
 impl<C, T> ConversationRuntime<C, T>
@@ -706,15 +707,20 @@ where
                 .is_some_and(|predicate| predicate(tool_name))
     }
 
+    /// The pre-tool hooks of a call, told of the call a wrapper carries when
+    /// the model called through it ([`ToldCall`]) — and so are the hooks after
+    /// the call, below.
     pub(super) fn run_pre_tool_use_hook(&mut self, tool_name: &str, input: &str) -> HookRunResult {
-        self.hook_runner.run_pre_tool_use_with_context(
-            tool_name,
-            input,
+        let told = ToldCall::of(tool_name, input);
+        let result = self.hook_runner.run_pre_tool_use_with_context(
+            &told.name,
+            &told.input,
             Some(&self.hook_abort_signal),
             self.hook_progress_reporter
                 .as_mut()
                 .map(|r| r.as_mut() as &mut dyn HookProgressReporter),
-        )
+        );
+        told.answered(result)
     }
 
     pub(super) fn run_post_tool_use_hook(
@@ -724,9 +730,10 @@ where
         output: &str,
         is_error: bool,
     ) -> HookRunResult {
+        let told = ToldCall::of(tool_name, input);
         self.hook_runner.run_post_tool_use_with_context(
-            tool_name,
-            input,
+            &told.name,
+            &told.input,
             output,
             is_error,
             Some(&self.hook_abort_signal),
@@ -742,9 +749,10 @@ where
         input: &str,
         output: &str,
     ) -> HookRunResult {
+        let told = ToldCall::of(tool_name, input);
         self.hook_runner.run_post_tool_use_failure_with_context(
-            tool_name,
-            input,
+            &told.name,
+            &told.input,
             output,
             Some(&self.hook_abort_signal),
             self.hook_progress_reporter
@@ -763,17 +771,19 @@ where
     ) -> HookRunResult {
         let runner = self.hook_runner.clone();
         let abort_signal = self.hook_abort_signal.clone();
-        let tool_name = tool_name.to_string();
-        let input = input.to_string();
-        self.run_hook_off_task(move |mut reporter| {
-            runner.run_pre_tool_use_with_context(
-                &tool_name,
-                &input,
-                Some(&abort_signal),
-                Some(&mut reporter),
-            )
-        })
-        .await
+        let told = ToldCall::of(tool_name, input);
+        let (tool_name, input) = (told.name.to_string(), told.input.to_string());
+        let result = self
+            .run_hook_off_task(move |mut reporter| {
+                runner.run_pre_tool_use_with_context(
+                    &tool_name,
+                    &input,
+                    Some(&abort_signal),
+                    Some(&mut reporter),
+                )
+            })
+            .await;
+        told.answered(result)
     }
 
     /// Async twin of [`Self::run_post_tool_use_hook`]; see
@@ -787,8 +797,8 @@ where
     ) -> HookRunResult {
         let runner = self.hook_runner.clone();
         let abort_signal = self.hook_abort_signal.clone();
-        let tool_name = tool_name.to_string();
-        let input = input.to_string();
+        let told = ToldCall::of(tool_name, input);
+        let (tool_name, input) = (told.name.into_owned(), told.input.into_owned());
         let output = output.to_string();
         self.run_hook_off_task(move |mut reporter| {
             runner.run_post_tool_use_with_context(
@@ -813,8 +823,8 @@ where
     ) -> HookRunResult {
         let runner = self.hook_runner.clone();
         let abort_signal = self.hook_abort_signal.clone();
-        let tool_name = tool_name.to_string();
-        let input = input.to_string();
+        let told = ToldCall::of(tool_name, input);
+        let (tool_name, input) = (told.name.into_owned(), told.input.into_owned());
         let output = output.to_string();
         self.run_hook_off_task(move |mut reporter| {
             runner.run_post_tool_use_failure_with_context(

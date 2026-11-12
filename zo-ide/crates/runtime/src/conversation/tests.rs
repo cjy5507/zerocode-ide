@@ -22048,3 +22048,258 @@ fn a_lasting_allow_sent_to_a_person_only_prompt_allows_the_one_call_and_leaves_n
     assert_eq!(ran, ["browser"]);
     assert_eq!(rules.len(), 1, "an ordinary prompt's lasting allow still leaves its rule: {rules:?}");
 }
+
+/* ---- a call through the wrapper, as hooks and gates are told of it ------------- */
+
+/// Keeps every call the conversation hands the executor, name and input.
+struct KeepsCalls(Arc<Mutex<Vec<(String, String)>>>);
+
+impl ToolExecutor for KeepsCalls {
+    fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.0.lock().expect("calls").push((tool_name.to_string(), input.to_string()));
+        Ok("ran".to_string())
+    }
+}
+
+/// The model's one call through the wrapper, then its answer.
+struct CallsThroughTheWrapper {
+    wrapper: String,
+    called: bool,
+}
+
+impl CallsThroughTheWrapper {
+    fn carrying(name: &str, arguments: serde_json::Value) -> Self {
+        Self {
+            wrapper: core_types::tool_names::carrying(name, arguments).to_string(),
+            called: false,
+        }
+    }
+}
+
+impl ApiClient for CallsThroughTheWrapper {
+    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        if std::mem::replace(&mut self.called, true) {
+            return Ok(vec![AssistantEvent::TextDelta("done".into()), AssistantEvent::MessageStop]);
+        }
+        Ok(vec![
+            AssistantEvent::ToolUse {
+                id: "call-1".to_string(),
+                name: core_types::tool_names::CAPABILITY_INVOKE.to_string(),
+                input: self.wrapper.clone(),
+            },
+            AssistantEvent::MessageStop,
+        ])
+    }
+}
+
+/// A full-access session whose model calls `name` through the wrapper, under
+/// `hooks`; what the executor is handed lands in `ran`.
+fn a_session_that_calls_through_the_wrapper(
+    name: &str,
+    arguments: serde_json::Value,
+    hooks: RuntimeHookConfig,
+    ran: &Arc<Mutex<Vec<(String, String)>>>,
+) -> ConversationRuntime<CallsThroughTheWrapper, KeepsCalls> {
+    let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+        .with_tool_requirement(core_types::tool_names::CAPABILITY_INVOKE, PermissionMode::ReadOnly);
+    let mut runtime = ConversationRuntime::new_with_features(
+        Session::new(),
+        CallsThroughTheWrapper::carrying(name, arguments),
+        KeepsCalls(Arc::clone(ran)),
+        policy,
+        vec!["system".into()],
+        &RuntimeFeatureConfig::default().with_hooks(hooks),
+    );
+    let cwd = temp_workspace("through-the-wrapper");
+    fs::create_dir_all(&cwd).expect("workspace");
+    runtime.set_workspace_cwd(cwd);
+    runtime
+}
+
+/// One turn on the streaming road, which is the one every front runs.
+fn run_one_streaming_turn(runtime: &mut ConversationRuntime<CallsThroughTheWrapper, KeepsCalls>) {
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    tokio_runtime.block_on(async {
+        let (render_tx, _render_rx) = tokio::sync::mpsc::channel(256);
+        let prompter: Arc<dyn crate::permission::PermissionPrompter> = Arc::new(AllowAsyncPrompterForOverflow);
+        runtime
+            .run_turn_streaming_with_images("do it", Vec::new(), render_tx, prompter)
+            .await
+            .expect("the turn");
+    });
+}
+
+/// A hook that refuses, written for `Bash` alone.
+fn a_hook_that_refuses_bash() -> RuntimeHookConfig {
+    RuntimeHookConfig::new(Vec::new(), Vec::new(), Vec::new())
+        .with_pre_tool_use_rule("Bash", shell_snippet("printf 'blocked by hook'; exit 2"))
+}
+
+/// A hook written for `Bash` is told of a `Bash` call the model makes through
+/// the wrapper, and refuses it: the wrapper is an address, and a call made
+/// through it used to reach the hook under the wrapper's name, which a rule
+/// for `Bash` does not match — so the command ran. A call to another tool
+/// through the wrapper is not the hook's, and runs. On both roads.
+#[test]
+fn a_hook_written_for_a_tool_refuses_a_call_to_it_made_through_the_wrapper() {
+    for streaming in [false, true] {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = a_session_that_calls_through_the_wrapper(
+            "Bash",
+            serde_json::json!({ "command": "ls" }),
+            a_hook_that_refuses_bash(),
+            &ran,
+        );
+        if streaming {
+            run_one_streaming_turn(&mut runtime);
+        } else {
+            let summary = runtime.run_turn("do it", None).expect("the turn goes on after a refusal");
+            let ContentBlock::ToolResult { is_error, output, .. } = &summary.tool_results[0].blocks[0] else {
+                panic!("expected a tool result");
+            };
+            assert!(*is_error, "{output}");
+            assert!(
+                output.contains("blocked by hook") || output.contains("denied tool"),
+                "the hook's refusal reaches the model: {output}"
+            );
+            assert!(!output.contains("CapabilityInvoke"), "the refusal names the call, not the wrapper: {output}");
+        }
+        assert!(ran.lock().expect("calls").is_empty(), "streaming={streaming}: the command ran past its hook");
+
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = a_session_that_calls_through_the_wrapper(
+            "mcp__docs__search",
+            serde_json::json!({ "query": "x" }),
+            a_hook_that_refuses_bash(),
+            &ran,
+        );
+        if streaming {
+            run_one_streaming_turn(&mut runtime);
+        } else {
+            runtime.run_turn("do it", None).expect("the turn");
+        }
+        assert_eq!(ran.lock().expect("calls").len(), 1, "streaming={streaming}: a hook for Bash is not this call's");
+    }
+}
+
+/// An input a hook rewrote is the carried call's, so it goes back into the
+/// wrapper: what is judged and run is the call the hook left. On both hook
+/// seams, and through a whole turn.
+#[test]
+fn an_input_a_hook_rewrote_for_a_call_through_the_wrapper_is_the_one_that_runs() {
+    let rewrites = || {
+        RuntimeHookConfig::new(
+            vec![shell_snippet(
+                r#"printf '%s' '{"hookSpecificOutput":{"permissionDecision":"allow","updatedInput":{"command":"git status"}}}'"#,
+            )],
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+    let rewritten = core_types::tool_names::carrying("bash", serde_json::json!({ "command": "git status" }));
+    let parsed = |text: &str| serde_json::from_str::<serde_json::Value>(text).expect("json");
+    let wrapper = core_types::tool_names::carrying("Bash", serde_json::json!({ "command": "ls" })).to_string();
+
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime =
+        a_session_that_calls_through_the_wrapper("Bash", serde_json::json!({ "command": "ls" }), rewrites(), &ran);
+    let by_the_sync_seam = runtime.run_pre_tool_use_hook(core_types::tool_names::CAPABILITY_INVOKE, &wrapper);
+    assert_eq!(by_the_sync_seam.updated_input().map(parsed), Some(rewritten.clone()));
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let by_the_async_seam = tokio_runtime
+        .block_on(runtime.run_pre_tool_use_hook_async(core_types::tool_names::CAPABILITY_INVOKE, &wrapper));
+    assert_eq!(by_the_async_seam.updated_input().map(parsed), Some(rewritten.clone()));
+    // A call by name is rewritten as it always was: no wrapper is put around it.
+    let by_name = runtime.run_pre_tool_use_hook("bash", r#"{"command":"ls"}"#);
+    assert_eq!(by_name.updated_input(), Some(r#"{"command":"git status"}"#));
+
+    runtime.run_turn("do it", None).expect("the turn");
+    let ran = ran.lock().expect("calls");
+    let [(name, input)] = ran.as_slice() else {
+        panic!("ran {ran:?}");
+    };
+    assert_eq!(name, core_types::tool_names::CAPABILITY_INVOKE, "the executor is still handed the wrapper");
+    assert_eq!(parsed(input), rewritten, "carrying the call the hook left");
+}
+
+/// A hook that runs after a call is told of the call the wrapper carried.
+#[test]
+fn a_hook_after_the_call_is_told_of_the_call_the_wrapper_carried() {
+    let hooks = RuntimeHookConfig::new(Vec::new(), Vec::new(), Vec::new())
+        .with_post_tool_use_rule("Bash", shell_snippet("printf 'blocked by hook'; exit 2"));
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let mut runtime =
+        a_session_that_calls_through_the_wrapper("Bash", serde_json::json!({ "command": "ls" }), hooks, &ran);
+    let through = |name: &str| core_types::tool_names::carrying(name, serde_json::json!({})).to_string();
+    let wrapper = core_types::tool_names::CAPABILITY_INVOKE;
+    assert!(runtime.run_post_tool_use_hook(wrapper, &through("Bash"), "out", false).is_denied());
+    assert!(!runtime.run_post_tool_use_hook(wrapper, &through("mcp__docs__search"), "out", false).is_denied());
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    assert!(tokio_runtime
+        .block_on(runtime.run_post_tool_use_hook_async(wrapper, &through("Bash"), "out", false))
+        .is_denied());
+    assert!(!tokio_runtime
+        .block_on(runtime.run_post_tool_use_hook_async(wrapper, &through("mcp__docs__search"), "out", false))
+        .is_denied());
+}
+
+/// The gate that keeps a planning model from editing is not passed by editing
+/// through the wrapper: the call it carries is the one the gate reads. On
+/// both roads; with the gate down, the same call runs.
+#[test]
+fn the_architect_gate_refuses_an_edit_made_through_the_wrapper() {
+    for (armed, streaming) in [(true, false), (true, true), (false, false)] {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = a_session_that_calls_through_the_wrapper(
+            "Edit",
+            serde_json::json!({ "file_path": "a.rs", "old_string": "a", "new_string": "b" }),
+            RuntimeHookConfig::new(Vec::new(), Vec::new(), Vec::new()),
+            &ran,
+        );
+        runtime.set_reserved_edit_gate(armed);
+        if streaming {
+            run_one_streaming_turn(&mut runtime);
+        } else {
+            let summary = runtime.run_turn("do it", None).expect("the turn");
+            let ContentBlock::ToolResult { is_error, output, .. } = &summary.tool_results[0].blocks[0] else {
+                panic!("expected a tool result");
+            };
+            assert_eq!(*is_error, armed, "{output}");
+            if armed {
+                assert!(output.contains("architect policy"), "{output}");
+                assert!(output.contains("`edit_file`"), "the gate names the call it refused: {output}");
+            }
+        }
+        assert_eq!(
+            ran.lock().expect("calls").len(),
+            usize::from(!armed),
+            "armed={armed} streaming={streaming}"
+        );
+    }
+}
+
+/// The banner of a refusal names the call that was refused, by the name the
+/// model knows it by, and a call by name is told as it stands.
+#[test]
+fn a_refusal_of_a_call_through_the_wrapper_is_bannered_under_the_calls_own_name() {
+    let wrapper = core_types::tool_names::carrying("Bash", serde_json::json!({ "command": "ls" })).to_string();
+    let told = super::tool::ToldCall::of(core_types::tool_names::CAPABILITY_INVOKE, &wrapper);
+    assert_eq!((told.name.as_ref(), told.input.as_ref()), ("bash", r#"{"command":"ls"}"#));
+    let (_, banner) = super::permission_denial_notice(&told.name, "blocked by hook.", false).expect("a banner");
+    assert_eq!(banner, "denied 'Bash': blocked by hook \u{00b7} /permissions");
+
+    let by_name = super::tool::ToldCall::of("read_file", r#"{"path":"a.rs"}"#);
+    assert_eq!((by_name.name.as_ref(), by_name.input.as_ref()), ("read_file", r#"{"path":"a.rs"}"#));
+    // A wrapper that carries nothing is told as the wrapper it is.
+    let nothing = super::tool::ToldCall::of(core_types::tool_names::CAPABILITY_INVOKE, "{}");
+    assert_eq!(nothing.name.as_ref(), core_types::tool_names::CAPABILITY_INVOKE);
+}

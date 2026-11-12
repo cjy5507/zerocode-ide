@@ -303,6 +303,15 @@ impl HookRunResult {
         self.updated_input.as_deref()
     }
 
+    /// The result with the input a hook rewrote, when one did, put through
+    /// `rewrite`: a hook told of the call a wrapper carries rewrites that
+    /// call, and its caller holds the wrapper.
+    #[must_use]
+    pub(crate) fn map_updated_input(mut self, rewrite: impl FnOnce(String) -> String) -> Self {
+        self.updated_input = self.updated_input.map(rewrite);
+        self
+    }
+
     /// Continuation message a `TurnEnd` (Stop) hook asked the agent to keep
     /// working on. When present, the turn loop re-injects it as the next user
     /// message and runs another turn (bounded by `max_stop_loops`), enabling

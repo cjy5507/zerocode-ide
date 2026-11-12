@@ -98,6 +98,55 @@ impl<C, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 }
 
+/// A call as everything beside the executor is told of it — a hook, the
+/// architect gate, a refusal's words, the banner: the call a wrapper carries
+/// when the model called through it, under the name and fields a direct call
+/// of that tool is stored by, and any other call as it stands.
+///
+/// `CapabilityInvoke` is an address and grants nothing. The policy judges the
+/// call it carries ([`crate::permissions::carried_call`]), and this is the
+/// same reading: a hook written for `Bash` is told of a `Bash` call whichever
+/// way the model made it, and a gate that keeps a model from editing is not
+/// passed by editing through the wrapper.
+pub(super) struct ToldCall<'a> {
+    pub(super) name: std::borrow::Cow<'a, str>,
+    pub(super) input: std::borrow::Cow<'a, str>,
+    carried: bool,
+}
+
+impl<'a> ToldCall<'a> {
+    pub(super) fn of(tool_name: &'a str, input: &'a str) -> Self {
+        match crate::permissions::carried_call(tool_name, input) {
+            Some((name, arguments)) => Self {
+                name: name.into(),
+                input: arguments.into(),
+                carried: true,
+            },
+            None => Self {
+                name: tool_name.into(),
+                input: input.into(),
+                carried: false,
+            },
+        }
+    }
+
+    /// A pre-tool hook's result as the conversation reads it. The hook was
+    /// told of the carried call, so an input it rewrote is that call's: it
+    /// goes back into the wrapper the conversation holds, and what is judged
+    /// and run next is the rewritten call. One that does not read as JSON
+    /// carries no call, and nothing runs for it.
+    pub(super) fn answered(&self, result: crate::hooks::HookRunResult) -> crate::hooks::HookRunResult {
+        if !self.carried {
+            return result;
+        }
+        result.map_updated_input(|rewritten| {
+            let arguments = core_types::tool_input::parse_tool_arguments(&rewritten)
+                .unwrap_or_else(|_| Value::String(rewritten));
+            core_types::tool_names::carrying(&self.name, arguments).to_string()
+        })
+    }
+}
+
 /// Predicate the host installs to mark tools whose execution may block. This is
 /// retained as compatibility metadata for dynamic plugin/MCP registrations; the
 /// live streaming path uses [`ConcurrentDispatchFn`] for every ordinary tool
