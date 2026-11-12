@@ -64,6 +64,9 @@ const LOCK_POLL: Duration = Duration::from_millis(20);
 /// A narrowing killed between its write and its rename leaves its temporary
 /// file in `.zo/`; under the lock, one older than this is nobody's.
 const ABANDONED_TEMP_AGE: Duration = Duration::from_secs(60);
+/// A cutoff past every temporary file's write time, so the sweep after a
+/// narrowing takes them whatever their age.
+const ANY_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// What the next session a person watches says, until it has said it.
 const NOTICE_FILE: &str = "notice.json";
 /// How many rules of each kind the notice names; the rest it counts.
@@ -219,6 +222,13 @@ fn narrow_with(
         // session tries again.
         return AllowAlwaysNarrowing::Skipped;
     }
+    // The file is narrowed and no zo using this lock is writing it, so every
+    // temporary file of this name in `.zo/` — however new — is one a killed
+    // narrowing left, holding the whole local settings. Once the project is
+    // marked no session comes back to take it, so it goes now. (A zo with
+    // another state folder writing just then loses its rename and tries again
+    // next session.)
+    remove_abandoned_temp_files(cwd, &settings_relative(), SystemTime::now() + ANY_AGE);
     let strings = |items: Vec<String>| JsonValue::Array(items.into_iter().map(JsonValue::String).collect());
     let notice = JsonValue::Object(
         [
@@ -435,11 +445,17 @@ fn narrow_notice_text(settings: &str, rules: &[String], dropped: &[String], back
     }
     if !dropped.is_empty() {
         let count = dropped.len();
+        let (form, approved, it, command, asks, refused, them) = if count == 1 {
+            ("form", "the command", "it", "that command", "asks", "is refused", "it")
+        } else {
+            ("forms", "the commands", "they", "those commands", "ask", "are refused", "them")
+        };
         let _ = write!(
             said,
-            "zo removed {count} \"always allow\" {} in {settings} whose saved form never matched the \
-             command approved, so it never allowed that command: {}. That command asks again, and \
-             \"always allow\" now saves it as approved. ",
+            "zo removed {count} \"always allow\" {} in {settings} whose saved {form} never matched \
+             {approved} approved, so {it} never allowed {command}: {}. Next time {command} {asks} \
+             again — or {refused} where an earlier deny rule matches — and \"always allow\" now \
+             saves {them} as approved. ",
             noun(count),
             shown_list(dropped)
         );
@@ -885,6 +901,20 @@ mod tests {
         assert!(project.state_files().is_empty(), "no copy, no marker: {:?}", project.state_files());
     }
 
+    /// A temporary file a killed narrowing left in `.zo/` — however new — is
+    /// gone once a later narrowing succeeds, so nothing but the settings file
+    /// is left there after the project is marked.
+    #[test]
+    #[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities, so on Windows the file fails closed and nothing is narrowed")]
+    fn a_temporary_file_a_killed_narrowing_left_goes_with_the_next_narrowing() {
+        let project = Project::new(&format!(r#"{{"permissions":{{"allow":["{BROAD}"]}}}}"#), false);
+        let left = project.cwd.join(".zo").join(format!(".zo-state-{SETTINGS_FILE}-99999-0.tmp"));
+        fs::write(&left, format!(r#"{{"permissions":{{"allow":["{NARROWED}"]}}}}"#)).expect("left behind");
+        assert!(matches!(project.narrow(), AllowAlwaysNarrowing::Narrowed { .. }));
+        assert!(project.marked());
+        assert_eq!(project.zo_folder_files(), [SETTINGS_FILE], "nothing is left in .zo/");
+    }
+
     /// A second zo starting while the first holds the lock waits, then finds
     /// the marker the first left and reads the file without touching it.
     #[test]
@@ -1001,6 +1031,15 @@ mod tests {
         assert!(!removed.contains("still allowed"), "{removed}");
         assert!(!removed.contains("narrowed"), "{removed}");
         assert!(removed.contains("kept at /s/kept"), "{removed}");
+        assert!(removed.contains("or is refused where an earlier deny rule matches"), "{removed}");
+
+        let two = [NEVER_MATCHED.to_string(), "bash(ls [ab])".to_string()];
+        let removed = narrow_notice_text("/p/s.json", &[], &two, "/s/kept");
+        assert!(removed.contains("removed 2 \"always allow\" rules"), "{removed}");
+        assert!(removed.contains("so they never allowed those commands"), "{removed}");
+        assert!(removed.contains("those commands ask again"), "{removed}");
+        assert!(removed.contains("now saves them as approved"), "{removed}");
+        assert!(!removed.contains("  "), "no doubled space: {removed}");
     }
 
     /// The notice names five rules of each kind and counts the rest.

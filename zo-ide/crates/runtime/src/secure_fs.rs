@@ -2319,6 +2319,35 @@ mod tests {
         assert_eq!(fs::read_to_string(root.path().join(state)).unwrap(), "{\"rev\":1}");
     }
 
+    /// A replace whose rename fails takes its temporary file with it: the
+    /// bytes were written, a folder took the target's place before the rename,
+    /// and nothing is left beside the target but that folder (t-105746).
+    #[cfg(unix)]
+    #[test]
+    fn a_replace_whose_rename_fails_takes_its_temporary_file_with_it() {
+        let root = TestRoot::new();
+        let dir = root.path();
+        let state = Path::new("settings.local.json");
+        let mut temp_seen = false;
+        let result = write_atomic_owner_only_observed(dir, state, b"{}", Durability::Flushed, TempName::Target, &mut |step| {
+            if step == "temp_written" {
+                temp_seen = fs::read_dir(dir).unwrap().flatten().any(|entry| {
+                    entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX)
+                });
+                fs::create_dir(dir.join(state)).expect("a folder takes the target's place");
+            }
+        });
+        assert!(temp_seen, "the temporary file was written before the rename");
+        assert!(result.is_err(), "a file cannot be renamed over a folder");
+        let left = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(left, ["settings.local.json"], "only the folder is left");
+        assert!(dir.join(state).is_dir());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_temp_named_for_its_file_goes_once_older_than_the_cutoff_and_no_other_does() {
