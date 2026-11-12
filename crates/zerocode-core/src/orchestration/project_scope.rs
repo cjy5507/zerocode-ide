@@ -38,6 +38,7 @@ pub const WINDOW_VERBS: &[&str] = &[
     "run-list",
     "retention",
     "agent-list",
+    super::room::PEERS_VERB,
     "inbox",
     "reset",
 ];
@@ -510,11 +511,24 @@ pub fn reach(
     } else {
         Vec::new()
     };
-    let Some(run) = acting_run(ledger, argv, team, pane, actor).and_then(|id| ledger.run(&id))
-    else {
+    /* A pane no run holds writes in its project's room ([`super::room`]):
+     * the run its letter is filed in, once a room is open. Before the first
+     * letter opens one, the pane it names is still a recipient the window
+     * holds to this project — a room letter never crosses one. */
+    let acting = acting_run(ledger, argv, team, pane, actor)
+        .or_else(|| super::room::acting_room(ledger, argv, root).map(str::to_string));
+    let Some(run) = acting.and_then(|id| ledger.run(&id)) else {
+        let recipient_seats: Vec<String> =
+            super::room::first_letter_seat(argv).into_iter().collect();
+        let seated_roots = recipient_seats
+            .iter()
+            .filter_map(|seat| Some((seat.clone(), ledger.seated_root(seat)?)))
+            .collect();
         return Reach {
             elsewhere,
             hidden,
+            recipient_seats,
+            seated_roots,
             ..Reach::default()
         };
     };

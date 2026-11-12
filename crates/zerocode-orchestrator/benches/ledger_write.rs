@@ -52,6 +52,7 @@ fn a_projection() -> LedgerProjectionV1 {
             handover: None,
             project: None,
             folded: None,
+            room: None,
         }],
         tasks: (0..TASK_COUNT)
             .map(|at| TaskRow {

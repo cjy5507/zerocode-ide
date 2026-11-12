@@ -50,6 +50,7 @@ pub mod marked;
 pub mod process_sweep;
 mod progress;
 pub mod project_scope;
+pub mod room;
 mod session_history;
 pub mod settle;
 pub mod stray_reap;
@@ -3016,6 +3017,12 @@ pub struct Run {
     /// what it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folded: Option<FoldedMail>,
+    /// Set on a project's room ([`room`]): the run agent panes the person
+    /// opened write to each other in, where nobody signs as the run.
+    /// `default`, so every run written before rooms existed reads back as an
+    /// ordinary run — which is what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<room::RoomMark>,
 }
 
 /// Who coordinates a run, and since when.
@@ -4441,12 +4448,18 @@ impl Run {
             });
         }
         if to.starts_with(PANE_ADDRESS_PREFIX) {
-            return Some(match self.answers_at(to) || from == LEDGER_ITSELF {
-                true => Ok(vec![to.to_string()]),
-                false => Err(format!(
-                    "unroutable address: {to} — a seat is answerable once it has spoken"
-                )),
-            });
+            /* A room is where panes that never spoke write first ([`room`]):
+             * any pane of its project is answerable there, and the window
+             * holds the address to that project before the letter is
+             * filed. */
+            return Some(
+                match self.is_room() || self.answers_at(to) || from == LEDGER_ITSELF {
+                    true => Ok(vec![to.to_string()]),
+                    false => Err(format!(
+                        "unroutable address: {to} — a seat is answerable once it has spoken"
+                    )),
+                },
+            );
         }
         None
     }
@@ -8160,6 +8173,7 @@ impl Ledger {
             coordinator: None,
             project: None,
             folded: None,
+            room: None,
         });
         id
     }
@@ -15093,6 +15107,7 @@ impl Ledger {
             coordinator: None,
             project: None,
             folded: None,
+            room: None,
         });
         id
     }
@@ -16753,6 +16768,20 @@ pub trait Launcher {
     /// a test launcher answers for the platform it stands in for.
     fn integration_queue_supported(&self) -> bool {
         land_batch::integration_queue_supported()
+    }
+
+    /// Whether the person's 「에이전트 판끼리 편지」 switch is on ([`room`]).
+    /// Off unless the window says so: a launcher that cannot read the
+    /// setting keeps panes from opening a room and waking each other.
+    fn peer_mail_on(&self) -> bool {
+        false
+    }
+
+    /// The agent panes the window has open in the project rooted at
+    /// `project`, for `peers` ([`room::peers`]). `None` is nobody looked, on
+    /// [`Self::presence`]'s rule; the window holds the rows to that project.
+    fn live_panes(&self, _project: Option<&str>) -> Option<Vec<room::PeerPane>> {
+        None
     }
 }
 
@@ -20865,6 +20894,13 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         Doing::FreshRead,
     ),
     (
+        room::PEERS_VERB,
+        "· the agent panes open in this project — address, agent, title, folder, \
+         working/idle, and the run each one sits in; a pane no run holds writes to them \
+         through the project's room with send/ask --to pane:<team>/<pane>",
+        Doing::FreshRead,
+    ),
+    (
         "worker-start",
         "--agent <a> [--task <id>] [--prompt <p>] [--model <id> [--effort <level>]] \
          [--retry-of <dispatch> [--inherit-checkout]] [--on-quota-wall wait|<agent[:model[:effort]]>] \
@@ -22462,14 +22498,35 @@ fn send_in_run(
     draft: Draft,
     now_ms: i64,
 ) -> Result<Decided, String> {
+    /* A room letter for a worker goes to its coordinator instead, and only
+     * there ([`room::worker_letter`]): the room holds nothing for a reader
+     * who never reads it. */
+    if let Some(redirect) = room::worker_letter(ledger, run_id, &draft) {
+        let (there, letter) = redirect?;
+        let held = ledger.post_acting(&there, letter, seat, run_id, now_ms)?;
+        return Ok(said(serde_json::json!({
+            "messageId": held,
+            "deliveredTo": { "runId": there, "messageId": held },
+            "forWorker": draft.to,
+        })));
+    }
+    let in_room = room::signs_as_pane(ledger, run_id);
     let copy = draft
         .to
         .strip_prefix(PANE_ADDRESS_PREFIX)
         .and_then(|seat| ledger.seat_reader(seat))
         .filter(|(_, address)| *address != draft.to)
         .map(|(there, address)| {
+            /* A room letter keeps its room signature in the copy: what a
+             * pane is in the run the copy is filed in is no voice it wrote
+             * with ([`room`]). */
+            let from = if in_room {
+                draft.from.clone()
+            } else {
+                sender(ledger, &team.leader_pane, &there, (&team.id, pane))
+            };
             let copy = Draft {
-                from: sender(ledger, &team.leader_pane, &there, (&team.id, pane)),
+                from,
                 to: address,
                 ..draft.clone()
             };
@@ -23329,7 +23386,7 @@ fn plan_inner(
     let (verb, rest) = argv
         .split_first()
         .ok_or_else(|| "a verb is required — try `help`".to_string())?;
-    let words = {
+    let mut words = {
         let mut words = split_words(rest, BOOL_FLAGS);
         if verb == delegate::VERB {
             delegate::strip_wait(&mut words);
@@ -23392,6 +23449,14 @@ fn plan_inner(
         false => actor.to_string(),
         true => seat.clone(),
     };
+    /* A pane no run holds writes in its project's room ([`room`]) — named
+     * onto the words here, before the retry below fingerprints them, so a
+     * retried letter is matched with the room it went to. And a verb that
+     * is not mail is refused in a room, whoever names one. */
+    room::route(
+        ledger, launcher, verb, &mut words, &caller, &seat, project, now_ms,
+    )?;
+    let words = words;
 
     if let Some(request) = words.value(RETRY_REQUEST) {
         let asked = ReceiptKey::of(request, actor, verb, &words);
@@ -24515,6 +24580,8 @@ fn plan_inner(
         // Run-free on purpose. Which agents exist is a fact about the machine,
         // not about a run, so it answers before any binding — a coordinator
         // deciding whom to summon may not have bound a run yet.
+        room::PEERS_VERB => said(room::peers(ledger, launcher, project, &seat)?),
+
         "agent-list" => {
             let only = words.value("--agent").filter(|held| !held.is_empty());
             if let Some(one) = only
@@ -25812,6 +25879,7 @@ fn plan_inner(
                         .filter(|held| !held.is_empty())
                         .ok_or("ask needs --body, or --resume <questionId>")?
                         .to_string();
+                    room::ask_allowed(ledger, &run_id, words.value("--to"))?;
                     // A question goes to the coordinator unless it is
                     // addressed elsewhere — and never to a group: one
                     // question takes ONE answer, and a crowd asked together
@@ -26173,6 +26241,7 @@ fn plan_inner(
                     kind.as_str()
                 ));
             }
+            room::send_allowed(ledger, &run_id, kind, words.value("--to"))?;
             // What a worker is carrying, so it does not have to say it back.
             // Every fact an agent repeats is a fact it can repeat wrong, and a
             // `worker_done` naming the wrong dispatch closes somebody else's
@@ -27007,6 +27076,14 @@ fn standing_in(ledger: &Ledger, caller: &str, seat: &str) -> Option<String> {
 /// as untrusted — the truthful answer for a stranger, and the same shape
 /// [`Run::worker_in_pane`] already gives for "nobody is in this seat".
 fn sender(ledger: &Ledger, leader_pane: &str, run_id: &str, seat: (&str, &str)) -> String {
+    /* In a room nobody signs as the run ([`room`]): a room has no coordinator
+     * record by design, and the leader-shaped rule below would hand any
+     * pane the person opened the operator voice a worker obeys. Reading
+     * follows signing ([`inbox_of`]), so the pane reads its own address
+     * there too. */
+    if room::signs_as_pane(ledger, run_id) {
+        return pane_address(seat);
+    }
     if let Some(worker) = ledger
         .run(run_id)
         .and_then(|run| run.worker_in_pane(seat.0, seat.1))
@@ -28066,6 +28143,10 @@ pub struct RunRow {
     /// same posture: absent from every store written before folding existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folded: Option<FoldedMail>,
+    /// The room mark ([`room`]), on the same posture: absent from every store
+    /// written before rooms existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<room::RoomMark>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -28489,6 +28570,7 @@ impl Ledger {
                 coordinator: run.coordinator.clone(),
                 project: run.project.clone(),
                 folded: run.folded.clone(),
+                room: run.room.clone(),
             });
             for task in &run.tasks {
                 projected.tasks.push(TaskRow {
@@ -28714,6 +28796,7 @@ impl Ledger {
                 coordinator: row.coordinator,
                 project: row.project,
                 folded: row.folded,
+                room: row.room,
             });
         }
 

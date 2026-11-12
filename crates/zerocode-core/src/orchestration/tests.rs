@@ -20911,6 +20911,7 @@ fn a_ledger_with_one_inbox() -> LedgerProjectionV1 {
             coordinator: None,
             project: None,
             folded: None,
+            room: None,
         }],
         tasks: Vec::new(),
         dispatches: Vec::new(),
@@ -22698,6 +22699,7 @@ fn a_large_healthy_ledger_still_loads() {
             coordinator: None,
             project: None,
             folded: None,
+            room: None,
         }],
         tasks: Vec::new(),
         dispatches: Vec::new(),
@@ -22797,6 +22799,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
             coordinator: None,
             project: None,
             folded: None,
+            room: None,
         });
         let mut carried = Vec::with_capacity(3);
         for _ in 0..3 {
@@ -26732,6 +26735,9 @@ mod letter_answers;
 /// t-68069: one conversation is one worker's, whatever seat a report comes by
 /// (`tests/one_conversation.rs`).
 mod one_conversation;
+/// A project's room: agent panes the person opened write to each other
+/// (`tests/peer_room.rs`).
+mod peer_room;
 /// t-78914: `process-sweep` lists by plain text and ends only the pids a list
 /// showed, each read again before its signal (`tests/process_sweep.rs`).
 mod process_sweep;

@@ -32,6 +32,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use zerocode_core::orchestration::room::RoomMark;
 use zerocode_core::orchestration::{
     AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, Closure, CoordinatorSeat,
     Delivery, DispatchRow, FoldedMail, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1,
@@ -102,6 +103,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         handover TEXT,
         project TEXT,
         folded TEXT,
+        room TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -529,6 +531,9 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * one JSON document of counts and stamps like the summary, NULL for
          * every run that never folded any. */
         ("ledger_runs", "folded", "TEXT"),
+        /* A project's room (2026-11-12): absent from every run written before
+         * rooms existed, which reads back as an ordinary run. */
+        ("ledger_runs", "room", "TEXT"),
         /* Whether a worker's checkout is its own tree (t-78914): a flag like
          * `taken_over`, and false for every row written before it — a
          * checkout nobody said was the worker's own is not counted as one. */
@@ -2402,8 +2407,8 @@ fn insert_row(
                 connection,
                 "INSERT INTO ledger_runs (
                     ledger_id, ordinal, id, name, created_ms, summary, coordinator, handover,
-                    project, folded
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    project, folded, room
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     ledger_id,
                     place,
@@ -2415,6 +2420,7 @@ fn insert_row(
                     document(row.handover.as_ref())?,
                     document(row.project.as_ref())?,
                     document(row.folded.as_ref())?,
+                    document(row.room.as_ref())?,
                 ],
             )?;
             let Some(auto) = &row.auto else {
@@ -3189,7 +3195,8 @@ fn read_repairable_from_head(
     let mut runs = Vec::new();
     each(
         connection,
-        "SELECT ordinal, id, name, created_ms, summary, coordinator, handover, project, folded
+        "SELECT ordinal, id, name, created_ms, summary, coordinator, handover, project, folded,
+                room
            FROM ledger_runs WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -3236,6 +3243,14 @@ fn read_repairable_from_head(
                 .map(|held| serde_json::from_str::<FoldedMail>(&held))
                 .transpose()
                 .map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
+            // A room mark that will not parse is a corrupt row for the seat's
+            // reason: read as `None` it would turn a room into an ordinary
+            // run, where a leader-shaped pane signs as the operator.
+            let room = row
+                .get::<_, Option<String>>(9)?
+                .map(|held| serde_json::from_str::<RoomMark>(&held))
+                .transpose()
+                .map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
             runs.push(RunRow {
                 id: row.get(1)?,
                 name: Text::from(row.get::<_, String>(2)?),
@@ -3246,6 +3261,7 @@ fn read_repairable_from_head(
                 handover,
                 project,
                 folded,
+                room,
             });
             Ok(())
         },
@@ -4343,6 +4359,7 @@ mod tests {
                     handover: None,
                     project: None,
                     folded: None,
+                    room: None,
                 },
                 RunRow {
                     id: "run-1".to_string(),
@@ -4374,6 +4391,7 @@ mod tests {
                     handover: None,
                     project: None,
                     folded: None,
+                    room: None,
                 },
             ],
             tasks: vec![TaskRow {
@@ -5394,6 +5412,7 @@ mod tests {
                  ALTER TABLE ledger_runs DROP COLUMN project;
                  ALTER TABLE ledger_workers DROP COLUMN in_worktree;
                  ALTER TABLE ledger_runs DROP COLUMN folded;
+                 ALTER TABLE ledger_runs DROP COLUMN room;
                  UPDATE orchestration_ledger_heads SET bytes_held = {};",
                 bytes_held(&expected)
             ))
