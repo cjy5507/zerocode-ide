@@ -86,7 +86,10 @@ const READS: &[(&str, &[(&str, &str)])] = &[
     (
         "stall",
         &[
-            (STALL, "crate::systemone::act_line(&wire, &STALL)"),
+            // One reading for the row that says `applied` and the two that act.
+            (STALL, "crate::systemone::act_line(wire, &STALL)"),
+            (STALL, "let line = act_line_when_acting(&wire)?;"),
+            (STALL, ".and_then(|wire| act_line_when_acting(&wire))"),
             (STALL, "STALL.acts_on("),
         ],
     ),
