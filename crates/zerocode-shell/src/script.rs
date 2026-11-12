@@ -202,29 +202,36 @@ fn run_shell(script: &str, cwd: &Path, env: &[(String, String)], budget: Duratio
         Ok(child) => child,
         Err(error) => return unstartable(error.to_string(), began),
     };
-    // Written and closed before waiting: a shell reading from stdin does not
-    // start until the pipe ends, so holding it open is a deadlock rather than
-    // a slow script.
+    // Both pipes are emptied from the moment the shell starts, each on a
+    // thread of its own. A pipe holds 64 KiB on macOS; a setup script that
+    // prints more (npm alone can print a megabyte) stops in its write until
+    // somebody reads, and reading only after it ended meant it never ended —
+    // the two minutes ran out and the output was lost with it.
+    let stdout = child.stdout.take().map(drain);
+    let stderr = child.stderr.take().map(drain);
+    // Written and closed on a thread of its own as well: a shell reading from
+    // stdin does not start until the pipe ends, so holding it open is a
+    // deadlock rather than a slow script. And a script longer than the pipe is
+    // only taken in as fast as the shell runs it, so a command in it that
+    // hangs would hold this write — and with it the budget below — forever.
     if let Some(mut pipe) = child.stdin.take() {
-        let _ = pipe.write_all(script.as_bytes());
-        // cmd's stdin reader needs a line terminator to execute the last
-        // command; EOF alone can leave it at the continuation prompt.
-        #[cfg(windows)]
-        if !script.ends_with('\n') {
-            let _ = pipe.write_all(b"\r\n");
-        }
+        let script = script.to_owned();
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(script.as_bytes());
+            // cmd's stdin reader needs a line terminator to execute the last
+            // command; EOF alone can leave it at the continuation prompt.
+            #[cfg(windows)]
+            if !script.ends_with('\n') {
+                let _ = pipe.write_all(b"\r\n");
+            }
+        });
     }
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut said = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = std::io::Read::read_to_end(&mut out, &mut said);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_end(&mut err, &mut said);
-                }
+                let mut said = stdout.map(drained).unwrap_or_default();
+                said.extend(stderr.map(drained).unwrap_or_default());
                 return Ran {
                     code: status.code(),
                     timed_out: false,
@@ -236,7 +243,10 @@ fn run_shell(script: &str, cwd: &Path, env: &[(String, String)], budget: Duratio
             Ok(None) => {
                 if began.elapsed() >= budget {
                     // Killed, not merely abandoned: a hung script holds a
-                    // shell for as long as the window lives otherwise.
+                    // shell for as long as the window lives otherwise. The
+                    // readers and the writer are let go rather than joined: a
+                    // child the script started may keep the pipes open after
+                    // the shell is gone, and they end when it does.
                     let _ = child.kill();
                     let _ = child.wait();
                     return Ran {
@@ -252,6 +262,20 @@ fn run_shell(script: &str, cwd: &Path, env: &[(String, String)], budget: Duratio
             Err(error) => return unstartable(error.to_string(), began),
         }
     }
+}
+
+/// Read one of the child's pipes to its end on a thread of its own.
+fn drain(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut said = Vec::new();
+        let _ = pipe.read_to_end(&mut said);
+        said
+    })
+}
+
+/// What a [`drain`] read, or nothing when its thread did not come back.
+fn drained(reader: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    reader.join().unwrap_or_default()
 }
 
 /// How much of a precheck's output the ledger keeps.
@@ -397,6 +421,61 @@ mod tests {
         let outcome = run_script(&script, dir.path(), dir.path());
         assert!(matches!(outcome, ScriptOutcome::Ok { .. }), "{outcome:?}");
         assert!(dir.path().join("ran.txt").exists());
+    }
+
+    /// More than a pipe holds (64 KiB on macOS), many times over.
+    #[cfg(unix)]
+    const MORE_THAN_A_PIPE: usize = 1024 * 1024;
+
+    /// [`run_shell`] on a thread of the test's own, answered within `patience`
+    /// — a runner that deadlocks is a failing test, not a test run that never
+    /// ends.
+    #[cfg(unix)]
+    fn run_shell_within(script: String, budget: Duration, patience: Duration) -> Ran {
+        let dir = scratch();
+        let (sent, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sent.send(run_shell(&script, dir.path(), &[], budget));
+        });
+        answer
+            .recv_timeout(patience)
+            .expect("the shell run never came back")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_larger_than_a_pipe_ends_the_script_with_both_pipes_kept() {
+        // stderr first and stdout after it: a runner that reads the pipes one
+        // after the other still stops on the one it is not reading.
+        let script = format!(
+            "head -c {MORE_THAN_A_PIPE} /dev/zero | tr '\\0' e >&2\n\
+             head -c {MORE_THAN_A_PIPE} /dev/zero | tr '\\0' o\n\
+             exit 0\n"
+        );
+        let ran = run_shell_within(script, Duration::from_secs(20), Duration::from_secs(40));
+        assert!(!ran.timed_out, "the shell stopped in its own write");
+        assert_eq!(ran.code, Some(0));
+        let count = |byte: u8| ran.said.iter().filter(|said| **said == byte).count();
+        assert_eq!(count(b'o'), MORE_THAN_A_PIPE, "stdout was cut");
+        assert_eq!(count(b'e'), MORE_THAN_A_PIPE, "stderr was cut");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_long_script_that_hangs_still_meets_its_budget() {
+        // The script is longer than the pipe, and the shell stops taking it in
+        // at the `sleep`. The budget is the runner's promise all the same.
+        let mut script = String::from("sleep 30\n");
+        script.push_str(&"# padding padding padding\n".repeat(MORE_THAN_A_PIPE / 26 + 1));
+        assert!(script.len() > MORE_THAN_A_PIPE);
+        let began = Instant::now();
+        let ran = run_shell_within(script, Duration::from_millis(300), Duration::from_secs(20));
+        assert!(ran.timed_out, "the hung script was not timed out");
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "the budget was not kept: {:?}",
+            began.elapsed()
+        );
     }
 
     #[cfg(unix)]
