@@ -5391,6 +5391,25 @@ function levelChatBesideHead(page, node) {
   if (head) node.style.setProperty("--chat-beside-head-h", `${head.offsetHeight}px`);
 }
 
+/* A card whose changes stand in `node`: its 「검토」 says so and names the
+ * panel, and its own rows stay shut — the rows stand in one place. The person
+ * keeps it, as they keep a card they opened a file of. */
+function holdBesideCard(list, card, node) {
+  card.__kept = true;
+  openResultFiles(list, card, false);
+  card.dataset.beside = "true";
+  writeAttribute(card.querySelector(".chat-result-all"), "aria-controls", node.id);
+  paintResultAll(card);
+}
+
+/* A card whose changes stand beside the conversation no longer — the panel
+ * went, or turned to another answer: it names no panel and says 「검토」 again. */
+function freeBesideCard(card) {
+  delete card.dataset.beside;
+  card.querySelector(".chat-result-all")?.removeAttribute("aria-controls");
+  paintResultAll(card);
+}
+
 /* `answer`'s changes beside the conversation: its card in the conversation
  * says so and keeps its rows shut, the panel takes a card of its own with
  * every file open. Returns the panel, or null when the answer has no card. */
@@ -5420,18 +5439,13 @@ function standChatBeside(list, answer) {
     held.watch.observe(page, { box: "border-box" });
     levelChatBesideHead(page, node);
   } else if (held.card && held.card !== card) {
-    delete held.card.dataset.beside;
-    if (held.card.isConnected) paintResultAll(held.card);
+    // The one panel turns to this answer: the card it showed is a card again.
+    freeBesideCard(held.card);
   }
   held.answer = answer;
   held.card = card;
   list.__besideOn = true;
-  card.__kept = true;
-  // The rows stand in one place: the card's own shut.
-  openResultFiles(list, card, false);
-  card.dataset.beside = "true";
-  writeAttribute(card.querySelector(".chat-result-all"), "aria-controls", held.node.id);
-  paintResultAll(card);
+  holdBesideCard(list, card, held.node);
   // Its changes were looked at: the sidebar's 「변경 N」 for it is spent, as a file opened in the card spends it.
   markAnswerReviewed(list.__run, answer);
   delete card.dataset.review;
@@ -5471,10 +5485,8 @@ function dropChatBeside(page, { inline = false, focus = false } = {}) {
   page.classList.remove("has-beside");
   const card = held.card;
   if (!card) return;
-  delete card.dataset.beside;
+  freeBesideCard(card);
   if (!card.isConnected) return;
-  card.querySelector(".chat-result-all")?.removeAttribute("aria-controls");
-  paintResultAll(card);
   if (inline) openResultFiles(held.list, card, true);
   if (focus) card.querySelector(".chat-result-all")?.focus({ preventScroll: true });
 }
@@ -5501,11 +5513,7 @@ function syncChatBeside(list) {
   }
   if (card === held.card && card.__said === held.said) return;
   held.card = card;
-  card.__kept = true;
-  card.dataset.beside = "true";
-  writeAttribute(card.querySelector(".chat-result-all"), "aria-controls", held.node.id);
-  openResultFiles(list, card, false);
-  paintResultAll(card);
+  holdBesideCard(list, card, held.node);
   fillChatBeside(held, row);
 }
 

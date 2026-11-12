@@ -7,13 +7,28 @@
  * browser laid out. The conversations are synthetic.
  *
  *   WINDOW_SUITES='^conversation-beside$' node ui/tests/window.mjs */
-import { openAfterScene } from "./conversation-after.mjs";
+import { afterTurns, openAfterScene } from "./conversation-after.mjs";
 import { foldConversations, openWindowTestPage } from "./window-boot.mjs";
 
 /* A window whose pane has the room: the page keeps a column beside the panel. */
 const WIDE = { context: { viewport: { width: 1920, height: 1080 } } };
 /* The harness's own window, whose pane has not. */
 const NARROW = { width: 1280, height: 860 };
+
+/* A turn that lands after the scene's: one more file changed, no test run. */
+const laterTurns = [
+  { role: "user", text: "세션을 열 때 로그도 남겨 줘." },
+  { role: "tool", text: "Edit src/log.rs", tool: { call_id: "log", name: "Edit", kind: "edit", input: "src/log.rs", file: { path: "src/log.rs" }, edits: [{ path: "src/log.rs", lines: [{ kind: "add", text: "log_session(id);" }] }] } },
+  { role: "tool_result", text: "updated", tool: { call_id: "log", is_error: false } },
+  { role: "assistant", text: "세션을 열 때 로그를 남기도록 했습니다." },
+].map((turn, at) => ({ ...turn, message_index: afterTurns.length + at, session_id: "after-session" }));
+
+/* A page with a panel is whole — marked, one panel, padded the panel's width, and the card of the
+ * answer the panel shows saying so and naming it — or bare: none of them, and no card saying it. */
+const whole = (at, card, word = "옆에서 보는 중") =>
+  at.marked && at.panels === 1 && at.padded === at.width && card?.beside === "true" && card.all === word && card.allControls === at.panelId &&
+    at.cards.filter((one) => one !== null && (one.beside !== null || one.allControls !== null)).length === 1;
+const bare = (at) => !at.marked && at.panels === 0 && at.padded === 0 && at.cards.every((one) => one === null || (one.beside === null && one.allControls === null));
 
 /* Where the page, its panel, its card and its composer stand, and what they say. */
 function readBeside() {
@@ -70,6 +85,9 @@ function readBeside() {
     prose: box(latest?.querySelector(":scope > .helper-said")),
     latest: cardOf(latest),
     older: cardOf(answers.find((row) => row !== latest)),
+    // Every answer's card, oldest first; null where an answer wears none.
+    cards: answers.map(cardOf),
+    fresh: window.__BESIDE_LIST__ ? window.__BESIDE_LIST__ !== list : null,
     focusOn: document.activeElement?.className ?? null,
     focusInPanel: Boolean(panel?.contains(document.activeElement)),
     sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth,
@@ -224,7 +242,7 @@ export async function testConversationBeside(browser, origin, ok) {
     const turned = await page.evaluate(readBeside);
     ok("beside: an older answer's 「변경 N」 turns the one panel to that answer — its card says so, and the newest card says 「검토」 again",
       turned.panels === 1 && turned.panelFiles.length === 1 && turned.panelFiles[0].path === "docs.md" && turned.panelTests === null &&
-        turned.older?.beside === "true" && turned.older.all === "옆에서 보는 중" && turned.latest.beside === null && turned.latest.all === "검토",
+        whole(turned, turned.older) && turned.latest.beside === null && turned.latest.allControls === null && turned.latest.all === "검토",
       JSON.stringify(turned));
 
     // The pane turned to its terminal and back keeps what stood.
@@ -264,6 +282,105 @@ export async function testConversationBeside(browser, origin, ok) {
     ok("beside: on a page without the room 「검토」 opens every file in the card, and a page that gets the room back opens no panel by itself",
       inline.panels === 0 && inline.latest.rows > 0 && inline.latest.allOpen === "true" && wide.panels === 0 && wide.padded === 0,
       JSON.stringify({ inline: inline.latest, wide: wide.latest }));
+
+    // What a standing panel lives through. The head's 「변경 N」 stands the newest answer's changes again.
+    await page.locator(".pane-chat .chat-head-review").click();
+    await settle(page);
+    const stood = await page.evaluate(readBeside);
+    ok("beside: on the page that got its room back the head's 「변경 N」 stands the panel again, and the rows that were open in the card shut",
+      whole(stood, stood.latest) && stood.panelFiles[0]?.path === "src/session.rs" && stood.latest.rows === 0, JSON.stringify(stood));
+
+    // An edit that joins its call late: the card stands anew, and the panel says what it now says.
+    await page.evaluate(async () => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      list.__run.helper.turns.find((turn) => turn.tool?.call_id === "edit").tool.edits[0].lines.push({ kind: "add", text: "log_session(id);" });
+      syncHelperTurns(list, list.__run);
+      await window.__PAINTED__();
+    });
+    await settle(page);
+    const late = await page.evaluate(readBeside);
+    ok("beside: a change that reaches the answer late is in the panel — its head's counts and its rows — and the card stood anew still says its changes stand beside it",
+      whole(late, late.latest) && late.panelId === stood.panelId && late.panelAdded === "+3" && late.panelRemoved === "−1" && late.panelRows === 4 &&
+        late.panelFiles[0]?.open === "true" && late.latest.rows === 0,
+      JSON.stringify(late));
+
+    // A new turn lands: the panel keeps the answer it shows, whose card stays; the newest answer wears a card of its own.
+    await page.evaluate(async (all) => {
+      const term = activePaneOf(currentTab());
+      window.__ANSWER__.pane_log = (args) => ({
+        found: true, next: all.length, turns: args.after == null ? all : all.slice(args.after),
+        skipped: false, more: false, folded: false, model: "claude-opus-5",
+      });
+      hookStates.set(term, "done");
+      await pollHelperPages();
+      paintPaneChat(term);
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+    }, [...afterTurns, ...laterTurns]);
+    await settle(page);
+    const landed = await page.evaluate(readBeside);
+    ok("beside: a turn that lands leaves the panel on the answer it shows — that answer's card stays and still says so — and the newest answer wears its own card saying 「검토」",
+      landed.cards.length === 3 && whole(landed, landed.cards[1]) && landed.panelId === stood.panelId && landed.panelFiles[0]?.path === "src/session.rs" &&
+        landed.panelAdded === "+3" && landed.latest?.paths[0] === "src/log.rs" && landed.latest.all === "검토" && landed.latest.beside === null,
+      JSON.stringify(landed));
+
+    // The newest card's 「검토」 turns the panel to it; then its only edit turns out to have failed: the card goes, and the panel with it.
+    await page.locator(".pane-chat .helper-turn.is-latest .chat-result-all").focus();
+    await page.keyboard.press("Enter");
+    await settle(page);
+    const moved = await page.evaluate(readBeside);
+    await page.evaluate(async () => {
+      const list = document.querySelector(".pane-chat .helper-turns");
+      list.__run.helper.turns.find((turn) => turn.tool?.call_id === "log").outputError = true;
+      syncHelperTurns(list, list.__run);
+      await window.__PAINTED__();
+    });
+    await settle(page);
+    const gone = await page.evaluate(readBeside);
+    ok("beside: the panel turned to the newest answer goes with that answer's card when its only edit failed — the page is bare, nothing padded for a panel that is gone",
+      whole(moved, moved.latest) && moved.panelFiles[0]?.path === "src/log.rs" && moved.cards[1]?.all === "검토" &&
+        bare(gone) && gone.latest === null && gone.dock.right === wide.dock.right && gone.sideways === 0,
+      JSON.stringify({ moved: [moved.panelFiles, moved.cards], gone: [gone.marked, gone.panels, gone.padded, gone.cards, gone.dock] }));
+
+    // A page drawn anew — another language — keeps no panel of the page before, and stands one again when asked.
+    await page.evaluate(() => {
+      const rows = [...document.querySelectorAll(".pane-chat .helper-turns > .helper-turn.is-assistant.is-turn-answer")];
+      rows[1].querySelector(".chat-result-all").focus();
+    });
+    await page.keyboard.press("Enter");
+    await settle(page);
+    const again = await page.evaluate(readBeside);
+    await page.evaluate(async () => {
+      const term = activePaneOf(currentTab());
+      window.__BESIDE_LIST__ = document.querySelector(".pane-chat .helper-turns");
+      setLocale("en", { persist: false });
+      await pollHelperPages();
+      paintPaneChat(term);
+      await window.__PAINTED__();
+      await window.__PAINTED__();
+    });
+    await settle(page);
+    const anew = await page.evaluate(readBeside);
+    ok("beside: a page drawn anew keeps no panel of the page before — a new list on a bare page, the composer at the page's own edge",
+      whole(again, again.cards[1]) && anew.fresh === true && bare(anew) && anew.dock.right === wide.dock.right && anew.sideways === 0,
+      JSON.stringify({ again: [again.marked, again.panels, again.cards], anew: [anew.fresh, anew.marked, anew.panels, anew.padded, anew.cards, anew.dock] }));
+    await page.evaluate(async () => {
+      const rows = [...document.querySelectorAll(".pane-chat .helper-turns > .helper-turn.is-assistant.is-turn-answer")];
+      rows[1].dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+      await window.__PAINTED__();
+      rows[1].querySelector(".chat-answer-changes").click();
+    });
+    await settle(page);
+    const english = await page.evaluate(readBeside);
+    await page.evaluate(async () => {
+      setLocale("ko", { persist: false });
+      await pollHelperPages();
+      await window.__PAINTED__();
+    });
+    ok("beside: on the page drawn anew the panel stands when asked, and speaks the page's language",
+      whole(english, english.cards[1], "Shown beside") && english.panelFiles[0]?.path === "src/session.rs" && english.panelClose === "Close" &&
+        english.panelName === "What this turn changed" && english.panelTitle === "1 files changed",
+      JSON.stringify(english));
     ok("beside: the page raised no errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
