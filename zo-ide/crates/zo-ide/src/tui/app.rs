@@ -1179,7 +1179,9 @@ fn is_paste_image_key(key: &KeyEvent, ch: char) -> bool {
 /// has to answer "what is it doing right now".
 fn status_detail_for(kind: &ToolKind) -> String {
     match kind {
-        ToolKind::Command { command, .. } => command.clone(),
+        // Its first line: the status is one row, and a heredoc's script is
+        // the transcript's to show.
+        ToolKind::Command { command, .. } => command.lines().next().unwrap_or_default().to_string(),
         ToolKind::Edit { path } => format!("editing {path}"),
         ToolKind::Explore(items) => items
             .first()
@@ -4371,7 +4373,8 @@ impl Ui {
             .values()
             .filter(|pending| core_types::tool_names::tool_key(&pending.name) == tool)
             .filter_map(|pending| match &pending.kind {
-                ToolKind::Command { command, .. } => Some(command.clone()),
+                // On one line, as the card has always shown it.
+                ToolKind::Command { command, .. } => Some(crate::util::ansi::sanitize_inline(command)),
                 _ => None,
             });
         let command = commands.next()?;
@@ -10474,6 +10477,11 @@ mod tests {
         assert_eq!(
             status_detail_for(&ToolKind::Command { command: "cargo test".into(), background: false }),
             "cargo test"
+        );
+        // A command of several lines is named by its first: the status is one row.
+        assert_eq!(
+            status_detail_for(&ToolKind::Command { command: "python3 - <<'EOF'\nimport sys\nEOF".into(), background: false }),
+            "python3 - <<'EOF'"
         );
         assert_eq!(
             status_detail_for(&ToolKind::Edit { path: "src/lib.rs".into() }),

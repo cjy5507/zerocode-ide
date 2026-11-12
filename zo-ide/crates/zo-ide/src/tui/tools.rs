@@ -144,7 +144,7 @@ impl ToolKind {
     pub fn from_preview(_name: &str, preview: &ToolPreview, summary: &str) -> Self {
         match preview {
             ToolPreview::Bash { command } => Self::Command {
-                command: sanitize(command, summary),
+                command: sanitize_lines(command, summary),
                 background: false,
             },
             ToolPreview::Read { path, range } => {
@@ -244,6 +244,25 @@ impl ToolKind {
 fn sanitize(text: &str, fallback: &str) -> String {
     let cleaned = crate::util::ansi::sanitize_inline(text.trim());
     if cleaned.is_empty() {
+        crate::util::ansi::sanitize_inline(fallback.trim())
+    } else {
+        cleaned
+    }
+}
+
+/// A command as its cell keeps it: every line cleaned as [`sanitize`] cleans a
+/// word, and the line breaks kept. A row shows a command's first line and
+/// hangs the rest under it; flattened on the way in, a heredoc's whole script
+/// stood in that one row, out to the pane's edge (the person's report,
+/// 2026-11-12, after the row stopped being cut at the reading width).
+fn sanitize_lines(text: &str, fallback: &str) -> String {
+    let cleaned = text
+        .trim()
+        .lines()
+        .map(crate::util::ansi::sanitize_inline)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if cleaned.trim().is_empty() {
         crate::util::ansi::sanitize_inline(fallback.trim())
     } else {
         cleaned
@@ -3148,6 +3167,32 @@ mod tests {
                 "  └ 3.12.1".to_string(),
             ]
         );
+    }
+
+    /// A command reaches its cell through the call's preview with its lines
+    /// kept, so what the tests above build by hand is what a session draws:
+    /// the row shows the first line and the rest hangs under it. Flattened on
+    /// the way in, a heredoc's whole script stood in one row.
+    #[test]
+    fn a_previewed_command_keeps_its_lines() {
+        let script = "python3 - <<'EOF'\nimport sys\r\n\tprint(sys.version)\nEOF\n";
+        let preview = preview_tool_input("Bash", &json!({ "command": script }));
+        let summary = preview_summary(&preview);
+        let kind = ToolKind::from_preview("Bash", &preview, &summary);
+        let ToolKind::Command { command, .. } = &kind else {
+            panic!("a command, not {kind:?}");
+        };
+        assert_eq!(command, "python3 - <<'EOF'\nimport sys\n print(sys.version)\nEOF");
+        let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
+        assert_eq!(plain(&group.lines(200, Duration::ZERO)), vec!["⠋ Run python3 - <<'EOF'".to_string()]);
+        assert!(group.complete("a", ok("3.12.1")));
+        assert_eq!(group.steps()[0].target, "python3 - <<'EOF'");
+        let finished = plain(&group.lines(200, Duration::ZERO));
+        assert!(
+            finished[0].starts_with("✓ Run python3 - <<'EOF'") && !finished[0].contains("import sys"),
+            "{finished:?}"
+        );
+        assert_eq!(finished[1], "    import sys");
     }
 
     /// The verb is a word, not a column (t-51389, 「ran call 등 도구 옆
