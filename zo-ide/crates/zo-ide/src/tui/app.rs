@@ -6263,6 +6263,12 @@ impl App {
         if self.session().resumed() {
             self.replay_history();
         }
+        // A person watches this session, so the notice of "always allow"
+        // rules narrowed — here or in a run nobody watched — is said now, once
+        // (t-105662).
+        if let Some(text) = runtime::take_allow_always_narrow_notice(&self.session().cwd) {
+            crate::runtime_support::push_startup_warning(text);
+        }
         // What the runtime build found wrong in the settings — a permission
         // rule that names no zo tool (t-81312) — is a startup warning.
         for text in crate::runtime_support::drain_startup_warnings() {

@@ -156,6 +156,8 @@ pub use config::{
     RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
     RuntimeSecondBrainConfig, RuntimeShipConfig, ScopedMcpServerConfig, UntrustedMcpServer,
     TRUSTED_MCP_SERVERS_FILE, ZO_SETTINGS_SCHEMA_NAME,
+    narrow_broad_allow_always_rules, take_allow_always_narrow_notice, AllowAlwaysNarrowing,
+    NarrowedRule,
     persist_allow_always_rules, remove_mcp_server, trust_mcp_server, untrust_mcp_server,
     write_mcp_server, mcp_literal_secrets, move_mcp_literal_to_reference,
     slot_holds_literal_secret, persons_own_literal_secrets, can_tell_persons_own_settings_file,

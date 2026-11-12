@@ -1278,6 +1278,66 @@ fn literal_rule_content(subject: &str) -> String {
     out
 }
 
+/// Whether `content` is already what [`literal_rule_content`] writes: every
+/// `*`, `?` and `[` sits in its own one-character class (`[*]`, `[?]`,
+/// `[[]`). Such a rule matches only its own text, so narrowing it again would
+/// wrap the classes a second time and stop matching the command it allows.
+fn is_literal_rule_content(content: &str) -> bool {
+    let chars: Vec<char> = content.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '[' if chars.get(index + 1).is_some_and(|ch| matches!(ch, '*' | '?' | '['))
+                && chars.get(index + 2) == Some(&']') =>
+            {
+                index += 3;
+            }
+            '*' | '?' | '[' => return false,
+            _ => index += 1,
+        }
+    }
+    true
+}
+
+/// The allow rule `tool(subject)` as "always allow" writes it since it stopped
+/// storing globs (t-104618 Z4): the subject taken as the literal command the
+/// person approved. `Ok(None)` leaves the rule as it is — a rule the parser
+/// does not read as a glob (a bare tool name, `tool(*)`, a `prefix:*` rule, an
+/// exact subject, a pattern that does not compile), and a glob already in the
+/// literal form. `Err` is a rewrite that would not read back as a glob meeting
+/// the approved text; the caller then changes nothing.
+pub(crate) fn narrowed_allow_rule(rule: &str) -> Result<Option<String>, String> {
+    let trimmed = rule.trim();
+    let (tool, Some(content)) = split_rule(trimmed) else {
+        return Ok(None);
+    };
+    if !matches!(parse_rule_matcher(content), PermissionRuleMatcher::Glob(_)) {
+        return Ok(None);
+    }
+    let approved = unescape_rule_content(content.trim());
+    if is_literal_rule_content(&approved) {
+        return Ok(None);
+    }
+    let narrowed = format!("{tool}({})", escape_rule_subject(&literal_rule_content(&approved)));
+    match PermissionRule::parse(&narrowed).matcher {
+        PermissionRuleMatcher::Glob(pattern) if pattern.matches(&approved) => Ok(Some(narrowed)),
+        _ => Err(format!("rule `{trimmed}` does not read back as `{narrowed}` meeting its own text")),
+    }
+}
+
+/// [`narrowed_allow_rule`] for an ordered spec: only a `…=allow` spec is
+/// narrowed, and its `=allow` is kept as written. A deny or ask spec, and a
+/// spec with no action, is left alone.
+pub(crate) fn narrowed_ordered_allow_rule(spec: &str) -> Result<Option<String>, String> {
+    let Some((rule_part, action_part)) = split_decision_rule(spec.trim()) else {
+        return Ok(None);
+    };
+    if PermissionRuleAction::parse(action_part) != Some(PermissionRuleAction::Allow) {
+        return Ok(None);
+    }
+    Ok(narrowed_allow_rule(rule_part)?.map(|narrowed| format!("{narrowed}={action_part}")))
+}
+
 /// Inverse of [`unescape_rule_content`] — escape a subject so it survives a
 /// round-trip through [`PermissionRule::parse`] when embedded in `tool(subject)`.
 fn escape_rule_subject(subject: &str) -> String {
@@ -1428,8 +1488,9 @@ fn extract_permission_subject(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PermissionContext, PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
-        PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+        narrowed_allow_rule, narrowed_ordered_allow_rule, PermissionContext, PermissionMode,
+        PermissionOutcome, PermissionOverride, PermissionPolicy, PermissionPromptDecision,
+        PermissionPrompter, PermissionRequest,
     };
     use crate::config::RuntimePermissionRuleConfig;
 
@@ -2168,6 +2229,101 @@ mod tests {
             assert_eq!(reloaded.authorize("bash", &input, None), PermissionOutcome::Allow);
             assert!(matches!(reloaded.authorize("bash", &wider_input, None), PermissionOutcome::Deny { .. }));
         }
+    }
+
+    /// A glob allow rule saved before "always allow" wrote its subject
+    /// literally is rewritten as that literal subject; every other shape of
+    /// rule — and a rule already in the literal form — is left alone.
+    #[test]
+    fn a_broad_allow_rule_narrows_to_its_own_text_and_nothing_else_moves() {
+        for (rule, expected) in [
+            ("bash(cargo test build/*)", Some("bash(cargo test build/[*])")),
+            ("Bash(cargo test ?)", Some("Bash(cargo test [?])")),
+            ("bash(cargo test [ab])", Some("bash(cargo test [[]ab])")),
+            (r"bash(echo \(a\) *)", Some(r"bash(echo \(a\) [*])")),
+            ("bash(ls [*].rs *)", Some("bash(ls [[][*]].rs [*])")),
+            // What the person writes on purpose, and what is not a glob.
+            ("bash(git status:*)", None),
+            ("bash(*)", None),
+            ("bash()", None),
+            ("bash", None),
+            ("bash(git log)", None),
+            ("bash(ls [)", None),
+            // Already narrow: the literal form "always allow" writes today.
+            ("bash(ls [*].rs)", None),
+            ("bash(cargo test [?] [[])", None),
+        ] {
+            assert_eq!(
+                narrowed_allow_rule(rule).expect("narrows"),
+                expected.map(str::to_string),
+                "{rule}"
+            );
+        }
+    }
+
+    /// Narrowing is a fixed point: what it writes is never narrowed again,
+    /// so a second run cannot double-wrap a class and stop the rule matching.
+    #[test]
+    fn a_narrowed_allow_rule_is_never_narrowed_twice() {
+        for rule in [
+            "bash(cargo test build/*)",
+            "bash(rm [!a]*)",
+            "bash(**)",
+            "bash(ls [*].rs *)",
+            "bash(a[b]c*)",
+            "bash(x ? y)",
+        ] {
+            let once = narrowed_allow_rule(rule)
+                .expect("narrows")
+                .unwrap_or_else(|| panic!("{rule} is broad"));
+            assert_eq!(narrowed_allow_rule(&once).expect("reads"), None, "{rule} → {once}");
+        }
+    }
+
+    /// The ordered form narrows only `…=allow` and keeps the action as written.
+    #[test]
+    fn an_ordered_allow_spec_narrows_and_deny_or_ask_specs_do_not() {
+        for (spec, expected) in [
+            ("bash(cargo test build/*)=allow", Some("bash(cargo test build/[*])=allow")),
+            ("bash(FOO=1 make *)=allow", Some("bash(FOO=1 make [*])=allow")),
+            ("bash(rm *)=deny", None),
+            ("bash(git push *)=ask", None),
+            ("bash(git status:*)=allow", None),
+            ("bash(ls [*].rs)=allow", None),
+            ("bash(ls *)", None),
+        ] {
+            assert_eq!(
+                narrowed_ordered_allow_rule(spec).expect("narrows"),
+                expected.map(str::to_string),
+                "{spec}"
+            );
+        }
+    }
+
+    /// The narrowed rule allows the command approved and asks for the wider
+    /// one the glob let through (`cargo test build/x && cargo publish`).
+    #[test]
+    fn a_narrowed_allow_rule_allows_the_approved_command_only() {
+        let narrowed = narrowed_allow_rule("bash(cargo test build/*)")
+            .expect("narrows")
+            .expect("broad");
+        let policy = |rule: &str| {
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+                .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+                .with_permission_rules(&RuntimePermissionRuleConfig::new(
+                    vec![rule.to_string()],
+                    Vec::new(),
+                    Vec::new(),
+                ))
+        };
+        let approved = serde_json::json!({ "command": "cargo test build/*" }).to_string();
+        let wider = serde_json::json!({ "command": "cargo test build/x && cargo publish" }).to_string();
+        assert_eq!(policy("bash(cargo test build/*)").authorize("bash", &wider, None), PermissionOutcome::Allow);
+        assert_eq!(policy(&narrowed).authorize("bash", &approved, None), PermissionOutcome::Allow);
+        assert!(matches!(
+            policy(&narrowed).authorize("bash", &wider, None),
+            PermissionOutcome::Deny { .. }
+        ));
     }
 
     #[test]

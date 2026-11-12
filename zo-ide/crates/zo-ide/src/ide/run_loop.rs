@@ -255,6 +255,14 @@ async fn run_frontend(
     for text in crate::runtime_support::drain_catalog_notices() {
         note(&mut renderer, &text);
     }
+    // The notice of "always allow" rules narrowed waits for a session a
+    // person watches (t-105662): a terminal on stdin and prose out. A pipe, a
+    // schedule or a JSON reader leaves it for the next one.
+    if tools::stdin_is_terminal() && !flags.json {
+        if let Some(text) = runtime::take_allow_always_narrow_notice(&session.cwd) {
+            crate::runtime_support::push_startup_warning(text);
+        }
+    }
     for text in crate::runtime_support::drain_startup_warnings() {
         let _ = renderer.push(system_note(SystemLevel::Warn, &text));
     }

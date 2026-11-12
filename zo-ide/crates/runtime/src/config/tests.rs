@@ -2996,7 +2996,7 @@ fn project_settings_may_still_add_deny_restrictions() {
 }
 
 /// git-init a repo at `cwd`, optionally staging `rel_path` so it is tracked.
-fn init_git_repo_with(cwd: &std::path::Path, rel_path: &str, track: bool) {
+pub(super) fn init_git_repo_with(cwd: &std::path::Path, rel_path: &str, track: bool) {
     let run = |args: &[&str]| {
         std::process::Command::new("git")
             .current_dir(cwd)

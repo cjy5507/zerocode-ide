@@ -344,8 +344,11 @@ pub(crate) fn build_runtime_with_thinking(
     // startup error must name the stage it escaped from or a rare failure
     // (the 2026-08-10 `Io(EINVAL)` flake) dies unattributable.
     let config_started = std::time::Instant::now();
+    // The session's own load: it first narrows the "always allow" rules an
+    // older zo saved wider than the command approved (t-105662), so the
+    // policy built below already reads them narrow.
     let runtime_config = loader
-        .load()
+        .load_for_session()
         .map_err(|error| format!("startup stage config-load: {error:?}"))?;
     log_boot_stage("config-load", config_started);
     profile_boot_components(cwd, &loader, &runtime_config, &model);

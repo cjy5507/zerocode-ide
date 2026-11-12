@@ -1,3 +1,4 @@
+mod allow_always_narrow;
 mod mcp_edit;
 mod mcp_secrets;
 mod parsers;
@@ -13,6 +14,10 @@ use core_types::paths::{write_private_file, ParentDirPolicy};
 use crate::json::JsonValue;
 use crate::sandbox::SandboxConfig;
 
+pub use self::allow_always_narrow::{
+    narrow_broad_allow_always_rules, take_allow_always_narrow_notice, AllowAlwaysNarrowing,
+    NarrowedRule,
+};
 pub use self::mcp_edit::{
     remove_mcp_server, trust_mcp_server, untrust_mcp_server, write_mcp_server, McpEdit,
 };
@@ -798,6 +803,16 @@ impl ConfigLoader {
     #[must_use]
     pub fn cli_settings_file() -> Option<PathBuf> {
         cli_overrides().settings_file
+    }
+
+    /// [`Self::load`] for a session about to build its permission policy:
+    /// first narrows, once per project, the "always allow" rules an older zo
+    /// saved wider than the command approved
+    /// ([`narrow_broad_allow_always_rules`]), so the very session that narrows
+    /// reads the narrowed rules. The narrowing never fails the load.
+    pub fn load_for_session(&self) -> Result<RuntimeConfig, ConfigError> {
+        let _ = narrow_broad_allow_always_rules(&self.cwd);
+        self.load()
     }
 
     // One cohesive merge pass over the discovered settings documents (scope
