@@ -296,9 +296,8 @@ pub fn build_linux_sandbox_command(
     if status.network_active {
         args.push("--net".to_string());
     }
-    args.push("sh".to_string());
-    args.push("-lc".to_string());
-    args.push(command.to_string());
+    args.push(tool_shell().to_string());
+    args.extend(tool_shell_args(command));
 
     let (sandbox_home, sandbox_tmp) = sandbox_scratch_dirs(cwd);
     // Only HOME/TMPDIR/PATH are exported. The former `ZO_SANDBOX_FILESYSTEM_MODE`
@@ -427,6 +426,102 @@ pub fn sandbox_backend() -> &'static dyn SandboxBackend {
     }
 }
 
+/// The shell the `bash` tool starts: `bash` where this machine has one, `sh`
+/// where it does not.
+///
+/// The tool is named `bash` and a model writes bash for it, but it used to be
+/// started as `sh -lc`. Where `sh` is dash (Debian, Ubuntu, most containers) a
+/// here-string, a process substitution or the `time` keyword fails with a dash
+/// syntax error and the whole command line is thrown away — 4 of 265 calls in
+/// one run of nine tasks on 2026-11-12, each a wasted round trip. macOS's `sh`
+/// is bash in POSIX mode, which takes most of that and still refuses `<(…)`.
+///
+/// Looked up once, and kept as a full path: the first `bash` on zo's own
+/// `PATH` that is an executable file. The command itself runs under the `PATH`
+/// the settings and the ledger give it, which may not hold that folder — a
+/// bare `bash` found here could then fail to start there. Windows keeps `sh`:
+/// a `bash.exe` found there may be WSL's launcher, which would run the command
+/// in another system.
+#[must_use]
+pub fn tool_shell() -> &'static str {
+    use std::sync::OnceLock;
+    static SHELL: OnceLock<String> = OnceLock::new();
+    SHELL.get_or_init(|| tool_shell_on(env::var_os("PATH").as_deref()))
+}
+
+/// The arguments that start `command` in [`tool_shell`]: its flags, then the
+/// script.
+///
+/// `sh` is started as it always was, a login shell (`-lc`). `bash` is not made
+/// a login shell: a login bash reads `~/.bash_profile` in place of the
+/// `~/.profile` a login `sh` reads, and runs `~/.bash_logout` when the command
+/// exits — a person whose `PATH` is set in `~/.profile` would lose it to a
+/// change that was only meant to widen the syntax a command may use. So bash
+/// starts plain (`-c`) and first reads the two files a login `sh` reads, on
+/// the command's own first line, so the line numbers in its messages stay the
+/// command's.
+///
+/// `--norc` keeps bash from reading `~/.bashrc` on its own: a plain `bash -c`
+/// does when it takes itself for the top shell of a remote login (`SSH_CLIENT`
+/// set, or its input a socket, and no `SHLVL` above it), which `sh` never did.
+///
+/// What still differs from the login `sh`: the two files are read by bash, so
+/// a profile that asks which shell reads it gets bash's answer (Debian's stock
+/// `~/.profile` then reads `~/.bashrc`); bash reads the file `BASH_ENV` names
+/// when the environment sets one; and an alias a profile defines is not
+/// expanded in the command.
+#[must_use]
+pub fn tool_shell_args(command: &str) -> Vec<String> {
+    tool_shell_args_for(tool_shell(), command)
+}
+
+/// [`tool_shell_args`] for a given shell.
+fn tool_shell_args_for(shell: &str, command: &str) -> Vec<String> {
+    if Path::new(shell).file_name() == Some(std::ffi::OsStr::new("bash")) {
+        vec![
+            "--norc".to_string(),
+            "-c".to_string(),
+            format!("{SH_LOGIN_FILES} {command}"),
+        ]
+    } else {
+        vec!["-lc".to_string(), command.to_string()]
+    }
+}
+
+/// What a login `sh` reads before a command, spelled for a shell that is not
+/// started as one: `/etc/profile`, then `~/.profile`, each if it is there.
+const SH_LOGIN_FILES: &str =
+    r#"if [ -r /etc/profile ]; then . /etc/profile; fi; if [ -r "$HOME/.profile" ]; then . "$HOME/.profile"; fi;"#;
+
+/// [`tool_shell`]'s decision for a given `PATH`.
+fn tool_shell_on(path: Option<&std::ffi::OsStr>) -> String {
+    if cfg!(windows) {
+        return "sh".to_string();
+    }
+    path.and_then(|path| {
+        env::split_paths(path)
+            .map(|dir| dir.join("bash"))
+            .find(|candidate| candidate.is_absolute() && is_executable_file(candidate))
+    })
+    .and_then(|found| found.to_str().map(str::to_string))
+    .unwrap_or_else(|| "sh".to_string())
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
 /// Wrap a shell command through the platform backend. The single entry point
 /// bash and typed actions share, so they isolate identically.
 #[must_use]
@@ -472,13 +567,14 @@ fn build_macos_sandbox_command(
     }
     Some(LinuxSandboxCommand {
         program: "sandbox-exec".to_string(),
-        args: vec![
+        args: [
             "-p".to_string(),
             build_seatbelt_profile(cwd, status),
-            "sh".to_string(),
-            "-lc".to_string(),
-            command.to_string(),
-        ],
+            tool_shell().to_string(),
+        ]
+        .into_iter()
+        .chain(tool_shell_args(command))
+        .collect(),
         env,
     })
 }
@@ -619,7 +715,7 @@ pub fn sandbox_wrap_argv(
     let mut wrapped: Vec<String> = launcher
         .args
         .into_iter()
-        .take_while(|arg| arg != "sh")
+        .take_while(|arg| arg.as_str() != tool_shell())
         .collect();
     wrapped.push(program.to_string());
     wrapped.extend(args.iter().cloned());
@@ -1007,6 +1103,101 @@ mod wi_e_backend_tests {
         );
     }
 
+    /// The tool shell is a `bash` exactly when `PATH` holds an executable file of
+    /// that name in an absolute folder: a folder without one, a `bash` that is
+    /// not executable, a relative entry, and no `PATH` at all leave `sh`.
+    #[cfg(unix)]
+    #[test]
+    fn the_tool_shell_is_bash_where_path_has_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = std::env::temp_dir().join(format!("zo-tool-shell-{}", std::process::id()));
+        let (with, without, inert) = (base.join("with"), base.join("without"), base.join("inert"));
+        for dir in [&with, &without, &inert] {
+            std::fs::create_dir_all(dir).expect("temp dir");
+        }
+        std::fs::write(with.join("bash"), "#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(with.join("bash"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::write(inert.join("bash"), "not a program\n").expect("write");
+        std::fs::set_permissions(inert.join("bash"), std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let path = |dirs: &[&std::path::PathBuf]| std::env::join_paths(dirs.iter().copied()).expect("join");
+        let found = with.join("bash");
+        assert_eq!(
+            super::tool_shell_on(Some(&path(&[&without, &with]))),
+            found.to_str().expect("utf-8 temp path"),
+            "the full path, so the command's own PATH cannot lose it"
+        );
+        assert_eq!(super::tool_shell_on(Some(&path(&[&without]))), "sh");
+        assert_eq!(super::tool_shell_on(Some(&path(&[&inert]))), "sh");
+        assert_eq!(super::tool_shell_on(Some(std::ffi::OsStr::new("relative-bin"))), "sh");
+        assert_eq!(super::tool_shell_on(None), "sh");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `sh` starts as the login shell it always was; `bash` starts plain and
+    /// reads `sh`'s two login files ahead of the command, on the same line.
+    #[test]
+    fn bash_is_started_plain_with_the_login_files_of_sh() {
+        assert_eq!(super::tool_shell_args_for("sh", "echo hi"), ["-lc", "echo hi"]);
+        let args = super::tool_shell_args_for("/usr/local/bin/bash", "echo hi\necho there");
+        let [norc, flag, script] = args.as_slice() else {
+            panic!("bash takes two flags and the script: {args:?}");
+        };
+        assert_eq!(norc, "--norc", "bash reads no startup file of its own");
+        assert_eq!(flag, "-c");
+        assert!(script.starts_with("if [ -r /etc/profile ]; then . /etc/profile; fi; "), "{script}");
+        assert!(script.ends_with("fi; echo hi\necho there"), "{script}");
+        assert_eq!(script.lines().count(), 2, "the command's first line stays line 1: {script}");
+    }
+
+    /// The tool's shell finds what a login `sh` would: `~/.profile` is read,
+    /// `~/.bash_profile` and `~/.bashrc` are not, and (under bash) no
+    /// `~/.bash_logout` runs when the command exits.
+    ///
+    /// The shell is started the way a plain `bash -c` takes for a remote login
+    /// — `SSH_CLIENT` set, a socket as its input, no `SHLVL` above it — which
+    /// is when bash would read `~/.bashrc` by itself.
+    #[cfg(unix)]
+    #[test]
+    fn the_tool_shell_reads_the_login_files_sh_reads_and_no_others() {
+        let home = std::env::temp_dir().join(format!("zo-tool-shell-home-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("temp home");
+        std::fs::write(home.join(".profile"), "export ZO_TEST_FROM_PROFILE=profile\n").expect("write");
+        std::fs::write(home.join(".bash_profile"), "export ZO_TEST_FROM_BASH_PROFILE=bash_profile\n")
+            .expect("write");
+        std::fs::write(home.join(".bashrc"), "export ZO_TEST_FROM_BASHRC=bashrc\n").expect("write");
+        std::fs::write(home.join(".bash_logout"), "echo logout-ran > \"$HOME/logout-ran\"\n").expect("write");
+
+        let (held_open, input) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let output = std::process::Command::new(super::tool_shell())
+            .args(super::tool_shell_args(
+                "echo \"[${ZO_TEST_FROM_PROFILE-}][${ZO_TEST_FROM_BASH_PROFILE-}][${ZO_TEST_FROM_BASHRC-}]\"; exit 0",
+            ))
+            .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(input)))
+            .env("HOME", &home)
+            .env("SSH_CLIENT", "192.0.2.1 50000 22")
+            .env_remove("SHLVL")
+            .env_remove("BASH_ENV")
+            .env_remove("ZO_TEST_FROM_PROFILE")
+            .env_remove("ZO_TEST_FROM_BASH_PROFILE")
+            .env_remove("ZO_TEST_FROM_BASHRC")
+            .output()
+            .expect("the tool shell starts");
+        drop(held_open);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.lines().any(|line| line == "[profile][][]"),
+            "stdout {stdout:?} stderr {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if super::tool_shell() != "sh" {
+            // macOS's login `sh` is bash and does run it on `exit`; the tool's bash never does
+            assert!(!home.join("logout-ran").exists(), "no logout file runs after a command");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn typed_action_inherits_sandbox() {
         let cwd = std::env::temp_dir();
@@ -1025,7 +1216,7 @@ mod wi_e_backend_tests {
             assert!(args.contains(&"cargo".to_string()));
             assert!(args.contains(&"--version".to_string()));
             assert!(
-                !args.contains(&"sh".to_string()),
+                !args.contains(&super::tool_shell().to_string()),
                 "typed action stays shell-free"
             );
         } else {
@@ -1076,6 +1267,21 @@ mod wi_e_backend_tests {
         );
         assert!(workspace.join("probe.txt").exists());
         assert!(!outside.join("probe.txt").exists());
+
+        // The shell the `bash` tool starts runs under the same profile.
+        let tool_shell_runs = Command::new("sandbox-exec")
+            .arg("-p")
+            .arg(&profile)
+            .arg(super::tool_shell())
+            .args(super::tool_shell_args(&format!(
+                "echo hi > {}/tool-shell.txt",
+                workspace.display()
+            )))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(tool_shell_runs, "{} starts under the profile", super::tool_shell());
+        assert!(workspace.join("tool-shell.txt").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

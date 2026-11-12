@@ -1354,8 +1354,8 @@ fn prepare_command(
         prepared.envs(launcher.env);
         prepared
     } else {
-        let mut prepared = Command::new("sh");
-        prepared.arg("-lc").arg(command).current_dir(cwd);
+        let mut prepared = Command::new(crate::sandbox::tool_shell());
+        prepared.args(crate::sandbox::tool_shell_args(command)).current_dir(cwd);
         if sandbox_status.home_tmp_redirected {
             let (home, tmp) = sandbox_scratch_dirs(cwd);
             prepared.env("HOME", home);
@@ -1398,8 +1398,8 @@ fn prepare_tokio_command(
         prepared.envs(launcher.env);
         prepared
     } else {
-        let mut prepared = TokioCommand::new("sh");
-        prepared.arg("-lc").arg(command).current_dir(cwd);
+        let mut prepared = TokioCommand::new(crate::sandbox::tool_shell());
+        prepared.args(crate::sandbox::tool_shell_args(command)).current_dir(cwd);
         if sandbox_status.home_tmp_redirected {
             let (home, tmp) = sandbox_scratch_dirs(cwd);
             prepared.env("HOME", home);
@@ -1899,6 +1899,54 @@ mod tests {
             allowed_mounts: None,
             cwd: None,
         }
+    }
+
+    /// The `bash` tool runs bash where the machine has one: what a model writes
+    /// for a tool of that name — a here-string, a process substitution, the
+    /// `time` keyword, `[[ ]]`, an array, `pipefail` — runs instead of dying on
+    /// a dash (or POSIX-mode) syntax error. Each line is one command a
+    /// deepseek-flash session issued in the 2026-11-12 harness run, reduced.
+    #[cfg(unix)]
+    #[test]
+    fn bash_syntax_runs_in_the_bash_tool() {
+        if crate::sandbox::tool_shell() == "sh" {
+            return; // no bash on this machine: the tool is `sh`, as before
+        }
+        let cases = [
+            ("cat <<< here-string", "here-string"),
+            ("cat <(echo process-substitution)", "process-substitution"),
+            ("time true; echo timed", "timed"),
+            ("[[ a == a ]] && echo double-bracket", "double-bracket"),
+            ("a=(one two); echo \"${a[1]}\"", "two"),
+            ("set -o pipefail; false | true || echo pipefail", "pipefail"),
+        ];
+        for (command, expected) in cases {
+            let output = execute_bash(unsandboxed(command, 10_000)).expect("bash command should execute");
+            assert!(
+                output.stdout.contains(expected),
+                "`{command}` did not run as bash: stdout {:?} stderr {:?}",
+                output.stdout,
+                output.stderr
+            );
+        }
+    }
+
+    /// A command that calls `exit` keeps its own exit code and its output — the
+    /// tool's shell is no login shell, so no logout file runs between the
+    /// command and its result.
+    #[cfg(unix)]
+    #[test]
+    fn a_commands_own_exit_code_comes_back_from_the_tool_shell() {
+        let output =
+            execute_bash(unsandboxed("echo before; exit 3", 10_000)).expect("bash command should execute");
+        assert!(output.stdout.contains("before"), "{}", output.stdout);
+        assert_eq!(
+            output.return_code_interpretation.as_deref(),
+            Some("exit_code:3"),
+            "stdout {:?} stderr {:?}",
+            output.stdout,
+            output.stderr
+        );
     }
 
     /// Asserts that nothing is left in the process group `pgid`, which a run led.
