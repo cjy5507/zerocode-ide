@@ -1480,6 +1480,11 @@ function glyphMeter() {
 const pitchClasses = new Map();
 let pitchSheet = null;
 
+/* Where a pitch or dress class is worn: the rows, and the caret's copy of the
+ * glyph under it (`paintCaretGlyph`) — the stylesheet's `.term-wide` rule
+ * reads the same two. */
+const PITCH_SCOPE = ":is(.term, .term-caret)";
+
 /* One rule more in the sheet the glyph dresses share. */
 function writePitchRule(rule) {
   if (pitchSheet === null) {
@@ -1499,7 +1504,7 @@ function pitchClass(spread) {
   const px = units * PITCH_QUANTUM_PX;
   // Half the tracking leads the glyph so it sits centred in its column; the
   // negative tail gives the lead back, so the next run starts on its column.
-  writePitchRule(`.term .${name} { letter-spacing: ${px}px; margin-left: ${px / 2}px; margin-right: ${-px / 2}px; }`);
+  writePitchRule(`${PITCH_SCOPE} .${name} { letter-spacing: ${px}px; margin-left: ${px / 2}px; margin-right: ${-px / 2}px; }`);
   pitchClasses.set(units, name);
   return name;
 }
@@ -1563,7 +1568,7 @@ function wideClass(dress) {
   const held = wideClasses.get(key);
   if (held !== undefined) return held;
   const name = `term-wide-${wideClasses.size}`;
-  writePitchRule(`.term .${name} { ${wideDressVars(...dress).map(([property, value]) => `${property}: ${value}`).join("; ")}; }`);
+  writePitchRule(`${PITCH_SCOPE} .${name} { ${wideDressVars(...dress).map(([property, value]) => `${property}: ${value}`).join("; ")}; }`);
   const classes = `${WIDE_RUN_CLASS} ${name}`;
   wideClasses.set(key, classes);
   return classes;
@@ -2290,9 +2295,11 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const drawn = band.getBoundingClientRect();
     const top = (drawn.top - row.top) * unit;
     const height = drawn.height * unit;
+    // On the host, which holds the rows and the caret both: the copy the caret
+    // draws over a wide glyph wears the same measured dress as its row.
     if (top !== fit.top || height !== fit.height) {
-      pre.style.setProperty("--term-band-top", `${top}px`);
-      pre.style.setProperty("--term-band-height", `${height}px`);
+      host.style.setProperty("--term-band-top", `${top}px`);
+      host.style.setProperty("--term-band-height", `${height}px`);
     }
     fit.advance = advance;
     fit.top = top;
@@ -2330,7 +2337,7 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const worn = dress.join(" ");
     if (worn !== fit.worn) {
       fit.worn = worn;
-      for (const [property, value] of wideDressVars(...dress)) pre.style.setProperty(property, value);
+      for (const [property, value] of wideDressVars(...dress)) host.style.setProperty(property, value);
     }
     fit.cls = wideDressIdle(dress) ? "" : WIDE_RUN_CLASS;
   }
@@ -2427,6 +2434,28 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     const answer = wide ? widePitch(glyph) : narrowPitch(glyph);
     answers.set(glyph, answer);
     return answer;
+  }
+
+  /* The glyph the caret draws over its cell, in the fit `pitch` its run wears:
+   * bare text when the face draws it on its columns, else one span carrying
+   * the run's classes — the `.term-wide` rule then sizes, seats and
+   * tracks it exactly as in the row. Written only when it changed: this runs
+   * on every frame that moves the cursor. */
+  function paintCaretGlyph(glyph, pitch) {
+    const copy = caret.firstElementChild;
+    if (pitch === "") {
+      if (copy !== null || caret.textContent !== glyph) caret.textContent = glyph;
+      return;
+    }
+    if (copy === null) {
+      const span = document.createElement("span");
+      span.className = pitch;
+      span.textContent = glyph;
+      caret.replaceChildren(span);
+      return;
+    }
+    if (copy.className !== pitch) copy.className = pitch;
+    if (copy.textContent !== glyph) copy.textContent = glyph;
   }
 
   /* The model's row count follows the frame; the DOM's follows the model at
@@ -3182,12 +3211,17 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // from it: the stylesheet knows the font size, not what the face that
     // actually drew answered, and a caret a fraction of a column off is
     // visible on every prompt.
-    caret.style.width = `${cell.width}px`;
+    // A double-width glyph under it is covered across both its columns, and
+    // the copy the caret draws wears the fit its run wears (`glyphPitch`):
+    // a one-cell box that clipped an unfitted copy showed half a smaller
+    // syllable wherever the cursor stood on Korean (t-103682's review, 3).
     const cursorCell = rows[cursorRow]?.[cursorCol];
     const cursorGlyph = cursorCell?.ch === CONTINUATION
       ? ""
       : `${cursorCell?.ch ?? " "}${cursorCell?.zw ?? ""}`;
-    if (caret.textContent !== cursorGlyph) caret.textContent = cursorGlyph;
+    const cursorWide = cursorGlyph !== "" && rows[cursorRow]?.[cursorCol + 1]?.ch === CONTINUATION;
+    caret.style.width = `${(cursorWide ? 2 : 1) * cell.width}px`;
+    paintCaretGlyph(cursorGlyph, cursorGlyph === "" ? "" : glyphPitch(cursorGlyph, cursorWide));
     const cursorStyle = cursorCell?.style ?? PLAIN_STYLE;
     caret.classList.toggle("bold", cursorStyle.bold === true);
     caret.classList.toggle("italic", cursorStyle.italic === true);

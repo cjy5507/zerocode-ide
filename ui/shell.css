@@ -16053,7 +16053,7 @@ body.is-dragging-pane {
  * says. A blank between two words of the run rides in it — a box a word
  * would be a layer a word to paint — and `--term-wide-blank` gives the blank,
  * shaped at the run's size, back to one cell. */
-.term .term-wide {
+:is(.term, .term-caret) .term-wide {
   display: inline-block;
   box-sizing: border-box;
   vertical-align: top;

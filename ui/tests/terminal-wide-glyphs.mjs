@@ -49,10 +49,15 @@ const LOCAL_MONO = ["Menlo", "Consolas", "DejaVu Sans Mono", "Liberation Mono", 
 const FIXTURE_CUTS = 6;
 const FIXTURE_SLACK_PX = 0.005;
 
+// The many-blank line: this many one-syllable words, a blank between each two,
+// all riding in one run (t-103682's delta review: a rounding a blank carries
+// adds up along the line).
+const RIDING_WORDS = 21;
+
 const WIDE_RIG = "__WIDE_GLYPH_RIG__";
 
 async function standRig(page) {
-  return page.evaluate(async ({ WIDE_RIG, WIDE_KINDS, BAR_COLOURS }) => {
+  return page.evaluate(async ({ WIDE_RIG, WIDE_KINDS, BAR_COLOURS, RIDING_WORDS }) => {
     const priorAnswers = { ...window.__ANSWER__ };
     window.__ANSWER__.term_snapshot = () => null;
     window.__ANSWER__.term_resize = () => null;
@@ -60,7 +65,7 @@ async function standRig(page) {
     const view = termView(term);
     setActiveTab(tabOfTerm(term).id);
     await window.__TERMINAL_READY__(term, view);
-    const COLS = 40;
+    const COLS = 80;
     // The grid marks the second column of a double-width glyph with a NUL cell.
     const CONTINUATION = "\u0000";
     const wideCells = (text, style) => [...text].flatMap((ch) => [style ? { ch, style } : { ch }, { ch: CONTINUATION }]);
@@ -90,12 +95,20 @@ async function standRig(page) {
       // 8: two wide words with one blank between them, then a bar — the blank
       // rides in their run and still takes one cell.
       pad([...wideCells(riders[0]), ...narrowCells(" "), ...wideCells(riders[1]), bar(0)]),
+      pad([]),
+      // 10: a bold Hangul run, then a bar — bold is fitted as the face draws bold.
+      pad([...wideCells(hangul, { bold: true }), bar(1)]),
+      pad([]),
+      // 12: one-syllable words with a blank between each two, then a bar: every
+      // blank rides in the one run, and the bar still lands on its column.
+      pad([...Array.from({ length: RIDING_WORDS }, (_, at) => [...(at ? narrowCells(" ") : []), ...wideCells("가")]).flat(), bar(0)]),
     ];
-    const feed = async () => {
+    // `cursor` puts the caret on a cell; left out, it stands hidden on the last row.
+    const feed = async (cursor = null) => {
       const rows = rowsOf().map((cells, index) => ({ index, cells }));
       await window.__TERM_FEED__(term, {
-        rows, scrolled_lines: 0, cursor: [rows.length - 1, 0], title: null, alt_screen: false, size: [rows.length, COLS],
-        full: true, cursor_visible: false, mouse_tracking: "off", mouse_sgr: false, bell: false, view_offset: 0,
+        rows, scrolled_lines: 0, cursor: cursor ?? [rows.length - 1, 0], title: null, alt_screen: false, size: [rows.length, COLS],
+        full: true, cursor_visible: cursor !== null, mouse_tracking: "off", mouse_sgr: false, bell: false, view_offset: 0,
         scrollback_len: 0, folds: [],
       });
       await window.__UNTIL__(() => view.pre.querySelectorAll(":scope > .term-row").length === rows.length
@@ -136,7 +149,7 @@ async function standRig(page) {
       };
     };
     window[WIDE_RIG] = {
-      term, view, hangul, riders, feed, settle, natural, rowAt, runOf, footprint,
+      term, view, hangul, riders, feed, settle, natural, rowAt, runOf, footprint, COLS,
       leave() {
         const tab = tabOfTerm(term);
         if (tab) {
@@ -148,12 +161,12 @@ async function standRig(page) {
       },
     };
     await feed();
-  }, { WIDE_RIG, WIDE_KINDS, BAR_COLOURS });
+  }, { WIDE_RIG, WIDE_KINDS, BAR_COLOURS, RIDING_WORDS });
 }
 
 /* The rows as they stand under the window's own font. */
 async function readRows(page) {
-  return page.evaluate(({ WIDE_RIG, WIDE_KINDS }) => {
+  return page.evaluate(({ WIDE_RIG, WIDE_KINDS, RIDING_WORDS }) => {
     const rig = window[WIDE_RIG];
     const { view } = rig;
     const cell = view.cell.width;
@@ -188,6 +201,12 @@ async function readRows(page) {
     const ridden = [...rig.rowAt(8).querySelectorAll("span")];
     const afterRiders = ridden.find((span) => span.textContent === "|");
     const riderColumns = 2 * [...rig.riders.join("")].length + 1;
+    // Where the bar after a row's last run stands against the column it was given.
+    const barShift = (index, column) => {
+      const bar = [...rig.rowAt(index).querySelectorAll("span")].find((span) => span.textContent === "|");
+      return bar.getBoundingClientRect().left - left - column * cell;
+    };
+    const glyphRuns = (index) => [...rig.rowAt(index).querySelectorAll("span")].map((span) => span.textContent).filter((text) => /\p{Script=Hangul}/u.test(text));
     return {
       ...rig.footprint(),
       advance,
@@ -205,13 +224,56 @@ async function readRows(page) {
         whole: rig.riders.join(" "),
         shift: afterRiders.getBoundingClientRect().left - left - riderColumns * cell,
       },
+      bold: {
+        classes: rig.runOf(10, rig.hangul)?.className ?? null,
+        advance: rig.natural([...rig.hangul][0]),
+        shift: barShift(10, 2 * [...rig.hangul].length),
+      },
+      manyBlanks: {
+        runs: glyphRuns(12).length,
+        shift: barShift(12, 2 * RIDING_WORDS + (RIDING_WORDS - 1)),
+      },
       narrowStrip: box(rig.runOf(4, "ab")),
       wideStrip: box(rig.runOf(4, "한글")),
       // The ink row with half of the empty row above it and half of the one
       // below, the first fourteen columns: clear of row 4's ground on every edge.
       clip: { x: left, y: inkRow.top - view.cell.height / 2, width: 14 * cell, height: 2 * view.cell.height },
     };
-  }, { WIDE_RIG, WIDE_KINDS });
+  }, { WIDE_RIG, WIDE_KINDS, RIDING_WORDS });
+}
+
+/* The caret over the first syllable of row 0: its box against two columns, and
+ * the copy it draws against the run that glyph stands in — its dress and the
+ * box it stands in on the screen. */
+async function readCaret(page) {
+  return page.evaluate(async ({ WIDE_RIG }) => {
+    const rig = window[WIDE_RIG];
+    const { view } = rig;
+    const caret = view.pre.parentElement.querySelector(":scope > .term-caret");
+    await rig.feed([0, 3]);
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    const run = rig.runOf(0, rig.hangul);
+    const copy = caret.firstElementChild ?? caret;
+    const fit = (node) => {
+      const style = getComputedStyle(node);
+      const box = node.getBoundingClientRect();
+      return { size: parseFloat(style.fontSize), tracking: parseFloat(style.letterSpacing) || 0, transform: style.transform,
+        left: box.left, top: box.top, height: box.height };
+    };
+    const seen = {
+      shown: !caret.hidden,
+      text: caret.textContent,
+      first: [...rig.hangul][0],
+      width: caret.getBoundingClientRect().width,
+      cell: view.cell.width,
+      copyClasses: copy === caret ? "" : copy.className,
+      runClasses: run.className,
+      copy: fit(copy),
+      run: fit(run),
+    };
+    await rig.feed();
+    return seen;
+  }, { WIDE_RIG });
 }
 
 /* Where the ink of a picture of the ink row stands: its top and bottom in CSS
@@ -337,10 +399,12 @@ export async function testWideGlyphs(page, ok) {
   let rows;
   let ink;
   let changes;
+  let caret;
   try {
     rows = await readRows(page);
     const picture = await page.screenshot({ clip: rows.clip });
     ink = await readInk(page, picture.toString("base64"), rows.clip, rows.cell);
+    caret = await readCaret(page);
     changes = await readChanges(page);
   } finally {
     await page.evaluate((WIDE_RIG) => window[WIDE_RIG]?.leave(), WIDE_RIG);
@@ -371,6 +435,20 @@ export async function testWideGlyphs(page, ok) {
   ok("a blank between two wide words rides in their run and still takes one cell",
     !rows.short || (rows.riding.runs[0] === rows.riding.whole && Math.abs(rows.riding.shift) < COLUMN_SLACK_PX),
     JSON.stringify({ short: rows.short, ...rows.riding }));
+
+  ok("a bold wide run is fitted as bold is drawn and ends on its own column",
+    Math.abs(rows.bold.shift) < COLUMN_SLACK_PX, JSON.stringify(rows.bold));
+
+  ok("twenty blanks riding between wide words in one run still end the line on its own column",
+    !rows.short || (rows.manyBlanks.runs === 1 && Math.abs(rows.manyBlanks.shift) < COLUMN_SLACK_PX),
+    JSON.stringify({ short: rows.short, ...rows.manyBlanks }));
+
+  ok("the caret over a wide glyph covers its two columns and draws the glyph as its row does",
+    caret.shown && caret.text === caret.first && Math.abs(caret.width - 2 * caret.cell) < COLUMN_SLACK_PX
+      && caret.copyClasses.split(" ").every((name) => caret.runClasses.split(" ").includes(name)) && Math.abs(caret.copy.size - caret.run.size) < 0.01
+      && Math.abs(caret.copy.tracking - caret.run.tracking) < 0.01 && caret.copy.transform === caret.run.transform
+      && ["left", "top", "height"].every((side) => Math.abs(caret.copy[side] - caret.run[side]) < COLUMN_SLACK_PX),
+    JSON.stringify(caret));
 
   ok("a picture is sized to its columns and never stretched",
     rows.pictures.length > 0 && rows.pictures.every((seen) => seen.stretch === 1 && seen.transform === "none"),
