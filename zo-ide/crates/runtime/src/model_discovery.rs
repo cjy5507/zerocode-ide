@@ -632,14 +632,26 @@ pub fn save(catalog: &DiscoveredCatalog) -> io::Result<()> {
     save_to(&cache_path(), catalog)
 }
 
+/// Write the cache through a temporary file of its own and a rename, so a reader
+/// never sees half a cache. The cache is shared by every zo process, and two of
+/// them can refresh at once: each write gets a temporary name no other write
+/// has (process id and sequence), and a failed write leaves none behind.
 pub fn save_to(path: &Path, catalog: &DiscoveredCatalog) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the cache path names no file"))?;
+    std::fs::create_dir_all(parent)?;
     let payload = serde_json::to_vec_pretty(catalog).map_err(io::Error::other)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, payload)?;
-    std::fs::rename(&tmp, path)
+    crate::secure_fs::write_atomic_owner_only_named_temp(
+        parent,
+        Path::new(name),
+        &payload,
+        crate::secure_fs::Durability::Published,
+    )
 }
 
 static CURRENT: RwLock<Option<Arc<DiscoveredCatalog>>> = RwLock::new(None);
@@ -3918,6 +3930,145 @@ mod tests {
         assert!(catalog.stale(catalog.fetched_at + 2 * super::DEFAULT_TTL_SECS, super::DEFAULT_TTL_SECS));
         assert!(!catalog.stale(catalog.fetched_at + super::DEFAULT_TTL_SECS / 2, super::DEFAULT_TTL_SECS));
         assert_eq!(super::DEFAULT_TTL_SECS, super::LIVE_TTL_SECS, "one table: the default TTL is the connection TTL");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Every file the cache's directory holds, by name.
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The write used one fixed temporary name, `discovered.json.tmp`: two
+    /// processes refreshing at once wrote the same file, and one's rename could
+    /// publish the other's half. A write now names its own temporary file, so
+    /// one left at the old name is neither used nor touched.
+    #[test]
+    fn a_save_does_not_use_the_one_fixed_temporary_name() {
+        let dir = scratch("save-temp-name");
+        let path = dir.join(super::CACHE_FILE);
+        // Another process, mid-write, holds the old fixed name.
+        let theirs = dir.join("discovered.json.tmp");
+        std::fs::write(&theirs, b"{ half a cache").unwrap();
+        let catalog = catalog(vec![model("anthropic", "claude-fable-5-1", 20_260_901)]);
+
+        super::save_to(&path, &catalog).unwrap();
+
+        assert_eq!(super::load_cached_from(&path), Some(catalog));
+        assert_eq!(
+            std::fs::read(&theirs).unwrap(),
+            b"{ half a cache",
+            "the save wrote into the file another process was writing"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Eight writers and a reader on one cache: the reader never sees a file
+    /// that is not a whole cache, and no writer is turned away.
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_saves_never_show_a_reader_a_half_written_cache() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let dir = scratch("save-race");
+        let path = dir.join(super::CACHE_FILE);
+        // Big enough that a write is more than one `write` call.
+        let models: Vec<DiscoveredModel> = (0..400)
+            .map(|index| model("anthropic", &format!("claude-fable-5-{index}"), 20_260_901))
+            .collect();
+        super::save_to(&path, &catalog(models.clone())).unwrap();
+        let done = AtomicBool::new(false);
+        let unreadable = AtomicUsize::new(0);
+
+        let refused = std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..8_usize)
+                .map(|writer| {
+                    let (path, models) = (&path, &models);
+                    scope.spawn(move || {
+                        (0..60_usize)
+                            .filter(|round| {
+                                let mut rows = models.clone();
+                                rows.truncate(200 + writer * 17 + round);
+                                super::save_to(path, &catalog(rows)).is_err()
+                            })
+                            .count()
+                    })
+                })
+                .collect();
+            scope.spawn(|| {
+                while !done.load(Ordering::Relaxed) {
+                    if super::load_cached_from(&path).is_none() {
+                        unreadable.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+            // Join every writer before `done` is set: a writer that panicked must
+            // not leave the reader spinning for ever.
+            let results: Vec<_> = writers
+                .into_iter()
+                .map(std::thread::ScopedJoinHandle::join)
+                .collect();
+            done.store(true, Ordering::Relaxed);
+            results.into_iter().map(|result| result.unwrap_or(usize::MAX)).fold(0, usize::saturating_add)
+        });
+
+        assert_eq!(refused, 0, "a save was refused or panicked while others wrote the cache");
+        assert_eq!(unreadable.load(Ordering::Relaxed), 0, "a reader met a cache that was not whole");
+        assert_eq!(names_in(&dir), vec![super::CACHE_FILE.to_string()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A cache an older zo wrote with a plain `std::fs::write` (not owner-only)
+    /// is replaced like any other: the secure write takes no exception to it.
+    #[test]
+    fn a_save_replaces_a_cache_an_older_zo_wrote_with_a_plain_write() {
+        let dir = scratch("save-over-plain");
+        let path = dir.join(super::CACHE_FILE);
+        std::fs::write(&path, b"{}").unwrap();
+        let catalog = catalog(vec![model("anthropic", "claude-fable-5-1", 20_260_901)]);
+
+        super::save_to(&path, &catalog).unwrap();
+
+        assert_eq!(super::load_cached_from(&path), Some(catalog));
+        assert_eq!(names_in(&dir), vec![super::CACHE_FILE.to_string()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A save that cannot finish leaves no temporary file, and the cache it
+    /// meant to replace is as it was.
+    #[test]
+    fn a_save_that_fails_leaves_no_temporary_file() {
+        let dir = scratch("save-fails");
+        let path = dir.join(super::CACHE_FILE);
+        // A directory where the cache belongs: the final rename cannot succeed.
+        std::fs::create_dir(&path).unwrap();
+
+        let error = super::save_to(&path, &catalog(Vec::new()));
+
+        assert!(error.is_err(), "a directory is no cache to replace");
+        assert_eq!(names_in(&dir), vec![super::CACHE_FILE.to_string()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The cache stays readable by its owner only, as every secure write of
+    /// zo's state is, and the temporary name is gone once the write is done.
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_cache_is_owner_only_and_leaves_no_temporary_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch("save-mode");
+        let path = dir.join(super::CACHE_FILE);
+
+        super::save_to(&path, &catalog(Vec::new())).unwrap();
+        super::save_to(&path, &catalog(Vec::new())).unwrap();
+
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(names_in(&dir), vec![super::CACHE_FILE.to_string()]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
