@@ -175,7 +175,10 @@ fn note_gate(gate: ProbeGate) {
             telemetry::attest_failed(telemetry::HarnessFeature::RoutingProbe, gate.token());
         }
         ProbeGate::Admitted => {}
-        ProbeGate::NotWorthIt | ProbeGate::ClassifierOff | ProbeGate::VerdictUnread => {
+        ProbeGate::NotWorthIt
+        | ProbeGate::ClassifierOff
+        | ProbeGate::VerdictUnread
+        | ProbeGate::NoFastTier => {
             telemetry::attest_declined(telemetry::HarnessFeature::RoutingProbe, gate.token());
         }
     }
@@ -537,8 +540,17 @@ pub fn assess_turn_probed(
     let verdict_read = (admission != ProbeAdmission::Declined || seat_acts)
         && assessment_has_a_reader(readers, || super::settings::exec_impl_model_armed(parent_model, &settings));
     let probe = admission_for_readers(admission, verdict_read);
+    // The probe is asked of the fast model of the provider the session is on,
+    // and of nobody where that provider has none of its own: the turn's words
+    // do not leave for another provider's account. Asked last, of a probe
+    // every other gate admitted. The seat's judgment is another road with a
+    // consent of its own, and is asked below as before.
+    let no_fast_tier =
+        probe != ProbeAdmission::Declined && !super::probe_exec::probe_has_a_model(parent_model);
+    let probe = if no_fast_tier { ProbeAdmission::Declined } else { probe };
     note_gate(match (admission, probe) {
         (ProbeAdmission::Declined, _) => ProbeGate::NotWorthIt,
+        _ if no_fast_tier => ProbeGate::NoFastTier,
         (_, ProbeAdmission::Declined) => ProbeGate::VerdictUnread,
         _ => ProbeGate::Admitted,
     });

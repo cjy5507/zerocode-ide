@@ -69,6 +69,9 @@ pub enum ProbeGate {
     /// Nothing this turn would read the verdict: no verify leg, and the
     /// settings arm no exec implementer for this main model.
     VerdictUnread,
+    /// The provider the session is on has no fast model of its own, so there
+    /// is nobody to ask: the probe's words stay with the session's provider.
+    NoFastTier,
 }
 
 impl ProbeGate {
@@ -81,6 +84,7 @@ impl ProbeGate {
             Self::ClassifierOff => "classifier_off",
             Self::SettingsUnavailable => "settings_unavailable",
             Self::VerdictUnread => "verdict_unread",
+            Self::NoFastTier => "no_fast_tier",
         }
     }
 
@@ -100,6 +104,11 @@ impl ProbeGate {
                 "nothing this turn would read the verdict: no verify leg is armed, and the \
                  settings arm no exec implementer for this main model — the probe was not asked, \
                  and an acting routing seat records instead"
+            }
+            Self::NoFastTier => {
+                "the provider this session is on has no fast model of its own (a person's own \
+                 provider, a model name the catalog does not know), so the probe was not asked: \
+                 the turn's words are not sent to another provider"
             }
         }
     }

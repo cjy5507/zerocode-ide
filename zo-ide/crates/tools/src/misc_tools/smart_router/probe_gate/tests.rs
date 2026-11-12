@@ -176,6 +176,7 @@ fn the_token_is_the_one_the_attestation_uses() {
     assert_eq!(ProbeGate::NotWorthIt.token(), "not_worth_it");
     assert_eq!(ProbeGate::ClassifierOff.token(), "classifier_off");
     assert_eq!(ProbeGate::VerdictUnread.token(), "verdict_unread");
+    assert_eq!(ProbeGate::NoFastTier.token(), "no_fast_tier");
     assert_eq!(
         ProbeGate::SettingsUnavailable.token(),
         "settings_unavailable"

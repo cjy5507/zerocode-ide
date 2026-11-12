@@ -232,6 +232,43 @@ fn the_probe_is_called_only_inside_the_abstain_band() {
     }
 }
 
+/// A session whose provider has no fast model of its own — a person's own
+/// provider, a name the catalog does not know — is not probed: the probe
+/// would be another provider's model, and the turn's words would go to that
+/// provider's account. The same easy turn with a reader armed is probed in a
+/// session on a built-in model, and stands on the tables here. An abstaining
+/// judgment is not given the probe in its place either.
+#[test]
+fn a_session_with_no_fast_model_of_its_own_is_not_probed() {
+    const OWN: &str = "zq-model-nobody-lists";
+    let own_turn = |text: &str| super::assess_turn_probed(text, OWN, AssessmentReaders { verify_leg: true }, "turn-9@1");
+    {
+        let judgment = answering(answer(1, 0.9));
+        let chat = probe();
+        let _machine = Machine::new(json!({}), &judgment, &chat);
+        let _ = turn(&unique("이 설정값이 뭔지 알려줘"), true);
+        assert_eq!(chat.requests().len(), 1, "premise: a built-in session's easy turn is probed");
+
+        let words = unique("이 설정값이 뭔지 알려줘");
+        let assessment = own_turn(&words);
+
+        assert_eq!(chat.requests().len(), 1, "nothing more was asked");
+        assert!(!assessment.judged);
+        assert_eq!(assessment.complexity, super::assess_turn_complexity(&words), "the tables' verdict stands");
+    }
+    {
+        let judgment = answering(answer(1, 0.4));
+        let chat = probe();
+        let machine = Machine::new(json!({ "decisionShadow": "on" }), &judgment, &chat);
+
+        let assessment = own_turn(&unique("이 설정값이 뭔지 알려줘"));
+
+        assert!(!assessment.judged, "an abstaining answer routes nothing");
+        assert!(chat.requests().is_empty(), "the probe is not asked in the judgment's place");
+        assert_eq!(machine.rows()[0]["routeUse"], "abstained");
+    }
+}
+
 /// Where the probe's gate declines the turn, an abstaining answer leaves the
 /// keyword tables standing — no probe is bought for a band the gate refused.
 #[test]

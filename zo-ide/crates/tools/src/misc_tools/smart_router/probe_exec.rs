@@ -13,10 +13,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use api::{InputMessage, MessageRequest, OutputContentBlock};
-use runtime::{
-    parse_probe_response, probe_prompt, route_model, ModelInventory, ProbeAssessment,
-    RouteRequest, RouteRole, RoutingTarget,
-};
+use runtime::{parse_probe_response, probe_prompt, ModelInventory, ProbeAssessment};
 
 use crate::misc_tools::agent_tools::{build_provider_client_for_agent, shared_agent_runtime};
 
@@ -56,6 +53,11 @@ const FAIL_JOIN_FAILURE: &str = "join_failure";
 const FAIL_MALFORMED: &str = "malformed";
 const FAIL_CACHED_MALFORMED: &str = "cached_malformed";
 const FAIL_CLIENT_UNAVAILABLE: &str = "client_unavailable";
+/// Why a slot holds no verdict where the provider the session is on has no
+/// fast tier of its own ([`probe_model`]): nobody was asked. Not a failure —
+/// a session on a person's own provider is how that person works — so it is
+/// attested as a decline, never as a defect.
+const SKIP_NO_FAST_TIER: &str = "no_fast_tier";
 const FAIL_CACHE_UNAVAILABLE: &str = "cache_unavailable";
 /// The probe's provider is parked behind its own wall — this process's 429,
 /// or a neighbour's through the shared cool-down — so no call is made: it
@@ -332,9 +334,6 @@ fn probe_cache() -> &'static Mutex<HashMap<u64, Option<ProbeAssessment>>> {
 /// pane's calls the way zo names its own.
 pub use zerocode_core::jev::task_fingerprint;
 
-/// Resolve the model the probe itself runs on: the router's own Fast-role
-/// pick from the already-loaded inventory — the probe reuses the engine it
-/// serves instead of hand-rolling a second "cheap model" table.
 /// Every task that lost its probe fails with `reason`, one row each — the
 /// one shape both a missing client and a parked provider answer in.
 fn fail_misses(
@@ -366,13 +365,51 @@ fn parked_ms_for(kind: api::ProviderKind) -> u64 {
     api::quota::rate_limit_cooldown_remaining_ms(kind)
 }
 
-fn probe_model(inventory: &ModelInventory, parent_model: &str) -> String {
-    let request = RouteRequest::for_target(
-        RoutingTarget::RoleFallback(RouteRole::Fast),
-        RouteRole::Fast,
-        parent_model,
-    );
-    route_model(&request, inventory).resolved_model
+/// The model the probe itself runs on: the fast tier of the provider the
+/// session is on ([`crate::fanout::fast_tier_model`], the pick the fold and
+/// the lessons make), or `None` where that provider has none of its own — a
+/// person's own provider, a name the catalog does not know, a provider whose
+/// catalog lists no fast tier.
+///
+/// The probe carries the person's words (a turn's) or a helper's task (a
+/// spawn's). Until v1.1.146 its model was the router's Fast-role pick over
+/// every connected provider, so on a machine that also held another
+/// provider's login those words left for that provider's account. Measured on
+/// v1.1.144 and v1.1.145: a turn of a `fable` session, and a helper's task in
+/// a `sonnet` session and in one on a person's own provider, went to OpenAI's
+/// fast model first. The connected inventory is no longer read here.
+fn probe_model(_connected: &ModelInventory, parent_model: &str) -> Option<String> {
+    crate::fanout::fast_tier_model(Some(parent_model))
+}
+
+/// Whether the probe has a model to ask for a session on `parent_model`
+/// ([`probe_model`]): the turn's gate asks before it admits the probe, so a
+/// session with none is told as a decline and builds nothing.
+pub(super) fn probe_has_a_model(parent_model: &str) -> bool {
+    crate::fanout::fast_tier_model(Some(parent_model)).is_some()
+}
+
+/// Every task that lost its probe to a session with no fast tier of its own:
+/// one slot each saying so. Unlike [`fail_misses`] it attests a decline — the
+/// turn's gate has usually said so already and no task reaches here; a
+/// spawn's has no gate of its own.
+fn skip_misses(slots: &mut [Option<ProbeSlot>], misses: &[(usize, u64)], road: ProbeUse) {
+    for (index, fingerprint) in misses {
+        if road == ProbeUse::Routing {
+            telemetry::attest_declined(telemetry::HarnessFeature::RoutingProbe, SKIP_NO_FAST_TIER);
+        }
+        if route_debug_enabled() {
+            eprintln!(
+                "[ROUTE_PROBE] task={fingerprint:016x} road={} result={SKIP_NO_FAST_TIER}",
+                road.word()
+            );
+        }
+        slots[*index] = Some(ProbeSlot {
+            fingerprint: *fingerprint,
+            verdict: Err(SKIP_NO_FAST_TIER),
+            spent: None,
+        });
+    }
 }
 
 /// Run (or recall) the routing readers for one task. Returns `None` on any
@@ -621,7 +658,12 @@ pub(super) fn probe_slots(
     if misses.is_empty() {
         return slots;
     }
-    let model = probe_model(inventory, parent_model);
+    let Some(model) = probe_model(inventory, parent_model) else {
+        // No fast tier that is the session's own: nobody is asked, and the
+        // words stay where the session's own requests go.
+        skip_misses(&mut slots, &misses, road);
+        return slots;
+    };
     // Alias-normalized like every sibling `build_provider_client_for_agent`
     // caller (`provider_client.rs`), so a pinned/aliased Fast-role model id
     // cannot misroute provider detection or the wire model.
@@ -737,6 +779,51 @@ mod tests {
     fn fingerprint_separates_field_boundaries() {
         assert_ne!(task_fingerprint("ab", "c"), task_fingerprint("a", "bc"));
         assert_eq!(task_fingerprint("a", "b"), task_fingerprint("a", "b"));
+    }
+
+    /// The probe asks the fast model of the provider the session is on, read
+    /// from the session's model alone: what else the machine has connected
+    /// does not move it. A `fable` session's turn went to OpenAI's fast model
+    /// on a machine that held an OpenAI login as well (v1.1.145).
+    #[test]
+    fn the_probe_asks_the_fast_model_of_the_sessions_own_provider() {
+        let connected = ModelInventory::new("claude-fable-5-1", Vec::new());
+        let asked = |parent: &str| probe_model(&connected, parent).map(|model| api::resolve_model_alias(&model));
+        let haiku = api::resolve_model_alias("haiku");
+        for anthropic in ["fable", "claude-fable-5-1", "opus", "sonnet"] {
+            assert_eq!(asked(anthropic), Some(haiku.clone()), "{anthropic}");
+        }
+        for openai in ["gpt-5.6-sol", "gpt-5.5-codex"] {
+            assert_eq!(asked(openai).as_deref(), Some("gpt-5.6-luna"), "{openai}");
+        }
+        let google = asked("gemini-3.1-pro-preview");
+        assert!(
+            google.as_deref().is_some_and(|model| model.starts_with("gemini")),
+            "a Gemini session asks a Gemini model: {google:?}"
+        );
+    }
+
+    /// A session whose provider has no fast model of its own has nobody to
+    /// ask, and a batch for it asks nobody: each task's slot says why.
+    #[test]
+    fn a_session_with_no_fast_model_of_its_own_asks_nobody() {
+        let connected = ModelInventory::new("zq-model-nobody-lists", Vec::new());
+        for own in ["zq-model-nobody-lists", "zq-relay/some-model"] {
+            assert_eq!(probe_model(&connected, own), None, "{own}");
+            assert!(!probe_has_a_model(own), "{own}");
+        }
+        let prompt = format!("zq a task nobody is asked about {}", std::process::id());
+        let slots = probe_slots(
+            &connected,
+            "zq-model-nobody-lists",
+            &[("zq", prompt.as_str())],
+            "turn-zq@1",
+            ProbeUse::Routing,
+        );
+        assert_eq!(slots.len(), 1);
+        let slot = slots[0].expect("the task has a slot");
+        assert_eq!(slot.verdict, Err(SKIP_NO_FAST_TIER));
+        assert_eq!(slot.spent, None, "nothing was spent on a question nobody was asked");
     }
 }
 
