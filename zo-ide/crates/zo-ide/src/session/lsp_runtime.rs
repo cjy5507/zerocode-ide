@@ -291,24 +291,36 @@ fn lsp_startup_configs(
         return configs;
     }
 
+    let path = std::env::var_os("PATH");
     for language in detect_project_languages(cwd) {
         if configs.iter().any(|config| config.language == language) {
             continue;
         }
-        if let Some(command) = detect_language_server(language) {
-            configs.push(LspStartupConfig {
-                language: language.to_string(),
-                command: command.to_string(),
-                args: Vec::new(),
-                env: BTreeMap::new(),
-                root_path: cwd.to_str().map(str::to_string),
-                capabilities: Vec::new(),
-                explicit: false,
-            });
+        if let Some(config) = autodetected_config(language, cwd, path.as_deref()) {
+            configs.push(config);
         }
     }
 
     configs
+}
+
+/// The server zo starts by itself for `language` when one is on `path`, with
+/// the arguments that make it speak LSP over stdin and stdout.
+fn autodetected_config(
+    language: &str,
+    cwd: &Path,
+    path: Option<&OsStr>,
+) -> Option<LspStartupConfig> {
+    let server = detect_language_server_in_path(language, path)?;
+    Some(LspStartupConfig {
+        language: language.to_string(),
+        command: server.command.to_string(),
+        args: server.args.iter().map(|arg| (*arg).to_string()).collect(),
+        env: BTreeMap::new(),
+        root_path: cwd.to_str().map(str::to_string),
+        capabilities: Vec::new(),
+        explicit: false,
+    })
 }
 
 fn detect_project_languages(cwd: &std::path::Path) -> Vec<&'static str> {
@@ -377,23 +389,35 @@ fn autodetect_enabled(raw: Option<&str>) -> bool {
     )
 }
 
-fn detect_language_server(language: &str) -> Option<&'static str> {
-    detect_language_server_in_path(language, std::env::var_os("PATH").as_deref())
+/// A language server zo may start by itself: the command it looks up on
+/// `PATH` and the arguments that make that command talk LSP over stdin and
+/// stdout. `rust-analyzer` and `gopls` do so with no argument;
+/// `typescript-language-server` and `pyright-langserver` exit unless they are
+/// told which transport to use, so they get `--stdio`. Plain `pyright` is the
+/// type-check command, not a language server, and is no candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ServerCandidate {
+    command: &'static str,
+    args: &'static [&'static str],
 }
 
-fn detect_language_server_in_path(language: &str, path: Option<&OsStr>) -> Option<&'static str> {
-    let candidates: &[&str] = match language {
-        "rust" => &["rust-analyzer"],
-        "typescript" | "javascript" => &["typescript-language-server"],
-        "python" => &["pyright", "pyright-langserver"],
-        "go" => &["gopls"],
+const STDIO: &[&str] = &["--stdio"];
+
+fn detect_language_server_in_path(language: &str, path: Option<&OsStr>) -> Option<ServerCandidate> {
+    let candidates: &[ServerCandidate] = match language {
+        "rust" => &[ServerCandidate { command: "rust-analyzer", args: &[] }],
+        "typescript" | "javascript" => {
+            &[ServerCandidate { command: "typescript-language-server", args: STDIO }]
+        }
+        "python" => &[ServerCandidate { command: "pyright-langserver", args: STDIO }],
+        "go" => &[ServerCandidate { command: "gopls", args: &[] }],
         _ => return None,
     };
-    candidates.iter().copied().find(|command| {
-        let Some(candidate_path) = command_path_in_path(command, path) else {
+    candidates.iter().copied().find(|candidate| {
+        let Some(candidate_path) = command_path_in_path(candidate.command, path) else {
             return false;
         };
-        *command != "rust-analyzer" || rust_analyzer_candidate_usable(&candidate_path)
+        candidate.command != "rust-analyzer" || rust_analyzer_candidate_usable(&candidate_path)
     })
 }
 
@@ -559,9 +583,9 @@ mod tests {
     use runtime::ConfigLoader;
 
     use super::{
-        autodetect_enabled, build_runtime_lsp_state, detect_language_server_in_path,
-        detect_project_languages, probe_stamp, read_probe_cache_at, write_probe_cache_at,
-        LspStartupConfig, RuntimeLspState,
+        autodetect_enabled, autodetected_config, build_runtime_lsp_state,
+        detect_language_server_in_path, detect_project_languages, probe_stamp,
+        read_probe_cache_at, write_probe_cache_at, LspStartupConfig, RuntimeLspState,
     };
 
     /// The probe answer survives the process that earned it.
@@ -966,7 +990,7 @@ sleep 5
         mark_test_script_executable(&server);
 
         assert_eq!(
-            detect_language_server_in_path("go", Some(bin.as_os_str())),
+            detect_language_server_in_path("go", Some(bin.as_os_str())).map(|server| server.command),
             Some("gopls")
         );
         assert_eq!(
@@ -974,6 +998,78 @@ sleep 5
             None
         );
 
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    /// `typescript-language-server` and `pyright-langserver` exit at once
+    /// unless they are told to talk over stdin and stdout. The fake servers
+    /// here do the same, so an autodetected one connects only when zo starts
+    /// it with `--stdio`; it used to be started with no argument and sat in
+    /// the error state.
+    #[cfg(unix)]
+    #[test]
+    fn an_autodetected_server_that_needs_a_transport_flag_connects() {
+        let root = crate::support::temp_dir("stdio-flag");
+        let cwd = root.join("project");
+        let bin = root.join("bin");
+        fs::create_dir_all(&cwd).expect("project dir");
+        fs::create_dir_all(&bin).expect("bin dir");
+        let init_server = write_init_only_lsp_server();
+        for (language, command) in [
+            ("typescript", "typescript-language-server"),
+            ("python", "pyright-langserver"),
+        ] {
+            let server = bin.join(command);
+            fs::write(
+                &server,
+                format!(
+                    "#!/bin/sh\n[ \"$1\" = --stdio ] || {{ echo 'no transport given' >&2; exit 1; }}\nexec '{}'\n",
+                    init_server.display()
+                ),
+            )
+            .expect("write fake server");
+            mark_test_script_executable(&server);
+
+            let mut config = autodetected_config(language, &cwd, Some(bin.as_os_str()))
+                .expect("the server on PATH is found");
+            assert_eq!(config.command, command);
+            assert_eq!(config.args, ["--stdio"], "{command}");
+            assert!(!config.explicit);
+            // The bare name is looked up on the process PATH when started;
+            // the fake lives only on the PATH handed to detection.
+            config.command = server.display().to_string();
+            let mut state = RuntimeLspState::new_with_startup_configs(&cwd, vec![config])
+                .expect("lsp state should build")
+                .expect("startup config should create an lsp state");
+            let servers = state.registry.list_servers();
+            assert_eq!(servers.len(), 1);
+            assert_eq!(servers[0].status, LspServerStatus::Connected, "{command}");
+            state.shutdown().expect("shutdown lsp state");
+        }
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+        fs::remove_dir_all(init_server.parent().expect("the fake server's folder"))
+            .expect("cleanup fake server");
+    }
+
+    /// Plain `pyright` is the type-check command; started as a language
+    /// server it prints a report and exits. Only `pyright-langserver` is one.
+    #[test]
+    fn plain_pyright_is_not_taken_for_the_python_language_server() {
+        let root = crate::support::temp_dir("pyright");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("bin dir");
+        let checker = bin.join("pyright");
+        fs::write(&checker, "#!/bin/sh\nexit 0\n").expect("write fake checker");
+        mark_test_script_executable(&checker);
+        assert_eq!(detect_language_server_in_path("python", Some(bin.as_os_str())), None);
+
+        let server = bin.join("pyright-langserver");
+        fs::write(&server, "#!/bin/sh\nexit 0\n").expect("write fake server");
+        mark_test_script_executable(&server);
+        assert_eq!(
+            detect_language_server_in_path("python", Some(bin.as_os_str())).map(|server| server.command),
+            Some("pyright-langserver")
+        );
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
