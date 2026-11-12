@@ -21950,6 +21950,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.resultReview",
         "worker.resultFile",
         "worker.resultMore",
+        // The same card beside the conversation (2026-11-12): what its
+        // 「검토」 says while the panel shows it.
+        "worker.resultBeside",
         "worker.statusKey",
         "chatPanel.title",
         "chatPanel.conversation",
@@ -22121,7 +22124,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ),
         // An answer's card of what its turn changed (2026-11-10).
         (
-            "function answerResultNode(list, row) {",
+            "function answerResultNode(list, row, { head: headed = true } = {}) {",
             vec![
                 "worker.resultCard",
                 "worker.resultFiles",
@@ -22129,6 +22132,16 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
                 "worker.resultFile",
                 "worker.resultMore",
             ],
+        ),
+        // The card beside the conversation (2026-11-12): the inline card's
+        // door says where its changes stand, the panel is named and closes.
+        (
+            "function paintResultAll(card) {",
+            vec!["worker.resultBeside", "worker.showLess", "worker.resultReview"],
+        ),
+        (
+            "function chatBesideNode(page) {",
+            vec!["worker.resultCard", "worker.reviewClose"],
         ),
         (
             "function updateHelperStatus(line, run) {",

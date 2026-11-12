@@ -19517,6 +19517,8 @@ function paintHelperPageOwn(host, tab, run, owner) {
   // control here (or on the list, which takes focus) is pulled away to the sink
   // (`rearmKeySink`) and never reaches the page.
   host.dataset.keyboardOwner = "true";
+  // A page drawn anew keeps no panel of the one before (`dropChatBeside`).
+  dropChatBeside(host);
   host.replaceChildren();
   const turns = helperTurnsNode(run);
   const status = helperStatusNode(run);
@@ -19584,6 +19586,7 @@ function paintHelperPage(host, tab) {
   host.classList.add("is-chat-page");
   host.classList.remove("is-helper-page");
   delete host.dataset.keyboardOwner;
+  dropChatBeside(host);
   host.replaceChildren();
   const head = workerHeadNode(run);
   const turns = helperTurnsNode(run);
@@ -19653,6 +19656,7 @@ function releaseWorkerPage(tab) {
   host.__helperPage = null;
   host.classList.remove("is-chat-page", "is-helper-page");
   delete host.dataset.keyboardOwner;
+  dropChatBeside(host);
   host.replaceChildren();
   // A view that stood behind another tab with this page stands no longer: an
   // empty view keeps nothing rendered (t-55369).
@@ -19751,6 +19755,7 @@ function paintWorkerView(tab) {
   host.classList.remove("is-chat-page", "is-helper-page");
   delete host.dataset.keyboardOwner;
   writeAttribute(host, "data-agent", run.agent ?? "");
+  dropChatBeside(host);
   host.replaceChildren();
   host.appendChild(workerHeadNode(run));
   const owner = tabOfTerm(run.term);

@@ -18282,6 +18282,80 @@ pre.md-block > .chat-code-deleted { color: var(--syntax-deleted); }
   background: none;
 }
 
+/* An answer's changes beside the conversation (2026-11-12, window artifact
+ * p-5e000c2b7e067271): on a page with the room, 「검토」 stands them in a panel
+ * at the page's right instead of under the answer. The page gives the panel
+ * its width as padding — the page is its own query container, so the column,
+ * the type and every rule that asks its width step down as a split pane's do —
+ * and the two things placed against the page's own edge, the dock and the
+ * fade under it, add the same room (`--chat-beside-room`: nothing, as the
+ * tokens say, until a page stands a panel). The panel is the page's ground
+ * with one rule at its left: no new colour, no shadow. Its head is the
+ * conversation head's height, so the two rules meet in one line; its card
+ * keeps no head of its own and lets every file's rows run their length, since
+ * the panel is what scrolls. */
+.worker-view.is-chat-page.has-beside {
+  --chat-beside-room: var(--chat-beside-w);
+  padding-right: var(--chat-beside-room);
+}
+
+.chat-beside {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: var(--chat-beside-w);
+  min-width: 0;
+  border-left: var(--rule-width) solid var(--chat-divider);
+  background: var(--chat-ground);
+  color: var(--ink-chalk);
+  font-family: var(--font-ui);
+}
+
+.chat-beside-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  /* As tall as the conversation's head (`levelChatBesideHead`). */
+  box-sizing: border-box;
+  min-height: var(--chat-beside-head-h, auto);
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
+  border-bottom: var(--rule-width) solid var(--chat-divider);
+  font-size: var(--text-sm);
+}
+
+.chat-beside-head > .icon {
+  flex: none;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  color: var(--ink-mist);
+}
+
+.chat-beside-close {
+  margin-left: auto;
+}
+
+.chat-beside-body {
+  flex: 1 1 0;
+  min-height: 0;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.chat-beside-body > .chat-result {
+  margin: 0;
+}
+
+.chat-beside-body .chat-result-diff .helper-tool-diff-rows {
+  max-height: none;
+}
+
 /* The turn's test line: the glyph and the words say the outcome, the ink
  * repeats it — and, in the quiet ink, the command that ran them, cut where the
  * line ends. */
@@ -19935,7 +20009,7 @@ details[open] > .helper-cap::after {
  * rows. The question card stands in it above the composer. */
 .chat-dock {
   position: absolute;
-  right: calc(var(--chat-turn-rail-w) + var(--chat-dock-inset));
+  right: calc(var(--chat-turn-rail-w) + var(--chat-dock-inset) + var(--chat-beside-room));
   bottom: var(--chat-dock-inset);
   /* Beside the turn rail, never over it (t-22100). */
   left: var(--chat-dock-inset);
@@ -20046,7 +20120,7 @@ details[open] > .helper-cap::after {
 .worker-view.is-chat-page:has(> .chat-dock)::after {
   content: "";
   position: absolute;
-  right: calc(var(--chat-turn-rail-w) + var(--chat-dock-inset));
+  right: calc(var(--chat-turn-rail-w) + var(--chat-dock-inset) + var(--chat-beside-room));
   bottom: 0;
   left: var(--chat-dock-inset);
   z-index: 2;

@@ -93,6 +93,7 @@ import {
   testConversationTable, testConversationTurnGap,
 } from "./conversation-outputs.mjs";
 import { testConversationPin, testConversationResult, testConversationViewMenu } from "./conversation-result.mjs";
+import { testConversationBeside } from "./conversation-beside.mjs";
 import { testHelperDoors } from "./helper-doors.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
@@ -627,6 +628,8 @@ suite("conversation-behind-tab", ({ browser, origin, ok }) => testConversationBe
 // 2026-11-10 (window artifact p-1c1bbf75726ff227): an answer's card of what its turn changed, on the
 // reading column; the head's one named 「보기」; a new answer starting under its question.
 suite("conversation-result", ({ browser, origin, ok }) => testConversationResult(browser, origin, ok));
+// An answer's changes beside the conversation, on a page with the room (2026-11-12, window artifact p-5e000c2b7e067271).
+suite("conversation-beside", ({ browser, origin, ok }) => testConversationBeside(browser, origin, ok));
 suite("conversation-view-menu", ({ browser, origin, ok }) => testConversationViewMenu(browser, origin, ok));
 suite("conversation-pin", ({ browser, origin, ok }) => testConversationPin(browser, origin, ok));
 suite("conversation-outputs-notes", ({ browser, origin, ok }) => testConversationCliNotes(browser, origin, ok));

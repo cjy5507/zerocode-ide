@@ -5008,8 +5008,11 @@ function resultBarNode(added, removed) {
 /* The card of `row`'s answer, or null when its turn changed no file and ran no
  * test. The way back (`conversationReviewUndoButton`) asks its owner once the
  * pointer or the keyboard first reaches the card, not when the card is built:
- * a card stands under every turn that ends, and most are never touched. */
-function answerResultNode(list, row) {
+ * a card stands under every turn that ends, and most are never touched.
+ * `head: false` builds the card the panel beside the conversation holds
+ * (`fillChatBeside`): the panel's head is its head, and the way back stays on
+ * the conversation's card. */
+function answerResultNode(list, row, { head: headed = true } = {}) {
   const answer = row.__turn;
   const facts = answerResultFacts(list, answer);
   if (facts.files.length === 0 && !facts.tests) return null;
@@ -5023,7 +5026,7 @@ function answerResultNode(list, row) {
   // A path under the conversation's checkout is said from there, as the recovery dialog says it.
   const base = helperBase(list.__run);
   const shown = (path) => (base && path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path);
-  if (facts.files.length > 0) {
+  if (facts.files.length > 0 && headed) {
     const head = document.createElement("div");
     head.className = "chat-result-head";
     const title = document.createElement("strong");
@@ -5048,6 +5051,8 @@ function answerResultNode(list, row) {
       card.addEventListener("focusin", arm);
     }
     card.appendChild(head);
+  }
+  if (facts.files.length > 0) {
     const lineOf = (file) => {
       const item = document.createElement("div");
       item.className = "chat-result-item";
@@ -5126,6 +5131,8 @@ function watchResultPresses(list) {
     }
     const open = hit.getAttribute("aria-expanded") !== "true";
     if (hit.classList.contains("chat-result-all")) {
+      // Beside the conversation on a page with the room for it; in the card otherwise.
+      if (reviewResultBeside(list, card, open)) return;
       openResultFiles(list, card, open);
       if (open) showOpenedResult(list, card, follow);
     } else {
@@ -5154,13 +5161,24 @@ function openResultFile(list, card, item, open) {
     markAnswerReviewed(list.__run, card.__answer);
     delete card.dataset.review;
   }
+  paintResultAll(card);
+}
+
+/* What a card's 「검토」 says: 「옆에서 보는 중」 while its changes stand beside
+ * the conversation (`standChatBeside`), 「접기」 once every file is open in the
+ * card, 「검토」 otherwise. A card whose turn changed no file has none. */
+function paintResultAll(card) {
   const all = card.querySelector(".chat-result-all");
-  if (all) {
-    const every = [...card.querySelectorAll(":scope > .chat-result-item > .chat-result-file")]
-      .every((one) => one.getAttribute("aria-expanded") === "true");
-    writeAttribute(all, "aria-expanded", every ? "true" : "false");
-    writeTextContent(all, every ? t("worker.showLess", "접기") : t("worker.resultReview", "검토"));
+  if (!all) return;
+  if (card.dataset.beside === "true") {
+    writeAttribute(all, "aria-expanded", "true");
+    writeTextContent(all, t("worker.resultBeside", "옆에서 보는 중"));
+    return;
   }
+  const every = [...card.querySelectorAll(":scope > .chat-result-item > .chat-result-file")]
+    .every((one) => one.getAttribute("aria-expanded") === "true");
+  writeAttribute(all, "aria-expanded", every ? "true" : "false");
+  writeTextContent(all, every ? t("worker.showLess", "접기") : t("worker.resultReview", "검토"));
 }
 
 function openResultFiles(list, card, open) {
@@ -5239,6 +5257,7 @@ function standNewestResult(list, run, settled) {
     }
   }
   if (row?.classList.contains("is-turn-answer")) standAnswerResult(list, row);
+  syncChatBeside(list);
 }
 
 /* An answer's card brought before the reader with every file open — the head's
@@ -5248,13 +5267,246 @@ function showAnswerResult(list, answer) {
   const card = row ? standAnswerResult(list, row) : null;
   if (!card) return null;
   card.__kept = true;
-  openResultFiles(list, card, true);
+  const beside = chatBesideFits(chatPageOf(list)) ? standChatBeside(list, row.__turn) : null;
+  if (!beside) openResultFiles(list, card, true);
   // The list is the one thing that scrolls here (`scrollHelperToBottom`): the
   // card's head comes a step under its top, by the list's own scroll.
   const step = parseFloat(getComputedStyle(card).marginTop) || 0;
   list.scrollTop += card.getBoundingClientRect().top - list.getBoundingClientRect().top - step;
-  card.querySelector(".chat-result-file")?.focus({ preventScroll: true });
+  (beside ?? card).querySelector(".chat-result-file")?.focus({ preventScroll: true });
   return card;
+}
+
+/* ---- an answer's changes beside the conversation (2026-11-12) --------------
+ *
+ * The person passed it on 2026-11-12 (window artifact p-5e000c2b7e067271,
+ * decision 1): on a page with the room for it, 「검토」 stands the turn's
+ * changes beside the conversation — the answer stays where it is read and the
+ * rows that changed are read next to it — and a page without the room opens
+ * them in the card as before. A file's own line still opens in the card: the
+ * quick look.
+ *
+ * The panel is the page's last child, over the room the page's right padding
+ * leaves (`.has-beside`): the page is its own query container, so its column,
+ * its type and its composer step to the narrower width as a split pane's do.
+ * It holds a card of its own for the same answer, every file open and without
+ * the head — the way back (`conversationReviewUndoButton`) stays on the card
+ * in the conversation, once. One panel a page: another answer's 「변경 N」
+ * turns it to that answer. Built by the press that opens it and gone with the
+ * one that closes it, so a page that never opens one carries nothing for it.
+ * `page.__beside` is what stands: the list, the answer, its card in the
+ * conversation, the panel, and what the card said when the panel was filled. */
+
+/* Panels are told apart for `aria-controls`. */
+let chatBesideSeq = 0;
+
+/* The page a conversation list stands on. */
+function chatPageOf(list) {
+  return list?.closest(".worker-view") ?? null;
+}
+
+/* A length token of `node` in px, or null when it is not one. */
+function tokenPx(node, name) {
+  const value = parseFloat(getComputedStyle(node).getPropertyValue(name));
+  return Number.isFinite(value) ? value : null;
+}
+
+/* Whether the page keeps a column to read once the panel has its width —
+ * asked of the page's whole width (its padding too), so a panel that stands
+ * does not answer for itself. */
+function chatBesideFits(page) {
+  if (!page) return false;
+  const panel = tokenPx(page, "--chat-beside-w");
+  const column = tokenPx(page, "--chat-beside-page-min");
+  return panel !== null && column !== null && page.clientWidth - panel >= column;
+}
+
+/* 「검토」 on `card`, when the page has the room: the press that opens stands
+ * the panel, and the press on the card whose changes stand there takes it
+ * down. False when the card is the place — a page without the room. */
+function reviewResultBeside(list, card, open) {
+  const page = chatPageOf(list);
+  if (card.dataset.beside === "true") {
+    dropChatBeside(page, { focus: true });
+    return true;
+  }
+  if (!open || !chatBesideFits(page)) return false;
+  return standChatBeside(list, card.__answer) !== null;
+}
+
+/* The panel's skeleton: a head that says what the card's head says, the
+ * close, and the room its card scrolls in. Its keys are its own, as the find
+ * bar's are — an Escape here closes the panel, not the agent's turn
+ * (`interruptOnEscape`). It takes the keyboard from a press anywhere inside
+ * it: WebKit gives a pressed button no focus, so the press would leave the
+ * keyboard outside the panel and its Escape with nothing to close. */
+function chatBesideNode(page) {
+  const node = document.createElement("aside");
+  node.className = "chat-beside";
+  chatBesideSeq += 1;
+  node.id = `chat-beside-${chatBesideSeq}`;
+  node.tabIndex = -1;
+  node.dataset.keyboardOwner = "true";
+  node.setAttribute("aria-label", t("worker.resultCard", "이 턴이 바꾼 것"));
+  const head = document.createElement("header");
+  head.className = "chat-beside-head";
+  const title = document.createElement("strong");
+  title.className = "chat-result-title";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "chat-answer-action chat-beside-close";
+  close.dataset.keyboardOwner = "true";
+  close.textContent = t("worker.reviewClose", "닫기");
+  close.addEventListener("click", () => dropChatBeside(page, { focus: true }));
+  head.append(iconNode("diff"), title, ...resultTallyNodes(0, 0), close);
+  const body = document.createElement("div");
+  body.className = "chat-beside-body";
+  node.append(head, body);
+  node.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.defaultPrevented) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dropChatBeside(page, { focus: true });
+  });
+  // A file's line folds and opens its own rows here too.
+  node.addEventListener("click", (event) => {
+    const hit = event.target instanceof Element ? event.target.closest(".chat-result-file, .chat-result-more") : null;
+    const held = page.__beside;
+    const card = hit?.closest(".chat-result");
+    if (!held || !card || !node.contains(card)) return;
+    if (hit.classList.contains("chat-result-more")) {
+      card.__rest?.();
+      openResultFiles(held.list, card, true);
+      return;
+    }
+    openResultFile(held.list, card, hit.parentElement, hit.getAttribute("aria-expanded") !== "true");
+  });
+  return node;
+}
+
+/* The panel's head as tall as the conversation's, so their rules meet in one
+ * line: the conversation's head is as tall as what it holds. */
+function levelChatBesideHead(page, node) {
+  const head = page.querySelector(":scope > .worker-head");
+  if (head) node.style.setProperty("--chat-beside-head-h", `${head.offsetHeight}px`);
+}
+
+/* `answer`'s changes beside the conversation: its card in the conversation
+ * says so and keeps its rows shut, the panel takes a card of its own with
+ * every file open. Returns the panel, or null when the answer has no card. */
+function standChatBeside(list, answer) {
+  const page = chatPageOf(list);
+  const row = answerRowOf(list, answer);
+  const card = row ? standAnswerResult(list, row) : null;
+  if (!page || !card || !card.querySelector(".chat-result-all")) return null;
+  let held = page.__beside;
+  if (held && (held.list !== list || !held.node.isConnected)) {
+    dropChatBeside(page);
+    held = null;
+  }
+  if (!held) {
+    const node = chatBesideNode(page);
+    held = page.__beside = { list, node, answer: null, card: null, said: null, watch: null };
+    page.appendChild(node);
+    page.classList.add("has-beside");
+    // A page that lost the room (a split, a narrower window) reads the rows in the card again.
+    // Asked of the page's border box — its own padding for the panel is not a
+    // change of size — and only of a page that is laid out.
+    held.watch = new ResizeObserver(() => {
+      if (page.__beside !== held || page.clientWidth === 0) return;
+      if (chatBesideFits(page)) levelChatBesideHead(page, node);
+      else dropChatBeside(page, { inline: true });
+    });
+    held.watch.observe(page, { box: "border-box" });
+    levelChatBesideHead(page, node);
+  } else if (held.card && held.card !== card) {
+    delete held.card.dataset.beside;
+    if (held.card.isConnected) paintResultAll(held.card);
+  }
+  held.answer = answer;
+  held.card = card;
+  list.__besideOn = true;
+  card.__kept = true;
+  // The rows stand in one place: the card's own shut.
+  openResultFiles(list, card, false);
+  card.dataset.beside = "true";
+  writeAttribute(card.querySelector(".chat-result-all"), "aria-controls", held.node.id);
+  paintResultAll(card);
+  // Its changes were looked at: the sidebar's 「변경 N」 for it is spent, as a file opened in the card spends it.
+  markAnswerReviewed(list.__run, answer);
+  delete card.dataset.review;
+  fillChatBeside(held, row);
+  return held.node;
+}
+
+/* The panel's card and head, from the answer as it stands now. */
+function fillChatBeside(held, row) {
+  const facts = answerResultFacts(held.list, held.answer);
+  const head = held.node.firstElementChild;
+  writeTextContent(head.querySelector(".chat-result-title"), t("worker.resultFiles", "변경된 파일 {{n}}개", { n: facts.files.length }));
+  writeTextContent(head.querySelector(".chat-result-added"), `+${facts.added}`);
+  writeTextContent(head.querySelector(".chat-result-removed"), `−${facts.removed}`);
+  const body = held.node.lastElementChild;
+  const card = answerResultNode(held.list, row, { head: false });
+  if (!card) {
+    body.replaceChildren();
+    held.said = null;
+    return;
+  }
+  body.replaceChildren(card);
+  openResultFiles(held.list, card, true);
+  held.said = held.card.__said;
+}
+
+/* The panel taken down. `inline` opens the same rows in the conversation's
+ * card — a page that lost the room; `focus` gives the keyboard back to the
+ * card's 「검토」. */
+function dropChatBeside(page, { inline = false, focus = false } = {}) {
+  const held = page?.__beside;
+  if (!held) return;
+  page.__beside = null;
+  held.list.__besideOn = false;
+  held.watch?.disconnect();
+  held.node.remove();
+  page.classList.remove("has-beside");
+  const card = held.card;
+  if (!card) return;
+  delete card.dataset.beside;
+  if (!card.isConnected) return;
+  card.querySelector(".chat-result-all")?.removeAttribute("aria-controls");
+  paintResultAll(card);
+  if (inline) openResultFiles(held.list, card, true);
+  if (focus) card.querySelector(".chat-result-all")?.focus({ preventScroll: true });
+}
+
+/* The panel kept true to the conversation, asked by every paint of the list:
+ * gone with a page drawn anew or an answer that lost its card, filled again
+ * when the card was stood anew or says something else (a result that joined
+ * its call late). A paint that moved nothing writes nothing. */
+function syncChatBeside(list) {
+  // A list no panel was opened from asks nothing of its page.
+  if (!list.__besideOn) return;
+  const page = chatPageOf(list);
+  const held = page?.__beside;
+  if (!held || held.list !== list || !held.node.isConnected) {
+    list.__besideOn = false;
+    if (held?.list === list) dropChatBeside(page);
+    return;
+  }
+  const row = answerRowOf(list, held.answer);
+  const card = row?.querySelector(":scope > .chat-result") ?? null;
+  if (!card || !card.querySelector(".chat-result-all")) {
+    dropChatBeside(page);
+    return;
+  }
+  if (card === held.card && card.__said === held.said) return;
+  held.card = card;
+  card.__kept = true;
+  card.dataset.beside = "true";
+  writeAttribute(card.querySelector(".chat-result-all"), "aria-controls", held.node.id);
+  openResultFiles(list, card, false);
+  paintResultAll(card);
+  fillChatBeside(held, row);
 }
 
 /* 「변경 N +a −d」 on an answer's action row (`chat-answer-changes`): the answers

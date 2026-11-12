@@ -3067,6 +3067,16 @@
   --chat-action-icon: 28px;
   --chat-result-line-h: 36px;
   --chat-result-diff-max: 520px;
+  /* The same card beside the conversation (2026-11-12): on a pane wide enough
+   * the turn's changes stand in a column of their own. The column is as wide
+   * as a diff's 80 columns of code at the code size need; the conversation
+   * keeps at least its reading column beside it, or the card stays inline.
+   * Both are widths of a column, not steps of the spacing scale. What the
+   * page's own edge gives up for the panel is nothing until a page stands
+   * one (`.has-beside`), so a rule that adds it is whole on every page. */
+  --chat-beside-w: 560px;
+  --chat-beside-page-min: 720px;
+  --chat-beside-room: 0px;
   /* A file's share of added lines beside its counts: five blocks, as a code
    * host draws a change. */
   --chat-result-bar-block: 6px;
