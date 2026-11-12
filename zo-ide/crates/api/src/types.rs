@@ -814,13 +814,21 @@ pub enum OutputContentBlock {
     },
 }
 
+/// The token counts of one request. Every count a server leaves out reads as
+/// none: the Messages API's documented closing `message_delta` carries
+/// `output_tokens` alone, and a server that follows the document — an
+/// Anthropic-compatible gateway — must not end the turn on a missing number.
+/// A stream's reader takes what `message_start` gave for a count its closing
+/// delta left out ([`Usage::with_what_the_start_gave`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    #[serde(default)]
     pub input_tokens: u32,
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
     #[serde(default)]
     pub cache_read_input_tokens: u32,
+    #[serde(default)]
     pub output_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens_details: Option<OutputTokensDetails>,
@@ -843,6 +851,26 @@ pub struct CacheCreation {
 }
 
 impl Usage {
+    /// A stream's closing usage with each input count it left out taken from
+    /// `start`, the usage `message_start` gave. A server restates the input
+    /// counts on the closing delta or it does not; a count it restates stands
+    /// (a context edit mid-stream moves it), and the output counts are the
+    /// closing delta's alone.
+    #[must_use]
+    pub fn with_what_the_start_gave(mut self, start: Self) -> Self {
+        if self.input_tokens == 0 {
+            self.input_tokens = start.input_tokens;
+        }
+        if self.cache_creation_input_tokens == 0 {
+            self.cache_creation_input_tokens = start.cache_creation_input_tokens;
+        }
+        if self.cache_read_input_tokens == 0 {
+            self.cache_read_input_tokens = start.cache_read_input_tokens;
+        }
+        self.cache_creation = self.cache_creation.or(start.cache_creation);
+        self
+    }
+
     #[must_use]
     pub const fn total_tokens(&self) -> u32 {
         self.input_tokens
@@ -1332,6 +1360,58 @@ mod tests {
             ),
             (25, 0, 0, 348, None)
         );
+    }
+
+    /// The closing delta of the Messages API's own streaming example carries
+    /// `output_tokens` and nothing else; it reads, the counts it left out as
+    /// none, and what `message_start` gave fills them in.
+    #[test]
+    fn a_closing_delta_that_carries_output_tokens_alone_reads_and_takes_the_starts_input_counts() {
+        let event: MessageDeltaEvent = serde_json::from_value(serde_json::json!({
+            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+            "usage": {"output_tokens": 15}
+        }))
+        .expect("the documented closing delta");
+        assert_eq!(
+            (event.usage.input_tokens, event.usage.output_tokens),
+            (0, 15)
+        );
+
+        let start = Usage {
+            input_tokens: 25,
+            cache_creation_input_tokens: 400,
+            cache_read_input_tokens: 9_000,
+            output_tokens: 1,
+            output_tokens_details: None,
+            cache_creation: Some(CacheCreation {
+                ephemeral_5m_input_tokens: 100,
+                ephemeral_1h_input_tokens: 300,
+            }),
+        };
+        let closed = event.usage.with_what_the_start_gave(start);
+        assert_eq!(
+            (closed.input_tokens, closed.cache_creation_input_tokens, closed.cache_read_input_tokens, closed.output_tokens),
+            (25, 400, 9_000, 15),
+            "the input counts are the start's, the output count the delta's"
+        );
+        assert_eq!(closed.cache_creation, start.cache_creation);
+
+        // A count the closing delta restates stands.
+        let restated = Usage {
+            input_tokens: 30,
+            cache_read_input_tokens: 8_000,
+            output_tokens: 15,
+            ..Usage::default()
+        }
+        .with_what_the_start_gave(start);
+        assert_eq!(
+            (restated.input_tokens, restated.cache_creation_input_tokens, restated.cache_read_input_tokens),
+            (30, 400, 8_000)
+        );
+
+        // A whole reply whose usage names no input count reads too.
+        let usage: Usage = serde_json::from_value(serde_json::json!({})).expect("an empty usage");
+        assert_eq!(usage, Usage::default());
     }
 
     #[test]

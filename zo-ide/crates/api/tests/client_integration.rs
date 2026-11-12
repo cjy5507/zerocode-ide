@@ -444,6 +444,80 @@ async fn stream_message_records_the_one_hour_part_of_the_cache_write() {
     std::env::remove_var("ZO_CONFIG_HOME");
 }
 
+/// A server that follows the Messages API's document closes a stream with a
+/// `message_delta` whose usage carries `output_tokens` alone. The stream
+/// reads it — the turn does not end on a missing number — and the event a
+/// reader gets, like the row the ledger keeps, has the input counts
+/// `message_start` gave.
+#[tokio::test]
+// Single-threaded test; the env lock across `.await` only serialises env access.
+#[allow(clippy::await_holding_lock)]
+async fn stream_message_reads_a_closing_delta_without_input_counts_and_keeps_the_starts() {
+    let _guard = env_lock();
+    let temp_root = std::env::temp_dir().join(format!(
+        "api-stream-lean-delta-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::env::set_var("ZO_CONFIG_HOME", &temp_root);
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_lean\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":25,\"cache_creation_input_tokens\":400,\"cache_read_input_tokens\":9000,\"output_tokens\":1}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":15}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "text/event-stream", sse)],
+    )
+    .await
+    else {
+        return;
+    };
+
+    let client = ApiClient::new("test-key")
+        .with_base_url(server.base_url())
+        .with_prompt_cache(PromptCache::new("lean-delta-session"));
+    let mut stream = client
+        .stream_message(&sample_request(false))
+        .await
+        .expect("stream should start");
+    let mut closing = None;
+    while let Some(event) = stream.next_event().await.expect("a closing delta without input counts reads") {
+        if let StreamEvent::MessageDelta(delta) = event {
+            closing = Some(delta.usage);
+        }
+    }
+    let closing = closing.expect("the closing delta reached the reader");
+    assert_eq!(
+        (closing.input_tokens, closing.cache_creation_input_tokens, closing.cache_read_input_tokens, closing.output_tokens),
+        (25, 400, 9_000, 15),
+        "the reader's event carries the start's input counts and the delta's output count"
+    );
+
+    let rows = api::read_request_ledger(&api::PromptCachePaths::for_session("lean-delta-session").requests_path);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].cache_creation, 400);
+
+    drop(stream);
+    drop(client);
+    remove_temp_root(&temp_root).expect("cleanup temp root");
+    std::env::remove_var("ZO_CONFIG_HOME");
+}
+
 /// A request whose newest message carries a conversation cache marker, as the
 /// foreground conversation's requests do.
 fn marked_request() -> MessageRequest {

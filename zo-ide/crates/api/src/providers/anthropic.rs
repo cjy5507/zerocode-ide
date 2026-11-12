@@ -21,7 +21,7 @@ use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 
 use crate::sse::SseParser;
 use crate::types::{
-    CacheCreation, ContextManagementResponse, MessageDeltaEvent, MessageRequest, MessageResponse,
+    ContextManagementResponse, MessageDeltaEvent, MessageRequest, MessageResponse,
     MessageStartEvent, ReasoningRequest, StreamEvent, Usage,
 };
 
@@ -1397,7 +1397,7 @@ impl AnthropicClient {
             request: request.clone(),
             prompt_cache: self.prompt_cache.clone(),
             latest_usage: None,
-            start_cache_creation: None,
+            start_usage: None,
             usage_recorded: false,
             last_prompt_cache_record: Arc::clone(&self.last_prompt_cache_record),
             client: self.clone(),
@@ -2796,10 +2796,11 @@ pub struct MessageStream {
     request: MessageRequest,
     prompt_cache: Option<PromptCache>,
     latest_usage: Option<Usage>,
-    /// The TTL split of the cache write, as `message_start` reported it: the
-    /// split rides that event's usage, and the `message_delta` usage the
-    /// ledger records may come without it.
-    start_cache_creation: Option<CacheCreation>,
+    /// The usage `message_start` reported. The closing `message_delta` may
+    /// come without the input counts and without the TTL split of the cache
+    /// write, which ride the start; what it leaves out is taken from here
+    /// ([`Usage::with_what_the_start_gave`]).
+    start_usage: Option<Usage>,
     usage_recorded: bool,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
     /// The owning client, kept so a pre-commit transport fault can transparently
@@ -2838,8 +2839,8 @@ impl MessageStream {
     pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
         let idle_timeout = super::stream_idle_timeout();
         loop {
-            if let Some(event) = self.pending.pop_front() {
-                self.observe_event(&event);
+            if let Some(mut event) = self.pending.pop_front() {
+                self.observe_event(&mut event);
                 // Past this point the caller has seen output, so a later drop
                 // must propagate rather than restart (a fresh stream would
                 // duplicate it).
@@ -2992,19 +2993,25 @@ impl MessageStream {
         Ok(())
     }
 
-    fn observe_event(&mut self, event: &StreamEvent) {
+    /// What the stream keeps of an event on its way out — and, for the
+    /// closing delta, what it completes: the input counts the delta left out
+    /// are the start's, in the event every reader gets and in the usage this
+    /// stream's ledger records, so no reader counts a request's input as none
+    /// because its server did not say it twice.
+    fn observe_event(&mut self, event: &mut StreamEvent) {
         match event {
             StreamEvent::MessageStart(MessageStartEvent { message }) => {
-                self.start_cache_creation = message.usage.cache_creation;
+                self.start_usage = Some(message.usage);
             }
             StreamEvent::MessageDelta(MessageDeltaEvent {
                 usage,
                 context_management,
                 ..
             }) => {
-                let mut usage = *usage;
-                usage.cache_creation = usage.cache_creation.or(self.start_cache_creation);
-                self.latest_usage = Some(usage);
+                if let Some(start) = self.start_usage {
+                    *usage = usage.with_what_the_start_gave(start);
+                }
+                self.latest_usage = Some(*usage);
                 if let Some(event) = context_edit_analytics_event(
                     self.request_id.as_deref(),
                     context_management.as_ref(),
