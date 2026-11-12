@@ -22,6 +22,8 @@
 //! zo dream-lessons preview <session id|name|path> [--candidates <file>] [--dry-run] [--json]
 //! ```
 
+use std::fmt::Write as _;
+
 use core_types::Session;
 use decision_core::dreamer::LessonKind;
 use decision_core::said_lessons::{line_allowed, Digest, Offered, Pending, NEW_SAID_TO_ASK};
@@ -198,19 +200,21 @@ impl Preview {
             "session {session_id}: the person said {} thing(s) a pass would show, {} characters\n",
             self.shown, self.chars
         );
-        match (&self.session_model, &self.asked_model) {
-            (Some(ran_on), Some(asked)) => text.push_str(&format!("ran on {ran_on}; the fast model asked is {asked}\n")),
-            _ => text.push_str("no model answered in it\n"),
-        }
-        match &self.outcome {
-            Outcome::NotAsked(why) => text.push_str(&format!("not asked: {why}\n")),
-            Outcome::Failed(error) => text.push_str(&format!("asked, and it failed: {error}\n")),
+        let _ = match (&self.session_model, &self.asked_model) {
+            (Some(ran_on), Some(asked)) => writeln!(text, "ran on {ran_on}; the fast model asked is {asked}"),
+            _ => writeln!(text, "no model answered in it"),
+        };
+        let _ = match &self.outcome {
+            Outcome::NotAsked(why) => writeln!(text, "not asked: {why}"),
+            Outcome::Failed(error) => writeln!(text, "asked, and it failed: {error}"),
             Outcome::Asked { taken, dropped } => {
-                text.push_str(&format!("asked: {} lesson(s) taken, {dropped} offered and not taken\n", taken.len()));
-                for lesson in taken {
-                    let again = lesson.same_as.as_deref().map_or(String::new(), |id| format!(", candidate {id} shown again"));
-                    text.push_str(&format!("- [{}] {} (from [{}]{again})\n", lesson.kind.as_str(), lesson.text, lesson.said));
-                }
+                writeln!(text, "asked: {} lesson(s) taken, {dropped} offered and not taken", taken.len())
+            }
+        };
+        if let Outcome::Asked { taken, .. } = &self.outcome {
+            for lesson in taken {
+                let again = lesson.same_as.as_deref().map_or(String::new(), |id| format!(", candidate {id} shown again"));
+                let _ = writeln!(text, "- [{}] {} (from [{}]{again})", lesson.kind.as_str(), lesson.text, lesson.said);
             }
         }
         text.push_str("nothing was written");
