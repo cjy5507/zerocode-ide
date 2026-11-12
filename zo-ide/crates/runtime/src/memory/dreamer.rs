@@ -2343,7 +2343,7 @@ fn said_lesson_allowed(kind: LessonKind, text: &str) -> bool {
 }
 
 /// Keep a lesson the person's own words offered in `session_id` as a
-/// candidate, which is all it is ([`SAID_LESSONS_DIR`]). `false` when the
+/// candidate, which is all it is: no pass reads where it is kept. `false` when the
 /// kind or the line is not one a session may offer, or it could not be
 /// written.
 #[must_use]

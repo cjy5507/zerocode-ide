@@ -674,7 +674,7 @@ impl ConfigLoader {
     }
 
     /// Whether the person's own settings turn the dreamer's question on
-    /// ([`DREAM_LESSONS_KEY`]), read from their settings files alone. That is
+    /// (`dreamLessons`), read from their settings files alone. That is
     /// the only source [`Self::load`] takes the key from, so the answer is
     /// the same — and a caller that asks at every idle moment opens no file
     /// of the repository and starts no `git` to learn the switch is off. The
