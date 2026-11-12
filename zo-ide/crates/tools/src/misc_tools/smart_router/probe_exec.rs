@@ -576,9 +576,13 @@ fn probe_and_shadow_judged(
             })
             .collect();
         // Routing is settled; the control sample leaves now, off the turn's
-        // clock, for the rows the judge compares.
+        // clock, for the rows the judge compares. Only where the probe has a
+        // model to ask: a session with no fast tier of its own has no probe
+        // the judgment stood in for, and its control row would hold a cell
+        // that compares nothing.
         let control = active
             .control
+            .filter(|_| probe_has_a_model(parent_model))
             .map(|batch| super::decision_shadow::fire_control(batch, parent_model));
         return (results, control);
     }
@@ -2138,6 +2142,35 @@ mod live_path_tests {
             let rows = env.rows();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].route_use, DecisionRouteUse::Fallback);
+        }
+
+        /// A sampled task of a session with no fast model of its own draws no
+        /// control either: the probe has nobody to ask there, so there is no
+        /// reader the judgment stood in for, and the row would stand beside
+        /// the active one with a cell that compares nothing.
+        #[test]
+        fn a_sampled_task_of_a_session_with_no_fast_model_draws_no_control_row() {
+            let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
+            let judgment = judging(judgment_answer());
+            let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
+            env.set_mode(Some("on"));
+            let picked = sampled_for("", "control-no-fast-tier");
+
+            let (results, control) = probe_and_shadow(
+                "zq-model-nobody-lists",
+                &[("", picked.as_str())],
+                &[],
+                "turn-7@1",
+                UNHURRIED,
+                super::super::Admitted { probe: true, read: true },
+            );
+
+            assert_eq!(results[0].expect("the judgment routed").complexity, RouteTaskComplexity::Large);
+            assert!(control.is_none(), "a control was fired where the probe has nobody to ask");
+            assert!(probe.requests().is_empty(), "the probe was asked");
+            let rows = env.rows();
+            assert_eq!(rows.len(), 1, "the active row and no control row beside it: {rows:?}");
+            assert_eq!(rows[0].route_use, DecisionRouteUse::Applied);
         }
 
         #[test]
