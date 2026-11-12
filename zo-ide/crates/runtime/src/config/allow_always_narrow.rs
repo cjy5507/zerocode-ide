@@ -442,7 +442,7 @@ mod tests {
     /// The broad rule stops allowing the wider command and keeps allowing the
     /// approved one, and the file read back by a later session says the same.
     #[test]
-    #[cfg(unix)]
+    #[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities, so on Windows the file fails closed and nothing is narrowed")]
     fn a_broad_allow_rule_stops_allowing_the_wider_command_and_reads_back_the_same() {
         let _stable = overrides_stable();
         let project = Project::new(
@@ -522,7 +522,7 @@ mod tests {
     /// A file holding only narrow rules is not written, and the project is
     /// marked: the literal form is never wrapped a second time.
     #[test]
-    #[cfg(unix)]
+    #[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities, so on Windows the file fails closed and nothing is narrowed")]
     fn an_already_narrow_rule_stays_byte_for_byte() {
         let before = r#"{ "permissions": { "allow": ["bash(ls [*].rs)", "bash(git status:*)"] } }"#;
         let project = Project::new(before, false);
@@ -535,7 +535,7 @@ mod tests {
     /// Once marked, a project is not read again: a second run changes no byte,
     /// and a glob the person writes by hand afterwards stays a glob.
     #[test]
-    #[cfg(unix)]
+    #[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities, so on Windows the file fails closed and nothing is narrowed")]
     fn a_second_run_changes_nothing_and_a_glob_written_later_stays_a_glob() {
         let _stable = overrides_stable();
         let project = Project::new(&format!(r#"{{"permissions":{{"allow":["{BROAD}"]}}}}"#), false);
@@ -554,7 +554,6 @@ mod tests {
     /// A committed file is not the person's trusted one: nothing is written,
     /// kept or marked, so a later session tries again.
     #[test]
-    #[cfg(unix)]
     fn an_untrusted_file_is_left_as_it_was_and_unmarked() {
         let before = format!(r#"{{"permissions":{{"allow":["{BROAD}"]}}}}"#);
         let project = Project::new(&before, true);
@@ -652,7 +651,7 @@ mod tests {
     /// The narrowing leaves a notice that waits — through any number of runs
     /// nobody watches — for the first session that says it, and is said once.
     #[test]
-    #[cfg(unix)]
+    #[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities, so on Windows the file fails closed and nothing is narrowed")]
     fn the_notice_waits_for_the_first_watched_session_and_is_said_once() {
         let project = Project::new(&format!(r#"{{"permissions":{{"allow":["{BROAD}"]}}}}"#), false);
         let AllowAlwaysNarrowing::Narrowed { backup, .. } = project.narrow() else {
@@ -684,7 +683,7 @@ mod tests {
     /// The session's own load narrows first, so the policy that very session
     /// builds is narrow (and the state folder is the project's zo state).
     #[test]
-    #[cfg(unix)]
+    #[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities, so on Windows the file fails closed and nothing is narrowed")]
     fn the_session_that_narrows_builds_a_narrow_policy() {
         let _stable = overrides_stable();
         let _env = crate::test_env_lock();
