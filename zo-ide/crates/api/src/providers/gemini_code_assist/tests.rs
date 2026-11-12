@@ -20,32 +20,69 @@ fn oauth_config_uses_caller_owned_client() {
     assert!(config.scopes.contains(&EXPERIMENTS_SCOPE.to_string()));
 }
 
+/// A stand-in for the secret the release lane builds in: the tests never read
+/// the real one, so they are the same green with it or without it.
+const TEST_BUILT_IN_SECRET: &str = "test-built-in-secret";
+
 #[test]
-fn resolve_client_uses_builtin_antigravity_pair_by_default() {
+fn resolve_client_uses_builtin_antigravity_pair_when_the_build_has_one() {
     // No override (or blank) → Antigravity's built-in installed-app client
-    // (id + secret), so `/login google` runs Antigravity's sign-in with no setup.
-    let (id, secret) = resolve_client(None, None);
+    // (id + the secret this build was given), so `/login google` runs
+    // Antigravity's sign-in with no setup.
+    let (id, secret) = resolve_client(None, None, Some(TEST_BUILT_IN_SECRET)).expect("built in");
     assert_eq!(id, ANTIGRAVITY_OAUTH_CLIENT_ID);
-    assert_eq!(secret.as_deref(), Some(ANTIGRAVITY_OAUTH_CLIENT_SECRET));
-    let (id, secret) = resolve_client(Some("   ".to_string()), Some("   ".to_string()));
+    assert_eq!(secret.as_deref(), Some(TEST_BUILT_IN_SECRET));
+    let (id, secret) = resolve_client(
+        Some("   ".to_string()),
+        Some("   ".to_string()),
+        Some(TEST_BUILT_IN_SECRET),
+    )
+    .expect("built in");
     assert_eq!(id, ANTIGRAVITY_OAUTH_CLIENT_ID);
-    assert_eq!(secret.as_deref(), Some(ANTIGRAVITY_OAUTH_CLIENT_SECRET));
+    assert_eq!(secret.as_deref(), Some(TEST_BUILT_IN_SECRET));
+}
+
+#[test]
+fn resolve_client_without_a_built_in_secret_or_override_is_unconfigured() {
+    // A build made without the secret has no built-in client: the built-in id
+    // is never sent alone, so the answer is an error naming the road, and the
+    // callers (`oauth_config`, `exchange_code`, `refresh_tokens`) return it
+    // before any request is built. A blank built-in value (the variable set
+    // but empty at build time) is the same as none.
+    for built_in in [None, Some(""), Some("  ")] {
+        let error = resolve_client(None, None, built_in).expect_err("no client");
+        let ApiError::Auth(message) = &error else {
+            panic!("an unconfigured client is an auth error, got {error:?}");
+        };
+        assert!(message.contains(GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID_ENV), "{message}");
+        assert!(message.contains(GEMINI_CODE_ASSIST_OAUTH_CLIENT_SECRET_ENV), "{message}");
+        assert!(message.contains("published"), "{message}");
+        assert!(!message.contains(ANTIGRAVITY_OAUTH_CLIENT_ID), "{message}");
+        // A secret override with no id override is no client either.
+        assert!(resolve_client(None, Some(TEST_OAUTH_CLIENT_SECRET.to_string()), built_in).is_err());
+    }
 }
 
 #[test]
 fn resolve_client_override_pairs_own_id_never_with_builtin_secret() {
-    // A caller-owned id is trimmed and paired with its own trimmed secret.
-    let (id, secret) = resolve_client(
-        Some(format!(" {TEST_OAUTH_CLIENT_ID} ")),
-        Some(format!(" {TEST_OAUTH_CLIENT_SECRET} ")),
-    );
-    assert_eq!(id, TEST_OAUTH_CLIENT_ID);
-    assert_eq!(secret.as_deref(), Some(TEST_OAUTH_CLIENT_SECRET));
-    // Overriding only the id yields a public PKCE client (no secret); the
-    // built-in secret is never paired with a caller-owned id.
-    let (id, secret) = resolve_client(Some(TEST_OAUTH_CLIENT_ID.to_string()), None);
-    assert_eq!(id, TEST_OAUTH_CLIENT_ID);
-    assert_eq!(secret, None);
+    for built_in in [Some(TEST_BUILT_IN_SECRET), None] {
+        // A caller-owned id is trimmed and paired with its own trimmed secret.
+        let (id, secret) = resolve_client(
+            Some(format!(" {TEST_OAUTH_CLIENT_ID} ")),
+            Some(format!(" {TEST_OAUTH_CLIENT_SECRET} ")),
+            built_in,
+        )
+        .expect("override");
+        assert_eq!(id, TEST_OAUTH_CLIENT_ID);
+        assert_eq!(secret.as_deref(), Some(TEST_OAUTH_CLIENT_SECRET));
+        // Overriding only the id yields a public PKCE client (no secret); the
+        // built-in secret is never paired with a caller-owned id, and a build
+        // without one still signs in this way.
+        let (id, secret) =
+            resolve_client(Some(TEST_OAUTH_CLIENT_ID.to_string()), None, built_in).expect("override");
+        assert_eq!(id, TEST_OAUTH_CLIENT_ID);
+        assert_eq!(secret, None);
+    }
 }
 
 #[test]

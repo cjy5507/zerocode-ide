@@ -76,6 +76,11 @@ just package-macos         # unsigned local bundle (smoke test)
 cd zo-ide && cargo build --release -p zo-ide   # the zo CLI on its own
 ```
 
+Google sign-in (the window's Antigravity login and zo's) uses an installed-app OAuth client whose
+secret is not in this repository: the release lane builds it into the app and `zo` it publishes.
+A build from source has no built-in Google client and says so; give zo your own with
+`ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID` (and `_SECRET`), or use a published build.
+
 A shipped build is a signed, notarized `.dmg` on macOS and `.msi`/NSIS on Windows. The version
 lives in the root `Cargo.toml` under `[workspace.package]`, and `tools/release/bump.sh` moves it
 everywhere at once — no version numbers are hand-written into docs.

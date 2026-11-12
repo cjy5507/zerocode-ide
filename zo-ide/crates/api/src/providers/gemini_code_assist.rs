@@ -9,11 +9,13 @@
 //! (`daily-cloudcode-pa.googleapis.com`; see `DEFAULT_CODE_ASSIST_ENDPOINT`).
 //!
 //! The built-in client id and secret are installed-app credentials, which
-//! Google documents as non-confidential — they ship inside (and are extractable
-//! from) the desktop client (OAuth for native apps, RFC 8252 §8.5), the same
-//! posture the Gemini Code Assist CLI takes with its own. Override both with the
-//! `ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID`/`_SECRET` env vars to sign in with a
-//! caller-owned client instead.
+//! Google documents as non-confidential (OAuth for native apps, RFC 8252 §8.5).
+//! The id is in this source; the secret is not — no credential goes into git.
+//! The release lane builds it in (`ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET`), so a
+//! published zo signs in with no setup, and a zo built without it has no
+//! built-in client and says so rather than sending a request. Override both with
+//! the `ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID`/`_SECRET` env vars to sign in with
+//! a caller-owned client instead — the road for a zo built from source.
 //!
 //! Note: the Code Assist compatibility metadata used by this backend may be
 //! subject to additional Google terms. Google ADC remains available through
@@ -22,7 +24,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::managed_account::external_credentials_disabled;
@@ -68,16 +70,25 @@ fn gemini_stream_commit_boundary(event: &StreamEvent) -> bool {
 }
 
 /// Antigravity IDE's built-in installed-app OAuth client, so `/login google`
-/// runs Antigravity's own Google sign-in with no per-user setup. Installed-app
-/// credentials are not confidential: Google documents the client secret as
-/// embedded in (and extractable from) the desktop client (OAuth for native
-/// apps, RFC 8252 §8.5) — the same posture the Gemini Code Assist CLI takes with
-/// its own public client, and the same way zo ships the OpenAI Codex client.
-/// Override both via the `ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID`/`_SECRET` env
-/// vars for a caller-owned client.
+/// runs Antigravity's own Google sign-in with no per-user setup. The id is an
+/// identifier and stays here. The secret — non-confidential by Google's own
+/// account (RFC 8252 §8.5), but a credential all the same — is not written in
+/// this source: the release lane passes it to the build it ships in
+/// `ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET` (`tools/release/lane.sh`), the same
+/// name the window's own Google login reads. A build made without it has no
+/// built-in client ([`resolve_client`]). Override both via the
+/// `ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID`/`_SECRET` env vars for a
+/// caller-owned client.
 const ANTIGRAVITY_OAUTH_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const ANTIGRAVITY_OAUTH_CLIENT_SECRET: &str = "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";
+const ANTIGRAVITY_OAUTH_CLIENT_SECRET: Option<&str> =
+    option_env!("ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET");
+
+/// What a zo built without the built-in secret says, instead of sending a
+/// sign-in or a refresh with an id whose secret it does not have.
+const NO_BUILT_IN_CLIENT: &str = "this zo build carries no built-in Google sign-in client — \
+     set ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID (and ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_SECRET \
+     for a client that has one), or use a published zo build";
 
 /// Env var overriding `ANTIGRAVITY_OAUTH_CLIENT_ID` with a caller-owned
 /// Google installed-app OAuth client ID.
@@ -283,6 +294,9 @@ fn is_project_rejection(error: &ApiError) -> bool {
 /// post-failure refresh backoff in `load_fresh_oauth`.
 static LAST_REFRESH_FAILURE_UNIX: AtomicU64 = AtomicU64::new(0);
 
+/// Whether this process already said it has no client to refresh with.
+static NO_CLIENT_SAID: AtomicBool = AtomicBool::new(false);
+
 /// Monotonic scope for zo-generated Gemini tool ids. Gemini Code Assist often
 /// omits `functionCall.id`; a content-index-only fallback collides across
 /// successive tool-loop streams (`gemini_tool_call_2` every time), so every
@@ -340,30 +354,35 @@ fn non_blank_credential(value: Option<String>) -> Option<String> {
 
 /// Resolve the OAuth client `(id, optional secret)` as an atomic pair.
 ///
-/// No id override → Antigravity's built-in installed-app client (id + secret),
-/// so `/login google` runs Antigravity's sign-in with zero setup. A caller-owned
-/// id override is paired only with its own secret override (or none, for a
-/// public PKCE client) — never with the built-in secret, so Google never
-/// receives a mismatched client. Pure over its inputs for testability.
+/// A caller-owned id override is paired only with its own secret override (or
+/// none, for a public PKCE client) — never with the built-in secret, so Google
+/// never receives a mismatched client. No id override → Antigravity's built-in
+/// installed-app client (id + the secret this build was given), so a published
+/// `/login google` runs Antigravity's sign-in with zero setup. A build given no
+/// secret has no built-in client: the built-in id is never sent without its
+/// secret, so the answer is [`NO_BUILT_IN_CLIENT`] and no request goes out. Pure
+/// over its inputs — the built-in secret included — for testability.
 fn resolve_client(
     id_override: Option<String>,
     secret_override: Option<String>,
-) -> (String, Option<String>) {
-    match non_blank_credential(id_override) {
-        Some(client_id) => (client_id, non_blank_credential(secret_override)),
-        None => (
-            ANTIGRAVITY_OAUTH_CLIENT_ID.to_string(),
-            Some(ANTIGRAVITY_OAUTH_CLIENT_SECRET.to_string()),
-        ),
+    built_in_secret: Option<&str>,
+) -> Result<(String, Option<String>), ApiError> {
+    if let Some(client_id) = non_blank_credential(id_override) {
+        return Ok((client_id, non_blank_credential(secret_override)));
     }
+    let secret = non_blank_credential(built_in_secret.map(str::to_string))
+        .ok_or_else(|| ApiError::Auth(NO_BUILT_IN_CLIENT.to_string()))?;
+    Ok((ANTIGRAVITY_OAUTH_CLIENT_ID.to_string(), Some(secret)))
 }
 
 /// The OAuth client sent on sign-in and token refresh: the env override pair,
-/// else the built-in Antigravity client. See [`resolve_client`].
-fn oauth_client() -> (String, Option<String>) {
+/// else the built-in Antigravity client, else [`NO_BUILT_IN_CLIENT`]. See
+/// [`resolve_client`].
+fn oauth_client() -> Result<(String, Option<String>), ApiError> {
     resolve_client(
         std::env::var(GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID_ENV).ok(),
         std::env::var(GEMINI_CODE_ASSIST_OAUTH_CLIENT_SECRET_ENV).ok(),
+        ANTIGRAVITY_OAUTH_CLIENT_SECRET,
     )
 }
 
@@ -385,9 +404,11 @@ fn oauth_config_for_client(client_id: String) -> OAuthConfig {
 /// Resolve Gemini Code Assist OAuth configuration: the env-override client id,
 /// else the built-in Antigravity client. The client secret is not needed to
 /// build the authorize URL (PKCE covers the redirect); it is sent only at the
-/// token endpoint by [`exchange_code`]/[`refresh_tokens`].
+/// token endpoint by [`exchange_code`]/[`refresh_tokens`]. A build with no
+/// built-in client and no override answers [`NO_BUILT_IN_CLIENT`] here, before
+/// a person is sent to a consent screen whose code could not be exchanged.
 pub fn oauth_config() -> Result<OAuthConfig, ApiError> {
-    let (client_id, _) = oauth_client();
+    let (client_id, _) = oauth_client()?;
     Ok(oauth_config_for_client(client_id))
 }
 
@@ -419,7 +440,7 @@ pub async fn exchange_code(
     code_verifier: &str,
     redirect_uri: &str,
 ) -> Result<OAuthTokenSet, ApiError> {
-    let (client_id, client_secret) = oauth_client();
+    let (client_id, client_secret) = oauth_client()?;
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
@@ -450,7 +471,7 @@ pub async fn exchange_code(
 
 /// Refresh a saved Gemini Code Assist OAuth token.
 pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokenSet, ApiError> {
-    let (client_id, client_secret) = oauth_client();
+    let (client_id, client_secret) = oauth_client()?;
     let mut params = vec![
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_token.to_string()),
@@ -538,6 +559,16 @@ pub fn load_fresh_oauth() -> Option<OAuthTokenSet> {
     // is pure latency on the credential path.
     if refresh_in_backoff() || crate::providers::refresh_gate::refresh_blocked(&refresh_token).is_some()
     {
+        return Some(tokens);
+    }
+    // A build with no client to refresh with is not a refresh that failed: it
+    // sends nothing, starts no backoff and retires no branch — the same login
+    // refreshes fine from a published zo. It says so once per process, not
+    // once per turn, and serves the saved token.
+    if let Err(error) = oauth_client() {
+        if !NO_CLIENT_SAID.swap(true, Ordering::Relaxed) {
+            eprintln!("\x1b[33mGemini login cannot be refreshed: {error}.\x1b[0m");
+        }
         return Some(tokens);
     }
     match crate::sync_bridge::run_blocking(refresh_tokens(&refresh_token)) {

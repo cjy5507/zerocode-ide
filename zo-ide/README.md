@@ -188,6 +188,9 @@ cargo test -p zo-ide --test tui_bytes       # TUI 바이트 골든 — COLORTERM
 cargo test -p zo-ide --test e2e_hermetic -- --test-threads=1
 cargo build --release -p zo-ide && cp target/release/zo ~/.local/bin/zo.new && mv -f ~/.local/bin/zo.new ~/.local/bin/zo
 ```
+Google 로그인(`/login google`·토큰 갱신)의 내장 OAuth 클라이언트 비밀값은 저장소에 없다 — 발행 레인이 빌드할 때
+`ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET`으로 넣는다. 직접 지은 `zo`는 내장 클라이언트가 없다고 말하고 요청을 보내지 않으니,
+`ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID`(비밀값이 있는 클라이언트면 `_SECRET`도)를 주거나 발행된 빌드를 쓴다.
 실행 중인 `zo`를 제자리에서 덮어쓰지 않는다(코드 서명 무효화). 헤르메틱 시험은 `ZO_CLAUDE_HOME`/`ZO_CODEX_HOME`을 빈 값으로 핀한다.
 
 ## 규율

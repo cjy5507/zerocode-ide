@@ -112,6 +112,26 @@ class PiiScan(unittest.TestCase):
                     f"{category}: the placeholder must be forgiven, not merely outranked: {hits}",
                 )
 
+    def test_an_installed_app_client_secret_is_a_credential_and_its_placeholder_is_not(self):
+        """Google's installed-app OAuth client secret (`GOCSPX-` and a body) left
+        the source once (audit 40-26): the release lane builds it in. A whole one
+        is caught as a credential wherever it comes back; the prefix alone — the
+        lane counts it in a built binary — and a placeholder that says so are not.
+        The caught value is assembled here, so this file carries no whole one."""
+        prefix = "GOCSPX" + "-"
+        caught = prefix + "Qz7Rk2Wm9Lp4" * 3
+        placeholder = prefix + "example" * 4
+        self.checkout.write("caught.txt", f"client_secret = {caught}\n")
+        self.checkout.write("placeholder.txt", f"client_secret = {placeholder}\n")
+        self.checkout.write("prefix.sh", f"grep -c '{prefix}' zo\n")
+        hits = found(self.checkout.root)
+        self.assertEqual(
+            [(h["path"], h["text"]) for h in hits["credential"]],
+            [("caught.txt", caught)],
+            hits,
+        )
+        self.assertEqual(sum(len(v) for v in hits.values()), 1, hits)
+
     def test_the_table_is_the_shared_json_and_the_script_names_no_value_itself(self):
         """One table, two readers (t-32798): the gate reads `pii-rules.json`,
         and so does `private_data.rs`, the mask every kept worker hand-in passes

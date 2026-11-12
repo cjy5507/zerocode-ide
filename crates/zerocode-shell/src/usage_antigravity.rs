@@ -185,7 +185,8 @@ fn cli_short_version(output: &str) -> Option<String> {
 /// is [`google_login::refreshed_access_token`], which is also what the settings
 /// card renews with.
 trait Wire {
-    fn refresh(&mut self, refresh_token: &str, now: i64) -> Option<String>;
+    fn refresh(&mut self, refresh_token: &str, now: i64)
+    -> Result<String, google_login::Unrenewed>;
 
     fn post_json(
         &mut self,
@@ -200,7 +201,11 @@ trait Wire {
 struct LiveWire;
 
 impl Wire for LiveWire {
-    fn refresh(&mut self, refresh_token: &str, now: i64) -> Option<String> {
+    fn refresh(
+        &mut self,
+        refresh_token: &str,
+        now: i64,
+    ) -> Result<String, google_login::Unrenewed> {
         google_login::refreshed_access_token(refresh_token, now)
     }
 
@@ -675,11 +680,25 @@ fn access_token(
     wire: &mut impl Wire,
     credentials: &google_login::Credentials,
     now: i64,
-) -> Option<String> {
+) -> Result<String, google_login::Unrenewed> {
     if !google_login::needs_refresh(credentials, now) {
-        return Some(credentials.access_token.clone());
+        return Ok(credentials.access_token.clone());
     }
-    wire.refresh(credentials.refresh_token.as_deref()?, now)
+    let refresh_token = credentials
+        .refresh_token
+        .as_deref()
+        .ok_or(google_login::Unrenewed::Failed)?;
+    wire.refresh(refresh_token, now)
+}
+
+/// The gauge's word for a spent token it could not renew. A build with no
+/// Google client says that, rather than a refresh failure it never sent.
+fn unrenewed(why: google_login::Unrenewed, now: i64) -> ProviderUsage {
+    let said = match why {
+        google_login::Unrenewed::NoClient => google_login::NO_CLIENT,
+        google_login::Unrenewed::Failed => "Antigravity Google 토큰을 갱신하지 못했습니다",
+    };
+    answer("error", Some(said.to_string()), now)
 }
 
 /// One read: the reading, and the refusal behind it when Google refused a call.
@@ -700,15 +719,9 @@ fn scan_with(
         Ok(None) => return (signed_out(now), None),
         Err(error) => return (answer("error", Some(error), now), None),
     };
-    let Some(access_token) = access_token(wire, &credentials, now) else {
-        return (
-            answer(
-                "error",
-                Some("Antigravity Google 토큰을 갱신하지 못했습니다".to_string()),
-                now,
-            ),
-            None,
-        );
+    let access_token = match access_token(wire, &credentials, now) {
+        Ok(access_token) => access_token,
+        Err(why) => return (unrenewed(why, now), None),
     };
     let headers = AntigravityHeaders::new();
     let load = match load_code_assist(wire, &access_token, &headers, configured, now) {
@@ -832,6 +845,8 @@ mod tests {
 
     struct FakeWire {
         refreshes: usize,
+        /// What a refresh answers when it gives no token; `None` renews.
+        unrenewed: Option<google_login::Unrenewed>,
         posts: Vec<PostedCall>,
         /// The call the server refuses, and the status it refuses with.
         refusal: Option<(&'static str, u16)>,
@@ -840,9 +855,16 @@ mod tests {
     }
 
     impl Wire for FakeWire {
-        fn refresh(&mut self, _refresh_token: &str, _now: i64) -> Option<String> {
+        fn refresh(
+            &mut self,
+            _refresh_token: &str,
+            _now: i64,
+        ) -> Result<String, google_login::Unrenewed> {
             self.refreshes += 1;
-            Some("fresh-access".to_string())
+            match self.unrenewed {
+                Some(why) => Err(why),
+                None => Ok("fresh-access".to_string()),
+            }
         }
 
         fn post_json(
@@ -887,6 +909,7 @@ mod tests {
     fn fake_wire() -> FakeWire {
         FakeWire {
             refreshes: 0,
+            unrenewed: None,
             posts: Vec::new(),
             refusal: None,
             load: serde_json::json!({ "cloudaicompanionProject": "project-a" }),
@@ -1138,6 +1161,42 @@ mod tests {
         );
         assert_eq!(wire.refreshes, 0);
         assert!(wire.posts.is_empty());
+    }
+
+    /// A spent token in a window built without the Google client's secret:
+    /// the gauge says the build has no client — not that a refresh failed —
+    /// and asks Google nothing. A refresh that was sent and failed keeps its
+    /// own sentence.
+    #[test]
+    fn a_build_without_a_client_says_so_and_asks_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{"google_code_assist_oauth": {"accessToken": "old-access", "refreshToken": "refresh-me", "expiresAt": 1800000030}}"#,
+        )
+        .expect("credentials");
+        for (why, said) in [
+            (google_login::Unrenewed::NoClient, google_login::NO_CLIENT),
+            (
+                google_login::Unrenewed::Failed,
+                "Antigravity Google 토큰을 갱신하지 못했습니다",
+            ),
+        ] {
+            let mut wire = FakeWire {
+                unrenewed: Some(why),
+                ..fake_wire()
+            };
+            let (held, refusal) = scan_with(Some(&path), None, 1_800_000_000_000, &mut wire);
+            assert_eq!(held.status, "error", "{why:?}");
+            assert_eq!(held.error.as_deref(), Some(said), "{why:?}");
+            assert_eq!(refusal, None);
+            assert_eq!(wire.refreshes, 1);
+            assert!(
+                wire.posts.is_empty(),
+                "{why:?}: a call went out on no token"
+            );
+        }
     }
 
     #[test]

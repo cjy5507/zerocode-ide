@@ -42,17 +42,43 @@ use crate::usage_http;
 /// The one top-level key this login lives under, in zo's spelling.
 const OAUTH_KEY: &str = "google_code_assist_oauth";
 
-/// Antigravity IDE's installed-app OAuth client, the same pair zo ships
-/// (`zo-ide/crates/api/src/providers/gemini_code_assist.rs`). Installed-app
-/// credentials are not confidential — Google documents the secret as embedded
-/// in and extractable from the desktop client (RFC 8252 §8.5) — and using
+/// Antigravity IDE's installed-app OAuth client, the same pair zo uses
+/// (`zo-ide/crates/api/src/providers/gemini_code_assist.rs`). Using
 /// Antigravity's own client is what lets this sign-in need no per-user setup.
 ///
 /// Named here ONCE. The gauge's refresh and this module's exchange both read
 /// these, and a second copy would be a login that works and a refresh that
 /// does not.
 const CLIENT_ID: &str = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const CLIENT_SECRET: &str = "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";
+
+/// The client's secret is given to the build, not written in this source: no
+/// credential goes into git, though Google documents an installed-app secret
+/// as non-confidential (RFC 8252 §8.5). The release lane sets
+/// `ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET` for the app it builds
+/// (`tools/release/lane.sh`) — the name zo's build reads too — so a published
+/// window signs in exactly as before. A window built without it has no client:
+/// [`client_secret`] answers [`NO_CLIENT`] and nothing is sent.
+const CLIENT_SECRET: Option<&str> = option_env!("ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET");
+
+/// What a window built without the client's secret says where a sign-in or a
+/// token refresh would have started.
+pub(crate) const NO_CLIENT: &str =
+    "이 빌드에는 Google 로그인 클라이언트가 없습니다 — 발행된 ZeroCode를 쓰세요";
+
+/// The secret this build signs in with, or [`NO_CLIENT`]. A value set empty at
+/// build time is none: the id is never sent without its secret.
+fn client_secret() -> Result<&'static str, &'static str> {
+    client_secret_from(CLIENT_SECRET)
+}
+
+/// [`client_secret`] over the built-in value, so the tests hold both cases
+/// without the real one.
+fn client_secret_from(built_in: Option<&str>) -> Result<&str, &'static str> {
+    built_in
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+        .ok_or(NO_CLIENT)
+}
 
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -500,24 +526,34 @@ fn stored_from_token_response(
     })
 }
 
+/// Why a refresh gave no access token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unrenewed {
+    /// This build has no client to refresh with ([`NO_CLIENT`]); nothing was sent.
+    NoClient,
+    /// The refresh was sent and did not come back with a token — whatever the
+    /// kind, the road it came back on already named it.
+    Failed,
+}
+
 /// Swap a refresh token for a fresh access token.
-///
-/// Any failure at all is "no refresh" to the caller: the road it came back on
-/// already named the kind, and the token either got renewed or it did not.
-pub(crate) fn refreshed_access_token(refresh_token: &str, now_ms: i64) -> Option<String> {
+pub(crate) fn refreshed_access_token(
+    refresh_token: &str,
+    now_ms: i64,
+) -> Result<String, Unrenewed> {
+    let secret = client_secret().map_err(|_| Unrenewed::NoClient)?;
     let form = form_encoded(&[
         ("client_id", CLIENT_ID),
-        ("client_secret", CLIENT_SECRET),
+        ("client_secret", secret),
         ("refresh_token", refresh_token),
         ("grant_type", "refresh_token"),
     ]);
-    let body = usage_http::post_form(TOKEN_URL, form, now_ms).ok()?;
-    Some(
-        body.get("access_token")?
-            .as_str()
-            .filter(|token| !token.is_empty())?
-            .to_string(),
-    )
+    let body = usage_http::post_form(TOKEN_URL, form, now_ms).map_err(|_| Unrenewed::Failed)?;
+    body.get("access_token")
+        .and_then(|token| token.as_str())
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .ok_or(Unrenewed::Failed)
 }
 
 /// Whether the stored access token has to be renewed before it is used.
@@ -545,7 +581,7 @@ pub(crate) fn usable_token(held: &Credentials, now_ms: i64) -> Option<String> {
     if !needs_refresh(held, now_ms) {
         return Some(held.access_token.clone());
     }
-    refreshed_access_token(held.refresh_token.as_deref()?, now_ms)
+    refreshed_access_token(held.refresh_token.as_deref()?, now_ms).ok()
 }
 
 /// Who this login belongs to, asked ONCE — at sign-in — and cached by the
@@ -708,8 +744,11 @@ fn bind_seat(port: u16) -> std::io::Result<TcpListener> {
 }
 
 impl Flow {
-    /// Take the seat and mint this attempt's secrets.
+    /// Take the seat and mint this attempt's secrets — unless this build has
+    /// no client, which is said before the seat is taken or a browser opened:
+    /// a consent whose code could not be exchanged is a person's time wasted.
     pub(crate) fn open() -> Result<Self, String> {
+        client_secret()?;
         let attempt = Attempt::new()?;
         let listener = bind_callback_seat().map_err(|error| {
             format!(
@@ -739,6 +778,7 @@ impl Flow {
         cancelled: &AtomicBool,
         now_ms: i64,
     ) -> Result<Option<Credentials>, String> {
+        let secret = client_secret()?;
         let Some(code) = self.await_code(cancelled)? else {
             return Ok(None);
         };
@@ -750,7 +790,7 @@ impl Flow {
             ("code", &code),
             ("redirect_uri", &self.attempt.redirect_uri),
             ("client_id", CLIENT_ID),
-            ("client_secret", CLIENT_SECRET),
+            ("client_secret", secret),
             ("code_verifier", &self.attempt.verifier),
         ]);
         let body = usage_http::post_form(TOKEN_URL, form, now_ms)
@@ -912,6 +952,59 @@ mod tests {
             expires_at: Some(1_800_000_000),
             scopes: SCOPES.iter().map(|scope| (*scope).to_string()).collect(),
         }
+    }
+
+    /// The secret is the build's, never this source's: with one the client
+    /// is whole, and without one — or with one set empty at build time — the
+    /// answer is the sentence that names the published build. Neither case
+    /// reads the real value.
+    #[test]
+    fn the_client_secret_is_the_builds_and_none_is_said_not_sent() {
+        assert_eq!(
+            client_secret_from(Some("built-in-for-test")),
+            Ok("built-in-for-test")
+        );
+        for missing in [None, Some(""), Some("   ")] {
+            assert_eq!(client_secret_from(missing), Err(NO_CLIENT), "{missing:?}");
+        }
+        assert!(NO_CLIENT.contains("발행된"), "{NO_CLIENT}");
+    }
+
+    /// Without a client nothing goes out: the sign-in asks before it binds
+    /// the seat, the exchange before it waits for the redirect, and the
+    /// refresh before it posts. Read from the source because the real road
+    /// binds a fixed port and talks to Google — neither a test may do.
+    #[test]
+    fn a_build_without_a_client_asks_before_any_seat_or_request() {
+        let source = include_str!("google_login.rs");
+        let (shipped, _) = source.split_once("#[cfg(test)]").expect("the test module");
+        let order = |from: &str, first: &str, then: &str| {
+            let body = &shipped[shipped.find(from).unwrap_or_else(|| panic!("{from}"))..];
+            let ask = body
+                .find(first)
+                .unwrap_or_else(|| panic!("{from}: {first}"));
+            let act = body.find(then).unwrap_or_else(|| panic!("{from}: {then}"));
+            assert!(ask < act, "{from}: `{first}` must come before `{then}`");
+        };
+        order(
+            "pub(crate) fn open() -> Result<Self, String> {",
+            "client_secret()?;",
+            "bind_callback_seat()",
+        );
+        order(
+            "pub(crate) fn wait(",
+            "client_secret()?;",
+            "self.await_code(cancelled)",
+        );
+        order(
+            "pub(crate) fn refreshed_access_token(",
+            "client_secret().map_err(|_| Unrenewed::NoClient)?;",
+            "usage_http::post_form(",
+        );
+        assert!(
+            !shipped.contains("(\"client_secret\", CLIENT_SECRET)"),
+            "the form reads the build's value raw, past the check"
+        );
     }
 
     #[test]

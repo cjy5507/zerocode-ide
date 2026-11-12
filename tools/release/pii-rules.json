@@ -33,7 +33,7 @@
     {
       "name": "credential",
       "says": "a token or key of a shape a provider actually issues, carrying a body",
-      "find": "sk-ant-[a-z0-9]{3,}-[A-Za-z0-9_-]{24,}|sk-proj-[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|AIza[0-9A-Za-z_-]{35}|ya29\\.[A-Za-z0-9_-]{30,}|-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----(?:[^A-Za-z0-9+/]{0,6}[A-Za-z0-9+/]{16,}){3,}",
+      "find": "sk-ant-[a-z0-9]{3,}-[A-Za-z0-9_-]{24,}|sk-proj-[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|AIza[0-9A-Za-z_-]{35}|GOCSPX-[A-Za-z0-9_-]{20,}|ya29\\.[A-Za-z0-9_-]{30,}|-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----(?:[^A-Za-z0-9+/]{0,6}[A-Za-z0-9+/]{16,}){3,}",
       "allow": "(?i).*(?:example|secret|sample|fake|dummy|test|canary|never|should|placeholder|redacted|abcdef|0123456789|xxxx).*",
       "skip": [
         [
@@ -41,7 +41,7 @@
           "third-party bundles carry minified strings of every shape"
         ]
       ],
-      "why": "A PEM header is a shape a test writes freely; only one carrying real base64 after it is a key: three wrapped runs, at any width a writer chose. `allow` is a fixture saying so in its own body; a leaked token never would."
+      "why": "`GOCSPX-` is a Google installed-app OAuth client secret: a published build carries it, the source never does (tools/release/lane.sh builds it in). A PEM header is a shape a test writes freely; only one carrying real base64 after it is a key: three wrapped runs, at any width a writer chose. `allow` is a fixture saying so in its own body; a leaked token never would."
     }
   ]
 }
