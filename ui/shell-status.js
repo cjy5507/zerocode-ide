@@ -5262,35 +5262,26 @@ const TAB_QUIET = ".tab:not(.is-streaming, .is-waiting, .is-blocked, .is-bell, .
 /* A crowded strip folds its quiet tabs to their mark (2026-11-12). Every named
  * tab stands between the floor and the cap, so the list overflows only once
  * each sits at the floor — and from there each fold gives back exactly
- * floor − folded width. How many to fold is arithmetic on one read of the
- * room, not a fold-and-measure loop, and it is asked again only when what
- * decides it changed: the tabs and which are quiet, the controls after the
- * list, the strip's width. The farthest from the tab on stage fold first, so
- * its neighbours keep their names. */
+ * floor − folded width. How many to fold is arithmetic on the room the list
+ * has, not a fold-and-measure loop. The farthest from the tab on stage fold
+ * first, so its neighbours keep their names. */
 function fitStrip(pane) {
   const { strip, list } = pane;
   const { floor, folded, windowFold } = tabStripMeasures();
   const nodes = [...list.children];
   const quiet = nodes.map((node) => node.matches(TAB_QUIET));
   const tail = [...strip.children].filter((node) => node !== list && !node.hidden);
-  const key = [
-    windowFold.matches ? "window-fold" : pane.stripWidth ?? 0,
-    quiet.map((one) => (one ? "q" : "l")).join(""),
-    tail.map((node) => node.textContent).join("|"),
-    strip.classList.contains("has-many"),
-  ].join("/");
-  if (key === pane.fitKey) return;
-  pane.fitKey = key;
-  let fold = 0;
-  if (!windowFold.matches && nodes.length > 0) {
-    const style = getComputedStyle(strip);
-    const room = tail.reduce(
-      (left, node) => left - node.offsetWidth,
-      strip.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
-    );
-    const over = nodes.length * floor - room;
-    if (over > 0) fold = Math.ceil(over / (floor - folded));
+  // The room is read only when what sizes it changed — the strip's width, the
+  // controls after the list. A switch of tabs moves no width, so it reads no
+  // layout here: the switch's own cost stays the view's one measure (window.mjs,
+  // 「폭풍 한가운데 탭을 갈아타는 값」).
+  const roomKey = [windowFold.matches, pane.stripWidth ?? 0, strip.classList.contains("has-many"),
+    ...tail.map((node) => node.textContent)].join("/");
+  if (roomKey !== pane.roomKey) {
+    pane.roomKey = roomKey;
+    pane.room = windowFold.matches ? Infinity : listRoom(strip, tail);
   }
+  const fold = Math.max(0, Math.ceil((nodes.length * floor - pane.room) / (floor - folded)));
   const front = nodes.findIndex((node) => node.classList.contains("is-front"));
   const folding = new Set(
     nodes
@@ -5306,6 +5297,16 @@ function fitStrip(pane) {
     const want = folding.has(node);
     if (node.hasAttribute("data-folded") !== want) node.toggleAttribute("data-folded", want);
   }
+}
+
+/* The width the tab list may take: the strip's content box less the controls
+ * that stand after the list. */
+function listRoom(strip, tail) {
+  const style = getComputedStyle(strip);
+  return tail.reduce(
+    (left, node) => left - node.offsetWidth,
+    strip.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+  );
 }
 
 /* The list's edges, after a scroll or a render, at most once a frame: the fade
