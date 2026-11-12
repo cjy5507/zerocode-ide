@@ -37,6 +37,7 @@ const PANE_OF = {
   "computer-live-reflex": "computer-use",
   "computer-shared-desktop": "computer-use",
   "computer-share-required": "computer-use",
+  "computer-desk-guard": "computer-use",
   "show-automations": "appearance",
   "show-tasks": "appearance",
   "worktree-prefix": "git",
@@ -1029,6 +1030,7 @@ function showSettingsPane(pane) {
   if (pane === "computer-use" && arriving) {
     void refreshComputerUse();
     void refreshPhoneAwakeRows();
+    void refreshDeskGuard();
   }
   // 프로필은 다른 창이 만든 것도 이 목록의 것이라, 올 때마다 파일을 다시
   // 읽는다 — 읽기 하나 값이고 이 페이지는 자주 열리지 않는다.
@@ -3392,6 +3394,64 @@ el("computer-shared-desktop").addEventListener("change", () => {
   if (!computerInputPolicyKnown) return;
   computerInputPolicy = el("computer-shared-desktop").checked ? "shared-desktop" : "background";
   void commitSetting("computer_input_policy", "set_computer_input_policy", { policy: computerInputPolicy }, { hand: handNow() });
+});
+
+/* zo's desk guard (v1.1.146): whether zo refuses a shell command of the
+ * model's that moves the person's screen is a key in the person's own zo
+ * settings file, not in the window's settings. So the row asks the window
+ * what that file says (`desk_guard_setting`) — when this page is opened and
+ * when the window comes back to the front with it open — and never paints a
+ * guess: a file that does not read, or a value that is neither on nor off,
+ * locks the switch, draws it as neither and says why. The write is the
+ * person's alone (`set_desk_guard`): it carries the hand of the press. */
+let deskGuardPaint = 0;
+
+function paintDeskGuard(said) {
+  const control = el("computer-desk-guard");
+  const told = typeof said?.on === "boolean";
+  control.checked = told && said.on;
+  control.indeterminate = !told;
+  control.disabled = !told;
+  const state = el("computer-desk-guard-state");
+  state.hidden = told;
+  if (told) {
+    say(state, null);
+    state.textContent = "";
+    return;
+  }
+  say(state, () => said?.why === "not_boolean"
+    ? t("computerUse.deskGuardNotBoolean", "zo 설정 파일의 deskGuard 값이 true도 false도 아니어서 켜져 있는지 알 수 없습니다. 파일에서 그 줄을 고치거나 지워 주세요.")
+    : t("computerUse.deskGuardUnreadable", "zo 설정 파일을 읽지 못해 켜져 있는지 알 수 없습니다. 파일을 고친 뒤 이 화면을 다시 열어 주세요."));
+}
+
+async function refreshDeskGuard() {
+  const turn = ++deskGuardPaint;
+  let said = null;
+  try {
+    said = await invoke("desk_guard_setting");
+  } catch {
+    // Unread is painted as unread: the switch shows no answer the file did not give.
+  }
+  if (turn === deskGuardPaint) paintDeskGuard(said);
+}
+
+el("computer-desk-guard").addEventListener("change", async () => {
+  const control = el("computer-desk-guard");
+  const on = control.checked;
+  const hand = handNow();
+  const turn = ++deskGuardPaint;
+  control.disabled = true;
+  try {
+    const said = await invoke("set_desk_guard", { on }, { hand });
+    if (turn === deskGuardPaint) paintDeskGuard(said);
+  } catch (error) {
+    showError(error);
+    if (turn === deskGuardPaint) void refreshDeskGuard();
+  }
+});
+
+window.addEventListener("focus", () => {
+  if (!settingsView.hidden && settingsPane === "computer-use") void refreshDeskGuard();
 });
 
 /* A real phone from inside (t-90894): a stored answer is a seal, so the page asks

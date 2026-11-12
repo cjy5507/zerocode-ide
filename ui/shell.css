@@ -31871,6 +31871,13 @@ progress:indeterminate::-webkit-progress-bar {
   transform: translateX(16px);
 }
 
+/* Neither on nor off: what the switch stands for could not be read (zo's
+ * desk guard, whose answer is a file's). The thumb stands halfway between
+ * the two ends, so an unread switch is never drawn as an answer. */
+.settings-check input:indeterminate::before {
+  transform: translateX(9px);
+}
+
 /* `.qo input:focus-visible` thickens a field's lower edge, which on a pill is
  * a line drawn through it. A switch has no edge to thicken, so it takes the
  * ring — and it has room for one, being 36px inside a padded row. */

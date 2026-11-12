@@ -12,6 +12,8 @@ pub(crate) mod build_buttons;
 pub(crate) mod build_order;
 pub(crate) mod console;
 pub(crate) use console::{agent_effort_ladder, agent_models, slash_commands, superseded_models};
+pub(crate) mod desk_guard;
+pub(crate) use desk_guard::{desk_guard_setting, set_desk_guard};
 pub(crate) mod wire;
 pub(crate) use wire::{
     HAND_OVER_EXIT_POLL, HAND_OVER_EXIT_WAIT, program_left, wait_process_group_gone, wire_answer,

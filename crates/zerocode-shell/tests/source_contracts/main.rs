@@ -19,6 +19,7 @@ mod continue_gate;
 mod cookie_import_card;
 mod coordinator_desk;
 mod crash_report;
+mod desk_guard;
 mod effort_chip;
 mod fixture_cases;
 mod git_doors;
@@ -520,6 +521,12 @@ mod tests {
                             // a person allowed and a runner's hold are judged on a
                             // checkout the test made, beside the command.
                             | "cmd/build_buttons.rs"
+                            // 2026-11-12 (v1.1.146): zo's desk guard switch.
+                            // Its read and its write are judged on a zo
+                            // settings file the test made, and the hands the
+                            // write refuses on the window's own wall — beside
+                            // the two commands.
+                            | "cmd/desk_guard.rs"
                             // t-21017: a provider's done report reaches the
                             // human-input line through the one door
                             // `note_pane_state` calls, tested beside that door.

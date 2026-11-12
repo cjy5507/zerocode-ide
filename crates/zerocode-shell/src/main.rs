@@ -464,6 +464,7 @@ use cmd::{
     claim_coordinator_seat, coordinator_handover_status, coordinator_seat_runs, coordinator_seats,
     set_coordinator_handover,
 };
+use cmd::{desk_guard_setting, set_desk_guard};
 use cmd::{
     integration_queue_setting, land_batch_bisect, land_batch_cancel, land_batch_promote,
     land_batch_restack, set_integration_queue_enabled,
@@ -3403,6 +3404,8 @@ fn main() -> ExitCode {
             set_emulator_real_phone,
             emulator_real_phone_said,
             set_computer_share_required,
+            desk_guard_setting,
+            set_desk_guard,
             computer_confirm_answer,
             computer_handoff_code,
             computer_self_answer,

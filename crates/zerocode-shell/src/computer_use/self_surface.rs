@@ -66,6 +66,9 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "set_emulator_real_phone",
     "set_computer_share_required",
     "set_computer_live_reflex",
+    // zo's desk guard turned on or off in the person's zo settings: off, zo
+    // stops refusing a shell command that moves the person's screen.
+    "set_desk_guard",
     "computer_resume",
     "claim_coordinator_seat",
     "set_coordinator_handover",
