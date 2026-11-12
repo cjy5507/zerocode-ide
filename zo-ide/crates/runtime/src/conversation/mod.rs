@@ -3374,13 +3374,16 @@ where
                             tool_start,
                             std::time::Duration::from_secs(10),
                         );
+                        // The seats beside a result know a call by the tool
+                        // that ran: the one a wrapper carried.
+                        let told_name = ToldCall::of(&p.tool_name, p.effective_input.as_ref()).name.into_owned();
                         // Kept before any hook merges text into it: the patch
                         // review seat reads the tool's own envelope (t-6203).
-                        let reviewed = (!is_error && self.reviews_edits_of(&p.tool_name))
+                        let reviewed = (!is_error && self.reviews_edits_of(&told_name))
                             .then(|| output.clone());
                         // So does the text guard (t-6348).
                         let text_asked =
-                            self.text_guard_ask(&p.tool_use_id, &p.tool_name, &output, is_error);
+                            self.text_guard_ask(&p.tool_use_id, &told_name, &output, is_error);
                         output = merge_hook_feedback(p.pre_hook_result.messages(), output, false);
 
                         let post_hook_result = if is_error {
@@ -3442,7 +3445,7 @@ where
                         if let Some(pristine) = reviewed.filter(|_| !is_error) {
                             let note = self.reviewed_edit_note_blocking(
                                 &p.tool_use_id,
-                                &p.tool_name,
+                                &told_name,
                                 &pristine,
                             );
                             output = reviewed_edit::with_review_note(output, note);
@@ -3450,7 +3453,7 @@ where
                         // The tool guards' fence and lines (t-6348).
                         output = self.guarded_result_blocking(
                             &p.tool_use_id,
-                            &p.tool_name,
+                            &told_name,
                             text_asked,
                             output,
                             is_error,

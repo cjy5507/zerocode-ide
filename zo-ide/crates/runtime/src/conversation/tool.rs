@@ -141,7 +141,7 @@ impl<'a> ToldCall<'a> {
         }
         result.map_updated_input(|rewritten| {
             let arguments = core_types::tool_input::parse_tool_arguments(&rewritten)
-                .unwrap_or_else(|_| Value::String(rewritten));
+                .unwrap_or(Value::String(rewritten));
             core_types::tool_names::carrying(&self.name, arguments).to_string()
         })
     }

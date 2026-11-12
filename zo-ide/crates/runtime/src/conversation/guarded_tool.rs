@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use super::tool::ToldCall;
 use super::ConversationRuntime;
 use crate::tool_cancel::CANCELLED_TOOL_RESULT;
 use crate::tool_guard::{command_with_cwd, guarded_output, task_line, text_ask, CommandAsk, CommandRan, TextAsk, SHELL_TOOL};
@@ -18,7 +19,8 @@ use crate::tool_guard::{command_with_cwd, guarded_output, task_line, text_ask, C
 impl<C, T> ConversationRuntime<C, T> {
     /// Hand a shell command to the command guard, right before it runs. Never
     /// waits; a runtime with no seat, another tool, and a command today's rule
-    /// proves read-only pay nothing here.
+    /// proves read-only pay nothing here. A command the model sent through
+    /// the wrapper is heard as one sent by name ([`ToldCall`]).
     pub(super) fn guard_command(&self, tool_use_id: &str, tool_name: &str, input: &str)
     where
         T: super::ToolExecutor,
@@ -26,7 +28,8 @@ impl<C, T> ConversationRuntime<C, T> {
         let Some(seat) = self.tool_guard_seat.as_ref() else {
             return;
         };
-        let Some((command, cwd)) = command_with_cwd(tool_name, input, self.tool_executor.execution_cwd()) else {
+        let told = ToldCall::of(tool_name, input);
+        let Some((command, cwd)) = command_with_cwd(&told.name, &told.input, self.tool_executor.execution_cwd()) else {
             return;
         };
         seat.command(CommandAsk {

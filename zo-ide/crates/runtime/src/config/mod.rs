@@ -3129,7 +3129,6 @@ impl RuntimeHookConfig {
         }
     }
 
-    #[must_use]
     /// A pre-tool hook that runs only for the tools `matcher` names, as a
     /// settings file writes one. For tests: a host's hooks come from settings.
     #[cfg(test)]
@@ -3147,6 +3146,7 @@ impl RuntimeHookConfig {
         self
     }
 
+    #[must_use]
     pub fn with_timeout_seconds(mut self, timeout_seconds: u64) -> Self {
         self.timeout_seconds = Some(timeout_seconds);
         self

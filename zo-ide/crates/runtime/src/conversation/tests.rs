@@ -22206,15 +22206,15 @@ fn an_input_a_hook_rewrote_for_a_call_through_the_wrapper_is_the_one_that_runs()
     let ran = Arc::new(Mutex::new(Vec::new()));
     let mut runtime =
         a_session_that_calls_through_the_wrapper("Bash", serde_json::json!({ "command": "ls" }), rewrites(), &ran);
-    let by_the_sync_seam = runtime.run_pre_tool_use_hook(core_types::tool_names::CAPABILITY_INVOKE, &wrapper);
-    assert_eq!(by_the_sync_seam.updated_input().map(parsed), Some(rewritten.clone()));
+    let blocking = runtime.run_pre_tool_use_hook(core_types::tool_names::CAPABILITY_INVOKE, &wrapper);
+    assert_eq!(blocking.updated_input().map(parsed), Some(rewritten.clone()));
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
-    let by_the_async_seam = tokio_runtime
+    let off_task = tokio_runtime
         .block_on(runtime.run_pre_tool_use_hook_async(core_types::tool_names::CAPABILITY_INVOKE, &wrapper));
-    assert_eq!(by_the_async_seam.updated_input().map(parsed), Some(rewritten.clone()));
+    assert_eq!(off_task.updated_input().map(parsed), Some(rewritten.clone()));
     // A call by name is rewritten as it always was: no wrapper is put around it.
     let by_name = runtime.run_pre_tool_use_hook("bash", r#"{"command":"ls"}"#);
     assert_eq!(by_name.updated_input(), Some(r#"{"command":"git status"}"#));
@@ -22284,6 +22284,51 @@ fn the_architect_gate_refuses_an_edit_made_through_the_wrapper() {
             usize::from(!armed),
             "armed={armed} streaming={streaming}"
         );
+    }
+}
+
+/// The guards beside a call read the call the wrapper carried: the command
+/// guard hears a shell command sent through it, and the text guard reads what
+/// an MCP tool called through it handed back — the way such a tool is called
+/// at all. On both roads.
+#[test]
+fn the_tool_guards_read_a_call_made_through_the_wrapper() {
+    for streaming in [false, true] {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let guard = RecordingGuard::answering(None, crate::TextGuard::default());
+        let commands = Arc::clone(&guard.commands);
+        let mut runtime = a_session_that_calls_through_the_wrapper(
+            "Bash",
+            serde_json::json!({ "command": "rm -rf build" }),
+            RuntimeHookConfig::new(Vec::new(), Vec::new(), Vec::new()),
+            &ran,
+        );
+        runtime.set_tool_guard_seat(Some(Arc::new(guard) as Arc<dyn crate::ToolGuardSeat>));
+        if streaming {
+            run_one_streaming_turn(&mut runtime);
+        } else {
+            runtime.run_turn("do it", None).expect("the turn");
+        }
+        let heard: Vec<String> = commands.lock().expect("commands").iter().map(|ask| ask.command.clone()).collect();
+        assert_eq!(heard, ["rm -rf build"], "streaming={streaming}");
+
+        let guard = RecordingGuard::answering(None, crate::TextGuard::default());
+        let texts = Arc::clone(&guard.texts);
+        let mut runtime = a_session_that_calls_through_the_wrapper(
+            "mcp__docs__search",
+            serde_json::json!({ "query": "x" }),
+            RuntimeHookConfig::new(Vec::new(), Vec::new(), Vec::new()),
+            &ran,
+        );
+        runtime.set_tool_guard_seat(Some(Arc::new(guard) as Arc<dyn crate::ToolGuardSeat>));
+        if streaming {
+            run_one_streaming_turn(&mut runtime);
+        } else {
+            runtime.run_turn("do it", None).expect("the turn");
+        }
+        let read: Vec<(String, crate::TextSource)> =
+            texts.lock().expect("texts").iter().map(|ask| (ask.tool_name.clone(), ask.source)).collect();
+        assert_eq!(read, [("mcp__docs__search".to_string(), crate::TextSource::Mcp)], "streaming={streaming}");
     }
 }
 

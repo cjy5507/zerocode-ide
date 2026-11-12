@@ -3469,12 +3469,15 @@ where
         let (execution, kind) = result;
         let ToolExecutionResult { text: mut output, surface } = execution;
         let mut is_error = kind.is_error();
+        // The seats beside a result know a call by the tool that ran: the one
+        // a wrapper carried, when the model called through it.
+        let told_name = ToldCall::of(&p.tool_name, &p.effective_input).name.into_owned();
         // The patch review seat reads the tool's own envelope, so it is kept
         // before any hook merges text into it (t-6203).
-        let reviewed = (!is_error && self.reviews_edits_of(&p.tool_name)).then(|| output.clone());
+        let reviewed = (!is_error && self.reviews_edits_of(&told_name)).then(|| output.clone());
         // So does the text guard, for a block a file read, a web tool, the
         // window's browser or an MCP tool handed back (t-6348).
-        let text_asked = self.text_guard_ask(&p.tool_use_id, &p.tool_name, &output, is_error);
+        let text_asked = self.text_guard_ask(&p.tool_use_id, &told_name, &output, is_error);
         if options.notify_slow {
             crate::notifications::notify_if_slow(
                 &p.tool_name,
@@ -3572,12 +3575,12 @@ where
         // The patch review seat's line, model-facing only and last: a hook
         // that failed the result took the patch with it.
         if let Some(pristine) = reviewed.filter(|_| !is_error) {
-            let note = self.reviewed_edit_note(&p.tool_use_id, &p.tool_name, &pristine).await;
+            let note = self.reviewed_edit_note(&p.tool_use_id, &told_name, &pristine).await;
             output = super::reviewed_edit::with_review_note(output, note);
         }
         // The tool guards' fence and lines, model-facing only (t-6348).
         output = self
-            .guarded_result(&p.tool_use_id, &p.tool_name, text_asked, output, is_error)
+            .guarded_result(&p.tool_use_id, &told_name, text_asked, output, is_error)
             .await;
 
         // Drain images the tool staged. The real live dispatcher shares the
