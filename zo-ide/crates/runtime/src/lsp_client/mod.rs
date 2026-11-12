@@ -20,10 +20,12 @@ use crate::mcp_client::McpStdioTransport;
 use crate::mcp_stdio::{JsonRpcResponse, McpStdioProcess};
 
 /// Sink invoked by the reader task whenever the language server publishes
-/// diagnostics for a document. Stored behind an `Option` so it can be
-/// attached after the reader task is already running (the registry injects
-/// it during `register_with_transport`).
-type DiagnosticsSink = Box<dyn Fn(Vec<LspDiagnostic>) + Send + Sync>;
+/// diagnostics for a document: the document's path, then its whole set — which
+/// may be empty, the server's way of saying the document's earlier diagnostics
+/// are gone. Stored behind an `Option` so it can be attached after the reader
+/// task is already running (the registry injects it during
+/// `register_with_transport`).
+type DiagnosticsSink = Box<dyn Fn(String, Vec<LspDiagnostic>) + Send + Sync>;
 
 #[cfg(test)]
 use std::future::pending;
@@ -98,7 +100,9 @@ pub trait LspTransport: Send + Sync + std::fmt::Debug {
     /// server via `textDocument/publishDiagnostics`. The default
     /// implementation is a no-op so non-stdio / mock transports remain
     /// unaffected; only [`LspStdioTransport`] wires this into its reader task.
-    fn attach_diagnostics_sink(&self, _sink: Box<dyn Fn(Vec<LspDiagnostic>) + Send + Sync>) {}
+    /// The callback is handed the document's path beside its diagnostics,
+    /// because an empty set names no path of its own.
+    fn attach_diagnostics_sink(&self, _sink: DiagnosticsSink) {}
 
     /// Notify the language server that a document's full text changed.
     /// Default no-op keeps mock and non-stdio transports unaffected.
@@ -542,7 +546,7 @@ impl LspTransport for LspStdioTransport {
         }
     }
 
-    fn attach_diagnostics_sink(&self, sink: Box<dyn Fn(Vec<LspDiagnostic>) + Send + Sync>) {
+    fn attach_diagnostics_sink(&self, sink: DiagnosticsSink) {
         let mut slot = self
             .diagnostics_sink
             .lock()
@@ -625,11 +629,11 @@ async fn reader_loop(
             == Some("textDocument/publishDiagnostics")
         {
             if let Some(params) = message.get("params") {
-                let diagnostics = parse_publish_diagnostics(params);
+                let (path, diagnostics) = parse_publish_diagnostics(params);
                 if !diagnostics.is_empty() || params.get("uri").is_some() {
                     if let Ok(slot) = diagnostics_sink.lock() {
                         if let Some(sink) = slot.as_ref() {
-                            sink(diagnostics);
+                            sink(path, diagnostics);
                         }
                     }
                 }
@@ -639,19 +643,21 @@ async fn reader_loop(
 }
 
 /// Convert a `textDocument/publishDiagnostics` params object into the
-/// registry's [`LspDiagnostic`] shape. The `uri` is reduced back to a file
-/// path (inverse of [`LspStdioTransport::path_to_uri`]).
-fn parse_publish_diagnostics(params: &JsonValue) -> Vec<LspDiagnostic> {
+/// document's path and the registry's [`LspDiagnostic`] shape. The `uri` is
+/// reduced back to a file path (inverse of [`LspStdioTransport::path_to_uri`])
+/// once, and returned on its own as well: an empty set carries it nowhere
+/// else.
+fn parse_publish_diagnostics(params: &JsonValue) -> (String, Vec<LspDiagnostic>) {
     let path = params
         .get("uri")
         .and_then(JsonValue::as_str)
         .map(uri_to_path)
         .unwrap_or_default();
     let Some(items) = params.get("diagnostics").and_then(JsonValue::as_array) else {
-        return Vec::new();
+        return (path, Vec::new());
     };
 
-    items
+    let diagnostics = items
         .iter()
         .map(|item| {
             let start = item.get("range").and_then(|range| range.get("start"));
@@ -688,7 +694,8 @@ fn parse_publish_diagnostics(params: &JsonValue) -> Vec<LspDiagnostic> {
                 source,
             }
         })
-        .collect()
+        .collect();
+    (path, diagnostics)
 }
 
 /// Map an LSP `DiagnosticSeverity` integer to a human-readable label.
@@ -1304,19 +1311,18 @@ impl LspRegistry {
             let weak = Arc::downgrade(&self.inner);
             let publish_generation = Arc::clone(&self.publish_generation);
             let lang = language.to_owned();
-            transport.attach_diagnostics_sink(Box::new(move |diags| {
+            transport.attach_diagnostics_sink(Box::new(move |path, diags| {
                 publish_generation.fetch_add(1, Ordering::SeqCst);
                 if let Some(inner) = weak.upgrade() {
                     if let Ok(mut guard) = inner.lock() {
                         if let Some(server) = guard.servers.get_mut(&lang) {
                             // publishDiagnostics carries the full diagnostic
                             // set for a uri (replace semantics): drop prior
-                            // entries for the same path, then insert.
-                            let incoming_paths: HashSet<_> =
-                                diags.iter().map(|d| d.path.clone()).collect();
-                            server
-                                .diagnostics
-                                .retain(|d| !incoming_paths.contains(&d.path));
+                            // entries for the uri's path, then insert. The
+                            // path is the uri's, not the incoming entries' —
+                            // an empty set is how a server says a file's
+                            // errors are fixed, and it names no path.
+                            server.diagnostics.retain(|d| d.path != path);
                             server.diagnostics.extend(diags);
                             trim_diagnostics(&mut server.diagnostics);
                             let index = diagnostics_by_path(&server.diagnostics);

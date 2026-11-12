@@ -468,12 +468,32 @@ async fn stdio_transport_bounds_open_document_bookkeeping() {
 /// notification for that document's uri. Hover requests get a stub reply
 /// so the test can use hover to drive the lazy didOpen.
 fn write_diagnostics_lsp_server_script() -> PathBuf {
+    write_diagnostics_lsp_server_script_where_a_change(ChangePublishes::OneWarning)
+}
+
+/// What the fake server publishes for a document after `didChange`.
+#[derive(Clone, Copy)]
+enum ChangePublishes {
+    /// One warning, in place of the error `didOpen` published.
+    OneWarning,
+    /// An empty set: every earlier diagnostic of that document is fixed.
+    Nothing,
+}
+
+/// [`write_diagnostics_lsp_server_script`], with what a `didChange` publishes
+/// chosen by the test.
+fn write_diagnostics_lsp_server_script_where_a_change(publishes: ChangePublishes) -> PathBuf {
+    let change_clears = match publishes {
+        ChangePublishes::OneWarning => "CHANGE_CLEARS = False",
+        ChangePublishes::Nothing => "CHANGE_CLEARS = True",
+    };
     let root = temp_dir("diag-server");
     fs::create_dir_all(&root).expect("temp dir");
     let script_path = root.join("fake-lsp-diag.py");
     let script = [
         "#!/usr/bin/env python3",
         "import json, sys",
+        change_clears,
         "",
         "def read_message():",
         "    header = b''",
@@ -529,7 +549,7 @@ fn write_diagnostics_lsp_server_script() -> PathBuf {
         "            'method': 'textDocument/publishDiagnostics',",
         "            'params': {",
         "                'uri': uri,",
-        "                'diagnostics': [",
+        "                'diagnostics': [] if CHANGE_CLEARS else [",
         "                    {",
         "                        'range': {'start': {'line': 1, 'character': 2}, 'end': {'line': 1, 'character': 6}},",
         "                        'severity': 2,",
@@ -646,6 +666,62 @@ async fn sync_and_collect_diagnostics_returns_did_change_diagnostics() {
         "didChange should publish diagnostics for {rel_path}"
     );
     assert_eq!(diagnostics[0].message, "changed document diagnostic");
+
+    transport.terminate().await.expect("terminate transport");
+    fs::remove_dir_all(script_path.parent().expect("script parent")).ok();
+}
+
+/// A server that publishes an empty set for a document is saying its earlier
+/// diagnostics are fixed (audit 46-01): the registry forgets that document's
+/// diagnostics, and keeps every other document's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_publish_clears_that_documents_diagnostics_and_no_other() {
+    let script_path = write_diagnostics_lsp_server_script_where_a_change(ChangePublishes::Nothing);
+    let transport =
+        LspStdioTransport::spawn_initialized(python_script_transport(&script_path), None)
+            .await
+            .expect("spawn + initialize diagnostics server");
+
+    let registry = LspRegistry::new();
+    registry.register_with_transport(
+        "rust",
+        LspServerStatus::Connected,
+        None,
+        vec!["hover".into()],
+        Some(Arc::new(transport.clone())),
+    );
+
+    // Both documents opened, so the server has published one error for each.
+    let fixed = "src/main.rs";
+    let untouched = "src/lib.rs";
+    for path in [fixed, untouched] {
+        registry
+            .dispatch("hover", Some(path), Some(0), Some(0), None)
+            .await
+            .expect("hover dispatch should open the document");
+        let mut published = false;
+        for _ in 0..50 {
+            if !registry.get_diagnostics(path).is_empty() {
+                published = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(published, "the server never published {path}'s error");
+    }
+
+    let after_the_fix =
+        registry.sync_and_collect_diagnostics(fixed, "fn main() {}", Duration::from_secs(2));
+
+    assert!(
+        after_the_fix.is_empty(),
+        "an empty publish left the fixed errors of {fixed}: {after_the_fix:?}"
+    );
+    assert_eq!(
+        registry.get_diagnostics(untouched).len(),
+        1,
+        "an empty publish for {fixed} reached {untouched}"
+    );
 
     transport.terminate().await.expect("terminate transport");
     fs::remove_dir_all(script_path.parent().expect("script parent")).ok();
