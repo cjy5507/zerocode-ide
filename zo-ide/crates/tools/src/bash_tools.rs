@@ -208,12 +208,14 @@ pub(crate) fn dispatch_result(
         // (t-84973), on one reading of the processes (t-84911). Where an
         // enforcer stands, nobody can be asked: the guard answers first, as
         // `check_bash` does for bash, and in its words — then the desk guard
-        // (t-104888), which no permission mode answers either.
+        // (t-104888) and the schedule guard's shell refusal, which no
+        // permission mode answers either.
         "PowerShell" => Some(runtime::kill_guard::for_one_command(None, || {
             if enforcer.is_some() {
                 let refused = input.get("command").and_then(Value::as_str).and_then(|command| {
                     runtime::kill_guard::refused_where_nobody_can_ask(runtime::kill_guard::Shell::PowerShell, command)
                         .or_else(|| runtime::desk_guard::refused(runtime::kill_guard::Shell::PowerShell, command))
+                        .or_else(|| runtime::schedule_guard::refused_in_a_shell(command))
                 });
                 if let Some(reason) = refused {
                     return Err(ToolError::PermissionDenied {

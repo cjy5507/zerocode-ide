@@ -162,13 +162,17 @@ impl PermissionEnforcer {
     /// too, since this layer has nobody to ask — saying what the session may
     /// still end itself (t-82854). The desk guard comes right after it, in
     /// every mode: a command that moves the person's screen is refused
-    /// ([`crate::desk_guard`], t-104888).
+    /// ([`crate::desk_guard`], t-104888). Then the schedule guard: a command
+    /// that registers a schedule from the shell is refused, since the
+    /// question a schedule is put to a person by is the tool's
+    /// ([`crate::schedule_guard::refused_in_a_shell`]).
     #[must_use]
     pub fn check_bash(&self, command: &str) -> EnforcementResult {
         let mode = self.policy.active_mode();
         let refused = crate::kill_guard::judge_where_nobody_can_ask(command)
             .err()
-            .or_else(|| crate::desk_guard::refused(crate::kill_guard::Shell::Bash, command));
+            .or_else(|| crate::desk_guard::refused(crate::kill_guard::Shell::Bash, command))
+            .or_else(|| crate::schedule_guard::refused_in_a_shell(command));
         if let Some(reason) = refused {
             return EnforcementResult::Denied {
                 tool: "bash".to_owned(),

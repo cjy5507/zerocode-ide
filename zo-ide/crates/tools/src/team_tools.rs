@@ -285,7 +285,7 @@ fn cron_tool_specs() -> Vec<ToolSpec> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "schedule": { "type": "string", "description": "Five-field cron read in this session's own time zone: minute hour day-of-month month day-of-week. The wall clock you write is the wall clock it fires on; the receipt names the zone." },
+                    "schedule": { "type": "string", "description": "Five-field cron read in this session's own time zone: minute hour day-of-month month day-of-week. The wall clock you write is the wall clock it fires on; the receipt names the zone. Runs come at least 15 minutes apart." },
                     "prompt": { "type": "string" },
                     "workflow": { "type": "object", "description": "Exactly one of {spec: graphSpec, input?} or {library: name, input?}. Graph mode only; the cron host owns runId/resumeFromRunId." },
                     "description": { "type": "string" }
@@ -2358,11 +2358,33 @@ mod tests {
         }})
     }
 
+    /// The floor the tool's schema names is the one the call is judged by,
+    /// and a call under it is refused in the floor's words, registering
+    /// nothing.
+    #[test]
+    fn cron_create_names_its_floor_and_refuses_a_schedule_under_it() {
+        let floor = runtime::team_cron_registry::ASKED_SCHEDULE_FLOOR_MINUTES;
+        let spec = cron_tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == runtime::schedule_guard::TOOL)
+            .expect("the cron tool");
+        let said = spec.input_schema["properties"]["schedule"]["description"].as_str().unwrap_or_default();
+        assert!(said.contains(&format!("at least {floor} minutes apart")), "{said}");
+
+        let crons = CronRegistry::new_in_memory();
+        let input: CronCreateInput = serde_json::from_value(json!({
+            "schedule":"*/5 * * * *", "prompt":"poll the build"
+        })).unwrap();
+        let refused = run_cron_create(&crons, &input).expect_err("under the floor").to_string();
+        assert!(refused.contains(&format!("no closer together than {floor} minutes")), "{refused}");
+        assert_eq!(crons.len(), 0, "nothing is registered");
+    }
+
     #[test]
     fn cron_create_freezes_graph_and_lists_the_typed_action() {
         let crons = CronRegistry::new_in_memory();
         let input: CronCreateInput = serde_json::from_value(json!({
-            "schedule":"* * * * *", "workflow":scheduled_check_graph()
+            "schedule":"*/15 * * * *", "workflow":scheduled_check_graph()
         })).unwrap();
         assert!(input.prompt.is_empty(), "workflow registration needs no fake prompt");
         let created = parse_json(&run_cron_create(&crons, &input).unwrap());

@@ -16,6 +16,12 @@
 //!
 //! `ensure` is idempotent ([`CronRegistry::ensure_named`]): the same words
 //! twice leave one record; other words replace it; the receipt says which.
+//!
+//! This door is the person's: the window sends `ensure` on their click, and
+//! they may type it. So it asks nobody, and it has no floor on how close
+//! together a schedule's runs come — both are what a schedule zo asks for
+//! goes through (`runtime::schedule_guard`), which also refuses a session's
+//! own shell command that spells `zo cron ensure` out.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -260,6 +266,29 @@ mod tests {
         assert!(parse(&args(&["show"])).unwrap_err().contains("--description"));
         assert!(parse(&args(&["dance"])).unwrap_err().contains("unknown"));
         assert!(parse(&args(&[])).unwrap_err().contains("zo cron ensure"));
+    }
+
+    /// The person's own road has no floor: a schedule tighter than one zo may
+    /// ask for is theirs to register, here.
+    #[test]
+    fn ensure_registers_a_schedule_tighter_than_one_zo_may_ask_for() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let tight = "*/5 * * * *";
+        assert!(
+            runtime::team_cron_registry::shortest_gap_minutes(tight).expect("it reads")
+                < Some(runtime::team_cron_registry::ASKED_SCHEDULE_FLOOR_MINUTES),
+            "tighter than the floor"
+        );
+        let receipt: Value = serde_json::from_str(
+            &run(
+                &args(&["ensure", "--description", "poll", "--schedule", tight, "--prompt", "poll the build"]),
+                root.path(),
+            )
+            .expect("the person's road registers it"),
+        )
+        .expect("json");
+        assert_eq!(receipt["outcome"], "created");
+        assert_eq!(receipt["registered"], true);
     }
 
     #[test]

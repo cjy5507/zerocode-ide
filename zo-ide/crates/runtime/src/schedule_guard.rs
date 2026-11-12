@@ -17,9 +17,22 @@
 //! (`zerocode_core::card_words`): what would run, when — the expression and
 //! the next runs it names — and where.
 //!
-//! What this is not: a boundary. `zo cron ensure` run from a shell writes the
-//! same store unasked, and so does an edit of the store's file. The guard
-//! closes the asking, not the file.
+//! A schedule zo asks for runs no closer together than the floor the window
+//! holds an asked schedule to (`CronCreateInput::work`): a tighter one
+//! registers nothing, so nobody is asked about it.
+//!
+//! The shell is not a second road to the store. `zo cron ensure` is the
+//! person's own — typed by them, or sent by the window on their click — and a
+//! shell command of the model's that spells it out is refused and sent to the
+//! tool, where the question stands ([`refused_in_a_shell`]). It is refused
+//! where the kill guard and the desk guard refuse: the permission policy, the
+//! enforcer a sub-agent's commands and a command file's `!` lines go through,
+//! and the `PowerShell` tool.
+//!
+//! What this is not: a boundary. The refusal reads the names a command spells
+//! out, by the reading the kill guard uses: a script file, a verb filled in
+//! at run time, or an edit of the store's file gets past it. The guard closes
+//! the asking, not the file.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -28,6 +41,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use core_types::tool_input::parse_tool_arguments;
 use serde_json::Value;
 use zerocode_core::card_words::{hidden_said, shown, shown_counting, EXCERPT_MAX_CHARS, WORD_MAX_CHARS};
+use zerocode_core::shell_rule::runs::{self, ProgramRun};
 
 use crate::team_cron_registry::{cron_zone, next_due_at_after_in_zone, CronCreateInput, CronWork, CronZone};
 
@@ -52,6 +66,20 @@ const NOT_THE_MODE: &str = "Permission audit: a person approves each schedule in
 /// one or the other.
 const SAYS_WHERE_TO_ASK: &str =
     "Where no person is at this run, ask for the schedule in a zo session a person is at.";
+
+/// The program that writes the schedule store from a shell, by the name in
+/// command position (`.exe` taken off), and the word that opens its schedule
+/// verbs.
+const SHELL_PROGRAM: &str = "zo";
+const SHELL_VERBS_UNDER: &str = "cron";
+
+/// The verb that registers a schedule.
+const SHELL_VERB_THAT_REGISTERS: &str = "ensure";
+
+/// The verbs under [`SHELL_VERBS_UNDER`] that register nothing: one reads the
+/// store, the other takes a record out. Any other word there is refused as
+/// the one that registers — a verb the command does not spell out among them.
+const SHELL_VERBS_THAT_REGISTER_NOTHING: &[&str] = &["show", "remove"];
 
 /// What a call would register, as it reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +146,44 @@ pub fn nobody_to_ask() -> String {
         "refused, since nobody here can be asked: a person approves each schedule zo asks for. \
          {SAYS_WHERE_TO_ASK} {NOT_THE_MODE}"
     )
+}
+
+/// The refusal for a shell `command` of the model's that would register a
+/// schedule past the question — `zo cron ensure`, wherever in the command the
+/// shell would run it — with the tool to ask through instead. `None` for any
+/// other command: `zo cron show` and `zo cron remove` register nothing. Asked
+/// by every layer that judges a model's command, after the kill guard and the
+/// desk guard; no mode, rule or hook answers it, since the question it sends
+/// the model to is one only a person answers.
+#[must_use]
+pub fn refused_in_a_shell(command: &str) -> Option<String> {
+    let ran = runs::programs_run(command, |text| text.contains(SHELL_VERBS_UNDER));
+    let verb = ran.iter().find_map(registering_verb)?;
+    let spelled = if verb == SHELL_VERB_THAT_REGISTERS {
+        format!("`{SHELL_PROGRAM} {SHELL_VERBS_UNDER} {SHELL_VERB_THAT_REGISTERS}`")
+    } else {
+        format!(
+            "`{SHELL_PROGRAM} {SHELL_VERBS_UNDER}` with a verb the command does not spell out as `{}`",
+            SHELL_VERBS_THAT_REGISTER_NOTHING.join("` or `")
+        )
+    };
+    Some(format!(
+        "refused to run: this command registers a schedule from a shell ({spelled}), past the          question a person answers. Ask for the schedule with the {TOOL} tool (`schedule`,          `prompt` or `workflow`, `description`): it puts the schedule to a person. {NOT_THE_MODE}"
+    ))
+}
+
+/// The verb by which `run` would write the schedule store: the word after
+/// [`SHELL_VERBS_UNDER`] when the program is [`SHELL_PROGRAM`] and that word
+/// is not one that registers nothing. `zo cron` with no verb prints its usage.
+fn registering_verb(run: &ProgramRun) -> Option<&str> {
+    let program = run.program.strip_suffix(".exe").unwrap_or(&run.program);
+    let [under, verb, ..] = run.args.as_slice() else {
+        return None;
+    };
+    (program == SHELL_PROGRAM
+        && under.as_str() == SHELL_VERBS_UNDER
+        && !SHELL_VERBS_THAT_REGISTER_NOTHING.contains(&verb.as_str()))
+    .then_some(verb.as_str())
 }
 
 /// Whether `tool_name` is the tool that registers a schedule, in any

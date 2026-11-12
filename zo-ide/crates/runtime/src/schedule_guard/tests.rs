@@ -8,8 +8,8 @@ use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
 use zerocode_core::card_words::EXCERPT_MAX_CHARS;
 
 use super::{
-    asks, card, nobody_to_ask, registration, unanswered, Registration, Runs, SAYS_OF_A_PROMPT,
-    SAYS_OF_A_WORKFLOW, TOOL,
+    asks, card, nobody_to_ask, refused_in_a_shell, registration, unanswered, Registration, Runs,
+    SAYS_OF_A_PROMPT, SAYS_OF_A_WORKFLOW, TOOL,
 };
 use crate::config::RuntimePermissionRuleConfig;
 use crate::permission_enforcer::{EnforcementResult, PermissionEnforcer};
@@ -124,16 +124,16 @@ fn the_card_says_what_runs_when_and_where_under_the_guards_own_sentence() {
     );
 }
 
-/// A schedule that fires every few minutes shows it: the three runs the card
-/// names stand minutes apart.
+/// A schedule as tight as one zo may ask for shows it: the three runs the
+/// card names stand a quarter of an hour apart, into the next day.
 #[test]
 fn the_card_of_a_tight_schedule_names_runs_minutes_apart() {
     let registration =
-        registration(TOOL, r#"{"schedule":"*/5 * * * *","prompt":"poll"}"#).expect("a schedule");
+        registration(TOOL, r#"{"schedule":"*/15 * * * *","prompt":"poll"}"#).expect("a schedule");
     let card = card(&registration, SEOUL, NOW, None);
     assert!(
         card.ends_with(
-            "When: */5 * * * * (Asia/Seoul time). Next: Wed 2026-11-11 23:35 · Wed 2026-11-11 23:40 · Wed 2026-11-11 23:45"
+            "When: */15 * * * * (Asia/Seoul time). Next: Wed 2026-11-11 23:45 · Thu 2026-11-12 00:00 · Thu 2026-11-12 00:15"
         ),
         "{card}"
     );
@@ -485,5 +485,217 @@ fn the_enforcer_refuses_a_schedule_in_every_mode() {
         prompt.check("CronList", "{}"),
         EnforcementResult::Allowed,
         "prompt mode still leaves any other call to its prompter"
+    );
+}
+
+/* ---- the floor --------------------------------------------------------------------- */
+
+/// A schedule whose runs come closer together than the floor registers
+/// nothing — the tool refuses it in the floor's words — so nobody is asked
+/// about it, and the call goes by the mode and the rules as any call that
+/// registers nothing does.
+#[test]
+fn a_schedule_under_the_floor_registers_nothing_so_nobody_is_asked() {
+    let _pane = Pane::a_person_opened();
+    for tight in [
+        r#"{"schedule":"* * * * *","prompt":"poll"}"#,
+        r#"{"schedule":"*/5 * * * *","prompt":"poll"}"#,
+        r#"{"schedule":"0,1 9 * * *","prompt":"poll"}"#,
+        r#"{"schedule":"*/10 * * * *","workflow":{"library":"nightly"}}"#,
+    ] {
+        assert_eq!(registration(TOOL, tight), None, "{tight}");
+        assert!(!asks(TOOL, tight), "{tight}");
+        let mut person = Person::saying(true);
+        assert_eq!(
+            policy(PermissionMode::DangerFullAccess).authorize(TOOL, tight, Some(&mut person)),
+            PermissionOutcome::Allow,
+            "{tight}: the tool is what refuses it"
+        );
+        assert!(person.asked.is_empty(), "{tight}: nothing would be registered");
+    }
+    assert!(
+        asks(TOOL, r#"{"schedule":"*/15 * * * *","prompt":"poll"}"#),
+        "a schedule at the floor is a person's to approve"
+    );
+}
+
+/* ---- the shell is not a second road -------------------------------------------------- */
+
+/// What `zo cron ensure` is handed, after the verb.
+const ENSURED: &str = "--description nightly --schedule '0 3 * * *' --prompt 'sweep the logs'";
+
+/// A shell command that would register a schedule, in the ways a shell runs
+/// one: by name, by path, behind assignments and wrappers, in a chain, in a
+/// string handed to a shell, fed its prompt on a pipe.
+fn registering_commands() -> Vec<String> {
+    vec![
+        format!("zo cron ensure {ENSURED}"),
+        format!("/Users/dev/.local/bin/zo cron ensure {ENSURED}"),
+        format!("ZO cron ensure {ENSURED}"),
+        format!("zo.exe cron ensure {ENSURED}"),
+        format!("ZO_STATE_DIR=/tmp/elsewhere zo cron ensure {ENSURED}"),
+        format!("env -u ZO_SESSION nice -n 5 zo cron ensure {ENSURED}"),
+        format!("cd /Users/dev/work && zo cron ensure {ENSURED} --cwd /Users/dev/work"),
+        format!("echo start; zo cron ensure {ENSURED} | tee receipt.json"),
+        "bash -c \"zo cron ensure --description nightly --schedule '0 3 * * *' --prompt sweep\"".to_string(),
+        "eval zo cron ensure --description nightly --schedule \"'0 3 * * *'\" --prompt sweep".to_string(),
+        "echo sweep | zo cron ensure --description nightly --schedule '0 3 * * *' --prompt-file -".to_string(),
+        "zo cron ensure --description nightly --schedule '0 3 * * *' --prompt-file plan.md".to_string(),
+        "echo \"$(zo cron ensure --description nightly --schedule '0 3 * * *' --prompt sweep)\"".to_string(),
+    ]
+}
+
+/// The refusal reads the command by the kill guard's reading, so it finds the
+/// call wherever the shell would run it, and says the tool to ask through.
+#[test]
+fn a_shell_command_that_registers_a_schedule_is_refused_wherever_the_shell_would_run_it() {
+    for command in registering_commands() {
+        let refused = refused_in_a_shell(&command).unwrap_or_else(|| panic!("passed: {command}"));
+        assert!(refused.starts_with("refused to run: this command registers a schedule from a shell (`zo cron ensure`)"), "{refused}");
+        assert!(refused.contains(&format!("with the {TOOL} tool")), "{refused}");
+        assert!(refused.contains("Permission audit:"), "{refused}");
+        assert!(refused.contains("do not register the schedule another way"), "{refused}");
+    }
+}
+
+/// Under `zo cron`, only the verbs that register nothing pass: a verb the
+/// command leaves to run time, or one this guard does not know, is refused
+/// as the one that registers — and the refusal says so, not `ensure`.
+#[test]
+fn a_cron_verb_the_command_does_not_spell_out_is_refused_as_the_one_that_registers() {
+    for command in [
+        "zo cron \"$VERB\" --description nightly --schedule '0 3 * * *' --prompt sweep",
+        "zo cron $(cat verb.txt) --description nightly",
+        "zo cron --description nightly --schedule '0 3 * * *' --prompt sweep",
+        "zo cron replace --description nightly",
+    ] {
+        let refused = refused_in_a_shell(command).unwrap_or_else(|| panic!("passed: {command}"));
+        assert!(
+            refused.contains("(`zo cron` with a verb the command does not spell out as `show` or `remove`)"),
+            "{refused}"
+        );
+    }
+}
+
+/// A command that registers nothing is not the guard's: the verbs that read
+/// the store or take a record out, `zo cron` alone, another `zo` verb, the
+/// words as an argument of something else, and a program that only shares
+/// the word.
+#[test]
+fn a_shell_command_that_registers_nothing_passes() {
+    for command in [
+        "zo cron show --description nightly",
+        "zo cron remove --description nightly --cwd /Users/dev/work",
+        "zo cron",
+        "zo vault search cron ensure",
+        "zo line add -- cargo test cron",
+        "echo zo cron ensure --description nightly",
+        "grep -rn 'zo cron ensure' README.md",
+        "git commit -m 'zo cron ensure asks a person'",
+        "crontab -l",
+        "cat .zo/registries/crons.json",
+        "ls -la",
+    ] {
+        assert_eq!(refused_in_a_shell(command), None, "{command}");
+    }
+}
+
+/// The policy refuses such a command in every mode, under an allow rule, and
+/// whoever could be asked: nobody is, since the question a schedule is put to
+/// a person by is the tool's. The other `zo cron` verbs go by the mode.
+#[test]
+fn the_policy_refuses_a_shell_command_that_registers_a_schedule_in_every_mode_and_asks_nobody() {
+    let _pane = Pane::a_person_opened();
+    let command = format!("zo cron ensure {ENSURED}");
+    let call = serde_json::json!({ "command": command }).to_string();
+    let refusal = refused_in_a_shell(&command).expect("a refusal");
+    let allow_rule = RuntimePermissionRuleConfig::new(vec!["bash".to_string()], Vec::new(), Vec::new());
+    let policies = [
+        ("full access", PermissionPolicy::new(PermissionMode::DangerFullAccess)),
+        ("allow", PermissionPolicy::new(PermissionMode::Allow)),
+        ("workspace write", PermissionPolicy::new(PermissionMode::WorkspaceWrite)),
+        ("prompt", PermissionPolicy::new(PermissionMode::Prompt)),
+        ("read only", PermissionPolicy::new(PermissionMode::ReadOnly)),
+        (
+            "an allow rule",
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite).with_permission_rules(&allow_rule),
+        ),
+    ];
+    for (name, policy) in policies {
+        for tool in ["bash", "Bash", "PowerShell"] {
+            let mut person = Person::saying(true);
+            assert_eq!(
+                policy.authorize(tool, &call, Some(&mut person)),
+                PermissionOutcome::Deny {
+                    reason: refusal.clone()
+                },
+                "{name}, {tool}"
+            );
+            assert!(person.asked.is_empty(), "{name}, {tool}: a refusal is not a question");
+            assert_eq!(
+                policy.authorize(tool, &call, None),
+                PermissionOutcome::Deny {
+                    reason: refusal.clone()
+                },
+                "{name}, {tool}: with nobody to ask"
+            );
+        }
+    }
+    let shown = serde_json::json!({ "command": "zo cron show --description nightly" }).to_string();
+    assert_eq!(
+        PermissionPolicy::new(PermissionMode::DangerFullAccess).authorize("bash", &shown, None),
+        PermissionOutcome::Allow,
+        "reading the store is the mode's to decide"
+    );
+}
+
+/// The wrapper grants nothing: a shell command it carries is refused as one
+/// called by name.
+#[test]
+fn a_shell_command_that_registers_a_schedule_is_refused_through_the_wrapper_too() {
+    let _pane = Pane::a_person_opened();
+    let command = format!("zo cron ensure {ENSURED}");
+    let wrapped = serde_json::json!({ "name": "Bash", "input": { "command": command } }).to_string();
+    let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+        .with_tool_requirement(core_types::tool_names::CAPABILITY_INVOKE, PermissionMode::ReadOnly);
+    let mut person = Person::saying(true);
+    assert_eq!(
+        policy.authorize(core_types::tool_names::CAPABILITY_INVOKE, &wrapped, Some(&mut person)),
+        PermissionOutcome::Deny {
+            reason: refused_in_a_shell(&command).expect("a refusal")
+        }
+    );
+    assert!(person.asked.is_empty());
+}
+
+/// The enforcer — a sub-agent's commands, a scheduled workflow's, a command
+/// file's `!` lines — refuses it in every mode, and in a pane the ledger
+/// summoned as a worker.
+#[test]
+fn the_enforcer_refuses_a_shell_command_that_registers_a_schedule_in_every_mode() {
+    let command = format!("zo cron ensure {ENSURED}");
+    let refusal = refused_in_a_shell(&command).expect("a refusal");
+    for pane in [Pane::a_person_opened, Pane::summoned_as_a_worker] {
+        let _pane = pane();
+        for mode in [
+            PermissionMode::Prompt,
+            PermissionMode::DangerFullAccess,
+            PermissionMode::Allow,
+            PermissionMode::WorkspaceWrite,
+            PermissionMode::ReadOnly,
+        ] {
+            let enforcer = PermissionEnforcer::new(PermissionPolicy::new(mode));
+            let EnforcementResult::Denied { reason, .. } = enforcer.check_bash(&command) else {
+                panic!("{mode:?}: the command passed the enforcer");
+            };
+            assert_eq!(reason, refusal, "{mode:?}");
+        }
+    }
+    let _pane = Pane::a_person_opened();
+    assert_eq!(
+        PermissionEnforcer::new(PermissionPolicy::new(PermissionMode::DangerFullAccess))
+            .check_bash("zo cron remove --description nightly"),
+        EnforcementResult::Allowed,
+        "taking a record out registers nothing"
     );
 }

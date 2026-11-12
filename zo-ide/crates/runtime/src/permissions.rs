@@ -455,7 +455,9 @@ impl PermissionPolicy {
     /// answers it (t-82420): nobody is expected at a question there, and one
     /// left unanswered stalls the turn. Right after the kill guard, the desk
     /// guard refuses a command that moves the person's screen, in every mode
-    /// and unasked ([`crate::desk_guard`], t-104888).
+    /// and unasked ([`crate::desk_guard`], t-104888), and the schedule guard
+    /// one that registers a schedule from the shell, past the question
+    /// ([`crate::schedule_guard::refused_in_a_shell`]).
     #[must_use]
     pub fn authorize_with_context(
         &self,
@@ -469,10 +471,10 @@ impl PermissionPolicy {
             .as_ref()
             .and_then(|(shell, command)| crate::kill_guard::judged(*shell, command));
         if !matches!(verdict, Some(KillVerdict::Deny { .. })) {
-            if let Some(reason) = shell
-                .as_ref()
-                .and_then(|(shell, command)| crate::desk_guard::refused(*shell, command))
-            {
+            if let Some(reason) = shell.as_ref().and_then(|(shell, command)| {
+                crate::desk_guard::refused(*shell, command)
+                    .or_else(|| crate::schedule_guard::refused_in_a_shell(command))
+            }) {
                 return PermissionOutcome::Deny { reason };
             }
         }

@@ -80,21 +80,98 @@ pub enum CronWork<'a> {
 
 impl CronCreateInput {
     /// What the call registers, or why it registers nothing: an expression
-    /// that does not read, a prompt and a workflow at once, or neither. The
-    /// one judgment of it — the tool registers by it and the schedule guard
-    /// asks a person by it ([`crate::schedule_guard`]), so a call the tool
-    /// would run is never one the guard did not see.
+    /// that does not read, a prompt and a workflow at once, or neither, or
+    /// runs that come closer together than a schedule zo asks for may
+    /// ([`ASKED_SCHEDULE_FLOOR_MINUTES`]). The one judgment of it — the tool
+    /// registers by it and the schedule guard asks a person by it
+    /// ([`crate::schedule_guard`]), so a call the tool would run is never one
+    /// the guard did not see.
     ///
     /// # Errors
     /// Why nothing is registered, in the words the tool refuses with.
     pub fn work(&self) -> Result<CronWork<'_>, String> {
         validate_cron_schedule(&self.schedule)?;
-        match (&self.workflow, self.prompt.trim().is_empty()) {
-            (Some(workflow), true) => Ok(CronWork::Workflow(workflow)),
-            (None, false) => Ok(CronWork::Prompt(&self.prompt)),
-            _ => Err("cron requires exactly one non-empty prompt or workflow".to_string()),
+        let work = match (&self.workflow, self.prompt.trim().is_empty()) {
+            (Some(workflow), true) => CronWork::Workflow(workflow),
+            (None, false) => CronWork::Prompt(&self.prompt),
+            _ => return Err("cron requires exactly one non-empty prompt or workflow".to_string()),
+        };
+        match shortest_gap_minutes(&self.schedule)? {
+            Some(gap) if gap < ASKED_SCHEDULE_FLOOR_MINUTES => Err(closer_than_the_floor(gap)),
+            _ => Ok(work),
         }
     }
+}
+
+/// The closest together the runs of a schedule zo asks for may come, in
+/// minutes: the floor the window holds a schedule an agent asks it for to
+/// (`zerocode_core::automation`). A turn nobody watches is not also one
+/// nobody could keep up with. The person's own road — `zo cron ensure`, typed
+/// by them or sent by the window on their click — has no such floor.
+pub const ASKED_SCHEDULE_FLOOR_MINUTES: u64 =
+    zerocode_core::automation::ASKED_SCHEDULE_FLOOR_MINUTES.unsigned_abs();
+
+/// The refusal for a schedule whose runs come `gap` minutes apart, under the
+/// floor: what the floor is, and whose the tighter schedule is.
+fn closer_than_the_floor(gap: u64) -> String {
+    format!(
+        "a schedule zo asks for runs no closer together than {ASKED_SCHEDULE_FLOOR_MINUTES} minutes;          this one has runs {gap} apart. A tighter one is the person's to register themselves,          from their own terminal; ask for {ASKED_SCHEDULE_FLOOR_MINUTES} minutes or more,          and do not register it another way"
+    )
+}
+
+/// The days [`shortest_gap_minutes`] looks through, from 2000-01-01: 28
+/// years, in which every date of the year falls on every weekday, leap day
+/// included — so two days a schedule ever runs on back to back are back to
+/// back somewhere in it — and one day more, for the pair that closes it.
+const GAP_CYCLE_DAYS: u64 = 28 * 365 + 7 + 1;
+
+/// Days from the Unix epoch to 2000-01-01, where the cycle starts.
+const GAP_CYCLE_FIRST_DAY: u64 = 10_957;
+
+const MINUTES_PER_DAY: u64 = 24 * 60;
+
+/// The fewest minutes between two runs of `schedule`, or `None` when it runs
+/// once in the cycle or not at all. The minutes of a day it runs at are the
+/// same on every day it runs — its hours by its minutes — so the answer is
+/// the tightest two of those, or the last of one day and the first of the
+/// next day it runs on. It reads the expression and no clock: the same call
+/// has the same answer whenever it is judged, so the schedule guard and the
+/// tool cannot disagree about one.
+///
+/// # Errors
+/// When `schedule` does not read.
+pub fn shortest_gap_minutes(schedule: &str) -> Result<Option<u64>, String> {
+    let parsed = parse_cron_schedule(schedule)?;
+    let at: Vec<u64> = parsed
+        .hour
+        .values
+        .iter()
+        .flat_map(|hour| parsed.minute.values.iter().map(move |minute| u64::from(*hour) * 60 + u64::from(*minute)))
+        .collect();
+    let (Some(first), Some(last)) = (at.first(), at.last()) else {
+        return Ok(None);
+    };
+    let within_a_day = at.windows(2).map(|pair| pair[1] - pair[0]).min();
+    let mut ran_on: Option<u64> = None;
+    let mut fewest_days: Option<u64> = None;
+    for day in 0..GAP_CYCLE_DAYS {
+        let day_start = (GAP_CYCLE_FIRST_DAY + day) * SECONDS_PER_DAY;
+        if !cron_date_matches(&parsed, datetime_from_wall_secs(day_start)) {
+            continue;
+        }
+        if let Some(before) = ran_on {
+            let days = day - before;
+            if fewest_days.is_none_or(|held| days < held) {
+                fewest_days = Some(days);
+                if days == 1 {
+                    break;
+                }
+            }
+        }
+        ran_on = Some(day);
+    }
+    let across_days = fewest_days.map(|days| days * MINUTES_PER_DAY - (last - first));
+    Ok(within_a_day.into_iter().chain(across_days).min())
 }
 
 /// Validate the deliberately small cron subset Zo currently registers.
@@ -3084,5 +3161,76 @@ mod tests {
         ] {
             assert!(call(nothing.clone()).work().is_err(), "{nothing}");
         }
+    }
+
+    /// The fewest minutes between two runs: within a day, and from the last
+    /// run of one day to the first of the next day the schedule runs on.
+    #[test]
+    fn the_shortest_gap_is_between_the_tightest_two_runs_in_a_day_or_across_two_days() {
+        for (schedule, gap) in [
+            ("* * * * *", Some(1)),
+            ("*/5 * * * *", Some(5)),
+            ("*/15 * * * *", Some(15)),
+            ("*/20 9-17 * * 1-5", Some(20)),
+            ("0 * * * *", Some(60)),
+            // Two minutes side by side, once a day.
+            ("0,1 9 * * *", Some(1)),
+            // Thirteen past and on the hour: 47 minutes, then 13.
+            ("0,13 * * * *", Some(13)),
+            // 23:59, then midnight of the next day.
+            ("0,59 0,23 * * *", Some(1)),
+            ("58 23 * * *", Some(MINUTES_PER_DAY)),
+            // 23:58 on a Monday, then 00:05 on the Tuesday: seven minutes.
+            ("5,58 0,23 * * 1,2", Some(7)),
+            // Mondays alone: a week, less nothing.
+            ("0 9 * * 1", Some(7 * MINUTES_PER_DAY)),
+            // The 15th and the 16th are back to back; the 1st is not.
+            ("30 12 1,15,16 * *", Some(MINUTES_PER_DAY)),
+            // The 28th and the 29th of February, in a leap year.
+            ("0 0 28,29 2 *", Some(MINUTES_PER_DAY)),
+            // A leap day alone: four years apart.
+            ("0 0 29 2 *", Some(1461 * MINUTES_PER_DAY)),
+        ] {
+            assert_eq!(shortest_gap_minutes(schedule), Ok(gap), "{schedule}");
+        }
+        assert!(shortest_gap_minutes("every morning").is_err());
+    }
+
+    /// The cycle the gap is read from starts where it says and holds every
+    /// date on every weekday.
+    #[test]
+    fn the_gap_cycle_starts_on_the_first_day_of_2000_and_is_28_years_and_a_day() {
+        assert_eq!(civil_from_days(i64::try_from(GAP_CYCLE_FIRST_DAY).unwrap()), (2000, 1, 1));
+        let after = i64::try_from(GAP_CYCLE_FIRST_DAY + GAP_CYCLE_DAYS).unwrap();
+        assert_eq!(civil_from_days(after), (2028, 1, 2));
+        // Two days that are back to back in one year of the 28 are found:
+        // February's Tuesdays or its 29th run a day apart only when the 28th
+        // is a Tuesday, which in this cycle is 2012 alone.
+        assert_eq!(shortest_gap_minutes("0 0 29 2 2"), Ok(Some(MINUTES_PER_DAY)));
+    }
+
+    /// A schedule zo asks for runs no closer together than the floor, which
+    /// is the window's; the refusal says the floor, the gap, and whose a
+    /// tighter schedule is.
+    #[test]
+    fn a_cron_call_whose_runs_come_closer_than_the_floor_registers_nothing() {
+        let call = |schedule: &str| -> CronCreateInput {
+            serde_json::from_value(serde_json::json!({ "schedule": schedule, "prompt": "check" })).expect("the call's shape")
+        };
+        assert_eq!(ASKED_SCHEDULE_FLOOR_MINUTES, 15, "the window's floor");
+        for (schedule, gap) in [("* * * * *", 1), ("*/5 * * * *", 5), ("0,1 9 * * *", 1), ("0,59 0,23 * * *", 1)] {
+            let refused = call(schedule).work().expect_err(schedule);
+            assert!(refused.contains("no closer together than 15 minutes"), "{refused}");
+            assert!(refused.contains(&format!("runs {gap} apart")), "{refused}");
+            assert!(refused.contains("the person's to register themselves"), "{refused}");
+            assert!(refused.contains("do not register it another way"), "{refused}");
+        }
+        for schedule in ["*/15 * * * *", "0 * * * *", "0 9 * * 1-5", "0 0 29 2 *"] {
+            assert_eq!(call(schedule).work(), Ok(CronWork::Prompt("check")), "{schedule}");
+        }
+        // The expression is judged before the floor, and so is what runs.
+        assert!(call("every minute").work().expect_err("unreadable").contains("5 fields"));
+        let neither: CronCreateInput = serde_json::from_value(serde_json::json!({ "schedule": "* * * * *" })).unwrap();
+        assert!(neither.work().expect_err("neither").contains("exactly one"));
     }
 }
