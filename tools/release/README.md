@@ -79,6 +79,29 @@ The lane reads the `.pub` beside the key and the scratch's
 `plugins.updater.pubkey`, writes the key id (`updater_pubkey`) to
 `status.json`, and is red on a mismatch before signing anything.
 
+## The Google sign-in client (once, on the lane machine)
+
+The window's Google login and zo's `/login google` use one installed-app OAuth
+client. Its secret left the source in v1.1.146 (audit 40-26): the window and zo
+read it at compile time from `ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET`, and only the
+lane's own builds are given it — build-app (with the zo it stages), build-zo,
+the legacy cross builds and the signed updater build. No gate is. Its one home
+is the login keychain, as a generic password:
+
+    security add-generic-password -U -a "$USER" -s dev.zerocode.release.google-oauth-client-secret -T /usr/bin/security -w
+
+With `-w` last, `security` asks for the value, so it never sits on a command
+line. `-T /usr/bin/security` lets the lane (a launchd job in the gui domain)
+read it with no prompt while the login keychain is unlocked.
+
+Every run checks that the item exists before any gate, install runs and publish
+runs alike, and is red without it, naming this command. Each build reads the
+value into its own environment only, never a log, `status.json` or an argument;
+an empty item is red at the build. What a build made must carry the value's own
+bytes (`grep -c -F` on the window's executable, the zo inside the app and the
+installed zo), or that build is red and is not installed. A build from source
+without the variable has no built-in Google client and says so.
+
 ## The private values that must not ship (`pii-scan.py`)
 
 The source repository publishes a release snapshot, so a value that points at

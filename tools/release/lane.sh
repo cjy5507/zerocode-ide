@@ -123,6 +123,15 @@ ZO_BUILD_TARGETS="aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-
 BUILD_APP_CONFIG='{"bundle":{"createUpdaterArtifacts":false}}'   # the local install build makes no updater artifacts (tauri-cli refuses the key without plugins.updater); bundle-updater is the phase that does
 COMPUTER_USE_HELPER='ZeroCode Computer Use.app'   # native UI helper under bundle Resources
 APP_SIBLING_BINS='zerocode-mirror zerocode-pick'   # helper executables beside the shell in Contents/MacOS (Cargo.toml [[bin]]); tauri-cli 2.11.4 once dropped the second inferred one
+APP_BIN=zerocode-shell                            # the window's own executable in Contents/MacOS
+APP_ZO=Resources/bin/zo                           # the zo the app carries, under Contents (tauri.release.conf.json bundle.resources)
+# The Google sign-in client's secret (the window's Antigravity login and zo's `/login google`):
+# not in the source since audit 40-26 (t-105752). A build reads it from this variable at compile
+# time (option_env!), and the lane gives it ONLY to the builds it installs and publishes — never
+# to a gate. Its one home is the login keychain, as a generic password under this service name.
+GOOGLE_OAUTH_SECRET_ENV=ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET
+GOOGLE_OAUTH_SECRET_ITEM=dev.zerocode.release.google-oauth-client-secret
+SECURITY_BIN=/usr/bin/security
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 RELEASE_REPO=${RELEASE_REPO:-$(cd "$SELF_DIR/../.." && pwd)}
@@ -176,6 +185,9 @@ APP_INSTALL_SH=$SELF_DIR/install.sh             # the app's installer: reads the
 # The root gate's browser harnesses (ui/tests/*.mjs) resolve Playwright through
 # NODE_PATH, not only through the node_modules symlink the scratch gets.
 export NODE_PATH=$RELEASE_NODE_MODULES
+# …and no gate builds with the Google client's secret, whatever the caller's environment held:
+# only the builds below are given it (with_oauth_secret).
+unset "$GOOGLE_OAUTH_SECRET_ENV"
 
 QUEUE=$RELEASE_HOME/queue
 LOCK=$RELEASE_HOME/lock
@@ -197,7 +209,8 @@ if [ "${1:-}" = "--table" ]; then
            RELEASE_ZO_BIN RELEASE_REPORT_ZO RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS PASSED RECEIPT_PY \
            RELEASE_BUILD_LINE RELEASE_COORD_RUN RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
            RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST UPDATER_KEY \
-           UPDATER_PLATFORM UPDATER_ARCH UPDATER_FEED ZO_BUILD_TARGETS COMPUTER_USE_HELPER APP_SIBLING_BINS; do
+           UPDATER_PLATFORM UPDATER_ARCH UPDATER_FEED ZO_BUILD_TARGETS COMPUTER_USE_HELPER APP_SIBLING_BINS APP_BIN APP_ZO \
+           GOOGLE_OAUTH_SECRET_ENV GOOGLE_OAUTH_SECRET_ITEM SECURITY_BIN; do
     eval "printf \"%s='%s'\\n\" \"$k\" \"\$$k\""
   done
   exit 0
@@ -780,21 +793,107 @@ superseded_by() {
   done
   return 1
 }
+# ------------------------------------------------- the Google sign-in client --
+# Its secret lives in the login keychain ($GOOGLE_OAUTH_SECRET_ITEM, a generic password) and
+# nowhere else: no file, no log, no status.json, no argument. The lane is a launchd job in the
+# person's gui domain (install-launchd.sh), so it reads that keychain while it is unlocked, and an
+# item added with `-T /usr/bin/security` is read by `security` with no prompt. macOS only, like
+# the lane: Linux and Windows have no such keychain and run no lane. The dry twin never calls
+# the keychain — RELEASE_STUB_OAUTH_SECRET is the item's value, `missing` for no item and
+# `empty` for an item with nothing in it.
+DRY_OAUTH_SECRET=dry-run-google-oauth-client-secret
+oauth_secret_howto() { printf 'security add-generic-password -U -a "$USER" -s %s -T %s -w   (it asks for the value; tools/release/README.md)' "$GOOGLE_OAUTH_SECRET_ITEM" "$SECURITY_BIN"; }
+oauth_secret_on_file() { # -> 0 when the keychain holds the item; its value is not read here
+  if is_dry; then [ "$(stub OAUTH_SECRET "$DRY_OAUTH_SECRET")" != missing ]; return; fi
+  "$SECURITY_BIN" find-generic-password -s "$GOOGLE_OAUTH_SECRET_ITEM" > /dev/null 2>&1
+}
+oauth_secret() { # -> the value on stdout, for a build's own environment only; nothing when unreadable
+  local v
+  if is_dry; then
+    v=$(stub OAUTH_SECRET "$DRY_OAUTH_SECRET")
+    case $v in missing|empty) ;; *) printf '%s' "$v" ;; esac
+    return 0
+  fi
+  "$SECURITY_BIN" find-generic-password -s "$GOOGLE_OAUTH_SECRET_ITEM" -w 2> /dev/null
+}
+oauth_secret_usable() { # VALUE — 0 for one non-empty line; WHY says what is wrong, never the value
+  case $1 in
+    '') WHY="the keychain item $GOOGLE_OAUTH_SECRET_ITEM is missing, empty or unreadable (a locked login keychain) — $(oauth_secret_howto)"; return 1 ;;
+    *$'\n'*) WHY="the keychain item $GOOGLE_OAUTH_SECRET_ITEM holds more than one line — set it again: $(oauth_secret_howto)"; return 1 ;;
+  esac
+}
+with_oauth_secret() { # VALUE CMD… — CMD in a subshell whose environment alone carries the value
+  local value=$1; shift
+  ( export "$GOOGLE_OAUTH_SECRET_ENV=$value"; "$@" )
+}
+# What a build made must carry the secret's own bytes. Not the `GOCSPX-` prefix: the app links the
+# private-value table (tools/release/pii-rules.json, through zerocode-core's private_data.rs),
+# which names the prefix, so a count of it is never 0 even in an app built without the secret.
+# The value reaches grep as a pattern file on a pipe (printf is a builtin), never as an argument,
+# and -c prints a count, never the line.
+carries_oauth_secret() { # VALUE FILE… — 0 when every file holds it; WHY names the first that does not
+  local value=$1 file n; shift
+  for file in "$@"; do
+    n=$(LC_ALL=C grep -c -a -F -f <(printf '%s\n' "$value") "$file" 2> /dev/null)
+    [ "${n:-0}" -gt 0 ] 2> /dev/null \
+      || { WHY="$file carries no built-in Google sign-in client (the keychain value occurs 0 times)"; return 1; }
+  done
+}
+app_carries_oauth_secret() { # VALUE TARGET — the window's executable and the zo inside the app
+  local app="$2/release/bundle/macos/$APP_NAME/Contents"
+  carries_oauth_secret "$1" "$app/MacOS/$APP_BIN" "$app/$APP_ZO"
+}
+stub_binary() { # FILE… — a dry build's output: the sha, then what the build was given for the
+  # Google client (RELEASE_STUB_BUILD_DROPS_SECRET=1 stands for a build that compiled without it)
+  local file
+  for file in "$@"; do
+    mkdir -p "$(dirname "$file")" || return 1
+    if [ "$(stub BUILD_DROPS_SECRET 0)" = 1 ]; then printf '%s\n' "$SHA" > "$file"
+    else printf '%s\n%s\n' "$SHA" "${!GOOGLE_OAUTH_SECRET_ENV:-}" > "$file"; fi
+  done
+}
+# The release builds themselves, each run only through with_oauth_secret.
+build_app_release() { # TARGET
+  cd "$SCRATCH" && CI=true CARGO_TARGET_DIR=$1 ZO_STAGE_TARGET_DIR=$(target_dir zo-release) \
+    npm run tauri:release -- --bundles app --ci --no-sign --config "$BUILD_APP_CONFIG"
+}
+build_app_signed() { # TARGET PASSWORD — tauri reads the key from the path in the env, never its bytes on a command line; --ci takes the password from the env (empty = none)
+  cd "$SCRATCH" && CI=true CARGO_TARGET_DIR=$1 TAURI_SIGNING_PRIVATE_KEY=$UPDATER_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$2 \
+    npm run tauri:release -- --bundles app,dmg --ci
+}
+build_zo_release() { # TARGET [TRIPLE] — the host's zo, or one triple's (Linux through zigbuild)
+  cd "$SCRATCH/zo-ide" || return 1
+  case ${2:-} in
+    '') CARGO_TARGET_DIR=$1 cargo build --profile "$ZO_PROFILE" -p zo-ide ;;
+    *-linux-*) CARGO_TARGET_DIR=$1 cargo zigbuild --profile "$ZO_PROFILE" -p zo-ide --target "$2" ;;
+    *) CARGO_TARGET_DIR=$1 cargo build --profile "$ZO_PROFILE" -p zo-ide --target "$2" ;;
+  esac
+}
 # build KIND(app|zo) — background; writes "rc secs" to $WORK/build-KIND.result
 run_build() {
-  local kind=$1 t0 rc log="$OUT/build-$1-$SHA8.log" target
+  local kind=$1 t0 rc log="$OUT/build-$1-$SHA8.log" target secret
   t0=$(now_s)
+  # Read here, for this build alone: the gates before it never had it.
+  secret=$(oauth_secret)
+  if ! oauth_secret_usable "$secret"; then
+    printf 'build-%s: %s\n' "$kind" "$WHY" > "$log"; log "build-$kind: $WHY"
+    echo "1 $(( $(now_s) - t0 ))" > "$WORK/build-$kind.result"
+    return 1
+  fi
   case $kind in
     app)
       target=$(target_dir root-release)
       if is_dry; then
         stub_log "build-app target=$target"; sleep "$(stub BUILD_APP_SLEEP 0)"; rc=$(stub BUILD_APP_RC 0)
         [ "$rc" = 0 ] && { mkdir -p "$target/release/bundle/macos/$APP_NAME" && printf '%s\n' "$SHA" > "$target/release/bundle/macos/$APP_NAME/sha"; }
+        [ "$rc" = 0 ] && { with_oauth_secret "$secret" stub_binary "$target/release/bundle/macos/$APP_NAME/Contents/MacOS/$APP_BIN" \
+                             "$target/release/bundle/macos/$APP_NAME/Contents/$APP_ZO" || rc=1; }
       else
         # stage-zo builds zo into the same warm target build-zo uses beside it: cargo's
         # build-directory lock serialises the two and the later one is a no-op, where a
-        # cold zo-ide/target under the scratch cost 6 min of the app build (09-08).
-        ( cd "$SCRATCH" && CI=true CARGO_TARGET_DIR=$target ZO_STAGE_TARGET_DIR=$(target_dir zo-release) npm run tauri:release -- --bundles app --ci --no-sign --config "$BUILD_APP_CONFIG" ) > "$log" 2>&1; rc=$?
+        # cold zo-ide/target under the scratch cost 6 min of the app build (09-08). The
+        # secret reaches that zo too: stage-zo hands cargo its whole environment.
+        with_oauth_secret "$secret" build_app_release "$target" > "$log" 2>&1; rc=$?
         if [ "$rc" = 0 ] && ! is_dry; then
           # Sign the whole app inside-out with the machine's local identity: the
           # helper, the sibling helpers, and the outer dev.zerocode.app — whose
@@ -804,16 +903,21 @@ run_build() {
           rc=$?
         fi
         [ "$rc" = 0 ] && ! helper_in_bundle "$target" && { printf 'build-app: %s\n' "$WHY" >> "$log"; rc=1; }
-      fi ;;
+      fi
+      # An app without its Google sign-in client is never installed: build-app is red instead.
+      [ "$rc" = 0 ] && ! app_carries_oauth_secret "$secret" "$target" \
+        && { printf 'build-app: %s\n' "$WHY" >> "$log"; log "build-app: $WHY"; rc=1; } ;;
     zo)
       target=$(target_dir zo-release)
       if is_dry; then
         stub_log "build-zo target=$target"; sleep "$(stub BUILD_ZO_SLEEP 0)"; rc=$(stub BUILD_ZO_RC 0)
-        [ "$rc" = 0 ] && { mkdir -p "$target/$ZO_PROFILE" && printf '%s\n' "$SHA" > "$target/$ZO_PROFILE/zo"; }
+        [ "$rc" = 0 ] && { with_oauth_secret "$secret" stub_binary "$target/$ZO_PROFILE/zo" || rc=1; }
       else
-        ( cd "$SCRATCH/zo-ide" && CARGO_TARGET_DIR=$target cargo build --profile "$ZO_PROFILE" -p zo-ide ) > "$log" 2>&1; rc=$?
+        with_oauth_secret "$secret" build_zo_release "$target" > "$log" 2>&1; rc=$?
       fi
-      [ "$rc" = 0 ] && [ "$RELEASE_LEGACY_MANIFEST" = 1 ] && build_zo_cross "$target" "$log" ;;
+      [ "$rc" = 0 ] && ! carries_oauth_secret "$secret" "$target/$ZO_PROFILE/zo" \
+        && { printf 'build-zo: %s\n' "$WHY" >> "$log"; log "build-zo: $WHY"; rc=1; }
+      [ "$rc" = 0 ] && [ "$RELEASE_LEGACY_MANIFEST" = 1 ] && build_zo_cross "$target" "$log" "$secret" ;;
   esac
   echo "$rc $(( $(now_s) - t0 ))" > "$WORK/build-$kind.result"
   return "$rc"
@@ -821,8 +925,8 @@ run_build() {
 # The legacy manifest's other targets (§2.7): a cross build per triple after
 # the host's, each on its own rc — a missing one does not redden build-zo (the
 # host zo still swaps); publish refuses the manifest whole instead.
-build_zo_cross() { # TARGET_DIR LOG
-  local t crc builder
+build_zo_cross() { # TARGET_DIR LOG SECRET — each triple's zo carries the Google client, or it is not built
+  local t crc
   for t in $ZO_BUILD_TARGETS; do
     [ "$t" = "${ZO_BUILD_TARGETS%% *}" ] && continue
     if is_dry; then
@@ -830,8 +934,10 @@ build_zo_cross() { # TARGET_DIR LOG
       stub_log "build-zo cross=$t rc=$crc"
       [ "$crc" = 0 ] && { mkdir -p "$1/$t/$ZO_PROFILE" && printf '%s %s\n' "$SHA" "$t" > "$1/$t/$ZO_PROFILE/zo"; }
     else
-      case $t in *-linux-*) builder="cargo zigbuild";; *) builder="cargo build";; esac
-      ( cd "$SCRATCH/zo-ide" && CARGO_TARGET_DIR=$1 $builder --profile "$ZO_PROFILE" -p zo-ide --target "$t" ) >> "$2" 2>&1; crc=$?
+      with_oauth_secret "$3" build_zo_release "$1" "$t" >> "$2" 2>&1; crc=$?
+      # A triple whose zo lacks the client is a missing triple: publish refuses the manifest whole.
+      [ "$crc" = 0 ] && ! carries_oauth_secret "$3" "$1/$t/$ZO_PROFILE/zo" \
+        && { printf 'build-zo cross %s: %s\n' "$t" "$WHY" >> "$2"; rm -f "$1/$t/$ZO_PROFILE/zo"; crc=1; }
       log "build-zo cross $t rc=$crc"
     fi
   done
@@ -881,9 +987,15 @@ asset_base() { printf 'ZeroCode_%s_%s' "$VERSION" "$UPDATER_ARCH"; }
 asset_url() { printf 'https://github.com/%s/releases/download/v%s/%s' "$RELEASE_GITHUB_REPO" "$VERSION" "$1"; }
 # The signed build: tauri reads the key from the path in the env, never its
 # bytes on a command line; --ci takes the password from the env (empty = none).
+# It builds the app again into build-app's target, and that app is the one published: it is given
+# the Google client's secret as build-app was (a build without it would rebuild the app without it).
 build_updater_bundle() { # TARGET PASSWORD LOG
-  ( cd "$SCRATCH" && CI=true CARGO_TARGET_DIR=$1 TAURI_SIGNING_PRIVATE_KEY=$UPDATER_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$2 \
-      npm run tauri:release -- --bundles app,dmg --ci ) > "$3" 2>&1
+  local secret rc
+  secret=$(oauth_secret)
+  oauth_secret_usable "$secret" || { printf 'bundle-updater: %s\n' "$WHY" > "$3"; return 1; }
+  with_oauth_secret "$secret" build_app_signed "$1" "$2" > "$3" 2>&1; rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+  app_carries_oauth_secret "$secret" "$1" || { printf 'bundle-updater: %s\n' "$WHY" >> "$3"; return 1; }
 }
 # The app the DMG and the updater archive carry must be SEALED, the way the
 # installed app is. Tauri's bundler signs only when a distribution identity is
@@ -1291,6 +1403,13 @@ judge_sha() {
   # mid-way puts it back itself).
   [ -n "$QUEUE_FILE" ] && rm -f "$QUEUE_FILE"
   bow_out_if_superseded archive || return 1
+  # Before any gate, install runs and publish runs alike: without the Google sign-in client's
+  # keychain item every build this run makes would be an app that cannot sign in to Google, and
+  # that is better known now than after an hour of gates. Only the item's presence is read here.
+  if ! oauth_secret_on_file; then
+    red "google sign-in client: no keychain item $GOOGLE_OAUTH_SECRET_ITEM, or the login keychain is locked — add it once: $(oauth_secret_howto)"
+    return 1
+  fi
 
   phase_begin archive
   heavy do_archive; rc=$?

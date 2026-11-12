@@ -624,7 +624,10 @@ class Syntax(LaneCase):
         # plugins.updater (U-B's section): the local install build turns the key
         # off through --config, the updater phase is the one that needs it.
         self.assertIn('"createUpdaterArtifacts":false', lane)
-        self.assertIn("--no-sign", lane.split("run_build()")[1].split("swap_app()")[0])
+        # build-app's tauri run is build_app_release, which run_build calls with the Google client's secret.
+        self.assertIn("--no-sign", lane.split("build_app_release() {")[1].split("\n}\n")[0])
+        self.assertIn('"$BUILD_APP_CONFIG"', lane.split("build_app_release() {")[1].split("\n}\n")[0])
+        self.assertIn('build_app_release "$target"', lane.split("run_build() {")[1].split("swap_app()")[0])
         just = (REPO / "justfile").read_text()
         self.assertIn('"createUpdaterArtifacts":false', just.split("package-macos:")[1].split("package-windows:")[0])
 
@@ -940,8 +943,8 @@ class Phases(LaneCase):
         self.assertTrue((self.lane.app_dir / "ZeroCode.app.old").is_dir())
         self.assertEqual((self.lane.app_dir / "ZeroCode.app.old" / "sha").read_text().strip(), SHA_A)
         self.assertEqual((self.lane.app_dir / "ZeroCode.app" / "sha").read_text().strip(), SHA_B)
-        self.assertEqual(self.lane.zo_bin.read_text().strip(), SHA_B)
-        self.assertEqual(self.lane.zo_bin.with_name("zo.old").read_text().strip(), SHA_A)
+        self.assertEqual(self.lane.zo_bin.read_text().splitlines()[0], SHA_B)
+        self.assertEqual(self.lane.zo_bin.with_name("zo.old").read_text().splitlines()[0], SHA_A)
         prev = json.loads((self.lane.home / "installed.prev.json").read_text())
         self.assertEqual(prev["app"]["sha"], SHA_A)
 
@@ -1862,7 +1865,7 @@ class Companions(LaneCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((self.lane.app_dir / "ZeroCode.app" / "sha").read_text().strip(), SHA_A)
         self.assertEqual((self.lane.app_dir / "ZeroCode.app.old" / "sha").read_text().strip(), SHA_B)
-        self.assertEqual(self.lane.zo_bin.read_text().strip(), SHA_A)
+        self.assertEqual(self.lane.zo_bin.read_text().splitlines()[0], SHA_A)
         inst = self.lane.installed()
         self.assertEqual(inst["app"]["sha"], SHA_A)
         self.assertEqual(inst["zo"]["sha"], SHA_A)
@@ -2314,6 +2317,110 @@ class GateOwed(LaneCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn(f"root tree unchanged since {SHA_B[:8]}", self.lane.phase("gate-root")["skipped"])
         self.assertIn(f"zo tree unchanged since {SHA_C[:8]}", self.lane.phase("gate-zo")["skipped"])
+
+
+# The Google sign-in client's secret, built in by the lane alone (audit 40-26, t-105752). Assembled
+# here so this file carries no whole one; the dry run never calls the keychain, it reads this stub.
+FAKE_OAUTH_SECRET = "GOCSPX" + "-" + "DryLane7" * 3
+OAUTH_ITEM = "dev.zerocode.release.google-oauth-client-secret"
+
+
+class GoogleClient(LaneCase):
+    def built(self):
+        app = self.lane.app_dir / "ZeroCode.app" / "Contents"
+        return [app / "MacOS" / "zerocode-shell", app / "Resources" / "bin" / "zo", self.lane.zo_bin]
+
+    def test_no_keychain_item_is_red_before_any_gate_on_an_install_run_and_a_publish_run(self):
+        for publish in ("0", "1"):
+            with self.subTest(publish=publish):
+                self.lane.extra_env["RELEASE_PUBLISH"] = publish
+                self.lane.enqueue(SHA_A)
+                self.lane.enqueue(SHA_B, mtime=time.time() + 5)
+                r = self.lane.run(OAUTH_SECRET="missing")
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                st = self.lane.status()
+                self.assertEqual(st["outcome"], "red")
+                self.assertIn(OAUTH_ITEM, st["reason"])
+                self.assertIn("security add-generic-password", st["reason"], "the red says how to add it")
+                self.assertEqual(self.phases(st), ["sweep"], "nothing ran before the check")
+                self.assertNotIn("gate root", " ".join(self.lane.stub_lines()))
+                # Each sha left the queue, so the lane ends rather than taking the same sha again.
+                self.assertEqual(self.lane.queue(), [])
+                self.assertIsNone(self.lane.installed())
+
+    def test_an_empty_item_is_red_at_build_and_nothing_is_installed(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(OAUTH_SECRET="empty")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red")
+        self.assertIn("build-app", st["reason"])
+        self.assertIn("build-zo", st["reason"])
+        self.assertIsNone(self.lane.installed())
+        self.assertFalse((self.lane.app_dir / "ZeroCode.app").exists())
+        self.assertFalse(self.lane.zo_bin.exists())
+        lane_log = (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text()
+        self.assertIn(f"the keychain item {OAUTH_ITEM} is missing, empty or unreadable", lane_log)
+
+    def test_a_build_without_the_secret_is_red_and_never_installed(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(OAUTH_SECRET=FAKE_OAUTH_SECRET, BUILD_DROPS_SECRET=1)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red")
+        self.assertIn("build-app", st["reason"])
+        self.assertIn("build-zo", st["reason"])
+        self.assertIsNone(self.lane.installed())
+        self.assertFalse((self.lane.app_dir / "ZeroCode.app").exists())
+        self.assertFalse(self.lane.zo_bin.exists())
+        lane_log = (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text()
+        self.assertIn("carries no built-in Google sign-in client (the keychain value occurs 0 times)", lane_log)
+
+    def test_the_builds_carry_the_keychain_value_and_nothing_else_the_lane_writes_does(self):
+        # A value in the caller's environment is not what a build gets, and no gate gets one.
+        self.lane.extra_env["ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET"] = "from-the-callers-environment"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(OAUTH_SECRET=FAKE_OAUTH_SECRET)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lane.status()["outcome"], "green")
+        for binary in self.built():
+            text = binary.read_text()
+            self.assertIn(FAKE_OAUTH_SECRET, text, binary)
+            self.assertNotIn("from-the-callers-environment", text, binary)
+        self.assertNotIn(FAKE_OAUTH_SECRET, r.stdout + r.stderr)
+        # Every file the lane keeps but the built binaries themselves: logs, status, records.
+        targets = self.lane.home / "target"
+        for path in [*self.lane.home.rglob("*"), self.lane.stub_log]:
+            if path.is_file() and targets not in path.parents:
+                self.assertNotIn(FAKE_OAUTH_SECRET, path.read_text(errors="replace"), path)
+
+    def test_the_value_is_read_once_per_build_and_given_to_the_release_builds_alone(self):
+        source = LANE.read_text()
+        self.assertEqual(source.count("find-generic-password"), 2, "a presence check and one read")
+        self.assertEqual(source.count('find-generic-password -s "$GOOGLE_OAUTH_SECRET_ITEM" -w'), 1)
+        self.assertNotIn("find-generic-password -g", source)
+        self.assertEqual(source.count('export "$GOOGLE_OAUTH_SECRET_ENV='), 1, "one place puts it in an environment")
+        for build in ("build_app_release", "build_app_signed", "build_zo_release"):
+            calls = [line for line in source.splitlines()
+                     if re.search(rf"\b{build}\b", line) and not line.startswith(f"{build}()")]
+            self.assertTrue(calls, build)
+            for line in calls:
+                self.assertIn("with_oauth_secret", line, f"{build} runs without the secret: {line}")
+        # The release builds are those functions' alone: no other line runs tauri or a cargo build.
+        bodies = source.split("build_app_release() {", 1)[1].split("# build KIND(app|zo)", 1)[0]
+        rest = source.replace(bodies, "")
+        self.assertNotIn("npm run tauri:release", rest)
+        self.assertNotRegex(rest, r"\bcargo (zig)?build\b")
+
+    def test_the_table_names_the_item_and_the_variable_both_builds_read(self):
+        out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
+        table = {k: v.strip("'") for k, v in (line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)}
+        self.assertEqual(table["GOOGLE_OAUTH_SECRET_ITEM"], OAUTH_ITEM)
+        self.assertEqual(table["GOOGLE_OAUTH_SECRET_ENV"], "ZEROCODE_GOOGLE_OAUTH_CLIENT_SECRET")
+        self.assertEqual(table["SECURITY_BIN"], "/usr/bin/security")
+        for source in (REPO / "crates" / "zerocode-shell" / "src" / "google_login.rs",
+                       REPO / "zo-ide" / "crates" / "api" / "src" / "providers" / "gemini_code_assist.rs"):
+            self.assertIn(f'option_env!("{table["GOOGLE_OAUTH_SECRET_ENV"]}")', source.read_text(), source)
 
 
 class GateOwedOnGit(unittest.TestCase):
