@@ -1241,14 +1241,17 @@ export async function testJevDashboard(browser, origin, ok) {
     // nothing said twice (t-6243 D2).
     const st = opened.statuses;
     // A feature left to apply is 「적용 중」 only when its week changed
-    // something; one that changed nothing records, and says so (2026-11-08).
+    // something; one that changed nothing is in the recording state and says
+    // so (2026-11-08) — under a chip of its own, 「켜짐」: 「기록만」 is the word
+    // of a mode its person did not leave it in (2026-11-12). The sentence
+    // says it applied nothing, once; the chip carries no separator dot.
     ok("each feature's state is one chip, one reason and, while it wants samples, how many remain until the check",
-      Object.values(st).every((one) => one.chips === 1 && one.bars === 0 && ["꺼짐", "기록만", "적용 중", "쉬는 중", "키 필요", "동의 필요", "확인 필요"].includes(one.chip))
-        && st.summon.chip === "기록만" && st.summon.tone === "recording" && st.summon.reason === "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다"
+      Object.values(st).every((one) => one.chips === 1 && one.bars === 0 && ["꺼짐", "기록만", "켜짐", "적용 중", "쉬는 중", "키 필요", "동의 필요", "확인 필요"].includes(one.chip))
+        && st.summon.chip === "켜짐" && st.summon.tone === "recording" && st.summon.reason === "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다"
         && st.summon.owed === null && st.summon.facts.join("|") === "이전 버전 jev-1.12.0의 기록은 제외"
         && st.routing.chip === "적용 중" && st.routing.tone === "applying" && st.routing.reason === "직접 켰습니다"
         && st.routing.owed === "판정까지 38건"
-        && st.browser.chip === "기록만" && st.browser.reason === "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다"
+        && st.browser.chip === "켜짐" && st.browser.tone === "recording" && st.browser.reason === "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다"
         && st.recall.chip === "기록만" && st.recall.tone === "recording" && st.recall.reason === "자동 적용 대상이 아니라 기록만 합니다"
         && st.placement.chip === "기록만" && st.placement.tone === "recording" && st.placement.reason === "정확도가 기준에 못 미칩니다"
         && st.placement.under && !st.recall.under
@@ -2315,7 +2318,8 @@ export async function testJevDashboardPictures(browser, origin, ok) {
         && rows.routing.states === "recorded,recorded,thin,recorded,recorded,recorded,recorded" && rows.routing.now === "applying"
         && rows.recall.states === Array(7).fill("recorded").join(",")
         && rows.notify.states === "idle,idle,idle,idle,idle,idle,recorded" && rows.notify.now === "blocked"
-        && rows.summon.stripLabel.includes("단순 방식이 같거나 나음") && rows.summon.stripLabel.includes("기록만"),
+        && rows.summon.stripLabel.includes("단순 방식이 같거나 나음") && rows.summon.stripLabel.includes("지금 켜짐")
+        && rows.recall.stripLabel.includes("지금 기록만"),
       JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, one]) => [id, { states: one.states, now: one.now }]))));
     ok("(b) the accuracy picture carries each graded day's share, its lower bound and the simplest method's share",
       JSON.stringify(rows.summon.trend) === JSON.stringify({

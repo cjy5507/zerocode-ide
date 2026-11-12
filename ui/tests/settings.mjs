@@ -10146,7 +10146,7 @@ await test("Jev를 켜면 카드가 기능마다 적용 중인지, 기록 중이
 
 await test("zo가 아무것도 묻지 않는다고 읽는 기능은 카드에 서지 않고, 내가 만든 결정은 결정이 묻기 시작해야 줄이 생긴다", async () => {
   await openJudgmentSettings(pageA);
-  const said = (key, fallback) => pageA.evaluate(([one, words]) => t(one, words), [key, fallback]);
+  const said = (key, fallback, vars) => pageA.evaluate(([one, words, values]) => t(one, words, values), [key, fallback, vars]);
   const tally = (rows) => ({
     rows, answered: rows, refused: 0, applied: 0, called: rows, requests: rows, redactedLines: 0,
     inputTokens: 0, p50Ms: rows ? 300 : null, p95Ms: rows ? 600 : null, failures: [],
@@ -10183,7 +10183,9 @@ await test("zo가 아무것도 묻지 않는다고 읽는 기능은 카드에 �
       { said: await said("jev.status.recording", "기록만"), status: "recording" },
       "a decision that only records");
     assertEqual(await standingAt("on", true),
-      { said: await said("jev.status.recording", "기록만"), status: "recording" },
+      { said: await said("settings.typesafe.standingWith", "{{state}} · {{detail}}", {
+        state: await said("jev.status.leftOn", "켜짐"), detail: await said("jev.status.leftOnDetail", "적용 0건"),
+      }), status: "recording" },
       "a decision left to act that changed nothing all week");
     assertEqual(await standingAt("on", true, 2),
       { said: await said("jev.status.applying", "적용 중"), status: "applying" },

@@ -543,7 +543,8 @@ const JEV_TRENDS = Object.freeze([
  * and the numbers zo answered, never off a mode word (`jevSeatStatus`). */
 const JEV_STATUSES = Object.freeze([
   { status: "applying", key: "jev.status.applying", word: "적용 중", counted: true },
-  { status: "recording", key: "jev.status.recording", word: "기록만", counted: true },
+  { status: "recording", key: "jev.status.recording", word: "기록만", counted: true,
+    leftOn: { key: "jev.status.leftOn", word: "켜짐", detail: { key: "jev.status.leftOnDetail", word: "적용 0건" } } },
   { status: "rest", key: "jev.status.rest", word: "쉬는 중", counted: true },
   { status: "blocked", key: "jev.status.blocked", word: "확인 필요", counted: true, waits: {
     key: { key: "jev.status.needsKey", word: "키 필요" },
@@ -657,6 +658,27 @@ function jevSeatStatus(held, choice) {
   return held.applies && (held.week.applied ?? 0) > 0 ? "applying" : "recording";
 }
 
+/* Whether a feature was left to act and its week changed nothing: asked,
+ * answered, and no answer was what the product did. Not one its judgment
+ * provider holds to recording (`providerHoldsBack`, the settings answer's
+ * word on the feature's `seat`) — that one records, and says why. */
+function jevLeftOnIdle(held, status, seat = null) {
+  return status === "recording" && Boolean(held?.applies) && !seat?.providerHoldsBack;
+}
+
+/* The words a feature's state is said in (`JEV_STATUSES`): what a waiting
+ * feature waits for; and, for one left to act whose week changed nothing,
+ * that it is on — not 「기록만」, the word of the mode its person did not
+ * leave it in, which read as the switch not having taken (2026-11-12). That
+ * it applied nothing is the sentence under the table's chip, said once
+ * (t-6243 D2), and the `detail` of the settings card's line, which has no
+ * sentence. The state itself, its tone and the strip's count stay. */
+function jevStatusWords(held, status, seat = null) {
+  const state = JEV_STATUSES.find((one) => one.status === status);
+  if (jevLeftOnIdle(held, status, seat)) return state.leftOn;
+  return state.waits?.[jevWaitsFor(held)] ?? state;
+}
+
 /* How many of a feature's week went unanswered for reasons no key, consent
  * or day's limit clears — timed out, unreachable, refused by the server —
  * when those are most of its week; `null` while half or more came back. */
@@ -727,18 +749,19 @@ function paintJevStandings(root = document) {
 /* One feature's line on the card: its name, and its state with what the
  * state is waiting on — 「기록 중 · 13/53」 while the judge counts samples
  * (the sentence the table says, 「판정 표본 13/53건」, as its tip), 「기록 중
- * · 기준 미달」 once measured under its bar, the state alone otherwise. */
+ * · 기준 미달」 once measured under its bar, 「켜짐 · 적용 0건」 when left to
+ * act and its week changed nothing, the state alone otherwise. */
 function jevStandingRow({ seat, held, status }) {
   const words = jevFeature(seat.id).name;
   const name = jevNode("span", "settings-jev-standing-name",
     document.createTextNode(words ? t(words.key, words.source) : seat.id));
-  const state = JEV_STATUSES.find((one) => one.status === status);
-  const word = state.waits?.[jevWaitsFor(held)] ?? state;
+  const word = jevStatusWords(held, status, seat);
   const said = t(word.key, word.word);
   const owed = status === "recording" ? jevOwed(held, seat) : null;
   const counting = owed !== null && owed.wants !== "next";
   const detail = counting ? `${jevCount(owed.have)}/${jevCount(owed.want)}`
-    : status === "recording" && jevUnderBar(held) ? t(JEV_UNDER.key, JEV_UNDER.word) : "";
+    : status === "recording" && jevUnderBar(held) ? t(JEV_UNDER.key, JEV_UNDER.word)
+      : word.detail ? t(word.detail.key, word.detail.word) : "";
   const standing = jevNode("span", "settings-jev-standing", document.createTextNode(detail
     ? t("settings.typesafe.standingWith", "{{state}} · {{detail}}", { state: said, detail })
     : said));
@@ -2272,10 +2295,10 @@ const JEV_DAY_COLUMNS = Object.freeze([
 /* The drawer's week (t-9633): the accuracy picture large, with the days'
  * comparisons over the sample floor under it, the key to its marks, and the
  * table of the days. */
-function paintJevDays(part, days, status) {
+function paintJevDays(part, days, status, standing) {
   // The strip of every day, ending where the feature stands — the row's own
-  // picture until 2026-11-08, kept here where the days are read one by one.
-  const standing = JEV_STATUSES.find((one) => one.status === status);
+  // picture until 2026-11-08, kept here where the days are read one by one —
+  // in the words its chip says it in (`jevStatusWords`).
   const tally = new Map();
   for (const day of days) {
     const state = jevDayState(day);
@@ -2486,8 +2509,7 @@ function jevRestWords(rest) {
  * over the table — each said once, in as few lines as a row can hold. */
 function jevStatusCell(held, choice, standing, head) {
   const status = jevSeatStatus(held, choice);
-  const state = JEV_STATUSES.find((one) => one.status === status);
-  const said = state.waits?.[jevWaitsFor(held)] ?? state;
+  const said = jevStatusWords(held, status, standing);
   const chip = jevNode("span", "jev-chip");
   chip.dataset.status = status;
   chip.textContent = t(said.key, said.word);
@@ -2569,7 +2591,7 @@ function jevStatusReason(held, status, choice, counting, standing = null) {
   // Told to act, held to recording by a provider that writes its own
   // probabilities (decision 1): that, before anything the judge says.
   if (standing?.providerHoldsBack) return t("jev.heldByProvider", "판단 모델이 확률을 글로 적는 방식이라 적용하지 않고 기록만 합니다");
-  if (status === "recording" && held.applies) return t("jev.appliedNone", "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다");
+  if (jevLeftOnIdle(held, status, standing)) return t("jev.appliedNone", "적용하게 두었지만 지난 7일 실제로 바꾼 것이 없습니다");
   if (status === "applying") {
     if (!choice?.applies) {
       // The judged window's comparisons are the evidence: said with the
@@ -2881,7 +2903,10 @@ function paintJevDrawer(view, id, held) {
   const days = jevWordsOf(held).read;
   const asked = days.some((day) => day.rows > 0 || day.compared > 0);
   part("days").hidden = !asked;
-  if (asked) paintJevDays(part("days"), days, jevSeatStatus(held, jevSeatChoice(typesafeState, id)));
+  if (asked) {
+    const status = jevSeatStatus(held, jevSeatChoice(typesafeState, id));
+    paintJevDays(part("days"), days, status, jevStatusWords(held, status, standing));
+  }
 
   // Who asked it this week, agent by agent — zo's own, every agent a pane
   // runs, and the ones whose work the window cannot see, with why (t-10916).
