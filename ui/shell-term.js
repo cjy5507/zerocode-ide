@@ -10062,6 +10062,20 @@ const TAB_GLYPH = {
  * sidebar row, not before its name (t-78107, 시안 「또렷한 Geist」 2: the strip
  * says the work and its state; 「코디 · …」 had taken a third of every
  * tab). `termTabTip` names the seats a tab holds (t-45938, t-67936). */
+/* A conversation that began with a letter from another session is titled by
+ * its first prompt — Claude names the session after it and says so as the
+ * terminal's title — and that prompt is the letter's envelope. The strip
+ * showed the raw tag (2026-11-12 capture: 「<cross-session-message from…」);
+ * it says what the tab holds instead: a letter, and who sent it. */
+const LETTER_ENVELOPE = /^<cross-session-message\b/;
+const LETTER_SENDER = /\bfrom="?([^"\s>]+)/;
+
+function readableTitle(text) {
+  if (!LETTER_ENVELOPE.test(text)) return text;
+  const from = LETTER_SENDER.exec(text)?.[1];
+  return from ? t("tab.letterFrom", "세션 편지 · {{from}}", { from }) : t("tab.letter", "세션 편지");
+}
+
 function tabLabel(tab) {
   // 표와 노트북은 그 파일 자체이지 파생된 판이 아니다 — 이름만 단다(1-g39·1-g40).
   if (
@@ -10155,9 +10169,9 @@ function tabLabel(tab) {
       // terminal that is doing something. A person's name for the pane still
       // wins above; the number below is only for a shell that says nothing.
       const spoken = spokenTitleOf(leaves[0]);
-      if (spoken) return spoken;
+      if (spoken) return readableTitle(spoken);
       const prompt = panePrompts.get(leaves[0])?.trim();
-      if (prompt) return prompt;
+      if (prompt) return readableTitle(prompt);
     }
     // A pane that runs an agent, with nothing above to say, is named for its folder: the folder is the
     // work's own name, where "터미널 N" says only where the tab sits (t-44016). A tab that carries its
