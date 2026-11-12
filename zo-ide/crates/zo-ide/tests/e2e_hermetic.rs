@@ -9872,8 +9872,9 @@ async fn e2e_the_narrowing_notice_is_said_once_at_the_next_tui_start() {
     let service = MockAnthropicService::spawn()
         .await
         .expect("start mock service");
-    // The line wraps at the PTY's width; read the screen with no spaces.
-    let squashed = |text: &str| text.split_whitespace().collect::<String>();
+    // The line wraps at the PTY's width, with its style codes between the
+    // pieces; read the screen without them and with no spaces.
+    let squashed = |text: &str| strip_ansi(text).split_whitespace().collect::<String>();
 
     let mut run = pty(&layout, &service.base_url(), &interactive_args());
     run.wait_for("directory:", TEST_TIMEOUT);
