@@ -27,6 +27,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::mcp_client::{McpClientBootstrap, McpClientTransport, McpStdioTransport};
 use crate::mcp_limits::guard_mcp_read_growth;
+use zerocode_core::agent_teams::PATH_SEPARATOR;
 
 use super::types::{
     InboundEvent, JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeParams,
@@ -448,7 +449,9 @@ fn apply_env(command: &mut Command, env: &BTreeMap<String, String>) {
     // explicit choice wins); we only augment the inherited PATH.
     if !env.contains_key("PATH") {
         let inherited = std::env::var("PATH").unwrap_or_default();
-        if let Some(merged) = merge_path_dirs(&inherited, &standard_tool_path_dirs()) {
+        if let Some(merged) =
+            merge_path_dirs(&inherited, &standard_tool_path_dirs(), PATH_SEPARATOR)
+        {
             command.env("PATH", merged);
         }
     }
@@ -481,9 +484,10 @@ fn standard_tool_path_dirs() -> Vec<String> {
 /// priority (they come first and win) and dropping any `extra` already present so
 /// no directory is duplicated. Returns `None` when nothing new would be added, so
 /// the caller can leave the child's PATH untouched in the common case where the
-/// launch environment already had everything.
-fn merge_path_dirs(inherited: &str, extra: &[String]) -> Option<String> {
-    let separator = ':';
+/// launch environment already had everything. `separator` splits `inherited` and
+/// joins the result; the caller passes [`PATH_SEPARATOR`] (`;` on Windows, where
+/// every drive letter holds a `:`), and a test passes the other platform's.
+fn merge_path_dirs(inherited: &str, extra: &[String], separator: char) -> Option<String> {
     let existing: Vec<&str> = inherited.split(separator).filter(|s| !s.is_empty()).collect();
     let additions: Vec<&String> = extra
         .iter()
@@ -515,7 +519,7 @@ fn encode_frame(payload: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{inbound_event_for_notification, merge_path_dirs, InboundEvent};
+    use super::{inbound_event_for_notification, merge_path_dirs, InboundEvent, PATH_SEPARATOR};
     #[cfg(unix)]
     use super::McpStdioProcess;
     #[cfg(unix)]
@@ -605,6 +609,7 @@ mod tests {
         let merged = merge_path_dirs(
             "/usr/bin:/bin",
             &["/opt/homebrew/bin".to_string(), "/usr/local/bin".to_string()],
+            ':',
         )
         .expect("a new dir is added");
         assert_eq!(merged, "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin");
@@ -617,6 +622,7 @@ mod tests {
         let merged = merge_path_dirs(
             "/opt/homebrew/bin:/usr/bin",
             &["/opt/homebrew/bin".to_string(), "/usr/local/bin".to_string()],
+            ':',
         )
         .expect("one new dir is added");
         assert_eq!(merged, "/opt/homebrew/bin:/usr/bin:/usr/local/bin");
@@ -630,16 +636,47 @@ mod tests {
             merge_path_dirs(
                 "/opt/homebrew/bin:/usr/local/bin:/usr/bin",
                 &["/opt/homebrew/bin".to_string(), "/usr/local/bin".to_string()],
+                ':',
             ),
             None,
         );
     }
 
     #[test]
+    fn merge_path_in_the_windows_form_splits_and_joins_on_semicolons() {
+        // `C:\` holds a colon, so a PATH split on `:` cuts `C:\Tools` into `C`
+        // and `\Tools`, never finds the directory already there, and appends a
+        // colon-joined entry the system cannot use. With the Windows separator the
+        // drive letters stay whole, a directory already present is not added again,
+        // and the new one is joined with `;`.
+        let extra = [
+            r"C:\Tools".to_string(),
+            r"C:\Users\a\.cargo\bin".to_string(),
+        ];
+        let merged = merge_path_dirs(r"C:\Windows;C:\Tools", &extra, ';')
+            .expect("one new dir is added");
+        assert_eq!(merged, r"C:\Windows;C:\Tools;C:\Users\a\.cargo\bin");
+        assert_eq!(
+            merge_path_dirs(r"C:\Tools;C:\Users\a\.cargo\bin", &extra, ';'),
+            None,
+            "directories already on PATH are found by their whole drive-letter form"
+        );
+    }
+
+    #[test]
+    fn the_platform_separator_is_the_one_its_path_variable_uses() {
+        // The platform's own `PATH` round-trips through `std::env`'s split and
+        // join with this separator, so the merge cuts entries where the OS does.
+        let joined = std::env::join_paths(["alpha", "beta"]).expect("a PATH");
+        let joined = joined.to_str().expect("utf-8");
+        assert_eq!(joined, format!("alpha{PATH_SEPARATOR}beta"));
+    }
+
+    #[test]
     fn merge_path_handles_empty_inherited() {
         // An empty inherited PATH (rare, but possible under `env -i`-style launch)
         // still yields the additions without a leading separator.
-        let merged = merge_path_dirs("", &["/opt/homebrew/bin".to_string()])
+        let merged = merge_path_dirs("", &["/opt/homebrew/bin".to_string()], ':')
             .expect("a dir is added to an empty PATH");
         assert_eq!(merged, "/opt/homebrew/bin");
     }
