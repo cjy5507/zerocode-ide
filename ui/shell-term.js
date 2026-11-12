@@ -1403,19 +1403,23 @@ const CONTINUATION = "\u0000";
 /* How far a double-width glyph may grow toward its two columns: its INK may
  * take this fraction of the row height and no more, standing in the middle
  * of the row. The row is the one box a glyph must never push — a Hangul
- * syllable drawn taller than the row would sit on the row below — and the
- * tenth left over is the air between two Korean lines. The ceiling used to
- * be the font-size against the row (0.95), which stopped at 1.09× while the
- * ink still had room: at 14px/1.15 the ink allows 1.14×. */
-const WIDE_GLYPH_ROW_FILL = 0.9;
+ * syllable drawn taller than the row would sit on the row below — and what
+ * is left over is the air between two Korean lines. At 14px/1.15 this is
+ * 1.09×, the size Korean had before it was widened at all. For a day the ink
+ * took 0.9 of the row (1.14×): with the widening below it read as another,
+ * larger face, and line stood on line ("너무 글들이 붙어서 따닥따닥",
+ * "글꼴도 뭔가 바뀐거같은데", the person, 2026-11-12). */
+const WIDE_GLYPH_ROW_FILL = 0.86;
 /* How much wider than its face draws it a double-width glyph may be made,
  * once the row stops it growing. Growing alone cannot reach two columns: a
  * fallback Hangul is about as wide as it is tall (0.865em in Apple SD Gothic
  * Neo), and two cells of a mono face are wider than a row is high. Widened
- * by a quarter a syllable reads as the wide cut of the same face; past a
- * third it reads as another face, so what is still short after this stays as
- * tracking, split around the glyph. At 14px/1.15 two columns ask for 1.25×. */
-const WIDE_GLYPH_STRETCH_LIMIT = 1.3;
+ * by a sixth a syllable is still the face's own shape; what is still short
+ * after this stays as tracking, split around the glyph — at 14px/1.15 about
+ * 2px between two syllables, half of what growing alone left (4.08px, "사 이
+ * 드 바") and not the none that widening by a quarter left. The person chose
+ * this of four drawn side by side (2026-11-12). */
+const WIDE_GLYPH_STRETCH_LIMIT = 1.15;
 /* The glyph a double-width cell is measured with (`measure`): which face
  * draws Hangul is the OS's answer to a stack with no Hangul in it. */
 const WIDE_PROBE_GLYPH = "가";
@@ -1971,7 +1975,9 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
    *
    * Growing alone left 4.08px of tracking between two syllables at 14px, and
    * Korean in every pane still read as spaced-out letters (2026-09-10 자 체
-   * 는, 2026-11-11 사 이 드 바); grown and widened the same line leaves none.
+   * 는, 2026-11-11 사 이 드 바); widened until none was left it read as
+   * packed, in another face (2026-11-12). Grown as before and widened by a
+   * sixth the same line leaves about 2px.
    *
    * What `measure` learns about the face that draws `WIDE_PROBE_GLYPH`:
    * `advance` its advance at the screen's font size, `grow` the largest size

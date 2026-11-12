@@ -3585,14 +3585,15 @@ mod tests {
             "a wide link's underline is drawn off its neighbour's again, or \
              an SGR underline no longer stands where the engine puts it"
         );
-        // The two numbers the fit turns on: lowered, the gap between two
-        // syllables comes back while every check that reads the window's own
-        // ceiling stays green.
+        // The two numbers the fit turns on, as the person chose them of four
+        // drawn side by side (2026-11-12): raised, Korean reads as packed and
+        // as another face again; lowered, as spaced-out letters — while every
+        // check that reads the window's own ceiling stays green.
         assert!(
-            source.contains("\nconst WIDE_GLYPH_ROW_FILL = 0.9;\n")
-                && source.contains("\nconst WIDE_GLYPH_STRETCH_LIMIT = 1.3;\n"),
+            source.contains("\nconst WIDE_GLYPH_ROW_FILL = 0.86;\n")
+                && source.contains("\nconst WIDE_GLYPH_STRETCH_LIMIT = 1.15;\n"),
             "the row's share of a wide glyph's ink, or how far it may be \
-             widened, is another number than the one measured"
+             widened, is another number than the one the person chose"
         );
     }
 

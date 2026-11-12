@@ -31,6 +31,12 @@ const COLUMNS_FILLED = 0.9;
 // than this fraction of a cell once their columns are filled. With tracking
 // between them they stood half a cell apart.
 const INK_GAP_CELLS = 0.3;
+// The most a fallback glyph is widened, and the air a glyph widened that far
+// keeps to itself, in cells (the person's choice of four, 2026-11-12: widened
+// by a quarter until no tracking was left, Korean read as packed and as
+// another face).
+const WIDEN_MOST = 1.15;
+const AIR_LEAST_CELLS = 0.1;
 // A pixel is ink when it differs from the screen's ground by this much of a
 // channel's range: past the fringe of an antialiased edge, short of a stroke.
 const INK_CONTRAST = 96;
@@ -355,6 +361,10 @@ export async function testWideGlyphs(page, ok) {
   ok("a wide glyph the fallback face draws short is grown and widened until it covers its two columns, or as far as it may be widened",
     !rows.short || (rows.fit.classes.includes("term-wide") && (filled >= COLUMNS_FILLED || widenedOut)),
     JSON.stringify({ short: rows.short, advance: rows.advance, cell: rows.cell, filled, fit: rows.fit, limit: rows.stretchLimit }));
+
+  ok("a wide glyph is widened by no more than a sixth, and one widened that far keeps air between it and the next",
+    !rows.short || (rows.fit.stretch <= WIDEN_MOST + 0.01 && (!widenedOut || rows.fit.tracking >= AIR_LEAST_CELLS * rows.cell)),
+    JSON.stringify({ short: rows.short, stretch: rows.fit.stretch, most: WIDEN_MOST, tracking: rows.fit.tracking, least: AIR_LEAST_CELLS * rows.cell }));
 
   // Asked only of a face that is dressed: a run left as its face draws it is
   // not a box of its own, and its blanks stay the narrow runs they are.
