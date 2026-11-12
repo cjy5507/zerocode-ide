@@ -125,7 +125,11 @@ pub(crate) fn set_weekly_review_in(
     enabled: bool,
 ) -> Result<(), String> {
     if enabled {
-        super::review::save_automation_in(config_root, weekly_review_job(vault))
+        super::review::save_automation_in(
+            config_root,
+            weekly_review_job(vault),
+            super::review::Approval::AsWritten,
+        )
     } else {
         delete_automation_and_run_history(
             config_root,
@@ -148,7 +152,11 @@ pub(crate) fn adopt_weekly_review_in(config_root: &Path, vault: &Path) -> Result
     if standing {
         return Ok(false);
     }
-    super::review::save_automation_in(config_root, weekly_review_job(vault))?;
+    super::review::save_automation_in(
+        config_root,
+        weekly_review_job(vault),
+        super::review::Approval::AsWritten,
+    )?;
     Ok(true)
 }
 

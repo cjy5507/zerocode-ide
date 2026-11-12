@@ -7892,7 +7892,7 @@ fn desktop_schedule(
     let _turn = schedule::Turn::take().ok_or_else(person_asked)?;
     // Two answers in a row that were not a yes: requests rest, and this one is
     // refused before it is read or shown.
-    schedule::rested(now_epoch_ms())?;
+    schedule::rested()?;
     let (Some(root), Some(window)) = (computer_use::evidence::root(), window) else {
         return Err(computer_use::ComputerUseError::new(
             error_code::ACCESSIBILITY_ERROR,
@@ -7914,9 +7914,13 @@ fn desktop_schedule(
         args,
         zerocode_core::computer_use::RECIPE_SCHEDULE_ASK_MS,
     );
-    schedule::answered(decision, now_epoch_ms());
+    schedule::answered(decision);
     schedule::settle(request, decision, now_epoch_ms(), |job| {
-        crate::cmd::review::save_automation_in(window.state::<AppState>().config_root(), job)
+        crate::cmd::review::save_automation_in(
+            window.state::<AppState>().config_root(),
+            job,
+            crate::cmd::review::Approval::AsWritten,
+        )
     })
 }
 

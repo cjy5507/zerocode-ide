@@ -13547,6 +13547,9 @@ registerAskKind("confirm", {
     title: ask.spec.title,
     mono: ask.spec.body || null,
     choices: null,
+    // `initial: null` — a question Enter must not answer (an approval): the
+    // keyboard starts on the frame. Every other confirm opens on its yes.
+    initial: ask.spec.initial,
   }),
   paint: (ask) => {
     const spec = ask.spec;

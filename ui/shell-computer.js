@@ -652,12 +652,13 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
         next: (args.next ?? []).map(localMinuteText).join(" · "),
       },
     ),
-    // Which document this is, beyond the title it gives itself.
-    flowAboutText(args.about),
-    // A Flow whose walk may spend money (policy guarded): the card says it in plain words, not by the policy's name alone.
+    // A Flow whose walk may spend money (policy guarded): the card says it in plain words, not by the policy's name alone —
+    // and before anything the document says of itself, which is as long as the document makes it.
     args.money === true
       ? t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다.")
       : "",
+    // Which document this is, beyond the title it gives itself.
+    flowAboutText(args.about),
     // Letters that draw nothing, left out of those names by the backend: the card says how many there were.
     args.hidden > 0
       ? t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count: args.hidden })
@@ -668,21 +669,28 @@ const COMPUTER_HANDOFF_WORDS = Object.freeze({
 
 /* Which document a schedule's card, or 「다시 승인」, is about — beyond the
  * title the document gives itself, which an agent may have written: the file's
- * own name, how many steps it walks, the apps and hosts it names (the first
- * few, the rest counted) and when the file was last written. A Flow saved a
- * minute ago under a familiar title does not read as the one the person knows.
- * The backend read all of it off the text the approval is held to
- * (`schedule::About`); an older backend sends none, and nothing is said. */
+ * own name, how many steps it walks, and the sites and the apps its
+ * fingerprint names — sites first, each kind counted apart, the first few by
+ * name. Those names are the document's own words and the page says so
+ * (「문서가 적은」): they are what the document claims, not what the window
+ * found. When the file was last written is not said — a process of the same
+ * user sets that time to what it likes. The backend read all of it off the
+ * text the approval is held to (`schedule::About`); an older backend sends
+ * none, and nothing is said. */
 function flowAboutText(about) {
   if (!about?.slug) return "";
-  const names = (about.names ?? []).join(", ");
+  const named = (key, fallback, names) => {
+    const count = names?.count ?? 0;
+    if (count === 0) return "";
+    const shown = names.shown ?? [];
+    const more = count - shown.length;
+    return t(key, fallback, { count, names: more > 0 ? `${shown.join(", ")} +${more}` : shown.join(", ") });
+  };
   return [
     t("auto.asked.aboutFile", "문서 {{slug}}.md", { slug: about.slug }),
     t("auto.asked.aboutSteps", "걸음 {{count}}개", { count: about.steps ?? 0 }),
-    names && (about.more > 0 ? `${names} +${about.more}` : names),
-    Number.isFinite(about.modified_ms)
-      ? t("auto.asked.aboutModified", "마지막으로 고친 때 {{when}}", { when: new Date(about.modified_ms).toLocaleString() })
-      : "",
+    named("auto.asked.aboutHosts", "문서가 적은 사이트 {{count}}곳: {{names}}", about.hosts),
+    named("auto.asked.aboutApps", "문서가 적은 앱 {{count}}개: {{names}}", about.apps),
   ].filter(Boolean).join(" · ") + ".";
 }
 

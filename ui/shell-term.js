@@ -5003,7 +5003,10 @@ function paintAsk() {
   el("ask-confirm-actions").hidden = choices !== null;
   if (choices === null) {
     el("ask-choices").replaceChildren();
-    askFocus = el("ask-yes");
+    // The window's own confirm opens on its yes, so Enter says it — unless the
+    // question asked for the frame (`initial: null`): an approval a stray
+    // Enter must not give.
+    askFocus = view.initial === null ? askFrame : el("ask-yes");
     askSafe = null;
   } else {
     const buttons = choices.map(askButton);

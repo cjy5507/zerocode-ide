@@ -23861,8 +23861,16 @@ mod tests {
         let saving = block_after(backend, "fn save_automation_in(");
 
         assert!(
-            block_after(backend, "fn save_automation(")
-                .contains("    save_automation_in(state.config_root(), automation)?;"),
+            block_after(backend, "fn save_automation(").contains(
+                &[
+                    "    save_automation_in(",
+                    "        state.config_root(),",
+                    "        automation,",
+                    "        Approval::FromForm(&standing),",
+                    "    )?;",
+                ]
+                .join("\n")
+            ),
             "the editor's save no longer goes through the door these lines pin"
         );
 

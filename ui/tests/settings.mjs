@@ -5720,18 +5720,35 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     assert(money && !question.includes(money), "a Flow that spends nothing was asked about as one that may spend", question);
     assertEqual(backend.count("A", "approve_automation_flow"), before, "the Flow was allowed again before the person said yes");
 
+    // An approval is not given by a stray Enter: the keyboard starts on the
+    // question's frame, not on its yes, and Enter leaves the question standing.
+    const opened = await pageA.evaluate(() => ({
+        onYes: document.activeElement === document.getElementById("ask-yes"),
+        inQuestion: document.getElementById("ask-scrim").contains(document.activeElement),
+    }));
+    await pageA.keyboard.press("Enter");
+    await pageA.waitForTimeout(150);
+    const afterEnter = await pageA.evaluate(() => !document.getElementById("ask-scrim").hidden);
+    assert(
+      !opened.onYes && opened.inQuestion && afterEnter && backend.count("A", "approve_automation_flow") === before,
+      "Enter answered 「다시 승인」, or the question opened with the keyboard on its yes",
+      { opened, afterEnter, calls: backend.count("A", "approve_automation_flow") - before },
+    );
+
     // The document is rewritten while the question stands — and now may spend.
     // The yes carries the hash the question was drawn from; the window refuses
     // it, says why, and the page reads the list again.
     backend.automations[0].flow_stands = "cc";
     backend.automations[0].flow_money = true;
+    // It names as much as a document may: three sites and three apps shown,
+    // each as long as the card's rule lets a name be, and more of each counted.
+    const longName = (word) => `${word}.`.repeat(20).slice(0, 80);
     backend.automations[0].flow_about = {
       slug: "wallet-qa",
       steps: 4,
-      names: ["shop.example.com"],
-      more: 0,
-      modified_ms: 1_794_000_100_000,
-      hidden: 0,
+      hosts: { shown: ["a", "b", "c"].map((word) => longName(`${word}-shop.example.com`)), count: 5 },
+      apps: { shown: ["x", "y", "z"].map((word) => longName(`com.example.${word}`)), count: 4 },
+      hidden: 2,
     };
     await pageA.evaluate(() => {
       window.__askedSaid = [];
@@ -5771,10 +5788,28 @@ await test("an_asked_job_says_who_asked_and_waits_for_the_person_once_its_flow_c
     await pageA.waitForSelector("#ask-scrim:not([hidden])");
     const second = await pageA.evaluate(() => document.getElementById("ask-body").textContent);
     assert(second.includes("Wallet QA") && second.includes(money), "the question did not say this document may spend money", second);
+    const words = await pageA.evaluate(() => ({
+      hosts: t("auto.asked.aboutHosts", "문서가 적은 사이트 {{count}}곳: {{names}}", { count: 5, names: "" }).split(":")[0],
+      apps: t("auto.asked.aboutApps", "문서가 적은 앱 {{count}}개: {{names}}", { count: 4, names: "" }).split(":")[0],
+      hidden: t("auto.asked.hidden", "받은 이름에서 보이지 않는 글자 {{count}}개를 뺐습니다.", { count: 2 }),
+    }));
     assert(
-      second.includes("wallet-qa.md") && second.includes("shop.example.com") && !question.includes("wallet-qa.md"),
+      second.includes("wallet-qa.md") && second.includes("a-shop.example.com") && !question.includes("wallet-qa.md"),
       "the question did not say which document it is about, or said it of a row that carried none",
       { second, question },
+    );
+    // What may spend is said BEFORE anything the document says of itself:
+    // those words are as long as the document makes them, and the box this
+    // is read in shows a few lines (t-105495, 막는 문제 1). Sites come before
+    // apps, each counted apart and named as the document's own words; letters
+    // left out of them are counted.
+    const at = (words_) => second.indexOf(words_);
+    assert(
+      at(money) > 0 && at(money) < at("wallet-qa.md")
+        && at(words.hosts) > 0 && at(words.hosts) < at(words.apps)
+        && second.includes("+2") && second.includes("+1") && second.includes(words.hidden),
+      "the money sentence stands behind the document's own words, or the sites and apps are not said apart and in that order",
+      { second, words },
     );
     await pageA.click("#ask-yes");
     const approved = await backend.waitForCall("A", "approve_automation_flow", again);
@@ -5848,6 +5883,21 @@ await test("the_card_for_an_asked_schedule_says_the_job_and_what_was_left_out", 
       hidden: 0,
     };
     const words = COMPUTER_HANDOFF_WORDS["auto.asked.card"];
+    const about = {
+      slug: "wallet-qa",
+      steps: 3,
+      hosts: { shown: ["a.example.com", "shop.example.com"], count: 4 },
+      apps: { shown: ["com.example.wallet"], count: 1 },
+      hidden: 0,
+      // A backend that still sent a file time would not be repeated.
+      modified_ms: 1_794_000_000_000,
+    };
+    const longName = (word) => `${word}.`.repeat(20).slice(0, 80);
+    const crowded = {
+      ...about,
+      hosts: { shown: ["a", "b", "c"].map((word) => longName(`${word}-shop.example.com`)), count: 5 },
+      apps: { shown: ["x", "y", "z"].map((word) => longName(`com.example.${word}`)), count: 4 },
+    };
     return {
       plain: words(args),
       counted: words({ ...args, hidden: 3 }),
@@ -5855,20 +5905,14 @@ await test("the_card_for_an_asked_schedule_says_the_job_and_what_was_left_out", 
       spending: words({ ...args, policy: "guarded", money: true }),
       moneyNote: t("auto.asked.money", "이 Flow는 돈이 오가는 걸음을 누를 수 있습니다 — 지켜보는 사람 없이 돕니다."),
       runs: args.next.map(localMinuteText),
-      // Which document: its file's name, its steps, what it names (two more counted) and when it was written.
-      about: words({
-        ...args,
-        about: {
-          slug: "wallet-qa",
-          steps: 3,
-          names: ["com.example.wallet", "shop.example.com"],
-          more: 2,
-          modified_ms: 1_794_000_000_000,
-          hidden: 0,
-        },
-      }),
+      // Which document: its file's name, its steps, the sites and the apps it names — each counted apart.
+      about: words({ ...args, about }),
+      // And of one that may spend, naming as much as a document may.
+      spendingAbout: words({ ...args, policy: "guarded", money: true, about: crowded }),
       aboutSteps: t("auto.asked.aboutSteps", "걸음 {{count}}개", { count: 3 }),
-      aboutWhen: new Date(1_794_000_000_000).toLocaleString(),
+      aboutHosts: t("auto.asked.aboutHosts", "문서가 적은 사이트 {{count}}곳: {{names}}", { count: 4, names: "a.example.com, shop.example.com +2" }),
+      aboutApps: t("auto.asked.aboutApps", "문서가 적은 앱 {{count}}개: {{names}}", { count: 1, names: "com.example.wallet" }),
+      fileTime: new Date(1_794_000_000_000).toLocaleString(),
     };
   });
   for (const shown of ["Wallet QA", "Morning wallet", "dry", "30 9 * * *", "/Users/dev/app", "term:7", ...said.runs]) {
@@ -5886,13 +5930,24 @@ await test("the_card_for_an_asked_schedule_says_the_job_and_what_was_left_out", 
   );
   assert(
     said.aboutSteps.includes("3")
-      && ["wallet-qa.md", said.aboutSteps, "com.example.wallet, shop.example.com +2", said.aboutWhen].every((shown) => said.about.includes(shown))
+      && ["wallet-qa.md", said.aboutSteps, said.aboutHosts, said.aboutApps].every((shown) => said.about.includes(shown))
+      && said.about.indexOf(said.aboutHosts) < said.about.indexOf(said.aboutApps)
       && said.about.startsWith(`${said.plain} `)
-      && !said.plain.includes("wallet-qa.md"),
-    "the card did not say which document it is about — its file, its steps, what it names and when it was written — or said it with none sent",
+      && !said.plain.includes("wallet-qa.md")
+      && !said.about.includes(said.fileTime),
+    "the card did not say which document it is about — its file, its steps, its sites and then its apps, each counted — or said a file time, or said it with none sent",
     said,
   );
-  return "the card named the Flow, the job, when and where it runs and who asked; three hidden letters were said once, a Flow that may spend was said so, and the document was named by its file, steps, names and last change";
+  // What may spend is said before anything the document says of itself, however
+  // long the document makes its names (t-105495, 막는 문제 1).
+  assert(
+    said.spendingAbout.indexOf(said.moneyNote) > 0
+      && said.spendingAbout.indexOf(said.moneyNote) < said.spendingAbout.indexOf("wallet-qa.md")
+      && said.spendingAbout.includes("a-shop.example.com"),
+    "the money sentence stands behind the document's own words on the card",
+    said,
+  );
+  return "the card named the Flow, the job, when and where it runs and who asked; three hidden letters were said once, a Flow that may spend was said so before the document's own words, and the document was named by its file, steps, sites and apps";
 });
 
 // The folded 「세부 설정」 line is where a save's command is read before the
