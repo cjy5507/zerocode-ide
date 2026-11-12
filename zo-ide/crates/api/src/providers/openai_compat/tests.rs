@@ -885,6 +885,35 @@ fn custom_provider_opt_in_sends_reasoning_effort_for_an_unrecognized_model() {
 }
 
 #[test]
+fn custom_provider_opt_in_sends_the_requested_top_rung_to_a_non_openai_model() {
+    // DeepSeek maps `xhigh -> high` and `max -> max`; clamping an unknown
+    // gateway model to OpenAI's pre-`max` enum sent `xhigh`, so `/effort max`
+    // ran at `high`. An OpenAI id behind the same gateway keeps OpenAI's clamp.
+    // The pass-through rungs use an id no catalog can know: a machine whose
+    // model discovery has learned a real id's levels clamps to those instead.
+    let mut config = OpenAiCompatConfig::from_user(
+        "agent",
+        "https://gateway.example.com/v1",
+        Some("ZO_AGENT_API_KEY"),
+        false,
+    );
+    config.supports_reasoning_effort = true;
+    for (model, level, expected) in [
+        ("deepseek-flash", crate::types::EffortLevel::Max, "max"),
+        ("acme-reasoner-1", crate::types::EffortLevel::Max, "max"),
+        ("acme-reasoner-1", crate::types::EffortLevel::Ultra, "max"),
+        ("acme-reasoner-1", crate::types::EffortLevel::Xhigh, "xhigh"),
+        ("acme-reasoner-1", crate::types::EffortLevel::High, "high"),
+        ("gpt-5.5", crate::types::EffortLevel::Max, "xhigh"),
+    ] {
+        let mut request = effort_request(model, None);
+        request.effort = Some(level);
+        let payload = build_chat_completion_request(&request, config);
+        assert_eq!(payload["reasoning_effort"], json!(expected), "{model} at {level:?}");
+    }
+}
+
+#[test]
 fn custom_provider_without_opt_in_still_omits_reasoning_effort() {
     // Default stays off: an endpoint that does not take the field would 400 on
     // it, so the operator must declare the capability.

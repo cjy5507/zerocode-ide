@@ -1553,6 +1553,23 @@ fn is_official_openai_base_url(base_url: &str) -> bool {
         || trimmed == format!("{DEFAULT_OPENAI_BASE_URL}/chat/completions")
 }
 
+/// The `reasoning_effort` a gateway-served, non-OpenAI model gets when the
+/// operator declared `supports_reasoning_effort`: the requested rung, clamped
+/// only by what the model's own catalog row declares. OpenAI's pre-`max` enum
+/// is OpenAI's — projecting it here turned `/effort max` into `xhigh`, which
+/// `DeepSeek` reads as `high` (its documented mapping: `xhigh -> high`,
+/// `max -> max`), so the top rung silently ran two rungs low.
+fn gateway_effort_wire(level: crate::types::EffortLevel, model: &str) -> &'static str {
+    use crate::types::EffortLevel;
+    match super::highest_accepted_effort(model, level) {
+        EffortLevel::Low => "low",
+        EffortLevel::Medium => "medium",
+        EffortLevel::High => "high",
+        EffortLevel::Xhigh => "xhigh",
+        EffortLevel::Max | EffortLevel::Ultra => "max",
+    }
+}
+
 fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatConfig) -> Value {
     let mut messages = Vec::new();
     if let Some(blocks) = request.system.as_ref().filter(|v| !v.is_empty()) {
@@ -1632,7 +1649,13 @@ fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatC
                     ),
                     None => level,
                 };
-                payload["reasoning_effort"] = json!(level.gpt_for_model(&request.model));
+                payload["reasoning_effort"] = json!(
+                    if is_openai_reasoning || super::is_openai_model(&request.model) {
+                        level.gpt_for_model(&request.model)
+                    } else {
+                        gateway_effort_wire(level, &request.model)
+                    }
+                );
             }
             ReasoningRequest::BudgetTokens(budget) => {
                 payload["reasoning_effort"] = json!(reasoning_effort_for(&request.model, budget));
