@@ -119,13 +119,45 @@ fn every_text_that_says_how_often_a_room_wakes_a_pane_says_the_constant() {
             "a catalog's hint does not say {word}: {line}"
         );
     }
-    let room = GUIDE
-        .split_once("## Writing to another agent pane")
-        .map(|(_, rest)| rest)
-        .expect("the guide's room section is gone");
+    let room = guide_room_section();
     assert!(
         room.contains(words[5]),
         "the guide's room section does not say {}",
         words[5]
+    );
+}
+
+const CORE_ROOM: &str = include_str!("../../../zerocode-core/src/orchestration/room.rs");
+
+/// The guide's room section alone — up to the next section's heading, so a
+/// word said only further down does not pass for it (review t-105808).
+fn guide_room_section() -> &'static str {
+    let rest = GUIDE
+        .split_once("## Writing to another agent pane")
+        .map(|(_, rest)| rest)
+        .expect("the guide's room section is gone");
+    rest.split_once("\n## ")
+        .map_or(rest, |(section, _)| section)
+}
+
+/// How many room letters two panes may write each other is one number, the
+/// ledger's `PAIR_LETTERS`, and the guide says that number (review
+/// t-105808: it said 「a handful each way」 of a limit that counts both ways).
+#[test]
+fn the_guide_says_the_pair_limit_the_ledger_holds() {
+    let pair: usize = CORE_ROOM
+        .split_once("pub const PAIR_LETTERS: usize = ")
+        .and_then(|(_, rest)| rest.split_once(';'))
+        .and_then(|(value, _)| value.trim().parse().ok())
+        .expect("PAIR_LETTERS is gone from the room");
+    let said: &[(usize, &str)] = &[(10, "ten room letters, both ways together")];
+    let words = said
+        .iter()
+        .find(|(count, _)| *count == pair)
+        .map(|(_, words)| *words)
+        .unwrap_or_else(|| panic!("PAIR_LETTERS is {pair}: say it in the guide's room section"));
+    assert!(
+        guide_room_section().contains(words),
+        "the guide's room section does not say {words}"
     );
 }

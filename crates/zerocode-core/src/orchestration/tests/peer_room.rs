@@ -1095,3 +1095,67 @@ fn two_panes_write_each_other_at_most_the_pair_limit_between_the_persons_inputs(
     };
     answered(&send(&mut bench, &after, LONE, &other, "after the person"));
 }
+
+/// The tenth letter between two panes may be a question, and its answer is
+/// not refused — an asker waiting on it would wait on nobody (review
+/// t-105808). An answer to that answer is a new letter, and refused, as is the
+/// pair's next new letter (review t-105844, 2).
+#[test]
+fn the_answer_to_a_question_at_the_pairs_limit_is_not_refused() {
+    let mut bench = Bench::new();
+    let launcher = on();
+    let lone = format!("pane:team-1/{LONE}");
+    let other = format!("pane:team-1/{OTHER}");
+    for at in 0..room::PAIR_LETTERS - 1 {
+        let (from, to) = match at % 2 {
+            0 => (LONE, other.as_str()),
+            _ => (OTHER, lone.as_str()),
+        };
+        answered(&send(&mut bench, &launcher, from, to, "back and forth"));
+    }
+    let asked = answered(&typed(
+        &mut bench,
+        &launcher,
+        LONE,
+        Some(A),
+        &[
+            "send",
+            "--to",
+            other.as_str(),
+            "--type",
+            "question",
+            "--body",
+            "the tenth: which?",
+        ],
+    ));
+    let question = asked["messageId"].as_str().expect("a question").to_string();
+    let answer = answered(&typed(
+        &mut bench,
+        &launcher,
+        OTHER,
+        Some(A),
+        &[
+            "reply",
+            "--to-message",
+            question.as_str(),
+            "--body",
+            "this one",
+        ],
+    ));
+    let answer = answer["messageId"].as_str().expect("an answer").to_string();
+    let why = refused(&typed(
+        &mut bench,
+        &launcher,
+        LONE,
+        Some(A),
+        &[
+            "reply",
+            "--to-message",
+            answer.as_str(),
+            "--body",
+            "and back",
+        ],
+    ));
+    assert!(why.contains("since the person last typed"), "{why}");
+    refused(&send(&mut bench, &launcher, OTHER, &lone, "one more"));
+}

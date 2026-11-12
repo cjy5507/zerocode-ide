@@ -26521,7 +26521,13 @@ fn plan_inner(
                 .message(&thread)
                 .ok_or_else(|| format!("unknown message: {thread}"))?;
             let (to, kind) = (answered.from.clone(), answered.kind);
-            room::pair_allowed(ledger, launcher, &run_id, &seat, Some(&to))?;
+            /* The answer to a question that began its thread is not refused
+             * at the limit — its asker waits on it (review t-105808); every
+             * other answer is, an answer to that answer too (review
+             * t-105844, 2). */
+            if !(kind == MessageKind::Question && answered.thread.is_none()) {
+                room::pair_allowed(ledger, launcher, &run_id, &seat, Some(&to))?;
+            }
             // The run the writer reads, when the writer is another run's
             // coordinator: the answer is delivered there too, so one
             // `reply` reaches it whatever run the letter was filed in — a

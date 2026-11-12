@@ -1447,6 +1447,13 @@ fn shared_native_open_validates_identity_fields_limits_and_listener_lifetime() {
      * it (2026-11-12, j-1794454394032-4070, a loaded parallel run). What the
      * gate guarantees is asked instead: nothing answering that port now says
      * `ok` to this job's capability. */
+    // Off macOS a socket is close-on-exec from its first step: the refused
+    // connect is the whole proof there, and the listener's lifetime is pinned.
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err(),
+        "gate listener accepted another connection after binding"
+    );
     if let Ok(mut second) = TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
         second
             .set_read_timeout(Some(Duration::from_millis(500)))

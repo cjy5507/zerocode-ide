@@ -338,7 +338,9 @@ pub(super) fn ask_allowed(
 /// A room letter from `seat` to `to`, held to [`PAIR_LETTERS`] between the two
 /// panes since the person last typed in either (`Launcher::person_input_ms`) —
 /// counted in the room, both ways (review t-105450, held for v1.1.146). Not a
-/// room, or not a pane: nothing to count.
+/// room, or not a pane: nothing to count — a conversation a coordinator
+/// carries on in its own run is not counted here yet (review t-105808, 1:
+/// v1.1.147).
 pub(super) fn pair_allowed(
     ledger: &Ledger,
     launcher: &dyn Launcher,
