@@ -12,15 +12,16 @@
 //! window names the key or this module's writer — the source contract
 //! `desk_guard` holds that.
 //!
-//! The file is the one every window writer of zo's settings uses
-//! ([`api_routers::zo_settings_path`]), which is the one that wins zo's
-//! merge. Both answers are written as they are — `false` for off, `true` for
-//! on — so what the person pressed is what zo reads even where a lower home
-//! of zo's (`ZO_HOME` under a `ZO_CONFIG_HOME`, the legacy home) says
-//! otherwise. A key written by hand in such a lower home while this file is
-//! silent is not shown here: the window reads the one file it writes.
+//! zo merges the settings of its homes — `ZO_CONFIG_HOME`, `ZO_HOME`, `~/.zo`,
+//! the legacy home — and the highest that names a key wins. The read follows
+//! that order (`settings_files_from`): the first file that names the key is
+//! the answer, as zo's own `persons_dream_lessons` reads its key. The write
+//! goes to the highest home's file, the one every window writer of zo's
+//! settings uses ([`api_routers::zo_settings_path`]), and both answers are
+//! written as they are — `false` for off, `true` for on — so what the person
+//! pressed is what zo reads even where a lower home says otherwise.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -30,6 +31,14 @@ use crate::api_routers;
 /// zo's settings key for the guard: zo's `desk_guard::SETTING`, held to the
 /// same letters by this module's test.
 pub(crate) const DESK_GUARD_KEY: &str = "deskGuard";
+
+/// zo's homes below the person's home folder, the one it reads first first:
+/// its own, then the legacy one it still reads (zo's `core_types::paths`,
+/// held to the same letters by this module's test).
+const HOMES_BELOW_HOME: [&str; 2] = [".zo", ".forge"];
+
+/// The settings file's name in each of zo's homes.
+const SETTINGS_FILE: &str = "settings.json";
 
 /// Why the settings cannot say whether the guard stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,27 +77,78 @@ impl DeskGuardSetting {
     }
 }
 
-/// What the settings file at `path` says, read as zo reads the key: absent —
-/// the file or the key — is on, a boolean is itself, anything else is not an
-/// answer.
-fn setting_at(path: Option<&Path>) -> DeskGuardSetting {
-    let Some(root) = path.and_then(|path| api_routers::read_zo_settings_root(path).ok()) else {
+/// The person's zo settings files, the one that wins zo's merge first: the
+/// file the window writes ([`api_routers::zo_settings_root_and_path_from`]),
+/// then the files of zo's lower homes in zo's own order.
+fn settings_files_from(
+    config_home: Option<&Path>,
+    zo_home: Option<&Path>,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let Some((_, written)) =
+        api_routers::zo_settings_root_and_path_from(config_home, zo_home, home)
+    else {
+        return Vec::new();
+    };
+    let mut files = vec![written];
+    let below_home = home
+        .into_iter()
+        .flat_map(|home| HOMES_BELOW_HOME.iter().map(move |name| home.join(name)));
+    for root in zo_home.map(Path::to_path_buf).into_iter().chain(below_home) {
+        let file = root.join(SETTINGS_FILE);
+        if !root.as_os_str().is_empty() && !files.contains(&file) {
+            files.push(file);
+        }
+    }
+    files
+}
+
+/// [`settings_files_from`] for this window: the homes its environment names,
+/// as [`api_routers::zo_settings_path`] reads them.
+fn settings_files() -> Vec<PathBuf> {
+    settings_files_from(
+        std::env::var_os("ZO_CONFIG_HOME").as_deref().map(Path::new),
+        std::env::var_os("ZO_HOME").as_deref().map(Path::new),
+        dirs::home_dir().as_deref(),
+    )
+}
+
+/// What `files` say — the person's zo settings files, highest first — read
+/// as zo reads the key: the first file that names it is the answer, a
+/// boolean is itself, anything else is not an answer, and no file naming it
+/// is on. The first file is the one a press writes, so it has to read; a
+/// lower one that does not is passed over, as zo's own read of a person's
+/// key passes it.
+fn setting_in(files: &[PathBuf]) -> DeskGuardSetting {
+    let Some((written, lower)) = files.split_first() else {
         return DeskGuardSetting::untold(Untold::Unreadable);
     };
-    match root.get(DESK_GUARD_KEY) {
+    let Ok(root) = api_routers::read_zo_settings_root(written) else {
+        return DeskGuardSetting::untold(Untold::Unreadable);
+    };
+    let named = root.get(DESK_GUARD_KEY).cloned().or_else(|| {
+        lower.iter().find_map(|file| {
+            api_routers::read_zo_settings_root(file)
+                .ok()?
+                .remove(DESK_GUARD_KEY)
+        })
+    });
+    match named {
         None => DeskGuardSetting::told(true),
-        Some(Value::Bool(on)) => DeskGuardSetting::told(*on),
+        Some(Value::Bool(on)) => DeskGuardSetting::told(on),
         Some(_) => DeskGuardSetting::untold(Untold::NotBoolean),
     }
 }
 
-/// Write the guard's answer into the settings file at `path`, every other key
-/// as it stood, and say what the file says afterwards. A file that already
-/// says `on` is not written again; one that does not read is left as it is
-/// and refused.
-fn turn_at(path: Option<&Path>, on: bool) -> Result<DeskGuardSetting, String> {
-    let path = path.ok_or_else(|| "설정 경로를 찾을 수 없습니다".to_string())?;
-    api_routers::update_zo_settings_root_if_changed(path, |root| {
+/// Write the guard's answer into the first of `files` — the one that wins
+/// zo's merge — every other key as it stood, and say what the files say
+/// afterwards. A file that already says `on` is not written again; one that
+/// does not read is left as it is and refused.
+fn turn_in(files: &[PathBuf], on: bool) -> Result<DeskGuardSetting, String> {
+    let written = files
+        .first()
+        .ok_or_else(|| "설정 경로를 찾을 수 없습니다".to_string())?;
+    api_routers::update_zo_settings_root_if_changed(written, |root| {
         let said = Value::Bool(on);
         if root.get(DESK_GUARD_KEY) == Some(&said) {
             return Ok(false);
@@ -96,7 +156,7 @@ fn turn_at(path: Option<&Path>, on: bool) -> Result<DeskGuardSetting, String> {
         root.insert(DESK_GUARD_KEY.to_string(), said);
         Ok(true)
     })?;
-    Ok(setting_at(Some(path)))
+    Ok(setting_in(files))
 }
 
 /// What the person's zo settings say about the desk guard. A read: asked
@@ -104,7 +164,7 @@ fn turn_at(path: Option<&Path>, on: bool) -> Result<DeskGuardSetting, String> {
 /// to the front with them open.
 #[tauri::command]
 pub(crate) async fn desk_guard_setting() -> Result<DeskGuardSetting, String> {
-    tauri::async_runtime::spawn_blocking(|| setting_at(api_routers::zo_settings_path().as_deref()))
+    tauri::async_runtime::spawn_blocking(|| setting_in(&settings_files()))
         .await
         .map_err(|error| error.to_string())
 }
@@ -117,17 +177,13 @@ pub(crate) async fn desk_guard_setting() -> Result<DeskGuardSetting, String> {
 /// that moves the person's screen.
 #[tauri::command]
 pub(crate) async fn set_desk_guard(on: bool) -> Result<DeskGuardSetting, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        turn_at(api_routers::zo_settings_path().as_deref(), on)
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || turn_in(&settings_files(), on))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use serde_json::json;
 
     use super::*;
@@ -162,11 +218,14 @@ mod tests {
     #[test]
     fn settings_that_do_not_name_the_key_leave_the_guard_on() {
         let (_home, settings) = home();
-        assert_eq!(setting_at(Some(&settings)), DeskGuardSetting::told(true));
+        assert_eq!(
+            setting_in(std::slice::from_ref(&settings)),
+            DeskGuardSetting::told(true)
+        );
         for text in ["", "{}", r#"{"model": "acme-large", "providers": []}"#] {
             write(&settings, text);
             assert_eq!(
-                setting_at(Some(&settings)),
+                setting_in(std::slice::from_ref(&settings)),
                 DeskGuardSetting::told(true),
                 "{text}"
             );
@@ -177,9 +236,15 @@ mod tests {
     fn the_file_says_off_and_on() {
         let (_home, settings) = home();
         write(&settings, r#"{"deskGuard": false}"#);
-        assert_eq!(setting_at(Some(&settings)), DeskGuardSetting::told(false));
+        assert_eq!(
+            setting_in(std::slice::from_ref(&settings)),
+            DeskGuardSetting::told(false)
+        );
         write(&settings, r#"{"deskGuard": true}"#);
-        assert_eq!(setting_at(Some(&settings)), DeskGuardSetting::told(true));
+        assert_eq!(
+            setting_in(std::slice::from_ref(&settings)),
+            DeskGuardSetting::told(true)
+        );
     }
 
     #[test]
@@ -188,7 +253,7 @@ mod tests {
         for value in [r#""off""#, "0", "null", "[]", "{}"] {
             write(&settings, &format!(r#"{{"deskGuard": {value}}}"#));
             assert_eq!(
-                setting_at(Some(&settings)),
+                setting_in(std::slice::from_ref(&settings)),
                 DeskGuardSetting::untold(Untold::NotBoolean),
                 "{value}"
             );
@@ -196,17 +261,17 @@ mod tests {
         for text in ["{", "[]", r#"{"providers": {}, "deskGuard": false}"#] {
             write(&settings, text);
             assert_eq!(
-                setting_at(Some(&settings)),
+                setting_in(std::slice::from_ref(&settings)),
                 DeskGuardSetting::untold(Untold::Unreadable),
                 "{text}"
             );
         }
         assert_eq!(
-            setting_at(None),
+            setting_in(&[]),
             DeskGuardSetting::untold(Untold::Unreadable)
         );
         assert_eq!(
-            serde_json::to_value(setting_at(None)).expect("a report"),
+            serde_json::to_value(setting_in(&[])).expect("a report"),
             json!({ "on": null, "why": "unreadable" })
         );
         assert_eq!(
@@ -233,7 +298,7 @@ mod tests {
         );
 
         assert_eq!(
-            turn_at(Some(&settings), false),
+            turn_in(std::slice::from_ref(&settings), false),
             Ok(DeskGuardSetting::told(false))
         );
         let mut off = before.clone();
@@ -243,7 +308,7 @@ mod tests {
         // On is written too: this file wins zo's merge, so a lower home of
         // zo's that says off no longer decides.
         assert_eq!(
-            turn_at(Some(&settings), true),
+            turn_in(std::slice::from_ref(&settings), true),
             Ok(DeskGuardSetting::told(true))
         );
         let mut on = before;
@@ -256,7 +321,7 @@ mod tests {
         let (_home, settings) = home();
         assert!(!settings.exists());
         assert_eq!(
-            turn_at(Some(&settings), false),
+            turn_in(std::slice::from_ref(&settings), false),
             Ok(DeskGuardSetting::told(false))
         );
         assert_eq!(document(&settings), json!({ "deskGuard": false }));
@@ -268,7 +333,7 @@ mod tests {
         let text = "{\"deskGuard\":false,   \"model\":\"acme-large\"}";
         write(&settings, text);
         assert_eq!(
-            turn_at(Some(&settings), false),
+            turn_in(std::slice::from_ref(&settings), false),
             Ok(DeskGuardSetting::told(false))
         );
         assert_eq!(
@@ -283,12 +348,12 @@ mod tests {
         let (_home, settings) = home();
         let text = "{ \"deskGuard\": false,";
         write(&settings, text);
-        assert!(turn_at(Some(&settings), true).is_err());
+        assert!(turn_in(std::slice::from_ref(&settings), true).is_err());
         assert_eq!(
             std::fs::read_to_string(&settings).expect("the file reads"),
             text
         );
-        assert!(turn_at(None, false).is_err());
+        assert!(turn_in(&[], false).is_err());
     }
 
     /// A value that is no boolean is the person's typing slip in their own
@@ -299,10 +364,137 @@ mod tests {
         let (_home, settings) = home();
         write(&settings, r#"{"deskGuard": "off"}"#);
         assert_eq!(
-            turn_at(Some(&settings), false),
+            turn_in(std::slice::from_ref(&settings), false),
             Ok(DeskGuardSetting::told(false))
         );
         assert_eq!(document(&settings), json!({ "deskGuard": false }));
+    }
+
+    #[test]
+    fn the_files_are_zos_homes_in_zos_order_and_the_first_is_the_one_the_window_writes() {
+        let paths = include_str!("../../../../zo-ide/crates/core-types/src/paths.rs");
+        for line in [
+            "pub const ZO_CONFIG_HOME_ENV: &str = \"ZO_CONFIG_HOME\";",
+            "pub const ZO_HOME_ENV: &str = \"ZO_HOME\";",
+            "pub const ZO_DIR_NAME: &str = \".zo\";",
+            "const LEGACY_FORGE_DIR_NAME: &str = \".forge\";",
+        ] {
+            assert!(paths.contains(line), "zo's homes no longer read: {line}");
+        }
+        let (config, zo, home) = (
+            Path::new("/Users/dev/zo-config"),
+            Path::new("/Users/dev/zo-home"),
+            Path::new("/Users/dev"),
+        );
+        let file = |root: &str| PathBuf::from(root).join("settings.json");
+        for (config_home, zo_home, expected) in [
+            (
+                None,
+                None,
+                vec![file("/Users/dev/.zo"), file("/Users/dev/.forge")],
+            ),
+            (
+                Some(config),
+                None,
+                vec![
+                    file("/Users/dev/zo-config"),
+                    file("/Users/dev/.zo"),
+                    file("/Users/dev/.forge"),
+                ],
+            ),
+            (
+                None,
+                Some(zo),
+                vec![
+                    file("/Users/dev/zo-home"),
+                    file("/Users/dev/.zo"),
+                    file("/Users/dev/.forge"),
+                ],
+            ),
+            (
+                Some(config),
+                Some(zo),
+                vec![
+                    file("/Users/dev/zo-config"),
+                    file("/Users/dev/zo-home"),
+                    file("/Users/dev/.zo"),
+                    file("/Users/dev/.forge"),
+                ],
+            ),
+            // A home named twice is read once.
+            (
+                Some(Path::new("/Users/dev/.zo")),
+                Some(Path::new("/Users/dev/.zo")),
+                vec![file("/Users/dev/.zo"), file("/Users/dev/.forge")],
+            ),
+        ] {
+            let files = settings_files_from(config_home, zo_home, Some(home));
+            assert_eq!(files, expected);
+            assert_eq!(
+                files.first(),
+                api_routers::zo_settings_root_and_path_from(config_home, zo_home, Some(home))
+                    .map(|(_, written)| written)
+                    .as_ref(),
+                "the first file is the one every window writer of zo's settings writes"
+            );
+        }
+        assert_eq!(
+            settings_files_from(Some(config), None, None),
+            vec![file("/Users/dev/zo-config")]
+        );
+        assert!(settings_files_from(None, None, None).is_empty());
+    }
+
+    /// zo merges its homes, so a lower home's `false` turns the guard off
+    /// while the file the window writes is silent: the switch says off, and a
+    /// press writes the answer where it wins.
+    #[test]
+    fn a_lower_home_that_names_the_key_is_the_answer_until_the_written_file_names_it() {
+        let (home, low) = home();
+        let high = home.path().join("zo-config").join("settings.json");
+        let files = [high.clone(), low.clone()];
+
+        write(&low, r#"{"deskGuard": false}"#);
+        assert_eq!(setting_in(&files), DeskGuardSetting::told(false));
+        write(&high, r#"{"model": "acme-large"}"#);
+        assert_eq!(setting_in(&files), DeskGuardSetting::told(false));
+
+        assert_eq!(turn_in(&files, true), Ok(DeskGuardSetting::told(true)));
+        assert_eq!(
+            document(&high),
+            json!({ "model": "acme-large", "deskGuard": true })
+        );
+        assert_eq!(document(&low), json!({ "deskGuard": false }));
+
+        // The written file's answer stands over the lower one's, whatever it is.
+        write(&high, r#"{"deskGuard": false}"#);
+        write(&low, r#"{"deskGuard": true}"#);
+        assert_eq!(setting_in(&files), DeskGuardSetting::told(false));
+        write(&high, r#"{"deskGuard": "off"}"#);
+        assert_eq!(
+            setting_in(&files),
+            DeskGuardSetting::untold(Untold::NotBoolean)
+        );
+
+        // A lower file is read only for the key: one that does not read is
+        // passed over, one that names something else is not an answer.
+        write(&high, "{}");
+        write(&low, "{");
+        assert_eq!(setting_in(&files), DeskGuardSetting::told(true));
+        write(&low, r#"{"deskGuard": 0}"#);
+        assert_eq!(
+            setting_in(&files),
+            DeskGuardSetting::untold(Untold::NotBoolean)
+        );
+
+        // The file a press writes has to read, whatever a lower one says.
+        write(&high, "{");
+        write(&low, r#"{"deskGuard": false}"#);
+        assert_eq!(
+            setting_in(&files),
+            DeskGuardSetting::untold(Untold::Unreadable)
+        );
+        assert!(turn_in(&files, true).is_err());
     }
 
     /// The window's second wall: the write runs for the person's own hand and

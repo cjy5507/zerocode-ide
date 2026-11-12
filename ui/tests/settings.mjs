@@ -6387,6 +6387,23 @@ await test("zo 화면 조작 막기 줄은 zo 설정 파일이 말하는 대로 
       window.__deskGuardErrors = [];
       window.showError = (message) => window.__deskGuardErrors.push(String(message));
     });
+    // Before the first answer the switch is neither on nor off: a window that
+    // has not opened these settings yet has asked nothing.
+    const fresh = await context.newPage();
+    const freshId = "desk-guard-fresh";
+    try {
+      if (PLATFORM_OVERRIDE) await addReportedPlatform(fresh, PLATFORM_OVERRIDE);
+      await installTauri(fresh, freshId);
+      attachFaultRecorder(fresh, freshId);
+      await bootPage(fresh, freshId);
+      assertEqual(backend.last(freshId, "desk_guard_setting"), null, "a window read the desk guard before its settings were opened");
+      assertEqual(await fresh.evaluate(() => {
+        const control = document.getElementById("computer-desk-guard");
+        return { checked: control.checked, neither: control.indeterminate, locked: control.disabled };
+      }), untold, "an unread switch is drawn as an answer");
+    } finally {
+      await fresh.close();
+    }
     backend.deskGuard = { on: true, why: null };
     const asked = backend.calls.length;
     await openSettings(pageA, "computer-use");

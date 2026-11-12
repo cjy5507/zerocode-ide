@@ -3402,9 +3402,12 @@ el("computer-shared-desktop").addEventListener("change", () => {
  * what that file says (`desk_guard_setting`) — when this page is opened and
  * when the window comes back to the front with it open — and never paints a
  * guess: a file that does not read, or a value that is neither on nor off,
- * locks the switch, draws it as neither and says why. The write is the
- * person's alone (`set_desk_guard`): it carries the hand of the press. */
+ * locks the switch, draws it as neither and says why — and so does the time
+ * before the first answer: the markup can lock the switch but cannot draw it
+ * as neither, so the script does once as it loads. The write is the person's
+ * alone (`set_desk_guard`): it carries the hand of the press. */
 let deskGuardPaint = 0;
+el("computer-desk-guard").indeterminate = true;
 
 function paintDeskGuard(said) {
   const control = el("computer-desk-guard");

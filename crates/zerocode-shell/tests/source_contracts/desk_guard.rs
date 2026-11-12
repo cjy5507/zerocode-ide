@@ -6,6 +6,11 @@
 //! else: not by a press an agent makes in the window, not by a CLI verb, an
 //! agent tool or a ledger verb, and not by a page a work browser shows.
 //!
+//! One road it does not hold, and no person-only switch does: a desktop
+//! press an agent sends with `--allow-self` once the person has allowed the
+//! shared mouse and keyboard lands on this window as a trusted event, which
+//! the page reads as the person's hand (review t-105852, A).
+//!
 //! It holds the window's roads. The file the switch writes is the person's
 //! own, and a model allowed to write anywhere can still edit it — zo's guard
 //! is a railing, not a boundary (`zo-ide/crates/runtime/src/desk_guard.rs`).
@@ -254,16 +259,16 @@ fn the_switch_that_takes_the_desk_guard_down_is_reached_by_the_persons_hand_alon
         "the module writes zo's settings in one place"
     );
     assert!(
-        block_after(&module, "fn turn_at(").contains("update_zo_settings_root_if_changed("),
+        block_after(&module, "fn turn_in(").contains("update_zo_settings_root_if_changed("),
         "the one write is the person's command's"
     );
     assert_eq!(
-        module.matches("turn_at(").count() - module.matches("fn turn_at(").count(),
+        module.matches("turn_in(").count() - module.matches("fn turn_in(").count(),
         1 + module
             .split("#[cfg(test)]")
             .nth(1)
             .expect("the module's tests")
-            .matches("turn_at(")
+            .matches("turn_in(")
             .count(),
         "the writer is called by the one command, and by the module's tests"
     );
@@ -275,9 +280,25 @@ fn the_switch_that_takes_the_desk_guard_down_is_reached_by_the_persons_hand_alon
     );
 
     // ── 3. A page a work browser shows ──────────────────────────────────
-    // The window's commands are granted to its own two documents by name,
-    // never to the window as a whole: a browser pane is a webview of the
-    // same window showing somebody else's page, and it can invoke nothing.
+    // A browser pane is a webview of the same window showing somebody
+    // else's page. Two devices keep it from the window's commands, and the
+    // list of webviews in the capability file is neither: Tauri asks the
+    // ACL about an app command only for a remote origin (this app declares
+    // no command manifest), so what refuses a guest page is that no
+    // capability grants a remote origin — and what keeps a pane off the
+    // app's own origin, where the window's script would boot with IPC, is
+    // the one function both the address bar and a page's own navigation ask.
+    let browser = file("crates/zerocode-shell/src/browser_runtime.rs");
+    let browsable = block_after(&browser, "pub(super) fn browsable_target(");
+    assert!(
+        browsable.contains("host == \"tauri.localhost\" || host.ends_with(\".tauri.localhost\")")
+            && browsable.contains("_ => false,"),
+        "a browser pane may stand on the app's own origin:\n{browsable}"
+    );
+    assert!(
+        !browsable.contains("\"tauri\""),
+        "a browser pane is let onto the app's own scheme:\n{browsable}"
+    );
     let capabilities = repository().join("crates/zerocode-shell/capabilities");
     let granted: Vec<String> = std::fs::read_dir(&capabilities)
         .expect("the capabilities folder")
@@ -293,17 +314,18 @@ fn the_switch_that_takes_the_desk_guard_down_is_reached_by_the_persons_hand_alon
     assert_eq!(
         granted,
         ["default.json"],
-        "a second capability is a second audience for the window's commands"
+        "a second capability file may grant what this one withholds: read it here first"
     );
     let capability = file("crates/zerocode-shell/capabilities/default.json");
     assert!(
-        capability.contains("\"webviews\": [\"main\", \"board-popout\"]"),
+        !capability.contains("\"remote\":"),
+        "the capability grants a remote origin: a guest page could invoke the window's commands"
+    );
+    // Not what stops a guest page, but what the file says of itself: its
+    // plugin permissions go to the window's own two documents by name.
+    assert!(
+        capability.contains("\"webviews\": [\"main\", \"board-popout\"]")
+            && !capability.contains("\"windows\":"),
         "the capability no longer names the window's own two documents"
     );
-    for wider in ["\"windows\":", "\"remote\":"] {
-        assert!(
-            !capability.contains(wider),
-            "the capability grants {wider} — wider than the window's own documents"
-        );
-    }
 }
