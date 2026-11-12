@@ -19,12 +19,13 @@
 #     (256 on this Mac).
 # What lane.sh exports to its gates, the command gets too (2026-11-11: a test
 # that counted the names it was handed was red in the lane alone, because the
-# lane hands two that a run made here did not): CARGO_INCREMENTAL as the table
-# says it (0), and NODE_PATH as the repository's own checkout's node_modules
+# lane hands names that a run made here did not): CARGO_INCREMENTAL and
+# WINDOW_SHARDS (the window harness's browsers) as the table says them, and
+# NODE_PATH as the repository's own checkout's node_modules
 # (the folder the lane links into its scratch), when that folder exists. NODE_PATH
 # reaches only `require`: an ES module's `import` resolves through a node_modules
 # folder beside the code, so a worktree without one links it, as the lane links
-# its scratch's. The caller's value of either wins when set, and so does its
+# its scratch's. The caller's value of any of the three wins when set, and so does its
 # CARGO_TARGET_DIR (where cargo builds), which the lane also sets to its own.
 #
 # The exit code is the command's (128+N when a signal ended it). A Ctrl-C or a
@@ -44,6 +45,7 @@ if [ -z "$lane_path" ]; then
   exit 2
 fi
 lane_incremental=$(said CARGO_INCREMENTAL)
+lane_shards=$(said WINDOW_SHARDS)
 common=$(said RELEASE_GIT_COMMON_DIR)
 lane_node=
 [ -z "$common" ] || [ ! -d "$(dirname "$common")/node_modules" ] || lane_node="$(dirname "$common")/node_modules"
@@ -55,13 +57,15 @@ node=${NODE_PATH:-$lane_node}
 [ -z "$node" ] || keep+=(NODE_PATH="$node")
 incremental=${CARGO_INCREMENTAL:-$lane_incremental}
 [ -z "$incremental" ] || keep+=(CARGO_INCREMENTAL="$incremental")
+shards=${WINDOW_SHARDS:-$lane_shards}
+[ -z "$shards" ] || keep+=(WINDOW_SHARDS="$shards")
 # Python only for setsid and setrlimit. Whatever its launcher adds to its own
 # environment (Apple's /usr/bin/python3 is an xcrun shim that sets SDKROOT and
 # CPATH) stays out: the command gets exactly the names given here.
 exec env -i "${keep[@]}" python3 -I -c '
 import os, resource, signal, sys
 files, command = int(sys.argv[1]), sys.argv[2:]
-names = ("HOME", "PATH", "CARGO_TARGET_DIR", "NODE_PATH", "CARGO_INCREMENTAL")
+names = ("HOME", "PATH", "CARGO_TARGET_DIR", "NODE_PATH", "CARGO_INCREMENTAL", "WINDOW_SHARDS")
 environment = {name: os.environ[name] for name in names if name in os.environ}
 child = os.fork()
 if child == 0:

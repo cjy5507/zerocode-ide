@@ -1105,6 +1105,34 @@ class Cap(LaneCase):
         out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
         self.assertIn("CARGO_INCREMENTAL='0'", out.stdout.splitlines())
 
+    def test_the_gates_split_the_window_harness_and_a_lane_started_with_one_browser_does_not(self):
+        # 2026-11-12: the window harness took 1,723 s in one browser in v1.1.144's gate-root and 444–454 s split
+        # four ways (6312/6312 three times). The lane hands the split to its gates (the harness reads
+        # WINDOW_SHARDS; a solo judgment names its suites and is never split), and RELEASE_WINDOW_SHARDS given
+        # when the lane starts takes it back to one browser without a commit.
+        def table(env):
+            out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, env=env).stdout
+            return re.search(r"^WINDOW_SHARDS='(.*)'$", out, re.M).group(1)
+        asked = table(self.lane.env())
+        self.assertGreater(int(asked), 1, "the lane splits the window harness")
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(DISK_FREE_GB=100)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        gates = [l for l in self.lane.stub_lines() if " gate " in l and "target=" in l]
+        self.assertEqual(len(gates), 2, gates)
+        for line in gates:
+            self.assertIn(f"shards={asked}", line.split())
+        self.lane.extra_env["RELEASE_WINDOW_SHARDS"] = "1"
+        self.assertEqual(table(self.lane.env()), "1")
+        since = len(self.lane.stub_lines())
+        self.lane.enqueue(SHA_B)
+        r = self.lane.run(DISK_FREE_GB=100)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        gates = [l for l in self.lane.stub_lines()[since:] if " gate " in l and "target=" in l]
+        self.assertEqual(len(gates), 2, gates)
+        for line in gates:
+            self.assertIn("shards=1", line.split())
+
     def test_the_repositorys_own_units_are_dropped_and_the_registry_ones_stay_warm(self):
         """Every unit of a crate this repository defines is rebuilt in every run
         (the scratch is a fresh clone), and the ones an earlier version left are
@@ -3141,8 +3169,8 @@ class Stoppable(LaneCase):
 
 class LaneEnv(unittest.TestCase):
     """`just lane-env <recipe>` (tools/release/lane-env.sh, 2026-11-10): a command run the way the lane's
-    launchd job runs its gates — HOME and lane.sh's LAUNCHD_PATH, the two names lane.sh exports to its gates
-    (CARGO_INCREMENTAL, NODE_PATH) unless the caller set its own, and nothing else of the caller's but where it
+    launchd job runs its gates — HOME and lane.sh's LAUNCHD_PATH, the names lane.sh exports to its gates
+    (CARGO_INCREMENTAL, WINDOW_SHARDS, NODE_PATH) unless the caller set its own, and nothing else of the caller's but where it
     builds; no controlling terminal, stdin at its end, launchd's open-file limit — with the command's own exit
     code. A test red only in the lane is reproduced in any checkout with it."""
 
@@ -3150,21 +3178,22 @@ class LaneEnv(unittest.TestCase):
     PROBE = ('env | cut -d= -f1 | sort | tr "\\n" " "; echo; echo "PATH=$PATH"; echo "files=$(ulimit -n)"; '
              '(exec 3</dev/tty) 2>/dev/null && echo tty=yes || echo tty=no; '
              'read -r line && echo stdin=read || echo stdin=end; '
-             'echo "node=${NODE_PATH-}"; echo "incremental=${CARGO_INCREMENTAL-}"')
+             'echo "node=${NODE_PATH-}"; echo "incremental=${CARGO_INCREMENTAL-}"; echo "shards=${WINDOW_SHARDS-}"')
 
     # A caller's value of these wins over the lane's, so they are each test's to set. The release lane exports
-    # both to its gates, and a caller built from this process's whole environment handed them to every command
+    # all three to its gates, and a caller built from this process's whole environment handed them to every command
     # here: the exact-set check below was red in the lane alone (v1.1.140's third lane, 2026-11-11).
-    KEPT_WHEN_SET = ("NODE_PATH", "CARGO_INCREMENTAL")
+    KEPT_WHEN_SET = ("NODE_PATH", "CARGO_INCREMENTAL", "WINDOW_SHARDS")
 
     def lane_exports(self, env=None):
-        """What lane.sh exports to its gates, as lane-env finds it: CARGO_INCREMENTAL from the table, and NODE_PATH
-        as the node_modules beside the repository's own .git, when that folder exists."""
+        """What lane.sh exports to its gates, as lane-env finds it: CARGO_INCREMENTAL and WINDOW_SHARDS from the
+        table, and NODE_PATH as the node_modules beside the repository's own .git, when that folder exists."""
         table = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, check=True,
                                env={**os.environ, **(env or {})}).stdout
         common = re.search(r"^RELEASE_GIT_COMMON_DIR='(.*)'$", table, re.M).group(1)
         node = Path(common).parent / "node_modules"
         return {"incremental": re.search(r"^CARGO_INCREMENTAL='(.*)'$", table, re.M).group(1),
+                "shards": re.search(r"^WINDOW_SHARDS='(.*)'$", table, re.M).group(1),
                 "node": str(node) if node.is_dir() else ""}
 
     def run_env(self, *command, env=None, **options):
@@ -3190,17 +3219,26 @@ class LaneEnv(unittest.TestCase):
         names, values = self.said(run)
         exports = self.lane_exports()
         self.assertEqual(set(names) - {"PWD", "SHLVL", "_", "OLDPWD"},
-                         {"HOME", "PATH", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL"} | ({"NODE_PATH"} if exports["node"] else set()))
+                         {"HOME", "PATH", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "WINDOW_SHARDS"}
+                         | ({"NODE_PATH"} if exports["node"] else set()))
         self.assertEqual(values, {"PATH": lane_path, "files": files, "tty": "no", "stdin": "end", **exports})
         self.assertEqual(exports["incremental"], "0")
 
     def test_the_callers_node_path_and_incremental_win_and_nothing_python_adds_goes_along(self):
         run = self.run_env("bash", "-c", self.PROBE, env={"NODE_PATH": "/tmp/lane-env-node", "CARGO_INCREMENTAL": "1",
+                                                          "WINDOW_SHARDS": "2",
                                                           "SDKROOT": "/x", "CPATH": "/y", "PYTHONPATH": "/z"})
         names, values = self.said(run)
         self.assertEqual(set(names) - {"PWD", "SHLVL", "_", "OLDPWD"},
-                         {"HOME", "PATH", "CARGO_TARGET_DIR", "NODE_PATH", "CARGO_INCREMENTAL"})
-        self.assertEqual((values["node"], values["incremental"]), ("/tmp/lane-env-node", "1"))
+                         {"HOME", "PATH", "CARGO_TARGET_DIR", "NODE_PATH", "CARGO_INCREMENTAL", "WINDOW_SHARDS"})
+        self.assertEqual((values["node"], values["incremental"], values["shards"]), ("/tmp/lane-env-node", "1", "2"))
+
+    def test_a_lane_started_with_one_window_browser_hands_one_on(self):
+        # RELEASE_WINDOW_SHARDS is how a lane is started without the split (lane.sh): lane-env reads the table
+        # that variable shaped, so a command run as that lane runs it gets the same browser count.
+        _, values = self.said(self.run_env("bash", "-c", self.PROBE, env={"RELEASE_WINDOW_SHARDS": "1"}))
+        self.assertEqual(values["shards"], "1")
+        self.assertEqual(self.lane_exports({"RELEASE_WINDOW_SHARDS": "1"})["shards"], "1")
 
     def test_the_lanes_node_modules_are_handed_on_only_where_the_repository_has_them(self):
         # The lane exports the repository's own node_modules as NODE_PATH (lane.sh); a repository with none hands

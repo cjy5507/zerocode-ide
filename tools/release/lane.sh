@@ -81,6 +81,15 @@ QUIET_CAP_FLOOR_SECS=1200   # never ended sooner, however quick its usual time
 QUIET_SAMPLES=5             # the green lanes a recipe's usual time is the median of (the board's estimates read five too)
 QUIET_POLL_SECS=10          # how often the lane looks at a running gate's log
 TARGET_LANES="root-gate zo-gate root-release zo-release"
+# The window harness (ui/tests/window.mjs) split across this many browsers in the lane's gates
+# (ui/tests/window-shards.mjs). 2026-11-12, main 1ebcbba2c on this Mac: 1,723 s in one browser
+# (v1.1.144's gate-root), 451 · 444 · 454 s split four ways — 6312/6312 each time, its four shares
+# 436–450 s. The lane's own: `just verify` anywhere else (CI, another machine) stays one browser.
+# A run that names its suites — the lane's solo judgment — is never split. A lane started with
+# RELEASE_WINDOW_SHARDS=1 runs the harness in one browser again, with no commit; lane-env.sh hands
+# the same value to a command run as the lane runs it.
+RELEASE_WINDOW_SHARDS=${RELEASE_WINDOW_SHARDS:-4}
+export WINDOW_SHARDS=$RELEASE_WINDOW_SHARDS
 export CARGO_INCREMENTAL=0  # every cargo the lane runs, gates and solo judgments alike (their fingerprints must agree): a
                             # gate rebuilds the workspace crates every run (a new version, a new scratch), and the cache
                             # it leaves is the disk — root-gate held 11–12 G of its 18–26 G as incremental/, 7–8 folders a
@@ -183,7 +192,7 @@ PASSED=$RELEASE_HOME/passed           # <sha>-<root|zo>: a gate this lane ran wh
 if [ "${1:-}" = "--table" ]; then
   for k in DISK_FLOOR_GB TARGET_CAP_GB RECLAIM_BELOW_GB POLL_SECS THROTTLE_SECS ZO_PROFILE SOLO_RUNS CALM_LOAD CALM_WAIT_SECS \
            CALM_POLL_SECS PHASES PHASE_LANGS BUILD_ID BUILD_WORDS QUIET_FACTOR QUIET_CAP_FACTOR QUIET_FLOOR_SECS QUIET_CAP_FLOOR_SECS QUIET_SAMPLES QUIET_POLL_SECS \
-           RELEASE_GIT_COMMON_DIR TARGET_LANES CARGO_INCREMENTAL TOOLS \
+           RELEASE_GIT_COMMON_DIR TARGET_LANES CARGO_INCREMENTAL WINDOW_SHARDS TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
            RELEASE_ZO_BIN RELEASE_REPORT_ZO RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS PASSED RECEIPT_PY \
            RELEASE_BUILD_LINE RELEASE_COORD_RUN RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
@@ -598,7 +607,7 @@ run_gate() {
   target=$(target_dir "$lane-gate"); t0=$(now_s)
   dir=$(stub "GATE_$(upper "$lane")_JUSTDIR")
   if is_dry && [ -z "$dir" ]; then
-    stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset}${ONLY:+ only=$ONLY}"
+    stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset} shards=${WINDOW_SHARDS-unset}${ONLY:+ only=$ONLY}"
     sleep "$(stub "GATE_$(upper "$lane")_SLEEP" 0)"
     rc=$(stub "GATE_$(upper "$lane")_RC" 0)
     { echo "stub gate $lane"; if [ "$rc" != 0 ]; then echo "==> verify recipe test"; echo "failures:"; local f; for f in $(stub "GATE_$(upper "$lane")_FAILS"); do echo "    $f"; done; echo "test result: FAILED."; fi
@@ -607,7 +616,7 @@ run_gate() {
       local u; u=$(stub "GATE_$(upper "$lane")_UNNAMED" ""); [ -z "$u" ] || { echo "==> verify recipe $u"; echo "error: recipe \`$u\` failed on line 43 with exit code 101"; }
     } > "$log"
   else
-    if is_dry; then stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset} justdir${ONLY:+ only=$ONLY}"
+    if is_dry; then stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset} shards=${WINDOW_SHARDS-unset} justdir${ONLY:+ only=$ONLY}"
     else dir="$SCRATCH/$(gate_dir "$lane")"; fi
     # exec: the pid the lane holds is the gate script's own, the one process it ever signals.
     ( cd "$dir" && CARGO_TARGET_DIR=$target exec "$SELF_DIR/verify-every-recipe.sh" --stoppable ${ONLY:+--only "$ONLY"} ) > "$log" 2>&1 &
