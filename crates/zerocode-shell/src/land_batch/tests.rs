@@ -1506,21 +1506,34 @@ fn sweep_removes_only_ended_batches_older_than_keep() {
 /// The approval's first change: a fast-forward that outlives [`Policy::promote_budget`] is not
 /// killed. The press answers "still promoting", git runs to its end, and the settle writes
 /// `promoted` in the presser's name — the watcher when git ends, and the next run the same.
+///
+/// The stand-in git waits for the test's word rather than a fixed sleep, so a loaded machine slows
+/// the press without letting git end inside it (a 2 s sleep left a press under load no room), and
+/// it writes its exit whole before naming it: read the moment the name stood, a `>` redirect's
+/// file was still empty (144's gate, 2026-11-12: "git was stopped" for an exit read as "").
 #[cfg(unix)]
 #[test]
 fn promote_outlives_its_budget_is_not_killed_and_the_next_settle_records_promoted() {
-    const SLOW_SECS: u64 = 2;
+    /// The longest the stand-in git waits for the word: a press that waited for git past its
+    /// budget answers only after this, which the test then says.
+    const HELD_SECS: u64 = 30;
     let fixture = Fixture::new(1, &[]);
     let window = window(&fixture);
     let (mut state, _) = stacked(&fixture, &window);
     green(&mut state);
     let tip = state.stacked.clone().expect("a stack").tip;
+    let go = fixture.root.join("fast-forward.go");
+    let partial = fixture.root.join("fast-forward.partial");
     let done = fixture.root.join("fast-forward.done");
+    let held_looks = HELD_SECS * 20;
     let slow = script(
         &fixture.root.join("slow-git"),
         &format!(
-            "#!/bin/sh\nsleep {SLOW_SECS}\ngit \"$@\"\nrc=$?\necho $rc > '{}'\nexit $rc\n",
-            done.display()
+            "#!/bin/sh\ni=0\nwhile [ ! -e '{go}' ] && [ $i -lt {held_looks} ]; do sleep 0.05; i=$((i + 1)); done\n\
+             git \"$@\"\nrc=$?\necho $rc > '{partial}'\nmv '{partial}' '{done}'\nexit $rc\n",
+            go = go.display(),
+            partial = partial.display(),
+            done = done.display(),
         ),
     );
     let policy = Policy {
@@ -1542,7 +1555,7 @@ fn promote_outlives_its_budget_is_not_killed_and_the_next_settle_records_promote
         &window.roads,
     ));
     assert!(
-        started.elapsed() < Duration::from_secs(SLOW_SECS),
+        started.elapsed() < Duration::from_secs(HELD_SECS),
         "the press waited for git past its budget"
     );
     assert_eq!(answer["state"], "promoting", "{answer}");
@@ -1557,6 +1570,7 @@ fn promote_outlives_its_budget_is_not_killed_and_the_next_settle_records_promote
         "the promote's end was written while git ran"
     );
 
+    fs::write(&go, "").expect("the word that lets git run");
     let waited = Instant::now();
     while !done.exists() {
         assert!(
