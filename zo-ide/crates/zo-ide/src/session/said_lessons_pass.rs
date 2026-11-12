@@ -14,7 +14,10 @@
 //! of an over-cap tool result does, and a slow provider costs the lessons and
 //! not the pass. Only the idle pass asks — a pass at a compaction or at the
 //! session's end has no time for it — and a pane the ledger summoned as a
-//! worker never does: what is said there is a briefing.
+//! worker never does: what is said there is a briefing. It asks when a pass
+//! is due by the clock, whether or not the project has anything yet for a
+//! pass to read (`dreamer_hook::idle_pass`): a project's first lesson has to
+//! come from somewhere.
 //!
 //! What a session was asked about is marked before the request leaves
 //! (`runtime::memory::mark_said_asked`), by what was said: nothing the
@@ -22,7 +25,7 @@
 
 use std::path::Path;
 
-use decision_core::said_lessons::{worth_asking, Digest, DigestLimits, Offered, Pending};
+use decision_core::said_lessons::{worth_asking, Digest, DigestLimits, Offered, Pending, SECS_BETWEEN_ASKS};
 use runtime::memory::{
     mark_said_asked, record_said_lesson, said_asked, said_lessons_known, said_words_mark,
 };
@@ -65,19 +68,25 @@ impl Asking {
 }
 
 /// Before an idle pass that is due: ask what this session's words teach,
-/// where the person turned that on. Returns what became of it, and says it
-/// in the log by its counts — never by a lesson's words.
-pub(crate) fn ask_before_a_pass(cwd: &Path, session_id: &str, model: &str) -> Asking {
-    let asking = if turned_on(cwd) {
-        match messages_of(session_id) {
-            Some(messages) => ask_about(cwd, session_id, &messages, now_secs(), |digest, pending| {
+/// where the person turned that on. `transcript` is the session's own file,
+/// as the session that calls this holds it. Returns what became of it, and
+/// says it in the log by its counts — never by a lesson's words.
+pub(crate) fn ask_before_a_pass(cwd: &Path, session_id: &str, transcript: &Path, model: &str) -> Asking {
+    let now = now_secs();
+    let asking = if !turned_on(cwd) {
+        Asking::Off
+    } else if asked_a_moment_ago(cwd, session_id, now) {
+        // Known from the mark alone: the session's file is not read to learn
+        // that it is too soon.
+        Asking::NotWorthIt
+    } else {
+        match messages_in(transcript) {
+            Some(messages) => ask_about(cwd, session_id, &messages, now, |digest, pending| {
                 tools::said_lessons::ask(digest, pending, model, tools::said_lessons::PASS_ASK_WITHIN)
                     .map(|asked| asked.read.taken)
             }),
             None => Asking::Unread,
         }
-    } else {
-        Asking::Off
     };
     if let Some(audit) = asking.audit() {
         super::dreamer_hook::log_status(session_id, &format!("idle {audit}"));
@@ -95,9 +104,15 @@ fn turned_on(cwd: &Path) -> bool {
             .is_ok_and(|config| config.dream_lessons())
 }
 
-fn messages_of(session_id: &str) -> Option<std::sync::Arc<Vec<ConversationMessage>>> {
-    let handle = crate::session_registry::resolve_session_reference(session_id).ok()?;
-    Some(core_types::Session::load_from_path(&handle.path).ok()?.messages)
+/// Whether `session_id` was asked about less than the wait between askings
+/// before `now_secs`.
+fn asked_a_moment_ago(cwd: &Path, session_id: &str, now_secs: u64) -> bool {
+    said_asked(cwd, session_id)
+        .is_some_and(|asked| now_secs.saturating_sub(asked.asked_at_secs) < SECS_BETWEEN_ASKS)
+}
+
+fn messages_in(transcript: &Path) -> Option<std::sync::Arc<Vec<ConversationMessage>>> {
+    Some(core_types::Session::load_from_path(transcript).ok()?.messages)
 }
 
 fn now_secs() -> u64 {
@@ -228,7 +243,7 @@ mod tests {
     fn off_unless_the_person_turned_it_on_and_never_in_a_summoned_workers_pane() {
         in_a_home("off", None, |cwd| {
             assert!(!turned_on(cwd));
-            assert_eq!(ask_before_a_pass(cwd, "no-such-session", "model-x"), Asking::Off);
+            assert_eq!(ask_before_a_pass(cwd, "s-0", &cwd.join("no-such-session.jsonl"), "model-x"), Asking::Off);
             assert_eq!(Asking::Off.audit(), None);
             assert!(!patterns_file(cwd).parent().expect("folder").exists(), "nothing was written");
         });
@@ -240,11 +255,16 @@ mod tests {
             std::env::remove_var(pane);
             std::env::remove_var(leader);
             let a_persons_pane = turned_on(cwd);
-            // Turned on, the session is looked for — and one that is not there is not asked about.
-            let unread = ask_before_a_pass(cwd, "no-such-session-zq", "model-x");
+            // Turned on, the session's file is read — and one that is not there is not asked about.
+            let nowhere = cwd.join("no-such-session.jsonl");
+            let unread = ask_before_a_pass(cwd, "s-0", &nowhere, "model-x");
+            // A session asked about a moment ago is not read at all.
+            let just_asked = runtime::memory::SaidAsked { asked_at_secs: now_secs(), sent: Vec::new() };
+            assert!(mark_said_asked(cwd, "s-9", &just_asked));
+            let too_soon = ask_before_a_pass(cwd, "s-9", &nowhere, "model-x");
             std::env::set_var(pane, "%3");
             std::env::set_var(leader, "%1");
-            let a_workers_pane = (turned_on(cwd), ask_before_a_pass(cwd, "no-such-session-zq", "model-x"));
+            let a_workers_pane = (turned_on(cwd), ask_before_a_pass(cwd, "s-0", &nowhere, "model-x"));
             for (name, value) in before {
                 match value {
                     Some(value) => std::env::set_var(name, value),
@@ -253,6 +273,7 @@ mod tests {
             }
             assert!(a_persons_pane);
             assert_eq!(unread, Asking::Unread);
+            assert_eq!(too_soon, Asking::NotWorthIt, "its mark says it is too soon, before its file is opened");
             assert_eq!(a_workers_pane, (false, Asking::Off), "a summoned worker's pane never asks");
         });
     }

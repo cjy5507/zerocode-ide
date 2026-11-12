@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use runtime::memory::{AutoDream, AutoDreamTrigger, DreamError, DreamReport};
 
+use super::said_lessons_pass::Asking;
 use crate::autonomy::dreaming::DreamAttempt;
 
 const SESSION_END_BUDGET: Duration = Duration::from_secs(2);
@@ -150,14 +151,17 @@ pub(crate) fn run_on_session_end(
 /// process.
 /// Start an idle pass without borrowing the session or blocking its renderer.
 pub(crate) fn spawn_on_idle(
-    cwd: &Path, session_id: &str, model: &str,
+    cwd: &Path, session: &super::SessionHandle, model: &str,
     attempt: DreamAttempt,
 ) {
     let cwd = cwd.to_path_buf();
-    let session_id = session_id.to_string();
+    let session_id = session.id.clone();
+    let transcript = session.path.clone();
     let model = model.to_string();
     let _ = thread::Builder::new().name("dreamer-idle".to_string()).spawn(move || {
-        let reply = idle_pass(runtime::memory::auto_dream_program(), &cwd, &session_id, &model);
+        let reply = idle_pass(runtime::memory::auto_dream_program(), &cwd, &session_id, &model, || {
+            super::said_lessons_pass::ask_before_a_pass(&cwd, &session_id, &transcript, &model)
+        });
         settle(&attempt, &reply, crate::autonomy::scheduler::now_unix_ms());
         match reply {
             PassReply::Ran { summary, audit, promoted } => {
@@ -214,15 +218,29 @@ fn unix_ms(at: std::time::SystemTime) -> u64 {
 
 /// The cheap gate first, in this process; a pass it lets through curates in
 /// `program` when there is one, else here.
-fn idle_pass(program: Option<&Path>, cwd: &Path, session_id: &str, model: &str) -> PassReply {
-    if let Some(held) = runtime::memory::auto_dream_held(cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL) {
+///
+/// A pass the switch or the clock holds does nothing, and asks nothing. One
+/// that is due is asked about first (`ask`: what this session's own words
+/// teach, where the person turned that on — `said_lessons_pass`), in the
+/// session's process, and the gate is read again after it: a project with
+/// nothing yet for a pass to read is where a first lesson comes from, so
+/// "nothing to read" must not be answered before the asking. What the asking
+/// left is then what the pass reads.
+fn idle_pass(
+    program: Option<&Path>,
+    cwd: &Path,
+    session_id: &str,
+    model: &str,
+    ask: impl FnOnce() -> Asking,
+) -> PassReply {
+    let gate = || runtime::memory::auto_dream_held(cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL);
+    if let Some(held @ (AutoDream::Disabled | AutoDream::NotDueUntil(_))) = gate() {
         return PassReply::of(&Ok(held));
     }
-    // The pass is due. Where the person turned it on, this session's own
-    // words are asked about first, here in the session's process, so the
-    // pass that follows reads what the answer left (`said_lessons_pass`).
-    // Off, it reads no setting twice and no session at all.
-    let _ = super::said_lessons_pass::ask_before_a_pass(cwd, session_id, model);
+    let _ = ask();
+    if let Some(held) = gate() {
+        return PassReply::of(&Ok(held));
+    }
     match program {
         Some(zo) => run_idle_pass(zo, cwd, session_id, model),
         None => curate_here(cwd, session_id, model),
@@ -498,11 +516,93 @@ mod tests {
             .expect("the stand-in zo should be executable");
 
         with_dream_env(&config_home, "1", || {
-            assert_eq!(super::idle_pass(Some(&zo), &cwd, "s", "m"), super::PassReply::NoEvidence);
+            let nothing_asked = || super::Asking::Off;
+            assert_eq!(super::idle_pass(Some(&zo), &cwd, "s", "m", nothing_asked), super::PassReply::NoEvidence);
             assert!(!seen.exists(), "a pass with nothing to curate must not start a process");
             seed_verified_observations(&cwd);
-            assert_eq!(super::idle_pass(Some(&zo), &cwd, "s", "m"), super::PassReply::Locked);
+            assert_eq!(super::idle_pass(Some(&zo), &cwd, "s", "m", nothing_asked), super::PassReply::Locked);
             assert!(seen.exists(), "a pass the gate lets through runs in the program");
+        });
+
+        fs::remove_dir_all(root).expect("test root should be removed");
+    }
+
+    /// The vault is off while `f` runs: a pass that keeps a lesson mirrors it
+    /// into the second brain, and a test's lesson is nobody's knowledge.
+    fn with_the_vault_off<T>(f: impl FnOnce() -> T) -> T {
+        let before = std::env::var_os(runtime::second_brain::VAULT_ENV);
+        std::env::set_var(runtime::second_brain::VAULT_ENV, runtime::second_brain::VAULT_OFF);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match before {
+            Some(value) => std::env::set_var(runtime::second_brain::VAULT_ENV, value),
+            None => std::env::remove_var(runtime::second_brain::VAULT_ENV),
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// A project with nothing yet for a pass to read is asked about all the
+    /// same — that is where its first lesson comes from — and the pass that
+    /// follows reads what the asking left. A pass the clock or the switch
+    /// holds asks nothing.
+    #[test]
+    fn an_idle_pass_asks_before_it_says_there_is_nothing_to_read() {
+        use decision_core::dreamer::LessonKind;
+        use std::cell::Cell;
+        let root = temp_root("asks-first");
+        let cwd = root.join("workspace");
+        let config_home = root.join("config");
+        fs::create_dir_all(&cwd).expect("workspace should be created");
+        fs::create_dir_all(&config_home).expect("config home should be created");
+        let lesson = "Never push to main";
+        let taught = |session: &str| {
+            assert!(runtime::memory::record_said_lesson(&cwd, session, LessonKind::Constraint, lesson));
+            super::Asking::Asked { taken: 1, recorded: 1 }
+        };
+
+        with_dream_env(&config_home, "1", || with_the_vault_off(|| {
+            // Nothing to read, and the asking leaves nothing: asked once, and no pass.
+            let asked = Cell::new(0);
+            let reply = super::idle_pass(None, &cwd, "s-0", "m", || {
+                asked.set(asked.get() + 1);
+                super::Asking::NotWorthIt
+            });
+            assert_eq!((asked.get(), reply), (1, super::PassReply::NoEvidence));
+
+            // Nothing to read, and the asking leaves a lesson: the pass runs
+            // and reads it. One session has shown it, so nothing is kept yet.
+            let reply = super::idle_pass(None, &cwd, "s-1", "m", || taught("s-1"));
+            let super::PassReply::Ran { promoted, .. } = reply else {
+                panic!("the pass did not run after the asking left it something: {reply:?}");
+            };
+            assert!(promoted.is_empty(), "{promoted:?}");
+
+            // That pass set the clock: the next one is held, and asks nothing.
+            let reply = super::idle_pass(None, &cwd, "s-2", "m", || panic!("asked while the clock holds the pass"));
+            assert!(matches!(reply, super::PassReply::NotDue { .. }), "{reply:?}");
+        }));
+
+        // Another workspace, where one session showed the lesson before: the
+        // asking records it for a second, and the same idle pass keeps it.
+        let cwd = root.join("second-workspace");
+        fs::create_dir_all(&cwd).expect("workspace should be created");
+        with_dream_env(&config_home, "1", || with_the_vault_off(|| {
+            assert!(runtime::memory::record_said_lesson(&cwd, "s-1", LessonKind::Constraint, lesson));
+            let reply = super::idle_pass(None, &cwd, "s-2", "m", || {
+                assert!(runtime::memory::record_said_lesson(&cwd, "s-2", LessonKind::Constraint, lesson));
+                super::Asking::Asked { taken: 1, recorded: 1 }
+            });
+            let super::PassReply::Ran { promoted, .. } = reply else {
+                panic!("{reply:?}");
+            };
+            assert_eq!(promoted.len(), 1, "{promoted:?}");
+            assert!(promoted[0].starts_with("constraint-"), "{promoted:?}");
+        }));
+        with_dream_env(&config_home, "0", || {
+            let reply = super::idle_pass(None, &cwd, "s-3", "m", || panic!("asked while dreaming is switched off"));
+            assert_eq!(reply, super::PassReply::Disabled);
         });
 
         fs::remove_dir_all(root).expect("test root should be removed");

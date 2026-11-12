@@ -2277,7 +2277,7 @@ impl PlainSession {
     /// Called only when the shared driver has no due user automation left.
     pub(crate) fn dream_when_idle(&self) {
         if let Some(attempt) = self.idle_dreamer.begin(now_unix_ms(), self.permission_mode != PermissionMode::ReadOnly) {
-            super::dreamer_hook::spawn_on_idle(&self.cwd, &self.handle.id, &self.model, attempt);
+            super::dreamer_hook::spawn_on_idle(&self.cwd, &self.handle, &self.model, attempt);
         }
     }
 
