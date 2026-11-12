@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use glob::Pattern;
 use ignore::WalkBuilder;
@@ -1175,12 +1175,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
 
     matches.sort();
     matches.dedup();
-    matches.sort_by_key(|path| {
-        fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .map(Reverse)
-    });
+    sort_newest_first(&mut matches, modified_time);
 
     let truncated = matches.len() > 100;
     let filenames = matches
@@ -1195,6 +1190,24 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
         filenames,
         truncated,
     })
+}
+
+/// When `path` was last written, or `None` when the file cannot be read.
+fn modified_time(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
+/// Order `paths` newest first by `modified`, keeping the order they came in for
+/// ties. A file whose time is unknown goes first, as it always has. The time is
+/// asked once per file: `sort_by_key` asks again at every comparison, which is a
+/// `stat` per comparison, `n log n` of them for `n` matches.
+fn sort_newest_first(
+    paths: &mut [PathBuf],
+    modified: impl Fn(&Path) -> Option<SystemTime>,
+) {
+    paths.sort_by_cached_key(|path| modified(path).map(Reverse));
 }
 
 /// Runs a regex search over workspace files with optional context lines.
@@ -1614,11 +1627,12 @@ pub fn is_symlink_escape(path: &Path, workspace_root: &Path) -> io::Result<bool>
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         edit_file, glob_search, grep_search, is_symlink_escape, read_file, read_file_in_workspace,
-        write_file, GrepSearchInput, DEFAULT_READ_LINE_LIMIT, MAX_WRITE_SIZE,
+        sort_newest_first, write_file, GrepSearchInput, DEFAULT_READ_LINE_LIMIT, MAX_WRITE_SIZE,
     };
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -2452,6 +2466,83 @@ mod tests {
             0,
             "a glob that genuinely matches nothing must still filter everything out"
         );
+    }
+
+    /// The seconds past the epoch as a time, for a file's modification time.
+    fn at(seconds: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn newest_first_asks_each_file_for_its_time_once() {
+        // 200 matches in an order that is neither sorted nor reversed. Each
+        // file's time is asked for once: 200 `stat`s. `sort_by_key` asked at
+        // every comparison, well over a thousand for the same list.
+        let calls = std::cell::Cell::new(0_usize);
+        let mut paths: Vec<PathBuf> = (0..200).map(|n| PathBuf::from(format!("f{n:03}"))).collect();
+        let time_of = |path: &Path| -> Option<SystemTime> {
+            calls.set(calls.get() + 1);
+            let n: u64 = path.to_str().unwrap()[1..].parse().unwrap();
+            Some(at((n * 7919) % 200))
+        };
+
+        sort_newest_first(&mut paths, time_of);
+
+        assert_eq!(
+            calls.get(),
+            paths.len(),
+            "the time of each file must be asked for once, not at every comparison"
+        );
+        let times: Vec<u64> = paths
+            .iter()
+            .map(|path| (path.to_str().unwrap()[1..].parse::<u64>().unwrap() * 7919) % 200)
+            .collect();
+        assert!(times.windows(2).all(|pair| pair[0] > pair[1]), "newest first: {times:?}");
+    }
+
+    #[test]
+    fn newest_first_keeps_the_given_order_for_ties_and_puts_unknown_times_first() {
+        // The order is what `sort_by_key` gave: ties stay as they came, and a
+        // file with no readable time comes before every file that has one.
+        let mut paths: Vec<PathBuf> = ["old", "tie-a", "gone", "new", "tie-b"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        sort_newest_first(&mut paths, |path| match path.to_str().unwrap() {
+            "old" => Some(at(10)),
+            "new" => Some(at(90)),
+            "tie-a" | "tie-b" => Some(at(50)),
+            _ => None,
+        });
+        let order: Vec<&str> = paths.iter().map(|path| path.to_str().unwrap()).collect();
+        assert_eq!(order, ["gone", "new", "tie-a", "tie-b", "old"]);
+    }
+
+    #[test]
+    fn glob_search_lists_the_newest_file_first() {
+        // End to end through `glob_search`: files written in one order carry
+        // modification times in another, and the answer follows the times.
+        let dir = temp_path("glob-newest-first");
+        std::fs::create_dir_all(&dir).expect("fixture directory");
+        for (name, seconds) in [("middle.txt", 2_000), ("oldest.txt", 1_000), ("newest.txt", 3_000)] {
+            let path = dir.join(name);
+            std::fs::write(&path, "fixture\n").expect("fixture file");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(at(1_700_000_000 + seconds)))
+                .expect("set the modification time");
+        }
+
+        let found = glob_search("*.txt", Some(dir.to_string_lossy().as_ref())).expect("glob");
+        let names: Vec<&str> = found
+            .filenames
+            .iter()
+            .map(|path| path.rsplit(['/', '\\']).next().unwrap())
+            .collect();
+        assert_eq!(names, ["newest.txt", "middle.txt", "oldest.txt"]);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
