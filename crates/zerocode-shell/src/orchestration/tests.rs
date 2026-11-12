@@ -7173,12 +7173,29 @@ fn an_answer_the_sweep_acts_on_says_applied_on_its_row() {
         .into_iter()
         .filter(|body| body["reason"] == STALL_JUDGED_REASON)
         .collect();
-    assert_eq!(
-        judged.len(),
-        1,
-        "the reading its row calls applied reached the coordinator once: {judged:?}"
+    assert!(
+        !judged.is_empty(),
+        "the reading its row calls applied reached the coordinator"
     );
-    assert_eq!(judged[0]["cause"], "finished_without_report");
+    // This bench's host starts the silence a grace before every beat
+    // (`quiet_since`), so each beat after the answer is a new silence to the
+    // ledger. Once per silence is the ledger's own test
+    // (`the_stall_seats_reading_is_told_once_per_silence`).
+    let starts: std::collections::HashSet<i64> = judged
+        .iter()
+        .filter_map(|body| body["stalledSinceMs"].as_i64())
+        .collect();
+    assert_eq!(
+        starts.len(),
+        judged.len(),
+        "one notice for each silence: {judged:?}"
+    );
+    assert!(
+        judged
+            .iter()
+            .all(|body| body["cause"] == "finished_without_report"),
+        "{judged:?}"
+    );
 }
 
 /// Nothing is asked where nothing should be: a person's `off`, and a silence
