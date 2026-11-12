@@ -14,10 +14,9 @@ use serde::Serialize;
 
 use crate::mcp_client::McpRemoteTransport;
 use crate::mcp_http_common::{
-    apply_headers_with_auth, build_http_client, resolve_headers_helper,
+    apply_headers_with_auth, build_http_client, read_bounded_body, resolve_headers_helper,
     select_jsonrpc_response_frame, InboundBuffer,
 };
-use crate::mcp_limits::MAX_MCP_MESSAGE_BYTES;
 use crate::mcp_stdio::{
     inbound_event_for_notification, InboundEvent, JsonRpcId, JsonRpcRequest, JsonRpcResponse,
     McpInitializeParams, McpInitializeResult, McpListResourcesParams, McpListResourcesResult,
@@ -338,39 +337,6 @@ impl McpHttpProcess {
     }
 }
 
-/// Read a response body to a `String`, rejecting one that would exceed the
-/// shared MCP message cap. `reqwest::Response::text` is unbounded, so a server
-/// (compromised or buggy) could otherwise stream an arbitrarily large body into
-/// memory. Streaming chunks lets the guard reject before the whole body lands.
-async fn read_bounded_body(response: reqwest::Response) -> io::Result<String> {
-    read_bounded_body_capped(response, MAX_MCP_MESSAGE_BYTES).await
-}
-
-/// Chunk-streaming core of [`read_bounded_body`], with the byte cap injected so a
-/// test can exercise the rejection path with a tiny limit instead of allocating
-/// 32 MiB. Production always calls it with the single-sourced
-/// [`MAX_MCP_MESSAGE_BYTES`], so the policy still lives in one place.
-async fn read_bounded_body_capped(
-    mut response: reqwest::Response,
-    cap: usize,
-) -> io::Result<String> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-    {
-        crate::mcp_limits::guard_mcp_read_growth_capped(
-            body.len(),
-            chunk.len(),
-            "HTTP response body",
-            cap,
-        )?;
-        body.extend_from_slice(&chunk);
-    }
-    String::from_utf8(body).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-}
-
 /// Connect to an MCP server over Streamable HTTP transport.
 ///
 /// This is the HTTP counterpart to [`crate::mcp_stdio::spawn_mcp_stdio_process`]
@@ -385,6 +351,7 @@ pub fn connect_mcp_http(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_http_common::read_bounded_body_capped;
 
     #[tokio::test]
     async fn request_reads_a_chunked_response_body_through_the_bounded_reader() {

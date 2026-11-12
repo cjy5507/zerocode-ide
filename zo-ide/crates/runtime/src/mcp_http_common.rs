@@ -10,6 +10,7 @@ use std::process::Command;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::mcp_limits::MAX_MCP_MESSAGE_BYTES;
 use crate::mcp_stdio::InboundEvent;
 
 /// A deduplicating, drainable buffer of inbound MCP events captured off a remote
@@ -227,6 +228,41 @@ pub(crate) fn select_jsonrpc_response_frame<'a>(
     }
 
     None
+}
+
+/// Read a response body to a `String`, rejecting one that would exceed the
+/// shared MCP message cap. Both the Streamable HTTP and the SSE transport read
+/// their POST replies through it. `reqwest::Response::text` is unbounded, so a
+/// server (compromised or buggy) could otherwise stream an arbitrarily large body
+/// into memory. Streaming chunks lets the guard reject before the whole body
+/// lands.
+pub(crate) async fn read_bounded_body(response: reqwest::Response) -> io::Result<String> {
+    read_bounded_body_capped(response, MAX_MCP_MESSAGE_BYTES).await
+}
+
+/// Chunk-streaming core of [`read_bounded_body`], with the byte cap injected so a
+/// test can exercise the rejection path with a tiny limit instead of allocating
+/// 32 MiB. Production always calls it with the single-sourced
+/// [`MAX_MCP_MESSAGE_BYTES`], so the policy still lives in one place.
+pub(crate) async fn read_bounded_body_capped(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> io::Result<String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+    {
+        crate::mcp_limits::guard_mcp_read_growth_capped(
+            body.len(),
+            chunk.len(),
+            "HTTP response body",
+            cap,
+        )?;
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 #[cfg(test)]

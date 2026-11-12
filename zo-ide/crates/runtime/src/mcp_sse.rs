@@ -16,8 +16,8 @@ use tokio::sync::Mutex;
 
 use crate::mcp_client::McpRemoteTransport;
 use crate::mcp_http_common::{
-    InboundBuffer, apply_headers_with_auth, build_http_client, resolve_headers_helper,
-    select_jsonrpc_response_frame,
+    InboundBuffer, apply_headers_with_auth, build_http_client, read_bounded_body,
+    resolve_headers_helper, select_jsonrpc_response_frame,
 };
 use crate::mcp_limits::guard_mcp_read_growth;
 use crate::mcp_stdio::{
@@ -202,10 +202,7 @@ impl McpSseProcess {
         // the response as a `message` event on the GET stream. A Streamable-style
         // server may instead inline the response in the POST reply. Prefer an
         // inline response when present and valid; otherwise read the stream.
-        let response_body = response
-            .text()
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let response_body = read_bounded_body(response).await?;
 
         if let Some(json_text) = select_jsonrpc_response_frame(&response_body, &id) {
             if let Ok(rpc_response) = serde_json::from_str::<JsonRpcResponse<TResult>>(json_text) {
@@ -891,6 +888,95 @@ mod tests {
             arguments: Some(serde_json::json!({})),
             meta: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_post_reply_past_the_message_cap_is_rejected_like_the_http_transport_does() {
+        // `response.text()` has no limit: a server could stream any body into
+        // memory. The POST reply is read through the same bounded reader the
+        // Streamable HTTP transport uses, so one past the cap is refused.
+        use tokio::io::AsyncWriteExt;
+
+        let Some((addr, server)) = serve_sse_post_reply(|_get, mut post_stream, _id| async move {
+            let length = crate::mcp_limits::MAX_MCP_MESSAGE_BYTES + 1;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {length}\r\n\r\n"
+            );
+            post_stream.write_all(head.as_bytes()).await.expect("head");
+            let piece = vec![b' '; 1024 * 1024];
+            let mut sent = 0;
+            while sent < length {
+                let take = piece.len().min(length - sent);
+                // The client hangs up once it has refused the body.
+                if post_stream.write_all(&piece[..take]).await.is_err() {
+                    break;
+                }
+                sent += take;
+            }
+        })
+        .await
+        else {
+            return;
+        };
+        let process = connect_to(addr).await;
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            process.call_tool(JsonRpcId::Number(3), echo_params()),
+        )
+        .await
+        .expect("a body past the cap must be refused, not read to the end and then wait on the stream")
+        .expect_err("a body past the cap must be an error");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("HTTP response body")
+                && error.to_string().contains("limit"),
+            "the same error the HTTP transport gives: {error}"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_post_reply_inside_the_cap_still_carries_the_response() {
+        // A Streamable-style server inlines the response in the POST reply: the
+        // bounded read changes nothing for a body inside the cap.
+        use tokio::io::AsyncWriteExt;
+
+        let Some((addr, server)) = serve_sse_post_reply(|_get, mut post_stream, id| async move {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "content": [{ "type": "text", "text": "inline" }], "isError": false }
+            })
+            .to_string();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            post_stream.write_all(head.as_bytes()).await.expect("head");
+            post_stream.write_all(body.as_bytes()).await.expect("body");
+            post_stream.flush().await.expect("flush");
+        })
+        .await
+        else {
+            return;
+        };
+        let process = connect_to(addr).await;
+
+        let call = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            process.call_tool(JsonRpcId::Number(4), echo_params()),
+        )
+        .await
+        .expect("an inline reply must answer without the stream")
+        .expect("call should succeed");
+        assert_eq!(
+            call.result.expect("call result").content[0].data["text"],
+            serde_json::json!("inline")
+        );
+
+        server.abort();
     }
 
     #[tokio::test]
