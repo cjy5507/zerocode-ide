@@ -115,6 +115,12 @@ export async function testTabstripOverflow(browser, origin, ok) {
       await page.evaluate((theme) => {
         window.__ANSWER__.read_text_file = () => ({ text: "x\n", mtime: 1, size: 2 });
         setTheme(theme);
+        // The strip's observer folds tabs; a fold that resized what it observes would loop it (2026-11-12, the
+        // settings harness's "ResizeObserver loop completed with undelivered notifications").
+        window.__resizeLoops = [];
+        addEventListener("error", (event) => {
+          if (/ResizeObserver loop/.test(event.message ?? "")) window.__resizeLoops.push(event.message);
+        });
       }, theme);
       let open = 0;
       let base = null;
@@ -241,6 +247,8 @@ export async function testTabstripOverflow(browser, origin, ok) {
       });
       ok(`a tab that waits on you out of sight rings the tab menu, and stops once it is in view (${theme})`,
         away.waiting && away.far && away.ring && away.tip !== "이 판의 탭 모두" && !away.near && !away.ringNear, JSON.stringify(away));
+      const loops = await page.evaluate(() => window.__resizeLoops);
+      ok(`folding a crowded strip never loops its resize observer (${theme})`, loops.length === 0, JSON.stringify(loops));
       ok(`the crowded strip raises no browser errors (${theme})`, faults.length === 0, faults.join("\n"));
     } finally {
       await page.close();

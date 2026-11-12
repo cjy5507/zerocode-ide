@@ -442,7 +442,14 @@ kbd {
  * height so a tab is a region of the bar rather than a chip sitting on it —
  * which is how Orca draws `Terminal 1 ×` beside its traffic lights. */
 .titlebar > .tabstrip {
-  flex: 1 1 auto;
+  /* The room the bar leaves, whatever the tabs inside ask for: a basis of 0,
+   * not the tabs' own width. With `auto` the strip's width followed its
+   * content through the bar's shrink — fold a tab and the strip changed width
+   * in the same frame its observer (`tabStripWatch`) answered, which the
+   * window reported as "ResizeObserver loop completed with undelivered
+   * notifications" (settings harness, 2026-11-12). It also stops a crowded
+   * strip from squeezing the bar's other items. */
+  flex: 1 1 0;
   align-self: stretch;
   min-width: 0;
   margin-left: var(--space-3);
