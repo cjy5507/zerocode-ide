@@ -2339,6 +2339,57 @@ raw-extra",
     });
 }
 
+/// A lesson the person's own words taught is one line of three kinds; it
+/// waits while one session alone has shown it, and what a session was asked
+/// about is kept by its marks, the newest ones.
+#[test]
+fn said_lessons_wait_for_a_second_session_and_what_was_asked_about_is_kept() {
+    let env_lock = crate::test_env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("repo");
+    let config_home = tmp.path().join("home").join(".zo");
+    fs::create_dir_all(&cwd).unwrap();
+
+    with_config_home(&env_lock, &config_home, || {
+        assert!(super::said_lessons_waiting(&cwd, 10).is_empty(), "no store yet");
+        assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Preference, "Answer in Korean"));
+        assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Constraint, " Never push to main "));
+        assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Workflow, "Run the gate before a hand-in"));
+        assert!(
+            !super::record_said_lesson(&cwd, "s1", LessonKind::Gotcha, "bash is error-prone here"),
+            "how a tool behaves is not a pattern of the person's"
+        );
+        assert!(!super::record_said_lesson(&cwd, "s1", LessonKind::Preference, "two\nlines"));
+        // The same line again from the same session, and once from another.
+        assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Preference, "Answer in Korean"));
+        assert!(super::record_said_lesson(&cwd, "s2", LessonKind::Workflow, "Run the gate before a hand-in"));
+
+        let waiting = super::said_lessons_waiting(&cwd, 10);
+        assert_eq!(
+            waiting.iter().map(|lesson| (lesson.kind, lesson.text.as_str())).collect::<Vec<_>>(),
+            [(LessonKind::Constraint, "Never push to main"), (LessonKind::Preference, "Answer in Korean")],
+            "one session alone has shown these two, newest first; the third has two sessions"
+        );
+        assert_eq!(super::said_lessons_waiting(&cwd, 1).len(), 1, "at most the limit");
+
+        let report = dream_at_cwd(&cwd, None).unwrap();
+        assert_eq!(report.applied.len(), 1, "{:?}", report.applied);
+        assert!(report.applied[0].slug.starts_with("workflow-user-pattern-"), "{}", report.applied[0].slug);
+
+        assert_eq!(super::said_asked(&cwd, "s1"), None, "never asked");
+        let marks: Vec<u64> = (0..(super::MAX_SAID_ASKED_MARKS as u64 + 5)).collect();
+        let asked = super::SaidAsked { asked_at_secs: 1_800_000_000, sent: marks };
+        assert!(super::mark_said_asked(&cwd, "s1", &asked));
+        let kept = super::said_asked(&cwd, "s1").expect("kept");
+        assert_eq!(kept.asked_at_secs, 1_800_000_000);
+        assert_eq!(kept.sent.len(), super::MAX_SAID_ASKED_MARKS, "the newest marks are the ones kept");
+        assert_eq!(kept.sent.first(), Some(&5));
+        assert_eq!(super::said_asked(&cwd, "s2"), None, "each session has its own");
+        assert_eq!(super::said_words_mark("  Answer in Korean "), super::said_words_mark("Answer in Korean"));
+        assert_ne!(super::said_words_mark("Answer in Korean"), super::said_words_mark("Answer in English"));
+    });
+}
+
 #[test]
 fn user_pattern_reader_revalidates_direct_jsonl_records() {
     let env_lock = crate::test_env_lock();

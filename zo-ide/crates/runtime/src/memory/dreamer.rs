@@ -2262,10 +2262,17 @@ fn user_pattern_text_allowed(text: &str) -> bool {
         && !text.chars().any(|ch| ch.is_control() && !ch.is_whitespace())
 }
 
+/// The kinds a lesson in the person's patterns may be: what they prefer, what
+/// must or must not be done here, and a way of working they asked for. How a
+/// tool behaves is none of them.
+const fn user_pattern_kind_allowed(kind: LessonKind) -> bool {
+    matches!(kind, LessonKind::Preference | LessonKind::Constraint | LessonKind::Workflow)
+}
+
 fn user_pattern_record_is_valid(record: &UserPatternRecord) -> bool {
     let obs = &record.observation;
     obs.verified
-        && obs.kind == LessonKind::Preference
+        && user_pattern_kind_allowed(obs.kind)
         && !obs.session_id.trim().is_empty()
         && user_pattern_text_allowed(&obs.session_id)
         && user_pattern_text_allowed(&obs.summary)
@@ -2280,8 +2287,164 @@ pub fn record_user_pattern_observation(
     summary: &str,
     verified: bool,
 ) -> bool {
+    verified && record_user_pattern(cwd, session_id, LessonKind::Preference, summary)
+}
+
+/// Record a lesson the person's own words taught in `session_id`
+/// (`decision_core::said_lessons`): one line of one of the three kinds a
+/// pattern may be. It is a candidate and no more — the gate keeps it once a
+/// second session shows the same line ([`dream_at_cwd`]). `false` when the
+/// kind or the line is not one the store takes, or it could not be written.
+#[must_use]
+pub fn record_said_lesson(cwd: &Path, session_id: &str, kind: LessonKind, lesson: &str) -> bool {
+    user_pattern_kind_allowed(kind) && record_user_pattern(cwd, session_id, kind, lesson)
+}
+
+/// A lesson in the person's patterns that one session alone has shown: the
+/// gate has not kept it, and a second session that shows it would.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitingLesson {
+    pub kind: LessonKind,
+    /// Its one line, by which the store knows it.
+    pub text: String,
+}
+
+/// The lessons in `cwd`'s patterns that one session alone has shown, newest
+/// first, at most `limit`: what a session is asked beside, so that showing
+/// one again is said by naming it and not in new words the store would take
+/// for another lesson.
+#[must_use]
+pub fn said_lessons_waiting(cwd: &Path, limit: usize) -> Vec<WaitingLesson> {
+    let Ok(lines) = fs::read_to_string(user_pattern_dir(cwd).join(USER_PATTERN_FILE)) else {
+        return Vec::new();
+    };
+    // In the order first recorded: a signature, its lesson, the sessions that showed it.
+    let mut shown: Vec<(String, WaitingLesson, std::collections::BTreeSet<String>)> = Vec::new();
+    for record in lines
+        .lines()
+        .filter_map(|line| serde_json::from_str::<UserPatternRecord>(line).ok())
+        .filter(user_pattern_record_is_valid)
+    {
+        let obs = record.observation;
+        match shown.iter_mut().find(|(signature, ..)| *signature == obs.signature) {
+            Some((_, _, sessions)) => {
+                sessions.insert(obs.session_id);
+            }
+            None => shown.push((
+                obs.signature,
+                WaitingLesson {
+                    kind: obs.kind,
+                    text: obs.summary,
+                },
+                std::collections::BTreeSet::from([obs.session_id]),
+            )),
+        }
+    }
+    shown
+        .into_iter()
+        .rev()
+        .filter(|(_, _, sessions)| sessions.len() == 1)
+        .take(limit)
+        .map(|(_, lesson, _)| lesson)
+        .collect()
+}
+
+/// Where a session was last asked what its words teach, and what it was
+/// asked about by then.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaidAsked {
+    /// Unix seconds of the last asking.
+    pub asked_at_secs: u64,
+    /// A mark for each thing the person said that an asking has covered
+    /// ([`said_words_mark`]), oldest first. By what was said and not by where
+    /// it stands: a compaction or a resume renumbers a session's messages.
+    pub sent: Vec<u64>,
+}
+
+/// The folder under the person's patterns that keeps one [`SaidAsked`] per
+/// session.
+const SAID_ASKED_DIR: &str = "said-asked";
+
+/// The most marks one session's [`SaidAsked`] keeps, its newest.
+const MAX_SAID_ASKED_MARKS: usize = 4_000;
+
+/// The most sessions whose [`SaidAsked`] is kept, the ones asked last.
+const MAX_SAID_ASKED_SESSIONS: usize = 256;
+
+/// The mark of one thing the person said, as [`SaidAsked`] keeps it: the
+/// words themselves are not kept a second time.
+#[must_use]
+pub fn said_words_mark(words: &str) -> u64 {
+    dreamer_owned_body_hash(words.trim())
+}
+
+fn said_asked_path(cwd: &Path, session_id: &str) -> PathBuf {
+    user_pattern_dir(cwd)
+        .join(SAID_ASKED_DIR)
+        .join(format!("{}.json", safe_stem(session_id)))
+}
+
+/// What `session_id` was asked about so far; `None` for a session never
+/// asked, or whose record does not read.
+#[must_use]
+pub fn said_asked(cwd: &Path, session_id: &str) -> Option<SaidAsked> {
+    let text = fs::read_to_string(said_asked_path(cwd, session_id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Keep what `session_id` has now been asked about, in place of what was
+/// kept. `false` when it could not be written — and then the asking it marks
+/// must not go out, or the same words would be sent again.
+#[must_use]
+pub fn mark_said_asked(cwd: &Path, session_id: &str, asked: &SaidAsked) -> bool {
+    let Ok((config_home, dir)) = ensure_user_pattern_dir(cwd) else {
+        return false;
+    };
+    let folder = dir.join(SAID_ASKED_DIR);
+    let Ok(relative) = folder.strip_prefix(&config_home) else {
+        return false;
+    };
+    if crate::secure_fs::ensure_private_dir(&config_home, relative).is_err() {
+        return false;
+    }
+    let mut kept = asked.clone();
+    let over = kept.sent.len().saturating_sub(MAX_SAID_ASKED_MARKS);
+    kept.sent.drain(..over);
+    let Ok(text) = serde_json::to_string(&kept) else {
+        return false;
+    };
+    let written = write_text_atomic(&config_home, &said_asked_path(cwd, session_id), &text).is_ok();
+    if written {
+        forget_oldest_said_asked(&folder);
+    }
+    written
+}
+
+/// Remove the records of the sessions asked longest ago, past
+/// [`MAX_SAID_ASKED_SESSIONS`]. Best effort: a record left over costs nothing
+/// but its bytes.
+fn forget_oldest_said_asked(folder: &Path) {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return;
+    };
+    let mut records: Vec<(SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "json"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    if records.len() <= MAX_SAID_ASKED_SESSIONS {
+        return;
+    }
+    records.sort();
+    let over = records.len() - MAX_SAID_ASKED_SESSIONS;
+    for (_, path) in records.into_iter().take(over) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn record_user_pattern(cwd: &Path, session_id: &str, kind: LessonKind, summary: &str) -> bool {
     let summary = summary.trim();
-    if !verified || !user_pattern_text_allowed(summary) {
+    if !user_pattern_text_allowed(summary) {
         return false;
     }
     let observation = LessonObservation {
@@ -2289,7 +2452,7 @@ pub fn record_user_pattern_observation(
         signature: user_pattern_signature(summary),
         lesson: summary.to_string(),
         summary: summary.to_string(),
-        kind: LessonKind::Preference,
+        kind,
         verified: true,
     };
     let record = UserPatternRecord { ts_ms: now_ms(), observation };

@@ -218,6 +218,11 @@ fn idle_pass(program: Option<&Path>, cwd: &Path, session_id: &str, model: &str) 
     if let Some(held) = runtime::memory::auto_dream_held(cwd, runtime::memory::DEFAULT_AUTO_DREAM_INTERVAL) {
         return PassReply::of(&Ok(held));
     }
+    // The pass is due. Where the person turned it on, this session's own
+    // words are asked about first, here in the session's process, so the
+    // pass that follows reads what the answer left (`said_lessons_pass`).
+    // Off, it reads no setting twice and no session at all.
+    let _ = super::said_lessons_pass::ask_before_a_pass(cwd, session_id, model);
     match program {
         Some(zo) => run_idle_pass(zo, cwd, session_id, model),
         None => curate_here(cwd, session_id, model),
@@ -271,7 +276,7 @@ fn dream_disabled() -> bool {
     std::env::var(DREAM_ENV).ok().as_deref() == Some("0")
 }
 
-fn log_status(session_id: &str, status: &str) {
+pub(super) fn log_status(session_id: &str, status: &str) {
     eprintln!(
         "[zo] dreamer session-end session={} status={status}",
         safe_session_id(session_id)
