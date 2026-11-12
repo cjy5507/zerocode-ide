@@ -3,11 +3,15 @@
 //! Where the person turned it on (`dreamLessons` in their own settings, off
 //! otherwise), an idle pass that is due first asks a model what the person's
 //! words in this session teach (`decision_core::said_lessons`), and what the
-//! reading takes is recorded in the person's patterns as a candidate
-//! (`runtime::memory::record_said_lesson`). The pass that follows reads those
-//! patterns as it always did, and keeps a lesson a second session has shown.
-//! The lessons the patterns already hold ride along with the question, kept
-//! ones too, so a session that shows one again names it.
+//! reading takes is kept as a candidate (`runtime::memory::record_said_lesson`).
+//!
+//! **A candidate is all it becomes.** It is kept beside the person's patterns,
+//! where no pass reads it: a lesson is a model's sentence about what a person
+//! said, and nothing yet checks that sentence against their words. Until
+//! something does, no lesson drawn this way becomes a memory entry, however
+//! many sessions show it. The lessons already kept ride along with the
+//! question, so a session that shows one again names it and the count of
+//! sessions behind each is true.
 //!
 //! It is asked here, in the session's own process, and not in the pass's:
 //! the request goes out on the login this session already holds, as the fold
@@ -15,10 +19,9 @@
 //! not the pass. Only the idle pass asks — a pass at a compaction or at the
 //! session's end has no time for it — and neither a pane the ledger summoned
 //! as a worker nor a run fed by a pipe (`-p`) ever does: what is said there
-//! is a briefing, or a program's lines, not a person's habits. It asks when a pass
-//! is due by the clock, whether or not the project has anything yet for a
-//! pass to read (`dreamer_hook::idle_pass`): a project's first lesson has to
-//! come from somewhere.
+//! is a briefing, or a program's lines, not a person's habits. It asks when a
+//! pass is due by the clock, whether or not the project has anything yet for
+//! a pass to read (`dreamer_hook::idle_pass`).
 //!
 //! What a session was asked about is marked before the request leaves
 //! (`runtime::memory::mark_said_asked`), by what was said: nothing the
@@ -104,13 +107,12 @@ pub(crate) fn ask_before_a_pass(
 }
 
 /// Whether the question is asked here: the person's own settings turn it on,
-/// and this is not a pane the ledger summoned as a worker. Settings that do
-/// not load leave it off.
+/// and this is not a pane the ledger summoned as a worker. Only the person's
+/// settings files are opened — the one source the switch is taken from — so
+/// a session with the asking off reads no repository settings for it.
 fn turned_on(cwd: &Path) -> bool {
     !runtime::kill_guard::in_a_summoned_worker_pane()
-        && runtime::ConfigLoader::default_for(cwd)
-            .load()
-            .is_ok_and(|config| config.dream_lessons())
+        && runtime::ConfigLoader::default_for(cwd).persons_dream_lessons()
 }
 
 /// Whether `session_id` was asked about less than the wait between askings
@@ -251,11 +253,14 @@ mod tests {
     /// run fed by a pipe.
     #[test]
     fn off_unless_the_person_turned_it_on_and_never_in_a_summoned_workers_pane() {
-        in_a_home("off", None, |cwd| {
+        // Said off in the test's own settings, which outrank the machine's:
+        // the person whose machine runs this may have turned theirs on.
+        in_a_home("off", Some(r#"{"dreamLessons":false}"#), |cwd| {
             assert!(!turned_on(cwd));
             assert_eq!(ask_before_a_pass(cwd, "s-0", &cwd.join("no-such-session.jsonl"), "model-x", true), Asking::Off);
             assert_eq!(Asking::Off.audit(), None);
             assert!(!patterns_file(cwd).parent().expect("folder").exists(), "nothing was written");
+            assert!(said_lessons_known(cwd, 10).is_empty());
         });
         in_a_home("on", Some(r#"{"dreamLessons":true}"#), |cwd| {
             // The answer must not depend on the pane the suite runs in: first
@@ -347,12 +352,12 @@ mod tests {
         });
     }
 
-    /// A second session that shows a waiting candidate answers with its id;
-    /// the candidate's own line is recorded again, under the second session,
-    /// and the pass that follows keeps it as a memory entry. One session
-    /// showing it twice keeps nothing.
+    /// A second session that shows a candidate answers with its id; the
+    /// candidate's own line is kept again, under the second session, and the
+    /// count behind it is two. No pass makes it a memory entry: a candidate
+    /// is all a lesson a session's words offered becomes.
     #[test]
-    fn a_candidate_a_second_session_shows_again_is_kept_by_the_pass_that_follows() {
+    fn a_candidate_a_second_session_shows_again_is_counted_and_no_pass_makes_it_memory() {
         in_a_home("kept", None, |cwd| {
             let now = 1_800_000_000;
             let first = ask_about(cwd, "s-1", &session(&SAID), now, |_, _| {
@@ -366,38 +371,33 @@ mod tests {
                 Ok(vec![Offered { same_as: Some(pending[0].id.clone()), kind: pending[0].kind, text: pending[0].text.clone(), said: 1 }])
             });
             assert_eq!(same_session, Asking::Asked { taken: 1, recorded: 1 });
-            let report = runtime::memory::dream_at_cwd(cwd, None).expect("a pass");
-            assert!(report.applied.is_empty(), "one session alone keeps nothing: {:?}", report.applied);
-            assert_eq!(said_lessons_known(cwd, 10)[0].sessions, 1, "it still waits");
+            assert_eq!(said_lessons_known(cwd, 10)[0].sessions, 1, "one session, however often it shows it");
 
-            // Another session shows it: the pass keeps it.
+            // Another session shows it: two sessions stand behind it.
             let second = ask_about(cwd, "s-2", &session(&["Work on a branch", "main is protected here", "Open a hand-in"]), now + 7_200, |_, pending| {
                 assert_eq!(pending.len(), 1);
                 assert_eq!((pending[0].id.as_str(), pending[0].text.as_str()), ("c1", "Never push to main"));
                 Ok(vec![Offered { same_as: Some("c1".to_string()), kind: pending[0].kind, text: pending[0].text.clone(), said: 2 }])
             });
             assert_eq!(second, Asking::Asked { taken: 1, recorded: 1 });
-            assert_eq!(said_lessons_known(cwd, 10)[0].sessions, 2, "two sessions have shown it");
-            let report = runtime::memory::dream_at_cwd(cwd, None).expect("a pass");
-            let [kept] = report.applied.as_slice() else {
-                panic!("kept {:?}", report.applied);
-            };
-            assert!(kept.slug.starts_with("constraint-"), "{}", kept.slug);
-            let body = std::fs::read_to_string(runtime::memory::paths::memory_write_dir(cwd, true).join(format!("{}.md", kept.slug)))
-                .expect("the entry the pass wrote");
-            assert!(body.contains("Never push to main"), "{body}");
+            assert_eq!(said_lessons_known(cwd, 10)[0].sessions, 2);
 
-            // Kept, it still rides along: a third session that shows it names
-            // it, and is not left to say it in new words the gate would keep
-            // as a second lesson.
+            // A pass reads none of it: nothing is kept, and the person's
+            // patterns — which a pass does read — were never written.
+            let report = runtime::memory::dream_at_cwd(cwd, None).expect("a pass");
+            assert!(report.applied.is_empty(), "a candidate became memory: {:?}", report.applied);
+            assert!(!patterns_file(cwd).exists(), "a lesson the words offered was written among the person's patterns");
+
+            // It still rides along: a third session that shows it names it,
+            // and is not left to say it in new words that would stand as a
+            // second lesson.
             let third = ask_about(cwd, "s-3", &session(&["No direct pushes", "Use a branch", "Then a hand-in"]), now + 10_800, |_, pending| {
-                assert_eq!(pending.len(), 1, "the kept lesson is shown beside the session");
+                assert_eq!(pending.len(), 1, "the lesson is shown beside the session");
                 Ok(vec![Offered { same_as: Some("c1".to_string()), kind: pending[0].kind, text: pending[0].text.clone(), said: 1 }])
             });
             assert_eq!(third, Asking::Asked { taken: 1, recorded: 1 });
-            assert_eq!(said_lessons_known(cwd, 10).len(), 1, "one lesson, shown by three sessions");
-            let report = runtime::memory::dream_at_cwd(cwd, None).expect("a pass");
-            assert!(report.applied.is_empty(), "nothing is kept twice: {:?}", report.applied);
+            let known = said_lessons_known(cwd, 10);
+            assert_eq!((known.len(), known[0].sessions), (1, 3), "one lesson, shown by three sessions");
         });
     }
 }

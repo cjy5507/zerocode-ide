@@ -673,6 +673,30 @@ impl ConfigLoader {
         &self.config_roots
     }
 
+    /// Whether the person's own settings turn the dreamer's question on
+    /// ([`DREAM_LESSONS_KEY`]), read from their settings files alone. That is
+    /// the only source [`Self::load`] takes the key from, so the answer is
+    /// the same — and a caller that asks at every idle moment opens no file
+    /// of the repository and starts no `git` to learn the switch is off. The
+    /// file that wins the merge wins here; one that does not read, or a value
+    /// that is not a boolean, leaves it off.
+    #[must_use]
+    pub fn persons_dream_lessons(&self) -> bool {
+        // The roots stand highest priority first: the first file that names
+        // the key is the one the merge would let win.
+        self.config_roots
+            .iter()
+            .find_map(|root| {
+                read_optional_json_object(&root.join("settings.json"))
+                    .ok()
+                    .flatten()?
+                    .get(DREAM_LESSONS_KEY)
+                    .map(JsonValue::as_bool)
+            })
+            .flatten()
+            .unwrap_or(false)
+    }
+
     #[must_use]
     pub fn discover(&self) -> Vec<ConfigEntry> {
         let path = self.cwd.join(".zo").join("settings.local.json");

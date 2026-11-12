@@ -415,15 +415,27 @@ pub(crate) fn decompose_model(parent_model: Option<&str>) -> String {
 }
 
 /// The Fast-tier model of the provider `parent_model` runs on — the pick
-/// [`decompose_model`] makes — or `None` where that provider's catalog has no
-/// Fast tier. [`decompose_model`] answers with the parent itself there; a
-/// caller that was promised a fast model, and not the session's own, asks
-/// this.
+/// [`decompose_model`] makes — or `None` where that provider has no Fast tier
+/// that is its own. [`decompose_model`] answers with the parent itself there;
+/// a caller that was promised the session's provider's fast model, and not
+/// another model or another account, asks this.
+///
+/// `None` as well for a model a person's own provider serves
+/// (`<provider>/<model>`) and for a name the catalog does not know. Both are
+/// read as a built-in provider — the first by the wire it speaks, the second
+/// by whichever login the machine holds — and the pick would be that
+/// provider's catalog model, dialled on that provider's account: not where
+/// the session's words went.
 pub(crate) fn fast_tier_model(parent_model: Option<&str>) -> Option<String> {
     let parent = parent_model
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .unwrap_or(api::ANTHROPIC_LATEST_MODEL_ALIAS);
+    if api::custom_provider_for_model(parent).is_some()
+        || api::metadata_for_model(&api::resolve_model_alias(parent)).is_none()
+    {
+        return None;
+    }
     fast_tier_triage_model(parent, api::detect_provider_kind(parent))
 }
 
@@ -1341,7 +1353,7 @@ mod tests {
     /// model named is a fast one and not the session's own.
     #[test]
     fn fast_tier_model_is_the_decomposition_pick_where_the_provider_has_one() {
-        for parent in ["opus", "claude-sonnet-4-6", "haiku", "gpt-5.5", "gpt-5.6-luna"] {
+        for parent in ["claude-sonnet-4-6", "gpt-5.5", "gpt-5.6-luna"] {
             assert_eq!(
                 super::fast_tier_model(Some(parent)).as_deref(),
                 Some(decompose_model(Some(parent)).as_str()),
@@ -1349,6 +1361,18 @@ mod tests {
             );
         }
         assert_eq!(super::fast_tier_model(None), Some(decompose_model(None)));
+    }
+
+    /// A name the catalog does not know has no fast tier that is its own,
+    /// whatever login the machine holds: the pick would be made for the
+    /// provider that login belongs to, and dialled on its account. The same
+    /// for a model spelled as a person's own provider serves it.
+    #[test]
+    fn fast_tier_model_is_none_for_a_name_the_catalog_does_not_know() {
+        for unknown in ["zq-model-nobody-lists", "zq-relay/some-model", "  "] {
+            let expected = if unknown.trim().is_empty() { Some(decompose_model(None)) } else { None };
+            assert_eq!(super::fast_tier_model(Some(unknown)), expected, "{unknown:?}");
+        }
     }
 
     #[test]

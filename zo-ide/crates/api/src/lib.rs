@@ -123,7 +123,7 @@ pub use providers::{
     PlanPriorsTable, ProviderCatalogEntry, ProviderKind, ProviderMetadata, RouterPriors,
     WireRoute, WorkTurnPrior,
     accepted_efforts, apply_non_anthropic_identity, band_difficulty_for_request, builtin_model_catalog_json, builtin_provider_catalog, catalog_family_id,
-    context_window_for_model, custom_provider_catalog, custom_provider_for_model, custom_provider_usability_catalog, custom_provider_usable_catalog, declared_model_class, detect_provider_kind, format_provider_model_ref,
+    context_window_for_model, custom_provider_catalog, custom_provider_for_model, metadata_for_model, custom_provider_usability_catalog, custom_provider_usable_catalog, declared_model_class, detect_provider_kind, format_provider_model_ref,
     family_alias_for, first_party_lineup,
     effective_effort_for_model,
     effort_budget_with_floor, effort_level_for_budget, effort_rank, explicit_non_claude_provider_kind,

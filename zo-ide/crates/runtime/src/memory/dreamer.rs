@@ -2262,17 +2262,10 @@ fn user_pattern_text_allowed(text: &str) -> bool {
         && !text.chars().any(|ch| ch.is_control() && !ch.is_whitespace())
 }
 
-/// The kinds a lesson in the person's patterns may be: what they prefer, what
-/// must or must not be done here, and a way of working they asked for. How a
-/// tool behaves is none of them.
-const fn user_pattern_kind_allowed(kind: LessonKind) -> bool {
-    matches!(kind, LessonKind::Preference | LessonKind::Constraint | LessonKind::Workflow)
-}
-
 fn user_pattern_record_is_valid(record: &UserPatternRecord) -> bool {
     let obs = &record.observation;
     obs.verified
-        && user_pattern_kind_allowed(obs.kind)
+        && obs.kind == LessonKind::Preference
         && !obs.session_id.trim().is_empty()
         && user_pattern_text_allowed(&obs.session_id)
         && user_pattern_text_allowed(&obs.summary)
@@ -2287,61 +2280,134 @@ pub fn record_user_pattern_observation(
     summary: &str,
     verified: bool,
 ) -> bool {
-    verified && record_user_pattern(cwd, session_id, LessonKind::Preference, summary)
+    let summary = summary.trim();
+    if !verified || !user_pattern_text_allowed(summary) {
+        return false;
+    }
+    let observation = LessonObservation {
+        session_id: session_id.trim().to_string(),
+        signature: user_pattern_signature(summary),
+        lesson: summary.to_string(),
+        summary: summary.to_string(),
+        kind: LessonKind::Preference,
+        verified: true,
+    };
+    let record = UserPatternRecord { ts_ms: now_ms(), observation };
+    let Ok((config_home, dir)) = ensure_user_pattern_dir(cwd) else {
+        return false;
+    };
+    let path = dir.join(USER_PATTERN_FILE);
+    let Ok(mut line) = serde_json::to_string(&record) else {
+        return false;
+    };
+    line.push('\n');
+    append_jsonl_line_no_symlink(&config_home, &path, &line).is_ok()
 }
 
-/// Record a lesson the person's own words taught in `session_id`
-/// (`decision_core::said_lessons`): one line of one of the three kinds a
-/// pattern may be. It is a candidate and no more — the gate keeps it once a
-/// second session shows the same line ([`dream_at_cwd`]). `false` when the
-/// kind or the line is not one the store takes, or it could not be written.
+/// A lesson a session's own words offered (`decision_core::said_lessons`), as
+/// it is kept: a candidate, beside the person's patterns and apart from them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SaidLessonRecord {
+    ts_ms: u64,
+    session_id: String,
+    kind: LessonKind,
+    text: String,
+}
+
+/// The folder under the person's patterns that keeps the lessons their words
+/// offered, and its one log. **No pass reads it**: a pass reads the logs that
+/// lie in the folders [`automatic_curation_dirs`] names, and this one lies
+/// below. What a model drew from a session is its own sentence; until there
+/// is a way to check that sentence against what the person said, it stays a
+/// candidate and nothing here becomes a memory entry.
+const SAID_LESSONS_DIR: &str = "said-lessons";
+const SAID_LESSONS_FILE: &str = "candidates.jsonl";
+
+/// The private folder `name` under the person's patterns, made when it is
+/// missing, beside the config home it lies in.
+fn ensure_said_folder(cwd: &Path, name: &str) -> Option<(PathBuf, PathBuf)> {
+    let (config_home, dir) = ensure_user_pattern_dir(cwd).ok()?;
+    let folder = dir.join(name);
+    let relative = folder.strip_prefix(&config_home).ok()?.to_path_buf();
+    crate::secure_fs::ensure_private_dir(&config_home, &relative).ok()?;
+    Some((config_home, folder))
+}
+
+/// Whether `kind` and `text` are a lesson a session's words may offer: what
+/// the person prefers, what must or must not be done here, or a way of
+/// working they asked for — how a tool behaves is none of them — on one line
+/// the store takes.
+fn said_lesson_allowed(kind: LessonKind, text: &str) -> bool {
+    matches!(kind, LessonKind::Preference | LessonKind::Constraint | LessonKind::Workflow)
+        && decision_core::said_lessons::line_allowed(text)
+}
+
+/// Keep a lesson the person's own words offered in `session_id` as a
+/// candidate, which is all it is ([`SAID_LESSONS_DIR`]). `false` when the
+/// kind or the line is not one a session may offer, or it could not be
+/// written.
 #[must_use]
 pub fn record_said_lesson(cwd: &Path, session_id: &str, kind: LessonKind, lesson: &str) -> bool {
-    user_pattern_kind_allowed(kind) && record_user_pattern(cwd, session_id, kind, lesson)
+    let (session_id, text) = (session_id.trim(), lesson.trim());
+    if session_id.is_empty() || !said_lesson_allowed(kind, text) {
+        return false;
+    }
+    let Some((config_home, folder)) = ensure_said_folder(cwd, SAID_LESSONS_DIR) else {
+        return false;
+    };
+    let record = SaidLessonRecord {
+        ts_ms: now_ms(),
+        session_id: session_id.to_string(),
+        kind,
+        text: text.to_string(),
+    };
+    let Ok(mut line) = serde_json::to_string(&record) else {
+        return false;
+    };
+    line.push('\n');
+    append_jsonl_line_no_symlink(&config_home, &folder.join(SAID_LESSONS_FILE), &line).is_ok()
 }
 
-/// A lesson in the person's patterns, and how many sessions have shown it:
-/// one a single session has shown waits, and the gate keeps it once a second
-/// does ([`dream_at_cwd`]).
+/// A lesson the person's words offered, and how many sessions have shown it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownLesson {
     pub kind: LessonKind,
-    /// Its one line, by which the store knows it.
+    /// Its one line, by which it is known.
     pub text: String,
     /// The distinct sessions that have shown it.
     pub sessions: usize,
 }
 
-/// The lessons `cwd`'s patterns hold, newest first, at most `limit`: what a
-/// session is asked beside. Showing one again is then said by naming it and
-/// not in new words the store would take for another lesson — which holds
-/// for a lesson the gate has kept as much as for one that waits, or the same
-/// lesson would be kept twice in two wordings.
+/// The lessons `cwd`'s sessions have offered, newest first, at most `limit`:
+/// what a session is asked beside. Showing one again is then said by naming
+/// it, and not in new words that would stand as another lesson.
 #[must_use]
 pub fn said_lessons_known(cwd: &Path, limit: usize) -> Vec<KnownLesson> {
-    let Ok(lines) = fs::read_to_string(user_pattern_dir(cwd).join(USER_PATTERN_FILE)) else {
+    let path = user_pattern_dir(cwd).join(SAID_LESSONS_DIR).join(SAID_LESSONS_FILE);
+    let Ok(lines) = fs::read_to_string(path) else {
         return Vec::new();
     };
-    // In the order first recorded: a signature, its lesson, the sessions that showed it.
-    let mut shown: Vec<(String, KnownLesson, std::collections::BTreeSet<String>)> = Vec::new();
+    // In the order first recorded: a lesson, and the sessions that showed it.
+    let mut shown: Vec<(KnownLesson, std::collections::BTreeSet<String>)> = Vec::new();
     for record in lines
         .lines()
-        .filter_map(|line| serde_json::from_str::<UserPatternRecord>(line).ok())
-        .filter(user_pattern_record_is_valid)
+        .filter_map(|line| serde_json::from_str::<SaidLessonRecord>(line).ok())
+        .filter(|record| said_lesson_allowed(record.kind, &record.text))
     {
-        let obs = record.observation;
-        match shown.iter_mut().find(|(signature, ..)| *signature == obs.signature) {
-            Some((_, _, sessions)) => {
-                sessions.insert(obs.session_id);
+        match shown
+            .iter_mut()
+            .find(|(lesson, _)| lesson.kind == record.kind && lesson.text == record.text)
+        {
+            Some((_, sessions)) => {
+                sessions.insert(record.session_id);
             }
             None => shown.push((
-                obs.signature,
                 KnownLesson {
-                    kind: obs.kind,
-                    text: obs.summary,
+                    kind: record.kind,
+                    text: record.text,
                     sessions: 0,
                 },
-                std::collections::BTreeSet::from([obs.session_id]),
+                std::collections::BTreeSet::from([record.session_id]),
             )),
         }
     }
@@ -2349,7 +2415,7 @@ pub fn said_lessons_known(cwd: &Path, limit: usize) -> Vec<KnownLesson> {
         .into_iter()
         .rev()
         .take(limit)
-        .map(|(_, lesson, sessions)| KnownLesson {
+        .map(|(lesson, sessions)| KnownLesson {
             sessions: sessions.len(),
             ..lesson
         })
@@ -2404,16 +2470,9 @@ pub fn said_asked(cwd: &Path, session_id: &str) -> Option<SaidAsked> {
 /// must not go out, or the same words would be sent again.
 #[must_use]
 pub fn mark_said_asked(cwd: &Path, session_id: &str, asked: &SaidAsked) -> bool {
-    let Ok((config_home, dir)) = ensure_user_pattern_dir(cwd) else {
+    let Some((config_home, folder)) = ensure_said_folder(cwd, SAID_ASKED_DIR) else {
         return false;
     };
-    let folder = dir.join(SAID_ASKED_DIR);
-    let Ok(relative) = folder.strip_prefix(&config_home) else {
-        return false;
-    };
-    if crate::secure_fs::ensure_private_dir(&config_home, relative).is_err() {
-        return false;
-    }
     let mut kept = asked.clone();
     let over = kept.sent.len().saturating_sub(MAX_SAID_ASKED_MARKS);
     kept.sent.drain(..over);
@@ -2447,31 +2506,6 @@ fn forget_oldest_said_asked(folder: &Path) {
     for (_, path) in records.into_iter().take(over) {
         let _ = fs::remove_file(path);
     }
-}
-
-fn record_user_pattern(cwd: &Path, session_id: &str, kind: LessonKind, summary: &str) -> bool {
-    let summary = summary.trim();
-    if !user_pattern_text_allowed(summary) {
-        return false;
-    }
-    let observation = LessonObservation {
-        session_id: session_id.trim().to_string(),
-        signature: user_pattern_signature(summary),
-        lesson: summary.to_string(),
-        summary: summary.to_string(),
-        kind,
-        verified: true,
-    };
-    let record = UserPatternRecord { ts_ms: now_ms(), observation };
-    let Ok((config_home, dir)) = ensure_user_pattern_dir(cwd) else {
-        return false;
-    };
-    let path = dir.join(USER_PATTERN_FILE);
-    let Ok(mut line) = serde_json::to_string(&record) else {
-        return false;
-    };
-    line.push('\n');
-    append_jsonl_line_no_symlink(&config_home, &path, &line).is_ok()
 }
 
 /// Reads candidate observations from append-only JSONL logs under

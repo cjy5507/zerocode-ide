@@ -18,8 +18,14 @@
 //! from one session of a project to the next. Its output says which of them
 //! this session showed again.
 //!
+//! It sends a session's words only where a person is at the terminal that
+//! ran it. Run by a program — a session's own shell among them — it answers
+//! as `--dry-run` does and says so, unless `--send` says the sending is
+//! meant: the switch a pass needs (`dreamLessons`) is not asked of a preview,
+//! so a preview a model could run would be a way round it.
+//!
 //! ```text
-//! zo dream-lessons preview <session id|name|path> [--candidates <file>] [--dry-run] [--json]
+//! zo dream-lessons preview <session id|name|path> [--candidates <file>] [--dry-run] [--send] [--json]
 //! ```
 
 use std::fmt::Write as _;
@@ -32,7 +38,7 @@ use tools::fast_model::FastModel;
 use tools::said_lessons::{ask, digest_of, model_of, ASK_WITHIN};
 
 pub const USAGE: &str = "\
-zo dream-lessons preview <session id|name|path> [--candidates <file>] [--dry-run] [--json]
+zo dream-lessons preview <session id|name|path> [--candidates <file>] [--dry-run] [--send] [--json]
 
   What the dreamer would ask about one session and take from the answer,
   shown and not kept: nothing is written to memory, the vault or the
@@ -42,6 +48,7 @@ zo dream-lessons preview <session id|name|path> [--candidates <file>] [--dry-run
   sends nothing: it names the model and the size of what would be shown.
   --candidates is a JSON list of {\"id\", \"kind\", \"text\"} — lessons earlier
   sessions left — shown beside the session; the file is read, never written.
+  Where no person is at the terminal it sends nothing either, unless --send.
 ";
 
 /// What became of one preview.
@@ -74,16 +81,30 @@ struct Preview {
 const TOO_LITTLE_SAID: &str = "the person said fewer things in it than a pass asks about";
 const NO_MODEL: &str = "no model answered in this session";
 const DRY_RUN: &str = "a dry run sends nothing";
+const NOBODY_AT_THE_TERMINAL: &str = "nobody is at the terminal that ran this, so nothing is sent; --send sends it";
+
+/// Why this run sends nothing, when it does not: it was asked not to, or a
+/// program ran it and did not say the sending is meant.
+fn held_back(dry_run: bool, send: bool, at_a_terminal: bool) -> Option<&'static str> {
+    if dry_run {
+        Some(DRY_RUN)
+    } else if !send && !at_a_terminal {
+        Some(NOBODY_AT_THE_TERMINAL)
+    } else {
+        None
+    }
+}
 
 /// # Errors
 /// The usage for words it does not know, or why the session could not be read.
 pub fn run(args: &[String]) -> Result<String, String> {
-    let (mut dry_run, mut as_json, mut candidates, mut words) = (false, false, None, Vec::new());
+    let (mut dry_run, mut send, mut as_json, mut candidates, mut words) = (false, false, false, None, Vec::new());
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => return Ok(USAGE.to_string()),
             "--dry-run" => dry_run = true,
+            "--send" => send = true,
             "--json" => as_json = true,
             "--candidates" => candidates = Some(args.next().ok_or("--candidates needs a file")?),
             flag if flag.starts_with("--") => return Err(format!("unknown word {flag:?}\n{USAGE}")),
@@ -101,7 +122,8 @@ pub fn run(args: &[String]) -> Result<String, String> {
     let session = Session::load_from_path(&handle.path).map_err(|error| error.to_string())?;
     let digest = digest_of(&session.messages);
     let session_model = model_of(&session.messages).map(str::to_string);
-    let preview = preview(&digest, session_model, dry_run, |digest, model| {
+    let held_back = held_back(dry_run, send, tools::stdin_is_terminal());
+    let preview = preview(&digest, session_model, held_back, |digest, model| {
         ask(digest, &pending, model, ASK_WITHIN).map(|asked| (asked.read.taken, asked.read.dropped))
     });
     Ok(if as_json {
@@ -141,12 +163,12 @@ fn candidates_in(file: &str) -> Result<Vec<Pending>, String> {
 }
 
 /// The preview of a session whose digest is `digest`: asked through `ask`
-/// only when a pass would ask about it, a model answered in it, and this is
-/// not a dry run.
+/// only when a pass would ask about it, a model answered in it, and nothing
+/// holds the sending back (`held_back`: why, when something does).
 fn preview(
     digest: &Digest,
     session_model: Option<String>,
-    dry_run: bool,
+    held_back: Option<&'static str>,
     ask: impl FnOnce(&Digest, &str) -> Result<(Vec<Offered>, usize), String>,
 ) -> Preview {
     let asked_model = session_model.as_deref().and_then(|model| FastModel::fast_tier_named_for(Some(model)));
@@ -156,10 +178,12 @@ fn preview(
         // Only a fast model is asked, as a pass asks: nothing goes to the
         // session's own model where its provider has no fast one.
         Some(_) if asked_model.is_none() => Outcome::NotAsked(tools::fast_model::NO_FAST_TIER),
-        Some(_) if dry_run => Outcome::NotAsked(DRY_RUN),
-        Some(model) => match ask(digest, model) {
-            Ok((taken, dropped)) => Outcome::Asked { taken, dropped },
-            Err(error) => Outcome::Failed(error),
+        Some(model) => match held_back {
+            Some(why) => Outcome::NotAsked(why),
+            None => match ask(digest, model) {
+                Ok((taken, dropped)) => Outcome::Asked { taken, dropped },
+                Err(error) => Outcome::Failed(error),
+            },
         },
     };
     Preview {
@@ -255,13 +279,13 @@ mod tests {
     /// model and the size.
     #[test]
     fn a_preview_sends_nothing_where_a_pass_would_not_ask_or_on_a_dry_run() {
-        let short = preview(&digest(&["one", "two"]), Some(A_CATALOG_MODEL.into()), false, never_asked);
+        let short = preview(&digest(&["one", "two"]), Some(A_CATALOG_MODEL.into()), None, never_asked);
         assert_eq!(short.outcome, Outcome::NotAsked(TOO_LITTLE_SAID));
         let three = digest(&["Answer in Korean", "Never push to main", "Run the gate first"]);
-        let no_model = preview(&three, None, false, never_asked);
+        let no_model = preview(&three, None, None, never_asked);
         assert_eq!(no_model.outcome, Outcome::NotAsked(NO_MODEL));
         assert_eq!(no_model.asked_model, None);
-        let dry = preview(&three, Some(A_CATALOG_MODEL.into()), true, never_asked);
+        let dry = preview(&three, Some(A_CATALOG_MODEL.into()), Some(DRY_RUN), never_asked);
         assert_eq!(dry.outcome, Outcome::NotAsked(DRY_RUN));
         assert_eq!(dry.shown, 3);
         assert_eq!(dry.chars, three.chars());
@@ -288,7 +312,7 @@ mod tests {
             // The model routes elsewhere on this machine: nothing to show here.
             return;
         }
-        let shown = preview(&three, Some(model.into()), false, never_asked);
+        let shown = preview(&three, Some(model.into()), None, never_asked);
         assert_eq!(shown.outcome, Outcome::NotAsked(tools::fast_model::NO_FAST_TIER));
         assert_eq!(shown.asked_model, None);
         assert!(shown.text("s-1").contains("its provider has no fast model"), "{}", shown.text("s-1"));
@@ -306,7 +330,7 @@ mod tests {
             text: "Never push to main".to_string(),
             said: 2,
         }];
-        let shown = preview(&three, Some(A_CATALOG_MODEL.into()), false, |digest, model| {
+        let shown = preview(&three, Some(A_CATALOG_MODEL.into()), None, |digest, model| {
             asked_with.push((digest.len(), model.to_string()));
             Ok((taken.clone(), 1))
         });
@@ -320,7 +344,7 @@ mod tests {
         assert_eq!(json["taken"][0]["kind"], "constraint");
         assert_eq!(json["dropped"], 1);
 
-        let failed = preview(&three, Some(A_CATALOG_MODEL.into()), false, |_, _| Err("timed out after 45s".to_string()));
+        let failed = preview(&three, Some(A_CATALOG_MODEL.into()), None, |_, _| Err("timed out after 45s".to_string()));
         assert_eq!(failed.outcome, Outcome::Failed("timed out after 45s".to_string()));
         assert_eq!(failed.json("s-1")["error"], "timed out after 45s");
     }
@@ -353,13 +377,30 @@ mod tests {
             text: "Never push to main".to_string(),
             said: 2,
         }];
-        let shown = preview(&three, Some(A_CATALOG_MODEL.into()), false, |_, _| Ok((again.clone(), 0)));
+        let shown = preview(&three, Some(A_CATALOG_MODEL.into()), None, |_, _| Ok((again.clone(), 0)));
         assert!(
             shown.text("s-2").contains("- [constraint] Never push to main (from [2], candidate c1 shown again)"),
             "{}",
             shown.text("s-2")
         );
         assert_eq!(shown.json("s-2")["taken"][0]["same_as"], "c1");
+    }
+
+    /// A preview sends only where a person is at its terminal, or where
+    /// `--send` says the sending is meant; a dry run sends nothing wherever
+    /// it is run.
+    #[test]
+    fn a_preview_a_program_runs_sends_nothing_unless_it_says_send() {
+        assert_eq!(held_back(false, false, true), None, "a person at the terminal");
+        assert_eq!(held_back(false, false, false), Some(NOBODY_AT_THE_TERMINAL), "a program ran it");
+        assert_eq!(held_back(false, true, false), None, "a program that says --send");
+        for (send, at_a_terminal) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(held_back(true, send, at_a_terminal), Some(DRY_RUN));
+        }
+        let three = digest(&["Answer in Korean", "Never push to main", "Run the gate first"]);
+        let held = preview(&three, Some(A_CATALOG_MODEL.into()), Some(NOBODY_AT_THE_TERMINAL), never_asked);
+        assert_eq!(held.outcome, Outcome::NotAsked(NOBODY_AT_THE_TERMINAL));
+        assert!(held.text("s-1").contains("--send sends it"), "{}", held.text("s-1"));
     }
 
     #[test]

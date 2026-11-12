@@ -2339,11 +2339,13 @@ raw-extra",
     });
 }
 
-/// A lesson the person's own words taught is one line of three kinds; the
-/// patterns say how many sessions have shown each, and what a session was
-/// asked about is kept by its marks, the newest ones.
+/// A lesson the person's own words offered is one line of three kinds, kept
+/// as a candidate beside the person's patterns with the sessions that showed
+/// it. No pass reads it — nothing becomes memory, and the patterns a pass
+/// does read are not written. What a session was asked about is kept by its
+/// marks, the newest ones.
 #[test]
-fn said_lessons_wait_for_a_second_session_and_what_was_asked_about_is_kept() {
+fn said_lessons_are_candidates_no_pass_reads_and_what_was_asked_about_is_kept() {
     let env_lock = crate::test_env_lock();
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().join("repo");
@@ -2357,9 +2359,10 @@ fn said_lessons_wait_for_a_second_session_and_what_was_asked_about_is_kept() {
         assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Workflow, "Run the gate before a hand-in"));
         assert!(
             !super::record_said_lesson(&cwd, "s1", LessonKind::Gotcha, "bash is error-prone here"),
-            "how a tool behaves is not a pattern of the person's"
+            "how a tool behaves is not a lesson a session's words may offer"
         );
         assert!(!super::record_said_lesson(&cwd, "s1", LessonKind::Preference, "two\nlines"));
+        assert!(!super::record_said_lesson(&cwd, "  ", LessonKind::Preference, "Answer in Korean"));
         // The same line again from the same session, and once from another.
         assert!(super::record_said_lesson(&cwd, "s1", LessonKind::Preference, "Answer in Korean"));
         assert!(super::record_said_lesson(&cwd, "s2", LessonKind::Workflow, "Run the gate before a hand-in"));
@@ -2376,9 +2379,15 @@ fn said_lessons_wait_for_a_second_session_and_what_was_asked_about_is_kept() {
         );
         assert_eq!(super::said_lessons_known(&cwd, 1).len(), 1, "at most the limit");
 
+        // Two sessions stand behind one of them, and still no pass keeps it:
+        // the candidates are not among the logs a pass reads.
+        assert!(super::auto_dream_held(&cwd, super::DEFAULT_AUTO_DREAM_INTERVAL).is_some(), "no evidence for a pass");
         let report = dream_at_cwd(&cwd, None).unwrap();
-        assert_eq!(report.applied.len(), 1, "{:?}", report.applied);
-        assert!(report.applied[0].slug.starts_with("workflow-user-pattern-"), "{}", report.applied[0].slug);
+        assert!(report.applied.is_empty(), "{:?}", report.applied);
+        assert!(!super::user_pattern_dir(&cwd).join(super::USER_PATTERN_FILE).exists());
+        // The person's patterns take what they always took.
+        assert!(super::record_user_pattern_observation(&cwd, "s1", "pattern-7a", true));
+        assert!(super::said_lessons_known(&cwd, 10).iter().all(|lesson| lesson.text != "pattern-7a"));
 
         assert_eq!(super::said_asked(&cwd, "s1"), None, "never asked");
         let marks: Vec<u64> = (0..(super::MAX_SAID_ASKED_MARKS as u64 + 5)).collect();
