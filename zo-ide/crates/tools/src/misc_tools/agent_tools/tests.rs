@@ -1701,6 +1701,12 @@ fn a_ps_listing_keeps_a_zo_whose_path_holds_spaces() {
 /// The probe itself, against a real process: an executable named `zo` in a
 /// folder whose name holds a space is alive while it runs, so the agents it
 /// owns are not overwritten as stopped.
+///
+/// The stand-in is a link to `sleep`, not a copy of it: macOS ends a copy of
+/// one of its own programs as it starts (a launch constraint — the program
+/// may only run from where the system keeps it), and the probe then found
+/// nothing alive. A link runs the system's own file under the link's path,
+/// and that path is what `ps` names.
 #[cfg(unix)]
 #[test]
 fn a_live_zo_under_a_path_with_spaces_is_alive() {
@@ -1708,7 +1714,7 @@ fn a_live_zo_under_a_path_with_spaces_is_alive() {
     let folder = dir.path().join("Application Support");
     std::fs::create_dir_all(&folder).expect("folder");
     let zo = folder.join("zo");
-    std::fs::copy("/bin/sleep", &zo).expect("copy sleep as zo");
+    std::os::unix::fs::symlink("/bin/sleep", &zo).expect("link sleep as zo");
     let mut child = std::process::Command::new(&zo).arg("30").spawn().expect("spawn zo");
     let alive = live_zo_pids(std::iter::once(child.id()));
     let _ = child.kill();
