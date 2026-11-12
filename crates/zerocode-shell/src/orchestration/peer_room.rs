@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use zerocode_core::orchestration::Run;
-use zerocode_core::orchestration::room::{self, PeerPane};
+use zerocode_core::orchestration::room::{self, PeerPane, PeerState};
 
 use super::{Host, PaneTurn, project_scope};
 
@@ -72,16 +72,20 @@ pub(super) fn note_panes(
                 .collect::<Vec<_>>()
         })
         .collect();
+    // A pane closed since the last beat takes its counts with it.
+    forget_closed(&seats.iter().map(|(_, term)| *term).collect());
+    // Which terminal each pane is, for the person's last input by seat.
+    *seat_terms().lock().unwrap_or_else(|held| held.into_inner()) = seats.iter().cloned().collect();
     let rows: PaneRows = seats
         .into_iter()
         .filter_map(|(seat, term)| {
             let agent = host.agent_of(term)?;
             let state = if attention.get(&term).copied().flatten().is_some() {
-                "waiting"
+                PeerState::Waiting
             } else if matches!(turns.get(&term), Some(PaneTurn::Running { .. })) {
-                "working"
+                PeerState::Working
             } else {
-                "idle"
+                PeerState::Idle
             };
             // The folder read once, and its project from it.
             let folder = host.worktree_of(term);
@@ -131,8 +135,69 @@ fn woken() -> &'static Mutex<HashMap<u32, HashSet<String>>> {
     WOKEN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Let go of the counts of every pane not in `live` — a closed pane's room
+/// letters and log lines are no one's any more (review t-105562).
+fn forget_closed(live: &HashSet<u32>) {
+    woken()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .retain(|term, _| live.contains(term));
+    hands()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .retain(|term, _| live.contains(term));
+    noted()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .retain(|(term, _)| live.contains(term));
+}
+
+/// Each pane's terminal by seat (`team/pane`), as the last beat read them.
+fn seat_terms() -> &'static Mutex<HashMap<String, u32>> {
+    static SEATS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    SEATS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// When the person last typed in each pane, by terminal.
+fn hands() -> &'static Mutex<HashMap<u32, i64>> {
+    static HANDS: OnceLock<Mutex<HashMap<u32, i64>>> = OnceLock::new();
+    HANDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// When this window first asked — what stands for the person's last input in
+/// a pane they have not typed in since it opened, so the letters two panes
+/// wrote before a restart are not held against them now.
+fn opened_ms() -> i64 {
+    static OPENED: OnceLock<i64> = OnceLock::new();
+    *OPENED.get_or_init(crate::usage_runtime::epoch_ms_now)
+}
+
+/// When the person last typed in the pane at `seat`, or when the window
+/// opened — a lookup the actor makes under the ledger
+/// (`zerocode_core::orchestration::room::pair_allowed`).
+pub(super) fn person_input_ms(seat: &str) -> Option<i64> {
+    let opened = opened_ms();
+    let term = seat_terms()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .get(seat)
+        .copied();
+    let typed = term.and_then(|term| {
+        hands()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            .copied()
+    });
+    Some(typed.map_or(opened, |typed| typed.max(opened)))
+}
+
 /// The person typed or sent something in `term`: the room may wake it again.
 pub(crate) fn person_at(term: u32) {
+    hands()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(term, crate::usage_runtime::epoch_ms_now());
     woken()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
@@ -685,6 +750,55 @@ mod tests {
         assert!(room_recipient(&host, "send", "t/%3", None).is_ok());
     }
 
+    /// A pane that closed takes its room counts with it; a live pane keeps
+    /// its own (review t-105562).
+    #[test]
+    fn a_closed_panes_counts_go_with_it() {
+        const LIVE: u32 = 71_020;
+        const CLOSED: u32 = 71_021;
+        for term in [LIVE, CLOSED] {
+            woken()
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .entry(term)
+                .or_default()
+                .insert(format!("m-{term}"));
+        }
+        let live: HashSet<u32> = woken()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .keys()
+            .copied()
+            .filter(|term| *term != CLOSED)
+            .collect();
+        forget_closed(&live);
+        let held = woken().lock().unwrap_or_else(|held| held.into_inner());
+        assert!(held.contains_key(&LIVE));
+        assert!(!held.contains_key(&CLOSED));
+    }
+
+    /// The person's last input is read by seat: a pane they typed in says
+    /// when, one they did not says when the window opened (review t-105450,
+    /// held for v1.1.146).
+    #[test]
+    fn the_persons_last_input_is_read_by_seat_and_the_window_opening_stands_in() {
+        const TERM: u32 = 71_030;
+        let seat = "team-hands/%4";
+        seat_terms()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(seat.to_string(), TERM);
+        let opened = opened_ms();
+        assert_eq!(
+            person_input_ms("team-hands/%9"),
+            Some(opened),
+            "a pane never typed in"
+        );
+        person_at(TERM);
+        let typed = person_input_ms(seat).expect("a time");
+        assert!(typed >= opened, "{typed} < {opened}");
+    }
+
     /// `peers` shows the caller's project only, and nobody to a caller in
     /// none — a pane of another project, or one in no known project (a remote
     /// workspace's), is in no other project's list.
@@ -695,7 +809,7 @@ mod tests {
             agent: Some("codex".to_string()),
             title: None,
             folder: None,
-            state: "idle",
+            state: PeerState::Idle,
         };
         let rows = vec![
             (Some(A.to_string()), pane("t/%1")),

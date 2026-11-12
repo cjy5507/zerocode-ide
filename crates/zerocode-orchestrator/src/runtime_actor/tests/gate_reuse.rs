@@ -1438,10 +1438,27 @@ fn shared_native_open_validates_identity_fields_limits_and_listener_lifetime() {
         session::read_frame(&mut stream).unwrap().unwrap()["ok"],
         true
     );
-    assert!(
-        TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err(),
-        "gate listener accepted another connection after binding"
-    );
+    /* The gate lets its listener go once one connection is bound, and must
+     * never serve a second. A refused connect is the usual proof, but not the
+     * only honest outcome: on macOS the standard library opens a socket and
+     * marks it close-on-exec in two steps, so a process another test thread
+     * spawns between them inherits the listener and keeps its port accepting
+     * after the gate dropped it — a connect that succeeds while nobody serves
+     * it (2026-11-12, j-1794454394032-4070, a loaded parallel run). What the
+     * gate guarantees is asked instead: nothing answering that port now says
+     * `ok` to this job's capability. */
+    if let Ok(mut second) = TcpStream::connect_timeout(&address, Duration::from_millis(100)) {
+        second
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let _ = session::write_frame(&mut second, &json!({"capability":capability_of("%1")}));
+        let answered = session::read_frame(&mut second).ok().flatten();
+        assert_ne!(
+            answered.map(|frame| frame["ok"].clone()),
+            Some(json!(true)),
+            "the gate served another connection after binding"
+        );
+    }
     drop(stream);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while fixture

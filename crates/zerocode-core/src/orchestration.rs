@@ -8758,7 +8758,7 @@ impl Ledger {
     /// `worker_fell_silent` reads its own JSON the same way.
     fn announce_a_ring_of_waiting(&mut self, run_id: &str, question_id: &str, now_ms: i64) {
         let ledger: &Ledger = self;
-        let Some((address, told)) = ledger.run(run_id).and_then(|run| {
+        let Some((readers, told)) = ledger.run(run_id).and_then(|run| {
             let ring = ring_closed_by(ledger, run, run.message(question_id)?, now_ms)?;
             let waiting: Vec<serde_json::Value> = ring
                 .iter()
@@ -8784,29 +8784,38 @@ impl Ledger {
             if already_told(ledger, run, &seats, now_ms) {
                 return None;
             }
+            /* A room has no reader at its `run:` address ([`room`]): the
+             * panes holding each other are told, each at its own. */
+            let readers: Vec<String> = match run.is_room() {
+                true => seats.iter().map(|seat| (*seat).to_string()).collect(),
+                false => vec![run.address()],
+            };
             Some((
-                run.address(),
+                readers,
                 serde_json::json!({ "reason": "circular_wait", "waiting": waiting }),
             ))
         }) else {
             return;
         };
-        let draft = Draft {
-            // Not either waiting seat's address: neither of them said this,
-            // and a reader who saw one here would be reading a report that
-            // seat never made. `worker_fell_silent`'s rule, for its reason.
-            from: LEDGER_ITSELF.to_string(),
-            to: address,
-            kind: MessageKind::Deadlocked,
-            body: told.to_string().into(),
-            subject: Text::default(),
-            priority: Priority::Normal,
-            payload: Text::default(),
-            thread: None,
-            task: None,
-            dispatch: None,
-        };
-        let _ = self.post(run_id, draft, now_ms);
+        for to in readers {
+            let draft = Draft {
+                // Not either waiting seat's address: neither of them said
+                // this, and a reader who saw one here would be reading a
+                // report that seat never made. `worker_fell_silent`'s rule,
+                // for its reason.
+                from: LEDGER_ITSELF.to_string(),
+                to,
+                kind: MessageKind::Deadlocked,
+                body: told.to_string().into(),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            };
+            let _ = self.post(run_id, draft, now_ms);
+        }
     }
 
     /// The federation relay hooks, run after every post has landed.
@@ -16805,6 +16814,14 @@ pub trait Launcher {
     /// `project`, for `peers` (`room::peers`). `None` is nobody looked, on
     /// [`Self::presence`]'s rule; the window holds the rows to that project.
     fn live_panes(&self, _project: Option<&str>) -> Option<Vec<room::PeerPane>> {
+        None
+    }
+
+    /// When the person last typed in the pane at `seat` (`team/pane`), or
+    /// when the window opened if not since — the start of what a room lets
+    /// two panes say to each other ([`room::pair_allowed`]). `None` is nobody
+    /// knows, which counts every letter the pair ever wrote.
+    fn person_input_ms(&self, _seat: &str) -> Option<i64> {
         None
     }
 }
@@ -25934,6 +25951,7 @@ fn plan_inner(
                         .ok_or("ask needs --body, or --resume <questionId>")?
                         .to_string();
                     room::ask_allowed(ledger, launcher, &run_id, words.value("--to"))?;
+                    room::pair_allowed(ledger, launcher, &run_id, &seat, words.value("--to"))?;
                     // A question goes to the coordinator unless it is
                     // addressed elsewhere — and never to a group: one
                     // question takes ONE answer, and a crowd asked together
@@ -26296,6 +26314,7 @@ fn plan_inner(
                 ));
             }
             room::send_allowed(ledger, launcher, &run_id, kind, words.value("--to"))?;
+            room::pair_allowed(ledger, launcher, &run_id, &seat, words.value("--to"))?;
             // What a worker is carrying, so it does not have to say it back.
             // Every fact an agent repeats is a fact it can repeat wrong, and a
             // `worker_done` naming the wrong dispatch closes somebody else's
@@ -26502,6 +26521,7 @@ fn plan_inner(
                 .message(&thread)
                 .ok_or_else(|| format!("unknown message: {thread}"))?;
             let (to, kind) = (answered.from.clone(), answered.kind);
+            room::pair_allowed(ledger, launcher, &run_id, &seat, Some(&to))?;
             // The run the writer reads, when the writer is another run's
             // coordinator: the answer is delivered there too, so one
             // `reply` reaches it whatever run the letter was filed in — a

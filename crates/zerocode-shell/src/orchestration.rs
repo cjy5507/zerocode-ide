@@ -4463,6 +4463,11 @@ impl Launcher for LiveCatalog {
         peer_room::live_panes(project)
     }
 
+    /// When the person last typed in a pane, read off the mail pass's cells.
+    fn person_input_ms(&self, seat: &str) -> Option<i64> {
+        peer_room::person_input_ms(seat)
+    }
+
     fn command_for_resume(
         &self,
         agent: &str,

@@ -47,6 +47,13 @@ pub const PEERS_VERB: &str = "peers";
 /// What a room answers. Everything else needs a run somebody coordinates.
 pub const ROOM_VERBS: &[&str] = &[PEERS_VERB, "send", "ask", "reply", "check"];
 
+/// Room letters two panes may write each other, both ways together, between
+/// two of the person's inputs in either pane ([`pair_allowed`]): a question
+/// and its answer five times over. The wake budget keeps a resting pane from
+/// being woken; this keeps two panes already turning — an `ask` answered,
+/// asked back, answered — from talking on with nobody watching.
+pub const PAIR_LETTERS: usize = 10;
+
 /// The name a room run is made under, so `run-list` says what it is.
 pub const ROOM_NAME: &str = "room";
 
@@ -84,8 +91,20 @@ pub struct PeerPane {
     /// The folder the pane works in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
-    /// `working`, `idle` or `waiting` (on the person).
-    pub state: &'static str,
+    /// What the pane is doing as the window last saw it.
+    pub state: PeerState,
+}
+
+/// What an agent pane is doing, as `peers` says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerState {
+    /// A turn is under way.
+    Working,
+    /// At rest, ready for a letter.
+    Idle,
+    /// Waiting on the person — a question or a permission prompt.
+    Waiting,
 }
 
 impl super::Run {
@@ -314,6 +333,50 @@ pub(super) fn ask_allowed(
         ));
     }
     Ok(())
+}
+
+/// A room letter from `seat` to `to`, held to [`PAIR_LETTERS`] between the two
+/// panes since the person last typed in either (`Launcher::person_input_ms`) —
+/// counted in the room, both ways (review t-105450, held for v1.1.146). Not a
+/// room, or not a pane: nothing to count.
+pub(super) fn pair_allowed(
+    ledger: &Ledger,
+    launcher: &dyn Launcher,
+    run_id: &str,
+    seat: &str,
+    to: Option<&str>,
+) -> Result<(), String> {
+    let Some(room) = ledger.run(run_id).filter(|run| run.is_room()) else {
+        return Ok(());
+    };
+    let Some(other) = to.and_then(|to| to.strip_prefix(PANE_ADDRESS_PREFIX)) else {
+        return Ok(());
+    };
+    let since = [seat, other]
+        .iter()
+        .filter_map(|seat| launcher.person_input_ms(seat))
+        .max()
+        .unwrap_or(i64::MIN);
+    let (mine, theirs) = (
+        format!("{PANE_ADDRESS_PREFIX}{seat}"),
+        format!("{PANE_ADDRESS_PREFIX}{other}"),
+    );
+    let written = room
+        .messages()
+        .iter()
+        .filter(|held| held.created_ms > since)
+        .filter(|held| {
+            (held.from == mine && held.to == theirs) || (held.from == theirs && held.to == mine)
+        })
+        .count();
+    match written < PAIR_LETTERS {
+        true => Ok(()),
+        false => Err(format!(
+            "{mine} and {theirs} have written each other {written} room letters since the \
+             person last typed in either pane — nothing was sent; the person reads them \
+             first, and their next input in either pane lets the two go on"
+        )),
+    }
 }
 
 /// A room reply, held by the person's switch like any room letter: off, two

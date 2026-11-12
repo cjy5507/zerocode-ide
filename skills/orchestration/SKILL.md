@@ -385,7 +385,9 @@ room, a run nobody coordinates and nobody signs as.
   to a coordinator or the person.
 - Write when there is something to say. Do not reply only to acknowledge a
   letter, and do not keep asking each other back and forth — two panes
-  turning each other over is work nobody asked for.
+  turning each other over is work nobody asked for. The room holds two panes
+  to a handful of letters each way between the person's inputs; the refusal
+  says so, and the person's next word in either pane lets them go on.
 - A letter for a worker goes to its run's coordinator, which decides whether
   the worker hears it; a run with no coordinator sitting refuses it.
 - The room carries mail only — `peers`, `send`, `ask`, `reply`, `check`. A

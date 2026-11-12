@@ -59,3 +59,73 @@ fn the_persons_input_commands_renew_the_room_only_for_the_persons_hand() {
         "the door renews before it asks whose hand"
     );
 }
+
+const PEER_ROOM: &str = include_str!("../../src/orchestration/peer_room.rs");
+const INDEX: &str = include_str!("../../../../ui/index.html");
+const CATALOGS: &str = include_str!("../../../../ui/shell-i18n.js");
+const GUIDE: &str = include_str!("../../../../skills/orchestration/SKILL.md");
+
+/// How often a room letter may wake a pane is one number, the window's
+/// `WAKES_PER_HAND`, and every text that says it — the setting's hint in five
+/// languages and the guide's room section — says that number (review
+/// t-105562: the count was written in six places beside the constant).
+#[test]
+fn every_text_that_says_how_often_a_room_wakes_a_pane_says_the_constant() {
+    let wakes: usize = PEER_ROOM
+        .split_once("pub(crate) const WAKES_PER_HAND: usize = ")
+        .and_then(|(_, rest)| rest.split_once(';'))
+        .and_then(|(value, _)| value.trim().parse().ok())
+        .expect("WAKES_PER_HAND is gone from orchestration/peer_room.rs");
+    // The words each text says the number with. A new number is a new row
+    // here and a new word in every text — which is the point.
+    let said: &[(usize, [&str; 6])] = &[(
+        3,
+        [
+            "세 번",
+            "three times",
+            "3回",
+            "三次",
+            "tres veces",
+            "three times",
+        ],
+    )];
+    let words = said
+        .iter()
+        .find(|(count, _)| *count == wakes)
+        .map(|(_, words)| words)
+        .unwrap_or_else(|| {
+            panic!(
+                "WAKES_PER_HAND is {wakes}: say it in the setting's five languages and the guide"
+            )
+        });
+    let hint = INDEX
+        .split_once("data-i18n=\"settings.harness.peerMailHint\"")
+        .and_then(|(_, rest)| rest.split_once("</span>"))
+        .map(|(hint, _)| hint)
+        .expect("the setting's hint is gone from ui/index.html");
+    assert!(
+        hint.contains(words[0]),
+        "the Korean hint does not say {}",
+        words[0]
+    );
+    let catalogs: Vec<&str> = CATALOGS
+        .lines()
+        .filter(|line| line.contains("\"settings.harness.peerMailHint\":"))
+        .collect();
+    assert_eq!(catalogs.len(), 4, "the hint is not in the four catalogs");
+    for (line, word) in catalogs.iter().zip(&words[1..5]) {
+        assert!(
+            line.contains(word),
+            "a catalog's hint does not say {word}: {line}"
+        );
+    }
+    let room = GUIDE
+        .split_once("## Writing to another agent pane")
+        .map(|(_, rest)| rest)
+        .expect("the guide's room section is gone");
+    assert!(
+        room.contains(words[5]),
+        "the guide's room section does not say {}",
+        words[5]
+    );
+}
