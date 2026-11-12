@@ -820,3 +820,125 @@ fn every_verb_of_the_table_outside_the_rooms_is_refused_in_a_room() {
     assert!(let_through.is_empty(), "{let_through:#?}");
     assert!(the_room(&bench).tasks.is_empty() && the_room(&bench).workers.is_empty());
 }
+
+/// Every letter a room's verbs write carries the room, wherever it is filed:
+/// the letter in the room, the copy a coordinator's pane reads in its run,
+/// the letter redirected to a worker's coordinator, and a live
+/// coordinator's own letter written into the room by `--run`. A letter of
+/// an ordinary run carries none (review t-105562, 1).
+#[test]
+fn every_letter_a_rooms_verbs_write_carries_the_room() {
+    let mut bench = Bench::new();
+    let run = bench.json("run-create --name work")["runId"]
+        .as_str()
+        .expect("a run")
+        .to_string();
+    let task = bench.json("task-create --spec x")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (_, worker_pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    let ordinary = bench.json(&format!("send --to run:{run} --type status --body plain"));
+    let launcher = on();
+    let to_chair = format!("pane:team-1/{}", agent_teams::LEADER_PANE);
+    let copied = answered(&send(
+        &mut bench,
+        &launcher,
+        LONE,
+        &to_chair,
+        "for-the-chair",
+    ));
+    let redirected = answered(&send(
+        &mut bench,
+        &launcher,
+        LONE,
+        &format!("pane:team-1/{worker_pane}"),
+        "for-the-worker",
+    ));
+    let room = the_room(&bench).id.clone();
+    let line = [
+        "send",
+        "--run",
+        room.as_str(),
+        "--to",
+        &format!("pane:team-1/{OTHER}"),
+        "--type",
+        "status",
+        "--body",
+        "from-the-chair",
+    ];
+    let chairs_own = answered(&typed(
+        &mut bench,
+        &launcher,
+        agent_teams::LEADER_PANE,
+        Some(A),
+        &line,
+    ));
+    let marked = |run_id: &str, id: &str| {
+        bench
+            .ledger
+            .run(run_id)
+            .and_then(|held| held.message(id))
+            .map(|message| message.room.clone())
+    };
+    let room_mark = Some(Some(room.clone()));
+    assert_eq!(
+        marked(&room, copied["messageId"].as_str().expect("id")),
+        room_mark
+    );
+    assert_eq!(
+        marked(
+            &run,
+            copied["deliveredTo"]["messageId"].as_str().expect("a copy")
+        ),
+        room_mark,
+        "the copy in the coordinator's run"
+    );
+    assert_eq!(
+        marked(&run, redirected["messageId"].as_str().expect("id")),
+        room_mark,
+        "the letter redirected to the worker's coordinator"
+    );
+    assert_eq!(
+        marked(&room, chairs_own["messageId"].as_str().expect("id")),
+        room_mark,
+        "a live coordinator's letter written into the room"
+    );
+    assert_eq!(
+        marked(&run, ordinary["messageId"].as_str().expect("id")),
+        Some(None),
+        "an ordinary run's letter"
+    );
+}
+
+/// A room reply is held by the person's switch like any room letter: off,
+/// two panes do not go on answering each other in a room (review t-105562).
+#[test]
+fn a_room_reply_is_refused_while_the_switch_is_off() {
+    let mut bench = Bench::new();
+    let sent = answered(&typed(
+        &mut bench,
+        &on(),
+        LONE,
+        Some(A),
+        &[
+            "send",
+            "--to",
+            &format!("pane:team-1/{OTHER}"),
+            "--type",
+            "question",
+            "--body",
+            "which?",
+        ],
+    ));
+    let question = sent["messageId"].as_str().expect("a question").to_string();
+    let off = Catalog(&["claude"]);
+    let why = refused(&typed(
+        &mut bench,
+        &off,
+        OTHER,
+        Some(A),
+        &["reply", "--to-message", &question, "--body", "this one"],
+    ));
+    assert!(why.contains(MAIL_OFF), "{why}");
+}

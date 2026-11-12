@@ -308,6 +308,9 @@ pub(crate) const AGENT_ALLOWED_DESTRUCTIVE_NAMED: &[&str] = &[
 /// ([`PROGRAM_COMMANDS`]).
 pub(crate) const HAND_HEADER: &str = "zerocode-hand";
 
+/// What [`HAND_HEADER`] says for a call the person's own hand made.
+pub(crate) const PERSON_HAND: &str = "person";
+
 /// The person-only commands a road no hand starts still runs: the update
 /// clock's quiet download and its staging. A `program` call of any other
 /// person-only command is refused.
@@ -355,7 +358,7 @@ pub(crate) fn person_only(command: &str, hand: Option<&str>) -> Result<(), Strin
         "{command} asks the second wall but is not on PERSON_ONLY_COMMANDS"
     );
     match hand {
-        Some("person") => Ok(()),
+        Some(PERSON_HAND) => Ok(()),
         Some("program") if PROGRAM_COMMANDS.contains(&command) => Ok(()),
         Some("agent") => Err(format!(
             "{command} is the person's to run, and an agent's press in ZeroCode's window made this call; the person runs it with their own hand"

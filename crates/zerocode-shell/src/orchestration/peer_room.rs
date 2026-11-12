@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use zerocode_core::orchestration::Ledger;
-use zerocode_core::orchestration::room::PeerPane;
+use zerocode_core::orchestration::room::{self, PeerPane};
 
 use super::{Host, PaneTurn, project_scope};
 
@@ -83,9 +83,11 @@ pub(super) fn note_panes(
             } else {
                 "idle"
             };
+            // The folder read once, and its project from it.
             let folder = host.worktree_of(term);
+            let root = folder.as_deref().and_then(project_scope::root_of);
             Some((
-                project_scope::pane_root(host, term),
+                root,
                 PeerPane {
                     seat,
                     agent: Some(agent),
@@ -135,52 +137,107 @@ pub(crate) fn person_at(term: u32) {
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .remove(&term);
+    noted()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .retain(|(noted_term, _)| *noted_term != term);
 }
 
-/// Why the pointer to `newest` — the newest letter waiting at `address` in
-/// `run` — is not handed to `term` this beat, when it was written in a room:
-/// it is a room reply, or the pane has been woken for [`WAKES_PER_HAND`]
-/// other room letters since the person last typed there. `None` for every
-/// other letter, and for a room letter the budget still covers — which is
-/// counted here, once per letter, so a pointer said again for the same
-/// letter costs nothing more.
+/// A room letter's recipient, held to a pane an agent runs in: a pane where
+/// only a shell stands would take the letter, the sender would hear it was
+/// filed, and nobody would ever read it (review t-105562). `term` is the
+/// recipient's pane in this window; a pane the window does not hold is the
+/// project door's to refuse ([`project_scope`]'s `recipient_gate`).
+pub(super) fn room_recipient(
+    host: &dyn Host,
+    verb: &str,
+    recipient: &str,
+    term: Option<u32>,
+) -> Result<(), String> {
+    match term {
+        Some(term) if host.agent_of(term).is_none() => Err(format!(
+            "pane:{recipient} is a pane no agent runs in — `{verb}` was not sent; a room \
+             letter goes to an agent pane (`zerocode-orc peers` lists them)"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The holds already written down in the window's log, by pane and newest
+/// letter — one line each, until the person types in that pane again.
+fn noted() -> &'static Mutex<HashSet<(u32, String)>> {
+    static NOTED: OnceLock<Mutex<HashSet<(u32, String)>>> = OnceLock::new();
+    NOTED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// The reason a room reply is not pointed at.
+pub(super) const ROOM_REPLY: &str = "a room reply wakes nobody";
+
+/// The reason a room letter past the budget is not pointed at.
+pub(super) const BUDGET_SPENT: &str =
+    "room letters already woke this pane as often as one input of the person allows";
+
+/// Why the letters waiting at `address` in `run` are not pointed at `term`
+/// this beat — every one of them a room's ([`room::of_a_room`]: written in a
+/// room, or an answer in a thread a room letter began, wherever filed):
+/// they are all room replies, or the pane has been woken for
+/// [`WAKES_PER_HAND`] other room letters since the person last typed there.
+///
+/// `None` the moment one waiting letter is not a room's: a `worker_done` or a
+/// coordinator's word behind a held room copy is pointed at as it always was.
+/// `None` too for a room letter the budget still covers — counted here, once
+/// per letter (the newest of them), so a pointer said again for the same
+/// letter costs nothing more. `rooms_open` is asked once a pass: with no room
+/// in the ledger nothing here is read at all.
 pub(super) fn held_back(
     ledger: &Ledger,
     run: &str,
-    newest: &str,
+    address: &str,
     term: u32,
+    rooms_open: bool,
 ) -> Option<&'static str> {
-    /* Asked of every pane the mail pass points at, every beat: nothing to
-     * read while no room is open, and the newest letter is looked for from
-     * the back, where it stands. */
-    if !ledger.runs().iter().any(|held| held.is_room()) {
+    if !rooms_open {
         return None;
     }
-    let message = ledger
-        .run(run)?
-        .messages()
-        .iter()
-        .rev()
-        .find(|held| held.id == newest)?;
-    let written_in = message.from_run.as_deref().unwrap_or(run);
-    if !ledger.run(written_in).is_some_and(|held| held.is_room()) {
-        return None;
+    let held = ledger.run(run)?;
+    let waiting = held.unread(address);
+    let mut newest_letter: Option<&str> = None;
+    for id in &waiting {
+        // Looked for from the back, where waiting mail stands.
+        let message = held.messages().iter().rev().find(|one| one.id == *id)?;
+        if !room::of_a_room(held, message) {
+            return None;
+        }
+        if message.thread.is_none() {
+            newest_letter = Some(*id);
+        }
     }
-    if message.thread.is_some() {
-        return Some("a room reply wakes nobody");
+    let why = match newest_letter {
+        None if waiting.is_empty() => return None,
+        None => ROOM_REPLY,
+        Some(letter) => {
+            let mut woken = woken().lock().unwrap_or_else(|held| held.into_inner());
+            let spent = woken.entry(term).or_default();
+            if spent.contains(letter) {
+                return None;
+            }
+            if spent.len() < WAKES_PER_HAND {
+                spent.insert(letter.to_string());
+                return None;
+            }
+            BUDGET_SPENT
+        }
+    };
+    // Said once per pane and newest letter, in the window's own log.
+    let newest = waiting.last().copied().unwrap_or_default();
+    if noted()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert((term, newest.to_string()))
+    {
+        super::note_pointer_silent(run, address, term, &format!("({why})"));
     }
-    let mut woken = woken().lock().unwrap_or_else(|held| held.into_inner());
-    let spent = woken.entry(term).or_default();
-    if spent.contains(newest) {
-        return None;
-    }
-    if spent.len() >= WAKES_PER_HAND {
-        return Some(
-            "room letters already woke this pane as often as one input of the person allows",
-        );
-    }
-    spent.insert(newest.to_string());
-    None
+    Some(why)
 }
 
 #[cfg(test)]
@@ -251,47 +308,88 @@ mod tests {
             .to_string()
     }
 
-    /// Three different room letters wake a pane; the fourth waits until the
-    /// person types there, and a letter already counted is said again for
-    /// free (the person's decision: 「기본 켬 · 사람 입력 뒤 3번」).
+    /// `pane:<team>/<pane>`.
+    fn pane(team: &str, pane: &str) -> String {
+        format!("pane:{team}/{pane}")
+    }
+
+    /// A status letter to `to`.
+    fn letter(to: &str, body: &str) -> Vec<String> {
+        ["send", "--to", to, "--type", "status", "--body", body]
+            .iter()
+            .map(|word| (*word).to_string())
+            .collect()
+    }
+
+    fn words(line: &[String]) -> Vec<&str> {
+        line.iter().map(String::as_str).collect()
+    }
+
+    /// A run of project A coordinated from `%1` of `team`.
+    fn chair_run(ledger: &mut Ledger, team: &mut Team) -> String {
+        typed(ledger, team, "%1", &["run-create", "--name", "work"], 900)["runId"]
+            .as_str()
+            .expect("a run")
+            .to_string()
+    }
+
+    /// Room letters wake a pane for three different letters; the fourth waits
+    /// until the person types there, and a pointer said again for a letter
+    /// already counted costs nothing (사람 결정 「기본 켬 · 사람 입력 뒤 3번」).
+    /// With no room open nothing is read at all.
     #[test]
     fn a_room_letter_wakes_a_pane_three_times_until_the_person_types_there() {
         const TERM: u32 = 71_001;
         let mut ledger = Ledger::new();
         let mut team = Team::new("team-room-a", "token", 7);
-        let to = [
-            "send",
-            "--to",
-            "pane:team-room-a/%8",
-            "--type",
-            "status",
-            "--body",
-        ];
-        let letters: Vec<String> = (0..4)
-            .map(|at| {
-                let line: Vec<&str> = to.iter().copied().chain(["news"]).collect();
-                id(&typed(&mut ledger, &mut team, "%9", &line, 1_000 + at))
-            })
-            .collect();
-        let room = ledger.room_of(A).expect("a room").to_string();
-        for letter in &letters[..WAKES_PER_HAND] {
-            assert_eq!(held_back(&ledger, &room, letter, TERM), None);
+        let to = pane("team-room-a", "%8");
+        for at in 0..WAKES_PER_HAND {
+            typed(
+                &mut ledger,
+                &mut team,
+                "%9",
+                &words(&letter(&to, "news")),
+                1_000 + at as i64,
+            );
+            let room = ledger.room_of(A).expect("a room").to_string();
+            assert_eq!(
+                held_back(&ledger, &room, &to, TERM, true),
+                None,
+                "letter {at}"
+            );
+            assert_eq!(
+                held_back(&ledger, &room, &to, TERM, true),
+                None,
+                "said again"
+            );
         }
-        assert!(held_back(&ledger, &room, &letters[3], TERM).is_some());
+        typed(
+            &mut ledger,
+            &mut team,
+            "%9",
+            &words(&letter(&to, "news")),
+            1_010,
+        );
+        let room = ledger.room_of(A).expect("a room").to_string();
         assert_eq!(
-            held_back(&ledger, &room, &letters[0], TERM),
+            held_back(&ledger, &room, &to, TERM, true),
+            Some(BUDGET_SPENT)
+        );
+        assert_eq!(
+            held_back(&ledger, &room, &to, TERM, false),
             None,
-            "said again, not spent again"
+            "no room open: nothing read"
         );
         person_at(TERM);
-        assert_eq!(held_back(&ledger, &room, &letters[3], TERM), None);
+        assert_eq!(held_back(&ledger, &room, &to, TERM, true), None);
     }
 
     /// A room reply wakes nobody — the asker has it as its tool's answer —
     /// so two panes answering each other cannot keep each other turning.
     #[test]
     fn a_room_reply_wakes_nobody() {
-        const TERM: u32 = 71_002;
+        const ASKER: u32 = 71_002;
+        const ASKED: u32 = 71_012;
         let mut ledger = Ledger::new();
         let mut team = Team::new("team-room-b", "token", 7);
         let asked = typed(
@@ -309,57 +407,146 @@ mod tests {
             ],
             1_000,
         );
-        let answer = typed(
+        let room = ledger.room_of(A).expect("a room").to_string();
+        let to_asked = pane("team-room-b", "%8");
+        assert_eq!(
+            held_back(&ledger, &room, &to_asked, ASKED, true),
+            None,
+            "the question wakes"
+        );
+        typed(
             &mut ledger,
             &mut team,
             "%8",
             &["reply", "--to-message", &id(&asked), "--body", "this one"],
             1_001,
         );
-        let room = ledger.room_of(A).expect("a room").to_string();
+        let to_asker = pane("team-room-b", "%9");
         assert_eq!(
-            held_back(&ledger, &room, &id(&answer), TERM),
-            Some("a room reply wakes nobody")
-        );
-        assert_eq!(
-            held_back(&ledger, &room, &id(&asked), TERM),
-            None,
-            "the question wakes"
+            held_back(&ledger, &room, &to_asker, ASKER, true),
+            Some(ROOM_REPLY)
         );
     }
 
-    /// A letter written in a coordinator's run is none of this budget's.
+    /// A room letter to a pane that coordinates a run is filed as a copy in
+    /// that run's `run:` inbox: the copy counts against the coordinator pane's
+    /// budget like any room letter, and the coordinator's answer to it,
+    /// written in its own run, is a room reply that wakes nobody (review
+    /// t-105562, 1).
     #[test]
-    fn a_letter_written_in_no_room_is_never_held() {
-        const TERM: u32 = 71_003;
+    fn a_room_copy_in_a_coordinators_run_counts_and_the_answer_to_it_wakes_nobody() {
+        const CHAIR: u32 = 71_004;
+        const LONE: u32 = 71_005;
         let mut ledger = Ledger::new();
-        let mut team = Team::new("team-room-c", "token", 7);
-        let run = typed(
+        let mut team = Team::new("team-room-e", "token", 7);
+        let run = chair_run(&mut ledger, &mut team);
+        let chair = format!("run:{run}");
+        let to_chair = pane("team-room-e", "%1");
+        let mut last_copy = String::new();
+        for at in 0..=WAKES_PER_HAND {
+            let sent = typed(
+                &mut ledger,
+                &mut team,
+                "%9",
+                &words(&letter(&to_chair, "x")),
+                1_001 + at as i64,
+            );
+            last_copy = sent["deliveredTo"]["messageId"]
+                .as_str()
+                .expect("a copy")
+                .to_string();
+            let held = held_back(&ledger, &run, &chair, CHAIR, true);
+            match at < WAKES_PER_HAND {
+                true => assert_eq!(held, None, "copy {at}"),
+                false => assert_eq!(held, Some(BUDGET_SPENT), "copy {at}"),
+            }
+        }
+        typed(
             &mut ledger,
             &mut team,
             "%1",
-            &["run-create", "--name", "work"],
+            &["reply", "--to-message", &last_copy, "--body", "noted"],
+            1_020,
+        );
+        let to_lone = pane("team-room-e", "%9");
+        assert_eq!(
+            held_back(&ledger, &run, &to_lone, LONE, true),
+            Some(ROOM_REPLY)
+        );
+    }
+
+    /// A live coordinator writing into the room with `--run` writes a room
+    /// letter, counted against the pane it wakes (review t-105562, 1).
+    #[test]
+    fn a_coordinator_writing_into_the_room_is_counted() {
+        const LONE: u32 = 71_006;
+        let mut ledger = Ledger::new();
+        let mut team = Team::new("team-room-f", "token", 7);
+        chair_run(&mut ledger, &mut team);
+        let to_lone = pane("team-room-f", "%9");
+        typed(
+            &mut ledger,
+            &mut team,
+            "%9",
+            &words(&letter(&pane("team-room-f", "%8"), "open")),
             1_000,
         );
-        let run = run["runId"].as_str().expect("a run").to_string();
-        for at in 0..5 {
-            let said = typed(
+        let room = ledger.room_of(A).expect("a room").to_string();
+        for at in 0..=WAKES_PER_HAND {
+            let line = [
+                "send", "--run", &room, "--to", &to_lone, "--type", "status", "--body", "x",
+            ];
+            typed(&mut ledger, &mut team, "%1", &line, 1_001 + at as i64);
+            let held = held_back(&ledger, &room, &to_lone, LONE, true);
+            match at < WAKES_PER_HAND {
+                true => assert_eq!(held, None, "letter {at}"),
+                false => assert_eq!(held, Some(BUDGET_SPENT), "letter {at}"),
+            }
+        }
+    }
+
+    /// An ordinary letter waiting in the same inbox as held room letters is
+    /// pointed at as it always was: a held room copy never holds back the
+    /// word a worker or a pane sent the coordinator (review t-105562, 1③).
+    /// And a run's own mail, with no room letter waiting, is never held.
+    #[test]
+    fn an_ordinary_letter_behind_held_room_letters_is_still_pointed_at() {
+        const CHAIR: u32 = 71_007;
+        let mut ledger = Ledger::new();
+        let mut team = Team::new("team-room-g", "token", 7);
+        let run = chair_run(&mut ledger, &mut team);
+        let chair = format!("run:{run}");
+        let ordinary = [
+            "send",
+            "--run",
+            run.as_str(),
+            "--to",
+            chair.as_str(),
+            "--type",
+            "status",
+            "--body",
+            "done",
+        ];
+        typed(&mut ledger, &mut team, "%7", &ordinary, 1_000);
+        assert_eq!(
+            held_back(&ledger, &run, &chair, CHAIR, true),
+            None,
+            "ordinary mail alone"
+        );
+        for at in 0..=WAKES_PER_HAND {
+            typed(
                 &mut ledger,
                 &mut team,
-                "%1",
-                &[
-                    "send",
-                    "--to",
-                    &format!("run:{run}"),
-                    "--type",
-                    "status",
-                    "--body",
-                    "x",
-                ],
-                1_001 + at,
+                "%9",
+                &words(&letter(&pane("team-room-g", "%1"), "x")),
+                1_001 + at as i64,
             );
-            assert_eq!(held_back(&ledger, &run, &id(&said), TERM), None);
         }
+        assert_eq!(
+            held_back(&ledger, &run, &chair, CHAIR, true),
+            None,
+            "the ordinary letter still waiting keeps the pointer"
+        );
     }
 
     /// The board's agent graph draws a room letter as a line between the two
@@ -405,6 +592,52 @@ mod tests {
             !super::super::desk::in_play(ledger.run(room).expect("the room")),
             "the room stands on the task board as a run"
         );
+    }
+
+    /// A host whose one agent pane is `agent`; every other pane is a shell.
+    struct Panes {
+        agent: u32,
+    }
+
+    impl Host for Panes {
+        fn split(
+            &self,
+            _team: &str,
+            _leader_term: u32,
+            _from_term: u32,
+            _pane: &str,
+            _direction: zerocode_core::agent_teams::Direction,
+            _command: &str,
+            _token: &str,
+        ) -> Option<u32> {
+            None
+        }
+        fn send(&self, _term: u32, _text: &str) -> bool {
+            false
+        }
+        fn capture(&self, _term: u32) -> Option<String> {
+            None
+        }
+        fn focus(&self, _term: u32) -> bool {
+            false
+        }
+        fn close(&self, _term: u32) {}
+        fn agent_of(&self, term: u32) -> Option<String> {
+            (term == self.agent).then(|| "codex".to_string())
+        }
+    }
+
+    /// A room letter to a pane no agent runs in — a shell — is refused, so
+    /// the sender never hears 「filed」 for a letter nobody will read; an
+    /// agent pane takes it, and a pane this window does not hold is left to
+    /// the project door (review t-105562).
+    #[test]
+    fn a_room_letter_to_a_pane_no_agent_runs_in_is_refused() {
+        let host = Panes { agent: 1 };
+        assert!(room_recipient(&host, "send", "t/%1", Some(1)).is_ok());
+        let why = room_recipient(&host, "send", "t/%2", Some(2)).expect_err("a shell pane");
+        assert!(why.contains("no agent runs in"), "{why}");
+        assert!(room_recipient(&host, "send", "t/%3", None).is_ok());
     }
 
     /// `peers` shows the caller's project only, and nobody to a caller in

@@ -339,6 +339,10 @@ pub struct Reach {
     /// Actual recipients of send/ask/reply, resolved by the ledger's own
     /// address rules. The window checks each pane's present project.
     pub recipient_seats: Vec<String>,
+    /// The letter goes through a project's room ([`super::room`]) — the
+    /// room is the run it answers in, or the first letter opens it — so
+    /// the window also holds each recipient to a pane an agent runs in.
+    pub room: bool,
     /// The other run a letter is filed in or copied into, with its project:
     /// the writer's run for a reply, the run a `send` to another run's
     /// `run:` address files in, and the run a `pane:` recipient reads its
@@ -527,6 +531,7 @@ pub fn reach(
         return Reach {
             elsewhere,
             hidden,
+            room: !recipient_seats.is_empty(),
             recipient_seats,
             seated_roots,
             ..Reach::default()
@@ -604,6 +609,7 @@ pub fn reach(
         participant: participant(run, team, pane),
         elsewhere,
         hidden,
+        room: run.is_room(),
         recipient_seats,
         carried_run,
         seated_roots,

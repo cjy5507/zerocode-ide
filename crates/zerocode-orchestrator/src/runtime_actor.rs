@@ -12128,6 +12128,7 @@ mod tests {
             dispatch: None,
             author_seat: None,
             from_run: None,
+            room: None,
             created_ms: 2,
         });
         projection.inboxes.push(InboxRow {

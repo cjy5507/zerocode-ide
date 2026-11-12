@@ -236,6 +236,15 @@ pub(super) fn verb_gate(
             reach.seated_root(recipient),
             filed_in,
         )?;
+        // A room letter is for a pane an agent runs in (review t-105562).
+        if reach.room {
+            let term = recipient.rsplit_once('/').and_then(|(team, pane)| {
+                crate::agent_teams::teams()
+                    .get(team)
+                    .and_then(|held| held.term_of(pane))
+            });
+            super::peer_room::room_recipient(host, verb, recipient, term)?;
+        }
     }
     if let Some((run_id, project)) = &reach.carried_run {
         match (caller.as_deref(), project.as_ref()) {

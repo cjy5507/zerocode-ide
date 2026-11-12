@@ -2202,6 +2202,7 @@ pub(crate) fn launch_agent_tab(
 pub(crate) fn term_text(
     app: AppHandle,
     state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
     term: TermId,
     text: String,
     human: Option<bool>,
@@ -2213,6 +2214,12 @@ pub(crate) fn term_text(
                 pty.write_input(text.as_bytes())
             })
         })?;
+        // Committed text the person's hand made renews what a room may wake
+        // this pane for; an agent's press does not (review t-105562, 2).
+        let hand = crate::computer_use::self_surface::hand_said(request.headers());
+        if crate::prompt_transaction::renews_the_room(hand, text.as_bytes()) {
+            crate::orchestration::peer_room::person_at(term);
+        }
         if theirs {
             let seat = orchestration::pane_taken_over(term, "ime", now_epoch_ms());
             tell_window_taken(&app, term, seat.as_deref());
@@ -2228,6 +2235,7 @@ pub(crate) fn term_text(
 pub(crate) fn term_key(
     app: AppHandle,
     state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
     term: TermId,
     press: KeyPress,
     road: Option<ChipRoad>,
@@ -2245,6 +2253,12 @@ pub(crate) fn term_key(
             None => crate::prompt_transaction::human_write(term, &bytes, write),
         }
     })?;
+    // The person's own words or Enter renew what a room may wake this pane
+    // for; an agent's press and a chip's key do not (review t-105562, 2).
+    let hand = crate::computer_use::self_surface::hand_said(request.headers());
+    if road.is_none() && crate::prompt_transaction::renews_the_room(hand, &bytes) {
+        crate::orchestration::peer_room::person_at(term);
+    }
     // A DELIVERED key from this road is a person's hand — paste delivery and
     // every programmatic write take other roads — and a hand that puts the
     // person's own words in a worker's pane takes the pane over. After the
@@ -2566,6 +2580,7 @@ pub(crate) fn term_mouse(
 pub(crate) fn term_paste(
     app: AppHandle,
     state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
     term: TermId,
     text: String,
     road: Option<ChipRoad>,
@@ -2580,6 +2595,13 @@ pub(crate) fn term_paste(
             None => crate::prompt_transaction::human_write(term, &bytes, write),
         }
     })?;
+    // A paste the person's hand made renews what a room may wake this pane
+    // for; one an agent pressed from a window button does not (review
+    // t-105562, 2).
+    let hand = crate::computer_use::self_surface::hand_said(request.headers());
+    if road.is_none() && crate::prompt_transaction::renews_the_room(hand, text.as_bytes()) {
+        crate::orchestration::peer_room::person_at(term);
+    }
     // A person's paste is their words as much as a typed key is, and takes a
     // worker's pane over the same way (t-57712).
     if theirs {

@@ -260,6 +260,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         dispatch TEXT,
         author_seat TEXT,
         from_run TEXT,
+        room TEXT,
         created_ms INTEGER NOT NULL,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
@@ -431,6 +432,9 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * for every row written before it, which reads the chairs back as
          * those rows always did. */
         ("ledger_messages", "from_run", "TEXT"),
+        /* The room a letter was written in (2026-11-12): NULL for every row
+         * written before rooms existed — no letter of a room. */
+        ("ledger_messages", "room", "TEXT"),
         /* Who wrote a task's result, as one JSON document like the seat —
          * and NULL for every row written before authorship was recorded,
          * which the review reads as a claim by nobody known (t-6815). */
@@ -2607,9 +2611,9 @@ fn insert_row(
                 "INSERT INTO ledger_messages (
                     ledger_id, ordinal, run, id, sender, recipient, kind, body,
                     subject, priority, payload, thread, task, dispatch,
-                    author_seat, from_run, created_ms
+                    author_seat, from_run, room, created_ms
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                           ?15, ?16, ?17)",
+                           ?15, ?16, ?17, ?18)",
                 params![
                     ledger_id,
                     place,
@@ -2627,6 +2631,7 @@ fn insert_row(
                     row.dispatch,
                     row.author_seat,
                     row.from_run,
+                    row.room,
                     row.created_ms,
                 ],
             )?;
@@ -3610,7 +3615,7 @@ fn read_repairable_from_head(
     each(
         connection,
         "SELECT run, id, sender, recipient, kind, body, subject, priority, payload,
-                thread, task, dispatch, author_seat, from_run, created_ms
+                thread, task, dispatch, author_seat, from_run, created_ms, room
            FROM ledger_messages WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -3628,6 +3633,7 @@ fn read_repairable_from_head(
                 (
                     row.get::<_, Option<String>>(12)?,
                     row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(15)?,
                 ),
                 row.get::<_, i64>(14)?,
             ));
@@ -3649,7 +3655,7 @@ fn read_repairable_from_head(
                     thread,
                     task,
                     dispatch,
-                    (author_seat, from_run),
+                    (author_seat, from_run, room),
                     created_ms,
                 ),
                 (kind, priority),
@@ -3669,6 +3675,7 @@ fn read_repairable_from_head(
                     dispatch,
                     author_seat,
                     from_run,
+                    room,
                     created_ms,
                 })
             },
@@ -3907,6 +3914,7 @@ pub(crate) fn a_ledger_with_mail_of(
             dispatch: None,
             author_seat: None,
             from_run: None,
+            room: None,
             created_ms: 2,
         });
         batch.push(id);
@@ -4060,6 +4068,7 @@ pub(crate) fn a_ledger_with_every_table(
         dispatch: None,
         author_seat: None,
         from_run: None,
+        room: None,
         created_ms: 5,
     });
     rows.bound.push(BoundRow {
@@ -4511,6 +4520,7 @@ mod tests {
                     dispatch: None,
                     author_seat: None,
                     from_run: None,
+                    room: None,
                     created_ms: 9,
                 },
                 MessageRow {
@@ -4528,6 +4538,7 @@ mod tests {
                     dispatch: None,
                     author_seat: None,
                     from_run: None,
+                    room: None,
                     created_ms: 8,
                 },
             ],

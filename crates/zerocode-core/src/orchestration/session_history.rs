@@ -231,6 +231,7 @@ impl Ledger {
             dispatch,
             author_seat: None,
             from_run: None,
+            room: None,
             created_ms: now_ms,
         });
         run.inbox_mut(&address).pending.push_back(id);

@@ -29,6 +29,7 @@ mod has_reach;
 mod jev_pane_seats;
 mod keys_tauri_reads;
 mod land_batch;
+mod peer_room;
 mod plain_words;
 mod pre_handin;
 mod quiet_children;

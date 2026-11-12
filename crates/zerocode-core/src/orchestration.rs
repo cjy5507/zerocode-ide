@@ -1939,6 +1939,15 @@ pub struct Message {
     /// existed byte-identical on disk; `None` reads the old way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_run: Option<String>,
+    /// The room this letter was written in ([`room`]), when it was: the
+    /// letter itself, and every copy, redirected letter and reply copy the
+    /// room's verbs file elsewhere. How the window knows a letter of a room
+    /// wherever it lands — `from_run` names a chair, and a room has none.
+    ///
+    /// `default` and the skip keep every message written before this field
+    /// existed byte-identical on disk; `None` reads as "not a room's".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
     pub created_ms: i64,
 }
 
@@ -12658,6 +12667,7 @@ impl Ledger {
             // The ledger's own observation sits in no seat.
             author_seat: None,
             from_run: None,
+            room: None,
             created_ms: now_ms,
         });
         if notify {
@@ -12862,6 +12872,7 @@ impl Ledger {
             dispatch: Some(dispatch_id),
             author_seat: None,
             from_run: None,
+            room: None,
             created_ms: now_ms,
         });
         run.inbox_mut(&address).pending.push_back(id.clone());
@@ -13862,6 +13873,7 @@ impl Ledger {
             dispatch: Some(plan.dispatch.clone()),
             author_seat: None,
             from_run: None,
+            room: None,
             created_ms: now_ms,
         });
         Ok(id)
@@ -14031,6 +14043,7 @@ impl Ledger {
             dispatch: Some(plan.dispatch.clone()),
             author_seat: None,
             from_run: None,
+            room: None,
             created_ms: now_ms,
         });
         Ok(id)
@@ -16298,6 +16311,10 @@ impl Ledger {
                     .or_else(|| self.chair_sat_in(seat))
             })
             .map(str::to_string);
+        // Written in a room when the verb acts in one, wherever it is filed.
+        let room = acting
+            .filter(|acting| self.run(acting).is_some_and(Run::is_room))
+            .map(str::to_string);
         self.send(
             run_id,
             Message {
@@ -16314,6 +16331,7 @@ impl Ledger {
                 dispatch: draft.dispatch,
                 author_seat: author_seat.map(str::to_string),
                 from_run,
+                room,
                 created_ms: now_ms,
             },
         )
@@ -26474,6 +26492,7 @@ fn plan_inner(
 
         "reply" => {
             let run_id = bound(ledger, &words, &caller, &seat)?;
+            room::reply_allowed(ledger, launcher, &run_id)?;
             let thread = words
                 .value("--to-message")
                 .ok_or("reply needs --to-message")?
@@ -28336,6 +28355,9 @@ pub struct MessageRow {
     /// of, which is how they already read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_run: Option<String>,
+    /// [`Message::room`]'s durable half, on the same posture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
     pub created_ms: i64,
 }
 
@@ -28718,6 +28740,7 @@ impl Ledger {
                     dispatch: message.dispatch.clone(),
                     author_seat: message.author_seat.clone(),
                     from_run: message.from_run.clone(),
+                    room: message.room.clone(),
                     created_ms: message.created_ms,
                 });
             }
@@ -28968,6 +28991,7 @@ impl Ledger {
                     dispatch: row.dispatch,
                     author_seat: row.author_seat,
                     from_run: row.from_run,
+                    room: row.room,
                     created_ms: row.created_ms,
                 });
         }

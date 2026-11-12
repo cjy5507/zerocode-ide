@@ -316,6 +316,32 @@ pub(super) fn ask_allowed(
     Ok(())
 }
 
+/// A room reply, held by the person's switch like any room letter: off, two
+/// panes do not go on answering each other in a room.
+pub(super) fn reply_allowed(
+    ledger: &Ledger,
+    launcher: &dyn Launcher,
+    run_id: &str,
+) -> Result<(), String> {
+    match ledger.is_room(run_id) && !launcher.peer_mail_on() {
+        true => Err(MAIL_OFF.to_string()),
+        false => Ok(()),
+    }
+}
+
+/// Whether `message`, filed in `run`, is a room's: written in a room, or an
+/// answer in a thread a room letter began — a coordinator's reply to the copy
+/// of a room letter is a room reply though it was written in its own run.
+#[must_use]
+pub fn of_a_room(run: &super::Run, message: &super::Message) -> bool {
+    message.room.is_some()
+        || message
+            .thread
+            .as_deref()
+            .and_then(|root| run.message(root))
+            .is_some_and(|root| root.room.is_some())
+}
+
 fn one_pane(to: Option<&str>) -> Result<(), String> {
     match to {
         Some(to) if to.starts_with(PANE_ADDRESS_PREFIX) => Ok(()),

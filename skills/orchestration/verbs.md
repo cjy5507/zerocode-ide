@@ -209,8 +209,8 @@ A pane the person opened, with no run, writes to the other agent panes of its
 project through the project's room: `peers` lists them, `send --to
 pane:<team>/<pane>` (a status or a question) and `reply` reach one, and a plain
 `check` reads what came. In a room every pane signs as its own `pane:`
-address, a group or a `run:` address is refused, and a letter for a worker is
-filed for its run's coordinator instead (SKILL.md, 「Writing to another agent
+address, a group, a `run:` or a `worker:` address is refused, and a letter to
+a worker's `pane:` address is filed for its run's coordinator instead (SKILL.md, 「Writing to another agent
 pane」).
 
 A worker can live on ANOTHER machine: `worker-start --on <server> --task

@@ -23141,6 +23141,7 @@ fn relation_test_message(
         dispatch: None,
         author_seat: None,
         from_run: None,
+        room: None,
         created_ms: at,
     }
 }
@@ -29827,6 +29828,7 @@ fn a_ledger_of_letters(total: usize) -> zerocode_core::orchestration::LedgerProj
                 dispatch: None,
                 author_seat: None,
                 from_run: None,
+                room: None,
                 created_ms: MEASURED_AT_MS - age_days * A_DAY_MS,
             });
             batch.push(id);

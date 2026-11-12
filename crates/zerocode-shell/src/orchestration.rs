@@ -9239,6 +9239,11 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     let on_their_way = host.prompts_on_their_way();
     // The agent panes `peers` lists, from the facts just copied out.
     peer_room::note_panes(host, &turns, &attention);
+    // Asked once a pass: with no room open the wake budget reads nothing.
+    let rooms_open = rows
+        .runs()
+        .iter()
+        .any(zerocode_core::orchestration::Run::is_room);
     /// Advice one pass decided to type: the pane, and the line.
     struct Pointing {
         run: String,
@@ -9765,9 +9770,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * ([`peer_room::held_back`]). Nothing is marked: the letter
                  * stays filed for the pane's next `check`, and the person's
                  * next input there lets the pointer go on the next beat. */
-                if let Some(newest) = run.newest_pending(&address)
-                    && peer_room::held_back(&rows, &run.id, newest, term).is_some()
-                {
+                if peer_room::held_back(&rows, &run.id, &address, term, rooms_open).is_some() {
                     continue;
                 }
                 /* The first two conditions, and the line between them: a door

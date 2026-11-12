@@ -42,6 +42,7 @@ fn posted(
         dispatch: None,
         author_seat: None,
         from_run: None,
+        room: None,
         created_ms: at,
     }
 }

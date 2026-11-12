@@ -509,6 +509,7 @@ impl Ledger {
             dispatch: Some(dispatch.clone()),
             author_seat: Some(seat.to_string()),
             from_run: None,
+            room: None,
             created_ms: now_ms,
         });
         Ok(Taken {
@@ -550,6 +551,7 @@ impl Ledger {
             dispatch: Some(dispatch_id.to_string()),
             author_seat: Some(seat.to_string()),
             from_run: None,
+            room: None,
             created_ms: now_ms,
         };
         Self::settle_report(run, &message, ok);

@@ -382,6 +382,9 @@ go through the project's room, a run nobody coordinates and nobody signs as.
   any other CLI's own messaging either.
 - Facts and findings go straight to the pane that needs them. A decision goes
   to a coordinator or the person.
+- Write when there is something to say. Do not reply only to acknowledge a
+  letter, and do not keep asking each other back and forth — two panes
+  turning each other over is work nobody asked for.
 - A letter for a worker goes to its run's coordinator, which decides whether
   the worker hears it; a run with no coordinator sitting refuses it.
 - The room carries mail only — `peers`, `send`, `ask`, `reply`, `check`. A
