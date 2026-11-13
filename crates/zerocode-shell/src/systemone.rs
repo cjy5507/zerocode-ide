@@ -1725,20 +1725,17 @@ pub(crate) fn today() -> String {
     count::day_of(now_ms, offset_minutes)
 }
 
-/// The local day a request at `now_ms` is counted in, on the clock [`today`]
-/// reads.
-pub(crate) fn day_at(now_ms: i64) -> String {
-    let offset_minutes =
-        i32::try_from(crate::automation_runtime::local_offset_secs() / 60).unwrap_or(0);
-    count::day_of(now_ms, offset_minutes)
+/// The local hour and day a person's decision asked at `now_ms` is held
+/// quiet against ([`zerocode_core::jev::custom::quiet::Now`]), on the clock
+/// [`today`] reads.
+pub(crate) fn quiet_now_at(now_ms: i64) -> zerocode_core::jev::custom::quiet::Now {
+    zerocode_core::jev::custom::quiet::Now::at(now_ms, local_offset_minutes())
 }
 
 /// The local hour a person's decision's request is counted in at `now_ms`
 /// ([`count::hour_of`]), on the clock [`today`] reads.
 pub(crate) fn hour_at(now_ms: i64) -> String {
-    let offset_minutes =
-        i32::try_from(crate::automation_runtime::local_offset_secs() / 60).unwrap_or(0);
-    count::hour_of(now_ms, offset_minutes)
+    count::hour_of(now_ms, local_offset_minutes())
 }
 
 /// Now, in Unix milliseconds, and the local clock's offset from UTC in
@@ -1749,9 +1746,12 @@ fn local_now() -> (i64, i32) {
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         });
-    let offset_minutes =
-        i32::try_from(crate::automation_runtime::local_offset_secs() / 60).unwrap_or(0);
-    (now_ms, offset_minutes)
+    (now_ms, local_offset_minutes())
+}
+
+/// The local clock's offset from UTC, in minutes.
+fn local_offset_minutes() -> i32 {
+    i32::try_from(crate::automation_runtime::local_offset_secs() / 60).unwrap_or(0)
 }
 
 pub(crate) mod latest;

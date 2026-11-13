@@ -18,16 +18,16 @@
 //! pane's event reads nothing for a decision while none asks at its point.
 //! A refusal the door would give again until something outside the pane
 //! changes — an hour or a day found full, no key, a folder not consented, a
-//! definition that breaks a rule — makes the decision quiet ([`Quiet`]): it
-//! writes one row saying so, and until its span ends, the settings or the
-//! store are read again, or its definition changes, a command costs it
-//! nothing more. A one-off failure — a wall, a malformed reply — writes its
-//! row each time, as the request it counts did leave.
+//! definition that breaks a rule — makes the decision quiet in the core's
+//! book zo keeps too ([`quiet::Quiet`]): it writes one row saying so, and
+//! until its span ends, the settings or the store are read again, or its
+//! definition changes, a command costs it nothing more. A one-off failure —
+//! a wall, a malformed reply — writes its row each time, as the request it
+//! counts did leave.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use zerocode_core::jev::custom::{self, DecisionRow, Definition, Lent, Point, store};
+use zerocode_core::jev::custom::{self, DecisionRow, Definition, Lent, Point, quiet, store};
 use zerocode_core::jev::{CUSTOM_DECISIONS, CUSTOM_EVIDENCE_BYTE_CAP, count, door};
 
 use super::*;
@@ -107,100 +107,15 @@ impl Decisions {
     }
 }
 
-/// Where a quiet decision's refusal stops repeating: the local hour or day
-/// it was refused in ([`door::Refused::repeats`]), or the version whose
-/// definition broke a rule ([`custom::check`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Until {
-    Hour(String),
-    Day(String),
-    Version(String),
-}
-
-/// The local hour and day a moment falls in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Now {
-    hour: String,
-    day: String,
-}
-
-impl Now {
-    /// The local hour and day of `at`, in Unix milliseconds.
-    pub(crate) fn at(at: u64) -> Self {
-        let at = i64::try_from(at).unwrap_or_default();
-        Self {
-            hour: systemone::hour_at(at),
-            day: systemone::day_at(at),
-        }
-    }
-
-    fn of(&self, span: door::Span) -> Until {
-        match span {
-            door::Span::Hour => Until::Hour(self.hour.clone()),
-            door::Span::Day => Until::Day(self.day.clone()),
-        }
-    }
-}
-
-/// The decisions whose refusal would repeat, each with where it stops: for
-/// the machine, or for the one folder whose refusal it is — a folder not
-/// consented quiets the decision there alone. Cleared whenever the snapshot
-/// is read again — zo's settings or the decisions' store moved — so a key
-/// put in, consent given, a bound raised or a definition mended asks at
-/// once.
-#[derive(Debug, Default)]
-pub(crate) struct Quiet {
-    marks: Mutex<Marks>,
-}
-
-/// The quiet marks, by decision: those for the whole machine, and those for
-/// one folder — the folder a pane works in, resolved — for a refusal that
-/// folder owns ([`door::Refused::of_the_folder`]). Two tables so the hook
-/// loop looks a mark up by borrowing, allocating nothing.
-#[derive(Debug, Default)]
-struct Marks {
-    everywhere: HashMap<String, Until>,
-    in_folder: HashMap<PathBuf, HashMap<String, Until>>,
-}
-
-impl Quiet {
-    /// Whether the decision `id`, at the version `version`, is quiet `now`:
-    /// everywhere, or — for a pane whose folder is known — in `folder`.
-    pub(crate) fn is(&self, id: &str, version: &str, folder: Option<&Path>, now: &Now) -> bool {
-        let marks = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
-        let holds = |until: &Until| match until {
-            Until::Hour(hour) => *hour == now.hour,
-            Until::Day(day) => *day == now.day,
-            Until::Version(quiet) => quiet == version,
-        };
-        marks.everywhere.get(id).is_some_and(holds)
-            || folder
-                .and_then(|folder| marks.in_folder.get(folder))
-                .and_then(|marked| marked.get(id))
-                .is_some_and(holds)
-    }
-
-    /// Mark `id` quiet until `until` — in `folder` alone, or everywhere:
-    /// whether this mark is new, which is what lets exactly one row say so.
-    fn mark(&self, id: &str, folder: Option<&Path>, until: Until) -> bool {
-        let mut marks = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
-        let marked = match folder {
-            Some(folder) => marks.in_folder.entry(folder.to_path_buf()).or_default(),
-            None => &mut marks.everywhere,
-        };
-        if marked.get(id) == Some(&until) {
-            return false;
-        }
-        marked.insert(id.to_string(), until);
-        true
-    }
-}
-
 /// What the decisions read now: the snapshot and the hours it found full.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Decided {
     pub decisions: Arc<Decisions>,
-    pub quiet: Arc<Quiet>,
+    /// The decisions whose refusal would repeat ([`quiet::Quiet`]): cleared
+    /// whenever the snapshot is read again — zo's settings or the decisions'
+    /// store moved — so a key put in, consent given, a bound raised or a
+    /// definition mended asks at once.
+    pub quiet: Arc<quiet::Quiet>,
 }
 
 impl Decided {
@@ -208,7 +123,7 @@ impl Decided {
     pub(crate) fn read(root: &Value, home: Option<&Path>) -> Self {
         Self {
             decisions: Arc::new(Decisions::read(root, home)),
-            quiet: Arc::new(Quiet::default()),
+            quiet: Arc::new(quiet::Quiet::default()),
         }
     }
 
@@ -216,7 +131,7 @@ impl Decided {
     /// pane's folder is known resolved ([`PaneBook::folder`]), that ask in
     /// it and are not quiet there. A paths' comparison, no file read: the
     /// hook loop asks it.
-    fn asking_at(&self, point: Point, now: &Now, folder: Option<&Path>) -> Vec<Kept> {
+    fn asking_at(&self, point: Point, now: quiet::Now, folder: Option<&Path>) -> Vec<Kept> {
         self.decisions
             .at(point)
             .filter(|kept| folder.is_none_or(|folder| custom::asks_in(&kept.definition, folder)))
@@ -323,7 +238,7 @@ pub(super) fn before_command(
         return None;
     }
     // Which decisions ask first: a command in a quiet hour is kept nowhere.
-    let kept = decided.asking_at(Point::BeforeCommand, &Now::at(at), known_folder(book, pane));
+    let kept = decided.asking_at(Point::BeforeCommand, now_at(at), known_folder(book, pane));
     if kept.is_empty() {
         return None;
     }
@@ -351,7 +266,7 @@ pub(super) fn at_turn_end(
     edited: &[String],
     at: u64,
 ) -> Option<Asked> {
-    let kept = decided.asking_at(Point::TurnEnd, &Now::at(at), known_folder(book, pane));
+    let kept = decided.asking_at(Point::TurnEnd, now_at(at), known_folder(book, pane));
     (!kept.is_empty()).then(|| Asked {
         point: Point::TurnEnd,
         kept,
@@ -418,13 +333,17 @@ pub(super) fn ask(
         systemone::project_ledger_of(wire, &CUSTOM_DECISIONS, &root),
     ) else {
         // No zo home or provider to file a row under: a refusal that repeats
-        // as no key does, with no ledger to say it in — quiet for the hour,
-        // or until the settings are read again.
-        let now = Now::at(asked.at);
+        // as no key does, with no ledger to say it in — quiet as long, or
+        // until the settings are read again.
+        let now = now_at(asked.at);
         for kept in &asked.kept {
-            decided
-                .quiet
-                .mark(&kept.entry.id, None, now.of(door::Span::Hour));
+            decided.quiet.refused(
+                (&kept.entry.id, &kept.entry.definition),
+                &root,
+                door::Refused::NoKey.token(),
+                now,
+                || false,
+            );
         }
         return;
     };
@@ -483,6 +402,12 @@ pub(super) fn ask(
         &rows,
         crate::usage_runtime::epoch_ms_now(),
     );
+}
+
+/// The local hour and day of `at`, in Unix milliseconds, as a quiet mark is
+/// held against them.
+fn now_at(at: u64) -> quiet::Now {
+    systemone::quiet_now_at(i64::try_from(at).unwrap_or_default())
 }
 
 /// Leave `root`, the folder `pane` works in resolved, in its book: the hook
@@ -550,7 +475,7 @@ fn turn_lent(
 
 /// Ask one decision through the door inside its point's wall and its two
 /// hours, the moment `at` its point came counted in: its row — none for a
-/// refusal that repeats and another ask already wrote ([`Quiet`]) — and the
+/// refusal that repeats and another ask already wrote ([`quiet::Quiet`]) — and the
 /// line it hands, when it stands on, its answer earns the line, the switch
 /// is still on, the door lets the folder act now and the pane's agent has a
 /// road for it.
@@ -579,21 +504,18 @@ fn ask_one(
         kept.mode,
         ANSWERED_OUTCOME,
     );
-    let now = Now::at(at);
-    if decided.quiet.is(id, version, Some(workspace), &now) {
+    let now = now_at(at);
+    if decided.quiet.is(id, version, Some(workspace), now) {
         return (None, None);
     }
     if let Some(refusal) = custom::check(&kept.definition).first() {
-        if !decided
-            .quiet
-            .mark(id, None, Until::Version(version.to_string()))
-        {
+        if !decided.quiet.broke((id, version), now) {
             return (None, None);
         }
         refusal.word().clone_into(&mut row.outcome);
         return (Some(row), None);
     }
-    let hour = now.hour.clone();
+    let hour = systemone::hour_at(i64::try_from(at).unwrap_or_default());
     let (own, every) = (
         count::hour_path(home, id, &hour),
         count::hour_path(home, custom::EVERY_DECISION, &hour),
@@ -618,18 +540,13 @@ fn ask_one(
     let body = match answered.answer {
         Ok(body) => body,
         Err(token) => {
-            // A refusal that repeats is written once a span. An hourly one
-            // is one only when an hour is truly full: a lock that stayed
-            // busy is a moment's.
-            let refused = door::Refused::from_token(&token);
-            let repeats = refused.and_then(door::Refused::repeats).filter(|_| {
-                token != door::Refused::HourlyBudget.token() || wire.hour_is_full(hours)
-            });
-            let folder = refused
-                .is_some_and(door::Refused::of_the_folder)
-                .then_some(workspace);
-            if let Some(span) = repeats
-                && !decided.quiet.mark(id, folder, now.of(span))
+            // A refusal that repeats is written once a span, by the core's
+            // one rule of which do and for how long.
+            if !decided
+                .quiet
+                .refused((id, version), workspace, &token, now, || {
+                    wire.hour_is_full(hours)
+                })
             {
                 return (None, None);
             }

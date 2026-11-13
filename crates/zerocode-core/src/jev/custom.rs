@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use super::{AGENT_TOOL_ASK_OPTIONS, JevMode};
 
 pub mod answered;
+pub mod quiet;
 pub mod store;
 
 pub use answered::{

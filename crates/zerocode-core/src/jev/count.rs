@@ -87,9 +87,29 @@ pub fn count_one(path: &Path) -> io::Result<u64> {
 /// requests in (`super::custom::HOURLY_REQUESTS`).
 #[must_use]
 pub fn hour_of(epoch_ms: i64, offset_minutes: i32) -> String {
-    let local_ms = epoch_ms + i64::from(offset_minutes) * MS_PER_MINUTE;
-    let hour = local_ms.rem_euclid(crate::civil::MS_PER_DAY) / crate::civil::MS_PER_HOUR;
+    let hour = local_ms(epoch_ms, offset_minutes).rem_euclid(crate::civil::MS_PER_DAY)
+        / crate::civil::MS_PER_HOUR;
     format!("{}T{hour:02}", day_of(epoch_ms, offset_minutes))
+}
+
+/// The local hour [`hour_of`] names, as the count of whole local hours since
+/// the epoch: two moments share one exactly when they share its name, and
+/// comparing it allocates nothing.
+#[must_use]
+pub fn hour_number(epoch_ms: i64, offset_minutes: i32) -> i64 {
+    local_ms(epoch_ms, offset_minutes).div_euclid(crate::civil::MS_PER_HOUR)
+}
+
+/// The local day [`day_of`] names, as the count of whole local days since
+/// the epoch.
+#[must_use]
+pub fn day_number(epoch_ms: i64, offset_minutes: i32) -> i64 {
+    local_ms(epoch_ms, offset_minutes).div_euclid(crate::civil::MS_PER_DAY)
+}
+
+/// `epoch_ms` on a clock `offset_minutes` ahead of UTC.
+fn local_ms(epoch_ms: i64, offset_minutes: i32) -> i64 {
+    epoch_ms + i64::from(offset_minutes) * MS_PER_MINUTE
 }
 
 /// The hour file for `key` in `hour` (`YYYY-MM-DDTHH`, local) under
