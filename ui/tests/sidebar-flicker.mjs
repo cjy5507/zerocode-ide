@@ -33,7 +33,8 @@ import { webkitType } from "./coordinator-desk-perf.mjs";
  *      writes that checkout's row and nothing else;
  *   ③ a storm of tool calls from every working agent replaces no row, and is drawn at most once a frame;
  *   ④ pressing agent rows one after another keeps every row's node — the pressed one and the one that was in front;
- *   ⑤ an agent ending its turn and starting the next keeps its row's node.
+ *   ⑤ an agent ending its turn and starting the next keeps its row's node in the branch list — the dot, the chip and
+ *      the second line its state shapes are new, the row is not — and every working ring turns on the document's clock.
  *
  *   node ui/tests/sidebar-flicker.mjs [--seconds 30] [--engine webkit] [--json out.json]
  *        each source alone for that long, on a fresh page, with the per-frame row sampler on; the table the report
@@ -515,10 +516,19 @@ export async function testSidebarFlicker({ browser, origin, ok, faults }) {
       JSON.stringify({ pressed: press.pressed, kept: press.pressedKept, rows: press.rows, top: press.top.slice(0, 6) }),
     );
     const turns = await playSource(page, "turns", { ms: 3200 });
+    // The working rows' rings after it: each a turn of the document's clock (`startTime` 0), so a dot the turn made
+    // new stands at the angle every other ring stands at.
+    const rings = await page.evaluate(() => [...document.querySelectorAll("#worktrees .wt-agent.is-working .wt-agent-dot")]
+      .flatMap((dot) => dot.getAnimations()).map((turn) => turn.startTime));
+    // A conversation row that leaves 「작업 중」 for the folded 「오늘 끝남」 and comes back is a row that went and came:
+    // only the branch list's rows are held to their nodes.
+    const replacedHere = Object.keys(turns.rows.replacedKeys).filter((key) => !key.startsWith("chat:"));
     ok(
-      "⑤ an agent ending its turn and starting the next keeps its row's node, in the branch list and in the conversation list",
-      turns.events >= 2 && turns.rows.replaced === 0 && turns.rows.rebuilds === 0,
-      JSON.stringify({ events: turns.events, rows: turns.rows, top: turns.top.slice(0, 6) }),
+      "⑤ an agent ending its turn and starting the next keeps its row's node in the branch list, and its ring turns on the document's clock",
+      turns.events >= 2 && replacedHere.length === 0 && turns.rows.rebuilds === 0 && rings.length > 0
+        && rings.every((at) => at === 0),
+      JSON.stringify({ events: turns.events, replaced: turns.rows.replacedKeys, rebuilds: turns.rows.rebuilds, rings,
+        top: turns.top.slice(0, 6) }),
     );
   } finally {
     await page.close();
