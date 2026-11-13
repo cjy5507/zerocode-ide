@@ -390,8 +390,14 @@ fn setting_an_agents_skill_copy_to_the_stores_is_the_persons_alone() {
         "the button carries the person-only mark"
     );
     assert!(
-        buttons.contains("\"library_skill_align\", { name: family.name, agent })"),
-        "the page hands the keeper a skill and an agent, not a path"
+        buttons.contains(
+            "\"library_skill_align\", { name: family.name, agent }, { hand: flowHand(started) })"
+        ),
+        "the page hands the keeper a skill and an agent, not a path, with the hand of the press"
+    );
+    assert!(
+        buttons.contains("const started = handNow();"),
+        "the press's hand is taken before the call"
     );
 }
 
