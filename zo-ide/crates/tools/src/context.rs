@@ -703,8 +703,6 @@ impl ToolContext {
         *self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = observation;
     }
 
-    /// This model's name in the window's last-look table.
-    #[must_use]
     /// True once per session: the first call that names the person's own
     /// browser is answered with where web pages go instead of being run.
     #[must_use]
@@ -712,6 +710,8 @@ impl ToolContext {
         !self.computer.work_browser_said.swap(true, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// This model's name in the window's last-look table.
+    #[must_use]
     pub fn computer_viewer(&self) -> &str {
         &self.computer.viewer
     }
