@@ -1387,29 +1387,6 @@ mod tests {
         }
     }
 
-    /// The custom-provider catalog as the test found it, put back on drop.
-    struct OwnProviders(Option<std::ffi::OsString>);
-
-    impl OwnProviders {
-        /// Declare `providers` (the `ZO_CUSTOM_PROVIDERS` JSON) for this process.
-        fn declared(providers: &str) -> Self {
-            let before = std::env::var_os(api::CUSTOM_PROVIDERS_ENV);
-            std::env::set_var(api::CUSTOM_PROVIDERS_ENV, providers);
-            api::refresh_custom_providers_from_env();
-            Self(before)
-        }
-    }
-
-    impl Drop for OwnProviders {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(before) => std::env::set_var(api::CUSTOM_PROVIDERS_ENV, before),
-                None => std::env::remove_var(api::CUSTOM_PROVIDERS_ENV),
-            }
-            api::refresh_custom_providers_from_env();
-        }
-    }
-
     /// A session on a person's own provider is never handed a built-in
     /// provider's fast model, however its model is spelled. The ids are
     /// chosen to read as OpenAI's and Anthropic's own when nobody declares
@@ -1418,7 +1395,7 @@ mod tests {
     /// v1.1.144: 1,500 of 1,500 rows of a `bash` result).
     #[test]
     fn a_model_a_persons_own_provider_serves_keeps_to_that_provider() {
-        let _env = crate::tests::env_lock()
+        let env = crate::tests::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let openai_fast = decompose_model(Some("gpt-5.5"));
@@ -1426,12 +1403,13 @@ mod tests {
 
         // Undeclared, the names are built-in families' by their spelling.
         {
-            let _none = OwnProviders::declared("[]");
+            let _none = crate::tests::OwnProviders::declared(&env, "[]");
             assert_eq!(decompose_model(Some("gpt-oss-120b")), openai_fast);
             assert_eq!(decompose_model(Some("claude-zq-gateway")), anthropic_fast);
         }
 
-        let _own = OwnProviders::declared(
+        let _own = crate::tests::OwnProviders::declared(
+            &env,
             r#"[{"name":"zqown","base_url":"https://own.invalid/v1","models":["gpt-oss-120b","claude-zq-gateway","zq-own-model"],"requires_auth":false}]"#,
         );
         for served in [

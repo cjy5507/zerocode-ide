@@ -663,77 +663,27 @@ const fn thinking_budget_for_difficulty(difficulty: AgentTaskDifficulty) -> Opti
     }
 }
 
-/// Whether `parent_model` is a genuine OpenAI model. Consumed by
-/// [`same_provider_family`] to gate a custom agent's `model:` frontmatter to the
-/// parent's provider family (the difficulty-scaled reasoning budget itself is
-/// now provider-neutral and no longer keys off this predicate).
+/// Whether a request for `candidate` goes where the session's own requests
+/// go: the same provider of the person's, or the same built-in provider
+/// ([`crate::model_home`], read in the order the session's client is built).
+/// Gates a per-agent `model` override and a custom agent's `model:`
+/// frontmatter, so that neither moves a helper to another account than the
+/// session's without the spawn saying so.
 ///
-/// Detection is purely **by model name** (the builtin GPT families plus the
-/// `gpt`/`o3`/`o4`/`codex` prefixes), deliberately *not* [`api::detect_provider_kind`]:
-/// that one falls back to ambient env (e.g. `OPENAI_API_KEY` present ⇒ every
-/// unknown model id is "OpenAI"), which rerouted a **custom OpenAI-compatible
-/// provider** parent (say `deepseek-chat`) to a hardcoded builtin GPT id,
-/// ignoring the user's actual provider/model (BUG-R14). Name-based detection
-/// still recognizes a real `gpt-*`/`o3` parent while leaving custom providers on
-/// inheritance, and is deterministic (no env reads).
-fn is_openai_parent_model(parent_model: Option<&str>) -> bool {
-    let Some(model) = non_empty(parent_model) else {
-        return false;
-    };
-    api::is_openai_model(&model)
-        || matches!(
-            api::explicit_non_claude_provider_kind(&model),
-            Some(api::ProviderKind::OpenAi)
-        )
-}
-
-/// Whether `parent_model` is an Anthropic Claude model — detected purely by name
-/// (alias or canonical id), so the difficulty tiering never depends on ambient
-/// env and never misfires for a custom provider (cf. [`is_openai_parent_model`]).
-fn is_anthropic_parent_model(parent_model: Option<&str>) -> bool {
-    let Some(model) = non_empty(parent_model) else {
-        return false;
-    };
-    let lower = model.to_ascii_lowercase();
-    lower == "opus"
-        || lower == "sonnet"
-        || lower == "haiku"
-        || lower.starts_with("claude-")
-        || api::resolve_model_alias(&lower)
-            .to_ascii_lowercase()
-            .starts_with("claude-")
-}
-
-/// Whether `candidate` belongs to the same provider family as `parent_model`.
-/// Used to gate a per-agent `model` override or custom agent's `model:`
-/// frontmatter so it only applies when it matches the active provider (a Claude
-/// id under a GPT session is ignored). The detection is deterministic and
-/// name-based; custom/Ollama ids with no unambiguous provider prefix are not
-/// treated as same-family because zo cannot safely prove they share a backend.
+/// Until v1.1.147 this read the two names. A model a person's own provider
+/// serves was `OpenAI`'s when it was spelled `gpt-…` and nobody's otherwise:
+/// a session on such a provider was refused that provider's other models as
+/// "outside the parent's provider family" and allowed `OpenAI`'s (measured
+/// on v1.1.145). The same for a session on a built-in provider and a
+/// like-spelled model of the person's own.
+///
+/// A model nothing knows is in no family, the session's included: its client
+/// is built for whichever login the machine holds, and that says nothing of
+/// where another model's requests go (BUG-R14 — a custom provider's
+/// `deepseek-chat` read as `OpenAI`'s because an `OpenAI` key was set).
 pub(super) fn same_provider_family(parent_model: Option<&str>, candidate: &str) -> bool {
-    let Some(parent_kind) = model_provider_family(parent_model) else {
-        return false;
-    };
-    let Some(candidate_kind) = model_provider_family(Some(candidate)) else {
-        return false;
-    };
-    parent_kind == candidate_kind
-}
-
-fn model_provider_family(model: Option<&str>) -> Option<api::ProviderKind> {
-    let model = super::normalized_agent_model(&non_empty(model)?);
-    if is_anthropic_parent_model(Some(&model)) {
-        return Some(api::ProviderKind::Anthropic);
-    }
-    if is_openai_parent_model(Some(&model)) {
-        return Some(api::ProviderKind::OpenAi);
-    }
-    match api::explicit_non_claude_provider_kind(&model) {
-        Some(api::ProviderKind::OpenAi) => Some(api::ProviderKind::OpenAi),
-        Some(api::ProviderKind::Google) => Some(api::ProviderKind::Google),
-        Some(api::ProviderKind::Xai) => Some(api::ProviderKind::Xai),
-        _ => None,
-    }
+    non_empty(parent_model)
+        .is_some_and(|parent| crate::model_home::Homes::load().same(&parent, candidate))
 }
 
 /// One catalog-owned step down the provider capability/latency ladder.
@@ -811,7 +761,7 @@ fn classify_agent_task_difficulty(
 mod tests {
     use super::{
         AGENT_MODEL_ENV, HIGH_EFFORT_TOKENS, XHIGH_EFFORT_TOKENS, build_agent_system_prompt,
-        is_openai_parent_model, resolve_agent_model_selection, smart_routed_model_selection,
+        resolve_agent_model_selection, same_provider_family, smart_routed_model_selection,
         starvation_demotion,
     };
 
@@ -870,13 +820,16 @@ mod tests {
 
     #[test]
     fn builtin_gpt_parents_are_recognized() {
-        // Used to gate the reasoning-budget assignment and the custom-agent
-        // frontmatter family check for genuine builtin GPT-family parents.
-        assert!(is_openai_parent_model(Some("gpt-5.5")));
-        assert!(is_openai_parent_model(Some("gpt-5.6-luna")));
-        assert!(is_openai_parent_model(Some("gpt-5.3-codex-spark")));
-        assert!(is_openai_parent_model(Some("gpt-5.5-2026-04-23")));
-        assert!(is_openai_parent_model(Some("gpt-5.5-fast")));
+        // The custom-agent frontmatter family check for genuine builtin
+        // GPT-family parents: each is on the provider `gpt-5.5` is on, and
+        // not on the one a Claude model is on.
+        let _env = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for parent in ["gpt-5.5", "gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.5-2026-04-23", "gpt-5.5-fast"] {
+            assert!(same_provider_family(Some(parent), "gpt-5.5"), "{parent}");
+            assert!(!same_provider_family(Some(parent), "claude-opus-4-8"), "{parent}");
+        }
     }
 
     /// CC parity (2026-06-11): a sub-agent runs on the parent's model verbatim.
@@ -981,14 +934,17 @@ mod tests {
 
     #[test]
     fn custom_openai_compatible_provider_is_not_rerouted_to_builtin_openai() {
+        let _env = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A custom OpenAI-compatible provider's model is not a builtin GPT
-        // family, so the predicate must be false regardless of ambient
-        // OPENAI_API_KEY (BUG-R14: the old `detect_provider_kind` env fallback
-        // rerouted it to a hardcoded builtin GPT family).
-        assert!(!is_openai_parent_model(Some("deepseek-chat")));
-        assert!(!is_openai_parent_model(Some("llama-3.3-70b-instruct")));
-        assert!(!is_openai_parent_model(Some("my-self-hosted-model")));
-        assert!(!is_openai_parent_model(None));
+        // family, so it is never in `gpt-5.5`'s, whatever key the machine
+        // holds (BUG-R14: the old `detect_provider_kind` env fallback
+        // rerouted it to a hardcoded builtin GPT family). The model's home
+        // reads no login.
+        for parent in [Some("deepseek-chat"), Some("llama-3.3-70b-instruct"), Some("my-self-hosted-model"), None] {
+            assert!(!same_provider_family(parent, "gpt-5.5"), "{parent:?}");
+        }
 
         // …and the sub-agent therefore inherits the user's actual model instead
         // of a builtin GPT id (env-key-free path: no ZO_AGENT_MODEL set).
@@ -1004,6 +960,54 @@ mod tests {
             assert_eq!(selection.model, "deepseek-chat");
             assert!(selection.thinking_budget_tokens.is_none());
         }
+    }
+
+    /// A helper's model is in the session's family where its requests go to
+    /// the session's provider — not where the two names look alike. On a
+    /// person's own provider that is every model the provider serves and no
+    /// built-in provider's, however either is spelled; on a built-in
+    /// provider it is that provider's models and no like-spelled model of a
+    /// person's own; and the catalog says which built-in provider a row or a
+    /// `<catalog key>/<id>` selection is on. Measured on v1.1.145: a session
+    /// on `gpt-oss-120b` of a person's endpoint was refused that endpoint's
+    /// `own-model` and allowed `OpenAI`'s `gpt-5.5`.
+    #[test]
+    fn a_helpers_model_is_in_the_family_where_its_requests_go_to_the_sessions_provider() {
+        use runtime::model_catalog::CatalogProvider;
+
+        let env = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // With a local Ollama named, every unknown name is Ollama's.
+        let _ollama = crate::tests::Var::unset(&env, "OLLAMA_BASE_URL");
+        let _home = crate::tests::ConfigHome::empty(&env).catalog_row(CatalogProvider::Google, "zq-row-on-google");
+        let _own = crate::tests::OwnProviders::declared(
+            &env,
+            r#"[{"name":"zqown","base_url":"https://own.invalid/v1","models":["gpt-zq-oss","claude-zq-gateway","zq-own-model"],"requires_auth":false},
+                {"name":"zqother","base_url":"https://other.invalid/v1","models":["zq-other-model"],"requires_auth":false}]"#,
+        );
+        let family = |parent: &str, candidate: &str| same_provider_family(Some(parent), candidate);
+
+        // On the person's own provider: its models, whatever they read as.
+        assert!(family("gpt-zq-oss", "zq-own-model"));
+        assert!(family("gpt-zq-oss", "claude-zq-gateway"));
+        assert!(family("zq-own-model", "zqown/gpt-zq-oss"));
+        // Not a built-in provider's, however alike the two are spelled; nor
+        // another provider of the person's.
+        assert!(!family("gpt-zq-oss", "gpt-5.5"));
+        assert!(!family("claude-zq-gateway", "claude-opus-4-8"));
+        assert!(!family("zq-own-model", "zq-other-model"));
+        // On a built-in provider: not a like-spelled model of the person's.
+        assert!(!family("gpt-5.5", "gpt-zq-oss"));
+        assert!(!family("claude-opus-4-8", "claude-zq-gateway"));
+        // The catalog says which built-in provider: a row the person wrote
+        // under Google, and OpenAI's key before an id that reads as Google's.
+        assert!(family("zq-row-on-google", "gemini-zq-9"));
+        assert!(!family("zq-row-on-google", "gpt-5.5"));
+        assert!(family("openai/gemini-zq-9", "gpt-5.5"));
+        assert!(!family("openai/gemini-zq-9", "gemini-zq-9"));
+        // A name nothing knows is in no family, its own included.
+        assert!(!family("zq-model-nobody-lists", "zq-model-nobody-lists"));
     }
 
     /// fallback 사다리: Anthropic opus→sonnet→haiku (별칭/정식 id 모두), 그리고
@@ -1064,8 +1068,8 @@ mod tests {
 
     /// Gap A (CC ultracode parity): the difficulty-scaled reasoning budget is
     /// provider-neutral. A Gemini, xAI/Ollama, or custom OpenAI-compatible
-    /// parent — none of which `is_openai_parent_model`/`is_anthropic_parent_model`
-    /// match — must still get the same hard-task budget an Anthropic/GPT parent
+    /// parent — none of them Anthropic's or `OpenAI`'s own — must still get
+    /// the same hard-task budget an Anthropic/GPT parent
     /// gets, instead of silently running at the provider default effort. The
     /// model is still inherited verbatim; only the budget is asserted here.
     #[test]

@@ -74,6 +74,19 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
         // under this lock, and puts back what it found.
         std::env::remove_var(api::CUSTOM_PROVIDERS_ENV);
         api::refresh_custom_providers_from_env();
+        // Nor the developer's config home. The model catalog a person edits
+        // lives there, and it is asked first whose account a model's
+        // requests go on (`crate::model_home`): a row the developer wrote
+        // would move a test's model to another provider. An empty home of
+        // this process's own, the homes of runs that ended going first; a
+        // test that wants a catalog makes its own ([`ConfigHome`]).
+        let _ = core_types::ended_process_folders::remove_folders_of_ended_processes(
+            &std::env::temp_dir(),
+            "zo-tools-test-home-",
+        );
+        let home = std::env::temp_dir().join(format!("zo-tools-test-home-{}", std::process::id()));
+        let _ = fs::create_dir_all(&home);
+        std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, &home);
         // A sub-agent turn a test runs roots its traces (`.zo/turns`,
         // `.zo/dream`) at `ZO_TRACE_ROOT`, else at the process cwd — the
         // crate's folder, where `.gitignore` hides them (244 session logs by
@@ -84,6 +97,116 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
         );
         Mutex::new(())
     })
+}
+
+/// Readies what [`env_lock`] readies — no keychain, none of the developer's
+/// providers, an empty config home — for a test that never takes the lock,
+/// before the code under test reads any of them.
+pub(crate) fn env_ready() {
+    let _ = env_lock();
+}
+
+/// One environment variable given a value, or taken out, for as long as this
+/// lives, and put back as the test found it. The [`env_lock`] guard it is
+/// given is held for as long as it lives.
+pub(crate) struct Var<'held> {
+    key: &'static str,
+    before: Option<std::ffi::OsString>,
+    _held: std::marker::PhantomData<&'held std::sync::MutexGuard<'held, ()>>,
+}
+
+impl<'held> Var<'held> {
+    pub(crate) fn set(
+        _held: &'held std::sync::MutexGuard<'held, ()>,
+        key: &'static str,
+        value: impl AsRef<std::ffi::OsStr>,
+    ) -> Self {
+        let before = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, before, _held: std::marker::PhantomData }
+    }
+
+    pub(crate) fn unset(_held: &'held std::sync::MutexGuard<'held, ()>, key: &'static str) -> Self {
+        let before = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, before, _held: std::marker::PhantomData }
+    }
+}
+
+impl Drop for Var<'_> {
+    fn drop(&mut self) {
+        match self.before.take() {
+            Some(before) => std::env::set_var(self.key, before),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// The person's own providers as the test found them, put back on drop. They
+/// are the process's, so the [`env_lock`] guard it is given is held for as
+/// long as it lives.
+pub(crate) struct OwnProviders<'held> {
+    before: Option<std::ffi::OsString>,
+    _held: std::marker::PhantomData<&'held std::sync::MutexGuard<'held, ()>>,
+}
+
+impl<'held> OwnProviders<'held> {
+    /// Declare `providers` (the `ZO_CUSTOM_PROVIDERS` JSON) for this process.
+    pub(crate) fn declared(_held: &'held std::sync::MutexGuard<'held, ()>, providers: &str) -> Self {
+        let before = std::env::var_os(api::CUSTOM_PROVIDERS_ENV);
+        std::env::set_var(api::CUSTOM_PROVIDERS_ENV, providers);
+        api::refresh_custom_providers_from_env();
+        Self { before, _held: std::marker::PhantomData }
+    }
+}
+
+impl Drop for OwnProviders<'_> {
+    fn drop(&mut self) {
+        match self.before.take() {
+            Some(before) => std::env::set_var(api::CUSTOM_PROVIDERS_ENV, before),
+            None => std::env::remove_var(api::CUSTOM_PROVIDERS_ENV),
+        }
+        api::refresh_custom_providers_from_env();
+    }
+}
+
+/// A config home of the test's own while it lives, holding the model catalog
+/// rows the test writes into it; the home the test found is put back on
+/// drop. It changes `ZO_CONFIG_HOME`, so the [`env_lock`] guard it is given
+/// is held for as long as it lives.
+pub(crate) struct ConfigHome<'held> {
+    home: tempfile::TempDir,
+    before: Option<std::ffi::OsString>,
+    _held: std::marker::PhantomData<&'held std::sync::MutexGuard<'held, ()>>,
+}
+
+impl<'held> ConfigHome<'held> {
+    pub(crate) fn empty(_held: &'held std::sync::MutexGuard<'held, ()>) -> Self {
+        let home = tempfile::tempdir().expect("a temp config home");
+        let before = std::env::var_os(core_types::paths::ZO_CONFIG_HOME_ENV);
+        std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, home.path());
+        Self { home, before, _held: std::marker::PhantomData }
+    }
+
+    /// Write a row into the catalog by hand, as a person does: `id` under
+    /// `provider`, with no wire mapping, dialled with that provider's API
+    /// key (a test machine holds no login).
+    pub(crate) fn catalog_row(self, provider: runtime::model_catalog::CatalogProvider, id: &str) -> Self {
+        runtime::model_catalog::ModelCatalog::load_from_home(self.home.path())
+            .expect("the config home loads")
+            .add_with_auth_route(provider, id, id, api::AuthRoute::ApiKey)
+            .expect("the row is added");
+        self
+    }
+}
+
+impl Drop for ConfigHome<'_> {
+    fn drop(&mut self) {
+        match self.before.take() {
+            Some(before) => std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, before),
+            None => std::env::remove_var(core_types::paths::ZO_CONFIG_HOME_ENV),
+        }
+    }
 }
 
 /// A `ps` first on `PATH` while it lives, which notes each run and then

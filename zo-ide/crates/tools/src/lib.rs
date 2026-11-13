@@ -47,6 +47,7 @@ mod hunk_attribution;
 mod http_bridge;
 mod mcp_tools;
 mod misc_tools;
+mod model_home;
 mod model_json;
 mod plan_mode_v2;
 mod preflight;
