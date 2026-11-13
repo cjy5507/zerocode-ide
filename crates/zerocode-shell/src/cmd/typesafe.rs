@@ -316,6 +316,7 @@ pub(crate) fn save_custom_decision(
     draft: DecisionDraft,
 ) -> Result<CustomDecisions, DecisionRefusal> {
     typesafe_settings::save_custom_decision_at(&decisions_home()?, draft, crate::now_epoch_ms())?;
+    crate::pane_guard::decisions_moved();
     decisions_now()
 }
 
@@ -323,6 +324,7 @@ pub(crate) fn save_custom_decision(
 #[tauri::command(async)]
 pub(crate) fn delete_custom_decision(id: String) -> Result<CustomDecisions, DecisionRefusal> {
     typesafe_settings::delete_custom_decision_at(&decisions_home()?, &id)?;
+    crate::pane_guard::decisions_moved();
     decisions_now()
 }
 
@@ -338,6 +340,7 @@ pub(crate) fn set_custom_decision_mode(
         &mode,
         crate::now_epoch_ms(),
     )?;
+    crate::pane_guard::decisions_moved();
     decisions_now()
 }
 

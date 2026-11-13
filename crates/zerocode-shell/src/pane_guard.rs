@@ -73,6 +73,7 @@ use zerocode_core::transcript::SaidAt;
 
 use crate::systemone::{self, SCHEMA, Wire, request_body};
 
+mod decisions;
 mod project_rules;
 
 /// What the two guards differ in, as this file asks them.
@@ -107,11 +108,14 @@ fn deadline_of(seat: &JevUse) -> Duration {
 /// which seats are asked ([`settings_moved`]).
 pub(crate) const WATCH_LANE: &str = "jev-settings";
 
-/// Which of the seats a pane's moments serve are asked, as zo's settings
-/// were last read — what the hook loop reads before anything else.
+/// Which of the seats a pane's moments serve are asked, and which of the
+/// person's own decisions ask (t-106308), as zo's settings and the
+/// decisions' store were last read — what the hook loop reads before
+/// anything else.
 #[derive(Debug, Default)]
 pub(crate) struct Standing {
     asking: Mutex<Asking>,
+    decided: Mutex<decisions::Decided>,
 }
 
 impl Standing {
@@ -120,15 +124,32 @@ impl Standing {
         *self.asking.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The decisions that ask now, and the hours they found full.
+    pub(crate) fn decided(&self) -> decisions::Decided {
+        self.decided
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Read `wire`'s settings again: each seat is asked while its mode asks,
-    /// and a file that does not read leaves every seat off.
+    /// and a file that does not read leaves every seat off; and the
+    /// decisions' store, only while the switch over every decision asks.
     pub(crate) fn read(&self, wire: &Wire) {
         let root = wire.settings_root();
-        let asking = Asking::of(
+        let mut asking = Asking::of(
             PANE_SEATS
                 .into_iter()
                 .filter(|seat| seat.mode_in_run(&root, Run::Fresh).asks()),
         );
+        let decided = decisions::Decided::read(&root, wire.config_home());
+        asking.decision_command = decided
+            .decisions
+            .asks_at(zerocode_core::jev::custom::Point::BeforeCommand);
+        asking.decision_turn_end = decided
+            .decisions
+            .asks_at(zerocode_core::jev::custom::Point::TurnEnd);
+        *self.decided.lock().unwrap_or_else(PoisonError::into_inner) = decided;
         *self.asking.lock().unwrap_or_else(PoisonError::into_inner) = asking;
     }
 }
@@ -136,21 +157,33 @@ impl Standing {
 /// The window's standing.
 static STANDING: LazyLock<Standing> = LazyLock::new(Standing::default);
 
-/// Put zo's settings file on the window's file watcher, and read which seats
-/// are asked now — the window's boot.
+/// Put zo's settings file and the decisions' index on the window's file
+/// watcher, and read which seats and decisions ask now — the window's boot.
 pub(crate) fn watch_settings(watched: &crate::file_watch::WatchSet) {
     if let Some(settings) = crate::api_routers::zo_settings_path() {
-        watched.replace_lane(
-            WATCH_LANE,
-            vec![(settings.to_string_lossy().into_owned(), Some(settings))],
-            false,
-        );
+        let mut files = vec![(
+            settings.to_string_lossy().into_owned(),
+            Some(settings.clone()),
+        )];
+        if let Some(home) = settings.parent() {
+            let index = zerocode_core::jev::custom::store::index_path(home);
+            files.push((index.to_string_lossy().into_owned(), Some(index)));
+        }
+        watched.replace_lane(WATCH_LANE, files, false);
     }
     STANDING.read(&Wire::of_this_machine());
 }
 
-/// zo's settings file changed: read which seats are asked again.
+/// zo's settings file or the decisions' index changed: read which seats and
+/// decisions ask again.
 pub(crate) fn settings_moved() {
+    STANDING.read(&Wire::of_this_machine());
+}
+
+/// The window wrote the decisions' store — made, edited, switched or
+/// deleted one: read which decisions ask again, without waiting for the
+/// watcher's next look.
+pub(crate) fn decisions_moved() {
     STANDING.read(&Wire::of_this_machine());
 }
 
@@ -175,6 +208,9 @@ pub(crate) struct Pane {
     /// ([`prompt_key`]) — `None` where the event carries no prompt the
     /// bridge reads.
     pub prompt_key: Option<String>,
+    /// The launch the hook's knock says it belongs to; empty from an older
+    /// script. A line a decision earned waits for this launch alone.
+    pub launch: String,
 }
 
 impl Pane {
@@ -324,6 +360,11 @@ struct PaneBook {
     finds: u64,
     /// Rows of the turns counted and not yet written.
     counted: Vec<Value>,
+    /// The shell calls the person's decisions were asked before this turn,
+    /// each by its id when its payload named one and by its command.
+    decided_calls: Vec<(Option<String>, String)>,
+    /// The lines the person's decisions earned, waiting to be handed.
+    waiting: decisions::Waiting,
 }
 
 /// A turn's file pick as its brief waits on it (t-14869): the prompt the
@@ -381,6 +422,8 @@ impl PaneBook {
 #[derive(Debug, Clone)]
 enum Question {
     ProjectRules(project_rules::Turn),
+    /// The person's own decisions at one of their points.
+    Decisions(decisions::Asked),
     Command {
         judged: u64,
         attempt: String,
@@ -503,12 +546,14 @@ fn read_hook(
         worktree: PathBuf::from(&envelope.worktree_id),
         worker: summoned(term),
         prompt_key: zerocode_hookd::turn_prompt(envelope).map(|prompt| prompt_key(&prompt)),
+        launch: envelope.launch_token.clone(),
     };
-    drop(note(
+    drop(note_deciding(
         &GUARDS,
         &Wire::of_this_machine(),
         &pane,
         asking,
+        &STANDING.decided(),
         moments,
         crate::usage_runtime::epoch_ms_now(),
     ));
@@ -536,6 +581,28 @@ pub(crate) fn note(
     moments: Vec<Moment>,
     now_ms: i64,
 ) -> Vec<JoinHandle<()>> {
+    note_deciding(
+        guards,
+        wire,
+        pane,
+        asking,
+        &decisions::Decided::default(),
+        moments,
+        now_ms,
+    )
+}
+
+/// [`note`], with the person's decisions `decided` names asking at their
+/// points beside the seats.
+pub(crate) fn note_deciding(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    pane: &Pane,
+    asking: Asking,
+    decided: &decisions::Decided,
+    moments: Vec<Moment>,
+    now_ms: i64,
+) -> Vec<JoinHandle<()>> {
     let mut questions = Vec::new();
     let mut labels: Vec<Filed> = Vec::new();
     let counted;
@@ -552,7 +619,15 @@ pub(crate) fn note(
         let at = u64::try_from(now_ms).unwrap_or_default();
         book.pane = Some(pane.clone());
         for moment in moments {
-            file(book, pane, asking, moment, at, &mut questions, &mut labels);
+            file(
+                book,
+                pane,
+                (asking, decided),
+                moment,
+                at,
+                &mut questions,
+                &mut labels,
+            );
         }
         counted = std::mem::take(&mut book.counted);
     }
@@ -563,19 +638,21 @@ pub(crate) fn note(
         .filter_map(|question| {
             let wire = wire.clone();
             let pane = pane.clone();
+            let decided = decided.clone();
             std::thread::Builder::new()
                 .name("jev-pane-guard".to_string())
-                .spawn(move || ask(guards, &wire, &pane, question))
+                .spawn(move || ask(guards, &wire, &pane, &decided, question))
                 .ok()
         })
         .collect()
 }
 
-/// File one moment in `book`.
+/// File one moment in `book`, for the seats `asking` asks and the
+/// decisions `decided` keeps.
 fn file(
     book: &mut PaneBook,
     pane: &Pane,
-    asking: Asking,
+    (asking, decided): (Asking, &decisions::Decided),
     moment: Moment,
     at: u64,
     questions: &mut Vec<Question>,
@@ -629,6 +706,7 @@ fn file(
             }
             book.task = task_line_of(&words);
             book.persons = squeezed(&words);
+            book.decided_calls.clear();
         }
         Moment::Started {
             call_id,
@@ -645,9 +723,21 @@ fn file(
             }
         }
         Moment::CommandAbout(call) => {
-            let Some(command) = call.command else {
+            let Some(command) = call.command.clone() else {
                 return;
             };
+            // The person's decisions keep their own count of the calls
+            // they were asked before: the command guard's book below is
+            // kept only while the guard asks.
+            if asking.decision_command {
+                questions.extend(
+                    decisions::before_command(book, pane, decided, &call, &command, at)
+                        .map(Question::Decisions),
+                );
+            }
+            if !asking.command {
+                return;
+            }
             // One call can be reported twice before it runs — a shell's own
             // event that names no call, and the tool event of the same call
             // (Cursor's `beforeShellExecution` and `preToolUse`): a command
@@ -819,6 +909,16 @@ fn file(
             count_turn(book, pane, at);
             let edited = std::mem::take(&mut book.turn_edited);
             let evidence = std::mem::take(&mut book.evidence);
+            book.decided_calls.clear();
+            if let Some(said) = said
+                .as_ref()
+                .filter(|_| !stopped && asking.decision_turn_end)
+            {
+                questions.extend(
+                    decisions::at_turn_end(book, decided, said, &evidence, &edited, at)
+                        .map(Question::Decisions),
+                );
+            }
             if let Some(said) = said {
                 if !stopped && asking.project_rules {
                     questions.push(Question::ProjectRules(project_rules::Turn {
@@ -1070,6 +1170,7 @@ const BRIEF_CONTRIBUTORS: &[BriefContributor] = &[
     crate::tree_selection::brief_line,
     file_pick_line,
     project_rules::brief_line,
+    decisions::brief_line,
 ];
 
 /// What separates two voices in a brief: a blank line, the way the bridge
@@ -1306,7 +1407,14 @@ fn briefing_of(held: &mut Guards, term: u32, judged: u64) -> Option<&mut Briefin
 /* ---- the questions --------------------------------------------------------------- */
 
 /// Ask one question and file what came of it.
-fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Question) {
+fn ask(
+    guards: &'static Mutex<Guards>,
+    wire: &Wire,
+    pane: &Pane,
+    decided: &decisions::Decided,
+    question: Question,
+) {
+    let unscoped = wire;
     let scoped = pane
         .session
         .as_deref()
@@ -1314,6 +1422,9 @@ fn ask(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question: Quest
     let wire = scoped.as_ref().unwrap_or(wire);
     match question {
         Question::ProjectRules(turn) => project_rules::check(wire, pane, &turn),
+        // The decisions' requests carry no seat's review origin: they ride
+        // the wire zo's decisions ride.
+        Question::Decisions(asked) => decisions::ask(guards, unscoped, pane, decided, asked),
         Question::Claim {
             judged,
             said,
@@ -1336,7 +1447,10 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
     let (guard, judged) = match &question {
         Question::Command { judged, .. } => (&COMMAND, *judged),
         Question::Text { judged, .. } => (&TEXT, *judged),
-        Question::Claim { .. } | Question::FilePick { .. } | Question::ProjectRules(_) => return,
+        Question::Claim { .. }
+        | Question::FilePick { .. }
+        | Question::ProjectRules(_)
+        | Question::Decisions(_) => return,
     };
     let (mode, _) = systemone::standing_in(wire, guard.seat, Run::Fresh);
     let Some(ledger) = systemone::ledger_of(wire, guard.seat).filter(|_| mode.asks()) else {
@@ -1433,7 +1547,10 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
                 rubric,
             )
         }
-        Question::Claim { .. } | Question::FilePick { .. } | Question::ProjectRules(_) => return,
+        Question::Claim { .. }
+        | Question::FilePick { .. }
+        | Question::ProjectRules(_)
+        | Question::Decisions(_) => return,
     };
     if let Some(mut row) = row {
         systemone::stamp_route(&mut row, route.as_deref());

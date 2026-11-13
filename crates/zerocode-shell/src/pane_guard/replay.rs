@@ -604,6 +604,7 @@ fn read_one(
         worktree: project.to_path_buf(),
         worker: false,
         prompt_key: None,
+        launch: String::new(),
     };
     (
         count,

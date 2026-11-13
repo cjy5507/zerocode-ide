@@ -106,6 +106,7 @@ fn pane(agent: AgentKind, project: &Path) -> Pane {
         worktree: project.to_path_buf(),
         worker: false,
         prompt_key: None,
+        launch: String::new(),
     }
 }
 
@@ -1219,6 +1220,7 @@ fn briefed_pane(project: &Path, worker: bool) -> Pane {
     Pane {
         worker,
         prompt_key: Some(prompt_key(BRIEFED)),
+        launch: String::new(),
         ..pane(AgentKind::Claude, project)
     }
 }

@@ -107,6 +107,14 @@ pub fn root(home: &Path) -> PathBuf {
     home.join(DIRECTORY)
 }
 
+/// The store's index under `home`: the one file every write of the store
+/// rewrites, so a reader that watches it sees every decision made, edited,
+/// switched or deleted.
+#[must_use]
+pub fn index_path(home: &Path) -> PathBuf {
+    root(home).join(INDEX)
+}
+
 /// Every decision the store keeps, in the order they were made; none before
 /// one is.
 ///

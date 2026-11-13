@@ -357,6 +357,13 @@ pub const PANE_SEATS: [&JevUse; 5] = [
 /// (t-11349): the one gate before anything of a pane's work is read — a seat
 /// left off is read nothing for, and with every seat off nothing is read at
 /// all.
+///
+/// Beside the seats, the person's own decisions (t-106308,
+/// [`crate::jev::custom`]): whether one asks before a shell command, and
+/// whether one asks at a turn's end. Each reads the moments its point lends
+/// and switches no seat's work on. A decision at a turn's start would add
+/// its flag here and read [`Moment::Prompt`], which every row that sees a
+/// prompt already carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[allow(clippy::struct_excessive_bools)] // one switch per seat, not a state machine
 pub struct Asking {
@@ -365,16 +372,25 @@ pub struct Asking {
     pub claim: bool,
     pub file_pick: bool,
     pub project_rules: bool,
+    /// A person's decision asks before a shell command: the command about
+    /// to run ([`Moment::CommandAbout`]) and the prompt's task line.
+    pub decision_command: bool,
+    /// A person's decision asks at a turn's end: the turn's answer, its
+    /// finished calls and the files its edits wrote.
+    pub decision_turn_end: bool,
 }
 
 impl Asking {
-    /// Every seat asked — a reader no switch gates.
+    /// Every seat asked — a reader no switch gates. The decisions' flags are
+    /// left off: they read nothing the seats do not already read.
     pub const ALL: Self = Self {
         command: true,
         text: true,
         claim: true,
         file_pick: true,
         project_rules: true,
+        decision_command: false,
+        decision_turn_end: false,
     };
 
     /// The seats `asked` names, each by its row.
@@ -406,10 +422,22 @@ impl Asking {
             || (seat.id == PROJECT_RULES.id && self.project_rules)
     }
 
-    /// Whether no seat is asked.
+    /// Whether no seat and no decision is asked.
     #[must_use]
     pub const fn nothing(self) -> bool {
-        !(self.command || self.text || self.claim || self.file_pick || self.project_rules)
+        !(self.command
+            || self.text
+            || self.claim
+            || self.file_pick
+            || self.project_rules
+            || self.decision_command
+            || self.decision_turn_end)
+    }
+
+    /// Whether a turn's answer, its finished calls and its edits are read:
+    /// the claim seat, the project-rules check, or a decision at a turn's end.
+    const fn reads_the_turn(self) -> bool {
+        self.claim || self.project_rules || self.decision_turn_end
     }
 }
 
@@ -547,7 +575,10 @@ pub fn moments_parsed(
                 Tool::Edit | Tool::Write => written_in(tree),
                 _ => None,
             };
-            if asking.command && activity.verb == Tool::Bash && row.before.yes() && words.is_some()
+            if (asking.command || asking.decision_command)
+                && activity.verb == Tool::Bash
+                && row.before.yes()
+                && words.is_some()
             {
                 found.push(Moment::CommandAbout(Call {
                     id: call_id.clone(),
@@ -555,7 +586,7 @@ pub fn moments_parsed(
                     cwd,
                 }));
             }
-            let paths = if (asking.file_pick || asking.project_rules)
+            let paths = if (asking.file_pick || asking.project_rules || asking.decision_turn_end)
                 && row.edited_path.yes()
                 && matches!(activity.verb, Tool::Edit | Tool::Write)
             {
@@ -597,7 +628,7 @@ pub fn moments_parsed(
                     text,
                 });
             }
-            let evidence = if (asking.claim || asking.project_rules) && row.after.yes() {
+            let evidence = if asking.reads_the_turn() && row.after.yes() {
                 evidence_in(&row, &activity.verb, tree, failed)
             } else {
                 None
@@ -615,7 +646,7 @@ pub fn moments_parsed(
         }
         Phase::Stopped => {
             if row.turn_end.yes() {
-                let said = if (asking.claim || asking.project_rules)
+                let said = if asking.reads_the_turn()
                     && row.turn_answer.yes()
                     && hook::turn_end_carries_answer(event)
                 {

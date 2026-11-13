@@ -906,3 +906,130 @@ fn only_a_seat_riding_the_turns_brief_reaches_an_agent_and_the_rest_record() {
     }
     assert_eq!(RECORDED_ONLY, "recorded_only");
 }
+
+/// A Claude turn's events, one of each kind a decision reads: a prompt, a
+/// shell command about to run and run, an edit, and the turn's end with its
+/// answer.
+fn a_turns_events() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "UserPromptSubmit",
+            serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": "fix the parser"})
+                .to_string(),
+        ),
+        (
+            "PreToolUse",
+            claude("PreToolUse", "Bash", &shell("rm -rf build"), &Value::Null),
+        ),
+        (
+            "PostToolUse",
+            claude(
+                "PostToolUse",
+                "Bash",
+                &shell("cargo test"),
+                &serde_json::json!({"tool_response": {"stdout": "ok", "stderr": ""}}),
+            ),
+        ),
+        (
+            "PreToolUse",
+            claude(
+                "PreToolUse",
+                "Write",
+                &serde_json::json!({"file_path": "/w/project/src/new.rs", "content": "fn f() {}"}),
+                &Value::Null,
+            ),
+        ),
+        (
+            "Stop",
+            serde_json::json!({"hook_event_name": "Stop", "last_assistant_message": "done"})
+                .to_string(),
+        ),
+    ]
+}
+
+/// A person's decision before a shell command reads the command about to
+/// run and the prompt, and nothing a seat reads besides — no step's record,
+/// no edit's files, no turn's answer; one at a turn's end reads the turn's
+/// answer, its finished calls and its edits. Neither switches a seat on
+/// (t-106308).
+#[test]
+fn a_decision_reads_the_moments_its_point_lends_and_no_seats() {
+    let events = a_turns_events();
+    let read = |asking: Asking| -> Vec<Vec<Moment>> {
+        events
+            .iter()
+            .map(|(event, payload)| {
+                moments_parsed(AgentKind::Claude, event, &HookPayload::of(payload), asking)
+            })
+            .collect()
+    };
+    let command = Asking {
+        decision_command: true,
+        ..Asking::default()
+    };
+    assert!(!command.nothing());
+    let before = read(command);
+    assert_eq!(before[0], [Moment::Prompt("fix the parser".to_string())]);
+    assert_eq!(
+        before[1],
+        [Moment::CommandAbout(Call {
+            id: Some("call-1".to_string()),
+            command: Some("rm -rf build".to_string()),
+            cwd: Some(PathBuf::from("/w/project")),
+        })]
+    );
+    assert!(before[2].is_empty(), "{:?}", before[2]);
+    assert!(before[3].is_empty(), "{:?}", before[3]);
+    assert_eq!(
+        before[4],
+        [Moment::TurnEnded {
+            stopped: false,
+            said: None
+        }]
+    );
+    let turn_end = Asking {
+        decision_turn_end: true,
+        ..Asking::default()
+    };
+    assert!(!turn_end.nothing());
+    let after = read(turn_end);
+    assert!(after[1].is_empty(), "{:?}", after[1]);
+    assert!(
+        matches!(after[2].as_slice(), [Moment::Finished { evidence: Some(evidence), .. }]
+            if evidence.command.as_deref() == Some("cargo test")),
+        "{:?}",
+        after[2]
+    );
+    assert!(
+        matches!(after[3].as_slice(), [Moment::Started { paths, .. }]
+            if paths == &["/w/project/src/new.rs".to_string()]),
+        "{:?}",
+        after[3]
+    );
+    assert_eq!(
+        after[4],
+        [Moment::TurnEnded {
+            stopped: false,
+            said: Some(SaidAt::Words("done".to_string())),
+        }]
+    );
+}
+
+/// The decisions read nothing the seats do not already read: beside every
+/// seat, their flags change no moment of any event.
+#[test]
+fn beside_every_seat_the_decisions_change_no_moment() {
+    let every = Asking {
+        decision_command: true,
+        decision_turn_end: true,
+        ..Asking::ALL
+    };
+    for (event, payload) in a_turns_events() {
+        let parsed = HookPayload::of(&payload);
+        assert_eq!(
+            moments_parsed(AgentKind::Claude, event, &parsed, every),
+            moments_parsed(AgentKind::Claude, event, &parsed, Asking::ALL),
+            "{event}"
+        );
+    }
+}

@@ -1592,3 +1592,27 @@ fn a_memo_hit_passes_the_door_and_takes_no_place_only_when_it_may_answer() {
         None
     );
 }
+
+/// A refusal the door gives again until something outside the asker changes
+/// says how long at the longest (t-106308): a full day until the day ends,
+/// a full hour, a missing key, a folder not consented and the switch off
+/// until the hour ends; a moment's race or a server's wait not at all.
+#[test]
+fn a_repeating_refusal_says_the_span_it_repeats_for() {
+    let spans: Vec<(Refused, Option<Span>)> = Refused::ALL
+        .into_iter()
+        .map(|refused| (refused, refused.repeats()))
+        .collect();
+    assert_eq!(
+        spans,
+        [
+            (Refused::NoKey, Some(Span::Hour)),
+            (Refused::Off, Some(Span::Hour)),
+            (Refused::NotConsented, Some(Span::Hour)),
+            (Refused::Budget, Some(Span::Day)),
+            (Refused::HourlyBudget, Some(Span::Hour)),
+            (Refused::SettingsChanged, None),
+            (Refused::Resting, None),
+        ]
+    );
+}

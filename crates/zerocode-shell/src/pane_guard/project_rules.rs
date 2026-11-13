@@ -374,6 +374,7 @@ mod tests {
             worktree: root,
             worker: false,
             prompt_key: None,
+            launch: String::new(),
         };
         (home, workspace, wire, endpoint, pane)
     }

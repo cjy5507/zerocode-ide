@@ -436,6 +436,35 @@ impl Refused {
             .into_iter()
             .find(|refused| refused.token() == token)
     }
+
+    /// Whether the door would give this refusal again to the same request
+    /// until something outside the asking program changes — and, when it
+    /// would, the clock span past which it may answer otherwise (t-106308).
+    /// A program that asks far more often than the door lets through (a
+    /// pane's agent runs thousands of commands a week) writes such a refusal
+    /// once per span, not once per ask. A settings file read again may lift
+    /// any of them sooner; the span is only the latest. `None` for a refusal
+    /// a moment's race or a server's own wait decides, which the next ask may
+    /// not meet.
+    #[must_use]
+    pub const fn repeats(self) -> Option<Span> {
+        match self {
+            // A key put in, consent given or the switch turned on shows in
+            // the settings file; with no new reading, an hour bounds it.
+            Self::NoKey | Self::Off | Self::NotConsented | Self::HourlyBudget => Some(Span::Hour),
+            Self::Budget => Some(Span::Day),
+            Self::SettingsChanged | Self::Resting => None,
+        }
+    }
+}
+
+/// The local clock span a refused request is refused for at the longest
+/// ([`Refused::repeats`]): the hour or the day the door counts it in
+/// ([`count::hour_of`], [`count::day_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Span {
+    Hour,
+    Day,
 }
 
 /// What the door is told about one request.
