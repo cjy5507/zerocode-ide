@@ -1950,6 +1950,7 @@ mod tests {
     }
 
     /// Whether `path` is a link itself.
+    #[cfg(unix)]
     fn is_link(path: &Path) -> bool {
         std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
     }
@@ -2118,6 +2119,7 @@ mod tests {
 
     /// A copy installed before the store stood: every file the skill ships,
     /// in this build's text, in the folder an agent reads.
+    #[cfg(unix)]
     fn copy_of(skill: &BundledSkill, dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(SKILL_FILE), skill.content).unwrap();
@@ -2128,6 +2130,7 @@ mod tests {
 
     /// Install `name` for Claude Code with the store standing, and say what
     /// its folder became.
+    #[cfg(unix)]
     fn install_for_claude(home: &Path, name: &str) -> SkillInstallOutcome {
         std::fs::create_dir_all(home.join(".agents/skills")).unwrap();
         let mut outcomes = install_bundled_skill(name, home, &[], &rows(&["claude"])).unwrap();
