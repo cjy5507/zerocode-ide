@@ -2070,17 +2070,22 @@ fn translate_message<'a>(
                 // conversation: an unsigned block (the lowering hands this wire
                 // no other kind — `runtime::convert_messages`). Where the
                 // endpoint takes the field it arrived in, it goes back there,
-                // whole. The text it has always been carried as goes with it:
-                // within one turn that text is a second copy, and taking it
-                // away is a change in what the model reads, measured apart.
+                // whole — and only there. Written into the content as well
+                // (`[earlier reasoning]` text, as it was until 2026-11-14) it
+                // is a second copy of what the field already holds, in the
+                // model's own voice: deepseek-flash took up the shape and
+                // wrote its reasoning out again in 44 of 55 replies of one
+                // task, paid for as output and again as input. An endpoint
+                // that does not take the field is still handed the text.
                 InputContentBlock::Thinking { thinking, signature } if signature.is_empty() => {
-                    if matches!(reasoning, ReasoningWire::Field { .. }) && !thinking.trim().is_empty() {
-                        if !reasoning_content.is_empty() {
-                            reasoning_content.push_str("\n\n");
+                    if matches!(reasoning, ReasoningWire::Field { .. }) {
+                        if !thinking.trim().is_empty() {
+                            if !reasoning_content.is_empty() {
+                                reasoning_content.push_str("\n\n");
+                            }
+                            reasoning_content.push_str(thinking);
                         }
-                        reasoning_content.push_str(thinking);
-                    }
-                    if let Some(passport) = super::reasoning_passport(thinking) {
+                    } else if let Some(passport) = super::reasoning_passport(thinking) {
                         super::push_assistant_text(&mut text, &passport);
                     }
                 }
@@ -2095,8 +2100,8 @@ fn translate_message<'a>(
             }
         }
         // An assistant message that lowers to nothing is not on the wire, so it
-        // ends no run of `tool` messages either. A turn that holds only
-        // reasoning is one through its passport text, as it always was.
+        // ends no run of `tool` messages either. Reasoning in the field alone
+        // does not make one: it rides with the answer or the calls it led to.
         if !text.is_empty() || !tool_calls.is_empty() {
             let mut message = json!({
                 "role": "assistant",

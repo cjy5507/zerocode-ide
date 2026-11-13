@@ -768,12 +768,12 @@ fn a_models_own_reasoning_goes_back_in_reasoning_content_on_an_endpoint_the_pers
         json!(OWN_REASONING),
         "the reasoning rides in the field it arrived in: {step}"
     );
-    assert_eq!(
-        step["content"],
-        json!(format!("[earlier reasoning]\n{OWN_REASONING}\n\nRunning the saved query.")),
-        "and the text it was always carried as is still there, byte for byte"
-    );
+    assert_eq!(step["content"], json!("Running the saved query."), "the answer is not touched");
     assert_eq!(step["tool_calls"].as_array().map(Vec::len), Some(1));
+    assert!(
+        !payload.to_string().contains("[earlier reasoning]"),
+        "and it is not written out a second time as text in the model's own voice"
+    );
 }
 
 #[test]
@@ -848,9 +848,10 @@ fn a_signed_reasoning_block_is_never_lowered_onto_the_chat_wire() {
 }
 
 #[test]
-fn a_turn_that_holds_only_reasoning_is_carried_as_it_always_was() {
-    // The passport text makes it an assistant message, as before; the
-    // reasoning rides with it.
+fn reasoning_alone_makes_no_assistant_message() {
+    // A stored turn that holds nothing but reasoning lowers to nothing where
+    // the field rides: the field goes with an answer or with calls, never
+    // alone.
     let payload = build_chat_completion_request(
         &chat_request(
             "acme-reasoner-1",
@@ -868,9 +869,8 @@ fn a_turn_that_holds_only_reasoning_is_carried_as_it_always_was() {
         a_persons_endpoint("https://gateway.example/v1"),
     );
 
-    assert_eq!(roles(&payload), ["user", "assistant"]);
-    assert_eq!(payload["messages"][1]["content"], json!("[earlier reasoning]\nnothing to say yet"));
-    assert_eq!(reasoning_fields(&payload), [Some("nothing to say yet")]);
+    assert_eq!(roles(&payload), ["user"]);
+    assert!(!payload.to_string().contains("reasoning_content"));
 }
 
 /// One whole HTTP request off `conn`: the head, then as much body as its
