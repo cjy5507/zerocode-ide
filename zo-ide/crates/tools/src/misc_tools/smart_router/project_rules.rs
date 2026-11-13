@@ -207,11 +207,13 @@ pub fn pending_project_rule_advice(workspace: &Path, recipient: &str, room: usiz
 }
 
 /// The lines the person's decisions handed this turn, as one advice whose
-/// text fits `room`: as many whole lines as fit under its key, and none when
-/// not one does. It names no rule, so its delivery writes no rule's receipt.
+/// text fits `room`: under its key, the one line saying what they are
+/// ([`jev::custom::LINES_INTRO`]) and as many whole lines as fit, and none
+/// when not one does. It names no rule, so its delivery writes no rule's
+/// receipt.
 fn decided_advice(workspace: &Path, recipient: &str, room: usize) -> Option<rules::Advice> {
     let (key, lines) = custom_decisions::pending_lines(workspace, recipient)?;
-    let head = format!("{ADVICE_PREFIX}{key}]");
+    let head = format!("{ADVICE_PREFIX}{key}]\n{}", jev::custom::LINES_INTRO);
     let mut text = head.clone();
     for line in lines {
         if text.chars().count() + 1 + line.chars().count() > room { break; }

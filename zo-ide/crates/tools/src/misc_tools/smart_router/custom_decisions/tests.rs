@@ -103,6 +103,13 @@ fn a_score(spread: &[f64], confidence: f64) -> Value {
     json!({"type": "score", "score": score, "confidence": confidence, "legend": legend, "probabilities": probabilities})
 }
 
+/// What a yes of [`yes_no`]'s decision means, as its line says it
+/// ([`custom::said`]).
+pub(crate) const YES_MEANS: &str = "A person sees it change.";
+
+/// What its no means.
+pub(crate) const NO_MEANS: &str = "Nothing a person sees moves.";
+
 /// A yes-or-no decision named `name` asking at `at`, as a new one starts
 /// ([`Definition::new`]).
 pub(crate) fn yes_no(name: &str, at: Point) -> Definition {
@@ -110,7 +117,7 @@ pub(crate) fn yes_no(name: &str, at: Point) -> Definition {
         custom::new_id(),
         name.to_string(),
         "Does this change what a person sees?".to_string(),
-        Answer::YesNo { yes: "A person sees it change.".to_string(), no: "Nothing a person sees moves.".to_string() },
+        Answer::YesNo { yes: YES_MEANS.to_string(), no: NO_MEANS.to_string() },
         at,
     )
 }
@@ -360,9 +367,10 @@ fn shadow_asks_and_writes_but_hands_nothing() {
 }
 
 /// A decision that is on hands its one line, in DESIGN 2.4's shape and under
-/// its cap, for each kind of answer as sure as its act-from line; one below
-/// it, or one that answers it does not apply, hands none and still keeps its
-/// row — with a score's level counted from zero there.
+/// its cap, for each kind of answer as sure as its act-from line — a yes in
+/// the person's words for it; one below it, one that answers it does not
+/// apply, or a yes or no that answers no where nobody asked, hands none and
+/// still keeps its row — with a score's level counted from zero there.
 #[test]
 fn on_above_the_bar_hands_one_line_and_below_hands_none() {
     let (docs, tests, unsure) =
@@ -384,10 +392,9 @@ fn on_above_the_bar_hands_one_line_and_below_hands_none() {
             keep(definition, JevMode::On);
         }
         let lines = run_blocking(at_turn_start(cwd.to_path_buf(), TASK.to_string()));
-        let (yes, no) = (AGENT_TOOL_ASK_OPTIONS[0], AGENT_TOOL_ASK_OPTIONS[1]);
+        let yes = AGENT_TOOL_ASK_OPTIONS[0];
         let handed = [
-            custom::line("Docs", yes, 0.9),
-            custom::line("Tests", no, 1.0 - 0.1),
+            custom::line("Docs", YES_MEANS, 0.9),
             custom::line("Size", "large", 0.85),
             custom::line("Effort", &custom::shown_level(2, 4), 0.85),
         ];
@@ -395,9 +402,11 @@ fn on_above_the_bar_hands_one_line_and_below_hands_none() {
         assert!(lines.iter().all(|line| line.chars().count() <= custom::LINE_MAX_CHARS), "{lines:?}");
         let rows = rows_now(cwd);
         let applied = |definition: &Definition| rows_of(&rows, &definition.id).first().map(|row| row["applied"].clone());
-        for (definition, was) in [(&docs, true), (&tests, true), (&unsure, false), (&size, true), (&effort, true), (&scope, false)] {
+        for (definition, was) in [(&docs, true), (&tests, false), (&unsure, false), (&size, true), (&effort, true), (&scope, false)] {
             assert_eq!(applied(definition), Some(Value::from(was)), "{}", definition.name);
         }
+        let tests_row = rows_of(&rows, &tests.id)[0];
+        assert_eq!(tests_row["chosen"], AGENT_TOOL_ASK_OPTIONS[1], "an unasked no keeps its row and hands nothing");
         let unsure_row = rows_of(&rows, &unsure.id)[0];
         assert_eq!((&unsure_row["chosen"], &unsure_row["confidence"]), (&Value::from(yes), &Value::from(0.7)));
         assert_eq!(rows_of(&rows, &effort.id)[0]["chosen"], 2, "the row keeps the level counted from zero");
@@ -407,11 +416,11 @@ fn on_above_the_bar_hands_one_line_and_below_hands_none() {
 
 /// Whatever a decision asked before a command answers, the command runs —
 /// once, and as the model wrote it. A decision that is on adds its line to
-/// what the model reads of the result; one that records adds nothing.
+/// what the model reads of the result when it answers yes, in the person's
+/// words for a yes; its no adds nothing, and one that records adds nothing.
 #[test]
 fn before_a_command_never_stops_it() {
-    let (yes, no) = (AGENT_TOOL_ASK_OPTIONS[0], AGENT_TOOL_ASK_OPTIONS[1]);
-    for (mode, answer, handed) in [(JevMode::On, 0.95, Some(yes)), (JevMode::On, 0.05, Some(no)), (JevMode::Shadow, 0.05, None)] {
+    for (mode, answer, handed) in [(JevMode::On, 0.95, true), (JevMode::On, 0.05, false), (JevMode::Shadow, 0.05, false)] {
         let mock = replying(move |_| a_noul(answer));
         machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
             keep(&yes_no("Cleanup", Point::BeforeCommand), mode);
@@ -436,10 +445,11 @@ fn before_a_command_never_stops_it() {
             let read = seen.lock().expect("what the model read").first().cloned().unwrap_or_default();
             assert!(read.contains("removed"), "{mode:?} {answer}: {read}");
             let sure = if answer < 0.5 { 1.0 - answer } else { answer };
-            for option in [yes, no] {
-                let line = custom::line("Cleanup", option, sure);
-                assert_eq!(read.contains(&line), handed == Some(option), "{mode:?} {answer}: {read}");
+            for means in [YES_MEANS, NO_MEANS] {
+                let line = custom::line("Cleanup", means, sure);
+                assert_eq!(read.contains(&line), handed && means == YES_MEANS, "{mode:?} {answer}: {read}");
             }
+            assert_eq!(read.contains("「Cleanup」"), handed, "{mode:?} {answer}: no line of any wording unless handed: {read}");
             let rows = rows_in(cwd, 1);
             assert_eq!(rows.len(), 1, "{rows:?}");
             assert_eq!(rows[0]["outcome"], door::ANSWERED_OUTCOME);
@@ -779,7 +789,7 @@ fn each_point_asks_with_the_use_already_there_off() {
         for point in [Point::TurnStart, Point::BeforeCommand, Point::TurnEnd] {
             keep(&yes_no(point.key(), point), JevMode::On);
         }
-        let line = |point: Point| custom::line(point.key(), AGENT_TOOL_ASK_OPTIONS[0], 0.9);
+        let line = |point: Point| custom::line(point.key(), YES_MEANS, 0.9);
         let note = run_blocking(SkillSuggestionJudge::at(cwd).suggest(TASK.to_string()));
         assert_eq!(note, Some(format!("{}\n{}", runtime::SKILL_RECOMMENDATION_REMINDER_PREFIX, line(Point::TurnStart))));
         let guard = ToolGuardJudge::at(cwd);
@@ -790,6 +800,7 @@ fn each_point_asks_with_the_use_already_there_off() {
             waited(|| pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP)).expect("the next turn's advice");
         let mut said = advice.text.lines();
         assert!(said.next().is_some_and(|head| head.contains(&advice.key)), "{}", advice.text);
+        assert_eq!(said.next(), Some(custom::LINES_INTRO), "the lines open with what they are: {}", advice.text);
         assert_eq!(said.collect::<Vec<&str>>(), [line(Point::TurnEnd).as_str()]);
         assert!(advice.rules.is_empty(), "it names no rule");
         project_rule_advice_delivered(cwd, "session", &advice);
@@ -809,7 +820,7 @@ fn a_lone_decision_line_opens_with_the_skill_prefix_and_is_gone_next_turn() {
     let mock = replying(|_| a_noul(0.9));
     machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
         let entry = keep(&yes_no("Docs", Point::TurnStart), JevMode::On);
-        let line = custom::line("Docs", AGENT_TOOL_ASK_OPTIONS[0], 0.9);
+        let line = custom::line("Docs", YES_MEANS, 0.9);
         let carried = Arc::new(Mutex::new(Vec::new()));
         let mut turns = ConversationRuntime::new(
             Session::new(),
@@ -831,6 +842,52 @@ fn a_lone_decision_line_opens_with_the_skill_prefix_and_is_gone_next_turn() {
         let second = carried.lock().expect("what the model read")[first.len()..].to_vec();
         assert!(!second.is_empty() && second.iter().all(|seen| !*seen), "the next turn's model never read it: {second:?}");
         assert_eq!(mock.requests().len(), 1, "the decision was asked in the first turn alone");
+    });
+}
+
+/// The scene of 2026-11-13: two yes-or-no decisions at a turn's end, both on,
+/// both answering no and sure of it — the turn left nothing worth a line.
+/// The next turn is handed nothing, and each row keeps its answer and says
+/// it was not applied. Before, both went out as `판단: no` under a name asked
+/// as a question, and a model took them for what the person asked next.
+#[test]
+fn a_no_at_a_turns_end_hands_the_next_turn_nothing() {
+    let (checked, asked_back) = (yes_no("Checked before done", Point::TurnEnd), yes_no("Asked back", Point::TurnEnd));
+    let answers = BTreeMap::from([(checked.id.clone(), a_noul(0.01)), (asked_back.id.clone(), a_noul(0.05))]);
+    let mock = replying(move |id| answers.get(id).cloned().unwrap_or_default());
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        for definition in [&checked, &asked_back] {
+            keep(definition, JevMode::On);
+        }
+        note_project_rule_turn(cwd, "session", "turn-1", &[ConversationMessage::user_text(TASK)]);
+        let rows = rows_in(cwd, 2);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for row in &rows {
+            assert_eq!(row["outcome"], door::ANSWERED_OUTCOME, "{row}");
+            assert_eq!((&row["chosen"], &row["applied"]), (&Value::from(AGENT_TOOL_ASK_OPTIONS[1]), &Value::from(false)), "{row}");
+        }
+        // The rows are written before the turn's end offers what it handed:
+        // look once an offer sent late would have landed.
+        std::thread::sleep(LATE);
+        assert_eq!(
+            pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP),
+            None,
+            "a no leaves the next turn nothing"
+        );
+    });
+}
+
+/// An agent that asked is told a no as it is told a yes, in the person's
+/// words for it: it asked, so either answer is the one it waits for.
+#[test]
+fn an_agent_that_asks_is_told_a_no_in_the_persons_words() {
+    let mock = replying(|_| a_noul(0.03));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let definition = yes_no("Ready", Point::AgentAsks);
+        keep(&definition, JevMode::On);
+        let (verdict, row) = decided(cwd, &definition);
+        assert_eq!(verdict.line, Some(custom::line("Ready", NO_MEANS, 1.0 - 0.03)));
+        assert_eq!((&row["chosen"], &row["applied"]), (&Value::from(AGENT_TOOL_ASK_OPTIONS[1]), &Value::from(true)));
     });
 }
 

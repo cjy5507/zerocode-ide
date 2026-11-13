@@ -908,7 +908,7 @@ fn decide_prints_an_on_decisions_line_and_nothing_of_one_that_records() {
     use std::ffi::OsStr;
     use std::sync::atomic::Ordering;
     use zerocode_core::jev::custom::{self, store, Answer, Definition, Point};
-    use zerocode_core::jev::{door, JevMode, AGENT_TOOL_ASK_OPTIONS, CUSTOM_DECISIONS, SMART_SETTINGS_KEY};
+    use zerocode_core::jev::{door, JevMode, CUSTOM_DECISIONS, SMART_SETTINGS_KEY};
     let home = tempfile::tempdir().expect("a config home");
     let work = tempfile::tempdir().expect("a project");
     let project = std::fs::canonicalize(work.path()).expect("the project resolved");
@@ -937,12 +937,12 @@ fn decide_prints_an_on_decisions_line_and_nothing_of_one_that_records() {
             }
             run(&args, &project, 1, 0)
         };
-        let yes = AGENT_TOOL_ASK_OPTIONS[0];
+        let ready = "It is ready.";
         let on = decide("Ship", false).expect("a report");
-        assert_eq!(on, Report { text: custom::line("Ship", yes, 0.9), exit: HEADLESS_LOOP_EXIT_DONE });
+        assert_eq!(on, Report { text: custom::line("Ship", ready, 0.9), exit: HEADLESS_LOOP_EXIT_DONE });
         let recording = decide("Wait", false).expect("a report");
         assert_eq!(recording.exit, NO_ANSWER_EXIT);
-        assert!(!recording.text.contains(&custom::line("Wait", yes, 0.9)), "{}", recording.text);
+        assert!(!recording.text.contains(&custom::line("Wait", ready, 0.9)), "{}", recording.text);
         let said: Value = serde_json::from_str(&decide("Wait", true).expect("a report").text).expect("json");
         assert_eq!((&said["line"], &said["mode"]), (&Value::Null, &json!(JevMode::Shadow.key())), "{said}");
         assert_eq!(answered.load(Ordering::SeqCst), 3, "each was asked");

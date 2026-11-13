@@ -25,7 +25,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::JevMode;
+use super::{AGENT_TOOL_ASK_OPTIONS, JevMode};
 
 pub mod store;
 
@@ -363,22 +363,95 @@ impl Refusal {
 }
 
 /// The most characters the one line a decision hands an agent holds
-/// (DESIGN 2.4). [`line()`] holds it by construction: a name and an option are
-/// each [`NAME_MAX_CHARS`] at most, so no line is ever cut.
+/// (DESIGN 2.4). [`line()`] holds it by construction: a name is
+/// [`NAME_MAX_CHARS`] at most and what the line says of the answer
+/// ([`said`]) [`SAID_MAX_CHARS`], so no line is ever cut when it is handed.
 pub const LINE_MAX_CHARS: usize = 200;
 
+/// The characters of a line that are neither its decision's name nor what it
+/// says of the answer, at the widest confidence: `「」 판단: ` and
+/// ` (확신 100%)`.
+const LINE_FRAME_CHARS: usize = 17;
+
+/// The most characters a line says of its answer ([`said`]): what is left of
+/// [`LINE_MAX_CHARS`] beside the longest name — room for a choice's longest
+/// option whole, and where a longer meaning of a yes or a no is cut.
+pub const SAID_MAX_CHARS: usize = LINE_MAX_CHARS - NAME_MAX_CHARS - LINE_FRAME_CHARS;
+
+/// What marks a meaning cut to fit its line ([`said`]).
+const CUT_MARK: char = '…';
+
+/// What stands once before the lines decisions hand a turn that asked for
+/// none of them — the lines a turn's end leaves the next turn: what they
+/// are, and that they are not the turn's work. Without it a line stood in
+/// the next turn as a remark out of nowhere, and a model took it for the
+/// subject of the person's next question and went looking for where it was
+/// written (2026-11-13).
+pub const LINES_INTRO: &str = "These lines come from checks the person set up, which read your previous \
+     turn. They are observations: not a new request, not new permission, and nothing to look up. Do what \
+     the person asks now, and follow a line only where it applies to that work.";
+
 /// The one line a decision that is on hands the agent when its answer is as
-/// sure as its act-from line (DESIGN 2.4): `「name」 판단: option (확신 85%)`,
-/// the confidence a whole percent. Every place a decision is asked builds it
-/// here, so the line an agent reads is the same wherever it was asked.
+/// sure as its act-from line (DESIGN 2.4): `「name」 판단: said (확신 85%)`,
+/// the confidence a whole percent and `said` what the line says of the
+/// answer ([`said`]). Every place a decision is asked builds it here, so the
+/// line an agent reads is the same wherever it was asked.
 #[must_use]
-pub fn line(name: &str, option: &str, confidence: f64) -> String {
+pub fn line(name: &str, said: &str, confidence: f64) -> String {
     let percent = if confidence.is_nan() {
         0.0
     } else {
         (confidence.clamp(0.0, 1.0) * 100.0).round()
     };
-    format!("「{name}」 판단: {option} (확신 {percent:.0}%)")
+    format!("「{name}」 판단: {said} (확신 {percent:.0}%)")
+}
+
+/// What a decision's line says of the answer shown as `shown`. A yes or a no
+/// is said in the person's own words for it — what that answer means
+/// ([`Answer::YesNo`]) — on one line, cut to [`SAID_MAX_CHARS`]: the bare
+/// word, under a name that is itself a question, reads as that question's
+/// answer (`「…확인했는가」 판단: no` told a model the work was unchecked when
+/// its no meant nothing was left to check, 2026-11-13). A choice's option and
+/// a score's level are said as they are shown: the person's own word, and a
+/// level over its count.
+#[must_use]
+pub fn said(definition: &Definition, shown: &str) -> String {
+    let Answer::YesNo { yes, no } = &definition.answer else {
+        return shown.to_string();
+    };
+    let meaning = if shown == AGENT_TOOL_ASK_OPTIONS[0] {
+        yes
+    } else {
+        no
+    };
+    let one_line = meaning.split_whitespace().collect::<Vec<&str>>().join(" ");
+    if one_line.is_empty() {
+        return shown.to_string();
+    }
+    if one_line.chars().count() <= SAID_MAX_CHARS {
+        return one_line;
+    }
+    let mut cut: String = one_line.chars().take(SAID_MAX_CHARS - 1).collect();
+    cut.push(CUT_MARK);
+    cut
+}
+
+/// Whether the answer shown as `shown` is one a decision speaks of at all,
+/// however sure it is. A yes-or-no decision at a point no agent asked at — a
+/// turn's start, before a command, a turn's end — speaks only of its yes:
+/// its question names what is worth a line, and its no is the answer that
+/// nothing is. Handed all the same, a no stood in every turn as a remark
+/// about nothing (2026-11-13). An agent that asked ([`Point::AgentAsks`]) is
+/// told either answer, and a choice's option or a score's level is always
+/// one — a choice has [`NOT_APPLICABLE`] for nothing to say.
+#[must_use]
+pub fn speaks(definition: &Definition, shown: &str) -> bool {
+    match &definition.answer {
+        Answer::YesNo { .. } => {
+            definition.at == Point::AgentAsks || shown == AGENT_TOOL_ASK_OPTIONS[0]
+        }
+        Answer::Choice(_) | Answer::Score(_) => true,
+    }
 }
 
 /// How a score's level is shown to a person and to the agent it is handed

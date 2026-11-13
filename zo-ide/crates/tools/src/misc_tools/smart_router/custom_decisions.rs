@@ -277,13 +277,18 @@ fn read(definition: &Definition, response: &SystemOneResponse) -> Result<Reading
 }
 
 /// Whether an answer earns its decision's line: as sure as the decision's
-/// act-from line, its chosen option alone at the top of the spread, and an
-/// option that applies. A tie is not an answer the model gave — its side is
-/// the order ties break in — so a tie hands nothing at any line and for every
-/// kind, the probabilities compared exactly as they were read.
+/// act-from line, its chosen option alone at the top of the spread, an
+/// option that applies, and an answer the decision speaks of at its point
+/// ([`custom::speaks`]: unasked, a yes or no speaks only of its yes). A tie is
+/// not an answer the model gave — its side is the order ties break in — so a
+/// tie hands nothing at any line and for every kind, the probabilities
+/// compared exactly as they were read.
 fn earns_its_line(definition: &Definition, reading: &Reading) -> bool {
     let at_the_top = reading.spread.iter().filter(|probability| **probability >= reading.top).count();
-    reading.confidence >= definition.act_from && at_the_top == 1 && reading.shown != custom::NOT_APPLICABLE
+    reading.confidence >= definition.act_from
+        && at_the_top == 1
+        && reading.shown != custom::NOT_APPLICABLE
+        && custom::speaks(definition, &reading.shown)
 }
 
 /// The level nearest a score's reading, counted from the lowest at zero.
@@ -399,7 +404,7 @@ async fn judged(
     hands.then(|| Handed {
         decision: asked.entry.id.clone(),
         version: asked.entry.definition.clone(),
-        line: custom::line(&asked.definition.name, &reading.shown, reading.confidence),
+        line: custom::line(&asked.definition.name, &custom::said(&asked.definition, &reading.shown), reading.confidence),
         chosen: reading.chosen,
         confidence: reading.confidence,
     })

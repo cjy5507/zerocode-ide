@@ -1929,7 +1929,11 @@ pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
             .collect(),
         version: definition.version().unwrap_or_default(),
         questions: custom::questions(&definition),
-        line: custom::line(&definition.name, &first, definition.act_from),
+        line: custom::line(
+            &definition.name,
+            &custom::said(&definition, &first),
+            definition.act_from,
+        ),
     }
 }
 
@@ -4195,8 +4199,12 @@ mod tests {
         let checked = check_custom_decision(draft.clone());
         assert_eq!(
             checked.line,
-            custom::line(&draft.name, AGENT_TOOL_ASK_OPTIONS[0], draft.act_from),
-            "a yes or no is told as a yes at its act-from line"
+            custom::line(
+                &draft.name,
+                "It changed what a person sees.",
+                draft.act_from
+            ),
+            "a yes or no is told as what its yes means, at its act-from line"
         );
         let wire = serde_json::to_value(&checked).expect("serializes");
         let secret = custom::Refusal::SecretLine {
