@@ -582,10 +582,15 @@ mod tests {
     use runtime::lsp_client::LspServerStatus;
     use runtime::ConfigLoader;
 
+    // Only the unix-only connect test builds one (its fake servers are shell
+    // scripts), so the import carries that test's cfg: the Windows lint has
+    // no other reader for it.
+    #[cfg(unix)]
+    use super::autodetected_config;
     use super::{
-        autodetect_enabled, autodetected_config, build_runtime_lsp_state,
-        detect_language_server_in_path, detect_project_languages, probe_stamp,
-        read_probe_cache_at, write_probe_cache_at, LspStartupConfig, RuntimeLspState,
+        autodetect_enabled, build_runtime_lsp_state, detect_language_server_in_path,
+        detect_project_languages, probe_stamp, read_probe_cache_at, write_probe_cache_at,
+        LspStartupConfig, RuntimeLspState,
     };
 
     /// The probe answer survives the process that earned it.
