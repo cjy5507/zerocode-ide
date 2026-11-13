@@ -375,7 +375,10 @@ fn the_ledger_ack_of_a_letter_is_a_person_only_command() {
 #[test]
 fn setting_an_agents_skill_copy_to_the_stores_is_the_persons_alone() {
     let name = "library_skill_align".to_string();
-    assert!(person_only_commands().contains(&name), "{name} is the person's");
+    assert!(
+        person_only_commands().contains(&name),
+        "{name} is the person's"
+    );
     assert!(
         registered_commands().contains(&name),
         "{name} is on the person-only list but not registered"

@@ -220,6 +220,10 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "library_server_remove",
     "library_skill_remove",
     "library_server_login",
+    // An agent's copy of a skill kept aside and taken out of its home, so
+    // it reads the common store's (「저장소 것으로 맞추기」, 2026-11-13): a
+    // copy a person may have edited, so the person's alone.
+    "library_skill_align",
 ];
 
 /// Commands whose names touch a key, a secret, a token, a password, a
@@ -299,9 +303,6 @@ pub(crate) const AGENT_ALLOWED_DESTRUCTIVE_NAMED: &[&str] = &[
     // The person's session regrant on a work browser turned off: the agent
     // loses a grant; the person keeps everything (t-66200).
     "end_browser_workspace_regrant",
-    // An agent's copy of a skill kept aside and taken out of its home, so
-    // it reads the common store's (「저장소 것으로 맞추기」, 2026-11-13).
-    "library_skill_align",
 ];
 
 /// The header in which the page's one `invoke` says whose hand made a call
