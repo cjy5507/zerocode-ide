@@ -289,7 +289,27 @@ pub fn memo_path(wire: &Wire) -> Option<PathBuf> {
 /// been left at `auto` with nothing deciding (2026-09-20, "전부 자동 기록하며
 /// 실제 적용되어야").
 pub fn record_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
-    append_rows(ledger, rows);
+    record(seat, ledger, rows, now_ms, None);
+}
+
+/// [`record_rows`] into a ledger zo appends to as well, kept within the one
+/// bound zo keeps on it ([`zerocode_core::jev::journal::LEDGER_MAX_BYTES`]):
+/// past it, the ledger keeps its newer half before the rows go in — whoever
+/// writes, the ledger is cut the same.
+pub fn record_bounded_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
+    record(
+        seat,
+        ledger,
+        rows,
+        now_ms,
+        Some(zerocode_core::jev::journal::LEDGER_MAX_BYTES),
+    );
+}
+
+fn record(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64, bound: Option<u64>) {
+    if let Err(why) = append_rows_inner(ledger, rows, false, bound) {
+        said_unwritten(ledger, &why);
+    }
     if !seat.promotes {
         return;
     }
@@ -437,13 +457,18 @@ fn standing_at(
 /// named by the ledger file's own stem, so the sentence cannot name one use
 /// while the bytes go to another.
 pub fn append_rows(ledger: &Path, rows: &[Value]) {
-    if let Err(why) = append_rows_inner(ledger, rows, false) {
-        let what = ledger.file_stem().map_or_else(
-            || ledger.to_string_lossy(),
-            std::ffi::OsStr::to_string_lossy,
-        );
-        eprintln!("orchestration: the {what} record was not written: {why}");
+    if let Err(why) = append_rows_inner(ledger, rows, false, None) {
+        said_unwritten(ledger, &why);
     }
+}
+
+/// Say once on stderr that `ledger` would not take its rows.
+fn said_unwritten(ledger: &Path, why: &std::io::Error) {
+    let what = ledger.file_stem().map_or_else(
+        || ledger.to_string_lossy(),
+        std::ffi::OsStr::to_string_lossy,
+    );
+    eprintln!("orchestration: the {what} record was not written: {why}");
 }
 
 /// Append a receipt whose successful write is part of acknowledging an effect.
@@ -451,10 +476,17 @@ pub fn append_rows(ledger: &Path, rows: &[Value]) {
 /// # Errors
 /// The ledger could not be created or written.
 pub fn append_rows_checked(ledger: &Path, rows: &[Value]) -> std::io::Result<()> {
-    append_rows_inner(ledger, rows, true)
+    append_rows_inner(ledger, rows, true, None)
 }
 
-fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::Result<()> {
+/// Append `rows` under the ledger's lock — past `bound`, when one is kept,
+/// cutting it to its newer half first.
+fn append_rows_inner(
+    ledger: &Path,
+    rows: &[Value],
+    durable: bool,
+    bound: Option<u64>,
+) -> std::io::Result<()> {
     if rows.is_empty() || !zerocode_core::jev::erase::may_write(ledger) {
         return Ok(());
     }
@@ -465,6 +497,9 @@ fn append_rows_inner(ledger: &Path, rows: &[Value], durable: bool) -> std::io::R
     let rows = zerocode_core::jev::erase::rows_may_write(ledger, rows);
     if rows.is_empty() {
         return Ok(());
+    }
+    if let Some(bound) = bound {
+        zerocode_core::jev::journal::keep_within(ledger, bound)?;
     }
     let mut said = String::new();
     for row in rows {
@@ -728,6 +763,19 @@ pub struct DecisionHour<'a> {
     /// The hour file every decision shares
     /// ([`zerocode_core::jev::custom::EVERY_DECISION`]).
     pub every: &'a Path,
+}
+
+impl<'a> DecisionHour<'a> {
+    /// The hours as the door counts them, with the bound every decision
+    /// shares read from `root`, the settings the door reads.
+    fn of_the_door(self, root: &Value) -> door::Hour<'a> {
+        door::Hour {
+            decision: self.decision,
+            decision_most: self.decision_most,
+            every: self.every,
+            every_most: door::custom_hourly_requests(root),
+        }
+    }
 }
 
 /// A key as the wire keeps it: trimmed, and empty is none.
@@ -1016,12 +1064,7 @@ impl Wire {
                 &settings,
                 workspace.as_deref(),
                 &requests,
-                door::Hour {
-                    decision: hour.decision,
-                    decision_most: hour.decision_most,
-                    every: hour.every,
-                    every_most: door::custom_hourly_requests(&root),
-                },
+                hour.of_the_door(&root),
             )
             .map(|cleared| Passed {
                 cleared,
@@ -1208,6 +1251,14 @@ impl Wire {
         hour: DecisionHour<'_>,
     ) -> Asked {
         self.ask_through_the_door(row, workspace, body, deadline, None, Some(hour))
+    }
+
+    /// Whether `hour` is full now, by the door's own rule
+    /// ([`door::Hour::is_full`]) with the bound the settings hold: a refusal
+    /// of an hour that repeats until it ends, not a busy lock's.
+    #[must_use]
+    pub fn hour_is_full(&self, hour: DecisionHour<'_>) -> bool {
+        hour.of_the_door(&self.settings_root()).is_full()
     }
 
     fn ask_through_the_door(

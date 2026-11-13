@@ -1627,3 +1627,39 @@ fn only_a_folder_not_consented_is_the_folders_own_refusal() {
         .collect();
     assert_eq!(owned, [Refused::NotConsented]);
 }
+
+/// An hour is full once either count reaches its bound — the one comparison
+/// the door refuses on — and an hour whose count does not read is not full:
+/// its refusal was a moment's, not the hour's.
+#[test]
+fn an_hour_is_full_at_either_bound_and_unread_is_not_full() {
+    let home = tempfile::tempdir().expect("a home");
+    let (mine, every) = (
+        crate::jev::count::hour_path(home.path(), "d-0000000a", "2026-11-13T10"),
+        crate::jev::count::hour_path(home.path(), "every", "2026-11-13T10"),
+    );
+    let hour = |decision_most, every_most| Hour {
+        decision: &mine,
+        decision_most,
+        every: &every,
+        every_most,
+    };
+    assert!(!hour(1, 1).is_full(), "nothing counted yet");
+    crate::jev::count::count_one_in_the_hour(&mine).expect("counted");
+    assert!(hour(1, 5).is_full(), "the decision's own bound");
+    assert!(!hour(2, 5).is_full());
+    crate::jev::count::count_one_in_the_hour(&every).expect("counted");
+    assert!(hour(2, 1).is_full(), "the bound every decision shares");
+    let blocked = home.path().join("a-file");
+    std::fs::write(&blocked, "").expect("a file where the directory should be");
+    let unread = blocked.join("hour");
+    assert!(
+        !Hour {
+            decision: &unread,
+            decision_most: 0,
+            every: &unread,
+            every_most: 0,
+        }
+        .is_full()
+    );
+}

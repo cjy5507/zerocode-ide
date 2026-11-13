@@ -14,8 +14,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 /// Past this size a shadow ledger keeps only its newer half. A soak is
-/// evidence, not an archive; the rows that matter are the recent ones.
-pub const SHADOW_LEDGER_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// evidence, not an archive; the rows that matter are the recent ones. The
+/// core's bound ([`zerocode_core::jev::journal::LEDGER_MAX_BYTES`]), the one
+/// the window keeps on the rows it writes beside zo's.
+pub const SHADOW_LEDGER_MAX_BYTES: u64 = zerocode_core::jev::journal::LEDGER_MAX_BYTES;
 
 /// Where a project's shadow ledgers live — the directory a reader that holds
 /// several of them keeps, so a ledger's name is the only thing it has to know.
@@ -75,9 +77,7 @@ pub fn append_shadow_row<T: Serialize>(path: &Path, row: &T, max_bytes: u64) -> 
         fs::create_dir_all(parent)?;
     }
     let _shared = zerocode_core::jev::erase::shared_ledger_lock(path)?;
-    if fs::metadata(path).is_ok_and(|meta| meta.len() > max_bytes) {
-        keep_newer_half(path)?;
-    }
+    zerocode_core::jev::journal::keep_within(path, max_bytes)?;
     let mut value = serde_json::to_value(row).map_err(io::Error::other)?;
     zerocode_core::jev::provenance::stamp_for_ledger(path, &mut value);
     let mut line = serde_json::to_string(&value).map_err(io::Error::other)?;
@@ -209,20 +209,6 @@ pub fn judge_seat_rows(
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }
     Some(judged.verdict)
-}
-
-/// Drop the older half of a ledger's lines, atomically (write beside, rename).
-fn keep_newer_half(path: &Path) -> io::Result<()> {
-    let text = fs::read_to_string(path)?;
-    let lines: Vec<&str> = text.lines().collect();
-    let keep = &lines[lines.len() / 2..];
-    let mut newer = keep.join("\n");
-    if !newer.is_empty() {
-        newer.push('\n');
-    }
-    let tmp = path.with_extension("jsonl.tmp");
-    fs::write(&tmp, newer)?;
-    fs::rename(tmp, path)
 }
 
 #[cfg(test)]

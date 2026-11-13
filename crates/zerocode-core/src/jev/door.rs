@@ -819,7 +819,7 @@ pub fn pass_within_the_hour(
         count::sent_in_the_hour(hour.decision).map_err(|_| Refused::HourlyBudget)?,
         count::sent_in_the_hour(hour.every).map_err(|_| Refused::HourlyBudget)?,
     );
-    if before.0 >= hour.decision_most || before.1 >= hour.every_most {
+    if hour.full_at(before) {
         return Err(Refused::HourlyBudget);
     }
     if let Err(refused) = take_an_hours_place(hour.decision, hour.decision_most)
@@ -830,6 +830,29 @@ pub fn pass_within_the_hour(
         return Err(refused);
     }
     Ok(cleared)
+}
+
+impl Hour<'_> {
+    /// Whether either hour is full at the counts `(decision, every)` — the
+    /// one comparison the door refuses on.
+    const fn full_at(self, (decision, every): (u64, u64)) -> bool {
+        decision >= self.decision_most || every >= self.every_most
+    }
+
+    /// Whether either hour is full now: what tells a [`Refused::HourlyBudget`]
+    /// that repeats until the hour ends from one a busy lock or a count that
+    /// did not read gave a moment's ask, which reads as not full. Read without
+    /// the lock, after the door let it go (t-106308).
+    #[must_use]
+    pub fn is_full(self) -> bool {
+        match (
+            count::sent_in_the_hour(self.decision),
+            count::sent_in_the_hour(self.every),
+        ) {
+            (Ok(decision), Ok(every)) => self.full_at((decision, every)),
+            _ => false,
+        }
+    }
 }
 
 fn return_hours(hour: Hour<'_>, before: (u64, u64)) -> Result<(), Refused> {
