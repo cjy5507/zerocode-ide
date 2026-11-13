@@ -12159,6 +12159,12 @@ function fittedAgentRowWords(node, row) {
   const foldedSummary = row.kids > 0 && !row.kidsShown;
   // A role that comes, goes or changes kind is a chip (or a ring) to build (t-45938).
   const role = agentRowRole(row);
+  // Whether the row is the pane in front is a class and nothing else (`makeAgentRow` builds the same children either
+  // way): a row whose only change is that is dressed in place, not built. Built, a press on an agent row replaced the
+  // row under the pointer and the row that had been in front — their hover, their focus and their transitions began
+  // again on every press (v1.1.149, 「왼쪽 네비 판이 계속 깜박」).
+  const here = agentRowHere(row);
+  const classes = agentRowClasses(state, here, foldedSummary, row);
   if (
     node.dataset.term !== String(row.term) ||
     (node.dataset.sub ?? "") !== (row.sub?.id ?? "") ||
@@ -12169,19 +12175,19 @@ function fittedAgentRowWords(node, row) {
     (node.dataset.crew ?? "") !== crewSaid(row.crew) ||
     (node.dataset.reclaim ?? "") !== reclaimSaid(row.reclaim) ||
     (node.dataset.crewOf ?? "") !== JSON.stringify(agentRowCrewOf(row)) ||
-    node.className !== agentRowClasses(state, agentRowHere(row), foldedSummary, row)
+    (node.className !== classes && node.className !== agentRowClasses(state, !here, foldedSummary, row))
   ) return null;
   // 이력 한 줄은 모양이 곧 말이다 — 수나 펼침이 바뀌면 다시 세운다. 코디의 워커 한 줄도 그렇다.
-  if (row.crew) return { node, row, state, foldedSummary: false, fold: null, history: true };
+  if (row.crew) return { node, row, state, foldedSummary: false, fold: null, history: true, classes };
   if (row.history) {
     if (node.getAttribute("aria-expanded") !== String(Boolean(row.historyShown))) return null;
-    return { node, row, state, foldedSummary: false, fold: null, history: true };
+    return { node, row, state, foldedSummary: false, fold: null, history: true, classes };
   }
   const fold = node.querySelector(":scope > .wt-agent-fold:not(.is-quiet)");
   if ((row.kids > 0) !== (fold !== null)) return null;
   // The row says whether its lineage is open (t-95957 r2); the chevron only draws it.
   if (fold !== null && node.getAttribute("aria-expanded") !== String(row.kidsShown)) return null;
-  const fit = { node, row, state, foldedSummary, fold, role };
+  const fit = { node, row, state, foldedSummary, fold, role, classes };
   if (!foldedSummary) {
     fit.chip = node.querySelector(":scope > .wt-agent-role");
     if ((role !== null) !== (fit.chip !== null)) return null;
@@ -12270,6 +12276,8 @@ function fittedOrMadeAgentSlots(host, rows) {
 /* Write one fitted row's words into the nodes it already holds (`fittedAgentRowWords` said they fit). */
 function dressFittedAgentRow(fit) {
   const { node, row, state } = fit;
+  // The one class a fitted row may differ by: whether it is the pane in front (`fittedAgentRowWords`).
+  writeClassName(node, fit.classes);
   if (fit.history) return;
   if (fit.foldedSummary) {
     const words = foldedSummaryWords(row, state);
