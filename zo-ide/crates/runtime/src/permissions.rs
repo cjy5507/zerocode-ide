@@ -229,15 +229,15 @@ impl PermissionPolicy {
         self
     }
 
-    /// The refusal for a schedule zo asks for — a call only a person may
-    /// answer ([`crate::schedule_guard`]) — where the caller has nobody to
-    /// ask at all: the enforcer a sub-agent's and a scheduled workflow's
-    /// tools go through. `None` for every other call. A kill only a person
-    /// may allow is refused on the shell tools' own road
+    /// The refusal for a schedule zo asks for or one it deletes — a call
+    /// only a person may answer ([`crate::schedule_guard`]) — where the
+    /// caller has nobody to ask at all: the enforcer a sub-agent's and a
+    /// scheduled workflow's tools go through. `None` for every other call. A
+    /// kill only a person may allow is refused on the shell tools' own road
     /// ([`crate::kill_guard::refused_where_nobody_can_ask`]).
     #[must_use]
     pub fn refused_with_nobody_to_ask(&self, tool_name: &str, input: &str) -> Option<String> {
-        crate::schedule_guard::asks(tool_name, input).then(crate::schedule_guard::nobody_to_ask)
+        crate::schedule_guard::Act::of(tool_name, input).map(crate::schedule_guard::Act::nobody_to_ask)
     }
 
     /// Whether a grade was ever set for `tool_name`: one that has none is
@@ -437,9 +437,9 @@ impl PermissionPolicy {
 
     /// The decision for one call. A call through the wrapper is judged as the
     /// call it carries — `CapabilityInvoke` is an address and grants nothing —
-    /// and a schedule zo asks for is a person's to approve in every mode
-    /// ([`crate::schedule_guard`]) — one that would register nothing is
-    /// refused with why, and nobody is asked.
+    /// and a schedule zo asks for, or one it deletes, is a person's to
+    /// approve in every mode ([`crate::schedule_guard`]) — one that would
+    /// register nothing is refused with why, and nobody is asked.
     ///
     /// A bash command that would send a signal is
     /// judged by the kill guard first (t-80732): a signal to the window is
@@ -457,8 +457,8 @@ impl PermissionPolicy {
     /// left unanswered stalls the turn. Right after the kill guard, the desk
     /// guard refuses a command that moves the person's screen, in every mode
     /// and unasked ([`crate::desk_guard`], t-104888), and the schedule guard
-    /// one that registers a schedule from the shell, past the question
-    /// ([`crate::schedule_guard::refused_in_a_shell`]).
+    /// one that registers or deletes a schedule from the shell, past the
+    /// question ([`crate::schedule_guard::refused_in_a_shell`]).
     #[must_use]
     pub fn authorize_with_context(
         &self,
@@ -511,7 +511,7 @@ impl PermissionPolicy {
                     return self.authorize_with_context(&carried, &arguments, context, prompter);
                 }
                 match crate::schedule_guard::asked(tool_name, input, self.schedule_workspace.as_deref()) {
-                    Some(card) => self.authorize_asked_schedule(tool_name, input, context, card, prompter),
+                    Some(asked) => self.authorize_asked_schedule(tool_name, input, context, asked, prompter),
                     None => match crate::schedule_guard::registers_nothing(tool_name, input) {
                         // A yes to it would register nothing, so nobody is
                         // asked in any mode: the model is told why, in the
@@ -524,36 +524,33 @@ impl PermissionPolicy {
         }
     }
 
-    /// A schedule zo asks for is a person's to approve, whatever the mode and
-    /// the rules would do with the call ([`crate::schedule_guard`]). What they
-    /// refuse without asking — a deny rule, a mode that never asks — stays
-    /// refused. Everything else, a call they would run unasked included, is
-    /// put to a person, with no lasting allow; and where nobody can be asked —
-    /// no prompter, or a pane the ledger summoned as a worker, which nobody
-    /// watches — it is refused with where to ask instead.
+    /// A schedule zo asks for, or one it deletes, is a person's to approve,
+    /// whatever the mode and the rules would do with the call
+    /// ([`crate::schedule_guard`]). What they refuse without asking — a deny
+    /// rule, a mode that never asks — stays refused. Everything else, a call
+    /// they would run unasked included, is put to a person as `asked`'s
+    /// card, with no lasting allow; and where nobody can be asked — no
+    /// prompter, or a pane the ledger summoned as a worker, which nobody
+    /// watches — it is refused with where to ask instead, in the words of
+    /// what `asked` says the call does.
     fn authorize_asked_schedule(
         &self,
         tool_name: &str,
         input: &str,
         context: &PermissionContext,
-        card: String,
+        asked: (String, crate::schedule_guard::Act),
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
+        let (card, act) = asked;
         if let Alone::Refuses(reason) = self.alone(tool_name, input, context) {
             return PermissionOutcome::Deny { reason };
         }
         if prompter.is_none() || crate::kill_guard::in_a_summoned_worker_pane() {
             return PermissionOutcome::Deny {
-                reason: crate::schedule_guard::nobody_to_ask(),
+                reason: act.nobody_to_ask(),
             };
         }
-        self.ask_a_person(
-            tool_name,
-            input,
-            card,
-            crate::schedule_guard::unanswered(),
-            prompter,
-        )
+        self.ask_a_person(tool_name, input, card, act.unanswered(), prompter)
     }
 
     /// What the mode, the rules and the hooks would do with a call by

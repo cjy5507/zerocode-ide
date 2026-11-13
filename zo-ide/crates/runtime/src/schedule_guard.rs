@@ -1,5 +1,5 @@
 //! The schedule guard: a schedule zo asks for is approved by a person, one
-//! schedule at a time.
+//! schedule at a time — and so is each one zo deletes.
 //!
 //! `CronCreate` writes work that later starts by itself. A prompt cron opens a
 //! turn in whatever zo session sits idle in the folder; a workflow cron runs
@@ -17,6 +17,19 @@
 //! (`zerocode_core::card_words`): what would run, when — the expression and
 //! the next runs it names — and where.
 //!
+//! Deleting goes the same way (`CronDelete`): every schedule in the store was
+//! registered by a person or approved by one, and nothing records who, so
+//! each deletion is put to a person on the same terms — every mode, one at a
+//! time, no lasting allow, refused where nobody can be asked. A call that
+//! names a `cron_id` is asked about whether or not the guard finds it: the
+//! store the guard reads and the one the tool deletes from are the same file
+//! in a session (`CronRegistry::workspace`), but a policy told no folder
+//! reads the one this process stands in, so a schedule the guard did not find
+//! is no proof a yes deletes nothing. The guard's look at the store writes
+//! nothing (`CronRegistry::peek_in_workspace`). The card is the guard's own
+//! sentence over the schedule as the store holds it: its name, what it runs,
+//! when, how many times it ran, and where.
+//!
 //! A schedule zo asks for runs no closer together than the floor the window
 //! holds an asked schedule to (`CronCreateInput::work`). A call that would
 //! register nothing — a tighter schedule, an expression that does not read, a
@@ -24,10 +37,11 @@
 //! words before anybody is asked (`registers_nothing`): a yes to it would
 //! register nothing, so no mode puts that question to a person.
 //!
-//! The shell is not a second road to the store. `zo cron ensure` is the
-//! person's own — typed by them, or sent by the window on their click — and a
-//! shell command of the model's that spells it out is refused and sent to the
-//! tool, where the question stands ([`refused_in_a_shell`]). It is refused
+//! The shell is not a second road to the store. `zo cron ensure` and
+//! `zo cron remove` are the person's own — typed by them, or sent by the
+//! window on their click — and a shell command of the model's that spells
+//! either out is refused and sent to the tool, where the question stands
+//! ([`refused_in_a_shell`]); `zo cron show` only reads, and passes. It is refused
 //! where the kill guard and the desk guard refuse: the permission policy, the
 //! enforcer a sub-agent's commands and a command file's `!` lines go through,
 //! and the `PowerShell` tool.
@@ -58,10 +72,16 @@ use serde_json::Value;
 use zerocode_core::card_words::{hidden_said, shown, shown_counting, EXCERPT_MAX_CHARS, WORD_MAX_CHARS};
 use zerocode_core::shell_rule::runs::{self, ProgramRun};
 
-use crate::team_cron_registry::{cron_zone, next_due_at_after_in_zone, CronCreateInput, CronWork, CronZone};
+use crate::team_cron_registry::{
+    cron_zone, next_due_at_after_in_zone, CronCreateInput, CronDeleteInput, CronEntry, CronRegistry, CronWork,
+    CronZone,
+};
 
 /// The tool that registers a schedule.
 pub const TOOL: &str = "CronCreate";
+
+/// The tool that deletes a schedule.
+pub const DELETE_TOOL: &str = "CronDelete";
 
 /// How many of the coming runs the card names.
 const CARD_RUNS: usize = 3;
@@ -72,15 +92,96 @@ const SAYS_OF_A_PROMPT: &str = "A schedule runs by itself: each time it comes du
 /// The card's first line for a workflow: the guard's own words.
 const SAYS_OF_A_WORKFLOW: &str = "A schedule runs by itself: each time it comes due, zo runs this workflow's graph here, with nobody watching and no turn of this session.";
 
-/// Said after every refusal, so the mode advice a denial otherwise carries
-/// does not send the model after an escalation that changes nothing — nor to
-/// another road into the same store.
-const NOT_THE_MODE: &str = "Permission audit: a person approves each schedule in every permission mode, so a wider mode changes nothing; do not retry the identical call, and do not register the schedule another way.";
+/// The card's first line for a deletion: the guard's own words.
+const SAYS_OF_A_DELETION: &str =
+    "Deleting this schedule is for good: it will not run again, and no record of it is left.";
 
-/// Where to ask instead, said in every refusal: a run with nobody at it gets
-/// one or the other.
-const SAYS_WHERE_TO_ASK: &str =
-    "Where no person is at this run, ask for the schedule in a zo session a person is at.";
+/// The card's line for an id the guard's look at the store did not find: the
+/// person is asked all the same, since the tool deletes from its own store.
+const NOT_FOUND_HERE: &str =
+    "Not found: no schedule by this id stands in this folder's store; the tool says whether one stands in its own.";
+
+/// What a call does that a person approves, which words its refusals say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Act {
+    /// It registers a schedule (`CronCreate`).
+    Registers,
+    /// It deletes one (`CronDelete`).
+    Deletes,
+}
+
+impl Act {
+    /// What `tool_name` called with `input` does that a person approves:
+    /// registers a schedule ([`asks`]) or deletes the one a readable
+    /// `cron_id` names. `None` for any other call.
+    #[must_use]
+    pub fn of(tool_name: &str, input: &str) -> Option<Self> {
+        if registration(tool_name, input).is_some() {
+            Some(Self::Registers)
+        } else {
+            removal(tool_name, input).map(|_| Self::Deletes)
+        }
+    }
+
+    /// The refusal when no person said yes: the person said no, the question
+    /// went unanswered, or the run answers in a person's absence. A turn
+    /// always has a prompter to put the question to, so a headless run and a
+    /// turn nobody opened end here, not at [`Self::nobody_to_ask`] — and it
+    /// says where to ask, too.
+    #[must_use]
+    pub fn unanswered(self) -> String {
+        format!(
+            "refused, since no person said yes to it: a person approves each {}. {} {}",
+            self.approved(),
+            self.where_to_ask(),
+            self.not_the_mode()
+        )
+    }
+
+    /// The refusal where nobody can be asked — a pipe, a sub-agent, a
+    /// workflow, a pane the ledger summoned as a worker — with where to ask
+    /// instead.
+    #[must_use]
+    pub fn nobody_to_ask(self) -> String {
+        format!(
+            "refused, since nobody here can be asked: a person approves each {}. {} {}",
+            self.approved(),
+            self.where_to_ask(),
+            self.not_the_mode()
+        )
+    }
+
+    /// What a person approves one at a time.
+    fn approved(self) -> &'static str {
+        match self {
+            Self::Registers => "schedule zo asks for",
+            Self::Deletes => "schedule zo deletes",
+        }
+    }
+
+    /// Where to ask instead, said in every refusal: a run with nobody at it
+    /// gets one or the other.
+    fn where_to_ask(self) -> &'static str {
+        match self {
+            Self::Registers => "Where no person is at this run, ask for the schedule in a zo session a person is at.",
+            Self::Deletes => "Where no person is at this run, ask for the deletion in a zo session a person is at.",
+        }
+    }
+
+    /// Said after every refusal, so the mode advice a denial otherwise
+    /// carries does not send the model after an escalation that changes
+    /// nothing — nor to another road into the same store.
+    fn not_the_mode(self) -> String {
+        let (each, verb) = match self {
+            Self::Registers => ("schedule", "register"),
+            Self::Deletes => ("deletion of a schedule", "delete"),
+        };
+        format!(
+            "Permission audit: a person approves each {each} in every permission mode, so a wider mode \
+             changes nothing; do not retry the identical call, and do not {verb} the schedule another way."
+        )
+    }
+}
 
 /// The program that writes the schedule store from a shell, by the name in
 /// command position (`.exe` taken off), and the word that opens its schedule
@@ -91,11 +192,15 @@ const SHELL_VERBS_UNDER: &str = "cron";
 /// The verb that registers a schedule.
 const SHELL_VERB_THAT_REGISTERS: &str = "ensure";
 
-/// The verbs under [`SHELL_VERBS_UNDER`] that register nothing: one reads the
-/// store, the other takes a record out. Any other word there is refused as
-/// the one that registers — a verb the command does not spell out among them
-/// — save the words that only print the usage ([`SHELL_USAGE_WORDS`]).
-const SHELL_VERBS_THAT_REGISTER_NOTHING: &[&str] = &["show", "remove"];
+/// The verb that takes a record out.
+const SHELL_VERB_THAT_DELETES: &str = "remove";
+
+/// The verb under [`SHELL_VERBS_UNDER`] that only reads the store, and
+/// passes. [`SHELL_VERB_THAT_DELETES`] is refused in its own words; any other
+/// word there is refused as the one that registers — a verb the command does
+/// not spell out among them — save the words that only print the usage
+/// ([`SHELL_USAGE_WORDS`]).
+const SHELL_VERB_THAT_READS: &str = "show";
 
 /// The words under [`SHELL_VERBS_UNDER`] that print the usage and do nothing.
 const SHELL_USAGE_WORDS: &[&str] = &["-h", "--help"];
@@ -120,87 +225,85 @@ enum Runs {
     Workflow(Option<String>),
 }
 
-/// The card for the schedule `tool_name` called with `input` would register.
-/// `None` for any other tool, and for a call that registers nothing
-/// ([`asks`]). `workspace` is the folder the session's schedules are kept
-/// for, which is where this one would run; without it the card names the
-/// folder this process stands in.
+/// The card for what `tool_name` called with `input` puts to a person — the
+/// schedule it would register, or the one it would delete — and which of the
+/// two it is. `None` for any other call ([`Act::of`]). `workspace` is the
+/// folder the session's schedules are kept for, which is where a schedule
+/// runs and whose store the card reads a deleted one from; without it the
+/// card names, and reads, the folder this process stands in.
 #[must_use]
-pub(crate) fn asked(tool_name: &str, input: &str, workspace: Option<&Path>) -> Option<String> {
-    let registration = registration(tool_name, input)?;
+pub(crate) fn asked(tool_name: &str, input: &str, workspace: Option<&Path>) -> Option<(String, Act)> {
     let here = if workspace.is_none() { std::env::current_dir().ok() } else { None };
+    let folder = workspace.or(here.as_deref());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    Some(card(&registration, cron_zone(), now, workspace.or(here.as_deref())))
+    if let Some(registration) = registration(tool_name, input) {
+        return Some((card(&registration, cron_zone(), now, folder), Act::Registers));
+    }
+    let cron_id = removal(tool_name, input)?;
+    let entry = folder.and_then(|folder| CronRegistry::peek_in_workspace(folder, &cron_id));
+    Some((deletion_card(&cron_id, entry.as_ref(), cron_zone(), now, folder), Act::Deletes))
 }
 
-/// Whether `tool_name` called with `input` would register a schedule, which
-/// is a person's to approve. Not so for any other tool, nor for a call the
-/// tool itself refuses — an expression that does not read, a call with both a
-/// prompt and a workflow or with neither — since that registers nothing.
+/// Whether `tool_name` called with `input` is a person's to approve: it
+/// would register a schedule, or it names one to delete ([`Act::of`]). Not
+/// so for any other tool, nor for a call the tool itself refuses before it
+/// touches the store — an expression that does not read, a call with both a
+/// prompt and a workflow or with neither, a deletion with no `cron_id`.
 #[must_use]
 pub fn asks(tool_name: &str, input: &str) -> bool {
-    registration(tool_name, input).is_some()
+    Act::of(tool_name, input).is_some()
 }
 
-/// The refusal when no person said yes: the person said no, the question went
-/// unanswered, or the run answers in a person's absence. A turn always has a
-/// prompter to put the question to, so a headless run and a turn nobody opened
-/// end here, not at [`nobody_to_ask`] — and it says where to ask, too.
-#[must_use]
-pub fn unanswered() -> String {
-    format!(
-        "refused, since no person said yes to it: a person approves each schedule zo asks for. \
-         {SAYS_WHERE_TO_ASK} {NOT_THE_MODE}"
-    )
-}
-
-/// The refusal where nobody can be asked — a pipe, a sub-agent, a workflow, a
-/// pane the ledger summoned as a worker — with where to ask instead.
-#[must_use]
-pub fn nobody_to_ask() -> String {
-    format!(
-        "refused, since nobody here can be asked: a person approves each schedule zo asks for. \
-         {SAYS_WHERE_TO_ASK} {NOT_THE_MODE}"
-    )
-}
-
-/// The refusal for a shell `command` of the model's that would register a
-/// schedule past the question — `zo cron ensure`, where the shell would run
-/// it and the reading reaches it (the module says what it does not reach) —
-/// with the tool to ask through instead. `None` for any other command:
-/// `zo cron show` and `zo cron remove` register nothing, and `-h` prints the
-/// usage. A word after `cron` that is none of these is refused as the verb
-/// that registers; at the top of a command that includes a verb the shell
-/// fills in when it runs. Asked by every layer that judges a model's command,
-/// after the kill guard and the desk guard; no mode, rule or hook answers it,
-/// since the question it sends the model to is one only a person answers.
+/// The refusal for a shell `command` of the model's that would write the
+/// schedule store past the question, where the shell would run it and the
+/// reading reaches it (the module says what it does not reach), with the tool
+/// to ask through instead: `zo cron ensure` registers a schedule, and
+/// `zo cron remove` deletes one — which is also the only road to another
+/// folder's store (`--cwd`), and that one a session has none of. `None` for
+/// any other command: `zo cron show` only reads, and `-h` prints the usage. A
+/// word after `cron` that is none of these is refused as the verb that
+/// registers; at the top of a command that includes a verb the shell fills in
+/// when it runs. Asked by every layer that judges a model's command, after the
+/// kill guard and the desk guard; no mode, rule or hook answers it, since the
+/// question it sends the model to is one only a person answers.
 #[must_use]
 pub fn refused_in_a_shell(command: &str) -> Option<String> {
     let ran = runs::programs_run(command, |text| text.contains(SHELL_VERBS_UNDER));
-    let verb = ran.iter().find_map(registering_verb)?;
+    let verb = ran.iter().find_map(writing_verb)?;
+    if verb == SHELL_VERB_THAT_DELETES {
+        return Some(format!(
+            "refused to run: this command deletes a schedule from a shell (`{SHELL_PROGRAM} \
+             {SHELL_VERBS_UNDER} {SHELL_VERB_THAT_DELETES}`), past the question a person answers. Delete \
+             a schedule with the {DELETE_TOOL} tool: find its `cron_id` with the CronList tool, then \
+             call {DELETE_TOOL} with it, and it puts the deletion to a person. A schedule kept for \
+             another folder (`--cwd`) cannot be deleted from this session. {}",
+            Act::Deletes.not_the_mode()
+        ));
+    }
     let spelled = if verb == SHELL_VERB_THAT_REGISTERS {
         format!("`{SHELL_PROGRAM} {SHELL_VERBS_UNDER} {SHELL_VERB_THAT_REGISTERS}`")
     } else {
         format!(
-            "`{SHELL_PROGRAM} {SHELL_VERBS_UNDER}` with a verb the command does not spell out as `{}`",
-            SHELL_VERBS_THAT_REGISTER_NOTHING.join("` or `")
+            "`{SHELL_PROGRAM} {SHELL_VERBS_UNDER}` with a verb the command does not spell out as \
+             `{SHELL_VERB_THAT_READS}`, which only reads"
         )
     };
     Some(format!(
         "refused to run: this command registers a schedule from a shell ({spelled}), past the \
          question a person answers. Ask for the schedule with the {TOOL} tool (`schedule`, \
-         `prompt` or `workflow`, `description`): it puts the schedule to a person. {NOT_THE_MODE}"
+         `prompt` or `workflow`, `description`): it puts the schedule to a person. {}",
+        Act::Registers.not_the_mode()
     ))
 }
 
 /// The verb by which `run` would write the schedule store: the word after
 /// [`SHELL_VERBS_UNDER`] when the program is [`SHELL_PROGRAM`] and that word
-/// neither registers nothing nor only prints the usage. `zo cron` with no
-/// word after it prints its usage too.
-fn registering_verb(run: &ProgramRun) -> Option<&str> {
+/// neither only reads nor only prints the usage. `zo cron` with no word after
+/// it prints its usage too.
+fn writing_verb(run: &ProgramRun) -> Option<&str> {
     let program = run.program.strip_suffix(".exe").unwrap_or(&run.program);
     let [under, verb, ..] = run.args.as_slice() else {
         return None;
@@ -208,7 +311,7 @@ fn registering_verb(run: &ProgramRun) -> Option<&str> {
     let verb = verb.as_str();
     (program == SHELL_PROGRAM
         && under.as_str() == SHELL_VERBS_UNDER
-        && !SHELL_VERBS_THAT_REGISTER_NOTHING.contains(&verb)
+        && verb != SHELL_VERB_THAT_READS
         && !SHELL_USAGE_WORDS.contains(&verb))
     .then_some(verb)
 }
@@ -225,7 +328,7 @@ fn registering_verb(run: &ProgramRun) -> Option<&str> {
 #[must_use]
 pub(crate) fn registers_nothing(tool_name: &str, input: &str) -> Option<String> {
     let why = call(tool_name, input)?.work().err()?;
-    Some(format!("refused, since it would register nothing: {why}. {NOT_THE_MODE}"))
+    Some(format!("refused, since it would register nothing: {why}. {}", Act::Registers.not_the_mode()))
 }
 
 /// Whether `tool_name` is the tool that registers a schedule, in any
@@ -251,6 +354,20 @@ fn registration(tool_name: &str, input: &str) -> Option<Registration> {
         runs,
         label: call.description,
     })
+}
+
+/// The `cron_id` `tool_name` called with `input` would delete, read as the
+/// executor reads it (`parse_tool_arguments`, a mended slip included) into
+/// the arguments the tool reads ([`CronDeleteInput`]); `None` for any other
+/// tool and for an input the tool cannot read. The tool's name is met case
+/// aside, as [`registers_schedules`] meets its own.
+fn removal(tool_name: &str, input: &str) -> Option<String> {
+    if !tool_name.eq_ignore_ascii_case(DELETE_TOOL) {
+        return None;
+    }
+    serde_json::from_value::<CronDeleteInput>(parse_tool_arguments(input).ok()?)
+        .ok()
+        .map(|call| call.cron_id)
 }
 
 /// The arguments `tool_name` called with `input` hands the tool that
@@ -282,10 +399,60 @@ fn card(registration: &Registration, zone: CronZone, now: u64, folder: Option<&P
         Runs::Prompt(_) => SAYS_OF_A_PROMPT,
         Runs::Workflow(_) => SAYS_OF_A_WORKFLOW,
     });
+    what_runs(&mut card, registration, 0, zone, now);
+    where_it_runs(&mut card, folder);
+    card
+}
+
+/// The card for deleting the schedule `cron_id` names: the guard's sentence,
+/// the id as the call gave it, then the schedule as the store holds it — its
+/// name, what it runs, when, how many times it ran — or that the guard's look
+/// did not find it, and the folder whose store that is. Every word of the
+/// call and of the store is shown as `card_words` shows data.
+fn deletion_card(cron_id: &str, entry: Option<&CronEntry>, zone: CronZone, now: u64, folder: Option<&Path>) -> String {
+    let mut card = String::from(SAYS_OF_A_DELETION);
+    let id = shown_counting(cron_id, WORD_MAX_CHARS);
+    let _ = write!(card, "\nSchedule: {}", id.text);
+    match entry {
+        Some(entry) => {
+            let runs = match &entry.workflow {
+                Some(workflow) => Runs::Workflow(workflow_name(workflow)),
+                None => Runs::Prompt(entry.prompt.trim().to_string()),
+            };
+            let held = Registration {
+                schedule: entry.schedule.clone(),
+                runs,
+                label: entry.description.clone(),
+            };
+            what_runs(&mut card, &held, id.hidden, zone, now);
+            let _ = match (entry.run_count, entry.last_run_at) {
+                (0, _) => write!(card, "\nRan: never"),
+                (1, Some(last)) => write!(card, "\nRan: once, at {}", clock(last, zone.offset_secs)),
+                (count, Some(last)) => {
+                    write!(card, "\nRan: {count} times, last at {}", clock(last, zone.offset_secs))
+                }
+                (count, None) => write!(card, "\nRan: {count} times"),
+            };
+        }
+        None => {
+            if let Some(left_out) = hidden_said(id.hidden) {
+                let _ = write!(card, "\nHidden: {left_out}");
+            }
+            let _ = write!(card, "\n{NOT_FOUND_HERE}");
+        }
+    }
+    where_it_runs(&mut card, folder);
+    card
+}
+
+/// The lines of a card that say what a schedule runs and when — its name,
+/// what comes due, how many letters that draw nothing were left out of them
+/// (`hidden` counted before them included), and when it runs on the clock of
+/// `zone`, counted from `now`.
+fn what_runs(card: &mut String, registration: &Registration, mut hidden: usize, zone: CronZone, now: u64) {
     // Letters that draw nothing are left out of what is shown and counted,
     // and the card says how many: what would run holds no word a person
     // approving it cannot see.
-    let mut hidden = 0usize;
     if let Some(label) = registration.label.as_deref().and_then(|label| said(label, &mut hidden)) {
         let _ = write!(card, "\nCalled: {label}");
     }
@@ -311,6 +478,10 @@ fn card(registration: &Registration, zone: CronZone, now: u64, folder: Option<&P
         zone.label,
         coming(&registration.schedule, zone, now),
     );
+}
+
+/// A card's last line: the folder a schedule runs in, when one is known.
+fn where_it_runs(card: &mut String, folder: Option<&Path>) {
     if let Some(folder) = folder {
         let _ = write!(
             card,
@@ -318,7 +489,6 @@ fn card(registration: &Registration, zone: CronZone, now: u64, folder: Option<&P
             shown(&folder.to_string_lossy(), EXCERPT_MAX_CHARS)
         );
     }
-    card
 }
 
 /// A name the call gave, as the card shows it — none when nothing of it

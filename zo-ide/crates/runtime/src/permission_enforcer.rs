@@ -40,8 +40,9 @@ impl PermissionEnforcer {
         // conversation-layer prompter (sub-agent / headless) would silently allow
         // a tool the operator explicitly denied.
         if self.policy.active_mode() == PermissionMode::Prompt {
-            // A schedule zo asks for is a person's to approve, and this layer
-            // has nobody to ask ([`crate::schedule_guard`]): it is refused
+            // A schedule zo asks for, or one it deletes, is a person's to
+            // approve, and this layer has nobody to ask
+            // ([`crate::schedule_guard`]): it is refused
             // here too, where every other question is left to a prompter this
             // path may never reach. In the other modes the policy below
             // refuses it, having no prompter either.
@@ -163,8 +164,8 @@ impl PermissionEnforcer {
     /// still end itself (t-82854). The desk guard comes right after it, in
     /// every mode: a command that moves the person's screen is refused
     /// ([`crate::desk_guard`], t-104888). Then the schedule guard: a command
-    /// that registers a schedule from the shell is refused, since the
-    /// question a schedule is put to a person by is the tool's
+    /// that registers or deletes a schedule from the shell is refused, since
+    /// the question a schedule is put to a person by is the tool's
     /// ([`crate::schedule_guard::refused_in_a_shell`]).
     #[must_use]
     pub fn check_bash(&self, command: &str) -> EnforcementResult {

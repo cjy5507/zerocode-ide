@@ -69,6 +69,15 @@ pub struct CronCreateInput {
     pub description: Option<String>,
 }
 
+/// The arguments of a `CronDelete` call: the tool deletes by them, and the
+/// schedule guard puts the deletion to a person by them
+/// ([`crate::schedule_guard`]), so a call the tool would run is never one the
+/// guard did not see.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CronDeleteInput {
+    pub cron_id: String,
+}
+
 /// What a `CronCreate` call registers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CronWork<'a> {
@@ -1214,6 +1223,19 @@ impl CronRegistry {
     #[must_use]
     pub fn for_workspace(cwd: &Path) -> Self {
         Self::with_persistence_path(Some(registry_io::registry_path_in(cwd, CRON_REGISTRY_FILE)))
+    }
+
+    /// The entry `cron_id` names in the store a session started in `cwd`
+    /// reads ([`Self::for_workspace`]), read and nothing more: opening the
+    /// registry puts away an entry that does not read and saves the file
+    /// ([`Self::with_persistence_path`]), and a look taken to ask a person
+    /// writes nothing. `None` when no entry by that id stands there, or the
+    /// file does not read.
+    #[must_use]
+    pub fn peek_in_workspace(cwd: &Path, cron_id: &str) -> Option<CronEntry> {
+        registry_io::load_registry_inner::<CronInner>(&registry_io::registry_path_in(cwd, CRON_REGISTRY_FILE))?
+            .entries
+            .remove(cron_id)
     }
 
     /// Where this registry persists, if anywhere.

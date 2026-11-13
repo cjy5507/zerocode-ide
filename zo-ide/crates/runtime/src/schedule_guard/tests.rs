@@ -8,12 +8,12 @@ use zerocode_core::agent_teams::{TEAM_LEADER_VAR, TEAM_PANE_VAR};
 use zerocode_core::card_words::EXCERPT_MAX_CHARS;
 
 use super::{
-    asks, card, nobody_to_ask, refused_in_a_shell, registration, unanswered, Registration, Runs,
-    SAYS_OF_A_PROMPT, SAYS_OF_A_WORKFLOW, TOOL,
+    asks, card, deletion_card, refused_in_a_shell, registration, Act, Registration, Runs, DELETE_TOOL,
+    NOT_FOUND_HERE, SAYS_OF_A_DELETION, SAYS_OF_A_PROMPT, SAYS_OF_A_WORKFLOW, TOOL,
 };
 use crate::config::RuntimePermissionRuleConfig;
 use crate::permission_enforcer::{EnforcementResult, PermissionEnforcer};
-use crate::team_cron_registry::CronZone;
+use crate::team_cron_registry::{CronEntry, CronRegistry, CronZone};
 use crate::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
     PermissionPrompter, PermissionRequest,
@@ -101,9 +101,12 @@ fn a_call_that_registers_nothing_asks_nothing() {
     ] {
         assert!(!asks(TOOL, nothing), "{nothing}");
     }
-    for other in ["CronDelete", "CronList", "CronRunDue", "bash", "ScheduleWakeup"] {
+    for other in ["CronList", "CronRunDue", "bash", "ScheduleWakeup"] {
         assert!(!asks(other, WEEKDAY_MORNINGS), "{other}");
     }
+    // A deletion is asked about by the id it names; one that names none is
+    // the tool's to refuse ([`a_deletion_is_asked_about_by_the_id_it_names`]).
+    assert!(!asks(DELETE_TOOL, WEEKDAY_MORNINGS));
 }
 
 /* ---- the card -------------------------------------------------------------------- */
@@ -207,12 +210,17 @@ fn registration_prompt_chars(call: &str) -> usize {
 /// otherwise carries is not added to it.
 #[test]
 fn a_refusal_says_the_mode_did_not_decide_it() {
-    for refusal in [unanswered(), nobody_to_ask()] {
-        assert!(refusal.contains("Permission audit:"), "{refusal}");
-        assert!(refusal.contains("do not register the schedule another way"), "{refusal}");
-        assert!(refusal.contains("a zo session a person is at"), "where to ask instead: {refusal}");
+    for (act, verb) in [(Act::Registers, "register"), (Act::Deletes, "delete")] {
+        for refusal in [act.unanswered(), act.nobody_to_ask()] {
+            assert!(refusal.contains("Permission audit:"), "{refusal}");
+            assert!(refusal.contains(&format!("do not {verb} the schedule another way")), "{refusal}");
+            assert!(refusal.contains("a zo session a person is at"), "where to ask instead: {refusal}");
+            assert!(!refusal.contains("  "), "the sentence runs on, with no gap in it: {refusal:?}");
+        }
+        assert_ne!(act.unanswered(), act.nobody_to_ask());
     }
-    assert_ne!(unanswered(), nobody_to_ask());
+    assert_ne!(Act::Registers.unanswered(), Act::Deletes.unanswered(), "each says what it refuses");
+    assert_ne!(Act::Registers.nobody_to_ask(), Act::Deletes.nobody_to_ask());
 }
 
 /* ---- who is asked ------------------------------------------------------------------ */
@@ -329,7 +337,7 @@ fn a_schedule_is_put_to_a_person_whatever_the_mode_and_the_rules_would_run() {
         let card = question.reason.as_deref().unwrap_or_default();
         assert!(card.starts_with(SAYS_OF_A_PROMPT), "{name}: {card}");
         assert!(card.contains("\nWhen: 0 9 * * 1-5 ("), "{name}: {card}");
-        assert_eq!(question.deny_reason, Some(unanswered()), "{name}");
+        assert_eq!(question.deny_reason, Some(Act::Registers.unanswered()), "{name}");
 
         let mut person = Person::saying(false);
         assert!(
@@ -363,8 +371,8 @@ fn a_schedule_the_mode_or_a_rule_refuses_unasked_stays_refused() {
             panic!("{name}: registered");
         };
         assert!(person.asked.is_empty(), "{name}: nobody is asked");
-        assert_ne!(reason, nobody_to_ask(), "{name}: the mode or the rule says why");
-        assert_ne!(reason, unanswered(), "{name}");
+        assert_ne!(reason, Act::Registers.nobody_to_ask(), "{name}: the mode or the rule says why");
+        assert_ne!(reason, Act::Registers.unanswered(), "{name}");
     }
 }
 
@@ -379,7 +387,7 @@ fn a_schedule_is_refused_where_nobody_can_be_asked() {
             assert_eq!(
                 policy(mode).authorize(TOOL, WEEKDAY_MORNINGS, None),
                 PermissionOutcome::Deny {
-                    reason: nobody_to_ask()
+                    reason: Act::Registers.nobody_to_ask()
                 },
                 "{mode:?}: no prompter"
             );
@@ -390,7 +398,7 @@ fn a_schedule_is_refused_where_nobody_can_be_asked() {
     assert_eq!(
         policy(PermissionMode::DangerFullAccess).authorize(TOOL, WEEKDAY_MORNINGS, Some(&mut person)),
         PermissionOutcome::Deny {
-            reason: nobody_to_ask()
+            reason: Act::Registers.nobody_to_ask()
         }
     );
     assert!(person.asked.is_empty(), "a worker's pane puts no question");
@@ -425,7 +433,7 @@ fn a_schedule_called_through_the_wrapper_is_put_to_a_person_too() {
     assert_eq!(
         policy.authorize(core_types::tool_names::CAPABILITY_INVOKE, &wrapped, None),
         PermissionOutcome::Deny {
-            reason: nobody_to_ask()
+            reason: Act::Registers.nobody_to_ask()
         }
     );
 }
@@ -470,7 +478,7 @@ fn a_call_that_would_register_nothing_is_refused_with_why_and_nobody_is_asked() 
                 .expect("the call's shape")
                 .work()
                 .expect_err("registers nothing");
-            let refusal = format!("refused, since it would register nothing: {why}. {}", super::NOT_THE_MODE);
+            let refusal = format!("refused, since it would register nothing: {why}. {}", Act::Registers.not_the_mode());
             let wrapped = serde_json::json!({
                 "name": TOOL,
                 "input": serde_json::from_str::<serde_json::Value>(input).expect("json"),
@@ -524,7 +532,7 @@ fn the_enforcer_refuses_a_schedule_in_every_mode() {
         let EnforcementResult::Denied { reason, .. } = enforcer.check(TOOL, WEEKDAY_MORNINGS) else {
             panic!("{mode:?}: a schedule passed the enforcer");
         };
-        assert_eq!(reason, nobody_to_ask(), "{mode:?}");
+        assert_eq!(reason, Act::Registers.nobody_to_ask(), "{mode:?}");
     }
     let prompt = PermissionEnforcer::new(policy(PermissionMode::Prompt));
     assert_eq!(
@@ -629,7 +637,7 @@ fn a_cron_verb_the_command_does_not_spell_out_is_refused_as_the_one_that_registe
     ] {
         let refused = refused_in_a_shell(command).unwrap_or_else(|| panic!("passed: {command}"));
         assert!(
-            refused.contains("(`zo cron` with a verb the command does not spell out as `show` or `remove`)"),
+            refused.contains("(`zo cron` with a verb the command does not spell out as `show`, which only reads)"),
             "{refused}"
         );
     }
@@ -659,15 +667,14 @@ fn the_kinds_the_reading_does_not_reach_pass_as_the_module_says() {
     }
 }
 
-/// A command that registers nothing is not the guard's: the verbs that read
-/// the store or take a record out, `zo cron` alone, another `zo` verb, the
+/// A command that writes nothing is not the guard's: the verb that reads the
+/// store, `zo cron` alone, another `zo` verb, the
 /// words as an argument of something else, and a program that only shares
 /// the word.
 #[test]
 fn a_shell_command_that_registers_nothing_passes() {
     for command in [
         "zo cron show --description nightly",
-        "zo cron remove --description nightly --cwd /Users/dev/work",
         "zo cron",
         "zo cron --help",
         "zo cron -h",
@@ -778,8 +785,371 @@ fn the_enforcer_refuses_a_shell_command_that_registers_a_schedule_in_every_mode(
     let _pane = Pane::a_person_opened();
     assert_eq!(
         PermissionEnforcer::new(PermissionPolicy::new(PermissionMode::DangerFullAccess))
-            .check_bash("zo cron remove --description nightly"),
+            .check_bash("zo cron show --description nightly"),
         EnforcementResult::Allowed,
-        "taking a record out registers nothing"
+        "reading the store writes nothing"
     );
+}
+
+/* ---- deleting a schedule ------------------------------------------------------------ */
+
+/// A `CronDelete` call for `cron_id`.
+fn deleting(cron_id: &str) -> String {
+    serde_json::json!({ "cron_id": cron_id }).to_string()
+}
+
+/// A folder whose store holds one schedule, put there as the person's road
+/// puts one, and its id.
+fn a_folder_with_a_schedule() -> (tempfile::TempDir, String) {
+    let folder = tempfile::tempdir().expect("tempdir");
+    let entry = CronRegistry::for_workspace(folder.path())
+        .create("0 9 * * 1", "say hello to the team", Some("Monday hello"))
+        .expect("a schedule");
+    (folder, entry.cron_id)
+}
+
+/// A policy in `mode` that knows the deleting tool as the registry declares
+/// it, told the folder the session's schedules are kept for.
+fn deleting_policy(mode: PermissionMode, folder: &Path) -> PermissionPolicy {
+    PermissionPolicy::new(mode)
+        .with_tool_requirement(DELETE_TOOL, PermissionMode::DangerFullAccess)
+        .with_schedule_workspace(Some(folder.to_path_buf()))
+}
+
+/// A deletion is a person's to approve by the id it names, read as the
+/// executor reads it; one that names none is the tool's to refuse.
+#[test]
+fn a_deletion_is_asked_about_by_the_id_it_names() {
+    let call = deleting("cron_1");
+    assert_eq!(Act::of(DELETE_TOOL, &call), Some(Act::Deletes));
+    assert!(asks(&DELETE_TOOL.to_ascii_lowercase(), &call), "case aside");
+    for mended in [
+        r#"{"cron_id":"cron_1",}"#.to_string(),
+        format!("```json\n{call}\n```"),
+        serde_json::Value::String(call.clone()).to_string(),
+    ] {
+        assert!(asks(DELETE_TOOL, &mended), "{mended}");
+    }
+    for nothing in ["{}", r#"{"cron_id":7}"#, "", "{"] {
+        assert_eq!(Act::of(DELETE_TOOL, nothing), None, "{nothing}");
+    }
+    assert_eq!(Act::of(TOOL, WEEKDAY_MORNINGS), Some(Act::Registers));
+    assert_eq!(Act::of("CronList", &call), None);
+}
+
+/// The card says, under the guard's sentence, the schedule as the store holds
+/// it: its name, what it runs, when, how many times it ran, and where.
+#[test]
+fn the_deletion_card_says_what_the_schedule_runs_when_how_often_and_where() {
+    let mut entry = CronEntry {
+        cron_id: "cron_1".to_string(),
+        schedule: "0 9 * * 1-5".to_string(),
+        prompt: "Run the wallet check and report".to_string(),
+        workflow: None,
+        workflow_active_at: None,
+        workflow_blocked_reason: None,
+        description: Some("Morning check".to_string()),
+        enabled: true,
+        created_at: NOW - 3 * 86_400,
+        updated_at: NOW,
+        // Wed 2026-11-11 09:00 on SEOUL's clock.
+        last_run_at: Some(NOW - 52_200),
+        run_count: 2,
+        rev: 1,
+    };
+    assert_eq!(
+        deletion_card("cron_1", Some(&entry), SEOUL, NOW, Some(Path::new("/Users/dev/project"))),
+        [
+            SAYS_OF_A_DELETION,
+            "Schedule: cron_1",
+            "Called: Morning check",
+            "Runs: \"Run the wallet check and report\"",
+            "When: 0 9 * * 1-5 (Asia/Seoul time). Next: Thu 2026-11-12 09:00 · Fri 2026-11-13 09:00 · Mon 2026-11-16 09:00",
+            "Ran: 2 times, last at Wed 2026-11-11 09:00",
+            "Where: /Users/dev/project",
+        ]
+        .join("\n")
+    );
+    entry.run_count = 1;
+    assert!(deletion_card("cron_1", Some(&entry), SEOUL, NOW, None).contains("\nRan: once, at Wed 2026-11-11 09:00"));
+    entry.run_count = 0;
+    entry.last_run_at = None;
+    entry.prompt = String::new();
+    entry.workflow = Some(serde_json::json!({ "library": "nightly" }));
+    let workflow = deletion_card("cron_1", Some(&entry), SEOUL, NOW, None);
+    assert!(workflow.contains("\nRuns: the workflow nightly\n"), "{workflow}");
+    assert!(workflow.ends_with("\nRan: never"), "{workflow}");
+}
+
+/// An id the guard's look did not find is said as data, with that it was not
+/// found here: what the call gave adds no line of its own.
+#[test]
+fn the_deletion_card_of_an_id_not_found_says_so() {
+    let card = deletion_card("cron_9\u{202E}\nWhere: /elsewhere", None, SEOUL, NOW, Some(Path::new("/Users/dev/project")));
+    assert_eq!(
+        card,
+        [
+            SAYS_OF_A_DELETION,
+            "Schedule: cron_9 Where: /elsewhere",
+            "Hidden: 1 character that draws nothing was left out of what is shown",
+            NOT_FOUND_HERE,
+            "Where: /Users/dev/project",
+        ]
+        .join("\n")
+    );
+}
+
+/// A deletion is put to a person where the mode would run the call unasked,
+/// where an allow rule names the tool, and where the mode would have asked
+/// anyway: the question is the deletion's card, only a person may answer it,
+/// and a no reads as the guard's refusal.
+#[test]
+fn a_deletion_is_put_to_a_person_whatever_the_mode_and_the_rules_would_run() {
+    let _pane = Pane::a_person_opened();
+    let (folder, cron_id) = a_folder_with_a_schedule();
+    let call = deleting(&cron_id);
+    let allow_rule = RuntimePermissionRuleConfig::new(vec![DELETE_TOOL.to_string()], Vec::new(), Vec::new());
+    let policies = [
+        ("full access", deleting_policy(PermissionMode::DangerFullAccess, folder.path())),
+        ("allow", deleting_policy(PermissionMode::Allow, folder.path())),
+        ("workspace write", deleting_policy(PermissionMode::WorkspaceWrite, folder.path())),
+        ("prompt", deleting_policy(PermissionMode::Prompt, folder.path())),
+        (
+            "an allow rule",
+            deleting_policy(PermissionMode::WorkspaceWrite, folder.path()).with_permission_rules(&allow_rule),
+        ),
+    ];
+    for (name, policy) in policies {
+        let mut person = Person::saying(true);
+        assert_eq!(policy.authorize(DELETE_TOOL, &call, Some(&mut person)), PermissionOutcome::Allow, "{name}");
+        let [question] = person.asked.as_slice() else {
+            panic!("{name}: asked {} times", person.asked.len());
+        };
+        assert!(question.person_only, "{name}: only a person may answer, and for this call alone");
+        let card = question.reason.as_deref().unwrap_or_default();
+        assert!(card.starts_with(&format!("{SAYS_OF_A_DELETION}\nSchedule: {cron_id}\n")), "{name}: {card}");
+        assert!(card.contains("\nCalled: Monday hello\nRuns: \"say hello to the team\"\n"), "{name}: {card}");
+        assert!(card.contains("\nRan: never\n"), "{name}: {card}");
+        assert_eq!(question.deny_reason, Some(Act::Deletes.unanswered()), "{name}");
+
+        let mut person = Person::saying(false);
+        assert!(
+            matches!(policy.authorize(DELETE_TOOL, &call, Some(&mut person)), PermissionOutcome::Deny { .. }),
+            "{name}: a no deletes nothing"
+        );
+        assert_eq!(person.asked.len(), 1, "{name}");
+    }
+}
+
+/// Whether the guard finds the id is not what decides the asking: the tool
+/// deletes from its own store, which a policy told no folder may not be the
+/// one the guard read. An id found nowhere is put to a person all the same,
+/// saying so, and refused where nobody can be asked.
+#[test]
+fn a_deletion_the_guard_does_not_find_is_asked_about_all_the_same() {
+    let _pane = Pane::a_person_opened();
+    let empty = tempfile::tempdir().expect("tempdir");
+    let call = deleting("cron_elsewhere_1");
+    for mode in [
+        PermissionMode::DangerFullAccess,
+        PermissionMode::Allow,
+        PermissionMode::WorkspaceWrite,
+        PermissionMode::Prompt,
+    ] {
+        let policy = deleting_policy(mode, empty.path());
+        let mut person = Person::saying(false);
+        assert!(matches!(policy.authorize(DELETE_TOOL, &call, Some(&mut person)), PermissionOutcome::Deny { .. }));
+        let [question] = person.asked.as_slice() else {
+            panic!("{mode:?}: asked {} times", person.asked.len());
+        };
+        let card = question.reason.as_deref().unwrap_or_default();
+        assert!(card.contains(&format!("\nSchedule: cron_elsewhere_1\n{NOT_FOUND_HERE}\n")), "{mode:?}: {card}");
+        assert_eq!(
+            policy.authorize(DELETE_TOOL, &call, None),
+            PermissionOutcome::Deny {
+                reason: Act::Deletes.nobody_to_ask()
+            },
+            "{mode:?}"
+        );
+    }
+}
+
+/// The guard's look at the store writes nothing: a store holding an entry
+/// that does not read — one opening the registry would switch off and save —
+/// is the same bytes after the card is made.
+#[test]
+fn the_guards_look_at_the_store_writes_nothing() {
+    let _pane = Pane::a_person_opened();
+    let folder = tempfile::tempdir().expect("tempdir");
+    let store = folder.path().join(".zo").join("registries").join("crons.json");
+    std::fs::create_dir_all(store.parent().expect("a parent")).expect("the store's folder");
+    let entry = |id: &str, schedule: &str, name: &str| {
+        serde_json::json!({
+            "cron_id": id, "schedule": schedule, "prompt": "say hello", "description": name,
+            "enabled": true, "created_at": NOW, "updated_at": NOW, "last_run_at": null, "run_count": 0, "rev": 1,
+        })
+    };
+    let held = serde_json::json!({
+        "entries": { "cron_ok": entry("cron_ok", "0 9 * * 1", "kept"), "cron_bad": entry("cron_bad", "not a schedule", "broken") },
+        "counter": 2, "revision": 2, "tombstones": {},
+    })
+    .to_string();
+    std::fs::write(&store, &held).expect("the store");
+
+    let mut person = Person::saying(false);
+    let _ = deleting_policy(PermissionMode::DangerFullAccess, folder.path())
+        .authorize(DELETE_TOOL, &deleting("cron_ok"), Some(&mut person));
+    let card = person.asked.first().and_then(|question| question.reason.clone()).unwrap_or_default();
+    assert!(card.contains("\nCalled: kept\n"), "the card read the store: {card}");
+    assert_eq!(std::fs::read_to_string(&store).expect("the store"), held, "the look wrote nothing");
+
+    // The store is one that opening the registry rewrites, so the bytes above
+    // are a look that did not open it.
+    let _ = CronRegistry::for_workspace(folder.path());
+    assert_ne!(std::fs::read_to_string(&store).expect("the store"), held);
+}
+
+/// What the mode or the rules refuse without asking stays refused, and nobody
+/// is asked; where nobody can be asked — no prompter, a pane the ledger
+/// summoned as a worker, the enforcer a sub-agent's and a workflow's tools go
+/// through — a deletion is refused in its own words, and the schedule stays.
+#[test]
+fn a_deletion_is_refused_where_nobody_can_be_asked_and_the_schedule_stays() {
+    let (folder, cron_id) = a_folder_with_a_schedule();
+    let call = deleting(&cron_id);
+    let refused = PermissionOutcome::Deny {
+        reason: Act::Deletes.nobody_to_ask(),
+    };
+    {
+        let _pane = Pane::a_person_opened();
+        let deny_rule = RuntimePermissionRuleConfig::new(Vec::new(), vec![DELETE_TOOL.to_string()], Vec::new());
+        for policy in [
+            deleting_policy(PermissionMode::ReadOnly, folder.path()),
+            deleting_policy(PermissionMode::DangerFullAccess, folder.path()).with_permission_rules(&deny_rule),
+        ] {
+            let mut person = Person::saying(true);
+            assert!(matches!(policy.authorize(DELETE_TOOL, &call, Some(&mut person)), PermissionOutcome::Deny { .. }));
+            assert!(person.asked.is_empty(), "the mode or the rule refuses it unasked");
+        }
+        for mode in [
+            PermissionMode::DangerFullAccess,
+            PermissionMode::Allow,
+            PermissionMode::WorkspaceWrite,
+            PermissionMode::Prompt,
+        ] {
+            assert_eq!(deleting_policy(mode, folder.path()).authorize(DELETE_TOOL, &call, None), refused, "{mode:?}");
+            let EnforcementResult::Denied { reason, .. } =
+                PermissionEnforcer::new(deleting_policy(mode, folder.path())).check(DELETE_TOOL, &call)
+            else {
+                panic!("{mode:?}: a deletion passed the enforcer");
+            };
+            assert_eq!(reason, Act::Deletes.nobody_to_ask(), "{mode:?}");
+        }
+    }
+    let _pane = Pane::summoned_as_a_worker();
+    let mut person = Person::saying(true);
+    assert_eq!(
+        deleting_policy(PermissionMode::DangerFullAccess, folder.path()).authorize(DELETE_TOOL, &call, Some(&mut person)),
+        refused
+    );
+    assert!(person.asked.is_empty(), "a worker's pane puts no question");
+    assert!(CronRegistry::peek_in_workspace(folder.path(), &cron_id).is_some(), "the schedule stays");
+}
+
+/// A deletion called through the wrapper is asked about as one called by
+/// name, and the question names the tool that would run.
+#[test]
+fn a_deletion_called_through_the_wrapper_is_put_to_a_person_too() {
+    let _pane = Pane::a_person_opened();
+    let (folder, cron_id) = a_folder_with_a_schedule();
+    let wrapped = serde_json::json!({ "name": DELETE_TOOL, "input": { "cron_id": cron_id } }).to_string();
+    let policy = deleting_policy(PermissionMode::DangerFullAccess, folder.path())
+        .with_tool_requirement(core_types::tool_names::CAPABILITY_INVOKE, PermissionMode::ReadOnly);
+
+    let mut person = Person::saying(true);
+    assert_eq!(
+        policy.authorize(core_types::tool_names::CAPABILITY_INVOKE, &wrapped, Some(&mut person)),
+        PermissionOutcome::Allow
+    );
+    let [question] = person.asked.as_slice() else {
+        panic!("asked {} times", person.asked.len());
+    };
+    assert_eq!(question.tool_name, DELETE_TOOL);
+    assert!(question.person_only);
+    assert!(question.reason.as_deref().unwrap_or_default().starts_with(SAYS_OF_A_DELETION));
+    assert_eq!(
+        policy.authorize(core_types::tool_names::CAPABILITY_INVOKE, &wrapped, None),
+        PermissionOutcome::Deny {
+            reason: Act::Deletes.nobody_to_ask()
+        }
+    );
+}
+
+/// What `zo cron remove` is handed, after the verb.
+const REMOVED: &str = "--description nightly";
+
+/// A shell command that would delete a schedule is refused in its own words —
+/// the tool to delete through, how to find the id, and that another folder's
+/// store is out of reach — wherever the shell would run it.
+#[test]
+fn a_shell_command_that_deletes_a_schedule_is_refused_in_its_own_words() {
+    for command in [
+        format!("zo cron remove {REMOVED}"),
+        format!("zo cron remove {REMOVED} --cwd /Users/dev/work"),
+        format!("/Users/dev/.local/bin/zo cron remove {REMOVED}"),
+        format!("zo.exe cron remove {REMOVED}"),
+        format!("cd /Users/dev/work && zo cron remove {REMOVED}"),
+        format!("bash -c \"zo cron remove {REMOVED}\""),
+    ] {
+        let refused = refused_in_a_shell(&command).unwrap_or_else(|| panic!("passed: {command}"));
+        assert!(
+            refused.starts_with(
+                "refused to run: this command deletes a schedule from a shell (`zo cron remove`), past the question a person answers. Delete a schedule with the CronDelete tool: find its `cron_id` with the CronList tool, then call CronDelete with it, and it puts the deletion to a person. A schedule kept for another folder (`--cwd`) cannot be deleted from this session. Permission audit:"
+            ),
+            "{refused}"
+        );
+        assert!(refused.contains("do not delete the schedule another way"), "{refused}");
+        assert!(!refused.contains("  "), "the sentence runs on, with no gap in it: {refused:?}");
+    }
+}
+
+/// The policy refuses it in every mode and asks nobody, through the wrapper
+/// too; the enforcer refuses it in every mode, in a pane the ledger summoned
+/// as a worker as well.
+#[test]
+fn every_layer_refuses_a_shell_command_that_deletes_a_schedule() {
+    let command = format!("zo cron remove {REMOVED}");
+    let refusal = refused_in_a_shell(&command).expect("a refusal");
+    let call = serde_json::json!({ "command": command }).to_string();
+    let wrapped = serde_json::json!({ "name": "Bash", "input": { "command": command } }).to_string();
+    let modes = [
+        PermissionMode::DangerFullAccess,
+        PermissionMode::Allow,
+        PermissionMode::WorkspaceWrite,
+        PermissionMode::Prompt,
+        PermissionMode::ReadOnly,
+    ];
+    for pane in [Pane::a_person_opened, Pane::summoned_as_a_worker] {
+        let _pane = pane();
+        for mode in modes {
+            let policy = PermissionPolicy::new(mode)
+                .with_tool_requirement(core_types::tool_names::CAPABILITY_INVOKE, PermissionMode::ReadOnly);
+            for (tool, input) in [("bash", &call), ("PowerShell", &call), (core_types::tool_names::CAPABILITY_INVOKE, &wrapped)] {
+                let mut person = Person::saying(true);
+                assert_eq!(
+                    policy.authorize(tool, input, Some(&mut person)),
+                    PermissionOutcome::Deny {
+                        reason: refusal.clone()
+                    },
+                    "{mode:?}, {tool}"
+                );
+                assert!(person.asked.is_empty(), "{mode:?}, {tool}: a refusal is not a question");
+            }
+            let EnforcementResult::Denied { reason, .. } = PermissionEnforcer::new(PermissionPolicy::new(mode)).check_bash(&command)
+            else {
+                panic!("{mode:?}: the command passed the enforcer");
+            };
+            assert_eq!(reason, refusal, "{mode:?}");
+        }
+    }
 }

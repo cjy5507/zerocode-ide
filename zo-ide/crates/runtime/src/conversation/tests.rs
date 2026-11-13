@@ -22063,6 +22063,29 @@ fn a_tool_found_later_is_judged_at_its_grade_on_the_streaming_turn_too() {
     assert_only_the_read_only_tool_ran(&ran);
 }
 
+/// A model that makes one call, `name` with `input`, and then says it is done.
+struct OneCall {
+    name: &'static str,
+    input: String,
+    called: bool,
+}
+
+impl ApiClient for OneCall {
+    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        if std::mem::replace(&mut self.called, true) {
+            return Ok(vec![AssistantEvent::TextDelta("done".into()), AssistantEvent::MessageStop]);
+        }
+        Ok(vec![
+            AssistantEvent::ToolUse {
+                id: "call-1".to_string(),
+                name: self.name.to_string(),
+                input: self.input.clone(),
+            },
+            AssistantEvent::MessageStop,
+        ])
+    }
+}
+
 /// A prompt only a person may answer leaves no allow rule, whatever a front
 /// answers it with: a schedule's question answered with the lasting allow —
 /// which the question does not offer, and the IDE channel takes anyway —
@@ -22075,26 +22098,6 @@ fn a_lasting_allow_sent_to_a_person_only_prompt_allows_the_one_call_and_leaves_n
         fn execute(&mut self, tool_name: &str, _input: &str) -> Result<String, ToolError> {
             self.0.lock().expect("calls").push(tool_name.to_string());
             Ok("ran".to_string())
-        }
-    }
-    struct OneCall {
-        name: &'static str,
-        input: String,
-        called: bool,
-    }
-    impl ApiClient for OneCall {
-        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-            if std::mem::replace(&mut self.called, true) {
-                return Ok(vec![AssistantEvent::TextDelta("done".into()), AssistantEvent::MessageStop]);
-            }
-            Ok(vec![
-                AssistantEvent::ToolUse {
-                    id: "call-1".to_string(),
-                    name: self.name.to_string(),
-                    input: self.input.clone(),
-                },
-                AssistantEvent::MessageStop,
-            ])
         }
     }
     // What the prompter is asked does not depend on the pane the suite runs
@@ -22142,9 +22145,102 @@ fn a_lasting_allow_sent_to_a_person_only_prompt_allows_the_one_call_and_leaves_n
     assert_eq!(ran, [crate::schedule_guard::TOOL], "the schedule the person was asked about is registered");
     assert!(rules.is_empty(), "and no rule is left for the next one: {rules:?}");
 
+    let (ran, rules) = answered_with_a_lasting_allow(
+        crate::schedule_guard::DELETE_TOOL,
+        r#"{"cron_id":"cron_1"}"#,
+        PermissionMode::DangerFullAccess,
+    );
+    assert_eq!(ran, [crate::schedule_guard::DELETE_TOOL], "the deletion the person was asked about runs");
+    assert!(rules.is_empty(), "and no rule is left for the next one: {rules:?}");
+
     let (ran, rules) = answered_with_a_lasting_allow("browser", "{}", PermissionMode::WorkspaceWrite);
     assert_eq!(ran, ["browser"]);
     assert_eq!(rules.len(), 1, "an ordinary prompt's lasting allow still leaves its rule: {rules:?}");
+}
+
+/// Deleting a schedule on the streaming turn every front runs, in full
+/// access: the call runs only on a person's yes. A no leaves the schedule in
+/// the store, and a yes lets the tool delete it.
+#[test]
+fn a_schedule_deletion_in_full_access_runs_only_on_a_persons_yes() {
+    use crate::schedule_guard::DELETE_TOOL;
+    use crate::team_cron_registry::{CronDeleteInput, CronRegistry};
+
+    /// Deletes from the store as the `CronDelete` tool does.
+    struct DeletesFrom(PathBuf);
+    impl ToolExecutor for DeletesFrom {
+        fn execute(&mut self, _tool_name: &str, input: &str) -> Result<String, ToolError> {
+            let call: CronDeleteInput =
+                serde_json::from_str(input).map_err(|error| ToolError::new(error.to_string()))?;
+            CronRegistry::for_workspace(&self.0)
+                .delete(&call.cron_id)
+                .map(|entry| entry.cron_id)
+                .map_err(ToolError::new)
+        }
+    }
+    /// Says yes or no to every question.
+    struct Answers(bool);
+    impl crate::permission::PermissionPrompter for Answers {
+        fn decide<'a>(
+            &'a self,
+            _request: crate::permission::PermissionRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<crate::permission::PermissionDecision, crate::permission::PermissionError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let decision = if self.0 {
+                crate::permission::PermissionDecision::AllowOnce
+            } else {
+                crate::permission::PermissionDecision::Deny
+            };
+            Box::pin(async move { Ok(decision) })
+        }
+    }
+    let _env = crate::test_env_lock();
+    let _pane = EnvVarGuard::unset(zerocode_core::agent_teams::TEAM_PANE_VAR);
+    let _leader = EnvVarGuard::unset(zerocode_core::agent_teams::TEAM_LEADER_VAR);
+
+    for says_yes in [false, true] {
+        let folder = tempfile::tempdir().expect("tempdir");
+        let cron_id = CronRegistry::for_workspace(folder.path())
+            .create("0 9 * * 1", "say hello to the team", Some("Monday hello"))
+            .expect("a schedule")
+            .cron_id;
+        let policy = PermissionPolicy::new(PermissionMode::DangerFullAccess)
+            .with_tool_requirement(DELETE_TOOL, PermissionMode::DangerFullAccess)
+            .with_schedule_workspace(Some(folder.path().to_path_buf()));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            OneCall { name: DELETE_TOOL, input: serde_json::json!({ "cron_id": cron_id }).to_string(), called: false },
+            DeletesFrom(folder.path().to_path_buf()),
+            policy,
+            vec!["system".into()],
+        );
+        runtime.set_workspace_cwd(folder.path().to_path_buf());
+        let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        tokio_runtime.block_on(async {
+            let (render_tx, _render_rx) = tokio::sync::mpsc::channel(256);
+            let prompter: Arc<dyn crate::permission::PermissionPrompter> = Arc::new(Answers(says_yes));
+            runtime
+                .run_turn_streaming_with_images("delete the monday schedule", Vec::new(), render_tx, prompter)
+                .await
+                .expect("the turn");
+        });
+        assert_eq!(
+            CronRegistry::peek_in_workspace(folder.path(), &cron_id).is_some(),
+            !says_yes,
+            "a {} leaves the schedule {}",
+            if says_yes { "yes" } else { "no" },
+            if says_yes { "deleted" } else { "in the store" }
+        );
+    }
 }
 
 /* ---- a call through the wrapper, as hooks and gates are told of it ------------- */

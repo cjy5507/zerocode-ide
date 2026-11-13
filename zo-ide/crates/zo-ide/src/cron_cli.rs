@@ -17,11 +17,12 @@
 //! `ensure` is idempotent ([`CronRegistry::ensure_named`]): the same words
 //! twice leave one record; other words replace it; the receipt says which.
 //!
-//! This door is the person's: the window sends `ensure` on their click, and
-//! they may type it. So it asks nobody, and it has no floor on how close
-//! together a schedule's runs come — both are what a schedule zo asks for
-//! goes through (`runtime::schedule_guard`), which also refuses a session's
-//! own shell command that spells `zo cron ensure` out.
+//! This door is the person's: the window sends `ensure` and `remove` on their
+//! click, and they may type them. So it asks nobody, and it has no floor on
+//! how close together a schedule's runs come — both are what a schedule zo
+//! asks for or deletes goes through (`runtime::schedule_guard`), which also
+//! refuses a session's own shell command that spells `zo cron ensure` or
+//! `zo cron remove` out.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -270,27 +271,34 @@ mod tests {
 
     /// The schedule guard refuses a session's shell command by the word after
     /// `cron` (`runtime::schedule_guard`), and those words are this command's:
-    /// the verb that registers is refused, the verbs that register nothing
-    /// and the words that print the usage pass, and a word this command does
-    /// not know is refused, on the side of asking.
+    /// the verbs that write the store — `ensure` registers, `remove` deletes —
+    /// are refused, the verb that only reads and the words that print the
+    /// usage pass, and a word this command does not know is refused, on the
+    /// side of asking. The person's own `remove` — the window's, on a click —
+    /// does not go through the guard and runs
+    /// ([`ensure_show_remove_round_trip_on_a_workspace_and_name_the_scheduler`]).
     #[test]
-    fn the_schedule_guard_refuses_this_commands_registering_verb_and_no_other_word_of_it() {
+    fn the_schedule_guard_refuses_this_commands_writing_verbs_and_no_other_word_of_it() {
         let rest = "--description nightly --schedule '0 3 * * *' --prompt sweep";
-        let refused = |word: &str| runtime::schedule_guard::refused_in_a_shell(&format!("zo cron {word} {rest}")).is_some();
+        let refused = |word: &str| runtime::schedule_guard::refused_in_a_shell(&format!("zo cron {word} {rest}"));
         let reads = |word: &str| parse(&args(&[word, "--description", "x", "--schedule", "0 3 * * *", "--prompt", "p"]));
         assert_eq!(reads("ensure").map(|request| request.verb), Ok(Verb::Ensure));
-        assert!(refused("ensure"));
-        for (word, verb) in [("show", Verb::Show), ("remove", Verb::Remove)] {
-            assert_eq!(reads(word).map(|request| request.verb), Ok(verb), "{word}");
-            assert!(!refused(word), "{word} registers nothing");
-        }
+        assert!(refused("ensure").is_some_and(|refusal| refusal.contains("registers a schedule")));
+        assert_eq!(reads("remove").map(|request| request.verb), Ok(Verb::Remove));
+        assert!(
+            refused("remove").is_some_and(|refusal| refusal.contains("deletes a schedule")
+                && refusal.contains(runtime::schedule_guard::DELETE_TOOL)),
+            "taking a record out is a person's to approve: the model is sent to the tool that asks"
+        );
+        assert_eq!(reads("show").map(|request| request.verb), Ok(Verb::Show));
+        assert!(refused("show").is_none(), "show only reads");
         for usage in ["-h", "--help"] {
             assert_eq!(reads(usage), Err(USAGE.to_string()), "{usage} prints the usage");
-            assert!(!refused(usage), "{usage} prints the usage");
+            assert!(refused(usage).is_none(), "{usage} prints the usage");
         }
         let unknown = "replace";
         assert!(reads(unknown).is_err_and(|message| message.starts_with("unknown `zo cron` verb")));
-        assert!(refused(unknown), "a word this command does not know is not passed");
+        assert!(refused(unknown).is_some(), "a word this command does not know is not passed");
     }
 
     /// The person's own road has no floor: a schedule tighter than one zo may
