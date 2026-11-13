@@ -56,6 +56,15 @@ const ANSWERED: &str = "answered";
 /// the hook already painted.
 pub(crate) const HUSH_EVENT: &str = "notify:call";
 
+/// Whether the main window had focus at the ring — one of the two facts
+/// `attendance` is read from, on every asked row.
+pub(crate) const FOCUSED: &str = "focused";
+
+/// How long before the ring the person's hand was last on the window, in
+/// milliseconds — the other fact; absent when it never was since the window
+/// opened.
+pub(crate) const HAND_AGO_MS: &str = "handAgoMs";
+
 /// The row key an answered row is named by, and a label row names it back
 /// under [`LABEL`].
 const KEY: &str = "notify";
@@ -134,6 +143,12 @@ pub(crate) struct NotifyBook {
 /// Everything the question needs from the book, read under one lock.
 struct Context {
     attendance: Attendance,
+    /// The two facts `attendance` was read from, kept on the row so the
+    /// ledger can say which half of the rule found the person away: whether
+    /// the main window had focus, and how long ago the hand was last on the
+    /// window (`None` when it never was since the window opened).
+    focused: bool,
+    hand_ago_ms: Option<i64>,
     since_last_ms: Option<i64>,
     recent: Vec<Recent>,
 }
@@ -160,6 +175,7 @@ impl NotifyBook {
         now_ms: i64,
     ) -> Context {
         let attendance = Attendance::of(focused, self.last_hand_ms, now_ms);
+        let hand_ago_ms = self.last_hand_ms.map(|hand| now_ms.saturating_sub(hand));
         let rang = self.recent.entry(term).or_default();
         let since_last_ms = rang.back().map(|last| now_ms.saturating_sub(last.at));
         let recent = rang
@@ -182,6 +198,8 @@ impl NotifyBook {
         }
         Context {
             attendance,
+            focused,
+            hand_ago_ms,
             since_last_ms,
             recent,
         }
@@ -286,6 +304,9 @@ struct Question {
     ring: Ring,
     interrupted: bool,
     attendance: Attendance,
+    /// What `attendance` was read from ([`Context`]).
+    focused: bool,
+    hand_ago_ms: Option<i64>,
     mode: JevMode,
     asked_ms: i64,
     since_last_ms: Option<i64>,
@@ -442,6 +463,8 @@ pub(crate) fn call_at_the_bell(app: &AppHandle, bell: &Bell<'_>) -> Call {
         ring: bell.ring,
         interrupted: bell.interrupted,
         attendance: context.attendance,
+        focused: context.focused,
+        hand_ago_ms: context.hand_ago_ms,
         mode,
         asked_ms: now_ms,
         since_last_ms: context.since_last_ms,
@@ -517,6 +540,8 @@ fn settle(wire: &Wire, question: Question) -> Settled {
         ring,
         interrupted,
         attendance,
+        focused,
+        hand_ago_ms,
         mode,
         asked_ms,
         since_last_ms,
@@ -532,12 +557,16 @@ fn settle(wire: &Wire, question: Question) -> Settled {
         "ring": ring.word(),
         "event": notify::verb(ring, interrupted),
         "attendance": attendance.word(),
+        FOCUSED: focused,
         "mode": mode.key(),
         "rubricVersion": NOTIFY_CALL_RUBRIC_VERSION,
         "today": Call::today().word(),
         "sinceLastMs": since_last_ms,
         "waitingPanes": waiting_panes,
     });
+    if let Some(ago) = hand_ago_ms {
+        row[HAND_AGO_MS] = json!(ago);
+    }
     let began = Instant::now();
     let answer = wire.ask(
         &NOTIFY,

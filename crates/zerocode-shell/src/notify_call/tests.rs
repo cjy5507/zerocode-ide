@@ -121,6 +121,8 @@ fn a_question(workspace: &str, asked_ms: i64) -> Question {
         ring: Ring::Completion,
         interrupted: false,
         attendance: Attendance::Present,
+        focused: true,
+        hand_ago_ms: Some(12_000),
         mode: JevMode::Shadow,
         asked_ms,
         since_last_ms: Some(30_000),
@@ -240,12 +242,15 @@ fn the_book_remembers_a_panes_last_rings_and_the_persons_last_hand() {
     let now = 1_000_000;
     let first = book.look_at(7, Ring::Completion, false, true, now);
     assert_eq!(first.attendance, Attendance::Away, "no hand yet");
+    assert!(first.focused);
+    assert_eq!(first.hand_ago_ms, None, "no hand since the window opened");
     assert_eq!(first.since_last_ms, None);
     assert!(first.recent.is_empty());
 
     book.note_hand(now + 1_000);
     let second = book.look_at(7, Ring::Attention, false, true, now + 5_000);
     assert_eq!(second.attendance, Attendance::Present);
+    assert_eq!(second.hand_ago_ms, Some(4_000));
     assert_eq!(second.since_last_ms, Some(5_000));
     assert_eq!(second.recent.len(), 1);
     assert_eq!(second.recent[0].ring, Ring::Completion);
@@ -276,6 +281,21 @@ fn the_book_remembers_a_panes_last_rings_and_the_persons_last_hand() {
         now + 1_000 + zerocode_core::jev::NOTIFY_ATTENDANCE_WINDOW_MS + 1,
     );
     assert_eq!(late.attendance, Attendance::Away);
+    assert!(
+        late.focused,
+        "focused, and the hand too old: the row says which"
+    );
+    assert_eq!(
+        late.hand_ago_ms,
+        Some(zerocode_core::jev::NOTIFY_ATTENDANCE_WINDOW_MS + 1)
+    );
+
+    // A fresh hand and an unfocused window: away, for the other reason.
+    book.note_hand(now + 2_000_000);
+    let unfocused = book.look_at(7, Ring::Completion, false, false, now + 2_000_500);
+    assert_eq!(unfocused.attendance, Attendance::Away);
+    assert!(!unfocused.focused);
+    assert_eq!(unfocused.hand_ago_ms, Some(500));
 }
 
 fn waiting(term: TermId, asked_ms: i64, call: Call, attendance: Attendance) -> Waiting {
@@ -418,6 +438,8 @@ fn an_answered_question_is_a_row_and_a_wait_and_shadow_changes_nothing() {
     assert_eq!(row["ring"], "completion");
     assert_eq!(row["event"], "finished");
     assert_eq!(row["attendance"], "present");
+    assert_eq!(row[FOCUSED], true, "what attendance was read from");
+    assert_eq!(row[HAND_AGO_MS], 12_000);
     assert_eq!(row["mode"], "shadow");
     assert_eq!(row["rubricVersion"], NOTIFY_CALL_RUBRIC_VERSION);
     assert_eq!(row[REQUESTS_KEY], 1);
@@ -470,8 +492,19 @@ fn a_refused_or_broken_answer_is_a_row_with_no_wait() {
             JevMode::Shadow,
         )),
     );
-    let (row, waiting) = settle(&wire, a_question(&workspace, asked_ms));
+    let mut never_touched = a_question(&workspace, asked_ms);
+    never_touched.focused = false;
+    never_touched.hand_ago_ms = None;
+    let (row, waiting) = settle(&wire, never_touched);
     assert_eq!(row["outcome"], Refused::NotConsented.token());
+    assert_eq!(
+        row[FOCUSED], false,
+        "every asked row says it, a refusal too"
+    );
+    assert!(
+        row.get(HAND_AGO_MS).is_none(),
+        "no hand since the window opened: the key is absent, not a null"
+    );
     assert!(waiting.is_none());
     assert_eq!(row[REQUESTS_KEY], 0);
     assert!(
@@ -568,6 +601,60 @@ fn a_restart_finds_the_answers_still_waiting_for_their_label() {
     );
     assert_eq!(unlabeled_in(&ledger), vec![("8@3".to_string(), 8, 5)]);
     assert!(unlabeled_in(&dir.path().join("gone.jsonl")).is_empty());
+}
+
+/// The two attendance facts are new keys on a ledger whose older rows lack
+/// them: the summary, the label reader and the restart's sweep read an old
+/// row and a new row of the same ring alike, so a ledger that spans the
+/// change counts both.
+#[test]
+fn an_old_row_and_a_row_with_the_attendance_facts_read_alike() {
+    let dir = tempfile::tempdir().expect("a zo home");
+    let ledger = dir.path().join(NOTIFY.ledger);
+    let asked = |key: &str, at: i64| {
+        json!({
+            "at": at, KEY: key, "term": 7, "ring": "completion", "attendance": "away",
+            "outcome": ANSWERED, "call": "batch", "confidence": 0.9,
+            (APPLIED.canonical): false, (REQUESTS_KEY): 1,
+        })
+    };
+    let old = asked("7@100", 100);
+    let mut new = asked("7@200", 200);
+    new[FOCUSED] = json!(false);
+    new[HAND_AGO_MS] = json!(420_000);
+    crate::systemone::append_rows(&ledger, &[old.clone(), new.clone()]);
+    assert_eq!(
+        unlabeled_in(&ledger),
+        vec![("7@100".to_string(), 7, 100), ("7@200".to_string(), 7, 200)],
+        "the restart's sweep finds both"
+    );
+
+    let tally = zerocode_core::jev::summary::summarize(&[old.clone(), new.clone()], 0);
+    let alone = zerocode_core::jev::summary::summarize(&[old.clone(), old], 0);
+    assert_eq!(tally.rows, 2);
+    assert_eq!(tally.answered, 2);
+    assert_eq!(
+        (tally.answered, tally.applied, tally.requests, tally.called),
+        (alone.answered, alone.applied, alone.requests, alone.called),
+        "the new keys change no count"
+    );
+
+    let mut labels: Vec<Value> = ["7@100", "7@200"]
+        .iter()
+        .map(|key| {
+            let mut label = json!({ "at": 300, (LABEL.canonical): key, "term": 7 });
+            notify_call::grade(&mut label, Call::Batch, Attendance::Away, true);
+            label
+        })
+        .collect();
+    for label in &mut labels {
+        notify_call::regrade(label);
+    }
+    let mut rows = vec![asked("7@100", 100), new];
+    rows.extend(labels);
+    let agreement = zerocode_core::jev::summary::agreement_since(&rows, 0);
+    assert_eq!(agreement.compared, 0, "an away ring is graded neither way");
+    assert_eq!(agreement.not_compared, 2, "and both rows say why");
 }
 
 /// Off is today's bytes: the bell asks the seat only where today's table
