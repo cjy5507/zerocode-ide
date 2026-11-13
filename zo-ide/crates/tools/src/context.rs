@@ -1153,7 +1153,7 @@ impl ToolContext {
     /// Where the requests of the session this context belongs to go, for the
     /// model it is running on now: what this context was told of its own
     /// client when that is of this model (a helper), else what the process's
-    /// session holds or the catalog says ([`crate::model_home::of_the_session`]).
+    /// session holds or the catalog says (`crate::model_home::of_the_session`).
     /// `None` without an active model.
     #[must_use]
     pub fn active_model_home(&self) -> Option<runtime::model_home::ModelHome> {
