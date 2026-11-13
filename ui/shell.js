@@ -9287,6 +9287,7 @@ function paintVaultLive(view, force = false) {
  * lookup (`docHost`) builds a group it does not find, and this runs on every
  * beat of agent news. */
 let vaultViewDrawn = null;
+let vaultHomeAsked = false;
 
 function paintVaultLiveWhereShown() {
   if (!vaultAnswer || !vaultViewDrawn?.isConnected) return;
@@ -9457,7 +9458,10 @@ function vaultRow(session, home = null) {
     if (!open) detail?.remove();
   };
   actsAsButton(row, (event) => {
-    if (event.target !== row && event.target.closest?.("button, .vdock-detail, .vault-subagents")) return;
+    // A hand inside this row answers for itself. A helper's row stands inside
+    // its parent's helper list, and that list is not a hand of the helper's row.
+    const inner = event.target.closest?.("button, .vdock-detail, .vault-subagents");
+    if (inner && inner !== row && row.contains(inner)) return;
     if (vaultStageOpen.has(session.id)) vaultStageOpen.delete(session.id);
     else vaultStageOpen.add(session.id);
     stand();
@@ -9677,9 +9681,13 @@ function paintVaultView(tab = tabs.find((held) => held.kind === "vault")) {
   // Nothing known yet and a walk looking: the first run on this machine. It
   // says it is reading rather than that there is nothing.
   const reading = vaultAnswer.refreshing === true && vaultAnswer.total === 0;
-  // Home is folded to `~` once the window has asked where it is; the answer
+  // Home is folded to `~` once the window has asked where it is — asked once,
+  // so a store that cannot answer is not asked again on every paint; the answer
   // arriving is a reason to draw the paths again, and nothing else is.
-  if (homeFolder === null) void readHomeFolder().then((home) => home && paintVaultView());
+  if (homeFolder === null && !vaultHomeAsked) {
+    vaultHomeAsked = true;
+    void readHomeFolder().then((home) => home && paintVaultView());
+  }
   // The rows are drawn again only when they differ from the ones standing: an
   // ask made while a walk looks comes back with the same list several times.
   // The sort is in it because the time a row says is the one the list is

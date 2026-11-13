@@ -44,6 +44,10 @@ export async function testVaultSubagents(page) {
     stage.querySelector(".vault-subagents-toggle")?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
     seen.stageChildren = stage.querySelectorAll(".vault-subagents-list .vault-row").length;
     seen.stageResume = [...stage.querySelectorAll(".vault-subagents-list button")].some(n => n.textContent === "다시 열기");
+    // A helper's row opens its preview under a pointer, as it always did: the press lands inside the parent's
+    // helper list, which is not a hand of the helper's row now that every row is the door to its details.
+    stage.querySelector(".vault-subagents-list .vault-row .vault-row-title")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    seen.stageChildOpens = Boolean(stage.querySelector(".vault-subagents-list .vault-row > .vdock-detail"));
     openVaultDockView(300, 120, document.getElementById("vdock-view"));
     const item = [...document.querySelectorAll(".sidebar-menu-item")].find(n => n.textContent.includes("200개"));
     seen.limitOption = Boolean(item);
@@ -108,6 +112,7 @@ export async function testVaultSubagents(page) {
   assert.ok(!seen.childButtons.some(n => n.includes("다시 열기")));
   assert.equal(seen.stageChildren, 1);
   assert.equal(seen.stageResume, false);
+  assert.equal(seen.stageChildOpens, true, "a helper's row in the stage list no longer opens its preview when pressed");
   assert.equal(seen.limitOption, true);
   assert.equal(seen.askedLimit, 200);
   assert.equal(seen.force, false);

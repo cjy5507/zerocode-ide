@@ -28498,6 +28498,7 @@ const vaultLive = await page.evaluate(async () => {
     return chip ? { state: chip.dataset.state, words: chip.textContent } : null;
   };
   const before = said();
+  const was = activeTabId;
   const term = await openTermTab({ placement: "tab" });
   paneAgents.set(term, "claude");
   tell("hook:agent", { term, state: "working", agent: "claude", session: { id: "aaa" } });
@@ -28522,8 +28523,13 @@ const vaultLive = await page.evaluate(async () => {
   scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
   await settle(() => said() === null);
   const gone = said();
+  // The state this test found: its terminal closed, the tab that was in front back in front.
+  closeTab(`term:${term}`);
+  if (tabs.some((one) => one.id === was)) setActiveTab(was);
+  await settle(() => !tabs.some((one) => one.id === `term:${term}`) && activeTabId === was);
+  const tidied = !tabs.some((one) => one.id === `term:${term}`) && activeTabId === was;
   return {
-    before, working, waiting, stranger, went, gone,
+    before, working, waiting, stranger, went, gone, tidied,
     words: { working: t("board.working", "x"), attention: t("board.attention", "x") },
   };
 });
@@ -28535,7 +28541,9 @@ ok(
     vaultLive.stranger === 0 &&
     // Pressed, it is the pane — no resume was asked for.
     vaultLive.went.resumed === null && vaultLive.went.here === true &&
-    vaultLive.gone === null,
+    vaultLive.gone === null &&
+    // And it leaves the window as it found it for the checks after it.
+    vaultLive.tidied === true,
   JSON.stringify(vaultLive),
 );
 
