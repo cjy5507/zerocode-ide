@@ -64,7 +64,8 @@ pub enum StepKind {
     /// An edit, a created file or a deleted one — `verb` says which.
     Edit,
     Run,
-    /// A web fetch — counted by its word in the fold, like any other call.
+    /// A web fetch — looking around, as a read is: the fold counts the pages
+    /// in the row that counts the files read.
     Fetch,
     /// Any other call: a helper spawned, an MCP tool, a plan update.
     Other,
@@ -536,6 +537,7 @@ fn looked_row(steps: &[Step]) -> Option<Vec<Span>> {
         (StepKind::Read, "read", "file", "files"),
         (StepKind::Search, "searched", "pattern", "patterns"),
         (StepKind::List, "listed", "folder", "folders"),
+        (StepKind::Fetch, "fetched", "page", "pages"),
     ] {
         let seen = count(kind);
         if seen > 0 {
@@ -613,7 +615,7 @@ fn run_rows(steps: &[Step]) -> Vec<Vec<Span>> {
 /// Everything else that went through, counted by its word.
 fn other_row(steps: &[Step]) -> Option<Vec<Span>> {
     let mut others: Vec<(&str, usize)> = Vec::new();
-    for step in steps.iter().filter(|step| step.ok && matches!(step.kind, StepKind::Other | StepKind::Fetch)) {
+    for step in steps.iter().filter(|step| step.ok && step.kind == StepKind::Other) {
         match others.iter_mut().find(|(verb, _)| *verb == step.verb) {
             Some(other) => other.1 += 1,
             None => others.push((step.verb.as_str(), 1)),
@@ -664,6 +666,30 @@ mod tests {
 
     fn plain(rows: &[Line]) -> Vec<String> {
         rows.iter().map(Line::plain).collect()
+    }
+
+    /// A fetch is looking around, as a read is: the fold counts the pages
+    /// in the row that counts the files read. It stood alone as `Fetch`
+    /// beside the plan updates — every fetch zo's models make, since a
+    /// fetch through `CapabilityInvoke` is a fetch (v1.1.150). A failed one
+    /// keeps its row.
+    #[test]
+    fn the_fold_counts_fetched_pages_beside_the_files_read() {
+        let now = Instant::now();
+        let fetch = |target: &str| step(StepKind::Fetch, "Fetch", target);
+        let one = plain(&cell(&[step(StepKind::Read, "Read", "a.rs"), fetch("example.com/a")], 100, now));
+        assert!(one.iter().any(|row| row.ends_with("Read 1 file · fetched 1 page")), "{one:#?}");
+        assert!(!one.iter().any(|row| row.trim_end().ends_with("Fetch")), "{one:#?}");
+        let two = plain(&cell(&[fetch("example.com/a"), fetch("example.com/b")], 100, now));
+        assert!(two.iter().any(|row| row.ends_with("Fetched 2 pages")), "{two:#?}");
+        let mut gone = fetch("example.com/gone");
+        gone.ok = false;
+        gone.failure = Some("failed".to_string());
+        let kept = plain(&cell(&[fetch("example.com/a"), gone], 100, now));
+        assert!(kept.iter().any(|row| row.ends_with("Fetched 1 page")), "{kept:#?}");
+        assert!(kept.iter().any(|row| row.contains("example.com/gone") && row.contains("failed")), "{kept:#?}");
+        let plans = plain(&cell(&[step(StepKind::Other, "Plan", ""), step(StepKind::Other, "Plan", ""), fetch("example.com/a")], 100, now));
+        assert!(plans.iter().any(|row| row.ends_with("Plan ×2")), "{plans:#?}");
     }
 
     #[test]
