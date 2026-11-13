@@ -263,6 +263,11 @@ pub struct DecisionRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
     /// Whether its line was handed — at a turn's end, offered to the next.
+    /// For a window pane's agent before a command, whether its line was left
+    /// waiting for the pane's next tool boundary or brief: a line still
+    /// waiting may be dropped there (its decision edited, its folder's
+    /// consent withdrawn, no room, another launch), so the count of these is
+    /// an upper bound on the lines the agent read.
     pub applied: bool,
     pub elapsed_ms: u64,
     pub requests: u32,

@@ -1,0 +1,70 @@
+//! A person's own decisions asked by zo and asked for a window pane's agent
+//! are one decision each (t-106308): both programs build what a point lends,
+//! make the one request, read its JSON answer, judge whether it earns its
+//! line, say that line and write the one row by the same functions of the
+//! core (`zerocode_core::jev::custom`), and neither keeps a reader or a rule
+//! of its own — a function spelled a second time in one of them is a red
+//! here.
+
+use crate::support::strip_rust_comments;
+
+const ZO: &str =
+    include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/custom_decisions.rs");
+const WINDOW: &str = include_str!("../../src/pane_guard/decisions.rs");
+
+/// A source's shipped part: what comes before its test module.
+fn shipped(text: &'static str) -> String {
+    let code = text
+        .split("\n#[cfg(test)]\nmod tests")
+        .next()
+        .unwrap_or(text);
+    strip_rust_comments(code)
+}
+
+#[test]
+fn zo_and_a_window_pane_ask_a_persons_decision_by_one_set_of_functions() {
+    let (zo, window) = (shipped(ZO), shipped(WINDOW));
+    for (name, code) in [("zo", &zo), ("a window pane", &window)] {
+        for function in [
+            "custom::lent_before_command(",
+            "custom::lent_at_turn_end(",
+            "custom::body_of(",
+            "custom::read(",
+            "custom::earns_its_line(",
+            "custom::line(",
+            "custom::check(",
+            "custom::asks_in(",
+            "DecisionRow::of(",
+            "deadline_at(",
+            "standing(",
+        ] {
+            assert!(
+                code.contains(function),
+                "{name} does not call the core's {function}"
+            );
+        }
+        // Neither keeps the rules itself: the readers of an answer, the line's
+        // bar, the request's shape and the row live in the core.
+        for own in [
+            "fn earns_its_line",
+            "fn nearest_level",
+            "fn body_of",
+            "fn lent_before_command",
+            "fn lent_at_turn_end",
+            "fn deadline_at",
+            "fn standing",
+            "struct Reading",
+            "YES_FROM",
+            "HALF_A_LEVEL",
+            "noul::read_value",
+            "choice::read_value",
+            "score::read_value",
+            "\"rubricVersion\"",
+        ] {
+            assert!(
+                !code.contains(own),
+                "{own} spelled in {name}, outside the core"
+            );
+        }
+    }
+}

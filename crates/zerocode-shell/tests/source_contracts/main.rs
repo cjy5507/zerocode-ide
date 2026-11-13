@@ -27,6 +27,7 @@ mod google_quota_api;
 mod hand_in_keep;
 mod handoff_code;
 mod has_reach;
+mod jev_pane_decisions;
 mod jev_pane_seats;
 mod keys_tauri_reads;
 mod land_batch;

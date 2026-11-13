@@ -1820,9 +1820,12 @@ mod tests {
         use super::super::skill_search::SkillSuggestionJudge;
         use super::super::tool_guard::ToolGuardJudge;
 
-        let source = include_str!("custom_decisions.rs");
-        for named in ["type_value", "Road::"] {
-            assert!(!source.contains(named), "the decisions name {named}");
+        // What zo's decisions moved into the core is read here too (t-106308).
+        let moved = include_str!("../../../../../../crates/zerocode-core/src/jev/custom/answered.rs");
+        for source in [include_str!("custom_decisions.rs"), moved] {
+            for named in ["type_value", "Road::"] {
+                assert!(!source.contains(named), "the decisions name {named}");
+            }
         }
         let mock = decisions::replying(|_| decisions::a_noul(0.9));
         machine_words(&decisions::words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
