@@ -268,6 +268,52 @@ fn each_decision_is_counted_apart_by_version() {
     assert_eq!(report.earlier.iter().map(counted).collect::<Vec<_>>(), [(first, 1, 2, true)], "the one before it");
 }
 
+/// A row a pane's agent asked a decision with (t-106308) — the core's row,
+/// `from` naming the agent, written as the window writes it — is counted in
+/// the decision's week as zo's own rows are.
+#[test]
+fn a_panes_row_is_counted_in_its_decisions_week() {
+    use zerocode_core::jev::custom::{store, Answer, DecisionRow, Definition, Point};
+    use zerocode_core::jev::door::ANSWERED_OUTCOME;
+    use zerocode_core::jev::provenance;
+
+    let home = tempfile::tempdir().unwrap();
+    let ledgers = tempfile::tempdir().unwrap();
+    let decision = Definition::new(
+        "d-0000000d".to_string(),
+        "Visible".to_string(),
+        "Does this change what a person sees?".to_string(),
+        Answer::YesNo { yes: "A visible change.".to_string(), no: "No visible change.".to_string() },
+        Point::BeforeCommand,
+    );
+    store::create(home.path(), &decision, JevMode::On, 1_000).unwrap();
+    let entry = store::list(home.path()).unwrap().remove(0);
+    let now = 10 * MS_PER_DAY + MS_PER_DAY / 2;
+    let ledger = ledgers.path().join(CUSTOM_DECISIONS.ledger);
+    let written = |from: &str, at: i64| {
+        let mut row = DecisionRow::of(
+            u64::try_from(at).unwrap(),
+            from,
+            &entry,
+            &decision,
+            JevMode::On,
+            ANSWERED_OUTCOME,
+        );
+        row.requests = 1;
+        let mut row = serde_json::to_value(row).unwrap();
+        if provenance::needs_source(&row) {
+            provenance::stamp_for_ledger(&ledger, &mut row);
+        }
+        row
+    };
+    write(ledgers.path(), CUSTOM_DECISIONS.ledger, &[written("zo", now - 2_000), written("claude", now - 1_000)]);
+    let reports = custom_decisions_in(home.path(), &[ledgers.path().to_path_buf()], None, now, 0);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    let current = &reports[0].current;
+    assert_eq!((current.today.rows, current.week.rows), (2, 2), "asks today · week, the pane's among them");
+    assert_eq!((current.today.requests, current.week.requests), (2, 2), "requests sent");
+}
+
 #[test]
 fn a_screen_seats_rows_are_counted_across_its_session_folders() {
     // The window's screen seats append beside each walk's evidence:

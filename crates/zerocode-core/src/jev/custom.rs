@@ -1,7 +1,8 @@
 //! Decisions a person makes (t-62170): the definition the window writes, the
 //! rules a definition keeps before anything stores it, and the question it
-//! asks System One. Nothing asks one yet — zo's four points come next, and
-//! the window's editor after them.
+//! asks System One. zo asks one at its four points, the window asks the
+//! ones at a shell command and a turn's end for the agents in its panes, and
+//! both read the answer and keep its row as [`answered`] does.
 //!
 //! A definition is one version, never rewritten. Its version is the SHA-256
 //! of the bytes [`Definition::to_bytes`] writes, so a word changed anywhere is
@@ -27,7 +28,13 @@ use sha2::{Digest, Sha256};
 
 use super::{AGENT_TOOL_ASK_OPTIONS, JevMode};
 
+pub mod answered;
 pub mod store;
+
+pub use answered::{
+    DecisionRow, Lent, Reading, body_of, deadline_at, earns_its_line, lent_at_turn_end,
+    lent_before_command, nearest_level, read, standing,
+};
 
 /// The shape a definition ([`Definition::to_bytes`]) and the store's own files are written in; a file of another is not read.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -97,7 +104,9 @@ const KIND_SCORE: &str = "score";
 /// What a definition's `folders` holds for every folder the person consented to.
 const CONSENTED: &str = "consented";
 
-/// Whose turns a decision asks in: zo's own; a Claude Code or Codex pane is a later stage's.
+/// The word a definition's `targets` holds. Written when zo alone asked, and
+/// kept as it is: it is part of every version's hash, and the window asks the
+/// same definitions for its panes' agents too (t-106308).
 const TARGETS: [&str; 1] = ["zo"];
 
 /// Who answers: the judgment model the person set (System One), never a subscription login.

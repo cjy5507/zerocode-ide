@@ -7,7 +7,7 @@
 //! every one off, nothing is asked or written and nothing a turn says
 //! changes, and a folder's own store or a damaged one asks nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use api::sync_bridge::run_blocking;
@@ -17,9 +17,13 @@ use runtime::{
     ApiRequest, AssistantEvent, CommandRan, ContentBlock, ConversationMessage, ConversationRuntime, MessageRole,
     PermissionMode, PermissionPolicy, RuntimeError, Session, StaticToolExecutor, ToolGuardSeat,
 };
-use zerocode_core::jev::custom::{Field, Folders, Refusal};
+use serde_json::{json, Map};
+use zerocode_core::jev::custom::{Answer, Field, Folders, Refusal};
 use zerocode_core::jev::door::{CUSTOM_HOURLY_REQUESTS_SETTING, JEV_SETTINGS_KEY};
-use zerocode_core::jev::{COMMAND_GUARD, PROJECT_RULES, SKILL_SUGGESTION, SMART_SETTINGS_KEY, TOOL_TEXT_GUARD};
+use zerocode_core::jev::{
+    project_rules, AGENT_TOOL_ASK_OPTIONS, COMMAND_GUARD, COMMAND_GUARD_TASK_CHAR_CAP, PROJECT_RULES,
+    SKILL_SUGGESTION, SMART_SETTINGS_KEY, TOOL_TEXT_GUARD,
+};
 
 use super::super::jev_mock::{machine_words, Mock};
 use super::super::project_rules::{note_project_rule_turn, pending_project_rule_advice, project_rule_advice_delivered};
