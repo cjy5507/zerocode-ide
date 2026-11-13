@@ -3903,7 +3903,7 @@ function jevCustomFormOf(form, draft, rules) {
       hourly),
     jevCustomGroup("model", jevText("jev.custom.modelLegend", "답하는 모델", "legend"), jevCustomModelLine()),
     jevCustomGroup("line", jevText("jev.custom.lineLegend", "에이전트가 읽는 줄", "legend"),
-      jevText("jev.custom.lineAbout", "켠 결정의 답이 기준을 넘으면 에이전트가 이 줄을 읽습니다.", "p", "jev-custom-about-line"), line),
+      jevText("jev.custom.lineAbout", "켠 결정의 답이 기준을 넘으면 에이전트가 이 줄을 읽습니다. 예/아니오 결정은 「예」의 뜻이 실립니다.", "p", "jev-custom-about-line"), line),
     jevNode("details", "jev-custom-preview", jevText("jev.custom.preview", "보내는 내용 미리보기", "summary"), questions));
   jevCustomAnswerFields(form, draft.answer, rules);
   const preview = jevInputPreview(form, () => {
@@ -3935,7 +3935,7 @@ function jevCustomAnswerFields(form, answer, rules) {
   };
   if (answer.kind !== "choice" && answer.kind !== "score") {
     holder.replaceChildren(legend,
-      jevCustomAbout("jev.custom.yesNoAbout", "예와 아니오가 각각 무엇을 뜻하는지 적습니다. 각 {{meaningMax}}자까지입니다."),
+      jevCustomAbout("jev.custom.yesNoAbout", "예와 아니오가 각각 무엇을 뜻하는지 적습니다. 각 {{meaningMax}}자까지입니다. 켜 둔 결정이 스스로 물을 때는 답이 「예」일 때만 그 뜻을 에이전트에게 한 줄로 건넵니다. 에이전트가 알아야 할 쪽을 「예」로 적으세요. 에이전트가 이름으로 물을 때는 두 답 모두 건넵니다."),
       jevNode("label", "jev-custom-label", jevText("jev.custom.yesMeans", "「예」의 뜻"), area("yes", answer.yes)),
       jevNode("label", "jev-custom-label", jevText("jev.custom.noMeans", "「아니오」의 뜻"), area("no", answer.no)));
     jevCustomExamples(form, answer.kind);
