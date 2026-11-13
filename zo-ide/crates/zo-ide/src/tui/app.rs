@@ -1216,8 +1216,8 @@ fn status_detail_for(kind: &ToolKind) -> String {
         ToolKind::WebFetch { url } => format!("fetching {}", super::strings::address_shown(url)),
         ToolKind::Spawn { label, .. } => format!("spawning {label}"),
         ToolKind::AgentResult { label, .. } => format!("agent result from {label}"),
-        ToolKind::Call { name, detail } if detail.is_empty() => name.clone(),
-        ToolKind::Call { name, detail } => format!("{name} · {detail}"),
+        ToolKind::Call { name, detail } if detail.is_empty() => super::strings::mcp_name_shown(name),
+        ToolKind::Call { name, detail } => format!("{} {detail}", super::strings::mcp_name_shown(name)),
     }
 }
 
@@ -10092,7 +10092,7 @@ mod tests {
         assert_eq!(
             (
                 frame.matches("\u{1b}[K• Updated Plan").count(),
-                plain.matches("✓ Call TodoWrite").count() + plain.matches("✗ Call TodoWrite").count(),
+                plain.matches("✓ TodoWrite").count() + plain.matches("✗ TodoWrite").count(),
             ),
             (1, 0),
             "one TodoWrite call must render exactly one plan cell: {frame:?}"
@@ -10904,7 +10904,7 @@ mod tests {
         });
         let visible: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         assert!(
-            visible.iter().any(|line| line.contains("Call ToolSearch"))
+            visible.iter().any(|line| line.contains("ToolSearch select:missing"))
                 && visible.iter().any(|line| line.contains("discovery denied")),
             "failed discovery was hidden: {visible:?}"
         );
@@ -12051,6 +12051,11 @@ mod tests {
             ("c2", "mcp__playwright__browser_take_screenshot"),
             ("c3", "mcp__playwright__browser_console_messages"),
         ];
+        let shown = [
+            "playwright · browser_navigate",
+            "playwright · browser_take_screenshot",
+            "playwright · browser_console_messages",
+        ];
         for (call, name) in calls {
             ui.block(tool_call(&ids, call, name, &json!({"url": "https://example.com"})));
             ui.block(RenderBlock::ToolResult {
@@ -12066,12 +12071,12 @@ mod tests {
         let rows: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
         let first = rows
             .iter()
-            .position(|row| row.starts_with(&format!("✓ Call {}", calls[0].1)))
+            .position(|row| row.starts_with(&format!("✓ {}", shown[0])))
             .unwrap_or_else(|| panic!("no first call row: {rows:#?}"));
         assert!(first > 0 && rows[first - 1].is_empty(), "the run keeps its gap: {rows:#?}");
-        for (offset, (_, name)) in calls.iter().enumerate().skip(1) {
+        for (offset, name) in shown.iter().enumerate().skip(1) {
             assert!(
-                rows[first + offset].starts_with(&format!("✓ Call {name}")),
+                rows[first + offset].starts_with(&format!("✓ {name}")),
                 "no blank row between the calls: {rows:#?}"
             );
         }

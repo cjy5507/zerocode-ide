@@ -20,7 +20,7 @@
 //! | 웹 검색 | `✓ Search <q> on the web` |
 //! | 스폰 | `✓ Spawn <label> [role] (request)` 과 그 아래 진행·결과 한 줄 |
 //! | 받아 오기 | `✓ Fetch <address>` (scheme 없이) |
-//! | 그 외(MCP 등) | `✓ Call <name>(<args>)` 과 그 아래 결과 |
+//! | 그 외(MCP 등) | `✓ <server> · <tool> <args>` 과 그 아래 결과 |
 //!
 //! # 트랜스크립트 힌트를 뺀 이유
 //!
@@ -643,7 +643,9 @@ impl ToolGroup {
                 ToolKind::AgentResult { label, .. } => {
                     out.push(step(StepKind::Other, super::strings::STEP_AGENT, label.clone()));
                 }
-                ToolKind::Call { name, .. } => out.push(step(StepKind::Other, name, String::new())),
+                ToolKind::Call { name, detail } => {
+                    out.push(step(StepKind::Other, &super::strings::mcp_name_shown(name), detail.clone()));
+                }
             }
         }
         out
@@ -1073,7 +1075,7 @@ impl ToolGroup {
         }
     }
 
-    /// `✓ Call <name>(<args>)` and what the call returned under it; an
+    /// `✓ <server> · <tool>(<args>)` and what the call returned under it; an
     /// empty result adds no row.
     fn mcp_lines(
         &self,
@@ -1083,18 +1085,12 @@ impl ToolGroup {
         width: usize,
         elapsed: Duration,
     ) -> Vec<Line> {
-        let mut invocation = vec![Span::new(
-            name.to_string(),
-            Style::new().fg(palette::TOOL_LABEL),
-        )];
-        if !detail.is_empty() {
-            invocation.push(Span::raw("("));
-            invocation.push(Span::dim(detail.to_string()));
-            invocation.push(Span::raw(")"));
-        }
+        // The tool is the row's verb (`almanac · read_webpage`), its argument
+        // the target; a call with no argument is its verb alone.
+        let target = if detail.is_empty() { Vec::new() } else { vec![Span::dim(detail.to_string())] };
         let result = call.done.as_ref().filter(|done| !done.ok).map(failure_result).unwrap_or_default();
-        let mut out =
-            self.uncut_row(call, super::strings::TOOL_CALL, invocation, result, width, elapsed);
+        let shown = super::strings::mcp_name_shown(name);
+        let mut out = self.uncut_row(call, &shown, target, result, width, elapsed);
         if let Some(done) = call.done.as_ref() {
             let said = mcp_envelope_text(&done.output);
             let output = said.as_deref().unwrap_or(&done.output);
@@ -1341,12 +1337,14 @@ fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width
     let wanted: usize = target.iter().map(Span::width).sum();
     let short = wanted.saturating_sub(target_budget(verb, &result, column).saturating_sub(closing));
     let width = width.min(column + short);
-    let opened = call_opening(verb);
+    // A call with nothing to say about its argument is its verb alone.
+    let bare = wanted == 0;
+    let opened = if bare { verb.to_string() } else { call_opening(verb) };
     let mut spans = vec![glyph, Span::raw(" "), Span::bold(opened)];
     let result_width: usize = result.iter().map(Span::width).sum();
     let target = Line::new(target).truncated(target_budget(verb, &result, width).saturating_sub(closing));
     spans.extend(target.spans);
-    if marks {
+    if marks && !bare {
         spans.push(Span::bold(call_closing()));
     }
     let used: usize = spans.iter().map(Span::width).sum();
@@ -2445,7 +2443,7 @@ mod tests {
         // the invocation as its target while it runs and once it is done.
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "⠋ Call TodoWrite(3 items)"
+            "⠋ TodoWrite 3 items"
         );
         assert!(group.complete(
             "a",
@@ -2461,7 +2459,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
             vec![
-                "✓ Call TodoWrite(3 items)".to_string(),
+                "✓ TodoWrite 3 items".to_string(),
                 "  └ done".to_string()
             ]
         );
@@ -2485,7 +2483,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO))[0],
-            "⠋ Call TodoWrite"
+            "⠋ TodoWrite"
         );
     }
 
@@ -2563,7 +2561,7 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["✓ Call Sleep".to_string()]
+            vec!["✓ Sleep".to_string()]
         );
     }
 
@@ -2595,14 +2593,14 @@ mod tests {
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
         let rows = plain(&group.lines(24, Duration::ZERO));
 
-        assert!(rows[0].starts_with("✓ Call Lookup("), "rows were {rows:?}");
+        assert!(rows[0].starts_with("✓ Lookup "), "rows were {rows:?}");
         assert!(rows.len() >= 3, "rows were {rows:?}");
         assert!(
             rows[1..rows.len() - 1].iter().all(|row| row.starts_with("    ")),
             "rows were {rows:?}"
         );
         assert!(rows.iter().all(|row| !row.contains('…')), "rows were {rows:?}");
-        assert!(rows.iter().any(|row| row.contains("epsilon)")), "rows were {rows:?}");
+        assert!(rows.iter().any(|row| row.contains("epsilon")), "rows were {rows:?}");
         assert_eq!(rows.last().expect("output row"), "  └ ok");
     }
 
@@ -3312,8 +3310,8 @@ mod tests {
                 detail: "alpha beta gamma delta".to_string(),
             }),
             vec![
-                "✓ Call Lookup(alpha beta".to_string(),
-                "    gamma delta)".to_string(),
+                "✓ Lookup alpha beta".to_string(),
+                "    gamma delta".to_string(),
             ]
         );
     }
@@ -3379,7 +3377,7 @@ mod tests {
                 r####"{"content":[{"type":"text","text":"### Result\nTook the viewport screenshot and saved it as page-1.png"},{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}],"structuredContent":null}"####,
             ),
             vec![
-                "✓ Call mcp__playwright__browser_take_screenshot".to_string(),
+                "✓ playwright · browser_take_screenshot".to_string(),
                 "  └ ### Result".to_string(),
                 "    Took the viewport screenshot and saved it as page-1.png".to_string(),
                 "    [image]".to_string(),
@@ -3387,7 +3385,7 @@ mod tests {
         );
         assert_eq!(
             call("mcp__playwright__browser_resize", r#"{"content":[],"structuredContent":null}"#),
-            vec!["✓ Call mcp__playwright__browser_resize".to_string()]
+            vec!["✓ playwright · browser_resize".to_string()]
         );
         let snapshot = (1..=300)
             .map(|n| format!("- generic [ref=e{n}]: row {n}"))
@@ -3419,7 +3417,7 @@ mod tests {
         assert_eq!(
             plain(&group.lines(80, Duration::ZERO)),
             vec![
-                "✓ Call mcp__playwright__browser_navigate".to_string(),
+                "✓ playwright · browser_navigate".to_string(),
                 "  └ ### Page state".to_string(),
                 "    - generic [ref=e1]: row 1".to_string(),
                 "    - generic [ref=e2]: ro".to_string(),

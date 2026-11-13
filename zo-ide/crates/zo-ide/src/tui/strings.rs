@@ -412,7 +412,6 @@ pub const TOOL_EDIT: &str = "Edit";
 pub const TOOL_CREATE: &str = "Create";
 pub const TOOL_DELETE: &str = "Delete";
 pub const TOOL_CHECK: &str = "Check";
-pub const TOOL_CALL: &str = "Call";
 pub const TOOL_FETCH: &str = "Fetch";
 pub const TOOL_SPAWN: &str = "Spawn";
 /// Where a web search looks, in the place a file search names its path:
@@ -502,6 +501,18 @@ pub fn address_shown(url: &str) -> &str {
     url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url)
 }
 
+/// An MCP tool's name as a row says it: `mcp__almanac__read_webpage` is the
+/// tool `read_webpage` of the server `almanac`, `almanac · read_webpage`. The
+/// first `__` after the prefix splits them; a name that is not in that shape
+/// stays as it is.
+#[must_use]
+pub fn mcp_name_shown(name: &str) -> String {
+    match name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
+        Some((server, tool)) if !server.is_empty() && !tool.is_empty() => format!("{server} · {tool}"),
+        _ => name.to_string(),
+    }
+}
+
 /// A result's size as a row says it: `812 B`, `3.1 KB`, `1.2 MB`.
 #[must_use]
 pub fn size_shown(bytes: usize) -> String {
@@ -558,7 +569,7 @@ fn tenths_of_mib(bytes: u64) -> String {
 
 #[cfg(test)]
 mod opening_tests {
-    use super::{address_shown, opening_progress, quoted, size_shown};
+    use super::{address_shown, mcp_name_shown, opening_progress, quoted, size_shown};
 
     #[test]
     fn the_opening_line_says_how_much_is_read_in_mib_and_percent() {
@@ -571,7 +582,12 @@ mod opening_tests {
     }
 
     #[test]
-    fn an_address_loses_its_scheme() {
+    fn an_mcp_tool_is_its_server_and_its_name_and_an_address_loses_its_scheme() {
+        assert_eq!(mcp_name_shown("mcp__almanac__read_webpage"), "almanac · read_webpage");
+        assert_eq!(mcp_name_shown("mcp__a__b__c"), "a · b__c", "only the first `__` splits");
+        for plain in ["Sleep", "mcp__", "mcp__server", "mcp____tool", "mcp__server__"] {
+            assert_eq!(mcp_name_shown(plain), plain);
+        }
         assert_eq!(address_shown("https://huggingface.co/api/x"), "huggingface.co/api/x");
         assert_eq!(address_shown("http://a.test"), "a.test");
         assert_eq!(address_shown("a.test/x"), "a.test/x");

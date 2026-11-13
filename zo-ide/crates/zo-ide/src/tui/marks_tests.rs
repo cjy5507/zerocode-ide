@@ -347,6 +347,11 @@ fn a_run_of_fetches_reads_as_calls_with_their_results() {
             finished(&"y".repeat(812)),
         ),
         (
+            ToolKind::Call { name: "mcp__almanac__read_webpage".to_string(), detail: "https://example.test/page".to_string() },
+            finished("text"),
+        ),
+        (ToolKind::Call { name: "mcp__almanac__whoami".to_string(), detail: String::new() }, finished("me")),
+        (
             ToolKind::Explore(vec![Explored::Search { query: "TODO".to_string(), path: Some("src".to_string()) }]),
             finished("src/a.rs:1:// TODO\nsrc/b.rs:2:// TODO\n"),
         ),
@@ -361,6 +366,8 @@ fn a_run_of_fetches_reads_as_calls_with_their_results() {
             "    Fetch(huggingface.co/api/models/acme/beta)  failed",
             "    HTTP 404 Not Found",
             "    Search(\"https://example.test/a\" on the web)  812 B",
+            "    almanac · read_webpage(https://example.test/page)",
+            "    almanac · whoami",
             "    Search(\"TODO\" in src)  2 matches",
             "    Run(ls -la)  3 lines",
         ]
