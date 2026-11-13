@@ -381,20 +381,13 @@ fn parked_ms_for(kind: api::ProviderKind) -> u64 {
 /// read at all: the callers build no model list for the probe.
 ///
 /// A session spelled `<provider key>/<id>` with one of the model catalog's
-/// own keys is on the provider that key names, whatever the id reads as
-/// (`ModelCatalog::provider_for_model`, asked first where the session's
-/// client is built). The pick reads the id after the slash, so where the two
-/// part — `openai/gemini-…`, or `google/<an id a person's own provider
-/// declares>` — the probe would be another provider's model than the
-/// session's: nobody is asked. Nor under a key the catalog does not have.
-/// Read from the letters alone: no catalog file, no discovery cache.
+/// own keys is on the provider that key names, whatever the id reads as, and
+/// so is a row the person wrote into the catalog: the probe asks that
+/// provider's fast model ([`crate::fanout::fast_tier_model`], which reads
+/// where the session's requests go in the order its client is built). In
+/// v1.1.146 and v1.1.147 the pick still read the id after the slash, so
+/// where key and id parted — `openai/gemini-…` — nobody was asked.
 fn probe_model(parent_model: &str) -> Option<String> {
-    if let Some((key, _)) = parent_model.trim().split_once('/') {
-        let keyed = runtime::model_catalog::CatalogProvider::from_key(key)?.kind();
-        if keyed != api::detect_provider_kind(parent_model) {
-            return None;
-        }
-    }
     crate::fanout::fast_tier_model(Some(parent_model))
 }
 
@@ -818,74 +811,46 @@ mod tests {
         );
     }
 
-    /// A person's own providers declared for as long as it lives, on a config
-    /// home of its own, and what stood there put back when it goes. Declared
-    /// after the environment lock's guard, so it goes first.
-    struct OwnProvidersDeclared {
-        providers: Option<std::ffi::OsString>,
-        home: Option<std::ffi::OsString>,
-        dir: std::path::PathBuf,
-    }
-
-    impl OwnProvidersDeclared {
-        fn new(providers: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("zo-tools-probe-own-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("a config home");
-            let home = std::env::var_os(core_types::paths::ZO_CONFIG_HOME_ENV);
-            std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, &dir);
-            let before = std::env::var_os(api::CUSTOM_PROVIDERS_ENV);
-            std::env::set_var(api::CUSTOM_PROVIDERS_ENV, providers);
-            api::refresh_custom_providers_from_env();
-            Self { providers: before, home, dir }
-        }
-    }
-
-    impl Drop for OwnProvidersDeclared {
-        fn drop(&mut self) {
-            match self.providers.take() {
-                Some(before) => std::env::set_var(api::CUSTOM_PROVIDERS_ENV, before),
-                None => std::env::remove_var(api::CUSTOM_PROVIDERS_ENV),
-            }
-            api::refresh_custom_providers_from_env();
-            match self.home.take() {
-                Some(home) => std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, home),
-                None => std::env::remove_var(core_types::paths::ZO_CONFIG_HOME_ENV),
-            }
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
     /// A session spelled `<provider key>/<id>` is on the provider its key
-    /// names. Where the id after the slash reads as another provider's — a
-    /// Google id under OpenAI's key, an id a person's own provider declares
-    /// under Google's — the probe would go where the session does not, so
-    /// nobody is asked. Where key and id agree, and for a bare id, the probe
-    /// asks that provider's fast model as before.
+    /// names, and the probe asks that provider's fast model whatever the id
+    /// after the slash reads as: a Google id under OpenAI's key is asked on
+    /// OpenAI, an id a person's own provider declares under Google's key on
+    /// Google. Those are the accounts such a session's own requests go on.
+    /// A word before the slash that names nobody leaves the id to be read.
     #[test]
-    fn a_session_keyed_to_another_provider_than_its_id_reads_as_asks_nobody() {
-        let _held = crate::tests::env_lock()
+    fn a_session_keyed_to_a_provider_asks_that_providers_fast_model() {
+        let held = crate::tests::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _own = OwnProvidersDeclared::new(
+        let _home = crate::tests::ConfigHome::empty(&held);
+        let _own = crate::tests::OwnProviders::declared(
+            &held,
             r#"[{"name":"zqrelay","base_url":"https://relay.invalid/v1","models":["gemini-zq-own"],"requires_auth":false}]"#,
         );
-        assert_eq!(probe_model("google/gemini-zq-own"), None, "Google's by its key, the relay's by its id");
-        assert_eq!(probe_model("openai/gemini-3.5-flash"), None, "OpenAI's by its key, Google's by its id");
-        assert_eq!(probe_model("zqnobody/gpt-zq-probe-session"), None, "a key the catalog does not have");
-        assert!(!probe_has_a_model("google/gemini-zq-own"));
-
         let asked = |parent: &str| probe_model(parent).map(|model| api::resolve_model_alias(&model));
         let haiku = api::resolve_model_alias("haiku");
+        let google = asked("gemini-zq-probe-session");
+        assert!(
+            google.as_deref().is_some_and(|model| model.starts_with("gemini")),
+            "a Gemini session asks a Gemini model: {google:?}"
+        );
+
+        // The key's provider, where key and id part.
+        assert_eq!(asked("google/gemini-zq-own"), google, "Google's by its key, the relay's by its id");
+        assert_eq!(asked("openai/gemini-3.5-flash").as_deref(), Some("gpt-5.6-luna"), "OpenAI's by its key");
+        assert!(probe_has_a_model("google/gemini-zq-own"));
+        // Bare, the relay's id is the relay's session, and the relay has no
+        // fast model of its own.
+        assert_eq!(asked("gemini-zq-own"), None);
+        // And where they agree, as before.
         assert_eq!(asked("anthropic/claude-zq-probe-session"), Some(haiku.clone()));
         assert_eq!(asked("claude/claude-zq-probe-session"), Some(haiku));
         assert_eq!(asked("openai/gpt-zq-probe-session").as_deref(), Some("gpt-5.6-luna"));
-        let google = asked("google/gemini-zq-probe-session");
-        assert!(
-            google.as_deref().is_some_and(|model| model.starts_with("gemini")),
-            "Google's key over a Google id: {google:?}"
-        );
+        assert_eq!(asked("google/gemini-zq-probe-session"), google);
         assert_eq!(asked("gpt-zq-probe-session").as_deref(), Some("gpt-5.6-luna"), "a bare id");
+        // A key the catalog does not have names nobody: the id is read.
+        assert_eq!(asked("zqnobody/gpt-zq-probe-session").as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(asked("zqnobody/zq-some-model"), None);
     }
 
     /// A session whose provider has no fast model of its own has nobody to

@@ -6,7 +6,8 @@
 //! asks about several models loads the catalog once ([`Homes`]).
 
 use runtime::model_catalog::ModelCatalog;
-use runtime::model_home::ModelHome;
+
+pub(crate) use runtime::model_home::ModelHome;
 
 /// One reading of the model catalog the person edits, for as many models as
 /// the caller asks about. The file is read when this is made and not again.
