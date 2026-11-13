@@ -364,7 +364,7 @@ fn a_run_of_fetches_reads_as_calls_with_their_results() {
         [
             "  ⎿ Fetch(huggingface.co/api/models/acme/alpha)  3.1 KB",
             "    Fetch(huggingface.co/api/models/acme/beta)  failed",
-            "    HTTP 404 Not Found",
+            "      HTTP 404 Not Found",
             "    Search(\"https://example.test/a\" on the web)  812 B",
             "    almanac · read_webpage(https://example.test/page)",
             "    almanac · whoami",
@@ -423,7 +423,7 @@ fn a_failed_step_stays_when_the_rest_fold_away() {
         [
             "  ⎿ … 6 earlier",
             "    Read(gone.rs)  failed",
-            "    No such file: gone.rs",
+            "      No such file: gone.rs",
             "    Read(f7.rs)  1 line",
             "    Read(f8.rs)  1 line",
             "    Read(f9.rs)  1 line",
@@ -491,8 +491,8 @@ fn turns_live_rows_aligns_finished_and_running_calls_and_marks_multiline_command
 }
 
 #[test]
-fn a_failed_bare_tool_strips_redundant_prefix_and_joins_with_dot() {
-    if !style::in_fresh_run(&path("a_failed_bare_tool_strips_redundant_prefix_and_joins_with_dot")) {
+fn a_failed_bare_tool_strips_redundant_prefix_and_keeps_its_result_two_columns_off() {
+    if !style::in_fresh_run(&path("a_failed_bare_tool_strips_redundant_prefix_and_keeps_its_result_two_columns_off")) {
         return;
     }
     style::init(&Preferences::default());
@@ -517,10 +517,10 @@ fn a_failed_bare_tool_strips_redundant_prefix_and_joins_with_dot() {
     assert_eq!(
         plain(&fold.live_rows(98, 16)),
         [
-            "  ⎿ session_recall · failed",
-            "    provide `query` to search across sessions, or `session_id`",
+            "  ⎿ session_recall  failed",
+            "      provide `query` to search across sessions, or `session_id`",
             "    Run(psql -c 'select 1')  exit 1",
-            "    ERROR:  function left(jsonb, integer) does not exist",
+            "      ERROR:  function left(jsonb, integer) does not exist",
         ]
     );
 }
@@ -535,4 +535,39 @@ fn marks_prose_keeps_a_right_gutter_on_medium_panes() {
     let rows = super::cells::prefixed_prose(&[prose], 98, &Prefix::hang(), true);
     assert!(rows.len() >= 2, "{rows:?}");
     assert!(rows.iter().all(|row| row.width() <= 95), "{rows:?}");
+}
+
+/// A call reads the same while it runs and once it ends, and is cut the same
+/// way: an address too long for its row gives up its middle on both rows,
+/// keeping its host and its last part. The running row cut it at its end
+/// (f81e7c8a4), so the row changed its words the moment the call ended.
+#[test]
+fn a_long_address_gives_up_its_middle_while_it_runs_and_after() {
+    if !style::in_fresh_run(&path("a_long_address_gives_up_its_middle_while_it_runs_and_after")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let url = "https://huggingface.co/api/models/acme-research/zq-coder-7b-instruct-preview/tree/main/config.json";
+    let mut group = ToolGroup::new(ToolCall::new("a".to_string(), ToolKind::WebFetch { url: url.to_string() }));
+    let running = plain(&group.turns_live_rows(60, Duration::ZERO, false));
+    assert!(group.complete("a", finished(&"x".repeat(3100))));
+    let done = plain(&group.turns_live_rows(60, Duration::ZERO, false));
+    // The call's words on each row: from its verb to its closing parenthesis.
+    let call = |row: &str| -> String {
+        let from = row.find("Fetch(").unwrap_or_else(|| panic!("{row:?}"));
+        let to = row.rfind(')').unwrap_or_else(|| panic!("{row:?}"));
+        row[from..=to].to_string()
+    };
+    let (shown, said) = (call(&running[0]), call(&done[0]));
+    for words in [&shown, &said] {
+        assert!(words.starts_with("Fetch(huggingface.co/"), "{running:?} {done:?}");
+        assert!(words.ends_with("config.json)"), "{running:?} {done:?}");
+        assert_eq!(words.matches('…').count(), 1, "{running:?} {done:?}");
+    }
+    // The finished row gives its result room from the same middle.
+    let (head, tail) = said.split_once('…').expect("cut");
+    assert!(shown.starts_with(head) && shown.ends_with(tail), "{shown:?} / {said:?}");
+    for row in running.iter().chain(&done) {
+        assert!(super::ansi::str_width(row) <= 60, "{row:?}");
+    }
 }

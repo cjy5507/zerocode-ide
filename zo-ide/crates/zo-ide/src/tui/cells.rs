@@ -89,6 +89,9 @@ pub fn prefixed(lines: &[Line], width: usize, prefix: &Prefix, first: bool) -> V
 /// Right-hand breathing room for `Marks` prose so wrapped lines never slam
 /// into the pane's right border or scrollbar on ~100-column IDE splits.
 const PROSE_RIGHT_GUTTER: usize = 3;
+/// The narrowest pane that keeps [`PROSE_RIGHT_GUTTER`]: below it every
+/// column is the text's.
+const PROSE_GUTTER_FROM: usize = 40;
 
 /// [`prefixed`] for prose: its lines wrap at the reading width when the look
 /// has one, and remember it, so a screen rebuilt wider wraps them there
@@ -96,7 +99,7 @@ const PROSE_RIGHT_GUTTER: usize = 3;
 #[must_use]
 pub fn prefixed_prose(lines: &[Line], width: usize, prefix: &Prefix, first: bool) -> Vec<Line> {
     let look = super::style::current();
-    let measure = if look.style == super::style::TuiStyle::Marks && width >= 40 {
+    let measure = if look.style == super::style::TuiStyle::Marks && width >= PROSE_GUTTER_FROM {
         let safe_width = width.saturating_sub(PROSE_RIGHT_GUTTER);
         Some(look.prose_width.map_or(safe_width, |cap| cap.min(safe_width)))
     } else {

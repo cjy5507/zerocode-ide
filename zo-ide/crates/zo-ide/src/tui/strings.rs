@@ -168,6 +168,15 @@ pub const TOOL_CALL_INTERRUPTED: &str = "interrupted before its result";
 pub fn more_lines(more: usize) -> String {
     format!("… {more} more lines")
 }
+/// `+2 lines` — the lines of a command's script after the first, which its
+/// row in the `turns` view does not show.
+#[must_use]
+pub fn command_more_lines(more: usize) -> String {
+    format!("+{more} {}", if more == 1 { "line" } else { "lines" })
+}
+/// After a command's first line that leaves a quote or a pipe open: the line
+/// shown is not the whole command.
+pub const COMMAND_CONTINUES: &str = " …";
 /// The first row of a turn's work in the viewport when not all of it fits:
 /// how many rows of it stand above the ones shown ([`super::turns`]).
 #[must_use]

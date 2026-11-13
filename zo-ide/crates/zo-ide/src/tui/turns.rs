@@ -304,87 +304,68 @@ impl TurnFold {
 }
 
 /// A step's row in the viewport: its hung mark, the call as the running row
-/// said it, and what it came to. The tail is kept before the target is: a
-/// target that does not fit gives up its own end (an address its middle) so
-/// the result stays on the row.
+/// said it, and what it came to.
 pub(super) fn step_row(step: &Step, lead: &str, width: usize) -> Line {
     let tail = step_tail(step, true, true);
-    if step.target.is_empty() {
-        let mut spans = vec![Span::dim(lead), Span::dim(step.verb.clone())];
-        if let Some((first, rest)) = tail.split_first() {
-            if first.text == "  " {
-                spans.push(Span::dim(" · "));
-                spans.extend(rest.iter().cloned());
-            } else {
-                spans.extend(tail);
-            }
-        }
-        return Line::new(spans).truncated(width);
-    }
-    let opening = super::tools::call_opening(&step.verb);
-    let closing = super::tools::call_closing();
-    let fixed = [lead, opening.as_str(), closing].iter().map(|text| super::ansi::str_width(text)).sum::<usize>()
-        + tail.iter().map(Span::width).sum::<usize>();
-    let budget = width.saturating_sub(fixed).max(1);
-    let target = if super::ansi::str_width(&step.target) <= budget {
-        step.target.clone()
-    } else if step.kind == StepKind::Fetch {
-        super::paths::center_truncate_path(&step.target, budget)
-    } else {
-        Line::new(vec![Span::raw(step.target.clone())]).truncated(budget).plain()
-    };
-    let mut spans = vec![Span::dim(lead), Span::dim(format!("{opening}{target}{closing}"))];
-    spans.extend(tail);
-    Line::new(spans).truncated(width)
+    call_row(vec![Span::dim(lead)], &step.verb, &step.target, step.kind == StepKind::Fetch, Style::new().dim(), tail, width)
 }
 
-/// A live (running) step's row in the `turns` viewport, aligned to the exact
-/// same column as [`step_row`] so finishing or folding causes no horizontal
-/// jump.
-pub(super) fn running_step_row(
-    spinner: Span,
-    verb: &str,
-    target: &str,
-    extra_note: Option<&str>,
-    width: usize,
-) -> Line {
-    let lead_width = 4usize; // "  " + spinner(1) + " "
-    let tail: Vec<Span> = extra_note
-        .map(|note| vec![Span::dim(format!("  {note}"))])
-        .unwrap_or_default();
-    let tail_width: usize = tail.iter().map(Span::width).sum();
+/// A running call's row in the `turns` viewport: the spinner where a
+/// finished step's hung mark stands, and the call as [`step_row`] will say
+/// it, at the same column and cut the same way — the row does not move or
+/// change its words when the call ends. `note` is what the call says beside
+/// its target while it runs (`+2 lines` of a command's script).
+pub(super) fn running_step_row(spinner: Span, verb: &str, target: &str, address: bool, note: Option<&str>, width: usize) -> Line {
+    let mark = super::style::glyphs().result_first;
+    let indent = mark.len() - mark.trim_start().len();
+    let lead = vec![Span::raw(" ".repeat(indent)), spinner, Span::raw(" ")];
+    let tail = note.map(|note| vec![Span::dim(format!("{RESULT_GAP}{note}"))]).unwrap_or_default();
+    call_row(lead, verb, target, address, Style::new(), tail, width)
+}
+
+/// What stands between a call and what it came to, on every row that says
+/// both — a step that names a target and one that does not alike.
+const RESULT_GAP: &str = "  ";
+
+/// A call's row: `lead`, the call — `Verb(target)`, or the verb alone — and
+/// `tail`. The tail is kept before the target is: a target that does not fit
+/// gives up its own end (an address its middle) so the result stays on the
+/// row.
+fn call_row(lead: Vec<Span>, verb: &str, target: &str, address: bool, style: Style, tail: Vec<Span>, width: usize) -> Line {
+    let mut spans = lead;
     if target.is_empty() {
-        let mut spans = vec![Span::raw("  "), spinner, Span::raw(" "), Span::raw(verb.to_string())];
+        spans.push(Span::new(verb.to_string(), style));
         spans.extend(tail);
         return Line::new(spans).truncated(width);
     }
     let opening = super::tools::call_opening(verb);
     let closing = super::tools::call_closing();
-    let fixed = lead_width
+    let fixed = spans.iter().chain(tail.iter()).map(Span::width).sum::<usize>()
         + super::ansi::str_width(&opening)
-        + super::ansi::str_width(closing)
-        + tail_width;
+        + super::ansi::str_width(closing);
     let budget = width.saturating_sub(fixed).max(1);
-    let shown_target = if super::ansi::str_width(target) <= budget {
+    let target = if super::ansi::str_width(target) <= budget {
         target.to_string()
+    } else if address {
+        super::paths::center_truncate_path(target, budget)
     } else {
         Line::new(vec![Span::raw(target.to_string())]).truncated(budget).plain()
     };
-    let mut spans = vec![
-        Span::raw("  "),
-        spinner,
-        Span::raw(" "),
-        Span::raw(format!("{opening}{shown_target}{closing}")),
-    ];
+    spans.push(Span::new(format!("{opening}{target}{closing}"), style));
     spans.extend(tail);
     Line::new(spans).truncated(width)
 }
+
+/// How much deeper than its step the row that says why it failed stands —
+/// under the call's words, not beside them, in the viewport as in the fold.
+const WHY_INDENT: &str = "  ";
 
 /// The row under a failed step: what it said first.
 pub(super) fn why_row(step: &Step, width: usize) -> Option<Line> {
     let why = step.error.as_ref()?;
     let glyphs = super::style::glyphs();
-    Some(Line::new(vec![Span::raw(glyphs.result_rest), Span::new(why.clone(), Style::new().fg(palette::TOOL_FAIL).dim())]).truncated(width))
+    let lead = format!("{}{WHY_INDENT}", glyphs.result_rest);
+    Some(Line::new(vec![Span::raw(lead), Span::new(why.clone(), Style::new().fg(palette::TOOL_FAIL).dim())]).truncated(width))
 }
 
 /// `1 step`, `7 steps` — a fold's count, in its cell and on the working row,
@@ -404,11 +385,11 @@ fn step_tail(step: &Step, quiet: bool, per_call: bool) -> Vec<Span> {
     if !step.ok {
         let word = step.failure.clone().unwrap_or_else(|| strings::TOOL_FAILED_RESULT.to_string());
         let style = if step.declined { Style::new().dim() } else { tint(palette::TOOL_FAIL) };
-        return vec![Span::raw("  "), Span::new(word, style)];
+        return vec![Span::raw(RESULT_GAP), Span::new(word, style)];
     }
     if let Some((added, removed)) = step.change {
         return vec![
-            Span::raw("  "),
+            Span::raw(RESULT_GAP),
             Span::new(format!("+{added}"), tint(Color::GREEN)),
             Span::raw(" "),
             Span::new(format!("-{removed}"), tint(Color::RED)),
@@ -416,10 +397,10 @@ fn step_tail(step: &Step, quiet: bool, per_call: bool) -> Vec<Span> {
     }
     let mut tail = Vec::new();
     if let Some(result) = step.result.as_ref().filter(|_| per_call) {
-        tail.push(Span::dim(format!("  {result}")));
+        tail.push(Span::dim(format!("{RESULT_GAP}{result}")));
     }
     if let Some(took) = step.took.filter(|took| step.kind == StepKind::Run && took.as_secs() > 0) {
-        tail.push(Span::dim(format!("  {:.1}s", took.as_secs_f32())));
+        tail.push(Span::dim(format!("{RESULT_GAP}{:.1}s", took.as_secs_f32())));
     }
     tail
 }
@@ -452,7 +433,7 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
         row.extend(step_tail(step, false, false));
         body.push(row);
         if let Some(why) = step.error.as_ref() {
-            body.push(vec![Span::raw("  "), Span::new(why.clone(), Style::new().fg(palette::TOOL_FAIL).dim())]);
+            body.push(vec![Span::raw(WHY_INDENT), Span::new(why.clone(), Style::new().fg(palette::TOOL_FAIL).dim())]);
         }
     }
 

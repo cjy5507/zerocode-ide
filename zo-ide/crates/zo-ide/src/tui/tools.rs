@@ -431,12 +431,11 @@ fn turns_command_target(command: &str) -> (String, Option<String>) {
         return (first.to_string(), None);
     }
     let target = if has_unclosed_shell_line(first) {
-        format!("{first} …")
+        format!("{first}{}", super::strings::COMMAND_CONTINUES)
     } else {
         first.to_string()
     };
-    let unit = if extra == 1 { "line" } else { "lines" };
-    (target, Some(format!("+{extra} {unit}")))
+    (target, Some(super::strings::command_more_lines(extra)))
 }
 
 /// The reason a write or edit was refused, without the words the row already
@@ -675,10 +674,12 @@ impl ToolGroup {
                         glyph,
                         super::strings::TOOL_RUN,
                         &target,
+                        false,
                         note.as_deref(),
                         width,
                     ));
-                    rows.extend(live_tail_with_prefix(&call.id, "    │ ", width));
+                    let under = format!("{}{LIVE_TAIL_BAR}", super::style::glyphs().result_rest);
+                    rows.extend(live_tail_with_prefix(&call.id, &under, width));
                 }
                 ToolKind::Explore(items) => {
                     for item in items {
@@ -687,6 +688,7 @@ impl ToolGroup {
                             glyph.clone(),
                             verb,
                             &plain_text(&target),
+                            false,
                             None,
                             width,
                         ));
@@ -697,6 +699,7 @@ impl ToolGroup {
                         glyph,
                         super::strings::TOOL_EDIT,
                         &shown_path(path),
+                        false,
                         None,
                         width,
                     ));
@@ -706,6 +709,7 @@ impl ToolGroup {
                         glyph,
                         super::strings::TOOL_SEARCH,
                         &plain_text(&web_search_target(detail)),
+                        false,
                         None,
                         width,
                     ));
@@ -715,6 +719,7 @@ impl ToolGroup {
                         glyph,
                         super::strings::TOOL_FETCH,
                         super::strings::address_shown(url),
+                        true,
                         None,
                         width,
                     ));
@@ -724,6 +729,7 @@ impl ToolGroup {
                         glyph,
                         &super::strings::mcp_name_shown(name),
                         detail,
+                        false,
                         None,
                         width,
                     ));
@@ -1793,9 +1799,12 @@ fn failure_result(done: &Outcome) -> Vec<Span> {
     vec![Span::new(text, Style::new().fg(palette::TOOL_FAIL))]
 }
 
+/// The bar a running command's last printed lines stand behind.
+const LIVE_TAIL_BAR: &str = "│ ";
+
 /// The last lines a running command has printed, `  │ ` under its row.
 fn live_tail(id: &str, width: usize) -> Vec<Line> {
-    live_tail_with_prefix(id, "  │ ", width)
+    live_tail_with_prefix(id, &format!("  {LIVE_TAIL_BAR}"), width)
 }
 
 fn live_tail_with_prefix(id: &str, prefix: &str, width: usize) -> Vec<Line> {
