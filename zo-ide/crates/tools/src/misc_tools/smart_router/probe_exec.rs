@@ -114,13 +114,20 @@ pub(super) struct Admitted {
     /// seat records instead — a verdict nobody reads is not worth holding
     /// the first request for.
     pub(super) read: bool,
+    /// The person's classifier word is the one under which the chat probe is
+    /// called (`probed`). Not the same as `probe`: under that word a turn's
+    /// gate may still decline this task, and the control sample of an acting
+    /// seat runs the probe for it all the same — that row is what the seat's
+    /// judgment is compared with. Under any other word nobody is asked the
+    /// chat probe's question, for a route or for a row.
+    pub(super) word_probes: bool,
 }
 
 impl Admitted {
     /// A spawn's: its model reads the verdict; the probe runs under the
     /// person's probing classifier word alone.
     pub(super) const fn spawn(probe: bool) -> Self {
-        Self { probe, read: true }
+        Self { probe, read: true, word_probes: probe }
     }
 }
 
@@ -575,10 +582,13 @@ fn probe_and_shadow_judged(
         // clock, for the rows the judge compares. Only where the probe has a
         // model to ask: a session with no fast tier of its own has no probe
         // the judgment stood in for, and its control row would hold a cell
-        // that compares nothing.
+        // that compares nothing. And only under the word that calls the
+        // probe: a person on `deterministic` or `assisted` was told no
+        // provider is asked, and until v1.1.148 one task in five an acting
+        // seat routed went to the fast model for this row.
         let control = active
             .control
-            .filter(|_| probe_has_a_model(parent_model))
+            .filter(|_| admitted.word_probes && probe_has_a_model(parent_model))
             .map(|batch| super::decision_shadow::fire_control(batch, parent_model));
         return (results, control);
     }
@@ -914,7 +924,7 @@ mod live_path_tests {
             prompt,
             runtime::RoutingFacts::default(),
             "",
-            super::Admitted { probe: true, read: true },
+            super::Admitted { probe: true, read: true, word_probes: true },
         )
     }
 
@@ -1532,7 +1542,7 @@ mod live_path_tests {
                 &[],
                 "turn-7@1",
                 deadline,
-                super::super::Admitted { probe: true, read: true },
+                super::super::Admitted { probe: true, read: true, word_probes: true },
             );
             let returned = started.elapsed();
             if let Some(shadow) = shadow {
@@ -2171,7 +2181,7 @@ mod live_path_tests {
                 &[],
                 "turn-7@1",
                 UNHURRIED,
-                super::super::Admitted { probe: true, read: true },
+                super::super::Admitted { probe: true, read: true, word_probes: true },
             );
 
             assert_eq!(results[0].expect("the judgment routed").complexity, RouteTaskComplexity::Large);
@@ -2180,6 +2190,39 @@ mod live_path_tests {
             let rows = env.rows();
             assert_eq!(rows.len(), 1, "the active row and no control row beside it: {rows:?}");
             assert_eq!(rows[0].route_use, DecisionRouteUse::Applied);
+        }
+
+        /// Under a classifier word that does not probe, a sampled task an
+        /// acting seat routed draws no control: `deterministic` and
+        /// `assisted` ask no provider, for a route or for a row. Under the
+        /// probing word the control runs even where the probe itself was
+        /// declined for the task — a turn's gate refused it — because that
+        /// row is all the seat's judgment of such a task is compared with.
+        #[test]
+        fn a_task_sampled_under_a_word_that_does_not_probe_draws_no_control_row() {
+            let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
+            let judgment = judging(judgment_answer());
+            let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
+            env.set_mode(Some("on"));
+            let routed = |label: &str, admitted: super::super::Admitted| {
+                let picked = sampled_for("", label);
+                let (results, control) =
+                    probe_and_shadow("gpt-5.5-codex", &[("", picked.as_str())], &[], "turn-7@1", UNHURRIED, admitted);
+                assert_eq!(results[0].expect("the judgment routed").complexity, RouteTaskComplexity::Large);
+                control.map(|control| api::sync_bridge::run_blocking(control).expect("the control ran to its end"))
+            };
+
+            // A spawn under `deterministic` or `assisted`.
+            let before = env.rows().len();
+            assert!(routed("control-word-off", super::super::Admitted::spawn(false)).is_none(), "a control was fired");
+            assert!(probe.requests().is_empty(), "the chat probe was asked under a word that asks no provider");
+            assert_eq!(env.rows().len() - before, 1, "the active row and no control row beside it");
+
+            // A turn the gate declined, under `probed`: the control is the probe's only run.
+            let declined = super::super::Admitted { probe: false, read: true, word_probes: true };
+            assert!(routed("control-word-on", declined).is_some(), "no control was fired");
+            assert_eq!(probe.requests().len(), 1, "the control's probe");
+            assert!(env.rows().last().is_some_and(|row| row.route_use == DecisionRouteUse::Control));
         }
 
         #[test]
@@ -2271,7 +2314,7 @@ mod live_path_tests {
                     &[],
                     "turn-7@1",
                     WALL,
-                    super::super::Admitted { probe: true, read: true },
+                    super::super::Admitted { probe: true, read: true, word_probes: true },
                 );
                 let returned = started.elapsed();
                 let written = env.rows().len() - before;

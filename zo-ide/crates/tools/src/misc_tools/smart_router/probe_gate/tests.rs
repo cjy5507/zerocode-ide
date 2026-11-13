@@ -144,8 +144,10 @@ fn a_row_carries_the_sentence_a_reader_needs() {
         ProbeGate::Admitted,
         ProbeGate::NotWorthIt,
         ProbeGate::ClassifierOff,
+        ProbeGate::ClassifierDoesNotProbe,
         ProbeGate::SettingsUnavailable,
         ProbeGate::VerdictUnread,
+        ProbeGate::NoFastTier,
     ] {
         assert!(!gate.means().is_empty(), "{gate:?} explains nothing");
         assert_ne!(
@@ -172,9 +174,10 @@ fn the_token_is_the_one_the_attestation_uses() {
         line.contains("\"gate\":\"not_worth_it\""),
         "the wire word must be the attested word: {line}"
     );
-    /* The four the gates in `turn.rs` can attest, spelled once here. */
+    /* The six the gates in `turn.rs` can attest, spelled once here. */
     assert_eq!(ProbeGate::NotWorthIt.token(), "not_worth_it");
     assert_eq!(ProbeGate::ClassifierOff.token(), "classifier_off");
+    assert_eq!(ProbeGate::ClassifierDoesNotProbe.token(), "classifier_does_not_probe");
     assert_eq!(ProbeGate::VerdictUnread.token(), "verdict_unread");
     assert_eq!(ProbeGate::NoFastTier.token(), "no_fast_tier");
     assert_eq!(

@@ -45,6 +45,18 @@ fn unique_for(description: &str, words: &str) -> String {
     }
 }
 
+/// Words no other case asked that the control sample does pick: a turn an
+/// acting seat routes on them draws the control row, where one is drawn.
+fn sampled(words: &str) -> String {
+    loop {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+        let text = format!("{words} #{nanos}");
+        if super::decision_shadow::control_sampled(super::probe_exec::task_fingerprint("", &text)) {
+            return text;
+        }
+    }
+}
+
 /// A second-version answer: complexity at `level` with `confidence`, a low
 /// risk, a debugging intent, a search, and every fact a clear no.
 fn answer(level: usize, confidence: f64) -> String {
@@ -307,6 +319,71 @@ fn the_gate_says_a_session_with_no_fast_model_of_its_own_was_not_probed() {
     assert_eq!(chat.requests().len(), 1, "the built-in session's probe, and nothing after it");
 }
 
+/// Only the probing word calls the chat probe, of a turn as of a spawn:
+/// `deterministic` and `assisted` ask no provider, which is what the window's
+/// card says of each. The same easy turn with a reader armed is probed under
+/// `probed` and stands on the tables under the other two, and the gate's
+/// ledger says why. Until v1.1.148 a turn's gate read the word for `off`
+/// alone, and probed such a turn under every other.
+#[test]
+fn a_classifier_word_that_does_not_probe_asks_the_chat_probe_nothing_of_a_turn() {
+    use super::probe_gate::{ProbeGate, ProbeGateRow, PROBE_GATE_LEDGER};
+    use super::shadow_ledger::{read_shadow_rows, shadow_ledger_path};
+
+    let cwd = std::env::current_dir().expect("a working directory");
+    let gates = || read_shadow_rows::<ProbeGateRow>(&shadow_ledger_path(&cwd, PROBE_GATE_LEDGER));
+    for word in ["deterministic", "assisted"] {
+        let judgment = answering(answer(1, 0.9));
+        let chat = probe();
+        {
+            let _machine = Machine::new(json!({ "autoClassifier": "probed" }), &judgment, &chat);
+            super::probe_gate::forget(&cwd);
+            let _ = turn(&unique("이 설정값이 뭔지 알려줘"), true);
+            assert_eq!(chat.requests().len(), 1, "premise: under `probed` this turn is probed");
+        }
+        let _machine = Machine::new(json!({ "autoClassifier": word }), &judgment, &chat);
+        // The gate writes a change of answer only and remembers its last one
+        // for the process, which another case may have set between the two
+        // machines: this one starts from none, under its own machine's lock.
+        super::probe_gate::forget(&cwd);
+        let words = unique("이 설정값이 뭔지 알려줘");
+
+        let assessment = turn(&words, true);
+
+        assert_eq!(chat.requests().len(), 1, "`{word}`: nothing more was asked of the chat probe");
+        assert!(judgment.requests().is_empty(), "`{word}`: nor of the seat, which is not switched on");
+        assert_eq!(assessment.complexity, super::assess_turn_complexity(&words), "`{word}`: the tables' verdict stands");
+        let written = gates();
+        super::probe_gate::forget(&cwd);
+        let last = written.last().expect("a gate row");
+        assert_eq!(last.gate, ProbeGate::ClassifierDoesNotProbe, "`{word}`: {written:?}");
+    }
+}
+
+/// A turn the acting seat routes draws no control under a word that does not
+/// probe. The seat's judgment is its own road and is asked; the row it is
+/// compared with is the chat probe's, and `deterministic` asks no provider
+/// that question — for a route or for a row. Under `probed` the same turn
+/// draws it, after the turn.
+#[test]
+fn a_turn_the_seat_routes_draws_no_control_under_a_word_that_does_not_probe() {
+    for (word, controls) in [("probed", 1), ("deterministic", 0)] {
+        let judgment = answering(answer(1, 0.9));
+        let chat = probe();
+        let machine = Machine::new(json!({ "decisionShadow": "on", "autoClassifier": word }), &judgment, &chat);
+
+        let assessment = turn(&sampled("이 설정값이 뭔지 알려줘"), true);
+
+        assert!(assessment.judged, "`{word}`: the seat routed the turn");
+        // The control leaves after the turn, detached: its row is waited for
+        // where one is due, and for the whole wall where none is.
+        let rows = machine.rows_after(2);
+        assert_eq!(judgment.requests().len(), 1, "`{word}`: the seat was asked once");
+        assert_eq!(chat.requests().len(), controls, "`{word}`: the chat probe's requests");
+        assert_eq!(rows.len(), 1 + controls, "`{word}`: the active row, and the control row where one is drawn: {rows:?}");
+    }
+}
+
 /// Where the probe's gate declines the turn, an abstaining answer leaves the
 /// keyword tables standing — no probe is bought for a band the gate refused.
 #[test]
@@ -398,7 +475,7 @@ fn a_retry_of_a_failed_attempt_is_judged_again_not_recalled() {
             &prompt,
             runtime::RoutingFacts { retry_of_failed_attempt },
             "turn-9@1",
-            super::probe_exec::Admitted { probe: true, read: true },
+            super::probe_exec::Admitted { probe: true, read: true, word_probes: true },
         )
     };
 

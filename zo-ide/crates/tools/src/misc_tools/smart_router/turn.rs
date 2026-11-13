@@ -177,6 +177,7 @@ fn note_gate(gate: ProbeGate) {
         ProbeGate::Admitted => {}
         ProbeGate::NotWorthIt
         | ProbeGate::ClassifierOff
+        | ProbeGate::ClassifierDoesNotProbe
         | ProbeGate::VerdictUnread
         | ProbeGate::NoFastTier => {
             telemetry::attest_declined(telemetry::HarnessFeature::RoutingProbe, gate.token());
@@ -211,10 +212,12 @@ fn note_gate(gate: ProbeGate) {
 /// classifier off, no inventory, timeout, malformed JSON — falls back to the
 /// deterministic verdict, so this can only ever refine it.
 ///
-/// Unlike the sub-agent spawn path, this does NOT require
-/// `classifier = probed`, and effort mode is intentionally not a gate. The
-/// default `Deterministic` classifier still gets the second opinion here;
-/// only an explicit [`RouteAutoClassifierMode::Off`] declines it.
+/// Like the sub-agent spawn path, the second opinion is asked under
+/// `classifier = probed` alone ([`RouteAutoClassifierMode::Probed`], which is
+/// what an unset `smart.autoClassifier` reads as): `deterministic` and
+/// `assisted` keep the keyword verdict and ask no provider, and `off`
+/// declines the routing seat's judgment too. Effort mode is intentionally
+/// not a gate.
 ///
 /// Blocking (one bounded Fast-tier round-trip, memoized per task text). Call
 /// it off the UI path — the TUI turn wraps it in `spawn_blocking`.
@@ -531,6 +534,15 @@ pub fn assess_turn_probed(
         note_gate(ProbeGate::ClassifierOff);
         return deterministic;
     }
+    // Only the probing word calls the chat probe — of a spawn (`apply.rs`)
+    // and of a turn. `deterministic` and `assisted` ask no provider: that is
+    // what the window's card says of each word, and until v1.1.148 a turn
+    // with a reader armed was probed under them all the same. The routing
+    // seat's judgment is another road with a consent of its own, and is
+    // asked below as before.
+    let word_probes = settings.auto_classifier == RouteAutoClassifierMode::Probed;
+    let table_admits = admission != ProbeAdmission::Declined;
+    let admission = if word_probes { admission } else { ProbeAdmission::Declined };
     // The verdict is read by the deep-gate verify leg and the exec contract
     // only; with neither armed the probe's round-trip is pure first-token
     // latency, and an acting judgment records instead of routing. Whether
@@ -549,6 +561,7 @@ pub fn assess_turn_probed(
         probe != ProbeAdmission::Declined && !super::probe_exec::probe_has_a_model(parent_model);
     let probe = if no_fast_tier { ProbeAdmission::Declined } else { probe };
     note_gate(match (admission, probe) {
+        _ if table_admits && !word_probes => ProbeGate::ClassifierDoesNotProbe,
         (ProbeAdmission::Declined, _) => ProbeGate::NotWorthIt,
         _ if no_fast_tier => ProbeGate::NoFastTier,
         (_, ProbeAdmission::Declined) => ProbeGate::VerdictUnread,
@@ -576,7 +589,7 @@ pub fn assess_turn_probed(
         user_text,
         runtime::RoutingFacts::default(),
         attempt,
-        super::probe_exec::Admitted { probe: probe != ProbeAdmission::Declined, read: verdict_read },
+        super::probe_exec::Admitted { probe: probe != ProbeAdmission::Declined, read: verdict_read, word_probes },
     ) else {
         return deterministic;
     };

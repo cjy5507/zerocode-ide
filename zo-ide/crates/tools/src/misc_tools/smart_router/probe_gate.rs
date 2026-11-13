@@ -64,6 +64,9 @@ pub enum ProbeGate {
     NotWorthIt,
     /// The person's settings turn the classifier off.
     ClassifierOff,
+    /// The person's classifier word is one that asks no provider
+    /// (`deterministic`, `assisted`): only `probed` calls the chat probe.
+    ClassifierDoesNotProbe,
     /// The settings could not be read — the one verdict nobody chose.
     SettingsUnavailable,
     /// Nothing this turn would read the verdict: no verify leg, and the
@@ -82,6 +85,7 @@ impl ProbeGate {
             Self::Admitted => "admitted",
             Self::NotWorthIt => "not_worth_it",
             Self::ClassifierOff => "classifier_off",
+            Self::ClassifierDoesNotProbe => "classifier_does_not_probe",
             Self::SettingsUnavailable => "settings_unavailable",
             Self::VerdictUnread => "verdict_unread",
             Self::NoFastTier => "no_fast_tier",
@@ -99,6 +103,10 @@ impl ProbeGate {
                  not asked"
             }
             Self::ClassifierOff => "smart.autoClassifier is off",
+            Self::ClassifierDoesNotProbe => {
+                "smart.autoClassifier is a word that asks no provider (deterministic or assisted): \
+                 the chat probe is called under `probed` alone, so it was not asked"
+            }
             Self::SettingsUnavailable => "the settings file could not be read",
             Self::VerdictUnread => {
                 "nothing this turn would read the verdict: no verify leg is armed, and the \
