@@ -1378,12 +1378,13 @@ fn a_running_generic_call_is_compact_at_narrow_width_with_cjk_detail() {
 
     let lines = group.lines(24, Duration::ZERO);
     assert_eq!(lines.len(), 1, "running generic calls must not grow the viewport");
-    assert!(lines[0].plain().starts_with("⠋ Call ToolSearch"));
+    // The tool is the row's verb (no `Call` before it) and its argument the target.
+    assert!(lines[0].plain().starts_with("⠋ ToolSearch "), "line was {:?}", lines[0].plain());
     assert!(lines[0].width() <= 24, "line was {:?}", lines[0].plain());
 
     let lines = group.lines(80, Duration::ZERO);
     assert_eq!(lines.len(), 1);
-    assert!(lines[0].plain().contains("ToolSearch(select:ToolSearch"));
+    assert!(lines[0].plain().contains("ToolSearch select:ToolSearch"), "line was {:?}", lines[0].plain());
 }
 
 #[test]

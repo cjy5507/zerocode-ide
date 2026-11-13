@@ -213,13 +213,13 @@ fn a_call_reads_the_same_while_it_runs_and_after_it_ends() {
 /// body), and the second's steps among the model's lines, the search quoted.
 #[test]
 fn the_screens_two_turns_are_drawn_again_in_one_vocabulary() {
+    use std::time::Instant;
+
+    use super::turns::{cell, Step, StepKind, TurnFold};
+
     if !style::in_fresh_run(&path("the_screens_two_turns_are_drawn_again_in_one_vocabulary")) {
         return;
     }
-    use std::time::Instant;
-
-    use super::ansi::Line;
-    use super::turns::{cell, Step, StepKind, TurnFold};
     style::init(&Preferences::default());
     let now = Instant::now();
     let step = |kind, verb: &str, target: &str| Step {
@@ -232,7 +232,7 @@ fn the_screens_two_turns_are_drawn_again_in_one_vocabulary() {
         failure: None,
         error: None,
         result: None,
-        started: now - Duration::from_secs(39),
+        started: now.checked_sub(Duration::from_secs(39)).unwrap_or(now),
         took: None,
     };
     let steps = vec![
