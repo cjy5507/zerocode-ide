@@ -668,6 +668,435 @@ fn zos_own_endpoints_are_not_sent_a_tools_picture() {
     assert!(endpoint_that_reads_pictures().is_declared_by_the_person());
 }
 
+/// The reasoning of the step in [`a_step_with_its_own_reasoning`].
+const OWN_REASONING: &str = "Jena is installed. Run arq against the saved query.";
+
+/// One tool step the way a reasoning model behind a person's endpoint leaves
+/// it in the history: its reasoning (unsigned — the lowering hands this wire
+/// no other kind), a line of commentary, one call, and the call's result.
+fn a_step_with_its_own_reasoning(signature: &str) -> Vec<InputMessage> {
+    vec![
+        InputMessage::user_text("run the saved query"),
+        message_of(
+            "assistant",
+            vec![
+                InputContentBlock::Thinking {
+                    thinking: OWN_REASONING.to_string(),
+                    signature: signature.to_string(),
+                },
+                InputContentBlock::Text {
+                    text: "Running the saved query.".to_string(),
+                    cache_control: None,
+                },
+                InputContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: json!({"command": "arq --query q.rq"}),
+                    cache_control: None,
+                },
+            ],
+        ),
+        message_of(
+            "user",
+            vec![result_of(
+                "call_1",
+                vec![ToolResultContentBlock::Text {
+                    text: "3 rows".to_string(),
+                }],
+            )],
+        ),
+    ]
+}
+
+/// A tool step with no reasoning block: the model went straight to the call,
+/// or the step is another model's (its reasoning, if any, is passport text).
+fn a_step_without_reasoning(call: &str) -> Vec<InputMessage> {
+    vec![
+        message_of(
+            "assistant",
+            vec![InputContentBlock::ToolUse {
+                id: call.to_string(),
+                name: "bash".to_string(),
+                input: json!({"command": "wc -l out.csv"}),
+                cache_control: None,
+            }],
+        ),
+        message_of(
+            "user",
+            vec![result_of(
+                call,
+                vec![ToolResultContentBlock::Text {
+                    text: "3 out.csv".to_string(),
+                }],
+            )],
+        ),
+    ]
+}
+
+/// An endpoint a person declared, under `base_url`. The answers an endpoint
+/// gives about the field are kept per base URL and model for the life of the
+/// process, so a test that sends anything names a base URL of its own.
+fn a_persons_endpoint(base_url: &'static str) -> OpenAiCompatConfig {
+    OpenAiCompatConfig::from_user("Gateway", base_url, None, false)
+}
+
+/// The `reasoning_content` of each assistant message in a request body, in
+/// order: `None` where the message has no such field.
+fn reasoning_fields(payload: &serde_json::Value) -> Vec<Option<&str>> {
+    payload["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .map(|message| message.get("reasoning_content").and_then(serde_json::Value::as_str))
+        .collect()
+}
+
+#[test]
+fn a_models_own_reasoning_goes_back_in_reasoning_content_on_an_endpoint_the_person_declared() {
+    let config = a_persons_endpoint("https://gateway.example/v1");
+    assert!(config.takes_its_reasoning_back());
+    let payload = build_chat_completion_request(
+        &chat_request("acme-reasoner-1", a_step_with_its_own_reasoning("")),
+        config,
+    );
+
+    assert_eq!(roles(&payload), ["user", "assistant", "tool"]);
+    let step = &payload["messages"][1];
+    assert_eq!(
+        step["reasoning_content"],
+        json!(OWN_REASONING),
+        "the reasoning rides in the field it arrived in: {step}"
+    );
+    assert_eq!(
+        step["content"],
+        json!(format!("[earlier reasoning]\n{OWN_REASONING}\n\nRunning the saved query.")),
+        "and the text it was always carried as is still there, byte for byte"
+    );
+    assert_eq!(step["tool_calls"].as_array().map(Vec::len), Some(1));
+}
+
+#[test]
+fn every_assistant_message_carries_the_field_once_one_of_them_does() {
+    // The endpoint takes no step of the turn without the field (measured: one
+    // step of three without it is a 400). A step that reasoned nothing carries
+    // an empty one.
+    let mut history = a_step_with_its_own_reasoning("");
+    history.extend(a_step_without_reasoning("call_2"));
+    let payload = build_chat_completion_request(
+        &chat_request("acme-reasoner-1", history),
+        a_persons_endpoint("https://gateway.example/v1"),
+    );
+
+    assert_eq!(roles(&payload), ["user", "assistant", "tool", "assistant", "tool"]);
+    assert_eq!(reasoning_fields(&payload), [Some(OWN_REASONING), Some("")]);
+}
+
+#[test]
+fn a_request_with_no_reasoning_to_send_carries_no_field() {
+    // An endpoint that never sent reasoning is not sent a field it may not
+    // know: the request is byte for byte what it was.
+    let mut history = vec![InputMessage::user_text("count the rows")];
+    history.extend(a_step_without_reasoning("call_1"));
+    let payload = build_chat_completion_request(
+        &chat_request("acme-plain-1", history),
+        a_persons_endpoint("https://gateway.example/v1"),
+    );
+
+    assert_eq!(reasoning_fields(&payload), [None]);
+    assert!(!payload.to_string().contains("reasoning_content"));
+}
+
+#[test]
+fn zos_own_endpoints_are_handed_reasoning_as_text_and_no_field() {
+    // What xAI, OpenAI and Google do with a `reasoning_content` they did not
+    // send is not known here. A model outside their lineups served through
+    // one of them (a base URL set in the environment) is carried its reasoning
+    // as the passport text, as before.
+    for config in [
+        OpenAiCompatConfig::xai(),
+        OpenAiCompatConfig::openai(),
+        OpenAiCompatConfig::google(),
+    ] {
+        assert!(!config.takes_its_reasoning_back(), "{}", config.provider_name);
+        let payload = build_chat_completion_request(
+            &chat_request("acme-reasoner-1", a_step_with_its_own_reasoning("")),
+            config,
+        );
+        assert_eq!(reasoning_fields(&payload), [None], "{}", config.provider_name);
+        assert_eq!(
+            payload["messages"][1]["content"],
+            json!(format!("[earlier reasoning]\n{OWN_REASONING}\n\nRunning the saved query.")),
+            "{}",
+            config.provider_name
+        );
+    }
+}
+
+#[test]
+fn a_signed_reasoning_block_is_never_lowered_onto_the_chat_wire() {
+    // A signature marks another provider's sealed reasoning (Anthropic's):
+    // opaque here, on any endpoint, as a field and as text.
+    let payload = build_chat_completion_request(
+        &chat_request("acme-reasoner-1", a_step_with_its_own_reasoning("sig-from-another-provider")),
+        a_persons_endpoint("https://gateway.example/v1"),
+    );
+
+    assert_eq!(roles(&payload), ["user", "assistant", "tool"]);
+    assert_eq!(payload["messages"][1]["content"], json!("Running the saved query."));
+    assert!(!payload.to_string().contains("reasoning_content"));
+}
+
+#[test]
+fn a_turn_that_holds_only_reasoning_is_carried_as_it_always_was() {
+    // The passport text makes it an assistant message, as before; the
+    // reasoning rides with it.
+    let payload = build_chat_completion_request(
+        &chat_request(
+            "acme-reasoner-1",
+            vec![
+                InputMessage::user_text("hello"),
+                message_of(
+                    "assistant",
+                    vec![InputContentBlock::Thinking {
+                        thinking: "nothing to say yet".to_string(),
+                        signature: String::new(),
+                    }],
+                ),
+            ],
+        ),
+        a_persons_endpoint("https://gateway.example/v1"),
+    );
+
+    assert_eq!(roles(&payload), ["user", "assistant"]);
+    assert_eq!(payload["messages"][1]["content"], json!("[earlier reasoning]\nnothing to say yet"));
+    assert_eq!(reasoning_fields(&payload), [Some("nothing to say yet")]);
+}
+
+/// One whole HTTP request off `conn`: the head, then as much body as its
+/// `content-length` says.
+async fn read_http_request(conn: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        let n = conn.read(&mut chunk).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        let text = String::from_utf8_lossy(&bytes);
+        if let Some(head_end) = text.find("\r\n\r\n") {
+            let length = text[..head_end]
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if bytes.len() >= head_end + 4 + length {
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// What an endpoint under test says to one request body: `None` takes it,
+/// `Some(message)` refuses it with 400 and that message.
+type EndpointRule = fn(&serde_json::Value) -> Option<&'static str>;
+
+/// The rule measured on deepseek-flash (2026-11-14): after the last user
+/// message, every assistant message carries `reasoning_content`.
+fn the_measured_rule(body: &serde_json::Value) -> Option<&'static str> {
+    let messages = body["messages"].as_array().expect("messages");
+    let turn_start = messages.iter().rposition(|message| message["role"] == "user").unwrap_or(0);
+    let kept = messages[turn_start..]
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .all(|message| message.get("reasoning_content").is_some_and(serde_json::Value::is_string));
+    (!kept).then_some("The `reasoning_content` in the thinking mode must be passed back to the API.")
+}
+
+/// A strict server: a message field it does not know is an error.
+fn no_field_it_does_not_know(body: &serde_json::Value) -> Option<&'static str> {
+    body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .any(|message| message.get("reasoning_content").is_some())
+        .then_some("extra inputs are not permitted")
+}
+
+/// A server that refuses the request whatever it carries.
+#[allow(clippy::unnecessary_wraps)] // an `EndpointRule` answers `Option`; this one always refuses
+fn nothing_is_taken(_: &serde_json::Value) -> Option<&'static str> {
+    Some("this model's maximum context length is 8 tokens")
+}
+
+/// An endpoint that answers `requests` requests in turn by `rule` — an empty
+/// stream for one it takes — and hands back the bodies it was sent.
+async fn endpoint(
+    rule: EndpointRule,
+    requests: usize,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for _ in 0..requests {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut conn).await;
+            let body: serde_json::Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").map_or("", |(_, body)| body)).expect("a JSON body");
+            let answer = match rule(&body) {
+                None => "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n\
+                         data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                    .to_string(),
+                Some(message) => {
+                    let refusal = json!({"error": {"message": message, "type": "invalid_request_error"}}).to_string();
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\nconnection: close\r\n\
+                         content-length: {}\r\n\r\n{refusal}",
+                        refusal.len()
+                    )
+                }
+            };
+            seen.push(body);
+            conn.write_all(answer.as_bytes()).await.unwrap();
+            conn.flush().await.unwrap();
+        }
+        seen
+    });
+    (addr, server)
+}
+
+#[tokio::test]
+async fn an_endpoint_that_takes_no_step_without_the_field_takes_a_turn_whose_second_step_reasoned_nothing() {
+    // One request, taken: the step that reasoned nothing carried an empty
+    // field. Without it the endpoint refuses the turn (400), as deepseek-flash
+    // does a step whose call id it does not remember.
+    let config = a_persons_endpoint("http://keeps-the-measured-rule.example/v1");
+    let mut history = a_step_with_its_own_reasoning("");
+    history.extend(a_step_without_reasoning("call_2"));
+    let request = chat_request("ruled-1", history);
+    let (addr, server) = endpoint(the_measured_rule, 1).await;
+    let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
+
+    let _ = client.stream_message(&request).await.expect("the endpoint takes the turn as first sent");
+
+    let seen = server.await.unwrap();
+    assert_eq!(reasoning_fields(&seen[0]), [Some(OWN_REASONING), Some("")]);
+}
+
+#[tokio::test]
+async fn an_endpoint_that_asks_for_the_field_is_sent_the_request_again_with_it() {
+    // A turn of steps with no reasoning to send (another model's, handed over
+    // mid-turn) goes out with no field; the endpoint refuses it by name, the
+    // same request goes again with an empty field on every assistant message,
+    // and the endpoint's model is sent one from then on.
+    let config = a_persons_endpoint("http://asks-for-the-field.example/v1");
+    let mut history = vec![InputMessage::user_text("count the rows")];
+    history.extend(a_step_without_reasoning("toolu_1"));
+    history.extend(a_step_without_reasoning("toolu_2"));
+    let request = chat_request("asker-1", history);
+    let (addr, server) = endpoint(the_measured_rule, 2).await;
+    let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
+
+    let _ = client.stream_message(&request).await.expect("the stream opens on the second send");
+
+    let seen = server.await.unwrap();
+    assert_eq!(reasoning_fields(&seen[0]), [None, None], "the first send carried none");
+    assert_eq!(reasoning_fields(&seen[1]), [Some(""), Some("")], "the second carried one on every step");
+    assert_eq!(
+        reasoning_fields(&build_chat_completion_request(&request, config)),
+        [Some(""), Some("")],
+        "and later requests to this endpoint's model carry it from the first send"
+    );
+    super::note_reasoning_answer(&config, "asker-1", None);
+}
+
+#[tokio::test]
+async fn an_endpoint_that_refuses_reasoning_content_is_sent_the_request_again_without_it() {
+    // The first refusal of a request that carried the reasoning back is
+    // answered with the same request, field off — the reasoning still reaches
+    // the model as the text it was always carried as. The endpoint took that
+    // one, so its model goes on without the field.
+    let config = a_persons_endpoint("http://refuses-reasoning.example/v1");
+    let request = chat_request("refuser-1", a_step_with_its_own_reasoning(""));
+    let (addr, server) = endpoint(no_field_it_does_not_know, 2).await;
+    let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
+
+    let _ = client.stream_message(&request).await.expect("the stream opens on the second send");
+
+    let seen = server.await.unwrap();
+    assert_eq!(reasoning_fields(&seen[0]), [Some(OWN_REASONING)], "the first send carried it");
+    assert_eq!(reasoning_fields(&seen[1]), [None], "the second did not");
+    assert_eq!(
+        seen[1]["messages"][1]["content"],
+        json!(format!("[earlier reasoning]\n{OWN_REASONING}\n\nRunning the saved query.")),
+        "the reasoning went as text instead"
+    );
+    assert_eq!(
+        reasoning_fields(&build_chat_completion_request(&request, config)),
+        [None],
+        "and later requests to this endpoint's model leave the field out"
+    );
+    // another model behind the same endpoint is not judged by this one
+    assert_eq!(
+        reasoning_fields(&build_chat_completion_request(
+            &chat_request("refuser-other", a_step_with_its_own_reasoning("")),
+            config
+        )),
+        [Some(OWN_REASONING)]
+    );
+    super::note_reasoning_answer(&config, "refuser-1", None);
+}
+
+#[tokio::test]
+async fn a_refusal_that_is_not_about_the_reasoning_leaves_it_riding() {
+    // The same request without the field is refused as well: the field was
+    // not why, the error is the caller's, and nothing is learnt.
+    let config = a_persons_endpoint("http://refuses-everything.example/v1");
+    let request = chat_request("refuser-2", a_step_with_its_own_reasoning(""));
+    let (addr, server) = endpoint(nothing_is_taken, 2).await;
+    let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
+
+    let refused = client.stream_message(&request).await;
+
+    assert!(refused.is_err(), "the refusal reaches the caller");
+    assert_eq!(server.await.unwrap().len(), 2, "one send with the field, one without");
+    assert_eq!(
+        reasoning_fields(&build_chat_completion_request(&request, config)),
+        [Some(OWN_REASONING)],
+        "the reasoning still rides to this endpoint"
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_that_does_not_name_the_field_is_not_answered_with_one() {
+    // A request with no reasoning to send, refused for something else: one
+    // send, and the error is the caller's.
+    let config = a_persons_endpoint("http://refuses-for-another-reason.example/v1");
+    let mut history = vec![InputMessage::user_text("count the rows")];
+    history.extend(a_step_without_reasoning("call_1"));
+    let request = chat_request("refuser-3", history);
+    let (addr, server) = endpoint(nothing_is_taken, 1).await;
+    let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
+
+    let refused = client.stream_message(&request).await;
+
+    assert!(refused.is_err(), "the refusal reaches the caller");
+    assert_eq!(server.await.unwrap().len(), 1);
+    assert_eq!(reasoning_fields(&build_chat_completion_request(&request, config)), [None]);
+}
+
 #[test]
 fn request_translation_preserves_user_image_blocks() {
     let payload = build_chat_completion_request(

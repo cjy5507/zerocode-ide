@@ -110,8 +110,9 @@ impl ReasoningReplay {
 /// is asked for, so a new constraint of a target is a field here and not
 /// another argument at every call site (three clients lower a history).
 ///
-/// * how reasoning travels ([`ReasoningReplay`]), and whose reasoning it is
-///   never carried as text (its own lineup's — see `writes_reasoning_of`); and
+/// * how reasoning travels ([`ReasoningReplay`]), and whose reasoning a stored
+///   turn holds as this target sees it (its own lineup's, its own, another's —
+///   see `reasoning_of`); and
 /// * how much body it takes in pictures: the budget of the byte ceiling its
 ///   catalog row declares (`max_request_bytes`, the number the client's
 ///   preflight refuses against — see `picture_budget`), and a hard cap a
@@ -122,7 +123,46 @@ pub struct WireTarget {
     /// The first-party lineup of the target model (`api::first_party_lineup`);
     /// `None` when its id names none.
     lineup: Option<api::ProviderKind>,
+    /// The target model itself ([`model_key`]), when an endpoint the person
+    /// declared serves it (`api::custom_provider_for_model`) — a gateway's
+    /// model, a person's own provider's. That endpoint's wire is the one that
+    /// hands a reasoning block back; every other encoder drops the block, so a
+    /// target of theirs keeps `None` here and is carried passports as before.
+    /// `None` also for a target built with no model in hand.
+    model: Option<u64>,
     pictures: PictureLimits,
+}
+
+/// One number for a model id, so two ids can be asked "is this the same
+/// model?" while the target stays `Copy`: the id's last path segment in lower
+/// case. A provider-qualified reference and the bare id it routes to agree
+/// (`acme/reasoner-1` and `reasoner-1`); two different models do not.
+fn model_key(model: &str) -> Option<u64> {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let name = model.trim().rsplit('/').next().unwrap_or_default();
+    if name.is_empty() {
+        return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.to_ascii_lowercase().hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// Whose reasoning a stored message holds, as its target sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningOf {
+    /// Another model's, or reasoning no stamp attributes: carried as a
+    /// passport where the target takes text.
+    Another,
+    /// The target's own first-party lineup's: not carried here; that lineup's
+    /// provider replays it natively where it can.
+    OwnLineup,
+    /// The target's own, and the target is a model outside the first-party
+    /// lineups: it leaves here as the reasoning it is, an unsigned block. The
+    /// Chat wire writes it into the field the endpoint sent it in, or as the
+    /// passport text where the endpoint does not take that field back.
+    Own,
 }
 
 impl WireTarget {
@@ -133,6 +173,7 @@ impl WireTarget {
         Self {
             reasoning: ReasoningReplay::for_model(model),
             lineup: api::first_party_lineup(model),
+            model: api::custom_provider_for_model(model).and_then(|_| model_key(model)),
             pictures: PictureLimits::for_model(model),
         }
     }
@@ -155,9 +196,35 @@ impl WireTarget {
     /// from the provider-opaque payload only one lineup writes. Both are pure
     /// functions of the stored message, so the history lowers to the same bytes
     /// on every request.
-    fn writes_reasoning_of(self, message: &ConversationMessage) -> bool {
+    ///
+    /// A target outside every first-party lineup has no lineup to compare, and
+    /// the same thing happens to it one model at a time: on 2026-11-12 a
+    /// deepseek-flash session that never switched models was carried each of
+    /// its own turns' reasoning as a passport, and from the third step on it
+    /// answered `[earlier reasoning]` followed by that turn's reasoning written
+    /// out again — 44 of 55 replies in one task, 97% of the visible text, paid
+    /// for a second time as output. For such a target a turn is its own when
+    /// the turn's model stamp names the same model ([`model_key`]). A turn
+    /// with no stamp, or another model's, is carried as before.
+    ///
+    /// The two cases part ways after that. A first-party lineup's own reasoning
+    /// is not carried here at all — its provider replays it by its own means.
+    /// A model outside the lineups has no such means on zo's side, and its
+    /// endpoint has one of its own: the reasoning arrives in a field of the
+    /// assistant message, and the endpoint expects it back there. Measured on
+    /// deepseek-flash, 2026-11-14: a tool step sent back without the field is
+    /// refused (400) unless the endpoint still remembers the call ids it issued
+    /// and fills the reasoning in by itself, and from the next user message on
+    /// it fills nothing in — the earlier reasoning is gone from the prompt and
+    /// the prompt cache breaks at the first step that had any (3,692 uncached
+    /// tokens against 179 when the field was sent, same conversation). So such
+    /// a turn leaves here as an unsigned reasoning block ([`ReasoningOf::Own`])
+    /// and the Chat wire decides how that endpoint is handed it.
+    fn reasoning_of(self, message: &ConversationMessage) -> ReasoningOf {
         let Some(target) = self.lineup else {
-            return false;
+            let own = self.model.is_some()
+                && message.model.as_deref().and_then(model_key) == self.model;
+            return if own { ReasoningOf::Own } else { ReasoningOf::Another };
         };
         let stamped = message.model.as_deref().and_then(api::first_party_lineup);
         let written_by = stamped.or_else(|| {
@@ -169,7 +236,11 @@ impl WireTarget {
                 None
             }
         });
-        written_by == Some(target)
+        if written_by == Some(target) {
+            ReasoningOf::OwnLineup
+        } else {
+            ReasoningOf::Another
+        }
     }
 
     /// Carry at most the newest `cap` pictures, however small the body. `None`
@@ -197,6 +268,7 @@ impl From<ReasoningReplay> for WireTarget {
         Self {
             reasoning,
             lineup: None,
+            model: None,
             pictures: PictureLimits::default(),
         }
     }
@@ -211,18 +283,8 @@ pub fn plan_picture_shed(messages: &[ConversationMessage], target: WireTarget) -
     plan(messages, target.pictures)
 }
 
-/// Per-block budget for carried reasoning, in characters (~250 tokens).
-///
-/// The cap is per block and EVERY unreplayable block is carried, rather than
-/// a sliding window of the last few. A window would be cheaper, but a block
-/// leaving it as the conversation grows would rewrite history the cache had
-/// already stored — the exact defect class this module spent a round fixing.
-/// A deterministic per-block digest lowers to the same bytes on every request
-/// of the session.
-const REASONING_PASSPORT_CHARS: usize = 1_000;
-
-/// Label that opens a carried reasoning block on the wire.
-pub const REASONING_PASSPORT_LABEL: &str = "[earlier reasoning]";
+pub use api::REASONING_PASSPORT_LABEL;
+use api::reasoning_passport;
 
 /// Whether assistant text is a wire-only carried-reasoning passport.
 ///
@@ -245,36 +307,6 @@ pub fn is_reasoning_passport_text(text: &str) -> bool {
 pub fn strip_reasoning_passport_label(text: &str) -> &str {
     text.strip_prefix(REASONING_PASSPORT_LABEL)
         .map_or(text, |rest| rest.trim_start_matches(['\n', '\r']))
-}
-
-/// Carry a reasoning block the target provider cannot replay, as text.
-///
-/// Deliberately NOT a thinking block: it is attributed, plain assistant text,
-/// so no provider can reject it as an unverified signature. The full original
-/// stays in the transcript vault, reachable with `session_recall`, so the cap
-/// costs recall effort rather than the record itself.
-///
-/// `None` for reasoning that carries nothing (empty, or whitespace only).
-fn reasoning_passport(thinking: &str) -> Option<String> {
-    let trimmed = thinking.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.chars().count() <= REASONING_PASSPORT_CHARS {
-        return Some(format!("{REASONING_PASSPORT_LABEL}\n{trimmed}"));
-    }
-    // Cut on a line boundary when one is near the cap, so the carried text
-    // ends on a thought rather than mid-word.
-    let head: String = trimmed.chars().take(REASONING_PASSPORT_CHARS).collect();
-    let cut = head
-        .rfind('\n')
-        .filter(|boundary| *boundary * 4 > REASONING_PASSPORT_CHARS * 3)
-        .unwrap_or(head.len());
-    Some(format!(
-        "{REASONING_PASSPORT_LABEL}\n{}\n[… truncated; the full reasoning is in this session's \
-         transcript, reachable with session_recall]",
-        &head[..cut]
-    ))
 }
 
 /// The note left in the transcript at a model switch.
@@ -305,7 +337,7 @@ pub fn model_handoff_notice(previous: &str, next: &str) -> Option<String> {
     );
     // Only say the reasoning changed shape when it actually did. Claiming it on
     // a swap inside one lineup — which carries no passports, see
-    // `WireTarget::writes_reasoning_of` — or on a switch to Anthropic, which is
+    // `WireTarget::reasoning_of` — or on a switch to Anthropic, which is
     // carried no earlier reasoning at all, would send the model looking for
     // markers that are not there. And say it on every switch that does carry
     // them: gpt → gemini as much as claude → gpt.
@@ -365,13 +397,13 @@ pub fn convert_messages_for(
         } else {
             crate::context_compression::WireRewrite::Full
         };
-        let own_reasoning = target.writes_reasoning_of(message);
+        let whose_reasoning = target.reasoning_of(message);
         let content = convert_blocks(
             message,
             index,
             rewrite,
             reasoning,
-            own_reasoning,
+            whose_reasoning,
             &mut pictures,
         );
         if content.is_empty() {
@@ -465,14 +497,14 @@ fn wire_text(role: MessageRole, text: &str) -> Option<InputContentBlock> {
 /// omitted rather than sent malformed. Block order is otherwise preserved, so
 /// replayed thinking still leads the assistant turn.
 ///
-/// `own_reasoning`: the message's reasoning was written by the target's own
-/// lineup (`WireTarget::writes_reasoning_of`), so it is not carried as text.
+/// `whose_reasoning`: who wrote the message's reasoning, as the target sees it
+/// (`WireTarget::reasoning_of`) — that decides how the reasoning leaves.
 fn convert_blocks(
     message: &ConversationMessage,
     message_index: usize,
     rewrite: crate::context_compression::WireRewrite,
     reasoning: ReasoningReplay,
-    own_reasoning: bool,
+    whose_reasoning: ReasoningOf,
     pictures: &mut PictureCursor,
 ) -> Vec<InputContentBlock> {
     message
@@ -500,18 +532,26 @@ fn convert_blocks(
                     // next model a conversation with every "why" removed while
                     // the "what" stayed. Text cannot be rejected as an
                     // unverified signature, and it is what the receiving model
-                    // can read. Its own lineup's reasoning is not carried as
-                    // text at all (see `WireTarget::writes_reasoning_of`).
-                    ContentBlock::Thinking { thinking, signature } => match reasoning {
-                        ReasoningReplay::Native if !signature.is_empty() => {
+                    // can read. Its own lineup's reasoning is never carried as
+                    // text and is left to its provider; the reasoning of a
+                    // model outside the lineups goes on unsigned and whole,
+                    // for the Chat wire to hand back the way its endpoint
+                    // takes it (see `WireTarget::reasoning_of`).
+                    ContentBlock::Thinking { thinking, signature } => match (reasoning, whose_reasoning) {
+                        (ReasoningReplay::Native, _) if !signature.is_empty() => {
                             Some(InputContentBlock::Thinking {
                                 thinking: thinking.clone(),
                                 signature: signature.clone(),
                             })
                         }
-                        ReasoningReplay::Native => None,
-                        ReasoningReplay::AsText if own_reasoning => None,
-                        ReasoningReplay::AsText => {
+                        (ReasoningReplay::Native, _) | (ReasoningReplay::AsText, ReasoningOf::OwnLineup) => None,
+                        (ReasoningReplay::AsText, ReasoningOf::Own) => {
+                            (!thinking.trim().is_empty()).then(|| InputContentBlock::Thinking {
+                                thinking: thinking.clone(),
+                                signature: String::new(),
+                            })
+                        }
+                        (ReasoningReplay::AsText, ReasoningOf::Another) => {
                             reasoning_passport(thinking).map(|text| InputContentBlock::Text {
                                 text,
                                 cache_control: None,
@@ -2575,6 +2615,135 @@ mod tests {
                     InputContentBlock::Text { text, .. } if text == "Reading the budget code."
                 ),
                 "the commentary still crosses, first: {wire:?}"
+            );
+        }
+    }
+
+    /// A target no first-party lineup claims, lowered as text. Built by hand:
+    /// `WireTarget::for_model` asks which provider this machine would send an
+    /// unlisted id to, and a machine signed in to Anthropic answers Anthropic.
+    fn unlisted_target(model: &str) -> WireTarget {
+        let mut target = WireTarget::from(ReasoningReplay::AsText);
+        target.model = super::model_key(model);
+        target
+    }
+
+    /// The 2026-11-12 conversation, by its shape: one session on a gateway's
+    /// model (deepseek-flash through a custom provider) that never switched
+    /// models. Each turn's reasoning went back as a passport, and the model
+    /// took up the shape — the label, then its reasoning written out again.
+    /// A model outside the first-party lineups is known by its own stamp, and
+    /// its own reasoning leaves the lowering whole and unsigned — the block
+    /// the Chat wire hands back the way its endpoint takes it. The lowering
+    /// writes no passport for it.
+    #[test]
+    fn a_model_outside_the_lineups_gets_its_own_reasoning_back_as_reasoning_not_text() {
+        let turn = |model: &str| {
+            ConversationMessage::assistant(vec![
+                crate::session::ContentBlock::Thinking {
+                    thinking: "Jena is installed. Now run arq against the saved query.".to_string(),
+                    signature: String::new(),
+                },
+                crate::session::ContentBlock::Text {
+                    text: "Running the saved query.".to_string(),
+                },
+                crate::session::ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: "{}".to_string(),
+                },
+            ])
+            .with_model(Some(model.to_string()))
+        };
+        let cases = [
+            ("acme-reasoner-1", turn("acme-reasoner-1")),
+            // the stamp is what the server answered: its casing, not the request's
+            ("acme-reasoner-1", turn("Acme-Reasoner-1")),
+            // a provider-qualified stamp and the bare id name one model
+            ("acme-reasoner-1", turn("acme/acme-reasoner-1")),
+        ];
+        for (target, message) in cases {
+            let wire = convert_messages_for(std::slice::from_ref(&message), unlisted_target(target));
+            assert_eq!(
+                count_passports(&wire),
+                0,
+                "{target} was sent its own reasoning as text ({:?}): {wire:?}",
+                message.model
+            );
+            assert!(
+                matches!(
+                    &wire[0].content[0],
+                    InputContentBlock::Thinking { thinking, signature }
+                        if thinking == "Jena is installed. Now run arq against the saved query."
+                            && signature.is_empty()
+                ),
+                "its own reasoning goes back as reasoning, whole and unsigned: {wire:?}"
+            );
+            assert!(
+                matches!(
+                    &wire[0].content[1],
+                    InputContentBlock::Text { text, .. } if text == "Running the saved query."
+                ),
+                "the commentary still crosses, behind it: {wire:?}"
+            );
+        }
+    }
+
+    /// Reasoning that says nothing is not sent back as an empty block.
+    #[test]
+    fn a_model_outside_the_lineups_is_not_sent_an_empty_reasoning_block() {
+        let message = ConversationMessage::assistant(vec![
+            crate::session::ContentBlock::Thinking {
+                thinking: "  \n".to_string(),
+                signature: String::new(),
+            },
+            crate::session::ContentBlock::Text {
+                text: "done".to_string(),
+            },
+        ])
+        .with_model(Some("acme-reasoner-1".to_string()));
+        let wire = convert_messages_for(std::slice::from_ref(&message), unlisted_target("acme-reasoner-1"));
+        assert_eq!(wire[0].content.len(), 1, "{wire:?}");
+        assert!(matches!(&wire[0].content[0], InputContentBlock::Text { text, .. } if text == "done"));
+    }
+
+    /// What the passport exists for is untouched for such a target: another
+    /// model's reasoning — a first-party model's, another gateway model's — and
+    /// reasoning no stamp attributes still cross as text. So does everything
+    /// for a target built with no model in hand.
+    #[test]
+    fn a_model_outside_the_lineups_is_still_carried_another_models_reasoning() {
+        let thought = |model: Option<&str>| {
+            ConversationMessage::assistant(vec![
+                crate::session::ContentBlock::Thinking {
+                    thinking: "the lock is held across the await".to_string(),
+                    signature: String::new(),
+                },
+                crate::session::ContentBlock::Text {
+                    text: "found it".to_string(),
+                },
+            ])
+            .with_model(model.map(str::to_string))
+        };
+        let named = unlisted_target("acme-reasoner-1");
+        let cases = [
+            (named, thought(Some("gpt-6.1-sol"))),
+            (named, thought(Some("acme-reasoner-2"))),
+            (named, thought(Some("other-lab-reasoner-1"))),
+            (named, thought(None)),
+            (WireTarget::from(ReasoningReplay::AsText), thought(Some("acme-reasoner-1"))),
+        ];
+        for (target, message) in cases {
+            let wire = convert_messages_for(std::slice::from_ref(&message), target);
+            assert!(
+                matches!(
+                    &wire[0].content[0],
+                    InputContentBlock::Text { text, .. }
+                        if text.starts_with(REASONING_PASSPORT_LABEL)
+                            && text.contains("the lock is held across the await")
+                ),
+                "{target:?} lost reasoning from {:?}: {wire:?}",
+                message.model
             );
         }
     }

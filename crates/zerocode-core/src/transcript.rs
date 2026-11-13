@@ -35,9 +35,9 @@ pub const SUMMARY_CHARS: usize = 240;
 pub const MAX_TAIL_BYTES: u64 = 256 * 1024;
 
 /// The label zo puts on reasoning it carries into a later turn as a text
-/// block — its "reasoning passport" (`runtime::convert_messages::
-/// REASONING_PASSPORT_LABEL` in zo-ide; spelled once more here because this
-/// crate cannot depend on zo). The label is the model's to read, never the
+/// block — its "reasoning passport" (`api::REASONING_PASSPORT_LABEL` in
+/// zo-ide; spelled once more here because this crate cannot depend on zo).
+/// The label is the model's to read, never the
 /// person's: a text block that starts with it is reasoning, and the page shows
 /// it as such (2026-09-08: the agent tab printed `[earlier reasoning] **…**`
 /// as prose).
@@ -4454,7 +4454,9 @@ mod tests {
     #[test]
     fn the_frames_this_reader_takes_off_are_zos_own_words() {
         let conversation = include_str!("../../../zo-ide/crates/runtime/src/conversation/mod.rs");
-        let convert = include_str!("../../../zo-ide/crates/runtime/src/convert_messages.rs");
+        // the label is spelled where the passport is written: the `api` crate, which
+        // the Chat wire and the lowering both take it from
+        let passport = include_str!("../../../zo-ide/crates/api/src/providers/mod.rs");
         let opening = "const STEERING_PREAMBLE: &str = \"";
         let preamble = &conversation[conversation
             .find(opening)
@@ -4465,7 +4467,7 @@ mod tests {
             "zo's steering line no longer opens with {STEERING_FRAME_HEAD:?}"
         );
         assert!(
-            convert.contains(&format!(
+            passport.contains(&format!(
                 "pub const REASONING_PASSPORT_LABEL: &str = \"{REASONING_PASSPORT_LABEL}\";"
             )),
             "zo's passport label is no longer {REASONING_PASSPORT_LABEL:?}"

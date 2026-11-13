@@ -210,6 +210,21 @@ impl OpenAiCompatConfig {
         self.base_url_env.is_empty()
     }
 
+    /// Whether a request to this endpoint carries the model's own earlier
+    /// reasoning back in `reasoning_content`, the field of the assistant
+    /// message it arrived in.
+    ///
+    /// An endpoint the person declared serves models zo has no other replay
+    /// for (its own providers replay reasoning by their own means: an
+    /// encrypted item, a signature), and the endpoints that send reasoning in
+    /// that field expect it back there — see [`ReasoningWire`] for what one of
+    /// them does with a step that comes back without it. zo's own endpoints
+    /// are left as they were: reasoning reaches them as `[earlier reasoning]`
+    /// text.
+    pub(crate) const fn takes_its_reasoning_back(&self) -> bool {
+        self.is_declared_by_the_person()
+    }
+
     /// Build a process-lifetime config for a user-defined
     /// OpenAI-compatible endpoint. The endpoint owns model routing elsewhere
     /// (for example `CustomProviderConfig::models`); this keeps the HTTP
@@ -760,6 +775,10 @@ impl OpenAiCompatClient {
         request: &MessageRequest,
     ) -> Result<reqwest::Response, ApiError> {
         let mut attempts = 0;
+        // Set once a refused request is being sent again with its reasoning
+        // the other way (`reasoning_answer_to_try`).
+        let mut resent_the_other_way = false;
+        let config = request_config_for_base_url(self.config(), &self.base_url);
 
         let last_error = loop {
             attempts += 1;
@@ -767,7 +786,25 @@ impl OpenAiCompatClient {
                 Ok((response, key_sent)) => match expect_success(response).await {
                     Ok(response) => return Ok(response),
                     Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => error,
-                    Err(error) => return Err(self.refused_router_key(error, key_sent)),
+                    Err(error) => {
+                        if resent_the_other_way {
+                            // The same request the other way was refused as
+                            // well, so the reasoning was not why: nothing was
+                            // learnt about the endpoint.
+                            if refuses_the_body(&error) {
+                                note_reasoning_answer(&config, &request.model, None);
+                            }
+                        } else if let Some(answer) = reasoning_answer_to_try(&error, request, &config) {
+                            // Not a transient failure: no backoff, and the
+                            // attempt is not spent. The body is built from the
+                            // answer noted here (`reasoning_wire`).
+                            note_reasoning_answer(&config, &request.model, Some(answer));
+                            resent_the_other_way = true;
+                            attempts -= 1;
+                            continue;
+                        }
+                        return Err(self.refused_router_key(error, key_sent));
+                    }
                 },
                 Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => error,
                 Err(error) => return Err(error),
@@ -1610,6 +1647,168 @@ fn gateway_effort_wire(level: crate::types::EffortLevel, model: &str) -> &'stati
     }
 }
 
+/// How one request's assistant messages carry reasoning on the Chat wire.
+///
+/// `reasoning_content` is the field these endpoints send reasoning in. What
+/// one of them does with it on the way back was measured on deepseek-flash
+/// (2026-11-14, a recorded conversation replayed with one thing changed at a
+/// time):
+///
+/// * a tool step after the last user message **must** carry the field, or the
+///   request is refused with 400 — unless the endpoint still holds the
+///   reasoning under the call ids it issued, in which case it fills the field
+///   in by itself (same prompt tokens, same cache hit, as when it was sent);
+/// * every such step must carry it, not the last one only; an empty string
+///   counts, and replaces whatever the endpoint held;
+/// * once a user message follows, the endpoint fills nothing in: a step sent
+///   without the field has lost its reasoning, the prompt is no longer the one
+///   the cache stored, and everything after the first reasoning is paid for
+///   as new input (3,692 tokens uncached against 179 with the field sent).
+///
+/// zo sent the field never, so a session held together only while the
+/// endpoint's own memory did, and lost both the reasoning and the cache at
+/// every user message — and at every message zo itself puts in mid-task (a
+/// picture a tool returned, the turn-end gate's question).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningWire {
+    /// As `[earlier reasoning]` text in the content, and no field: an endpoint
+    /// of zo's own, or one that refused the field.
+    Text,
+    /// In `reasoning_content`. `every_step`: an assistant message that has no
+    /// reasoning carries an empty one, because the endpoint takes no step
+    /// without the field — the request speaks the field already (some message
+    /// in it has reasoning to send), or the endpoint asked for it.
+    Field { every_step: bool },
+}
+
+/// What an endpoint answered a request about `reasoning_content`, learnt from
+/// a refusal that the same request sent the other way did not get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningAnswer {
+    /// It refused a request that carried the field (400, or the 422 "extra
+    /// inputs are not permitted") and took it without.
+    Refused,
+    /// It refused a request for lacking the field and took it with one.
+    Demanded,
+}
+
+/// The answers so far, by base URL and lower-cased model id, for the life of
+/// the process: an endpoint that refuses the field would refuse it on every
+/// later step of the conversation, and one that demands it likewise
+/// (`OpenAiCompatClient::send_with_retry`).
+type ReasoningAnswers = std::sync::Mutex<std::collections::BTreeMap<(String, String), ReasoningAnswer>>;
+
+fn reasoning_answers() -> &'static ReasoningAnswers {
+    static ANSWERS: std::sync::OnceLock<ReasoningAnswers> = std::sync::OnceLock::new();
+    ANSWERS.get_or_init(Default::default)
+}
+
+fn reasoning_answer_key(config: &OpenAiCompatConfig, model: &str) -> (String, String) {
+    (config.default_base_url.to_string(), model.trim().to_ascii_lowercase())
+}
+
+fn reasoning_answer(config: &OpenAiCompatConfig, model: &str) -> Option<ReasoningAnswer> {
+    reasoning_answers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&reasoning_answer_key(config, model))
+        .copied()
+}
+
+/// Remember what `model` behind this endpoint answered, or forget it.
+fn note_reasoning_answer(config: &OpenAiCompatConfig, model: &str, answer: Option<ReasoningAnswer>) {
+    let mut answers = reasoning_answers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = reasoning_answer_key(config, model);
+    match answer {
+        Some(answer) => {
+            answers.insert(key, answer);
+        }
+        None => {
+            answers.remove(&key);
+        }
+    }
+}
+
+/// How `request` carries reasoning to this endpoint ([`ReasoningWire`]).
+fn reasoning_wire(request: &MessageRequest, config: &OpenAiCompatConfig) -> ReasoningWire {
+    if !config.takes_its_reasoning_back() {
+        return ReasoningWire::Text;
+    }
+    match reasoning_answer(config, &request.model) {
+        Some(ReasoningAnswer::Refused) => ReasoningWire::Text,
+        Some(ReasoningAnswer::Demanded) => ReasoningWire::Field { every_step: true },
+        None => ReasoningWire::Field {
+            every_step: holds_reasoning_to_send_back(request),
+        },
+    }
+}
+
+/// Whether `request` holds reasoning the Chat wire writes into
+/// `reasoning_content`: an unsigned block, with something in it, in an
+/// assistant message.
+fn holds_reasoning_to_send_back(request: &MessageRequest) -> bool {
+    request.messages.iter().any(|message| {
+        message.role == "assistant"
+            && message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    InputContentBlock::Thinking { thinking, signature }
+                        if signature.is_empty() && !thinking.trim().is_empty()
+                )
+            })
+    })
+}
+
+/// The other way to send a request this endpoint just refused, when the
+/// refusal may be about `reasoning_content` and nothing is known of the
+/// endpoint yet: without the field when the request carried it, with it when
+/// the refusal names the field and the request carried none.
+fn reasoning_answer_to_try(
+    error: &ApiError,
+    request: &MessageRequest,
+    config: &OpenAiCompatConfig,
+) -> Option<ReasoningAnswer> {
+    if !config.takes_its_reasoning_back()
+        || !refuses_the_body(error)
+        || reasoning_answer(config, &request.model).is_some()
+    {
+        return None;
+    }
+    if holds_reasoning_to_send_back(request) {
+        Some(ReasoningAnswer::Refused)
+    } else if names_the_reasoning_field(error)
+        && request.messages.iter().any(|message| message.role == "assistant")
+    {
+        Some(ReasoningAnswer::Demanded)
+    } else {
+        None
+    }
+}
+
+/// Whether a refusal's own words name `reasoning_content` — the 400 an
+/// endpoint answers a step that came back without its reasoning.
+fn names_the_reasoning_field(error: &ApiError) -> bool {
+    match error {
+        ApiError::Api { message, body, .. } => {
+            message.as_deref().is_some_and(|text| text.contains("reasoning_content"))
+                || body.contains("reasoning_content")
+        }
+        _ => false,
+    }
+}
+
+/// A refusal of what the request said, as opposed to who sent it or how
+/// often: 400, and the 422 some servers answer an unknown field with.
+fn refuses_the_body(error: &ApiError) -> bool {
+    matches!(
+        error,
+        ApiError::Api { status, .. }
+            if *status == reqwest::StatusCode::BAD_REQUEST || *status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    )
+}
+
 fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatConfig) -> Value {
     let mut messages = Vec::new();
     if let Some(blocks) = request.system.as_ref().filter(|v| !v.is_empty()) {
@@ -1639,8 +1838,15 @@ fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatC
     // only): it waits until the step's run of `tool` messages has ended and
     // then goes out in a user message of its own — see `ToolPictures`.
     let mut tool_pictures = ToolPictures::for_request(request, &config);
+    let reasoning = reasoning_wire(request, &config);
     for message in &request.messages {
-        translate_message(message, config.supports_vision, &mut tool_pictures, &mut messages);
+        translate_message(
+            message,
+            config.supports_vision,
+            reasoning,
+            &mut tool_pictures,
+            &mut messages,
+        );
     }
     tool_pictures.show(&mut messages);
 
@@ -1826,15 +2032,20 @@ impl<'a> ToolPictures<'a> {
 
 /// Lower one message onto the end of `translated`. A message that is not a
 /// `tool` message first lets the pictures waiting in `tool_pictures` out.
+///
+/// `reasoning`: how this request's assistant messages carry their reasoning
+/// ([`ReasoningWire`]).
 fn translate_message<'a>(
     message: &'a InputMessage,
     supports_vision: bool,
+    reasoning: ReasoningWire,
     tool_pictures: &mut ToolPictures<'a>,
     translated: &mut Vec<Value>,
 ) {
     if message.role == "assistant" {
         let mut text = String::new();
         let mut tool_calls = Vec::new();
+        let mut reasoning_content = String::new();
         for block in &message.content {
             match block {
                 InputContentBlock::Text { text: value, .. } => {
@@ -1855,8 +2066,27 @@ fn translate_message<'a>(
                         }
                     }));
                 }
-                // Anthropic reasoning blocks are provider-opaque and never
-                // lowered into an OpenAI-compatible request.
+                // The model's own reasoning from an earlier step of this
+                // conversation: an unsigned block (the lowering hands this wire
+                // no other kind — `runtime::convert_messages`). Where the
+                // endpoint takes the field it arrived in, it goes back there,
+                // whole. The text it has always been carried as goes with it:
+                // within one turn that text is a second copy, and taking it
+                // away is a change in what the model reads, measured apart.
+                InputContentBlock::Thinking { thinking, signature } if signature.is_empty() => {
+                    if matches!(reasoning, ReasoningWire::Field { .. }) && !thinking.trim().is_empty() {
+                        if !reasoning_content.is_empty() {
+                            reasoning_content.push_str("\n\n");
+                        }
+                        reasoning_content.push_str(thinking);
+                    }
+                    if let Some(passport) = super::reasoning_passport(thinking) {
+                        super::push_assistant_text(&mut text, &passport);
+                    }
+                }
+                // A signed (Anthropic) or sealed reasoning block is
+                // provider-opaque and never lowered into an OpenAI-compatible
+                // request.
                 InputContentBlock::ToolResult { .. }
                 | InputContentBlock::Image { .. }
                 | InputContentBlock::Document { .. }
@@ -1865,12 +2095,16 @@ fn translate_message<'a>(
             }
         }
         // An assistant message that lowers to nothing is not on the wire, so it
-        // ends no run of `tool` messages either.
+        // ends no run of `tool` messages either. A turn that holds only
+        // reasoning is one through its passport text, as it always was.
         if !text.is_empty() || !tool_calls.is_empty() {
             let mut message = json!({
                 "role": "assistant",
                 "content": (!text.is_empty()).then_some(text),
             });
+            if !reasoning_content.is_empty() || reasoning == (ReasoningWire::Field { every_step: true }) {
+                message["reasoning_content"] = Value::String(reasoning_content);
+            }
             // OpenAI-compatible servers (e.g. DeepSeek) reject an empty
             // `tool_calls` array; the field must be omitted when there are no
             // tool calls rather than serialized as `[]`.

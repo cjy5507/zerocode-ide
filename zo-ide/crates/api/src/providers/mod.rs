@@ -3652,6 +3652,50 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     ProviderKind::Anthropic
 }
 
+/// Per-block budget for carried reasoning, in characters (~250 tokens).
+///
+/// The cap is per block and EVERY unreplayable block is carried, rather than
+/// a sliding window of the last few. A window would be cheaper, but a block
+/// leaving it as the conversation grows would rewrite history the cache had
+/// already stored — the exact defect class this module spent a round fixing.
+/// A deterministic per-block digest lowers to the same bytes on every request
+/// of the session.
+const REASONING_PASSPORT_CHARS: usize = 1_000;
+
+/// Label that opens a carried reasoning block on the wire.
+pub const REASONING_PASSPORT_LABEL: &str = "[earlier reasoning]";
+
+/// Carry a reasoning block the target provider cannot replay, as text.
+///
+/// Deliberately NOT a thinking block: it is attributed, plain assistant text,
+/// so no provider can reject it as an unverified signature. The full original
+/// stays in the transcript vault, reachable with `session_recall`, so the cap
+/// costs recall effort rather than the record itself.
+///
+/// `None` for reasoning that carries nothing (empty, or whitespace only).
+#[must_use]
+pub fn reasoning_passport(thinking: &str) -> Option<String> {
+    let trimmed = thinking.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.chars().count() <= REASONING_PASSPORT_CHARS {
+        return Some(format!("{REASONING_PASSPORT_LABEL}\n{trimmed}"));
+    }
+    // Cut on a line boundary when one is near the cap, so the carried text
+    // ends on a thought rather than mid-word.
+    let head: String = trimmed.chars().take(REASONING_PASSPORT_CHARS).collect();
+    let cut = head
+        .rfind('\n')
+        .filter(|boundary| *boundary * 4 > REASONING_PASSPORT_CHARS * 3)
+        .unwrap_or(head.len());
+    Some(format!(
+        "{REASONING_PASSPORT_LABEL}\n{}\n[… truncated; the full reasoning is in this session's \
+         transcript, reachable with session_recall]",
+        &head[..cut]
+    ))
+}
+
 /// Add one of an assistant turn's text blocks to the text an encoder collects
 /// into a single wire message, a blank line apart from the block before it.
 ///
