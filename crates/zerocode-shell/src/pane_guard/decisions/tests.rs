@@ -6,8 +6,8 @@
 
 use serde_json::{Map, json};
 use zerocode_core::hook_guard::Call;
-use zerocode_core::jev::SMART_SETTINGS_KEY;
 use zerocode_core::jev::custom::{Answer, Input, NOT_APPLICABLE};
+use zerocode_core::jev::{AGENT_TOOL_ASK_OPTIONS, SMART_SETTINGS_KEY};
 
 use super::*;
 use crate::systemone::tests::Endpoint;
@@ -28,6 +28,13 @@ fn pane(project: &Path) -> Pane {
     }
 }
 
+/// What a yes of [`yes_no`]'s decision means, as its line says it
+/// ([`custom::said`]).
+const YES_MEANS: &str = "A person sees it change.";
+
+/// What its no means.
+const NO_MEANS: &str = "Nothing a person sees moves.";
+
 /// A yes-or-no decision named `name` asking at `at`, as a new one starts.
 fn yes_no(name: &str, at: Point) -> Definition {
     Definition::new(
@@ -35,11 +42,17 @@ fn yes_no(name: &str, at: Point) -> Definition {
         name.to_string(),
         "Does this change what a person sees?".to_string(),
         Answer::YesNo {
-            yes: "A person sees it change.".to_string(),
-            no: "Nothing a person sees moves.".to_string(),
+            yes: YES_MEANS.to_string(),
+            no: NO_MEANS.to_string(),
         },
         at,
     )
+}
+
+/// `line` as a reply or a brief carries it: after the line that says what
+/// the lines are ([`custom::introduced`]).
+fn briefed(line: String) -> String {
+    custom::introduced(&[line]).expect("a line")
 }
 
 /// A decision named `name` at `at` that chooses one of `options`.
@@ -449,7 +462,7 @@ fn on_and_sure_hands_its_line_to_the_persons_own_pane_once() {
     );
     assert_eq!(
         brief(guards, &home, &standing, LAUNCH),
-        Some(custom::line("Visible", "yes", 0.9))
+        Some(briefed(custom::line("Visible", YES_MEANS, 0.9)))
     );
     assert!(
         brief(guards, &home, &standing, LAUNCH).is_none(),
@@ -592,7 +605,7 @@ fn a_turns_end_asks_unless_stopped_and_its_offer_is_replaced_by_a_later_one() {
     );
     assert_eq!(
         brief(guards, &home, &standing, LAUNCH),
-        Some(custom::line("Done", "yes", 0.9))
+        Some(briefed(custom::line("Done", YES_MEANS, 0.9)))
     );
     noted(guards, &home, &standing, vec![turn_ended(false)]);
     sure.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1102,7 +1115,7 @@ fn a_commands_line_is_taken_at_the_next_tool_boundary_once() {
     assert!(boundary_in(guards, &decided, &key, "launch-2").is_none());
     assert_eq!(
         boundary_in(guards, &decided, &key, LAUNCH),
-        Some(custom::line("Visible", "yes", 0.9))
+        Some(briefed(custom::line("Visible", YES_MEANS, 0.9)))
     );
     assert!(boundary_in(guards, &decided, &key, LAUNCH).is_none());
     assert!(brief(guards, &home, &standing, LAUNCH).is_none());
@@ -1128,7 +1141,7 @@ fn a_turns_offer_is_not_taken_at_a_tool_boundary() {
     assert!(boundary_in(guards, &standing.decided(), &key, LAUNCH).is_none());
     assert_eq!(
         brief(guards, &home, &standing, LAUNCH),
-        Some(custom::line("Done", "yes", 0.9))
+        Some(briefed(custom::line("Done", YES_MEANS, 0.9)))
     );
 }
 
@@ -1174,7 +1187,7 @@ fn a_waiting_line_is_taken_without_reading_the_settings() {
             &crate::hooks::pane_key_of(7),
             LAUNCH
         ),
-        Some(custom::line("Visible", "yes", 0.9))
+        Some(briefed(custom::line("Visible", YES_MEANS, 0.9)))
     );
 }
 
@@ -1224,7 +1237,7 @@ fn a_later_turns_end_replaces_the_offer_even_when_nothing_asks_there() {
     assert_eq!(ended(true, nothing_asks.0, &nothing_asks.1, at + 1), 0);
     assert_eq!(
         brief(guards, &home, &standing, LAUNCH),
-        Some(custom::line("Done", "yes", 0.9)),
+        Some(briefed(custom::line("Done", YES_MEANS, 0.9))),
         "a stopped turn left the offer standing"
     );
     assert_eq!(
@@ -1342,4 +1355,53 @@ fn the_ledger_a_pane_writes_is_cut_where_zo_cuts_it() {
         rows.last().expect("a row")["outcome"],
         json!(ANSWERED_OUTCOME)
     );
+}
+
+/// Where no agent asked — before a command, at a turn's end — a yes-or-no
+/// decision speaks only of its yes: a no as sure as 0.99 keeps its row, says
+/// it was not applied and hands no line, in no wording. A yes is handed in
+/// the person's own words for it ([`custom::said`]), never the bare word.
+#[test]
+fn an_unasked_no_hands_nothing_and_a_yes_says_what_it_means() {
+    for at_point in [Point::BeforeCommand, Point::TurnEnd] {
+        for (yes, handed) in [(0.01, false), (0.99, true)] {
+            let endpoint = replying(move |_| a_noul(yes));
+            let project = tempfile::tempdir().expect("a project");
+            let decision = yes_no("Seen", at_point);
+            let home = Home::new(
+                &endpoint,
+                project.path(),
+                JevMode::On,
+                &[(&decision, JevMode::On)],
+            );
+            let standing = home.standing();
+            let guards = fresh_guards();
+            let moment = match at_point {
+                Point::BeforeCommand => about(Some("call-1"), "rm -rf build", project.path()),
+                _ => turn_ended(false),
+            };
+            assert_eq!(noted(guards, &home, &standing, vec![moment]), 1);
+            let rows = home.rows();
+            let chosen = if handed {
+                AGENT_TOOL_ASK_OPTIONS[0]
+            } else {
+                AGENT_TOOL_ASK_OPTIONS[1]
+            };
+            assert_eq!(
+                (&rows[0]["chosen"], &rows[0]["applied"]),
+                (&json!(chosen), &json!(handed)),
+                "{at_point:?} {yes}"
+            );
+            let said = brief(guards, &home, &standing, LAUNCH);
+            assert_eq!(
+                said,
+                handed.then(|| briefed(custom::line("Seen", YES_MEANS, 0.99))),
+                "{at_point:?} {yes}"
+            );
+            assert!(
+                !said.unwrap_or_default().contains(NO_MEANS),
+                "{at_point:?} {yes}"
+            );
+        }
+    }
 }

@@ -3218,13 +3218,13 @@ mod prompt_knowledge_tests {
                 None,
                 Some((
                     "PostToolUse",
-                    "「Visible」 판단: yes (확신 90%)".to_string()
+                    "「Visible」 판단: A person sees it change. (확신 90%)".to_string()
                 )),
                 Some(("PostToolUse", "mail".to_string()))
             ),
             Some((
                 "PostToolUse".to_string(),
-                "「Visible」 판단: yes (확신 90%)\n\nmail".to_string()
+                "「Visible」 판단: A person sees it change. (확신 90%)\n\nmail".to_string()
             ))
         );
         assert_eq!(

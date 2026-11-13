@@ -1716,7 +1716,7 @@ impl zerocode_hookd::BoundaryLines for WaitingLines {
 /// nothing waiting, the reply is what it always was.
 #[tokio::test]
 async fn a_decisions_line_rides_the_tool_boundary_beside_the_pointer() {
-    const LINE: &str = "「Visible」 판단: yes (확신 90%)";
+    const LINE: &str = "「Visible」 판단: A person sees it change. (확신 90%)";
     let lines = WaitingLines::holding(LINE);
     let mailbox = StandingPointer::holding(2);
     let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);

@@ -630,7 +630,11 @@ fn ask_one(
     let handed = hands.then(|| Handed {
         decision: kept.entry.id.clone(),
         version: kept.entry.definition.clone(),
-        line: custom::line(&kept.definition.name, &reading.shown, reading.confidence),
+        line: custom::line(
+            &kept.definition.name,
+            &custom::said(&kept.definition, &reading.shown),
+            reading.confidence,
+        ),
     });
     (Some(row), handed)
 }
@@ -719,20 +723,21 @@ pub(super) fn drop_lines_the_door_refuses(guards: &Mutex<Guards>, wire: &Wire) {
 /// with `offered_too` what the last turn's end offered: none for a knock from another
 /// launch of the pane, which leaves them where they were. Those whose
 /// decision no longer stands on at the version that answered are dropped;
-/// of the rest, each that fits under `room` after the ones before it, one to
-/// a line. The snapshot alone is read — no file: a folder the door stopped
-/// letting act lost its lines when the settings were read again
+/// of the rest, each that fits under `room` after the ones before it and the
+/// line that says what they are, as zo hands its unasked lines
+/// ([`custom::introduced`]) — and none at all, left waiting, when that line
+/// itself does not fit. The snapshot alone is read — no file: a folder the
+/// door stopped letting act lost its lines when the settings were read again
 /// ([`drop_lines_the_door_refuses`]). Taken lines are gone whether or not
 /// the reply that carries them is read: at most once, not exactly once.
 fn take(
     guards: &Mutex<Guards>,
     decided: &Decided,
-    pane_key: &str,
-    launch: &str,
-    session: Option<&str>,
+    (pane_key, launch, session): (&str, &str, Option<&str>),
     offered_too: bool,
     room: usize,
 ) -> Option<String> {
+    let room = room.checked_sub(custom::LINES_INTRO.chars().count() + 1)?;
     if decided.decisions.kept.is_empty() {
         return None;
     }
@@ -762,26 +767,27 @@ fn take(
         }
         handed
     };
-    let mut said = String::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0;
     for one in handed
         .iter()
         .filter(|one| decided.decisions.stands_on(&one.decision, &one.version))
     {
-        let gap = usize::from(!said.is_empty());
-        if said.chars().count() + gap + one.line.chars().count() > room {
+        let gap = usize::from(!lines.is_empty());
+        let width = one.line.chars().count();
+        if used + gap + width > room {
             continue;
         }
-        if gap > 0 {
-            said.push('\n');
-        }
-        said.push_str(&one.line);
+        used += gap + width;
+        lines.push(one.line.clone());
     }
-    (!said.is_empty()).then_some(said)
+    custom::introduced(&lines)
 }
 
 /// The decisions' voice in a turn's brief: every line waiting in the
 /// asking pane — the person's own as well as a summoned worker's — that
-/// fits the room the voices before it left.
+/// fits the room the voices before it left, opened by what they are
+/// ([`custom::introduced`]): observations, not the person's next request.
 pub(super) fn brief_line(ask: &zerocode_hookd::TurnBriefAsk, room: usize) -> Option<String> {
     brief_in(&GUARDS, &STANDING.decided(), ask, room)
 }
@@ -795,9 +801,7 @@ pub(super) fn brief_in(
     take(
         guards,
         decided,
-        &ask.pane_key,
-        &ask.launch_token,
-        ask.session_id.as_deref(),
+        (&ask.pane_key, &ask.launch_token, ask.session_id.as_deref()),
         true,
         room,
     )
@@ -806,8 +810,9 @@ pub(super) fn brief_in(
 /// The lines a command's decisions handed the pane `pane_key` names, for
 /// the reply to its agent's tool boundary
 /// ([`zerocode_core::hook_continuation::tool_boundary_context`]): taken now,
-/// never waited for, within the brief's cap. What a turn's end offered waits
-/// for the next turn's brief.
+/// never waited for, within the brief's cap, opened by what they are as zo
+/// opens the lines beside a command's result ([`custom::introduced`]). What
+/// a turn's end offered waits for the next turn's brief.
 pub(crate) fn take_for_the_tool_boundary(pane_key: &str, launch: &str) -> Option<String> {
     boundary_in(&GUARDS, &STANDING.decided(), pane_key, launch)
 }
@@ -821,9 +826,7 @@ pub(super) fn boundary_in(
     take(
         guards,
         decided,
-        pane_key,
-        launch,
-        None,
+        (pane_key, launch, None),
         false,
         zerocode_hookd::TURN_BRIEF_CHAR_CAP,
     )
