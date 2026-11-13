@@ -6835,7 +6835,8 @@ function librarySkillAlignButtons(view, state, family, record) {
   return agents.map((agent) => {
     const who = libraryWho(agent);
     const button = libraryButton(t("library.pick.alignStore", "저장소 것으로 맞추기 · {{who}}", { who }), () => {
-      void libraryAct(view, state, "library_skill_align", { name: family.name, agent });
+      const started = handNow();
+      void libraryAct(view, state, "library_skill_align", { name: family.name, agent }, { hand: flowHand(started) });
     }, "btn btn--sm", "refresh");
     button.dataset.personOnly = "";
     button.dataset.tip = t("library.pick.alignTip", "{{who}}의 이 사본을 보관 폴더에 남기고 휴지통으로 옮깁니다. 그 뒤 {{who}}는 공통 저장소의 것을 씁니다.", { who });
