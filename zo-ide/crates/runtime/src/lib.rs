@@ -51,6 +51,7 @@ pub mod message_stream;
 pub mod model_inventory;
 pub mod model_catalog;
 pub mod model_discovery;
+pub mod model_home;
 pub mod model_router;
 pub mod notifications;
 mod oauth;

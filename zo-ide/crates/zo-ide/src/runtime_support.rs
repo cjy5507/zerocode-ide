@@ -3435,6 +3435,122 @@ mod oauth_refresh_tests {
     }
 
 
+    /// The client a session is built on and [`runtime::model_home::ModelHome`]
+    /// are one reading. However a model is named — a row the person wrote
+    /// into the catalog, a `<catalog key>/<id>` selection, an id a provider
+    /// of the person's declares, a name read by its spelling — the home says
+    /// the provider the client is built for, and `/status` reads the same.
+    /// What asks whose account a session spends asks the home: were the two
+    /// to part, a session's probe, helper or verifier would be picked for an
+    /// account the session is not on.
+    #[test]
+    fn the_session_client_is_built_where_the_models_home_says() {
+        use runtime::model_catalog::{CatalogProvider, ModelCatalog};
+        use runtime::model_home::ModelHome;
+
+        const OWN_ENDPOINT: &str = "https://own.invalid/v1";
+        let _env_lock = crate::test_env_lock();
+        let config_home = crate::support::temp_dir("model-home-differential");
+        let _config_home = crate::support::EnvVarGuard::set(
+            "ZO_CONFIG_HOME",
+            Some(config_home.to_str().expect("utf8 config home")),
+        );
+        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
+        let _custom = crate::support::EnvVarGuard::set(api::CUSTOM_PROVIDERS_ENV, None);
+        // A key for each built-in provider, so its client can be built on a
+        // machine with no login, at that provider's own address.
+        let _adapters = crate::support::EnvVarGuard::set(api::NON_CLAUDE_ADAPTERS_ENV, Some("1"));
+        let _openai = crate::support::EnvVarGuard::set("OPENAI_API_KEY", Some("test-key"));
+        let _google = crate::support::EnvVarGuard::set("GOOGLE_API_KEY", Some("test-key"));
+        let _xai = crate::support::EnvVarGuard::set("XAI_API_KEY", Some("test-key"));
+        let _openai_url = crate::support::EnvVarGuard::set("OPENAI_BASE_URL", None);
+        let _google_url = crate::support::EnvVarGuard::set("GOOGLE_BASE_URL", None);
+        let _xai_url = crate::support::EnvVarGuard::set("XAI_BASE_URL", None);
+        let _ollama = crate::support::EnvVarGuard::set("OLLAMA_BASE_URL", None);
+
+        // Rows the person wrote by hand, one per built-in provider and none
+        // spelled as that provider's models are; the last is also listed by
+        // the person's own provider below.
+        let mut catalog = ModelCatalog::load_from_home(&config_home).expect("an empty home loads");
+        for (provider, id) in [
+            (CatalogProvider::Google, "zq-row-on-google"),
+            (CatalogProvider::Anthropic, "zq-row-on-anthropic"),
+            (CatalogProvider::Openai, "zq-row-on-openai"),
+            (CatalogProvider::Google, "zq-both-list"),
+        ] {
+            catalog.add(provider, id, id).expect("the row is added");
+        }
+        let shipped = api::provider_catalog()
+            .iter()
+            .find(|entry| entry.provider == ProviderKind::Anthropic)
+            .expect("an Anthropic catalog row")
+            .canonical_model_id;
+        api::refresh_custom_providers_from_json(&format!(
+            r#"[{{"name":"zqown","base_url":"{OWN_ENDPOINT}","requires_auth":false,
+                 "models":["gpt-zq-oss","claude-zq-gateway","gemini-zq-relay","zq-own-model",
+                           "zq-both-list","anthropic/zq-slash-id","{shipped}"]}}]"#
+        ))
+        .expect("custom providers");
+
+        let built_in = ModelHome::BuiltIn;
+        let own = || ModelHome::Own("zqown".to_string());
+        let cases: Vec<(String, ModelHome)> = [
+            ("zq-row-on-google", built_in(ProviderKind::Google)),
+            ("zq-row-on-anthropic", built_in(ProviderKind::Anthropic)),
+            ("zq-row-on-openai", built_in(ProviderKind::OpenAi)),
+            ("zq-both-list", built_in(ProviderKind::Google)),
+            ("openai/gemini-zq-9", built_in(ProviderKind::OpenAi)),
+            ("google/zq-own-model", built_in(ProviderKind::Google)),
+            ("claude/gpt-zq-9", built_in(ProviderKind::Anthropic)),
+            ("gpt-zq-oss", own()),
+            ("claude-zq-gateway", own()),
+            ("gemini-zq-relay", own()),
+            ("zq-own-model", own()),
+            ("zqown/zq-own-model", own()),
+            ("anthropic/zq-slash-id", own()),
+            ("gpt-zq-9", built_in(ProviderKind::OpenAi)),
+            ("claude-zq-9", built_in(ProviderKind::Anthropic)),
+            ("gemini-zq-9", built_in(ProviderKind::Google)),
+            ("grok-zq-9", built_in(ProviderKind::Xai)),
+            ("zqrelay/gpt-zq-9", built_in(ProviderKind::OpenAi)),
+            (shipped, built_in(ProviderKind::Anthropic)),
+        ]
+        .into_iter()
+        .map(|(model, home)| (model.to_string(), home))
+        .chain([(api::format_provider_model_ref("zqown", shipped), own())])
+        .collect();
+
+        // The provider the client is built for, and whether it is dialled at
+        // the person's own endpoint.
+        let built = |model: &str| {
+            super::build_provider_client(
+                "model-home-test",
+                model,
+                AuthRoute::Auto,
+                Some(api::AuthSource::ApiKey("test-key".to_string())),
+            )
+            .map(|client| (client.provider_kind(), format!("{client:?}").contains(OWN_ENDPOINT)))
+            .map_err(|error| error.to_string())
+        };
+        for (model, expected) in &cases {
+            let home = ModelHome::of(model);
+            assert_eq!(&home, expected, "{model}: the home");
+            let client = match home {
+                ModelHome::BuiltIn(kind) => (kind, false),
+                ModelHome::Own(_) => (ProviderKind::OpenAi, true),
+                ModelHome::Unknown => unreachable!("no case expects an unknown home"),
+            };
+            assert_eq!(built(model), Ok(client), "{model}: the client");
+            assert_eq!(provider_kind_for_model(model), client.0, "{model}: what `/status` reads");
+        }
+        // A name nothing knows has no home; its client is built for whichever
+        // login the machine holds, which no judgment may read as a provider.
+        assert_eq!(ModelHome::of("zq-model-nobody-lists"), ModelHome::Unknown);
+
+        api::refresh_custom_providers_from_json("[]").expect("clear");
+        std::fs::remove_dir_all(config_home).ok();
+    }
+
     #[test]
     fn boot_does_not_resolve_anthropic_auth_for_non_anthropic_main() {
         // Booting with a non-Anthropic main model must not resolve Claude auth.
