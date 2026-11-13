@@ -582,10 +582,13 @@ pub(crate) fn forget_term(term: u32) {
         .remove(&term);
 }
 
-/// [`note_hook`]'s body, with the books and the wire handed in: file each
+/// [`note_hook`]'s body for the seats alone, with the books and the wire
+/// handed in — what the seats' cases ask; the hook loop asks
+/// [`note_deciding`], beside the person's decisions. File each
 /// moment in `pane`'s book for the seats `asking` asks, write the labels a
 /// turn's end settles, and ask each question on a thread of its own — whose
 /// handles are answered, for a caller that waits on them.
+#[cfg(test)]
 pub(crate) fn note(
     guards: &'static Mutex<Guards>,
     wire: &Wire,
