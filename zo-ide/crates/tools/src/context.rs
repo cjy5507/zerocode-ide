@@ -707,6 +707,7 @@ impl ToolContext {
     #[must_use]
     /// True once per session: the first call that names the person's own
     /// browser is answered with where web pages go instead of being run.
+    #[must_use]
     pub(crate) fn computer_says_work_browser_once(&self) -> bool {
         !self.computer.work_browser_said.swap(true, std::sync::atomic::Ordering::Relaxed)
     }

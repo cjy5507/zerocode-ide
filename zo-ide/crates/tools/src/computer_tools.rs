@@ -265,8 +265,8 @@ fn known_action(action: &str) -> Result<(), ToolError> {
 }
 
 fn unknown_action(action: &str) -> ToolError {
-    let near = nearest_action(action).map(|name| format!("; did you mean `{name}`?")).unwrap_or_default();
-    ToolError::InvalidInput(format!("unknown Computer action {action:?}{near}; one of {}", action_names(|_| true).join(", ")))
+    let near = nearest_action(action).map_or_else(|| "; one of".to_string(), |name| format!("; did you mean `{name}`? one of"));
+    ToolError::InvalidInput(format!("unknown Computer action {action:?}{near} {}", action_names(|_| true).join(", ")))
 }
 
 /// The call in the tool's own names, at the top and in each batch step: an
@@ -327,9 +327,19 @@ fn persons_browser(input: &ComputerInput) -> Option<&str> {
 /// nothing and says where web pages go (t-106321): a weak model drove the
 /// person's Chrome 24 times and the work browser never, and input there
 /// stops whenever the person uses it. Sent again, the same call runs as it
-/// always has — once a session, never a refusal.
-fn work_browser_first(input: &ComputerInput, ctx: &ToolContext) -> Option<Result<ToolExecutionResult, ToolError>> {
-    let app = persons_browser(input)?;
+/// always has — once a session, never a refusal. A call the tool would
+/// refuse anyway is refused first, as it always was.
+fn work_browser_first(input: &Value, ctx: &ToolContext) -> Option<Result<ToolExecutionResult, ToolError>> {
+    let input = read_input(input).ok()?;
+    let well_formed = match input.action.trim() {
+        BATCH_ACTION => input.steps.as_ref().is_some_and(|steps| check_batch_len(steps.len()).is_ok()),
+        WALK_ACTION => input.steps.is_none(),
+        _ => input.steps.is_none() && argv_for(&input).is_ok(),
+    };
+    if !well_formed {
+        return None;
+    }
+    let app = persons_browser(&input)?;
     if !ctx.computer_says_work_browser_once() {
         return None;
     }
@@ -2588,7 +2598,7 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
 }
 
 pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<ToolExecutionResult, ToolError> {
-    super::computer_tally::run(input, ctx, || run_computer_inner(input, ctx, road))
+    super::computer_tally::run(input, ctx, || work_browser_first(input, ctx).unwrap_or_else(|| run_computer_inner(input, ctx, road)))
 }
 
 fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<ToolExecutionResult, ToolError> {
@@ -2604,25 +2614,16 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
     let action = input.action.trim().to_string();
     if action == BATCH_ACTION {
-        if let Some(said) = work_browser_first(&input, ctx) {
-            return said;
-        }
         return run_computer_batch(input, ctx, road).map(ToolExecutionResult::from);
     }
     if input.steps.is_some() {
         return Err(ToolError::InvalidInput(format!("`steps` belongs to `batch`, not `{action}`")));
     }
     if action == WALK_ACTION {
-        if let Some(said) = work_browser_first(&input, ctx) {
-            return said;
-        }
         return run_computer_walk(&input, ctx, road, settle).map(ToolExecutionResult::from);
     }
     // A command the tool cannot spell costs no look.
     argv_for(&input)?;
-    if let Some(said) = work_browser_first(&input, ctx) {
-        return said;
-    }
     let first_look = first_look(&[&input], ctx, road)?;
     let frame = if let Some(target) = target_of(&input).filter(|_| input.coordinate.is_some() || input.start_coordinate.is_some()) {
         Some(ctx.computer_target_frame(&target).ok_or_else(|| ToolError::InvalidInput("the selected window has no matching picture frame".into()))?)
@@ -6455,8 +6456,8 @@ printf '%s
     }
 
     /// What one call resolves to — its command line, or the words it is refused in.
-    fn resolved(fields: Value) -> Result<String, String> {
-        canonical_call(&fields).map(|call| call.input).map_err(|error| error.to_string())
+    fn resolved(fields: &Value) -> Result<String, String> {
+        canonical_call(fields).map(|call| call.input).map_err(|error| error.to_string())
     }
 
     /// The six calls a weak model sent in one session (t-106321), window and
@@ -6466,32 +6467,32 @@ printf '%s
     fn the_six_reported_calls_get_answers_that_name_what_is_wrong() {
         let click = json!({"action":"click","app":"Notes","coordinate":[100,20],"window_id":41});
         let left_click = json!({"action":"left_click","app":"Notes","coordinate":[100,20],"window_id":41});
-        assert_eq!(resolved(click), resolved(left_click.clone()));
-        assert!(resolved(left_click).unwrap().contains("\"action\":\"left_click\""));
+        assert_eq!(resolved(&click), resolved(&left_click));
+        assert!(resolved(&left_click).unwrap().contains("\"action\":\"left_click\""));
 
-        let scroll = resolved(json!({"action":"scroll","app":"Notes","direction":"down","scroll_amount":5,"window_id":41})).unwrap_err();
+        let scroll = resolved(&json!({"action":"scroll","app":"Notes","direction":"down","scroll_amount":5,"window_id":41})).unwrap_err();
         assert_eq!(scroll, format!("invalid input: scroll_amount belongs to desktop scrolling: {SCROLL_SHAPES}"));
 
-        let screenshot = resolved(json!({"action":"screenshot","window_id":41})).unwrap_err();
+        let screenshot = resolved(&json!({"action":"screenshot","window_id":41})).unwrap_err();
         assert!(screenshot.contains("window_id goes with the app whose window it is: add `app`"), "{screenshot}");
         assert!(screenshot.contains(r#"{"action":"screenshot","app":"Notes","window_id":41}"#), "{screenshot}");
         assert!(screenshot.contains("this selector cannot be ignored"), "{screenshot}");
         let example = json!({"action":"screenshot","app":"Notes","window_id":41});
-        assert!(resolved(example).is_ok(), "the example is taken as it stands");
+        assert!(resolved(&example).is_ok(), "the example is taken as it stands");
 
-        let pages = resolved(json!({"action":"scroll","app":"Notes","coordinate":[600,400],"scroll_amount":500,"scroll_direction":"down","window_id":41})).unwrap_err();
+        let pages = resolved(&json!({"action":"scroll","app":"Notes","coordinate":[600,400],"scroll_amount":500,"scroll_direction":"down","window_id":41})).unwrap_err();
         assert_eq!(pages, format!("invalid input: scroll_amount belongs to desktop scrolling: {SCROLL_SHAPES}"));
 
-        let empty = resolved(json!({})).unwrap_err();
+        let empty = resolved(&json!({})).unwrap_err();
         assert_eq!(empty, "invalid input: missing field `action`");
 
-        let unknown = resolved(json!({"action":"invalid_action_name"})).unwrap_err();
+        let unknown = resolved(&json!({"action":"invalid_action_name"})).unwrap_err();
         assert_eq!(unknown, format!("invalid input: unknown Computer action \"invalid_action_name\"; one of {}", action_names(|_| true).join(", ")));
     }
 
     #[test]
     fn an_action_with_no_name_is_refused_by_its_name_before_any_selector() {
-        let typo = resolved(json!({"action":"left_clik","app":"Notes","coordinate":[100,20],"window_id":41})).unwrap_err();
+        let typo = resolved(&json!({"action":"left_clik","app":"Notes","coordinate":[100,20],"window_id":41})).unwrap_err();
         assert!(typo.starts_with("invalid input: unknown Computer action \"left_clik\"; did you mean `left_click`? one of "), "{typo}");
         for fields in [
             json!({"action":"tap","window_id":41}),
@@ -6500,15 +6501,15 @@ printf '%s
             json!({"action":"tap","mark":3}),
             json!({"action":"tap","window":"Draft"}),
         ] {
-            let refused = resolved(fields.clone()).unwrap_err();
+            let refused = resolved(&fields).unwrap_err();
             assert!(refused.starts_with("invalid input: unknown Computer action"), "{fields}: {refused}");
             assert!(!refused.contains("did you mean"), "no guess for {fields}: {refused}");
             let direct = argv_for(&input(fields.clone())).unwrap_err().to_string();
             assert!(direct.starts_with("invalid input: unknown Computer action"), "{fields}: {direct}");
         }
-        let unknown_field = resolved(json!({"action":"tap","sideways":true})).unwrap_err();
+        let unknown_field = resolved(&json!({"action":"tap","sideways":true})).unwrap_err();
         assert!(unknown_field.contains("unknown Computer action \"tap\""), "{unknown_field}");
-        let step = resolved(json!({"action":"batch","steps":[{"action":"tap","window_id":41}]})).unwrap_err();
+        let step = resolved(&json!({"action":"batch","steps":[{"action":"tap","window_id":41}]})).unwrap_err();
         assert!(step.starts_with("invalid input: step 1 (tap): invalid input: unknown Computer action \"tap\""), "{step}");
     }
 
@@ -6540,12 +6541,12 @@ printf '%s
                 call["action"] = json!(action);
                 call
             };
-            assert_eq!(resolved(with(" click ")), resolved(with("left_click")), "{fields}");
+            assert_eq!(resolved(&with(" click ")), resolved(&with("left_click")), "{fields}");
         }
         let scroll = |field: &str| json!({"action":"scroll","coordinate":[790,450],field:"down","scroll_amount":3});
-        assert_eq!(resolved(scroll("direction")), resolved(scroll("scroll_direction")));
-        assert!(resolved(scroll("direction")).unwrap().contains("down"));
-        let both = resolved(json!({"action":"scroll","coordinate":[790,450],"direction":"down","scroll_direction":"down","scroll_amount":3})).unwrap_err();
+        assert_eq!(resolved(&scroll("direction")), resolved(&scroll("scroll_direction")));
+        assert!(resolved(&scroll("direction")).is_ok());
+        let both = resolved(&json!({"action":"scroll","coordinate":[790,450],"direction":"down","scroll_direction":"down","scroll_amount":3})).unwrap_err();
         assert!(both.contains("`direction` and `scroll_direction` are one field"), "{both}");
         let batch = |action: &str, field: &str| {
             let call = read_input(&json!({"action":"batch","steps":[
@@ -6598,10 +6599,11 @@ printf '%s
     /// clause; t-70459) ~29, and the desktop taken only for a step the person
     /// told it to do (foreground in the tool and a step, its sentences, a phone's
     /// borrowing; t-90094) ~206, and a phone's borrowing said only for its mirroring
-    /// window, three sentences shortened to pay for it (t-78118) ~+3.
+    /// window, three sentences shortened to pay for it (t-78118) ~+3, and the
+    /// person's own browser pausing input while they use it (t-106321) ~+10.
     #[test]
     fn the_computer_schema_is_measured() {
-        const CEILING_TOKENS: usize = 2_270;
+        const CEILING_TOKENS: usize = 2_280;
         let spec = tool_specs().pop().expect("one spec");
         let definition = json!({ "name": spec.name, "description": spec.description, "input_schema": spec.input_schema });
         let compact = serde_json::to_string(&definition).unwrap().chars().count();
