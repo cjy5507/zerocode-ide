@@ -286,8 +286,8 @@ package-windows:
     if [[ "${GITHUB_ACTIONS:-}" == "true" && "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]; then pwsh -NoProfile -File scripts/native-package-smoke.windows.ps1; else echo "Windows install/launch smoke runs only on an ephemeral GitHub-hosted runner"; fi
 
 # The rustdoc flags, and the crate `doc` leaves out (its webview stack is a
-# build of minutes), are shared with `pre-handin`, which builds the docs of the
-# crates it tests.
+# build of minutes). `pre-handin` reads this recipe, not these variables, to build
+# the docs of the crates it tests (`tools/release/changed_crates.py`).
 doc_flags := "-D warnings"
 doc_skip := "zerocode-shell"
 
@@ -308,16 +308,23 @@ fmt:
 #   (a dependency a crate takes also changes the lock of a workspace that reads
 #   that crate by path), the private-value gate (the gate's own `fmt-check`
 #   recipes), the window's source contracts,
-#   and the unit tests and the rustdoc (the gate's `doc` flags; not the crate
-#   `doc` leaves out) of each crate the branch changed or reads a changed file
-#   of (`tools/release/changed_crates.py` picks them from Cargo's package list,
+#   and, for each crate the branch changed or reads a changed file of
+#   (`tools/release/changed_crates.py` picks them from Cargo's package list,
 #   the files the sources `include_str!`, and the diff against main — no list
-#   here, and no workspace name either). A file only a `tests/` source reads
-#   picks nothing: the contracts above are that target. NOT run: the crates that
-#   depend on a changed crate, and integration tests other than the contracts —
-#   the gate runs those (the last lines say so). The contracts build the window
-#   once, so a first run in a fresh checkout takes minutes on every core,
-#   whichever crate the branch changed.
+#   here, and no workspace name either): its unit tests, then its rustdoc, its
+#   clippy and its integration tests (`tests/`). The last three are the
+#   commands of that workspace's gate (the recipes its `verify` depends on,
+#   read by the script), narrowed to the crate with `-p` and run with the gate's
+#   own flags, targets and environment, so a gate that changes a flag is
+#   followed with no edit here; a crate the gate leaves out (the root `doc`'s
+#   `--exclude`) is left out of that check too. A crate only `tests/` changed
+#   owes clippy and its integration tests, no unit test. A file only a `tests/`
+#   source reads picks nothing: the contracts above are that target. NOT run:
+#   the crates that depend on a changed crate, the doc tests, and the lint and
+#   tests of the rest of the workspace — the gate runs those (the last lines say
+#   so). The contracts build the window once, so a first run in a fresh checkout
+#   takes minutes on every core, whichever crate the branch changed; a crate's
+#   integration tests add their own minutes (zo-ide's `tests/` are about 6 min).
 #   Then the Windows build of each workspace the branch changed a Rust source or
 #   manifest of (`changed_crates.py` names it): the gate's own `just win-check`
 #   there, never `win-check-if-available` — whose SKIPPED on a cold target is
@@ -339,8 +346,8 @@ pre-handin suites='':
     #!/usr/bin/env bash
     set -u
     suites={{quote(suites)}}
-    doc_flags={{quote(doc_flags)}}
-    doc_skip={{quote(doc_skip)}}
+    contracts_package=zerocode-shell    # the window's source contracts: stage one runs this target, so a crate's own
+    contracts_target=source_contracts   # integration tests leave it out rather than run it again
     broad_over=4    # a suite hint of more than 1/broad_over of the window's suites is not much of a hint
     names=(); codes=(); secs=(); hints=(); extras=()
     hint=; extra=; units=0
@@ -384,22 +391,32 @@ pre-handin suites='':
     step quality-runner just quality-runner-test
     hint='fix the failed window source/runner checks above before the Rust source contracts build'
     step window-runner just window-runner-test
-    hint='fix the FAILED names above, then rerun one: cargo test -p zerocode-shell --test source_contracts <name>'
-    step contracts cargo test -p zerocode-shell --test source_contracts
-    picked=$(python3 tools/release/changed_crates.py ${PRE_HANDIN_BASE:+--base "$PRE_HANDIN_BASE"}); pick=$?
+    hint="fix the FAILED names above, then rerun one: cargo test -p $contracts_package --test $contracts_target <name>"
+    step contracts cargo test -p "$contracts_package" --test "$contracts_target"
+    picked=$(python3 tools/release/changed_crates.py --ran-test "$contracts_package:$contracts_target" ${PRE_HANDIN_BASE:+--base "$PRE_HANDIN_BASE"}); pick=$?
     hint='the message above says why; name the branch point with PRE_HANDIN_BASE=<commit>'
     note pick "$pick"
     if [ "$pick" -eq 0 ]; then
-        while IFS=$'\t' read -r kind workspace package arguments; do
-            [ "$kind" = crate ] || continue
-            hint="fix the FAILED names above, then rerun one: (cd $workspace && cargo test -p $package $arguments <name>)"
-            step "unit:$package" bash -c 'cd "$1" && cargo test -p "$2" $3' _ "$workspace" "$package" "$arguments"
+        ran_kinds=' '
+        while IFS=$'\t' read -r kind workspace package arguments <&3; do
+            case $kind in
+                crate)
+                    hint="fix the FAILED names above, then rerun one: (cd $workspace && cargo test -p $package $arguments <name>)"
+                    step "unit:$package" bash -c 'cd "$1" && cargo test -p "$2" $3' _ "$workspace" "$package" "$arguments"
+                    ;;
+                doc|clippy|tests)
+                    # the gate's own command for this crate, as changed_crates.py read it from the workspace's gate
+                    hint="fix what the lines above say, then rerun: (cd $workspace && $arguments)"
+                    step "$kind:$package" bash -c 'cd "$1" && eval "$2"' _ "$workspace" "$arguments"
+                    ran_kinds="$ran_kinds$kind "
+                    ;;
+                *) continue ;;
+            esac
             units=1
-            if [ "$workspace" = . ] && [ "$package" != "$doc_skip" ]; then
-                hint="fix the rustdoc warnings above: RUSTDOCFLAGS='$doc_flags' cargo doc -p $package --no-deps"
-                step "doc:$package" env RUSTDOCFLAGS="$doc_flags" cargo doc -p "$package" --no-deps
-            fi
-        done <<< "$picked"
+        done 3<<< "$picked"    # a test that reads its stdin must not eat the lines of the crates after it
+        for kind in doc clippy tests; do    # a check no crate owed is `-`, not a check that was left out
+            case $ran_kinds in *" $kind "*) ;; *) note "$kind" - ;; esac
+        done
         for workspace in $(printf '%s\n' "$picked" | awk -F'\t' '$1 == "windows" { print $2 }'); do
             name=win; [ "$workspace" = . ] || name="win-$workspace"
             hint="fix what the cross-compile says above, then rerun (cd $workspace && just win-check); without cargo-xwin or Homebrew llvm here: cargo install cargo-xwin; brew install llvm"
@@ -443,7 +460,7 @@ pre-handin suites='':
         esac
     done
     if [ "$units" -ne 0 ]; then
-        echo "pre-handin: units and docs ran for the crates the branch changed or reads files of, not the crates that depend on them, nor integration tests other than the contracts — the gate runs those" >&2
+        echo "pre-handin: units, docs, lints and integration tests ran for the crates the branch changed or reads files of, not the crates that depend on them, nor the doc tests — the gate runs those" >&2
     fi
     echo "pre-handin:$line rc=$rc"
     [ -z "$next" ] || echo "next:$next"

@@ -157,6 +157,55 @@ class Pick(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("cargo") and shutil.which("git"), "needs cargo and git")
+class Gate(unittest.TestCase):
+    """The gate's cargo commands, narrowed to one crate."""
+
+    def setUp(self):
+        self.mod = load()
+        self.lib = package("lib-crate", "crates/lib-crate", (["lib"], "lib_crate"))
+        self.tested = package("tested", "crates/tested", (["lib"], "tested"), (["test"], "one"), (["test"], "two"))
+
+    def test_a_workspace_command_names_the_crate_unless_it_excludes_it_and_a_p_command_only_its_own(self):
+        self.assertEqual(self.mod.narrow(["--workspace", "--all-targets"], "a"), ["--all-targets"])
+        self.assertEqual(self.mod.narrow(["--workspace", "--exclude", "b", "--no-deps"], "a"), ["--no-deps"])
+        self.assertIsNone(self.mod.narrow(["--workspace", "--exclude", "a", "--exclude=b"], "a"))
+        self.assertEqual(self.mod.narrow(["-p", "a", "--lib", "--bins"], "a"), ["--lib", "--bins"])
+        self.assertIsNone(self.mod.narrow(["-p", "b", "--lib"], "a"))
+        self.assertIsNone(self.mod.narrow(["--lib"], "a"), "a command that selects no package is no one's")
+
+    def test_a_test_command_is_cut_to_the_integration_tests_the_crate_has(self):
+        cut = self.mod.integration_tests
+        self.assertEqual(cut(["--no-fail-fast"], self.tested), ["--test", "one", "--test", "two", "--no-fail-fast"])
+        self.assertEqual(cut(["--lib", "--bins", "--tests"], self.tested), ["--test", "one", "--test", "two"])
+        self.assertEqual(cut(["--all-targets"], self.tested), ["--test", "one", "--test", "two"])
+        self.assertEqual(cut(["--test", "two", "--no-fail-fast"], self.tested), ["--test", "two", "--no-fail-fast"])
+        self.assertIsNone(cut(["--lib", "--bins"], self.tested), "the unit tests are the `crate` line's")
+        self.assertIsNone(cut(["--no-fail-fast"], self.lib), "no `tests/` target, nothing to run")
+
+    def test_a_target_the_recipe_ran_already_is_left_out_and_a_crate_with_no_other_has_no_tests_line(self):
+        self.assertEqual(self.mod.integration_tests(["--tests"], self.tested, ["one"]), ["--test", "two"])
+        self.assertEqual(self.mod.integration_tests(["--test", "one"], self.tested, ["one"]), None)
+        commands = [("test", [], ["--workspace"], [])]
+        self.assertEqual(self.mod.gate_checks(self.tested, commands, ["one", "two"]), [])
+
+    def test_the_checks_a_crate_owes_are_the_commands_that_select_it_in_the_order_of_the_gate(self):
+        commands = [
+            ("clippy", [], ["-p", "tested", "--lib"], ["-D", "warnings"]),
+            ("clippy", [], ["--workspace", "--tests"], ["-D", "warnings"]),
+            ("doc", ["env", "RUSTDOCFLAGS=-D warnings"], ["--workspace", "--exclude", "lib-crate"], []),
+            ("test", ["env", "-u", "OUT", "KEEP=1"], ["--workspace", "--lib", "--tests"], ["--skip", "slow"]),
+            ("test", [], ["-p", "tested", "--test", "one"], []),
+        ]
+        self.assertEqual(self.mod.gate_checks(self.tested, commands), [
+            ("doc", "env 'RUSTDOCFLAGS=-D warnings' cargo doc -p tested"),
+            ("clippy", "cargo clippy -p tested --lib -- -D warnings && cargo clippy -p tested --tests -- -D warnings"),
+            ("tests", "env -u OUT KEEP=1 cargo test -p tested --test one --test two -- --skip slow"
+                      " && cargo test -p tested --test one"),
+        ])
+        self.assertEqual(self.mod.gate_checks(self.lib, commands), [
+            ("clippy", "cargo clippy -p lib-crate --tests -- -D warnings")])
+
+
 class WholeRun(unittest.TestCase):
     """The script copied into a throwaway repository: real `cargo metadata`, real `git diff`."""
 
@@ -261,10 +310,79 @@ class WholeRun(unittest.TestCase):
         self.write("crates/mixed/tests/contract.rs", "// edited\n")
         self.assertEqual(self.run_script(), ["windows\t."])
 
+    GATE = (
+        'flags := "-D warnings"\nunexport OUT\n\n'
+        "verify: doc lint test\n\n"
+        'doc:\n    RUSTDOCFLAGS="{{flags}}" cargo doc --workspace --exclude bin-crate --no-deps\n\n'
+        "lint:\n    cargo clippy --workspace --all-targets -- -D warnings\n\n"
+        '[env("KEEP", "1")]\ntest:\n    # a comment line is no command\n'
+        "    cargo test --workspace --lib --bins --tests --no-fail-fast -- --skip slow\n\n"
+        "unrelated:\n    cargo test -p lib-crate --test nobody\n"
+    )
+
+    def test_a_crate_owes_the_gates_doc_lint_and_integration_tests_as_the_gate_runs_them(self):
+        self.write("justfile", self.GATE)
+        self.commit("the gate")
+        self.write("crates/mixed/src/lib.rs", "pub fn a() {}\n")
+        self.assertEqual(self.run_script(), [
+            "crate\t.\tmixed\t--lib --bins",
+            "doc\t.\tmixed\tenv -u OUT 'RUSTDOCFLAGS=-D warnings' cargo doc -p mixed --no-deps",
+            "clippy\t.\tmixed\tenv -u OUT cargo clippy -p mixed --all-targets -- -D warnings",
+            "tests\t.\tmixed\tenv -u OUT KEEP=1 cargo test -p mixed --test contract --no-fail-fast -- --skip slow",
+            "windows\t.",
+        ])
+
+    def test_a_test_target_named_by_ran_test_is_not_run_again(self):
+        self.write("justfile", self.GATE)
+        self.commit("the gate")
+        self.write("crates/mixed/tests/contract.rs", "// edited\n")
+        self.assertEqual([line.split("\t")[0] for line in self.run_script("--ran-test", "mixed:contract")],
+                         ["doc", "clippy", "windows"])
+
+    def test_a_crate_only_its_tests_changed_owes_lint_and_tests_but_no_unit_test(self):
+        self.write("justfile", self.GATE)
+        self.commit("the gate")
+        self.write("crates/mixed/tests/contract.rs", "// edited\n")
+        self.assertEqual([line.split("\t")[0] for line in self.run_script()], ["doc", "clippy", "tests", "windows"])
+
+    def test_a_crate_the_gate_leaves_out_of_a_recipe_is_left_out_of_that_check_and_one_without_tests_has_none(self):
+        self.write("justfile", self.GATE)
+        self.commit("the gate")
+        self.write("crates/bin-crate/src/new.rs", "")
+        self.write("crates/lib-crate/src/lib.rs", "pub fn a() {}\n")
+        self.assertEqual([line.split("\t")[:3] for line in self.run_script() if not line.startswith("windows")], [
+            ["crate", ".", "bin-crate"], ["clippy", ".", "bin-crate"],
+            ["crate", ".", "lib-crate"], ["doc", ".", "lib-crate"], ["clippy", ".", "lib-crate"],
+        ])
+
+    def test_a_cargo_line_the_gate_spells_with_an_expression_it_cannot_read_stops_the_run(self):
+        self.write("justfile", "verify: lint\n\nlint:\n    cargo clippy {{arch()}} -p lib-crate\n")
+        self.commit("the gate")
+        self.write("crates/lib-crate/src/lib.rs", "pub fn a() {}\n")
+        done = subprocess.run([sys.executable, "-I", str(self.repo / "tools/release/changed_crates.py")],
+                              cwd=self.repo, capture_output=True, text=True)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("cannot evaluate", done.stderr)
+
     def test_the_other_cargo_workspaces_are_named_by_the_script_alone(self):
         self.assertEqual(self.run_script("--workspaces"), [])
         self.write("zo-ide/Cargo.toml", "[workspace]\n")
         self.assertEqual(self.run_script("--workspaces"), ["zo-ide"])
+
+
+class RealGate(unittest.TestCase):
+    """The repository's own justfiles, read as `pre-handin` reads them."""
+
+    def test_every_crate_of_both_workspaces_owes_a_lint_and_the_zo_ide_ones_a_rustdoc_too(self):
+        mod = load()
+        for workspace in mod.cargo_workspaces():
+            commands = mod.gate_commands(workspace)
+            self.assertTrue(commands, f"{workspace}: the gate's cargo commands were not found")
+            for found in mod.packages(workspace):
+                facts = [fact for fact, _ in mod.gate_checks(found, commands)]
+                self.assertIn("clippy", facts, f"{found['name']}: no gate recipe lints it, so `pre-handin` could not either")
+                if workspace != ".":
+                    self.assertIn("doc", facts, f"{found['name']}: no gate recipe builds its rustdoc")
 
 
 if __name__ == "__main__":

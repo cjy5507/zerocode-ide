@@ -83,7 +83,7 @@ fn stage_one_runs_quick_checks_before_the_source_contract_build() {
     let privacy = position("pii", "just pii-check");
     let contracts = position(
         "contracts",
-        "cargo test -p zerocode-shell --test source_contracts",
+        "cargo test -p \"$contracts_package\" --test \"$contracts_target\"",
     );
     for (name, command) in [
         ("package-runner", "just package-runner-test"),
@@ -149,44 +149,101 @@ fn the_fmt_steps_run_recipes_that_exist() {
     }
 }
 
-/// A crate under test also gets its rustdoc built with the gate's own flags
-/// (a private intra-doc link was the red the lane hit on 2026-10-28), except
-/// the one crate the gate leaves out of `just doc`. Flags and that name are
-/// the `doc` recipe's variables, interpolated, so the step and the gate agree.
+/// A crate under test also gets the gate's own rustdoc, lint and integration
+/// tests (a private intra-doc link was the red the lane hit on 2026-10-28; on
+/// v1.1.149 nine more reds came up on the stacked tree that these three would
+/// have shown first). The commands are the script's `doc`, `clippy` and `tests`
+/// lines — the gate's recipes narrowed to the crate — so the recipe runs the
+/// line and spells no flag, no crate and no cargo subcommand of its own.
 #[test]
-fn a_crate_under_test_gets_its_docs_built_like_the_gate_builds_them() {
+fn a_crate_under_test_gets_the_gates_own_doc_lint_and_integration_commands() {
     let body = body();
     let steps = steps(&body);
     assert!(
         steps
             .iter()
-            .any(|(name, command)| name == "\"doc:$package\""
-                && command
-                    == "env RUSTDOCFLAGS=\"$doc_flags\" cargo doc -p \"$package\" --no-deps"),
-        "a `doc:$package` step runs cargo doc with the flags the gate uses:\n{body}"
+            .any(|(name, command)| name == "\"$kind:$package\""
+                && command == "bash -c 'cd \"$1\" && eval \"$2\"' _ \"$workspace\" \"$arguments\""),
+        "a `$kind:$package` step runs the script's command line in the workspace:\n{body}"
+    );
+    let path = repo_root().join("tools/release/changed_crates.py");
+    let script =
+        std::fs::read_to_string(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
+    let kinds = script
+        .lines()
+        .find(|line| line.starts_with("GATE_KINDS = {"))
+        .expect("a `GATE_KINDS = {...}` line in changed_crates.py");
+    for kind in ["doc", "clippy", "tests"] {
+        assert!(
+            kinds.contains(&format!("\"{kind}\"")),
+            "the script prints a `{kind}` fact: {kinds}"
+        );
+    }
+    assert!(
+        body.lines().any(|line| line.trim() == "doc|clippy|tests)"),
+        "the recipe reads the three facts the script prints:\n{body}"
     );
     assert!(
         body.lines()
-            .any(|line| line.trim() == "doc_flags={{quote(doc_flags)}}")
-            && body
-                .lines()
-                .any(|line| line.trim() == "doc_skip={{quote(doc_skip)}}"),
-        "the recipe takes the doc flags and the skipped crate from the justfile's variables:\n{body}"
+            .any(|line| line.trim().starts_with("for kind in doc clippy tests;")),
+        "a check no crate owed is noted `-`, so \"not owed\" and \"left out\" read differently:\n{body}"
     );
-    let path = repo_root().join("justfile");
-    let justfile =
-        std::fs::read_to_string(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
     assert!(
-        justfile.contains(
-            "RUSTDOCFLAGS=\"{{doc_flags}}\" cargo doc --workspace --exclude {{doc_skip}} --no-deps"
-        ),
-        "the gate's `doc` recipe runs on the same variables"
+        body.lines()
+            .any(|line| line.trim().starts_with("done 3<<< \"$picked\"")),
+        "the crates are read from their own descriptor, so a test that reads stdin cannot eat the rest:\n{body}"
+    );
+    for spelled in [
+        "cargo doc",
+        "cargo clippy",
+        "RUSTDOCFLAGS",
+        "-D warnings",
+        "doc_flags",
+        "doc_skip",
+    ] {
+        assert!(
+            !body.contains(spelled),
+            "the recipe spells `{spelled}`; the gate's recipes say it and the script reads them:\n{body}"
+        );
+    }
+}
+
+/// Stage one runs the window's source contracts, which are an integration test
+/// target of the window's own crate. A branch that changes that crate would owe
+/// the same target again as its integration tests (71 s of a measured 100 s run
+/// on 2026-11-14), so the recipe says which target ran and the script leaves it
+/// out. The two names are the recipe's own variables, and they name a real target.
+#[test]
+fn the_contracts_stage_is_not_run_a_second_time_as_a_crates_integration_tests() {
+    let body = body();
+    let value = |name: &str| -> String {
+        body.lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("no `{name}=` line:\n{body}"))
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let (package, target) = (value("contracts_package"), value("contracts_target"));
+    assert!(
+        body.lines().any(|line| line.trim().starts_with("picked=")
+            && line.contains("--ran-test \"$contracts_package:$contracts_target\"")),
+        "the script is told which target stage one ran:\n{body}"
+    );
+    let manifest = repo_root().join("crates").join(&package).join("Cargo.toml");
+    assert!(manifest.is_file(), "`{package}` is a crate here");
+    let tests = repo_root().join("crates").join(&package).join("tests");
+    assert!(
+        tests.join(format!("{target}.rs")).is_file()
+            || tests.join(&target).join("main.rs").is_file(),
+        "`{target}` is an integration test target of `{package}`"
     );
 }
 
-/// What the unit stage does not run is said on the last lines, not left for a
-/// worker to find out: the crates that depend on a changed crate, and the
-/// integration tests other than the contracts.
+/// What the crate stages do not run is said on the last lines, not left for a
+/// worker to find out: the crates that depend on a changed crate, and the doc
+/// tests.
 #[test]
 fn the_recipe_says_what_the_unit_stage_does_not_run() {
     let body = body();
