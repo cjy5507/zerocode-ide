@@ -70,6 +70,36 @@ fn asking_at(cwd: &Path, point: Point) -> Vec<Asked> {
         .collect()
 }
 
+/// The moment a point asks at: Unix milliseconds, and the local clock's
+/// offset from UTC in minutes — the hour and day its decisions count in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Moment {
+    ms: i64,
+    offset_minutes: i32,
+}
+
+impl Moment {
+    /// Now, on this machine's clock.
+    fn now() -> Self {
+        Self::at(super::decision_shadow::now_ms())
+    }
+
+    /// `ms`, in Unix milliseconds, on this machine's clock.
+    fn at(ms: i64) -> Self {
+        Self { ms, offset_minutes: i32::try_from(core_types::date::local_utc_offset_secs() / 60).unwrap_or(0) }
+    }
+
+    /// The local hour a request at this moment is counted in ([`count::hour_of`]).
+    fn hour(self) -> String {
+        count::hour_of(self.ms, self.offset_minutes)
+    }
+
+    /// This moment as a row's `at`.
+    fn row_at(self) -> u64 {
+        u64::try_from(self.ms).unwrap_or_default()
+    }
+}
+
 /// One request of a decision's, as its ledger keeps it ([`custom::DecisionRow`]),
 /// with what the server said beside it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,10 +111,10 @@ struct DecisionRow {
 }
 
 impl DecisionRow {
-    fn of(asked: &Asked, outcome: &str) -> Self {
+    fn of(asked: &Asked, outcome: &str, at: Moment) -> Self {
         Self {
             row: custom::DecisionRow::of(
-                super::decision_shadow::unix_millis(),
+                at.row_at(),
                 AgentKind::Zo.slug(),
                 &asked.entry,
                 &asked.definition,
@@ -116,10 +146,10 @@ fn write(cwd: &Path, row: &DecisionRow) {
 /// `asked` while its definition still keeps every rule ([`custom::check`]);
 /// else the word of the first rule it breaks, on the one row it writes. It is
 /// not asked: a definition the store would refuse today sends nothing.
-fn kept(cwd: &Path, asked: Asked) -> Result<Asked, &'static str> {
+fn kept(cwd: &Path, asked: Asked, at: Moment) -> Result<Asked, &'static str> {
     match custom::check(&asked.definition).first() {
         Some(refusal) => {
-            write(cwd, &DecisionRow::of(&asked, refusal.word()));
+            write(cwd, &DecisionRow::of(&asked, refusal.word(), at));
             Err(refusal.word())
         }
         None => Ok(asked),
@@ -144,9 +174,10 @@ async fn ask_one(
     client: Option<&SystemOneClient>,
     asked: &Asked,
     lent: &Lent,
+    at: Moment,
 ) -> (String, Option<Handed>) {
-    let mut row = DecisionRow::of(asked, door::ANSWERED_OUTCOME);
-    let handed = judged(cwd, door, client, asked, lent, &mut row).await;
+    let mut row = DecisionRow::of(asked, door::ANSWERED_OUTCOME, at);
+    let handed = judged(cwd, door, client, (asked, lent), at, &mut row).await;
     row.row.applied = handed.is_some();
     let outcome = row.row.outcome.clone();
     let ledger = shadow_ledger_path(cwd, CUSTOM_DECISIONS.ledger);
@@ -158,13 +189,12 @@ async fn judged(
     cwd: &Path,
     door: &JevDoor,
     client: Option<&SystemOneClient>,
-    asked: &Asked,
-    lent: &Lent,
+    (asked, lent): (&Asked, &Lent),
+    at: Moment,
     row: &mut DecisionRow,
 ) -> Option<Handed> {
     let home = runtime::default_config_home();
-    let offset_minutes = i32::try_from(core_types::date::local_utc_offset_secs() / 60).unwrap_or(0);
-    let hour = count::hour_of(super::decision_shadow::now_ms(), offset_minutes);
+    let hour = at.hour();
     let (decision_hour, every_hour) =
         (count::hour_path(&home, &asked.entry.id, &hour), count::hour_path(&home, custom::EVERY_DECISION, &hour));
     let body = custom::body_of(&asked.definition, lent);
@@ -223,33 +253,33 @@ async fn judged(
 
 /// Ask every decision in `asking` through one door: what each row's outcome
 /// was, and the line each hands.
-async fn ask_each(cwd: PathBuf, asking: Vec<Asked>, lent: Arc<Lent>) -> Vec<(String, Option<Handed>)> {
+async fn ask_each(cwd: PathBuf, asking: Vec<Asked>, lent: Arc<Lent>, at: Moment) -> Vec<(String, Option<Handed>)> {
     let opened = cwd.clone();
     let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&opened)).await else {
         return Vec::new();
     };
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
-    let asks = asking.iter().map(|asked| ask_one(&cwd, &door, client.as_ref(), asked, &lent));
+    let asks = asking.iter().map(|asked| ask_one(&cwd, &door, client.as_ref(), asked, &lent, at));
     futures_util::future::join_all(asks).await
 }
 
 /// Ask every decision in `asking` with what its point lent: the recording
 /// ones on a worker, so they hold up nobody, and the acting ones awaited for
 /// the lines they hand.
-async fn ask_all(cwd: PathBuf, asking: Vec<Asked>, lent: Lent) -> Vec<Handed> {
+async fn ask_all(cwd: PathBuf, asking: Vec<Asked>, lent: Lent, at: Moment) -> Vec<Handed> {
     let (acting, recording): (Vec<Asked>, Vec<Asked>) =
-        asking.into_iter().filter_map(|asked| kept(&cwd, asked).ok()).partition(|asked| asked.mode.applies());
+        asking.into_iter().filter_map(|asked| kept(&cwd, asked, at).ok()).partition(|asked| asked.mode.applies());
     let lent = Arc::new(lent);
     if !recording.is_empty() {
         let (cwd, lent) = (cwd.clone(), Arc::clone(&lent));
         detach(async move {
-            drop(ask_each(cwd, recording, lent).await);
+            drop(ask_each(cwd, recording, lent, at).await);
         });
     }
     if acting.is_empty() {
         return Vec::new();
     }
-    ask_each(cwd, acting, lent).await.into_iter().filter_map(|(_, handed)| handed).collect()
+    ask_each(cwd, acting, lent, at).await.into_iter().filter_map(|(_, handed)| handed).collect()
 }
 
 /// `note` with `lines` under it, one to a line, after the one line saying
@@ -277,7 +307,7 @@ pub(super) async fn at_turn_start(cwd: PathBuf, task: String) -> Vec<String> {
         return Vec::new();
     }
     let lent: Lent = [(Input::Task.key().to_string(), Value::from(task))].into_iter().collect();
-    ask_all(cwd, asking, lent).await.into_iter().map(|handed| handed.line).collect()
+    ask_all(cwd, asking, lent, Moment::now()).await.into_iter().map(|handed| handed.line).collect()
 }
 
 /* ---- a turn's end ------------------------------------------------------------- */
@@ -321,7 +351,7 @@ pub(super) fn at_turn_end(workspace: &Path, recipient: &str, turn: impl FnOnce()
     let (cwd, recipient) = (workspace.to_path_buf(), recipient.to_string());
     let at = super::decision_shadow::unix_millis();
     detach(async move {
-        let handed = ask_all(cwd.clone(), asking, lent).await;
+        let handed = ask_all(cwd.clone(), asking, lent, Moment::now()).await;
         offer(cwd, recipient, at, handed);
     });
 }
@@ -400,6 +430,11 @@ fn commands() -> &'static Mutex<Commands> {
 /// the seat none. The task lent is the first line of the person's words, cut
 /// to the command guard's cap ([`custom::lent_before_command`]).
 pub(super) fn before_command(project: &Path, ask: &CommandAsk) {
+    before_command_at(project, ask, Moment::now());
+}
+
+/// [`before_command`] at the moment `at`.
+fn before_command_at(project: &Path, ask: &CommandAsk, at: Moment) {
     if !asks_about(&ask.command) {
         return;
     }
@@ -409,7 +444,7 @@ pub(super) fn before_command(project: &Path, ask: &CommandAsk) {
     }
     let lent = custom::lent_before_command(&ask.command, &ask.cwd, &ask.task);
     let acting = asking.iter().any(|asked| asked.mode.applies());
-    let judged: Judged = ask_all(project.to_path_buf(), asking, lent)
+    let judged: Judged = ask_all(project.to_path_buf(), asking, lent, at)
         .map(|handed| handed.into_iter().map(|one| one.line).collect())
         .boxed()
         .shared();
@@ -517,7 +552,8 @@ pub fn decide(cwd: &Path, name: &str, context: Option<&str>, items: &[String]) -
         let note = format!("'{name}' does not ask in this folder, so nothing was asked; decide this yourself.");
         return Ok(CustomVerdict::nothing(name, mode, off, note));
     }
-    let asked = match kept(cwd, Asked { entry, definition, mode }) {
+    let at = Moment::now();
+    let asked = match kept(cwd, Asked { entry, definition, mode }, at) {
         Ok(asked) => asked,
         Err(word) => {
             let note = format!("'{name}' breaks a rule it was kept under ({word}), so nothing was asked; decide this yourself.");
@@ -533,7 +569,7 @@ pub fn decide(cwd: &Path, name: &str, context: Option<&str>, items: &[String]) -
     }
     let door = JevDoor::open(cwd);
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
-    let (outcome, handed) = api::sync_bridge::run_blocking(ask_one(cwd, &door, client.as_ref(), &asked, &lent));
+    let (outcome, handed) = api::sync_bridge::run_blocking(ask_one(cwd, &door, client.as_ref(), &asked, &lent, at));
     let mut verdict = CustomVerdict::nothing(name, mode, &outcome, String::new());
     match handed {
         Some(handed) => {
