@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::time::Duration;
 
 use api::sync_bridge::run_blocking;
 use runtime::skill_rank::SkillSuggestionSeat;

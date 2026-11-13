@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use api::{SystemOneClient, SystemOneConfig, SystemOneFailure};
 use futures_util::future::{BoxFuture, FutureExt, Shared};
