@@ -28115,11 +28115,13 @@ ok(
     vaultPane.groups.every((group) => group.sticky === "sticky") &&
     vaultPane.rows.length === 3 &&
     vaultPane.rows[0].title.startsWith("report.py") &&
-    // The row says which agent, on which branch, and where — the three things
-    // that tell two similar conversations apart.
+    // The row says which agent and on which branch; where is the group's to
+    // say — its head names the folder (here the label is the folder itself),
+    // and a row repeats a directory only where it ran somewhere else, so
+    // fifteen rows no longer carry the same path fifteen times.
     vaultPane.rows[0].meta.includes("Claude") &&
     vaultPane.rows[0].meta.includes("main") &&
-    vaultPane.rows[0].path === "/w/zerocode" &&
+    vaultPane.rows[0].path === null &&
     // Reopen and copy where there is a command, and always the file.
     vaultPane.rows[0].acts.join("|") ===
       [vaultPane.resume, vaultPane.copy, vaultPane.reveal].join("|") &&
@@ -28425,7 +28427,10 @@ const vaultDrop = await page.evaluate(async () => {
     draggable: cards[0].draggable,
     // The legacy row has no resume command, so there is nothing to carry.
     unresumable: cards[1].draggable,
-    hint: cards[0].dataset.tip,
+    // Said on the mark a hand takes hold of, not over the whole row, where the
+    // tip stood over the title being read.
+    hint: cards[0].querySelector(".vault-row-mark")?.dataset.tip ?? "",
+    rowTip: cards[0].dataset.tip ?? null,
   };
   // Nothing of ours in the transfer: the row must not offer to take it.
   const stranger = fire(target, "dragover", new DataTransfer());
@@ -28457,7 +28462,7 @@ ok(
   "a session dropped on a workspace row is resumed in that workspace",
   // The card is the drag source, and only where there is a command to carry.
   vaultDrop.draggable === true && vaultDrop.unresumable === false &&
-    vaultDrop.hint.length > 0 &&
+    vaultDrop.hint.length > 0 && vaultDrop.rowTip === null &&
     // A workspace row takes our cards and nothing else, and says so while the
     // pointer is over it.
     vaultDrop.refusedStranger === true &&
@@ -28471,6 +28476,67 @@ ok(
     vaultDrop.at === "/tmp/drop-home-wt/port" &&
     vaultDrop.tabs.some((title) => title.includes("report.py")),
   JSON.stringify(vaultDrop),
+);
+
+/* A conversation a pane holds says so on its row — what that pane is doing, in
+ * the words the sidebar's agent rows say for it — follows the pane's news on the
+ * agent cards' beat, and its chip goes to that pane instead of asking the
+ * backend for a second process on a live transcript. */
+const vaultLive = await page.evaluate(async () => {
+  const tell = (name, payload) => { for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload }); };
+  const settle = async (want) => {
+    for (let tries = 0; tries < 40; tries += 1) {
+      if (want()) return true;
+      await new Promise((done) => setTimeout(done, 25));
+    }
+    return want();
+  };
+  const row = () => [...document.querySelectorAll("#vault-view .vault-row")]
+    .find((one) => one.querySelector(".vault-row-title")?.textContent.startsWith("report.py"));
+  const said = () => {
+    const chip = row()?.querySelector(":scope > .vault-live");
+    return chip ? { state: chip.dataset.state, words: chip.textContent } : null;
+  };
+  const before = said();
+  const term = await openTermTab({ placement: "tab" });
+  paneAgents.set(term, "claude");
+  tell("hook:agent", { term, state: "working", agent: "claude", session: { id: "aaa" } });
+  el("nav-vault").click();
+  await refreshVault();
+  await settle(() => said()?.state === "working");
+  const working = said();
+  tell("hook:agent", { term, state: "needs-attention", agent: "claude", session: { id: "aaa" } });
+  await settle(() => said()?.state === "waiting");
+  const waiting = said();
+  // Another agent's session with the same id is another conversation.
+  const stranger = [...document.querySelectorAll("#vault-view .vault-row")]
+    .filter((one) => one.dataset.agent !== "claude" && one.querySelector(":scope > .vault-live")).length;
+  window.__RESUMED_VAULT__ = null;
+  row()?.querySelector(":scope > .vault-live")?.click();
+  await settle(() => activeTabId === tabOfTerm(term)?.id);
+  const went = { resumed: window.__RESUMED_VAULT__, here: activeTabId === tabOfTerm(term)?.id };
+  // The pane lets go of the conversation: the mark leaves with it.
+  paneSessions.delete(term);
+  hookStates.delete(term);
+  paneAgents.delete(term);
+  scheduleAgentPaint(["tabs", "cards", "badge", "board"]);
+  await settle(() => said() === null);
+  const gone = said();
+  return {
+    before, working, waiting, stranger, went, gone,
+    words: { working: t("board.working", "x"), attention: t("board.attention", "x") },
+  };
+});
+ok(
+  "a conversation a pane holds says what that pane is doing, follows its news, and goes to it",
+  vaultLive.before === null &&
+    vaultLive.working?.state === "working" && vaultLive.working.words === vaultLive.words.working &&
+    vaultLive.waiting?.state === "waiting" && vaultLive.waiting.words === vaultLive.words.attention &&
+    vaultLive.stranger === 0 &&
+    // Pressed, it is the pane — no resume was asked for.
+    vaultLive.went.resumed === null && vaultLive.went.here === true &&
+    vaultLive.gone === null,
+  JSON.stringify(vaultLive),
 );
 
 /* The switch is the uninstall too, and a bridge that never bound is worth

@@ -8978,6 +8978,8 @@ function vaultTitle(session) {
 
 function openVault() {
   openTab({ id: "vault", kind: "vault" });
+  // The rows stand from the last visit; which panes hold them may have moved.
+  paintVaultLiveWhereShown();
 }
 
 /* The scan is not cheap — fourteen directory walks over stores that can hold
@@ -9089,6 +9091,9 @@ function droppedVaultSession(transfer) {
 
 /* Both vault surfaces share the saved limit and child disclosure state. */
 const vaultChildrenOpen = new Set();
+/* Which of the stage's rows stand open to their details, by the session's one
+ * id — kept across the redraws a walk still looking at the disk brings. */
+const vaultStageOpen = new Set();
 let vaultLimits = null;
 let vaultSessionLimit = null;
 
@@ -9191,22 +9196,156 @@ function vaultIssueText(issue) {
   return `${prefix}${reason}${count}`;
 }
 
-/* One session. The title is what was said; under it the directory, branch,
- * and agent distinguish similar conversations. */
-function vaultRow(session) {
+/* Which conversations a pane holds now, as `agent\nsession id` → term: a pane
+ * that reported the session, whose agent still holds it, and that has a tab to
+ * go to. The same pairing the backend reads before it would open a second
+ * process on a live transcript (`conversation_wake::panes_naming`: the agent
+ * and the trimmed id) — so a row can say it before it is pressed. A mark and
+ * nothing more: 다시 열기 still asks the backend, which has the last word. */
+let vaultLive = new Map();
+let vaultLiveSaid = "";
+
+function vaultLivePanes() {
+  const live = new Map();
+  for (const [term, held] of paneSessions) {
+    const id = typeof held?.session?.id === "string" ? held.session.id.trim() : "";
+    if (!id || !held.agent || paneAgents.get(term) !== held.agent || !tabOfTerm(term)) continue;
+    live.set(`${held.agent}\n${id}`, term);
+  }
+  return live;
+}
+
+function vaultLiveTerm(session) {
+  if (vaultIsChild(session)) return null;
+  return vaultLive.get(`${session.agent}\n${String(session.session_id ?? "").trim()}`) ?? null;
+}
+
+/* What the pane holding a conversation is doing, in the conversation list's
+ * marks: the blue dot for a turn that waits for the person (the one blue the
+ * window spends), the turning ring for work, a quiet dot for a pane that is only
+ * open — each with its word, never the colour alone. Pressed, it goes to that
+ * pane rather than asking for a second one. */
+function vaultLiveState(term) {
+  const state = hookStates.get(term);
+  return state === "needs-attention" ? "waiting" : state === "working" ? "working" : "open";
+}
+
+function vaultLiveChip(session, term) {
+  const state = vaultLiveState(term);
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "vault-live";
+  chip.dataset.state = state;
+  chip.__term = term;
+  const mark = document.createElement("span");
+  mark.className = "vault-live-mark";
+  mark.setAttribute("aria-hidden", "true");
+  const words = document.createElement("span");
+  // The words the sidebar's agent rows say for the same pane (`bucketWord`), so
+  // one pane is not called two things on one screen.
+  words.textContent =
+    state === "waiting"
+      ? t("board.attention", "확인 필요")
+      : state === "working"
+        ? t("board.working", "작업 중")
+        : t("board.idle", "대기 중");
+  chip.append(mark, words);
+  chip.dataset.tip = t("vault.liveTip", "터미널 {{term}}에 열려 있습니다 — 누르면 그 판으로 갑니다", { term });
+  chip.addEventListener("click", () => {
+    const tab = tabOfTerm(term);
+    if (tab) void focusAgentPane(tab.worktree, tab.id, term, session.agent);
+    else void resumeVaultSession(session);
+  });
+  return chip;
+}
+
+/* The marks brought up to date where the rows stand — after a paint, and on the
+ * beat that carries a pane's news to the agent cards (`flushAgentPaint`'s
+ * `due.cards`; one coalescer, not two). Nothing is built while no pane moved. */
+function paintVaultLive(view, force = false) {
+  vaultLive = vaultLivePanes();
+  const said = [...vaultLive].map(([key, term]) => `${key}\t${term}\t${vaultLiveState(term)}`).join("\n");
+  if (!force && said === vaultLiveSaid) return;
+  vaultLiveSaid = said;
+  for (const row of view.querySelectorAll(".vault-list .vault-row")) {
+    const session = row.__vaultSession;
+    if (!session) continue;
+    const term = vaultLiveTerm(session);
+    const held = row.querySelector(":scope > .vault-live");
+    if (held && term !== null && held.__term === term && held.dataset.state === vaultLiveState(term)) continue;
+    if (term === null) {
+      held?.remove();
+      continue;
+    }
+    const chip = vaultLiveChip(session, term);
+    if (held) held.replaceWith(chip);
+    else row.insertBefore(chip, row.querySelector(":scope > .vault-row-actions"));
+  }
+}
+
+/* The view the stage list was last drawn into. Held rather than looked up: the
+ * lookup (`docHost`) builds a group it does not find, and this runs on every
+ * beat of agent news. */
+let vaultViewDrawn = null;
+
+function paintVaultLiveWhereShown() {
+  if (!vaultAnswer || !vaultViewDrawn?.isConnected) return;
+  paintVaultLive(vaultViewDrawn);
+}
+
+/* When — the time the list is ordered by, so the column a person reads down is
+ * the one the sort stands on: the last word for 마지막 대화순, the first for 시작한
+ * 순, each falling back to the file's own time as the sort does. The words are
+ * the docked card's; the tip holds the date. */
+function vaultRowWhen(session) {
+  const started = vaultSort === "created";
+  const at = (started ? session.created_at : session.updated_at) ?? session.modified_at;
+  const when = document.createElement("span");
+  when.className = "vault-row-when";
+  when.textContent = vaultDockAge(at);
+  const stamp = Date.parse(at ?? "");
+  if (Number.isFinite(stamp)) {
+    const date = new Date(stamp).toLocaleString(locale);
+    when.dataset.tip = started
+      ? t("vault.startedAt", "시작 {{when}}", { when: date })
+      : t("vault.spokeAt", "마지막 대화 {{when}}", { when: date });
+  }
+  return when;
+}
+
+/* A directory, said the same way on a group's head and on a row: home folded to
+ * `~` once the window knows it, the words isolated left-to-right inside a
+ * right-to-left box. The box keeps the tail of a long path in view; the
+ * isolation keeps its leading `/` at the front — the box alone carried it to
+ * the end (`Users/…/zerocode/`). */
+function vaultPathNode(className, path) {
+  const where = document.createElement("span");
+  where.className = className;
+  const words = document.createElement("bdi");
+  words.textContent = shownHomePath(path);
+  where.appendChild(words);
+  where.dataset.tip = path;
+  return where;
+}
+
+/* One session, in the conversation list's grammar (`.chat-row`): the agent's
+ * mark; what was said over who said it, where and how much; on the right
+ * whether a pane holds it now, when, and its three hands. A full-bleed row with
+ * a rule under it — the Geist list, not a stack of cards. The directory is the
+ * group head's to say, and a row repeats it only where it ran somewhere else
+ * (`home`). */
+function vaultRow(session, home = null) {
   const child = vaultIsChild(session);
   if (child) session = { ...session, resume: null };
   const row = document.createElement("div");
   row.className = "vault-row";
   row.dataset.agent = session.agent;
+  row.__vaultSession = session;
   // Draggable only where there is a command, for the same reason the 다시 열기
   // button is only there: a card that cannot be reopened would light up every
   // workspace row on the way past and then fail on the drop.
   if (session.resume) {
     row.draggable = true;
-    // Said on the card, because a drag nobody knows about is a feature nobody
-    // has. The button beside it stays the way to reopen a session where it ran.
-    row.dataset.tip = t("vault.dragHint", "워크스페이스로 끌어다 놓으면 그곳에서 이어집니다");
     row.addEventListener("dragstart", (event) => {
       vaultDragged = session;
       event.dataTransfer.effectAllowed = "copy";
@@ -9216,6 +9355,20 @@ function vaultRow(session) {
       vaultDragged = null;
     });
   }
+
+  // The agent's mark, as the conversation list wears it.
+  const mark = document.createElement("span");
+  mark.className = "vault-row-mark";
+  const reg = agentRows.find((one) => one.id === session.agent);
+  mark.appendChild(agentIcon(reg ?? { id: session.agent, name: agentName(session.agent), favicon_domain: "" }));
+  if (session.resume) {
+    // Said on the card, because a drag nobody knows about is a feature nobody
+    // has — on its mark, where the hand takes hold, and not over the whole row,
+    // where the tip stood over the very title a person was reading. The button
+    // beside it stays the way to reopen a session where it ran.
+    mark.dataset.tip = t("vault.dragHint", "워크스페이스로 끌어다 놓으면 그곳에서 이어집니다");
+  }
+  row.appendChild(mark);
 
   const body = document.createElement("div");
   body.className = "vault-row-body";
@@ -9229,29 +9382,35 @@ function vaultRow(session) {
   meta.className = "vault-row-meta";
   const parts = [agentName(session.agent)];
   if (session.branch) parts.push(session.branch);
+  // The docked card's words for the same number: the count is of messages, both
+  // sides — 「N번 주고받음」 said twice as many exchanges as there were.
   if (session.message_count > 0) {
-    // The number first: every language in the catalogs reads "12 turns" and none
-    // of them reads "turns 12".
-    parts.push(`${session.message_count} ${t("vault.messages", "번 주고받음")}`);
+    parts.push(t("vaultDock.messageCount", "메시지 {{n}}개", { n: session.message_count }));
   }
+  if (session.model) parts.push(session.model);
+  // Said rather than shown as a dead button: an agent this window has no
+  // resume spelling for is a fact, and a button that fails is a bug report.
+  if (!session.resume && !child) parts.push(t("vault.noResume", "이 에이전트는 여기서 다시 열 수 없습니다"));
   meta.textContent = parts.join(" · ");
   body.appendChild(meta);
 
-  if (session.cwd) {
-    const where = document.createElement("span");
-    where.className = "vault-row-path";
-    where.textContent = session.cwd;
-    body.appendChild(where);
-  }
+  if (session.cwd && session.cwd !== home) body.appendChild(vaultPathNode("vault-row-path", session.cwd));
   if (child) body.appendChild(vaultChildContext(session));
   row.appendChild(body);
+
+  // On the right: the pane that holds it, the hands, and when — all said in
+  // words and always there, the hands only quieter until the row is pointed at
+  // or holds the focus. The time is last, so the column a person reads down
+  // stands on one edge whatever hands a row has.
+  const term = vaultLiveTerm(session);
+  if (term !== null) row.appendChild(vaultLiveChip(session, term));
 
   const actions = document.createElement("div");
   actions.className = "vault-row-actions";
   if (session.resume) {
     const open = document.createElement("button");
     open.type = "button";
-    open.className = "vault-act";
+    open.className = "vault-act vault-act--primary";
     open.textContent = t("vault.resume", "다시 열기");
     open.onclick = () => resumeVaultSession(session);
     actions.appendChild(open);
@@ -9270,13 +9429,6 @@ function vaultRow(session) {
       }, VAULT_COPY_FEEDBACK_MS);
     };
     actions.appendChild(copy);
-  } else if (!child) {
-    // Said rather than shown as a dead button: an agent this window has no
-    // resume spelling for is a fact, and a button that fails is a bug report.
-    const no = document.createElement("span");
-    no.className = "vault-row-meta";
-    no.textContent = t("vault.noResume", "이 에이전트는 여기서 다시 열 수 없습니다");
-    actions.appendChild(no);
   }
   // Always offered, including for the agents that cannot be reopened: the
   // transcript is on disk either way, and looking at it is the one thing that
@@ -9290,18 +9442,27 @@ function vaultRow(session) {
   };
   if (!child) actions.appendChild(show);
   row.appendChild(actions);
-  const children = vaultSubagents(session, vaultRow);
+  row.appendChild(vaultRowWhen(session));
+  const children = vaultSubagents(session, (one) => vaultRow(one, home));
   if (children) row.appendChild(children);
-  if (child) {
-    row.setAttribute("aria-expanded", "false");
-    const toggle = () => {
-      const detail = row.querySelector(".vdock-detail");
-      if (detail) detail.remove();
-      else row.appendChild(vaultDockDetail(session));
-      row.setAttribute("aria-expanded", String(!detail));
-    };
-    actsAsButton(row, toggle);
-  }
+
+  // The row is the door to its details, as the docked card is and as a
+  // helper's row here already was: the first ask in full, the turns read, the
+  // worktree — what a one-line title cuts. A hand inside answers for itself.
+  const stand = () => {
+    const open = vaultStageOpen.has(session.id);
+    row.setAttribute("aria-expanded", String(open));
+    const detail = row.querySelector(":scope > .vdock-detail");
+    if (open && !detail) row.insertBefore(vaultDockDetail(session, { hands: false }), children);
+    if (!open) detail?.remove();
+  };
+  actsAsButton(row, (event) => {
+    if (event.target !== row && event.target.closest?.("button, .vdock-detail, .vault-subagents")) return;
+    if (vaultStageOpen.has(session.id)) vaultStageOpen.delete(session.id);
+    else vaultStageOpen.add(session.id);
+    stand();
+  });
+  stand();
   return row;
 }
 
@@ -9337,9 +9498,27 @@ async function resumeVaultSession(session, worktree) {
   }
 }
 
+/* The directory most of a group's sessions ran in — said once, on the group's
+ * head, and on a row only where that row ran somewhere else. Counted from the
+ * sessions rather than read off the key: a project group is keyed by its
+ * worktree's id, a folder group by the folder, an agent group by the agent, and
+ * only the sessions say where they stood. */
+function vaultGroupHome(group) {
+  const seen = new Map();
+  let home = null;
+  for (const session of group.sessions) {
+    if (!session.cwd) continue;
+    const count = (seen.get(session.cwd) ?? 0) + 1;
+    seen.set(session.cwd, count);
+    if (home === null || count > seen.get(home)) home = session.cwd;
+  }
+  return home;
+}
+
 function vaultGroupNode(group) {
   const box = document.createElement("section");
   box.className = "vault-group";
+  const home = vaultGroupHome(group);
 
   const head = document.createElement("header");
   head.className = "vault-group-head";
@@ -9347,13 +9526,17 @@ function vaultGroupNode(group) {
   label.className = "vault-group-label";
   label.textContent = group.label;
   head.appendChild(label);
+  // A folder group's name is already its directory (the key is the folder, the
+  // label its words); every other group says where its sessions stood.
+  const folder = home?.replace(/\\/g, "/").replace(/(.)\/+$/, "$1");
+  if (home && folder !== group.key) head.appendChild(vaultPathNode("vault-group-path", home));
   const count = document.createElement("span");
   count.className = "vault-group-count";
   count.textContent = String(group.sessions.length);
   head.appendChild(count);
   box.appendChild(head);
 
-  for (const session of group.sessions) box.appendChild(vaultRow(session));
+  for (const session of group.sessions) box.appendChild(vaultRow(session, home));
   return box;
 }
 
@@ -9478,6 +9661,7 @@ function wireVaultHead(view) {
 function paintVaultView(tab = tabs.find((held) => held.kind === "vault")) {
   if (!tab) return;
   const view = docHost(tab.pane, "vault");
+  vaultViewDrawn = view;
   wireVaultHead(view);
   const host = view.querySelector(".vault-list");
   const count = view.querySelector(".vault-count");
@@ -9493,11 +9677,17 @@ function paintVaultView(tab = tabs.find((held) => held.kind === "vault")) {
   // Nothing known yet and a walk looking: the first run on this machine. It
   // says it is reading rather than that there is nothing.
   const reading = vaultAnswer.refreshing === true && vaultAnswer.total === 0;
+  // Home is folded to `~` once the window has asked where it is; the answer
+  // arriving is a reason to draw the paths again, and nothing else is.
+  if (homeFolder === null) void readHomeFolder().then((home) => home && paintVaultView());
   // The rows are drawn again only when they differ from the ones standing: an
   // ask made while a walk looks comes back with the same list several times.
-  const drawn = `${locale}\n${JSON.stringify(vaultAnswer.groups)}\n${reading}`;
+  // The sort is in it because the time a row says is the one the list is
+  // ordered by (`vaultRowWhen`).
+  const drawn = `${locale}\n${vaultSort}\n${homeFolder ?? ""}\n${JSON.stringify(vaultAnswer.groups)}\n${reading}`;
   if (drawn !== vaultDrawn) {
     vaultDrawn = drawn;
+    vaultLive = vaultLivePanes();
     host.replaceChildren();
     for (const group of vaultAnswer.groups) host.appendChild(vaultGroupNode(group));
     if (vaultAnswer.groups.length === 0 && !reading) {
@@ -9506,6 +9696,9 @@ function paintVaultView(tab = tabs.find((held) => held.kind === "vault")) {
       line.textContent = t("vault.empty", "세션이 없습니다");
       host.appendChild(line);
     }
+    paintVaultLive(view, true);
+  } else {
+    paintVaultLive(view);
   }
   // Both numbers, because they answer different questions: how many sessions
   // exist, and how many this search is showing.
@@ -9772,8 +9965,11 @@ function vaultDockCard(session) {
  * strip over a receipt body of the first ask, the latest turns (the preview's
  * own three — PREVIEW_LINES is Orca's constant too), and the worktree lines.
  * Recorded deviations: our one resume stands where Orca splits worktree/new-tab,
- * and "Continue in New Session…" waits on a flow this window does not hold yet. */
-function vaultDockDetail(session) {
+ * and "Continue in New Session…" waits on a flow this window does not hold yet.
+ *
+ * `hands: false` leaves the strip out where the row above already holds the
+ * same three hands in words (the stage's row) — one set per session. */
+function vaultDockDetail(session, { hands = true } = {}) {
   const child = vaultIsChild(session);
   if (child) session = { ...session, resume: null };
   const detail = document.createElement("div");
@@ -9801,7 +9997,7 @@ function vaultDockDetail(session) {
   reveal.addEventListener("click", () => {
     invoke("reveal_vault_session", { path: session.file_path }).catch(showError);
   });
-  if (!child) {
+  if (!child && hands) {
     strip.appendChild(reveal);
     detail.appendChild(strip);
   }
@@ -13205,6 +13401,9 @@ function flushAgentPaint() {
     // 에이전트가 앉은 판의 목록이다. 서 있을 때만 그린다(2026-09-13, 「에이전트가
     // codex만 표시」 — 새 판의 에이전트가 도착해도 목록이 그대로였다).
     noteArtifactSeats();
+    // And the session list's marks for the conversations a pane holds: the
+    // same panes' states, written where its rows stand (`paintVaultLive`).
+    paintVaultLiveWhereShown();
   }
   // Badge and graph are one Rust snapshot. The badge remains global even when
   // the open graph is searched, so one answer can feed both without a second
