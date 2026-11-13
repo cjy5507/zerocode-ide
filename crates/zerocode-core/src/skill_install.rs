@@ -403,16 +403,22 @@ pub fn install_bundled_skill(
 ///
 /// - the store's own folder (the window's Claude home is a link to the
 ///   store, so its skills are the store's): what the store's install did;
-/// - nothing, or a link whose target is gone: a link to the store's;
+/// - nothing, or a link whose target is gone: a link to the store's, or a
+///   copy where a link cannot be made;
 /// - a link that reaches the store's: what the store's install did;
 /// - a folder holding nothing but texts this build or an earlier release
 ///   shipped for the skill ([`folder_is_ours`]): ours — it gives way to a
-///   link, and an install that cannot finish the swap leaves it as it was;
+///   link in one exchange of names ([`swap_for_link`]), so the name never
+///   stands empty; where the names cannot be exchanged it stays a copy,
+///   kept the store's text;
 /// - a link to somewhere else that stands, or any other folder (a person's
 ///   edit, a file they added): as a copy is treated — written through or
 ///   brought up where its files are ours, kept where they are somebody's
 ///   ([`install_one`]). A person's edit is never replaced by a link;
 /// - a plain file: somebody's, kept.
+///
+/// What a swap cut short left beside the skills folder is settled first
+/// ([`settle_left_swap`]).
 fn install_linked(
     skill: &BundledSkill,
     agent: &str,
@@ -436,38 +442,44 @@ fn install_linked(
         state,
         detail,
     };
+    let Some(swap) = swap_folder(root) else {
+        return install_one(skill, agent, label, root);
+    };
+    settle_left_swap(skill, &swap, &dir);
     if same_folder(&dir, &in_store) {
         return outcome(store_did.state, store_did.detail);
     }
     match std::fs::symlink_metadata(&dir) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match std::fs::create_dir_all(root).and_then(|()| link_beside(&in_store, &dir)) {
+            match std::fs::create_dir_all(root).and_then(|()| link_into(&in_store, &swap, &dir)) {
                 Ok(()) => outcome(
                     InstallState::Written,
                     "공통 저장소의 스킬로 링크했습니다".to_string(),
                 ),
-                Err(error) => outcome(InstallState::Failed, error.to_string()),
+                Err(_) => install_one(skill, agent, label, root),
             }
         }
         Err(error) => outcome(InstallState::Failed, error.to_string()),
         Ok(meta) if meta.file_type().is_symlink() && !dir.exists() => {
-            match link_beside(&in_store, &dir) {
+            match link_into(&in_store, &swap, &dir) {
                 Ok(()) => outcome(
                     InstallState::Written,
                     "끊어진 링크를 공통 저장소의 스킬 링크로 바꿨습니다".to_string(),
                 ),
-                Err(error) => outcome(InstallState::Failed, error.to_string()),
+                Err(_) => install_one(skill, agent, label, root),
             }
         }
         Ok(meta) if meta.is_dir() && folder_is_ours(skill, &dir) => {
             let said = "사본을 공통 저장소의 스킬 링크로 바꿨습니다";
-            match swap_for_link(&in_store, &dir) {
+            match swap_for_link(&in_store, &swap, &dir) {
                 Ok(None) => outcome(InstallState::Written, said.to_string()),
                 Ok(Some(left)) => outcome(
                     InstallState::Written,
                     format!("{said} · 옛 사본을 지우지 못했습니다: {}", left.display()),
                 ),
-                Err(error) => outcome(InstallState::Failed, error.to_string()),
+                // A system or a disk that cannot exchange two names in one
+                // step: the copy stays, kept the store's text.
+                Err(_) => install_one(skill, agent, label, root),
             }
         }
         Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
@@ -535,27 +547,82 @@ fn folder_is_ours(skill: &BundledSkill, dir: &Path) -> bool {
     holds_the_skill
 }
 
-/// Put a link to `target` where the folder `dir` stands. The link is made
-/// beside it first, the folder steps aside under a dot name, and the link
-/// takes the name; a step that fails puts back what stood. Between the two
-/// renames the name is empty for a moment — two calls, no read between them.
-/// The folder set aside is removed last; the answer names it when it would
-/// not go.
-fn swap_for_link(target: &Path, dir: &Path) -> io::Result<Option<PathBuf>> {
-    let staged = beside(dir, "link");
-    let _ = std::fs::remove_file(&staged);
-    make_link(target, &staged)?;
-    let aside = beside(dir, "copy");
-    if let Err(error) = std::fs::rename(dir, &aside) {
+/// The folder a link is made in before it takes a skill's name, and where
+/// the copy it replaces lands: beside the skills folder, never in it, so no
+/// agent that reads a skills folder one level deep (zo, Claude Code) takes
+/// what a cut-short swap left for a skill; and on the skills folder's own
+/// disk, so a name moves between the two in one step. Emptied and removed
+/// after each step; `None` for a skills folder with no folder above it.
+const SWAP_FOLDER: &str = ".zerocode-skill-swap";
+
+fn swap_folder(root: &Path) -> Option<PathBuf> {
+    root.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.join(SWAP_FOLDER))
+}
+
+/// Put a link to `target` where the folder `dir` stands, in one exchange of
+/// the two names: the link is made in `swap`, and the exchange leaves the
+/// link at `dir` and the copy in `swap` at once — there is no moment when
+/// `dir` names nothing. The copy is then removed; the answer names it when it
+/// would not go. Any step that fails before the exchange leaves the copy
+/// where it was and nothing in `swap`.
+fn swap_for_link(target: &Path, swap: &Path, dir: &Path) -> io::Result<Option<PathBuf>> {
+    let staged = staged_in(swap, dir);
+    std::fs::create_dir_all(swap)?;
+    make_link(target, &staged).inspect_err(|_| {
+        let _ = std::fs::remove_dir(swap);
+    })?;
+    if let Err(error) = exchange(&staged, dir) {
         let _ = std::fs::remove_file(&staged);
+        let _ = std::fs::remove_dir(swap);
         return Err(error);
     }
-    if let Err(error) = std::fs::rename(&staged, dir) {
-        let _ = std::fs::rename(&aside, dir);
-        let _ = std::fs::remove_file(&staged);
-        return Err(error);
+    if std::fs::remove_dir_all(&staged).is_err() {
+        return Ok(Some(staged));
     }
-    Ok(std::fs::remove_dir_all(&aside).err().map(|_| aside))
+    let _ = std::fs::remove_dir(swap);
+    Ok(None)
+}
+
+/// Make `at` — nothing, or a dead link — a link to `target`: made in `swap`
+/// and moved to the name in one step.
+fn link_into(target: &Path, swap: &Path, at: &Path) -> io::Result<()> {
+    let staged = staged_in(swap, at);
+    std::fs::create_dir_all(swap)?;
+    let made = make_link(target, &staged).and_then(|()| {
+        std::fs::rename(&staged, at).inspect_err(|_| {
+            let _ = std::fs::remove_file(&staged);
+        })
+    });
+    let _ = std::fs::remove_dir(swap);
+    made
+}
+
+fn staged_in(swap: &Path, dir: &Path) -> PathBuf {
+    swap.join(dir.file_name().unwrap_or_default())
+}
+
+/// What a swap cut short — the process stopped — left for this skill in
+/// `swap`: a link never exchanged goes; a copy the exchange put there goes
+/// when it is ours ([`folder_is_ours`]), and comes back to its name when that
+/// name stands empty. A copy of anybody else's text stays where it is.
+fn settle_left_swap(skill: &BundledSkill, swap: &Path, dir: &Path) {
+    let staged = staged_in(swap, dir);
+    match std::fs::symlink_metadata(&staged) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(&staged);
+        }
+        Ok(meta) if meta.is_dir() => {
+            if std::fs::symlink_metadata(dir).is_err() {
+                let _ = std::fs::rename(&staged, dir);
+            } else if folder_is_ours(skill, &staged) {
+                let _ = std::fs::remove_dir_all(&staged);
+            }
+        }
+        _ => {}
+    }
+    let _ = std::fs::remove_dir(swap);
 }
 
 /// Whether `a` and `b` are one folder, by where each really is.
@@ -566,25 +633,53 @@ fn same_folder(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Make `at` a link to `target`. The link is made beside `at` under another
-/// name and then takes the name, so whatever link stood at `at` — a dead one —
-/// is replaced in one step and never leaves the name empty.
-fn link_beside(target: &Path, at: &Path) -> io::Result<()> {
-    let staged = beside(at, "link");
-    let _ = std::fs::remove_file(&staged);
-    make_link(target, &staged)?;
-    std::fs::rename(&staged, at).inspect_err(|_| {
-        let _ = std::fs::remove_file(&staged);
-    })
+/// Exchange two names in one step: each then names what the other did.
+#[cfg(target_os = "macos")]
+fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    let (a, b) = (c_path(a)?, c_path(b)?);
+    // SAFETY: both are NUL-terminated paths that outlive the call.
+    let said = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+    if said == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
-/// A dot name beside `at` for a step of this process: no skill reader takes a
-/// dot folder for a skill.
-fn beside(at: &Path, what: &str) -> PathBuf {
-    let name = at
-        .file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-    at.with_file_name(format!(".{name}.{what}.{}", std::process::id()))
+#[cfg(target_os = "linux")]
+fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    let (a, b) = (c_path(a)?, c_path(b)?);
+    // SAFETY: both are NUL-terminated paths that outlive the call.
+    let said = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if said == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// No exchange of names here: a copy stays a copy.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn exchange(_a: &Path, _b: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "names are not exchanged on this system",
+    ))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn c_path(path: &Path) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
 #[cfg(unix)]
@@ -2049,7 +2144,8 @@ mod tests {
     fn a_copy_of_ours_gives_way_to_a_link_to_the_store() {
         let orchestration = bundled_skill("orchestration").unwrap();
         let second_brain = bundled_skill("second-brain").unwrap();
-        let cases: [(&str, &BundledSkill, fn(&Path)); 4] = [
+        type Shape = fn(&Path);
+        let cases: [(&str, &BundledSkill, Shape); 4] = [
             ("current", orchestration, |_| {}),
             ("stale skill file", second_brain, |dir| {
                 std::fs::write(dir.join(SKILL_FILE), SECOND_BRAIN_9F3B7DBCE).unwrap();
@@ -2086,6 +2182,10 @@ mod tests {
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .collect();
             assert_eq!(left, vec![skill.name.to_string()], "{case}: left beside it");
+            assert!(
+                !home.path().join(".claude").join(SWAP_FOLDER).exists(),
+                "{case}: the swap folder stayed"
+            );
             let again = install_for_claude(home.path(), skill.name);
             assert_eq!(again.state, InstallState::Unchanged, "{case}: {again:?}");
         }
@@ -2100,7 +2200,8 @@ mod tests {
         let skill = bundled_skill("orchestration").unwrap();
         let edited = skill.content.replacen("orchestration", "orchestratioN", 1);
         assert_ne!(edited, skill.content);
-        let cases: [(&str, Box<dyn Fn(&Path) + '_>); 3] = [
+        type Shape<'a> = Box<dyn Fn(&Path) + 'a>;
+        let cases: [(&str, Shape<'_>); 3] = [
             (
                 "one letter",
                 Box::new(|dir: &Path| std::fs::write(dir.join(SKILL_FILE), &edited).unwrap()),
@@ -2158,11 +2259,12 @@ mod tests {
         assert_eq!(outcome.state, InstallState::Kept, "{outcome:?}");
     }
 
-    /// A folder the install may not write in: the swap fails before anything
-    /// moves, and the copy stands as it was.
+    /// A skills folder whose names cannot be exchanged — here one its owner
+    /// may not write — keeps the copy, kept the store's text: the install
+    /// takes the copy road, never a half-made link, and leaves nothing beside.
     #[cfg(unix)]
     #[test]
-    fn a_swap_the_folder_refuses_leaves_the_copy_as_it_was() {
+    fn a_skills_folder_that_refuses_the_exchange_keeps_the_copy() {
         use std::os::unix::fs::PermissionsExt;
         let skill = bundled_skill("orchestration").unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -2172,7 +2274,7 @@ mod tests {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
         let outcome = install_for_claude(home.path(), skill.name);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(outcome.state, InstallState::Failed, "{outcome:?}");
+        assert_eq!(outcome.state, InstallState::Unchanged, "{outcome:?}");
         assert!(dir.is_dir() && !is_link(&dir));
         assert_eq!(
             std::fs::read_to_string(dir.join(SKILL_FILE)).unwrap(),
@@ -2184,6 +2286,116 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec![skill.name.to_string()]);
+        assert!(!home.path().join(".claude").join(SWAP_FOLDER).exists());
+    }
+
+    /// The exchange is one step: each name then holds what the other did —
+    /// a folder and a link here, the two a swap trades.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn an_exchange_trades_two_names_at_once() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("mark"), "copy").unwrap();
+        let target = home.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = home.path().join("link");
+        make_link(&target, &link).unwrap();
+        exchange(&link, &folder).unwrap();
+        assert!(is_link(&folder));
+        assert_eq!(std::fs::read_link(&folder).unwrap(), target);
+        assert!(!is_link(&link));
+        assert_eq!(std::fs::read_to_string(link.join("mark")).unwrap(), "copy");
+    }
+
+    /// The swap never names the skill twice and never leaves it unnamed: the
+    /// one call that moves the copy is the exchange, and no plain rename
+    /// takes the skill's name away from the copy first.
+    #[test]
+    fn a_swap_moves_the_copy_only_by_the_exchange() {
+        let source = include_str!("skill_install.rs");
+        let at = source.find("fn swap_for_link(").unwrap();
+        let body = &source[at..at + source[at..].find("\n}\n").unwrap()];
+        assert!(body.contains("exchange(&staged, dir)"), "{body}");
+        assert!(!body.contains("rename("), "{body}");
+    }
+
+    /// What a swap cut short left beside the skills folder is settled by the
+    /// next install, and nothing of it is read as a skill meanwhile: a link
+    /// never exchanged goes; a copy of ours the exchange moved goes; a copy
+    /// whose name stands empty comes back to it; a copy a person changed
+    /// stays where it is.
+    #[cfg(unix)]
+    #[test]
+    fn what_a_cut_short_swap_left_is_settled_by_the_next_install() {
+        let skill = bundled_skill("orchestration").unwrap();
+        let swap_of = |home: &Path| home.join(".claude").join(SWAP_FOLDER);
+        let in_store = |home: &Path| home.join(".agents/skills").join(skill.name);
+
+        // A link made, the process stopped before the exchange.
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/skills").join(skill.name);
+        copy_of(skill, &dir);
+        copy_of(skill, &in_store(home.path()));
+        std::fs::create_dir_all(swap_of(home.path())).unwrap();
+        make_link(
+            &in_store(home.path()),
+            &swap_of(home.path()).join(skill.name),
+        )
+        .unwrap();
+        let outcome = install_for_claude(home.path(), skill.name);
+        assert_eq!(outcome.state, InstallState::Written, "{outcome:?}");
+        assert!(is_link(&dir));
+        assert!(!swap_of(home.path()).exists(), "link never exchanged");
+
+        // The exchange made, the process stopped before the copy went.
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/skills").join(skill.name);
+        copy_of(skill, &in_store(home.path()));
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        make_link(&in_store(home.path()), &dir).unwrap();
+        copy_of(skill, &swap_of(home.path()).join(skill.name));
+        let outcome = install_for_claude(home.path(), skill.name);
+        assert_eq!(outcome.state, InstallState::Unchanged, "{outcome:?}");
+        assert!(is_link(&dir));
+        assert!(!swap_of(home.path()).exists(), "copy of ours left");
+
+        // The name standing empty: the copy comes back, then gives way.
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/skills").join(skill.name);
+        copy_of(skill, &in_store(home.path()));
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        copy_of(skill, &swap_of(home.path()).join(skill.name));
+        let outcome = install_for_claude(home.path(), skill.name);
+        assert_eq!(outcome.state, InstallState::Written, "{outcome:?}");
+        assert!(is_link(&dir));
+        assert!(!swap_of(home.path()).exists(), "copy not brought back");
+
+        // A copy a person changed, left by the exchange: it stays.
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/skills").join(skill.name);
+        copy_of(skill, &in_store(home.path()));
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        make_link(&in_store(home.path()), &dir).unwrap();
+        let left = swap_of(home.path()).join(skill.name);
+        copy_of(skill, &left);
+        std::fs::write(left.join("notes.md"), "mine").unwrap();
+        install_for_claude(home.path(), skill.name);
+        assert_eq!(
+            std::fs::read_to_string(left.join("notes.md")).unwrap(),
+            "mine"
+        );
+        let names: Vec<String> = std::fs::read_dir(dir.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![skill.name.to_string()],
+            "nothing beside the skill"
+        );
     }
 
     /// The machine this was written for (2026-11-13): every shipped skill as

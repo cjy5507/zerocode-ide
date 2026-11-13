@@ -42,7 +42,8 @@ ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 # The existing CLI lock owner probe, shared without introducing unsafe calls.
 nix = { version = "0.29", features = ["process", "signal"] }
 # Only the two open flags that keep a text file's open from following a link or waiting on a pipe
-# (`orchestration::text_file`); nothing here calls into libc.
+# (`orchestration::text_file`), and the one call that exchanges two names in a single step
+# (`skill_install`, macOS `renamex_np` / Linux `renameat2`).
 libc = { workspace = true }
 
 [dev-dependencies]
