@@ -137,6 +137,74 @@
         let _ = fs::remove_dir_all(&repository);
     }
 
+    /// Nor does the router put the verify leg on another provider, carry a
+    /// turn out of quota on at one, or have the checking roles prefer one,
+    /// because a repository said so: a person's `false` stands against its
+    /// `true`, and their allowlist against its wider one (`[]` is every
+    /// provider).
+    #[test]
+    fn the_router_does_not_send_elsewhere_because_a_repository_said_so() {
+        let config_home = temp_config_home("repository-sends-elsewhere");
+        let repository = temp_config_home("repository-sends-elsewhere-cwd");
+        fs::create_dir_all(repository.join(".zo")).expect("project dir");
+        let repository_says = |smart: Value| {
+            fs::write(repository.join(".zo").join("settings.json"), json!({ "smart": smart }).to_string())
+                .expect("project settings");
+        };
+        let read = || {
+            with_config_home(&config_home, || {
+                super::settings::read_smart_runtime_settings_for(&repository).expect("settings")
+            })
+        };
+        let kept_in = |settings: &super::settings::SmartRuntimeSettings| {
+            !settings.allow_cross_provider_diversity && !settings.verify_cross_provider && !settings.quota_fallback
+        };
+
+        write_settings(
+            &config_home,
+            &json!({ "smart": {
+                "allowCrossProviderDiversity": false, "verifyCrossProvider": false, "quotaFallback": false,
+                "providerAllowlist": ["anthropic"],
+            } }),
+        );
+        repository_says(json!({
+            "allowCrossProviderDiversity": true, "verifyCrossProvider": true, "quotaFallback": true,
+            "providerAllowlist": [],
+        }));
+        let settings = read();
+        assert!(kept_in(&settings), "{settings:?}");
+        assert_eq!(settings.provider_allowlist, ["anthropic"]);
+        repository_says(json!({ "providerAllowlist": ["openai", "Anthropic"] }));
+        assert_eq!(read().provider_allowlist, ["Anthropic"], "cut down to what the person named");
+        // A refused turn: the person is asked, whatever the repository says.
+        repository_says(json!({ "classifierFallback": "auto" }));
+        assert_eq!(read().classifier_fallback, runtime::ClassifierFallback::Ask);
+        // Nor have the host spawn where the person keeps it from doing so.
+        write_settings(&config_home, &json!({ "smart": { "orchestration": "model" } }));
+        for spawns in ["auto", "AUTO", "sometimes"] {
+            repository_says(json!({ "orchestration": spawns }));
+            assert_eq!(read().orchestration, super::settings::HostOrchestration::ModelLed, "{spawns}");
+        }
+        repository_says(json!({ "orchestration": "off" }));
+        assert_eq!(read().orchestration, super::settings::HostOrchestration::Off, "keeping it out is the repository's to say");
+
+        // A person who said nothing: the defaults, which a repository may narrow.
+        write_settings(&config_home, &json!({}));
+        repository_says(json!({}));
+        let settings = read();
+        assert!(settings.allow_cross_provider_diversity && settings.verify_cross_provider && settings.quota_fallback);
+        assert!(settings.provider_allowlist.is_empty());
+        repository_says(json!({
+            "allowCrossProviderDiversity": false, "verifyCrossProvider": false, "quotaFallback": false,
+            "providerAllowlist": ["openai"],
+        }));
+        let settings = read();
+        assert!(kept_in(&settings), "{settings:?}");
+        assert_eq!(settings.provider_allowlist, ["openai"]);
+        let _ = fs::remove_dir_all(&config_home);
+        let _ = fs::remove_dir_all(&repository);
+    }
+
     #[test]
     fn builtin_profile_keys_use_the_profile_role_mapping() {
         for profile in runtime::BuiltinSubagentProfile::all() {

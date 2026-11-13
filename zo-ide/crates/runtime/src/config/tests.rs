@@ -227,6 +227,66 @@ fn a_repository_does_not_switch_back_on_what_a_person_switched_off() {
     assert_eq!(smart_says(&config, "enabled"), Some(JsonValue::Bool(false)));
 }
 
+/// A person who switched off what sends to another provider (the verify leg
+/// there, a turn out of quota carried on there, the checking roles' taste for
+/// one), or named the providers a route may go to, is not sent elsewhere by
+/// the repository they opened: its switches stand only where they say
+/// `false`, and its list only cuts the person's down.
+#[test]
+fn a_repository_does_not_send_requests_where_a_person_did_not() {
+    let _stable = overrides_stable();
+    let root = temp_dir();
+    let cwd = root.join("project");
+    let home = root.join("home").join(".zo");
+    fs::create_dir_all(cwd.join(".zo")).expect("project dir");
+    fs::create_dir_all(&home).expect("home dir");
+    let repository = cwd.join(".zo").join("settings.json");
+    let load = || ConfigLoader::new(&cwd, &home).load().expect("config");
+    let switches = ["allowCrossProviderDiversity", "verifyCrossProvider", "quotaFallback"];
+    let list = |names: &[&str]| {
+        Some(JsonValue::Array(names.iter().map(|name| JsonValue::String((*name).to_string())).collect()))
+    };
+
+    fs::write(
+        home.join("settings.json"),
+        r#"{"smart":{"allowCrossProviderDiversity":false,"verifyCrossProvider":false,"quotaFallback":false,"providerAllowlist":["anthropic"]}}"#,
+    )
+    .expect("own settings");
+    for widened in [
+        r#"{"smart":{"allowCrossProviderDiversity":true,"verifyCrossProvider":true,"quotaFallback":true,"providerAllowlist":[]}}"#,
+        r#"{"smart":{"allowCrossProviderDiversity":"yes","verifyCrossProvider":null,"quotaFallback":1,"providerAllowlist":["openai","google"]}}"#,
+    ] {
+        fs::write(&repository, widened).expect("project settings");
+        let config = load();
+        for switch in switches {
+            assert_eq!(smart_says(&config, switch), Some(JsonValue::Bool(false)), "{switch} under {widened}");
+        }
+        assert_eq!(smart_says(&config, "providerAllowlist"), list(&["anthropic"]), "{widened}");
+    }
+
+    // Nor move a refused turn to another model without asking the person.
+    fs::write(home.join("settings.json"), r#"{"smart":{"classifierFallback":"off"}}"#).expect("own settings");
+    for moves in ["auto", "ask", "AUTO"] {
+        fs::write(&repository, format!(r#"{{"smart":{{"classifierFallback":"{moves}"}}}}"#)).expect("project settings");
+        assert_eq!(smart_says(&load(), "classifierFallback"), Some(JsonValue::String("off".to_string())), "{moves}");
+    }
+    fs::write(home.join("settings.json"), r#"{"smart":{"classifierFallback":"auto"}}"#).expect("own settings");
+    fs::write(&repository, r#"{"smart":{"classifierFallback":"off"}}"#).expect("project settings");
+    assert_eq!(smart_says(&load(), "classifierFallback"), Some(JsonValue::String("off".to_string())), "narrowing stands");
+    // Narrowing is the repository's to say.
+    fs::write(home.join("settings.json"), r#"{"smart":{"providerAllowlist":["anthropic","google"]}}"#).expect("own settings");
+    fs::write(
+        &repository,
+        r#"{"smart":{"allowCrossProviderDiversity":false,"verifyCrossProvider":false,"quotaFallback":false,"providerAllowlist":["google","openai"]}}"#,
+    )
+    .expect("project settings");
+    let config = load();
+    for switch in switches {
+        assert_eq!(smart_says(&config, switch), Some(JsonValue::Bool(false)), "{switch}");
+    }
+    assert_eq!(smart_says(&config, "providerAllowlist"), list(&["google"]));
+}
+
 /// The person's own documents beside the user settings — a `--settings`
 /// file, and a `.zo/settings.local.json` git does not track — still say how
 /// much is asked: what a repository may not widen is theirs to widen.
