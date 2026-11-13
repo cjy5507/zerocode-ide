@@ -207,6 +207,12 @@ const KEYCHAIN_EXPIRY_BUFFER_MS: u64 = 60_000;
 /// real keychain item exists).
 const DISABLE_KEYCHAIN_ENV: &str = "ZO_DISABLE_KEYCHAIN";
 
+/// Whether this machine keeps a macOS keychain at all. Off macOS none is kept
+/// and none is asked for: a `security` on the path there is another program,
+/// and a path that could not be searched for one is not a keychain that did
+/// not answer.
+const KEEPS_A_KEYCHAIN: bool = cfg!(target_os = "macos");
+
 /// The account the CLI files its item under: `$USER` as the CLI reads it
 /// (`wk()`), or the CLI's own name for one `$USER` cannot spell. `None` when
 /// `$USER` is unset — the CLI then asks the password database, which this
@@ -573,16 +579,25 @@ pub fn claude_code_login_configured() -> bool {
 /// answer may well keep one, and saying so costs one more question at the
 /// next connection; a machine without `security` keeps none.
 fn keychain_item_kept(service: &str) -> bool {
-    let account = cli_keychain_account();
-    let mut command = Command::new("security");
-    command.args(["find-generic-password", "-s", service]);
-    if let Some(account) = account.as_deref() {
-        command.args(["-a", account]);
-    }
-    match command.output() {
-        Ok(output) => output.status.code() != Some(KEYCHAIN_ITEM_NOT_FOUND),
-        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-    }
+    item_kept(KEEPS_A_KEYCHAIN, || {
+        let account = cli_keychain_account();
+        let mut command = Command::new("security");
+        command.args(["find-generic-password", "-s", service]);
+        if let Some(account) = account.as_deref() {
+            command.args(["-a", account]);
+        }
+        command.output()
+    })
+}
+
+/// [`keychain_item_kept`] of what `ask` came to. A machine that keeps no
+/// keychain (`keeps` false) keeps no item and is not asked.
+fn item_kept(keeps: bool, ask: impl FnOnce() -> std::io::Result<std::process::Output>) -> bool {
+    keeps
+        && match ask() {
+            Ok(output) => output.status.code() != Some(KEYCHAIN_ITEM_NOT_FOUND),
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        }
 }
 
 /// The Claude Code login this process would read, for a diagnosis: what chose
@@ -855,15 +870,31 @@ impl KeychainAnswer {
 /// One keychain item's secret as `security find-generic-password -w` prints
 /// it, trimmed — filed under `account` when one is named.
 fn read_keychain_service_secret(service: &str, account: Option<&str>) -> KeychainAnswer {
-    let mut command = Command::new("security");
-    command.args(["find-generic-password", "-s", service]);
-    if let Some(account) = account {
-        command.args(["-a", account]);
+    keychain_answer(KEEPS_A_KEYCHAIN, || {
+        let mut command = Command::new("security");
+        command.args(["find-generic-password", "-s", service]);
+        if let Some(account) = account {
+            command.args(["-a", account]);
+        }
+        command.arg("-w").output()
+    })
+}
+
+/// What one question to the keychain (`ask`) came to. A machine that keeps no
+/// keychain (`keeps` false) is not asked, and that is settled: every failure
+/// to start `security` but "no such program" reads as a keychain that did not
+/// answer, which is true of a Mac and was said of every other machine too.
+fn keychain_answer(
+    keeps: bool,
+    ask: impl FnOnce() -> std::io::Result<std::process::Output>,
+) -> KeychainAnswer {
+    if !keeps {
+        return KeychainAnswer::Absent;
     }
-    let output = match command.arg("-w").output() {
+    let output = match ask() {
         Ok(output) => output,
-        // No `security` at all is a machine that keeps no keychain (Linux,
-        // Windows): settled, not a read that failed.
+        // A Mac without `security` keeps no keychain this process can read:
+        // settled, not a read that failed.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return KeychainAnswer::Absent,
         Err(_) => return KeychainAnswer::Unanswered,
     };
@@ -891,7 +922,7 @@ fn read_keychain_service_secret(service: &str, account: Option<&str>) -> Keychai
 /// on macOS, the one platform where the window keeps router keys, and never
 /// under the keychain kill switch (`ZO_DISABLE_KEYCHAIN`).
 pub(crate) fn router_keychain_available() -> bool {
-    cfg!(target_os = "macos") && std::env::var_os(DISABLE_KEYCHAIN_ENV).is_none()
+    KEEPS_A_KEYCHAIN && std::env::var_os(DISABLE_KEYCHAIN_ENV).is_none()
 }
 
 pub(crate) fn read_router_key(service: &str) -> KeychainAnswer {
@@ -1315,5 +1346,29 @@ mod tests {
                 .starts_with("https://console.anthropic.com/")
         );
         assert!(config.scopes.iter().any(|scope| scope == "user:inference"));
+    }
+}
+
+#[cfg(test)]
+mod machine_without_a_keychain_tests {
+    use super::{KeychainAnswer, item_kept, keychain_answer};
+    use std::io::{Error, ErrorKind, Result};
+    use std::process::Output;
+
+    /// A machine that keeps no macOS keychain is not asked for one. On a Mac,
+    /// `security` failing to start for any reason but "no such program" is a
+    /// keychain that did not answer, and an item it may well keep. The same
+    /// reading on Linux — where the failure can be a path entry that may not
+    /// be searched — told every start of zo that "the macOS keychain did not
+    /// answer for the Claude Code sign-in".
+    #[test]
+    fn a_machine_that_keeps_no_keychain_is_not_asked_for_one() {
+        let refused = || -> Result<Output> { Err(Error::from(ErrorKind::PermissionDenied)) };
+        assert!(matches!(keychain_answer(true, refused), KeychainAnswer::Unanswered));
+        assert!(item_kept(true, refused));
+
+        let never = || -> Result<Output> { panic!("a machine that keeps no keychain was asked for an item") };
+        assert!(matches!(keychain_answer(false, never), KeychainAnswer::Absent));
+        assert!(!item_kept(false, never));
     }
 }
