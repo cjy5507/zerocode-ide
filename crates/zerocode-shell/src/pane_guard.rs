@@ -175,9 +175,12 @@ pub(crate) fn watch_settings(watched: &crate::file_watch::WatchSet) {
 }
 
 /// zo's settings file or the decisions' index changed: read which seats and
-/// decisions ask again.
+/// decisions ask again, and drop the lines waiting in a folder the door no
+/// longer lets act.
 pub(crate) fn settings_moved() {
-    STANDING.read(&Wire::of_this_machine());
+    let wire = Wire::of_this_machine();
+    STANDING.read(&wire);
+    decisions::drop_lines_the_door_refuses(&GUARDS, &wire);
 }
 
 /// The window wrote the decisions' store — made, edited, switched or
@@ -915,6 +918,9 @@ fn file(
             let edited = std::mem::take(&mut book.turn_edited);
             let evidence = std::mem::take(&mut book.evidence);
             book.decided_calls.clear();
+            if !stopped {
+                decisions::turn_ended(book, pane, at);
+            }
             if let Some(said) = said
                 .as_ref()
                 .filter(|_| !stopped && asking.decision_turn_end)

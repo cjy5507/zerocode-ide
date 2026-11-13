@@ -256,7 +256,6 @@ fn brief(
     brief_in(
         guards,
         &standing.decided(),
-        &home.wire,
         &brief_ask(&home.root, launch),
         zerocode_hookd::TURN_BRIEF_CHAR_CAP,
     )
@@ -1100,12 +1099,12 @@ fn a_commands_line_is_taken_at_the_next_tool_boundary_once() {
     );
     let key = crate::hooks::pane_key_of(7);
     let decided = standing.decided();
-    assert!(boundary_in(guards, &decided, &home.wire, &key, "launch-2").is_none());
+    assert!(boundary_in(guards, &decided, &key, "launch-2").is_none());
     assert_eq!(
-        boundary_in(guards, &decided, &home.wire, &key, LAUNCH),
+        boundary_in(guards, &decided, &key, LAUNCH),
         Some(custom::line("Visible", "yes", 0.9))
     );
-    assert!(boundary_in(guards, &decided, &home.wire, &key, LAUNCH).is_none());
+    assert!(boundary_in(guards, &decided, &key, LAUNCH).is_none());
     assert!(brief(guards, &home, &standing, LAUNCH).is_none());
 }
 
@@ -1126,9 +1125,221 @@ fn a_turns_offer_is_not_taken_at_a_tool_boundary() {
     let guards = fresh_guards();
     noted(guards, &home, &standing, vec![turn_ended(false)]);
     let key = crate::hooks::pane_key_of(7);
-    assert!(boundary_in(guards, &standing.decided(), &home.wire, &key, LAUNCH).is_none());
+    assert!(boundary_in(guards, &standing.decided(), &key, LAUNCH).is_none());
     assert_eq!(
         brief(guards, &home, &standing, LAUNCH),
         Some(custom::line("Done", "yes", 0.9))
+    );
+}
+
+/// zo's settings as `home` keeps them, `change`d and written back.
+fn settings_changed(home: &Home, change: impl FnOnce(&mut Value)) {
+    let settings = home.home.path().join("settings.json");
+    let mut written: Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).expect("the settings"))
+            .expect("JSON");
+    change(&mut written);
+    std::fs::write(&settings, written.to_string()).expect("the settings written");
+}
+
+/// A decision that stands on and earns its line before a command, its line
+/// left waiting in the pane.
+fn a_line_waiting(project: &Path) -> (Endpoint, Home, Standing, &'static Mutex<Guards>) {
+    let endpoint = replying(|_| a_noul(0.9));
+    let decision = yes_no("Visible", Point::BeforeCommand);
+    let home = Home::new(&endpoint, project, JevMode::On, &[(&decision, JevMode::On)]);
+    let standing = home.standing();
+    let guards = fresh_guards();
+    noted(
+        guards,
+        &home,
+        &standing,
+        vec![about(Some("call-1"), "rm -rf build", project)],
+    );
+    (endpoint, home, standing, guards)
+}
+
+/// Taking a waiting line reads the snapshot alone, never zo's settings: a
+/// settings file that no longer reads still lets the tool boundary's reply
+/// carry the line the door let act when it was placed.
+#[test]
+fn a_waiting_line_is_taken_without_reading_the_settings() {
+    let project = tempfile::tempdir().expect("a project");
+    let (_endpoint, home, standing, guards) = a_line_waiting(project.path());
+    std::fs::write(home.home.path().join("settings.json"), "not JSON").expect("unreadable");
+    assert_eq!(
+        boundary_in(
+            guards,
+            &standing.decided(),
+            &crate::hooks::pane_key_of(7),
+            LAUNCH
+        ),
+        Some(custom::line("Visible", "yes", 0.9))
+    );
+}
+
+/// Consent withdrawn: when the settings are read again, the lines waiting in
+/// that folder's panes are dropped, so no reply carries one.
+#[test]
+fn consent_withdrawn_drops_the_waiting_lines_when_the_settings_are_read_again() {
+    let project = tempfile::tempdir().expect("a project");
+    let (_endpoint, home, standing, guards) = a_line_waiting(project.path());
+    settings_changed(&home, |written| {
+        written[SMART_SETTINGS_KEY]["jev"]["workspaces"] = json!([]);
+    });
+    drop_lines_the_door_refuses(guards, &home.wire);
+    let key = crate::hooks::pane_key_of(7);
+    assert!(boundary_in(guards, &standing.decided(), &key, LAUNCH).is_none());
+    assert!(brief(guards, &home, &standing, LAUNCH).is_none());
+}
+
+/// A turn that ends, not stopped, replaces what the turn before it offered
+/// even when no decision asks at its end — the offer was for the turn that
+/// just ended. A stopped turn replaces nothing, as zo's asks nothing.
+#[test]
+fn a_later_turns_end_replaces_the_offer_even_when_nothing_asks_there() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Done", Point::TurnEnd);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+    );
+    let standing = home.standing();
+    let guards = fresh_guards();
+    let at = crate::usage_runtime::epoch_ms_now();
+    let ended = |stopped: bool, asking: Asking, decided: &Decided, at: i64| {
+        noted_with(
+            guards,
+            &home,
+            (asking, decided),
+            vec![turn_ended(stopped)],
+            at,
+        )
+    };
+    let nothing_asks = (Asking::default(), Decided::default());
+    assert_eq!(ended(false, standing.asking(), &standing.decided(), at), 1);
+    assert_eq!(ended(true, nothing_asks.0, &nothing_asks.1, at + 1), 0);
+    assert_eq!(
+        brief(guards, &home, &standing, LAUNCH),
+        Some(custom::line("Done", "yes", 0.9)),
+        "a stopped turn left the offer standing"
+    );
+    assert_eq!(
+        ended(false, standing.asking(), &standing.decided(), at + 2),
+        1
+    );
+    assert_eq!(ended(false, nothing_asks.0, &nothing_asks.1, at + 3), 0);
+    assert!(
+        brief(guards, &home, &standing, LAUNCH).is_none(),
+        "the later turn's end replaced the offer with nothing"
+    );
+}
+
+/// With Jev itself off, a pane's decisions ask nothing at all: no thread and
+/// no row — not one `off` row an hour.
+#[test]
+fn with_jev_off_a_panes_decisions_start_no_thread_and_write_no_row() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Visible", Point::BeforeCommand);
+    let home = Home::with(
+        &endpoint,
+        "test-key",
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+        &Map::from_iter([("enabled".to_string(), json!(false))]),
+    );
+    let standing = home.standing();
+    assert!(standing.asking().nothing(), "{:?}", standing.asking());
+    let guards = fresh_guards();
+    assert_eq!(
+        commands(
+            guards,
+            &home,
+            (standing.asking(), &standing.decided()),
+            0..=100,
+            0
+        ),
+        0
+    );
+    assert!(home.rows().is_empty());
+    settings_changed(&home, |written| {
+        written[SMART_SETTINGS_KEY]["jev"]["enabled"] = json!(true);
+    });
+    assert!(home.standing().asking().decision_command, "turned back on");
+}
+
+/// No ledger to file a row under — zo's provider settings that do not read —
+/// quiets the decision for the hour as no key does: one thread, then none.
+#[test]
+fn a_provider_that_does_not_read_quiets_the_decision_for_the_hour() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Visible", Point::BeforeCommand);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+    );
+    settings_changed(&home, |written| {
+        written[SMART_SETTINGS_KEY][judgment_provider::SETTINGS_KEY] = json!("not a provider");
+    });
+    let standing = home.standing();
+    let decided = standing.decided();
+    let guards = fresh_guards();
+    let at = crate::usage_runtime::epoch_ms_now();
+    assert_eq!(
+        commands(guards, &home, (standing.asking(), &decided), 0..=0, at),
+        1
+    );
+    assert_eq!(
+        commands(guards, &home, (standing.asking(), &decided), 1..=100, at),
+        0,
+        "quiet for the hour"
+    );
+    assert!(endpoint.asked().is_empty());
+}
+
+/// The ledger a pane's decisions write keeps the bound zo keeps on it: past
+/// it, the newer half stays and the pane's row lands after it.
+#[test]
+fn the_ledger_a_pane_writes_is_cut_where_zo_cuts_it() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Visible", Point::BeforeCommand);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::Shadow,
+        &[(&decision, JevMode::Shadow)],
+    );
+    let ledger = systemone::project_ledger_of(&home.wire, &CUSTOM_DECISIONS, &home.root)
+        .expect("the ledger");
+    std::fs::create_dir_all(ledger.parent().expect("its folder")).expect("its folder");
+    let line = format!("{}\n", json!({"at": 0, "pad": "x".repeat(200)}));
+    let lines = zerocode_core::jev::journal::LEDGER_MAX_BYTES / line.len() as u64 + 1;
+    std::fs::write(&ledger, line.repeat(usize::try_from(lines).expect("lines"))).expect("full");
+    let standing = home.standing();
+    noted(
+        fresh_guards(),
+        &home,
+        &standing,
+        vec![about(Some("call-1"), "rm -rf build", project.path())],
+    );
+    let size = std::fs::metadata(&ledger).expect("the ledger").len();
+    assert!(
+        size <= zerocode_core::jev::journal::LEDGER_MAX_BYTES,
+        "{size} bytes"
+    );
+    let rows = home.rows();
+    assert_eq!(rows.len() as u64, lines - lines / 2 + 1);
+    assert_eq!(
+        rows.last().expect("a row")["outcome"],
+        json!(ANSWERED_OUTCOME)
     );
 }

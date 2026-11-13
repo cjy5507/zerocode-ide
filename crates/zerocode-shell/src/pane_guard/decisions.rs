@@ -52,12 +52,15 @@ pub(crate) struct Decisions {
 }
 
 impl Decisions {
-    /// Read the switch from `root`, zo's settings, and — only while it asks —
-    /// every decision of the store under `home` that stands anything but
-    /// off. A store that does not read asks nothing.
+    /// Read the switch from `root`, zo's settings, and — only while it asks
+    /// and Jev itself is on — every decision of the store under `home` that
+    /// stands anything but off. A store that does not read asks nothing, and
+    /// with Jev off a pane's decisions start no thread and write no row; the
+    /// settings read again when it is turned back on.
     pub(crate) fn read(root: &Value, home: Option<&Path>) -> Self {
         let switch = CUSTOM_DECISIONS.mode_in(root);
-        let Some(home) = home.filter(|_| switch.asks()) else {
+        let jev_on = door::JevSettings::from_root(root).enabled;
+        let Some(home) = home.filter(|_| switch.asks() && jev_on) else {
             return Self {
                 switch,
                 kept: Vec::new(),
@@ -352,6 +355,32 @@ pub(super) fn at_turn_end(
     })
 }
 
+/// A turn ended, not stopped: what an earlier turn's end offered was for the
+/// turn that just ended, so it is replaced now — by nothing, until this
+/// turn's own decisions answer ([`place`]) — whether or not a decision asks
+/// here or every one is quiet. A stopped turn replaces nothing, as zo's
+/// stopped turn asks nothing. On the hook loop: the book alone.
+pub(super) fn turn_ended(book: &mut PaneBook, pane: &Pane, at: u64) {
+    if book.waiting.launch != pane.launch {
+        book.waiting = Waiting {
+            launch: pane.launch.clone(),
+            ..Waiting::default()
+        };
+    }
+    if book
+        .waiting
+        .offered
+        .as_ref()
+        .is_some_and(|later| later.at > at)
+    {
+        return;
+    }
+    book.waiting.offered = Some(Offered {
+        at,
+        handed: Vec::new(),
+    });
+}
+
 /// Whether a line a decision at `point` earns can reach `agent` at all: the
 /// next turn's brief, where its prompt hook takes context
 /// ([`hook_guard::turn_start_road`]) — or, before a command, its next tool
@@ -378,6 +407,15 @@ pub(super) fn ask(
         wire.config_home(),
         systemone::project_ledger_of(wire, &CUSTOM_DECISIONS, &root),
     ) else {
+        // No zo home or provider to file a row under: a refusal that repeats
+        // as no key does, with no ledger to say it in — quiet for the hour,
+        // or until the settings are read again.
+        let now = Now::at(asked.at);
+        for kept in &asked.kept {
+            decided
+                .quiet
+                .mark(&kept.entry.id, None, now.of(door::Span::Hour));
+        }
         return;
     };
     let workspace = PathBuf::from(door::resolved_path(&root));
@@ -435,7 +473,7 @@ pub(super) fn ask(
         .flatten()
         .filter_map(|row| serde_json::to_value(row).ok())
         .collect();
-    systemone::record_rows(
+    systemone::record_bounded_rows(
         &CUSTOM_DECISIONS,
         &ledger,
         &rows,
@@ -530,16 +568,17 @@ fn ask_one(
         count::hour_path(home, id, &hour),
         count::hour_path(home, custom::EVERY_DECISION, &hour),
     );
+    let hours = DecisionHour {
+        decision: &own,
+        decision_most: kept.definition.max_per_hour,
+        every: &every,
+    };
     let answered = wire.ask_within_the_hour(
         &CUSTOM_DECISIONS,
         Some(workspace),
         custom::body_of(&kept.definition, lent),
         custom::deadline_at(point),
-        DecisionHour {
-            decision: &own,
-            decision_most: kept.definition.max_per_hour,
-            every: &every,
-        },
+        hours,
     );
     row.elapsed_ms = u64::try_from(answered.waited.as_millis()).unwrap_or(u64::MAX);
     row.requests = answered.spent.requests;
@@ -554,8 +593,7 @@ fn ask_one(
             // busy is a moment's.
             let refused = door::Refused::from_token(&token);
             let repeats = refused.and_then(door::Refused::repeats).filter(|_| {
-                token != door::Refused::HourlyBudget.token()
-                    || hour_is_full(wire, &own, kept.definition.max_per_hour, &every)
+                token != door::Refused::HourlyBudget.token() || wire.hour_is_full(hours)
             });
             let folder = refused
                 .is_some_and(door::Refused::of_the_folder)
@@ -595,14 +633,6 @@ fn ask_one(
         line: custom::line(&kept.definition.name, &reading.shown, reading.confidence),
     });
     (Some(row), handed)
-}
-
-/// Whether the hour a decision was refused in is full — its own or the one
-/// every decision shares — rather than refused for a lock that stayed busy
-/// or a count that did not read.
-fn hour_is_full(wire: &Wire, own: &Path, own_most: u64, every: &Path) -> bool {
-    let sent = |path: &Path| std::fs::metadata(path).map_or(0, |held| held.len());
-    sent(own) >= own_most || sent(every) >= door::custom_hourly_requests(&wire.settings_root())
 }
 
 /// Leave the lines `handed` waiting in `pane`'s book: a command's after the
@@ -649,20 +679,54 @@ fn place(
     true
 }
 
+/// zo's settings were read again: drop every line waiting in a pane whose
+/// folder the door no longer lets act — consent withdrawn, Jev turned off —
+/// here, on the watcher's road, so taking a line on a hook's reply reads no
+/// file ([`take`]). The folders are asked outside the books' lock.
+pub(super) fn drop_lines_the_door_refuses(guards: &Mutex<Guards>, wire: &Wire) {
+    let waiting: Vec<(u32, PathBuf)> = guards
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .panes
+        .iter()
+        .filter(|(_, book)| !book.waiting.command.is_empty() || book.waiting.offered.is_some())
+        .filter_map(|(term, book)| Some((*term, book.folder.as_ref()?.1.clone())))
+        .collect();
+    let refused: Vec<(u32, PathBuf)> = waiting
+        .into_iter()
+        .filter(|(_, folder)| !wire.permits_workspace_now(Some(folder)))
+        .collect();
+    if refused.is_empty() {
+        return;
+    }
+    let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+    for (term, folder) in refused {
+        if let Some(book) = held
+            .panes
+            .get_mut(&term)
+            .filter(|book| book.folder.as_ref().is_some_and(|(_, own)| *own == folder))
+        {
+            book.waiting = Waiting {
+                launch: book.waiting.launch.clone(),
+                ..Waiting::default()
+            };
+        }
+    }
+}
+
 /// Take the lines waiting in the pane `pane_key` names for the knock of
 /// `launch` (and `session`, when it names one) — a command's decisions', and
 /// with `offered_too` what the last turn's end offered: none for a knock from another
 /// launch of the pane, which leaves them where they were. Those whose
-/// decision no longer stands on at the version that answered, or whose
-/// folder the door no longer lets act, are dropped; of the rest, each that
-/// fits under `room` after the ones before it, one to a line. Taken lines
-/// are gone whether or not the reply that carries them is read: at most
-/// once, not exactly once.
-#[allow(clippy::too_many_arguments)] // the knock's identity and the room it leaves
+/// decision no longer stands on at the version that answered are dropped;
+/// of the rest, each that fits under `room` after the ones before it, one to
+/// a line. The snapshot alone is read — no file: a folder the door stopped
+/// letting act lost its lines when the settings were read again
+/// ([`drop_lines_the_door_refuses`]). Taken lines are gone whether or not
+/// the reply that carries them is read: at most once, not exactly once.
 fn take(
     guards: &Mutex<Guards>,
     decided: &Decided,
-    wire: &Wire,
     pane_key: &str,
     launch: &str,
     session: Option<&str>,
@@ -673,7 +737,7 @@ fn take(
         return None;
     }
     let term = crate::hooks::term_of_pane_key(pane_key)?;
-    let (handed, worktree) = {
+    let handed = {
         let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
         let book = held.panes.get_mut(&term)?;
         let pane = book.pane.as_ref()?;
@@ -685,7 +749,6 @@ fn take(
         if other_launch || other_session {
             return None;
         }
-        let worktree = pane.worktree.clone();
         let mut handed = std::mem::take(&mut book.waiting.command);
         if offered_too {
             handed.extend(
@@ -697,15 +760,8 @@ fn take(
                     .flatten(),
             );
         }
-        (handed, worktree)
+        handed
     };
-    if handed.is_empty() {
-        return None;
-    }
-    let root = worktree.canonicalize().unwrap_or(worktree);
-    if !wire.permits_workspace_now(Some(&root)) {
-        return None;
-    }
     let mut said = String::new();
     for one in handed
         .iter()
@@ -727,26 +783,18 @@ fn take(
 /// asking pane — the person's own as well as a summoned worker's — that
 /// fits the room the voices before it left.
 pub(super) fn brief_line(ask: &zerocode_hookd::TurnBriefAsk, room: usize) -> Option<String> {
-    brief_in(
-        &GUARDS,
-        &STANDING.decided(),
-        &Wire::of_this_machine(),
-        ask,
-        room,
-    )
+    brief_in(&GUARDS, &STANDING.decided(), ask, room)
 }
 
 pub(super) fn brief_in(
     guards: &Mutex<Guards>,
     decided: &Decided,
-    wire: &Wire,
     ask: &zerocode_hookd::TurnBriefAsk,
     room: usize,
 ) -> Option<String> {
     take(
         guards,
         decided,
-        wire,
         &ask.pane_key,
         &ask.launch_token,
         ask.session_id.as_deref(),
@@ -761,26 +809,18 @@ pub(super) fn brief_in(
 /// never waited for, within the brief's cap. What a turn's end offered waits
 /// for the next turn's brief.
 pub(crate) fn take_for_the_tool_boundary(pane_key: &str, launch: &str) -> Option<String> {
-    boundary_in(
-        &GUARDS,
-        &STANDING.decided(),
-        &Wire::of_this_machine(),
-        pane_key,
-        launch,
-    )
+    boundary_in(&GUARDS, &STANDING.decided(), pane_key, launch)
 }
 
 pub(super) fn boundary_in(
     guards: &Mutex<Guards>,
     decided: &Decided,
-    wire: &Wire,
     pane_key: &str,
     launch: &str,
 ) -> Option<String> {
     take(
         guards,
         decided,
-        wire,
         pane_key,
         launch,
         None,
