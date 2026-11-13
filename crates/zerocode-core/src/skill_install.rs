@@ -286,7 +286,7 @@ fn text_state(book_name: &str, carried: &str, bytes: &[u8]) -> CopyState {
 }
 
 /// Whether the folder `dir` is a copy this build or an earlier release of it
-/// shipped under `name`, whole ([`folder_is_ours`]): the window's own copy,
+/// shipped under `name`, whole (`folder_is_ours`): the window's own copy,
 /// which the common store keeps one of and never asks the person about. A
 /// folder whose `SKILL.md` is ours but that holds a file a person added or
 /// changed is theirs. The installer and the store's keeper judge by this one
