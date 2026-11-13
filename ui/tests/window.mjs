@@ -170,6 +170,7 @@ import { testCloseGuard, testRestartNotice } from "./close-guard.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
 import { testSidebarFinishedFold } from "./sidebar-finished-fold.mjs";
 import { testSidebarTeam, testSidebarTeamFamilies } from "./sidebar-team.mjs";
+import { testSidebarFlicker } from "./sidebar-flicker.mjs";
 import { testSidebarTeamSettled } from "./sidebar-team-settled.mjs";
 import { testSidebarScroll } from "./sidebar-scroll.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
@@ -557,6 +558,9 @@ suite("sidebar-finished-fold", testSidebarFinishedFold);
 // The team view: coordinators, the workers under each, a row a worker's pane (t-56141).
 suite("sidebar-team", testSidebarTeam);
 suite("sidebar-team-families", testSidebarTeamFamilies);
+// A working window's sidebar writes only what moved: beats over the same data write nothing, one row's news writes
+// that row, and a press or a turn keeps every row's node (v1.1.149, 「왼쪽 네비 판이 계속 깜박」).
+suite("sidebar-flicker", testSidebarFlicker);
 // A coordinator's finished sub-agents stand under it in the branch list, whatever the run or the agent (t-66539).
 suite("sidebar-team-settled", testSidebarTeamSettled);
 // The sidebar holds its rows while the person scrolls it, and reaches row 0 in one go (t-63568).
