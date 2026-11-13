@@ -456,6 +456,25 @@ impl Refused {
             Self::SettingsChanged | Self::Resting => None,
         }
     }
+
+    /// Whether this refusal is the asking folder's own: the door refuses the
+    /// words of that folder and may let another folder's through in the same
+    /// span. A program that quiets a refusal that repeats ([`Self::repeats`])
+    /// quiets it for that folder alone; every other one holds for the
+    /// machine — the key, the switch, the day and the hours are the
+    /// machine's.
+    #[must_use]
+    pub const fn of_the_folder(self) -> bool {
+        match self {
+            Self::NotConsented => true,
+            Self::NoKey
+            | Self::Off
+            | Self::Budget
+            | Self::HourlyBudget
+            | Self::SettingsChanged
+            | Self::Resting => false,
+        }
+    }
 }
 
 /// The local clock span a refused request is refused for at the longest

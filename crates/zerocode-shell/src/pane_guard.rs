@@ -365,6 +365,11 @@ struct PaneBook {
     decided_calls: Vec<(Option<String>, String)>,
     /// The lines the person's decisions earned, waiting to be handed.
     waiting: decisions::Waiting,
+    /// The folder the pane's hooks named and the folder it resolves to, as
+    /// the last ask of its decisions read it off the hook loop: what the
+    /// hook loop holds a decision's chosen folders and quiet marks against
+    /// without reading a file.
+    folder: Option<(PathBuf, PathBuf)>,
 }
 
 /// A turn's file pick as its brief waits on it (t-14869): the prompt the
@@ -915,7 +920,7 @@ fn file(
                 .filter(|_| !stopped && asking.decision_turn_end)
             {
                 questions.extend(
-                    decisions::at_turn_end(book, decided, said, &evidence, &edited, at)
+                    decisions::at_turn_end(book, pane, decided, said, &evidence, &edited, at)
                         .map(Question::Decisions),
                 );
             }

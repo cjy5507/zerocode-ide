@@ -1616,3 +1616,14 @@ fn a_repeating_refusal_says_the_span_it_repeats_for() {
         ]
     );
 }
+
+/// Consent is the one refusal a folder owns: another folder's words may pass
+/// in the same span. Every other refusal holds for the machine.
+#[test]
+fn only_a_folder_not_consented_is_the_folders_own_refusal() {
+    let owned: Vec<Refused> = Refused::ALL
+        .into_iter()
+        .filter(|refused| refused.of_the_folder())
+        .collect();
+    assert_eq!(owned, [Refused::NotConsented]);
+}

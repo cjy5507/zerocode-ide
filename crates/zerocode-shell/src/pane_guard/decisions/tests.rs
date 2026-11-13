@@ -206,15 +206,26 @@ fn noted_with(
     moments: Vec<Moment>,
     at: i64,
 ) -> usize {
-    let handles = note_deciding(
+    noted_in(
         guards,
-        &home.wire,
+        home,
         &pane(&home.root),
-        asking,
-        decided,
+        (asking, decided),
         moments,
         at,
-    );
+    )
+}
+
+/// [`noted_with`], for `pane`.
+fn noted_in(
+    guards: &'static Mutex<Guards>,
+    home: &Home,
+    pane: &Pane,
+    (asking, decided): (Asking, &Decided),
+    moments: Vec<Moment>,
+    at: i64,
+) -> usize {
+    let handles = note_deciding(guards, &home.wire, pane, asking, decided, moments, at);
     let started = handles.len();
     for handle in handles {
         handle.join().expect("a question's thread");
@@ -814,6 +825,149 @@ fn a_folder_not_consented_writes_one_row_and_consent_asks_again() {
         outcomes(&home),
         [door::Refused::NotConsented.token(), ANSWERED_OUTCOME]
     );
+}
+
+/// The person's pane in another folder, the one `home` did not consent to:
+/// its own pane id, under the same launch.
+fn pane_elsewhere(folder: &Path) -> Pane {
+    Pane {
+        term: 8,
+        session: Some("session-2".to_string()),
+        ..pane(folder)
+    }
+}
+
+/// The outcomes of the rows zo's ledger keeps for `folder`, in order.
+fn outcomes_in(home: &Home, folder: &Path) -> Vec<String> {
+    let ledger =
+        systemone::project_ledger_of(&home.wire, &CUSTOM_DECISIONS, folder).expect("the ledger");
+    systemone::read_rows(&ledger)
+        .iter()
+        .map(|row| row["outcome"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// A folder not consented is that folder's refusal alone: a pane there
+/// writes its one row and goes quiet, and in the same hour a pane in the
+/// folder the person consented to still asks the same decision — before a
+/// command and at a turn's end alike.
+#[test]
+fn a_folder_not_consented_quiets_the_decision_there_alone() {
+    for at_point in [Point::BeforeCommand, Point::TurnEnd] {
+        let endpoint = replying(|_| a_noul(0.9));
+        let project = tempfile::tempdir().expect("a project");
+        let other = tempfile::tempdir().expect("a folder not consented");
+        let elsewhere = other.path().canonicalize().expect("a folder");
+        let decision = yes_no("Everywhere", at_point);
+        let home = Home::new(
+            &endpoint,
+            project.path(),
+            JevMode::On,
+            &[(&decision, JevMode::On)],
+        );
+        let standing = home.standing();
+        let decided = standing.decided();
+        let guards = fresh_guards();
+        let at = crate::usage_runtime::epoch_ms_now();
+        let moment = |call: u32, folder: &Path| match at_point {
+            Point::BeforeCommand => about(
+                Some(&format!("call-{call}")),
+                &format!("rm -rf build-{call}"),
+                folder,
+            ),
+            _ => turn_ended(false),
+        };
+        let in_folder = |pane: &Pane, folder: &Path, calls: std::ops::RangeInclusive<u32>| {
+            calls
+                .map(|call| {
+                    noted_in(
+                        guards,
+                        &home,
+                        pane,
+                        (standing.asking(), &decided),
+                        vec![moment(call, folder)],
+                        at,
+                    )
+                })
+                .sum::<usize>()
+        };
+        let there = pane_elsewhere(&elsewhere);
+        assert_eq!(in_folder(&there, &elsewhere, 0..=0), 1, "{at_point:?}");
+        assert_eq!(
+            in_folder(&there, &elsewhere, 1..=100),
+            0,
+            "{at_point:?}: quiet in the folder not consented"
+        );
+        assert_eq!(
+            outcomes_in(&home, &elsewhere),
+            [door::Refused::NotConsented.token()],
+            "{at_point:?}"
+        );
+        assert!(endpoint.asked().is_empty(), "{at_point:?}");
+        assert_eq!(
+            in_folder(&pane(&home.root), &home.root, 101..=101),
+            1,
+            "{at_point:?}: the consented folder's pane still asks"
+        );
+        assert_eq!(outcomes(&home), [ANSWERED_OUTCOME], "{at_point:?}");
+        assert_eq!(endpoint.asked().len(), 1, "{at_point:?}");
+    }
+}
+
+/// A decision that chose its folders: a pane outside them asks it on a
+/// thread once — which learns the pane's folder — and after that its
+/// commands start no thread at all, while a pane inside them asks.
+#[test]
+fn a_pane_outside_a_decisions_chosen_folders_starts_no_thread_after_its_first() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let other = tempfile::tempdir().expect("another folder");
+    let elsewhere = other.path().canonicalize().expect("a folder");
+    let mut decision = yes_no("Here only", Point::BeforeCommand);
+    let home = Home::with(
+        &endpoint,
+        "test-key",
+        project.path(),
+        JevMode::On,
+        &[],
+        &Map::from_iter([(
+            "workspaces".to_string(),
+            json!([project.path().canonicalize().expect("a project"), elsewhere]),
+        )]),
+    );
+    decision.folders = custom::Folders::Chosen(
+        std::iter::once(home.root.to_string_lossy().into_owned()).collect(),
+    );
+    store::create(home.home.path(), &decision, JevMode::On, 1).expect("the store keeps it");
+    let standing = home.standing();
+    let decided = standing.decided();
+    let guards = fresh_guards();
+    let at = crate::usage_runtime::epoch_ms_now();
+    let there = pane_elsewhere(&elsewhere);
+    let started: Vec<usize> = (0..=100)
+        .map(|call| {
+            noted_in(
+                guards,
+                &home,
+                &there,
+                (standing.asking(), &decided),
+                vec![about(
+                    Some(&format!("call-{call}")),
+                    &format!("rm -rf build-{call}"),
+                    &elsewhere,
+                )],
+                at,
+            )
+        })
+        .collect();
+    assert_eq!(started.iter().sum::<usize>(), 1, "{started:?}");
+    assert!(outcomes_in(&home, &elsewhere).is_empty());
+    assert!(endpoint.asked().is_empty());
+    assert_eq!(
+        commands(guards, &home, (standing.asking(), &decided), 101..=101, at),
+        1
+    );
+    assert_eq!(outcomes(&home), [ANSWERED_OUTCOME]);
 }
 
 /// No key writes one row; the next hour asks again.
