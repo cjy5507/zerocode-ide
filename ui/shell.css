@@ -1050,6 +1050,9 @@ kbd {
 
 .chat-list {
   display: grid;
+  /* The rows stand from the top: the room the list holds while a turn hides a row (`holdChatListHeight`) stays empty
+   * at its end instead of spreading between the groups. */
+  align-content: start;
   gap: 2px;
   margin-block: var(--space-1);
 }

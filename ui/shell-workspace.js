@@ -17526,6 +17526,7 @@ function paintChatList() {
   const shown = chatListShown();
   writeHidden(host, !shown);
   if (!shown) {
+    releaseChatListHeld();
     if (chatListDrawn !== "") {
       el("chat-list-groups").replaceChildren();
       chatListNodes.clear();
@@ -17552,7 +17553,57 @@ function paintChatList() {
     parts.push(standChatGroup(group, rows));
   }
   reconcileElementOrder(el("chat-list-groups"), parts);
+  holdChatListHeight(host);
 }
+
+/* The conversation list keeps the height it reached while agents come and go (v1.1.149, 「왼쪽 네비 판이 계속
+ * 깜박」). It heads the column above the branch list's scroller, so a row leaving the open 「작업 중」 for the folded
+ * 「오늘 끝남」 at a turn's end — and coming back at the next — moved the whole branch list 43px up and down on
+ * every turn of every agent. A turn hides a row; it does not end a conversation. So the list does not shrink under a
+ * turn: the room a hidden row leaves stays, empty, at the list's end, and the row takes it again when its agent works
+ * again. It grows at once for a new conversation (the person opened it). The room is given back on the person's
+ * hand — a press anywhere in the list, a group folded or opened — or once the list has been still for the team's
+ * clock with the pointer off the sidebar: one move when the person is not working the column, not one per turn.
+ * The room never outgrows the branch list it keeps still. */
+let chatListHeld = 0;
+// The list's own height at the last paint: a change is a row that came or went, which starts the still clock again.
+let chatListNatural = 0;
+
+function holdChatListHeight(host) {
+  const top = host.getBoundingClientRect().top;
+  // The list's own height without the room it holds: its children stand from its top (`align-content: start`).
+  const last = host.lastElementChild;
+  const natural = last ? last.getBoundingClientRect().bottom - top : 0;
+  const moved = natural !== chatListNatural;
+  chatListNatural = natural;
+  if (natural >= chatListHeld || chatListHeld - natural > sidebarScroller.clientHeight) chatListHeld = natural;
+  const room = chatListHeld > natural ? `${Math.ceil(chatListHeld)}px` : "";
+  if (host.style.minHeight !== room) host.style.minHeight = room;
+  // Words moving (a title, an elapsed time) are not the list moving: only a row coming or going holds the room longer.
+  if (room !== "" && moved) settle("chat-list-held", TEAM_CLOCK_MS, releaseChatListHeldAway);
+}
+
+/* Give the room back now: the person's hand, or a hidden list. */
+function releaseChatListHeld() {
+  chatListHeld = 0;
+  const host = document.getElementById("chat-list");
+  if (host && host.style.minHeight !== "") host.style.minHeight = "";
+}
+
+/* The still list's release waits for the pointer to leave the sidebar: a column the person is reading does not move
+ * under them. */
+function releaseChatListHeldAway() {
+  const column = document.querySelector("aside.threads");
+  if (column?.matches(":hover")) {
+    column.addEventListener("pointerleave", () => releaseChatListHeldAway(), { once: true });
+    return;
+  }
+  releaseChatListHeld();
+  paintChatList();
+}
+
+// The person's hand in the list gives the room back before what it does lays the list out again.
+document.getElementById("chat-list")?.addEventListener("click", releaseChatListHeld, true);
 
 /* What a row is built from, but for its time words, its title and whether its pane is
  * the one in front, which it writes in place (`standChatRow`). A permission's
