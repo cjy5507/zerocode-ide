@@ -287,6 +287,9 @@ struct ComputerSight {
     observation: Mutex<Option<ComputerObservation>>,
     /// The last marked look's id: a click by a mark's number names it.
     marked_look: Mutex<Option<String>>,
+    /// Whether this session was told once where web pages go, the first
+    /// time it named the person's own browser as an app (t-106321).
+    work_browser_said: std::sync::atomic::AtomicBool,
     viewer: String,
 }
 
@@ -295,7 +298,13 @@ impl ComputerSight {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self { frame: Mutex::new(None), observation: Mutex::new(None), marked_look: Mutex::new(None), viewer: format!("zo-{}-{n}", std::process::id()) }
+        Self {
+            frame: Mutex::new(None),
+            observation: Mutex::new(None),
+            marked_look: Mutex::new(None),
+            work_browser_said: std::sync::atomic::AtomicBool::new(false),
+            viewer: format!("zo-{}-{n}", std::process::id()),
+        }
     }
 }
 
@@ -696,6 +705,12 @@ impl ToolContext {
 
     /// This model's name in the window's last-look table.
     #[must_use]
+    /// True once per session: the first call that names the person's own
+    /// browser is answered with where web pages go instead of being run.
+    pub(crate) fn computer_says_work_browser_once(&self) -> bool {
+        !self.computer.work_browser_said.swap(true, std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn computer_viewer(&self) -> &str {
         &self.computer.viewer
     }

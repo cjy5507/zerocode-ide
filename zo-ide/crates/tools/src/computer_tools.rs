@@ -43,6 +43,7 @@ use zerocode_core::screen_action::GIVE_UP;
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::execution::{FOREGROUND, REQUIRES_FOREGROUND};
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
+use zerocode_core::computer_use_protocol::identity::{is_known_browser, AppQuery};
 use zerocode_core::computer_use_protocol::marks::{legend_line, ITEMS_KEY, LEGEND_KEY, LOOK_ID_KEY, TOOL_ONLY_KEYS};
 
 use super::{
@@ -308,6 +309,44 @@ fn rename(call: &mut Value, step: Option<usize>) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+/// The app a call names that is the person's own web browser — at the top or
+/// in a step — by the core's one browser table; a `pid:N` is not judged.
+fn persons_browser(input: &ComputerInput) -> Option<&str> {
+    std::iter::once(input)
+        .chain(input.steps.iter().flatten())
+        .filter_map(|call| call.app.as_deref())
+        .find(|app| match AppQuery::parse(app) {
+            Ok(AppQuery::Named(name)) => is_known_browser(&name, Some(&name), None),
+            _ => false,
+        })
+}
+
+/// The first call of a session that names the person's own browser runs
+/// nothing and says where web pages go (t-106321): a weak model drove the
+/// person's Chrome 24 times and the work browser never, and input there
+/// stops whenever the person uses it. Sent again, the same call runs as it
+/// always has — once a session, never a refusal.
+fn work_browser_first(input: &ComputerInput, ctx: &ToolContext) -> Option<Result<ToolExecutionResult, ToolError>> {
+    let app = persons_browser(input)?;
+    if !ctx.computer_says_work_browser_once() {
+        return None;
+    }
+    Some(
+        to_pretty_json(json!({
+            "ok": false,
+            "action": input.action.trim(),
+            "ran": false,
+            "app": app,
+            "next": format!(
+                "{app} is the person's own browser: input there pauses whenever they use it. \
+                 For a web page use your own tab, which never meets theirs: {BROWSER_CLI} open <url>, then read, marks, click, type and fill. \
+                 If the person told you to do this in their own browser, send this same request again and it runs there."
+            ),
+        }))
+        .map(ToolExecutionResult::from),
+    )
 }
 
 /// The input as the tool reads it: in its own names, then its own fields.
@@ -610,7 +649,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         description: "Drive desktop apps inside a ZeroCode pane: screenshots/zoom, mouse moves/clicks/drags/scroll, \
             keys/text/waits, app/window management, element/OCR reads, clipboard and programs. \
             For web pages use zerocode-browser open <url>, then read, marks, click, type and fill; \
-            the person's own browser is an app when they ask for it. \
+            the person's own browser is an app when they ask for it; input there pauses while they use it. \
             Windows without trees (mirrored phones): one batch, not a call per click: \
             left_click {label, ocr: true, foreground: true, after_text: line above} only when the person told you to do that step on their own screen, otherwise hand it to them; \
             type, key Return, wait_for {ocr: true, text}. \
@@ -2565,16 +2604,25 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
     let action = input.action.trim().to_string();
     if action == BATCH_ACTION {
+        if let Some(said) = work_browser_first(&input, ctx) {
+            return said;
+        }
         return run_computer_batch(input, ctx, road).map(ToolExecutionResult::from);
     }
     if input.steps.is_some() {
         return Err(ToolError::InvalidInput(format!("`steps` belongs to `batch`, not `{action}`")));
     }
     if action == WALK_ACTION {
+        if let Some(said) = work_browser_first(&input, ctx) {
+            return said;
+        }
         return run_computer_walk(&input, ctx, road, settle).map(ToolExecutionResult::from);
     }
     // A command the tool cannot spell costs no look.
     argv_for(&input)?;
+    if let Some(said) = work_browser_first(&input, ctx) {
+        return said;
+    }
     let first_look = first_look(&[&input], ctx, road)?;
     let frame = if let Some(target) = target_of(&input).filter(|_| input.coordinate.is_some() || input.start_coordinate.is_some()) {
         Some(ctx.computer_target_frame(&target).ok_or_else(|| ToolError::InvalidInput("the selected window has no matching picture frame".into()))?)
@@ -6347,6 +6395,62 @@ printf '%s
                     assert!(!input.contains(A_CODE), "the model was handed a code to type: {input}");
                 }
             }
+        }
+    }
+
+    /// The person's own browser, named first in a session, is answered with
+    /// where web pages go and nothing runs; the same call sent again runs as
+    /// it always has; another app, or a pid, runs from the first call.
+    #[cfg(unix)]
+    #[test]
+    fn the_first_call_on_the_persons_browser_says_where_web_pages_go_and_the_same_call_again_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let call = json!({"action":"find","app":"Google Chrome","window_id":41,"label":"Save"});
+        let said: Value = serde_json::from_str(&run_computer(&call, &ctx, &road).unwrap()).unwrap();
+        assert_eq!(said["ok"], false, "{said}");
+        assert_eq!(said["ran"], false, "{said}");
+        let next = said["next"].as_str().unwrap();
+        assert!(next.contains("Google Chrome is the person's own browser: input there pauses whenever they use it."), "{next}");
+        assert!(next.contains(&format!("{BROWSER_CLI} open <url>")) && next.contains("send this same request again"), "{next}");
+        assert!(calls(dir.path()).is_empty(), "the first call runs nothing");
+        let ran: Value = serde_json::from_str(&run_computer(&call, &ctx, &road).unwrap()).unwrap();
+        assert_eq!(ran["ok"], true, "{ran}");
+        assert_eq!(calls(dir.path()).iter().filter(|verb| *verb == "find").count(), 1, "the same call again runs once");
+        let words = std::fs::read_to_string(dir.path().join("argv-find.1")).unwrap();
+        let expected = argv_for(&read_input(&call).unwrap()).unwrap();
+        for word in expected.iter().filter(|word| *word != "--json") {
+            assert!(words.lines().any(|line| line == word), "{word} in {words}");
+        }
+        let later: Value = serde_json::from_str(&run_computer(&json!({"action":"find","app":"Safari","label":"Save"}), &ctx, &road).unwrap()).unwrap();
+        assert_eq!(later["ok"], true, "once a session: {later}");
+
+        for first in [json!({"action":"find","app":"Notes","window_id":41,"label":"Save"}), json!({"action":"find","app":"pid:41","label":"Save"})] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            let ran: Value = serde_json::from_str(&run_computer(&first, &ctx, &road).unwrap()).unwrap();
+            assert_eq!(ran["ok"], true, "{first}: {ran}");
+            assert_eq!(calls(dir.path()).iter().filter(|verb| *verb == "find").count(), 1, "{first} runs from the first call");
+        }
+    }
+
+    #[test]
+    fn the_persons_browser_is_judged_by_the_cores_one_table() {
+        let named = |app: &str, steps: Value| {
+            let call = read_input(&json!({"action":"batch","steps":steps}));
+            let top = read_input(&json!({"action":"find","app":app,"label":"Save"})).unwrap();
+            (persons_browser(&top).map(str::to_string), call.ok().and_then(|call| persons_browser(&call).map(str::to_string)))
+        };
+        for browser in ["Google Chrome", "google chrome", "Safari", "Arc", "Microsoft Edge", "Brave Browser", "Firefox", "com.google.Chrome"] {
+            let (top, step) = named(browser, json!([{"action":"find","app":browser,"label":"Save"}]));
+            assert_eq!(top.as_deref(), Some(browser));
+            assert_eq!(step.as_deref(), Some(browser), "a step's app counts too");
+        }
+        for app in ["Notes", "pid:41", "Finder"] {
+            let (top, step) = named(app, json!([{"action":"find","app":app,"label":"Save"}]));
+            assert_eq!((top, step), (None, None), "{app}");
         }
     }
 
