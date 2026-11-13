@@ -225,9 +225,25 @@ pub enum RouteAutoClassifierMode {
 }
 
 impl RouteAutoClassifierMode {
+    /// What a `smart` object that does not say `autoClassifier` runs as: the
+    /// settings reader's answer for an absent key (`tools` `smart_router`),
+    /// which spells it out for the window's card to read, and a test holds
+    /// the two together.
+    pub const UNSAID: Self = Self::Probed;
+
     #[must_use]
     pub fn from_settings_value(value: Option<&serde_json::Value>) -> Self {
-        let Some(value) = value.and_then(serde_json::Value::as_str).map(str::trim) else {
+        Self::from_settings_word(value.and_then(serde_json::Value::as_str))
+    }
+
+    /// The mode a settings document's word names. Anything that is not one
+    /// of the words — no string at all, another case, a word nobody knows —
+    /// is `Deterministic`.
+    #[must_use]
+    pub fn from_settings_word(word: Option<&str>) -> Self {
+        // Compared word by word as written: the window's card is held to
+        // these comparisons (`zerocode-core` `jev::tests`).
+        let Some(value) = word.map(str::trim) else {
             return Self::Deterministic;
         };
         if value == "off" {
@@ -238,6 +254,20 @@ impl RouteAutoClassifierMode {
             Self::Probed
         } else {
             Self::Deterministic
+        }
+    }
+
+    /// How much a session under this mode asks outside itself, for telling
+    /// whether one document's word asks more than another's. `Off` asks
+    /// nobody. `Deterministic` and `Assisted` ask no model about a task (a
+    /// Jev seat the person switched on may still be asked). `Probed` asks
+    /// the fast model as well.
+    #[must_use]
+    pub const fn asks(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Deterministic | Self::Assisted => 1,
+            Self::Probed => 2,
         }
     }
 

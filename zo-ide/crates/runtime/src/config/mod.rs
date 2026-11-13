@@ -2,6 +2,7 @@ mod allow_always_narrow;
 mod mcp_edit;
 mod mcp_secrets;
 mod parsers;
+mod repository_narrows;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter};
@@ -965,6 +966,9 @@ impl ConfigLoader {
                 if !project_lsp_opt_in {
                     value.remove("lspServers");
                 }
+                // How much the session asks outside itself is the person's
+                // to widen; what their repository committed may narrow it.
+                repository_narrows::only_narrows(&mut value, &trusted_settings);
             }
             // The desk guard is a person's to turn off (t-104888), in their
             // user settings file only: a repository cannot lift it for

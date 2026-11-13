@@ -184,6 +184,82 @@ fn tui_inline_mode_loads_from_merged_settings_and_defaults_unset() {
     assert!(error.to_string().contains("tui.inlineMode"));
 }
 
+/// What the loaded settings say of `smart.<key>`.
+fn smart_says(config: &super::RuntimeConfig, key: &str) -> Option<JsonValue> {
+    config.get("smart").and_then(JsonValue::as_object).and_then(|smart| smart.get(key)).cloned()
+}
+
+/// A person who switched the routing probe off in their own settings is not
+/// asked again because the repository they opened says `probed` (measured on
+/// v1.1.150: one request to the fast model a spawn). The repository may still
+/// ask less than the person does.
+#[test]
+fn a_repository_does_not_switch_back_on_what_a_person_switched_off() {
+    let _stable = overrides_stable();
+    let root = temp_dir();
+    let cwd = root.join("project");
+    let home = root.join("home").join(".zo");
+    fs::create_dir_all(cwd.join(".zo")).expect("project dir");
+    fs::create_dir_all(&home).expect("home dir");
+    let repository = cwd.join(".zo").join("settings.json");
+    let word = |word: &str| Some(JsonValue::String(word.to_string()));
+    let load = || ConfigLoader::new(&cwd, &home).load().expect("config");
+
+    fs::write(home.join("settings.json"), r#"{"smart":{"autoClassifier":"deterministic","enabled":false}}"#)
+        .expect("own settings");
+    fs::write(&repository, r#"{"smart":{"autoClassifier":"probed","enabled":true,"policy":"classic"}}"#)
+        .expect("project settings");
+    let config = load();
+    assert_eq!(smart_says(&config, "autoClassifier"), word("deterministic"));
+    assert_eq!(smart_says(&config, "enabled"), Some(JsonValue::Bool(false)));
+    assert_eq!(smart_says(&config, "policy"), word("classic"), "the rest of the repository's `smart` stays");
+
+    // Not an object: merged whole it would replace the person's `smart`,
+    // and a `smart` that says nothing runs probed.
+    fs::write(&repository, r#"{"smart":"x"}"#).expect("project settings");
+    assert_eq!(smart_says(&load(), "autoClassifier"), word("deterministic"));
+
+    // Asking less is the repository's to say.
+    fs::write(home.join("settings.json"), r#"{"smart":{"autoClassifier":"probed"}}"#).expect("own settings");
+    fs::write(&repository, r#"{"smart":{"autoClassifier":"off","enabled":false}}"#).expect("project settings");
+    let config = load();
+    assert_eq!(smart_says(&config, "autoClassifier"), word("off"));
+    assert_eq!(smart_says(&config, "enabled"), Some(JsonValue::Bool(false)));
+}
+
+/// The person's own documents beside the user settings — a `--settings`
+/// file, and a `.zo/settings.local.json` git does not track — still say how
+/// much is asked: what a repository may not widen is theirs to widen.
+#[test]
+#[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities")]
+fn a_persons_own_local_and_cli_settings_still_switch_the_probe_on() {
+    let _serial = CLI_OVERRIDE_LOCK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _reset = CliOverrideGuard;
+    let root = temp_dir();
+    let cwd = root.join("project");
+    let home = root.join("home").join(".zo");
+    fs::create_dir_all(cwd.join(".zo")).expect("project dir");
+    fs::create_dir_all(&home).expect("home dir");
+    let probed = r#"{"smart":{"autoClassifier":"probed"}}"#;
+    let word = |word: &str| Some(JsonValue::String(word.to_string()));
+    fs::write(home.join("settings.json"), r#"{"smart":{"autoClassifier":"deterministic"}}"#).expect("own settings");
+    fs::write(cwd.join(".zo").join("settings.json"), probed).expect("project settings");
+    let load = || ConfigLoader::new(&cwd, &home).load().expect("config");
+    assert_eq!(smart_says(&load(), "autoClassifier"), word("deterministic"));
+
+    let extra = root.join("extra-settings.json");
+    fs::write(&extra, probed).expect("extra settings");
+    ConfigLoader::set_cli_overrides(super::CliConfigOverrides { settings_file: Some(extra), strict_mcp_config: false });
+    assert_eq!(smart_says(&load(), "autoClassifier"), word("probed"), "--settings");
+
+    ConfigLoader::set_cli_overrides(super::CliConfigOverrides::default());
+    assert_eq!(smart_says(&load(), "autoClassifier"), word("deterministic"));
+    fs::write(cwd.join(".zo").join("settings.local.json"), probed).expect("local settings");
+    assert_eq!(smart_says(&load(), "autoClassifier"), word("probed"), "the person's uncommitted local file");
+}
+
 /// `--settings`/`--strict-mcp-config` 는 프로세스 전역 셀이라 병렬 테스트 간에
 /// 새는 상태다. 셀을 *바꾸는* 테스트는 write 락 + `CliOverrideGuard` 복원을,
 /// `ConfigLoader::load`/`discover` 를 호출하는 테스트는 read 락을 잡는다 —

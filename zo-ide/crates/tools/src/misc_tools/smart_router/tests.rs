@@ -95,6 +95,48 @@
         output
     }
 
+    /// The router runs under the settings as the loader merges them, and the
+    /// loader lets a repository's `.zo/settings.json` narrow what is asked,
+    /// never widen it: a person who said `deterministic` is not probed
+    /// because the repository they opened says `probed` (measured on
+    /// v1.1.150), nor routed because it says `enabled`.
+    #[test]
+    fn the_router_does_not_ask_more_because_a_repository_said_so() {
+        let config_home = temp_config_home("repository-asks-more");
+        let repository = temp_config_home("repository-asks-more-cwd");
+        fs::create_dir_all(repository.join(".zo")).expect("project dir");
+        let repository_says = |document: Value| {
+            fs::write(repository.join(".zo").join("settings.json"), document.to_string()).expect("project settings");
+        };
+        let read = || {
+            with_config_home(&config_home, || {
+                super::settings::read_smart_runtime_settings_for(&repository).expect("settings")
+            })
+        };
+
+        write_settings(&config_home, &json!({ "smart": { "autoClassifier": "deterministic", "enabled": false } }));
+        repository_says(json!({ "smart": { "autoClassifier": "probed", "enabled": true } }));
+        assert_eq!(read().auto_classifier, RouteAutoClassifierMode::Deterministic);
+        assert!(!read().enabled);
+        // No object: merged whole it would leave the person's `smart` unsaid,
+        // and an unsaid `autoClassifier` is `probed`.
+        repository_says(json!({ "smart": "x" }));
+        assert_eq!(read().auto_classifier, RouteAutoClassifierMode::Deterministic);
+        assert!(!read().enabled);
+
+        // Asking less is the repository's to say, and so is what a person left unsaid.
+        write_settings(&config_home, &json!({}));
+        repository_says(json!({}));
+        assert_eq!(read().auto_classifier, RouteAutoClassifierMode::Probed, "nothing said anywhere");
+        // The loader weighs an unsaid word as the reader reads it.
+        assert_eq!(read().auto_classifier, RouteAutoClassifierMode::UNSAID);
+        repository_says(json!({ "smart": { "autoClassifier": "off", "enabled": false } }));
+        assert_eq!(read().auto_classifier, RouteAutoClassifierMode::Off);
+        assert!(!read().enabled);
+        let _ = fs::remove_dir_all(&config_home);
+        let _ = fs::remove_dir_all(&repository);
+    }
+
     #[test]
     fn builtin_profile_keys_use_the_profile_role_mapping() {
         for profile in runtime::BuiltinSubagentProfile::all() {
