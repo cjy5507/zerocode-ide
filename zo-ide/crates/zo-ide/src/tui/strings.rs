@@ -413,6 +413,7 @@ pub const TOOL_CREATE: &str = "Create";
 pub const TOOL_DELETE: &str = "Delete";
 pub const TOOL_CHECK: &str = "Check";
 pub const TOOL_CALL: &str = "Call";
+pub const TOOL_FETCH: &str = "Fetch";
 pub const TOOL_SPAWN: &str = "Spawn";
 /// Where a web search looks, in the place a file search names its path:
 /// `✓ Search rust async on the web`.
@@ -494,16 +495,23 @@ pub fn quoted(text: &str) -> String {
     format!("\"{text}\"")
 }
 
-/// [`quoted`] for what a web call carries: the web tools share one preview
-/// (`ToolPreview::Search`), and a fetch puts an address where a search puts
-/// its question. An address is a name, like a path: it stays as it is.
+/// An address as a row shows it: without its scheme (`https://`), which says
+/// nothing a row needs.
 #[must_use]
-pub fn quoted_unless_address(text: &str) -> String {
-    if text.starts_with("http://") || text.starts_with("https://") {
-        text.to_string()
-    } else {
-        quoted(text)
+pub fn address_shown(url: &str) -> &str {
+    url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url)
+}
+
+/// A result's size as a row says it: `812 B`, `3.1 KB`, `1.2 MB`.
+#[must_use]
+pub fn size_shown(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    if bytes < 1024 {
+        return format!("{bytes} B");
     }
+    #[allow(clippy::cast_precision_loss)]
+    let kb = bytes as f64 / KB;
+    if kb < KB { format!("{kb:.1} KB") } else { format!("{:.1} MB", kb / KB) }
 }
 
 /// The footer's mark before a permission that lets everything run.
@@ -550,7 +558,7 @@ fn tenths_of_mib(bytes: u64) -> String {
 
 #[cfg(test)]
 mod opening_tests {
-    use super::opening_progress;
+    use super::{address_shown, opening_progress, quoted, size_shown};
 
     #[test]
     fn the_opening_line_says_how_much_is_read_in_mib_and_percent() {
@@ -560,5 +568,22 @@ mod opening_tests {
         );
         assert_eq!(opening_progress(0, 0), "Opening saved conversation · 0.0 of 0.0 MiB (100%) · Esc to cancel");
         assert_eq!(opening_progress(9, 4), "Opening saved conversation · 0.0 of 0.0 MiB (100%) · Esc to cancel");
+    }
+
+    #[test]
+    fn an_address_loses_its_scheme() {
+        assert_eq!(address_shown("https://huggingface.co/api/x"), "huggingface.co/api/x");
+        assert_eq!(address_shown("http://a.test"), "a.test");
+        assert_eq!(address_shown("a.test/x"), "a.test/x");
+        assert_eq!(quoted("a b"), "\"a b\"");
+    }
+
+    #[test]
+    fn a_size_is_said_in_the_unit_that_fits() {
+        assert_eq!(size_shown(0), "0 B");
+        assert_eq!(size_shown(812), "812 B");
+        assert_eq!(size_shown(1024), "1.0 KB");
+        assert_eq!(size_shown(3174), "3.1 KB");
+        assert_eq!(size_shown(1_572_864), "1.5 MB");
     }
 }

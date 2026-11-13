@@ -1212,7 +1212,8 @@ fn status_detail_for(kind: &ToolKind) -> String {
             .map_or_else(|| "exploring".to_string(), explored_detail),
         ToolKind::Plan(_) => "updating plan".to_string(),
         ToolKind::WebSearch { detail } if detail.is_empty() => "searching the web".to_string(),
-        ToolKind::WebSearch { detail } => format!("searching the web for {}", super::strings::quoted_unless_address(detail)),
+        ToolKind::WebSearch { detail } => format!("searching the web for {}", super::strings::quoted(detail)),
+        ToolKind::WebFetch { url } => format!("fetching {}", super::strings::address_shown(url)),
         ToolKind::Spawn { label, .. } => format!("spawning {label}"),
         ToolKind::AgentResult { label, .. } => format!("agent result from {label}"),
         ToolKind::Call { name, detail } if detail.is_empty() => name.clone(),
@@ -9202,7 +9203,11 @@ mod tests {
         assert!(live.iter().any(|row| row.contains(&command)), "the command was cut on a pane with room for it: {live:#?}");
         // On a pane narrower than the command it is cut at that pane's edge.
         let narrow: Vec<String> = ui.active_cell(80).0.iter().map(Line::plain).collect();
-        assert!(narrow.iter().any(|row| row.contains("Run git -C") && row.ends_with('…')), "{narrow:#?}");
+        // The result stays on the row; the command gives up its own end.
+        assert!(
+            narrow.iter().any(|row| row.contains("Run(git -C") && row.contains('…') && row.ends_with(")  1 line")),
+            "{narrow:#?}"
+        );
     }
 
     /// The `turns` view: finished calls are held for one cell, a short text
@@ -9292,6 +9297,8 @@ mod tests {
             ok: true,
             declined: false,
             failure: None,
+            error: None,
+            result: None,
             started: std::time::Instant::now(),
             took: None,
         }]);
@@ -11033,9 +11040,9 @@ mod tests {
             "searching the web for \"rust async\""
         );
         assert_eq!(
-            status_detail_for(&ToolKind::WebSearch { detail: "https://example.com/a".to_string() }),
-            "searching the web for https://example.com/a",
-            "a fetch's address is a name, not words"
+            status_detail_for(&ToolKind::WebFetch { url: "https://example.com/a".to_string() }),
+            "fetching example.com/a",
+            "a fetch's address is a name, not words, and has no scheme"
         );
     }
 

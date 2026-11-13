@@ -64,6 +64,8 @@ pub enum StepKind {
     /// An edit, a created file or a deleted one — `verb` says which.
     Edit,
     Run,
+    /// A web fetch — counted by its word in the fold, like any other call.
+    Fetch,
     /// Any other call: a helper spawned, an MCP tool, a plan update.
     Other,
 }
@@ -82,6 +84,11 @@ pub struct Step {
     pub declined: bool,
     /// `exit 101`, `failed`, `declined` — a failed step's own word.
     pub failure: Option<String>,
+    /// What a failed step said first: the row under it.
+    pub error: Option<String>,
+    /// What the step brought back, short — `12 lines`, `1 match`, `3.1 KB` —
+    /// for the viewport's row of it. Nothing where zo is not told.
+    pub result: Option<String>,
     pub started: Instant,
     pub took: Option<Duration>,
 }
@@ -215,31 +222,47 @@ impl TurnFold {
     pub fn live_rows(&self, width: usize, room: usize) -> Vec<Line> {
         let glyphs = super::style::glyphs();
         let room = room.max(1);
-        // A row and, above one that opens a group, its blank row.
-        let cost = |at: usize| 1 + usize::from(self.opens_a_group(at));
+        // What an entry takes: its row, the blank row above one that opens a
+        // group, and the row under a failed step that says why.
+        let cost = |at: usize| 1 + usize::from(self.opens_a_group(at)) + usize::from(self.says_why(at));
         let all: usize = (0..self.live.len()).map(cost).sum();
-        // The first row shown: all of them when they fit, else the newest
-        // that fit under the row that counts the rest.
+        // The first entry shown: all of them when they fit, else the newest
+        // that fit under the row that counts the rest. A step that failed is
+        // not counted among the rest: it stays, newest first, within half
+        // the room.
         let mut earlier = 0;
+        let mut kept: Vec<usize> = Vec::new();
         if all > room {
-            let mut used = 1;
+            let mut pinned: Vec<usize> = Vec::new();
+            let mut pinned_cost = 0;
+            for at in (0..self.live.len()).rev().filter(|at| self.failed(*at)) {
+                if pinned_cost + cost(at) > room / 2 {
+                    break;
+                }
+                pinned_cost += cost(at);
+                pinned.push(at);
+            }
+            let hidden_pins = |from: usize| -> usize { pinned.iter().filter(|at| **at < from).map(|at| cost(*at)).sum() };
             earlier = self.live.len();
-            while earlier > 0 && used + cost(earlier - 1) <= room {
-                used += cost(earlier - 1);
+            let mut shown = 0;
+            while earlier > 0 && 1 + hidden_pins(earlier - 1) + shown + cost(earlier - 1) <= room {
+                shown += cost(earlier - 1);
                 earlier -= 1;
             }
+            kept = pinned.into_iter().filter(|at| *at < earlier).collect();
+            kept.sort_unstable();
         }
         let mut rows = Vec::with_capacity(all.min(room));
         // Whether the row above is one a step hangs under with no mark of
         // its own: another step, or the count of the rows not shown.
         let mut hangs = false;
-        if earlier > 0 {
-            let counted = vec![Span::dim(glyphs.result_first), Span::dim(strings::earlier_rows(earlier))];
+        if earlier > kept.len() {
+            let counted = vec![Span::dim(glyphs.result_first), Span::dim(strings::earlier_rows(earlier - kept.len()))];
             rows.push(Line::new(counted).truncated(width));
             hangs = true;
         }
-        for (at, shown) in self.live.iter().enumerate().skip(earlier) {
-            match shown {
+        for at in kept.iter().copied().chain(earlier..self.live.len()) {
+            match &self.live[at] {
                 Shown::Said(row) => {
                     if self.opens_a_group(at) {
                         rows.push(Line::empty());
@@ -249,26 +272,62 @@ impl TurnFold {
                 }
                 Shown::Step(step) => {
                     let lead = if hangs { glyphs.result_rest } else { glyphs.result_first };
-                    let mut spans = vec![Span::dim(lead), Span::dim(call_words(step))];
-                    spans.extend(step_tail(step, true));
-                    rows.push(Line::new(spans).truncated(width));
+                    rows.push(step_row(step, lead, width));
+                    if let Some(why) = why_row(step, width) {
+                        rows.push(why);
+                    }
                     hangs = true;
                 }
             }
         }
         rows
     }
+
+    /// Whether the entry at `at` is a step that failed — one that is not
+    /// folded away into the count of earlier rows.
+    fn failed(&self, at: usize) -> bool {
+        matches!(&self.live[at], Shown::Step(step) if !step.ok && !step.declined)
+    }
+
+    /// Whether a row under the entry at `at` says why its step failed.
+    fn says_why(&self, at: usize) -> bool {
+        matches!(&self.live[at], Shown::Step(step) if step.error.is_some())
+    }
 }
 
-/// A finished step as its row says it: the words the running row used
-/// ([`super::tools::call_opening`]) — `Search("pattern" in src)` in the marks
-/// look — so a call is the same text while it runs and after it ends. A step
-/// with no target (a plan update, an MCP tool's name) is its verb alone.
-fn call_words(step: &Step) -> String {
+/// A step's row in the viewport: its hung mark, the call as the running row
+/// said it, and what it came to. The tail is kept before the target is: a
+/// target that does not fit gives up its own end (an address its middle) so
+/// the result stays on the row.
+fn step_row(step: &Step, lead: &str, width: usize) -> Line {
+    let tail = step_tail(step, true, true);
     if step.target.is_empty() {
-        return step.verb.clone();
+        let mut spans = vec![Span::dim(lead), Span::dim(step.verb.clone())];
+        spans.extend(tail);
+        return Line::new(spans).truncated(width);
     }
-    format!("{}{}{}", super::tools::call_opening(&step.verb), step.target, super::tools::call_closing())
+    let opening = super::tools::call_opening(&step.verb);
+    let closing = super::tools::call_closing();
+    let fixed = [lead, opening.as_str(), closing].iter().map(|text| super::ansi::str_width(text)).sum::<usize>()
+        + tail.iter().map(Span::width).sum::<usize>();
+    let budget = width.saturating_sub(fixed).max(1);
+    let target = if super::ansi::str_width(&step.target) <= budget {
+        step.target.clone()
+    } else if step.kind == StepKind::Fetch {
+        super::paths::center_truncate_path(&step.target, budget)
+    } else {
+        Line::new(vec![Span::raw(step.target.clone())]).truncated(budget).plain()
+    };
+    let mut spans = vec![Span::dim(lead), Span::dim(format!("{opening}{target}{closing}"))];
+    spans.extend(tail);
+    Line::new(spans).truncated(width)
+}
+
+/// The row under a failed step: what it said first.
+fn why_row(step: &Step, width: usize) -> Option<Line> {
+    let why = step.error.as_ref()?;
+    let glyphs = super::style::glyphs();
+    Some(Line::new(vec![Span::raw(glyphs.result_rest), Span::new(why.clone(), Style::new().fg(palette::TOOL_FAIL).dim())]).truncated(width))
 }
 
 /// `1 step`, `7 steps` — a fold's count, in its cell and on the working row,
@@ -280,7 +339,10 @@ pub fn steps_word(count: usize) -> String {
 
 /// What follows a step's target on its row: an edit's counts, a command's
 /// seconds, a failure's word.
-fn step_tail(step: &Step, quiet: bool) -> Vec<Span> {
+///
+/// `per_call` is the viewport's row of one call, which says what the call
+/// brought back; the fold's cell sums its steps up and does not.
+fn step_tail(step: &Step, quiet: bool, per_call: bool) -> Vec<Span> {
     let tint = |color: Color| if quiet { Style::new().fg(color).dim() } else { Style::new().fg(color) };
     if !step.ok {
         let word = step.failure.clone().unwrap_or_else(|| strings::TOOL_FAILED_RESULT.to_string());
@@ -295,10 +357,14 @@ fn step_tail(step: &Step, quiet: bool) -> Vec<Span> {
             Span::new(format!("-{removed}"), tint(Color::RED)),
         ];
     }
-    match step.took.filter(|took| step.kind == StepKind::Run && took.as_secs() > 0) {
-        Some(took) => vec![Span::dim(format!("  {:.1}s", took.as_secs_f32()))],
-        None => Vec::new(),
+    let mut tail = Vec::new();
+    if let Some(result) = step.result.as_ref().filter(|_| per_call) {
+        tail.push(Span::dim(format!("  {result}")));
     }
+    if let Some(took) = step.took.filter(|took| step.kind == StepKind::Run && took.as_secs() > 0) {
+        tail.push(Span::dim(format!("  {:.1}s", took.as_secs_f32())));
+    }
+    tail
 }
 
 /// `1 file`, `3 files`.
@@ -326,8 +392,11 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
     // What did not go through is never folded away.
     for step in steps.iter().filter(|step| !step.ok) {
         let mut row = vec![Span::dim(format!("{} ", step.verb)), Span::raw(step.target.clone())];
-        row.extend(step_tail(step, false));
+        row.extend(step_tail(step, false, false));
         body.push(row);
+        if let Some(why) = step.error.as_ref() {
+            body.push(vec![Span::raw("  "), Span::new(why.clone(), Style::new().fg(palette::TOOL_FAIL).dim())]);
+        }
     }
 
     let mut out = vec![Line::empty(), Line::new(head_row(steps, column, now)).truncated(column)];
@@ -360,6 +429,10 @@ fn head_row(steps: &[Step], width: usize, now: Instant) -> Vec<Span> {
         Span::bold(worked),
         Span::dim(format!(" · {}", steps_word(steps.len()))),
     ];
+    let failures = steps.iter().filter(|step| !step.ok && !step.declined).count();
+    if failures > 0 {
+        head.push(Span::new(format!(" · {failures} failed"), Style::new().fg(palette::TOOL_FAIL)));
+    }
     let hint = [Span::bold(strings::KEY_VIEW), Span::dim(strings::TO_EXPAND)];
     let used: usize = head.iter().map(Span::width).sum();
     let hint_width: usize = hint.iter().map(Span::width).sum();
@@ -446,7 +519,7 @@ fn run_rows(steps: &[Step]) -> Vec<Vec<Span>> {
     }
     for step in runs.iter().skip(runs.len().saturating_sub(NAMED_RUNS)) {
         let mut row = vec![Span::dim(format!("{} ", strings::RAN)), Span::raw(step.target.clone())];
-        row.extend(step_tail(step, false));
+        row.extend(step_tail(step, false, false));
         rows.push(row);
     }
     rows
@@ -455,7 +528,7 @@ fn run_rows(steps: &[Step]) -> Vec<Vec<Span>> {
 /// Everything else that went through, counted by its word.
 fn other_row(steps: &[Step]) -> Option<Vec<Span>> {
     let mut others: Vec<(&str, usize)> = Vec::new();
-    for step in steps.iter().filter(|step| step.ok && step.kind == StepKind::Other) {
+    for step in steps.iter().filter(|step| step.ok && matches!(step.kind, StepKind::Other | StepKind::Fetch)) {
         match others.iter_mut().find(|(verb, _)| *verb == step.verb) {
             Some(other) => other.1 += 1,
             None => others.push((step.verb.as_str(), 1)),
@@ -497,6 +570,8 @@ mod tests {
             ok: true,
             declined: false,
             failure: None,
+            error: None,
+            result: None,
             started: Instant::now(),
             took: None,
         }
@@ -674,7 +749,8 @@ mod tests {
         let wide = plain(&fold.live_rows(200, LIVE_ROWS_MAX));
         assert_eq!(wide, [format!("  └ Run {command}  2.6s")]);
         let narrow = plain(&fold.live_rows(60, LIVE_ROWS_MAX));
-        assert!(narrow[0].ends_with('…') && narrow[0].chars().count() == 60, "{narrow:?}");
+        // The seconds stay on the row: the command gives up its own end.
+        assert!(narrow[0].ends_with("…  2.6s") && narrow[0].chars().count() == 60, "{narrow:?}");
         let (cell, _) = fold.flush(200, Instant::now());
         assert!(plain(&cell).iter().any(|row| row.contains(&command)), "{cell:#?}");
     }

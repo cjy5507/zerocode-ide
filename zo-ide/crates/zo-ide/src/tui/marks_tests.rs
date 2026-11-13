@@ -166,7 +166,9 @@ fn ended_words(kind: ToolKind) -> String {
     let mut fold = super::turns::TurnFold::default();
     fold.take_steps(group.steps());
     let row = fold.live_rows(100, 16)[0].plain();
-    row.strip_prefix("  ⎿ ").unwrap_or_else(|| panic!("a step opens hung under the mark: {row:?}")).trim_end().to_string()
+    let words = row.strip_prefix("  ⎿ ").unwrap_or_else(|| panic!("a step opens hung under the mark: {row:?}"));
+    // What the call brought back follows its words after two spaces.
+    words.split("  ").next().unwrap_or_default().trim_end().to_string()
 }
 
 /// One call is one text while it runs and after it ends (v1.1.149): the
@@ -193,7 +195,7 @@ fn a_call_reads_the_same_while_it_runs_and_after_it_ends() {
         ),
         (
             ToolKind::WebSearch { detail: "https://example.com/a".to_string() },
-            "Search(https://example.com/a on the web)",
+            "Search(\"https://example.com/a\" on the web)",
         ),
         (ToolKind::Explore(vec![Explored::Read { name: "src/app.py".to_string() }]), "Read(src/app.py)"),
         (ToolKind::Explore(vec![Explored::List { path: "src/*.rs".to_string() }]), "List(src/*.rs)"),
@@ -228,6 +230,8 @@ fn the_screens_two_turns_are_drawn_again_in_one_vocabulary() {
         ok: true,
         declined: false,
         failure: None,
+        error: None,
+        result: None,
         started: now - Duration::from_secs(39),
         took: None,
     };
@@ -275,10 +279,10 @@ fn the_screens_two_turns_are_drawn_again_in_one_vocabulary() {
         wide,
         [
             "⏺ 프로젝트 내 규칙을 확인하기 위해 설정을 봅니다",
-            "  ⎿ Search(\"끝났다고 하기 전에 확인했는가\" in .zo)",
+            "  ⎿ Search(\"끝났다고 하기 전에 확인했는가\" in .zo)  no matches",
             "",
             "⏺ 판단 기준이 정의된 위치를 찾습니다",
-            "  ⎿ Search(\"끝났다고 하기 전에 확인했는가\")",
+            "  ⎿ Search(\"끝났다고 하기 전에 확인했는가\")  no matches",
         ]
     );
     // On a pane 40 columns wide a full-width (two-column) query is cut at the
@@ -295,4 +299,149 @@ fn the_screens_two_turns_are_drawn_again_in_one_vocabulary() {
             assert!(row.width() <= width, "{:?} is {} columns", row.plain(), row.width());
         }
     }
+}
+
+fn failed(output: &str) -> Outcome {
+    Outcome { ok: false, declined: false, output: output.to_string(), change: None, exit_code: None }
+}
+
+/// Finished calls as the fold takes them: `(kind, outcome)` each in a cell of
+/// its own, in the order they are given.
+fn steps_of(calls: Vec<(ToolKind, Outcome)>) -> Vec<super::turns::Step> {
+    let mut group: Option<ToolGroup> = None;
+    for (at, (kind, _)) in calls.iter().enumerate() {
+        let call = ToolCall::new(format!("c{at}"), kind.clone());
+        match group.as_mut() {
+            Some(group) => group.push(call),
+            None => group = Some(ToolGroup::new(call)),
+        }
+    }
+    let mut group = group.expect("a call");
+    for (at, (_, outcome)) in calls.into_iter().enumerate() {
+        assert!(group.complete(&format!("c{at}"), outcome));
+    }
+    group.steps()
+}
+
+fn fetch(url: &str) -> ToolKind {
+    ToolKind::WebFetch { url: url.to_string() }
+}
+
+/// The second screen of 1.1.148 (v1.1.149): addresses fetched one after
+/// another, a tool of an MCP server, one that failed. A fetch says `Fetch`
+/// and its address without the scheme, an MCP tool its server and its name,
+/// a finished call what it brought back at the end of its row, and a failed
+/// one why, under it.
+#[test]
+fn a_run_of_fetches_reads_as_calls_with_their_results() {
+    if !style::in_fresh_run(&path("a_run_of_fetches_reads_as_calls_with_their_results")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let page = "x".repeat(3174);
+    let steps = steps_of(vec![
+        (fetch("https://huggingface.co/api/models/acme/alpha"), finished(&page)),
+        (fetch("https://huggingface.co/api/models/acme/beta"), failed("HTTP 404 Not Found\nbody the model reads")),
+        (
+            ToolKind::WebSearch { detail: "https://example.test/a".to_string() },
+            finished(&"y".repeat(812)),
+        ),
+        (
+            ToolKind::Explore(vec![Explored::Search { query: "TODO".to_string(), path: Some("src".to_string()) }]),
+            finished("src/a.rs:1:// TODO\nsrc/b.rs:2:// TODO\n"),
+        ),
+        (ToolKind::Command { command: "ls -la".to_string(), background: false }, finished("a\nb\nc\n")),
+    ]);
+    let mut fold = super::turns::TurnFold::default();
+    fold.take_steps(steps);
+    assert_eq!(
+        plain(&fold.live_rows(80, 16)),
+        [
+            "  ⎿ Fetch(huggingface.co/api/models/acme/alpha)  3.1 KB",
+            "    Fetch(huggingface.co/api/models/acme/beta)  failed",
+            "    HTTP 404 Not Found",
+            "    Search(\"https://example.test/a\" on the web)  812 B",
+            "    Search(\"TODO\" in src)  2 matches",
+            "    Run(ls -la)  3 lines",
+        ]
+    );
+}
+
+/// The row keeps its result before its target: on a pane 40 columns wide a
+/// long address gives up its middle, a long query its end, and the result
+/// stays; no row is wider than the pane.
+#[test]
+fn a_steps_result_is_kept_when_its_target_is_cut() {
+    if !style::in_fresh_run(&path("a_steps_result_is_kept_when_its_target_is_cut")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let steps = steps_of(vec![
+        (fetch("https://huggingface.co/api/models/acme/a-very-long-model-name-for-this-test"), finished(&"x".repeat(3174))),
+        (
+            ToolKind::Explore(vec![Explored::Search {
+                query: "끝났다고 하기 전에 확인했는가 끝났다고 하기 전에 확인했는가".to_string(),
+                path: None,
+            }]),
+            finished("a:1:x\n"),
+        ),
+    ]);
+    let mut fold = super::turns::TurnFold::default();
+    fold.take_steps(steps);
+    for row in fold.live_rows(40, 16) {
+        assert!(row.width() <= 40, "{:?} is {} columns", row.plain(), row.width());
+    }
+    let rows = plain(&fold.live_rows(40, 16));
+    assert!(rows[0].starts_with("  ⎿ Fetch(") && rows[0].contains('…') && rows[0].ends_with(")  3.1 KB"), "{rows:?}");
+    assert!(rows[1].starts_with("    Search(\"끝났다고") && rows[1].ends_with("…)  1 match"), "{rows:?}");
+}
+
+/// A step that failed is not folded away into `… N earlier`, and the fold's
+/// head counts it; the calls stand in the order they were made.
+#[test]
+fn a_failed_step_stays_when_the_rest_fold_away() {
+    if !style::in_fresh_run(&path("a_failed_step_stays_when_the_rest_fold_away")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let mut calls: Vec<(ToolKind, Outcome)> = (0..10)
+        .map(|n| (ToolKind::Explore(vec![Explored::Read { name: format!("f{n}.rs") }]), finished("l\n")))
+        .collect();
+    calls[1] = (ToolKind::Explore(vec![Explored::Read { name: "gone.rs".to_string() }]), failed("No such file: gone.rs"));
+    let steps = steps_of(calls);
+    let mut fold = super::turns::TurnFold::default();
+    fold.take_steps(steps.clone());
+    assert_eq!(
+        plain(&fold.live_rows(80, 6)),
+        [
+            "  ⎿ … 6 earlier",
+            "    Read(gone.rs)  failed",
+            "    No such file: gone.rs",
+            "    Read(f7.rs)  1 line",
+            "    Read(f8.rs)  1 line",
+            "    Read(f9.rs)  1 line",
+        ]
+    );
+    let head = plain(&super::turns::cell(&steps, 100, std::time::Instant::now()));
+    assert!(head[1].starts_with("⏺ Worked · 10 steps · 1 failed"), "{head:?}");
+    assert!(head.iter().any(|row| row.trim() == "No such file: gone.rs"), "{head:?}");
+}
+
+/// Calls made together stand in the order they were made, not in the order
+/// they ended.
+#[test]
+fn calls_made_together_stand_in_the_order_they_were_made() {
+    if !style::in_fresh_run(&path("calls_made_together_stand_in_the_order_they_were_made")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let read = |name: &str| ToolKind::Explore(vec![Explored::Read { name: name.to_string() }]);
+    let mut group = ToolGroup::new(ToolCall::new("a".to_string(), read("a.rs")));
+    group.push(ToolCall::new("b".to_string(), read("b.rs")));
+    group.push(ToolCall::new("c".to_string(), read("c.rs")));
+    for id in ["c", "a", "b"] {
+        assert!(group.complete(id, finished("l\n")));
+    }
+    let targets: Vec<String> = group.steps().into_iter().map(|step| step.target).collect();
+    assert_eq!(targets, ["a.rs", "b.rs", "c.rs"]);
 }
