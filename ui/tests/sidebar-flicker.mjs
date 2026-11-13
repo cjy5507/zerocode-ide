@@ -518,9 +518,11 @@ export async function testSidebarFlicker({ browser, origin, ok, faults }) {
     );
     const press = await playSource(page, "press", { ms: 2500 });
     ok(
-      "④ pressing agent rows one after another keeps every row's node — the pressed one and the one that was in front — and rebuilds no list",
-      press.pressed >= 3 && press.pressedKept === press.pressed && press.rows.replaced === 0 && press.rows.rebuilds === 0,
-      JSON.stringify({ pressed: press.pressed, kept: press.pressedKept, rows: press.rows, top: press.top.slice(0, 6) }),
+      "④ pressing agent rows one after another keeps every row's node — the pressed one and the one that was in front — rebuilds no list, and starts no ring again (the rows' dots stay theirs)",
+      press.pressed >= 3 && press.pressedKept === press.pressed && press.rows.replaced === 0 && press.rows.rebuilds === 0
+        && Object.keys(press.animations).length === 0,
+      JSON.stringify({ pressed: press.pressed, kept: press.pressedKept, animations: press.animations, rows: press.rows,
+        top: press.top.slice(0, 6) }),
     );
     const turns = await playSource(page, "turns", { ms: 3200 });
     // The working rows' rings after it: each a turn of the document's clock (`startTime` 0), so a dot the turn made
