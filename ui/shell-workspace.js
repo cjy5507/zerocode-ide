@@ -1804,7 +1804,9 @@ function paintWorktreeSelection() {
     row.classList.toggle("is-selected", selected);
     const node = row.closest(".wt-node");
     node?.classList.toggle("is-selected", selected);
-    node?.setAttribute("aria-selected", selected ? "true" : "false");
+    // Written only when it moved: this runs on every refresh of the list, and an attribute set to the value it
+    // holds is still a mutation the sidebar pays for on every row (v1.1.149, 「왼쪽 네비 판이 계속 깜박」).
+    if (node) writeAttribute(node, "aria-selected", selected ? "true" : "false");
   }
 }
 
@@ -1829,7 +1831,8 @@ function paintWorktreeActive() {
     const node = row.closest(".wt-node");
     node?.classList.toggle("is-active", here);
     // The item carries "current", as it carries the name and the selection: the row inside it is a plain box.
-    node?.setAttribute("aria-current", here ? "location" : "false");
+    // Written only when it moved, as the selection is.
+    if (node) writeAttribute(node, "aria-current", here ? "location" : "false");
   }
   // The list's focus stays on the list; this says which item the keys act on (t-88672).
   const current = worktreeList.querySelector(".wt-node[aria-current=location]");
@@ -6756,17 +6759,19 @@ async function refreshWorktrees() {
   paintStagePlaceholder();
   const canCreateWorktree = activeProject?.worktrees.some((worktree) => !worktree.is_folder) ?? false;
   // Live on a folder project too — the dialog offers to make it git.
-  el("worktree-new").disabled = !activeProject;
+  writeDisabled(el("worktree-new"), !activeProject);
   paintWorktreeNewTitle();
   // 작업 is reachable only where there is something to browse, which is Orca's
   // own rule for this row: `canBrowseTasks = repos.some(isGitRepoKind)`
   // (`App-BaqTRjaA.js:8737`). It holds here for the same reason it holds
   // there — a folder project has no worktrees, so the finder this row opens
   // would come up empty and the row would have led nowhere.
-  el("nav-tasks").disabled = !canCreateWorktree;
-  el("nav-tasks").dataset.tip = canCreateWorktree
+  // Every refresh says these again, and most say what they already said: written only when they moved.
+  writeDisabled(el("nav-tasks"), !canCreateWorktree);
+  const tasksTip = canCreateWorktree
     ? t("view.tasksTitle", "작업")
     : t("worktree.gitOnly", "Git 프로젝트에서만 워크트리를 만들 수 있습니다");
+  if (el("nav-tasks").dataset.tip !== tasksTip) el("nav-tasks").dataset.tip = tasksTip;
   if (activeProject) paintProjectName(activeProject.name);
 
   // The repositories the 표시 menu left checked. Ungrouped rows cannot hide
