@@ -22,7 +22,8 @@ import { webkitType } from "./coordinator-desk-perf.mjs";
  *               a row put in under a key that a different node held is REPLACED — its hover, its focus and its
  *               transitions start again; a row taken out and put back is MOVED;
  *   motion      `animationstart` and `transitionrun` inside the sidebar, and (in the measuring mode) rows whose top
- *               moved between two frames;
+ *               moved between two frames, each block whose height moved (the conversation list, the nav rows, the
+ *               list's top, each project) and the list's scroll;
  *   paints      the agent paint's flushes, the list's refreshes, the conversation list's paints.
  *
  * The suite (`testSidebarFlicker`) pins, in a few beats each:
@@ -196,7 +197,7 @@ export async function installFlickerProbe(page) {
     window.__FLICKER__ = {
       start({ sample = false } = {}) {
         const count = {
-          records: [], animations: {}, transitions: {}, shifts: 0, scrolls: 0, frames: 0,
+          records: [], animations: {}, transitions: {}, shifts: 0, scrolls: 0, frames: 0, heights: {},
           paints: { flush: 0, refresh: 0, chat: 0, agents: 0 },
         };
         count.take = (records) => count.records.push(...records);
@@ -227,6 +228,7 @@ export async function installFlickerProbe(page) {
         /* Rows whose top moved between two frames while they stood, and the scroller's own moves. */
         const scroller = document.getElementById("sidebar-scroll");
         const tops = new WeakMap();
+        const heights = new Map();
         let lastScroll = scroller?.scrollTop ?? 0;
         const look = () => {
           if (held !== count) return;
@@ -241,6 +243,24 @@ export async function installFlickerProbe(page) {
             const now = scroller?.scrollTop ?? 0;
             if (now !== lastScroll) count.scrolls += 1;
             lastScroll = now;
+            // Each block's height (the coordinator's ask, 11-13): the conversation list, the nav rows, the list's
+            // top under them, and every project — a block that grows or shrinks pushes every row under it.
+            const blocks = [["chat", document.getElementById("chat-list")], ["nav", aside.querySelector(".nav-rows")],
+              ["scroller-top", scroller], ...[...aside.querySelectorAll("#worktrees > .proj")].map((node) =>
+                [`project:${node.dataset.projectPath ?? "resting"}`, node])];
+            for (const [name, node] of blocks) {
+              if (!node) continue;
+              const box = node.getBoundingClientRect();
+              const size = name === "scroller-top" ? box.top : box.height;
+              const was = heights.get(name);
+              if (was !== undefined && Math.abs(was - size) > 0.5) {
+                const held = count.heights[name] ?? { changes: 0, most: 0 };
+                held.changes += 1;
+                held.most = Math.max(held.most, Math.round(Math.abs(was - size)));
+                count.heights[name] = held;
+              }
+              heights.set(name, size);
+            }
           }
           requestAnimationFrame(look);
         };
@@ -328,6 +348,7 @@ export async function installFlickerProbe(page) {
           mutations: count.records.length - kinds.spin, kinds, regions, top,
           rows: { touched: [...touched].sort(), out: out.size, in: into.size, moved, replaced, replacedKeys, rebuilds },
           animations: count.animations, transitions: count.transitions, shifts: count.shifts, scrolls: count.scrolls,
+          heights: count.heights,
           frames: count.frames, paints: count.paints,
         };
       },
@@ -556,6 +577,8 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     if (one.rows.replaced) console.log(`  replaced: ${JSON.stringify(one.rows.replacedKeys)}`);
     if (Object.keys(one.transitions).length) console.log(`  transitions: ${JSON.stringify(one.transitions)}`);
     if (Object.keys(one.animations).length) console.log(`  animations: ${JSON.stringify(one.animations)}`);
+    if (Object.keys(one.heights).length) console.log(`  heights (changes, largest px): ${JSON.stringify(one.heights)}`);
+    if (one.scrolls) console.log(`  scroll moves: ${one.scrolls}`);
     if (one.faults) console.log(`  faults: ${one.faults.join(" | ")}`);
   }
 }
