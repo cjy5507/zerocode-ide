@@ -3625,6 +3625,65 @@ fn pinned_model_outside_provider_allowlist_is_flagged_not_blocked() {
     assert_eq!(decision.reason, "role exact pin");
 }
 
+/// A pin or a selector a repository's committed settings said is not the
+/// person's: it routes inside their `smart.providerAllowlist` and nowhere
+/// else, where their own steps outside it as before
+/// ([`pinned_model_outside_provider_allowlist_is_flagged_not_blocked`]).
+/// Until v1.1.150 any repository a person opened could pin a role to a
+/// provider they had left off their list.
+#[test]
+fn a_repositorys_pin_and_selector_route_only_inside_the_persons_allowlist() {
+    let routed = |allowlist: &[&str], named: Option<RoleOverride>, repositorys: bool| {
+        let mut context = neutral_route_context(true);
+        context.provider_allowlist = allowlist.iter().map(ToString::to_string).collect();
+        let mut request = RouteRequest::new(RouteRole::Coding, "claude-sonnet-main").with_context(context);
+        request.override_rule = named;
+        request.repository_override = repositorys;
+        route_model(&request, &inventory())
+    };
+    let pin = || Some(RoleOverride::Pin("gpt-coder".to_string()));
+    let selector = || {
+        Some(RoleOverride::Family(
+            RoleSelector::new().family("gpt").capability(ModelCapability::Coding).tier(ModelTier::Strong),
+        ))
+    };
+    let said_not_applied = |decision: &RouteDecision| {
+        decision.audit.guardrails.iter().any(|line| line.contains("the repository's pin") && line.contains("not applied"))
+    };
+
+    // Outside the list: as if nothing were named, and the audit says why.
+    let unnamed = routed(&["anthropic"], None, false);
+    assert_ne!(unnamed.resolved_model, "gpt-coder", "fixture: the list keeps the route off OpenAI");
+    let pinned = routed(&["anthropic"], pin(), true);
+    assert_eq!((pinned.resolved_model.as_str(), pinned.source), (unnamed.resolved_model.as_str(), unnamed.source));
+    assert!(said_not_applied(&pinned), "{:?}", pinned.audit.guardrails);
+    let selected = routed(&["anthropic"], selector(), true);
+    assert_ne!(selected.resolved_model, "gpt-coder");
+    assert_ne!(selected.source, RouteDecisionSource::ManualSelector);
+
+    // The person's own pin and selector step outside their list as they did.
+    let pinned = routed(&["anthropic"], pin(), false);
+    assert_eq!((pinned.resolved_model.as_str(), pinned.source), ("gpt-coder", RouteDecisionSource::Pinned));
+    assert!(!said_not_applied(&pinned));
+    let selected = routed(&["anthropic"], selector(), false);
+    assert_eq!((selected.resolved_model.as_str(), selected.source), ("gpt-coder", RouteDecisionSource::ManualSelector));
+
+    // Inside the list, and where the person named no list: a repository's
+    // routes as the person's would.
+    for allowlist in [&["OpenAI"][..], &[][..]] {
+        let pinned = routed(allowlist, pin(), true);
+        assert_eq!((pinned.resolved_model.as_str(), pinned.source), ("gpt-coder", RouteDecisionSource::Pinned), "{allowlist:?}");
+        assert_eq!(pinned.reason, "role exact pin");
+        assert!(!said_not_applied(&pinned));
+        let selected = routed(allowlist, selector(), true);
+        assert_eq!(
+            (selected.resolved_model.as_str(), selected.source),
+            ("gpt-coder", RouteDecisionSource::ManualSelector),
+            "{allowlist:?}"
+        );
+    }
+}
+
 fn cooldown_test_inventory() -> ModelInventory {
     ModelInventory::new(
         "main-model",

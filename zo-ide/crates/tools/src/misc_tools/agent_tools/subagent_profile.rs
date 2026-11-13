@@ -690,7 +690,7 @@ const fn thinking_budget_for_difficulty(difficulty: AgentTaskDifficulty) -> Opti
 /// (`build_provider_client_for_agent`). Read from the file instead, a row
 /// moved onto the session's provider after such a leg was built passed the
 /// helper as "the same family" and sent its task where the leg went.
-pub(super) fn same_provider_family(parent_model: Option<&str>, candidate: &str) -> bool {
+pub(crate) fn same_provider_family(parent_model: Option<&str>, candidate: &str) -> bool {
     non_empty(parent_model).is_some_and(|parent| {
         crate::model_home::of_the_session(&parent)
             .is_where(&crate::model_home::of_the_session(candidate))

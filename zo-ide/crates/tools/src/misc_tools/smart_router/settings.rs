@@ -1,16 +1,18 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use runtime::{
     connected_model_inventory, default_config_home, route_model, route_model_fallback_candidates,
     FreshnessPolicy, LearnedSpecialtyHint, RoleOverride, RoleSelector, RouteAutoClassifierMode,
-    RouteContextNeed, RouteFeedbackHint, RoutePolicyContext, RouteRequest, RouteRole,
+    RouteContextNeed, RouteDecision, RouteDecisionSource, RouteFeedbackHint, RoutePolicyContext,
+    RouteRequest, RouteRole,
     RouteTaskComplexity, RouteTaskRisk, RouteToolNeed, RouteVerificationNeed, RoutingTarget,
     SmartPolicy, SubagentProfileId,
 };
 use serde_json::Value;
 
 use super::infer::{role_key, route_role_from_key};
+use crate::misc_tools::agent_tools::same_provider_family;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeepTierModelsSetting {
@@ -271,6 +273,17 @@ pub(super) struct SmartRuntimeSettings {
     pub auto_classifier: RouteAutoClassifierMode,
     pub subagents: BTreeMap<String, RoleOverride>,
     pub roles: BTreeMap<String, RoleOverride>,
+    /// The keys of `subagents` and of `roles` whose override a repository's
+    /// committed settings said, and the person's own documents did not say
+    /// alike. A pin is the person's selection — it may step outside their
+    /// allowlist, take the verifier across providers and an implementer out
+    /// of the session's provider family — only where the person said it.
+    pub repository_subagents: BTreeSet<String>,
+    pub repository_roles: BTreeSet<String>,
+    /// `smart.deepTierModels` as the person's own documents say it, empty
+    /// where they say none: the models a person chose, which a repository's
+    /// list is not.
+    pub persons_deep_tier_models: Vec<String>,
     /// Ranked fallback-candidate count for quota/rate-limit escape
     /// (`smart.fallbackCandidateLimit`, default [`DEFAULT_FALLBACK_CANDIDATE_LIMIT`]).
     pub fallback_candidate_limit: usize,
@@ -644,7 +657,7 @@ pub(super) fn read_smart_runtime_settings() -> Option<SmartRuntimeSettings> {
 
 #[allow(clippy::too_many_lines)] // flat, one-block-per-key parser for the merged smart.* object
 pub(super) fn read_smart_runtime_settings_for(cwd: &Path) -> Option<SmartRuntimeSettings> {
-    let root = merged_settings_root(cwd)?;
+    let (root, persons) = settings_roots(&runtime::ConfigLoader::default_for(cwd))?;
     let smart = root.get("smart").and_then(Value::as_object);
     let enabled = smart
         .and_then(|smart| smart.get("enabled"))
@@ -745,32 +758,10 @@ pub(super) fn read_smart_runtime_settings_for(cwd: &Path) -> Option<SmartRuntime
         .and_then(|value| u8::try_from(value).ok())
         .unwrap_or(DEFAULT_HEADROOM_PENALTY_THRESHOLD);
     let plan = PlanShadowSettings::from_settings_value(smart.and_then(|smart| smart.get("plan")));
-    let mut subagents = BTreeMap::new();
-    if let Some(router) = root.get("modelRouter").and_then(Value::as_object) {
-        if let Some(subagent_object) = router.get("subagents").and_then(Value::as_object) {
-            for (subagent, value) in subagent_object {
-                let Some(profile) = SubagentProfileId::parse(subagent) else {
-                    continue;
-                };
-                if let Ok(Some(override_rule)) = role_override_from_json(value) {
-                    subagents.insert(profile.key().to_string(), override_rule);
-                }
-            }
-        }
-    }
-    let mut roles = BTreeMap::new();
-    if let Some(router) = root.get("modelRouter").and_then(Value::as_object) {
-        if let Some(role_object) = router.get("roles").and_then(Value::as_object) {
-            for (role, value) in role_object {
-                let Some(route_role) = route_role_from_key(role) else {
-                    continue;
-                };
-                if let Ok(Some(override_rule)) = role_override_from_json(value) {
-                    roles.insert(role_key(route_role).to_string(), override_rule);
-                }
-            }
-        }
-    }
+    let (subagents, roles) = configured_overrides(&root);
+    let (own_subagents, own_roles) = configured_overrides(&persons);
+    let persons_deep_tier =
+        deep_tier_models_from_smart(persons.get("smart").and_then(Value::as_object));
     Some(SmartRuntimeSettings {
         enabled,
         allow_cross_provider_diversity,
@@ -782,6 +773,9 @@ pub(super) fn read_smart_runtime_settings_for(cwd: &Path) -> Option<SmartRuntime
         deep_tier_models_configured: deep_tier_setting.configured,
         feedback_informed_auto,
         auto_classifier,
+        repository_subagents: not_the_persons(&subagents, &own_subagents),
+        repository_roles: not_the_persons(&roles, &own_roles),
+        persons_deep_tier_models: if persons_deep_tier.configured { persons_deep_tier.models } else { Vec::new() },
         subagents,
         roles,
         fallback_candidate_limit,
@@ -795,6 +789,95 @@ pub(super) fn read_smart_runtime_settings_for(cwd: &Path) -> Option<SmartRuntime
         orchestration,
         plan,
     })
+}
+
+/// Whether `model`, which a repository's document pinned, is at a provider
+/// the person's `smart.providerAllowlist` lets a route go to — any, where the
+/// list names none. A model the inventory does not hold is at no provider
+/// the list could name.
+fn inside_the_allowlist(model: &str, settings: &SmartRuntimeSettings, inventory: &runtime::ModelInventory) -> bool {
+    settings.provider_allowlist.is_empty()
+        || inventory.find(model).is_some_and(|descriptor| {
+            let allowed = RoutePolicyContext { provider_allowlist: settings.provider_allowlist.clone(), ..RoutePolicyContext::default() };
+            allowed.provider_allowed(descriptor.provider())
+        })
+}
+
+/// What a route's audit says of a repository's pin that was not applied
+/// because it would take the work to another provider family.
+const NOT_APPLIED_OUTSIDE_THE_FAMILY: &str =
+    "the repository's pin is outside this session's provider family and was not applied to work that edits files: \
+     pin the model in your own settings to use it";
+
+/// `request` routed, for work that edits files: a helper that can, or the
+/// Architect implementer. A pin or a selector may take such work outside the
+/// session's provider family only as the person's own selection
+/// (`implementation_model_refusal`); where a repository's did, the route is
+/// made again as if nothing were named, and the request is left that way
+/// for whatever is routed from it next.
+pub(super) fn route_within_the_family(request: &mut RouteRequest, inventory: &runtime::ModelInventory) -> RouteDecision {
+    let decision = route_model(request, inventory);
+    if request.repository_override
+        && matches!(decision.source, RouteDecisionSource::Pinned | RouteDecisionSource::ManualSelector)
+        && !same_provider_family(Some(&request.main_model), &decision.resolved_model)
+    {
+        request.override_rule = None;
+        request.repository_override = false;
+        request.context.audit_notes.push(NOT_APPLIED_OUTSIDE_THE_FAMILY.to_string());
+        return route_model(request, inventory);
+    }
+    decision
+}
+
+/// The `modelRouter.subagents` and `modelRouter.roles` overrides a settings
+/// document names, by the key each is looked up under.
+fn configured_overrides(root: &Value) -> (BTreeMap<String, RoleOverride>, BTreeMap<String, RoleOverride>) {
+    let router = root.get("modelRouter").and_then(Value::as_object);
+    let named = |section: &str| router.and_then(|router| router.get(section)).and_then(Value::as_object);
+    let mut subagents = BTreeMap::new();
+    for (subagent, value) in named("subagents").into_iter().flatten() {
+        let Some(profile) = SubagentProfileId::parse(subagent) else {
+            continue;
+        };
+        if let Ok(Some(override_rule)) = role_override_from_json(value) {
+            subagents.insert(profile.key().to_string(), override_rule);
+        }
+    }
+    let mut roles = BTreeMap::new();
+    for (role, value) in named("roles").into_iter().flatten() {
+        let Some(route_role) = route_role_from_key(role) else {
+            continue;
+        };
+        if let Ok(Some(override_rule)) = role_override_from_json(value) {
+            roles.insert(role_key(route_role).to_string(), override_rule);
+        }
+    }
+    (subagents, roles)
+}
+
+/// The keys of `named` — the overrides of the merged settings — that the
+/// person's own documents do not name alike: a repository's committed
+/// settings said them. An override both wrote the same is the person's.
+fn not_the_persons(
+    named: &BTreeMap<String, RoleOverride>,
+    persons: &BTreeMap<String, RoleOverride>,
+) -> BTreeSet<String> {
+    named
+        .iter()
+        .filter(|(key, override_rule)| persons.get(*key) != Some(*override_rule))
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+/// The settings a loader reads, twice: merged, as every reader of these
+/// words sees them, and as the person's own documents alone say them
+/// (`runtime::RuntimeConfig::persons_own_json`).
+fn settings_roots(loader: &runtime::ConfigLoader) -> Option<(Value, Value)> {
+    let config = loader.load().ok()?;
+    Some((
+        serde_json::from_str(&config.as_json().render()).ok()?,
+        serde_json::from_str(&config.persons_own_json().render()).ok()?,
+    ))
 }
 
 /// The settings a use's mode is read from — the global file merged with the
@@ -1039,7 +1122,6 @@ pub(super) fn effective_deep_tier_models(
 /// Say once per distinct dropped set which `smart.deepTierModels` entries the
 /// connected top tier does not contain, and what the pool is instead.
 fn notice_dropped_deep_tier_entries(dropped: &[&str], pool: &[String]) {
-    use std::collections::BTreeSet;
     use std::sync::{Mutex, OnceLock};
     static NOTICED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
     let key = dropped.join(", ");
@@ -1134,7 +1216,19 @@ fn route_deep_verify_model(
     if main_model.is_empty() || !settings.enabled {
         return None;
     }
-    if let Some(RoleOverride::Pin(model)) = settings.roles.get(role_key(RouteRole::Verifier)) {
+    // A repository's pin for the verifier stands inside the person's
+    // allowlist, and on the session's provider where they switched the
+    // verify leg's crossing off: stepping over either is the person's own
+    // pin's to do. One that does not stand is as if nothing were pinned.
+    let repositorys = settings.repository_roles.contains(role_key(RouteRole::Verifier));
+    let named = settings.roles.get(role_key(RouteRole::Verifier)).filter(|named| match named {
+        RoleOverride::Pin(model) if repositorys => {
+            inside_the_allowlist(model, settings, inventory)
+                && (settings.verify_cross_provider || same_provider_family(Some(main_model), model))
+        }
+        _ => true,
+    });
+    if let Some(RoleOverride::Pin(model)) = named {
         return (!model.trim().is_empty() && !same_smart_model(model, main_model))
             .then(|| model.clone());
     }
@@ -1149,7 +1243,8 @@ fn route_deep_verify_model(
             RouteRole::Verifier,
             main_model,
         );
-        request.override_rule = settings.roles.get(role_key(RouteRole::Verifier)).cloned();
+        request.override_rule = named.cloned();
+        request.repository_override = repositorys;
         request = request.with_context(RoutePolicyContext {
             risk: RouteTaskRisk::Low,
             complexity: RouteTaskComplexity::Large,
@@ -1277,7 +1372,21 @@ fn route_exec_impl_model(
         RouteRole::Coding,
         main_model,
     );
-    request.override_rule = settings.roles.get(role_key(RouteRole::Coding)).cloned();
+    // A repository's pin for the implementer stands inside the person's
+    // allowlist and the session's provider family; a selector of its is kept
+    // to both by the route below.
+    let repositorys = settings.repository_roles.contains(role_key(RouteRole::Coding));
+    request.repository_override = repositorys;
+    request.override_rule = settings
+        .roles
+        .get(role_key(RouteRole::Coding))
+        .filter(|named| match named {
+            RoleOverride::Pin(model) if repositorys => {
+                inside_the_allowlist(model, settings, inventory) && same_provider_family(Some(main_model), model)
+            }
+            _ => true,
+        })
+        .cloned();
     request = request.with_context(RoutePolicyContext {
         risk: RouteTaskRisk::Medium,
         complexity,
@@ -1298,7 +1407,7 @@ fn route_exec_impl_model(
             && !runtime::is_deep_tier_model(model, deep_tier_models))
         .then(|| model.clone());
     }
-    let primary = route_model(&request, inventory).resolved_model;
+    let primary = route_within_the_family(&mut request, inventory).resolved_model;
     let usable = |candidate: &String| {
         !same_smart_generation(candidate, main_model)
             && !runtime::is_deep_tier_model(candidate, deep_tier_models)
@@ -1323,9 +1432,15 @@ fn same_smart_model(left: &str, right: &str) -> bool {
 /// One settings snapshot for the implementation gate. Only a person-authored
 /// deep-tier list grants an exception; the shipped default is not a pin.
 pub(crate) fn live_agent_model_policy() -> (SmartPolicy, Vec<String>) {
-    read_smart_runtime_settings().map_or((SmartPolicy::Classic, Vec::new()), |settings| {
-        (settings.policy, if settings.deep_tier_models_configured { settings.deep_tier_models } else { Vec::new() })
-    })
+    agent_model_policy(read_smart_runtime_settings())
+}
+
+/// [`live_agent_model_policy`] of settings already read: the policy, and
+/// the deep-tier models the person's own documents list. A list a
+/// repository committed is the pool its sessions plan and verify with, and
+/// not a model the person chose for a helper.
+pub(super) fn agent_model_policy(settings: Option<SmartRuntimeSettings>) -> (SmartPolicy, Vec<String>) {
+    settings.map_or((SmartPolicy::Classic, Vec::new()), |settings| (settings.policy, settings.persons_deep_tier_models))
 }
 
 /// Parse `smart.providerAllowlist` — a JSON array of provider names. Blank

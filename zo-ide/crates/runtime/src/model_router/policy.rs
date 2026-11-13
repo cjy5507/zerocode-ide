@@ -736,6 +736,11 @@ pub struct RouteRequest {
     pub mode: RouterMode,
     pub allow_fallback: bool,
     pub override_rule: Option<RoleOverride>,
+    /// `override_rule` was said by a repository's committed settings and
+    /// not by the person. A pin or a selector of the person's own may step
+    /// outside `smart.providerAllowlist` — it is their word against their
+    /// own list. A repository's routes only inside it.
+    pub repository_override: bool,
     pub context: RoutePolicyContext,
 }
 
@@ -750,6 +755,7 @@ impl RouteRequest {
             mode: RouterMode::Auto,
             allow_fallback: true,
             override_rule: None,
+            repository_override: false,
             context: RoutePolicyContext::default(),
         }
     }
@@ -764,6 +770,7 @@ impl RouteRequest {
             mode: RouterMode::Auto,
             allow_fallback: true,
             override_rule: None,
+            repository_override: false,
             context: RoutePolicyContext::default(),
         }
     }
@@ -849,7 +856,7 @@ pub fn route_model(request: &RouteRequest, inventory: &ModelInventory) -> RouteD
         return main_decision(request, inventory, RouteDecisionSource::MainOnly, "router mainOnly mode");
     }
 
-    match request.override_rule.as_ref() {
+    match standing_override(request, inventory) {
         Some(RoleOverride::Pin(model)) if !model.is_empty() => {
             if model_allowed(model, request, inventory) {
                 // A pin may point outside `smart.providerAllowlist` — the
@@ -874,7 +881,7 @@ pub fn route_model(request: &RouteRequest, inventory: &ModelInventory) -> RouteD
         }
         Some(RoleOverride::Family(selector)) => {
             if let Some(model) = select_model(selector, inventory, |model| {
-                route_candidate_allowed(model, request, inventory)
+                route_candidate_allowed(model, request, inventory) && inside_a_repositorys_bound(model, request)
             }) {
                 return decision(
                     request,
@@ -1036,11 +1043,14 @@ fn ranked_route_candidates<'a>(
     request: &RouteRequest,
     inventory: &'a ModelInventory,
 ) -> Vec<RankedCandidate<'a>> {
-    let mut ranked = match request.override_rule.as_ref() {
+    let mut ranked = match standing_override(request, inventory) {
         Some(RoleOverride::Pin(_)) => Vec::new(),
         Some(RoleOverride::Family(selector)) => ranked_selector_candidates(selector, inventory)
             .into_iter()
-            .filter(|candidate| route_candidate_allowed(candidate.model, request, inventory))
+            .filter(|candidate| {
+                route_candidate_allowed(candidate.model, request, inventory)
+                    && inside_a_repositorys_bound(candidate.model, request)
+            })
             .collect(),
         Some(RoleOverride::Auto) | None => {
             if request.mode == RouterMode::Auto {
@@ -1658,6 +1668,28 @@ fn model_allowed(model: &str, request: &RouteRequest, inventory: &ModelInventory
     model == request.main_model || inventory.find(model).is_some()
 }
 
+/// The override `request` is routed by: the one its settings name, unless a
+/// repository's document pinned a model at a provider outside the person's
+/// `smart.providerAllowlist` ([`RouteRequest::repository_override`]). Such a
+/// pin is not applied, and the request routes as if nothing were pinned.
+fn standing_override<'a>(request: &'a RouteRequest, inventory: &ModelInventory) -> Option<&'a RoleOverride> {
+    match request.override_rule.as_ref() {
+        Some(RoleOverride::Pin(model))
+            if request.repository_override && pin_escapes_provider_allowlist(model, request, inventory) =>
+        {
+            None
+        }
+        named => named,
+    }
+}
+
+/// Whether a selector may pick `model` for `request`: any model for the
+/// person's own selector, and one at a provider inside their
+/// `smart.providerAllowlist` for a repository's.
+fn inside_a_repositorys_bound(model: &ModelDescriptor, request: &RouteRequest) -> bool {
+    !request.repository_override || request.context.provider_allowed(model.provider())
+}
+
 /// `true` when a pinned model resolves to a provider that
 /// `smart.providerAllowlist` would exclude from the auto pool.
 fn pin_escapes_provider_allowlist(
@@ -1847,6 +1879,13 @@ fn audit_decision(request: &RouteRequest, selected_model: &str, inventory: &Mode
     }
     if request.context.feedback.enabled {
         guardrails.push("feedback-informed scoring is bounded".to_string());
+    }
+    if request.override_rule.is_some() && standing_override(request, inventory).is_none() {
+        guardrails.push(
+            "the repository's pin is at a provider outside your smart.providerAllowlist and was not applied: \
+             pin the model in your own settings to use it"
+                .to_string(),
+        );
     }
     RouteAudit {
         reference_provider,

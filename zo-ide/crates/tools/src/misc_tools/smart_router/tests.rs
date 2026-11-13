@@ -205,6 +205,186 @@
         let _ = fs::remove_dir_all(&repository);
     }
 
+    /// The router's settings in a repository whose committed
+    /// `.zo/settings.json` is `repository`, for a person whose own settings
+    /// are `persons` — read, and handed to `then`, under that person's home.
+    fn in_a_repository<T>(
+        label: &str,
+        persons: &Value,
+        repository: &Value,
+        then: impl FnOnce(super::settings::SmartRuntimeSettings) -> T,
+    ) -> T {
+        let config_home = temp_config_home(label);
+        let project = temp_config_home(&format!("{label}-cwd"));
+        fs::create_dir_all(project.join(".zo")).expect("project dir");
+        write_settings(&config_home, persons);
+        fs::write(project.join(".zo").join("settings.json"), repository.to_string()).expect("project settings");
+        let out = with_config_home(&config_home, || {
+            then(super::settings::read_smart_runtime_settings_for(&project).expect("settings"))
+        });
+        let _ = fs::remove_dir_all(&config_home);
+        let _ = fs::remove_dir_all(&project);
+        out
+    }
+
+    fn pinned(role: &str, model: &str) -> Value {
+        json!({ "modelRouter": { "roles": { role: { "mode": "pinned", "model": model } } } })
+    }
+
+    /// A pin, and a `deepTierModels` list, are the person's selection only
+    /// where the person's own documents say them: what a repository's
+    /// committed settings added or changed is told apart, and what both say
+    /// alike is the person's.
+    #[test]
+    fn a_repositorys_pins_are_told_from_the_persons_own() {
+        let explore = runtime::SubagentProfileId::parse("Explore").expect("a built-in profile").key().to_string();
+        let persons = json!({
+            "smart": { "deepTierModels": ["claude-opus-5"] },
+            "modelRouter": {
+                "roles": {
+                    "verifier": { "mode": "pinned", "model": "Verifier/Model-X" },
+                    "writing": { "mode": "pinned", "model": "Role/Model-Y" },
+                },
+                "subagents": { "Explore": { "mode": "pinned", "model": "Subagent/Model-Z" } },
+            },
+        });
+        let repository = json!({
+            "smart": { "deepTierModels": ["gpt-5.6-sol"] },
+            "modelRouter": {
+                "roles": {
+                    // The same as the person's, a change of the person's, and one of its own.
+                    "verifier": { "mode": "pinned", "model": "Verifier/Model-X" },
+                    "writing": { "mode": "pinned", "model": "Verifier/Model-X" },
+                    "coding": { "mode": "pinned", "model": "Role/Model-Y" },
+                },
+                "subagents": { "Explore": { "mode": "pinned", "model": "Role/Model-Y" } },
+            },
+        });
+        let keys = |keys: &[&str]| keys.iter().map(ToString::to_string).collect::<std::collections::BTreeSet<_>>();
+        in_a_repository("pins-told-apart", &persons, &repository, |settings| {
+            assert_eq!(settings.repository_roles, keys(&["coding", "writing"]));
+            assert_eq!(settings.repository_subagents, keys(&[explore.as_str()]));
+            assert!(settings.roles.contains_key("verifier"), "said alike: the person's, and routed by");
+            assert_eq!(settings.persons_deep_tier_models, [api::resolve_catalog_alias("claude-opus-5")]);
+            assert_eq!(settings.deep_tier_models, [api::resolve_catalog_alias("gpt-5.6-sol")], "the pool is the merged list");
+        });
+        // Nothing of the repository's: nothing is its, and a person who lists no deep models chose none.
+        in_a_repository("pins-all-the-persons", &pinned("coding", "Role/Model-Y"), &json!({}), |settings| {
+            assert!(settings.repository_roles.is_empty() && settings.repository_subagents.is_empty());
+            assert!(settings.persons_deep_tier_models.is_empty());
+        });
+        in_a_repository("deep-tier-the-repositorys", &json!({}), &repository, |settings| {
+            assert!(settings.persons_deep_tier_models.is_empty(), "a repository's list is not the person's choice");
+            assert!(settings.deep_tier_models_configured);
+            // The implementation gate's exception is for a model the person chose.
+            assert!(super::settings::agent_model_policy(Some(settings)).1.is_empty());
+        });
+        in_a_repository("deep-tier-the-persons", &persons, &repository, |settings| {
+            let chosen = super::settings::agent_model_policy(Some(settings)).1;
+            assert_eq!(chosen, [api::resolve_catalog_alias("claude-opus-5")]);
+        });
+    }
+
+    /// A helper that can edit files leaves the session's provider family on
+    /// the person's own pin and no other. A repository's committed pin was
+    /// read as that selection (until v1.1.150), so any repository a person
+    /// opened could put its implementers on another provider. It still
+    /// routes a read-only helper, and an implementer inside the family.
+    #[test]
+    fn a_repositorys_pin_does_not_take_a_helper_that_edits_files_to_another_provider_family() {
+        const MAIN: &str = "claude-sonnet-5";
+        const OTHER: &str = "gpt-5.6-terra";
+        const SAME: &str = "claude-haiku-4-5-20251001";
+        let inventory = inventory_of(MAIN, &[MAIN, OTHER, SAME]);
+        let routed = |label: &str, persons: &Value, repository: &Value, edits_files: bool| {
+            in_a_repository(label, persons, repository, |settings| {
+                let context = runtime::RoutePolicyContext {
+                    provider_allowlist: settings.provider_allowlist.clone(),
+                    ..runtime::RoutePolicyContext::default()
+                };
+                let mut request = runtime::RouteRequest::new(RouteRole::Coding, MAIN).with_context(context);
+                super::apply::route_spawn(&mut request, &settings, &inventory, edits_files)
+            })
+        };
+        let nothing = json!({});
+
+        let implementer = routed("family-repository-edits", &nothing, &pinned("coding", OTHER), true);
+        assert_ne!(implementer.resolved_model, OTHER);
+        assert!(
+            implementer.audit.guardrails.iter().any(|line| line.contains("provider family") && line.contains("not applied")),
+            "{:?}",
+            implementer.audit.guardrails
+        );
+        // Read-only work goes where the repository pinned it, as auto routing may.
+        let reader = routed("family-repository-reads", &nothing, &pinned("coding", OTHER), false);
+        assert_eq!((reader.resolved_model.as_str(), reader.source), (OTHER, runtime::RouteDecisionSource::Pinned));
+        // Inside the family the repository's pin routes the implementer too.
+        assert_eq!(routed("family-repository-same", &nothing, &pinned("coding", SAME), true).resolved_model, SAME);
+        // The person's own pin is their selection, alone or said by both.
+        assert_eq!(routed("family-persons", &pinned("coding", OTHER), &nothing, true).resolved_model, OTHER);
+        assert_eq!(routed("family-both", &pinned("coding", OTHER), &pinned("coding", OTHER), true).resolved_model, OTHER);
+        // And a repository's pin does not step outside the person's allowlist, read-only or not.
+        let listed = json!({ "smart": { "providerAllowlist": ["anthropic"] } });
+        assert_ne!(routed("family-allowlist", &listed, &pinned("coding", OTHER), false).resolved_model, OTHER);
+        // The same for a pin on a kind of helper, which is looked up before the role's.
+        let on_explore = json!({ "modelRouter": { "subagents": { "Explore": { "mode": "pinned", "model": OTHER } } } });
+        let explore = |label: &str, persons: &Value, repository: &Value| {
+            in_a_repository(label, persons, repository, |settings| {
+                let context = runtime::RoutePolicyContext {
+                    provider_allowlist: settings.provider_allowlist.clone(),
+                    ..runtime::RoutePolicyContext::default()
+                };
+                let profile = runtime::SubagentProfileId::parse("Explore").expect("a built-in profile");
+                let mut request =
+                    runtime::RouteRequest::for_target(runtime::RoutingTarget::Subagent(profile), RouteRole::Research, MAIN)
+                        .with_context(context);
+                super::apply::route_spawn(&mut request, &settings, &inventory, false).resolved_model
+            })
+        };
+        assert_ne!(explore("family-explore-listed", &listed, &on_explore), OTHER);
+        assert_eq!(explore("family-explore-open", &nothing, &on_explore), OTHER);
+        let mut listed_and_pins = listed.clone();
+        listed_and_pins["modelRouter"] = on_explore["modelRouter"].clone();
+        assert_eq!(explore("family-explore-persons", &listed_and_pins, &nothing), OTHER, "the person's own pin");
+    }
+
+    /// The verify leg and the Architect implementer are pinned by a role too,
+    /// each by a shortcut past the router. A repository's pin takes neither
+    /// where the person did not: the verifier across providers once they
+    /// switched its crossing off, either outside their allowlist, the
+    /// implementer out of the session's provider family. The person's own
+    /// pin does all three, as before.
+    #[test]
+    fn a_repositorys_pin_does_not_take_the_verify_leg_or_the_implementer_where_the_person_did_not() {
+        // A top-band main, so that the turn has an implementer below it.
+        const MAIN: &str = "claude-fable-5-1";
+        const OTHER: &str = "gpt-5.6-terra";
+        const SAME: &str = "claude-sonnet-5";
+        let inventory = top_tier_probe_inventory(MAIN);
+        let turn = |label: &str, persons: &Value, repository: &Value| {
+            in_a_repository(label, persons, repository, |settings| {
+                super::settings::smart_turn_routing_with(Some(settings), MAIN, &inventory, RouteTaskComplexity::Medium)
+            })
+        };
+        let nothing = json!({});
+        let stays_in = json!({ "smart": { "verifyCrossProvider": false } });
+        let listed = json!({ "smart": { "providerAllowlist": ["anthropic"] } });
+        let mut stays_in_and_pins = stays_in.clone();
+        stays_in_and_pins["modelRouter"] = pinned("verifier", OTHER)["modelRouter"].clone();
+
+        let verifier = |label: &str, persons: &Value, repository: &Value| turn(label, persons, repository).deep_verify_model;
+        assert_eq!(verifier("verify-open", &nothing, &pinned("verifier", OTHER)).as_deref(), Some(OTHER), "crossing is on by default");
+        assert_ne!(verifier("verify-kept-in", &stays_in, &pinned("verifier", OTHER)).as_deref(), Some(OTHER));
+        assert_ne!(verifier("verify-listed", &listed, &pinned("verifier", OTHER)).as_deref(), Some(OTHER));
+        assert_eq!(verifier("verify-persons", &stays_in_and_pins, &nothing).as_deref(), Some(OTHER), "the person's own pin");
+        assert_eq!(verifier("verify-same", &stays_in, &pinned("verifier", SAME)).as_deref(), Some(SAME));
+
+        let implementer = |label: &str, persons: &Value, repository: &Value| turn(label, persons, repository).exec_impl_model;
+        assert_ne!(implementer("impl-repository", &nothing, &pinned("coding", OTHER)).as_deref(), Some(OTHER));
+        assert_eq!(implementer("impl-persons", &pinned("coding", OTHER), &nothing).as_deref(), Some(OTHER), "the person's own pin");
+        assert_eq!(implementer("impl-same", &nothing, &pinned("coding", SAME)).as_deref(), Some(SAME));
+    }
+
     #[test]
     fn builtin_profile_keys_use_the_profile_role_mapping() {
         for profile in runtime::BuiltinSubagentProfile::all() {

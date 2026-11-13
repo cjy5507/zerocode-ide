@@ -151,7 +151,9 @@ pub(crate) use self::rate_limit::{
 };
 use self::spawn::spawn_agent_job;
 pub(crate) use self::spawn::AgentJob;
-pub(crate) use self::subagent_profile::{resolve_subagent_type, implementation_task, supports_file_edits};
+pub(crate) use self::subagent_profile::{
+    implementation_task, resolve_subagent_type, same_provider_family, supports_file_edits,
+};
 use self::subagent_profile::{
     agent_role_prompt, build_agent_system_prompt, smart_routed_model_selection, AgentModelSelection,
 };

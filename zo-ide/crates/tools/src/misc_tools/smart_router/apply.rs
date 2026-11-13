@@ -879,6 +879,28 @@ fn smart_routing_identity(
     }
 }
 
+/// A spawn's route: `request` under the override the settings name for it.
+///
+/// A helper that can edit files (`edits_files`) leaves the session's
+/// provider family on the person's own pin and no other
+/// (`settings::route_within_the_family`): a repository's committed pin that
+/// would take it out is not applied. A read-only helper goes where the route
+/// says, inside the person's allowlist where a repository named it
+/// (`RouteRequest::repository_override`).
+pub(super) fn route_spawn(
+    request: &mut RouteRequest,
+    settings: &SmartRuntimeSettings,
+    inventory: &ModelInventory,
+    edits_files: bool,
+) -> RouteDecision {
+    apply_configured_route_override(request, settings);
+    if edits_files {
+        super::settings::route_within_the_family(request, inventory)
+    } else {
+        route_model(request, inventory)
+    }
+}
+
 fn apply_configured_route_override(
     request: &mut RouteRequest,
     settings: &SmartRuntimeSettings,
@@ -886,11 +908,14 @@ fn apply_configured_route_override(
     if let RoutingTarget::Subagent(profile) = &request.target {
         if let Some(override_rule) = settings.subagents.get(profile.key()) {
             request.override_rule = Some(override_rule.clone());
+            request.repository_override = settings.repository_subagents.contains(profile.key());
         }
     }
     if request.override_rule.is_none() {
-        if let Some(override_rule) = settings.roles.get(role_key(request.effective_role())) {
+        let role = role_key(request.effective_role());
+        if let Some(override_rule) = settings.roles.get(role) {
             request.override_rule = Some(override_rule.clone());
+            request.repository_override = settings.repository_roles.contains(role);
         }
     }
 }
@@ -1026,8 +1051,12 @@ fn smart_model_for_fields(
     } else if crate::misc_tools::agent_tools::implementation_task(implementation_kind, description, prompt) {
         request.context.tool_need = runtime::RouteToolNeed::Write;
     }
-    apply_configured_route_override(&mut request, settings);
-    let decision = route_model(&request, &context.inventory);
+    let decision = route_spawn(
+        &mut request,
+        settings,
+        &context.inventory,
+        crate::misc_tools::agent_tools::supports_file_edits(implementation_kind),
+    );
     let decision = annotate_learned_shadow_delta(
         decision,
         &request,
