@@ -1107,11 +1107,15 @@ impl TurnTally {
     }
 }
 
-/// The rule a work turn ends on: `── 57s · 4 tool calls · +9 -1 ──…` — how
-/// long it took, how many calls it made and how many lines they changed,
+/// The rule a work turn ends on: `── 57s · 4 steps · +9 -1 ──…` — how
+/// long the whole turn took, how many calls it made (steps, as a fold counts
+/// them) and how many lines they changed,
 /// each part only when there is one, then the turn's agents, then `actions`
 /// (the conversation actions, when they ride in the divider). The marks look
-/// says it as a line, not a rule: `✓ Done in 57s · 4 tool calls · +9 -1`.
+/// says it as a line, not a rule: `✓ Done in 57s · 4 steps · +9 -1`. The fold's
+/// head (`Worked for 39s · 5 steps`) times from its first step to the moment
+/// it is said, the turn's line from the request to the end: two spans, one
+/// word for the calls both count.
 fn turn_separator(
     width: usize,
     elapsed_seconds: u64,
@@ -1122,7 +1126,7 @@ fn turn_separator(
 ) -> Line {
     let mut parts = vec![super::shimmer::fmt_elapsed_compact(elapsed_seconds)];
     if tally.calls > 0 {
-        parts.push(super::strings::tool_calls(tally.calls));
+        parts.push(super::turns::steps_word(tally.calls));
     }
     if tally.added + tally.removed > 0 {
         parts.push(format!("+{} -{}", tally.added, tally.removed));
@@ -1208,7 +1212,7 @@ fn status_detail_for(kind: &ToolKind) -> String {
             .map_or_else(|| "exploring".to_string(), explored_detail),
         ToolKind::Plan(_) => "updating plan".to_string(),
         ToolKind::WebSearch { detail } if detail.is_empty() => "searching the web".to_string(),
-        ToolKind::WebSearch { detail } => format!("searching the web for {detail}"),
+        ToolKind::WebSearch { detail } => format!("searching the web for {}", super::strings::quoted_unless_address(detail)),
         ToolKind::Spawn { label, .. } => format!("spawning {label}"),
         ToolKind::AgentResult { label, .. } => format!("agent result from {label}"),
         ToolKind::Call { name, detail } if detail.is_empty() => name.clone(),
@@ -1326,11 +1330,11 @@ fn explored_detail(item: &Explored) -> String {
     match item {
         Explored::Read { name } => format!("reading {name}"),
         Explored::List { path } => format!("listing {path}"),
-        Explored::Search { query, path: None } => format!("searching {query}"),
+        Explored::Search { query, path: None } => format!("searching {}", super::strings::quoted(query)),
         Explored::Search {
             query,
             path: Some(path),
-        } => format!("searching {query} in {path}"),
+        } => format!("searching {} in {path}", super::strings::quoted(query)),
     }
 }
 
@@ -9548,7 +9552,7 @@ mod tests {
         ui.redraw_end_row(1);
         let said = history(&ui);
         let last = said.last().expect("the row was said");
-        assert!(last.contains("9s") && last.contains("7 tool calls") && last.contains("/rewind"), "{said:#?}");
+        assert!(last.contains("9s") && last.contains("7 steps") && last.contains("/rewind"), "{said:#?}");
 
         // A turn ending where a kept one did has taken its place, and a turn
         // ending before it means the later one was rewound.
@@ -10964,7 +10968,7 @@ mod tests {
         use super::{turn_separator, TurnTally};
         let tally = TurnTally { calls: 3, added: 1, removed: 1 };
         let line = turn_separator(80, 5, 0, &tally, &["/find", "/diff", "/rewind"], &[]).plain();
-        assert!(line.starts_with("── 5s · 3 tool calls · +1 -1 · /find · /diff · /rewind ─"), "{line}");
+        assert!(line.starts_with("── 5s · 3 steps · +1 -1 · /find · /diff · /rewind ─"), "{line}");
     }
 
     /// The marks look ends a work turn on a line, not a rule.
@@ -10977,7 +10981,7 @@ mod tests {
         }
         super::super::style::init(&crate::preferences::Preferences::default());
         let tally = TurnTally { calls: 3, added: 1, removed: 1 };
-        assert_eq!(turn_separator(80, 5, 0, &tally, &[], &[]).plain(), "✓ Done in 5s · 3 tool calls · +1 -1");
+        assert_eq!(turn_separator(80, 5, 0, &tally, &[], &[]).plain(), "✓ Done in 5s · 3 steps · +1 -1");
         // The checks that passed ride on the left, the conversation actions on
         // the right, and the row is no wider than the reading width.
         let actions = ["/find", "/diff", "/rewind"];
@@ -10986,14 +10990,52 @@ mod tests {
         assert_eq!(row.width(), super::super::style::DEFAULT_PROSE_WIDTH);
         let plain = row.plain();
         assert!(
-            plain.starts_with("✓ Done in 5s · 3 tool calls · +1 -1 · verified by cargo test parser  "),
+            plain.starts_with("✓ Done in 5s · 3 steps · +1 -1 · verified by cargo test parser  "),
             "{plain}"
         );
         assert!(plain.ends_with("  /find · /diff · /rewind"), "{plain}");
         // A row too short for both keeps how the turn went.
         assert_eq!(
             turn_separator(44, 5, 0, &tally, &actions, &[]).plain(),
-            "✓ Done in 5s · 3 tool calls · +1 -1"
+            "✓ Done in 5s · 3 steps · +1 -1"
+        );
+    }
+
+    /// The screen of 1.1.148 said `Worked for 39s · 5 steps` and, under the
+    /// answer, `Done in 1m 14s · 5 tool calls`: two words for one count. The
+    /// fold's clock runs from its first step to the moment it is said and the
+    /// turn's from the request to its end, so the seconds differ and stay;
+    /// the calls both count are steps in both.
+    #[test]
+    fn the_turns_line_counts_steps_as_the_fold_does() {
+        use super::{turn_separator, TurnTally};
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !super::super::style::in_fresh_run(&format!("{module}::the_turns_line_counts_steps_as_the_fold_does")) {
+            return;
+        }
+        super::super::style::init(&crate::preferences::Preferences::default());
+        let tally = TurnTally { calls: 5, added: 0, removed: 0 };
+        assert_eq!(turn_separator(80, 74, 0, &tally, &[], &[]).plain(), "✓ Done in 1m 14s · 5 steps");
+        let one = TurnTally { calls: 1, added: 0, removed: 0 };
+        assert_eq!(turn_separator(80, 3, 0, &one, &[], &[]).plain(), "✓ Done in 3s · 1 step");
+    }
+
+    /// What the working row says a search is doing quotes the search's
+    /// words, as the call's own row does.
+    #[test]
+    fn a_searchs_words_are_quoted_on_the_working_row() {
+        use super::{explored_detail, status_detail_for, Explored, ToolKind};
+        let search = |query: &str, path: Option<&str>| Explored::Search { query: query.to_string(), path: path.map(str::to_string) };
+        assert_eq!(explored_detail(&search("끝났다고 하기 전에", None)), "searching \"끝났다고 하기 전에\"");
+        assert_eq!(explored_detail(&search("TODO", Some("src"))), "searching \"TODO\" in src");
+        assert_eq!(
+            status_detail_for(&ToolKind::WebSearch { detail: "rust async".to_string() }),
+            "searching the web for \"rust async\""
+        );
+        assert_eq!(
+            status_detail_for(&ToolKind::WebSearch { detail: "https://example.com/a".to_string() }),
+            "searching the web for https://example.com/a",
+            "a fetch's address is a name, not words"
         );
     }
 
@@ -11599,7 +11641,7 @@ mod tests {
     }
 
     /// The turn ends on what it did, not only on how long it took (t-48216):
-    /// `── 57s · 3 tool calls · +2 -2 ──…`, the rule running to the edge.
+    /// `── 57s · 3 steps · +2 -2 ──…`, the rule running to the edge.
     #[test]
     fn the_turn_summary_counts_the_calls_and_the_changed_lines() {
         let mut ui = test_ui();
@@ -11627,7 +11669,7 @@ mod tests {
             is_error: false,
             body: format_tool_result_from_raw("bash", r#"{"stdout": "ok", "stderr": "", "exit_code": 0}"#, false),
         });
-        let label = "── 57s · 3 tool calls · +2 -2 ";
+        let label = "── 57s · 3 steps · +2 -2 ";
         let rule = "─".repeat(ui.width() - label.chars().count());
         assert_eq!(ui.turn_summary(57, &[]).plain(), format!("{label}{rule}"));
     }

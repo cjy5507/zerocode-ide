@@ -485,10 +485,25 @@ pub fn risk(level: &str) -> String {
     format!("{level} risk")
 }
 
-/// How many tool calls a turn made, on the line it ends on.
+/// A search's words — a pattern the model wrote, a question it asked the
+/// web — as a call's argument carries them: in quotation marks, so the row
+/// does not read as zo saying them. A path and a command are not quoted: they
+/// are names, and the row's own words around them already say which.
 #[must_use]
-pub fn tool_calls(count: usize) -> String {
-    if count == 1 { "1 tool call".to_string() } else { format!("{count} tool calls") }
+pub fn quoted(text: &str) -> String {
+    format!("\"{text}\"")
+}
+
+/// [`quoted`] for what a web call carries: the web tools share one preview
+/// (`ToolPreview::Search`), and a fetch puts an address where a search puts
+/// its question. An address is a name, like a path: it stays as it is.
+#[must_use]
+pub fn quoted_unless_address(text: &str) -> String {
+    if text.starts_with("http://") || text.starts_with("https://") {
+        text.to_string()
+    } else {
+        quoted(text)
+    }
 }
 
 /// The footer's mark before a permission that lets everything run.

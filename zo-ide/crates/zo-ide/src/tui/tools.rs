@@ -560,7 +560,7 @@ impl ToolGroup {
     /// ([`super::turns`]): what each did, to what, and how it ended.
     #[must_use]
     pub(super) fn steps(&self) -> Vec<super::turns::Step> {
-        use super::strings::{TOOL_CREATE, TOOL_DELETE, TOOL_EDIT, TOOL_LIST, TOOL_READ, TOOL_RUN, TOOL_SEARCH, TOOL_SPAWN};
+        use super::strings::{TOOL_CREATE, TOOL_DELETE, TOOL_EDIT, TOOL_RUN, TOOL_SEARCH, TOOL_SPAWN};
         use super::turns::{Step, StepKind};
         let mut out = Vec::new();
         for call in &self.calls {
@@ -586,15 +586,15 @@ impl ToolGroup {
                 }
                 ToolKind::Explore(items) => {
                     for item in items {
-                        out.push(match item {
-                            Explored::Read { name } => step(StepKind::Read, TOOL_READ, shown_path(name)),
-                            Explored::List { path } => step(StepKind::List, TOOL_LIST, shown_path(path)),
-                            Explored::Search { query, path } => step(
-                                StepKind::Search,
-                                TOOL_SEARCH,
-                                path.as_ref().map_or_else(|| query.clone(), |path| format!("{query} in {}", shown_path(path))),
-                            ),
-                        });
+                        // The words the running row says, so the call reads the
+                        // same while it runs and after it ends.
+                        let (verb, target) = explored_target(item);
+                        let kind = match item {
+                            Explored::Read { .. } => StepKind::Read,
+                            Explored::List { .. } => StepKind::List,
+                            Explored::Search { .. } => StepKind::Search,
+                        };
+                        out.push(step(kind, verb, plain_text(&target)));
                     }
                 }
                 ToolKind::Edit { path } => {
@@ -609,7 +609,9 @@ impl ToolGroup {
                     out.push(edit);
                 }
                 ToolKind::Plan(_) => out.push(step(StepKind::Other, super::strings::STEP_PLAN, String::new())),
-                ToolKind::WebSearch { detail } => out.push(step(StepKind::Search, TOOL_SEARCH, detail.clone())),
+                ToolKind::WebSearch { detail } => {
+                    out.push(step(StepKind::Search, TOOL_SEARCH, plain_text(&web_search_target(detail))));
+                }
                 ToolKind::Spawn { label, .. } => out.push(step(StepKind::Other, TOOL_SPAWN, label.clone())),
                 ToolKind::AgentResult { label, .. } => {
                     out.push(step(StepKind::Other, super::strings::STEP_AGENT, label.clone()));
@@ -1084,12 +1086,7 @@ impl ToolGroup {
         width: usize,
         elapsed: Duration,
     ) -> Vec<Line> {
-        let mut target = Vec::new();
-        if !detail.is_empty() {
-            target.push(Span::raw(detail.to_string()));
-            target.push(Span::dim(" on "));
-        }
-        target.push(Span::dim(super::strings::THE_WEB));
+        let target = web_search_target(detail);
         let result = call.done.as_ref().filter(|done| !done.ok).map(failure_result).unwrap_or_default();
         self.uncut_row(call, super::strings::TOOL_SEARCH, target, result, width, elapsed)
     }
@@ -1309,13 +1306,13 @@ fn tool_row(glyph: Span, verb: &str, target: Vec<Span>, result: Vec<Span>, width
     let wanted: usize = target.iter().map(Span::width).sum();
     let short = wanted.saturating_sub(target_budget(verb, &result, column).saturating_sub(closing));
     let width = width.min(column + short);
-    let opened = if marks { format!("{verb}(") } else { format!("{verb} ") };
+    let opened = call_opening(verb);
     let mut spans = vec![glyph, Span::raw(" "), Span::bold(opened)];
     let result_width: usize = result.iter().map(Span::width).sum();
     let target = Line::new(target).truncated(target_budget(verb, &result, width).saturating_sub(closing));
     spans.extend(target.spans);
     if marks {
-        spans.push(Span::bold(")"));
+        spans.push(Span::bold(call_closing()));
     }
     let used: usize = spans.iter().map(Span::width).sum();
     if result_width > 0 {
@@ -1460,12 +1457,49 @@ fn closed_json(printed: &str) -> String {
     closed
 }
 
+/// `"rust async" on the web` — a web search's argument: the question the
+/// model asked, quoted, and the web where a file search names its path.
+fn web_search_target(detail: &str) -> Vec<Span> {
+    let mut target = Vec::new();
+    if !detail.is_empty() {
+        target.push(Span::raw(super::strings::quoted_unless_address(detail)));
+        target.push(Span::dim(" on "));
+    }
+    target.push(Span::dim(super::strings::THE_WEB));
+    target
+}
+
+/// What a row's target spans say, without their styles.
+fn plain_text(spans: &[Span]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
+}
+
+/// How a call's name and argument stand together on a row: the marks look
+/// writes a call (`Search(…)`), the codex look a phrase (`Search …`). The
+/// running row ([`tool_row`]) and the finished step the `turns` view shows
+/// ([`super::turns`]) both take it from here, so one call reads the same
+/// while it runs and after.
+#[must_use]
+pub(super) fn call_opening(verb: &str) -> String {
+    if super::style::current().style == super::style::TuiStyle::Marks {
+        format!("{verb}(")
+    } else {
+        format!("{verb} ")
+    }
+}
+
+/// What closes a call written by [`call_opening`].
+#[must_use]
+pub(super) fn call_closing() -> &'static str {
+    if super::style::current().style == super::style::TuiStyle::Marks { ")" } else { "" }
+}
+
 fn explored_target(item: &Explored) -> (&'static str, Vec<Span>) {
     match item {
         Explored::Read { name } => (super::strings::TOOL_READ, vec![path_span(shown_path(name), name)]),
         Explored::List { path } => (super::strings::TOOL_LIST, vec![Span::raw(shown_path(path))]),
         Explored::Search { query, path } => {
-            let mut target = vec![Span::raw(query.clone())];
+            let mut target = vec![Span::raw(super::strings::quoted(query))];
             if let Some(path) = path {
                 target.push(Span::dim(" in "));
                 target.push(path_span(shown_path(path), path));
@@ -2537,13 +2571,13 @@ mod tests {
 
         assert_eq!(
             plain(&group.lines(60, Duration::ZERO)),
-            vec!["⠋ Search rust async on the web".to_string()]
+            vec!["⠋ Search \"rust async\" on the web".to_string()]
         );
 
         let body = format_tool_result_from_raw("WebSearch", "raw search result", false);
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
         let lines = group.lines(60, Duration::ZERO);
-        assert_eq!(plain(&lines), vec!["✓ Search rust async on the web".to_string()]);
+        assert_eq!(plain(&lines), vec!["✓ Search \"rust async\" on the web".to_string()]);
         assert_eq!(lines[0].spans[0].style.fg, Some(super::palette::TOOL_OK));
     }
 
@@ -3677,7 +3711,7 @@ mod row_tests {
             plain(&group.lines(WIDTH, Duration::ZERO)),
             vec![
                 edge("✓ Read src/app.py", "12 lines", WIDTH),
-                edge("✓ Search do_(GET|POST) in src", "1 match", WIDTH),
+                edge("✓ Search \"do_(GET|POST)\" in src", "1 match", WIDTH),
             ]
         );
     }

@@ -249,7 +249,7 @@ impl TurnFold {
                 }
                 Shown::Step(step) => {
                     let lead = if hangs { glyphs.result_rest } else { glyphs.result_first };
-                    let mut spans = vec![Span::dim(lead), Span::dim(format!("{} {}", step.verb, step.target))];
+                    let mut spans = vec![Span::dim(lead), Span::dim(call_words(step))];
                     spans.extend(step_tail(step, true));
                     rows.push(Line::new(spans).truncated(width));
                     hangs = true;
@@ -260,7 +260,19 @@ impl TurnFold {
     }
 }
 
-/// `1 step`, `7 steps` — a fold's count, in its cell and on the working row.
+/// A finished step as its row says it: the words the running row used
+/// ([`super::tools::call_opening`]) — `Search("pattern" in src)` in the marks
+/// look — so a call is the same text while it runs and after it ends. A step
+/// with no target (a plan update, an MCP tool's name) is its verb alone.
+fn call_words(step: &Step) -> String {
+    if step.target.is_empty() {
+        return step.verb.clone();
+    }
+    format!("{}{}{}", super::tools::call_opening(&step.verb), step.target, super::tools::call_closing())
+}
+
+/// `1 step`, `7 steps` — a fold's count, in its cell and on the working row,
+/// and on the line a turn ends on: one word for one thing counted.
 #[must_use]
 pub fn steps_word(count: usize) -> String {
     counted(count, "step", "steps")

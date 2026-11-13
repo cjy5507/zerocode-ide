@@ -283,15 +283,15 @@ fn elapsed_len(text: &str) -> usize {
 
 #[test]
 fn the_turn_rule_mask_hides_its_time_and_the_times_width() {
-    let three = "\u{1b}[2m── 3s · 1 tool call ──────".as_bytes();
-    let twelve = "\u{1b}[2m── 12s · 1 tool call ─────".as_bytes();
-    let minute = "\u{1b}[2m── 1m 05s · 1 tool call ──".as_bytes();
-    let masked = "\u{1b}[2m── {ELAPSED} · 1 tool call ─".as_bytes();
+    let three = "\u{1b}[2m── 3s · 1 step ──────".as_bytes();
+    let twelve = "\u{1b}[2m── 12s · 1 step ─────".as_bytes();
+    let minute = "\u{1b}[2m── 1m 05s · 1 step ──".as_bytes();
+    let masked = "\u{1b}[2m── {ELAPSED} · 1 step ─".as_bytes();
     assert_eq!(mask_turn_elapsed(three), masked);
     assert_eq!(mask_turn_elapsed(twelve), masked);
     assert_eq!(mask_turn_elapsed(minute), masked);
     // The tally is still evidence.
-    let two = "\u{1b}[2m── 3s · 2 tool calls ─────".as_bytes();
+    let two = "\u{1b}[2m── 3s · 2 steps ─────".as_bytes();
     assert_ne!(mask_turn_elapsed(two), masked);
     for row in ["  ── 3s · not a rule", "── done ──", "╭──────╮", "── 3x ──"] {
         assert_eq!(mask_turn_elapsed(row.as_bytes()), row.as_bytes(), "{row}");
