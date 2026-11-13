@@ -726,8 +726,9 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
     /* ---- a working row that goes quiet uncovers its card's ring, pinned before the frame (review t-103290 N1) ----
      *
      * The card's ring stands only where no working agent row is shown. A session still streaming in the checkout
-     * keeps the dot working while the one agent row there goes quiet: the quiet row is a new node, the working row
-     * goes once the new one is laid out, and only then does the stylesheet uncover the card's ring. Read before any
+     * keeps the dot working while the one agent row there goes quiet: the quiet row is drawn again in the node that
+     * stood (v1.1.149, 「왼쪽 네비 판이 계속 깜박」 — before, it was a new node and the working row went once the new one was
+     * laid out), and the stylesheet uncovers the card's ring the moment the row stops being a working one. Read before any
      * frame, that ring must already stand on the document's clock; pinned while the working row still stood, there
      * was no ring yet to pin and it drew one frame at the top. */
     const quieted = await page.evaluate(async () => {
@@ -756,7 +757,7 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
       tell("hook:agent", { term: TERM, state: "done", agent: "claude", session: `s-${TERM}` });
       flushAgentPaint();
       // Read before any frame: what the card painter left is what the first frame after it draws.
-      const after = { ...said(), rowGone: row !== null && !row.isConnected };
+      const after = { ...said(), rowKept: row !== null && row.isConnected };
       removeLane(LANE);
       tell("hook:agent", { term: TERM, state: "working", agent: "claude", session: `s-${TERM}` });
       flushAgentPaint();
@@ -766,7 +767,7 @@ export async function testSidebarLandingState({ browser, origin, ok, faults }) {
     ok(
       "a working agent row that goes quiet while its checkout still works uncovers the card's ring, which stands on the document's clock before the frame that first draws it",
       quieted.before.dot === "working" && quieted.before.working > 0 && quieted.before.rings.length === 0 &&
-        quieted.after.dot === "working" && quieted.after.working === 0 && quieted.after.rowGone &&
+        quieted.after.dot === "working" && quieted.after.working === 0 && quieted.after.rowKept &&
         quieted.after.rings.length > 0 && quieted.after.rings.every((at) => at === 0) && quieted.putBack,
       JSON.stringify(quieted),
     );
