@@ -595,14 +595,15 @@ function paintWorktreePortPins() {
   for (const pin of document.querySelectorAll(".wt-row .wt-ports")) {
     const path = pin.closest(".wt-row")?.dataset.worktreePath ?? "";
     const count = ownedPorts().filter((port) => port.owner_path === path).length;
-    pin.hidden = count === 0;
+    // Painted on every scan and every refresh of the list: written only when the count moved (v1.1.149).
+    if (pin.hidden !== (count === 0)) pin.hidden = count === 0;
     if (count === 0) continue;
     const said = t("ports.livePin", "{{count}} 실시간 {{unit}}", {
       count,
       unit: count === 1 ? "port" : "ports",
     });
-    pin.dataset.tip = said;
-    pin.setAttribute("aria-label", said);
+    if (pin.dataset.tip !== said) pin.dataset.tip = said;
+    if (pin.getAttribute("aria-label") !== said) pin.setAttribute("aria-label", said);
   }
 }
 

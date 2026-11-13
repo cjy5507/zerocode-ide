@@ -1293,14 +1293,16 @@ function paintSidebarSearchKeys() {
  * every tooltip in the window except this one. */
 function paintWorktreeNewTitle() {
   const button = el("worktree-new");
-  if (button.disabled) {
-    button.dataset.tip = t("worktree.gitOnly", "Git 프로젝트에서만 워크트리를 만들 수 있습니다");
-    return;
+  // Painted by every refresh of the list: the tip is written only when it moved (v1.1.149).
+  let tip;
+  if (button.disabled) tip = t("worktree.gitOnly", "Git 프로젝트에서만 워크트리를 만들 수 있습니다");
+  else {
+    const makeChord = optionalShortcutLabel("worktree.create");
+    tip = makeChord === null
+      ? t("sidebar.newWorktree", "새 워크트리")
+      : t("sidebar.newWorktreeChord", "새 워크트리 ({{chord}})", { chord: makeChord });
   }
-  const makeChord = optionalShortcutLabel("worktree.create");
-  button.dataset.tip = makeChord === null
-    ? t("sidebar.newWorktree", "새 워크트리")
-    : t("sidebar.newWorktreeChord", "새 워크트리 ({{chord}})", { chord: makeChord });
+  if (button.dataset.tip !== tip) button.dataset.tip = tip;
 }
 
 /* Which actions a chord would collide with.

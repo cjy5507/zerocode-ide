@@ -3992,8 +3992,10 @@ function paintSidebarFilterBadge() {
   const badge = el("project-collapse").querySelector(".sidebar-filter-count");
   if (!badge) return;
   const count = sidebarActiveFilterCount();
-  badge.hidden = count === 0;
-  badge.textContent = count > 9 ? "9+" : String(count);
+  // Painted by every refresh of the list: written only when the count moved (v1.1.149, 「왼쪽 네비 판이 계속 깜박」).
+  if (badge.hidden !== (count === 0)) badge.hidden = count === 0;
+  const said = count > 9 ? "9+" : String(count);
+  if (badge.textContent !== said) badge.textContent = said;
   paintWorkspaceBoardFilterBadge();
 }
 el("worktree-new").addEventListener("click", () => {
@@ -6497,7 +6499,7 @@ function dressWorktreeFold(chip, path) {
   if (chip.hidden !== (words === "")) chip.hidden = words === "";
   if ((chip.dataset.tip ?? "") !== tip) chip.dataset.tip = tip;
   if ((chip.dataset.foldKey ?? "") !== (held?.key ?? "")) chip.dataset.foldKey = held?.key ?? "";
-  chip.setAttribute("aria-expanded", opened ? "true" : "false");
+  if (chip.getAttribute("aria-expanded") !== (opened ? "true" : "false")) chip.setAttribute("aria-expanded", opened ? "true" : "false");
 }
 
 /* What a workspace row is CALLED — the branch, or the folder's own name.
@@ -9611,9 +9613,13 @@ function paintWorkspaceBoardStage() {
  * neighbours do (`renderTabs`): pressed, and 「여기」 like the 작업 row. */
 function paintWorkspaceBoardDoor() {
   workspaceBoardOpen = activeTabId === WORKSPACE_BOARD_TAB.id;
-  el("nav-board").setAttribute("aria-pressed", String(workspaceBoardOpen));
-  if (workspaceBoardOpen) el("nav-board").setAttribute("aria-current", "page");
-  else el("nav-board").removeAttribute("aria-current");
+  // Painted on every pass over the tabs: each attribute is written only when it moved (v1.1.149).
+  if (el("nav-board").getAttribute("aria-pressed") !== String(workspaceBoardOpen)) {
+    el("nav-board").setAttribute("aria-pressed", String(workspaceBoardOpen));
+  }
+  if (workspaceBoardOpen) {
+    if (el("nav-board").getAttribute("aria-current") !== "page") el("nav-board").setAttribute("aria-current", "page");
+  } else if (el("nav-board").hasAttribute("aria-current")) el("nav-board").removeAttribute("aria-current");
 }
 
 /* Open the board's tab, or close it. Closing is the tab's — its ×, ⌘W or the
