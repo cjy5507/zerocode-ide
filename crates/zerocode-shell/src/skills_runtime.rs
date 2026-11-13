@@ -187,6 +187,11 @@ impl Runtime {
         let mut report = SkillReport::default();
         let mut reads = 0;
         let mut capped = false;
+        let mut links = Vec::new();
+        let store = sources
+            .iter()
+            .find(|source| source.id == skill::STORE_SOURCE_ID)
+            .map(|source| source.path.clone());
         for source in sources {
             let old = self.roots.remove(&source.path).filter(|_| !force);
             let scanned = skill::scan_incremental(&source, policy, old);
@@ -198,8 +203,17 @@ impl Runtime {
                 source: source.clone(),
             });
             report.skills.extend(scanned.skills.iter().cloned());
+            links.extend(
+                scanned
+                    .links
+                    .iter()
+                    .map(|link| (source.clone(), link.clone())),
+            );
             self.roots.insert(source.path, scanned);
         }
+        // A link in an agent's root to the store's skill is that agent
+        // reading the store's, not a second skill.
+        skill::credit_store_links(&mut report.skills, store.as_deref(), &links);
         (report, reads, capped)
     }
 }

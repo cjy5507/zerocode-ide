@@ -620,6 +620,10 @@ pub struct ScanSnapshot {
     pub skills: Vec<Skill>,
     pub reads: usize,
     pub capped: bool,
+    /// The links standing directly in the root, where a skill's folder would
+    /// stand. None is followed; [`credit_store_links`] reads the ones that
+    /// reach the store's folder of their own name.
+    pub links: Vec<PathBuf>,
     stamps: Vec<(PathBuf, Option<(std::time::SystemTime, u64)>)>,
     policy: Policy,
 }
@@ -702,6 +706,9 @@ fn walk(
             continue;
         };
         if kind.is_symlink() {
+            if at == source.path {
+                result.links.push(path);
+            }
             continue;
         }
         if kind.is_dir() && depth > 0 {
@@ -820,16 +827,27 @@ pub struct ScannedSource {
 pub fn discover(home: &Path, repos: &[PathBuf]) -> SkillReport {
     let mut skills = Vec::new();
     let mut sources = Vec::new();
+    let mut links = Vec::new();
     for source in discovery_sources(home, repos) {
         let exists = source.path.is_dir();
-        let found = if exists { scan(&source) } else { Vec::new() };
+        let found = if exists {
+            scan_incremental(&source, &Policy::default(), None)
+        } else {
+            ScanSnapshot::default()
+        };
+        links.extend(found.links.into_iter().map(|link| (source.clone(), link)));
         sources.push(ScannedSource {
             exists,
-            found: found.len(),
+            found: found.skills.len(),
             source,
         });
-        skills.extend(found);
+        skills.extend(found.skills);
     }
+    let store = sources
+        .iter()
+        .find(|scanned| scanned.source.id == STORE_SOURCE_ID)
+        .map(|scanned| scanned.source.path.clone());
+    credit_store_links(&mut skills, store.as_deref(), &links);
     // One order for the whole list, not per root: the page groups by nothing, so
     // the reader's eye needs a single alphabetical run.
     skills.sort_by(|left, right| {
@@ -840,6 +858,46 @@ pub fn discover(home: &Path, repos: &[PathBuf]) -> SkillReport {
             .then_with(|| left.file.cmp(&right.file))
     });
     SkillReport { skills, sources }
+}
+
+/// The id of the common store's root among [`discovery_sources`].
+pub const STORE_SOURCE_ID: &str = "home-agents";
+
+/// A link standing in an agent's root is that agent reading the store's skill
+/// when it reaches the store's folder of its own name, both read where they
+/// really are: the store's skill gains the root (`Skill::roots`), and is
+/// counted once — no second copy, no conflict — and as seen by the root's
+/// agent (`agent_reads_skill`). A link to anywhere else, a dead one or a loop
+/// is left as `walk` leaves it: not followed, not counted.
+pub fn credit_store_links(
+    skills: &mut [Skill],
+    store: Option<&Path>,
+    links: &[(SkillSource, PathBuf)],
+) {
+    let Some(store) = store.and_then(|store| std::fs::canonicalize(store).ok()) else {
+        return;
+    };
+    for (source, link) in links {
+        if source.id == STORE_SOURCE_ID {
+            continue;
+        }
+        let Some(name) = link.file_name() else {
+            continue;
+        };
+        let in_store = store.join(name);
+        if std::fs::canonicalize(link).ok().as_ref() != Some(&in_store) {
+            continue;
+        }
+        for skill in skills.iter_mut().filter(|skill| {
+            skill.source_id == STORE_SOURCE_ID
+                && skill.directory.file_name() == Some(name)
+                && std::fs::canonicalize(&skill.directory).ok().as_ref() == Some(&in_store)
+        }) {
+            if !skill.roots.iter().any(|root| root.id == source.id) {
+                skill.roots.push(source.clone());
+            }
+        }
+    }
 }
 
 /* ---- the orchestration skill ----
@@ -1964,6 +2022,55 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(report.skills[0].name, "Real");
+    }
+
+    /// A link in an agent's root that reaches the store's folder of its own
+    /// name is that agent reading the store's skill: one skill, one family
+    /// with no conflict, the agent's root among its roots. A link to
+    /// anywhere else, a dead one, one under another name and a loop are not
+    /// followed and not counted, as before.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_the_stores_skill_is_that_agent_reading_it() {
+        let dir = tempfile::tempdir().expect("temp");
+        let home = dir.path();
+        let store = home.join(".agents").join("skills");
+        std::fs::create_dir_all(store.join("shared")).expect("mkdir");
+        std::fs::write(store.join("shared").join(SKILL_FILE), "# Shared\n").expect("write");
+        let elsewhere = home.join("elsewhere").join("outside");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir");
+        std::fs::write(elsewhere.join(SKILL_FILE), "# Outside\n").expect("write");
+        let claude = home.join(".claude").join("skills");
+        let kiro = home.join(".kiro").join("skills");
+        for root in [&claude, &kiro] {
+            std::fs::create_dir_all(root).expect("mkdir");
+        }
+        std::os::unix::fs::symlink(store.join("shared"), claude.join("shared")).expect("link");
+        std::os::unix::fs::symlink(store.join("shared"), kiro.join("shared")).expect("link");
+        std::os::unix::fs::symlink(&elsewhere, claude.join("outside")).expect("link");
+        std::os::unix::fs::symlink(home.join("gone"), claude.join("dead")).expect("link");
+        std::os::unix::fs::symlink(&claude, claude.join("loop")).expect("link");
+        std::os::unix::fs::symlink(store.join("shared"), kiro.join("renamed")).expect("link");
+
+        let report = discover(home, &[]);
+        let names: Vec<&str> = report.skills.iter().map(|one| one.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Shared"],
+            "a link was walked as a skill of its own"
+        );
+        let shared = &report.skills[0];
+        let roots: Vec<&str> = shared.roots.iter().map(|root| root.id.as_str()).collect();
+        assert_eq!(roots, vec!["home-agents", "home-claude", "home-kiro"]);
+        let readers: Vec<&str> = ["claude", "kiro"]
+            .into_iter()
+            .filter(|agent| agent_reads_skill(agent, shared))
+            .collect();
+        assert_eq!(readers, vec!["claude", "kiro"]);
+        let family = families(report.skills.clone());
+        assert_eq!(family.len(), 1);
+        assert!(!family[0].conflict);
+        assert_eq!(family[0].variants.len(), 1);
     }
 
     /// A skill under `.system` came with the tool, and says so. "You wrote this"
