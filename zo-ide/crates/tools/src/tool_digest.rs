@@ -566,7 +566,7 @@ mod tests {
         let digester = match super::ProviderDigester::for_session(parent.as_deref()) {
             Some(Ok(digester)) => digester,
             Some(Err(error)) => panic!("no digester: {error}"),
-            None => panic!("no digester: {}", crate::fast_model::NO_FAST_TIER),
+            None => panic!("no digester: the session's provider has no fast model"),
         };
         eprintln!("digester model: {}", digester.model());
         // A test log with the one failure buried mid-stream: the shape the

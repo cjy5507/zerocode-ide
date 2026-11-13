@@ -224,38 +224,6 @@ fn persons_said(messages: &[ConversationMessage]) -> impl Iterator<Item = (usize
     words_where(messages, MessageRole::User, is_persons).filter(move |(at, _)| messages[*at].origin.is_none())
 }
 
-/// Everything the person said in `messages`, oldest first, each beside its
-/// index: what [`persons_words`] reads the newest of. The lessons a pass draws
-/// from a session are drawn from these and from nothing a harness or the
-/// window wrote in the person's place.
-#[must_use]
-pub fn said_by_the_person(messages: &[ConversationMessage]) -> Vec<(usize, String)> {
-    let mut said: Vec<_> = persons_said(messages).collect();
-    said.reverse();
-    said
-}
-
-/// Everything the person said in `messages`, oldest first, each with what
-/// the assistant had last said before it — the thing a "no, not that" answers
-/// — and nothing there where the assistant had not spoken yet. What a pass
-/// shows a model of a session (`decision_core::said_lessons`).
-#[must_use]
-pub fn said_with_what_came_before(messages: &[ConversationMessage]) -> Vec<decision_core::said_lessons::Said> {
-    let spoken: Vec<(usize, String)> = words_where(messages, MessageRole::Assistant, |_| true).collect();
-    said_by_the_person(messages)
-        .into_iter()
-        .map(|(at, words)| {
-            // Newest first: the first one before this message is the last said.
-            let before = spoken
-                .iter()
-                .find(|(spoke_at, _)| *spoke_at < at)
-                .map(|(_, words)| words.clone())
-                .unwrap_or_default();
-            decision_core::said_lessons::Said { words, before }
-        })
-        .collect()
-}
-
 /// Whether a user message's words are the person's own — not what the
 /// harness wrote in their place ([`HARNESS_TAG_OPEN`]).
 fn is_persons(words: &str) -> bool {

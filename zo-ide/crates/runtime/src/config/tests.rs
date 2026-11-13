@@ -80,12 +80,13 @@ fn desk_guard_defaults_on_and_only_a_persons_settings_turn_it_off() {
     assert!(error.to_string().contains("deskGuard"));
 }
 
-/// The dreamer's question about a session sends the person's words to a
-/// model, so it is off unless the person's own settings say
-/// `dreamLessons: true`: a repository's `.zo/settings.json`, a workspace's
-/// `.zo/settings.local.json` and a `--settings` file cannot turn it on.
+/// zo once asked a model what a session's words teach, where a person's
+/// settings said `dreamLessons: true`; it no longer does, and the key is
+/// nobody's. A settings file written then still loads — with `true`, and
+/// with the non-boolean the loader used to refuse — in the person's own
+/// home and in a repository alike.
 #[test]
-fn dream_lessons_defaults_off_and_only_a_persons_settings_turn_it_on() {
+fn a_settings_file_that_still_says_dream_lessons_loads() {
     let _serial = CLI_OVERRIDE_LOCK
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -95,37 +96,16 @@ fn dream_lessons_defaults_off_and_only_a_persons_settings_turn_it_on() {
     let home = root.join("home").join(".zo");
     fs::create_dir_all(cwd.join(".zo")).expect("project dir");
     fs::create_dir_all(&home).expect("home dir");
+    let plain = ConfigLoader::new(&cwd, &home).load().expect("default config");
 
-    let default = ConfigLoader::new(&cwd, &home).load().expect("default config");
-    assert!(!default.dream_lessons(), "off where nothing says otherwise");
-    assert!(!ConfigLoader::new(&cwd, &home).persons_dream_lessons());
-
-    fs::write(cwd.join(".zo").join("settings.json"), r#"{"dreamLessons":true}"#).expect("project settings");
-    fs::write(cwd.join(".zo").join("settings.local.json"), r#"{"dreamLessons":true}"#).expect("local settings");
-    let extra = cwd.join("extra-settings.json");
-    fs::write(&extra, r#"{"dreamLessons":true}"#).expect("extra settings");
-    ConfigLoader::set_cli_overrides(super::CliConfigOverrides {
-        settings_file: Some(extra),
-        strict_mcp_config: false,
-    });
-    let from_elsewhere = ConfigLoader::new(&cwd, &home).load().expect("config");
-    assert!(
-        !from_elsewhere.dream_lessons(),
-        "a repository, a workspace's local settings and a --settings file cannot turn it on"
-    );
-    assert!(!ConfigLoader::new(&cwd, &home).persons_dream_lessons(), "the person's files alone are read");
-
-    fs::write(home.join("settings.json"), r#"{"dreamLessons":true}"#).expect("own settings");
-    let on = ConfigLoader::new(&cwd, &home).load().expect("own config");
-    assert!(on.dream_lessons());
-    assert!(ConfigLoader::new(&cwd, &home).persons_dream_lessons(), "the two readings agree");
-
-    fs::write(home.join("settings.json"), r#"{"dreamLessons":"yes"}"#).expect("bad settings");
-    let error = ConfigLoader::new(&cwd, &home)
-        .load()
-        .expect_err("a non-boolean dreamLessons must fail");
-    assert!(error.to_string().contains(super::DREAM_LESSONS_KEY));
-    assert!(!ConfigLoader::new(&cwd, &home).persons_dream_lessons(), "a value that is not a boolean is off");
+    for left_over in [r#"{"dreamLessons":true}"#, r#"{"dreamLessons":"yes"}"#] {
+        fs::write(home.join("settings.json"), left_over).expect("own settings");
+        fs::write(cwd.join(".zo").join("settings.json"), left_over).expect("project settings");
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .unwrap_or_else(|error| panic!("{left_over} no longer loads: {error}"));
+        assert_eq!(loaded.desk_guard(), plain.desk_guard(), "{left_over}");
+    }
 }
 
 /// t-104888, review t-104945: only the person's user settings file turns the

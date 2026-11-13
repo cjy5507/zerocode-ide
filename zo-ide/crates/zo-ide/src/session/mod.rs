@@ -9,7 +9,6 @@ mod built_runtime;
 pub(crate) mod conversation_control;
 mod agent_completion_pump;
 mod dreamer_hook;
-mod said_lessons_pass;
 mod scheduled_workflow;
 #[cfg(test)]
 mod automatic_work_tests;

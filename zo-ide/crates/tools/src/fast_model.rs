@@ -1,23 +1,22 @@
 //! One request to the session provider's fast-tier model, outside any turn.
 //!
-//! Two features ask a small model something while the session does something
-//! else: the fold of an over-cap tool result (`tool_digest`), and the lessons
-//! a pass draws from what the person said (`zo auto-dream`). Both dial the
-//! model the way a sub-agent is dialled and hold the request to a wall clock,
-//! and neither may be load-bearing: every failure here is a `String` the
-//! caller turns into "do without".
+//! The fold of an over-cap tool result (`tool_digest`) asks a small model
+//! something while the session does something else. It dials the model the
+//! way a sub-agent is dialled and holds the request to a wall clock, and it
+//! may not be load-bearing: every failure here is a `String` the caller
+//! turns into "do without".
 //!
-//! Both hand over what the session holds — a tool's whole output, the
-//! person's own words — so there is one way in, and it names a model only
-//! where the provider the session runs on has a fast tier of its own. A
-//! session on a person's own endpoint, on a local model, or on a name the
-//! catalog does not know has none, and is asked nothing: its "fast model"
-//! would be a built-in provider's, on that provider's account.
+//! It hands over what the session holds — a tool's whole output — so there
+//! is one way in, and it names a model only where the provider the session
+//! runs on has a fast tier of its own. A session on a person's own endpoint,
+//! on a local model, or on a name the catalog does not know has none, and is
+//! asked nothing: its "fast model" would be a built-in provider's, on that
+//! provider's account.
+//!
+//! Until v1.1.148 a second caller came this way: a pass that asked what the
+//! person's words in a session teach (`dreamLessons`). It was taken out.
 
 use std::time::Duration;
-
-/// Why [`FastModel::for_fast_tier`] dialled nothing.
-pub const NO_FAST_TIER: &str = "the session's provider has no fast model";
 
 /// The fast-tier model of the provider a session runs on.
 pub struct FastModel {
@@ -34,15 +33,6 @@ impl FastModel {
         // The cheap-model choice is a family alias (`haiku`); the wire wants
         // the release id, the same way the sub-agent client resolves it.
         crate::fanout::fast_tier_model(parent_model).map(|model| api::resolve_model_alias(&model))
-    }
-
-    /// The fast model for a session whose own model is `parent_model`.
-    ///
-    /// # Errors
-    /// With [`NO_FAST_TIER`] when the provider has no fast tier; otherwise
-    /// when no client can be built for it: no credential, an unknown model.
-    pub fn for_fast_tier(parent_model: Option<&str>) -> Result<Self, String> {
-        Self::dialling(Self::fast_tier_named_for(parent_model).ok_or(NO_FAST_TIER)?)
     }
 
     /// The client for `model`, a name [`Self::fast_tier_named_for`] gave.

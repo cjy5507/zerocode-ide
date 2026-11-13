@@ -47,12 +47,6 @@ pub const ZO_SETTINGS_SCHEMA_NAME: &str = "SettingsSchema";
 pub const TRUSTED_MCP_SERVERS_FILE: &str = mcp_keys::TRUSTED_SERVERS_FILE;
 /// The settings key that turns the desk guard off ([`crate::desk_guard`]).
 const DESK_GUARD_KEY: &str = crate::desk_guard::SETTING;
-/// The settings key that turns on the dreamer's question about a session:
-/// what of the person's own words will still hold in the next one
-/// (`decision_core::said_lessons`). Off unless the person's user settings
-/// file says `true`, since turning it on sends those words to a model.
-pub const DREAM_LESSONS_KEY: &str = "dreamLessons";
-
 /// Origin of a loaded settings file in the configuration precedence chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigSource {
@@ -216,12 +210,6 @@ pub struct RuntimeFeatureConfig {
     /// t-104888). Defaults on; only a person's own settings turn it off — a
     /// repository's `.zo/settings.json` cannot.
     desk_guard: bool,
-    /// Settings `dreamLessons`: whether an idle pass first asks a model what
-    /// the person's words in the session teach
-    /// (`decision_core::said_lessons`). Defaults off; only a person's own
-    /// settings turn it on — a repository's `.zo/settings.json` cannot send
-    /// the words of whoever opens it.
-    dream_lessons: bool,
     checkpoint_durable: bool,
     /// Settings `tui.inlineMode`: render the interactive TUI in the primary
     /// screen and emit settled transcript content into native scrollback.
@@ -260,7 +248,6 @@ impl Default for RuntimeFeatureConfig {
             team_inbox_digest_max_updates: 8,
             recall_hint_enabled: true,
             desk_guard: true,
-            dream_lessons: false,
             checkpoint_durable: false,
             tui_inline_mode: None,
             second_brain: RuntimeSecondBrainConfig::default(),
@@ -678,30 +665,6 @@ impl ConfigLoader {
         &self.config_roots
     }
 
-    /// Whether the person's own settings turn the dreamer's question on
-    /// (`dreamLessons`), read from their settings files alone. That is
-    /// the only source [`Self::load`] takes the key from, so the answer is
-    /// the same — and a caller that asks at every idle moment opens no file
-    /// of the repository and starts no `git` to learn the switch is off. The
-    /// file that wins the merge wins here; one that does not read, or a value
-    /// that is not a boolean, leaves it off.
-    #[must_use]
-    pub fn persons_dream_lessons(&self) -> bool {
-        // The roots stand highest priority first: the first file that names
-        // the key is the one the merge would let win.
-        self.config_roots
-            .iter()
-            .find_map(|root| {
-                read_optional_json_object(&root.join("settings.json"))
-                    .ok()
-                    .flatten()?
-                    .get(DREAM_LESSONS_KEY)
-                    .map(JsonValue::as_bool)
-            })
-            .flatten()
-            .unwrap_or(false)
-    }
-
     #[must_use]
     pub fn discover(&self) -> Vec<ConfigEntry> {
         let path = self.cwd.join(".zo").join("settings.local.json");
@@ -1009,9 +972,6 @@ impl ConfigLoader {
             // `--settings` file is one the model's writes may reach.
             if entry.source != ConfigSource::User {
                 value.remove(DESK_GUARD_KEY);
-                // The same for the dreamer's question, the other way round:
-                // only the person turns on what sends their words to a model.
-                value.remove(DREAM_LESSONS_KEY);
             }
             validate_optional_hooks_config(&value, &entry.path)?;
             if !strict_mcp {
@@ -1141,7 +1101,6 @@ impl ConfigLoader {
             team_inbox_digest_max_updates: parse_team_inbox_digest_max_updates(&merged_value)?,
             recall_hint_enabled: parse_enabled_flag(&merged_value, "recallHintEnabled")?,
             desk_guard: parse_enabled_flag(&merged_value, DESK_GUARD_KEY)?,
-            dream_lessons: parse_opt_in_flag(&merged_value, DREAM_LESSONS_KEY)?,
             checkpoint_durable: parse_checkpoint_durable(&merged_value)?,
             tui_inline_mode: parse_tui_inline_mode(&merged_value)?,
             second_brain: parse_second_brain_config(&merged_value)?,
@@ -2728,12 +2687,6 @@ impl RuntimeConfig {
         self.feature_config.desk_guard()
     }
 
-    /// See [`RuntimeFeatureConfig::dream_lessons`].
-    #[must_use]
-    pub fn dream_lessons(&self) -> bool {
-        self.feature_config.dream_lessons()
-    }
-
     /// `None` when the user never pinned a presentation mode — see
     /// [`RuntimeFeatureConfig::tui_inline_mode`].
     #[must_use]
@@ -2922,14 +2875,6 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn desk_guard(&self) -> bool {
         self.desk_guard
-    }
-
-    /// Settings `dreamLessons`: whether an idle pass first asks a model what
-    /// the person's words in the session teach. Off unless the person's user
-    /// settings file says `true`.
-    #[must_use]
-    pub fn dream_lessons(&self) -> bool {
-        self.dream_lessons
     }
 
     #[must_use]
