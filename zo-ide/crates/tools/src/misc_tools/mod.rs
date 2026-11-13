@@ -110,7 +110,7 @@ pub use smart_router::{
 pub(crate) use agent_tools::{
     agent_usage_cost_for_attempt, AgentUsageCost, wait_for_next_agent_completions,
     agent_worker_generation_is_live, cancel_and_salvage_agent_attempt,
-    build_provider_client_for_agent,
+    build_provider_client_for_agent, build_provider_client_for_the_sessions_fast_model,
     agent_permission_policy, allowed_tools_for_subagent, inspection_shell_for_subagent, cancel_and_salvage_agent,
     classify_lane_failure, execute_agent_with_parent_model_and_hooks, execute_agent_with_spawn,
     execute_agent_with_spawn_and_parent_model_and_hooks, final_assistant_text,

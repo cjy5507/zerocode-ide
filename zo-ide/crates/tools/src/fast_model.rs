@@ -36,12 +36,20 @@ impl FastModel {
         crate::fanout::fast_tier_model(parent_model).map(|model| api::resolve_model_alias(&model))
     }
 
-    /// The client for `model`, a name [`Self::fast_tier_named_for`] gave.
+    /// The client for `model`, a name [`Self::fast_tier_named_for`] gave for
+    /// a session on `session_model` — on the login that session's own client
+    /// is pinned to, where it is pinned to one
+    /// (`build_provider_client_for_the_sessions_fast_model`).
     ///
     /// # Errors
     /// When no client can be built for it: no credential, an unknown model.
-    pub(crate) fn dialling(model: String) -> Result<Self, String> {
-        let client = crate::misc_tools::build_provider_client_for_agent(&model)?;
+    pub(crate) fn dialling(model: String, session_model: Option<&str>) -> Result<Self, String> {
+        let client = match session_model {
+            Some(session) => {
+                crate::misc_tools::build_provider_client_for_the_sessions_fast_model(&model, session)?
+            }
+            None => crate::misc_tools::build_provider_client_for_agent(&model)?,
+        };
         Ok(Self { model, client })
     }
 

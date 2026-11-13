@@ -15,7 +15,9 @@ use std::time::Duration;
 use api::{InputMessage, MessageRequest, OutputContentBlock};
 use runtime::{parse_probe_response, probe_prompt, ProbeAssessment};
 
-use crate::misc_tools::agent_tools::{build_provider_client_for_agent, shared_agent_runtime};
+use crate::misc_tools::agent_tools::{
+    build_provider_client_for_the_sessions_fast_model, shared_agent_runtime,
+};
 
 /// Hard wall for one probe call. A Fast-tier model answers the ~200-token
 /// classification prompt well inside this; anything slower forfeits the
@@ -298,7 +300,7 @@ fn record_route_tax(attempt: &str, model: &str, status: &str, elapsed_ms: u64, o
 /// design below turned each one into silence rather than an error. Only an
 /// end-to-end test against a real HTTP endpoint can catch that class of bug,
 /// and the single thing preventing one was credential resolution inside
-/// [`build_provider_client_for_agent`].
+/// [`build_provider_client_for_the_sessions_fast_model`].
 ///
 /// When set, the probe — and only the probe — talks to this endpoint through a
 /// ChatGPT-backend (Codex Responses) client with a placeholder bearer. Every
@@ -308,8 +310,9 @@ const PROBE_BASE_URL_ENV: &str = "ZO_PROBE_BASE_URL";
 
 /// The client one probe batch sends on: the override endpoint when
 /// [`PROBE_BASE_URL_ENV`] names one, else the normally-resolved provider client
-/// for `model`.
-fn probe_client(model: &str) -> Option<api::ProviderClient> {
+/// for `model` — the fast model of the provider the session on
+/// `parent_model` runs on, on the login that session is on.
+fn probe_client(model: &str, parent_model: &str) -> Option<api::ProviderClient> {
     if let Some(base_url) = std::env::var(PROBE_BASE_URL_ENV)
         .ok()
         .map(|url| url.trim().to_string())
@@ -320,7 +323,7 @@ fn probe_client(model: &str) -> Option<api::ProviderClient> {
             "zo-probe-diagnostic-token",
         ));
     }
-    build_provider_client_for_agent(model).ok()
+    build_provider_client_for_the_sessions_fast_model(model, parent_model).ok()
 }
 
 fn probe_cache() -> &'static Mutex<HashMap<u64, Option<ProbeAssessment>>> {
@@ -677,7 +680,7 @@ pub(super) fn probe_slots(
         fail_misses(&mut slots, &misses, road, &model, FAIL_PROVIDER_PARKED);
         return slots;
     }
-    let Some(client) = probe_client(&model) else {
+    let Some(client) = probe_client(&model, parent_model) else {
         // One failure per task that lost its probe, not one per batch — a
         // credential-less environment should read as "every probe gave up",
         // which is what the count then says.

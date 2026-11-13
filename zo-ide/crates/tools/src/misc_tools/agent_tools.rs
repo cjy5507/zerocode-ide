@@ -142,7 +142,10 @@ pub(crate) use self::manifest::{
     AgentActivitySnapshot, agent_activity_snapshot_by_id, classify_lane_failure,
     persist_agent_terminal_state,
 };
-pub(crate) use self::provider_client::{build_provider_client_for_agent, push_output_block};
+pub(crate) use self::provider_client::{
+    build_provider_client_for_agent, build_provider_client_for_the_sessions_fast_model,
+    push_output_block,
+};
 pub(crate) use self::rate_limit::{
     rate_limit_headroom_low, shared_agent_runtime, workflow_concurrency_limit,
 };

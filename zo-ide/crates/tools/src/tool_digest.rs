@@ -184,7 +184,7 @@ impl ProviderDigester {
     /// nothing has failed), `Some(Err)` where the fast model cannot be dialled.
     fn for_session(session_model: Option<&str>) -> Option<Result<Self, String>> {
         let model = crate::fast_model::FastModel::fast_tier_named_for(session_model)?;
-        Some(crate::fast_model::FastModel::dialling(model).map(Self))
+        Some(crate::fast_model::FastModel::dialling(model, session_model).map(Self))
     }
 
     /// [`Self::for_session`] for the session `ctx` belongs to, whose provider
@@ -196,7 +196,7 @@ impl ProviderDigester {
             return Self::for_session(None);
         };
         let model = crate::fast_model::FastModel::fast_tier_named_where(&session_model, &home)?;
-        Some(crate::fast_model::FastModel::dialling(model).map(Self))
+        Some(crate::fast_model::FastModel::dialling(model, Some(&session_model)).map(Self))
     }
 }
 

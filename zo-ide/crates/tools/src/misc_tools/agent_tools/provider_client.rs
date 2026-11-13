@@ -6,7 +6,7 @@ use api::{
     StreamEvent as ApiStreamEvent, ThinkingConfig, ToolChoice, ToolDefinition, detect_provider_kind,
     max_tokens_for_model, resolve_model_alias,
 };
-use runtime::model_home::ModelHome;
+use runtime::model_home::{Held, ModelHome};
 use runtime::{ApiClient, ApiRequest, AssistantEvent, ProviderStateBlob, RuntimeError};
 
 use super::super::{ToolSpec, mvp_tool_specs};
@@ -861,24 +861,68 @@ fn build_provider_client_for_agent_with_rate_limit_failover(
     model: &str,
     fail_fast_on_rate_limit: bool,
 ) -> Result<ProviderClient, String> {
-    // A model the session itself runs on is built as the session's client
-    // for it was: the same home, the same word of the catalog, the same
-    // login (`runtime::model_home::held`). The catalog file may say something
-    // else of that model by now, and a helper that inherits the session's
-    // model — the commonest helper — would take its whole task there. Any
-    // other model has no client yet, and is read from the catalog as it is.
-    let runtime::model_home::Held { home, catalog_provider, auth_route } =
-        runtime::model_home::held(model).unwrap_or_else(|| {
-            let homes = crate::model_home::Homes::load();
-            let catalog = homes.catalog();
-            runtime::model_home::Held {
-                home: homes.of(model),
-                catalog_provider: catalog.and_then(|catalog| catalog.provider_for_model(model)),
-                auth_route: catalog
-                    .and_then(|catalog| catalog.auth_route_for_model(model))
-                    .unwrap_or(AuthRoute::Auto),
-            }
-        });
+    build_as(model, built_by(model), fail_fast_on_rate_limit)
+}
+
+/// The client for `fast_model`, the fast model of the provider the session
+/// on `session_model` runs on, on the login that session is on.
+///
+/// The fast model has a row of its own in the catalog, and that row pins no
+/// login. Built by it alone, a session whose own row was pinned to its API
+/// key had its tool output folded on whichever login the machine holds for
+/// that provider: the same provider, another account.
+pub(crate) fn build_provider_client_for_the_sessions_fast_model(
+    fast_model: &str,
+    session_model: &str,
+) -> Result<ProviderClient, String> {
+    build_as(fast_model, on_the_sessions_login(built_by(fast_model), session_model), false)
+}
+
+/// `built` on the login the session's own client for `session_model` is
+/// pinned to, where the two send to the same place and `built` pins none of
+/// its own. A session on any login pins nothing, a model with a pin of its
+/// own keeps it, and a model on another provider than the session's is never
+/// put on the session's login.
+pub(super) fn on_the_sessions_login(built: Held, session_model: &str) -> Held {
+    match runtime::model_home::held(session_model) {
+        Some(session)
+            if built.auth_route == AuthRoute::Auto
+                && session.auth_route != AuthRoute::Auto
+                && session.home.is_where(&built.home) =>
+        {
+            Held { auth_route: session.auth_route, ..built }
+        }
+        _ => built,
+    }
+}
+
+/// What a client for `model` is built by.
+///
+/// A model the session itself runs on is built as the session's client for
+/// it was: the same home, the same word of the catalog, the same login
+/// (`runtime::model_home::held`). The catalog file may say something else of
+/// that model by now, and a helper that inherits the session's model — the
+/// commonest helper — would take its whole task there. Any other model has
+/// no client yet, and is read from the catalog as it is.
+fn built_by(model: &str) -> Held {
+    runtime::model_home::held(model).unwrap_or_else(|| {
+        let homes = crate::model_home::Homes::load();
+        let catalog = homes.catalog();
+        Held {
+            home: homes.of(model),
+            catalog_provider: catalog.and_then(|catalog| catalog.provider_for_model(model)),
+            auth_route: catalog
+                .and_then(|catalog| catalog.auth_route_for_model(model))
+                .unwrap_or(AuthRoute::Auto),
+        }
+    })
+}
+
+fn build_as(
+    model: &str,
+    Held { home, catalog_provider, auth_route }: Held,
+    fail_fast_on_rate_limit: bool,
+) -> Result<ProviderClient, String> {
     // The provider is the model's home, read in the order the session's own
     // client is built: the catalog, then a provider the person declared,
     // then the name. Until v1.1.147 the name came second here, so a bare

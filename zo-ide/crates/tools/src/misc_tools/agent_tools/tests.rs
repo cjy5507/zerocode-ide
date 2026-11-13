@@ -744,6 +744,47 @@ fn a_running_session_keeps_its_helpers_where_its_client_was_built() {
     assert!(!refused(helper(LISTED, LEG)));
 }
 
+/// The fast model of the session's provider is asked on the login the
+/// session is on. Its own catalog row pins no login, and built by that row
+/// alone a session pinned to its API key had its tool output folded on
+/// whichever login the machine holds for the provider — the same provider,
+/// another account. Only that is changed: a session on any login pins
+/// nothing, a model pinned by its own row keeps its pin, and a model on
+/// another provider is never put on the session's login.
+#[test]
+fn the_sessions_fast_model_is_built_on_the_login_the_session_is_pinned_to() {
+    use super::provider_client::on_the_sessions_login;
+    use crate::tests::RunningSession;
+    use api::{AuthRoute, ProviderKind};
+    use runtime::model_catalog::CatalogProvider;
+    use runtime::model_home::{Held, ModelHome};
+
+    const PINNED: &str = "zq-pinned-session";
+    let env = crate::tests::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A row written by hand, dialled with the provider's API key.
+    let _home = crate::tests::ConfigHome::empty(&env).catalog_row(CatalogProvider::Google, PINNED);
+    let on = |provider: ProviderKind, auth_route: AuthRoute| Held {
+        home: ModelHome::BuiltIn(provider),
+        catalog_provider: None,
+        auth_route,
+    };
+    let login = |built: Held, session: &str| on_the_sessions_login(built, session).auth_route;
+
+    let session = RunningSession::built_now(&env, PINNED);
+    assert_eq!(login(on(ProviderKind::Google, AuthRoute::Auto), PINNED), AuthRoute::ApiKey);
+    assert_eq!(login(on(ProviderKind::Google, AuthRoute::Auto), &format!(" {PINNED} ")), AuthRoute::ApiKey);
+    // A pin of its own stands; another provider's model is left alone.
+    assert_eq!(login(on(ProviderKind::Google, AuthRoute::OAuth), PINNED), AuthRoute::OAuth);
+    assert_eq!(login(on(ProviderKind::OpenAi, AuthRoute::Auto), PINNED), AuthRoute::Auto);
+    // A model the session holds no client for — a helper's — pins nothing.
+    assert_eq!(login(on(ProviderKind::Google, AuthRoute::Auto), "zq-pinned-helper"), AuthRoute::Auto);
+    // Nor does a session on any login.
+    session.client_built_now("gemini-zq-9");
+    assert_eq!(login(on(ProviderKind::Google, AuthRoute::Auto), "gemini-zq-9"), AuthRoute::Auto);
+}
+
 #[test]
 fn live_spawn_path_honors_same_family_explicit_model() {
     let store = TempAgentStore::new("same-family-explicit");
