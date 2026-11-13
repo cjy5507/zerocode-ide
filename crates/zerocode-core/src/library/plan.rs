@@ -2350,6 +2350,51 @@ mod tests {
         assert!(plan.ledger.skills["design"].pick.is_empty());
     }
 
+    /// Gemini CLI reads the store by itself (2026-11-13: an old copy of
+    /// `computer-use` in its own folder showed beside the store's). A copy
+    /// of ours there goes to the Trash; a text that is no release of ours is
+    /// the person's, and is asked about — never taken away unasked.
+    #[test]
+    fn a_shipped_skill_in_a_native_agents_folder_goes_if_ours_and_is_asked_if_edited() {
+        let mut ours = folder("computer-use", "OLD-RELEASE");
+        ours.ours = true;
+        let edited = folder("computer-use", "PERSONS-EDIT");
+        let store = || -> BTreeMap<String, SkillFolder> {
+            [(
+                "computer-use".to_string(),
+                folder("computer-use", "CURRENT"),
+            )]
+            .into_iter()
+            .collect()
+        };
+        let plan = plan_skills(
+            &SkillsView {
+                store: store(),
+                places: vec![place("gemini", true, vec![ours])],
+            },
+            &Ledger::new(),
+            1,
+        );
+        assert!(
+            matches!(&plan.steps[..], [SkillStep::Trash { agent, .. }] if agent == "gemini"),
+            "{:?}",
+            plan.steps
+        );
+        assert!(plan.ledger.skills["computer-use"].pick.is_empty());
+        let plan = plan_skills(
+            &SkillsView {
+                store: store(),
+                places: vec![place("gemini", true, vec![edited])],
+            },
+            &Ledger::new(),
+            1,
+        );
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        let pick = &plan.ledger.skills["computer-use"].pick;
+        assert_eq!(pick.len(), 1);
+        assert_eq!(pick[0].agent, "gemini");
+    }
+
     #[test]
     fn hidden_folders_links_into_the_store_and_claude_account_skills_are_left() {
         let mut through = folder("a", "da");

@@ -405,9 +405,13 @@ pub fn install_bundled_skill(
 ///   store, so its skills are the store's): what the store's install did;
 /// - nothing, or a link whose target is gone: a link to the store's;
 /// - a link that reaches the store's: what the store's install did;
-/// - a link to somewhere else that stands, or a folder: as a copy is
-///   treated — written through or replaced where it is ours, kept where it is
-///   somebody's ([`install_one`]);
+/// - a folder holding nothing but texts this build or an earlier release
+///   shipped for the skill ([`folder_is_ours`]): ours — it gives way to a
+///   link, and an install that cannot finish the swap leaves it as it was;
+/// - a link to somewhere else that stands, or any other folder (a person's
+///   edit, a file they added): as a copy is treated — written through or
+///   brought up where its files are ours, kept where they are somebody's
+///   ([`install_one`]). A person's edit is never replaced by a link;
 /// - a plain file: somebody's, kept.
 fn install_linked(
     skill: &BundledSkill,
@@ -455,6 +459,17 @@ fn install_linked(
                 Err(error) => outcome(InstallState::Failed, error.to_string()),
             }
         }
+        Ok(meta) if meta.is_dir() && folder_is_ours(skill, &dir) => {
+            let said = "사본을 공통 저장소의 스킬 링크로 바꿨습니다";
+            match swap_for_link(&in_store, &dir) {
+                Ok(None) => outcome(InstallState::Written, said.to_string()),
+                Ok(Some(left)) => outcome(
+                    InstallState::Written,
+                    format!("{said} · 옛 사본을 지우지 못했습니다: {}", left.display()),
+                ),
+                Err(error) => outcome(InstallState::Failed, error.to_string()),
+            }
+        }
         Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
             install_one(skill, agent, label, root)
         }
@@ -463,6 +478,84 @@ fn install_linked(
             "스킬 폴더 자리에 다른 파일이 있어 그대로 두었습니다".to_string(),
         ),
     }
+}
+
+/// The file Finder leaves in a folder a person opened: nobody's text, and
+/// not a reason to keep a copy of ours.
+const FINDER_FILE: &str = ".DS_Store";
+
+/// Whether `dir` holds nothing but texts this build or an earlier release
+/// shipped for `skill`: its `SKILL.md` current or of an earlier release
+/// (`skill_releases.tsv`), and every other file a reference file of the skill
+/// in a text of this build or an earlier one — or empty, what a full disk
+/// left. A file of any other text or name, a folder or a link inside, or a
+/// file that cannot be read, is somebody's, and the folder is not ours to
+/// replace. Finder's own file ([`FINDER_FILE`]) is no one's.
+fn folder_is_ours(skill: &BundledSkill, dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut holds_the_skill = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == FINDER_FILE {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            return false;
+        };
+        let ours = if name == SKILL_FILE {
+            holds_the_skill = true;
+            matches!(
+                copy_state(skill, &bytes),
+                CopyState::Current | CopyState::Stale
+            )
+        } else {
+            let carried = skill
+                .files
+                .iter()
+                .find(|(file, _)| *file == name)
+                .map_or("", |(_, text)| *text);
+            bytes.is_empty()
+                || matches!(
+                    text_state(&format!("{}/{name}", skill.name), carried, &bytes),
+                    CopyState::Current | CopyState::Stale
+                )
+        };
+        if !ours {
+            return false;
+        }
+    }
+    holds_the_skill
+}
+
+/// Put a link to `target` where the folder `dir` stands. The link is made
+/// beside it first, the folder steps aside under a dot name, and the link
+/// takes the name; a step that fails puts back what stood. Between the two
+/// renames the name is empty for a moment — two calls, no read between them.
+/// The folder set aside is removed last; the answer names it when it would
+/// not go.
+fn swap_for_link(target: &Path, dir: &Path) -> io::Result<Option<PathBuf>> {
+    let staged = beside(dir, "link");
+    let _ = std::fs::remove_file(&staged);
+    make_link(target, &staged)?;
+    let aside = beside(dir, "copy");
+    if let Err(error) = std::fs::rename(dir, &aside) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&staged, dir) {
+        let _ = std::fs::rename(&aside, dir);
+        let _ = std::fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(std::fs::remove_dir_all(&aside).err().map(|_| aside))
 }
 
 /// Whether `a` and `b` are one folder, by where each really is.
@@ -1926,5 +2019,223 @@ mod tests {
             std::fs::read_to_string(dir.join(SKILL_FILE)).unwrap(),
             bundled_skill("orchestration").unwrap().content
         );
+    }
+
+    /// A copy installed before the store stood: every file the skill ships,
+    /// in this build's text, in the folder an agent reads.
+    fn copy_of(skill: &BundledSkill, dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(SKILL_FILE), skill.content).unwrap();
+        for (file, text) in skill.files {
+            std::fs::write(dir.join(file), text).unwrap();
+        }
+    }
+
+    /// Install `name` for Claude Code with the store standing, and say what
+    /// its folder became.
+    fn install_for_claude(home: &Path, name: &str) -> SkillInstallOutcome {
+        std::fs::create_dir_all(home.join(".agents/skills")).unwrap();
+        let mut outcomes = install_bundled_skill(name, home, &[], &rows(&["claude"])).unwrap();
+        assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+        outcomes.remove(0)
+    }
+
+    /// A copy of ours — this build's text, an earlier release's, a reference
+    /// file of an earlier release, Finder's file beside them — gives way to a
+    /// link to the store's; nothing of it is left beside the link, and the
+    /// install after changes nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_ours_gives_way_to_a_link_to_the_store() {
+        let orchestration = bundled_skill("orchestration").unwrap();
+        let second_brain = bundled_skill("second-brain").unwrap();
+        let cases: [(&str, &BundledSkill, fn(&Path)); 4] = [
+            ("current", orchestration, |_| {}),
+            ("stale skill file", second_brain, |dir| {
+                std::fs::write(dir.join(SKILL_FILE), SECOND_BRAIN_9F3B7DBCE).unwrap();
+            }),
+            ("stale reference file", orchestration, |dir| {
+                std::fs::write(dir.join(VERBS), VERBS_5DDD03741).unwrap();
+            }),
+            ("finder's file", orchestration, |dir| {
+                std::fs::write(dir.join(FINDER_FILE), [0u8, 1, 2]).unwrap();
+            }),
+        ];
+        for (case, skill, shape) in cases {
+            let home = tempfile::tempdir().unwrap();
+            let dir = home.path().join(".claude/skills").join(skill.name);
+            copy_of(skill, &dir);
+            shape(&dir);
+            let outcome = install_for_claude(home.path(), skill.name);
+            assert_eq!(outcome.state, InstallState::Written, "{case}: {outcome:?}");
+            assert!(
+                outcome.detail.contains("링크로 바꿨습니다"),
+                "{case}: {outcome:?}"
+            );
+            assert!(is_link(&dir), "{case}: still a copy");
+            let in_store = home.path().join(".agents/skills").join(skill.name);
+            assert_eq!(std::fs::read_link(&dir).unwrap(), in_store, "{case}");
+            assert_eq!(
+                std::fs::read_to_string(dir.join(SKILL_FILE)).unwrap(),
+                skill.content,
+                "{case}"
+            );
+            let left: Vec<String> = std::fs::read_dir(dir.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(left, vec![skill.name.to_string()], "{case}: left beside it");
+            let again = install_for_claude(home.path(), skill.name);
+            assert_eq!(again.state, InstallState::Unchanged, "{case}: {again:?}");
+        }
+    }
+
+    /// A copy a person touched — one letter of `SKILL.md` changed, or a file
+    /// of their own put beside it — is never replaced by a link: the edit
+    /// stays as it was, the install says so, and the copy is left a copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_a_person_touched_stays_a_copy() {
+        let skill = bundled_skill("orchestration").unwrap();
+        let edited = skill.content.replacen("orchestration", "orchestratioN", 1);
+        assert_ne!(edited, skill.content);
+        let cases: [(&str, Box<dyn Fn(&Path) + '_>); 3] = [
+            (
+                "one letter",
+                Box::new(|dir: &Path| std::fs::write(dir.join(SKILL_FILE), &edited).unwrap()),
+            ),
+            (
+                "a file of their own",
+                Box::new(|dir: &Path| std::fs::write(dir.join("notes.md"), "mine").unwrap()),
+            ),
+            (
+                "an edited reference file",
+                Box::new(|dir: &Path| std::fs::write(dir.join(VERBS), "my verbs").unwrap()),
+            ),
+        ];
+        for (case, shape) in cases {
+            let home = tempfile::tempdir().unwrap();
+            let dir = home.path().join(".claude/skills").join(skill.name);
+            copy_of(skill, &dir);
+            shape(&dir);
+            let before: Vec<(String, Vec<u8>)> = {
+                let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
+                    .unwrap()
+                    .flatten()
+                    .map(|entry| {
+                        (
+                            entry.file_name().to_string_lossy().into_owned(),
+                            std::fs::read(entry.path()).unwrap(),
+                        )
+                    })
+                    .collect();
+                files.sort();
+                files
+            };
+            let outcome = install_for_claude(home.path(), skill.name);
+            assert!(!is_link(&dir), "{case}: replaced by a link");
+            assert_ne!(outcome.state, InstallState::Failed, "{case}: {outcome:?}");
+            let mut after: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| {
+                    (
+                        entry.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect();
+            after.sort();
+            assert_eq!(after, before, "{case}: the person's copy changed");
+        }
+        // The one-letter edit is named as kept.
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/skills").join(skill.name);
+        copy_of(skill, &dir);
+        std::fs::write(dir.join(SKILL_FILE), &edited).unwrap();
+        let outcome = install_for_claude(home.path(), skill.name);
+        assert_eq!(outcome.state, InstallState::Kept, "{outcome:?}");
+    }
+
+    /// A folder the install may not write in: the swap fails before anything
+    /// moves, and the copy stands as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_swap_the_folder_refuses_leaves_the_copy_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let skill = bundled_skill("orchestration").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join(".claude/skills");
+        let dir = root.join(skill.name);
+        copy_of(skill, &dir);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let outcome = install_for_claude(home.path(), skill.name);
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(outcome.state, InstallState::Failed, "{outcome:?}");
+        assert!(dir.is_dir() && !is_link(&dir));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(SKILL_FILE)).unwrap(),
+            skill.content
+        );
+        let names: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![skill.name.to_string()]);
+    }
+
+    /// The machine this was written for (2026-11-13): every shipped skill as
+    /// a copy in Claude Code's, zo's, Kiro's and Antigravity's folders and in
+    /// the store. One install of each leaves the store's folder the only one
+    /// for Claude Code and zo, and a copy of the same text for the others.
+    #[cfg(unix)]
+    #[test]
+    fn four_folders_of_copies_become_two_of_links_and_two_of_the_same_copies() {
+        let home = tempfile::tempdir().unwrap();
+        let roots = [
+            ".agents/skills",
+            ".claude/skills",
+            ".zo/skills",
+            ".kiro/skills",
+            ".gemini/antigravity/skills",
+        ];
+        for skill in BUNDLED_SKILLS {
+            for root in roots {
+                copy_of(skill, &home.path().join(root).join(skill.name));
+            }
+        }
+        let agents = rows(&["claude", "zo", "kiro", "antigravity"]);
+        for skill in BUNDLED_SKILLS {
+            let outcomes = install_bundled_skill(skill.name, home.path(), &[], &agents).unwrap();
+            assert!(
+                outcomes.iter().all(|row| row.state != InstallState::Failed),
+                "{outcomes:?}"
+            );
+            let in_store = home.path().join(".agents/skills").join(skill.name);
+            for linked in [".claude/skills", ".zo/skills"] {
+                let dir = home.path().join(linked).join(skill.name);
+                assert_eq!(
+                    std::fs::read_link(&dir).unwrap(),
+                    in_store,
+                    "{}",
+                    skill.name
+                );
+            }
+            for copied in [".kiro/skills", ".gemini/antigravity/skills"] {
+                let dir = home.path().join(copied).join(skill.name);
+                assert!(!is_link(&dir));
+                assert_eq!(
+                    std::fs::read_to_string(dir.join(SKILL_FILE)).unwrap(),
+                    skill.content
+                );
+            }
+            let again = install_bundled_skill(skill.name, home.path(), &[], &agents).unwrap();
+            assert!(
+                again.iter().all(|row| row.state == InstallState::Unchanged),
+                "{again:?}"
+            );
+        }
     }
 }
