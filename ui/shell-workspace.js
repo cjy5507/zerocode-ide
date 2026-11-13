@@ -6761,7 +6761,7 @@ async function refreshWorktrees() {
   paintStagePlaceholder();
   const canCreateWorktree = activeProject?.worktrees.some((worktree) => !worktree.is_folder) ?? false;
   // Live on a folder project too — the dialog offers to make it git.
-  writeDisabled(el("worktree-new"), !activeProject);
+  if (el("worktree-new").disabled !== !activeProject) el("worktree-new").disabled = !activeProject;
   paintWorktreeNewTitle();
   // 작업 is reachable only where there is something to browse, which is Orca's
   // own rule for this row: `canBrowseTasks = repos.some(isGitRepoKind)`
@@ -6769,7 +6769,7 @@ async function refreshWorktrees() {
   // there — a folder project has no worktrees, so the finder this row opens
   // would come up empty and the row would have led nowhere.
   // Every refresh says these again, and most say what they already said: written only when they moved.
-  writeDisabled(el("nav-tasks"), !canCreateWorktree);
+  if (el("nav-tasks").disabled !== !canCreateWorktree) el("nav-tasks").disabled = !canCreateWorktree;
   const tasksTip = canCreateWorktree
     ? t("view.tasksTitle", "작업")
     : t("worktree.gitOnly", "Git 프로젝트에서만 워크트리를 만들 수 있습니다");
