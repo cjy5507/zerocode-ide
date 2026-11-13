@@ -22086,6 +22086,27 @@ impl ApiClient for OneCall {
     }
 }
 
+/// A front that answers every question with the lasting allow, and counts
+/// the questions it was put.
+struct CountedLastingAllow(Arc<Mutex<usize>>);
+
+impl crate::permission::PermissionPrompter for CountedLastingAllow {
+    fn decide<'a>(
+        &'a self,
+        _request: crate::permission::PermissionRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<crate::permission::PermissionDecision, crate::permission::PermissionError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        *self.0.lock().expect("questions") += 1;
+        Box::pin(async { Ok(crate::permission::PermissionDecision::Allow) })
+    }
+}
+
 /// A prompt only a person may answer leaves no allow rule, whatever a front
 /// answers it with: a schedule's question answered with the lasting allow —
 /// which the question does not offer, and the IDE channel takes anyway —
@@ -22107,9 +22128,10 @@ fn a_lasting_allow_sent_to_a_person_only_prompt_allows_the_one_call_and_leaves_n
     let _leader = EnvVarGuard::unset(zerocode_core::agent_teams::TEAM_LEADER_VAR);
 
     // The calls that ran and the rules left behind, when the front answers
-    // the one prompt with the lasting allow.
+    // the one prompt with the lasting allow — which it was put once.
     let answered_with_a_lasting_allow = |name: &'static str, input: &str, mode: PermissionMode| {
         let ran = Arc::new(Mutex::new(Vec::new()));
+        let questions = Arc::new(Mutex::new(0));
         let policy = PermissionPolicy::new(mode).with_tool_requirement(name, PermissionMode::DangerFullAccess);
         let mut runtime = ConversationRuntime::new(
             Session::new(),
@@ -22127,13 +22149,15 @@ fn a_lasting_allow_sent_to_a_person_only_prompt_allows_the_one_call_and_leaves_n
             .expect("tokio runtime");
         tokio_runtime.block_on(async {
             let (render_tx, _render_rx) = tokio::sync::mpsc::channel(256);
-            let prompter: Arc<dyn crate::permission::PermissionPrompter> = Arc::new(AllowAsyncPrompterForOverflow);
+            let prompter: Arc<dyn crate::permission::PermissionPrompter> =
+                Arc::new(CountedLastingAllow(Arc::clone(&questions)));
             runtime
                 .run_turn_streaming_with_images("do it", Vec::new(), render_tx, prompter)
                 .await
                 .expect("the turn");
         });
         let ran = ran.lock().expect("calls").clone();
+        assert_eq!(*questions.lock().expect("questions"), 1, "{name}: the front is put the one question");
         (ran, runtime.take_granted_permission_rules())
     };
 
@@ -22234,7 +22258,7 @@ fn a_schedule_deletion_in_full_access_runs_only_on_a_persons_yes() {
                 .expect("the turn");
         });
         assert_eq!(
-            CronRegistry::peek_in_workspace(folder.path(), &cron_id).is_some(),
+            CronRegistry::peek_in_workspace(folder.path(), &cron_id).stands(),
             !says_yes,
             "a {} leaves the schedule {}",
             if says_yes { "yes" } else { "no" },

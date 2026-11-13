@@ -308,7 +308,7 @@ fn cron_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
-            name: "CronList",
+            name: runtime::schedule_guard::LIST_TOOL,
             description: "List all registered cron task records, their next due time, the time zone their schedules are read in, and the scheduler status.",
             input_schema: json!({
                 "type": "object",
@@ -399,7 +399,7 @@ pub(crate) fn dispatch(
                     .and_then(|parsed| run_cron_delete(&ctx.crons, &parsed))
             }),
         ),
-        "CronList" => Some(
+        runtime::schedule_guard::LIST_TOOL => Some(
             maybe_enforce_permission_check(enforcer, name, input)
                 .and_then(|()| run_cron_list(&ctx.crons)),
         ),

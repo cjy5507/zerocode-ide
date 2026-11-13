@@ -723,6 +723,13 @@ impl InlineShell<'_> {
             Ok(call) => call,
             Err(refused) => return Some(format!("not run — {refused}")),
         };
+        // A line that registers or deletes a schedule (`zo cron ensure`,
+        // `zo cron remove`) goes past the question only a person answers, and
+        // a command file asks nobody: refused in the schedule guard's words,
+        // whatever the rules say.
+        if let Some(refused) = runtime::schedule_guard::refused_in_a_shell(command) {
+            return Some(format!("not run — {refused}"));
+        }
         match policy.authorize_let_through(&call, None) {
             runtime::PermissionOutcome::Allow => None,
             runtime::PermissionOutcome::Deny { .. } => Some(
@@ -1196,6 +1203,36 @@ mod tests {
         assert!(rendered.starts_with(&refused), "{rendered}");
         assert!(!rendered.contains("an ask rule"), "{rendered}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// A `!` line that registers or deletes a schedule is refused in the
+    /// schedule guard's words in a trusted folder, under an allow rule for
+    /// it: a command file asks nobody, and the store is a person's to change
+    /// (t-106892). A line that only reads the store is not the guard's. The
+    /// judgment is asked alone, so no `zo` runs here even were it let through.
+    #[test]
+    fn a_bang_line_that_writes_the_schedule_store_is_refused_in_the_schedule_guards_words() {
+        let root = temp_dir("bang-cron");
+        let rules =
+            runtime::RuntimePermissionRuleConfig::new(vec!["Bash(zo cron:*)".to_string()], Vec::new(), Vec::new());
+        let allowed_tools = vec!["Bash".to_string()];
+        let shell = InlineShell {
+            allowed_tools: &allowed_tools,
+            read_only: false,
+            workspace: WorkspaceTrust::Trusted,
+            folder: &root,
+            rules: Ok(&rules),
+            confined: false,
+            line_limit_ms: None,
+        };
+        for (line, says) in [
+            ("zo cron remove --description nightly", "deletes a schedule from a shell"),
+            ("zo cron ensure --description nightly --schedule '0 3 * * *' --prompt sweep", "registers a schedule from a shell"),
+        ] {
+            let refused = shell.refusal(line).unwrap_or_default();
+            assert!(refused.starts_with(&format!("not run — refused to run: this command {says}")), "{line}: {refused}");
+        }
+        assert_eq!(shell.refusal("zo cron show --description nightly"), None, "a line that only reads the store");
     }
 
     /// A `!` line is judged on one reading of the processes: the guard's

@@ -28,7 +28,10 @@
 //! is no proof a yes deletes nothing. The guard's look at the store writes
 //! nothing (`CronRegistry::peek_in_workspace`). The card is the guard's own
 //! sentence over the schedule as the store holds it: its name, what it runs,
-//! when, how many times it ran, and where.
+//! when, how many times it ran, and where. When the look finds no schedule by
+//! that id, or the store's file does not read, the card says it cannot show
+//! what a yes deletes, and that the tool deletes the one its own store holds
+//! under the id, if one stands.
 //!
 //! A schedule zo asks for runs no closer together than the floor the window
 //! holds an asked schedule to (`CronCreateInput::work`). A call that would
@@ -41,10 +44,12 @@
 //! `zo cron remove` are the person's own — typed by them, or sent by the
 //! window on their click — and a shell command of the model's that spells
 //! either out is refused and sent to the tool, where the question stands
-//! ([`refused_in_a_shell`]); `zo cron show` only reads, and passes. It is refused
-//! where the kill guard and the desk guard refuse: the permission policy, the
-//! enforcer a sub-agent's commands and a command file's `!` lines go through,
-//! and the `PowerShell` tool.
+//! ([`refused_in_a_shell`]); `zo cron show` writes no schedule, and passes
+//! (opening the store, it sets aside an entry that does not read, as every
+//! open does). It is refused where the kill guard and the desk guard refuse —
+//! the permission policy, the enforcer a sub-agent's commands go through, and
+//! the `PowerShell` tool — and in a command file's `!` lines, which answer to
+//! the kill guard and this guard but not the desk guard.
 //!
 //! What this is not: a boundary. The refusal reads the names a command spells
 //! out, by the reading the kill guard uses, and these kinds get past it:
@@ -56,9 +61,12 @@
 //! - a verb filled in at run time inside a string handed to a shell
 //!   (`bash -c "zo cron $VERB"`): the reading drops what is filled in and
 //!   takes the next word for the verb, so the call passes when no word
-//!   follows, or when the one that does is a verb that registers nothing. At
-//!   the top of a command such a verb is refused, since the empty word keeps
-//!   its place;
+//!   follows, or when the one that does is the verb that only reads (`show`)
+//!   or a usage word. At the top of a command such a verb is refused, since
+//!   the empty word keeps its place;
+//! - words another program feeds in when it runs (`… | xargs zo cron`,
+//!   `… | xargs zo`): the reading sees `zo cron` with no verb, or `zo` alone,
+//!   which print the usage;
 //! - an edit of the store's file.
 //!
 //! The guard closes the asking, not the file.
@@ -73,7 +81,7 @@ use zerocode_core::card_words::{hidden_said, shown, shown_counting, EXCERPT_MAX_
 use zerocode_core::shell_rule::runs::{self, ProgramRun};
 
 use crate::team_cron_registry::{
-    cron_zone, next_due_at_after_in_zone, CronCreateInput, CronDeleteInput, CronEntry, CronRegistry, CronWork,
+    cron_zone, next_due_at_after_in_zone, CronCreateInput, CronDeleteInput, CronPeek, CronRegistry, CronWork,
     CronZone,
 };
 
@@ -97,9 +105,17 @@ const SAYS_OF_A_DELETION: &str =
     "Deleting this schedule is for good: it will not run again, and no record of it is left.";
 
 /// The card's line for an id the guard's look at the store did not find: the
-/// person is asked all the same, since the tool deletes from its own store.
-const NOT_FOUND_HERE: &str =
-    "Not found: no schedule by this id stands in this folder's store; the tool says whether one stands in its own.";
+/// person is asked all the same, since the tool deletes from its own store,
+/// and the card says it cannot show what a yes deletes.
+const NOT_FOUND_HERE: &str = "Not found here: this card cannot show what a yes deletes; the tool deletes the schedule its own store holds under this id, if one stands.";
+
+/// The card's line when the store's file is there and did not read (broken
+/// JSON, a link, no right to read it), or no folder is known to look in: the
+/// card has nothing to show, and the tool may still hold the schedule.
+const STORE_DID_NOT_READ: &str = "The store did not read: this card cannot show what a yes deletes; the tool deletes the schedule its own store holds under this id, if one stands.";
+
+/// The tool that lists the schedules and their ids.
+pub const LIST_TOOL: &str = "CronList";
 
 /// What a call does that a person approves, which words its refusals say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,8 +259,8 @@ pub(crate) fn asked(tool_name: &str, input: &str, workspace: Option<&Path>) -> O
         return Some((card(&registration, cron_zone(), now, folder), Act::Registers));
     }
     let cron_id = removal(tool_name, input)?;
-    let entry = folder.and_then(|folder| CronRegistry::peek_in_workspace(folder, &cron_id));
-    Some((deletion_card(&cron_id, entry.as_ref(), cron_zone(), now, folder), Act::Deletes))
+    let peek = folder.map_or(CronPeek::DidNotRead, |folder| CronRegistry::peek_in_workspace(folder, &cron_id));
+    Some((deletion_card(&cron_id, &peek, cron_zone(), now, folder), Act::Deletes))
 }
 
 /// Whether `tool_name` called with `input` is a person's to approve: it
@@ -263,11 +279,12 @@ pub fn asks(tool_name: &str, input: &str) -> bool {
 /// to ask through instead: `zo cron ensure` registers a schedule, and
 /// `zo cron remove` deletes one — which is also the only road to another
 /// folder's store (`--cwd`), and that one a session has none of. `None` for
-/// any other command: `zo cron show` only reads, and `-h` prints the usage. A
+/// any other command: `zo cron show` writes no schedule, and `-h` prints the usage. A
 /// word after `cron` that is none of these is refused as the verb that
 /// registers; at the top of a command that includes a verb the shell fills in
 /// when it runs. Asked by every layer that judges a model's command, after the
-/// kill guard and the desk guard; no mode, rule or hook answers it, since the
+/// kill guard and the desk guard, and of a command file's `!` lines after the
+/// kill guard; no mode, rule or hook answers it, since the
 /// question it sends the model to is one only a person answers.
 #[must_use]
 pub fn refused_in_a_shell(command: &str) -> Option<String> {
@@ -277,7 +294,7 @@ pub fn refused_in_a_shell(command: &str) -> Option<String> {
         return Some(format!(
             "refused to run: this command deletes a schedule from a shell (`{SHELL_PROGRAM} \
              {SHELL_VERBS_UNDER} {SHELL_VERB_THAT_DELETES}`), past the question a person answers. Delete \
-             a schedule with the {DELETE_TOOL} tool: find its `cron_id` with the CronList tool, then \
+             a schedule with the {DELETE_TOOL} tool: find its `cron_id` with the {LIST_TOOL} tool, then \
              call {DELETE_TOOL} with it, and it puts the deletion to a person. A schedule kept for \
              another folder (`--cwd`) cannot be deleted from this session. {}",
             Act::Deletes.not_the_mode()
@@ -407,14 +424,15 @@ fn card(registration: &Registration, zone: CronZone, now: u64, folder: Option<&P
 /// The card for deleting the schedule `cron_id` names: the guard's sentence,
 /// the id as the call gave it, then the schedule as the store holds it — its
 /// name, what it runs, when, how many times it ran — or that the guard's look
-/// did not find it, and the folder whose store that is. Every word of the
-/// call and of the store is shown as `card_words` shows data.
-fn deletion_card(cron_id: &str, entry: Option<&CronEntry>, zone: CronZone, now: u64, folder: Option<&Path>) -> String {
+/// did not find it or the store did not read, so the card cannot show what a
+/// yes deletes, and the folder whose store that is. Every word of the call
+/// and of the store is shown as `card_words` shows data.
+fn deletion_card(cron_id: &str, peek: &CronPeek, zone: CronZone, now: u64, folder: Option<&Path>) -> String {
     let mut card = String::from(SAYS_OF_A_DELETION);
     let id = shown_counting(cron_id, WORD_MAX_CHARS);
     let _ = write!(card, "\nSchedule: {}", id.text);
-    match entry {
-        Some(entry) => {
+    match peek {
+        CronPeek::Stands(entry) => {
             let runs = match &entry.workflow {
                 Some(workflow) => Runs::Workflow(workflow_name(workflow)),
                 None => Runs::Prompt(entry.prompt.trim().to_string()),
@@ -428,17 +446,19 @@ fn deletion_card(cron_id: &str, entry: Option<&CronEntry>, zone: CronZone, now: 
             let _ = match (entry.run_count, entry.last_run_at) {
                 (0, _) => write!(card, "\nRan: never"),
                 (1, Some(last)) => write!(card, "\nRan: once, at {}", clock(last, zone.offset_secs)),
+                (1, None) => write!(card, "\nRan: once"),
                 (count, Some(last)) => {
                     write!(card, "\nRan: {count} times, last at {}", clock(last, zone.offset_secs))
                 }
                 (count, None) => write!(card, "\nRan: {count} times"),
             };
         }
-        None => {
+        CronPeek::NotHere | CronPeek::DidNotRead => {
             if let Some(left_out) = hidden_said(id.hidden) {
                 let _ = write!(card, "\nHidden: {left_out}");
             }
-            let _ = write!(card, "\n{NOT_FOUND_HERE}");
+            let line = if matches!(peek, CronPeek::NotHere) { NOT_FOUND_HERE } else { STORE_DID_NOT_READ };
+            let _ = write!(card, "\n{line}");
         }
     }
     where_it_runs(&mut card, folder);

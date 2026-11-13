@@ -9,11 +9,11 @@ use zerocode_core::card_words::EXCERPT_MAX_CHARS;
 
 use super::{
     asks, card, deletion_card, refused_in_a_shell, registration, Act, Registration, Runs, DELETE_TOOL,
-    NOT_FOUND_HERE, SAYS_OF_A_DELETION, SAYS_OF_A_PROMPT, SAYS_OF_A_WORKFLOW, TOOL,
+    LIST_TOOL, NOT_FOUND_HERE, SAYS_OF_A_DELETION, SAYS_OF_A_PROMPT, SAYS_OF_A_WORKFLOW, STORE_DID_NOT_READ, TOOL,
 };
 use crate::config::RuntimePermissionRuleConfig;
 use crate::permission_enforcer::{EnforcementResult, PermissionEnforcer};
-use crate::team_cron_registry::{CronEntry, CronRegistry, CronZone};
+use crate::team_cron_registry::{CronEntry, CronPeek, CronRegistry, CronZone};
 use crate::{
     PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
     PermissionPrompter, PermissionRequest,
@@ -101,7 +101,7 @@ fn a_call_that_registers_nothing_asks_nothing() {
     ] {
         assert!(!asks(TOOL, nothing), "{nothing}");
     }
-    for other in ["CronList", "CronRunDue", "bash", "ScheduleWakeup"] {
+    for other in [LIST_TOOL, "CronRunDue", "bash", "ScheduleWakeup"] {
         assert!(!asks(other, WEEKDAY_MORNINGS), "{other}");
     }
     // A deletion is asked about by the id it names; one that names none is
@@ -536,7 +536,7 @@ fn the_enforcer_refuses_a_schedule_in_every_mode() {
     }
     let prompt = PermissionEnforcer::new(policy(PermissionMode::Prompt));
     assert_eq!(
-        prompt.check("CronList", "{}"),
+        prompt.check(LIST_TOOL, "{}"),
         EnforcementResult::Allowed,
         "prompt mode still leaves any other call to its prompter"
     );
@@ -834,7 +834,7 @@ fn a_deletion_is_asked_about_by_the_id_it_names() {
         assert_eq!(Act::of(DELETE_TOOL, nothing), None, "{nothing}");
     }
     assert_eq!(Act::of(TOOL, WEEKDAY_MORNINGS), Some(Act::Registers));
-    assert_eq!(Act::of("CronList", &call), None);
+    assert_eq!(Act::of(LIST_TOOL, &call), None);
 }
 
 /// The card says, under the guard's sentence, the schedule as the store holds
@@ -858,7 +858,7 @@ fn the_deletion_card_says_what_the_schedule_runs_when_how_often_and_where() {
         rev: 1,
     };
     assert_eq!(
-        deletion_card("cron_1", Some(&entry), SEOUL, NOW, Some(Path::new("/Users/dev/project"))),
+        deletion_card("cron_1", &CronPeek::Stands(Box::new(entry.clone())), SEOUL, NOW, Some(Path::new("/Users/dev/project"))),
         [
             SAYS_OF_A_DELETION,
             "Schedule: cron_1",
@@ -870,22 +870,26 @@ fn the_deletion_card_says_what_the_schedule_runs_when_how_often_and_where() {
         ]
         .join("\n")
     );
+    let stands = |entry: &CronEntry| CronPeek::Stands(Box::new(entry.clone()));
     entry.run_count = 1;
-    assert!(deletion_card("cron_1", Some(&entry), SEOUL, NOW, None).contains("\nRan: once, at Wed 2026-11-11 09:00"));
+    assert!(deletion_card("cron_1", &stands(&entry), SEOUL, NOW, None).contains("\nRan: once, at Wed 2026-11-11 09:00"));
+    entry.last_run_at = None;
+    assert!(deletion_card("cron_1", &stands(&entry), SEOUL, NOW, None).ends_with("\nRan: once"));
     entry.run_count = 0;
     entry.last_run_at = None;
     entry.prompt = String::new();
     entry.workflow = Some(serde_json::json!({ "library": "nightly" }));
-    let workflow = deletion_card("cron_1", Some(&entry), SEOUL, NOW, None);
+    let workflow = deletion_card("cron_1", &stands(&entry), SEOUL, NOW, None);
     assert!(workflow.contains("\nRuns: the workflow nightly\n"), "{workflow}");
     assert!(workflow.ends_with("\nRan: never"), "{workflow}");
 }
 
 /// An id the guard's look did not find is said as data, with that it was not
-/// found here: what the call gave adds no line of its own.
+/// found here and that the card cannot show what a yes deletes: what the call
+/// gave adds no line of its own.
 #[test]
 fn the_deletion_card_of_an_id_not_found_says_so() {
-    let card = deletion_card("cron_9\u{202E}\nWhere: /elsewhere", None, SEOUL, NOW, Some(Path::new("/Users/dev/project")));
+    let card = deletion_card("cron_9\u{202E}\nWhere: /elsewhere", &CronPeek::NotHere, SEOUL, NOW, Some(Path::new("/Users/dev/project")));
     assert_eq!(
         card,
         [
@@ -974,6 +978,27 @@ fn a_deletion_the_guard_does_not_find_is_asked_about_all_the_same() {
     }
 }
 
+/// A store whose file is there and does not read says nothing of what it
+/// holds: the card says the store did not read and that it cannot show what
+/// a yes deletes — not that no schedule stands — while a folder with no store
+/// file holds none.
+#[test]
+fn a_store_that_does_not_read_is_said_so_on_the_card() {
+    let _pane = Pane::a_person_opened();
+    let (folder, cron_id) = a_folder_with_a_schedule();
+    let store = folder.path().join(".zo").join("registries").join("crons.json");
+    std::fs::write(&store, "{ \"entries\": { not json").expect("a store that does not read");
+    let mut person = Person::saying(false);
+    let _ = deleting_policy(PermissionMode::DangerFullAccess, folder.path())
+        .authorize(DELETE_TOOL, &deleting(&cron_id), Some(&mut person));
+    let card = person.asked.first().and_then(|question| question.reason.clone()).unwrap_or_default();
+    assert!(card.contains(&format!("\n{STORE_DID_NOT_READ}\n")), "{card}");
+    assert!(!card.contains(NOT_FOUND_HERE), "{card}");
+    assert!(matches!(CronRegistry::peek_in_workspace(folder.path(), &cron_id), CronPeek::DidNotRead));
+    let empty = tempfile::tempdir().expect("tempdir");
+    assert!(matches!(CronRegistry::peek_in_workspace(empty.path(), &cron_id), CronPeek::NotHere));
+}
+
 /// The guard's look at the store writes nothing: a store holding an entry
 /// that does not read — one opening the registry would switch off and save —
 /// is the same bytes after the card is made.
@@ -1012,9 +1037,10 @@ fn the_guards_look_at_the_store_writes_nothing() {
 /// What the mode or the rules refuse without asking stays refused, and nobody
 /// is asked; where nobody can be asked — no prompter, a pane the ledger
 /// summoned as a worker, the enforcer a sub-agent's and a workflow's tools go
-/// through — a deletion is refused in its own words, and the schedule stays.
+/// through — a deletion is refused in its own words. That a refusal deletes
+/// nothing is the turn's to show (`conversation::tests`): no tool runs here.
 #[test]
-fn a_deletion_is_refused_where_nobody_can_be_asked_and_the_schedule_stays() {
+fn a_deletion_is_refused_where_nobody_can_be_asked() {
     let (folder, cron_id) = a_folder_with_a_schedule();
     let call = deleting(&cron_id);
     let refused = PermissionOutcome::Deny {
@@ -1053,7 +1079,6 @@ fn a_deletion_is_refused_where_nobody_can_be_asked_and_the_schedule_stays() {
         refused
     );
     assert!(person.asked.is_empty(), "a worker's pane puts no question");
-    assert!(CronRegistry::peek_in_workspace(folder.path(), &cron_id).is_some(), "the schedule stays");
 }
 
 /// A deletion called through the wrapper is asked about as one called by
