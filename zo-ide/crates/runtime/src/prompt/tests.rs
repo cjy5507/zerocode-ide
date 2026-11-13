@@ -768,6 +768,12 @@ fn build_includes_responding_section_before_boundary() {
         "style contract must require outcome-first answers"
     );
     assert!(
+        contract_section.contains("the conclusion, not its topic")
+            && contract_section.contains("your overall judgment, not what the thing is")
+            && contract_section.contains("Do not open by defining the subject"),
+        "style contract must say what the first sentence is and what it is not: {contract_section}"
+    );
+    assert!(
         contract_section.contains("readable matters more"),
         "style contract must rank readability above brevity"
     );

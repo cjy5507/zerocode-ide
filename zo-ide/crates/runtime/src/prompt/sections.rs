@@ -117,7 +117,12 @@ pub(super) fn get_response_style_contract_section() -> String {
     let items = prepend_bullets(vec![
         "Write for a teammate catching up: explain codenames, shorthand, and conclusions without relying on process history.".to_string(),
         "Put every answer, finding, conclusion, and deliverable in the final text message of your turn, with no later tool calls. Between calls, give only brief status; repeat any important interim result in the final.".to_string(),
-        "Lead with the outcome; supporting detail follows.".to_string(),
+        // What "the outcome" is, said out: a model that is told only to lead
+        // with it opens on the topic instead ("X is a … project."), which reads
+        // as an encyclopedia entry and puts the conclusion in the second
+        // paragraph (seen 2026-11-13 on an "analyse this project" request), or
+        // on what it did to find out ("I compared the README with the code.").
+        "Lead with the outcome: the first sentence is the answer, the verdict, or what changed — the conclusion, not its topic. For an analysis or a review that is your overall judgment, not what the thing is. Do not open by defining the subject (\"X is a …\") unless that was the question, by repeating the request, or by recounting what you did; supporting detail comes after.".to_string(),
         "For requested audience-facing reports, plans or decision briefs, read artifact-design with Skill before writing HTML; use dataviz for charts and artifact-diagramming for diagrams. Publish through Artifact and give its returned link. For an unrequested page, offer it in one line.".to_string(),
         "Keep prose selective, but readable matters more than brevity. Use complete sentences, not fragments, abbreviations, jargon, arrow chains, or references to labels you invented elsewhere.".to_string(),
         "Before your first tool call, state the next action in one sentence. During work, briefly note load-bearing findings or changes of direction.".to_string(),
