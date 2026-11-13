@@ -752,7 +752,9 @@ async fn timed_probe_call(
 
 fn probe_request(model: &str, description: &str, prompt: &str) -> MessageRequest {
     MessageRequest {
-        model: model.to_string(),
+        // The id the endpoint knows the model by: a provider of the person's
+        // is named `<provider>/<id>` here, and is asked for `<id>`.
+        model: api::wire_model_id(model),
         max_tokens: PROBE_MAX_TOKENS,
         messages: vec![InputMessage::user_text(probe_prompt(description, prompt))],
         system: None,
@@ -1229,6 +1231,45 @@ mod live_path_tests {
     /// sides: a Codex-shaped probe endpoint and a System One endpoint speaking
     /// its documented contract (`docs/design/jev-decision-shadow-20260917.md`
     /// §4 — tools).
+    /// A person's own endpoint is asked for its fast model by the id the
+    /// endpoint knows it by. Here the model is named `<provider>/<id>`, so
+    /// that it is that provider's and no other's; sent as it is named, the
+    /// endpoint knew no such model and refused — the probe fell back to the
+    /// tables and the fold to the cut, after the turn's words and a tool's
+    /// whole output had left in requests that could not be answered.
+    #[test]
+    fn a_persons_own_endpoint_is_asked_for_its_fast_model_by_its_own_id() {
+        const REPLY: &str = r#"{"id":"zq","object":"chat.completion","model":"zq-wire-small","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let held = env_lock();
+        let _home = crate::tests::ConfigHome::empty(&held);
+        let _no_override = crate::tests::Var::unset(&held, PROBE_BASE_URL_ENV);
+        let endpoint = MockCodex::serving("HTTP/1.1 200 OK", "application/json", REPLY.to_string());
+        let _own = crate::tests::OwnProviders::declared(
+            &held,
+            &format!(
+                r#"[{{"name":"zqwire","base_url":"http://{}/v1","requires_auth":false,
+                     "models":["zq-wire-big","zq-wire-small"],"fast_model":"zq-wire-small"}}]"#,
+                endpoint.addr
+            ),
+        );
+        let named = super::probe_model("zq-wire-big").expect("the provider names its fast model");
+        assert_eq!(named, "zqwire/zq-wire-small");
+
+        // The probe of a task, and the one request a fold makes.
+        let task = format!("zq wire probe {}", std::process::id());
+        let _ = super::probe_slots("zq-wire-big", &[("", task.as_str())], "", super::ProbeUse::Routing);
+        let fold = crate::fast_model::FastModel::dialling(named, Some("zq-wire-big"))
+            .expect("a client for the person's endpoint");
+        let _ = fold.reply(&["zq wire system".to_string()], "zq wire fold", 64, std::time::Duration::from_secs(10));
+
+        let asked = endpoint.requests();
+        assert!(asked.len() >= 2, "the probe and the fold both reached the endpoint: {asked:?}");
+        for body in &asked {
+            let body: serde_json::Value = serde_json::from_str(body).expect("a JSON request");
+            assert_eq!(body["model"], "zq-wire-small", "{body}");
+        }
+    }
+
     mod decision_shadow {
         use std::ffi::OsString;
         use std::io::Write;

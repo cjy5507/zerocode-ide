@@ -83,7 +83,9 @@ impl FastModel {
         within: Duration,
     ) -> Result<String, String> {
         let request = api::MessageRequest {
-            model: self.model.clone(),
+            // The id the endpoint knows the model by: a provider of the
+            // person's is named `<provider>/<id>` here, and is asked for `<id>`.
+            model: api::wire_model_id(&self.model),
             max_tokens: max_tokens.min(api::max_tokens_for_model(&self.model)),
             messages: vec![api::InputMessage::user_text(user)],
             // The identity-first split the sub-agent path uses: the Claude Max
