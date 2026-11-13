@@ -206,6 +206,12 @@ impl TurnFold {
         self.steps.len()
     }
 
+    /// How many of the fold's steps failed — what its head row says.
+    #[must_use]
+    pub fn failures(&self) -> usize {
+        failures(&self.steps)
+    }
+
     /// Whether a blank row stands above the row at `at`: it opens a text that
     /// follows a step. The text and the steps under it stay together, and
     /// one such group stands apart from the next ("너무 붙어있어",
@@ -446,11 +452,46 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
     out
 }
 
+/// The row the work stands under while the turn runs — `⏺ Working · 3 steps`,
+/// with ` · 1 failed` once one has: the words and the order of the row the
+/// fold's cell opens with when the turn is said ([`cell`]), on the screen
+/// row it will be said on, so nothing moves then but the words. `steps` are
+/// the calls made so far, the running ones too. No clock and no spinner of
+/// its own: the working row counts the time, and the running call's row
+/// turns. Its mark is the look's cell mark (`⏺`, `•`): the done mark (`✓`)
+/// is the fold's to put there.
+#[must_use]
+pub fn working_head(steps: usize, failed: usize, width: usize) -> Line {
+    let column = super::style::current().reading_width(width);
+    let mark = super::style::glyphs().answer.trim_end();
+    Line::new(head_spans(mark, Style::new().dim(), strings::WORKING.to_string(), steps, failed)).truncated(column)
+}
+
+/// A head row's words: its mark, what was done, how many steps, how many of
+/// them failed.
+fn head_spans(mark: &str, style: Style, done: String, steps: usize, failed: usize) -> Vec<Span> {
+    let mut head = vec![
+        Span::new(mark.to_string(), style),
+        Span::raw(" "),
+        Span::bold(done),
+        Span::dim(format!(" · {}", steps_word(steps))),
+    ];
+    if failed > 0 {
+        head.push(Span::new(format!(" · {failed} failed"), Style::new().fg(palette::TOOL_FAIL)));
+    }
+    head
+}
+
+/// How many steps failed: a declined one did not fail, it was not run.
+fn failures(steps: &[Step]) -> usize {
+    steps.iter().filter(|step| !step.ok && !step.declined).count()
+}
+
 /// The cell's first row: how long the steps took and how many there were,
 /// and, where it fits, the key that shows them all.
 fn head_row(steps: &[Step], width: usize, now: Instant) -> Vec<Span> {
-    let failed = steps.iter().any(|step| !step.ok && !step.declined);
-    let glyph_style = Style::new().fg(if failed { palette::TOOL_FAIL } else { palette::TOOL_OK }).bold();
+    let failed = failures(steps);
+    let glyph_style = Style::new().fg(if failed > 0 { palette::TOOL_FAIL } else { palette::TOOL_OK }).bold();
     let seconds = steps
         .iter()
         .map(|step| step.started)
@@ -461,16 +502,7 @@ fn head_row(steps: &[Step], width: usize, now: Instant) -> Vec<Span> {
     } else {
         strings::WORKED.to_string()
     };
-    let mut head = vec![
-        Span::new(super::style::glyphs().tool_done.to_string(), glyph_style),
-        Span::raw(" "),
-        Span::bold(worked),
-        Span::dim(format!(" · {}", steps_word(steps.len()))),
-    ];
-    let failures = steps.iter().filter(|step| !step.ok && !step.declined).count();
-    if failures > 0 {
-        head.push(Span::new(format!(" · {failures} failed"), Style::new().fg(palette::TOOL_FAIL)));
-    }
+    let mut head = head_spans(super::style::glyphs().tool_done, glyph_style, worked, steps.len(), failed);
     let hint = [Span::bold(strings::KEY_VIEW), Span::dim(strings::TO_EXPAND)];
     let used: usize = head.iter().map(Span::width).sum();
     let hint_width: usize = hint.iter().map(Span::width).sum();

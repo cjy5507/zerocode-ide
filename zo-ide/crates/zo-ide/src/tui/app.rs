@@ -380,6 +380,19 @@ struct PendingTool {
     presentation: ToolPresentation,
 }
 
+impl PendingTool {
+    /// Whether the call becomes a step of the turn's work when it ends. Known
+    /// when it starts: internal preparation that goes through (`ToolSearch`,
+    /// a skill read) leaves the screen, and so do a question's call and a
+    /// submitted plan, which are said as their own cells. One that fails is
+    /// a step after all.
+    fn stays_a_step(&self) -> bool {
+        self.presentation != ToolPresentation::TransientOnSuccess
+            && self.result_name != ASK_USER_QUESTION_TOOL
+            && self.result_name != PLAN_SUBMISSION_TOOL
+    }
+}
+
 #[derive(Debug)]
 struct QuietLoopCell {
     loop_id: String,
@@ -2158,20 +2171,23 @@ impl Ui {
     /// 감춘다(`sync_active_stream_tail` → `hide_status_indicator`).
     fn active_cell(&self, width: usize) -> (Vec<Line>, bool) {
         let (cell, tail_owns_slot) = self.live_cell(width);
+        let head_row = self.work_head(width);
         if !self.fold.is_pending() {
-            return (cell, tail_owns_slot);
+            return (head_row.into_iter().chain(cell).collect(), tail_owns_slot);
         }
         // The `turns` view: the finished steps, the texts that led into them
         // and the text it holds stand above whatever is live, one under
         // another, so the work shows while it runs and no row of it goes
-        // away before the fold is said.
-        let room = turns::live_room(usize::from(self.painter.max_height()));
+        // away before the fold is said — under the head row the fold's cell
+        // will open with.
+        let room = turns::live_room(usize::from(self.painter.max_height())).saturating_sub(usize::from(head_row.is_some()));
         let fold_room = if cell.is_empty() {
             room
         } else {
             room.saturating_sub(cell.len()).max(turns::LIVE_ROWS_MIN)
         };
-        let mut rows = self.fold.live_rows(width, fold_room);
+        let mut rows: Vec<Line> = head_row.into_iter().collect();
+        rows.extend(self.fold.live_rows(width, fold_room));
         let held = self.fold.held();
         if !held.is_empty() {
             rows.extend(held.iter().cloned());
@@ -2180,6 +2196,28 @@ impl Ui {
             rows.extend(cell);
         }
         (rows, tail_owns_slot)
+    }
+
+    /// The `turns` view's head row over the work in the viewport
+    /// ([`turns::working_head`]): from the first call that stays a step —
+    /// running or done — to the moment the fold is said, when the fold's own
+    /// head row takes its screen row. A call that goes without a step
+    /// ([`PendingTool::stays_a_step`]) brings none: it would leave the row
+    /// with it.
+    fn work_head(&self, width: usize) -> Option<Line> {
+        if !self.folding() {
+            return None;
+        }
+        let running = self.tool_cell.as_ref().is_some_and(|cell| {
+            cell.call_ids().any(|id| self.tools.get(id).is_none_or(PendingTool::stays_a_step))
+        });
+        (self.fold.has_steps() || running).then(|| turns::working_head(self.work_steps(), self.fold.failures(), width))
+    }
+
+    /// The steps the open fold has taken: the ones it holds and the calls of
+    /// the cell still live.
+    fn work_steps(&self) -> usize {
+        self.fold.step_count() + self.tool_cell.as_ref().map_or(0, ToolGroup::call_count)
     }
 
     /// The one live cell: the running tool cell, the stream's unsettled tail,
@@ -4889,11 +4927,7 @@ impl Ui {
     /// rows above it show them one under another, as many as the pane has
     /// room for.
     fn count_steps(&mut self) {
-        let steps = if self.folding() {
-            self.fold.step_count() + self.tool_cell.as_ref().map_or(0, ToolGroup::call_count)
-        } else {
-            0
-        };
+        let steps = if self.folding() { self.work_steps() } else { 0 };
         if let Some(status) = self.status.as_mut() {
             status.set_steps(steps);
         }
@@ -9177,6 +9211,199 @@ mod tests {
         ui.block(RenderBlock::TextDelta { id: ids.next(), text: format!("{words}\n"), done: true });
     }
 
+    /// What the screen shows of the conversation in this frame: the
+    /// transcript, the gap row the viewport opens the work with unless it
+    /// stands right under the transcript's last row ([`super::Ui::place`]),
+    /// and the live rows.
+    fn work_screen(ui: &super::Ui, width: usize) -> Vec<String> {
+        let (active, tail_owns_slot) = ui.active_cell(width);
+        let mut rows = history(ui);
+        let dense = ui.work_opens_dense(tail_owns_slot) || ui.tail_continues_its_answer(tail_owns_slot);
+        if !active.is_empty() && !dense {
+            rows.push(String::new());
+        }
+        rows.extend(active.iter().map(Line::plain));
+        rows
+    }
+
+    /// A turn of three calls — a read, a command that fails, a search — and
+    /// a short answer, one frame after every event, the turn's end the last.
+    /// `preamble` has the model say what it is about to do first.
+    fn three_calls_frames(ui: &mut super::Ui, preamble: bool, width: usize) -> Vec<Vec<String>> {
+        use runtime::message_stream::types::ToolResultBody;
+        let ids = BlockIdGen::default();
+        let result = |ids: &BlockIdGen, call: &str, content: &str, is_error: bool| RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId(call.to_string()),
+            is_error,
+            body: ToolResultBody::Text { content: content.to_string(), truncated: false },
+        };
+        let mut frames = vec![work_screen(ui, width)];
+        if preamble {
+            says(ui, &ids, "I will read the parser first.");
+            frames.push(work_screen(ui, width));
+        }
+        let calls = [
+            ("toolu_read", "read_file", json!({ "path": "src/parser.rs" }), "fn parse() {}\n", false),
+            ("toolu_run", "bash", json!({ "command": "cargo test parser" }), "error: 1 test failed\n", true),
+            ("toolu_grep", "Grep", json!({ "pattern": "fn parse", "path": "src" }), "src/parser.rs\n", false),
+        ];
+        for (call, tool, input, output, failed) in calls {
+            ui.block(tool_call(&ids, call, tool, &input));
+            frames.push(work_screen(ui, width));
+            ui.block(result(&ids, call, output, failed));
+            frames.push(work_screen(ui, width));
+        }
+        says(ui, &ids, "Fixed.");
+        frames.push(work_screen(ui, width));
+        // The turn's end, as `run_turn` says it.
+        ui.close_segment();
+        ui.retire_tool_cell();
+        if ui.fold.is_pending() {
+            ui.flush_fold();
+        }
+        ui.status = None;
+        ui.history(&[Line::empty(), Line::from_text("✓ Done")]);
+        frames.push(work_screen(ui, width));
+        frames
+    }
+
+    /// The four things that make the work's head row stand still, read off
+    /// the frames of [`three_calls_frames`]:
+    /// 1. from the first frame it stands in to the turn's end, the head row
+    ///    is on one screen row — `Working · N steps`, then `Worked …`;
+    /// 2. the frame the turn is said in gives the work no more rows than the
+    ///    frame before it did;
+    /// 3. no frame in between is without it;
+    /// 4. a row that stood before the head came moves down once, by one
+    ///    row, when it comes, and no row moves after that.
+    fn assert_the_head_stands_still(frames: &[Vec<String>], preamble: bool) {
+        let glyphs = crate::tui::style::glyphs();
+        let head_at = |rows: &[String]| {
+            rows.iter().position(|row| {
+                row.starts_with(&format!("{}{}", glyphs.answer, crate::tui::strings::WORKING))
+                    || row.starts_with(&format!("{} {}", glyphs.tool_done, crate::tui::strings::WORKED))
+            })
+        };
+        let first = frames.iter().position(|rows| head_at(rows).is_some()).expect("a head row stands");
+        let at = head_at(&frames[first]).expect("the head row");
+        let last = frames.len() - 1;
+        for (index, rows) in frames.iter().enumerate().skip(first) {
+            assert_eq!(head_at(rows), Some(at), "frame {index} of {last}: {rows:#?}");
+        }
+        assert!(frames[first][at].contains(crate::tui::strings::WORKING), "{:#?}", frames[first]);
+        assert!(frames[last][at].contains(crate::tui::strings::WORKED), "{:#?}", frames[last]);
+        assert!(frames[last - 1][at].contains("3 steps · 1 failed"), "{:#?}", frames[last - 1]);
+        // 2: the work, from its head row to the answer under it.
+        let answer = |rows: &[String]| rows.iter().position(|row| row.contains("Fixed.")).expect("the answer");
+        let before = answer(&frames[last - 1]) - at;
+        let after = answer(&frames[last]) - at;
+        assert!(after <= before, "the turn's end grew the work from {before} rows to {after}: {:#?}", frames[last]);
+        // 4: each row's screen row, from the frame it first stands in.
+        let tracked = ["I will read the parser first.", "src/parser.rs", "cargo test parser", "fn parse"];
+        for words in tracked {
+            let shown: Vec<(usize, usize)> = frames[..last]
+                .iter()
+                .enumerate()
+                .filter_map(|(index, rows)| rows.iter().position(|row| row.contains(words)).map(|row| (index, row)))
+                .collect();
+            let moves: Vec<(usize, usize, usize)> = shown
+                .windows(2)
+                .filter(|pair| pair[0].1 != pair[1].1)
+                .map(|pair| (pair[1].0, pair[0].1, pair[1].1))
+                .collect();
+            match moves.as_slice() {
+                [] => {}
+                [(frame, from, to)] => {
+                    assert!(preamble && *frame == first && *to == from + 1, "{words:?} moved in frame {frame}: {moves:?}");
+                }
+                _ => panic!("{words:?} moved more than once: {moves:?}"),
+            }
+        }
+    }
+
+    /// While a turn's work runs in the `turns` view it stands under one head
+    /// row, which becomes the fold's `Worked for …` row when the turn is said
+    /// — on the screen row it stood on. A turn whose model called its tools
+    /// before it said a word hung its first steps under the person's words
+    /// with no head ("첫 묶음의 머리 줄", v1.1.150): the head comes with the
+    /// first call, so no row moves; after a text it comes over the text,
+    /// which moves down once.
+    #[test]
+    fn the_work_stands_under_one_head_row_from_its_first_call_to_the_turns_end() {
+        for preamble in [false, true] {
+            let mut ui = test_ui();
+            ui.view = super::super::style::ConversationView::Turns;
+            ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+            let frames = three_calls_frames(&mut ui, preamble, 80);
+            assert_the_head_stands_still(&frames, preamble);
+        }
+    }
+
+    /// The same under the marks look's band: the work stands on the row
+    /// right under the person's words while it runs, and so does the fold
+    /// when it is said.
+    #[test]
+    fn the_marks_look_keeps_the_works_head_row_on_the_row_under_the_band() {
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !super::super::style::in_fresh_run(&format!(
+            "{module}::the_marks_look_keeps_the_works_head_row_on_the_row_under_the_band"
+        )) {
+            return;
+        }
+        super::super::style::init(&crate::preferences::Preferences::default());
+        for (preamble, banded, width) in [(false, true, 80), (true, true, 201), (false, false, 201), (true, false, 80)] {
+            {
+                let mut ui = test_ui();
+                ui.view = super::super::style::ConversationView::Turns;
+                ui.user_cell("find where the parser is wired");
+                // A terminal that answers the colour query has the band
+                // close on a blank row of its own; this one does not answer
+                // (nor did the capture's), and the work keeps its gap row.
+                if banded {
+                    ui.history_tail = super::HistoryTail::UserBand;
+                }
+                ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+                let frames = three_calls_frames(&mut ui, preamble, width);
+                assert_the_head_stands_still(&frames, preamble);
+            }
+        }
+    }
+
+    /// A call that leaves no step when it goes through — `ToolSearch`, which
+    /// many models open a turn with — brings no head row: a head that came
+    /// with it would go with it. The head comes with the first call that
+    /// stays a step, and a call of that kind that fails stays one.
+    #[test]
+    fn a_call_that_leaves_no_step_brings_no_head_row() {
+        use runtime::message_stream::types::ToolResultBody;
+        let working = format!("{}{}", crate::tui::style::glyphs().answer, crate::tui::strings::WORKING);
+        let first = |ui: &super::Ui| ui.active_cell(80).0.first().map(Line::plain).unwrap_or_default();
+        let result = |ids: &BlockIdGen, call: &str, is_error: bool| RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId(call.to_string()),
+            is_error,
+            body: ToolResultBody::Text { content: "found\n".to_string(), truncated: false },
+        };
+        let mut ui = test_ui();
+        ui.view = super::super::style::ConversationView::Turns;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        let ids = BlockIdGen::default();
+        ui.block(tool_call(&ids, "toolu_search", "ToolSearch", &json!({ "query": "select:WebFetch" })));
+        assert!(!first(&ui).starts_with(&working), "{:#?}", ui.active_cell(80).0);
+        ui.block(result(&ids, "toolu_search", false));
+        assert!(!first(&ui).starts_with(&working), "{:#?}", ui.active_cell(80).0);
+        ui.block(tool_call(&ids, "toolu_read", "read_file", &json!({ "path": "src/parser.rs" })));
+        assert!(first(&ui).starts_with(&format!("{working} · 1 step")), "{:#?}", ui.active_cell(80).0);
+
+        let mut failed = test_ui();
+        failed.view = super::super::style::ConversationView::Turns;
+        failed.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        failed.block(tool_call(&ids, "toolu_search", "ToolSearch", &json!({ "query": "select:Nothing" })));
+        failed.block(result(&ids, "toolu_search", true));
+        assert!(first(&failed).starts_with(&format!("{working} · 1 step · 1 failed")), "{:#?}", failed.active_cell(80).0);
+    }
+
     /// Under the marks look prose keeps to the reading width — 100 columns.
     /// A finished step's row in the viewport is cut, not wrapped, and it is
     /// cut at the pane's edge: on a pane of 200 a command of 150 columns is
@@ -9523,7 +9750,11 @@ mod tests {
             read(&mut ui, &ids, n);
             let rows = live(&ui);
             assert!(rows.len() > before.len(), "call {n} added a row: {rows:#?}");
-            assert_eq!(rows[..before.len()], before[..], "and moved none of the rows above it");
+            // The head row counts the steps; every row under it stays put.
+            assert!(rows[0].contains(crate::tui::strings::WORKING), "{rows:#?}");
+            if !before.is_empty() {
+                assert_eq!(rows[1..before.len()], before[1..], "and moved none of the rows above it");
+            }
             before = rows;
         }
         for n in 0..6 {
