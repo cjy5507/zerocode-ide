@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use zerocode_core::jev::count::REQUESTS_DIR;
-use zerocode_core::jev::custom::store;
+use zerocode_core::jev::custom::{quiet, store};
 use zerocode_core::jev::promote::{self, Stand, Verdict};
 use zerocode_core::jev::recent::{self, Decision};
 use zerocode_core::jev::summary::{self, Tally};
@@ -339,7 +339,10 @@ pub struct VersionReport {
     /// they sent with retries, how many handed the decision's line
     /// ([`summary::applied_of`]), and the asks that went unanswered by
     /// outcome — the hour's bound among them — so the screen reads a
-    /// decision's row the way it reads a feature's.
+    /// decision's row the way it reads a feature's. A refusal that repeats
+    /// counts once per span ([`quiet::counted_once`]): an hour found full
+    /// is one ask and one hour's bound however many rows said so, and
+    /// whichever programs wrote them.
     pub today: SeatTally,
     pub week: SeatTally,
     /// Its last request, when it made one.
@@ -368,6 +371,7 @@ fn custom_decisions_in(
     let (_, rows) = rows_of(&CUSTOM_DECISIONS, roots, sessions);
     let today = start_of_day_ms(now_ms, offset_s);
     let week = now_ms - WINDOW_DAYS * MS_PER_DAY;
+    let offset_minutes = i32::try_from(offset_s / 60).unwrap_or(0);
     decisions
         .into_iter()
         .map(|entry| {
@@ -384,8 +388,8 @@ fn custom_decisions_in(
                 let owned: Vec<Value> = held.iter().copied().cloned().collect();
                 VersionReport {
                     definition: definition.to_string(),
-                    today: summary::summarize_rows(held.iter().copied(), today),
-                    week: summary::summarize_rows(held.iter().copied(), week),
+                    today: summary::summarize_rows(quiet::counted_once(held.iter().copied(), today, offset_minutes), today),
+                    week: summary::summarize_rows(quiet::counted_once(held.iter().copied(), week, offset_minutes), week),
                     latest: recent::recent(&owned, 1).into_iter().next(),
                 }
             };

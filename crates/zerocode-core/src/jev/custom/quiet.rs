@@ -20,13 +20,19 @@
 //! definition changed holds no more; and a mark whose span has passed is
 //! dropped when the next is made. So a book stays bounded by the decisions
 //! times the folders one program asks them in.
+//!
+//! Rows written before this book, or by several programs each writing its
+//! one row for the same span, are counted once a span by [`counted_once`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
+use serde_json::Value;
+
 use crate::jev::count;
 use crate::jev::door::{Refused, Span};
+use crate::jev::summary::{AT, OUTCOME};
 
 /// The local hour and day a moment falls in, as numbers
 /// ([`count::hour_number`], [`count::day_number`]): what a mark is held
@@ -59,7 +65,7 @@ impl Now {
 /// Where a quiet decision's refusal stops repeating: the local hour or day
 /// it was refused in ([`Refused::repeats`]), or — for a definition that
 /// breaks a rule — the version that broke it, mended only by a new one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Until {
     Hour(i64),
     Day(i64),
@@ -216,14 +222,47 @@ impl Quiet {
     }
 }
 
+/// The rows of a decision's ledger from `since_ms` on, as they count: a
+/// refusal that repeats ([`Refused::repeats`]) once per decision per span —
+/// the hour for an hour's bound, the day for the day's — whoever wrote its
+/// rows and however many did, on a clock `offset_minutes` ahead of UTC.
+/// Answers and one-off failures pass as they are. One lazy pass, remembering
+/// a span by borrowing its row's words.
+pub fn counted_once<'row>(
+    rows: impl IntoIterator<Item = &'row Value>,
+    since_ms: i64,
+    offset_minutes: i32,
+) -> impl Iterator<Item = &'row Value> {
+    let mut seen: HashSet<(&'row str, &'row str, Until)> = HashSet::new();
+    rows.into_iter().filter(move |row| {
+        let at = AT.read(row).and_then(Value::as_i64).unwrap_or(0);
+        if at < since_ms {
+            return false;
+        }
+        let Some(token) = OUTCOME.read(row).and_then(Value::as_str) else {
+            return true;
+        };
+        let Some(span) = Refused::from_token(token).and_then(Refused::repeats) else {
+            return true;
+        };
+        let decision = row
+            .get("decision")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        seen.insert((decision, token, Now::at(at, offset_minutes).of(span)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{Now, Quiet};
+    use serde_json::{Value, json};
+
+    use super::{Now, Quiet, counted_once};
     use crate::civil::{MS_PER_DAY, MS_PER_HOUR};
     use crate::jev::count;
-    use crate::jev::door::Refused;
+    use crate::jev::door::{ANSWERED_OUTCOME, Refused};
 
     const ID: &str = "d-00000001";
     const VERSION: &str = "v1";
@@ -367,5 +406,38 @@ mod tests {
         let marks = quiet.marks.lock().expect("the marks");
         assert_eq!(marks.everywhere.len(), 1, "{marks:?}");
         assert!(marks.in_folder.is_empty(), "{marks:?}");
+    }
+
+    fn row(decision: &str, at: i64, outcome: &str) -> Value {
+        json!({"at": at, "decision": decision, "outcome": outcome, "requests": 0})
+    }
+
+    #[test]
+    fn a_repeating_refusal_counts_once_a_span_and_answers_as_they_are() {
+        let full = Refused::HourlyBudget.token();
+        let mut rows: Vec<Value> = (0..57)
+            .map(|minute| row(ID, AT + minute * 1_000, full))
+            .collect();
+        rows.extend((0..3).map(|second| row(ID, AT + MS_PER_HOUR + second, full)));
+        rows.extend((0..2).map(|second| row(ID, AT + second, ANSWERED_OUTCOME)));
+        rows.extend((0..2).map(|second| row(ID, AT + second, "timeout")));
+        rows.extend((0..4).map(|hour| row(ID, AT + hour * MS_PER_HOUR, Refused::Budget.token())));
+        let counted: Vec<&Value> = counted_once(&rows, i64::MIN, 0).collect();
+        let of = |outcome: &str| {
+            counted
+                .iter()
+                .filter(|row| row["outcome"] == outcome)
+                .count()
+        };
+        assert_eq!(of(full), 2, "two hours");
+        assert_eq!(of(ANSWERED_OUTCOME), 2);
+        assert_eq!(of("timeout"), 2);
+        assert_eq!(of(Refused::Budget.token()), 1, "one day");
+        let later: Vec<&Value> = counted_once(&rows, AT + 30_000, 0).collect();
+        assert_eq!(
+            later.iter().filter(|row| row["outcome"] == full).count(),
+            2,
+            "an hour cut by the window counts from its first row inside it"
+        );
     }
 }

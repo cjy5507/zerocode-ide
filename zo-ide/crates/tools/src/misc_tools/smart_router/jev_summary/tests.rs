@@ -215,6 +215,65 @@ fn each_decision_says_what_it_handed_and_what_the_hour_refused() {
     assert_eq!((quiet.week.rows, quiet.week.applied, quiet.latest.is_none()), (0, 0, true), "never asked counts zero");
 }
 
+/// A refusal that repeats counts once a span, whoever wrote its rows
+/// (t-107587): the 57 rows one project's ledger took in one full hour are one
+/// ask and one hour's bound, rows of two hours are two, three programs' one
+/// row each for the same hour is one, a spent day's rows are one, and the
+/// answer and the one-off failure beside them count as they did.
+#[test]
+fn a_repeating_refusal_counts_once_a_span_whoever_wrote_it() {
+    use zerocode_core::jev::custom::{Answer, Definition, Point, store};
+    use zerocode_core::jev::door::{ANSWERED_OUTCOME, Refused};
+
+    let home = tempfile::tempdir().unwrap();
+    let ledgers = tempfile::tempdir().unwrap();
+    let decision = Definition::new(
+        "d-0000000f".to_string(),
+        "Cleanup".to_string(),
+        "Does this change what a person sees?".to_string(),
+        Answer::YesNo { yes: "A visible change.".to_string(), no: "No visible change.".to_string() },
+        Point::BeforeCommand,
+    );
+    let version = store::create(home.path(), &decision, JevMode::On, 1_000).unwrap();
+    // Noon on the clock the summary reads (offset zero), so ten and eleven
+    // o'clock are today's.
+    let now = 10 * MS_PER_DAY + MS_PER_DAY / 2;
+    let hour = MS_PER_DAY / 24;
+    let (full, spent) = (Refused::HourlyBudget.token(), Refused::Budget.token());
+    let row = |at: i64, from: &str, outcome: &str, requests: u32| {
+        asked_by(
+            &CUSTOM_DECISIONS,
+            json!({
+                "at": at, "from": from, "decision": decision.id, "definition": version, "point": "before_command",
+                "mode": "on", "outcome": outcome, "applied": outcome == ANSWERED_OUTCOME, "requests": requests,
+            }),
+        )
+    };
+    let ten = now - 2 * hour;
+    let mut rows: Vec<Value> = (0..57).map(|at| row(ten + at * 20_000, "zo", full, 0)).collect();
+    rows.push(row(ten + 30 * 60_000, "zo", ANSWERED_OUTCOME, 1));
+    rows.push(row(ten + 31 * 60_000, "zo", "timeout", 1));
+    rows.push(row(ten + 32 * 60_000, "zo", "timeout", 1));
+    rows.extend(["zo", "claude", "codex"].map(|from| row(now - hour + 5 * 60_000, from, full, 0)));
+    rows.extend((0..4).map(|at| row(now - hour + (10 + at) * 60_000, "zo", spent, 0)));
+    rows.extend((0..5).map(|at| row(ten - MS_PER_DAY + at * 1_000, "zo", full, 0)));
+    write(ledgers.path(), CUSTOM_DECISIONS.ledger, &rows);
+    let reports = custom_decisions_in(home.path(), &[ledgers.path().to_path_buf()], None, now, 0);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    let current = &reports[0].current;
+    let failed = |tally: &SeatTally, token: &str| {
+        tally.failures.iter().find(|(failure, _)| failure == token).map_or(0, |(_, rows)| *rows)
+    };
+    assert_eq!(
+        (failed(&current.today, full), failed(&current.week, full)),
+        (2, 3),
+        "two full hours today, three this week, however many rows said so"
+    );
+    assert_eq!((failed(&current.today, spent), failed(&current.today, "timeout")), (1, 2), "one spent day; each timeout");
+    assert_eq!((current.today.rows, current.week.rows), (6, 7), "asks today · week");
+    assert_eq!((current.today.applied, current.today.requests), (1, 3), "the answer and the requests as they were");
+}
+
 /// A person's decisions are counted off the one ledger every decision writes
 /// (t-62170): each by its id, the version it asks with now apart from each
 /// earlier version a row names — a changed question's answers are never
