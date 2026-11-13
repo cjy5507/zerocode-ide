@@ -585,6 +585,66 @@ fn skill_digest(dir: &Path, skill_md: &[u8]) -> String {
         .collect()
 }
 
+/// The files under `dir`, by path below it, to the digest's bounds.
+fn digest_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![(dir.to_path_buf(), 0usize)];
+    while let Some((at, depth)) = pending.pop() {
+        let Ok(read) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            if files.len() >= DIGEST_ENTRIES {
+                break;
+            }
+            let path = entry.path();
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() && depth < 4 => pending.push((path, depth + 1)),
+                Ok(meta) if meta.is_file() => {
+                    if let Ok(relative) = path.strip_prefix(dir) {
+                        files.push(relative.to_path_buf());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Whether every file under `copy` is byte for byte the one at its place in
+/// `held` — asked only of two folders whose digests already agree, so the
+/// two hold the same names at the same sizes.
+fn same_bytes(held: &Path, copy: &Path) -> bool {
+    digest_files(copy).iter().all(|relative| {
+        match (
+            std::fs::read(copy.join(relative)),
+            std::fs::read(held.join(relative)),
+        ) {
+            (Ok(mine), Ok(theirs)) => mine == theirs,
+            _ => false,
+        }
+    })
+}
+
+/// A digest of every file's path and text under `dir`, for a copy whose
+/// sizes agree with the store's but whose text does not.
+fn content_digest(dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"bytes");
+    for relative in digest_files(dir) {
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update(std::fs::read(dir.join(&relative)).unwrap_or_default());
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// A skill folder's digest as [`skill_folders`] reads it; `None` without its
 /// `SKILL.md`.
 fn folder_digest(dir: &Path) -> Option<String> {
@@ -629,9 +689,23 @@ fn skill_folders(dir: &Path, store: Option<&Path>, home: &Path) -> Vec<SkillFold
             .as_ref()
             .zip(real.as_ref())
             .is_some_and(|(store, real)| real.starts_with(store));
+        let mut digest = skill_digest(&path, &bytes);
+        // A digest reads sizes, not texts: a copy that agrees with the
+        // store's by it is read byte for byte once, and one a person changed
+        // a letter of — same size — is told apart, so it is asked about and
+        // never taken for the store's (review t-106726, fourth).
+        let held = store.as_ref().map(|store| store.join(&name));
+        if let Some(held) = held.filter(|held| {
+            !into_store
+                && canonical(&path) != canonical(held)
+                && folder_digest(held).as_deref() == Some(digest.as_str())
+        }) && !same_bytes(&held, &path)
+        {
+            digest = content_digest(&path);
+        }
         folders.push(SkillFolder {
             ours: zerocode_core::skill_install::ships_this_folder(&name, &path),
-            digest: skill_digest(&path, &bytes),
+            digest,
             name,
             path,
             into_store,
@@ -1241,8 +1315,9 @@ fn copy_into_store(ctx: &Context, from: &Path, name: &str) -> Result<Option<Remo
 }
 
 /// Whether `path` holds what the store's `held` folder holds: the same text,
-/// or, whole, a copy this build or an earlier release ships, whose store copy
-/// is the one kept — not one a person added a file to or changed one of.
+/// byte for byte, or, whole, a copy this build or an earlier release ships,
+/// whose store copy is the one kept — not one a person added a file to or
+/// changed a letter of.
 fn duplicates(held: &Path, path: &Path, name: &str) -> bool {
     let Some(store_text) = folder_digest(held) else {
         return false;
@@ -1250,7 +1325,7 @@ fn duplicates(held: &Path, path: &Path, name: &str) -> bool {
     let Ok(bytes) = std::fs::read(path.join(zerocode_core::skill::SKILL_FILE)) else {
         return false;
     };
-    skill_digest(path, &bytes) == store_text
+    (skill_digest(path, &bytes) == store_text && same_bytes(held, path))
         || zerocode_core::skill_install::ships_this_folder(name, path)
 }
 
@@ -4527,6 +4602,44 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(home.path().join(".gemini/skills/dataviz")).is_err(),
             "a copy of ours alone stayed"
+        );
+    }
+
+    /// A copy whose reference file a person changed a letter of — the same
+    /// size, so the digest agrees with the store's — stays and is asked
+    /// about; a copy the same byte for byte still goes (review t-106726,
+    /// fourth, the rest).
+    #[test]
+    fn a_native_agents_copy_changed_at_the_same_size_stays_and_is_asked() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        for name in ["notes-a", "notes-b"] {
+            for root in [".agents/skills", ".gemini/skills"] {
+                let dir = home.path().join(root).join(name);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(
+                    dir.join(zerocode_core::skill::SKILL_FILE),
+                    format!("---\nname: {name}\n---\nbody\n"),
+                )
+                .unwrap();
+                std::fs::write(dir.join("verbs.md"), "verbs: ask, tell\n").unwrap();
+            }
+        }
+        let changed = home.path().join(".gemini/skills/notes-a");
+        std::fs::write(changed.join("verbs.md"), "verbs: ask, sell\n").unwrap();
+        let ctx = context_of(home.path(), data.path(), &["gemini"]);
+        look(&ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(changed.join("verbs.md")).unwrap(),
+            "verbs: ask, sell\n",
+            "a copy changed at the same size went"
+        );
+        let asked = &read_ledger(&ctx).skills["notes-a"].pick;
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].agent, "gemini");
+        assert!(
+            std::fs::symlink_metadata(home.path().join(".gemini/skills/notes-b")).is_err(),
+            "a copy the same byte for byte stayed"
         );
     }
 
