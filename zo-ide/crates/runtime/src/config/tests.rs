@@ -417,6 +417,39 @@ fn custom_providers_json_is_none_for_empty_or_missing() {
     );
 }
 
+/// A `providers` that is not a list is handed on as it stands, so that the
+/// reader can refuse it and say so: one provider written as an object is a
+/// slip, not "none declared". Written where a person's providers live — the
+/// settings of the config home; a project's own document is not read for
+/// them at all.
+#[test]
+fn a_providers_that_is_not_a_list_is_handed_on_as_it_stands() {
+    let _serial = CLI_OVERRIDE_LOCK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _reset = CliOverrideGuard;
+    ConfigLoader::set_cli_overrides(super::CliConfigOverrides {
+        settings_file: None,
+        strict_mcp_config: false,
+    });
+    let read = |providers: &str| {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".zo");
+        fs::create_dir_all(cwd.join(".zo")).expect("project dir");
+        fs::create_dir_all(&home).expect("home dir");
+        fs::write(home.join("settings.json"), format!(r#"{{"providers":{providers}}}"#))
+            .expect("global settings");
+        ConfigLoader::new(&cwd, &home).load().expect("load").custom_providers_json()
+    };
+
+    let written = read(r#"{"name":"zqhost","models":["zq-big"]}"#).expect("an object is not none declared");
+    assert!(written.starts_with('{') && written.contains("zqhost"), "{written}");
+    assert_eq!(read(r#""zqhost""#).as_deref(), Some(r#""zqhost""#));
+    assert_eq!(read("null"), None, "nothing declared");
+    assert_eq!(read("[]"), None, "nothing declared");
+}
+
 #[test]
 fn rejects_non_object_settings_files() {
     let _overrides_stable = overrides_stable();

@@ -2572,12 +2572,19 @@ impl RuntimeConfig {
     /// depend on runtime config — so the bootstrap mirrors settings into the env
     /// before the first provider client is built (an explicit env var still
     /// wins; see the caller).
+    ///
+    /// A `providers` that is not a list — one provider written as an object,
+    /// a string — is handed on as it stands: the reader refuses it by what it
+    /// is, and says the providers could not be read. Rendered as "none
+    /// declared", such a slip opened a session on a model the provider
+    /// serves as if nothing knew the name.
     #[must_use]
     pub fn custom_providers_json(&self) -> Option<String> {
         let value = self.merged.get("providers")?;
-        match value.as_array() {
-            Some(entries) if !entries.is_empty() => Some(value.render()),
-            _ => None,
+        match value {
+            JsonValue::Array(entries) if entries.is_empty() => None,
+            JsonValue::Null => None,
+            _ => Some(value.render()),
         }
     }
 

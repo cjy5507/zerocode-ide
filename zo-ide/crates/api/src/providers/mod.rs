@@ -2558,9 +2558,11 @@ fn load_custom_providers_from_env() -> Vec<ResolvedCustomProvider> {
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
+        // None exported is nothing that could not be read.
+        let _ = noting_readable(ProvidersRead::Environment, Ok(()));
         return Vec::new();
     };
-    match parse_resolved_custom_providers(&raw) {
+    match noting_readable(ProvidersRead::Environment, parse_resolved_custom_providers(&raw)) {
         Ok(providers) => providers,
         Err(error) => {
             eprintln!("[zo] {CUSTOM_PROVIDERS_ENV} is not a valid provider JSON array: {error}");
@@ -2694,10 +2696,65 @@ fn last_custom_providers_json() -> &'static std::sync::Mutex<Option<String>> {
     LAST.get_or_init(Default::default)
 }
 
+/// The two readings of the providers a person declared: the array handed in
+/// (their settings, with an operator's export merged in), and the
+/// environment variable read by itself — which is also how the catalog is
+/// first filled, lazily, by whoever asks it first.
+#[derive(Clone, Copy)]
+enum ProvidersRead {
+    Declared,
+    Environment,
+}
+
+/// Why each reading failed the last time it was made — the parse error — or
+/// `None` while it reads. One slot to a reading: the second one succeeding,
+/// or finding nothing to read, says nothing of the first.
+fn providers_unreadable() -> &'static std::sync::Mutex<[Option<String>; 2]> {
+    static UNREADABLE: OnceLock<std::sync::Mutex<[Option<String>; 2]>> = OnceLock::new();
+    UNREADABLE.get_or_init(Default::default)
+}
+
+/// `parsed`, with whether `read` could make it out noted for
+/// [`custom_providers_unreadable`].
+fn noting_readable<T>(read: ProvidersRead, parsed: Result<T, serde_json::Error>) -> Result<T, serde_json::Error> {
+    providers_unreadable().lock().unwrap_or_else(std::sync::PoisonError::into_inner)[read as usize] =
+        parsed.as_ref().err().map(ToString::to_string);
+    parsed
+}
+
+/// Why the providers the person declared (`providers` in settings, or
+/// `ZO_CUSTOM_PROVIDERS`) could not be read, when either reading of them
+/// could not. One slip in the array costs every provider it declares, and a
+/// model one of them serves then reads as a name nothing knows: a caller
+/// that would build a client for such a name on whichever login the machine
+/// holds asks this first — the name may be a provider's of the person's that
+/// it cannot see.
+#[must_use]
+pub fn custom_providers_unreadable() -> Option<String> {
+    providers_unreadable()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .flatten()
+        .next()
+        .cloned()
+}
+
 pub fn refresh_custom_providers_from_json(raw: &str) -> Result<(), serde_json::Error> {
     let mut last = last_custom_providers_json().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if last.as_deref() == Some(raw) { return Ok(()); }
-    let providers = shared_providers(with_builtin_seed(parse_resolved_custom_providers(raw)?));
+    // The array the catalog was last filled from, handed in again: it read
+    // then, so it reads — whatever was handed in between and did not.
+    if last.as_deref() == Some(raw) { return noting_readable(ProvidersRead::Declared, Ok(())); }
+    let providers = shared_providers(with_builtin_seed(noting_readable(
+        ProvidersRead::Declared,
+        parse_resolved_custom_providers(raw),
+    )?));
+    // The environment variable holding this very array is zo's own copy of
+    // it (the settings, mirrored for whoever reads the variable): what the
+    // variable failed on when the catalog was first filled is mended with it.
+    if std::env::var(CUSTOM_PROVIDERS_ENV).is_ok_and(|exported| exported == raw) {
+        let _ = noting_readable(ProvidersRead::Environment, Ok(()));
+    }
     let mut guard = custom_provider_store()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7534,6 +7591,61 @@ mod tests {
         }
 
         super::refresh_custom_providers_from_json("[]").expect("clear custom providers");
+    }
+
+    /// The providers could not be read while either reading of them could
+    /// not. The settings' array fails on a row of the wrong shape and leaves
+    /// the catalog as it was; the environment variable is then read by
+    /// itself — it is how the catalog is first filled, by whoever asks it
+    /// first — and reads well, or is not there. That second reading says
+    /// nothing of the first: held in one flag, it took the first one's
+    /// failure down, and a session opened on a guess a moment later.
+    #[test]
+    fn the_providers_are_unread_while_either_reading_of_them_fails() {
+        let _lock = crate::test_env_lock();
+        let _env = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        super::refresh_custom_providers_from_json("[]").expect("readable");
+        assert_eq!(super::custom_providers_unreadable(), None);
+
+        let slipped = r#"[{"name":"zqhost","base_url":"https://zqhost.invalid/v1","models":"zq-unread-big"}]"#;
+        assert!(super::refresh_custom_providers_from_json(slipped).is_err());
+        assert!(super::custom_providers_unreadable().is_some());
+        // The environment read by itself, with nothing exported, and then
+        // with an operator's own array that reads well.
+        let _ = super::load_custom_providers_from_env();
+        assert!(super::custom_providers_unreadable().is_some(), "an absent export took the settings' failure down");
+        let exported = EnvVarGuard::set(
+            super::CUSTOM_PROVIDERS_ENV,
+            Some(r#"[{"name":"zqpinned","base_url":"https://zqpinned.invalid/v1","models":["zq-pinned"]}]"#),
+        );
+        let _ = super::load_custom_providers_from_env();
+        assert!(super::custom_providers_unreadable().is_some(), "a readable export took the settings' failure down");
+        // And the other way round: an export that cannot be read stands
+        // though the settings' array reads.
+        drop(exported);
+        let broken = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, Some("{not an array"));
+        super::refresh_custom_providers_from_json("[]").expect("readable");
+        let _ = super::load_custom_providers_from_env();
+        assert!(super::custom_providers_unreadable().is_some(), "the settings reading well took the export's failure down");
+
+        // The variable is zo's own copy of the settings, and failed with
+        // them when the catalog was first filled; the settings mended and
+        // copied into it again, both readings are mended — the variable is
+        // not read a second time by itself.
+        let mended = r#"[{"name":"zqmended","base_url":"https://zqmended.invalid/v1","models":["zq-mended"]}]"#;
+        std::env::set_var(super::CUSTOM_PROVIDERS_ENV, mended);
+        super::refresh_custom_providers_from_json(mended).expect("readable");
+        assert_eq!(super::custom_providers_unreadable(), None, "the copy of the mended settings");
+
+        drop(broken);
+        super::refresh_custom_providers_from_env();
+        super::refresh_custom_providers_from_json("[]").expect("readable");
+        assert_eq!(super::custom_providers_unreadable(), None, "both read again");
+        // Mended back to the very array the catalog was last filled from:
+        // it is not parsed again, and it reads.
+        assert!(super::refresh_custom_providers_from_json(slipped).is_err());
+        super::refresh_custom_providers_from_json("[]").expect("readable");
+        assert_eq!(super::custom_providers_unreadable(), None, "the array it was last filled from");
     }
 
     #[test]

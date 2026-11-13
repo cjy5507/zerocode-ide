@@ -1416,6 +1416,23 @@ fn build_provider_client(
     let catalog = runtime::model_catalog::ModelCatalog::load().ok();
     let catalog_provider = catalog.as_ref().and_then(|catalog| catalog.provider_for_model(model.trim()));
     let built = Held { home: ModelHome::read(catalog.as_ref(), model), catalog_provider, auth_route };
+    // A name nothing knows is built for whichever login the machine holds —
+    // but not while the person's own providers cannot be read. One slip in
+    // `providers` costs every provider the array declares, and the model one
+    // of them serves then reads as such a name: the session's words would
+    // leave for a built-in provider the person did not choose (which refuses
+    // the model, after it has them).
+    if built.home == ModelHome::Unknown {
+        if let Some(why) = api::custom_providers_unreadable() {
+            return Err(format!(
+                "The `providers` in settings could not be read ({why}), and nothing else says whose model `{}` is. \
+                 The session is not opened on whichever login this machine holds: fix `providers`, or start zo on a model \
+                 the catalog knows (`--model <name>`; in a session, /model).",
+                model.trim()
+            )
+            .into());
+        }
+    }
     let client = if let Some(provider_kind) = catalog_provider {
         ProviderClient::from_provider_kind_with_auth_route_and_anthropic_auth(
             provider_kind,
@@ -3711,6 +3728,66 @@ mod oauth_refresh_tests {
         assert_eq!(held_home(LISTED), Some(openai));
         assert_eq!(held(LISTED).map(|held| held.auth_route), Some(AuthRoute::ApiKey), "on the login its row was pinned to when it began");
 
+        std::fs::remove_dir_all(config_home).ok();
+    }
+
+    /// A session is not opened on a guess while the person's own providers
+    /// cannot be read. One slip in `providers` costs every provider the array
+    /// declares; the model one of them serves then reads as a name nothing
+    /// knows, and such a name is built for whichever login the machine holds
+    /// — the session's words left for a provider the person did not choose.
+    /// A model the catalog or the name does say is opened as before, and so
+    /// is the unknown name once `providers` reads again.
+    #[test]
+    fn a_name_nothing_knows_is_not_opened_while_the_persons_providers_cannot_be_read() {
+        const UNSEEN: &str = "zq-unread-big";
+        let _env_lock = crate::test_env_lock();
+        let _clean = NoHeldSession;
+        let config_home = crate::support::temp_dir("providers-unread");
+        let _config_home = crate::support::EnvVarGuard::set(
+            "ZO_CONFIG_HOME",
+            Some(config_home.to_str().expect("utf8 config home")),
+        );
+        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
+        let _custom = crate::support::EnvVarGuard::set(api::CUSTOM_PROVIDERS_ENV, None);
+        let _adapters = crate::support::EnvVarGuard::set(api::NON_CLAUDE_ADAPTERS_ENV, Some("1"));
+        let _openai = crate::support::EnvVarGuard::set("OPENAI_API_KEY", Some("test-key"));
+        let _openai_url = crate::support::EnvVarGuard::set("OPENAI_BASE_URL", None);
+        let _ollama = crate::support::EnvVarGuard::set("OLLAMA_BASE_URL", None);
+        let open = |model: &str| {
+            AnthropicRuntimeClient::new_with_auth_resolver(
+                "providers-unread-test",
+                model.to_string(),
+                false,
+                false,
+                None,
+                GlobalToolRegistry::builtin(),
+                PermissionMode::ReadOnly,
+                None,
+                None,
+                None,
+                || Ok(api::AuthSource::ApiKey("test-key".to_string())),
+            )
+            .map(|client| client.provider_kind())
+            .map_err(|error| error.to_string())
+        };
+
+        api::refresh_custom_providers_from_json("[]").expect("no provider of the person's");
+        assert!(open(UNSEEN).is_ok(), "premise: with readable providers the name opens on the machine's login");
+
+        // The array as a slip leaves it: one row's `models` is not a list.
+        let slipped = format!(r#"[{{"name":"zqhost","base_url":"https://zqhost.invalid/v1","models":"{UNSEEN}"}}]"#);
+        assert!(api::refresh_custom_providers_from_json(&slipped).is_err());
+        let refused = open(UNSEEN).expect_err("opened on a guess");
+        assert!(refused.contains("providers") && refused.contains(UNSEEN), "{refused}");
+        assert_eq!(open("gpt-zq-9"), Ok(ProviderKind::OpenAi), "a model the name says");
+        // One provider written as an object where the list belongs.
+        let not_a_list = format!(r#"{{"name":"zqhost","base_url":"https://zqhost.invalid/v1","models":["{UNSEEN}"]}}"#);
+        assert!(api::refresh_custom_providers_from_json(&not_a_list).is_err());
+        assert!(open(UNSEEN).is_err(), "opened on a guess under a `providers` that is not a list");
+
+        api::refresh_custom_providers_from_json("[]").expect("readable again");
+        assert!(open(UNSEEN).is_ok(), "the providers read again");
         std::fs::remove_dir_all(config_home).ok();
     }
 

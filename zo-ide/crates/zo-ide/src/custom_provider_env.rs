@@ -65,7 +65,17 @@ pub(crate) fn operator_override_active() -> bool {
 pub(crate) fn publish(settings_json: &str) -> Result<(), String> {
     let mut source = CONNECTION_SOURCE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(override_json) = env_value().filter(|_| operator_override_active()) {
-        let merged = merge_operator_override(&override_json, settings_json)?;
+        let merged = merge_operator_override(&override_json, settings_json).inspect_err(|_| {
+            // Settings whose `providers` is not a list cannot be laid under
+            // the override, and never reach the reader that way. They are
+            // handed to it as they stand: it refuses them, leaves the catalog
+            // as the override filled it, and notes that the person's
+            // providers could not be read — a model only they declared is
+            // not opened as a name nothing knows.
+            if parse_array("settings.providers", settings_json).is_err() {
+                let _ = api::refresh_custom_providers_from_json(settings_json);
+            }
+        })?;
         api::refresh_custom_providers_from_json(&merged).map_err(|error| error.to_string())?;
     } else {
         if env_value().as_deref() != Some(settings_json) {
@@ -135,5 +145,32 @@ mod tests {
     fn a_non_array_override_is_reported_rather_than_silently_dropped() {
         let error = merge_operator_override("{}", SETTINGS).expect_err("rejected");
         assert!(error.contains("must be a JSON array"), "{error}");
+    }
+
+    /// Under an operator's export, settings whose `providers` is not a list
+    /// are never merged — and are still said to be unread: the model only
+    /// they declared must not be opened as a name nothing knows. The
+    /// override's own providers stay as they were.
+    #[test]
+    fn settings_that_are_not_a_list_are_unread_under_an_operators_export_too() {
+        let _lock = crate::test_env_lock();
+        let _export = crate::support::EnvVarGuard::set(
+            api::CUSTOM_PROVIDERS_ENV,
+            Some(r#"[{"name":"zqpinned","base_url":"https://zqpinned.invalid/v1","models":["zq-pinned"],"requires_auth":false}]"#),
+        );
+        api::refresh_custom_providers_from_env();
+        assert!(super::operator_override_active(), "premise: the export is the operator's, not zo's copy");
+        assert_eq!(api::custom_providers_unreadable(), None);
+
+        let not_a_list = r#"{"name":"zqhost","base_url":"https://zqhost.invalid/v1","models":["zq-unmerged"]}"#;
+        let refused = super::publish(not_a_list).expect_err("merged");
+        assert!(refused.contains("must be a JSON array"), "{refused}");
+        assert!(api::custom_providers_unreadable().is_some(), "the settings were not said to be unread");
+        assert!(api::custom_provider_for_model("zq-pinned").is_some(), "the override's provider stands");
+
+        // The settings mended: merged under the export, and read.
+        super::publish(SETTINGS).expect("merged");
+        assert_eq!(api::custom_providers_unreadable(), None);
+        api::refresh_custom_providers_from_json("[]").expect("clear");
     }
 }
