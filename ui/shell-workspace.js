@@ -17554,13 +17554,14 @@ function paintChatList() {
   reconcileElementOrder(el("chat-list-groups"), parts);
 }
 
-/* What a row is built from, but for its time words and whether its pane is
+/* What a row is built from, but for its time words, its title and whether its pane is
  * the one in front, which it writes in place (`standChatRow`). A permission's
- * row carries what its last answer refused. */
+ * row carries what its last answer refused. The title is a word: an agent names its terminal again every few seconds,
+ * and built, the row's hover and transition began again each time (v1.1.149, 「왼쪽 네비 판이 계속 깜박」). */
 function chatRowShape(row) {
   const permission = row.card && yourTurnKind(row.card) === "permission";
   return JSON.stringify([
-    locale, row.term, row.key, row.said, row.title, row.agent, row.project, row.mark, row.branch,
+    locale, row.term, row.key, row.said, row.agent, row.project, row.mark, row.branch,
     chatListNotes.pinned.has(row.key), row.card ? yourTurnKey(row.card) : "",
     permission ? yourTurnDraft(row.card).refusal ?? "" : "",
   ]);
@@ -17607,6 +17608,7 @@ function standChatRow(held, row) {
     held.set(row.key, node);
   }
   writeTextContent(node.__word, row.word);
+  writeTextContent(node.__title, row.title);
   const tip = chatRowTip(row);
   if (node.__open.dataset.tip !== tip) {
     node.__open.dataset.tip = tip;
@@ -17693,6 +17695,7 @@ function chatRowNode(row) {
   open.setAttribute("aria-label", open.dataset.tip);
   // What a paint writes in place (`standChatRow`).
   node.__word = word;
+  node.__title = title;
   node.__open = open;
   open.addEventListener("click", () => {
     if (row.open) row.open();
