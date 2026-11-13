@@ -23,6 +23,12 @@ impl Homes {
         Self(ModelCatalog::load().ok())
     }
 
+    /// The catalog that was read, for what else a caller asks of it about
+    /// the same model (the login a row is pinned to).
+    pub(crate) const fn catalog(&self) -> Option<&ModelCatalog> {
+        self.0.as_ref()
+    }
+
     /// Where `model`'s requests go.
     pub(crate) fn of(&self, model: &str) -> ModelHome {
         ModelHome::read(self.0.as_ref(), model)

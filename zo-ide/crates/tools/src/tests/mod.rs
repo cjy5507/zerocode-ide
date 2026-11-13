@@ -188,6 +188,12 @@ impl<'held> ConfigHome<'held> {
         Self { home, before, _held: std::marker::PhantomData }
     }
 
+    /// The folder: a test that keeps other stores out of the developer's
+    /// home points them here too.
+    pub(crate) fn path(&self) -> &Path {
+        self.home.path()
+    }
+
     /// Write a row into the catalog by hand, as a person does: `id` under
     /// `provider`, with no wire mapping, dialled with that provider's API
     /// key (a test machine holds no login).

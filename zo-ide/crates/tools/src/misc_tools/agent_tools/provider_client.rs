@@ -6,6 +6,7 @@ use api::{
     StreamEvent as ApiStreamEvent, ThinkingConfig, ToolChoice, ToolDefinition, detect_provider_kind,
     max_tokens_for_model, resolve_model_alias,
 };
+use runtime::model_home::ModelHome;
 use runtime::{ApiClient, ApiRequest, AssistantEvent, ProviderStateBlob, RuntimeError};
 
 use super::super::{ToolSpec, mvp_tool_specs};
@@ -860,15 +861,26 @@ fn build_provider_client_for_agent_with_rate_limit_failover(
     model: &str,
     fail_fast_on_rate_limit: bool,
 ) -> Result<ProviderClient, String> {
-    let catalog = runtime::model_catalog::ModelCatalog::load().ok();
-    let catalog_provider = catalog
-        .as_ref()
+    let homes = crate::model_home::Homes::load();
+    let catalog_provider = homes
+        .catalog()
         .and_then(|catalog| catalog.provider_for_model(model));
-    let auth_route = catalog
-        .as_ref()
+    let auth_route = homes
+        .catalog()
         .and_then(|catalog| catalog.auth_route_for_model(model))
         .unwrap_or(AuthRoute::Auto);
-    let provider_kind = catalog_provider.unwrap_or_else(|| detect_provider_kind(model));
+    // The provider is the model's home, read in the order the session's own
+    // client is built: the catalog, then a provider the person declared,
+    // then the name. Until v1.1.147 the name came second here, so a bare
+    // `claude…` id a person's own provider declares took the Anthropic road
+    // below: on a session that provider served, the helper's task went to
+    // Anthropic. A name nothing knows is built for whichever login the
+    // machine holds, as the session's client is.
+    let provider_kind = match homes.of(model) {
+        ModelHome::BuiltIn(kind) => kind,
+        ModelHome::Own(_) => ProviderKind::OpenAi,
+        ModelHome::Unknown => detect_provider_kind(model),
+    };
     if provider_kind != ProviderKind::Anthropic {
         let client = if let Some(provider_kind) = catalog_provider {
             ProviderClient::from_provider_kind_with_auth_route(provider_kind, auth_route)

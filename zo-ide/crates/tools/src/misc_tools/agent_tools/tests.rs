@@ -526,6 +526,120 @@ fn live_spawn_path_rejects_explicit_cross_provider_before_spawn() {
     }
 }
 
+/// A helper's client is built where the model's home says, as the session's
+/// own client is (`zo-ide` holds the same names to the session's builder in
+/// `the_session_client_is_built_where_the_models_home_says`). The two read
+/// in one order now: the catalog, then a provider the person declared, then
+/// the name. Until v1.1.147 a helper read the name second, and a bare
+/// `claude…` id a person's own provider declares was built for Anthropic —
+/// on a session that provider served, the helper's task left for Anthropic.
+#[test]
+fn a_helpers_client_is_built_where_the_models_home_says() {
+    use crate::tests::Var;
+    use api::ProviderKind;
+    use runtime::model_catalog::CatalogProvider;
+    use runtime::model_home::ModelHome;
+
+    const OWN_ENDPOINT: &str = "https://own.invalid/v1";
+    let env = crate::tests::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Rows the person wrote by hand, one per built-in provider and none
+    // spelled as that provider's models are; the last is also listed by the
+    // person's own provider below.
+    let config_home = crate::tests::ConfigHome::empty(&env)
+        .catalog_row(CatalogProvider::Google, "zq-row-on-google")
+        .catalog_row(CatalogProvider::Anthropic, "zq-row-on-anthropic")
+        .catalog_row(CatalogProvider::Openai, "zq-row-on-openai")
+        .catalog_row(CatalogProvider::Google, "zq-both-list");
+    // No login of the developer's is read or refreshed: the stores outside
+    // zo's own are switched off, every folder a client looks in is the empty
+    // home, and no Claude credential is in the environment. Each other
+    // built-in provider has a key, so that its client can be built at that
+    // provider's own address.
+    let _machine = [
+        Var::set(&env, api::managed_account::EXTERNAL_CREDENTIALS_DISABLED_ENV, "1"),
+        Var::set(&env, "HOME", config_home.path()),
+        Var::set(&env, "CODEX_HOME", config_home.path()),
+        Var::set(&env, "ZO_CODEX_HOME", config_home.path()),
+        Var::set(&env, "CLAUDE_CONFIG_DIR", config_home.path()),
+        Var::unset(&env, api::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV),
+        Var::unset(&env, "ANTHROPIC_API_KEY"),
+        Var::unset(&env, "ANTHROPIC_AUTH_TOKEN"),
+        Var::unset(&env, "GOOGLE_APPLICATION_CREDENTIALS"),
+        Var::set(&env, api::NON_CLAUDE_ADAPTERS_ENV, "1"),
+        Var::set(&env, "OPENAI_API_KEY", "test-key"),
+        Var::set(&env, "GOOGLE_API_KEY", "test-key"),
+        Var::set(&env, "XAI_API_KEY", "test-key"),
+        Var::unset(&env, "OPENAI_BASE_URL"),
+        Var::unset(&env, "GOOGLE_BASE_URL"),
+        Var::unset(&env, "XAI_BASE_URL"),
+        Var::unset(&env, "OLLAMA_BASE_URL"),
+    ];
+    let shipped = api::builtin_provider_catalog()
+        .iter()
+        .find(|entry| entry.provider == ProviderKind::Anthropic)
+        .expect("an Anthropic row ships")
+        .canonical_model_id;
+    let _own = crate::tests::OwnProviders::declared(
+        &env,
+        &format!(
+            r#"[{{"name":"zqown","base_url":"{OWN_ENDPOINT}","requires_auth":false,
+                 "models":["gpt-zq-oss","claude-zq-gateway","gemini-zq-relay","zq-own-model",
+                           "zq-both-list","anthropic/zq-slash-id","{shipped}"]}}]"#
+        ),
+    );
+
+    let built_in = ModelHome::BuiltIn;
+    let own = || ModelHome::Own("zqown".to_string());
+    let cases: Vec<(String, ModelHome)> = [
+        ("zq-row-on-google", built_in(ProviderKind::Google)),
+        ("zq-row-on-anthropic", built_in(ProviderKind::Anthropic)),
+        ("zq-row-on-openai", built_in(ProviderKind::OpenAi)),
+        ("zq-both-list", built_in(ProviderKind::Google)),
+        ("openai/gemini-zq-9", built_in(ProviderKind::OpenAi)),
+        ("google/zq-own-model", built_in(ProviderKind::Google)),
+        ("claude/gpt-zq-9", built_in(ProviderKind::Anthropic)),
+        ("gpt-zq-oss", own()),
+        ("claude-zq-gateway", own()),
+        ("gemini-zq-relay", own()),
+        ("zq-own-model", own()),
+        ("zqown/zq-own-model", own()),
+        ("anthropic/zq-slash-id", own()),
+        ("gpt-zq-9", built_in(ProviderKind::OpenAi)),
+        ("claude-zq-9", built_in(ProviderKind::Anthropic)),
+        ("gemini-zq-9", built_in(ProviderKind::Google)),
+        ("grok-zq-9", built_in(ProviderKind::Xai)),
+        ("zqrelay/gpt-zq-9", built_in(ProviderKind::OpenAi)),
+        (shipped, built_in(ProviderKind::Anthropic)),
+    ]
+    .into_iter()
+    .map(|(model, home)| (model.to_string(), home))
+    .chain([(api::format_provider_model_ref("zqown", shipped), own())])
+    .collect();
+
+    // The provider the client is built for, and whether it is dialled at the
+    // person's own endpoint. On a machine that holds no Claude login the
+    // Anthropic road ends by saying whose credential it lacks; no other road
+    // names Anthropic.
+    let built = |model: &str| match build_provider_client_for_agent(model) {
+        Ok(client) => Ok((client.provider_kind(), format!("{client:?}").contains(OWN_ENDPOINT))),
+        Err(error) if error.contains("Anthropic") => Ok((ProviderKind::Anthropic, false)),
+        Err(error) => Err(error),
+    };
+    let homes = crate::model_home::Homes::load();
+    for (model, expected) in &cases {
+        let home = homes.of(model);
+        assert_eq!(&home, expected, "{model}: the home");
+        let client = match home {
+            ModelHome::BuiltIn(kind) => (kind, false),
+            ModelHome::Own(_) => (ProviderKind::OpenAi, true),
+            ModelHome::Unknown => unreachable!("no case expects an unknown home"),
+        };
+        assert_eq!(built(model), Ok(client), "{model}: the client");
+    }
+}
+
 #[test]
 fn live_spawn_path_honors_same_family_explicit_model() {
     let store = TempAgentStore::new("same-family-explicit");
