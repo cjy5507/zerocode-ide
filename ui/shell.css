@@ -54822,6 +54822,7 @@ h4.knowledge-inspector-head::after {
 
 .jev-custom {
   flex: none;
+  container: jev-custom / inline-size;
   display: grid;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
@@ -54865,9 +54866,76 @@ h4.knowledge-inspector-head::after {
 .jev-custom-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    "about modes actions"
+    "figures figures figures";
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2) var(--space-3);
   padding: var(--space-2) 0;
+}
+
+.jev-custom-row > .jev-custom-about { grid-area: about; }
+.jev-custom-row > .jev-custom-mode { grid-area: modes; }
+.jev-custom-row > .jev-custom-actions { grid-area: actions; }
+
+/* What a decision did, under its name: the table's own figures — today
+   strong, the week beside it — each under its column's name, as the
+   table's rows wear them on a narrow page (2026-11-13). */
+.jev-custom-figures {
+  grid-area: figures;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.jev-custom-figure {
+  display: grid;
+  align-content: start;
+  gap: var(--space-1);
+  min-width: var(--jev-cell-min);
+}
+
+.jev-custom-figure dt {
+  color: var(--ink-mist);
+  font-size: var(--jev-stat-label-size);
+}
+
+.jev-custom-figure dd {
+  margin: 0;
+  line-height: var(--jev-cell-leading);
+  white-space: nowrap;
+}
+
+.jev-custom-figure[data-jev-custom-figure="latest"] dd {
+  white-space: normal;
+}
+
+.jev-custom-row.is-quiet .jev-custom-figure dd {
+  color: var(--ink-mist);
+}
+
+/* A narrow part puts the mode and the buttons on a line of their own. */
+@container jev-custom (width < 36em) {
+  .jev-custom-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "about about"
+      "modes actions"
+      "figures figures";
+  }
+}
+
+/* An open drawer stands over the page's right side; the part of a person's
+   decisions keeps out from under it, so each row's mode, 「편집」 and
+   「삭제」 stay in reach. The drawer reaches over the page's padding, so the
+   part steps in by the drawer less that padding, and a gap. A page too
+   narrow to hold both leaves the drawer the whole width, as it is. */
+@container jev (width >= 40em) {
+  .jev-view:has(.jev-drawer:not([hidden])) .jev-custom {
+    margin-inline-end: calc(var(--jev-drawer-width) - var(--space-5) + var(--space-3));
+  }
 }
 
 .jev-custom-row + .jev-custom-row {

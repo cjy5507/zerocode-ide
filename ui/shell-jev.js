@@ -91,6 +91,10 @@ const JEV_CHART = Object.freeze({
  * it stays null on a zo too old to know the verb — the switches then stand
  * without numbers rather than not at all. */
 let jevNumbers = null;
+/* What zo last counted for each of the person's own decisions
+ * (`customDecisions`, read beside the seats) — `null` until zo answers or on
+ * a zo too old to send them: their rows then say a dash, not "never asked". */
+let jevDecisionNumbers = null;
 /* When each judgment provider was applied from this window, by its identity
  * (`model_connection_checks`, t-76598) — `null` until the record is read. */
 let jevApplied = null;
@@ -239,6 +243,7 @@ async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
     // The reading names what it counted (t-9091): the seats, and the scope
     // the dashboard says it counted them over.
     jevNumbers = held.seats;
+    jevDecisionNumbers = Array.isArray(held.decisions) ? held.decisions : null;
     jevScope = held.scope;
     jevNumbersRecent = recent;
     if (typesafeState) paintTypeSafe(typesafeState);
@@ -553,6 +558,19 @@ const JEV_STATUSES = Object.freeze([
   { status: "dormant", key: "jev.status.dormant", word: "꺼짐", counted: false },
 ]);
 
+/* The strip's cell for the features left to act whose week changed nothing:
+ * their chip says 「켜짐」 (`jevStatusWords`), so the strip counts them under
+ * that word, not under 「기록만」 (2026-11-13). */
+const JEV_LEFT_ON = "leftOn";
+
+/* The strip cell a feature is counted in: its state's, or `JEV_LEFT_ON` when
+ * its chip wears that word — the same test the chip reads, on the same
+ * standing (`seat`). */
+function jevStripStatus(held, choice, seat) {
+  const status = jevSeatStatus(held, choice);
+  return jevLeftOnIdle(held, status, seat) ? JEV_LEFT_ON : status;
+}
+
 /* Of the features recording, the ones a judgment measured and held under a
  * line of their own — not a chip of its own (a feature under its bar is still
  * recording, and its sentence says why, in the tone of a miss), but a count
@@ -866,9 +884,13 @@ function buildJevView() {
   };
   summary.append(stat("registered", jevText("jev.stat.registered", "등록된 기능", "dt"), "states"));
   for (const state of JEV_STATUSES.filter((one) => one.counted)) {
-    const holder = stat(state.status, jevText(state.key, state.word, "dt"), "states");
-    holder.dataset.status = state.status;
-    summary.append(holder);
+    // A state whose chip has a second word (`leftOn`) is counted under that
+    // word too, before it, in its tone (`jevStripStatus`).
+    for (const [name, words] of state.leftOn ? [[JEV_LEFT_ON, state.leftOn], [state.status, state]] : [[state.status, state]]) {
+      const holder = stat(name, jevText(words.key, words.word, "dt"), "states");
+      holder.dataset.status = state.status;
+      summary.append(holder);
+    }
   }
   // The week's sums start a group of their own after the states.
   for (const [at, total] of JEV_TOTALS.entries()) {
@@ -3368,9 +3390,12 @@ function paintJevSummary(view, registered, heldOf) {
     ? t("jev.stat.cost", "7일 비용") : t("jev.stat.tokens", "7일 입력 토큰"));
   // Every registered feature stands in one state: a feature nothing asked
   // all week rests, and is no longer left out of the count (2026-11-08).
-  const standing = registered.map((id) => jevSeatStatus(heldOf.get(id) ?? null, jevSeatChoice(typesafeState, id)));
-  for (const state of JEV_STATUSES.filter((one) => one.counted)) {
-    said(state.status, jevCount(standing.filter((status) => status === state.status).length));
+  // A feature counts where its chip says it stands: one left to act whose
+  // week changed nothing under 「켜짐」, beside 「기록만」 (`jevStripStatus`).
+  const standing = registered.map((id) => jevStripStatus(heldOf.get(id) ?? null, jevSeatChoice(typesafeState, id),
+    jevSeat(typesafeState ?? {}, id)));
+  for (const name of [JEV_LEFT_ON, ...JEV_STATUSES.filter((one) => one.counted).map((one) => one.status)]) {
+    said(name, jevCount(standing.filter((status) => status === name).length));
   }
 }
 
@@ -3622,6 +3647,12 @@ function wireJevCustom(host) {
       openJevCustomDrawer(null, button);
       return;
     }
+    // A token a person clears, under a decision's asks, takes them where
+    // it is cleared — as the same word does in the table.
+    if (button.dataset.jevFix) {
+      jevFix(button.dataset.jevFix);
+      return;
+    }
     const id = button.closest("[data-jev-custom-row]")?.dataset.jevCustomRow;
     const kept = jevCustom?.decisions.find((one) => one.draft.id === id);
     if (!kept) return;
@@ -3654,7 +3685,10 @@ function paintJevCustom(view) {
   if (guide) guide.hidden = !store || standing;
   const part = view.querySelector("[data-jev-custom]");
   part.hidden = !store || !standing;
-  if (part.hidden || !jevMoved(part, JSON.stringify(store), JSON.stringify(rules), jevLanguage())) return;
+  // Drawn again when the store, the rules, zo's counts or the language moved
+  // — or a minute passed, which moves how long ago each last answer was.
+  if (part.hidden || !jevMoved(part, JSON.stringify(store), JSON.stringify(rules), JSON.stringify(jevDecisionNumbers),
+    jevLanguage(), String(Math.floor(Date.now() / 60_000)))) return;
   const bounds = jevCustomBounds(rules);
   jevSay(part.querySelector("[data-jev-custom-count]"), t("jev.custom.count",
     "{{count}}/{{decisionsMax}}개 · 모두 합쳐 한 시간에 {{hourlyAll}}회까지 묻습니다", { ...bounds, count: jevCount(decisions.length) }));
@@ -3695,13 +3729,20 @@ function jevCustomRow(list, kept, rules) {
     const remove = jevText("app.delete", "삭제", "button", "btn btn--halt-quiet jev-custom-delete");
     remove.type = "button";
     remove.dataset.jevCustomDelete = "";
+    const figures = jevNode("dl", "jev-custom-figures", ...JEV_CUSTOM_FIGURES.map((figure) => {
+      const holder = jevNode("div", "jev-custom-figure", jevText(figure.key, figure.word, "dt"), document.createElement("dd"));
+      holder.dataset.jevCustomFigure = figure.figure;
+      return holder;
+    }));
     row = jevNode("li", "jev-custom-row",
       jevNode("div", "jev-custom-about", jevNode("strong", "jev-custom-name"), jevNode("p", "jev-custom-facts")),
-      modes, jevNode("div", "jev-custom-actions", edit, remove));
+      modes, jevNode("div", "jev-custom-actions", edit, remove), figures);
     row.dataset.jevCustomRow = id;
     list.append(row);
   }
-  if (!jevMoved(row, JSON.stringify(kept), jevLanguage())) return row;
+  const counted = jevDecisionNumbers?.find((one) => one.id === id) ?? null;
+  if (!jevMoved(row, JSON.stringify(kept), JSON.stringify(counted), jevLanguage(), String(Math.floor(Date.now() / 60_000)))) return row;
+  paintJevCustomFigures(row, counted);
   jevSay(row.querySelector(".jev-custom-name"), kept.draft.name);
   row.querySelector(".jev-custom-facts").replaceChildren(...jevCustomFacts(kept.draft));
   const group = row.querySelector("[data-jev-custom-mode]");
@@ -3716,6 +3757,76 @@ function jevCustomRow(list, kept, rules) {
   }
   if (!radios.some((radio) => radio.tabIndex === 0) && radios.length > 0) radios[0].tabIndex = 0;
   return row;
+}
+
+/* What a decision did, in the figures and words the built-in table below
+ * reads (2026-11-13, 「jev는 언제 개선돼 된건가?」): its asks today and over
+ * the week, the ones that handed its line, the ones its hourly bound
+ * refused, and its last answer with how long ago — each figure under its
+ * name, as the table's own rows wear their column's name on a narrow page. */
+const JEV_CUSTOM_FIGURES = Object.freeze([
+  Object.freeze({ figure: "rows", key: "jev.col.rows", word: "요청 (오늘 · 7일)" }),
+  Object.freeze({ figure: "applied", key: "jev.custom.applied", word: "적용 (오늘 · 7일)" }),
+  Object.freeze({ figure: "hourFull", key: "jev.custom.hourFull", word: "시간당 한도 초과 (오늘 · 7일)" }),
+  Object.freeze({ figure: "latest", key: "jev.custom.latest", word: "마지막 답" }),
+]);
+
+/* The token the door files an ask under when a decision's hour is full
+ * (`Refused::HourlyBudget`): the key `JEV_TOKENS` words it under. */
+const JEV_HOUR_FULL = "hourly_budget";
+
+/* A yes-or-no decision's answer, by the word the core keeps it under. A
+ * choice's answer is the person's own option; a score's is its level. */
+const JEV_CUSTOM_ANSWERS = Object.freeze({
+  yes: Object.freeze({ key: "jev.custom.answer.yes", word: "예" }),
+  no: Object.freeze({ key: "jev.custom.answer.no", word: "아니오" }),
+});
+
+/* A decision's last ask in words: what it answered, or the token's own word
+ * for an ask that was not answered (`JEV_TOKENS`). */
+function jevCustomAnswerWords(latest) {
+  if (latest.outcome !== "answered") {
+    const token = jevTokenRow(latest.outcome);
+    return token ? t(token.key, token.word) : latest.outcome;
+  }
+  const answer = latest.answered;
+  if (Object.hasOwn(JEV_CUSTOM_ANSWERS, String(answer))) {
+    const words = JEV_CUSTOM_ANSWERS[String(answer)];
+    return t(words.key, words.word);
+  }
+  if (typeof answer === "number") return t("jev.custom.level", "{{count}}단계", { count: jevCount(answer + 1) });
+  return answer === null || answer === undefined ? "—" : String(answer);
+}
+
+/* One decision's figures from zo's count of it (`counted`, null while zo has
+ * not counted it): today's figure strong and the week's beside it, as the
+ * table's request cell; the other unanswered asks as the table's token
+ * words under the asks; and a decision nothing ever asked says so. */
+function paintJevCustomFigures(row, counted) {
+  const figure = (name) => row.querySelector(`[data-jev-custom-figure="${name}"] dd`);
+  const known = Boolean(counted?.today && counted?.week);
+  const pair = (read) => known
+    ? [jevFact("today", jevCount(read(counted.today)), "jev-fact-strong"), document.createTextNode(" · "), jevFact("week", jevCount(read(counted.week)))]
+    : [document.createTextNode("—")];
+  const hourFull = (window) => (window.failures ?? []).find((one) => one.token === JEV_HOUR_FULL)?.rows ?? 0;
+  figure("rows").replaceChildren(...pair((window) => window.rows));
+  const others = known ? (counted.week.failures ?? []).filter((one) => one.token !== JEV_HOUR_FULL) : [];
+  if (others.length > 0) figure("rows").append(jevNode("div", "jev-tokens", ...others.map(jevTokenChip)));
+  figure("applied").replaceChildren(...pair((window) => window.applied ?? 0));
+  figure("hourFull").replaceChildren(...pair(hourFull));
+  const latest = figure("latest");
+  const last = counted?.latest ?? null;
+  if (!known) latest.textContent = "—";
+  else if (!last) latest.textContent = t("jev.custom.neverAsked", "아직 한 번도 묻지 않았습니다");
+  else {
+    const ago = agoWord(last.at, Date.now());
+    const answer = jevCustomAnswerWords(last);
+    latest.textContent = ago === t("board.justNow", "방금")
+      ? t("jev.custom.latestNow", "{{answer}} · 방금", { answer })
+      : t("jev.custom.latestAgo", "{{answer}} · {{ago}} 전", { answer, ago });
+    latest.dataset.tip = new Date(last.at).toLocaleString();
+  }
+  row.classList.toggle("is-quiet", known && counted.week.rows === 0);
 }
 
 /* What a decision is, fact by fact: its kind of answer, when it asks and

@@ -103,6 +103,8 @@ export function jevDashboardFixture(real = null) {
     return {
       scope: { scope: args?.scope ?? "workspace", workspace: "/Users/p/project", workspaceName: "project", recorded: true, projects: [], windowDays: 7 },
       seats: seats.map((seat) => ({ ...seat, reach: reachOf(seat.found) })),
+      // The person's own decisions, as zo counts them beside the seats.
+      decisions: window.__JEV__?.custom?.counted?.() ?? [],
     };
   }
   const seats = [...document.getElementById("jev-features").content.querySelectorAll("[data-jev-feature]")]
@@ -315,6 +317,19 @@ export function jevDashboardFixture(real = null) {
   };
   const store = { decisions: [], folders: ["/Users/p/project", "/Users/p/shop"], everywhere: false };
   const custom = { rules, store, saves: [], checks: 0, lines: [], modes: [], deletes: [], made: 0 };
+  // What zo counts for each decision (2026-11-13): the first one asked 3
+  // times today and 12 this week — 5 handed its line, 4 refused by its hour,
+  // 1 timed out — and last answered yes four minutes ago; every other one
+  // never asked, which zo says with zeros and no last ask.
+  const decisionWindow = (rows, applied, hourFull, timedOut) => ({
+    rows, answered: rows - hourFull - timedOut, refused: hourFull, applied, called: rows - hourFull, requests: rows - hourFull,
+    failures: [...(hourFull ? [{ token: "hourly_budget", rows: hourFull }] : []), ...(timedOut ? [{ token: "timeout", rows: timedOut }] : [])],
+    refusals: hourFull ? [{ token: "hourly_budget", rows: hourFull }] : [],
+  });
+  custom.counted = () => store.decisions.map((kept, at) => (at === 0
+    ? { id: kept.draft.id, definition: kept.version, today: decisionWindow(3, 1, 1, 0), week: decisionWindow(12, 5, 4, 1),
+      latest: { at: Date.now() - 4 * 60_000, outcome: "answered", answered: "yes", confidence: 0.82, applied: true } }
+    : { id: kept.draft.id, definition: kept.version, today: decisionWindow(0, 0, 0, 0), week: decisionWindow(0, 0, 0, 0), latest: null }));
   window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [], custom };
   const builtin = { saved: {}, calls: [], failNext: false };
   window.__JEV__.builtin = builtin;
@@ -942,11 +957,20 @@ export async function testJevDashboard(browser, origin, ok) {
     // that changed nothing all week records, one nothing asked rests, and the
     // one switched off is registered but in no state (2026-11-08).
     ok("the strip counts the registered features, where each stands, then the week's requests and its cost",
-      Object.keys(opened.strip).join(",") === "registered,applying,recording,rest,blocked,week,cost"
-        && opened.strip.registered === String(BUILT_IN) && opened.strip.applying === "1" && opened.strip.recording === "4"
+      Object.keys(opened.strip).join(",") === "registered,applying,leftOn,recording,rest,blocked,week,cost"
+        && opened.strip.registered === String(BUILT_IN) && opened.strip.applying === "1"
+        && Number(opened.strip.leftOn) + Number(opened.strip.recording) === 4
         && opened.strip.rest === String(BUILT_IN - 7) && opened.strip.blocked === "1"
         && opened.strip.week === "1,156" && opened.strip.cost === "$0.328",
       JSON.stringify(opened.strip));
+    // The strip and the chips agree (2026-11-13): a feature left to act whose
+    // week changed nothing wears 「켜짐」 and is counted under 「켜짐」, never
+    // under 「기록만」 — each cell's count is the number of chips with its word.
+    const chipsSaying = (word) => String(Object.values(opened.statuses).filter((one) => one.chip === word).length);
+    ok("the strip counts each feature under the word its chip says: 「켜짐」 apart from 「기록만」",
+      opened.strip.leftOn === chipsSaying("켜짐") && opened.strip.recording === chipsSaying("기록만")
+        && opened.strip.leftOn !== "0" && opened.strip.applying === chipsSaying("적용 중"),
+      JSON.stringify({ strip: opened.strip, chips: Object.fromEntries(Object.entries(opened.statuses).map(([id, one]) => [id, one.chip])) }));
     const linked = await page.evaluate(async () => {
       const view = document.querySelector("#jev-view");
       const until = performance.now() + 3_000;
@@ -1784,7 +1808,7 @@ export async function testJevDashboard(browser, origin, ok) {
     });
     ok("the strip's figures are larger and heavier than their labels, and the sums stand apart after the states",
       strip.scale.every((scale) => scale >= 1.5) && strip.weights.every((weight, at) => weight > strip.labels[at])
-        && strip.order === "states,states,states,states,states,totals,totals"
+        && strip.order === "states,states,states,states,states,states,totals,totals"
         && strip.withinStates !== null && strip.beforeSums !== null && strip.beforeSums > strip.withinStates,
       JSON.stringify(strip));
 
@@ -3311,6 +3335,76 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       switched.calls.length === 1 && switched.calls[0].id === firstId && switched.calls[0].mode === applying && switched.checked === "켜짐",
       JSON.stringify(switched));
     await picture("list", true, "[data-jev-custom]");
+
+    // What each decision did (2026-11-13, 「jev는 언제 개선돼 된건가?」): its
+    // asks, the ones that handed its line and the ones its hour refused,
+    // today and over the week, and its last answer with how long ago — in
+    // the built-in table's own words; one never asked says so in words.
+    await page.evaluate(async () => {
+      await loadJevNumbers({ recent: true });
+      await window.__PAINTED__();
+      document.querySelector("#jev-view").scrollTop = 0;
+    });
+    await settlePaint(page);
+    await picture("figures");
+    const did = await page.evaluate(([first, second]) => {
+      const view = document.querySelector("#jev-view");
+      const figures = (id) => Object.fromEntries([...(view.querySelector(`[data-jev-custom-row="${id}"]`)
+        ?.querySelectorAll("[data-jev-custom-figure]") ?? [])].map((one) => [one.dataset.jevCustomFigure,
+        { label: one.querySelector("dt")?.textContent.trim() ?? "", said: one.querySelector("dd")?.textContent.trim() ?? "" }]));
+      return { first: figures(first), second: figures(second),
+        head: [...view.querySelectorAll(".jev-table thead th")].map((one) => one.textContent.trim()) };
+    }, [firstId, secondId]);
+    const figureSaid = (row, figure) => did[row][figure]?.said ?? "";
+    ok("each decision says what it did today and this week — asked, handed its line, refused by its hour — and its last answer and when",
+      figureSaid("first", "rows").startsWith("3 · 12") && figureSaid("first", "rows").includes("시간 초과 1")
+        && figureSaid("first", "applied") === "1 · 5" && figureSaid("first", "hourFull") === "1 · 4"
+        && /^예 · \d+분 전$/.test(figureSaid("first", "latest")),
+      JSON.stringify(did));
+    ok("a decision never asked says so in words, its figures zero rather than blank",
+      figureSaid("second", "rows") === "0 · 0" && figureSaid("second", "applied") === "0 · 0" && figureSaid("second", "hourFull") === "0 · 0"
+        && figureSaid("second", "latest") === "아직 한 번도 묻지 않았습니다",
+      JSON.stringify(did.second));
+    ok("a decision's figures wear the built-in table's own column words",
+      did.head.includes(did.first.rows?.label) && did.first.applied?.label === "적용 (오늘 · 7일)"
+        && did.first.hourFull?.label === "시간당 한도 초과 (오늘 · 7일)" && did.first.latest?.label === "마지막 답",
+      JSON.stringify({ head: did.head, labels: Object.fromEntries(Object.entries(did.first).map(([name, one]) => [name, one.label])) }));
+
+    // With a feature's drawer open the decisions' buttons stay in reach
+    // (2026-11-12: the drawer covered 「편집」 and 「삭제」, read as "there is
+    // no delete"): every mode, 「편집」 and 「삭제」 clear of the drawer and the
+    // topmost thing at its own centre.
+    await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      view.scrollTop = 0;
+      view.querySelector("[data-jev-dash-row] .jev-row-open")?.click();
+      await window.__PAINTED__();
+    });
+    await settlePaint(page);
+    await picture("figures-drawer");
+    const reach = await page.evaluate(() => {
+      const view = document.querySelector("#jev-view");
+      const drawer = view.querySelector(".jev-drawer");
+      const box = drawer.getBoundingClientRect();
+      const meet = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+      const controls = [...view.querySelectorAll("[data-jev-custom-row] [role='radio'], [data-jev-custom-row] [data-jev-custom-edit], [data-jev-custom-row] [data-jev-custom-delete]")];
+      const seen = controls.map((one) => {
+        const rect = one.getBoundingClientRect();
+        const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return { name: one.textContent.trim(), meets: meet(rect, box), reachable: Boolean(top) && (top === one || one.contains(top)),
+          right: Math.round(rect.right) };
+      });
+      return { open: !drawer.hidden, drawer: { left: Math.round(box.left), top: Math.round(box.top), bottom: Math.round(box.bottom) },
+        controls: seen.length, covered: seen.filter((one) => one.meets), unreachable: seen.filter((one) => !one.reachable) };
+    });
+    ok("with a feature's drawer open, every decision's mode, 「편집」 and 「삭제」 stand clear of the drawer and answer a press",
+      reach.open && reach.controls === 2 * 5 && reach.covered.length === 0 && reach.unreachable.length === 0,
+      JSON.stringify(reach));
+    await page.evaluate(async () => {
+      document.querySelector("#jev-view [data-jev-dash-row] .jev-row-open")?.click();
+      await window.__PAINTED__();
+    });
+    await settlePaint(page);
 
     const keptBefore = await page.evaluate(() => window.__JEV__.custom.store.decisions[0]?.version ?? "");
     await press(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-edit]`);
