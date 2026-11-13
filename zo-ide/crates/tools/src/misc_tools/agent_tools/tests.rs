@@ -822,6 +822,90 @@ fn the_sessions_fast_model_is_built_on_the_login_the_session_is_pinned_to() {
     assert_eq!(login(on(ProviderKind::Google, AuthRoute::Auto), "gemini-zq-9"), AuthRoute::Auto);
 }
 
+/// The split of a request into lanes is the session's own question, asked
+/// of its provider's fast model. It is asked on the login the session is on
+/// there, as its fold and its probe are: built by the fast model's own row,
+/// which pins no login, a session pinned to one login had the person's words
+/// split on whichever login the machine holds for that provider (until
+/// v1.1.150). Seen here by the login a client cannot be built on: the machine
+/// holds an API key for Google and no OAuth login.
+///
+/// The session runs on a row of its own under Google, so that its provider's
+/// fast model is another model. A helper on the session's own model is built
+/// as the session's client was, on its login (v1.1.149) — on the catalog's
+/// Google head, which is also Google's fast model, that would hold however
+/// the split were built, and say nothing about it.
+#[test]
+fn the_split_of_a_request_is_asked_on_the_login_the_session_is_on() {
+    use crate::tests::{OwnProviders, RunningSession, Var};
+    use api::{AuthRoute, ProviderKind};
+    use runtime::model_catalog::CatalogProvider;
+    use runtime::model_home::{hold, Held, ModelHome};
+
+    const SESSION: &str = "zq-own-call-session";
+    const LEG: &str = "zq-own-call-leg";
+    let env = crate::tests::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let config_home = crate::tests::ConfigHome::empty(&env).catalog_row(CatalogProvider::Google, SESSION);
+    let _machine = a_machine_with_no_login(&env, config_home.path());
+    // No provider of the person's: every name here is a built-in one's.
+    let _providers = OwnProviders::declared(&env, "[]");
+    let store = TempAgentStore::new("own-call-login");
+    let _agents = [
+        Var::unset(&env, AGENT_MODEL_ENV),
+        Var::set(&env, super::labels::AGENT_STORE_ENV, store.path.as_os_str()),
+    ];
+    let session_model = SESSION;
+    let fast = crate::fanout::fast_tier_model(Some(session_model)).expect("Google has a fast tier of its own");
+    assert_ne!(fast, session_model, "fixture: the split's model is not the session's own");
+    let google = |auth_route: AuthRoute| Held {
+        home: ModelHome::BuiltIn(ProviderKind::Google),
+        catalog_provider: None,
+        auth_route,
+    };
+    // What the runtime of the split's spawn is built on (`route_tax`), on a
+    // session whose fast model is `fast`.
+    let split = || {
+        let mut input = sample_agent_input();
+        input.subagent_type = Some("classifier".to_string());
+        input.route_tax = Some(runtime::RouteTaxCall::Decompose);
+        let mut built = None;
+        execute_agent_with_spawn_and_parent_model(
+            input,
+            |job| {
+                built = Some(super::agent_runtime::build_agent_runtime(&job, std::sync::Arc::default(), std::sync::Arc::default()).map(|_| ()));
+                Ok(())
+            },
+            Some(&fast),
+            None,
+        )
+        .expect("the spawn is reached");
+        built.expect("the spawn ran")
+    };
+    let wants_oauth = |built: Result<(), String>| built.is_err_and(|why| why.contains("oauth credentials"));
+
+    // A session pinned to its OAuth login.
+    let _session = RunningSession::built_now(&env, session_model);
+    hold(session_model, google(AuthRoute::OAuth));
+    assert!(wants_oauth(split()), "the split is asked on the session's login");
+    assert!(
+        wants_oauth(build_provider_client_for_the_sessions_fast_model(&fast, session_model).map(|_| ())),
+        "and so are the fold and the probe"
+    );
+    if let Err(why) = build_provider_client_for_agent(&fast) {
+        panic!("a helper on `{fast}` is built by the model's own row (the session runs on `{session_model}`): {why}");
+    }
+
+    // Two logins at the one provider: nothing says which the session is on.
+    hold(LEG, google(AuthRoute::ApiKey));
+    assert_eq!(split(), Ok(()));
+    // A session on any login pins nothing.
+    hold(LEG, google(AuthRoute::Auto));
+    hold(session_model, google(AuthRoute::Auto));
+    assert_eq!(split(), Ok(()));
+}
+
 #[test]
 fn live_spawn_path_honors_same_family_explicit_model() {
     let store = TempAgentStore::new("same-family-explicit");

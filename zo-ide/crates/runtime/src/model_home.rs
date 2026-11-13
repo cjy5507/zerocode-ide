@@ -200,6 +200,22 @@ pub fn held(model: &str) -> Option<Held> {
         .map(|(_, held)| held.clone())
 }
 
+/// The login the session is on at `home`: the one login its clients there
+/// are pinned to. `None` where it holds no client there, where none of them
+/// pins a login, and where two of them pin different ones — nothing then
+/// says which of the two the session is on at that provider, in whatever
+/// order they were built. No file is read.
+#[must_use]
+pub fn held_login_at(home: &ModelHome) -> Option<AuthRoute> {
+    let held = held_now();
+    let mut pins = held
+        .iter()
+        .filter(|(_, held)| held.home.is_where(home) && held.auth_route != AuthRoute::Auto)
+        .map(|(_, held)| held.auth_route);
+    let first = pins.next()?;
+    pins.all(|pin| pin == first).then_some(first)
+}
+
 /// Nothing is held: the process runs no session. For a test that held one.
 pub fn forget_session() {
     held_now().clear();
@@ -486,5 +502,44 @@ mod tests {
         assert_eq!(held("zq-held-next"), by(&own(), AuthRoute::Auto));
         assert_eq!(held("zq-held-session"), None);
         assert_eq!(held("zq-held-turn"), None);
+    }
+
+    /// The login the session is on at a provider is the one its clients
+    /// there agree on, whichever was built last; two that differ say nothing.
+    #[test]
+    fn the_login_a_session_is_on_at_a_provider_is_the_one_its_clients_there_agree_on() {
+        let _lock = crate::test_env_lock();
+        let _clean = NoSession;
+        let at = |home: &ModelHome, auth_route: AuthRoute| Held { home: home.clone(), catalog_provider: None, auth_route };
+        let google = ModelHome::BuiltIn(ProviderKind::Google);
+        let openai = ModelHome::BuiltIn(ProviderKind::OpenAi);
+        forget_session();
+        assert_eq!(held_login_at(&google), None, "nothing runs");
+
+        hold_session("zq-login-session", at(&google, AuthRoute::ApiKey));
+        assert_eq!(held_login_at(&google), Some(AuthRoute::ApiKey));
+        assert_eq!(held_login_at(&openai), None, "no client there");
+        assert_eq!(held_login_at(&own()), None);
+        assert_eq!(held_login_at(&ModelHome::Unknown), None, "two unknown models share nothing");
+
+        // A leg on any login beside it pins nothing, and one on the same login agrees.
+        hold("zq-login-leg", at(&google, AuthRoute::Auto));
+        assert_eq!(held_login_at(&google), Some(AuthRoute::ApiKey));
+        hold("zq-login-leg", at(&google, AuthRoute::ApiKey));
+        assert_eq!(held_login_at(&google), Some(AuthRoute::ApiKey));
+        // A leg at another provider is that provider's.
+        hold("zq-login-elsewhere", at(&openai, AuthRoute::OAuth));
+        assert_eq!(held_login_at(&google), Some(AuthRoute::ApiKey));
+        assert_eq!(held_login_at(&openai), Some(AuthRoute::OAuth));
+
+        // Two logins at one provider: neither, whichever was put in last.
+        hold("zq-login-leg", at(&google, AuthRoute::OAuth));
+        assert_eq!(held_login_at(&google), None);
+        hold("zq-login-session", at(&google, AuthRoute::ApiKey));
+        assert_eq!(held_login_at(&google), None, "the session's own client built again changes the order, not the answer");
+
+        // A session on any login pins nothing.
+        hold_session("zq-login-next", at(&google, AuthRoute::Auto));
+        assert_eq!(held_login_at(&google), None);
     }
 }

@@ -361,6 +361,9 @@ pub(super) fn build_agent_runtime(
             job.api_concurrency,
             job.route_fallback_models.clone(),
             Some(job.cancel_signal.clone()),
+            // The router's own call (`AgentJob::route_tax`: the split of a
+            // request) is the session asking, and is asked on its login.
+            job.route_tax.is_some(),
         )?
         .with_mcp_tools(
             mcp_tools

@@ -319,12 +319,15 @@ impl ProviderRuntimeClient {
         api_concurrency: Option<usize>,
         rate_limit_fallback_models: Vec<String>,
         cancel_signal: Option<runtime::HookAbortSignal>,
+        the_sessions_own_call: bool,
     ) -> Result<Self, String> {
         let (selection, model) = agent_model_route(model);
-        let client = build_provider_client_for_agent_with_rate_limit_failover(
-            &selection,
-            !rate_limit_fallback_models.is_empty(),
-        )?;
+        let fail_fast_on_rate_limit = !rate_limit_fallback_models.is_empty();
+        let client = if the_sessions_own_call {
+            build_provider_client_for_the_sessions_own_call(&selection, fail_fast_on_rate_limit)
+        } else {
+            build_provider_client_for_agent_with_rate_limit_failover(&selection, fail_fast_on_rate_limit)
+        }?;
         Ok(Self {
             handle: shared_agent_runtime().handle().clone(),
             client,
@@ -892,6 +895,32 @@ pub(super) fn on_the_sessions_login(built: Held, session_model: &str) -> Held {
         {
             Held { auth_route: session.auth_route, ..built }
         }
+        _ => built,
+    }
+}
+
+/// The client for `model` where the session itself is the one asking: the
+/// router's own call — the split of a request into lanes — which is no
+/// helper's work. It goes on the login the session is on at that provider,
+/// as its fold and its probe do
+/// ([`build_provider_client_for_the_sessions_fast_model`]). Built by the
+/// model's own row alone, a session pinned to its API key had the person's
+/// words split on whichever login the machine holds for that provider: the
+/// same provider, another account.
+fn build_provider_client_for_the_sessions_own_call(
+    model: &str,
+    fail_fast_on_rate_limit: bool,
+) -> Result<ProviderClient, String> {
+    build_as(model, &on_the_login_the_session_is_on(built_by(model)), fail_fast_on_rate_limit)
+}
+
+/// `built` on the login the session is on at the provider `built` sends to
+/// ([`runtime::model_home::held_login_at`]), where `built` pins none of its
+/// own. The router's own call is handed the model it runs on and not the
+/// session's, so the session is found by where its clients send.
+pub(super) fn on_the_login_the_session_is_on(built: Held) -> Held {
+    match runtime::model_home::held_login_at(&built.home) {
+        Some(auth_route) if built.auth_route == AuthRoute::Auto => Held { auth_route, ..built },
         _ => built,
     }
 }
