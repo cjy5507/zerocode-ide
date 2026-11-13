@@ -399,8 +399,8 @@ fn keychain_services(home: &Path) -> Vec<String> {
 /// The chain ends in `None`, never in a name. The version before this one
 /// returned the literal `"user"` once both variables were absent, and that is a
 /// real execution environment: MEASURED 2026-09-20 (w-4837), an exec'd child of
-/// the window had no `USER` at all, `LOGNAME=root`, and `joe` as the uid's own
-/// account. The window then asked the keychain about an account nobody has, was
+/// the window had no `USER` at all, `LOGNAME=root`, and the uid's own
+/// account under another name. The window then asked the keychain about an account nobody has, was
 /// told there is no such item, and reported that the person kept no key while
 /// the key sat right there. A made-up name turns "I do not know" into a
 /// confident wrong answer about somebody else's keychain; `None` keeps it a
@@ -6969,7 +6969,7 @@ JSON
     /// this, and the uid is the one that cannot be empty.
     ///
     /// MEASURED 2026-09-20 (w-4837): an exec'd child of the window had no
-    /// `USER` at all, `LOGNAME=root`, and `joe` as the uid's own account.
+    /// `USER` at all, `LOGNAME=root`, and the uid's own account under another name.
     /// `LOGNAME` is deliberately not in the chain for exactly that reason — it
     /// was the variable that DID answer, and it answered with the wrong
     /// account. A third guess is not a third chance at the truth.
