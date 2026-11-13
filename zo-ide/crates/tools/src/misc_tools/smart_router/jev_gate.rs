@@ -88,6 +88,14 @@ pub(super) fn workspace_permitted_now(cwd: &Path) -> bool {
     settings.enabled && settings.consents(&door::resolved_path(cwd))
 }
 
+/// A decision's two hours as the door counts them: its own hour file
+/// `decision`, at most `decision_most`, and the file `every` decision shares,
+/// at most what `root`, the person's settings, holds
+/// ([`door::custom_hourly_requests`]).
+fn decision_hour<'a>(root: &Value, decision: &'a Path, decision_most: u64, every: &'a Path) -> door::Hour<'a> {
+    door::Hour { decision, decision_most, every, every_most: door::custom_hourly_requests(root) }
+}
+
 /// The door as it stands for one batch of requests.
 #[derive(Debug, Clone)]
 pub struct JevDoor {
@@ -280,7 +288,7 @@ impl JevDoor {
             || self.settings.clone(),
             |_| JevSettings::from_root(&root).resolved(),
         );
-        let hour = door::Hour { decision, decision_most, every, every_most: door::custom_hourly_requests(&root) };
+        let hour = decision_hour(&root, decision, decision_most, every);
         door::pass_within_the_hour(
             |asking| self.may_send_now(row, &settings, asking, body),
             key,
@@ -289,6 +297,16 @@ impl JevDoor {
             &self.requests,
             hour,
         ).map(|cleared| self.with_review(row, cleared))
+    }
+
+    /// Whether the hours [`Self::pass_within_the_hour`] counts a decision in
+    /// are full now, by the door's own rule ([`door::Hour::is_full`]) and the
+    /// bound the settings hold: a refusal of an hour that repeats until it
+    /// ends, not a busy lock's.
+    #[must_use]
+    pub fn hour_is_full(&self, decision: &Path, decision_most: u64, every: &Path) -> bool {
+        let root = self.settings_file.as_deref().map_or(Value::Null, read_settings_root);
+        decision_hour(&root, decision, decision_most, every).is_full()
     }
 
     /// The door's own questions of a request, then this door's: the seat

@@ -949,3 +949,131 @@ fn a_two_option_tie_hands_nothing() {
         assert_eq!((&row["chosen"], &row["applied"]), (&Value::from("ship"), &Value::from(false)));
     });
 }
+
+/// One hour, in milliseconds.
+const HOUR_MS: i64 = 3_600_000;
+
+/// A moment a minute past `hours` o'clock today, on this machine's clock.
+fn today_at(hours: i64) -> Moment {
+    let now = super::super::decision_shadow::now_ms();
+    let offset = i64::from(Moment::at(now).offset_minutes) * 60_000;
+    let midnight = now - (now + offset).rem_euclid(24 * HOUR_MS);
+    Moment::at(midnight + hours * HOUR_MS + 60_000)
+}
+
+/// Ask the decisions before `count` commands of `cwd`'s, at `at`, each to its
+/// end: the calls `first` on.
+fn commands_at(cwd: &Path, at: Moment, first: usize, count: usize) {
+    for call in first..first + count {
+        let id = format!("call-{call}");
+        before_command_at(cwd, &command_ask(cwd, &id, "rm -rf build"), at);
+        drop(run_blocking(after_command(cwd.to_path_buf(), "turn-1".to_string(), id)));
+    }
+}
+
+/// The settings file of zo's config home, changed by `change`.
+fn settings_changed(change: impl FnOnce(&mut Value)) {
+    let path = runtime::default_config_home().join("settings.json");
+    let mut settings: Value = serde_json::from_str(&fs::read_to_string(&path).expect("the settings")).expect("JSON");
+    change(&mut settings);
+    fs::write(path, settings.to_string()).expect("the settings written");
+}
+
+/// A decision whose hour is full writes one row for a hundred commands in it
+/// — after its first, the commands cost it nothing: no door, no lock, no
+/// count file, no request — and the next hour asks again (t-107587).
+#[test]
+fn a_full_hour_writes_one_row_for_a_hundred_commands_and_the_next_hour_asks() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let mut once = yes_no("Cleanup", Point::BeforeCommand);
+        once.max_per_hour = *custom::HOURLY_REQUESTS.start();
+        keep(&once, JevMode::On);
+        let (at, next) = (today_at(10), today_at(11));
+        commands_at(cwd, at, 0, 1);
+        commands_at(cwd, at, 1, 1);
+        let rows = rows_in(cwd, 2);
+        let outcomes: Vec<&str> = rows.iter().filter_map(|row| row["outcome"].as_str()).collect();
+        assert_eq!(outcomes, [door::ANSWERED_OUTCOME, Refused::HourlyBudget.token()], "{rows:?}");
+        // The count and lock files gone, the decisions' store beside them
+        // kept: a command that went to the door again would lock and count
+        // there anew, and be let through.
+        let counted = runtime::default_config_home().join(count::REQUESTS_DIR);
+        let counts = || -> Vec<String> {
+            fs::read_dir(&counted)
+                .expect("the count folder")
+                .filter_map(Result::ok)
+                .filter(|file| file.path().is_file())
+                .map(|file| file.file_name().to_string_lossy().into_owned())
+                .collect()
+        };
+        let spent = counts();
+        assert!(!spent.is_empty(), "the first command counted its hour and locked it");
+        for file in &spent {
+            fs::remove_file(counted.join(file)).expect("a count file removed");
+        }
+        commands_at(cwd, at, 2, 98);
+        std::thread::sleep(LATE);
+        let rows = rows_now(cwd);
+        assert_eq!(rows.len(), 2, "a hundred commands in a full hour, one row saying so: {rows:?}");
+        assert_eq!(counts(), Vec::<String>::new(), "no door, no lock, no count file");
+        assert_eq!(mock.requests().len(), 1, "and no request");
+        commands_at(cwd, next, 100, 1);
+        let rows = rows_in(cwd, 3);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[2]["outcome"], door::ANSWERED_OUTCOME, "the next hour asks");
+        assert_eq!(mock.requests().len(), 2);
+    });
+}
+
+/// A spent day writes one row for every command of the day, the next hour's
+/// among them.
+#[test]
+fn a_spent_day_writes_one_row_all_day() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        settings_changed(|settings| {
+            settings[SMART_SETTINGS_KEY][JEV_SETTINGS_KEY][door::DAILY_REQUESTS_SETTING] = Value::from(0);
+        });
+        keep(&yes_no("Cleanup", Point::BeforeCommand), JevMode::On);
+        commands_at(cwd, today_at(10), 0, 50);
+        commands_at(cwd, today_at(11), 50, 50);
+        std::thread::sleep(LATE);
+        let rows = rows_now(cwd);
+        let outcomes: Vec<&str> = rows.iter().filter_map(|row| row["outcome"].as_str()).collect();
+        assert_eq!(outcomes, [Refused::Budget.token()], "one row for the day: {rows:?}");
+        assert!(mock.requests().is_empty());
+    });
+}
+
+/// A folder not consented quiets the decision in that folder alone: a
+/// hundred commands there write one row while a consented folder's commands
+/// ask in the same hour, and consent given mid-hour asks at once.
+#[test]
+fn a_folder_not_consented_is_quiet_there_alone_and_consent_asks_at_once() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let unconsented = tempfile::tempdir().expect("a folder nobody consented to");
+        let elsewhere = fs::canonicalize(unconsented.path()).expect("the folder resolved");
+        keep(&yes_no("Cleanup", Point::BeforeCommand), JevMode::On);
+        let at = today_at(10);
+        commands_at(&elsewhere, at, 0, 100);
+        std::thread::sleep(LATE);
+        let refused = rows_now(&elsewhere);
+        let outcomes: Vec<&str> = refused.iter().filter_map(|row| row["outcome"].as_str()).collect();
+        assert_eq!(outcomes, [Refused::NotConsented.token()], "one row there: {refused:?}");
+        commands_at(cwd, at, 100, 2);
+        let asked = rows_in(cwd, 2);
+        assert_eq!(asked.len(), 2, "the consented folder asks in the same hour: {asked:?}");
+        assert!(asked.iter().all(|row| row["outcome"] == door::ANSWERED_OUTCOME), "{asked:?}");
+        settings_changed(|settings| {
+            let workspaces = &mut settings[SMART_SETTINGS_KEY][JEV_SETTINGS_KEY][door::WORKSPACES_SETTING];
+            workspaces.as_array_mut().expect("the consented folders").push(Value::from(elsewhere.to_string_lossy()));
+        });
+        commands_at(&elsewhere, at, 102, 1);
+        let rows = rows_in(&elsewhere, 2);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[1]["outcome"], door::ANSWERED_OUTCOME, "consent given mid-hour asks at once");
+        assert_eq!(mock.requests().len(), 3);
+    });
+}

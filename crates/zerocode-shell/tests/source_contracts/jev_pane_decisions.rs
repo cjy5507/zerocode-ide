@@ -77,3 +77,36 @@ fn zo_and_a_window_pane_ask_a_persons_decision_by_one_set_of_functions() {
     assert!(advice.contains("custom::introduced_within("));
     assert!(!advice.contains("LINES_INTRO.chars()"));
 }
+
+/// A decision whose refusal repeats is quiet in one book (t-107587): zo and a
+/// window pane both keep the core's (`zerocode_core::jev::custom::quiet`),
+/// ask it before a decision and tell it each refusal, and neither keeps
+/// marks, spans or the rule of which refusals repeat of its own.
+#[test]
+fn zo_and_a_window_pane_keep_one_book_of_quiet_decisions() {
+    let (zo, window) = (shipped(ZO), shipped(WINDOW));
+    for (name, code) in [("zo", &zo), ("a window pane", &window)] {
+        for call in ["quiet::Now", "quiet.is(", "quiet.refused(", "quiet.broke("] {
+            assert!(
+                code.contains(call),
+                "{name} does not call the core's book: {call}"
+            );
+        }
+        for own in [
+            "struct Marks",
+            "enum Until",
+            "Until::",
+            "struct Quiet",
+            "fn mark(",
+            ".repeats()",
+            "Refused::repeats",
+            "of_the_folder",
+            "is_full()",
+        ] {
+            assert!(
+                !code.contains(own),
+                "{own} spelled in {name}, outside the core's book"
+            );
+        }
+    }
+}

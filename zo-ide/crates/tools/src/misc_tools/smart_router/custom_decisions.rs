@@ -13,6 +13,15 @@
 //! never stops a command or changes what a turn says: all it may do is hand
 //! one line ([`custom::line`]), and only while it is on and as sure as its
 //! act-from line.
+//!
+//! A refusal the door would give again until something outside zo changes —
+//! an hour or a day found full, no key, the switch off, a folder not
+//! consented, a definition that breaks a rule — makes the decision quiet in
+//! the core's book the window's panes keep too ([`Quiet`]): it writes one row
+//! saying so, and until its span ends, the settings read otherwise, or its
+//! definition changes, a point costs it nothing more — no door, no count
+//! file, no lock, no row. The book is this process's, read off the settings
+//! each point reads anyway ([`quiet_as_read`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,6 +33,7 @@ use futures_util::future::{BoxFuture, FutureExt, Shared};
 use runtime::CommandAsk;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zerocode_core::jev::custom::quiet::{self, Quiet};
 use zerocode_core::jev::custom::{self, deadline_at, standing, store, Definition, Lent, Point};
 use zerocode_core::jev::door::{self, Refused};
 use zerocode_core::jev::custom::Input;
@@ -36,11 +46,45 @@ use super::patch_review::detach;
 use super::settings::merged_settings_root_from;
 use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 
+/// The settings `cwd` reads, merged; `None` when they cannot be read.
+fn settings_root(cwd: &Path) -> Option<Value> {
+    merged_settings_root_from(&runtime::ConfigLoader::default_for(cwd))
+}
+
 /// The switch over every decision (`smart.customDecisions`) in the settings
 /// `cwd` reads; off when they cannot be read.
 fn switch_in(cwd: &Path) -> JevMode {
-    merged_settings_root_from(&runtime::ConfigLoader::default_for(cwd))
-        .map_or(JevMode::Off, |root| CUSTOM_DECISIONS.mode_in(&root))
+    settings_root(cwd).map_or(JevMode::Off, |root| CUSTOM_DECISIONS.mode_in(&root))
+}
+
+/// What this process's quiet marks were read from — zo's config home and the
+/// settings a point read, merged — and the book kept under that reading.
+struct ReadFrom {
+    home: PathBuf,
+    root: Value,
+    quiet: Arc<Quiet>,
+}
+
+fn read_from() -> &'static Mutex<Option<ReadFrom>> {
+    static READ_FROM: OnceLock<Mutex<Option<ReadFrom>>> = OnceLock::new();
+    READ_FROM.get_or_init(|| Mutex::new(None))
+}
+
+/// The quiet marks kept while zo's settings read `root` under `home`: the
+/// same book while they read so, and a new one — every mark gone — once they
+/// read otherwise, as the window starts one when it reads them again. So a
+/// key put in, consent given, the switch turned on or a bound raised asks at
+/// once. An ask that began before keeps marking the book it began with,
+/// which nothing reads any more. Compares, and copies the settings only when
+/// they changed.
+fn quiet_as_read(home: &Path, root: &Value) -> Arc<Quiet> {
+    let mut held = read_from().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(read) = held.as_ref().filter(|read| read.home == home && read.root == *root) {
+        return Arc::clone(&read.quiet);
+    }
+    let quiet = Arc::new(Quiet::default());
+    *held = Some(ReadFrom { home: home.to_path_buf(), root: root.clone(), quiet: Arc::clone(&quiet) });
+    quiet
 }
 
 /// One decision about to be asked: its row in the index, its definition, and
@@ -52,22 +96,39 @@ struct Asked {
     mode: JevMode,
 }
 
-/// The decisions that ask at `point` in `cwd`, each where it stands. Nothing
-/// past the switch is read while it is off, and a store that cannot be read
-/// asks nothing.
-fn asking_at(cwd: &Path, point: Point) -> Vec<Asked> {
-    let switch = switch_in(cwd);
+/// The decisions that ask at `point` in `cwd` at the moment `at`, each where
+/// it stands, and the quiet marks they are held to: none when none asks.
+/// Nothing past the switch is read while it is off, a store that cannot be
+/// read asks nothing, and a decision quiet at `at` — everywhere or in this
+/// folder — is not asked.
+fn asking_at(cwd: &Path, point: Point, at: Moment) -> Option<Held> {
+    let root = settings_root(cwd)?;
+    let switch = CUSTOM_DECISIONS.mode_in(&root);
     if !switch.asks() {
-        return Vec::new();
+        return None;
     }
+    let home = runtime::default_config_home();
+    let quiet = quiet_as_read(&home, &root);
     let workspace = PathBuf::from(door::resolved_path(cwd));
-    store::asking_in(&runtime::default_config_home(), &workspace)
+    let now = at.quiet_now();
+    let asking: Vec<Asked> = store::asking_in(&home, &workspace)
         .unwrap_or_default()
         .into_iter()
-        .filter(|(_, definition)| definition.at == point)
+        .filter(|(entry, definition)| {
+            definition.at == point && !quiet.is(&entry.id, &entry.definition, Some(&workspace), now)
+        })
         .map(|(entry, definition)| Asked { mode: standing(switch, entry.mode), entry, definition })
         .filter(|asked| asked.mode.asks())
-        .collect()
+        .collect();
+    (!asking.is_empty()).then_some(Held { asking, at, quiet })
+}
+
+/// The decisions one point asks, the moment it asks them at, and the quiet
+/// marks they are held to.
+struct Held {
+    asking: Vec<Asked>,
+    at: Moment,
+    quiet: Arc<Quiet>,
 }
 
 /// The moment a point asks at: Unix milliseconds, and the local clock's
@@ -92,6 +153,11 @@ impl Moment {
     /// The local hour a request at this moment is counted in ([`count::hour_of`]).
     fn hour(self) -> String {
         count::hour_of(self.ms, self.offset_minutes)
+    }
+
+    /// The local hour and day of this moment, as a quiet mark holds them.
+    fn quiet_now(self) -> quiet::Now {
+        quiet::Now::at(self.ms, self.offset_minutes)
     }
 
     /// This moment as a row's `at`.
@@ -144,12 +210,15 @@ fn write(cwd: &Path, row: &DecisionRow) {
 }
 
 /// `asked` while its definition still keeps every rule ([`custom::check`]);
-/// else the word of the first rule it breaks, on the one row it writes. It is
-/// not asked: a definition the store would refuse today sends nothing.
-fn kept(cwd: &Path, asked: Asked, at: Moment) -> Result<Asked, &'static str> {
+/// else the word of the first rule it breaks, on the one row it writes —
+/// once, until the definition changes ([`Quiet::broke`]). It is not asked: a
+/// definition the store would refuse today sends nothing.
+fn kept(cwd: &Path, asked: Asked, (at, quiet): (Moment, &Quiet)) -> Result<Asked, &'static str> {
     match custom::check(&asked.definition).first() {
         Some(refusal) => {
-            write(cwd, &DecisionRow::of(&asked, refusal.word(), at));
+            if quiet.broke((&asked.entry.id, &asked.entry.definition), at.quiet_now()) {
+                write(cwd, &DecisionRow::of(&asked, refusal.word(), at));
+            }
             Err(refusal.word())
         }
         None => Ok(asked),
@@ -166,20 +235,50 @@ struct Handed {
     confidence: f64,
 }
 
+/// The two hour files a decision asked at a moment counts in: its own, and
+/// the one every decision shares.
+struct Hours {
+    decision: PathBuf,
+    every: PathBuf,
+}
+
+impl Hours {
+    fn of(asked: &Asked, at: Moment) -> Self {
+        let (home, hour) = (runtime::default_config_home(), at.hour());
+        Self {
+            decision: count::hour_path(&home, &asked.entry.id, &hour),
+            every: count::hour_path(&home, custom::EVERY_DECISION, &hour),
+        }
+    }
+}
+
 /// Ask one decision through the door, inside its point's wall, and write its
-/// row: the row's outcome, and the line it hands when it earns one.
+/// row — none for a refusal that repeats and another ask already wrote
+/// ([`Quiet::refused`]): the row's outcome, and the line it hands when it
+/// earns one.
 async fn ask_one(
     cwd: &Path,
     door: &JevDoor,
     client: Option<&SystemOneClient>,
-    asked: &Asked,
-    lent: &Lent,
-    at: Moment,
+    (asked, lent): (&Asked, &Lent),
+    (at, quiet): (Moment, &Quiet),
 ) -> (String, Option<Handed>) {
     let mut row = DecisionRow::of(asked, door::ANSWERED_OUTCOME, at);
-    let handed = judged(cwd, door, client, (asked, lent), at, &mut row).await;
+    let hours = Hours::of(asked, at);
+    let handed = judged(cwd, door, client, (asked, lent), &hours, &mut row).await;
     row.row.applied = handed.is_some();
     let outcome = row.row.outcome.clone();
+    if outcome != door::ANSWERED_OUTCOME
+        && !quiet.refused(
+            (&asked.entry.id, &asked.entry.definition),
+            Path::new(&door::resolved_path(cwd)),
+            &outcome,
+            at.quiet_now(),
+            || door.hour_is_full(&hours.decision, asked.definition.max_per_hour, &hours.every),
+        )
+    {
+        return (outcome, handed);
+    }
     let ledger = shadow_ledger_path(cwd, CUSTOM_DECISIONS.ledger);
     let _ = tokio::task::spawn_blocking(move || append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES)).await;
     (outcome, handed)
@@ -190,21 +289,17 @@ async fn judged(
     door: &JevDoor,
     client: Option<&SystemOneClient>,
     (asked, lent): (&Asked, &Lent),
-    at: Moment,
+    hours: &Hours,
     row: &mut DecisionRow,
 ) -> Option<Handed> {
-    let home = runtime::default_config_home();
-    let hour = at.hour();
-    let (decision_hour, every_hour) =
-        (count::hour_path(&home, &asked.entry.id, &hour), count::hour_path(&home, custom::EVERY_DECISION, &hour));
     let body = custom::body_of(&asked.definition, lent);
     let passed = door.pass_within_the_hour(
         &CUSTOM_DECISIONS,
         client.is_some(),
         body,
-        &decision_hour,
+        &hours.decision,
         asked.definition.max_per_hour,
-        &every_hour,
+        &hours.every,
     );
     let (cleared, client) = match (passed, client) {
         (Ok(cleared), Some(client)) => (cleared, client),
@@ -251,35 +346,43 @@ async fn judged(
     })
 }
 
-/// Ask every decision in `asking` through one door: what each row's outcome
-/// was, and the line each hands.
-async fn ask_each(cwd: PathBuf, asking: Vec<Asked>, lent: Arc<Lent>, at: Moment) -> Vec<(String, Option<Handed>)> {
+/// Ask every decision in `asking` through one door, at the moment `at` and
+/// held to `quiet`: what each row's outcome was, and the line each hands.
+async fn ask_each(
+    cwd: PathBuf,
+    asking: Vec<Asked>,
+    lent: Arc<Lent>,
+    (at, quiet): (Moment, Arc<Quiet>),
+) -> Vec<(String, Option<Handed>)> {
     let opened = cwd.clone();
     let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&opened)).await else {
         return Vec::new();
     };
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
-    let asks = asking.iter().map(|asked| ask_one(&cwd, &door, client.as_ref(), asked, &lent, at));
+    let asks = asking.iter().map(|asked| ask_one(&cwd, &door, client.as_ref(), (asked, &lent), (at, &quiet)));
     futures_util::future::join_all(asks).await
 }
 
-/// Ask every decision in `asking` with what its point lent: the recording
+/// Ask every decision `held` names with what its point lent: the recording
 /// ones on a worker, so they hold up nobody, and the acting ones awaited for
 /// the lines they hand.
-async fn ask_all(cwd: PathBuf, asking: Vec<Asked>, lent: Lent, at: Moment) -> Vec<Handed> {
-    let (acting, recording): (Vec<Asked>, Vec<Asked>) =
-        asking.into_iter().filter_map(|asked| kept(&cwd, asked, at).ok()).partition(|asked| asked.mode.applies());
+async fn ask_all(cwd: PathBuf, held: Held, lent: Lent) -> Vec<Handed> {
+    let Held { asking, at, quiet } = held;
+    let (acting, recording): (Vec<Asked>, Vec<Asked>) = asking
+        .into_iter()
+        .filter_map(|asked| kept(&cwd, asked, (at, &quiet)).ok())
+        .partition(|asked| asked.mode.applies());
     let lent = Arc::new(lent);
     if !recording.is_empty() {
-        let (cwd, lent) = (cwd.clone(), Arc::clone(&lent));
+        let (cwd, lent, quiet) = (cwd.clone(), Arc::clone(&lent), Arc::clone(&quiet));
         detach(async move {
-            drop(ask_each(cwd, recording, lent, at).await);
+            drop(ask_each(cwd, recording, lent, (at, quiet)).await);
         });
     }
     if acting.is_empty() {
         return Vec::new();
     }
-    ask_each(cwd, acting, lent, at).await.into_iter().filter_map(|(_, handed)| handed).collect()
+    ask_each(cwd, acting, lent, (at, quiet)).await.into_iter().filter_map(|(_, handed)| handed).collect()
 }
 
 /// `note` with `lines` under it, one to a line, after the one line saying
@@ -302,12 +405,11 @@ pub(super) async fn at_turn_start(cwd: PathBuf, task: String) -> Vec<String> {
     if task.trim().is_empty() {
         return Vec::new();
     }
-    let asking = asking_at(&cwd, Point::TurnStart);
-    if asking.is_empty() {
+    let Some(held) = asking_at(&cwd, Point::TurnStart, Moment::now()) else {
         return Vec::new();
-    }
+    };
     let lent: Lent = [(Input::Task.key().to_string(), Value::from(task))].into_iter().collect();
-    ask_all(cwd, asking, lent, Moment::now()).await.into_iter().map(|handed| handed.line).collect()
+    ask_all(cwd, held, lent).await.into_iter().map(|handed| handed.line).collect()
 }
 
 /* ---- a turn's end ------------------------------------------------------------- */
@@ -342,16 +444,15 @@ fn offers() -> &'static Mutex<Offers> {
 /// to the next turn ([`pending_lines`]). `turn` is read only when a decision
 /// asks.
 pub(super) fn at_turn_end(workspace: &Path, recipient: &str, turn: impl FnOnce() -> TurnEnd) {
-    let asking = asking_at(workspace, Point::TurnEnd);
-    if asking.is_empty() {
+    let Some(held) = asking_at(workspace, Point::TurnEnd, Moment::now()) else {
         return;
-    }
+    };
     let TurnEnd { task, final_text, evidence, edited_paths } = turn();
     let lent = custom::lent_at_turn_end(task, final_text, evidence, edited_paths);
     let (cwd, recipient) = (workspace.to_path_buf(), recipient.to_string());
     let at = super::decision_shadow::unix_millis();
     detach(async move {
-        let handed = ask_all(cwd.clone(), asking, lent, Moment::now()).await;
+        let handed = ask_all(cwd.clone(), held, lent).await;
         offer(cwd, recipient, at, handed);
     });
 }
@@ -438,13 +539,14 @@ fn before_command_at(project: &Path, ask: &CommandAsk, at: Moment) {
     if !asks_about(&ask.command) {
         return;
     }
-    let asking = asking_at(project, Point::BeforeCommand);
-    if asking.is_empty() {
+    // A decision quiet now is not among them: with none left, the command
+    // costs the decisions nothing more — no door, no count file, no row.
+    let Some(held) = asking_at(project, Point::BeforeCommand, at) else {
         return;
-    }
+    };
     let lent = custom::lent_before_command(&ask.command, &ask.cwd, &ask.task);
-    let acting = asking.iter().any(|asked| asked.mode.applies());
-    let judged: Judged = ask_all(project.to_path_buf(), asking, lent, at)
+    let acting = held.asking.iter().any(|asked| asked.mode.applies());
+    let judged: Judged = ask_all(project.to_path_buf(), held, lent)
         .map(|handed| handed.into_iter().map(|one| one.line).collect())
         .boxed()
         .shared();
@@ -522,15 +624,16 @@ impl CustomVerdict {
 /// decision asks at another point.
 pub fn decide(cwd: &Path, name: &str, context: Option<&str>, items: &[String]) -> Result<CustomVerdict, String> {
     let off = JevMode::Off.key();
-    let switch = switch_in(cwd);
-    if !switch.asks() {
+    let root = settings_root(cwd);
+    let switch = root.as_ref().map_or(JevMode::Off, |root| CUSTOM_DECISIONS.mode_in(root));
+    let (Some(root), true) = (root, switch.asks()) else {
         let note = format!(
             "smart.{} is off, so nothing was asked; decide this yourself, or ask the person to turn it on in the \
              ZeroCode settings.",
             CUSTOM_DECISIONS.setting
         );
         return Ok(CustomVerdict::nothing(name, JevMode::Off, off, note));
-    }
+    };
     let home = runtime::default_config_home();
     let entry = store::list(&home)
         .map_err(|error| format!("the decisions store cannot be read: {error}"))?
@@ -552,8 +655,10 @@ pub fn decide(cwd: &Path, name: &str, context: Option<&str>, items: &[String]) -
         let note = format!("'{name}' does not ask in this folder, so nothing was asked; decide this yourself.");
         return Ok(CustomVerdict::nothing(name, mode, off, note));
     }
-    let at = Moment::now();
-    let asked = match kept(cwd, Asked { entry, definition, mode }, at) {
+    // Asked by name, a decision always goes to the door, so its verdict says
+    // why nothing was asked every time; only its row is once a span.
+    let (at, quiet) = (Moment::now(), quiet_as_read(&home, &root));
+    let asked = match kept(cwd, Asked { entry, definition, mode }, (at, &quiet)) {
         Ok(asked) => asked,
         Err(word) => {
             let note = format!("'{name}' breaks a rule it was kept under ({word}), so nothing was asked; decide this yourself.");
@@ -569,7 +674,8 @@ pub fn decide(cwd: &Path, name: &str, context: Option<&str>, items: &[String]) -
     }
     let door = JevDoor::open(cwd);
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
-    let (outcome, handed) = api::sync_bridge::run_blocking(ask_one(cwd, &door, client.as_ref(), &asked, &lent, at));
+    let (outcome, handed) =
+        api::sync_bridge::run_blocking(ask_one(cwd, &door, client.as_ref(), (&asked, &lent), (at, &quiet)));
     let mut verdict = CustomVerdict::nothing(name, mode, &outcome, String::new());
     match handed {
         Some(handed) => {
