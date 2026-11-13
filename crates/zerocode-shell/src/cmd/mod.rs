@@ -328,8 +328,8 @@ pub(crate) use library::{
     library_look, library_paste_add, library_paste_read, library_pause, library_report,
     library_server_agent, library_server_check, library_server_choose, library_server_login,
     library_server_remove, library_server_save, library_server_share, library_server_switch,
-    library_skill_choose, library_skill_create, library_skill_import, library_skill_list,
-    library_skill_remove, library_undo,
+    library_skill_align, library_skill_choose, library_skill_create, library_skill_import,
+    library_skill_list, library_skill_remove, library_undo,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

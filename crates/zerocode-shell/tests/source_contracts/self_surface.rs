@@ -368,6 +368,30 @@ fn the_ledger_ack_of_a_letter_is_a_person_only_command() {
     assert!(person_only_commands().contains(&"desk_ack".to_string()));
 }
 
+/// 「저장소 것으로 맞추기」 takes a copy out of an agent's home (2026-11-13):
+/// the command stands on the second wall's list and is registered, and the
+/// skills page's button for it wears the person-only mark. The page names the
+/// skill and the agent, never a folder: the keeper finds the folder itself.
+#[test]
+fn setting_an_agents_skill_copy_to_the_stores_is_the_persons_alone() {
+    let name = "library_skill_align".to_string();
+    assert!(person_only_commands().contains(&name), "{name} is the person's");
+    assert!(
+        registered_commands().contains(&name),
+        "{name} is on the person-only list but not registered"
+    );
+    let doc = ui_file("shell-doc.js");
+    let buttons = block_after(&doc, "function librarySkillAlignButtons(");
+    assert!(
+        buttons.contains("button.dataset.personOnly = \"\";"),
+        "the button carries the person-only mark"
+    );
+    assert!(
+        buttons.contains("\"library_skill_align\", { name: family.name, agent })"),
+        "the page hands the keeper a skill and an agent, not a path"
+    );
+}
+
 /// Taking a recipe or Flow away from the card, and standing a plain recipe up
 /// as a Flow, are the person's alone (t-93871): both stand on the second wall's
 /// list and are registered; their buttons wear the person-only mark (the first

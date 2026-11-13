@@ -6533,6 +6533,7 @@ function libraryLogWords(row) {
     case "agent-off": return t("library.log.agentOff", "{{who}}에서 {{name}} 끔", vars);
     case "agent-on": return t("library.log.agentOn", "{{who}}에서 {{name}} 켬", vars);
     case "chosen": return t("library.log.chosen", "{{name}}: 고른 내용으로 맞춤", vars);
+    case "aligned": return t("library.log.aligned", "{{who}}의 {{name}} 사본을 보관하고 뺌 → 공통 저장소의 것을 씀", vars);
     case "shared": return t("library.log.shared", "{{who}} 전용이던 {{name}}을(를) 모두에게 공유", vars);
     case "linked": return t("library.log.linked", "창의 Claude Code가 공통 스킬 저장소를 읽게 연결", vars);
     case "first-merge": return t("library.log.firstMerge", "처음 합침: 스킬 {{skills}}개 · MCP 서버 {{servers}}개를 공통 저장소로 · 고르기 필요 {{asked}}", vars);
@@ -6820,7 +6821,26 @@ function librarySkillPickBlock(view, state, family, record) {
     const picked = group.querySelector("input:checked")?.value ?? "";
     void libraryAct(view, state, "library_skill_choose", { name: family.name, path: picked || null });
   }, "btn btn--primary btn--sm");
-  return [note, group, choose];
+  return [note, group, choose, ...librarySkillAlignButtons(view, state, family, record)];
+}
+/* 「저장소 것으로 맞추기」 (2026-11-13): an agent that reads the common store
+ * by itself still lists its own copy of the name first, so choosing the
+ * store's text above leaves it reading its copy. One button per such agent
+ * keeps that copy aside and takes it out of the agent's home; the page names
+ * the skill and the agent, and the keeper finds the folder. The person's
+ * alone: the button carries the mark, the command is on the second wall. */
+function librarySkillAlignButtons(view, state, family, record) {
+  const native = new Set((libraryReport?.agents ?? []).filter((agent) => agent.skills === "native").map((agent) => agent.id));
+  const agents = [...new Set(record.pick.map((candidate) => candidate.agent))].filter((agent) => native.has(agent));
+  return agents.map((agent) => {
+    const who = libraryWho(agent);
+    const button = libraryButton(t("library.pick.alignStore", "저장소 것으로 맞추기 · {{who}}", { who }), () => {
+      void libraryAct(view, state, "library_skill_align", { name: family.name, agent });
+    }, "btn btn--sm", "refresh");
+    button.dataset.personOnly = "";
+    button.dataset.tip = t("library.pick.alignTip", "{{who}}의 이 사본을 보관 폴더에 남기고 휴지통으로 옮깁니다. 그 뒤 {{who}}는 공통 저장소의 것을 씁니다.", { who });
+    return button;
+  });
 }
 
 /* ---- acting --------------------------------------------------------------------- */

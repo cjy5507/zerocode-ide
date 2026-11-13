@@ -67,7 +67,7 @@ const STAND = `(async (library, skills) => {
   window.__ANSWER__.skill_detail = ({ id }) => ({ skill: skills.families.flatMap((f) => f.variants).find((v) => v.id === id), markdown: "# Body\\n\\nThe skill's own text.", evidence: [] });
   window.__ANSWER__.library_report = () => library;
   window.__ANSWER__.library_look = () => library;
-  for (const command of ["library_server_switch", "library_server_agent", "library_server_choose", "library_server_share", "library_server_remove", "library_server_save", "library_paste_add", "library_skill_remove", "library_skill_import", "library_skill_choose", "library_undo", "library_pause"]) {
+  for (const command of ["library_server_switch", "library_server_agent", "library_server_choose", "library_server_share", "library_server_remove", "library_server_save", "library_paste_add", "library_skill_remove", "library_skill_import", "library_skill_choose", "library_skill_align", "library_undo", "library_pause"]) {
     window.__ANSWER__[command] = record(command, library);
   }
   window.__ANSWER__.library_paste_read = record("library_paste_read", [{ name: "github", kind: "stdio", summary: "npx -y @modelcontextprotocol/server-github", secrets: ["GITHUB_TOKEN"] }]);
@@ -186,6 +186,33 @@ export async function testLibraryPage(browser, origin, ok) {
     ok("a server bound to one agent says so and offers to share it", pick.own.includes("Codex 전용") && pick.own.includes("모두에게 공유"), pick.own.slice(0, 300));
     ok("a server the person kept with several agents names them in the language's list form and says the person kept it (second review t-99089 P3-F)",
       pick.kept.includes("Codex 및 Gemini CLI 전용") && pick.kept.includes("되돌려") && !pick.kept.includes("자기 기능으로"), pick.kept.slice(0, 300));
+
+    /* ---- 「저장소 것으로 맞추기」: a copy in a folder whose agent reads the store ------------ */
+    const align = await page.evaluate(`(async () => {
+      const v = ${view()};
+      const record = libraryReport.skills.find((one) => one.name === "notes");
+      const before = record.pick;
+      record.pick = [...before, { agent: "gemini", path: "/Users/dev/.gemini/skills/notes", digest: "older" }];
+      try {
+        await selectSkillFamily(v, "family-notes");
+        await window.__PAINTED__();
+        const host = v.querySelector(".skills-detail-content");
+        const buttons = [...host.querySelectorAll("button")].filter((button) => button.textContent.startsWith("저장소 것으로 맞추기"));
+        const calls = window.__LIB_CALLS__.length;
+        buttons[0]?.click();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return {
+          words: buttons.map((button) => button.textContent),
+          marked: buttons.every((button) => button.hasAttribute("data-person-only")),
+          sent: window.__LIB_CALLS__.slice(calls),
+        };
+      } finally { record.pick = before; }
+    })()`);
+    ok("a copy in an agent's folder that reads the store offers 「저장소 것으로 맞추기」 for that agent alone, marked the person's",
+      JSON.stringify(align.words) === JSON.stringify(["저장소 것으로 맞추기 · Gemini CLI"]) && align.marked, JSON.stringify(align));
+    ok("「저장소 것으로 맞추기」 sends the skill and the agent, never a path",
+      align.sent.length === 1 && align.sent[0].command === "library_skill_align"
+        && JSON.stringify(align.sent[0].args) === JSON.stringify({ name: "notes", agent: "gemini" }), JSON.stringify(align.sent));
 
     /* ---- the add dialog: a pasted block, then a typed command line ------------------------- */
     const added = await page.evaluate(`(async () => {

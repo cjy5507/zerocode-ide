@@ -299,6 +299,9 @@ pub(crate) const AGENT_ALLOWED_DESTRUCTIVE_NAMED: &[&str] = &[
     // The person's session regrant on a work browser turned off: the agent
     // loses a grant; the person keeps everything (t-66200).
     "end_browser_workspace_regrant",
+    // An agent's copy of a skill kept aside and taken out of its home, so
+    // it reads the common store's (「저장소 것으로 맞추기」, 2026-11-13).
+    "library_skill_align",
 ];
 
 /// The header in which the page's one `invoke` says whose hand made a call

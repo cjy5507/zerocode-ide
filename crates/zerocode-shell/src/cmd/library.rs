@@ -219,6 +219,21 @@ pub(crate) async fn library_skill_choose(
     .await
 }
 
+/// 「저장소 것으로 맞추기」: an agent's copy of a skill set to the store's
+/// text — kept, then to the Trash. The person's alone (`PERSON_ONLY_COMMANDS`):
+/// it takes a folder out of an agent's home.
+#[tauri::command]
+pub(crate) async fn library_skill_align(
+    state: State<'_, AppState>,
+    name: String,
+    agent: String,
+) -> Result<Report, String> {
+    off_thread(&state, move |context| {
+        library_runtime::align_skill(&context, &name, &agent)
+    })
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn library_undo(state: State<'_, AppState>, id: u64) -> Result<Report, String> {
     off_thread(&state, move |context| library_runtime::undo(&context, id)).await
