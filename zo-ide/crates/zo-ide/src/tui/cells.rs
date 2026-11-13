@@ -86,12 +86,23 @@ pub fn prefixed(lines: &[Line], width: usize, prefix: &Prefix, first: bool) -> V
     prefixed_marking(lines, width, None, prefix, first).0
 }
 
+/// Right-hand breathing room for `Marks` prose so wrapped lines never slam
+/// into the pane's right border or scrollbar on ~100-column IDE splits.
+const PROSE_RIGHT_GUTTER: usize = 3;
+
 /// [`prefixed`] for prose: its lines wrap at the reading width when the look
 /// has one, and remember it, so a screen rebuilt wider wraps them there
 /// again. A code row and a table's row keep the pane's width.
 #[must_use]
 pub fn prefixed_prose(lines: &[Line], width: usize, prefix: &Prefix, first: bool) -> Vec<Line> {
-    prefixed_marking(lines, width, super::style::current().prose_width, prefix, first).0
+    let look = super::style::current();
+    let measure = if look.style == super::style::TuiStyle::Marks && width >= 40 {
+        let safe_width = width.saturating_sub(PROSE_RIGHT_GUTTER);
+        Some(look.prose_width.map_or(safe_width, |cap| cap.min(safe_width)))
+    } else {
+        look.prose_width
+    };
+    prefixed_marking(lines, width, measure, prefix, first).0
 }
 
 /// [`prefixed`] 와 같되 **마커를 가져갔는지**를 함께 준다.

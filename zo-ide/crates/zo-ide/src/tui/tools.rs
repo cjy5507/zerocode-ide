@@ -380,6 +380,65 @@ impl Change {
     }
 }
 
+/// Strip redundant `invalid input: <tool>: ` framing from a failed step's first
+/// error line while leaving real command stderr (`ERROR: ...`, `HTTP 404 ...`)
+/// intact.
+fn clean_step_error(first_line: &str, kind: &ToolKind) -> String {
+    if let ToolKind::Edit { path } = kind {
+        return failure_reason(first_line, path);
+    }
+    let mut rest = first_line.trim();
+    if let Some(after) = rest.strip_prefix("invalid input: ") {
+        rest = after;
+        if let Some((tool, tail)) = rest.split_once(": ") {
+            if !tool.is_empty() && !tool.contains(' ') && !tool.contains('/') {
+                rest = tail;
+            }
+        }
+    }
+    rest.to_string()
+}
+
+/// Whether the first line of a multi-line shell command ends mid-quote or with
+/// a line-continuation token (so showing line 1 alone looks syntactically cut).
+fn has_unclosed_shell_line(line: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if !in_single && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if !in_double && ch == '\'' {
+            in_single = !in_single;
+        } else if !in_single && ch == '"' {
+            in_double = !in_double;
+        }
+    }
+    in_single || in_double || escaped || line.trim_end().ends_with('|')
+}
+
+/// First-line target and optional `+N lines` note for a command in `turns` view.
+fn turns_command_target(command: &str) -> (String, Option<String>) {
+    let first = command.lines().next().unwrap_or_default().trim_end();
+    let extra = command.lines().skip(1).filter(|line| !line.trim().is_empty()).count();
+    if extra == 0 {
+        return (first.to_string(), None);
+    }
+    let target = if has_unclosed_shell_line(first) {
+        format!("{first} …")
+    } else {
+        first.to_string()
+    };
+    let unit = if extra == 1 { "line" } else { "lines" };
+    (target, Some(format!("+{extra} {unit}")))
+}
+
 /// The reason a write or edit was refused, without the words the row already
 /// carries: the runtime's `invalid input: write_file: /abs/path …` prefix
 /// repeats the tool and the path, and pushed the sentence that matters
@@ -569,83 +628,190 @@ impl ToolGroup {
     /// ([`super::turns`]): what each did, to what, and how it ended.
     #[must_use]
     pub(super) fn steps(&self) -> Vec<super::turns::Step> {
-        use super::strings::{TOOL_CREATE, TOOL_DELETE, TOOL_EDIT, TOOL_FETCH, TOOL_RUN, TOOL_SEARCH, TOOL_SPAWN};
-        use super::turns::{Step, StepKind};
-        let mut out = Vec::new();
+        self.calls.iter().flat_map(Self::call_steps).collect()
+    }
+
+    /// Whether this group should share the `turns` view's indented step
+    /// layout while live instead of switching to full-width `tool_row` grammar.
+    #[must_use]
+    pub(super) fn uses_turns_live_rows(&self) -> bool {
+        !self.calls.is_empty()
+            && !self.is_spawning()
+            && !self
+                .calls
+                .iter()
+                .any(|call| matches!(call.kind, ToolKind::Plan(_) | ToolKind::AgentResult { .. }))
+    }
+
+    /// Render every call in this group (finished and still running) in the
+    /// `turns` view's unified indented step grammar so calls never jump or
+    /// split across two formats mid-turn.
+    #[must_use]
+    pub(super) fn turns_live_rows(
+        &self,
+        width: usize,
+        elapsed: Duration,
+        mut hangs: bool,
+    ) -> Vec<Line> {
+        let glyphs = super::style::glyphs();
+        let mut rows = Vec::new();
         for call in &self.calls {
-            let Some(done) = call.done.as_ref() else {
+            if call.done.is_some() {
+                for step in Self::call_steps(call) {
+                    let lead = if hangs { glyphs.result_rest } else { glyphs.result_first };
+                    rows.push(super::turns::step_row(&step, lead, width));
+                    if let Some(why) = super::turns::why_row(&step, width) {
+                        rows.push(why);
+                    }
+                    hangs = true;
+                }
                 continue;
-            };
-            let failure = (!done.ok)
-                .then(|| failure_result(done).iter().map(|span| span.text.as_str()).collect::<String>());
-            // What a failed call said first, for the row under its step.
-            let error = (!done.ok && !done.declined)
-                .then(|| done.output.lines().map(str::trim).find(|line| !line.is_empty()))
-                .flatten()
-                .map(crate::util::ansi::sanitize_inline);
-            let step = |kind: StepKind, verb: &str, target: String| Step {
-                kind,
-                verb: verb.to_string(),
-                target,
-                change: None,
-                ok: done.ok,
-                declined: done.declined,
-                failure: failure.clone(),
-                error: error.clone(),
-                result: None,
-                started: call.started,
-                took: call.took,
-            };
-            let with_result = |mut step: Step, result: Vec<Span>| {
-                step.result = (done.ok && !result.is_empty()).then(|| plain_text(&result));
-                step
-            };
+            }
+            let glyph = self.row_glyph(call, elapsed);
             match &call.kind {
                 ToolKind::Command { command, .. } => {
-                    let run = step(StepKind::Run, TOOL_RUN, command.lines().next().unwrap_or_default().to_string());
-                    out.push(with_result(run, command_result(done)));
+                    let (target, note) = turns_command_target(command);
+                    rows.push(super::turns::running_step_row(
+                        glyph,
+                        super::strings::TOOL_RUN,
+                        &target,
+                        note.as_deref(),
+                        width,
+                    ));
+                    rows.extend(live_tail_with_prefix(&call.id, "    │ ", width));
                 }
                 ToolKind::Explore(items) => {
                     for item in items {
-                        // The words the running row says, so the call reads the
-                        // same while it runs and after it ends.
                         let (verb, target) = explored_target(item);
-                        let kind = match item {
-                            Explored::Read { .. } => StepKind::Read,
-                            Explored::List { .. } => StepKind::List,
-                            Explored::Search { .. } => StepKind::Search,
-                        };
-                        let row = step(kind, verb, plain_text(&target));
-                        out.push(with_result(row, explored_result(item, done)));
+                        rows.push(super::turns::running_step_row(
+                            glyph.clone(),
+                            verb,
+                            &plain_text(&target),
+                            None,
+                            width,
+                        ));
                     }
                 }
                 ToolKind::Edit { path } => {
-                    let change = done.change.as_ref().filter(|_| done.ok);
-                    let verb = change.map_or(TOOL_EDIT, |change| match change.verb {
-                        "Added" => TOOL_CREATE,
-                        "Deleted" => TOOL_DELETE,
-                        _ => TOOL_EDIT,
-                    });
-                    let mut edit = step(StepKind::Edit, verb, change.map_or_else(|| shown_path(path), Change::display_path));
-                    edit.change = change.map(|change| (change.added, change.removed));
-                    out.push(edit);
+                    rows.push(super::turns::running_step_row(
+                        glyph,
+                        super::strings::TOOL_EDIT,
+                        &shown_path(path),
+                        None,
+                        width,
+                    ));
                 }
-                ToolKind::Plan(_) => out.push(step(StepKind::Other, super::strings::STEP_PLAN, String::new())),
                 ToolKind::WebSearch { detail } => {
-                    let search = step(StepKind::Search, TOOL_SEARCH, plain_text(&web_search_target(detail)));
-                    out.push(with_result(search, web_result(done)));
+                    rows.push(super::turns::running_step_row(
+                        glyph,
+                        super::strings::TOOL_SEARCH,
+                        &plain_text(&web_search_target(detail)),
+                        None,
+                        width,
+                    ));
                 }
                 ToolKind::WebFetch { url } => {
-                    let fetch = step(StepKind::Fetch, TOOL_FETCH, super::strings::address_shown(url).to_string());
-                    out.push(with_result(fetch, web_result(done)));
-                }
-                ToolKind::Spawn { label, .. } => out.push(step(StepKind::Other, TOOL_SPAWN, label.clone())),
-                ToolKind::AgentResult { label, .. } => {
-                    out.push(step(StepKind::Other, super::strings::STEP_AGENT, label.clone()));
+                    rows.push(super::turns::running_step_row(
+                        glyph,
+                        super::strings::TOOL_FETCH,
+                        super::strings::address_shown(url),
+                        None,
+                        width,
+                    ));
                 }
                 ToolKind::Call { name, detail } => {
-                    out.push(step(StepKind::Other, &super::strings::mcp_name_shown(name), detail.clone()));
+                    rows.push(super::turns::running_step_row(
+                        glyph,
+                        &super::strings::mcp_name_shown(name),
+                        detail,
+                        None,
+                        width,
+                    ));
                 }
+                ToolKind::Spawn { .. } | ToolKind::Plan(_) | ToolKind::AgentResult { .. } => {}
+            }
+            hangs = true;
+        }
+        rows
+    }
+
+    fn call_steps(call: &ToolCall) -> Vec<super::turns::Step> {
+        use super::strings::{TOOL_CREATE, TOOL_DELETE, TOOL_EDIT, TOOL_FETCH, TOOL_RUN, TOOL_SEARCH, TOOL_SPAWN};
+        use super::turns::{Step, StepKind};
+        let Some(done) = call.done.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let failure = (!done.ok)
+            .then(|| failure_result(done).iter().map(|span| span.text.as_str()).collect::<String>());
+        // What a failed call said first, for the row under its step.
+        let error = (!done.ok && !done.declined)
+            .then(|| done.output.lines().map(str::trim).find(|line| !line.is_empty()))
+            .flatten()
+            .map(|line| crate::util::ansi::sanitize_inline(&clean_step_error(line, &call.kind)));
+        let step = |kind: StepKind, verb: &str, target: String| Step {
+            kind,
+            verb: verb.to_string(),
+            target,
+            change: None,
+            ok: done.ok,
+            declined: done.declined,
+            failure: failure.clone(),
+            error: error.clone(),
+            result: None,
+            started: call.started,
+            took: call.took,
+        };
+        let with_result = |mut step: Step, result: Vec<Span>| {
+            step.result = (done.ok && !result.is_empty()).then(|| plain_text(&result));
+            step
+        };
+        match &call.kind {
+            ToolKind::Command { command, .. } => {
+                let (target, _) = turns_command_target(command);
+                let run = step(StepKind::Run, TOOL_RUN, target);
+                out.push(with_result(run, command_result(done)));
+            }
+            ToolKind::Explore(items) => {
+                for item in items {
+                    // The words the running row says, so the call reads the
+                    // same while it runs and after it ends.
+                    let (verb, target) = explored_target(item);
+                    let kind = match item {
+                        Explored::Read { .. } => StepKind::Read,
+                        Explored::List { .. } => StepKind::List,
+                        Explored::Search { .. } => StepKind::Search,
+                    };
+                    let row = step(kind, verb, plain_text(&target));
+                    out.push(with_result(row, explored_result(item, done)));
+                }
+            }
+            ToolKind::Edit { path } => {
+                let change = done.change.as_ref().filter(|_| done.ok);
+                let verb = change.map_or(TOOL_EDIT, |change| match change.verb {
+                    "Added" => TOOL_CREATE,
+                    "Deleted" => TOOL_DELETE,
+                    _ => TOOL_EDIT,
+                });
+                let mut edit = step(StepKind::Edit, verb, change.map_or_else(|| shown_path(path), Change::display_path));
+                edit.change = change.map(|change| (change.added, change.removed));
+                out.push(edit);
+            }
+            ToolKind::Plan(_) => out.push(step(StepKind::Other, super::strings::STEP_PLAN, String::new())),
+            ToolKind::WebSearch { detail } => {
+                let search = step(StepKind::Search, TOOL_SEARCH, plain_text(&web_search_target(detail)));
+                out.push(with_result(search, web_result(done)));
+            }
+            ToolKind::WebFetch { url } => {
+                let fetch = step(StepKind::Fetch, TOOL_FETCH, super::strings::address_shown(url).to_string());
+                out.push(with_result(fetch, web_result(done)));
+            }
+            ToolKind::Spawn { label, .. } => out.push(step(StepKind::Other, TOOL_SPAWN, label.clone())),
+            ToolKind::AgentResult { label, .. } => {
+                out.push(step(StepKind::Other, super::strings::STEP_AGENT, label.clone()));
+            }
+            ToolKind::Call { name, detail } => {
+                out.push(step(StepKind::Other, &super::strings::mcp_name_shown(name), detail.clone()));
             }
         }
         out
@@ -1629,6 +1795,10 @@ fn failure_result(done: &Outcome) -> Vec<Span> {
 
 /// The last lines a running command has printed, `  │ ` under its row.
 fn live_tail(id: &str, width: usize) -> Vec<Line> {
+    live_tail_with_prefix(id, "  │ ", width)
+}
+
+fn live_tail_with_prefix(id: &str, prefix: &str, width: usize) -> Vec<Line> {
     let Some(tail) = runtime::live_output::snapshot(id, LIVE_TAIL_BYTES) else {
         return Vec::new();
     };
@@ -1637,7 +1807,7 @@ fn live_tail(id: &str, width: usize) -> Vec<Line> {
     let rows: Vec<&str> = printed.lines().filter(|line| !line.trim().is_empty()).collect();
     rows[rows.len().saturating_sub(LIVE_TAIL_ROWS)..]
         .iter()
-        .map(|row| Line::new(vec![Span::dim("  │ "), Span::dim((*row).to_string())]).truncated(width))
+        .map(|row| Line::new(vec![Span::dim(prefix), Span::dim((*row).to_string())]).truncated(width))
         .collect()
 }
 

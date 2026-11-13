@@ -452,3 +452,87 @@ fn calls_made_together_stand_in_the_order_they_were_made() {
     let targets: Vec<String> = group.steps().into_iter().map(|step| step.target).collect();
     assert_eq!(targets, ["a.rs", "b.rs", "c.rs"]);
 }
+
+#[test]
+fn turns_live_rows_aligns_finished_and_running_calls_and_marks_multiline_commands() {
+    if !style::in_fresh_run(&path("turns_live_rows_aligns_finished_and_running_calls_and_marks_multiline_commands")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let twelve = "line\n".repeat(12);
+    let mut group = ToolGroup::new(ToolCall::new(
+        "r1".to_string(),
+        ToolKind::Explore(vec![Explored::Read { name: "controlled/types.go:420-579".to_string() }]),
+    ));
+    assert!(group.complete("r1", finished(&twelve)));
+    group.push(ToolCall::new(
+        "r2".to_string(),
+        ToolKind::Explore(vec![Explored::Read { name: "server/controlled.go:550-699".to_string() }]),
+    ));
+    assert!(group.complete("r2", finished(&twelve)));
+    group.push(ToolCall::new(
+        "cmd".to_string(),
+        ToolKind::Command {
+            command: "docker compose exec -T exploit-runner sh -c 'python3 -c \"\nimport sys\nprint(1)\n\"'".to_string(),
+            background: false,
+        },
+    ));
+    let rows = plain(&group.turns_live_rows(98, Duration::ZERO, false));
+    assert_eq!(
+        rows,
+        [
+            "  ⎿ Read(controlled/types.go:420-579)  12 lines",
+            "    Read(server/controlled.go:550-699)  12 lines",
+            "  ⠋ Run(docker compose exec -T exploit-runner sh -c 'python3 -c \" …)  +3 lines",
+        ]
+    );
+    let continued = plain(&group.turns_live_rows(98, Duration::ZERO, true));
+    assert!(continued[0].starts_with("    Read("), "{continued:?}");
+}
+
+#[test]
+fn a_failed_bare_tool_strips_redundant_prefix_and_joins_with_dot() {
+    if !style::in_fresh_run(&path("a_failed_bare_tool_strips_redundant_prefix_and_joins_with_dot")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let steps = steps_of(vec![
+        (
+            ToolKind::Call { name: "session_recall".to_string(), detail: String::new() },
+            failed("invalid input: session_recall: provide `query` to search across sessions, or `session_id`"),
+        ),
+        (
+            ToolKind::Command { command: "psql -c 'select 1'".to_string(), background: false },
+            Outcome {
+                ok: false,
+                declined: false,
+                output: "ERROR:  function left(jsonb, integer) does not exist".to_string(),
+                change: None,
+                exit_code: Some(1),
+            },
+        ),
+    ]);
+    let mut fold = super::turns::TurnFold::default();
+    fold.take_steps(steps);
+    assert_eq!(
+        plain(&fold.live_rows(98, 16)),
+        [
+            "  ⎿ session_recall · failed",
+            "    provide `query` to search across sessions, or `session_id`",
+            "    Run(psql -c 'select 1')  exit 1",
+            "    ERROR:  function left(jsonb, integer) does not exist",
+        ]
+    );
+}
+
+#[test]
+fn marks_prose_keeps_a_right_gutter_on_medium_panes() {
+    if !style::in_fresh_run(&path("marks_prose_keeps_a_right_gutter_on_medium_panes")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let prose = Line::from_text("word ".repeat(30).trim_end().to_string());
+    let rows = super::cells::prefixed_prose(&[prose], 98, &Prefix::hang(), true);
+    assert!(rows.len() >= 2, "{rows:?}");
+    assert!(rows.iter().all(|row| row.width() <= 95), "{rows:?}");
+}

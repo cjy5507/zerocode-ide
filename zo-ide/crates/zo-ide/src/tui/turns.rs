@@ -128,6 +128,14 @@ impl TurnFold {
         !self.steps.is_empty()
     }
 
+    /// Whether the last shown entry is a step (so a following live step from
+    /// an open tool cell hangs with continuation indent rather than opening a
+    /// new hung mark).
+    #[must_use]
+    pub fn ends_hanging(&self) -> bool {
+        matches!(self.live.last(), Some(Shown::Step(_)))
+    }
+
     /// Finished calls join the fold.
     pub fn take_steps(&mut self, steps: Vec<Step>) {
         for step in steps {
@@ -299,11 +307,18 @@ impl TurnFold {
 /// said it, and what it came to. The tail is kept before the target is: a
 /// target that does not fit gives up its own end (an address its middle) so
 /// the result stays on the row.
-fn step_row(step: &Step, lead: &str, width: usize) -> Line {
+pub(super) fn step_row(step: &Step, lead: &str, width: usize) -> Line {
     let tail = step_tail(step, true, true);
     if step.target.is_empty() {
         let mut spans = vec![Span::dim(lead), Span::dim(step.verb.clone())];
-        spans.extend(tail);
+        if let Some((first, rest)) = tail.split_first() {
+            if first.text == "  " {
+                spans.push(Span::dim(" · "));
+                spans.extend(rest.iter().cloned());
+            } else {
+                spans.extend(tail);
+            }
+        }
         return Line::new(spans).truncated(width);
     }
     let opening = super::tools::call_opening(&step.verb);
@@ -323,8 +338,50 @@ fn step_row(step: &Step, lead: &str, width: usize) -> Line {
     Line::new(spans).truncated(width)
 }
 
+/// A live (running) step's row in the `turns` viewport, aligned to the exact
+/// same column as [`step_row`] so finishing or folding causes no horizontal
+/// jump.
+pub(super) fn running_step_row(
+    spinner: Span,
+    verb: &str,
+    target: &str,
+    extra_note: Option<&str>,
+    width: usize,
+) -> Line {
+    let lead_width = 4usize; // "  " + spinner(1) + " "
+    let tail: Vec<Span> = extra_note
+        .map(|note| vec![Span::dim(format!("  {note}"))])
+        .unwrap_or_default();
+    let tail_width: usize = tail.iter().map(Span::width).sum();
+    if target.is_empty() {
+        let mut spans = vec![Span::raw("  "), spinner, Span::raw(" "), Span::raw(verb.to_string())];
+        spans.extend(tail);
+        return Line::new(spans).truncated(width);
+    }
+    let opening = super::tools::call_opening(verb);
+    let closing = super::tools::call_closing();
+    let fixed = lead_width
+        + super::ansi::str_width(&opening)
+        + super::ansi::str_width(closing)
+        + tail_width;
+    let budget = width.saturating_sub(fixed).max(1);
+    let shown_target = if super::ansi::str_width(target) <= budget {
+        target.to_string()
+    } else {
+        Line::new(vec![Span::raw(target.to_string())]).truncated(budget).plain()
+    };
+    let mut spans = vec![
+        Span::raw("  "),
+        spinner,
+        Span::raw(" "),
+        Span::raw(format!("{opening}{shown_target}{closing}")),
+    ];
+    spans.extend(tail);
+    Line::new(spans).truncated(width)
+}
+
 /// The row under a failed step: what it said first.
-fn why_row(step: &Step, width: usize) -> Option<Line> {
+pub(super) fn why_row(step: &Step, width: usize) -> Option<Line> {
     let why = step.error.as_ref()?;
     let glyphs = super::style::glyphs();
     Some(Line::new(vec![Span::raw(glyphs.result_rest), Span::new(why.clone(), Style::new().fg(palette::TOOL_FAIL).dim())]).truncated(width))

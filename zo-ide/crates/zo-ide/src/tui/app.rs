@@ -2166,7 +2166,12 @@ impl Ui {
         // another, so the work shows while it runs and no row of it goes
         // away before the fold is said.
         let room = turns::live_room(usize::from(self.painter.max_height()));
-        let mut rows = self.fold.live_rows(width, room);
+        let fold_room = if cell.is_empty() {
+            room
+        } else {
+            room.saturating_sub(cell.len()).max(turns::LIVE_ROWS_MIN)
+        };
+        let mut rows = self.fold.live_rows(width, fold_room);
         let held = self.fold.held();
         if !held.is_empty() {
             rows.extend(held.iter().cloned());
@@ -2181,8 +2186,15 @@ impl Ui {
     /// a finished cell still open for its next call, or a quiet loop's row.
     fn live_cell(&self, width: usize) -> (Vec<Line>, bool) {
         let elapsed = self.status.as_ref().map_or(Duration::ZERO, |status| status.elapsed);
+        let draw_tool = |cell: &ToolGroup| {
+            if self.folding() && cell.uses_turns_live_rows() {
+                cell.turns_live_rows(width, elapsed, self.fold.ends_hanging())
+            } else {
+                cell.lines(width, elapsed)
+            }
+        };
         if let Some(cell) = self.tool_cell.as_ref().filter(|cell| cell.is_active()) {
-            return (cell.lines(width, elapsed), false);
+            return (draw_tool(cell), false);
         }
         let tail = match &self.segment {
             Segment::None => Vec::new(),
@@ -2192,7 +2204,7 @@ impl Ui {
             return (tail, true);
         }
         match self.tool_cell.as_ref() {
-            Some(cell) => (cell.lines(width, elapsed), false),
+            Some(cell) => (draw_tool(cell), false),
             None => (
                 self.quiet_loop_cell
                     .as_ref()
@@ -9207,6 +9219,70 @@ mod tests {
         assert!(
             narrow.iter().any(|row| row.contains("Run(git -C") && row.contains('…') && row.ends_with(")  1 line")),
             "{narrow:#?}"
+        );
+    }
+
+    #[test]
+    fn the_marks_turns_view_draws_live_and_folded_steps_in_one_grammar() {
+        use runtime::message_stream::types::ToolResultBody;
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !super::super::style::in_fresh_run(&format!(
+            "{module}::the_marks_turns_view_draws_live_and_folded_steps_in_one_grammar"
+        )) {
+            return;
+        }
+        super::super::style::init(&crate::preferences::Preferences::default());
+        let mut ui = test_ui();
+        ui.view = super::super::style::ConversationView::Turns;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        let ids = BlockIdGen::default();
+
+        says(&mut ui, &ids, "Checking the parser.");
+        ui.block(tool_call(&ids, "r0", "read_file", &json!({ "path": "a.go" })));
+        ui.block(RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId("r0".to_string()),
+            is_error: false,
+            body: ToolResultBody::Text { content: "line\n".repeat(12), truncated: false },
+        });
+        says(&mut ui, &ids, "Now reading types and running python.");
+        ui.block(tool_call(&ids, "r1", "read_file", &json!({ "path": "controlled/types.go" })));
+        ui.block(tool_call(&ids, "r2", "read_file", &json!({ "path": "server/controlled.go" })));
+        ui.block(tool_call(
+            &ids,
+            "b1",
+            "bash",
+            &json!({ "command": "docker compose exec -T runner sh -c 'python3 -c \"\nimport sys\n\"" }),
+        ));
+        ui.block(RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId("r1".to_string()),
+            is_error: false,
+            body: ToolResultBody::Text { content: "line\n".repeat(12), truncated: false },
+        });
+        ui.block(RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId("r2".to_string()),
+            is_error: false,
+            body: ToolResultBody::Text { content: "line\n".repeat(12), truncated: false },
+        });
+
+        let live: Vec<String> = ui.active_cell(98).0.iter().map(Line::plain).collect();
+        assert!(
+            live.iter().any(|row| row == "  ⎿ Read(controlled/types.go)  12 lines"),
+            "finished live Read must use turns hung grammar, not 0-col right-aligned tool_row: {live:#?}"
+        );
+        assert!(
+            live.iter().any(|row| row == "    Read(server/controlled.go)  12 lines"),
+            "{live:#?}"
+        );
+        assert!(
+            live.iter().any(|row| row.contains("Run(docker compose exec -T runner sh -c 'python3 -c \" …)  +2 lines") && row.starts_with("  ")),
+            "{live:#?}"
+        );
+        assert!(
+            !live.iter().any(|row| row.starts_with("⏺ Read(")),
+            "0-col tool marker collision must not appear in turns view: {live:#?}"
         );
     }
 
