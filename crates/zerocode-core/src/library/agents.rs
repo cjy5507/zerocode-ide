@@ -13,6 +13,23 @@
 //! zo reads only its own roots (`skill_search_roots`), Claude Code reads its
 //! config home's `skills` and nothing like a shared folder (its skills page),
 //! and Kiro and Antigravity name no such folder.
+//!
+//! Which of those follows a link standing in its own folder was read the
+//! same way (2026-11-13), so a skill this build ships can stand there as a
+//! link to the store's one copy ([`LibraryAgent::follows_links`]):
+//!
+//! - zo: yes. Its global roots take any entry whose `SKILL.md` is a file
+//!   through the link (`push_candidates_in_root`, `skill_md.is_file()`, in
+//!   `zo-ide/crates/runtime/src/skill_sources.rs`), and only provider roots
+//!   are held to their own tree; its prompt's root list says a skill from
+//!   another tool is "placed (or symlinked) under a Zo root".
+//! - Claude Code: yes. The installed 2.1.323 lists a skills folder's entries
+//!   with `isDirectory() || isSymbolicLink()`, and a window pane of it loads
+//!   `humanize-korean`, which stands in its skills folder only as a link.
+//! - Kiro and Antigravity: not known. Kiro's build names only the pattern
+//!   `skill://.kiro/skills/*/SKILL.md`, which says nothing of links, and
+//!   Antigravity's was not read; each keeps a copy, written again whenever
+//!   the store's changes.
 
 use super::mcp::Format;
 
@@ -37,10 +54,23 @@ impl Skills {
     /// leave its own folder for the store, and a shipped skill be written to
     /// the store for it. Claude Code reads the store only through the
     /// window's home and zo only in the window's terminals, so their own
-    /// folders keep their copies.
+    /// folders keep the skill: a copy, or, for a shipped skill, a link to the
+    /// store's ([`LibraryAgent::links_into_store`]).
     #[must_use]
     pub fn reads_the_store_everywhere(self) -> bool {
         matches!(self, Self::Native)
+    }
+}
+
+impl LibraryAgent {
+    /// Whether a skill this build ships stands in the agent's own folders as
+    /// a link to the store's copy rather than as a copy: the agent follows a
+    /// link and does not read the store by itself. Never on Windows, where a
+    /// link needs a right a person's account seldom has — a copy there, kept
+    /// the store's text by every install.
+    #[must_use]
+    pub fn links_into_store(&self) -> bool {
+        cfg!(unix) && self.follows_links && !self.skills.reads_the_store_everywhere()
     }
 }
 
@@ -72,6 +102,12 @@ pub struct LibraryAgent {
     /// a skill it installs reaches the store. One written under `.config/` is
     /// under the XDG config home, where the agent reads it.
     pub own_skills: &'static [&'static str],
+    /// Whether it reads a skill that stands in its own folder as a link to a
+    /// folder elsewhere — set only where the agent's own code or build was
+    /// read to say so (above). Asked of an agent that does not read the store
+    /// by itself: such an agent's copy of a shipped skill becomes a link to
+    /// the store's.
+    pub follows_links: bool,
     pub mcp: McpPlace,
     pub format: Format,
 }
@@ -86,6 +122,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "claude",
         skills: Skills::WindowHome,
         own_skills: &[],
+        follows_links: true,
         mcp: McpPlace::ClaudeWindow,
         format: Format::Claude,
     },
@@ -96,6 +133,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "codex",
         skills: Skills::Native,
         own_skills: &[".codex/skills"],
+        follows_links: false,
         mcp: McpPlace::Home(".codex/config.toml"),
         format: Format::Codex,
     },
@@ -106,6 +144,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "zo",
         skills: Skills::WindowEnv,
         own_skills: &[".zo/skills"],
+        follows_links: true,
         mcp: McpPlace::Home(".zo/settings.json"),
         format: Format::Zo,
     },
@@ -116,6 +155,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "gemini",
         skills: Skills::Native,
         own_skills: &[".gemini/skills"],
+        follows_links: false,
         mcp: McpPlace::Home(".gemini/settings.json"),
         format: Format::Gemini,
     },
@@ -126,6 +166,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "qwen",
         skills: Skills::Native,
         own_skills: &[".qwen/skills"],
+        follows_links: false,
         mcp: McpPlace::Home(".qwen/settings.json"),
         format: Format::Qwen,
     },
@@ -136,6 +177,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "grok",
         skills: Skills::Native,
         own_skills: &[".grok/skills"],
+        follows_links: false,
         mcp: McpPlace::Home(".grok/config.toml"),
         format: Format::Grok,
     },
@@ -146,6 +188,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "agy",
         skills: Skills::OwnOnly,
         own_skills: &[".gemini/antigravity/skills"],
+        follows_links: false,
         mcp: McpPlace::Home(".gemini/config/mcp_config.json"),
         format: Format::Antigravity,
     },
@@ -156,6 +199,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "opencode",
         skills: Skills::Native,
         own_skills: &[".config/opencode/skills"],
+        follows_links: false,
         mcp: McpPlace::OpenCode,
         format: Format::OpenCode,
     },
@@ -166,6 +210,7 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "kiro-cli",
         skills: Skills::OwnOnly,
         own_skills: &[".kiro/skills"],
+        follows_links: false,
         mcp: McpPlace::Home(".kiro/settings/mcp.json"),
         format: Format::Kiro,
     },
@@ -176,15 +221,18 @@ pub const AGENTS: [LibraryAgent; 10] = [
         binary: "cursor-agent",
         skills: Skills::Native,
         own_skills: &[".cursor/skills"],
+        follows_links: false,
         mcp: McpPlace::Home(".cursor/mcp.json"),
         format: Format::Cursor,
     },
 ];
 
 /// The id the person's own Claude Code — the one in their terminal, outside
-/// the window — is read under. Read only: the window never writes the
-/// person's Claude home (`accounts`), so a skill or a server found there is
-/// copied into the store and the home stays as it was.
+/// the window — is read under. Read only to the store's keeper: it never
+/// writes the person's Claude home (`accounts`), so a skill or a server found
+/// there is copied into the store and the home stays as it was. The one write
+/// there is the person's own press of a shipped skill's install, which puts
+/// a link to the store's copy (`skill_install`).
 pub const MAC_CLAUDE: &str = "claude-mac";
 /// Its skills folder, under the home.
 pub const MAC_CLAUDE_SKILLS: &str = ".claude/skills";
@@ -234,6 +282,33 @@ mod tests {
                 "{} is not a catalog id",
                 library.id
             );
+        }
+    }
+
+    /// A link stands only where the agent was read to follow one: zo and
+    /// Claude Code. An agent that reads the store by itself needs none, and
+    /// one not read keeps a copy.
+    #[test]
+    fn only_an_agent_read_to_follow_links_gets_one_into_the_store() {
+        let linked: Vec<&str> = AGENTS
+            .iter()
+            .filter(|agent| agent.links_into_store())
+            .map(|agent| agent.id)
+            .collect();
+        if cfg!(unix) {
+            assert_eq!(linked, vec!["claude", "zo"]);
+        } else {
+            assert!(linked.is_empty(), "{linked:?}");
+        }
+        for agent in AGENTS.iter().filter(|agent| agent.follows_links) {
+            assert!(
+                !agent.skills.reads_the_store_everywhere(),
+                "{} reads the store by itself and needs no link",
+                agent.id
+            );
+        }
+        for unread in ["kiro", "antigravity"] {
+            assert!(!agent(unread).unwrap().follows_links, "{unread}");
         }
     }
 
