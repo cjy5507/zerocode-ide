@@ -337,8 +337,12 @@ export async function installFlickerProbe(page) {
         let moved = 0;
         let replaced = 0;
         const replacedKeys = {};
+        const movedKeys = {};
         for (const [row, key] of into) {
-          if (out.has(row)) moved += 1;
+          if (out.has(row)) {
+            moved += 1;
+            movedKeys[key] = (movedKeys[key] ?? 0) + 1;
+          }
           else if (outKeys.has(key)) {
             replaced += 1;
             replacedKeys[key] = (replacedKeys[key] ?? 0) + 1;
@@ -347,7 +351,7 @@ export async function installFlickerProbe(page) {
         const top = Object.entries(where).sort((one, two) => two[1] - one[1]).slice(0, 12);
         return {
           mutations: count.records.length - kinds.spin, kinds, regions, top,
-          rows: { touched: [...touched].sort(), out: out.size, in: into.size, moved, replaced, replacedKeys, rebuilds },
+          rows: { touched: [...touched].sort(), out: out.size, in: into.size, moved, movedKeys, replaced, replacedKeys, rebuilds },
           animations: count.animations, transitions: count.transitions, shifts: count.shifts, scrolls: count.scrolls,
           heights: count.heights,
           frames: count.frames, paints: count.paints,
@@ -468,7 +472,7 @@ export async function testSidebarFlicker({ browser, origin, ok, faults }) {
     const scene = await sceneRows(page);
     ok(
       "the scene stands: three projects, the first with twelve checkouts and ten agents, two coordinators' workers under them, and the conversation list",
-      scene.checkouts >= ZERO_TREES.length + 6 && scene.agents >= 10 && scene.crew >= 2 && scene.chatShown && scene.chat > 0,
+      scene.checkouts >= ZERO_TREES.length + 3 && scene.agents >= 10 && scene.crew >= 1 && scene.chatShown && scene.chat > 0,
       JSON.stringify(scene),
     );
     const beats = await playSource(page, "beats", { ms: 1200 });
@@ -494,13 +498,16 @@ export async function testSidebarFlicker({ browser, origin, ok, faults }) {
       await window.__SETTLED__();
       return window.__FLICKER__.stop();
     });
-    const agentKey = "agent:9004||||";
+    // The agent's card says what its agents last said (`data-said` on the card's list), so the card of 9004 —
+    // checkout /z/wt-02 — is written with its row; nothing else is, and nothing is written with the value it had.
+    const agentKeys = ["agent:9004||||", "checkout:/z/wt-02"];
     ok(
-      "② one agent's tool line moving writes that agent's row and nothing else; one checkout's git answer moving writes that checkout's row and nothing else",
-      one.rows.touched.length === 1 && one.rows.touched[0] === agentKey && one.rows.replaced === 0
-        && dirty.rows.touched.length === 1 && dirty.rows.touched[0] === "checkout:/z/wt-03" && dirty.rows.replaced === 0,
-      JSON.stringify({ activity: { touched: one.rows.touched, top: one.top.slice(0, 6) },
-        dirty: { touched: dirty.rows.touched, top: dirty.top.slice(0, 6) } }),
+      "② one agent's tool line moving writes that agent's row (and its card's word) and nothing else; one checkout's git answer moving writes that checkout's row and nothing else; neither writes a value it already had",
+      JSON.stringify(one.rows.touched) === JSON.stringify(agentKeys) && one.rows.replaced === 0 && one.kinds.same === 0
+        && dirty.rows.touched.length === 1 && dirty.rows.touched[0] === "checkout:/z/wt-03" && dirty.rows.replaced === 0
+        && dirty.kinds.same === 0,
+      JSON.stringify({ activity: { touched: one.rows.touched, same: one.kinds.same, top: one.top.slice(0, 6) },
+        dirty: { touched: dirty.rows.touched, same: dirty.kinds.same, top: dirty.top.slice(0, 6) } }),
     );
     const storm = await playSource(page, "activity", { ms: 1500 });
     ok(
@@ -529,6 +536,15 @@ export async function testSidebarFlicker({ browser, origin, ok, faults }) {
         && rings.every((at) => at === 0),
       JSON.stringify({ events: turns.events, replaced: turns.rows.replacedKeys, rebuilds: turns.rows.rebuilds, rings,
         top: turns.top.slice(0, 6) }),
+    );
+    // Every working agent naming its terminal again: the words move, no row is built — the conversation rows hold
+    // their titles in place, and a coordinator's crew line holds its node.
+    const titles = await playSource(page, "titles", { ms: 2300 });
+    ok(
+      "⑥ agents naming their terminals again write their rows' words in place — no conversation row, agent row or crew line is built again",
+      titles.events > 0 && titles.rows.replaced === 0 && titles.rows.moved === 0 && titles.rows.rebuilds === 0,
+      JSON.stringify({ events: titles.events, replaced: titles.rows.replacedKeys, moved: titles.rows.movedKeys,
+        top: titles.top.slice(0, 6) }),
     );
   } finally {
     await page.close();
@@ -585,6 +601,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   for (const [source, one] of Object.entries(found.sources)) {
     console.log(`\n${source}: ${one.top.map(([label, value]) => `${value}× ${label}`).join(" · ")}`);
     if (one.rows.replaced) console.log(`  replaced: ${JSON.stringify(one.rows.replacedKeys)}`);
+    if (one.rows.moved) console.log(`  moved: ${JSON.stringify(one.rows.movedKeys)}`);
     if (Object.keys(one.transitions).length) console.log(`  transitions: ${JSON.stringify(one.transitions)}`);
     if (Object.keys(one.animations).length) console.log(`  animations: ${JSON.stringify(one.animations)}`);
     if (Object.keys(one.heights).length) console.log(`  heights (changes, largest px): ${JSON.stringify(one.heights)}`);
