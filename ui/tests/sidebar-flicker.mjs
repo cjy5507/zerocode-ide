@@ -475,6 +475,14 @@ export async function testSidebarFlicker({ browser, origin, ok, faults }) {
       scene.checkouts >= ZERO_TREES.length + 3 && scene.agents >= 10 && scene.crew >= 1 && scene.chatShown && scene.chat > 0,
       JSON.stringify(scene),
     );
+    // The workers listed before the ledger named them left the list when it did: conversations that leave take their
+    // room with them — only a row a turn hid in a folded group is held (⑦).
+    const bootRoom = await page.evaluate(() => document.getElementById("chat-list").style.minHeight);
+    ok(
+      "⑦0 conversations that leave the list as the ledger arrives hold no room — the list stands at its own height",
+      bootRoom === "",
+      JSON.stringify({ bootRoom }),
+    );
     const beats = await playSource(page, "beats", { ms: 1200 });
     ok(
       "① the window's beats over data that did not move — agent news said again, the list refreshed, the ledger's beat — write nothing to the sidebar but the working dots' ring step",
