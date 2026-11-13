@@ -1977,6 +1977,12 @@ mod erase_tests;
 mod tests {
     use super::*;
 
+    /// The seats of what `zo jev summary --json` said ([`read_zo_summary`]),
+    /// as the tests of the seats' reading ask for them.
+    fn read_summary(stdout: &[u8]) -> Option<Vec<SeatNumbers>> {
+        read_zo_summary(stdout).map(|said| said.seats)
+    }
+
     #[test]
     fn managed_provider_apply_compares_the_identity_inside_the_settings_transaction() {
         let home = tempfile::tempdir().unwrap();
@@ -5065,15 +5071,10 @@ pub struct ZoSummary {
     pub decisions: Vec<DecisionNumbers>,
 }
 
-/// What `zo jev summary --json` said, or `None` when it printed nothing this
-/// reader understands — an older zo, or one that failed before it answered.
-#[must_use]
-pub fn read_summary(stdout: &[u8]) -> Option<Vec<SeatNumbers>> {
-    read_zo_summary(stdout).map(|said| said.seats)
-}
-
-/// [`read_summary`] and the person's decisions beside the seats: a zo that
-/// lists none, or a decision this reader does not understand, leaves that
+/// What `zo jev summary --json` said — the seats, and the person's decisions
+/// beside them — or `None` when it printed nothing this reader understands:
+/// an older zo, or one that failed before it answered. A zo that lists no
+/// decision, or a decision this reader does not understand, leaves that
 /// decision out and the seats as they are.
 #[must_use]
 pub fn read_zo_summary(stdout: &[u8]) -> Option<ZoSummary> {
