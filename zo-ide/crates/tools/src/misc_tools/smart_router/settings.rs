@@ -1195,8 +1195,10 @@ pub(super) fn preferred_verify_model(
     candidates: impl Iterator<Item = String>,
     allow_cross_provider: bool,
 ) -> Option<String> {
+    // The session's side is what its client was built by; the candidates
+    // have no client yet and are read from the catalog as it is, once.
+    let main_home = crate::model_home::of_the_session(main_model);
     let homes = crate::model_home::Homes::load();
-    let main_home = homes.of(main_model);
     let on_the_sessions_provider = |candidate: &String| main_home.is_where(&homes.of(candidate));
     let candidates = candidates
         .filter(|candidate| !same_smart_generation(candidate, main_model))

@@ -185,6 +185,18 @@ impl ProviderDigester {
         let model = crate::fast_model::FastModel::fast_tier_named_for(session_model)?;
         Some(crate::fast_model::FastModel::dialling(model).map(Self))
     }
+
+    /// [`Self::for_session`] for the session `ctx` belongs to, whose provider
+    /// is where the client it runs on was built to send
+    /// ([`ToolContext::active_model_home`]) — a helper's own client inside
+    /// that helper, the session's outside one.
+    fn for_context(ctx: &ToolContext) -> Option<Result<Self, String>> {
+        let Some((session_model, home)) = ctx.active_model().zip(ctx.active_model_home()) else {
+            return Self::for_session(None);
+        };
+        let model = crate::fast_model::FastModel::fast_tier_named_where(&session_model, &home)?;
+        Some(crate::fast_model::FastModel::dialling(model).map(Self))
+    }
 }
 
 impl Digester for ProviderDigester {
@@ -210,7 +222,7 @@ pub(crate) fn digest_over_cap(
     if mode() == ToolDigestMode::Off || !is_digestible(tool) || HEALTH.given_up() {
         return None;
     }
-    let Ok(digester) = ProviderDigester::for_session(ctx.active_model().as_deref())? else {
+    let Ok(digester) = ProviderDigester::for_context(ctx)? else {
         HEALTH.note_failure();
         return None;
     };
@@ -481,6 +493,65 @@ mod tests {
         for own in ["zq-model-nobody-lists", "zq-relay/some-model"] {
             assert!(super::ProviderDigester::for_session(Some(own)).is_none(), "{own}");
         }
+    }
+
+    /// The fold asks the fast model of the provider the client it runs under
+    /// was built to send to, and keeps asking it though the catalog file is
+    /// edited meanwhile: the session's own client for a tool the session
+    /// runs, a helper's own for a tool that helper runs. Read from the file
+    /// each time, a row moved to another provider took the whole over-cap
+    /// output there.
+    #[test]
+    fn the_fold_of_a_running_session_stays_where_its_client_was_built() {
+        use crate::context::ToolContext;
+        use crate::tests::{ConfigHome, RunningSession, Var};
+        use api::ProviderKind;
+        use runtime::model_catalog::CatalogProvider;
+        use runtime::model_home::ModelHome;
+
+        const SESSION: &str = "zq-held-folding";
+        const HELPER: &str = "zq-held-folding-helper";
+        let env = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let config_home = ConfigHome::empty(&env);
+        let _keys = [
+            Var::set(&env, api::NON_CLAUDE_ADAPTERS_ENV, "1"),
+            Var::set(&env, "OPENAI_API_KEY", "test-key"),
+            Var::set(&env, "GOOGLE_API_KEY", "test-key"),
+            Var::unset(&env, "OPENAI_BASE_URL"),
+            Var::unset(&env, "GOOGLE_BASE_URL"),
+            Var::unset(&env, "OLLAMA_BASE_URL"),
+        ];
+        // The model the fold of a tool run in `ctx` asks, if any.
+        let asked = |ctx: &ToolContext| {
+            super::ProviderDigester::for_context(ctx)
+                .map(|digester| digester.map(|digester| digester.0.model().to_string()))
+        };
+        let fast_of = |spelled: &str| -> Option<Result<String, String>> {
+            crate::fast_model::FastModel::fast_tier_named_for(Some(spelled)).map(Ok)
+        };
+        let (google_fast, openai_fast) = (fast_of("gemini-zq-9"), fast_of("gpt-zq-9"));
+        assert!(google_fast.is_some() && openai_fast.is_some() && google_fast != openai_fast);
+
+        // The session's own tools: built on a row under Google, the row moved.
+        config_home.catalog_now(&[(CatalogProvider::Google, SESSION)]);
+        let session = RunningSession::built_now(&env, SESSION);
+        let ctx = ToolContext::new();
+        ctx.set_active_model(&format!(" {SESSION} "));
+        assert_eq!(asked(&ctx), google_fast);
+        config_home.catalog_now(&[(CatalogProvider::Openai, SESSION), (CatalogProvider::Openai, HELPER)]);
+        assert_eq!(asked(&ctx), google_fast, "the file says OpenAI now; the session's client does not");
+        session.client_built_now(SESSION);
+        assert_eq!(asked(&ctx), openai_fast, "its client built again");
+
+        // A helper's tools: its executor said where the helper's own client
+        // was built to send, and the file says another provider by now.
+        let helper = ToolContext::new();
+        helper.set_active_model(HELPER);
+        helper.hold_active_model_home(HELPER, ModelHome::BuiltIn(ProviderKind::Google));
+        assert_eq!(asked(&helper), google_fast);
+        // What it was told is of that model and of no other it may run on.
+        helper.set_active_model("gpt-zq-9");
+        assert_eq!(asked(&helper), openai_fast);
     }
 
     /// Live probe, ignored by default: dials the real fast model for the

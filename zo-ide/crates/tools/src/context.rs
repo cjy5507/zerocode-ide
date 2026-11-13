@@ -348,6 +348,12 @@ pub struct ToolContext {
     /// at the build-time model, so post-switch sub-agents would keep spawning on
     /// the startup model instead of the one the user just selected.
     pub active_model: Arc<Mutex<Option<String>>>,
+    /// Where this context's own client for a model was built to send, when
+    /// the one who built it said so: a helper's executor does, of the model
+    /// the helper runs on ([`Self::hold_active_model_home`]). The foreground
+    /// session leaves it empty — what its clients were built by is the
+    /// process's record ([`runtime::model_home::held`]).
+    pub active_model_home: Arc<Mutex<Option<(String, runtime::model_home::ModelHome)>>>,
     /// `true` when [`Self::active_model`] was chosen explicitly *for this
     /// agent* — i.e. a sub-agent spawned with a concrete `model` field rather
     /// than a Smart route (see `agent_tools::runtime::subagent_model_pinned`).
@@ -744,6 +750,7 @@ impl ToolContext {
             hook_config: runtime::RuntimeHookConfig::default(),
             user_question_channel: Arc::new(Mutex::new(None)),
             active_model: Arc::new(Mutex::new(None)),
+            active_model_home: Arc::new(Mutex::new(None)),
             active_model_pinned: Arc::new(Mutex::new(false)),
             session_id: Arc::new(Mutex::new(None)),
             agent_registry: Arc::new(Mutex::new(None)),
@@ -1131,6 +1138,35 @@ impl ToolContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             (!model.trim().is_empty()).then(|| model.trim().to_string());
+    }
+
+    /// Say where this context's own client for `model` was built to send (see
+    /// the field doc on [`Self::active_model_home`]). Blank input clears it.
+    pub fn hold_active_model_home(&self, model: &str, home: runtime::model_home::ModelHome) {
+        *self
+            .active_model_home
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            (!model.trim().is_empty()).then(|| (model.trim().to_string(), home));
+    }
+
+    /// Where the requests of the session this context belongs to go, for the
+    /// model it is running on now: what this context was told of its own
+    /// client when that is of this model (a helper), else what the process's
+    /// session holds or the catalog says ([`crate::model_home::of_the_session`]).
+    /// `None` without an active model.
+    #[must_use]
+    pub fn active_model_home(&self) -> Option<runtime::model_home::ModelHome> {
+        let model = self.active_model()?;
+        let own = self
+            .active_model_home
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Some(match own {
+            Some((of, home)) if of == model => home,
+            _ => crate::model_home::of_the_session(&model),
+        })
     }
 
     /// Record whether this agent's active model was chosen explicitly for it

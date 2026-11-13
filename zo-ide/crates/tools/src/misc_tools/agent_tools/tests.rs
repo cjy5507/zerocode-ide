@@ -526,6 +526,38 @@ fn live_spawn_path_rejects_explicit_cross_provider_before_spawn() {
     }
 }
 
+/// A machine on which no login of the developer's is read or refreshed: the
+/// stores outside zo's own are switched off, every folder a client looks in
+/// is `home`, and no Claude credential is in the environment. Each other
+/// built-in provider has a key, so that its client can be built at that
+/// provider's own address.
+fn a_machine_with_no_login<'held>(
+    env: &'held std::sync::MutexGuard<'held, ()>,
+    home: &std::path::Path,
+) -> Vec<crate::tests::Var<'held>> {
+    use crate::tests::Var;
+
+    vec![
+        Var::set(env, api::managed_account::EXTERNAL_CREDENTIALS_DISABLED_ENV, "1"),
+        Var::set(env, "HOME", home),
+        Var::set(env, "CODEX_HOME", home),
+        Var::set(env, "ZO_CODEX_HOME", home),
+        Var::set(env, "CLAUDE_CONFIG_DIR", home),
+        Var::unset(env, api::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV),
+        Var::unset(env, "ANTHROPIC_API_KEY"),
+        Var::unset(env, "ANTHROPIC_AUTH_TOKEN"),
+        Var::unset(env, "GOOGLE_APPLICATION_CREDENTIALS"),
+        Var::set(env, api::NON_CLAUDE_ADAPTERS_ENV, "1"),
+        Var::set(env, "OPENAI_API_KEY", "test-key"),
+        Var::set(env, "GOOGLE_API_KEY", "test-key"),
+        Var::set(env, "XAI_API_KEY", "test-key"),
+        Var::unset(env, "OPENAI_BASE_URL"),
+        Var::unset(env, "GOOGLE_BASE_URL"),
+        Var::unset(env, "XAI_BASE_URL"),
+        Var::unset(env, "OLLAMA_BASE_URL"),
+    ]
+}
+
 /// A helper's client is built where the model's home says, as the session's
 /// own client is (`zo-ide` holds the same names to the session's builder in
 /// `the_session_client_is_built_where_the_models_home_says`). The two read
@@ -535,7 +567,6 @@ fn live_spawn_path_rejects_explicit_cross_provider_before_spawn() {
 /// on a session that provider served, the helper's task left for Anthropic.
 #[test]
 fn a_helpers_client_is_built_where_the_models_home_says() {
-    use crate::tests::Var;
     use api::ProviderKind;
     use runtime::model_catalog::CatalogProvider;
     use runtime::model_home::ModelHome;
@@ -552,30 +583,7 @@ fn a_helpers_client_is_built_where_the_models_home_says() {
         .catalog_row(CatalogProvider::Anthropic, "zq-row-on-anthropic")
         .catalog_row(CatalogProvider::Openai, "zq-row-on-openai")
         .catalog_row(CatalogProvider::Google, "zq-both-list");
-    // No login of the developer's is read or refreshed: the stores outside
-    // zo's own are switched off, every folder a client looks in is the empty
-    // home, and no Claude credential is in the environment. Each other
-    // built-in provider has a key, so that its client can be built at that
-    // provider's own address.
-    let _machine = [
-        Var::set(&env, api::managed_account::EXTERNAL_CREDENTIALS_DISABLED_ENV, "1"),
-        Var::set(&env, "HOME", config_home.path()),
-        Var::set(&env, "CODEX_HOME", config_home.path()),
-        Var::set(&env, "ZO_CODEX_HOME", config_home.path()),
-        Var::set(&env, "CLAUDE_CONFIG_DIR", config_home.path()),
-        Var::unset(&env, api::managed_account::CLAUDE_SECURE_STORAGE_DIR_ENV),
-        Var::unset(&env, "ANTHROPIC_API_KEY"),
-        Var::unset(&env, "ANTHROPIC_AUTH_TOKEN"),
-        Var::unset(&env, "GOOGLE_APPLICATION_CREDENTIALS"),
-        Var::set(&env, api::NON_CLAUDE_ADAPTERS_ENV, "1"),
-        Var::set(&env, "OPENAI_API_KEY", "test-key"),
-        Var::set(&env, "GOOGLE_API_KEY", "test-key"),
-        Var::set(&env, "XAI_API_KEY", "test-key"),
-        Var::unset(&env, "OPENAI_BASE_URL"),
-        Var::unset(&env, "GOOGLE_BASE_URL"),
-        Var::unset(&env, "XAI_BASE_URL"),
-        Var::unset(&env, "OLLAMA_BASE_URL"),
-    ];
+    let _machine = a_machine_with_no_login(&env, config_home.path());
     let shipped = api::builtin_provider_catalog()
         .iter()
         .find(|entry| entry.provider == ProviderKind::Anthropic)
@@ -638,6 +646,102 @@ fn a_helpers_client_is_built_where_the_models_home_says() {
         };
         assert_eq!(built(model), Ok(client), "{model}: the client");
     }
+}
+
+/// A running session keeps its helpers where its client was built. The
+/// catalog is a file another pane may edit while the session runs; read from
+/// it each time, a row written under Google for the name a session ran on
+/// made a `gemini…` helper "the session's own family" and built the helper
+/// that inherits the session's model at Google — the task's words and the
+/// workspace left for a provider the session's own requests never went to.
+/// Held to what the session's client was built by
+/// ([`runtime::model_home::held`]), both stay until that client is built
+/// again, which is when the session's own requests move.
+#[test]
+fn a_running_session_keeps_its_helpers_where_its_client_was_built() {
+    use crate::tests::{RunningSession, Var};
+    use api::ProviderKind;
+    use runtime::model_catalog::CatalogProvider;
+
+    const UNLISTED: &str = "zq-held-unlisted";
+    const LISTED: &str = "zq-held-listed";
+    const LEG: &str = "zq-held-leg";
+    const OPENAI_HELPER: &str = "gpt-5.6-terra";
+    const INLINE: &str = "do this work inline";
+    let env = crate::tests::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let config_home = crate::tests::ConfigHome::empty(&env);
+    let _machine = a_machine_with_no_login(&env, config_home.path());
+    let store = TempAgentStore::new("held-session");
+    let _agents = [
+        Var::unset(&env, AGENT_MODEL_ENV),
+        Var::set(&env, super::labels::AGENT_STORE_ENV, store.path.as_os_str()),
+    ];
+    // The provider a helper on `model` is built for; the Anthropic road ends
+    // by naming the credential this machine lacks, and no other road does.
+    let built = |model: &str| match build_provider_client_for_agent(model) {
+        Ok(client) => Ok(client.provider_kind()),
+        Err(error) if error.contains("Anthropic") => Ok(ProviderKind::Anthropic),
+        Err(error) => Err(error),
+    };
+    // A helper the turn's model names `explicit` for, on a session running
+    // on `parent`: spawned, or refused with these words.
+    let helper = |parent: &str, explicit: &str| {
+        let mut input = sample_agent_input();
+        input.model = Some(explicit.to_string());
+        execute_agent_with_spawn_and_parent_model(input, |_| Ok(()), Some(parent), None)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    };
+    let refused = |outcome: Result<(), String>| outcome.is_err_and(|words| words.contains(INLINE));
+
+    // A session on a name nothing knows: built for whichever login the
+    // machine holds. The row written while it runs puts the name under a
+    // provider that login is not of, whichever this machine's is. (The
+    // `OpenAI` model named is one a helper may run on: `gpt-5.5…` reads as
+    // the model kept for orchestration, and is refused for that.)
+    let session = RunningSession::built_now(&env, UNLISTED);
+    let before = built(UNLISTED);
+    let (row, moved_to, its_model) = if before == Ok(ProviderKind::Google) {
+        (CatalogProvider::Openai, ProviderKind::OpenAi, OPENAI_HELPER)
+    } else {
+        (CatalogProvider::Google, ProviderKind::Google, "gemini-3.5-flash")
+    };
+    config_home.catalog_now(&[(row, UNLISTED)]);
+    assert_eq!(built(UNLISTED), before, "the helper on the session's own model");
+    assert!(refused(helper(UNLISTED, its_model)), "the row's provider is not this session's");
+    // Its client built again reads the file, and its helpers go with it.
+    session.client_built_now(UNLISTED);
+    assert_eq!(built(UNLISTED), Ok(moved_to));
+    assert_eq!(helper(UNLISTED, its_model), Ok(()));
+
+    // A session built on a row, in the spaces a setting may carry, and the
+    // row moved to another provider.
+    config_home.catalog_now(&[(CatalogProvider::Google, LISTED)]);
+    let session = RunningSession::built_now(&env, &format!(" {LISTED} "));
+    assert_eq!(built(LISTED), Ok(ProviderKind::Google));
+    config_home.catalog_now(&[(CatalogProvider::Openai, LISTED)]);
+    assert_eq!(built(LISTED), Ok(ProviderKind::Google), "the helper on the session's own model");
+    assert!(refused(helper(LISTED, OPENAI_HELPER)), "OpenAI is not this session's provider");
+    assert_eq!(helper(LISTED, "gemini-3.5-flash"), Ok(()));
+    session.client_built_now(LISTED);
+    assert_eq!(built(LISTED), Ok(ProviderKind::OpenAi));
+    assert!(refused(helper(LISTED, "gemini-3.5-flash")), "nor is Google, from here on");
+
+    // A turn's leg on another provider's model is held as it was built too
+    // (a quota fallback's is built ahead of every turn). Its row moved onto
+    // the session's provider, a helper named for it is still built where the
+    // leg went — so it is still another provider's to this session.
+    config_home.catalog_now(&[(CatalogProvider::Openai, LISTED), (CatalogProvider::Google, LEG)]);
+    session.client_built_now(LEG);
+    config_home.catalog_now(&[(CatalogProvider::Openai, LISTED), (CatalogProvider::Openai, LEG)]);
+    assert_eq!(built(LEG), Ok(ProviderKind::Google));
+    assert!(refused(helper(LISTED, LEG)), "the leg's model is where the leg was built");
+    // The next turn builds the leg again, as the file reads then.
+    session.client_built_now(LEG);
+    assert_eq!(built(LEG), Ok(ProviderKind::OpenAi));
+    assert!(!refused(helper(LISTED, LEG)));
 }
 
 #[test]

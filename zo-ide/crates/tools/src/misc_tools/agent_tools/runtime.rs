@@ -93,9 +93,17 @@ impl SubagentToolExecutor {
     /// delegation tools read this through `spawn_parent_model()` so their model
     /// selection stays in the same provider/model context unless explicitly
     /// overridden by the nested tool input.
+    ///
+    /// With it goes where this sub-agent's own client is built to send, read
+    /// now as that client is built now (`build_provider_client_for_agent`):
+    /// the fold of this agent's over-cap tool output asks the fast model of
+    /// that provider, and keeps asking it though the catalog file is edited
+    /// while the agent runs.
     pub(crate) fn with_parent_model(self, model: Option<&str>) -> Self {
         if let Some(model) = non_empty_model(model) {
             self.context.set_active_model(model);
+            self.context
+                .hold_active_model_home(model, crate::model_home::of_the_session(model));
         }
         self
     }

@@ -4,10 +4,30 @@
 //! Every judgment here that asks "is this the session's provider?" comes
 //! through this door, so that none reads the name on its own. A caller that
 //! asks about several models loads the catalog once ([`Homes`]).
+//!
+//! Two questions come through it, and they are read differently. Where a
+//! model the session *runs on* sends is what its client was built by
+//! ([`of_the_session`]): the session's own record first, with no file read,
+//! so that an edit of the catalog while the session runs moves no judgment
+//! off the client. Where a model the session holds no client for *would*
+//! send — a candidate for a helper, a verifier — is what the catalog says now
+//! ([`Homes::of`]), which is also what its client is then built by.
 
 use runtime::model_catalog::ModelCatalog;
 
 pub(crate) use runtime::model_home::ModelHome;
+
+/// Where the requests of a session running on `model` go, and where those of
+/// a helper on `model` would. What the session's client for `model` was
+/// built by, when this process's session holds one
+/// ([`runtime::model_home::held`] — a home of `Unknown` is such a record, and
+/// stands); the catalog as it is now for a model it holds none for. A
+/// helper's client is built by the same two-step
+/// (`build_provider_client_for_agent`), so a judgment about a helper's model
+/// that asks here reads what that client will be built by.
+pub(crate) fn of_the_session(model: &str) -> ModelHome {
+    runtime::model_home::held(model).map_or_else(|| Homes::load().of(model), |held| held.home)
+}
 
 /// One reading of the model catalog the person edits, for as many models as
 /// the caller asks about. The file is read when this is made and not again.
@@ -30,14 +50,9 @@ impl Homes {
         self.0.as_ref()
     }
 
-    /// Where `model`'s requests go.
+    /// Where `model`'s requests would go, as the catalog reads now: the home
+    /// of a model no client is built for yet.
     pub(crate) fn of(&self, model: &str) -> ModelHome {
         ModelHome::read(self.0.as_ref(), model)
-    }
-
-    /// Whether requests for `left` and for `right` are known to go to the
-    /// same place: one provider of the person's, or one built-in provider.
-    pub(crate) fn same(&self, left: &str, right: &str) -> bool {
-        self.of(left).is_where(&self.of(right))
     }
 }

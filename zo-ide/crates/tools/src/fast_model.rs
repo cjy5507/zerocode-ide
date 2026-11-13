@@ -54,6 +54,17 @@ impl FastModel {
         Ok(Self { model, client })
     }
 
+    /// [`Self::fast_tier_named_for`] for a session on `parent_model` whose
+    /// home the caller holds: the context a tool runs in knows where the
+    /// client it runs on was built to send.
+    pub(crate) fn fast_tier_named_where(
+        parent_model: &str,
+        home: &crate::model_home::ModelHome,
+    ) -> Option<String> {
+        crate::fanout::fast_tier_model_where(parent_model, home)
+            .map(|model| api::resolve_model_alias(&model))
+    }
+
     /// The model a reply is attributed to.
     #[must_use]
     pub fn model(&self) -> &str {

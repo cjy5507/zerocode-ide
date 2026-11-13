@@ -1805,6 +1805,35 @@
         assert!(super::settings::smart_setting_defaults().verify_cross_provider);
     }
 
+    /// The session's provider, for the verifier that stays on it, is where
+    /// the session's client was built to send — not what the catalog file
+    /// says of the session's model when the turn begins. A row written while
+    /// the session ran moved its verifier to the provider the row named.
+    #[test]
+    fn a_running_sessions_verifier_stays_where_its_client_was_built() {
+        use runtime::model_catalog::CatalogProvider;
+
+        const SESSION: &str = "zq-held-verified";
+        let env = env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ollama = crate::tests::Var::unset(&env, "OLLAMA_BASE_URL");
+        let home = crate::tests::ConfigHome::empty(&env);
+        let pick = |candidates: &[&str]| {
+            super::settings::preferred_verify_model(SESSION, candidates.iter().map(ToString::to_string), false)
+        };
+        let candidates = ["gpt-zq-verifier", "gemini-zq-verifier"];
+
+        // Built on a name nothing knows: no provider to keep a verifier on.
+        let session = crate::tests::RunningSession::built_now(&env, SESSION);
+        assert_eq!(pick(&candidates), None);
+        home.catalog_now(&[(CatalogProvider::Google, SESSION)]);
+        assert_eq!(pick(&candidates), None, "the file says Google now; the session's client does not");
+        // Its client built again: on Google, and held there as the row moves on.
+        session.client_built_now(SESSION);
+        assert_eq!(pick(&candidates), Some("gemini-zq-verifier".to_string()));
+        home.catalog_now(&[(CatalogProvider::Openai, SESSION)]);
+        assert_eq!(pick(&candidates), Some("gemini-zq-verifier".to_string()));
+    }
+
     /// With `smart.verifyCrossProvider` off the verifier stays on the
     /// session's provider, and that is the provider the session's requests
     /// go to — not the one its model is spelled like. A session on a

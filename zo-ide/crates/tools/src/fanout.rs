@@ -448,10 +448,22 @@ fn session_model(parent_model: Option<&str>) -> &str {
 /// built for whichever login the machine holds; a pick for either would be
 /// that built-in provider's catalog model, dialled on that provider's
 /// account: not where the session's words went.
+///
+/// "Where the session's requests go" is what its client was built by, not
+/// what the catalog file says when this is asked
+/// ([`crate::model_home::of_the_session`]): read from the file each time, a
+/// row written while the session ran moved its folds to the provider the row
+/// named, and left its own requests where they were.
 pub(crate) fn fast_tier_model(parent_model: Option<&str>) -> Option<String> {
     let parent = session_model(parent_model);
-    match crate::model_home::Homes::load().of(parent) {
-        ModelHome::BuiltIn(provider) => fast_tier_triage_model(parent, provider),
+    fast_tier_model_where(parent, &crate::model_home::of_the_session(parent))
+}
+
+/// [`fast_tier_model`] for a session whose home the caller holds itself: a
+/// helper's context, told where the helper's own client was built to send.
+pub(crate) fn fast_tier_model_where(parent: &str, home: &ModelHome) -> Option<String> {
+    match home {
+        ModelHome::BuiltIn(provider) => fast_tier_triage_model(parent, *provider),
         ModelHome::Own(_) | ModelHome::Unknown => None,
     }
 }

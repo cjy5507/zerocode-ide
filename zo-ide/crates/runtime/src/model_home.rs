@@ -11,8 +11,25 @@
 //! session the catalog put on Google to `OpenAI`'s fast model.
 //!
 //! [`ModelHome`] is that one reading. It names no model and builds no client.
+//!
+//! ## What a running session is held to
+//!
+//! A session's client is built once and sends where it was built to send
+//! until it is built again; the catalog is a file, and another pane may write
+//! it meanwhile. A judgment that read the file each time would follow the edit
+//! while the client did not, and send what the session holds — a tool's
+//! output, a task's words — to the provider the file names *now*. So whoever
+//! builds a client the session runs on says what it was built by as it puts
+//! the client in ([`hold_session`], [`hold`]): the session's own client, and
+//! the clients a turn is given for other models. Whatever then asks about a
+//! model the session runs on — where its requests go, and where a helper on
+//! that same model must be built — asks that first ([`held`]). A model the
+//! session holds no client for has none of this: its home is read from the
+//! catalog as it is, and so is the client then built for it.
 
-use api::ProviderKind;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use api::{AuthRoute, ProviderKind};
 
 use crate::model_catalog::ModelCatalog;
 
@@ -88,6 +105,72 @@ impl ModelHome {
     pub fn is_where(&self, other: &Self) -> bool {
         !matches!(self, Self::Unknown) && self == other
     }
+}
+
+/// What a client of the session's was built by: where it sends, the provider
+/// the catalog named for its model then (`None`: the catalog did not name
+/// it, and the client was built from the model itself), and the login it was
+/// pinned to — all a second client for the same model needs to be built the
+/// same way. A home of `Unknown` is a record like any other: that client was
+/// built for whichever login the machine holds, and nothing read later may
+/// say otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    pub home: ModelHome,
+    pub catalog_provider: Option<ProviderKind>,
+    pub auth_route: AuthRoute,
+}
+
+/// The clients this process's session runs on, by the model each was built
+/// for. One session to a process: its own model, and the few a turn was
+/// given a client for.
+static HELD: Mutex<Vec<(String, Held)>> = Mutex::new(Vec::new());
+
+fn held_now() -> MutexGuard<'static, Vec<(String, Held)>> {
+    HELD.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A new session's own client was put in for `model`, built by `built`. All
+/// the session before it held is gone with it — a model it left is not a
+/// model this one runs on.
+pub fn hold_session(model: &str, built: Held) {
+    let mut held = held_now();
+    held.clear();
+    put(&mut held, model, built);
+}
+
+/// Another client of the same session was put in for `model`: its own built
+/// again, or one a turn was given for another model. Said by whoever builds a
+/// client the session's own requests go on and by nobody else — a helper's
+/// client is not the session's.
+pub fn hold(model: &str, built: Held) {
+    put(&mut held_now(), model, built);
+}
+
+/// `model`'s record in `held` is `built`; a blank model has none.
+fn put(held: &mut Vec<(String, Held)>, model: &str, built: Held) {
+    let model = model.trim();
+    if model.is_empty() {
+        return;
+    }
+    held.retain(|(running, _)| running != model);
+    held.push((model.to_string(), built));
+}
+
+/// What the session's client for `model` was built by, or `None` for a model
+/// the session holds no client for. No file is read.
+#[must_use]
+pub fn held(model: &str) -> Option<Held> {
+    let model = model.trim();
+    held_now()
+        .iter()
+        .find(|(running, _)| running == model)
+        .map(|(_, held)| held.clone())
+}
+
+/// Nothing is held: the process runs no session. For a test that held one.
+pub fn forget_session() {
+    held_now().clear();
 }
 
 #[cfg(test)]
@@ -281,5 +364,57 @@ mod tests {
         assert_eq!(google.built_in(), Some(ProviderKind::Google));
         assert_eq!(own().built_in(), None);
         assert_eq!(ModelHome::Unknown.built_in(), None);
+    }
+
+    /// Nothing held when the test ends, however it ends.
+    struct NoSession;
+
+    impl Drop for NoSession {
+        fn drop(&mut self) {
+            forget_session();
+        }
+    }
+
+    /// The record is of the models the session holds a client for and of no
+    /// other, and "built for whichever login the machine holds" is a record.
+    #[test]
+    fn a_session_is_held_to_what_its_clients_were_built_by() {
+        let _lock = crate::test_env_lock();
+        let _clean = NoSession;
+        let built = |home: &ModelHome, auth_route: AuthRoute| Held {
+            home: home.clone(),
+            catalog_provider: home.built_in(),
+            auth_route,
+        };
+        let by = |home: &ModelHome, auth_route: AuthRoute| Some(built(home, auth_route));
+        let unknown = ModelHome::Unknown;
+        let google = ModelHome::BuiltIn(ProviderKind::Google);
+        let openai = ModelHome::BuiltIn(ProviderKind::OpenAi);
+        forget_session();
+        assert_eq!(held("zq-held-session"), None, "nothing runs yet");
+
+        hold_session(" zq-held-session ", built(&unknown, AuthRoute::Auto));
+        assert_eq!(held("zq-held-session"), by(&unknown, AuthRoute::Auto));
+        assert_eq!(held("  zq-held-session"), by(&unknown, AuthRoute::Auto), "the model is the trimmed name");
+        assert_eq!(held("zq-held-candidate"), None, "a model the session holds no client for");
+        assert_eq!(held(""), None);
+        hold("  ", built(&openai, AuthRoute::Auto));
+        assert_eq!(held(""), None, "no model, no record");
+
+        // A turn's client for another model is held beside the session's own.
+        hold("zq-held-turn", built(&openai, AuthRoute::ApiKey));
+        assert_eq!(held("zq-held-turn"), by(&openai, AuthRoute::ApiKey));
+        assert_eq!(held("zq-held-session"), by(&unknown, AuthRoute::Auto));
+
+        // The session's own client built again: its record, and no other.
+        hold("zq-held-session", built(&google, AuthRoute::OAuth));
+        assert_eq!(held("zq-held-session"), by(&google, AuthRoute::OAuth));
+        assert_eq!(held("zq-held-turn"), by(&openai, AuthRoute::ApiKey));
+
+        // A new session: what the one before it held is gone.
+        hold_session("zq-held-next", built(&own(), AuthRoute::Auto));
+        assert_eq!(held("zq-held-next"), by(&own(), AuthRoute::Auto));
+        assert_eq!(held("zq-held-session"), None);
+        assert_eq!(held("zq-held-turn"), None);
     }
 }

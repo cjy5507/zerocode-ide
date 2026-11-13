@@ -861,14 +861,24 @@ fn build_provider_client_for_agent_with_rate_limit_failover(
     model: &str,
     fail_fast_on_rate_limit: bool,
 ) -> Result<ProviderClient, String> {
-    let homes = crate::model_home::Homes::load();
-    let catalog_provider = homes
-        .catalog()
-        .and_then(|catalog| catalog.provider_for_model(model));
-    let auth_route = homes
-        .catalog()
-        .and_then(|catalog| catalog.auth_route_for_model(model))
-        .unwrap_or(AuthRoute::Auto);
+    // A model the session itself runs on is built as the session's client
+    // for it was: the same home, the same word of the catalog, the same
+    // login (`runtime::model_home::held`). The catalog file may say something
+    // else of that model by now, and a helper that inherits the session's
+    // model — the commonest helper — would take its whole task there. Any
+    // other model has no client yet, and is read from the catalog as it is.
+    let runtime::model_home::Held { home, catalog_provider, auth_route } =
+        runtime::model_home::held(model).unwrap_or_else(|| {
+            let homes = crate::model_home::Homes::load();
+            let catalog = homes.catalog();
+            runtime::model_home::Held {
+                home: homes.of(model),
+                catalog_provider: catalog.and_then(|catalog| catalog.provider_for_model(model)),
+                auth_route: catalog
+                    .and_then(|catalog| catalog.auth_route_for_model(model))
+                    .unwrap_or(AuthRoute::Auto),
+            }
+        });
     // The provider is the model's home, read in the order the session's own
     // client is built: the catalog, then a provider the person declared,
     // then the name. Until v1.1.147 the name came second here, so a bare
@@ -876,7 +886,7 @@ fn build_provider_client_for_agent_with_rate_limit_failover(
     // below: on a session that provider served, the helper's task went to
     // Anthropic. A name nothing knows is built for whichever login the
     // machine holds, as the session's client is.
-    let provider_kind = match homes.of(model) {
+    let provider_kind = match home {
         ModelHome::BuiltIn(kind) => kind,
         ModelHome::Own(_) => ProviderKind::OpenAi,
         ModelHome::Unknown => detect_provider_kind(model),

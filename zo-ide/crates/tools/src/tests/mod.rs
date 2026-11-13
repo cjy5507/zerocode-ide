@@ -194,6 +194,19 @@ impl<'held> ConfigHome<'held> {
         self.home.path()
     }
 
+    /// The catalog holding exactly `rows` from here on, as an edit made in
+    /// another pane leaves it while a session runs.
+    pub(crate) fn catalog_now(&self, rows: &[(runtime::model_catalog::CatalogProvider, &str)]) {
+        let _ = fs::remove_file(self.home.path().join(runtime::model_catalog::CATALOG_FILE));
+        let mut catalog = runtime::model_catalog::ModelCatalog::load_from_home(self.home.path())
+            .expect("the config home loads");
+        for (provider, id) in rows {
+            catalog
+                .add_with_auth_route(*provider, id, id, api::AuthRoute::ApiKey)
+                .expect("the row is added");
+        }
+    }
+
     /// Write a row into the catalog by hand, as a person does: `id` under
     /// `provider`, with no wire mapping, dialled with that provider's API
     /// key (a test machine holds no login).
@@ -212,6 +225,50 @@ impl Drop for ConfigHome<'_> {
             Some(before) => std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, before),
             None => std::env::remove_var(core_types::paths::ZO_CONFIG_HOME_ENV),
         }
+    }
+}
+
+/// This process's session while it lives: a client put in for a model, as
+/// `zo-ide` says when it builds one (`runtime::model_home::hold_session`),
+/// and nothing held when the test ends, however it ends. The record is the
+/// process's, so the [`env_lock`] guard it is given is held for as long as
+/// it lives.
+pub(crate) struct RunningSession<'held>(std::marker::PhantomData<&'held std::sync::MutexGuard<'held, ()>>);
+
+impl<'held> RunningSession<'held> {
+    /// A session whose own client for `model` was built as the catalog and
+    /// the providers read now, on the login a row pins or on any.
+    pub(crate) fn built_now(_held: &'held std::sync::MutexGuard<'held, ()>, model: &str) -> Self {
+        runtime::model_home::hold_session(model, Self::read_now(model));
+        Self(std::marker::PhantomData)
+    }
+
+    /// A client of the session's built for `model` as the catalog reads now,
+    /// as `zo-ide` says of each: its own client built again, or the client a
+    /// turn's leg is given for another model. Asked of a session that is
+    /// held, so that what it adds is forgotten with it.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn client_built_now(&self, model: &str) {
+        runtime::model_home::hold(model, Self::read_now(model));
+    }
+
+    fn read_now(model: &str) -> runtime::model_home::Held {
+        let catalog = runtime::model_catalog::ModelCatalog::load().ok();
+        let named = |catalog: &runtime::model_catalog::ModelCatalog| catalog.provider_for_model(model.trim());
+        runtime::model_home::Held {
+            home: runtime::model_home::ModelHome::read(catalog.as_ref(), model),
+            catalog_provider: catalog.as_ref().and_then(named),
+            auth_route: catalog
+                .as_ref()
+                .and_then(|catalog| catalog.auth_route_for_model(model.trim()))
+                .unwrap_or(api::AuthRoute::Auto),
+        }
+    }
+}
+
+impl Drop for RunningSession<'_> {
+    fn drop(&mut self) {
+        runtime::model_home::forget_session();
     }
 }
 

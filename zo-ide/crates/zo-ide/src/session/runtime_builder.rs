@@ -186,28 +186,8 @@ pub(crate) fn build_smart_live_client(
     named_effort: Option<api::EffortLevel>,
     effort_band_ceiling: Option<api::EffortLevel>,
 ) -> Option<Arc<dyn runtime::AsyncApiClient>> {
-    let requested_auth = crate::runtime_support::catalog_auth_route_for_model(model);
     let main = runtime.api_client();
-    let native_provider = |selected: &str| {
-        crate::runtime_support::catalog_provider_for_model(selected).or_else(|| {
-            api::provider_catalog().iter().find(|entry|
-                entry.alias == selected || entry.canonical_model_id == selected).map(|entry| entry.provider)
-        })
-    };
-    let same_provider = native_provider(main.model()).zip(native_provider(model))
-        .is_some_and(|(current, selected)| current == selected && current == main.provider_kind());
-    let (provider, auth_route) = if same_provider
-        && (requested_auth == api::AuthRoute::Auto || requested_auth == main.auth_route())
-    {
-        (main.client(), main.auth_route())
-    } else {
-        let provider = if let Some(provider_kind) = crate::runtime_support::catalog_provider_for_model(model) {
-            api::ProviderClient::from_provider_kind_with_auth_route(provider_kind, requested_auth)
-        } else {
-            api::ProviderClient::from_model_with_auth_route(model, requested_auth)
-        }.ok()?;
-        (provider, requested_auth)
-    };
+    let (provider, auth_route) = turn_client(main, model)?;
     Some(Arc::new(super::runtime_bridge::LiveAsyncApiClient::new(
         provider.with_cache_scope(session_id),
         model.to_string(),
@@ -219,6 +199,58 @@ pub(crate) fn build_smart_live_client(
         named_effort,
         effort_band_ceiling,
     )))
+}
+
+/// The client a turn's leg on `model` goes through, and the login it is on,
+/// for the session `main` is the client of.
+///
+/// The session's own model is where the session's client is: a leg on that
+/// same model goes through that client, whatever the catalog file says by
+/// now — read from the file, a row moved while the session ran built this leg
+/// at the row's new provider and left the session's own requests where they
+/// were. Any other model is read from the catalog as it is — once, for its
+/// login, its provider and its home — and what its client is built by is
+/// held for the session ([`runtime::model_home::hold`]), so the judgments
+/// about a turn that runs on it, and a helper on it, keep to that client.
+pub(crate) fn turn_client(
+    main: &crate::AnthropicRuntimeClient,
+    model: &str,
+) -> Option<(api::ProviderClient, api::AuthRoute)> {
+    use runtime::model_home::{Held, ModelHome};
+
+    if model.trim() == main.model().trim() {
+        return Some((main.client(), main.auth_route()));
+    }
+    let catalog = runtime::model_catalog::ModelCatalog::load().ok();
+    let in_the_catalog = |selected: &str| catalog.as_ref().and_then(|catalog| catalog.provider_for_model(selected.trim()));
+    let requested_auth = catalog.as_ref().and_then(|catalog| catalog.auth_route_for_model(model.trim())).unwrap_or(api::AuthRoute::Auto);
+    let native_provider = |selected: &str| {
+        in_the_catalog(selected).or_else(|| {
+            api::provider_catalog().iter().find(|entry|
+                entry.alias == selected || entry.canonical_model_id == selected).map(|entry| entry.provider)
+        })
+    };
+    // The session's side of "the same provider" is where its client was built
+    // to send, not what the file says of its model now.
+    let main_provider = runtime::model_home::held(main.model())
+        .map_or_else(|| native_provider(main.model()), |held| held.home.built_in());
+    let same_provider = main_provider.zip(native_provider(model))
+        .is_some_and(|(current, selected)| current == selected && current == main.provider_kind());
+    let catalog_provider = in_the_catalog(model);
+    let (provider, auth_route, home) = if same_provider
+        && (requested_auth == api::AuthRoute::Auto || requested_auth == main.auth_route())
+    {
+        (main.client(), main.auth_route(), ModelHome::BuiltIn(main.provider_kind()))
+    } else {
+        let provider = if let Some(provider_kind) = catalog_provider {
+            api::ProviderClient::from_provider_kind_with_auth_route(provider_kind, requested_auth)
+        } else {
+            api::ProviderClient::from_model_with_auth_route(model, requested_auth)
+        }.ok()?;
+        (provider, requested_auth, ModelHome::read(catalog.as_ref(), model))
+    };
+    runtime::model_home::hold(model, Held { home, catalog_provider, auth_route });
+    Some((provider, auth_route))
 }
 
 // The two arms must take the same argument: this one is only ever compiled on

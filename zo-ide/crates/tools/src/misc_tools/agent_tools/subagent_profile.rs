@@ -681,9 +681,20 @@ const fn thinking_budget_for_difficulty(difficulty: AgentTaskDifficulty) -> Opti
 /// is built for whichever login the machine holds, and that says nothing of
 /// where another model's requests go (BUG-R14 — a custom provider's
 /// `deepseek-chat` read as `OpenAI`'s because an `OpenAI` key was set).
+///
+/// Both sides are read as a client is built ([`crate::model_home::of_the_session`]):
+/// what the session's client for the model was built by where it holds one,
+/// the catalog as it is now where it holds none. The candidate too — the
+/// session may hold a client for it, a turn's leg on another provider's
+/// model, and the helper's client is then built by that record
+/// (`build_provider_client_for_agent`). Read from the file instead, a row
+/// moved onto the session's provider after such a leg was built passed the
+/// helper as "the same family" and sent its task where the leg went.
 pub(super) fn same_provider_family(parent_model: Option<&str>, candidate: &str) -> bool {
-    non_empty(parent_model)
-        .is_some_and(|parent| crate::model_home::Homes::load().same(&parent, candidate))
+    non_empty(parent_model).is_some_and(|parent| {
+        crate::model_home::of_the_session(&parent)
+            .is_where(&crate::model_home::of_the_session(candidate))
+    })
 }
 
 /// One catalog-owned step down the provider capability/latency ladder.
