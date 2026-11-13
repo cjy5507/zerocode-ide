@@ -4601,9 +4601,9 @@
             </select>
           </label>
           <label class="settings-field" data-field="md" for="harness-workers-prompts">
-            <span class="settings-label" data-i18n="settings.harness.prompts">소환한 Claude 워커가 허락을 물을 때</span>
+            <span class="settings-label" data-i18n="settings.harness.prompts">소환한 워커가 허락을 물을 때</span>
             <span class="settings-hint" id="harness-workers-prompts-hint" data-i18n="settings.harness.promptsHint">
-              「묻기」는 지금처럼 워커가 허락 창에서 사람의 답을 기다립니다. 「거절하고 계속」은 그 호출을 Claude Code가 바로 거절하고 모델에게 알린 뒤 턴을 이어 가며, 거절이 여러 번 이어지면 턴을 끝냅니다. 허락했을 수도 있는 일을 거절하는 대신 워커가 멈춰 서지 않습니다. 사람이 직접 연 판은 바뀌지 않고, 이미 도는 워커는 다음에 띄울 때부터 따릅니다. Claude Code 2.1.319 이상에서 동작합니다.
+              「묻기」는 지금처럼 워커가 허락 창에서 사람의 답을 기다립니다. 「거절하고 계속」은 그 호출을 바로 거절하고 모델에게 알린 뒤 턴을 이어 가며, 거절이 여러 번 이어지면 턴을 끝냅니다. 허락했을 수도 있는 일을 거절하는 대신 워커가 멈춰 서지 않습니다. 창은 워커를 묻지 않고 일하게 띄우므로 Codex · zo를 비롯한 대부분의 에이전트는 허락 창을 열지 않고, 그래도 묻는 Claude Code 워커(2.1.319 이상)에 이 설정이 닿습니다. 사람이 직접 연 판은 바뀌지 않고, 이미 도는 워커는 다음에 띄울 때부터 따릅니다.
             </span>
             <select class="settings-input" id="harness-workers-prompts" aria-describedby="harness-workers-prompts-hint">
               <option value="ask" data-i18n="settings.harness.promptsAsk">묻기</option>
