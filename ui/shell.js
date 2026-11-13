@@ -12269,8 +12269,43 @@ function fittedOrMadeAgentSlots(host, rows) {
       dressFittedAgentRow(fit);
       return slot;
     }
+    // The same pane's row whose shape moved — above all its state, at work and back, which an agent turns every
+    // turn — is drawn again in the node that stands (v1.1.149, 「왼쪽 네비 판이 계속 깜박」): the children its state
+    // shapes (the dot, the chip, the second line) are new, the row is not, so its hover and focus stay and its
+    // transitions do not begin again.
+    const same = samePaneSlot(standing, taken, row);
+    if (same !== null) {
+      const fresh = makeAgentRow(row, true);
+      if (!fresh.classList.contains("wt-agent") || typeof fresh.__press !== "function") return fresh;
+      taken.add(same);
+      return restandAgentRow(same, fresh);
+    }
     return makeAgentRow(row, true);
   });
+}
+
+/* A standing slot that draws the same pane's own row as `row` — the same term, helper and released work — with the
+ * press `makeAgentRow` holds on its node. A helper's line (its row beside its reading hand), the 「완료 N개」 line and
+ * a coordinator's crew line are not stood again: they are built, as before. */
+function samePaneSlot(standing, taken, row) {
+  if (row.history || row.crew) return null;
+  for (const slot of standing) {
+    if (taken.has(slot) || !slot.classList.contains("wt-agent") || typeof slot.__press !== "function") continue;
+    if (slot.dataset.term === String(row.term) && (slot.dataset.sub ?? "") === (row.sub?.id ?? "")
+      && (slot.dataset.work ?? "") === (row.work?.worker ?? "") && slot.dataset.history === undefined
+      && slot.dataset.crew === undefined) return slot;
+  }
+  return null;
+}
+
+/* `node` takes what `fresh` was built with: its attributes (each written only when it moved), its children and its
+ * press. The node stays where it stands. */
+function restandAgentRow(node, fresh) {
+  for (const name of node.getAttributeNames()) if (!fresh.hasAttribute(name)) node.removeAttribute(name);
+  for (const name of fresh.getAttributeNames()) writeAttribute(node, name, fresh.getAttribute(name));
+  node.replaceChildren(...fresh.childNodes);
+  node.__press = fresh.__press;
+  return node;
 }
 
 /* Write one fitted row's words into the nodes it already holds (`fittedAgentRowWords` said they fit). */
@@ -12562,7 +12597,10 @@ function makeAgentRow(row, gutter = false) {
     face = agentIcon(reg ?? { id: row.agent, name: agentName(row.agent), favicon_domain: "" });
     face.classList.add("wt-agent-face");
   }
-  node.addEventListener("click", (event) => {
+  // The press is held on the node and called through it, so a row stood again in its own node takes the press of
+  // the row it now draws (`restandAgentRow`) — the listener stays the one bound here.
+  node.addEventListener("click", (event) => node.__press(event));
+  node.__press = (event) => {
     event.stopPropagation();
     // The chevron is part of this button, not a button of its own (above): a press that lands on it folds the lineage,
     // the flip it always was, and goes to no pane. A press anywhere else on the row goes where it always went.
@@ -12597,7 +12635,7 @@ function makeAgentRow(row, gutter = false) {
       return;
     }
     void focusAgentPane(row.worktree, row.tab?.id ?? null, row.term, row.agent);
-  });
+  };
   // A row at work wears no ring of its own (2026-11-05, the familiar-frame draft): the spinning state mark already
   // says it works, and the moving ring drawn inside the card read as a second card — 「카드 속 카드」.
   // Orca's collapsed compact summary is identity, not a shortened sentence:
