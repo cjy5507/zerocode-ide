@@ -18647,6 +18647,52 @@ await test("모델 연결: 설정을 열지 않아도 창이 뜬 뒤 한가할 �
 });
 
 await (await import("./settings-gguf.mjs")).runSettingsGguf({ test, assert, assertEqual, backend, withJudgmentStatus, setQualityLocale });
+await test("a list that grows above the setting a person scrolled down to leaves that setting where it was — WebKit never anchors a scroll (사람 11-13: 휠로 내리면 중간쯤으로 튕김)", async () => {
+  await pageA.setViewportSize({ width: 1280, height: 800 });
+  backend.claudeAccounts = { accounts: [], can_add: true };
+  await openSettings(pageA, "provider-accounts");
+  await pageA.evaluate(() => refreshClaudeAccounts());
+  await renderSettled(pageA);
+  // Where the field the person came down for stands in the frame's window.
+  const seen = () => pageA.evaluate(() => {
+    const frame = document.querySelector("#settings-view .settings-frame");
+    const field = document.querySelector('label[for="harness-mail-peers"]');
+    return {
+      top: Math.round(field.getBoundingClientRect().top - frame.getBoundingClientRect().top),
+      scrollTop: Math.round(frame.scrollTop),
+      rows: document.querySelectorAll("#account-list .account-row").length,
+    };
+  });
+  await pageA.evaluate(() => {
+    const frame = document.querySelector("#settings-view .settings-frame");
+    frame.scrollTop = frame.scrollHeight;
+  });
+  await renderSettled(pageA);
+  const before = await seen();
+  assert(before.scrollTop > 0, "the pane did not scroll, so nothing stood above the field", before);
+  // The accounts' answer lands late — a CLI's verify, a usage beat — while
+  // the person is already at the bottom: eight rows grow the card above.
+  backend.claudeAccounts = {
+    can_add: true,
+    accounts: Array.from({ length: 8 }, (_, i) => ({
+      id: `late-${i}`, email: `late${i}@example.test`, signed_in: true,
+      organization_uuid: `org-${i}`, organization_name: `Org ${i}`, organization_type: "claude_max",
+    })),
+  };
+  await pageA.evaluate(() => refreshClaudeAccounts());
+  await renderSettled(pageA);
+  const grown = await seen();
+  assert(grown.rows > before.rows, "the late rows were not painted", { before, grown });
+  assert(Math.abs(grown.top - before.top) <= 1, "the rows that grew above the field pushed it down the window", { before, grown });
+  // And the rows going away again does not pull it up either.
+  backend.claudeAccounts = { accounts: [], can_add: true };
+  await pageA.evaluate(() => refreshClaudeAccounts());
+  await renderSettled(pageA);
+  const shrunk = await seen();
+  assert(Math.abs(shrunk.top - before.top) <= 1, "the rows that left above the field pulled it up the window", { before, shrunk });
+  return `field ${before.top}px from the frame's top at scroll ${before.scrollTop}, ${grown.top}px at ${grown.scrollTop} with ${grown.rows} rows, ${shrunk.top}px at ${shrunk.scrollTop}`;
+});
+
 await test("the stateful backend refused every command the fixture did not define", async () => {
   assertEqual(backend.unknown, [], "unknown IPC was treated as success");
 });

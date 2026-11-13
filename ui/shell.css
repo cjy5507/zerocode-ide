@@ -22829,6 +22829,10 @@ button.helper-sib:hover {
   min-width: 0;
   padding: 40px 0 96px;
   overflow-y: auto;
+  /* The frame keeps a person's place itself (shell-settings.js
+   * `settingsKeepsPlace`): macOS WebKit never anchors a scroll, and the
+   * Windows webview's Chromium would correct a second time. */
+  overflow-anchor: none;
 }
 
 /* The view wraps for its narrow layout (t-74119), and a wrapping flex line is

@@ -7,6 +7,50 @@
 
 const settingsView = el("settings-view");
 
+/* The frame keeps a person's place.
+ *
+ * 사람 11-13: 「마우스 휠을 설정을 바뀌기위해 내리면 갑자기 중간쯤으로 튕김」.
+ *
+ * A pane's blocks repaint after it opened: the accounts arrive, a CLI's verify
+ * adds a line under a login, a usage beat rewrites a gauge. Chromium anchors
+ * the scroll when something above the window grows; macOS WebKit — this
+ * window's engine — never does (`.sidebar-scroll` says the same), so eight
+ * late account rows pushed the field a person had scrolled down to some
+ * 670px down the window, and the pane read as bouncing back up under the
+ * wheel. A block whose bottom stood above the frame's visible top before it
+ * moved shifts the scroll by what it grew or shrank; one the person can see
+ * any of moves under their eyes as it should. `overflow-anchor: none` on the
+ * frame keeps Chromium (the Windows webview) from correcting twice. */
+const settingsFrame = settingsView.querySelector(".settings-frame");
+const settingsBlockHeights = new WeakMap();
+const settingsKeepsPlace = new ResizeObserver((entries) => {
+  const visibleTop = settingsFrame.getBoundingClientRect().top;
+  const moved = entries
+    .map((entry) => {
+      const box = entry.target.getBoundingClientRect();
+      const was = settingsBlockHeights.get(entry.target);
+      settingsBlockHeights.set(entry.target, box.height);
+      // A pane shown or hidden (its blocks go to or from nothing) is a page
+      // turned, not a place moved under the person.
+      const turned = !was || box.height === 0;
+      return { box, grew: turned ? 0 : box.height - was };
+    })
+    .filter(({ grew }) => grew !== 0)
+    .sort((a, b) => a.box.top - b.box.top);
+  let above = 0;
+  let shift = 0;
+  for (const { box, grew } of moved) {
+    // Its bottom as it stood before this round: what grew above it already
+    // moved it down, and so did its own growth.
+    if (box.bottom - above - grew <= visibleTop) shift += grew;
+    above += grew;
+  }
+  if (shift !== 0) settingsFrame.scrollTop += shift;
+});
+for (const block of settingsFrame.querySelectorAll(":scope > .settings-pane > *")) {
+  settingsKeepsPlace.observe(block);
+}
+
 /* ---- the section rail ----
  *
  * Orca's settings draws ONE section at a time: the rail holds the sections
