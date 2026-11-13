@@ -432,6 +432,8 @@ fn a_failed_step_stays_when_the_rest_fold_away() {
     let head = plain(&super::turns::cell(&steps, 100, std::time::Instant::now()));
     assert!(head[1].starts_with("⏺ Worked · 10 steps · 1 failed"), "{head:?}");
     assert!(head.iter().any(|row| row.trim() == "No such file: gone.rs"), "{head:?}");
+    // The failed call reads in the fold as its row read while the turn ran.
+    assert!(head.iter().any(|row| row.ends_with("Read(gone.rs)  failed")), "{head:?}");
 }
 
 /// Calls made together stand in the order they were made, not in the order

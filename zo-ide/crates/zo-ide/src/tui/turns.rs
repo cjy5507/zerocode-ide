@@ -362,6 +362,21 @@ fn call_row(lead: Vec<Span>, verb: &str, target: &str, address: bool, style: Sty
     Line::new(spans).truncated(width)
 }
 
+/// A failed step's call in the fold, in the words its row said while the turn
+/// ran — `Run(cat a.txt)`, the verb alone for a call with no target — so the
+/// call reads the same once it is said (`Run cat a.txt` before, and
+/// `almanac · whoami   failed` with a space for the target it did not have).
+fn call_words(step: &Step) -> Vec<Span> {
+    if step.target.is_empty() {
+        return vec![Span::dim(step.verb.clone())];
+    }
+    vec![
+        Span::dim(super::tools::call_opening(&step.verb)),
+        Span::raw(step.target.clone()),
+        Span::dim(super::tools::call_closing()),
+    ]
+}
+
 /// How much deeper than its step the row that says why it failed stands —
 /// under the call's words, not beside them, in the viewport as in the fold.
 const WHY_INDENT: &str = "  ";
@@ -435,7 +450,7 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
     body.extend(other_row(steps));
     // What did not go through is never folded away.
     for step in steps.iter().filter(|step| !step.ok) {
-        let mut row = vec![Span::dim(format!("{} ", step.verb)), Span::raw(step.target.clone())];
+        let mut row = call_words(step);
         row.extend(step_tail(step, false, false));
         body.push(row);
         if let Some(why) = step.error.as_ref() {
