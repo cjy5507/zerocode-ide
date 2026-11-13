@@ -791,10 +791,14 @@ fn each_point_asks_with_the_use_already_there_off() {
         }
         let line = |point: Point| custom::line(point.key(), YES_MEANS, 0.9);
         let note = run_blocking(SkillSuggestionJudge::at(cwd).suggest(TASK.to_string()));
-        assert_eq!(note, Some(format!("{}\n{}", runtime::SKILL_RECOMMENDATION_REMINDER_PREFIX, line(Point::TurnStart))));
+        let introduced = |point: Point| format!("{}\n{}", custom::LINES_INTRO, line(point));
+        assert_eq!(
+            note,
+            Some(format!("{}\n{}", runtime::SKILL_RECOMMENDATION_REMINDER_PREFIX, introduced(Point::TurnStart)))
+        );
         let guard = ToolGuardJudge::at(cwd);
         guard.command(command_ask(cwd, "clean", "rm -rf build"));
-        assert_eq!(run_blocking(guard.command_ran(finished("clean"))), Some(line(Point::BeforeCommand)));
+        assert_eq!(run_blocking(guard.command_ran(finished("clean"))), Some(introduced(Point::BeforeCommand)));
         note_project_rule_turn(cwd, "session", "turn-1", &[ConversationMessage::user_text(TASK)]);
         let advice =
             waited(|| pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP)).expect("the next turn's advice");
@@ -833,7 +837,8 @@ fn a_lone_decision_line_opens_with_the_skill_prefix_and_is_gone_next_turn() {
         let prefix = runtime::SKILL_RECOMMENDATION_REMINDER_PREFIX;
         turns.run_turn(TASK, None).expect("the first turn");
         let noted: Vec<&String> = turns.transient_reminders().iter().filter(|reminder| reminder.starts_with(prefix)).collect();
-        assert_eq!(noted, [&format!("{prefix}\n{line}")], "the line rides the skill note's prefix alone");
+        let introduced = format!("{}\n{line}", custom::LINES_INTRO);
+        assert_eq!(noted, [&format!("{prefix}\n{introduced}")], "the line rides the skill note's prefix alone, under what it is");
         let first = carried.lock().expect("what the model read").clone();
         assert!(!first.is_empty() && first.iter().all(|seen| *seen), "the first turn's model read the line: {first:?}");
         store::set_mode(&runtime::default_config_home(), &entry.id, JevMode::Off, 1).expect("the decision turned off");

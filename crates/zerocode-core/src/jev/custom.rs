@@ -381,15 +381,26 @@ pub const SAID_MAX_CHARS: usize = LINE_MAX_CHARS - NAME_MAX_CHARS - LINE_FRAME_C
 /// What marks a meaning cut to fit its line ([`said`]).
 const CUT_MARK: char = '…';
 
-/// What stands once before the lines decisions hand a turn that asked for
-/// none of them — the lines a turn's end leaves the next turn: what they
-/// are, and that they are not the turn's work. Without it a line stood in
-/// the next turn as a remark out of nowhere, and a model took it for the
-/// subject of the person's next question and went looking for where it was
-/// written (2026-11-13).
-pub const LINES_INTRO: &str = "These lines come from checks the person set up, which read your previous \
-     turn. They are observations: not a new request, not new permission, and nothing to look up. Do what \
-     the person asks now, and follow a line only where it applies to that work.";
+/// What stands once before the lines decisions hand where no agent asked
+/// for them — at a turn's start, under a command's result, from a turn's end
+/// to the next turn ([`introduced`]): what they are, and what to do with
+/// them. Without it a line stood in the next turn as a remark out of
+/// nowhere, and a model took it for the subject of the person's next
+/// question and went looking for where it was written (2026-11-13). It asks
+/// for the person's request first and keeps what a line tells the agent to
+/// do: a decision's yes is often the person's own instruction, and a line
+/// that only "applies where it applies" would be skipped.
+pub const LINES_INTRO: &str = "These lines come from checks the person set up. They are observations, not \
+     a new request, not new permission, and nothing to look up. Answer what the person asks now first; \
+     where a line says what to do next and it holds for this turn, do that too, briefly.";
+
+/// The lines decisions hand unasked, as an agent reads them: [`LINES_INTRO`]
+/// once, then each on a line of its own — nothing for no line. Every place
+/// that hands such lines whole builds them here.
+#[must_use]
+pub fn introduced(lines: &[String]) -> Option<String> {
+    (!lines.is_empty()).then(|| format!("{LINES_INTRO}\n{}", lines.join("\n")))
+}
 
 /// The one line a decision that is on hands the agent when its answer is as
 /// sure as its act-from line (DESIGN 2.4): `「name」 판단: said (확신 85%)`,
@@ -414,6 +425,12 @@ pub fn line(name: &str, said: &str, confidence: f64) -> String {
 /// its no meant nothing was left to check, 2026-11-13). A choice's option and
 /// a score's level are said as they are shown: the person's own word, and a
 /// level over its count.
+///
+/// The meaning's lines are joined by one space each, control characters
+/// read as spaces. The store checks a meaning for a credential line by line
+/// ([`check`]), so the joined line is read once more by the same detector —
+/// digits that are a card's number only once two lines meet — and a meaning
+/// it would withhold, or an empty one, is said as the bare word.
 #[must_use]
 pub fn said(definition: &Definition, shown: &str) -> String {
     let Answer::YesNo { yes, no } = &definition.answer else {
@@ -424,16 +441,30 @@ pub fn said(definition: &Definition, shown: &str) -> String {
     } else {
         no
     };
-    let one_line = meaning.split_whitespace().collect::<Vec<&str>>().join(" ");
-    if one_line.is_empty() {
+    let mut one_line = String::with_capacity(meaning.len());
+    for word in meaning
+        .split(|read: char| read.is_whitespace() || read.is_control())
+        .filter(|word| !word.is_empty())
+    {
+        if !one_line.is_empty() {
+            one_line.push(' ');
+        }
+        one_line.push_str(word);
+    }
+    if one_line.is_empty() || crate::credential::may_carry_a_credential(&one_line) {
         return shown.to_string();
     }
-    if one_line.chars().count() <= SAID_MAX_CHARS {
-        return one_line;
+    // One character past the cap is all that says the meaning is too long:
+    // the line is never counted whole.
+    if one_line.char_indices().nth(SAID_MAX_CHARS).is_some() {
+        let kept = one_line
+            .char_indices()
+            .nth(SAID_MAX_CHARS - 1)
+            .map_or(one_line.len(), |(at, _)| at);
+        one_line.truncate(kept);
+        one_line.push(CUT_MARK);
     }
-    let mut cut: String = one_line.chars().take(SAID_MAX_CHARS - 1).collect();
-    cut.push(CUT_MARK);
-    cut
+    one_line
 }
 
 /// Whether the answer shown as `shown` is one a decision speaks of at all,

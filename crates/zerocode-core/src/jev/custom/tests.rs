@@ -596,15 +596,43 @@ fn unasked_a_yes_or_no_speaks_only_of_its_yes() {
     assert!(speaks(&definition, &shown_level(0, 2)));
 }
 
-/// What stands before the lines of a turn's end says what they are in one
-/// line: read with the lines, it is nothing a model can take for a request.
+/// What stands before the lines handed unasked says what they are in one
+/// line — nothing a model can take for a request — and keeps what a line
+/// tells the agent to do; it stands once, before every line, and not at all
+/// before none.
 #[test]
-fn the_intro_is_one_line_and_says_the_lines_are_no_request() {
+fn the_intro_is_one_line_and_stands_once_before_the_lines() {
     assert!(
         !LINES_INTRO.contains('\n') && !LINES_INTRO.contains("  "),
         "{LINES_INTRO}"
     );
     assert!(LINES_INTRO.contains("not a new request"), "{LINES_INTRO}");
+    assert!(LINES_INTRO.contains("do that too"), "{LINES_INTRO}");
+    assert_eq!(introduced(&[]), None);
+    let lines = ["one".to_string(), "two".to_string()];
+    assert_eq!(introduced(&lines), Some(format!("{LINES_INTRO}\none\ntwo")));
+}
+
+/// A meaning is read for a credential line by line when it is stored, and
+/// once more as the one line it is said on: digits that are a card's number
+/// only once two lines meet are never said, and neither is a control
+/// character. The bare word stands in for a meaning withheld.
+#[test]
+fn a_meaning_that_joins_into_a_credential_is_said_as_the_bare_word() {
+    let [yes, no] = AGENT_TOOL_ASK_OPTIONS;
+    let half = "42".repeat(4);
+    let mut definition = yes_no("d-0000000a", "Paid");
+    definition.answer = Answer::YesNo {
+        yes: format!("{half}\n{half}"),
+        no: "Nothing\u{1b}[31m was\u{7}paid.".to_string(),
+    };
+    assert_eq!(
+        check(&definition),
+        Vec::new(),
+        "each line alone passes the store's check"
+    );
+    assert_eq!(said(&definition, yes), yes);
+    assert_eq!(said(&definition, no), "Nothing [31m was paid.");
 }
 
 /// A score's level is shown counted from one over its levels, the way a

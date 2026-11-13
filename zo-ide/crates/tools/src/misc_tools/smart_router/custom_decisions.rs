@@ -441,12 +441,12 @@ async fn ask_all(cwd: PathBuf, asking: Vec<Asked>, lent: Lent) -> Vec<Handed> {
     ask_each(cwd, acting, lent).await.into_iter().filter_map(|(_, handed)| handed).collect()
 }
 
-/// `note` with `lines` under it, one to a line.
+/// `note` with `lines` under it, one to a line, after the one line saying
+/// what they are ([`custom::introduced`]).
 pub(super) fn beside(note: Option<String>, lines: &[String]) -> Option<String> {
-    if lines.is_empty() {
+    let Some(lines) = custom::introduced(lines) else {
         return note;
-    }
-    let lines = lines.join("\n");
+    };
     Some(match note {
         Some(note) => format!("{note}\n{lines}"),
         None => lines,

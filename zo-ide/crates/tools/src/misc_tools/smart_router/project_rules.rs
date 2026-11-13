@@ -213,14 +213,16 @@ pub fn pending_project_rule_advice(workspace: &Path, recipient: &str, room: usiz
 /// receipt.
 fn decided_advice(workspace: &Path, recipient: &str, room: usize) -> Option<rules::Advice> {
     let (key, lines) = custom_decisions::pending_lines(workspace, recipient)?;
-    let head = format!("{ADVICE_PREFIX}{key}]\n{}", jev::custom::LINES_INTRO);
-    let mut text = head.clone();
+    let mut text = format!("{ADVICE_PREFIX}{key}]\n{}", jev::custom::LINES_INTRO);
+    let (mut held, mut handed) = (text.chars().count(), false);
     for line in lines {
-        if text.chars().count() + 1 + line.chars().count() > room { break; }
+        let longer = held + 1 + line.chars().count();
+        if longer > room { break; }
         text.push('\n');
         text.push_str(&line);
+        (held, handed) = (longer, true);
     }
-    (text != head).then(|| rules::Advice { key, definition: String::new(), at: 0, turn: String::new(), text,
+    handed.then(|| rules::Advice { key, definition: String::new(), at: 0, turn: String::new(), text,
         rules: Vec::new(), edited: Vec::new() })
 }
 
