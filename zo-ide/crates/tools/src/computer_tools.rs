@@ -238,10 +238,12 @@ pub(crate) fn action_named(action: &str) -> &str {
 
 /// The one action a misspelled name is plainly near: within a quarter of
 /// that name's length (one edit at least), and nearer than any other — a tie
-/// or a short guess (`tap`, `type`) names nothing.
+/// or a short guess (`tap`, `type`) names nothing. A guess never leads into
+/// an act that ends something (`step` is not offered `stop`).
 fn nearest_action(action: &str) -> Option<&'static str> {
+    const NEVER_GUESSED: &[&str] = &["stop", "quit"];
     let query = action.to_ascii_lowercase();
-    let mut near: Vec<(usize, &'static str)> = action_names(|name| name != action)
+    let mut near: Vec<(usize, &'static str)> = action_names(|name| name != action && !NEVER_GUESSED.contains(&name))
         .into_iter()
         .map(|name| (core_types::text::levenshtein_distance(&query, name), name))
         .filter(|(distance, name)| *distance <= (name.chars().count() / 4).max(1))
@@ -330,6 +332,9 @@ fn persons_browser(input: &ComputerInput) -> Option<&str> {
 /// always has — once a session, never a refusal. A call the tool would
 /// refuse anyway is refused first, as it always was.
 fn work_browser_first(input: &Value, ctx: &ToolContext) -> Option<Result<ToolExecutionResult, ToolError>> {
+    if input.get("steps").and_then(Value::as_array).is_some_and(|steps| check_batch_len(steps.len()).is_err()) {
+        return None;
+    }
     let input = read_input(input).ok()?;
     let well_formed = match input.action.trim() {
         BATCH_ACTION => input.steps.as_ref().is_some_and(|steps| check_batch_len(steps.len()).is_ok()),
@@ -940,9 +945,9 @@ fn validate_scope(input: &ComputerInput) -> Result<(), ToolError> {
             return Err(ToolError::InvalidInput("window_id needs a supported app-scoped action and a positive window ID; this selector cannot be ignored".into()));
         }
         if action != "window" && input.app.as_deref().is_none_or(|app| app.trim().is_empty()) {
-            return Err(ToolError::InvalidInput(format!(
-                "window_id goes with the app whose window it is: add `app`, e.g. {{\"action\":\"{action}\",\"app\":\"Notes\",\"window_id\":41}}; this selector cannot be ignored"
-            )));
+            return Err(ToolError::InvalidInput(
+                "window_id goes with the app whose window it is: add `app` next to it, e.g. {\"app\":\"Notes\",\"window_id\":41}; this selector cannot be ignored".into(),
+            ));
         }
     }
     if input.app.is_some() && !app_scoped_action(action) && !timer
@@ -6474,8 +6479,8 @@ printf '%s
         assert_eq!(scroll, format!("invalid input: scroll_amount belongs to desktop scrolling: {SCROLL_SHAPES}"));
 
         let screenshot = resolved(&json!({"action":"screenshot","window_id":41})).unwrap_err();
-        assert!(screenshot.contains("window_id goes with the app whose window it is: add `app`"), "{screenshot}");
-        assert!(screenshot.contains(r#"{"action":"screenshot","app":"Notes","window_id":41}"#), "{screenshot}");
+        assert!(screenshot.contains("window_id goes with the app whose window it is: add `app` next to it"), "{screenshot}");
+        assert!(screenshot.contains(r#"e.g. {"app":"Notes","window_id":41}"#), "{screenshot}");
         assert!(screenshot.contains("this selector cannot be ignored"), "{screenshot}");
         let example = json!({"action":"screenshot","app":"Notes","window_id":41});
         assert!(resolved(&example).is_ok(), "the example is taken as it stands");
@@ -6518,7 +6523,7 @@ printf '%s
         for (typo, near) in [("left_clik", "left_click"), ("scrol", "scroll"), ("screenshoot", "screenshot"), ("Left_Click", "left_click"), ("doubleclick", "double_click")] {
             assert_eq!(nearest_action(typo), Some(near), "{typo}");
         }
-        for far in ["tap", "press", "invalid_action_name", "click_here", "go"] {
+        for far in ["tap", "press", "invalid_action_name", "click_here", "go", "step", "qiut"] {
             assert_eq!(nearest_action(far), None, "{far}");
         }
     }
