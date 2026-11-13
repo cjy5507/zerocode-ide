@@ -583,8 +583,13 @@ fn decision_json(decision: &jev_summary::SeatDecision) -> Value {
 fn version_json(version: &jev_summary::VersionReport) -> Value {
     json!({
         "definition": version.definition,
-        "requestsToday": version.requests_today,
-        "requestsWeek": version.requests_week,
+        "requestsToday": version.today.requests,
+        "requestsWeek": version.week.requests,
+        // The same tally the seats' table reads (`tally_json`): the asks, how
+        // many handed the decision's line, and the asks the hour's bound or
+        // anything else left unanswered, by token.
+        "today": tally_json(&version.today),
+        "week": tally_json(&version.week),
         "latest": version.latest.as_ref().map(decision_json),
     })
 }

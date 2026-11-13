@@ -153,6 +153,68 @@ fn the_custom_row_reads_the_config_store_and_uses_the_lower_mode() {
     }
 }
 
+/// What each decision did (2026-11-13, 「jev는 언제 개선돼 된건가?」): its
+/// asks today and over the week, how many handed its line — read by the one
+/// reader of `applied` — and how many the hour's bound refused, counted by
+/// the counter the seats' table reads, off rows in the shape zo writes them.
+/// A decision nothing asked counts zero, not nothing.
+#[test]
+fn each_decision_says_what_it_handed_and_what_the_hour_refused() {
+    use zerocode_core::jev::custom::{Answer, Definition, Point, store};
+    use zerocode_core::jev::door::{ANSWERED_OUTCOME, Refused};
+
+    let home = tempfile::tempdir().unwrap();
+    let ledgers = tempfile::tempdir().unwrap();
+    let made = |id: &str, name: &str| {
+        let decision = Definition::new(
+            id.to_string(),
+            name.to_string(),
+            "Did the product change?".to_string(),
+            Answer::YesNo { yes: "A visible change.".to_string(), no: "No visible change.".to_string() },
+            Point::TurnEnd,
+        );
+        let version = store::create(home.path(), &decision, JevMode::On, 1_000).unwrap();
+        (decision.id, version)
+    };
+    let (asked_id, version) = made("d-0000000d", "Release notes");
+    let (quiet_id, _) = made("d-0000000e", "Never asked");
+    let now = 10 * MS_PER_DAY + MS_PER_DAY / 2;
+    let hour_full = Refused::HourlyBudget.token();
+    let row = |at: i64, outcome: &str, applied: bool, requests: u32| {
+        asked_by(
+            &CUSTOM_DECISIONS,
+            json!({
+                "at": at, "from": "zo", "decision": asked_id, "definition": version, "point": "turn_end",
+                "mode": "on", "rubricVersion": CUSTOM_DECISIONS.rubric_version, "outcome": outcome,
+                "applied": applied, "elapsedMs": 40, "requests": requests, "retries": 0, "redactedLines": 0,
+            }),
+        )
+    };
+    write(
+        ledgers.path(),
+        CUSTOM_DECISIONS.ledger,
+        &[
+            row(now - 3 * MS_PER_DAY, ANSWERED_OUTCOME, true, 1),
+            row(now - 3 * MS_PER_DAY + 1, hour_full, false, 0),
+            row(now - 3_000, ANSWERED_OUTCOME, true, 2),
+            row(now - 2_000, ANSWERED_OUTCOME, false, 1),
+            row(now - 1_000, hour_full, false, 0),
+        ],
+    );
+    let reports = custom_decisions_in(home.path(), &[ledgers.path().to_path_buf()], None, now, 0);
+    let of = |id: &str| reports.iter().find(|report| report.id == id).expect("every decision is reported");
+    let hourly = |tally: &SeatTally| {
+        tally.failures.iter().find(|(token, _)| token == hour_full).map_or(0, |(_, rows)| *rows)
+    };
+    let current = &of(&asked_id).current;
+    assert_eq!((current.today.rows, current.week.rows), (3, 5), "asks today · week");
+    assert_eq!((current.today.applied, current.week.applied), (1, 2), "handed its line");
+    assert_eq!((hourly(&current.today), hourly(&current.week)), (1, 2), "refused by the hour's bound");
+    assert_eq!((current.today.requests, current.week.requests), (3, 4), "requests sent, retries included");
+    let quiet = &of(&quiet_id).current;
+    assert_eq!((quiet.week.rows, quiet.week.applied, quiet.latest.is_none()), (0, 0, true), "never asked counts zero");
+}
+
 /// A person's decisions are counted off the one ledger every decision writes
 /// (t-62170): each by its id, the version it asks with now apart from each
 /// earlier version a row names — a changed question's answers are never
@@ -197,7 +259,7 @@ fn each_decision_is_counted_apart_by_version() {
     );
     let reports = custom_decisions_in(home.path(), &[ledgers.path().to_path_buf()], None, now, 0);
     let counted = |version: &VersionReport| {
-        (version.definition.clone(), version.requests_today, version.requests_week, version.latest.is_some())
+        (version.definition.clone(), version.today.requests, version.week.requests, version.latest.is_some())
     };
     assert_eq!(reports.len(), 1, "{reports:?}");
     let report = &reports[0];

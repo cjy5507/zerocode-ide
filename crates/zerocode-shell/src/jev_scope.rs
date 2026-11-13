@@ -12,7 +12,7 @@
 //! when the one it counted has none, and — asked — the sum over every project,
 //! the machine's rows counted once.
 
-use crate::typesafe_settings::SeatNumbers;
+use crate::typesafe_settings::{DecisionNumbers, SeatNumbers, ZoSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -105,11 +105,13 @@ pub struct JevScope {
     pub window_days: i64,
 }
 
-/// The dashboard's reading: what it counted, and the seats.
+/// The dashboard's reading: what it counted, the seats, and the person's own
+/// decisions over the same scope.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct JevReading {
     pub scope: JevScope,
     pub seats: Vec<SeatNumbers>,
+    pub decisions: Vec<DecisionNumbers>,
 }
 
 /// Where a reading looks, handed in so a test reads a folder of its own
@@ -138,7 +140,7 @@ pub struct Places {
 /// # Errors
 /// The checkout's zo failing, or every project's.
 pub fn read(
-    ask: &(dyn Fn(&Path) -> Result<Vec<SeatNumbers>, String> + Sync),
+    ask: &(dyn Fn(&Path) -> Result<ZoSummary, String> + Sync),
     places: &Places,
     workspace: &Path,
     scope: Scope,
@@ -146,22 +148,23 @@ pub fn read(
 ) -> Result<JevReading, String> {
     let machine = machine_places(&places.zo_home, &places.sessions);
     let looked = || recorded_projects(&places.zo_home, now_ms, &places.temporary, &places.known);
-    let own = || -> Result<(Vec<SeatNumbers>, bool), String> {
-        let seats = with_reach(ask(workspace)?, &machine);
+    let own = || -> Result<(Vec<SeatNumbers>, Vec<DecisionNumbers>, bool), String> {
+        let said = ask(workspace)?;
+        let seats = with_reach(said.seats, &machine);
         let recorded = has_own_records(&seats);
-        Ok((seats, recorded))
+        Ok((seats, said.decisions, recorded))
     };
-    let (seats, recorded, projects) = match scope {
+    let (seats, decisions, recorded, projects) = match scope {
         Scope::Workspace => {
-            let (seats, recorded) = own()?;
+            let (seats, decisions, recorded) = own()?;
             let projects = if recorded { Vec::new() } else { looked() };
-            (seats, recorded, projects)
+            (seats, decisions, recorded, projects)
         }
         Scope::Projects => {
             let listed = looked();
             if listed.is_empty() {
-                let (seats, recorded) = own()?;
-                (seats, recorded, listed)
+                let (seats, decisions, recorded) = own()?;
+                (seats, decisions, recorded, listed)
             } else {
                 let answered = ask_each(ask, &listed)?;
                 let recorded = answered
@@ -169,10 +172,16 @@ pub fn read(
                     .any(|(project, _)| Path::new(&project.path) == workspace);
                 let readings: Vec<Vec<SeatNumbers>> = answered
                     .iter()
-                    .map(|(_, seats)| with_reach(seats.clone(), &machine))
+                    .map(|(_, said)| with_reach(said.seats.clone(), &machine))
                     .collect();
+                let decisions = summed_decisions(
+                    &answered
+                        .iter()
+                        .map(|(_, said)| said.decisions.as_slice())
+                        .collect::<Vec<_>>(),
+                )?;
                 let projects = answered.into_iter().map(|(project, _)| project).collect();
-                (summed(&readings)?, recorded, projects)
+                (summed(&readings)?, decisions, recorded, projects)
             }
         }
     };
@@ -186,6 +195,7 @@ pub fn read(
             window_days: WINDOW_DAYS,
         },
         seats: with_askers(seats),
+        decisions,
     })
 }
 
@@ -235,13 +245,13 @@ pub fn with_askers(mut seats: Vec<SeatNumbers>) -> Vec<SeatNumbers> {
 /// the project it counted. A project whose zo failed — its workspace moved
 /// between the look and the ask — is left out.
 fn ask_each(
-    ask: &(dyn Fn(&Path) -> Result<Vec<SeatNumbers>, String> + Sync),
+    ask: &(dyn Fn(&Path) -> Result<ZoSummary, String> + Sync),
     listed: &[JevProject],
-) -> Result<Vec<(JevProject, Vec<SeatNumbers>)>, String> {
+) -> Result<Vec<(JevProject, ZoSummary)>, String> {
     let mut answered = Vec::new();
     let mut failed = None;
     for round in listed.chunks(PROJECT_ASKS_AT_ONCE) {
-        let results: Vec<Result<Vec<SeatNumbers>, String>> = std::thread::scope(|threads| {
+        let results: Vec<Result<ZoSummary, String>> = std::thread::scope(|threads| {
             let running: Vec<_> = round
                 .iter()
                 .map(|project| threads.spawn(move || ask(Path::new(&project.path))))
@@ -571,6 +581,67 @@ pub fn summed(readings: &[Vec<SeatNumbers>]) -> Result<Vec<SeatNumbers>, String>
         .collect()
 }
 
+/// The person's decisions across every project's reading (t-62170): a
+/// decision's rows are kept under each project's own zo state (zo's shadow
+/// ledger), so each project's are added — by decision and by the version it
+/// asks with, a changed question never added to the old one — window by
+/// window as a seat's ([`WINDOW`]), and its last ask is the newest any
+/// reading lists. A reading from a zo older than the windows adds nothing.
+///
+/// # Errors
+/// A window the seats' reader refuses once summed.
+pub fn summed_decisions(readings: &[&[DecisionNumbers]]) -> Result<Vec<DecisionNumbers>, String> {
+    let mut order: Vec<(&str, Option<&str>)> = Vec::new();
+    for one in readings.iter().flat_map(|reading| reading.iter()) {
+        let key = (one.id.as_str(), one.definition.as_deref());
+        if !order.contains(&key) {
+            order.push(key);
+        }
+    }
+    order
+        .into_iter()
+        .map(|(id, definition)| {
+            let of: Vec<&DecisionNumbers> = readings
+                .iter()
+                .flat_map(|reading| reading.iter())
+                .filter(|one| one.id == id && one.definition.as_deref() == definition)
+                .collect();
+            let sum =
+                |pick: fn(&DecisionNumbers) -> Option<&crate::typesafe_settings::SeatWindow>| {
+                    let values = of
+                        .iter()
+                        .filter_map(|one| pick(one))
+                        .map(serde_json::to_value)
+                        .collect::<Result<Vec<Value>, _>>()
+                        .map_err(|error| error.to_string())?;
+                    if values.is_empty() {
+                        return Ok(None);
+                    }
+                    serde_json::from_value(window(&values.iter().collect::<Vec<_>>()))
+                        .map(Some)
+                        .map_err(|error| error.to_string())
+                };
+            let at = |one: &DecisionNumbers| {
+                one.latest
+                    .as_ref()
+                    .and_then(|latest| latest.get("at"))
+                    .and_then(Value::as_i64)
+            };
+            Ok(DecisionNumbers {
+                id: id.to_string(),
+                definition: definition.map(str::to_string),
+                today: sum(|one| one.today.as_ref())?,
+                week: sum(|one| one.week.as_ref())?,
+                latest: of
+                    .iter()
+                    .filter_map(|one| Some((at(one)?, *one)))
+                    .max_by_key(|(at, _)| *at)
+                    .and_then(|(_, one)| one.latest.clone()),
+            })
+        })
+        .collect()
+}
+
 /// One seat across every project's reading. The machine's rows are one set
 /// whichever project asked, so they are read once; a project's own rows are
 /// that project's, so each is added. One reading left is carried as it
@@ -810,6 +881,63 @@ mod tests {
             }
         }
         seat
+    }
+
+    /// One of the person's decisions as zo sends it: the week's asks that
+    /// handed its line, that the hour's bound refused, and every ask; its
+    /// last ask at the count of its asks.
+    fn decision(id: &str, week: (u64, u64, u64)) -> DecisionNumbers {
+        let (applied, hour_full, rows) = week;
+        let token = zerocode_core::jev::door::Refused::HourlyBudget.token();
+        let window = json!({
+            "rows": rows, "answered": rows - hour_full, "refused": hour_full, "applied": applied,
+            "failures": [{ "token": token, "rows": hour_full }],
+            "refusals": [{ "token": token, "rows": hour_full }],
+        });
+        serde_json::from_value(json!({
+            "id": id, "definition": "v1", "today": window, "week": window,
+            "latest": { "at": rows, "outcome": "answered" },
+        }))
+        .expect("zo's decision")
+    }
+
+    /// Every project's decisions add, decision by decision and version by
+    /// version; a zo that sent no windows adds nothing and says nothing, and
+    /// the last ask is the newest any project lists.
+    #[test]
+    fn each_projects_decisions_are_added_by_decision_and_version() {
+        let mut other_version = decision("d-1", (0, 0, 2));
+        other_version.definition = Some("v0".to_string());
+        let mut older_zo = decision("d-2", (0, 0, 0));
+        (older_zo.today, older_zo.week, older_zo.latest) = (None, None, None);
+        let first = [decision("d-1", (1, 1, 3)), older_zo.clone()];
+        let second = [decision("d-1", (2, 0, 5)), other_version];
+        let summed = summed_decisions(&[&first, &second]).expect("summed");
+        let said: Vec<(&str, Option<&str>)> = summed
+            .iter()
+            .map(|one| (one.id.as_str(), one.definition.as_deref()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("d-1", Some("v1")),
+                ("d-2", Some("v1")),
+                ("d-1", Some("v0"))
+            ]
+        );
+        let week = summed[0].week.as_ref().expect("a week");
+        assert_eq!((week.rows, week.applied, week.refused), (8, 3, 1));
+        assert_eq!(
+            week.failures.iter().map(|one| one.rows).sum::<usize>(),
+            1,
+            "the hour's bound counted once: {:?}",
+            week.failures
+        );
+        assert_eq!(
+            summed[0].latest.as_ref().map(|one| one["at"].clone()),
+            Some(json!(5))
+        );
+        assert_eq!(summed[1], older_zo, "not known is not zero");
     }
 
     fn reading(seats: &[Value]) -> Vec<SeatNumbers> {
@@ -1458,13 +1586,13 @@ mod tests {
         let machine = home.path().join("jev/notify-call.jsonl");
         let asked: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
         let with_records = Mutex::new(false);
-        let ask = |project: &Path| -> Result<Vec<SeatNumbers>, String> {
+        let ask = |project: &Path| -> Result<ZoSummary, String> {
             asked.lock().expect("the asks").push(project.to_path_buf());
             if project == broken {
                 return Err("zo exited 1".to_string());
             }
             let records = project == atlas || *with_records.lock().expect("the switch");
-            Ok(reading(&[
+            let seats = reading(&[
                 seat(
                     "routing",
                     records.then(|| own.to_str().expect("a path")),
@@ -1479,7 +1607,9 @@ mod tests {
                     false,
                     json!({}),
                 ),
-            ]))
+            ]);
+            let decisions = vec![decision("d-1", (u64::from(records), 1, 7))];
+            Ok(ZoSummary { seats, decisions })
         };
         let now_ms = crate::now_epoch_ms();
 
@@ -1530,6 +1660,16 @@ mod tests {
             "a project whose zo failed was counted"
         );
         assert!(!every.scope.recorded);
+        let decisions: Vec<(&str, Option<usize>)> = every
+            .decisions
+            .iter()
+            .map(|one| (one.id.as_str(), one.week.as_ref().map(|week| week.applied)))
+            .collect();
+        assert_eq!(
+            decisions,
+            [("d-1", Some(1))],
+            "the decisions counted with the seats"
+        );
         let routing = of(&every.seats, "routing");
         assert_eq!(routing.week.rows, 9);
         assert_eq!(

@@ -990,6 +990,9 @@ fn the_summary_names_each_decision_and_counts_its_versions_apart() {
         let named = (&one["id"], &one["name"], &one["mode"]);
         assert_eq!(named, (&json!(decision.id), &json!("Release notes"), &json!(JevMode::Shadow.key())), "{one}");
         assert_eq!((&one["definition"], &one["requestsWeek"]), (&json!(second), &json!(1)), "{one}");
+        // The table's own tally beside it: the asks, and how many handed the line.
+        assert_eq!((&one["week"]["rows"], &one["week"]["applied"], &one["today"]["rows"]), (&json!(1), &json!(0), &json!(1)), "{one}");
+        assert!(one["week"]["failures"].is_array(), "the unanswered asks by token: {one}");
         let earlier: Vec<(&Value, &Value)> = one["earlier"]
             .as_array()
             .expect("its earlier versions")

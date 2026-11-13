@@ -5037,10 +5037,57 @@ pub struct SeatControls {
     pub destructive_held: usize,
 }
 
+/// One of the person's own decisions as `zo jev summary --json` counts it
+/// (`customDecisions[]`, t-62170): the version it asks with now, that
+/// version's rows today and over the week by the counter the seats' table
+/// reads, and its last ask. The windows are absent from a zo older than them
+/// — not zero: a screen says it does not know rather than "never asked".
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionNumbers {
+    pub id: String,
+    #[serde(default)]
+    pub definition: Option<String>,
+    #[serde(default)]
+    pub today: Option<SeatWindow>,
+    #[serde(default)]
+    pub week: Option<SeatWindow>,
+    /// Its last ask, as zo lists a seat's recent ones.
+    #[serde(default)]
+    pub latest: Option<Value>,
+}
+
+/// Everything one `zo jev summary --json` said that the window reads: the
+/// seats, and the person's own decisions.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ZoSummary {
+    pub seats: Vec<SeatNumbers>,
+    pub decisions: Vec<DecisionNumbers>,
+}
+
 /// What `zo jev summary --json` said, or `None` when it printed nothing this
 /// reader understands — an older zo, or one that failed before it answered.
 #[must_use]
 pub fn read_summary(stdout: &[u8]) -> Option<Vec<SeatNumbers>> {
+    read_zo_summary(stdout).map(|said| said.seats)
+}
+
+/// [`read_summary`] and the person's decisions beside the seats: a zo that
+/// lists none, or a decision this reader does not understand, leaves that
+/// decision out and the seats as they are.
+#[must_use]
+pub fn read_zo_summary(stdout: &[u8]) -> Option<ZoSummary> {
     let value: Value = serde_json::from_slice(stdout).ok()?;
-    serde_json::from_value(value.get("seats")?.clone()).ok()
+    let seats = serde_json::from_value(value.get("seats")?.clone()).ok()?;
+    let decisions = value
+        .get("customDecisions")
+        .and_then(Value::as_array)
+        .map(|listed| {
+            listed
+                .iter()
+                .filter_map(|one| serde_json::from_value(one.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ZoSummary { seats, decisions })
 }

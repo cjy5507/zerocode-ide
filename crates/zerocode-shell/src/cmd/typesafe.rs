@@ -2,8 +2,8 @@
 use crate::api_routers::{self, Keychain, RouterRefusal};
 use crate::jev_scope;
 use crate::typesafe_settings::{
-    self, CustomDecisions, DayBudget, DecisionDraft, DecisionRefusal, DraftCheck, SeatNumbers,
-    SummonRowRefusal, TypeSafeCheck, TypeSafeSettings,
+    self, CustomDecisions, DayBudget, DecisionDraft, DecisionRefusal, DraftCheck, SummonRowRefusal,
+    TypeSafeCheck, TypeSafeSettings,
 };
 use tauri::State;
 
@@ -572,7 +572,7 @@ pub(crate) async fn jev_summary(
         if !bin.exists() {
             return Err(format!("zo not installed at {}", bin.display()));
         }
-        let ask = |project: &std::path::Path| -> Result<Vec<SeatNumbers>, String> {
+        let ask = |project: &std::path::Path| -> Result<typesafe_settings::ZoSummary, String> {
             let mut command = crate::proc::quiet_command(&bin);
             command
                 .args(typesafe_settings::ZO_JEV_SUMMARY_ARGS)
@@ -586,7 +586,7 @@ pub(crate) async fn jev_summary(
                     .arg(count.to_string());
             }
             let output = command.output().map_err(|error| error.to_string())?;
-            typesafe_settings::read_summary(&output.stdout).ok_or_else(|| {
+            typesafe_settings::read_zo_summary(&output.stdout).ok_or_else(|| {
                 format!(
                     "zo {} exited {}: {}",
                     typesafe_settings::ZO_JEV_SUMMARY_ARGS.join(" "),

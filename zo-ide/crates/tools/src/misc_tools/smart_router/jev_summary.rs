@@ -334,9 +334,14 @@ pub struct DecisionReport {
 pub struct VersionReport {
     /// The version: its definition's hash.
     pub definition: String,
-    /// Requests it sent today and over the week, retries included.
-    pub requests_today: u64,
-    pub requests_week: u64,
+    /// Its rows today and over the week, counted by the one counter every
+    /// seat's table is ([`summary::summarize_rows`]): the asks, the requests
+    /// they sent with retries, how many handed the decision's line
+    /// ([`summary::applied_of`]), and the asks that went unanswered by
+    /// outcome — the hour's bound among them — so the screen reads a
+    /// decision's row the way it reads a feature's.
+    pub today: SeatTally,
+    pub week: SeatTally,
     /// Its last request, when it made one.
     pub latest: Option<Decision>,
 }
@@ -379,8 +384,8 @@ fn custom_decisions_in(
                 let owned: Vec<Value> = held.iter().copied().cloned().collect();
                 VersionReport {
                     definition: definition.to_string(),
-                    requests_today: summary::summarize_rows(held.iter().copied(), today).requests,
-                    requests_week: summary::summarize_rows(held.iter().copied(), week).requests,
+                    today: summary::summarize_rows(held.iter().copied(), today),
+                    week: summary::summarize_rows(held.iter().copied(), week),
                     latest: recent::recent(&owned, 1).into_iter().next(),
                 }
             };
