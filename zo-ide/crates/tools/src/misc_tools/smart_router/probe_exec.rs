@@ -366,10 +366,10 @@ fn parked_ms_for(kind: api::ProviderKind) -> u64 {
 }
 
 /// The model the probe itself runs on: the fast tier of the provider the
-/// session is on ([`crate::fanout::fast_tier_model`], the pick the fold and
-/// the lessons make), or `None` where that provider has none of its own — a
-/// person's own provider, a name the catalog does not know, a provider whose
-/// catalog lists no fast tier.
+/// session is on ([`crate::fanout::fast_tier_model`], the pick the fold
+/// makes), or `None` where that provider has none of its own — a person's
+/// own provider whose `providers` row names no `fast_model`, a name the
+/// catalog does not know, a provider whose catalog lists no fast tier.
 ///
 /// The probe carries the person's words (a turn's) or a helper's task (a
 /// spawn's). Until v1.1.146 its model was the router's Fast-role pick over

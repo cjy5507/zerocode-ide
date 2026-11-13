@@ -16,9 +16,10 @@
 //! - **Only a fast tier that is the session's own.** The fold is worth its
 //!   request because a cheaper model of the same provider reads what the main
 //!   one then need not. A session whose provider has none — a person's own
-//!   endpoint, a local model, a name the catalog does not know — takes the
-//!   head+tail cut: its "fast model" would be a built-in provider's, and a
-//!   tool's whole output is not handed to an account the session is not on.
+//!   endpoint whose `providers` row names no `fast_model`, a local model, a
+//!   name the catalog does not know — takes the head+tail cut: its "fast
+//!   model" would be a built-in provider's, and a tool's whole output is not
+//!   handed to an account the session is not on.
 //! - **Verbatim or nothing.** Every kept line is checked against the source; a
 //!   line the source does not contain is dropped, and a reply with more than
 //!   [`MAX_UNVERIFIED_PERCENT`] of such lines is rejected wholesale.

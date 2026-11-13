@@ -2418,6 +2418,10 @@ pub struct CustomProviderUsability {
 pub struct ResolvedCustomProvider {
     pub connection: Option<judgment_provider::connections::Metadata>,
     pub models: Vec<String>,
+    /// The fast model the person named for this provider
+    /// (`fast_model`), in the casing [`Self::models`] declares it — `None`
+    /// when none is named, or the name is not one of this provider's models.
+    pub fast_model: Option<String>,
     pub requires_auth: bool,
     pub config: openai_compat::OpenAiCompatConfig,
     /// Optional operator-provided context window for every declared model
@@ -2448,6 +2452,9 @@ impl From<openai_compat::CustomProviderConfig> for ResolvedCustomProvider {
             }
             models.push(model.id.clone());
         }
+        let fast_model = custom.fast_model.as_deref().map(str::trim).and_then(|named| {
+            models.iter().find(|declared| declared.eq_ignore_ascii_case(named)).cloned()
+        });
         Self {
             context_window: custom.context_window.filter(|&value| value > 0),
             max_output_tokens: custom.max_output_tokens.filter(|&value| value > 0),
@@ -2456,6 +2463,7 @@ impl From<openai_compat::CustomProviderConfig> for ResolvedCustomProvider {
             config: custom.to_static_config(),
             connection: custom.connection,
             models,
+            fast_model,
             requires_auth: custom.requires_auth,
         }
     }
@@ -2617,6 +2625,10 @@ fn builtin_seed_providers() -> Vec<ResolvedCustomProvider> {
                 "deepseek-v4-pro".to_string(),
                 "deepseek-v4-flash".to_string(),
             ],
+            // Not named here: what a `DeepSeek` session is asked on its flash
+            // model would change every such session at once, unmeasured. A
+            // person names it in their own `providers` row.
+            fast_model: None,
             requires_auth: true,
             config: deepseek_seed_config(),
             context_window: None,
@@ -2797,6 +2809,26 @@ fn named_provider_ref(model: &str) -> Option<(Arc<ResolvedCustomProvider>, Strin
 #[must_use]
 pub fn format_provider_model_ref(provider: &str, model: &str) -> String {
     format!("{}/{}", provider.trim(), model.trim())
+}
+
+/// The fast model of the provider of the person's that serves
+/// `session_model` (`fast_model` in that provider's settings), by the name
+/// that is that provider's and no other's: `<provider>/<id>`.
+///
+/// `None` when no provider of the person's serves `session_model`, when that
+/// provider names no fast model, when the model it names is not one of its
+/// own — and when the name would not read back as that same provider entry:
+/// a like-named provider declared before this one that serves the id too
+/// would take it. The bare id is never the name: one the shipped registry
+/// names stays first-party, and one the person also wrote into the model
+/// catalog is the catalog's.
+#[must_use]
+pub fn own_fast_model_ref(session_model: &str) -> Option<String> {
+    let provider = custom_provider_for_model(&resolve_model_alias(session_model))?;
+    let named = format_provider_model_ref(provider.config.provider_name, provider.fast_model.as_deref()?);
+    custom_provider_for_model(&resolve_model_alias(&named))
+        .is_some_and(|back| Arc::ptr_eq(&back, &provider))
+        .then_some(named)
 }
 
 /// Wire model id to send to the remote API for `model`.
@@ -7445,6 +7477,63 @@ mod tests {
         assert_eq!(max_tokens_for_model("grok-4.5"), 32_000);
 
         super::refresh_custom_providers_from_json("[]").expect("restore empty custom providers");
+    }
+
+    /// A provider's fast model goes by the one name that is that provider's
+    /// — `<provider>/<id>`, in the casing its `models` lists — whatever the id
+    /// is spelled like, and by none where the entry names no fast model,
+    /// names one it does not list, or shares both its name and that id with
+    /// an entry declared before it.
+    #[test]
+    fn a_providers_fast_model_goes_by_the_name_that_is_that_providers() {
+        let _lock = crate::test_env_lock();
+        let shipped = super::builtin_provider_catalog()
+            .iter()
+            .find(|entry| entry.provider == ProviderKind::Anthropic)
+            .expect("an Anthropic row ships")
+            .canonical_model_id;
+        let entry = |name: &str, models: &str, fast: &str| {
+            format!(r#"{{"name":"{name}","base_url":"https://{name}.invalid/v1","requires_auth":false,"models":[{models}]{fast}}}"#)
+        };
+        super::refresh_custom_providers_from_json(&format!(
+            "[{}]",
+            [
+                entry("zqplain", r#""zq-plain-big","zq-small""#, r#","fast_model":" ZQ-Small ""#),
+                entry("zqshipped", &format!(r#""zq-shipped-big","{shipped}""#), &format!(r#","fast_model":"{shipped}""#)),
+                entry("zqstray", r#""zq-stray-big""#, r#","fast_model":"zq-not-listed""#),
+                entry("zqnone", r#""zq-none-big""#, ""),
+                entry("zqtwin", r#""zq-twin-small""#, ""),
+                entry("zqtwin", r#""zq-twin-big","zq-twin-small""#, r#","fast_model":"zq-twin-small""#),
+            ]
+            .join(",")
+        ))
+        .expect("custom providers");
+
+        let named = |session: &str| super::own_fast_model_ref(session);
+        assert_eq!(named("zq-plain-big").as_deref(), Some("zqplain/zq-small"));
+        assert_eq!(named("zqplain/zq-plain-big").as_deref(), Some("zqplain/zq-small"));
+        assert_eq!(named("zq-shipped-big"), Some(format!("zqshipped/{shipped}")));
+        assert_eq!(named("zq-stray-big"), None, "a model the entry does not list");
+        assert_eq!(named("zq-none-big"), None, "no fast model named");
+        assert_eq!(named("zq-twin-big"), None, "the name is the like-named entry's declared first");
+        assert_eq!(named("zq-model-nobody-serves"), None);
+        assert_eq!(named(shipped), None, "a first-party id is served by no provider of the person's");
+
+        // A `fast_model` that is not a model id names none, and costs the
+        // person nothing else the array declares.
+        for not_an_id in ["7", "true", r#"["zq-small"]"#, r#"{"id":"zq-small"}"#, "null"] {
+            super::refresh_custom_providers_from_json(&format!(
+                "[{},{}]",
+                entry("zqplain", r#""zq-plain-big","zq-small""#, &format!(r#","fast_model":{not_an_id}"#)),
+                entry("zqbeside", r#""zq-beside-big","zq-beside-small""#, r#","fast_model":"zq-beside-small""#),
+            ))
+            .unwrap_or_else(|error| panic!("`{not_an_id}` cost the whole array: {error}"));
+            assert!(super::custom_provider_for_model("zq-plain-big").is_some(), "`{not_an_id}`: the provider stands");
+            assert_eq!(named("zq-plain-big"), None, "`{not_an_id}`");
+            assert_eq!(named("zq-beside-big").as_deref(), Some("zqbeside/zq-beside-small"), "`{not_an_id}`");
+        }
+
+        super::refresh_custom_providers_from_json("[]").expect("clear custom providers");
     }
 
     #[test]

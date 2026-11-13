@@ -8,10 +8,11 @@
 //!
 //! It hands over what the session holds — a tool's whole output — so there
 //! is one way in, and it names a model only where the provider the session
-//! runs on has a fast tier of its own. A session on a person's own endpoint,
-//! on a local model, or on a name the catalog does not know has none, and is
-//! asked nothing: its "fast model" would be a built-in provider's, on that
-//! provider's account.
+//! runs on has a fast tier of its own. A session on a person's own endpoint
+//! has the model that endpoint's `providers` row names (`fast_model`). One
+//! whose row names none, on a local model, or on a name the catalog does not
+//! know has none, and is asked nothing: its "fast model" would be a built-in
+//! provider's, on that provider's account.
 //!
 //! Until v1.1.148 a second caller came this way: a pass that asked what the
 //! person's words in a session teach (`dreamLessons`). It was taken out.

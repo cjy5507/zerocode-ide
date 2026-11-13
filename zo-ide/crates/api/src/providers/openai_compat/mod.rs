@@ -290,6 +290,15 @@ pub struct CustomProviderConfig {
     /// carrying that model's own limits (see [`CustomModel`]).
     #[serde(default)]
     pub models: Vec<CustomModel>,
+    /// The model of this provider's own that zo's small questions go to, for
+    /// a session this provider serves: the fold of an over-cap tool result,
+    /// the split of a parallel task, the difficulty probe. One of
+    /// [`Self::models`], by its id. Unset (the default), such a session is
+    /// asked nothing at all — the fast model zo would otherwise pick is a
+    /// built-in provider's, on that provider's account. A value that is not
+    /// a model id names none ([`fast_model_or_none`]).
+    #[serde(default, deserialize_with = "fast_model_or_none")]
+    pub fast_model: Option<String>,
     /// Whether a key is mandatory. `true` (the default) errors clearly when the
     /// `auth_env` var is unset; `false` lets a keyless self-host build.
     #[serde(default = "default_requires_auth")]
@@ -351,6 +360,30 @@ pub struct CustomProviderConfig {
     /// default) for endpoints that would 400 on the unknown field.
     #[serde(default)]
     pub supports_reasoning_effort: bool,
+}
+
+/// A provider's `fast_model` as a person may have written it: one model id,
+/// or nothing. Anything else — a number, a flag, a list — names no model:
+/// it is dropped, with one line said about it, and the provider stands as if
+/// the key were not there. The array's other keys fail the whole array when
+/// they are the wrong shape; a key added for a convenience does not get to
+/// cost a person every provider they declared.
+fn fast_model_or_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let shape = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(id) => return Ok(Some(id)),
+        serde_json::Value::Null => return Ok(None),
+        serde_json::Value::Bool(_) => "true or false",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::Array(_) => "a list",
+        serde_json::Value::Object(_) => "an object",
+    };
+    // The shape and not the value: what a person put under a key that takes
+    // none of it is not this line's to show.
+    eprintln!("[zo] a provider's `fast_model` is one model id of its own, in quotes; {shape} names none and is not used");
+    Ok(None)
 }
 
 /// One model's own limits, where it states them; `None` defers to the
