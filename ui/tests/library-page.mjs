@@ -206,7 +206,11 @@ export async function testLibraryPage(browser, origin, ok) {
           marked: buttons.every((button) => button.hasAttribute("data-person-only")),
           sent: window.__LIB_CALLS__.slice(calls),
         };
-      } finally { record.pick = before; }
+      } finally {
+        record.pick = before;
+        v.querySelector("#lib-tab-mcp").click();
+        await window.__PAINTED__();
+      }
     })()`);
     ok("a copy in an agent's folder that reads the store offers 「저장소 것으로 맞추기」 for that agent alone, marked the person's",
       JSON.stringify(align.words) === JSON.stringify(["저장소 것으로 맞추기 · Gemini CLI"]) && align.marked, JSON.stringify(align));
