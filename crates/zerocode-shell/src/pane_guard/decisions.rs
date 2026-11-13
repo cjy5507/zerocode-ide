@@ -8,8 +8,10 @@
 //! own after the hook was answered, and a decision never blocks a command,
 //! changes a tool's input or output, or answers a permission. All one may do
 //! is hand its one line ([`custom::line`]), and only while it stands on and
-//! its answer earns it. A line waits for the pane's next turn's brief and is
-//! taken once, by the launch that earned it.
+//! its answer earns it. A line waits for the pane's next turn's brief — and,
+//! from a decision before a command, for the pane's next tool boundary
+//! first ([`take_for_the_tool_boundary`]) — and is taken once, by the launch
+//! that earned it.
 //!
 //! What asks is read off a snapshot ([`Decisions`]) the window refreshes
 //! when zo's settings file, the decisions' store or its index moves, so a
@@ -321,10 +323,12 @@ pub(super) fn at_turn_end(
 
 /// Whether a line a decision at `point` earns can reach `agent` at all: the
 /// next turn's brief, where its prompt hook takes context
-/// ([`hook_guard::turn_start_road`]). With none, its answer is recorded and
-/// never handed.
-fn has_a_road(agent: AgentKind, _point: Point) -> bool {
+/// ([`hook_guard::turn_start_road`]) — or, before a command, its next tool
+/// boundary first. With neither, its answer is recorded and never handed.
+fn has_a_road(agent: AgentKind, point: Point) -> bool {
     hook_guard::turn_start_road(agent).yes()
+        || (point == Point::BeforeCommand
+            && zerocode_core::hook_continuation::tool_boundary_context(agent).is_some())
 }
 
 /// Ask what `asked` names for `pane`, write each decision's row in the
@@ -699,6 +703,40 @@ pub(super) fn brief_in(
         ask.session_id.as_deref(),
         true,
         room,
+    )
+}
+
+/// The lines a command's decisions handed the pane `pane_key` names, for
+/// the reply to its agent's tool boundary
+/// ([`zerocode_core::hook_continuation::tool_boundary_context`]): taken now,
+/// never waited for, within the brief's cap. What a turn's end offered waits
+/// for the next turn's brief.
+pub(crate) fn take_for_the_tool_boundary(pane_key: &str, launch: &str) -> Option<String> {
+    boundary_in(
+        &GUARDS,
+        &STANDING.decided(),
+        &Wire::of_this_machine(),
+        pane_key,
+        launch,
+    )
+}
+
+pub(super) fn boundary_in(
+    guards: &Mutex<Guards>,
+    decided: &Decided,
+    wire: &Wire,
+    pane_key: &str,
+    launch: &str,
+) -> Option<String> {
+    take(
+        guards,
+        decided,
+        wire,
+        pane_key,
+        launch,
+        None,
+        false,
+        zerocode_hookd::TURN_BRIEF_CHAR_CAP,
     )
 }
 

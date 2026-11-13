@@ -1279,6 +1279,16 @@ impl zerocode_hookd::TurnBrief for PaneBrief {
     }
 }
 
+/// The window's answer to an agent's tool boundary, installed on the bridge:
+/// the lines its person's decisions earned before a command (t-106308).
+pub(crate) struct PaneBoundaryLines;
+
+impl zerocode_hookd::BoundaryLines for PaneBoundaryLines {
+    fn take(&self, pane_key: &str, launch_token: &str) -> Option<String> {
+        decisions::take_for_the_tool_boundary(pane_key, launch_token)
+    }
+}
+
 /// Whether `term`'s pane holds a worker the window summoned, its dispatch
 /// still open — read off the board's snapshot of the ledger, which takes no
 /// lock the ledger's actor holds and reads no file.

@@ -591,6 +591,10 @@ pub struct BridgeState {
     /// [`pointer_mailbox::PointerMailbox`]. `None` until the window installs
     /// one, and `None` is a bridge that simply never answers with a pointer.
     pointers: Option<Arc<dyn pointer_mailbox::PointerMailbox>>,
+    /// Where the lines a person's decisions earned before a command wait for
+    /// the agent's next tool boundary — see [`BoundaryLines`]. `None` until
+    /// the window installs one.
+    boundary_lines: Option<Arc<dyn BoundaryLines>>,
     /// The hook posts tried again, answered once ([`replays`]).
     replays: Arc<std::sync::Mutex<replays::Replays>>,
     /// Where a hook delivery that needed more than one try is written down
@@ -814,6 +818,22 @@ pub struct TurnBriefAsk {
     pub wall: std::time::Duration,
 }
 
+/// The lines a person's own decisions earned before a pane's shell command
+/// (t-106308), handed at the agent's next tool boundary
+/// ([`zerocode_core::hook_continuation::tool_boundary_context`]) as context
+/// composed with whatever else that knock is owed — never instead of it.
+///
+/// The bridge takes lines that are already waiting and never waits for one:
+/// nothing is added to the time the reply takes. Taking consumes, so the
+/// window checks `launch_token` as [`pointer_mailbox::PointerMailbox::take`]
+/// does — an agent of an earlier launch of a reused pane must not swallow
+/// the lines of the one living there now. A reply the script threw away
+/// loses the lines it carried: at most once, not exactly once. `None` says
+/// nothing, and the reply is what it was without this trait.
+pub trait BoundaryLines: Send + Sync {
+    fn take(&self, pane_key: &str, launch_token: &str) -> Option<String>;
+}
+
 /// `zerocode-find`, answered by the window (t-14869): the files of the pane's
 /// project most likely involved in what the agent is about to change or
 /// debug — the bridge only authenticates, reads the argv and forwards. The
@@ -906,6 +926,14 @@ impl BridgeState {
         self
     }
 
+    /// Install where the lines a person's decisions earned before a command
+    /// wait for the agent's next tool boundary ([`BoundaryLines`]).
+    #[must_use]
+    pub fn with_boundary_lines(mut self, lines: Arc<dyn BoundaryLines>) -> Self {
+        self.boundary_lines = Some(lines);
+        self
+    }
+
     /// Install where a hook delivery that needed more than one try is
     /// written down (t-78634): one line per post again, with the try and the
     /// curl exits before it, so the posts a slow bridge lost can be counted.
@@ -958,6 +986,7 @@ impl BridgeState {
                 finder: None,
                 artifacts: None,
                 pointers: None,
+                boundary_lines: None,
                 replays: Arc::new(std::sync::Mutex::new(replays::Replays::default())),
                 delivery_notes: None,
                 kill_witness: None,
@@ -1954,7 +1983,11 @@ async fn answer_hook(
         Some(PointerAnswer::Context { event_name, text }) => Some((event_name, text)),
         _ => None,
     };
-    match compose_additional_context(additional_context, knowledge, brief, pointer) {
+    // The decisions' lines, taken only now — after the envelope found its
+    // consumer and no refusal or continuation answers this knock whole — and
+    // only at the agent's tool boundary.
+    let decided = boundary_lines(&state, &pane_key, &knock);
+    match compose_additional_context(additional_context, knowledge, brief, decided, pointer) {
         Some((event_name, context)) => replays::HookAnswer::Json(
             if wants_receipt {
                 StatusCode::OK
@@ -2065,6 +2098,24 @@ fn pointer_reply(
     })
 }
 
+/// The lines waiting for this knock, when it is its agent's tool boundary:
+/// taken from the window's [`BoundaryLines`], within a brief's cap.
+fn boundary_lines(
+    state: &BridgeState,
+    pane_key: &str,
+    knock: &PointerKnock,
+) -> Option<(&'static str, String)> {
+    let source = state.boundary_lines.as_ref()?;
+    let boundary = zerocode_core::hook_continuation::tool_boundary_context(knock.agent)?;
+    if normalized_hook_event(&knock.event) != normalized_hook_event(boundary.event) {
+        return None;
+    }
+    source
+        .take(pane_key, &knock.launch_token)
+        .filter(|text| !text.trim().is_empty() && text.chars().count() <= TURN_BRIEF_CHAR_CAP)
+        .map(|text| (boundary.event, text))
+}
+
 /// One spelling for an event name, so `Stop`, `stop` and `stop_hook` are the
 /// same knock. The same normalisation the context road already uses.
 fn normalized_hook_event(event: &str) -> String {
@@ -2078,13 +2129,15 @@ fn normalized_hook_event(event: &str) -> String {
 /// One `additionalContext` out of the things a prompt hook may have to say:
 /// the orchestration contract (once per model context), the second brain's
 /// block (whenever the vault has pages for the prompt) and the turn's brief
-/// (whenever a seat acting for the pane has something to say, t-14869). Any
-/// alone is the whole answer; together they stand a blank line apart, in
-/// that order.
+/// (whenever a seat acting for the pane has something to say, t-14869), the
+/// lines a person's decisions earned before a command (at a tool boundary,
+/// t-106308) and the pointer. Any alone is the whole answer; together they
+/// stand a blank line apart, in that order.
 fn compose_additional_context(
     selection: Option<orchestration_contract::ContextReply>,
     knowledge: Option<(String, String)>,
     brief: Option<(String, String)>,
+    decided: Option<(&'static str, String)>,
     pointer: Option<(&'static str, String)>,
 ) -> Option<(String, String)> {
     let mut event_name = selection.as_ref().map(|reply| reply.event_name.clone());
@@ -2107,10 +2160,11 @@ fn compose_additional_context(
      * A tool boundary is a knock the contract and the vault never answer, so
      * a reply that inherited a prompt event's name there would be addressed
      * to an event that is not happening. */
-    let event_name = match (event_name, &pointer) {
-        (_, Some((named, _))) => Some((*named).to_string()),
-        (named, None) => named,
+    let event_name = match (event_name, &decided, &pointer) {
+        (_, _, Some((named, _))) | (_, Some((named, _)), None) => Some((*named).to_string()),
+        (named, None, None) => named,
     };
+    blocks.extend(decided.map(|(_, text)| text));
     blocks.extend(pointer.map(|(_, text)| text));
     match (event_name, blocks.is_empty()) {
         (Some(event_name), false) => Some((event_name, blocks.join("\n\n"))),
@@ -3074,15 +3128,19 @@ mod prompt_knowledge_tests {
     /// agent for the rest of the session.
     #[test]
     fn the_contract_the_block_and_the_pointer_share_one_additional_context() {
-        assert_eq!(compose_additional_context(None, None, None, None), None);
         assert_eq!(
-            compose_additional_context(Some(contract()), None, None, None),
+            compose_additional_context(None, None, None, None, None),
+            None
+        );
+        assert_eq!(
+            compose_additional_context(Some(contract()), None, None, None, None),
             Some(("UserPromptSubmit".to_string(), "contract".to_string()))
         );
         assert_eq!(
             compose_additional_context(
                 None,
                 Some(("UserPromptSubmit".to_string(), "## block".to_string())),
+                None,
                 None,
                 None
             ),
@@ -3092,6 +3150,7 @@ mod prompt_knowledge_tests {
             compose_additional_context(
                 Some(contract()),
                 Some(("UserPromptSubmit".to_string(), "## block".to_string())),
+                None,
                 None,
                 None
             ),
@@ -3106,6 +3165,7 @@ mod prompt_knowledge_tests {
                 None,
                 None,
                 None,
+                None,
                 Some(("SessionStart", "mail".to_string()))
             ),
             Some(("SessionStart".to_string(), "mail".to_string()))
@@ -3115,6 +3175,7 @@ mod prompt_knowledge_tests {
             compose_additional_context(
                 Some(contract()),
                 Some(("UserPromptSubmit".to_string(), "## block".to_string())),
+                None,
                 None,
                 Some(("UserPromptSubmit", "mail".to_string()))
             ),
@@ -3130,6 +3191,7 @@ mod prompt_knowledge_tests {
                 Some(contract()),
                 Some(("UserPromptSubmit".to_string(), "## block".to_string())),
                 Some(("UserPromptSubmit".to_string(), "brief".to_string())),
+                None,
                 Some(("UserPromptSubmit", "mail".to_string()))
             ),
             Some((
@@ -3142,9 +3204,38 @@ mod prompt_knowledge_tests {
                 None,
                 None,
                 Some(("UserPromptSubmit".to_string(), "brief".to_string())),
+                None,
                 None
             ),
             Some(("UserPromptSubmit".to_string(), "brief".to_string()))
+        );
+        // A decision's lines at a tool boundary stand before the pointer and
+        // name the boundary's event; alone they are the whole answer.
+        assert_eq!(
+            compose_additional_context(
+                None,
+                None,
+                None,
+                Some((
+                    "PostToolUse",
+                    "「Visible」 판단: yes (확신 90%)".to_string()
+                )),
+                Some(("PostToolUse", "mail".to_string()))
+            ),
+            Some((
+                "PostToolUse".to_string(),
+                "「Visible」 판단: yes (확신 90%)\n\nmail".to_string()
+            ))
+        );
+        assert_eq!(
+            compose_additional_context(
+                None,
+                None,
+                None,
+                Some(("PostToolUse", "line".to_string())),
+                None
+            ),
+            Some(("PostToolUse".to_string(), "line".to_string()))
         );
     }
 }

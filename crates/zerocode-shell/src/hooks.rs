@@ -275,6 +275,7 @@ pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
     // `zerocode-find` (t-14869).
     let state = state
         .with_turn_brief(std::sync::Arc::new(crate::pane_guard::PaneBrief))
+        .with_boundary_lines(std::sync::Arc::new(crate::pane_guard::PaneBoundaryLines))
         .with_file_find(std::sync::Arc::new(crate::pane_guard::PaneFind));
     let state = state.with_pointer_mailbox(crate::orchestration_pointer_mailbox::mailbox());
     // A pane's command that would signal the window or another pane is

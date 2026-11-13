@@ -1679,6 +1679,123 @@ async fn a_working_agent_is_told_at_its_next_tool_boundary() {
     );
 }
 
+/// The lines a person's decisions earned before a command, as the window
+/// keeps them for one pane: what it hands, and every knock that asked.
+#[derive(Default)]
+struct WaitingLines {
+    lines: std::sync::Mutex<Option<String>>,
+    knocks: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl WaitingLines {
+    fn holding(line: &str) -> Arc<Self> {
+        Arc::new(Self {
+            lines: std::sync::Mutex::new(Some(line.to_string())),
+            knocks: std::sync::Mutex::default(),
+        })
+    }
+
+    fn knocks(&self) -> Vec<(String, String)> {
+        self.knocks.lock().expect("the knocks").clone()
+    }
+}
+
+impl zerocode_hookd::BoundaryLines for WaitingLines {
+    fn take(&self, pane_key: &str, launch_token: &str) -> Option<String> {
+        self.knocks
+            .lock()
+            .expect("the knocks")
+            .push((pane_key.to_string(), launch_token.to_string()));
+        self.lines.lock().expect("the lines").take()
+    }
+}
+
+/// A decision's line rides the agent's next tool boundary (t-106308): as
+/// context and nothing else, composed with the pointer the same knock is
+/// owed — the pointer last — and taken with the knock's own launch. With
+/// nothing waiting, the reply is what it always was.
+#[tokio::test]
+async fn a_decisions_line_rides_the_tool_boundary_beside_the_pointer() {
+    const LINE: &str = "「Visible」 판단: yes (확신 90%)";
+    let lines = WaitingLines::holding(LINE);
+    let mailbox = StandingPointer::holding(2);
+    let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(
+        state
+            .with_pointer_mailbox(mailbox.clone())
+            .with_boundary_lines(lines.clone()),
+    );
+    let response = service
+        .clone()
+        .oneshot(post_json(
+            "/hook/claude",
+            Some(TOKEN),
+            &tool_body("term-21"),
+        ))
+        .await
+        .expect("the tool hook");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let reply = reply_of(response).await;
+    assert_eq!(reply["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert_eq!(
+        reply["hookSpecificOutput"]["additionalContext"],
+        format!(
+            "{LINE}\n\n{}",
+            zerocode_core::orchestration::pointer_text(2)
+        )
+    );
+    for forbidden in [
+        "decision",
+        "permissionDecision",
+        "updatedToolOutput",
+        "continue",
+    ] {
+        assert!(
+            reply.get(forbidden).is_none() && reply["hookSpecificOutput"].get(forbidden).is_none(),
+            "a decision's line reached for {forbidden}: {reply}"
+        );
+    }
+    assert_eq!(
+        lines.knocks(),
+        [("term-21".to_string(), "launch-7".to_string())]
+    );
+    let again = service
+        .clone()
+        .oneshot(post_json(
+            "/hook/claude",
+            Some(TOKEN),
+            &tool_body("term-22"),
+        ))
+        .await
+        .expect("the tool hook");
+    assert_eq!(again.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        reply_of(again).await,
+        serde_json::Value::Null,
+        "nothing waiting, nothing said"
+    );
+}
+
+/// A turn's end, and a provider with no measured tool boundary, take no line.
+#[tokio::test]
+async fn a_decisions_line_waits_out_every_knock_but_the_tool_boundary() {
+    let lines = WaitingLines::holding("line");
+    let (state, _events, _teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state.with_boundary_lines(lines.clone()));
+    for (agent, body) in [
+        ("claude", stop_body("term-23", false)),
+        ("codex", tool_body("term-24")),
+    ] {
+        let response = service
+            .clone()
+            .oneshot(post_json(&format!("/hook/{agent}"), Some(TOKEN), &body))
+            .await
+            .expect("the hook");
+        assert_eq!(reply_of(response).await, serde_json::Value::Null, "{agent}");
+    }
+    assert!(lines.knocks().is_empty());
+}
+
 /// A provider nobody measured gets no context at a tool boundary either.
 #[tokio::test]
 async fn an_unmeasured_provider_is_never_given_a_tool_boundary_pointer() {

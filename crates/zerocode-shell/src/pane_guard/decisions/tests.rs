@@ -921,3 +921,60 @@ fn the_rows_land_in_the_file_zo_writes_for_the_folder() {
         Some(zo_writes)
     );
 }
+
+/// Before a command, a line waits for the agent's next tool boundary: taken
+/// there once — not again, not at the next turn's brief, and not by another
+/// launch of the pane.
+#[test]
+fn a_commands_line_is_taken_at_the_next_tool_boundary_once() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Visible", Point::BeforeCommand);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+    );
+    let standing = home.standing();
+    let guards = fresh_guards();
+    noted(
+        guards,
+        &home,
+        &standing,
+        vec![about(Some("call-1"), "rm -rf build", project.path())],
+    );
+    let key = crate::hooks::pane_key_of(7);
+    let decided = standing.decided();
+    assert!(boundary_in(guards, &decided, &home.wire, &key, "launch-2").is_none());
+    assert_eq!(
+        boundary_in(guards, &decided, &home.wire, &key, LAUNCH),
+        Some(custom::line("Visible", "yes", 0.9))
+    );
+    assert!(boundary_in(guards, &decided, &home.wire, &key, LAUNCH).is_none());
+    assert!(brief(guards, &home, &standing, LAUNCH).is_none());
+}
+
+/// What a turn's end offered waits for the next turn's brief: a tool
+/// boundary in between takes none of it.
+#[test]
+fn a_turns_offer_is_not_taken_at_a_tool_boundary() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Done", Point::TurnEnd);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+    );
+    let standing = home.standing();
+    let guards = fresh_guards();
+    noted(guards, &home, &standing, vec![turn_ended(false)]);
+    let key = crate::hooks::pane_key_of(7);
+    assert!(boundary_in(guards, &standing.decided(), &home.wire, &key, LAUNCH).is_none());
+    assert_eq!(
+        brief(guards, &home, &standing, LAUNCH),
+        Some(custom::line("Done", "yes", 0.9))
+    );
+}
