@@ -548,6 +548,99 @@ export async function testSidebarFlicker({ browser, origin, ok, faults }) {
       JSON.stringify({ events: titles.events, replaced: titles.rows.replacedKeys, moved: titles.rows.movedKeys,
         top: titles.top.slice(0, 6) }),
     );
+
+    /* ⑦ The conversation list heads the column above the branch list: a turn's row leaving the open 「작업 중」 for the
+     * folded 「오늘 끝남」 moved the whole branch list 43px on every turn. The list holds its height across turns,
+     * grows for a new conversation, and gives the room back on the person's hand or once still with the pointer away. */
+    await page.mouse.move(1200, 700);
+    const held = await page.evaluate(async () => {
+      const chat = document.getElementById("chat-list");
+      const scroller = document.getElementById("sidebar-scroll");
+      const at = () => Math.round(scroller.getBoundingClientRect().top);
+      const head = () => chat.querySelector('.chat-group[data-group="working"] .chat-group-head');
+      const flip = async (term, state) => {
+        const next = { ...window.__PANES__.get(term), state };
+        window.__PANES__.set(term, next);
+        window.__TELL__("hook:agent", next);
+        await window.__SETTLED__();
+      };
+      // From the list's own height: the person folds 「작업 중」 and opens it again.
+      head().click();
+      head().click();
+      await window.__SETTLED__();
+      const turning = [...window.__PANES__.values()].filter((pane) => pane.state === "working" && pane.term < 9100)
+        .slice(0, 3).map((pane) => pane.term);
+      const start = at();
+      const tops = [];
+      for (const term of turning) {
+        await flip(term, "done");
+        tops.push(at());
+      }
+      const room = chat.style.minHeight;
+      const armed = typeof settleTimers !== "undefined" && settleTimers.has("chat-list-held");
+      for (const term of turning) {
+        await flip(term, "working");
+        tops.push(at());
+      }
+      const turns = { start, tops, moves: tops.filter((top) => top !== start).length, room, armed };
+      // A new conversation, while the list holds room for three hidden rows: the three come back into their room,
+      // and the new one grows the list — once.
+      for (const term of turning) await flip(term, "done");
+      const beforeNew = at();
+      for (const term of turning) await flip(term, "working");
+      const backIn = at();
+      const term = 9301;
+      tabs.push({ kind: "term", worktree: "/z/wt-09", id: `tab-${term}`, layout: { type: "leaf", term } });
+      paneAgents.set(term, "claude");
+      const pane = { term, state: "working", agent: "claude", session: `s-${term}`, model: "claude-opus-5-5" };
+      window.__PANES__.set(term, pane);
+      window.__TELL__("hook:agent", pane);
+      await window.__SETTLED__();
+      const grown = { beforeNew, backIn, after: at() };
+      // The person folds a group: the room is given back at once.
+      await flip(turning[0], "done");
+      const roomBeforeFold = chat.style.minHeight;
+      head().click();
+      const roomAfterFold = chat.style.minHeight;
+      head().click();
+      await window.__SETTLED__();
+      // Held again for the still release below.
+      await flip(turning[1], "done");
+      return { turns, grown, fold: { roomBeforeFold, roomAfterFold }, stillRoom: chat.style.minHeight,
+        stillTop: at(), released: typeof releaseChatListHeldAway === "function" };
+    });
+    // Still: the release waits while the pointer is over the sidebar and comes once it leaves.
+    await page.mouse.move(120, 700);
+    const hovered = await page.evaluate(() => {
+      if (typeof releaseChatListHeldAway === "function") releaseChatListHeldAway();
+      return document.getElementById("chat-list").style.minHeight;
+    });
+    await page.mouse.move(1200, 700);
+    const away = await page.evaluate(async () => {
+      await window.__SETTLED__();
+      return { room: document.getElementById("chat-list").style.minHeight,
+        top: Math.round(document.getElementById("sidebar-scroll").getBoundingClientRect().top) };
+    });
+    ok(
+      "⑦a an agent ending its turn and starting the next moves the branch list not once — the conversation list keeps its height and the hidden row's room waits for it",
+      held.turns.tops.length === 6 && held.turns.moves === 0 && held.turns.room !== "" && held.turns.armed,
+      JSON.stringify(held.turns),
+    );
+    ok(
+      "⑦b a new conversation grows the list at once — the rows that came back take their room without a move, the new one moves it once",
+      held.grown.backIn === held.grown.beforeNew && held.grown.after > held.grown.backIn,
+      JSON.stringify(held.grown),
+    );
+    ok(
+      "⑦c the person folding a group gives the held room back at once",
+      held.fold.roomBeforeFold !== "" && held.fold.roomAfterFold === "",
+      JSON.stringify(held.fold),
+    );
+    ok(
+      "⑦d once still, the room is given back only when the pointer has left the sidebar — then in one move",
+      held.released && held.stillRoom !== "" && hovered === held.stillRoom && away.room === "" && away.top !== held.stillTop,
+      JSON.stringify({ stillRoom: held.stillRoom, hovered, away, stillTop: held.stillTop }),
+    );
   } finally {
     await page.close();
   }
