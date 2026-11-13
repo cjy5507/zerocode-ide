@@ -405,7 +405,7 @@ fn oauth_config_for_client(client_id: String) -> OAuthConfig {
 /// else the built-in Antigravity client. The client secret is not needed to
 /// build the authorize URL (PKCE covers the redirect); it is sent only at the
 /// token endpoint by [`exchange_code`]/[`refresh_tokens`]. A build with no
-/// built-in client and no override answers [`NO_BUILT_IN_CLIENT`] here, before
+/// built-in client and no override answers `NO_BUILT_IN_CLIENT` here, before
 /// a person is sent to a consent screen whose code could not be exchanged.
 pub fn oauth_config() -> Result<OAuthConfig, ApiError> {
     let (client_id, _) = oauth_client()?;
