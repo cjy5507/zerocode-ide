@@ -296,7 +296,7 @@ pub fn record_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
 /// bound zo keeps on it ([`zerocode_core::jev::journal::LEDGER_MAX_BYTES`]):
 /// past it, the ledger keeps its newer half before the rows go in — whoever
 /// writes, the ledger is cut the same.
-pub fn record_bounded_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
+pub(crate) fn record_bounded_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
     record(
         seat,
         ledger,
@@ -755,14 +755,14 @@ pub struct Wire {
 /// ([`door::Hour`]): the bound every decision shares is read from the
 /// settings the door reads, as zo's door reads it.
 #[derive(Debug, Clone, Copy)]
-pub struct DecisionHour<'a> {
+pub(crate) struct DecisionHour<'a> {
     /// The decision's own hour file ([`count::hour_path`] under its id).
-    pub decision: &'a Path,
+    pub(crate) decision: &'a Path,
     /// The most it sends in an hour.
-    pub decision_most: u64,
+    pub(crate) decision_most: u64,
     /// The hour file every decision shares
     /// ([`zerocode_core::jev::custom::EVERY_DECISION`]).
-    pub every: &'a Path,
+    pub(crate) every: &'a Path,
 }
 
 impl<'a> DecisionHour<'a> {
@@ -997,9 +997,14 @@ impl Wire {
     /// Whether current global settings still authorize effects in this workspace.
     #[must_use]
     pub(crate) fn permits_workspace_now(&self, workspace: Option<&Path>) -> bool {
+        workspace.is_some_and(self.permits_workspaces_now())
+    }
+
+    /// [`Self::permits_workspace_now`] for any number of folders, the settings
+    /// read once now.
+    pub(crate) fn permits_workspaces_now(&self) -> impl Fn(&Path) -> bool {
         let settings = JevSettings::from_root(&self.settings_root()).resolved();
-        settings.enabled
-            && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
+        move |path| settings.enabled && settings.consents(&door::resolved_path(path))
     }
 
     fn response_is_current(
@@ -1242,7 +1247,7 @@ impl Wire {
     /// decision's own hour and the hour every decision shares counted in the
     /// files zo counts them in, beside the day. Blocks like [`Self::ask`].
     #[must_use]
-    pub fn ask_within_the_hour(
+    pub(crate) fn ask_within_the_hour(
         &self,
         row: &JevUse,
         workspace: Option<&Path>,
@@ -1257,7 +1262,7 @@ impl Wire {
     /// ([`door::Hour::is_full`]) with the bound the settings hold: a refusal
     /// of an hour that repeats until it ends, not a busy lock's.
     #[must_use]
-    pub fn hour_is_full(&self, hour: DecisionHour<'_>) -> bool {
+    pub(crate) fn hour_is_full(&self, hour: DecisionHour<'_>) -> bool {
         hour.of_the_door(&self.settings_root()).is_full()
     }
 

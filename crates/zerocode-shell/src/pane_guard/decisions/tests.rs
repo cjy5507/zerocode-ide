@@ -1405,3 +1405,109 @@ fn an_unasked_no_hands_nothing_and_a_yes_says_what_it_means() {
         }
     }
 }
+
+/// One decision answering yes before three commands leaves one line waiting
+/// — its newest — so the brief of an agent that took none at a tool
+/// boundary carries it once, not once a command.
+#[test]
+fn a_decision_leaves_one_line_waiting_however_many_commands_it_answered() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Visible", Point::BeforeCommand);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+    );
+    let standing = home.standing();
+    let guards = fresh_guards();
+    let at = crate::usage_runtime::epoch_ms_now();
+    assert_eq!(
+        commands(
+            guards,
+            &home,
+            (standing.asking(), &standing.decided()),
+            1..=3,
+            at
+        ),
+        3
+    );
+    assert_eq!(home.rows().len(), 3);
+    assert_eq!(
+        brief(guards, &home, &standing, LAUNCH),
+        Some(briefed(custom::line("Visible", YES_MEANS, 0.9)))
+    );
+}
+
+/// An ask that began before zo's settings were read again places nothing
+/// after that reading: the door it asked may no longer let the folder act.
+/// One that began after places its line.
+#[test]
+fn an_ask_begun_before_the_settings_were_read_again_places_nothing() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let home = Home::new(&endpoint, project.path(), JevMode::On, &[]);
+    let standing = home.standing();
+    let guards = fresh_guards();
+    noted(
+        guards,
+        &home,
+        &standing,
+        vec![about(Some("call-1"), "ls", project.path())],
+    );
+    let here = pane(&home.root);
+    let begun = keep_the_folder(guards, &here, &home.root);
+    let handed = || {
+        vec![Handed {
+            decision: "d-0000000a".to_string(),
+            version: "v".to_string(),
+            line: custom::line("Visible", YES_MEANS, 0.9),
+        }]
+    };
+    drop_lines_the_door_refuses(guards, &home.wire);
+    let at = u64::try_from(crate::usage_runtime::epoch_ms_now()).expect("now");
+    assert!(!place(
+        guards,
+        &here,
+        (Point::BeforeCommand, at),
+        handed(),
+        begun
+    ));
+    assert!(
+        guards.lock().expect("the books").panes[&here.term]
+            .waiting
+            .command
+            .is_empty()
+    );
+    let now = keep_the_folder(guards, &here, &home.root);
+    assert!(place(
+        guards,
+        &here,
+        (Point::BeforeCommand, at),
+        handed(),
+        now
+    ));
+}
+
+/// A room the line saying what they are fills alone hands nothing and takes
+/// nothing: the line still waits for a room it fits.
+#[test]
+fn a_room_too_small_for_the_opening_takes_nothing_and_the_line_waits() {
+    let project = tempfile::tempdir().expect("a project");
+    let (_endpoint, home, standing, guards) = a_line_waiting(project.path());
+    let tight = custom::LINES_INTRO.chars().count() + 1;
+    assert!(
+        brief_in(
+            guards,
+            &standing.decided(),
+            &brief_ask(&home.root, LAUNCH),
+            tight
+        )
+        .is_none()
+    );
+    assert_eq!(
+        brief(guards, &home, &standing, LAUNCH),
+        Some(briefed(custom::line("Visible", YES_MEANS, 0.9)))
+    );
+}

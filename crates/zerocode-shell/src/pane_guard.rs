@@ -372,7 +372,7 @@ struct PaneBook {
     /// the last ask of its decisions read it off the hook loop: what the
     /// hook loop holds a decision's chosen folders and quiet marks against
     /// without reading a file.
-    folder: Option<(PathBuf, PathBuf)>,
+    folder: Option<decisions::KnownFolder>,
 }
 
 /// A turn's file pick as its brief waits on it (t-14869): the prompt the
@@ -479,6 +479,11 @@ struct Filed {
 #[derive(Debug, Default)]
 pub(crate) struct Guards {
     panes: HashMap<u32, PaneBook>,
+    /// How many times zo's settings were read again to drop the lines a
+    /// folder's door no longer lets act ([`decisions::drop_lines_the_door_refuses`]):
+    /// an ask of the decisions places its lines only under the count it
+    /// began under.
+    lines_dropped: u64,
 }
 
 /// The window's books.

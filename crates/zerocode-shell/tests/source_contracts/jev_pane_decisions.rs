@@ -10,6 +10,8 @@ use crate::support::strip_rust_comments;
 
 const ZO: &str =
     include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/custom_decisions.rs");
+const ZO_ADVICE: &str =
+    include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/project_rules.rs");
 const WINDOW: &str = include_str!("../../src/pane_guard/decisions.rs");
 
 /// A source's shipped part: what comes before its test module.
@@ -32,6 +34,8 @@ fn zo_and_a_window_pane_ask_a_persons_decision_by_one_set_of_functions() {
             "custom::read(",
             "custom::earns_its_line(",
             "custom::line(",
+            "custom::said(",
+            "custom::introduced",
             "custom::check(",
             "custom::asks_in(",
             "DecisionRow::of(",
@@ -60,6 +64,7 @@ fn zo_and_a_window_pane_ask_a_persons_decision_by_one_set_of_functions() {
             "choice::read_value",
             "score::read_value",
             "\"rubricVersion\"",
+            "LINES_INTRO.chars()",
         ] {
             assert!(
                 !code.contains(own),
@@ -67,4 +72,8 @@ fn zo_and_a_window_pane_ask_a_persons_decision_by_one_set_of_functions() {
             );
         }
     }
+    // zo's turn's-end advice bounds its lines by the core's one count.
+    let advice = shipped(ZO_ADVICE);
+    assert!(advice.contains("custom::introduced_within("));
+    assert!(!advice.contains("LINES_INTRO.chars()"));
 }

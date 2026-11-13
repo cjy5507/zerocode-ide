@@ -142,11 +142,6 @@ impl Now {
     }
 }
 
-/// What a quiet mark holds for: a decision everywhere, or a decision in one
-/// folder — the folder a pane works in, resolved — for a refusal that folder
-/// owns ([`door::Refused::of_the_folder`]).
-type Marked = (String, Option<PathBuf>);
-
 /// The decisions whose refusal would repeat, each with where it stops: for
 /// the machine, or for the one folder whose refusal it is — a folder not
 /// consented quiets the decision there alone. Cleared whenever the snapshot
@@ -155,7 +150,17 @@ type Marked = (String, Option<PathBuf>);
 /// once.
 #[derive(Debug, Default)]
 pub(crate) struct Quiet {
-    marks: Mutex<HashMap<Marked, Until>>,
+    marks: Mutex<Marks>,
+}
+
+/// The quiet marks, by decision: those for the whole machine, and those for
+/// one folder — the folder a pane works in, resolved — for a refusal that
+/// folder owns ([`door::Refused::of_the_folder`]). Two tables so the hook
+/// loop looks a mark up by borrowing, allocating nothing.
+#[derive(Debug, Default)]
+struct Marks {
+    everywhere: HashMap<String, Until>,
+    in_folder: HashMap<PathBuf, HashMap<String, Until>>,
 }
 
 impl Quiet {
@@ -168,23 +173,25 @@ impl Quiet {
             Until::Day(day) => *day == now.day,
             Until::Version(quiet) => quiet == version,
         };
-        marks.get(&(id.to_string(), None)).is_some_and(holds)
-            || folder.is_some_and(|folder| {
-                marks
-                    .get(&(id.to_string(), Some(folder.to_path_buf())))
-                    .is_some_and(holds)
-            })
+        marks.everywhere.get(id).is_some_and(holds)
+            || folder
+                .and_then(|folder| marks.in_folder.get(folder))
+                .and_then(|marked| marked.get(id))
+                .is_some_and(holds)
     }
 
     /// Mark `id` quiet until `until` — in `folder` alone, or everywhere:
     /// whether this mark is new, which is what lets exactly one row say so.
     fn mark(&self, id: &str, folder: Option<&Path>, until: Until) -> bool {
         let mut marks = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
-        let key = (id.to_string(), folder.map(Path::to_path_buf));
-        if marks.get(&key) == Some(&until) {
+        let marked = match folder {
+            Some(folder) => marks.in_folder.entry(folder.to_path_buf()).or_default(),
+            None => &mut marks.everywhere,
+        };
+        if marked.get(id) == Some(&until) {
             return false;
         }
-        marks.insert(key, until);
+        marked.insert(id.to_string(), until);
         true
     }
 }
@@ -223,18 +230,26 @@ impl Decided {
     }
 }
 
+/// The folder a pane's hooks named and the folder it resolves to, as the
+/// last ask of its decisions read it off the hook loop ([`PaneBook::folder`]).
+#[derive(Debug, Clone)]
+pub(crate) struct KnownFolder {
+    said: PathBuf,
+    resolved: PathBuf,
+}
+
 /// The folder `pane` works in, resolved, as an ask of its decisions left it
 /// in its book — `None` until one has, or when the pane's hooks name another
 /// folder now.
 fn known_folder<'a>(book: &'a PaneBook, pane: &Pane) -> Option<&'a Path> {
     book.folder
         .as_ref()
-        .filter(|(said, _)| *said == pane.worktree)
-        .map(|(_, resolved)| resolved.as_path())
+        .filter(|known| known.said == pane.worktree)
+        .map(|known| known.resolved.as_path())
 }
 
 /// A line one decision earned for a pane, with what earned it: the decision
-/// and the version that answered, and the launch it was earned in.
+/// and the version that answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Handed {
     decision: String,
@@ -297,30 +312,25 @@ pub(super) fn before_command(
     if !asks_about(command) {
         return None;
     }
-    let named = call.id.is_some();
     let seen = book
         .decided_calls
         .iter()
         .any(|(id, words)| match (&call.id, id) {
             (Some(id), Some(seen)) => id == seen,
             _ => words == command,
-        })
-        || (named
-            && book
-                .decided_calls
-                .iter()
-                .any(|(id, words)| id.is_none() && words == command));
+        });
     if seen {
+        return None;
+    }
+    // Which decisions ask first: a command in a quiet hour is kept nowhere.
+    let kept = decided.asking_at(Point::BeforeCommand, &Now::at(at), known_folder(book, pane));
+    if kept.is_empty() {
         return None;
     }
     shelve(
         &mut book.decided_calls,
         (call.id.clone(), command.to_string()),
     );
-    let kept = decided.asking_at(Point::BeforeCommand, &Now::at(at), known_folder(book, pane));
-    if kept.is_empty() {
-        return None;
-    }
     let cwd = call.cwd.clone().unwrap_or_else(|| pane.worktree.clone());
     Some(Asked {
         point: Point::BeforeCommand,
@@ -402,7 +412,7 @@ pub(super) fn ask(
     asked: Asked,
 ) {
     let root = pane.root();
-    keep_the_folder(guards, pane, &root);
+    let generation = keep_the_folder(guards, pane, &root);
     let (Some(home), Some(ledger)) = (
         wire.config_home(),
         systemone::project_ledger_of(wire, &CUSTOM_DECISIONS, &root),
@@ -418,11 +428,10 @@ pub(super) fn ask(
         }
         return;
     };
-    let workspace = PathBuf::from(door::resolved_path(&root));
     let kept: Vec<Kept> = asked
         .kept
         .into_iter()
-        .filter(|kept| custom::asks_in(&kept.definition, &workspace))
+        .filter(|kept| custom::asks_in(&kept.definition, &root))
         .collect();
     if kept.is_empty() {
         return;
@@ -436,25 +445,20 @@ pub(super) fn ask(
             edited,
         } => turn_lent(&root, task, said, &evidence, &edited),
     };
-    let from = pane.agent.slug();
-    let road = has_a_road(pane.agent, asked.point);
+    let asker = Asker {
+        home,
+        root: &root,
+        from: pane.agent.slug(),
+        road: has_a_road(pane.agent, asked.point),
+        point: asked.point,
+        at: asked.at,
+    };
     let answered: Vec<(Option<DecisionRow>, Option<Handed>)> = std::thread::scope(|scope| {
         let asks: Vec<_> = kept
             .iter()
             .map(|one| {
-                let lent = &lent;
-                let workspace = root.as_path();
-                scope.spawn(move || {
-                    ask_one(
-                        wire,
-                        (home, workspace),
-                        decided,
-                        one,
-                        lent,
-                        (from, road),
-                        (asked.point, asked.at),
-                    )
-                })
+                let (lent, asker) = (&lent, &asker);
+                scope.spawn(move || ask_one(wire, asker, decided, one, lent))
             })
             .collect();
         asks.into_iter()
@@ -464,7 +468,7 @@ pub(super) fn ask(
     let (mut rows, handed): (Vec<Option<DecisionRow>>, Vec<Option<Handed>>) =
         answered.into_iter().unzip();
     let handed: Vec<Handed> = handed.into_iter().flatten().collect();
-    let placed = place(guards, pane, asked.point, asked.at, handed);
+    let placed = place(guards, pane, (asked.point, asked.at), handed, generation);
     for row in rows.iter_mut().flatten() {
         row.applied = row.applied && placed;
     }
@@ -484,13 +488,33 @@ pub(super) fn ask(
 /// Leave `root`, the folder `pane` works in resolved, in its book: the hook
 /// loop holds the pane's next moments against it without reading a file —
 /// the decisions that do not ask there, or are quiet there, start no thread.
-fn keep_the_folder(guards: &'static Mutex<Guards>, pane: &Pane, root: &Path) {
+/// And the books' generation of dropped lines as this ask begins
+/// ([`Guards::lines_dropped`]): an ask that began before the settings were
+/// read again places nothing after them ([`place`]).
+fn keep_the_folder(guards: &'static Mutex<Guards>, pane: &Pane, root: &Path) -> u64 {
     let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(book) = held.panes.get_mut(&pane.term)
         && book.owner == pane.owner()
     {
-        book.folder = Some((pane.worktree.clone(), root.to_path_buf()));
+        book.folder = Some(KnownFolder {
+            said: pane.worktree.clone(),
+            resolved: root.to_path_buf(),
+        });
     }
+    held.lines_dropped
+}
+
+/// Who asks one decision, where and when: the zo home its hours are counted
+/// in, the folder it asks for, the pane's agent a row names, whether that
+/// agent has a road for a line, and the point and moment it asks at.
+#[derive(Debug, Clone, Copy)]
+struct Asker<'a> {
+    home: &'a Path,
+    root: &'a Path,
+    from: &'a str,
+    road: bool,
+    point: Point,
+    at: u64,
 }
 
 /// What a turn's end lends, read now: the answer from its transcript when
@@ -532,13 +556,19 @@ fn turn_lent(
 /// road for it.
 fn ask_one(
     wire: &Wire,
-    (home, workspace): (&Path, &Path),
+    asker: &Asker<'_>,
     decided: &Decided,
     kept: &Kept,
     lent: &Lent,
-    (from, road): (&str, bool),
-    (point, at): (Point, u64),
 ) -> (Option<DecisionRow>, Option<Handed>) {
+    let Asker {
+        home,
+        root: workspace,
+        from,
+        road,
+        point,
+        at,
+    } = *asker;
     let id = kept.entry.id.as_str();
     let version = kept.entry.definition.as_str();
     let mut row = DecisionRow::of(
@@ -639,19 +669,26 @@ fn ask_one(
     (Some(row), handed)
 }
 
-/// Leave the lines `handed` waiting in `pane`'s book: a command's after the
-/// ones already there, a turn's end's in place of what an earlier turn's end
-/// offered — even when it hands nothing — unless a later turn's end has
-/// already offered. Whether the book still is the pane's and the launch's
-/// that asked.
+/// Leave the lines `handed` waiting in `pane`'s book: a command's in place
+/// of the line the same decision left waiting before — one a decision, the
+/// newest, so an agent with no tool boundary is not handed the same line
+/// once a command at its next brief — and a turn's end's in place of what an
+/// earlier turn's end offered, even when it hands nothing, unless a later
+/// turn's end has already offered. Nothing when the settings were read again
+/// since the ask began (`generation`, [`keep_the_folder`]): the door it
+/// asked may no longer let the folder act. Whether the book still is the
+/// pane's and the launch's that asked.
 fn place(
     guards: &'static Mutex<Guards>,
     pane: &Pane,
-    point: Point,
-    at: u64,
+    (point, at): (Point, u64),
     handed: Vec<Handed>,
+    generation: u64,
 ) -> bool {
     let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+    if held.lines_dropped != generation {
+        return false;
+    }
     let Some(book) = held
         .panes
         .get_mut(&pane.term)
@@ -666,7 +703,12 @@ fn place(
         };
     }
     match point {
-        Point::BeforeCommand => book.waiting.command.extend(handed),
+        Point::BeforeCommand => {
+            book.waiting
+                .command
+                .retain(|waiting| !handed.iter().any(|one| one.decision == waiting.decision));
+            book.waiting.command.extend(handed);
+        }
         Point::TurnEnd => {
             if book
                 .waiting
@@ -686,30 +728,37 @@ fn place(
 /// zo's settings were read again: drop every line waiting in a pane whose
 /// folder the door no longer lets act — consent withdrawn, Jev turned off —
 /// here, on the watcher's road, so taking a line on a hook's reply reads no
-/// file ([`take`]). The folders are asked outside the books' lock.
+/// file ([`take`]). The books' generation moves first, so an ask that
+/// checked the door before this reading places nothing after it ([`place`]).
+/// The settings are read once, outside the books' lock.
 pub(super) fn drop_lines_the_door_refuses(guards: &Mutex<Guards>, wire: &Wire) {
-    let waiting: Vec<(u32, PathBuf)> = guards
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .panes
-        .iter()
-        .filter(|(_, book)| !book.waiting.command.is_empty() || book.waiting.offered.is_some())
-        .filter_map(|(term, book)| Some((*term, book.folder.as_ref()?.1.clone())))
-        .collect();
+    let waiting: Vec<(u32, PathBuf)> = {
+        let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+        held.lines_dropped = held.lines_dropped.wrapping_add(1);
+        held.panes
+            .iter()
+            .filter(|(_, book)| !book.waiting.command.is_empty() || book.waiting.offered.is_some())
+            .filter_map(|(term, book)| Some((*term, book.folder.as_ref()?.resolved.clone())))
+            .collect()
+    };
+    if waiting.is_empty() {
+        return;
+    }
+    let permits = wire.permits_workspaces_now();
     let refused: Vec<(u32, PathBuf)> = waiting
         .into_iter()
-        .filter(|(_, folder)| !wire.permits_workspace_now(Some(folder)))
+        .filter(|(_, folder)| !permits(folder))
         .collect();
     if refused.is_empty() {
         return;
     }
     let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
     for (term, folder) in refused {
-        if let Some(book) = held
-            .panes
-            .get_mut(&term)
-            .filter(|book| book.folder.as_ref().is_some_and(|(_, own)| *own == folder))
-        {
+        if let Some(book) = held.panes.get_mut(&term).filter(|book| {
+            book.folder
+                .as_ref()
+                .is_some_and(|known| known.resolved == folder)
+        }) {
             book.waiting = Waiting {
                 launch: book.waiting.launch.clone(),
                 ..Waiting::default()
@@ -718,70 +767,70 @@ pub(super) fn drop_lines_the_door_refuses(guards: &Mutex<Guards>, wire: &Wire) {
     }
 }
 
-/// Take the lines waiting in the pane `pane_key` names for the knock of
-/// `launch` (and `session`, when it names one) — a command's decisions', and
-/// with `offered_too` what the last turn's end offered: none for a knock from another
-/// launch of the pane, which leaves them where they were. Those whose
-/// decision no longer stands on at the version that answered are dropped;
-/// of the rest, each that fits under `room` after the ones before it and the
-/// line that says what they are, as zo hands its unasked lines
-/// ([`custom::introduced`]) — and none at all, left waiting, when that line
-/// itself does not fit. The snapshot alone is read — no file: a folder the
-/// door stopped letting act lost its lines when the settings were read again
+/// The knock of a hook asking for the lines waiting in a pane: the pane its
+/// key names, the launch it comes from, and its session when it names one.
+#[derive(Debug, Clone, Copy)]
+struct Knock<'a> {
+    pane_key: &'a str,
+    launch: &'a str,
+    session: Option<&'a str>,
+}
+
+/// Take the lines waiting in the pane `knock` names, for that knock — a
+/// command's decisions', and with `offered_too` what the last turn's end
+/// offered: none for a knock from another launch or session of the pane,
+/// which leaves them where they were. Those whose decision no longer stands
+/// on at the version that answered are passed over; the rest are handed in
+/// order under the line that says what they are, as many as fit `room`
+/// ([`custom::introduced_within`]), and the ones after them are dropped.
+/// When not one fits beside that line, nothing is taken and every line stays
+/// waiting. The snapshot alone is read — no file: a folder the door stopped
+/// letting act lost its lines when the settings were read again
 /// ([`drop_lines_the_door_refuses`]). Taken lines are gone whether or not
 /// the reply that carries them is read: at most once, not exactly once.
 fn take(
     guards: &Mutex<Guards>,
     decided: &Decided,
-    (pane_key, launch, session): (&str, &str, Option<&str>),
+    knock: Knock<'_>,
     offered_too: bool,
     room: usize,
 ) -> Option<String> {
-    let room = room.checked_sub(custom::LINES_INTRO.chars().count() + 1)?;
     if decided.decisions.kept.is_empty() {
         return None;
     }
-    let term = crate::hooks::term_of_pane_key(pane_key)?;
-    let handed = {
-        let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
-        let book = held.panes.get_mut(&term)?;
-        let pane = book.pane.as_ref()?;
-        let other_launch =
-            !launch.is_empty() && !book.waiting.launch.is_empty() && launch != book.waiting.launch;
-        let other_session = session.is_some_and(|session| {
-            !session.is_empty() && pane.session.as_deref().is_some_and(|own| own != session)
-        });
-        if other_launch || other_session {
-            return None;
-        }
-        let mut handed = std::mem::take(&mut book.waiting.command);
-        if offered_too {
-            handed.extend(
-                book.waiting
-                    .offered
-                    .take()
-                    .map(|offered| offered.handed)
-                    .into_iter()
-                    .flatten(),
-            );
-        }
-        handed
-    };
-    let mut lines: Vec<String> = Vec::new();
-    let mut used = 0;
-    for one in handed
-        .iter()
-        .filter(|one| decided.decisions.stands_on(&one.decision, &one.version))
-    {
-        let gap = usize::from(!lines.is_empty());
-        let width = one.line.chars().count();
-        if used + gap + width > room {
-            continue;
-        }
-        used += gap + width;
-        lines.push(one.line.clone());
+    let term = crate::hooks::term_of_pane_key(knock.pane_key)?;
+    let mut held = guards.lock().unwrap_or_else(PoisonError::into_inner);
+    let book = held.panes.get_mut(&term)?;
+    let pane = book.pane.as_ref()?;
+    let other_launch = !knock.launch.is_empty()
+        && !book.waiting.launch.is_empty()
+        && knock.launch != book.waiting.launch;
+    let other_session = knock.session.is_some_and(|session| {
+        !session.is_empty() && pane.session.as_deref().is_some_and(|own| own != session)
+    });
+    if other_launch || other_session {
+        return None;
     }
-    custom::introduced(&lines)
+    let offered = book
+        .waiting
+        .offered
+        .as_ref()
+        .filter(|_| offered_too)
+        .map_or(&[][..], |offered| offered.handed.as_slice());
+    let lines: Vec<&str> = book
+        .waiting
+        .command
+        .iter()
+        .chain(offered)
+        .filter(|one| decided.decisions.stands_on(&one.decision, &one.version))
+        .map(|one| one.line.as_str())
+        .collect();
+    let said = custom::introduced_within(&lines, room).0?;
+    book.waiting.command.clear();
+    if offered_too {
+        book.waiting.offered = None;
+    }
+    Some(said)
 }
 
 /// The decisions' voice in a turn's brief: every line waiting in the
@@ -801,7 +850,11 @@ pub(super) fn brief_in(
     take(
         guards,
         decided,
-        (&ask.pane_key, &ask.launch_token, ask.session_id.as_deref()),
+        Knock {
+            pane_key: &ask.pane_key,
+            launch: &ask.launch_token,
+            session: ask.session_id.as_deref(),
+        },
         true,
         room,
     )
@@ -826,7 +879,11 @@ pub(super) fn boundary_in(
     take(
         guards,
         decided,
-        (pane_key, launch, None),
+        Knock {
+            pane_key,
+            launch,
+            session: None,
+        },
         false,
         zerocode_hookd::TURN_BRIEF_CHAR_CAP,
     )
