@@ -630,7 +630,7 @@ fn skill_folders(dir: &Path, store: Option<&Path>, home: &Path) -> Vec<SkillFold
             .zip(real.as_ref())
             .is_some_and(|(store, real)| real.starts_with(store));
         folders.push(SkillFolder {
-            ours: zerocode_core::skill_install::ships_this_text(&name, &bytes),
+            ours: zerocode_core::skill_install::ships_this_folder(&name, &path),
             digest: skill_digest(&path, &bytes),
             name,
             path,
@@ -1241,8 +1241,8 @@ fn copy_into_store(ctx: &Context, from: &Path, name: &str) -> Result<Option<Remo
 }
 
 /// Whether `path` holds what the store's `held` folder holds: the same text,
-/// or an earlier release of a skill this build ships, whose store copy is the
-/// one kept.
+/// or, whole, a copy this build or an earlier release ships, whose store copy
+/// is the one kept — not one a person added a file to or changed one of.
 fn duplicates(held: &Path, path: &Path, name: &str) -> bool {
     let Some(store_text) = folder_digest(held) else {
         return false;
@@ -1251,7 +1251,7 @@ fn duplicates(held: &Path, path: &Path, name: &str) -> bool {
         return false;
     };
     skill_digest(path, &bytes) == store_text
-        || zerocode_core::skill_install::ships_this_text(name, &bytes)
+        || zerocode_core::skill_install::ships_this_folder(name, path)
 }
 
 /// Where a folder's own entry stands, by its whole path: a link is an entry
@@ -1534,7 +1534,7 @@ fn link_claude_home(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) 
                             std::fs::read(target.join(zerocode_core::skill::SKILL_FILE))
                                 .unwrap_or_default();
                         let same = skill_digest(&target, &store_bytes) == theirs;
-                        if same || zerocode_core::skill_install::ships_this_text(&name, bytes) {
+                        if same || zerocode_core::skill_install::ships_this_folder(&name, &path) {
                             put_away(&path).is_ok()
                         } else {
                             let keep = held.join(&name);
@@ -4490,6 +4490,44 @@ mod tests {
             Some("library.invalidName")
         );
         assert!(!read_ledger(&ctx).skills.contains_key("../x"));
+    }
+
+    /// A copy of a shipped skill in a Native agent's own folder goes to the
+    /// Trash only when the whole folder is ours (review t-106726, fourth): a
+    /// shipped `SKILL.md` beside a file the person added stays where it is,
+    /// and is asked about; the same text alone goes.
+    #[test]
+    fn a_native_agents_copy_with_a_file_of_the_persons_stays_and_is_asked() {
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let shipped = |name: &str| zerocode_core::skill_install::bundled_skill(name).unwrap();
+        for name in ["computer-use", "dataviz"] {
+            for root in [".agents/skills", ".gemini/skills"] {
+                let dir = home.path().join(root).join(name);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(
+                    dir.join(zerocode_core::skill::SKILL_FILE),
+                    shipped(name).content,
+                )
+                .unwrap();
+            }
+        }
+        let added = home.path().join(".gemini/skills/computer-use");
+        std::fs::write(added.join("notes.md"), "mine").unwrap();
+        let ctx = context_of(home.path(), data.path(), &["gemini"]);
+        look(&ctx).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(added.join("notes.md")).unwrap(),
+            "mine",
+            "a folder with the person's file went"
+        );
+        let asked = &read_ledger(&ctx).skills["computer-use"].pick;
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].agent, "gemini");
+        assert!(
+            std::fs::symlink_metadata(home.path().join(".gemini/skills/dataviz")).is_err(),
+            "a copy of ours alone stayed"
+        );
     }
 
     /// 「저장소 것으로 맞추기」 (2026-11-13): Gemini CLI reads the store by

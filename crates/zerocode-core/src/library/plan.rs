@@ -2352,8 +2352,9 @@ mod tests {
 
     /// Gemini CLI reads the store by itself (2026-11-13: an old copy of
     /// `computer-use` in its own folder showed beside the store's). A copy
-    /// of ours there goes to the Trash; a text that is no release of ours is
-    /// the person's, and is asked about — never taken away unasked.
+    /// of ours there — the whole folder, as the keeper reads it
+    /// (`skill_install::ships_this_folder`) — goes to the Trash; anything
+    /// else is the person's, and is asked about — never taken away unasked.
     #[test]
     fn a_shipped_skill_in_a_native_agents_folder_goes_if_ours_and_is_asked_if_edited() {
         let mut ours = folder("computer-use", "OLD-RELEASE");

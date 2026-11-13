@@ -285,17 +285,15 @@ fn text_state(book_name: &str, carried: &str, bytes: &[u8]) -> CopyState {
     }
 }
 
-/// Whether `bytes` is a `SKILL.md` text this build or an earlier release of
-/// it shipped under `name` — the window's own copy, which the common store
-/// keeps one of and never asks the person about.
+/// Whether the folder `dir` is a copy this build or an earlier release of it
+/// shipped under `name`, whole ([`folder_is_ours`]): the window's own copy,
+/// which the common store keeps one of and never asks the person about. A
+/// folder whose `SKILL.md` is ours but that holds a file a person added or
+/// changed is theirs. The installer and the store's keeper judge by this one
+/// rule.
 #[must_use]
-pub fn ships_this_text(name: &str, bytes: &[u8]) -> bool {
-    bundled_skill(name).is_some_and(|skill| {
-        matches!(
-            copy_state(skill, bytes),
-            CopyState::Current | CopyState::Stale
-        )
-    })
+pub fn ships_this_folder(name: &str, dir: &Path) -> bool {
+    bundled_skill(name).is_some_and(|skill| folder_is_ours(skill, dir))
 }
 
 fn copy_state(skill: &BundledSkill, bytes: &[u8]) -> CopyState {
