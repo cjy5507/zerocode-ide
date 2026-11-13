@@ -12165,6 +12165,14 @@ function fittedAgentRowWords(node, row) {
   // again on every press (v1.1.149, 「왼쪽 네비 판이 계속 깜박」).
   const here = agentRowHere(row);
   const classes = agentRowClasses(state, here, foldedSummary, row);
+  // A coordinator's crew line wears its term and what it says, and nothing of its lead's agent or role
+  // (`makeAgentRow`): read against the checks below it never fitted, so it was built again on every paint of its card
+  // — each tool call of any agent — and its ring began again each time (v1.1.149, 「왼쪽 네비 판이 계속 깜박」).
+  if (row.crew) {
+    if (node.dataset.term !== String(row.term) || (node.dataset.crew ?? "") !== crewSaid(row.crew)
+      || node.className !== classes) return null;
+    return { node, row, state, foldedSummary: false, fold: null, history: true, classes };
+  }
   if (
     node.dataset.term !== String(row.term) ||
     (node.dataset.sub ?? "") !== (row.sub?.id ?? "") ||
@@ -12177,8 +12185,7 @@ function fittedAgentRowWords(node, row) {
     (node.dataset.crewOf ?? "") !== JSON.stringify(agentRowCrewOf(row)) ||
     (node.className !== classes && node.className !== agentRowClasses(state, !here, foldedSummary, row))
   ) return null;
-  // 이력 한 줄은 모양이 곧 말이다 — 수나 펼침이 바뀌면 다시 세운다. 코디의 워커 한 줄도 그렇다.
-  if (row.crew) return { node, row, state, foldedSummary: false, fold: null, history: true, classes };
+  // 이력 한 줄은 모양이 곧 말이다 — 수나 펼침이 바뀌면 다시 세운다. 코디의 워커 한 줄도 그렇다(위에서).
   if (row.history) {
     if (node.getAttribute("aria-expanded") !== String(Boolean(row.historyShown))) return null;
     return { node, row, state, foldedSummary: false, fold: null, history: true, classes };
