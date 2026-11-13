@@ -17553,7 +17553,7 @@ function paintChatList() {
     parts.push(standChatGroup(group, rows));
   }
   reconcileElementOrder(el("chat-list-groups"), parts);
-  holdChatListHeight(host);
+  holdChatListHeight(host, [...groups.values()].reduce((sum, rows) => sum + rows.length, 0));
 }
 
 /* The conversation list keeps the height it reached while agents come and go (v1.1.149, 「왼쪽 네비 판이 계속
@@ -17561,22 +17561,28 @@ function paintChatList() {
  * 「오늘 끝남」 at a turn's end — and coming back at the next — moved the whole branch list 43px up and down on
  * every turn of every agent. A turn hides a row; it does not end a conversation. So the list does not shrink under a
  * turn: the room a hidden row leaves stays, empty, at the list's end, and the row takes it again when its agent works
- * again. It grows at once for a new conversation (the person opened it). The room is given back on the person's
+ * again. A conversation that leaves the list (put away, closed, a worker the ledger names) takes its room with it:
+ * only a row hidden in a folded group, the conversations counted the same, is held. It grows at once for a new
+ * conversation (the person opened it). The room is given back on the person's
  * hand — a press anywhere in the list, a group folded or opened — or once the list has been still for the team's
  * clock with the pointer off the sidebar: one move when the person is not working the column, not one per turn.
  * The room never outgrows the branch list it keeps still. */
 let chatListHeld = 0;
 // The list's own height at the last paint: a change is a row that came or went, which starts the still clock again.
 let chatListNatural = 0;
+// How many conversations the list counted at the last paint, the folded groups' with the open ones'.
+let chatListCount = 0;
 
-function holdChatListHeight(host) {
+function holdChatListHeight(host, count) {
   const top = host.getBoundingClientRect().top;
   // The list's own height without the room it holds: its children stand from its top (`align-content: start`).
   const last = host.lastElementChild;
   const natural = last ? last.getBoundingClientRect().bottom - top : 0;
   const moved = natural !== chatListNatural;
+  const left = count < chatListCount;
   chatListNatural = natural;
-  if (natural >= chatListHeld || chatListHeld - natural > sidebarScroller.clientHeight) chatListHeld = natural;
+  chatListCount = count;
+  if (left || natural >= chatListHeld || chatListHeld - natural > sidebarScroller.clientHeight) chatListHeld = natural;
   const room = chatListHeld > natural ? `${Math.ceil(chatListHeld)}px` : "";
   if (host.style.minHeight !== room) host.style.minHeight = room;
   // Words moving (a title, an elapsed time) are not the list moving: only a row coming or going holds the room longer.
