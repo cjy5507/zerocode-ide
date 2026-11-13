@@ -1077,7 +1077,7 @@ fn preview_summary(preview: &ToolPreview, fallback: &str) -> String {
             Some(path) => format!("{pattern} in {path}"),
             None => pattern.clone(),
         },
-        ToolPreview::Search { query } => query.clone(),
+        ToolPreview::Search { query, .. } => query.clone(),
         ToolPreview::Generic { input_summary, .. } => input_summary.clone(),
     };
     let detail = sanitize_inline(detail.trim());
@@ -1239,5 +1239,16 @@ mod tests {
         assert_eq!(with_truncation_note("out", false), "out");
         assert_eq!(with_truncation_note("out", true), "out\n… (truncated)");
         assert_eq!(with_truncation_note("", true), "… (truncated)");
+    }
+
+    /// A fetch and a search say the same detail on the IDE's row as before
+    /// the preview told them apart: the address, or the words, as given.
+    #[test]
+    fn a_fetch_says_its_address_on_the_ides_row_as_a_search_does() {
+        use runtime::message_stream::ToolPreview;
+        for fetch in [false, true] {
+            let preview = ToolPreview::Search { query: "https://example.com/models/zq".to_string(), fetch };
+            assert_eq!(super::preview_summary(&preview, "fallback"), "https://example.com/models/zq");
+        }
     }
 }

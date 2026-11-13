@@ -144,9 +144,11 @@ impl ToolKind {
         matches!(self, Self::Spawn { .. })
     }
 
-    /// 도구 호출 preview 를 셀 종류로 옮긴다.
+    /// 도구 호출 preview 를 셀 종류로 옮긴다. 도구의 이름은 읽지 않는다 —
+    /// `CapabilityInvoke` 로 감싼 호출의 블록은 감싼 쪽 이름만 들고 오므로,
+    /// 무엇을 불렀는지는 런타임이 안쪽 이름으로 지은 preview 가 말한다.
     #[must_use]
-    pub fn from_preview(name: &str, preview: &ToolPreview, summary: &str) -> Self {
+    pub fn from_preview(preview: &ToolPreview, summary: &str) -> Self {
         match preview {
             ToolPreview::Bash { command } => Self::Command {
                 command: sanitize_lines(command, summary),
@@ -174,10 +176,8 @@ impl ToolKind {
             ToolPreview::Write { path, .. } | ToolPreview::Edit { path, .. } => Self::Edit {
                 path: sanitize(path, summary),
             },
-            ToolPreview::Search { query } if core_types::tool_names::canonical_tool_name(name) == "WebFetch" => {
-                Self::WebFetch { url: sanitize(query, summary) }
-            }
-            ToolPreview::Search { query } => Self::WebSearch {
+            ToolPreview::Search { query, fetch: true } => Self::WebFetch { url: sanitize(query, summary) },
+            ToolPreview::Search { query, fetch: false } => Self::WebSearch {
                 detail: sanitize(query, summary),
             },
             ToolPreview::Generic {
@@ -2657,7 +2657,7 @@ mod tests {
             }),
         );
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("TodoWrite", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
 
         assert_eq!(
@@ -2676,7 +2676,7 @@ mod tests {
             }),
         );
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("CapabilityInvoke", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
 
         assert_eq!(
@@ -2700,7 +2700,7 @@ mod tests {
         });
         let preview = preview_tool_input("TodoWrite", &input);
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("TodoWrite", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
         let body = format_tool_result_from_raw(
             "TodoWrite",
@@ -2733,7 +2733,7 @@ mod tests {
     fn an_empty_mcp_result_does_not_add_a_no_output_row() {
         let preview = preview_tool_input("Sleep", &json!({}));
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Sleep", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
         let body = format_tool_result_from_raw("Sleep", "", false);
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
@@ -2748,7 +2748,7 @@ mod tests {
     fn a_successful_mcp_result_uses_the_success_status_color() {
         let preview = preview_tool_input("Sleep", &json!({}));
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Sleep", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
         let body = format_tool_result_from_raw("Sleep", "", false);
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
@@ -2766,7 +2766,7 @@ mod tests {
             &json!({ "query": "alpha beta gamma delta epsilon" }),
         );
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Lookup", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
         let body = format_tool_result_from_raw("Lookup", "ok", false);
         assert!(group.complete("a", Outcome::from_result(false, &body, "")));
@@ -2783,11 +2783,39 @@ mod tests {
         assert_eq!(rows.last().expect("output row"), "  └ ok");
     }
 
+    /// zo offers the web tools through `CapabilityInvoke`, whose block names
+    /// only the wrapper: a fetch made that way drew as a search of its
+    /// address (`Search("http://…" on the web)`, v1.1.149's screen). It draws
+    /// as the fetch made directly, running and done; a wrapped search is a
+    /// search.
+    #[test]
+    fn a_wrapped_fetch_draws_as_the_fetch_made_directly() {
+        let page = json!({ "url": "https://example.com/models/zq", "prompt": "What does it say?" });
+        let wrapped = json!({ "name": "WebFetch", "input": page.clone() });
+        let rows = |name: &str, input: &serde_json::Value| {
+            let preview = preview_tool_input(name, input);
+            let kind = ToolKind::from_preview(&preview, &preview_summary(&preview));
+            let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
+            let running = plain(&group.lines(60, Duration::ZERO));
+            let body = format_tool_result_from_raw("WebFetch", "URL: https://example.com/models/zq\n\n# zq\n", false);
+            assert!(group.complete("a", Outcome::from_result(false, &body, "")));
+            (running, plain(&group.lines(60, Duration::ZERO)))
+        };
+        let direct = rows("WebFetch", &page);
+        assert_eq!(direct.0, vec!["⠋ Fetch example.com/models/zq".to_string()]);
+        assert_eq!(rows("CapabilityInvoke", &wrapped), direct);
+        let search = json!({ "name": "WebSearch", "input": { "query": "rust async" } });
+        let preview = preview_tool_input("CapabilityInvoke", &search);
+        let kind = ToolKind::from_preview(&preview, &preview_summary(&preview));
+        let group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
+        assert_eq!(plain(&group.lines(60, Duration::ZERO)), vec!["⠋ Search \"rust async\" on the web".to_string()]);
+    }
+
     #[test]
     fn web_search_wears_the_search_row() {
         let preview = preview_tool_input("WebSearch", &json!({ "query": "rust async" }));
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("WebSearch", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
 
         assert_eq!(
@@ -2805,7 +2833,7 @@ mod tests {
     #[test]
     fn failed_spawn_shows_the_refusal_instead_of_the_delegated_prompt() {
         let preview = preview_tool_input("Agent", &json!({"description":"look up remote", "prompt":"delegated prompt"}));
-        let kind = ToolKind::from_preview("Agent", &preview, &preview_summary(&preview));
+        let kind = ToolKind::from_preview(&preview, &preview_summary(&preview));
         let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
         let reason = "Small delegated task: do it inline. Do not retry this spawn.";
         let body = ToolResultBody::Declined { reason: reason.to_owned() };
@@ -2820,7 +2848,7 @@ mod tests {
         assert!(!text.contains("failed"), "a verdict is not a failure:\n{text}");
         assert!(lines[0].spans[0].style.dim && lines[0].spans[0].style.fg.is_none(), "{:?}", lines[0].spans[0]);
         // A spawn that really failed still says so.
-        let kind = ToolKind::from_preview("Agent", &preview, &preview_summary(&preview));
+        let kind = ToolKind::from_preview(&preview, &preview_summary(&preview));
         let mut failed = ToolGroup::new(ToolCall::new("b".to_string(), kind));
         let body = format_tool_result_from_raw("Agent", "execution error: child died", true);
         failed.complete("b", Outcome::from_result(true, &body, "child died"));
@@ -2841,7 +2869,7 @@ mod tests {
             }),
         );
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Agent", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("a".to_string(), kind));
 
         // While the helper works, the cell is what the person watches — it
@@ -2926,7 +2954,7 @@ mod tests {
                 &json!({ "name": label, "description": "look into it" }),
             );
             let summary = preview_summary(&preview);
-            ToolKind::from_preview("Agent", &preview, &summary)
+            ToolKind::from_preview(&preview, &summary)
         };
         let mut group = ToolGroup::new(ToolCall::new("a".to_string(), spawn("scout")));
         let second = spawn("verifier");
@@ -2976,7 +3004,7 @@ mod tests {
             }),
         );
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Workflow", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("workflow-1".to_string(), kind));
 
         assert!(group.set_spawn_progress(&[
@@ -3014,7 +3042,7 @@ mod tests {
         let preview =
             preview_tool_input("Agent", &json!({ "name": "scout", "description": "look" }));
         let summary = preview_summary(&preview);
-        let spawn = ToolKind::from_preview("Agent", &preview, &summary);
+        let spawn = ToolKind::from_preview(&preview, &summary);
         assert!(!group.accepts(&spawn));
         assert!(group.is_active());
     }
@@ -3144,7 +3172,7 @@ mod tests {
                 &json!({"path": path, "old_string": "a", "new_string": "b"}),
             );
             let summary = preview_summary(&preview);
-            ToolCall::new(id.to_string(), ToolKind::from_preview("edit_file", &preview, &summary))
+            ToolCall::new(id.to_string(), ToolKind::from_preview(&preview, &summary))
         };
         let mut group = ToolGroup::new(announce("e1", "src/a.rs"));
         group.push(announce("e2", "src/b.rs"));
@@ -3175,7 +3203,7 @@ mod tests {
         let announce = |id: &str, path: &str| {
             let preview = preview_tool_input("write_file", &json!({"path": path, "content": "a\nb\n"}));
             let summary = preview_summary(&preview);
-            ToolCall::new(id.to_string(), ToolKind::from_preview("write_file", &preview, &summary))
+            ToolCall::new(id.to_string(), ToolKind::from_preview(&preview, &summary))
         };
         let mut group = ToolGroup::new(announce("w1", "src/a.ts"));
         group.push(announce("w2", "src/b.ts"));
@@ -3215,7 +3243,7 @@ mod tests {
         let summary = preview_summary(&preview);
         let mut group = ToolGroup::new(ToolCall::new(
             "w1".to_string(),
-            ToolKind::from_preview("write_file", &preview, &summary),
+            ToolKind::from_preview(&preview, &summary),
         ));
         let body: Vec<String> = (1..=60).map(|n| format!("+line {n}")).collect();
         let created = json!({
@@ -3250,7 +3278,7 @@ mod tests {
             let summary = preview_summary(&preview);
             ToolCall::new(
                 id.to_string(),
-                ToolKind::from_preview("MultiEdit", &preview, &summary),
+                ToolKind::from_preview(&preview, &summary),
             )
         };
         let mut group = ToolGroup::new(announce("m1", "ui/tokens.css"));
@@ -3295,7 +3323,7 @@ mod tests {
             }),
         );
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Edit", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("edit".to_string(), kind));
         let body = format_tool_result_from_raw("Edit", "context mismatch\ntry again", true);
         assert!(group.complete("edit", Outcome::from_result(true, &body, "src/lib.rs")));
@@ -3313,10 +3341,10 @@ mod tests {
     fn consecutive_edits_are_one_row_each_in_call_order() {
         let b_preview = preview_tool_input("Edit", &json!({ "file_path": "b.rs" }));
         let b_summary = preview_summary(&b_preview);
-        let b_kind = ToolKind::from_preview("Edit", &b_preview, &b_summary);
+        let b_kind = ToolKind::from_preview(&b_preview, &b_summary);
         let a_preview = preview_tool_input("Edit", &json!({ "file_path": "a.rs" }));
         let a_summary = preview_summary(&a_preview);
-        let a_kind = ToolKind::from_preview("Edit", &a_preview, &a_summary);
+        let a_kind = ToolKind::from_preview(&a_preview, &a_summary);
         let mut group = ToolGroup::new(ToolCall::new("b".to_string(), b_kind));
 
         assert!(group.accepts(&a_kind));
@@ -3347,7 +3375,7 @@ mod tests {
 
         let preview = preview_tool_input("Edit", &json!({ "file_path": "old.rs" }));
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Edit", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let mut group = ToolGroup::new(ToolCall::new("rename".to_string(), kind));
         let body = ToolResultBody::Diff(DiffView {
             old_path: Some("old.rs".to_string()),
@@ -3373,7 +3401,7 @@ mod tests {
             &json!({ "command": "echo \"hello\" && cargo test --lib" }),
         );
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Bash", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let group = ToolGroup::new(ToolCall::new("bash".to_string(), kind));
         let lines = group.lines(100, Duration::ZERO);
 
@@ -3433,7 +3461,7 @@ mod tests {
         let script = "python3 - <<'EOF'\nimport sys\r\n\tprint(sys.version)\nEOF\n";
         let preview = preview_tool_input("Bash", &json!({ "command": script }));
         let summary = preview_summary(&preview);
-        let kind = ToolKind::from_preview("Bash", &preview, &summary);
+        let kind = ToolKind::from_preview(&preview, &summary);
         let ToolKind::Command { command, .. } = &kind else {
             panic!("a command, not {kind:?}");
         };

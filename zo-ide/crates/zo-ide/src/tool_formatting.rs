@@ -108,7 +108,7 @@ pub(crate) fn format_tool_call_start_from_preview(
             "🔎 Grep {pattern}\n\x1b[2min {}\x1b[0m",
             path.as_deref().unwrap_or(".")
         ),
-        ToolPreview::Search { query } => query.clone(),
+        ToolPreview::Search { query, .. } => query.clone(),
         ToolPreview::Generic { input_summary, .. } => {
             if input_summary.is_empty() {
                 summary.to_string()

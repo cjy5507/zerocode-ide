@@ -33,7 +33,7 @@ impl Activity {
             ToolPreview::Grep { pattern, .. } => Self::new("Grep", Some(pattern)),
             ToolPreview::Write { path, .. } => Self::new("Write", Some(path)),
             ToolPreview::Edit { path, .. } => Self::new("Edit", Some(path)),
-            ToolPreview::Search { query } => Self::new("WebSearch", Some(query)),
+            ToolPreview::Search { query, .. } => Self::new("WebSearch", Some(query)),
             ToolPreview::Generic {
                 name,
                 input_summary,

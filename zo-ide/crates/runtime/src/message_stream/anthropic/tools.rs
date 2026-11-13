@@ -121,10 +121,11 @@ pub fn preview_tool_input(name: &str, input: &Value) -> ToolPreview {
             path: extract_str(input, "path"),
         },
         None => match canonical_tool_name(name).as_str() {
-            "WebSearch" | "WebFetch" => ToolPreview::Search {
+            web @ ("WebSearch" | "WebFetch") => ToolPreview::Search {
                 query: extract_str(input, "query")
                     .or_else(|| extract_str(input, "url"))
                     .unwrap_or_else(|| "?".to_string()),
+                fetch: web == "WebFetch",
             },
             _ => ToolPreview::Generic {
                 name: name.to_string(),
@@ -892,7 +893,10 @@ pub fn preview_summary(preview: &ToolPreview) -> String {
             Some(p) => format!("grep {pattern} in {p}"),
             None => format!("grep {pattern}"),
         },
-        ToolPreview::Search { query } => format!("search {query}"),
+        // A fetch keeps the word it always had here: this header is what the
+        // IDE's events carry (`sinks`), and the screen's own word for it is
+        // the TUI's to say.
+        ToolPreview::Search { query, .. } => format!("search {query}"),
         // An empty summary is the deliberate answer for a call whose input
         // says nothing a reader would want ([`humanize_tool_input`]); the name
         // alone is the cell then, with no trailing space to show for it.
@@ -1154,6 +1158,49 @@ mod tests {
         // An older runtime that sent no patch keeps the sentence.
         let bare = json!({"type": "create", "filePath": "/w/a.ts", "content": "a\n"});
         assert!(matches!(format_write_result("write_file", &bare), ToolResultBody::Generic { .. }));
+    }
+
+    /// A call through `CapabilityInvoke` previews as the call it carries, the
+    /// way the same call made directly does: a wrapped fetch is a fetch, not
+    /// a search. The block's name stays the wrapper's, so the preview is the
+    /// only place that can say it; a fetch drew as `Search("http://…" on the
+    /// web)` where zo offers the web tools only through the wrapper (v1.1.149's
+    /// screen). The header the IDE's events carry keeps its words.
+    #[test]
+    fn a_wrapped_call_previews_as_the_call_it_carries() {
+        let wrapped = |name: &str, input: Value| preview_tool_input("CapabilityInvoke", &json!({ "name": name, "input": input }));
+        let page = json!({ "url": "https://example.com/models/zq", "prompt": "What does it say?" });
+        let query = json!({ "query": "rust async runtime" });
+        for preview in [preview_tool_input("WebFetch", &page), wrapped("WebFetch", page.clone())] {
+            assert!(
+                matches!(&preview, ToolPreview::Search { query, fetch: true } if query == "https://example.com/models/zq"),
+                "{preview:?}"
+            );
+            assert_eq!(preview_summary(&preview), "search https://example.com/models/zq");
+        }
+        for preview in [preview_tool_input("WebSearch", &query), wrapped("WebSearch", query.clone())] {
+            assert!(
+                matches!(&preview, ToolPreview::Search { query, fetch: false } if query == "rust async runtime"),
+                "{preview:?}"
+            );
+        }
+        let notes = json!({ "url": "https://example.com/notes" });
+        assert!(
+            matches!(
+                wrapped("mcp__almanac__read_webpage", notes),
+                ToolPreview::Generic { name, .. } if name == "mcp__almanac__read_webpage"
+            ),
+            "a wrapped MCP tool keeps its own name"
+        );
+        let run = json!({ "command": "ls src" });
+        assert!(matches!(wrapped("Bash", run), ToolPreview::Bash { command } if command == "ls src"));
+        let read = json!({ "file_path": "src/b.rs" });
+        assert!(matches!(wrapped("Read", read), ToolPreview::Read { path, .. } if path == "src/b.rs"));
+        let grep = json!({ "pattern": "TODO", "path": "src" });
+        assert!(matches!(
+            wrapped("Grep", grep),
+            ToolPreview::Grep { pattern, path } if pattern == "TODO" && path.as_deref() == Some("src")
+        ));
     }
 
     /// `MultiEdit` applies several replacements to one file and answers with the

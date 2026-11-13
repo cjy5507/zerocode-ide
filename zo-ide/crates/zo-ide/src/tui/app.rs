@@ -4962,7 +4962,7 @@ impl Ui {
                 if status == ToolCallStatus::Pending || self.tools.contains_key(&tool_call_id.0) {
                     return;
                 }
-                let kind = ToolKind::from_preview(&name, &preview, &summary);
+                let kind = ToolKind::from_preview(&preview, &summary);
                 let presentation = preview.presentation();
                 let activity = super::activity::Activity::from_preview(&name, &preview);
                 let result_name = kind.result_formatter_name(&name).to_string();

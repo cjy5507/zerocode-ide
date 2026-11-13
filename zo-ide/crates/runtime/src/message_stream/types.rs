@@ -504,8 +504,14 @@ pub enum ToolPreview {
     },
     /// `web_search`, `web_fetch`.
     Search {
-        /// Query string submitted by the model.
+        /// Query string submitted by the model — the address, for a fetch.
         query: String,
+        /// The call fetches the address in `query` (`WebFetch`) rather than
+        /// searching the web for it (`WebSearch`). The tool's name is read
+        /// once, here: a call through `CapabilityInvoke` carries only the
+        /// wrapper's name on its block, and a reader that told the two apart
+        /// by that name drew a wrapped fetch as a search.
+        fetch: bool,
     },
     /// MCP-provided tool we have no special handler for.
     Generic {
