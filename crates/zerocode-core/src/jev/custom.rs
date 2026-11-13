@@ -411,6 +411,34 @@ pub fn introduced(lines: &[String]) -> Option<String> {
     (!lines.is_empty()).then(|| format!("{LINES_INTRO}\n{}", lines.join("\n")))
 }
 
+/// [`introduced`] within `room` characters: [`LINES_INTRO`] and as many of
+/// `lines`, in order, as fit whole after it — and how many that was. `None`
+/// and none when not one line fits beside the opening, so a caller leaves
+/// every line where it was. Every place that hands such lines into a bounded
+/// room builds them here, so none counts the opening's shape again.
+#[must_use]
+pub fn introduced_within<S: AsRef<str>>(lines: &[S], room: usize) -> (Option<String>, usize) {
+    let mut held = LINES_INTRO.chars().count();
+    let mut used = 0;
+    for line in lines {
+        let longer = held + 1 + line.as_ref().chars().count();
+        if longer > room {
+            break;
+        }
+        (held, used) = (longer, used + 1);
+    }
+    let text = (used > 0).then(|| {
+        let mut text = String::with_capacity(LINES_INTRO.len() + held);
+        text.push_str(LINES_INTRO);
+        for line in &lines[..used] {
+            text.push('\n');
+            text.push_str(line.as_ref());
+        }
+        text
+    });
+    (text, used)
+}
+
 /// The one line a decision that is on hands the agent when its answer is as
 /// sure as its act-from line (DESIGN 2.4): `「name」 판단: said (확신 85%)`,
 /// the confidence a whole percent and `said` what the line says of the

@@ -207,22 +207,16 @@ pub fn pending_project_rule_advice(workspace: &Path, recipient: &str, room: usiz
 }
 
 /// The lines the person's decisions handed this turn, as one advice whose
-/// text fits `room`: under its key, the one line saying what they are
-/// ([`jev::custom::LINES_INTRO`]) and as many whole lines as fit, and none
+/// text fits `room`: under its key, the one line saying what they are and as
+/// many whole lines as fit ([`jev::custom::introduced_within`]), and none
 /// when not one does. It names no rule, so its delivery writes no rule's
 /// receipt.
 fn decided_advice(workspace: &Path, recipient: &str, room: usize) -> Option<rules::Advice> {
     let (key, lines) = custom_decisions::pending_lines(workspace, recipient)?;
-    let mut text = format!("{ADVICE_PREFIX}{key}]\n{}", jev::custom::LINES_INTRO);
-    let (mut held, mut handed) = (text.chars().count(), false);
-    for line in lines {
-        let longer = held + 1 + line.chars().count();
-        if longer > room { break; }
-        text.push('\n');
-        text.push_str(&line);
-        (held, handed) = (longer, true);
-    }
-    handed.then(|| rules::Advice { key, definition: String::new(), at: 0, turn: String::new(), text,
+    let head = format!("{ADVICE_PREFIX}{key}]\n");
+    let (lines, _) = jev::custom::introduced_within(&lines, room.checked_sub(head.chars().count())?);
+    let text = head + &lines?;
+    Some(rules::Advice { key, definition: String::new(), at: 0, turn: String::new(), text,
         rules: Vec::new(), edited: Vec::new() })
 }
 

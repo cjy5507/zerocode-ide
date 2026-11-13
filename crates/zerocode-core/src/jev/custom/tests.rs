@@ -613,6 +613,33 @@ fn the_intro_is_one_line_and_stands_once_before_the_lines() {
     assert_eq!(introduced(&lines), Some(format!("{LINES_INTRO}\none\ntwo")));
 }
 
+/// Within a room, two lines stand under one opening; the lines that do not
+/// fit after it are left out, in order; and a room the opening fills alone
+/// gives nothing at all, so a caller leaves its lines waiting (t-106308).
+#[test]
+fn the_lines_within_a_room_open_once_and_none_go_without_the_opening() {
+    let lines = ["one".to_string(), "two".to_string(), "three".to_string()];
+    let whole = introduced(&lines).expect("lines");
+    assert_eq!(
+        introduced_within(&lines, whole.chars().count()),
+        (Some(whole.clone()), 3)
+    );
+    assert_eq!(
+        introduced_within(&lines, whole.chars().count() - 1),
+        (Some(format!("{LINES_INTRO}\none\ntwo")), 2)
+    );
+    assert_eq!(
+        introduced_within(&lines[..2], usize::MAX)
+            .0
+            .map(|text| text.matches(LINES_INTRO).count()),
+        Some(1)
+    );
+    let opening = LINES_INTRO.chars().count();
+    assert_eq!(introduced_within(&lines, opening + 3), (None, 0));
+    assert_eq!(introduced_within(&lines, opening), (None, 0));
+    assert_eq!(introduced_within::<String>(&[], usize::MAX), (None, 0));
+}
+
 /// A meaning is read for a credential line by line when it is stored, and
 /// once more as the one line it is said on: digits that are a card's number
 /// only once two lines meet are never said, and neither is a control
