@@ -15,6 +15,15 @@ pub enum ApiError {
     /// A saved connection changed while this client was being constructed.
     ConnectionChanged,
     ConnectionRestartRequired,
+    /// `model` is served by `provider`, a provider the person declared
+    /// themselves, and that provider does not serve it now: the row was
+    /// removed, or `providers` could not be read (`unreadable` says why).
+    /// The client is not built for any other provider in its place.
+    OwnProviderGone {
+        provider: String,
+        model: String,
+        unreadable: Option<String>,
+    },
     MissingCredentials {
         provider: &'static str,
         env_vars: &'static [&'static str],
@@ -496,6 +505,7 @@ impl ApiError {
             | Self::InvalidApiKeyEnv(_) => ProviderErrorClass::AuthExpired,
             Self::ConnectionChanged
             | Self::ConnectionRestartRequired
+            | Self::OwnProviderGone { .. }
             | Self::Http(_)
             | Self::Io(_)
             | Self::Json(_)
@@ -556,6 +566,7 @@ impl ApiError {
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
             Self::ConnectionChanged
             | Self::ConnectionRestartRequired
+            | Self::OwnProviderGone { .. }
             | Self::MissingCredentials { .. }
             | Self::RouterKeyRefused { .. }
             | Self::UnsupportedProvider { .. }
@@ -920,6 +931,14 @@ impl Display for ApiError {
             }
             Self::ConnectionChanged => write!(f, "The model connection changed. Retry the turn to use the saved connection."),
             Self::ConnectionRestartRequired => write!(f, "The key supplied at launch belongs to an older model connection. Restart zo with credentials for the saved connection."),
+            Self::OwnProviderGone { provider, model, unreadable } => {
+                write!(f, "`{model}` was served by `{provider}`, a provider of your own, and `providers` in settings ")?;
+                match unreadable {
+                    Some(why) => write!(f, "cannot say now that it still is: it could not be read ({why})")?,
+                    None => write!(f, "no longer has it serve this model first (its row is gone, or another provider of yours now lists the model before it)")?,
+                }
+                write!(f, ". Nothing is sent to another provider in its place: restore the provider, or choose a model with /model.")
+            }
             Self::Auth(message) => write!(f, "auth error: {message}"),
             Self::InvalidApiKeyEnv(error) => {
                 write!(f, "failed to read credential environment variable: {error}")

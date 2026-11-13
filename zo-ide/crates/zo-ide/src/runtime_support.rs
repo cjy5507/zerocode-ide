@@ -1433,19 +1433,7 @@ fn build_provider_client(
             .into());
         }
     }
-    let client = if let Some(provider_kind) = catalog_provider {
-        ProviderClient::from_provider_kind_with_auth_route_and_anthropic_auth(
-            provider_kind,
-            auth_route,
-            anthropic_auth,
-        )?
-    } else {
-        ProviderClient::from_model_with_auth_route_and_anthropic_auth(
-            model,
-            auth_route,
-            anthropic_auth,
-        )?
-    };
+    let client = built.client(model, anthropic_auth)?;
 
     if let ProviderClient::Anthropic(client) = client {
         // The session's own conversation: its cache entry is refreshed while
@@ -2123,12 +2111,22 @@ impl AnthropicRuntimeClient {
         };
         if self.connections_generation == generation { return Ok(None); }
         if was_custom {
+            let removed = || "The selected model connection was removed. Choose a registered model with /model.".to_string();
             if api::custom_provider_for_model(&self.model).is_none() {
-                return Err("The selected model connection was removed. Choose a registered model with /model.".to_string());
+                return Err(removed());
             }
             let session = self.session_id.clone(); let model = self.model.clone(); let route = self.auth_route;
             let rebuilt = tokio::task::spawn_blocking(move || build_provider_client(&session, &model, route, None).map_err(|error| error.to_string()))
                 .await.map_err(|error| error.to_string())??;
+            // A session held to a provider of the person's own is built
+            // again at one, or the new client is not put in: the row can be
+            // gone between the look above and the build, and the name alone
+            // then reads as a built-in provider's. A catalog row the person
+            // wrote for the model in the meantime is theirs to follow.
+            let held_to_own = runtime::model_home::held(&self.model).is_some_and(|held| matches!(held.home, ModelHome::Own(_)));
+            if held_to_own && !matches!(rebuilt.1.home, ModelHome::Own(_)) && rebuilt.1.catalog_provider.is_none() {
+                return Err(removed());
+            }
             self.put_in(rebuilt);
         }
         self.connections_generation = generation;

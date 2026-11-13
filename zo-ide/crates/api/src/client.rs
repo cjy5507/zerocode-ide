@@ -151,15 +151,7 @@ impl ProviderClient {
         // gate: otherwise a custom model named `grok-*` is misclassified as the
         // first-party xAI adapter and rejected before the custom route can run.
         if let Some(custom) = providers::custom_provider_for_model(&resolved_model) {
-            return match auth_route {
-                AuthRoute::Auto | AuthRoute::ApiKey => {
-                    Ok(Self::OpenAi(build_custom_client(&custom)?))
-                }
-                AuthRoute::OAuth => Err(ApiError::unsupported_auth_route(
-                    custom.config.provider_name,
-                    auth_route.as_str(),
-                )),
-            };
+            return Self::at_own_provider(&custom, auth_route);
         }
 
         if auth_route == AuthRoute::Auto {
@@ -180,6 +172,50 @@ impl ProviderClient {
             auth_route,
             anthropic_auth,
         )
+    }
+
+    /// The client for `model` at `provider`, a provider the person declared
+    /// themselves, or [`ApiError::OwnProviderGone`] where that provider does
+    /// not serve the model now.
+    ///
+    /// For a caller that has already read whose model this is. Built from
+    /// the model alone ([`Self::from_model_with_auth_route`]), a model no
+    /// provider of the person's claims any more is read by its name, and the
+    /// client is built for the built-in provider the name reads as (`gpt-…`,
+    /// `claude-…`) or for whichever login the machine holds. A row can be
+    /// gone between the reading and the building — the person removed it, or
+    /// one slip in `providers` cost every row of the array — and a session
+    /// held to its own provider then sent a helper's task, or the words it
+    /// asks a model to split, to a provider the person did not choose.
+    pub fn for_own_provider(
+        model: &str,
+        provider: &str,
+        auth_route: AuthRoute,
+    ) -> Result<Self, ApiError> {
+        let resolved_model = providers::resolve_model_alias(model);
+        match providers::custom_provider_for_model(&resolved_model) {
+            Some(custom) if custom.config.provider_name == provider => {
+                Self::at_own_provider(&custom, auth_route)
+            }
+            _ => Err(ApiError::OwnProviderGone {
+                provider: provider.to_string(),
+                model: model.trim().to_string(),
+                unreadable: providers::custom_providers_unreadable(),
+            }),
+        }
+    }
+
+    fn at_own_provider(
+        custom: &providers::ResolvedCustomProvider,
+        auth_route: AuthRoute,
+    ) -> Result<Self, ApiError> {
+        match auth_route {
+            AuthRoute::Auto | AuthRoute::ApiKey => Ok(Self::OpenAi(build_custom_client(custom)?)),
+            AuthRoute::OAuth => Err(ApiError::unsupported_auth_route(
+                custom.config.provider_name,
+                auth_route.as_str(),
+            )),
+        }
     }
 
     pub fn from_provider_kind_with_auth_route(

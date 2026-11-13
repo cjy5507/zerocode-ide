@@ -861,7 +861,7 @@ fn build_provider_client_for_agent_with_rate_limit_failover(
     model: &str,
     fail_fast_on_rate_limit: bool,
 ) -> Result<ProviderClient, String> {
-    build_as(model, built_by(model), fail_fast_on_rate_limit)
+    build_as(model, &built_by(model), fail_fast_on_rate_limit)
 }
 
 /// The client for `fast_model`, the fast model of the provider the session
@@ -875,7 +875,7 @@ pub(crate) fn build_provider_client_for_the_sessions_fast_model(
     fast_model: &str,
     session_model: &str,
 ) -> Result<ProviderClient, String> {
-    build_as(fast_model, on_the_sessions_login(built_by(fast_model), session_model), false)
+    build_as(fast_model, &on_the_sessions_login(built_by(fast_model), session_model), false)
 }
 
 /// `built` on the login the session's own client for `session_model` is
@@ -920,7 +920,7 @@ fn built_by(model: &str) -> Held {
 
 fn build_as(
     model: &str,
-    Held { home, catalog_provider, auth_route }: Held,
+    built: &Held,
     fail_fast_on_rate_limit: bool,
 ) -> Result<ProviderClient, String> {
     // The provider is the model's home, read in the order the session's own
@@ -930,18 +930,15 @@ fn build_as(
     // below: on a session that provider served, the helper's task went to
     // Anthropic. A name nothing knows is built for whichever login the
     // machine holds, as the session's client is.
-    let provider_kind = match home {
+    let provider_kind = match built.home {
         ModelHome::BuiltIn(kind) => kind,
         ModelHome::Own(_) => ProviderKind::OpenAi,
         ModelHome::Unknown => detect_provider_kind(model),
     };
     if provider_kind != ProviderKind::Anthropic {
-        let client = if let Some(provider_kind) = catalog_provider {
-            ProviderClient::from_provider_kind_with_auth_route(provider_kind, auth_route)
-        } else {
-            ProviderClient::from_model_with_auth_route(model, auth_route)
-        };
-        return client.map_err(|error| error.to_string());
+        // A model held to a provider of the person's own is built there or
+        // not at all (`Held::client`).
+        return built.client(model, None).map_err(|error| error.to_string());
     }
 
     // Inherit the parent runtime's credential when one is cached; otherwise run
@@ -953,7 +950,7 @@ fn build_as(
     // Under a cloud gateway (Bedrock/Vertex) the gateway credential replaces
     // the first-party chain at send time, so sub-agents must not fail here
     // just because no Anthropic credential exists on the machine.
-    let auth = match auth_route {
+    let auth = match built.auth_route {
         AuthRoute::Auto => {
             match api::AuthSource::cached().or_else(api::resolve_claude_auth_fresh) {
                 Some(auth) => auth,

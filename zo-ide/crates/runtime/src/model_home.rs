@@ -29,7 +29,7 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use api::{AuthRoute, ProviderKind};
+use api::{ApiError, AuthRoute, AuthSource, ProviderClient, ProviderKind};
 
 use crate::model_catalog::ModelCatalog;
 
@@ -121,6 +121,38 @@ pub struct Held {
     pub auth_route: AuthRoute,
 }
 
+impl Held {
+    /// The client for `model`, built as this record says: for the provider
+    /// the catalog named; else at the provider of the person's own that
+    /// serves it; else from the model's name.
+    ///
+    /// A model held to a provider of the person's own gets a client at that
+    /// provider or none ([`ProviderClient::for_own_provider`]). Built from
+    /// the name, as it was until v1.1.150, a helper on the session's model —
+    /// or the split of a request, where that provider names no fast model —
+    /// went to the built-in provider the name reads as once the provider's
+    /// row was gone from `providers`.
+    ///
+    /// `anthropic_auth` is the credential an Anthropic client is built with
+    /// where the caller already holds one.
+    ///
+    /// # Errors
+    /// What the constructor it comes to refuses with.
+    pub fn client(&self, model: &str, anthropic_auth: Option<AuthSource>) -> Result<ProviderClient, ApiError> {
+        match (&self.home, self.catalog_provider) {
+            (_, Some(provider_kind)) => ProviderClient::from_provider_kind_with_auth_route_and_anthropic_auth(
+                provider_kind,
+                self.auth_route,
+                anthropic_auth,
+            ),
+            (ModelHome::Own(provider), None) => ProviderClient::for_own_provider(model, provider, self.auth_route),
+            (ModelHome::BuiltIn(_) | ModelHome::Unknown, None) => {
+                ProviderClient::from_model_with_auth_route_and_anthropic_auth(model, self.auth_route, anthropic_auth)
+            }
+        }
+    }
+}
+
 /// The clients this process's session runs on, by the model each was built
 /// for. One session to a process: its own model, and the few a turn was
 /// given a client for.
@@ -187,6 +219,12 @@ mod tests {
         fn unset(name: &'static str) -> Self {
             let before = std::env::var_os(name);
             std::env::remove_var(name);
+            Self(name, before)
+        }
+
+        fn set(name: &'static str, value: &str) -> Self {
+            let before = std::env::var_os(name);
+            std::env::set_var(name, value);
             Self(name, before)
         }
     }
@@ -372,6 +410,38 @@ mod tests {
     impl Drop for NoSession {
         fn drop(&mut self) {
             forget_session();
+        }
+    }
+
+    /// A model held to a provider of the person's own gets a client at that
+    /// provider or none. Built from its name once the provider's row was
+    /// gone, `gpt-zq-oss` got a client for `OpenAI` on a machine that holds a
+    /// key for it (until v1.1.150): a helper's task, or the words a session
+    /// asks a model to split, left for a provider the person did not choose.
+    #[test]
+    fn a_model_held_to_a_persons_own_provider_gets_a_client_there_or_none() {
+        const OTHER: &str = r#"[{"name":"zqother","base_url":"https://other.invalid/v1","models":["gpt-zq-oss","claude-zq-gateway","zq-own-model"],"requires_auth":false}]"#;
+        let _lock = crate::test_env_lock();
+        let _key = Var::set("OPENAI_API_KEY", "zq-test-key");
+        let held = Held { home: own(), catalog_provider: None, auth_route: AuthRoute::Auto };
+        let served = ["gpt-zq-oss", "claude-zq-gateway", "zq-own-model"];
+        {
+            let _own = OwnProviders::declared(OWN);
+            for model in served {
+                assert!(held.client(model, None).is_ok(), "{model} at the provider that declares it");
+            }
+        }
+        // The row is gone. A provider of another name that lists the same
+        // ids is not the one the session was held to either.
+        for providers in ["[]", OTHER] {
+            let _now = OwnProviders::declared(providers);
+            for model in served {
+                let refused = held.client(model, None).expect_err("a client for another provider");
+                assert!(
+                    matches!(&refused, ApiError::OwnProviderGone { provider, model: named, .. } if provider == "zqown" && named == model),
+                    "{model} under {providers}: {refused}"
+                );
+            }
         }
     }
 

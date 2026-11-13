@@ -237,19 +237,17 @@ pub(crate) fn turn_client(
     let same_provider = main_provider.zip(native_provider(model))
         .is_some_and(|(current, selected)| current == selected && current == main.provider_kind());
     let catalog_provider = in_the_catalog(model);
-    let (provider, auth_route, home) = if same_provider
+    let (provider, built) = if same_provider
         && (requested_auth == api::AuthRoute::Auto || requested_auth == main.auth_route())
     {
-        (main.client(), main.auth_route(), ModelHome::BuiltIn(main.provider_kind()))
+        let home = ModelHome::BuiltIn(main.provider_kind());
+        (main.client(), Held { home, catalog_provider, auth_route: main.auth_route() })
     } else {
-        let provider = if let Some(provider_kind) = catalog_provider {
-            api::ProviderClient::from_provider_kind_with_auth_route(provider_kind, requested_auth)
-        } else {
-            api::ProviderClient::from_model_with_auth_route(model, requested_auth)
-        }.ok()?;
-        (provider, requested_auth, ModelHome::read(catalog.as_ref(), model))
+        let built = Held { home: ModelHome::read(catalog.as_ref(), model), catalog_provider, auth_route: requested_auth };
+        (built.client(model, None).ok()?, built)
     };
-    runtime::model_home::hold(model, Held { home, catalog_provider, auth_route });
+    let auth_route = built.auth_route;
+    runtime::model_home::hold(model, built);
     Some((provider, auth_route))
 }
 

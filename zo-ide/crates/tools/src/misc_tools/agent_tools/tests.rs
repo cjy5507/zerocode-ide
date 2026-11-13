@@ -648,6 +648,43 @@ fn a_helpers_client_is_built_where_the_models_home_says() {
     }
 }
 
+/// A session on a provider of the person's own, and that provider's row gone
+/// from `providers` while it runs — removed, or lost with every other row to
+/// one slip in the array. The session is still held to that provider, and a
+/// helper on its model was then built from the model's name (until
+/// v1.1.150): for `OpenAI`, where the name is spelled `gpt-…` and the machine
+/// holds a key, so the helper's task left for a provider the person did not
+/// choose. It is built at the person's provider or not at all.
+#[test]
+fn a_helper_is_not_built_elsewhere_once_the_sessions_own_provider_is_gone() {
+    use crate::tests::{OwnProviders, RunningSession};
+    use runtime::model_home::ModelHome;
+
+    const SERVED: &str = "gpt-zq-own-served";
+    const DECLARED: &str =
+        r#"[{"name":"zqown","base_url":"https://own.invalid/v1","models":["gpt-zq-own-served"],"requires_auth":false}]"#;
+    let env = crate::tests::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let config_home = crate::tests::ConfigHome::empty(&env);
+    let _machine = a_machine_with_no_login(&env, config_home.path());
+
+    let declared = OwnProviders::declared(&env, DECLARED);
+    let _session = RunningSession::built_now(&env, SERVED);
+    assert_eq!(
+        runtime::model_home::held(SERVED).map(|held| held.home),
+        Some(ModelHome::Own("zqown".to_string()))
+    );
+    assert!(build_provider_client_for_agent(SERVED).is_ok(), "at the provider that serves it");
+
+    drop(declared);
+    let _gone = OwnProviders::declared(&env, "[]");
+    // Nobody declares it now: by its name it is OpenAI's, and this machine holds a key for that.
+    assert_eq!(ModelHome::of(SERVED), ModelHome::BuiltIn(api::ProviderKind::OpenAi));
+    let refused = build_provider_client_for_agent(SERVED).expect_err("a client for another provider");
+    assert!(refused.contains("`zqown`") && refused.contains("its row is gone"), "{refused}");
+}
+
 /// A running session keeps its helpers where its client was built. The
 /// catalog is a file another pane may edit while the session runs; read from
 /// it each time, a row written under Google for the name a session ran on
