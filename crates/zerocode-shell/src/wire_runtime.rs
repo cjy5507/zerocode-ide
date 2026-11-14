@@ -4406,4 +4406,153 @@ mod tests {
             "term 4 kept claude b7695d1e on its screen, no wire started: a worker's pane stays a pane"
         );
     }
+
+    /// A stand-in for a wire's CLI (152): it answers the handshake's `--help`
+    /// and `--version` probes as Claude Code does, then runs `body` with the
+    /// folder it was written to as `$HERE`.
+    #[cfg(unix)]
+    fn fake_wire_cli(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let here = tempfile::tempdir().expect("a folder for the stand-in CLI");
+        let cli = here.path().join("claude");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --help) echo '  --permission-mode <mode>  (choices: \"default\", \"plan\")'; exit 0;;\n  --version) echo '9.9.9 (Claude Code)'; exit 0;;\nesac\nHERE='{}'\n{body}\n",
+                here.path().display()
+            ),
+        )
+        .expect("the stand-in CLI");
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
+            .expect("the stand-in CLI runs");
+        (here, cli)
+    }
+
+    #[cfg(unix)]
+    fn quiet_news() -> WireNews {
+        WireNews {
+            changed: Box::new(|_| {}),
+            acted: Box::new(|_, _| {}),
+        }
+    }
+
+    /// What `ps` says of `pid` now: its state letters (`Z` for a zombie), or
+    /// `None` once no process has that id.
+    #[cfg(unix)]
+    fn process_state(pid: u32) -> Option<String> {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps runs");
+        let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!state.is_empty()).then_some(state)
+    }
+
+    #[cfg(unix)]
+    fn runs(pid: u32) -> bool {
+        process_state(pid).is_some_and(|state| !state.starts_with('Z'))
+    }
+
+    /// A stopped wire ends every process its CLI started, not the CLI alone
+    /// (152). Claude Code starts an MCP server for each one configured; one
+    /// that does not end when its parent's pipe closes outlived
+    /// `Child::kill` of the CLI — and the CLI stood in the window's own
+    /// process group, where no group signal could reach it without reaching
+    /// the window. The stand-in leaves a grandchild whose input is not the
+    /// CLI's pipe, so only the wire's own group ending takes it.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_wire_ends_every_process_its_cli_started() {
+        let (here, cli) = fake_wire_cli(
+            "sleep 600 </dev/null >/dev/null 2>&1 &\necho $! > \"$HERE/grandchild\"\nexec cat >/dev/null",
+        );
+        let wires = WireRuntime::default();
+        let session = wires
+            .start(
+                "claude",
+                &cli,
+                here.path(),
+                "test",
+                None,
+                &[],
+                &[],
+                quiet_news(),
+            )
+            .expect("the wire stands");
+        let written = here.path().join("grandchild");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(&written).is_ok_and(|pid| !pid.trim().is_empty())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let grandchild: u32 = std::fs::read_to_string(&written)
+            .expect("the grandchild's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        wires.stop(session.id).expect("the wire stops");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runs(grandchild) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let survived = runs(grandchild);
+        if survived {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &grandchild.to_string()])
+                .status();
+        }
+        assert!(
+            !survived,
+            "the wire was stopped and a process its CLI started still runs"
+        );
+    }
+
+    /// A wire whose CLI left by itself is collected as its output closes, not
+    /// kept as a zombie until somebody stops it (152: pid 83478 stood
+    /// `<defunct>` under the window after its CLI had gone, its tab or no tab).
+    #[cfg(unix)]
+    #[test]
+    fn a_wire_whose_cli_left_is_collected_not_kept_a_zombie() {
+        let (here, cli) = fake_wire_cli("sleep 1\nexit 0");
+        let wires = WireRuntime::default();
+        let session = wires
+            .start(
+                "claude",
+                &cli,
+                here.path(),
+                "test",
+                None,
+                &[],
+                &[],
+                quiet_news(),
+            )
+            .expect("the wire stands");
+        let pid = session
+            .child
+            .lock()
+            .map(|child| child.id())
+            .expect("its child");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !session
+            .state
+            .lock()
+            .is_ok_and(|state| state.status == "ended")
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_state(pid).is_some_and(|state| state.starts_with('Z'))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = process_state(pid);
+        wires.stop(session.id).expect("the wire stops");
+        assert!(
+            !left.as_deref().is_some_and(|state| state.starts_with('Z')),
+            "the wire's CLI left and stays a zombie under the window: {left:?}"
+        );
+    }
 }
