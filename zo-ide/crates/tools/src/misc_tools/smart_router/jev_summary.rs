@@ -412,7 +412,8 @@ fn custom_decisions_in(
             // A version that asks the same question as the one asking now —
             // only its hourly bound, act-from line, folders or name moved —
             // is the same series, its answers counted with it (t-107869).
-            let meaning = store::definition(config_home, &entry.definition).ok().and_then(|now| now.meaning().ok());
+            let current = store::definition(config_home, &entry.definition).ok();
+            let meaning = current.as_ref().and_then(|now| now.meaning().ok());
             let same_question = |version: &str| {
                 meaning.is_some()
                     && store::definition(config_home, version)
@@ -437,7 +438,11 @@ fn custom_decisions_in(
             DecisionReport {
                 current: count(&series, &entry.definition),
                 earlier: earlier.iter().map(|&version| count(&[version], version)).collect(),
-                ask_when: asks_when.remove(&entry.id).unwrap_or_default(),
+                ask_when: asks_when
+                    .remove(&entry.id)
+                    .zip(current.as_ref())
+                    .map(|(said, now)| said.kept_at(now.at))
+                    .unwrap_or_default(),
                 left_out: LeftOut { today: days.first().copied().unwrap_or(0), week: days.iter().sum() },
                 id: entry.id,
                 name: entry.name,

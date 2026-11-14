@@ -220,7 +220,10 @@ pub fn create(
 
 /// Keep `definition` as the newest version of the decision with its id,
 /// changed at `now_ms`; that version. The old version stays, and so does the
-/// decision's mode.
+/// decision's mode. A decision moved to another point loses what it was told
+/// about when to ask ([`set_ask_when`]): words chosen for one point's text are
+/// never looked for in another's (t-107869), so it asks every time until it
+/// is told again.
 ///
 /// # Errors
 /// [`Error::Missing`] when no decision has its id, [`Error::Refused`] with
@@ -228,7 +231,46 @@ pub fn create(
 pub fn edit(home: &Path, definition: &Definition, now_ms: i64) -> Result<String, Error> {
     let root = root(home);
     let _lock = lock(&root)?;
-    let mut index = read_index(&root)?;
+    let index = read_index(&root)?;
+    edit_held(&root, index, definition, now_ms)
+}
+
+/// Set how many requests the decision `id` may send in an hour to `most`,
+/// at `now_ms`, on the version it asks with now — read under the store's
+/// lock, so an edit saved meanwhile is never written over by an older
+/// question (t-107869). The bound it had, and the version that holds `most`:
+/// the same one when it already did.
+///
+/// # Errors
+/// As [`edit`].
+pub fn set_max_per_hour(
+    home: &Path,
+    id: &str,
+    most: u64,
+    now_ms: i64,
+) -> Result<(u64, String), Error> {
+    let root = root(home);
+    let _lock = lock(&root)?;
+    let index = read_index(&root)?;
+    let Some(entry) = index.iter().find(|entry| entry.id == id) else {
+        return Err(Error::Missing);
+    };
+    let mut definition = read_definition(&root.join(DEFINITIONS), &entry.definition)?;
+    let before = definition.max_per_hour;
+    if before == most {
+        return Ok((before, entry.definition.clone()));
+    }
+    definition.max_per_hour = most;
+    edit_held(&root, index, &definition, now_ms).map(|version| (before, version))
+}
+
+/// [`edit`] under the lock its caller holds, on the `index` it read there.
+fn edit_held(
+    root: &Path,
+    mut index: Vec<Entry>,
+    definition: &Definition,
+    now_ms: i64,
+) -> Result<String, Error> {
     let Some(at) = index.iter().position(|entry| entry.id == definition.id) else {
         return Err(Error::Missing);
     };
@@ -243,12 +285,22 @@ pub fn edit(home: &Path, definition: &Definition, now_ms: i64) -> Result<String,
     if !refused.is_empty() {
         return Err(Error::Refused(refused));
     }
-    let version = write_definition(&root, &bytes)?;
+    let moved = read_definition(&root.join(DEFINITIONS), &index[at].definition)
+        .ok()
+        .is_none_or(|before| before.at != definition.at);
+    let version = write_definition(root, &bytes)?;
     let entry = &mut index[at];
     entry.name.clone_from(&definition.name);
     entry.definition.clone_from(&version);
     entry.updated_at = civil::iso_utc_of(now_ms);
-    write_index(&root, index)?;
+    if moved {
+        // Best effort, as a delete's: a line left behind is read as its new
+        // point keeps it ([`AskWhen::kept_at`]).
+        let _ = keep_ask_when(root, &index, |decisions| {
+            decisions.remove(&definition.id);
+        });
+    }
+    write_index(root, index)?;
     Ok(version)
 }
 
@@ -301,6 +353,8 @@ pub fn delete(home: &Path, id: &str) -> Result<(), Error> {
     // index already, so a file that will not change is no error: a line no
     // row lists is read past and dropped at the next write.
     let _ = keep_ask_when(&root, &index, |_| {});
+    // Its left-out counts too: nothing counts them again to clear them.
+    crate::jev::count::forget_left_out(home, id);
     // An edit writes another definition and keeps the old one, so a decision
     // may leave several: read what is there and remove those that are this
     // decision's and that no remaining row names.
@@ -517,10 +571,21 @@ fn read_ask_when(root: &Path) -> io::Result<BTreeMap<String, AskWhen>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         read => read?,
     };
-    let file: AskWhenFile = serde_json::from_slice(&bytes)
-        .map_err(|_| unreadable("not an ask-when file this store writes"))?;
+    // Every reader takes a file that does not read as saying nothing — every
+    // decision asks every time — and so does the store once it is removed:
+    // the error says so, for a person who cannot write past it.
+    let broken = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is not an ask-when file this store writes; removing it makes every decision ask every time",
+                root.join(ASK_WHEN).display()
+            ),
+        )
+    };
+    let file: AskWhenFile = serde_json::from_slice(&bytes).map_err(|_| broken())?;
     if file.schema_version != SCHEMA_VERSION || !file.decisions.keys().all(|id| is_id(id)) {
-        return Err(unreadable("not an ask-when file this store writes"));
+        return Err(broken());
     }
     Ok(file.decisions)
 }
@@ -1155,8 +1220,14 @@ mod tests {
             let one = asking_at(id, id, Point::BeforeCommand);
             create(home.path(), &one, JevMode::On, NOW).unwrap();
             set_ask_when(home.path(), id, &asks_when(&["rm"], false)).unwrap();
+            crate::jev::count::count_left_out(home.path(), id, "2026-11-14").unwrap();
         }
         delete(home.path(), "d-0000000a").unwrap();
+        let left_out = |id: &str| crate::jev::count::left_out_path(home.path(), id, "2026-11-14");
+        assert!(
+            !left_out("d-0000000a").exists() && left_out("d-0000000b").exists(),
+            "its left-out days go with it, and no other decision's"
+        );
         assert_eq!(
             ask_when(home.path()).unwrap().keys().collect::<Vec<_>>(),
             ["d-0000000b"]
@@ -1218,5 +1289,82 @@ mod tests {
             "and leaves the file be"
         );
         assert_eq!(ask_when(home.path()).unwrap().len(), 2);
+    }
+    /// A bound is set on the decision's newest version under the store's
+    /// lock (t-107869): the question an edit saved before stays, the bound
+    /// moves, and the same bound again writes no version.
+    #[test]
+    fn a_bound_is_set_on_the_newest_version_and_keeps_its_edits() {
+        let home = tempfile::tempdir().unwrap();
+        let mut decision = asking_at("d-0000000a", "Bound", Point::BeforeCommand);
+        create(home.path(), &decision, JevMode::On, NOW).unwrap();
+        decision.question = "Does this command delete anything?".to_string();
+        edit(home.path(), &decision, NOW + 1).unwrap();
+        let (before, version) = set_max_per_hour(home.path(), "d-0000000a", 60, NOW + 2).unwrap();
+        assert_eq!(before, decision.max_per_hour);
+        let now = definition(home.path(), &version).unwrap();
+        assert_eq!(
+            (now.question.as_str(), now.max_per_hour),
+            (decision.question.as_str(), 60)
+        );
+        assert_eq!(list(home.path()).unwrap()[0].definition, version);
+        assert_eq!(
+            set_max_per_hour(home.path(), "d-0000000a", 60, NOW + 3).unwrap(),
+            (60, version)
+        );
+        assert!(matches!(
+            set_max_per_hour(home.path(), "d-0000000f", 60, NOW),
+            Err(Error::Missing)
+        ));
+        assert!(matches!(
+            set_max_per_hour(home.path(), "d-0000000a", 0, NOW),
+            Err(Error::Refused(_))
+        ));
+    }
+
+    /// A decision moved to another point loses its words (t-107869): words
+    /// chosen for a command are never looked for in a turn's last answer. An
+    /// edit that keeps the point keeps them.
+    #[test]
+    fn an_edit_that_moves_the_point_takes_the_words_and_one_that_does_not_keeps_them() {
+        let home = tempfile::tempdir().unwrap();
+        let mut decision = asking_at("d-0000000a", "Deletes", Point::BeforeCommand);
+        create(home.path(), &decision, JevMode::On, NOW).unwrap();
+        let (_, said) =
+            set_ask_when(home.path(), "d-0000000a", &asks_when(&["rm"], false)).unwrap();
+        decision.question = "Does this command remove anything?".to_string();
+        edit(home.path(), &decision, NOW + 1).unwrap();
+        assert_eq!(
+            ask_when(home.path()).unwrap().get("d-0000000a"),
+            Some(&said)
+        );
+        let moved = asking_at("d-0000000a", "Deletes", Point::TurnEnd);
+        edit(home.path(), &moved, NOW + 2).unwrap();
+        assert!(ask_when(home.path()).unwrap().is_empty());
+        assert!(!ask_when_path(home.path()).exists());
+    }
+
+    /// A file beside the index that does not read says how to get back to
+    /// asking every time (t-107869): remove it, which is what every reader
+    /// already takes it to mean.
+    #[test]
+    fn a_broken_file_says_that_removing_it_asks_every_time() {
+        let home = tempfile::tempdir().unwrap();
+        let decision = asking_at("d-0000000a", "Deletes", Point::BeforeCommand);
+        create(home.path(), &decision, JevMode::On, NOW).unwrap();
+        let path = ask_when_path(home.path());
+        fs::write(&path, "{ not json").unwrap();
+        let said = ask_when(home.path()).unwrap_err().to_string();
+        assert!(
+            said.contains(&path.display().to_string())
+                && said.contains("removing it makes every decision ask every time"),
+            "{said}"
+        );
+        let Err(AskWhenError::Io(error)) =
+            set_ask_when(home.path(), "d-0000000a", &asks_when(&["rm"], false))
+        else {
+            panic!("a broken file was written past");
+        };
+        assert_eq!(error.to_string(), said);
     }
 }

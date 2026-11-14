@@ -122,9 +122,21 @@ impl AskWhen {
         })
     }
 
+    /// What this says for a decision that asks at `point` now: itself, as
+    /// the point keeps it ([`Self::fit_for`]), or nothing — every moment
+    /// asks — when the point does not take it. A decision moved to another
+    /// point after it was told asks every time (t-107869), never on words
+    /// meant for what another point is about.
+    #[must_use]
+    pub fn kept_at(&self, point: Point) -> Self {
+        self.fit_for(point).unwrap_or_default()
+    }
+
     /// Whether a decision at `point` asks about `about` — the command about to
     /// run, the turn's last answer, or the person's request — after a turn
-    /// that `edited` files or not. What an agent asks by name is always asked.
+    /// that `edited` files or not. What an agent asks by name is always asked,
+    /// and so is a moment whose text is empty: a transcript that did not read
+    /// says nothing a word could be missing from.
     #[must_use]
     pub fn admits(&self, point: Point, about: &str, edited: bool) -> bool {
         if point == Point::AgentAsks || self.always() {
@@ -137,6 +149,9 @@ impl AskWhen {
             return true;
         }
         let about = folded(about);
+        if about.is_empty() {
+            return true;
+        }
         self.words
             .iter()
             .any(|word| stands_in(&about, &folded(word)))
@@ -365,6 +380,83 @@ mod tests {
             read.edited && read.words.is_empty(),
             "a key a later build adds is read past"
         );
+    }
+
+    /// A decision moved to another point after it was told when to ask
+    /// (t-107869) asks every time: words for a command are never looked for
+    /// in a turn's last answer, nor an edit asked of a command.
+    #[test]
+    fn a_decision_moved_to_a_point_that_does_not_take_its_words_asks_every_time() {
+        let deleting = words(&["rm"]);
+        assert_eq!(deleting.kept_at(Point::BeforeCommand), deleting);
+        assert_eq!(
+            deleting.kept_at(Point::TurnEnd),
+            deleting,
+            "words fit every point an agent does not ask at"
+        );
+        assert_eq!(deleting.kept_at(Point::AgentAsks), AskWhen::default());
+        let edits = AskWhen {
+            words: Vec::new(),
+            edited: true,
+        };
+        assert_eq!(edits.kept_at(Point::TurnEnd), edits);
+        assert_eq!(edits.kept_at(Point::BeforeCommand), AskWhen::default());
+        assert!(
+            edits
+                .kept_at(Point::BeforeCommand)
+                .admits(Point::BeforeCommand, "ls", false)
+        );
+        assert_eq!(
+            words(&["  rm  ", "rm"]).kept_at(Point::BeforeCommand),
+            deleting,
+            "kept as its point keeps it"
+        );
+    }
+
+    /// A moment whose text is empty — a transcript the window could not read
+    /// — is asked (t-107869): no word can be missing from nothing.
+    #[test]
+    fn a_moment_whose_text_is_empty_is_asked() {
+        let finished = words(&["done"]);
+        for empty in ["", "  ", "\n\t"] {
+            assert!(finished.admits(Point::TurnEnd, empty, true), "{empty:?}");
+            assert!(
+                finished.admits(Point::BeforeCommand, empty, false),
+                "{empty:?}"
+            );
+        }
+        let after_edits = AskWhen {
+            words: vec!["done".to_string()],
+            edited: true,
+        };
+        assert!(
+            !after_edits.admits(Point::TurnEnd, "", false),
+            "a turn that edited nothing is still left out"
+        );
+    }
+
+    /// Where the asking program cannot see an agent's edits, a turn's end is
+    /// asked: a decision told to ask after edits is never left out on a turn
+    /// nobody could tell about.
+    #[test]
+    fn a_turn_whose_edits_nobody_sees_is_asked() {
+        let after_edits = AskWhen {
+            words: Vec::new(),
+            edited: true,
+        };
+        let mut lent = Lent::new();
+        lent.insert(Input::FinalText.key().to_string(), Value::from("done"));
+        lent.insert(
+            Input::EditedPaths.key().to_string(),
+            Value::Array(Vec::new()),
+        );
+        assert!(after_edits.admits_lent(Point::TurnEnd, &lent, false));
+        assert!(!after_edits.admits_lent(Point::TurnEnd, &lent, true));
+        lent.insert(
+            Input::EditedPaths.key().to_string(),
+            Value::Array(vec![Value::from("src/a.rs")]),
+        );
+        assert!(after_edits.admits_lent(Point::TurnEnd, &lent, true));
     }
 }
 

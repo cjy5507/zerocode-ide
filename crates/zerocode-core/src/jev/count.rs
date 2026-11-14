@@ -271,6 +271,22 @@ pub fn left_out_over(config_home: &Path, id: &str, day: &str, days: usize) -> Ve
     counts
 }
 
+/// Remove every day file of the decision `id`'s left-out moments — what a
+/// deleted decision leaves behind, since nothing counts it again to clear
+/// them (t-107869). Best effort, as [`forget_earlier_days`].
+pub fn forget_left_out(config_home: &Path, id: &str) {
+    let prefix = format!("{LEFT_OUT_PREFIX}{id}-");
+    let Ok(entries) = fs::read_dir(config_home.join(REQUESTS_DIR)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if day_named(&path, &prefix, DAY_FILE_SUFFIX).is_some() {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 /// The day before `day` (`YYYY-MM-DD`), or `None` for a word that is not a
 /// date. Calendar labels, so no clock is read: the day before a date is the
 /// same on every machine.
@@ -365,7 +381,9 @@ fn hour_named(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LEFT_OUT_DAYS, count_left_out, left_out_over, left_out_path, lock_hours};
+    use super::{
+        LEFT_OUT_DAYS, count_left_out, forget_left_out, left_out_over, left_out_path, lock_hours,
+    };
 
     /// A process launch on another thread that forks before it execs holds a
     /// copy of the hour lock until the exec; the duplicate here is that copy,
@@ -417,5 +435,21 @@ mod tests {
             left_out_over(home.path(), id, "2026-11-14", LEFT_OUT_DAYS),
             vec![2, 0, 0, 0, 0, 0, 1]
         );
+    }
+    /// A deleted decision's left-out days go with it, and only its own.
+    #[test]
+    fn a_deleted_decisions_left_out_days_are_forgotten_and_no_others() {
+        let home = tempfile::tempdir().unwrap();
+        let (gone, kept) = ("d-0000000a", "d-0000000b");
+        for day in ["2026-11-13", "2026-11-14"] {
+            count_left_out(home.path(), gone, day).unwrap();
+            count_left_out(home.path(), kept, day).unwrap();
+        }
+        forget_left_out(home.path(), gone);
+        for day in ["2026-11-13", "2026-11-14"] {
+            assert!(!left_out_path(home.path(), gone, day).exists(), "{day}");
+            assert!(left_out_path(home.path(), kept, day).exists(), "{day}");
+        }
+        forget_left_out(home.path(), "d-0000000c");
     }
 }

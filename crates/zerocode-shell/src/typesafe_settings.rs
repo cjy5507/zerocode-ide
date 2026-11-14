@@ -1897,10 +1897,16 @@ pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<Cus
     let decisions = custom::store::list(home)?
         .into_iter()
         .map(|entry| {
+            let definition = custom::store::definition(home, &entry.definition)?;
+            // As the window and zo read it: kept as its point keeps it.
+            let ask_when = asks_when
+                .remove(&entry.id)
+                .map(|said| said.kept_at(definition.at))
+                .unwrap_or_default();
             Ok(KeptDecision {
-                draft: DecisionDraft::of(custom::store::definition(home, &entry.definition)?),
+                draft: DecisionDraft::of(definition),
                 mode: entry.mode.key(),
-                ask_when: asks_when.remove(&entry.id).unwrap_or_default(),
+                ask_when,
                 version: entry.definition,
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,

@@ -1,7 +1,7 @@
 //! `zo jev decisions` (t-107869): the person's own decisions, listed, and
 //! the three things this verb changes — when one asks (the store's file
 //! beside the index, `custom::ask_when`), how many requests one may send in
-//! an hour (a new version of its definition, `store::edit`), and the hourly
+//! an hour (a new version of its definition, `store::set_max_per_hour`), and the hourly
 //! bound of every decision together (`smart.jev.customHourlyRequests`).
 //!
 //! Each change answers what it said before, what it says now, and the
@@ -9,6 +9,7 @@
 //! own writers and the settings lock every other writer takes: nothing here
 //! edits a definition's file or the settings by hand.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -109,15 +110,9 @@ pub(super) fn run(request: &Request, home: &Path, now_ms: i64) -> Result<Report,
                     HOURLY_REQUESTS.end()
                 )));
             }
-            let mut definition = store::definition(home, &entry.definition)
-                .map_err(|error| refused(format!("'{}' cannot be read: {error}", entry.name)))?;
-            let before = definition.max_per_hour;
-            let version = if before == *most {
-                entry.definition.clone()
-            } else {
-                definition.max_per_hour = *most;
-                store::edit(home, &definition, now_ms).map_err(|error| refused(format!("the store kept nothing: {error:?}")))?
-            };
+            // Read and written under the store's lock: an edit saved meanwhile stays.
+            let (before, version) = store::set_max_per_hour(home, &entry.id, *most, now_ms)
+                .map_err(|error| refused(format!("the store kept nothing: {error:?}")))?;
             json!({
                 "id": entry.id, "name": entry.name,
                 "before": before, "now": most, "version": version,
@@ -140,10 +135,15 @@ pub(super) fn run(request: &Request, home: &Path, now_ms: i64) -> Result<Report,
 }
 
 /// Every decision: its id, name, mode, point, hourly bound and when it asks,
-/// and the bound of every decision together.
+/// and the bound of every decision together. A file of when they ask that
+/// does not read is said beside them, with how to get past it: every reader
+/// takes it as saying nothing, so each decision asks every time.
 fn listed(home: &Path) -> Result<Value, Refused> {
     let entries = store::list(home).map_err(|error| refused(format!("the decisions store: {error}")))?;
-    let mut asks_when = store::ask_when(home).unwrap_or_default();
+    let (mut asks_when, unreadable) = match store::ask_when(home) {
+        Ok(said) => (said, None),
+        Err(error) => (BTreeMap::new(), Some(error.to_string())),
+    };
     let decisions: Vec<Value> = entries
         .into_iter()
         .map(|entry| {
@@ -154,12 +154,20 @@ fn listed(home: &Path) -> Result<Value, Refused> {
                 "mode": entry.mode.key(),
                 "at": definition.as_ref().map(|one| one.at.key()),
                 "maxPerHour": definition.as_ref().map(|one| one.max_per_hour),
-                "askWhen": asks_when.remove(&entry.id).unwrap_or_default(),
+                "askWhen": asks_when
+                    .remove(&entry.id)
+                    .zip(definition.as_ref())
+                    .map(|(said, one)| said.kept_at(one.at))
+                    .unwrap_or_default(),
             })
         })
         .collect();
     let settings = read_settings(&home.join(SETTINGS_FILE))?;
-    Ok(json!({ "decisions": decisions, "allPerHour": door::custom_hourly_requests(&settings) }))
+    let mut listed = json!({ "decisions": decisions, "allPerHour": door::custom_hourly_requests(&settings) });
+    if let Some(error) = unreadable {
+        listed["askWhenUnreadable"] = Value::String(error);
+    }
+    Ok(listed)
 }
 
 /// The decision `word` names — its id, or else its name.
@@ -343,6 +351,36 @@ mod tests {
         assert!(run(&parse(&words(&["limit", "--all", "0"])).unwrap(), home.path(), 8).is_err());
         let listed = said(&run(&Request::List, home.path(), 9).unwrap());
         assert_eq!(listed["allPerHour"], 240);
+    }
+
+    /// A file of when they ask that does not read is said beside the list,
+    /// with how to get past it — every reader already takes it as saying
+    /// nothing — and a change of words refuses with the same (t-107869).
+    #[test]
+    fn a_broken_file_of_when_they_ask_says_how_to_get_past_it() {
+        let home = tempfile::tempdir().unwrap();
+        let id = keep(home.path(), "Deleting", Point::BeforeCommand);
+        let listed = said(&run(&Request::List, home.path(), 1).unwrap());
+        assert!(listed.get("askWhenUnreadable").is_none(), "{listed}");
+        std::fs::write(store::ask_when_path(home.path()), "{ not json").unwrap();
+        let listed = said(&run(&Request::List, home.path(), 2).unwrap());
+        let unreadable = listed["askWhenUnreadable"].as_str().unwrap_or_default();
+        assert!(unreadable.contains("removing it makes every decision ask every time"), "{listed}");
+        assert_eq!(listed["decisions"][0]["askWhen"], json!({}), "read as saying nothing");
+        let refused = run(&parse(&words(&["ask-when", &id, "--always"])).unwrap(), home.path(), 3).unwrap_err();
+        assert!(refused.message.contains(unreadable), "{}", refused.message);
+    }
+
+    /// A bound is set on the newest version, and a bound it already has
+    /// writes nothing new.
+    #[test]
+    fn a_bound_it_already_has_writes_no_version() {
+        let home = tempfile::tempdir().unwrap();
+        let id = keep(home.path(), "Deleting", Point::BeforeCommand);
+        let first = said(&run(&parse(&words(&["limit", &id, "--per-hour", "60"])).unwrap(), home.path(), 1).unwrap());
+        let again = said(&run(&parse(&words(&["limit", &id, "--per-hour", "60"])).unwrap(), home.path(), 2).unwrap());
+        assert_eq!((again["before"].as_u64(), again["now"].as_u64()), (Some(60), Some(60)));
+        assert_eq!(again["version"], first["version"]);
     }
 
     /// The person's settings file keeps the permissions it had (t-107869):

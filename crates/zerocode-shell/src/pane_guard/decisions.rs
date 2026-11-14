@@ -86,7 +86,12 @@ impl Decisions {
                 if definition.id != entry.id {
                     return None;
                 }
-                let ask_when = asks_when.remove(&entry.id).unwrap_or_default();
+                // Kept as its point keeps it: a decision moved to another
+                // point since it was told asks every time.
+                let ask_when = asks_when
+                    .remove(&entry.id)
+                    .map(|said| said.kept_at(definition.at))
+                    .unwrap_or_default();
                 Some(Kept {
                     entry,
                     definition,

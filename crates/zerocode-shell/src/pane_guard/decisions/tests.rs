@@ -1694,3 +1694,56 @@ fn when_a_decision_asks_reaches_the_running_window_within_a_tick() {
         told(standing)
     );
 }
+
+/// A decision's words are read as its point keeps them (t-107869): a line
+/// its point does not take — "after edits" on a command, as no writer of the
+/// store writes it — asks every time, and so does a decision an edit moved
+/// to another point: a command's words are never looked for in a turn's last
+/// answer.
+#[test]
+fn a_decision_whose_point_does_not_take_its_words_asks_every_time() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let command = yes_no("Deletes", Point::BeforeCommand);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&command, JevMode::On)],
+    );
+    let told = |home: &Home| -> Vec<AskWhen> {
+        home.standing()
+            .decided()
+            .decisions
+            .kept
+            .iter()
+            .map(|kept| kept.ask_when.clone())
+            .collect()
+    };
+    let side = store::ask_when_path(home.home.path());
+    let id = command.id.clone();
+    std::fs::write(
+        &side,
+        json!({ "schemaVersion": custom::SCHEMA_VERSION, "decisions": { id: { "edited": true } } })
+            .to_string(),
+    )
+    .expect("a line by hand");
+    assert_eq!(told(&home), [AskWhen::default()]);
+
+    std::fs::remove_file(&side).expect("the hand's line goes");
+    let words = AskWhen {
+        words: vec!["rm".to_string()],
+        edited: false,
+    };
+    store::set_ask_when(home.home.path(), &command.id, &words).expect("its words are kept");
+    assert_eq!(told(&home), [words]);
+    let mut moved = command.clone();
+    moved.at = Point::TurnEnd;
+    moved.reads = Point::TurnEnd.inputs().iter().copied().collect();
+    store::edit(home.home.path(), &moved, 2).expect("moved to a turn's end");
+    assert_eq!(
+        told(&home),
+        [AskWhen::default()],
+        "a command's words are looked for in a turn's last answer"
+    );
+}

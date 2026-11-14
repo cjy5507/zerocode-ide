@@ -123,7 +123,8 @@ fn asking_at(cwd: &Path, point: Point, at: Moment) -> Option<Held> {
         })
         .map(|(entry, definition)| Asked {
             mode: standing(switch, entry.mode),
-            ask_when: asks_when.remove(&entry.id).unwrap_or_default(),
+            // Kept as its point keeps it: a decision moved since it was told asks every time.
+            ask_when: asks_when.remove(&entry.id).map(|said| said.kept_at(definition.at)).unwrap_or_default(),
             entry,
             definition,
         })
