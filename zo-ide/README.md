@@ -181,6 +181,11 @@ zo가 값싼 모델에 맡기는 일 가운데 둘은 세션이 쓰는 공급자
   - `smart.providerAllowlist`: 사람의 목록 안에서만 줄인다.
   - `modelRouter`에서 저장소가 적은 고정(`"mode": "pinned"`)과 계열 선택자: 사람의 허용 목록 안에서만 쓰이고, 파일을 고칠 수 있는 도우미와 Architect의 구현 모델을 세션의 공급자 밖으로 옮기지 못하며, 사람이 검증 교차를 껐으면 검증 다리도 옮기지 못한다.
   - `smart.deepTierModels`: 저장소가 적은 것은 「사람이 고른 모델」로 치지 않는다.
+  - `smart.policy`: 사람이 `classic`이면 저장소의 다른 값은 빠진다(Architect의 최상위 모델 풀은 허용 목록이 거르지 않는다).
+  - `modelRouter`의 사람의 고정 · 선택자: 저장소가 같은 역할을 `"mode": "auto"` · `"deleted"`나 다른 모델로 적어도, `modelRouter` · `roles`를 객체가 아닌 값으로 적어도 사람의 것이 선다.
+  - 저장소의 고정으로 정해진 도우미의 경로는 `routeSource`에 `repository-pin`으로 적히고, 사람의 고정처럼 구현 도우미의 「오케스트레이션 예약 모델」 거절을 건너뛰지 않는다. 저장소의 `.zo/agents/<이름>.md`가 적은 `model:`도 사람의 고정으로 치지 않는다.
+  - Jev 기능마다의 설정값(`smart.jevPatchReview` 등 — 나뉘기 전 기능의 값 · 저장된 내장 결정 포함)과 스위치 `smart.jev.enabled`: 사람의 문서로 읽은 것보다 더 가지 못한다(`off` < `shadow` < `auto` < `on`).
+  - `cache.refresh`: 사람이 끈 것을 저장소가 켜지 못한다.
 
   넓히는 값은 사람의 문서에 적는다: `~/.zo/settings.json`, git 저장소 안에서 git이 추적하지 않는 `.zo/settings.local.json`(macOS · Linux — Windows에서는 저장소의 문서로 읽힌다). 사람과 저장소가 같은 값을 적었으면 사람의 것이다.
 - 그 폴더와 위쪽 폴더 어디에도 `.git`이 없으면(git 저장소가 아닌 폴더 — 폴더 자체를 git 디렉터리 꼴로 만든 것 · Mercurial · SVN 작업본 포함) 그 폴더의 `.zo/settings.local.json`과 `.zo/trusted-mcp-servers.json`은 저장소의 문서로 읽힌다. 저장소의 ZIP · 릴리스 tarball · 패키지는 저장소가 커밋한 이 파일을 git 없이 가져오고, 사람이 쓴 것과 가를 길이 없어서다. 로컬 설정 파일(`settings.local.json`)의 hooks · env · 권한 허용 · MCP 서버 · `enableAllProject…`가 쓰이지 않으면 세션 시작에 한 줄로 이름을 알리고, 그 폴더의 「항상 허용」은 그 세션에서만 산다. `model` · `reasoningEffort` · `outputStyle` · 계획 모드처럼 저장소의 문서에서도 쓰이는 값은 그대로다. git 저장소 안에서 받은 폴더를 풀거나, 받은 폴더에서 `git init`을 하면 그 파일은 다시 「git이 추적하지 않는 파일」이 된다 — 받은 폴더의 이 파일은 먼저 읽어 본다.
