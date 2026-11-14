@@ -324,6 +324,7 @@ pub use model_router::{
     RoutePolicyContext, RouteRequest, RouteRole, RouteShapeKind, RouteSignalSource,
     RouteTaskComplexity, RouteTaskKind, RouteTaskRisk, RouteToolNeed, RouteVerificationNeed,
     RouterMode, RoutingTarget, SmartPolicy, SubagentProfileId, SubagentProfileKind, TiersProvenance,
+    REPOSITORY_PIN_NOT_APPLIED,
 };
 pub use memory::{
     dream_at_cwd, load_lexical_memory_retriever, load_memory_retriever, maybe_auto_dream,

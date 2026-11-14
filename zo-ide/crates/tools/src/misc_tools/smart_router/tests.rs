@@ -506,6 +506,39 @@
         assert_eq!(explore("family-explore-persons", &listed_and_pins, &nothing), OTHER, "the person's own pin");
     }
 
+    /// Where a repository's committed pin is named and not applied, the
+    /// route says so on the line the person sees, and why — a team that
+    /// relied on it finds its helpers on automatic routing otherwise in
+    /// silence (152, review t-107693).
+    #[test]
+    fn a_repositorys_pin_that_was_not_applied_is_named_on_the_route() {
+        const MAIN: &str = "claude-sonnet-5";
+        const OTHER: &str = "gpt-5.6-terra";
+        let inventory = inventory_of(MAIN, &[MAIN, OTHER]);
+        let why = |label: &str, persons: &Value, repository: &Value, edits_files: bool| {
+            in_a_repository(label, persons, repository, |settings| {
+                let context = runtime::RoutePolicyContext {
+                    provider_allowlist: settings.provider_allowlist.clone(),
+                    ..runtime::RoutePolicyContext::default()
+                };
+                let mut request = runtime::RouteRequest::new(RouteRole::Coding, MAIN).with_context(context);
+                let decision = super::apply::route_spawn(&mut request, &settings, &inventory, edits_files);
+                super::apply::repository_pin_not_applied(&decision)
+            })
+        };
+        let listed = json!({ "smart": { "providerAllowlist": ["anthropic"] } });
+        assert_eq!(
+            why("not-applied-allowlist", &listed, &pinned("coding", OTHER), false),
+            Some("outside your smart.providerAllowlist")
+        );
+        assert_eq!(
+            why("not-applied-family", &json!({}), &pinned("coding", OTHER), true),
+            Some("outside the session's provider family")
+        );
+        assert_eq!(why("applied", &json!({}), &pinned("coding", OTHER), false), None);
+        assert_eq!(why("persons-pin", &pinned("coding", OTHER), &json!({}), true), None);
+    }
+
     /// The verify leg and the Architect implementer are pinned by a role too,
     /// each by a shortcut past the router. A repository's pin takes neither
     /// where the person did not: the verifier across providers once they

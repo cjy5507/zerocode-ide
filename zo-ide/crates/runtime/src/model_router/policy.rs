@@ -816,6 +816,13 @@ pub enum RouteDecisionSource {
     FallbackDisabled,
 }
 
+/// The guardrail tag a route's audit carries where a repository's committed
+/// pin or selector was named and not applied, followed by why: `allowlist`
+/// (at a provider outside the person's `smart.providerAllowlist`) or
+/// `family` (work that edits files, outside the session's provider family).
+/// The person who relied on the pin is told on the route's reason line.
+pub const REPOSITORY_PIN_NOT_APPLIED: &str = "repository-pin-not-applied:";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteAudit {
     pub reference_provider: Option<String>,
@@ -1886,6 +1893,7 @@ fn audit_decision(request: &RouteRequest, selected_model: &str, inventory: &Mode
              pin the model in your own settings to use it"
                 .to_string(),
         );
+        guardrails.push(format!("{REPOSITORY_PIN_NOT_APPLIED}allowlist"));
     }
     RouteAudit {
         reference_provider,

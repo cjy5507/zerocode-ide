@@ -1147,6 +1147,7 @@ fn smart_model_for_fields(
         && fallback_models.is_empty()
         && effort.is_none()
         && !matches!(effective_role, RouteRole::Coding | RouteRole::Debugging)
+        && repository_pin_not_applied(&decision).is_none()
     {
         return None;
     }
@@ -1254,7 +1255,26 @@ fn compose_route_reason(
         use std::fmt::Write as _;
         let _ = write!(reason, " · learned-shadow-differs:{model}");
     }
+    if let Some(why) = repository_pin_not_applied(decision) {
+        use std::fmt::Write as _;
+        let _ = write!(reason, " · repository pin not applied: {why}");
+    }
     reason
+}
+
+/// Why a repository's committed pin or selector named for this route was
+/// not applied, in the words of the reason line — `None` where none was
+/// named or it was applied (`runtime::REPOSITORY_PIN_NOT_APPLIED`). A team
+/// that relied on it is told, rather than finding its helpers moved to
+/// automatic routing in silence (152, review t-107693).
+pub(super) fn repository_pin_not_applied(decision: &RouteDecision) -> Option<&'static str> {
+    decision.audit.guardrails.iter().find_map(|line| {
+        match line.strip_prefix(runtime::REPOSITORY_PIN_NOT_APPLIED)? {
+            "allowlist" => Some("outside your smart.providerAllowlist"),
+            "family" => Some("outside the session's provider family"),
+            _ => None,
+        }
+    })
 }
 
 /// Phase 6 shadow-mode wiring: `request` already carries whatever
@@ -1324,6 +1344,7 @@ fn route_reason_is_worth_reporting(model_override: Option<&String>, decision: &R
             .guardrails
             .iter()
             .any(|line| line.starts_with("learned-shadow-differs:"))
+        || repository_pin_not_applied(decision).is_some()
 }
 
 fn route_audit_notes(

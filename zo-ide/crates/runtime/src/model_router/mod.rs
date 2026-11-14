@@ -82,7 +82,7 @@ pub use policy::{
     RouteDecision, RouteDecisionSource, RouteDiversityNeed, RouteFeedbackHint,
     RouteOutputNeed, RoutePolicyContext, RouteRequest, RouterMode, RouteShapeKind,
     RouteSignalSource, RouteTaskComplexity, RouteTaskKind, RouteTaskRisk, RouteToolNeed,
-    RouteVerificationNeed, SmartPolicy, TiersProvenance,
+    RouteVerificationNeed, SmartPolicy, TiersProvenance, REPOSITORY_PIN_NOT_APPLIED,
 };
 pub use calibration::{
     read_route_outcomes_across_projects, route_outcome_log_paths_across_projects,

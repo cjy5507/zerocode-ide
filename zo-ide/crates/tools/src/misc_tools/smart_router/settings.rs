@@ -832,6 +832,7 @@ pub(super) fn route_within_the_family(request: &mut RouteRequest, inventory: &ru
         request.override_rule = None;
         request.repository_override = false;
         request.context.audit_notes.push(NOT_APPLIED_OUTSIDE_THE_FAMILY.to_string());
+        request.context.audit_notes.push(format!("{}family", runtime::REPOSITORY_PIN_NOT_APPLIED));
         return route_model(request, inventory);
     }
     decision
