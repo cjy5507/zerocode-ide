@@ -8492,10 +8492,15 @@ async function spawnStoredLeaf(wake, launched, grid = null, restore = null, work
         // a record that named it twice is what put two resumes on one transcript
         // to begin with.
         duplicate = true;
-        notice = t("session.wakeStanding", "{{agent}} 대화는 이미 다른 판에서 열려 있어, 이 판은 빈 셸로 섭니다", {
-          agent: agentName(wake.agent),
-        });
-        console.warn(`[restore] ${wake.agent} ${wake.id} is already standing in term ${woke.term}; this leaf opens as a plain shell`);
+        // Held on a wire (152): the conversation is on that wire's page.
+        notice = woke.wire != null
+          ? t("session.wakeOnWire", "{{agent}} 대화는 이미 대화 화면에서 열려 있어, 이 판은 빈 셸로 섭니다", {
+            agent: agentName(wake.agent),
+          })
+          : t("session.wakeStanding", "{{agent}} 대화는 이미 다른 판에서 열려 있어, 이 판은 빈 셸로 섭니다", {
+            agent: agentName(wake.agent),
+          });
+        console.warn(`[restore] ${wake.agent} ${wake.id} is already standing ${woke.wire != null ? `on wire ${woke.wire}` : `in term ${woke.term}`}; this leaf opens as a plain shell`);
       }
     } catch (error) {
       // The agent left the PATH, or the vendor dropped the session. The layout

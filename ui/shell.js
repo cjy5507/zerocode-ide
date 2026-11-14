@@ -643,6 +643,13 @@ async function resumeSession(known, worktree = null, road = "reopen") {
       openWorkbenchTasks({ path });
       return;
     }
+    // Held on a wire (152): its page is the answer.
+    if (woke.standing && woke.wire != null) {
+      const page = wirePageOf(woke.wire);
+      if (page) await showWirePage(page);
+      toast(t("vault.alreadyOpenWire", "이 대화는 이미 대화 화면에서 열려 있어 새로 열지 않았습니다"), "warn");
+      return;
+    }
     if (woke.standing) {
       // Held in a tab: that pane is the answer. In none yet: the door that is
       // opening it puts it on the stage itself.
@@ -9488,9 +9495,9 @@ async function resumeVaultSession(session, worktree, retried = false) {
     // window holds with no tab of its own is nobody's to reach — it ends, and
     // the row asks again, once.
     if (woke.standing && woke.wire != null) {
-      const page = tabs.find((one) => one.kind === "worker" && one.worker?.wire === woke.wire);
+      const page = wirePageOf(woke.wire);
       if (page) {
-        setActiveTab(page.id);
+        await showWirePage(page);
         toast(t("vault.alreadyOpenWire", "이 대화는 이미 대화 화면에서 열려 있어 새로 열지 않았습니다"), "warn");
         return;
       }
@@ -14605,6 +14612,20 @@ async function openWirePage(agent, cwd, { resume = null, fromTerm = null, deadli
   // The words that waited for the wire go down it now, a message a turn.
   if (worker.queue?.length) settleComposerQueue(worker);
   return tabId;
+}
+
+/* The tab a wire's page stands in, if one does (152). */
+function wirePageOf(wire) {
+  return tabs.find((one) => one.kind === "worker" && one.worker?.wire === wire) ?? null;
+}
+
+/* A wire's page in front, in its own checkout (152): one standing in another
+ * checkout brings that checkout to the stage first, as a pane's does
+ * (`focusAgentPane`) — a tab chosen behind the checkout in front is a tab
+ * nobody sees. */
+async function showWirePage(page) {
+  if (page.worktree && page.worktree !== activeWorktreePath && !(await activateWorktree(page.worktree))) return;
+  setActiveTab(page.id);
 }
 
 /* Move a tab to an index on the strip — the seat another tab holds, so a tab

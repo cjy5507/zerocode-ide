@@ -158,6 +158,36 @@ before it execs (t-47141):\n  {}",
     );
 }
 
+/// 창은 대화 화면(선)의 프로세스 무리를 `zerocode_core::process_tree` 로
+/// 끝낸다(152). 위의 걸음은 다른 크레이트를 읽지 않으므로, 그 파일의 맨
+/// `taskkill` 은 게이트를 지나 대화 탭을 닫을 때마다, 창이 끝날 때는 선마다
+/// 검은 콘솔 창을 깜빡였다(AO #5309). 그 파일이 띄우는 자식은 모두
+/// `CREATE_NO_WINDOW` 를 단다.
+#[test]
+fn the_tree_ending_the_window_borrows_from_core_starts_no_console_window() {
+    let core = include_str!("../../../zerocode-core/src/process_tree.rs");
+    let (shipped, _) = core
+        .split_once("#[cfg(all(test, unix))]")
+        .unwrap_or((core, ""));
+    let code = code_only(shipped);
+    let started = code.matches("Command::new(").count();
+    assert!(
+        started > 0,
+        "process_tree.rs starts no child any more; this contract reads the wrong file"
+    );
+    assert_eq!(
+        code.matches(".creation_flags(CREATE_NO_WINDOW)").count(),
+        started,
+        "a child process_tree.rs starts has no CREATE_NO_WINDOW, and the window that ends a \
+         wire's tree through it flashes a console window on Windows (AO #5309):\n{code}"
+    );
+    assert_eq!(
+        code.matches("0x0800_0000").count(),
+        1,
+        "CREATE_NO_WINDOW is spelled once in process_tree.rs"
+    );
+}
+
 #[test]
 fn the_flag_is_spelled_once_and_only_the_door_reaches_for_it() {
     let sources = shell_sources();

@@ -1868,6 +1868,13 @@ pub(crate) trait WakeWindow {
     fn data_root(&self) -> PathBuf;
     /// The live pane already holding `wanted`, if one does.
     fn standing(&self, wanted: &zerocode_core::ConversationKey) -> Option<TermId>;
+    /// The wire of this window already holding `agent`'s conversation
+    /// `session`, if one does (152).
+    fn wire_holding(
+        &self,
+        agent: &str,
+        session: &zerocode_core::ProviderSession,
+    ) -> Option<crate::wire_runtime::WireId>;
     /// The person's stored launch override for `agent`.
     fn launch_override(&self, agent: &str)
     -> Result<Option<zerocode_core::LaunchOverride>, String>;
@@ -1962,6 +1969,14 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     // them and starts no second process on its transcript. The claim lives
     // until this function returns: past the spawn that failed, and past the
     // pane `pane_sessions` answers for from then on.
+    //
+    // A wire holds a conversation too (152): its page is where the
+    // conversation is, and a pane woken on it — a sleeping tab put on the
+    // stage, a first visit — would be a second process on its transcript.
+    // Nothing of this wake happens; the door stands its pane as a plain shell.
+    if let Some(wire) = window.wire_holding(agent, &session) {
+        return Ok(ConversationWake::on_wire(wire));
+    }
     let _claim =
         match conversation_wake::claim_among(agent, &session, term, |held| window.standing(held)) {
             Ok(claim) => claim,
@@ -2395,6 +2410,17 @@ impl WakeWindow for ResumeDoor<'_> {
 
     fn standing(&self, wanted: &zerocode_core::ConversationKey) -> Option<TermId> {
         conversation_wake::holding_pane(self.state, wanted)
+    }
+
+    fn wire_holding(
+        &self,
+        agent: &str,
+        session: &zerocode_core::ProviderSession,
+    ) -> Option<crate::wire_runtime::WireId> {
+        self.state
+            .shell_runtime()
+            .wires
+            .holding(agent, session, None)
     }
 
     fn launch_override(

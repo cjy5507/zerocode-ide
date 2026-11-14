@@ -956,27 +956,30 @@ pub(super) async fn hook_loop(
             };
             codex_queue::bind_session(report.term, &session);
             orchestration::pane_session_reported(report.term, &session, now_epoch_ms());
-            // A wire of this window holding the conversation this pane reports
-            // is a second process on one transcript (152): the pane's CLI runs
-            // already, so the wire ends, and its page says where the
-            // conversation goes on. Never the wire this pane handed it to.
-            let superseded = app.state::<AppState>().shell_runtime().wires.supersede(
-                report.agent.slug(),
-                &session,
-                report.term,
-            );
-            if let Some(wire) = superseded {
-                note_window_event(
-                    app.state::<AppState>().local_data_root(),
-                    &crate::wire_runtime::superseded_line(
-                        report.term,
-                        report.agent.slug(),
-                        &session.id,
-                        wire,
-                    ),
-                );
-            }
             if let Some(word) = word {
+                // A conversation no door named, that a wire of this window
+                // holds (152): a second process on one transcript, opened in a
+                // shell or by a picker inside the CLI, which runs already — so
+                // the wire ends, and its page says where the conversation goes
+                // on. Only such a report: a pane a door of this window opened
+                // was asked of the wires before it started (`wake_conversation`,
+                // the vault's door), and its report here says nothing new.
+                let superseded = app.state::<AppState>().shell_runtime().wires.supersede(
+                    report.agent.slug(),
+                    &session,
+                    report.term,
+                );
+                if let Some(wire) = superseded {
+                    note_window_event(
+                        app.state::<AppState>().local_data_root(),
+                        &crate::wire_runtime::superseded_line(
+                            report.term,
+                            report.agent.slug(),
+                            &session.id,
+                            wire,
+                        ),
+                    );
+                }
                 let state = app.state::<AppState>();
                 note_window_event(
                     state.local_data_root(),

@@ -787,3 +787,61 @@ fn the_calls_the_composer_makes_at_a_pane_are_these_and_the_queue_adds_none() {
     assert_eq!(queue.matches("composerDeliver(").count(), 1);
     assert_eq!(queue.matches("sendFront(").count(), 1);
 }
+
+/// A wire ends for a pane only on a report no door of this window named
+/// (152): a conversation opened in a shell, or by a picker inside the CLI.
+/// A pane a door opened was asked of the wires before it started, so its
+/// report ending a wire would end a turn the person was reading — a sleeping
+/// tab put on the stage would have cut the wire's answer off mid-turn.
+#[test]
+fn a_wire_ends_only_for_a_conversation_no_door_named() {
+    let pane = include_str!("../../src/pane_runtime.rs");
+    let (pane, _) = pane.split_once("#[cfg(test)]").unwrap_or((pane, ""));
+    assert_eq!(
+        shipped_backend().matches(".wires.supersede(").count(),
+        1,
+        "a wire is ended for a pane's report from one place only"
+    );
+    assert!(
+        pane.contains(
+            "            if let Some(word) = word {\n                // A conversation no door named"
+        ),
+        "the wire's end is no longer inside the word a report no door named carries"
+    );
+    let word = &pane[pane
+        .find("            if let Some(word) = word {")
+        .expect("the report's word")..];
+    let inside = &word[..word
+        .find("\n            }\n")
+        .expect("the word's block closes")];
+    assert!(
+        inside.contains(".wires.supersede("),
+        "the wire is ended outside the word a report no door named carries:\n{inside}"
+    );
+}
+
+/// Every way out tells the wires to end (152) — the quit's and the restart's.
+/// An update's restart (`exit_runtime::relaunch`) passes `hang_up_panes` and
+/// never `end_panes`: four restarts in a window log went by with no TERM to a
+/// wire while the goodbye stood in `end_panes`.
+#[test]
+fn every_way_out_tells_the_wires_to_end() {
+    let main = include_str!("../../src/main.rs");
+    let hang = &main[main
+        .find("    fn hang_up_panes(&self) {")
+        .expect("the way out's hangup step")..];
+    let hang = &hang[..hang.find("\n    }\n").expect("the step closes")];
+    assert!(
+        hang.contains(".wires") && hang.contains(".hang_up_all();"),
+        "the wires' goodbye is not in the step every way out passes:\n{hang}"
+    );
+    let exit = include_str!("../../src/exit_runtime.rs");
+    let relaunch = &exit[exit
+        .find("pub(crate) fn relaunch(")
+        .expect("the restart's way out")..];
+    let relaunch = &relaunch[..relaunch.find("\n}\n").expect("the restart closes")];
+    assert!(
+        relaunch.contains("steps.hang_up_panes();"),
+        "a restart no longer passes the hangup step:\n{relaunch}"
+    );
+}

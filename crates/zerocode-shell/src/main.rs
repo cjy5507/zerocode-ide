@@ -4172,6 +4172,15 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
     }
 
     fn hang_up_panes(&self) {
+        // Every wire's CLI hears the goodbye too (152): it was nobody's pane,
+        // so no hangup reached it, and the sweep below knows panes alone. Here
+        // rather than in `end_panes`, because a restart (`exit_runtime::
+        // relaunch`) passes this step and never that one. Nobody waits.
+        self.0
+            .state::<AppState>()
+            .shell_runtime()
+            .wires
+            .hang_up_all();
         // The panes' agents are read on the way out's own thread (t-76504):
         // the window's pane maps can be held by a stuck thread, and this one
         // waits on none of them past `pane_leftovers::WRITE_PATIENCE`.
@@ -4184,13 +4193,6 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
     }
 
     fn end_panes(&self) {
-        // Every wire's CLI hears the goodbye too (152): it was nobody's pane,
-        // so no hangup reached it, and the sweep below knows panes alone.
-        self.0
-            .state::<AppState>()
-            .shell_runtime()
-            .wires
-            .hang_up_all();
         cmd::managed_judgment::shutdown();
         // The tailnet mapping the phone link made goes with the window.
         phone_link::shutdown();

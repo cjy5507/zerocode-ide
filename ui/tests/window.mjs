@@ -59997,6 +59997,33 @@ suite("wire-ends-with-its-page", async ({ browser, origin, ok }) => {
       notice?.querySelector(".pane-chat-notice-go")?.click();
       seen.wentThere = await until(() => activeTabId === tabOfTerm(other)?.id);
 
+      // 5. A tab's 「이 대화 다시 열기」 the backend answers with a wire: that page.
+      window.__ANSWER__.resume_session = () => ({ term: 0, standing: true, wire: 44 });
+      const mountedBefore = tabs.filter((tab) => tab.kind === "term").length;
+      await resumeSession({ agent: "claude", session: { key: "session_id", id: "s-vault" } });
+      await settle();
+      seen.reopenFront = activeTabId === held && tabs.filter((tab) => tab.kind === "term").length === mountedBefore;
+
+      // 6. A stored pane woken on a conversation a wire holds (a sleeping tab
+      // put on the stage, a first visit): a plain shell that says where the
+      // conversation is, and no CLI.
+      const plain = [];
+      window.__ANSWER__.open_term_tab = (args) => { plain.push(args); return 9300 + plain.length; };
+      window.__ANSWER__.pane_layouts = () => [{
+        id: 31, root: { type: "leaf" }, agents: { 0: { agent: "claude", key: "session_id", id: "s-vault" } },
+        running: { 0: "claude" }, active: 0,
+      }];
+      const launchesBefore = calls.filter(([kind]) => kind === "launch").length;
+      const before = tabs.filter((tab) => tab.kind === "term").length;
+      await restoreWorktreeLayouts(activeWorktreePath);
+      await settle();
+      await settle();
+      const wakeSays = t("session.wakeOnWire", "{{agent}} 대화는 이미 대화 화면에서 열려 있어, 이 판은 빈 셸로 섭니다", { agent: agentName("claude") });
+      seen.wokeAsPlainShell = plain.some((args) => args.plain === true && String(args.notice ?? "").includes(wakeSays)) &&
+        calls.filter(([kind]) => kind === "launch").length === launchesBefore &&
+        tabs.filter((tab) => tab.kind === "term").length > before;
+      for (const name of ["resume_session", "open_term_tab", "pane_layouts"]) delete window.__ANSWER__[name];
+
       for (const name of ["wire_start", "wire_log", "wire_stop"]) delete window.__ANSWER__[name];
       if (launchBefore) window.__ANSWER__.launch_agent_tab = launchBefore;
       else delete window.__ANSWER__.launch_agent_tab;
@@ -60004,9 +60031,10 @@ suite("wire-ends-with-its-page", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "a wire ends with its page and one conversation stays one process — a tab dropped by a sweep stops its wire, 「터미널」 stops the wire before the pane resumes the session and not while it works, a vault row a wire holds brings that tab forward (a tabless wire is stopped and the row asks again), and a wire a pane took up says where it goes on with the way there",
+      "a wire ends with its page and one conversation stays one process — a tab dropped by a sweep stops its wire, 「터미널」 stops the wire before the pane resumes the session and not while it works, a vault row or a tab's reopen a wire holds brings that tab forward (a tabless wire is stopped and the row asks again), a stored pane woken on a wire's conversation stands as a plain shell saying so, and a wire a pane took up says where it goes on with the way there",
       seen.droppedStops && seen.screenLaunched && seen.stopBeforeLaunch && seen.screenTabGone &&
-        seen.busyKept && seen.busySaid && seen.vaultFront && seen.orphanStopped && seen.continuedSaid && seen.wentThere,
+        seen.busyKept && seen.busySaid && seen.vaultFront && seen.orphanStopped && seen.continuedSaid && seen.wentThere &&
+        seen.reopenFront && seen.wokeAsPlainShell,
       JSON.stringify(seen),
     );
   } finally {

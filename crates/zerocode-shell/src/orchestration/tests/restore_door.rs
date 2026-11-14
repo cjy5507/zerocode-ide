@@ -87,6 +87,9 @@ pub(super) struct Door {
     answers: Mutex<HashMap<u32, VecDeque<DeliveryOutcome>>>,
     launches: Mutex<HashMap<u32, u64>>,
     live: Mutex<HashMap<zerocode_core::ConversationKey, u32>>,
+    /// The conversations a wire of this window holds (152): none, unless a
+    /// test says.
+    wired: Mutex<HashMap<zerocode_core::ConversationKey, u32>>,
     agents: Mutex<HashMap<u32, &'static str>>,
     rows: Mutex<PendingNudges>,
     armed: Mutex<Vec<(u32, Option<Receiver<DeliveryOutcome>>)>>,
@@ -123,6 +126,7 @@ impl Door {
             answers: Mutex::new(HashMap::new()),
             launches: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
+            wired: Mutex::new(HashMap::new()),
             agents: Mutex::new(HashMap::new()),
             rows: Mutex::new(PendingNudges::default()),
             armed: Mutex::new(Vec::new()),
@@ -257,6 +261,20 @@ impl Door {
         self.live.lock().unwrap().insert(key, term);
     }
 
+    /// Wire `wire` of this window holds `agent`'s conversation `session` (152).
+    pub(super) fn already_on_wire(&self, agent: &str, session: &str, wire: u32) {
+        let key = zerocode_core::conversation_key(
+            agent,
+            &zerocode_core::ProviderSession {
+                key: zerocode_core::SessionKey::SessionId,
+                id: session.to_string(),
+                transcript_path: None,
+            },
+        )
+        .expect("a conversation");
+        self.wired.lock().unwrap().insert(key, wire);
+    }
+
     /// Every process this launcher started: its term and command line.
     pub(super) fn started(&self) -> Vec<(u32, String)> {
         self.did
@@ -355,6 +373,11 @@ impl WakeWindow for Door {
 
     fn standing(&self, wanted: &zerocode_core::ConversationKey) -> Option<u32> {
         self.live.lock().unwrap().get(wanted).copied()
+    }
+
+    fn wire_holding(&self, agent: &str, session: &zerocode_core::ProviderSession) -> Option<u32> {
+        let key = zerocode_core::conversation_key(agent, session)?;
+        self.wired.lock().unwrap().get(&key).copied()
     }
 
     fn launch_override(
@@ -1261,6 +1284,36 @@ fn a_sleeper_whose_conversation_cannot_come_back_is_told_once_and_nothing_starts
 /// agent's, or in another checkout, is not that sleeper and seats nobody;
 /// two runs' workers in one checkout each come back as themselves; and a
 /// late exit of a pane from the last window ends nobody that came back.
+/// A conversation a wire of this window holds is not woken again (152): the
+/// wake starts nothing and answers that wire, and the page stands the pane as
+/// a plain shell. Without the question, a sleeping tab put on the stage woke a
+/// second process on the wire's transcript — and that pane's report then ended
+/// the wire mid-turn.
+#[test]
+fn a_conversation_held_on_a_wire_is_not_woken_again() {
+    const TAB: u32 = 278_600;
+    const WIRE: u32 = 9;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("a checkout");
+    let door = Door::new(checkout.path());
+    let held = "7812b0c1-0000-4000-8000-000000000600";
+    door.already_on_wire("claude", held, WIRE);
+    assert_eq!(
+        door.wake(TAB, "claude", held),
+        Ok(ConversationWake::on_wire(WIRE))
+    );
+    assert!(
+        door.started().is_empty(),
+        "a CLI was started on a conversation a wire holds: {:?}",
+        door.started()
+    );
+    // Another conversation wakes as before.
+    assert_eq!(
+        door.wake(TAB + 1, "claude", "7812b0c1-0000-4000-8000-000000000601"),
+        Ok(ConversationWake::opened(TAB + 1))
+    );
+}
+
 #[test]
 fn one_conversation_comes_back_once_whatever_else_names_it() {
     const LEADER_A: u32 = 278_540;

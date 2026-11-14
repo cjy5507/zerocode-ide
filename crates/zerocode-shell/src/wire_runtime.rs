@@ -2452,20 +2452,13 @@ impl WireSession {
             .is_ok_and(|state| state.continued_in.is_none())
     }
 
-    /// The window is going: the CLI's group hears a TERM, and nobody waits
-    /// (`WireRuntime::hang_up_all`). On Windows the tree is ended outright.
-    fn hang_up(&self) {
-        let Ok(mut child) = self.child.lock() else {
-            return;
-        };
-        #[cfg(unix)]
-        if matches!(child.try_wait(), Ok(None)) {
-            let _ = crate::codex_queue::signal_process_group(child.id(), libc::SIGTERM);
-        }
-        #[cfg(windows)]
-        zerocode_core::process_tree::end_tree(&mut child);
-        #[cfg(not(any(unix, windows)))]
-        let _ = child.kill();
+    /// The CLI's pid while it still runs — the head of its tree — or `None`
+    /// once it has gone, or while somebody else holds it: a wire being ended
+    /// right now (`supersede`'s thread) is not waited for on the way out
+    /// (`WireRuntime::hang_up_all`).
+    fn running_pid(&self) -> Option<u32> {
+        let mut child = self.child.try_lock().ok()?;
+        matches!(child.try_wait(), Ok(None)).then_some(child.id())
     }
 
     /// A CLI that left by itself is collected as its output closes (152): left
@@ -2680,10 +2673,24 @@ impl WireRuntime {
     /// Claude Code measured gone 1.5–3.6 s after that, mid-answer and while it
     /// waited on an approval — but the TERM says it at once, to every wire
     /// protocol alike.
+    ///
+    /// On Windows each tree's `taskkill` is started and nobody waits for it
+    /// either. Called where every way out passes — the quit's and the
+    /// restart's (`ExitSteps::hang_up_panes`).
     pub(crate) fn hang_up_all(&self) {
-        for wire in self.held() {
-            wire.hang_up();
+        let running: Vec<u32> = self
+            .held()
+            .iter()
+            .filter_map(|wire| wire.running_pid())
+            .collect();
+        #[cfg(unix)]
+        for pid in running {
+            let _ = crate::codex_queue::signal_process_group(pid, libc::SIGTERM);
         }
+        #[cfg(windows)]
+        zerocode_core::process_tree::start_ending_trees(&running);
+        #[cfg(not(any(unix, windows)))]
+        let _ = running;
     }
 
     /// Start `agent` on its wire in `cwd`, walk the handshake, and hold the
@@ -4650,7 +4657,7 @@ mod tests {
     /// `None` once no process has that id.
     #[cfg(unix)]
     fn process_state(pid: u32) -> Option<String> {
-        let out = std::process::Command::new("ps")
+        let out = crate::proc::quiet_command("ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
             .expect("ps runs");
@@ -4709,7 +4716,7 @@ mod tests {
         }
         let survived = runs(grandchild);
         if survived {
-            let _ = std::process::Command::new("kill")
+            let _ = crate::proc::quiet_command("kill")
                 .args(["-9", &grandchild.to_string()])
                 .status();
         }

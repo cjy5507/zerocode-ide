@@ -9,10 +9,12 @@
 //! unix its process group, on Windows `taskkill /T`, which follows
 //! parentage — the way ZO's build runner ends a step's `cmd` (`end_tree`).
 //!
-//! For the children of a console program, such as the mirror in a person's
-//! terminal: `taskkill` here shares that console. The window has no console,
-//! so it starts its own `taskkill` through its quiet door (`proc.rs`), with
-//! the same [`TASKKILL_TREE`] words.
+//! `taskkill` starts with no console window of its own (`CREATE_NO_WINDOW`,
+//! 152): the window, which has no console, ends its wires' trees through here,
+//! and a bare `taskkill` flashed a black window over the person's screen for
+//! each one (AO #5309). Its input and output are nobody's, so a console
+//! program loses nothing by it either. The window's own `taskkill`s go through
+//! its quiet door (`proc.rs`), with the same [`TASKKILL_TREE`] words.
 
 use std::process::{Child, Command};
 
@@ -29,6 +31,11 @@ const TASKKILL_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// How often [`end_tree`] looks whether `taskkill` has ended.
 #[cfg(windows)]
 const TASKKILL_LOOK_EVERY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// `winbase.h`'s `CREATE_NO_WINDOW`: a console child started without a
+/// console window — the flag the window's `proc::quiet_command` sets too.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Make the child `command` starts the head of a tree [`end_tree`] can end:
 /// on unix the leader of a process group of its own, which every process it
@@ -69,23 +76,53 @@ pub fn end_tree(child: &mut Child) {
 /// `taskkill /T /F /PID <pid>`, waited for [`TASKKILL_WAIT`] at most.
 #[cfg(windows)]
 fn end_tree_by_taskkill(pid: u32) {
+    end_trees(&[pid]);
+}
+
+/// `taskkill /T /F /PID <pid>` for every pid at once — each tree's ending
+/// started before any is waited for — then [`TASKKILL_WAIT`] at most for all
+/// of them together (152): several trees wait once, not once a tree.
+#[cfg(windows)]
+pub fn end_trees(pids: &[u32]) {
+    let mut running: Vec<Child> = pids.iter().filter_map(|pid| taskkill_tree(*pid)).collect();
+    let until = std::time::Instant::now() + TASKKILL_WAIT;
+    while running
+        .iter_mut()
+        .any(|taskkill| matches!(taskkill.try_wait(), Ok(None)))
+        && std::time::Instant::now() < until
+    {
+        std::thread::sleep(TASKKILL_LOOK_EVERY);
+    }
+    for mut taskkill in running {
+        let _ = taskkill.kill();
+        let _ = taskkill.wait();
+    }
+}
+
+/// `taskkill /T /F /PID <pid>` for every pid, waited for by nobody (152): a
+/// window on its way out ends its wires' trees without holding the way out.
+#[cfg(windows)]
+pub fn start_ending_trees(pids: &[u32]) {
+    for pid in pids {
+        drop(taskkill_tree(*pid));
+    }
+}
+
+/// The one `taskkill` this file starts: `/T /F /PID <pid>`, with no console
+/// window of its own ([`CREATE_NO_WINDOW`]) and nobody's input or output.
+#[cfg(windows)]
+fn taskkill_tree(pid: u32) -> Option<Child> {
+    use std::os::windows::process::CommandExt as _;
     use std::process::Stdio;
-    let Ok(mut taskkill) = Command::new("taskkill")
+    Command::new("taskkill")
         .args(TASKKILL_TREE)
         .arg(pid.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-    else {
-        return;
-    };
-    let until = std::time::Instant::now() + TASKKILL_WAIT;
-    while matches!(taskkill.try_wait(), Ok(None)) && std::time::Instant::now() < until {
-        std::thread::sleep(TASKKILL_LOOK_EVERY);
-    }
-    let _ = taskkill.kill();
-    let _ = taskkill.wait();
+        .ok()
 }
 
 /// Unix only: the Windows tree is ended by `taskkill`, which this machine

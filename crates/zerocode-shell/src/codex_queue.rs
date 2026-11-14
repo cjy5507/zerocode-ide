@@ -396,6 +396,15 @@ pub(crate) fn prepare_process_group(command: &mut std::process::Command) {
 pub(crate) fn signal_process_group(process_group: u32, signal: libc::c_int) -> std::io::Result<()> {
     let process_group = libc::pid_t::try_from(process_group)
         .map_err(|_| std::io::Error::other("process group id is outside pid_t"))?;
+    // Never a group that is not a child's own (152): `kill(-0)` is the
+    // window's own group, `kill(-1)` every process this user may signal, and
+    // the window's own group holds the window.
+    // SAFETY: `getpgrp` takes nothing and cannot fail.
+    if process_group <= 1 || process_group == unsafe { libc::getpgrp() } {
+        return Err(std::io::Error::other(
+            "not a child's own process group: the window's, or every process",
+        ));
+    }
     // SAFETY: the negative, non-zero pid addresses only the fresh process
     // group created for this sidecar. No pointer crosses the FFI boundary.
     if unsafe { libc::kill(-process_group, signal) } == 0 {
