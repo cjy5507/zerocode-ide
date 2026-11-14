@@ -10516,6 +10516,43 @@ async fn e2e_a_deny_rule_in_claude_code_spelling_stops_the_models_rm() {
     );
 }
 
+/// `--settings <file>` (152): a file the person names on the command line
+/// is read as one of their own settings documents, merged last — its deny
+/// rule stops the model's `rm` as the same rule in their settings does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_settings_file_named_on_the_command_line_is_read() {
+    let layout = Layout::new();
+    let extra = layout.home.join("extra-settings.json");
+    fs::write(&extra, serde_json::json!({"permissions": {"deny": ["Bash(rm:*)"]}}).to_string())
+        .expect("settings file");
+    let victim = layout.cwd.join("victim.txt");
+    fs::write(&victim, "keep").expect("victim file");
+    let service = ScriptedAnthropicService::tool_calls(
+        &[("bash", serde_json::json!({"command": "rm victim.txt"}))],
+        "settings-flag-finished-marker",
+    )
+    .await
+    .expect("start rm script");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access", "--settings", extra.to_str().expect("utf8")],
+        b"Remove victim.txt\n/exit\n",
+    )
+    .expect("run zo in pipe mode");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "pipe exited with {:?}:\n{stdout}", output.status);
+    assert!(victim.exists(), "the --settings file's deny rule did not hold:\n{stdout}");
+    let requests = service.request_bodies().await;
+    assert!(
+        requests.get(1).is_some_and(|body| body.contains("denied by rule 'Bash(rm:*)'")),
+        "the model is not told the --settings rule refused it: {requests:?}"
+    );
+}
+
 /// The lines of a plain transcript that warn of `rule` as naming no zo tool.
 fn rule_warnings<'a>(stdout: &'a str, rule: &str) -> Vec<&'a str> {
     let quoted = format!("'{rule}'");

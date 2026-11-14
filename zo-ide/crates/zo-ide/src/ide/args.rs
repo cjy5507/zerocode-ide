@@ -14,7 +14,7 @@ use crate::session::plain_session::OpenOptions;
 
 pub const USAGE: &str = "\
 zo [<prompt>…] [--prompt-file <file|->] [--model <alias>] [--permission-mode <mode>] [--effort <level>]
-       [--resume [<id|latest|name|path>]] [--continue] [--mcp-config <file>] [--cwd <dir>]
+       [--resume [<id|latest|name|path>]] [--continue] [--mcp-config <file>] [--settings <file>] [--cwd <dir>]
        [--no-spawn] [--allowed-tools <names>] [--render-markdown] [--show-thinking] [--verbose-stderr]
        [--teammate <dir> [--resume-transcript <path>]] [--launch-contract <version>]
        [--classifier-fallback off|ask|auto]
@@ -225,6 +225,10 @@ pub struct Launch {
     pub prompt_file: Option<PathBuf>,
     pub worktree: Option<PathBuf>,
     pub review_target: Option<crate::review::Target>,
+    /// `--settings <file>` (Claude Code's flag): one more settings document of
+    /// the person's own, merged after every other, for each settings read
+    /// this process makes. Read against the `--cwd` folder, canonical.
+    pub settings_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +251,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
     let mut effort: Option<Effort> = None;
     let mut resume: Option<String> = None;
     let mut mcp_config: Option<PathBuf> = None;
+    let mut settings_file: Option<PathBuf> = None;
     let mut cwd: Option<PathBuf> = None;
     let mut no_spawn = false;
     let mut allowed_tools = None;
@@ -382,6 +387,11 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
                 mcp_config = Some(PathBuf::from(value("--mcp-config")?));
                 index += 2;
             }
+            "--settings" => {
+                if settings_file.is_some() { return Err("--settings is given once".into()); }
+                settings_file = Some(PathBuf::from(value("--settings")?));
+                index += 2;
+            }
             "--cwd" => {
                 cwd = Some(PathBuf::from(value("--cwd")?));
                 index += 2;
@@ -514,6 +524,18 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
     if !cwd.is_dir() { return Err(format!("--cwd {} is not a directory", cwd.display())); }
     let prompt_file = prompt_file.map(|path| if path == std::path::Path::new("-") || path.is_absolute() { path } else { cwd.join(path) });
     let last_message = last_message.map(|path| if path.is_absolute() { path } else { cwd.join(path) });
+    // Read against the `--cwd` folder like every other file named here. A file
+    // zo cannot read is refused, not read as an empty document: a session
+    // must not open without the settings it was started with.
+    let settings_file = settings_file
+        .map(|path| {
+            let path = if path.is_absolute() { path } else { cwd.join(path) };
+            std::fs::canonicalize(&path)
+                .ok()
+                .filter(|file| file.is_file())
+                .ok_or_else(|| format!("--settings file not found: {}", path.display()))
+        })
+        .transpose()?;
     if prompt_file.is_some() && !prompt_words.is_empty() { return Err("choose positional prompt text or --prompt-file".into()); }
     if !prompt_words.is_empty() {
         let prompt = prompt_words.join(" ");
@@ -595,6 +617,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
         prompt_file,
         worktree,
         review_target,
+        settings_file,
     })
 }
 
@@ -640,6 +663,32 @@ mod tests {
         let restoring = super::parse(&["--resume".to_string(), "abc".to_string()]).expect("parse");
         assert_eq!(restoring.action, super::Action::Repl);
         assert_eq!(restoring.open.resume.as_deref(), Some("abc"));
+    }
+
+    /// `--settings <file>` names one more of the person's own settings
+    /// documents (152): read against the `--cwd` folder like every file named
+    /// on the command line, refused where it is not a file, given once.
+    #[test]
+    fn settings_names_a_file_of_the_persons_read_against_the_cwd_folder() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let file = folder.path().join("extra-settings.json");
+        std::fs::write(&file, "{}").expect("a settings file");
+        let canonical = std::fs::canonicalize(&file).expect("canonical");
+        let cwd = folder.path().to_str().expect("utf8").to_string();
+        let named = |list: &[&str]| super::parse(&list.iter().map(|word| (*word).to_string()).collect::<Vec<_>>());
+
+        let launch = named(&["--settings", file.to_str().expect("utf8")]).expect("parse");
+        assert_eq!(launch.settings_file.as_deref(), Some(canonical.as_path()));
+        let relative = named(&["--cwd", &cwd, "--settings", "extra-settings.json"]).expect("parse");
+        assert_eq!(relative.settings_file.as_deref(), Some(canonical.as_path()), "read against --cwd");
+        assert!(named(&[]).expect("parse").settings_file.is_none());
+
+        let refused = named(&["--cwd", &cwd, "--settings", "nowhere.json"]).map(|_| ()).expect_err("refused");
+        assert!(refused.contains("--settings file not found"), "{refused}");
+        assert!(named(&["--settings", &cwd]).is_err(), "a folder is not a settings file");
+        assert!(named(&["--settings"]).is_err());
+        let path = file.to_str().expect("utf8");
+        assert!(named(&["--settings", path, "--settings", path]).is_err());
     }
 
     /// A teammate pane is one turn under a brief, and it cannot start

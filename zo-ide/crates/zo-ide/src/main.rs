@@ -167,6 +167,15 @@ fn run(
         return answered;
     }
     let mut launch = args::parse(&argv)?;
+    // `--settings <file>`: one more of the person's own settings documents,
+    // read last by every settings loader this process runs — before the
+    // first one does (152).
+    if launch.settings_file.is_some() {
+        runtime::ConfigLoader::set_cli_overrides(runtime::CliConfigOverrides {
+            settings_file: launch.settings_file.clone(),
+            strict_mcp_config: false,
+        });
+    }
     if let Some(done) = run_without_a_session(&launch)? {
         return Ok(done);
     }
