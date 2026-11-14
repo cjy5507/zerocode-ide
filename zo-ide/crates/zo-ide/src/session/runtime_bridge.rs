@@ -466,15 +466,7 @@ impl AsyncApiClient for LiveAsyncApiClient {
                     // Surface the underlying cause: a bare "retrying" row left
                     // users unable to tell a 429 from an overload or a network
                     // drop during multi-attempt ladders.
-                    let mut reason: String = notice
-                        .error
-                        .chars()
-                        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
-                        .take(120)
-                        .collect();
-                    if notice.error.chars().count() > 120 {
-                        reason.push('…');
-                    }
+                    let reason = core_types::retry_signal::retry_notice_reason(&notice.error);
                     let text = format!(
                         "{label}; retrying in {:.0}s (attempt {}/{}) — {reason}",
                         notice.delay.as_secs_f64().ceil(),

@@ -791,6 +791,26 @@ pub fn retry_notice_label(error_message: &str) -> &'static str {
     }
 }
 
+/// The longest cause a retry row carries. A provider's own sentence fits whole
+/// — Google's quota and capacity answers run to about 300 characters — and only
+/// a body dump past this is shortened.
+pub const RETRY_REASON_MAX_CHARS: usize = 400;
+
+/// An error's text as the cause on a retry row: one line with single spaces, and
+/// text past [`RETRY_REASON_MAX_CHARS`] cut at the last word break before it,
+/// with `…`. A fixed 120-character cut once hid the end of Google's
+/// "Resource has been exhausted (e.g. check quota)." (2026-11-15).
+#[must_use]
+pub fn retry_notice_reason(error_message: &str) -> String {
+    let line = error_message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= RETRY_REASON_MAX_CHARS {
+        return line;
+    }
+    let head: String = line.chars().take(RETRY_REASON_MAX_CHARS).collect();
+    let kept = head.rfind(' ').map_or(head.as_str(), |at| &head[..at]);
+    format!("{kept}…")
+}
+
 /// The words a stall cut is named by: zo cut an attempt because its model made
 /// no progress for the stall window. [`is_transient_text`] reads them, so a
 /// stall stays retryable.
@@ -1289,5 +1309,22 @@ mod tests {
             );
         }
         assert!(!REFUSAL_STANDING_REPEAT_NOTICE.contains("asked once"), "this turn asked nothing");
+    }
+
+    /// A retry row carries the provider's whole sentence; only a body dump past
+    /// the cap is cut, at a word break.
+    #[test]
+    fn a_retry_reason_keeps_the_providers_sentence_whole() {
+        let google = "provider transport: api returned 429 Too Many Requests (RESOURCE_EXHAUSTED): \
+             Google gave no quota, rate or capacity reason — Resource has been exhausted (e.g. check quota).";
+        assert_eq!(super::retry_notice_reason(google), google);
+        assert_eq!(
+            super::retry_notice_reason("first line\n\n  second\r\nthird"),
+            "first line second third"
+        );
+        let dump = "word ".repeat(200);
+        let reason = super::retry_notice_reason(&dump);
+        assert!(reason.ends_with("word…"), "{reason}");
+        assert!(reason.chars().count() <= super::RETRY_REASON_MAX_CHARS + 1, "{reason}");
     }
 }

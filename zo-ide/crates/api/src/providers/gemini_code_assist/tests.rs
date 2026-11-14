@@ -2997,6 +2997,89 @@ fn usage_clamping_and_missing_thoughts_handling() {
     assert_eq!(usage_missing.total_tokens(), 0);
 }
 
+/// A capacity answer says what ran out: the account's quota, its request rate,
+/// Google's own capacity — or no reason at all, the gateway's answer on
+/// 2026-11-15 — and carries the wait Google named as the reset hint the retry
+/// reads.
+#[test]
+fn a_google_capacity_answer_says_what_ran_out_and_when_it_lifts() {
+    let error = |status: u16, body: &str| {
+        api_error_from_body(
+            reqwest::StatusCode::from_u16(status).expect("status"),
+            body.to_string(),
+        )
+    };
+    let reset = |error: &ApiError| core_types::retry_signal::reset_hint_in_text(&error.to_string());
+
+    let opaque = error(
+        429,
+        r#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}"#,
+    );
+    assert_eq!(
+        opaque.to_string(),
+        "api returned 429 Too Many Requests (RESOURCE_EXHAUSTED): Google gave no quota, rate or \
+         capacity reason — Resource has been exhausted (e.g. check quota)."
+    );
+    assert_eq!(reset(&opaque), None);
+
+    let quota = error(
+        429,
+        r#"{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 2h3m4s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","domain":"cloudcode-pa.googleapis.com"}]}}"#,
+    );
+    assert!(
+        quota.to_string().contains("Google's quota for this model is used up — You have exhausted"),
+        "{quota}"
+    );
+    assert_eq!(reset(&quota), Some(Duration::from_secs(7384)));
+
+    let rate = error(
+        429,
+        r#"{"error":{"code":429,"message":"Rate limited.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED","domain":"cloudcode-pa.googleapis.com"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"36.2s"}]}}"#,
+    );
+    assert!(
+        rate.to_string().contains("Google is limiting this account's request rate"),
+        "{rate}"
+    );
+    assert_eq!(reset(&rate), Some(Duration::from_secs(37)));
+
+    let per_minute = error(
+        429,
+        r#"{"error":{"code":429,"message":"Quota exceeded.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerMinutePerProject"}]}]}}"#,
+    );
+    assert!(per_minute.to_string().contains("request rate"), "{per_minute}");
+    assert_eq!(reset(&per_minute), Some(Duration::from_secs(60)));
+
+    let busy = error(
+        503,
+        r#"{"error":{"code":503,"message":"No capacity available for model gemini-4-argon on the server","status":"UNAVAILABLE","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_CAPACITY_EXHAUSTED","domain":"cloudcode-pa.googleapis.com"}]}}"#,
+    );
+    assert!(
+        busy.to_string().contains("Google has no free capacity for this model right now; this is not your quota"),
+        "{busy}"
+    );
+
+    let invalid = error(
+        400,
+        r#"{"error":{"code":400,"message":"Request contains an invalid argument.","status":"INVALID_ARGUMENT"}}"#,
+    );
+    assert_eq!(
+        invalid.to_string(),
+        "api returned 400 Bad Request (INVALID_ARGUMENT): Request contains an invalid argument."
+    );
+}
+
+#[test]
+fn a_google_duration_reads_in_whole_seconds() {
+    assert_eq!(google_duration("36s"), Some(Duration::from_secs(36)));
+    assert_eq!(google_duration("36.2s."), Some(Duration::from_secs(37)));
+    assert_eq!(google_duration("500ms"), Some(Duration::from_secs(1)));
+    assert_eq!(google_duration("2h3m4s"), Some(Duration::from_secs(7384)));
+    assert_eq!(google_duration("4m"), Some(Duration::from_secs(240)));
+    assert_eq!(google_duration("0s"), None);
+    assert_eq!(google_duration("soon"), None);
+    assert_eq!(google_duration("36"), None);
+}
+
 /// A Google error's `details[]` — field violations, reason and domain — ride on
 /// the message, so a 400 says which argument was invalid; a body without them
 /// keeps the bare message.

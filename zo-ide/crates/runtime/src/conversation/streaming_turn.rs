@@ -1526,20 +1526,13 @@ where
                             // it stays in lockstep with the backoff classifier.
                             let error_text = error.to_string();
                             let label = core_types::retry_signal::retry_notice_label(&error_text);
-                            // The cause rides along, clipped to one line: a bare
+                            // The cause rides along on one line: a bare
                             // "rate limited" reads as a transient stall, while
                             // Google's RESOURCE_EXHAUSTED "check quota" is a
                             // quota the person has to know about (live report
                             // 2026-09-02: gemini-3.6-flash looked stuck for
                             // minutes on a free tier that was simply used up).
-                            let mut reason: String = error_text
-                                .chars()
-                                .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
-                                .take(120)
-                                .collect();
-                            if error_text.chars().count() > 120 {
-                                reason.push('…');
-                            }
+                            let reason = core_types::retry_signal::retry_notice_reason(&error_text);
                             let _ = notice_tx.try_send(RenderBlock::System {
                                 id: notice_ids.next(),
                                 level: SystemLevel::Warn,

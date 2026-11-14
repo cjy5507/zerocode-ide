@@ -2708,14 +2708,171 @@ async fn api_error_from_response(
         "error",
         &format!("status {status}\n{body}"),
     );
+    api_error_from_body(status, body)
+}
+
+/// The error a Code Assist answer that is not a success becomes. A capacity
+/// answer (429, 499, 503) leads its message with what ran out and carries the
+/// wait Google named as the error's reset hint.
+fn api_error_from_body(status: reqwest::StatusCode, body: String) -> ApiError {
+    let capacity = GoogleCapacity::of(status, &body);
     ApiError::Api {
         status,
         error_type: google_error_type(&body),
-        message: google_error_message(&body),
+        message: google_error_message(&body).map(|message| match capacity {
+            Some(capacity) => format!("{} — {message}", capacity.kind.sentence()),
+            None => message,
+        }),
         body,
         retryable: is_retryable_status(status),
-        retry_after: None,
+        retry_after: capacity.and_then(|capacity| capacity.retry_after),
     }
+}
+
+/// What a Google capacity answer says ran out. Its status reads
+/// `RESOURCE_EXHAUSTED` for all four, so the person is told which one it is,
+/// from the `details[]` and the message the way Gemini CLI reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoogleCapacityKind {
+    /// The account's quota for the model is used up (`QUOTA_EXHAUSTED`, a daily
+    /// quota, "You have exhausted your capacity on this model").
+    QuotaUsedUp,
+    /// The account's request rate is limited (`RATE_LIMIT_EXCEEDED`, a
+    /// per-minute quota, or a named wait).
+    RateLimited,
+    /// Google has no capacity for the model (`MODEL_CAPACITY_EXHAUSTED`, "No
+    /// capacity available") — the account's quota is not the cause.
+    NoCapacity,
+    /// No reason at all. On 2026-11-15 Google's gateway answered this way to
+    /// every request whose system instruction copied another product's prompt,
+    /// while the account's quota stood.
+    NoReason,
+}
+
+impl GoogleCapacityKind {
+    const fn sentence(self) -> &'static str {
+        match self {
+            Self::QuotaUsedUp => "Google's quota for this model is used up",
+            Self::RateLimited => "Google is limiting this account's request rate",
+            Self::NoCapacity => {
+                "Google has no free capacity for this model right now; this is not your quota"
+            }
+            Self::NoReason => "Google gave no quota, rate or capacity reason",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GoogleCapacity {
+    kind: GoogleCapacityKind,
+    /// The wait Google named: `RetryInfo.retryDelay`, an `ErrorInfo`'s
+    /// `quotaResetDelay`, "Please retry in …", "reset after …", or a minute for
+    /// a per-minute quota.
+    retry_after: Option<Duration>,
+}
+
+impl GoogleCapacity {
+    fn of(status: reqwest::StatusCode, body: &str) -> Option<Self> {
+        if !matches!(status.as_u16(), 429 | 499 | 503) {
+            return None;
+        }
+        let value = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+        let message = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let details = value
+            .pointer("/error/details")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        let reasons: Vec<&str> = details
+            .iter()
+            .filter_map(|detail| detail.get("reason").and_then(Value::as_str))
+            .collect();
+        let quotas: Vec<&str> = details
+            .iter()
+            .filter_map(|detail| detail.get("violations").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|violation| violation.get("quotaId").and_then(Value::as_str))
+            .chain(
+                details
+                    .iter()
+                    .filter_map(|detail| detail.pointer("/metadata/quota_limit"))
+                    .filter_map(Value::as_str),
+            )
+            .collect();
+        let per_minute = quotas.iter().any(|quota| quota.contains("PerMinute"));
+        let lower = message.to_ascii_lowercase();
+        let has_reason = |names: &[&str]| reasons.iter().any(|reason| names.contains(reason));
+        let retry_after = details
+            .iter()
+            .find_map(|detail| detail.get("retryDelay").and_then(Value::as_str))
+            .or_else(|| {
+                details
+                    .iter()
+                    .find_map(|detail| detail.pointer("/metadata/quotaResetDelay"))
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| word_after(message, "Please retry in "))
+            .or_else(|| word_after(message, "reset after "))
+            .and_then(google_duration)
+            .or_else(|| per_minute.then_some(Duration::from_secs(60)));
+        let kind = if has_reason(&["MODEL_CAPACITY_EXHAUSTED", "MODEL_CAPACITY_EXCEEDED"])
+            || lower.contains("no capacity available")
+        {
+            GoogleCapacityKind::NoCapacity
+        } else if has_reason(&["QUOTA_EXHAUSTED", "INSUFFICIENT_G1_CREDITS_BALANCE"])
+            || quotas
+                .iter()
+                .any(|quota| quota.contains("PerDay") || quota.contains("Daily"))
+            || lower.contains("exhausted your capacity")
+        {
+            GoogleCapacityKind::QuotaUsedUp
+        } else if has_reason(&["RATE_LIMIT_EXCEEDED"]) || per_minute || retry_after.is_some() {
+            GoogleCapacityKind::RateLimited
+        } else {
+            GoogleCapacityKind::NoReason
+        };
+        Some(Self { kind, retry_after })
+    }
+}
+
+/// The word after `marker` in `text`.
+fn word_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    let at = text.find(marker)? + marker.len();
+    text[at..].split_whitespace().next()
+}
+
+/// A Google duration — `36s`, `36.5s`, `500ms`, `2h3m4s` — rounded up to whole
+/// seconds, at least one.
+fn google_duration(text: &str) -> Option<Duration> {
+    let text = text.trim().trim_end_matches(['.', ',', ';', ')']);
+    let mut seconds = 0.0_f64;
+    let mut number = String::new();
+    let mut units = text.chars().peekable();
+    while let Some(ch) = units.next() {
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+            continue;
+        }
+        let value: f64 = number.parse().ok()?;
+        number.clear();
+        let scale = match ch {
+            'h' => 3600.0,
+            'm' if units.peek() == Some(&'s') => {
+                units.next();
+                0.001
+            }
+            'm' => 60.0,
+            's' => 1.0,
+            _ => return None,
+        };
+        seconds += value * scale;
+    }
+    if !number.is_empty() || seconds <= 0.0 {
+        return None;
+    }
+    Duration::try_from_secs_f64(seconds.ceil()).ok()
 }
 
 fn request_not_found_context(error: ApiError, requested_model: &str) -> ApiError {
