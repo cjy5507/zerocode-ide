@@ -37,11 +37,12 @@ pub(crate) fn build_system_prompt_for_mode(
         spawn_family_enabled(),
     )?;
     // Deferred-tool manifest: the model cannot ToolSearch for names it has
-    // never seen. Session-stable, so it never disturbs the prompt cache.
-    // Appended here rather than in the runtime builder because the deferred
-    // set is owned by the tools crate, which depends on runtime — not vice
-    // versa.
-    sections.push(tools::deferred_tool_manifest_section());
+    // never seen. Session-stable, so it never disturbs the prompt cache — the
+    // tools it names are what this process's `PATH` reaches, and that does not
+    // change under a session (`tools::ToolReach`). Appended here rather than
+    // in the runtime builder because the deferred set is owned by the tools
+    // crate, which depends on runtime — not vice versa.
+    sections.push(tools::deferred_tool_manifest_section(tools::ToolReach::here()));
     Ok(sections)
 }
 

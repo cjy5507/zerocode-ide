@@ -102,6 +102,11 @@ pub struct GlobalToolRegistry {
     runtime_tools: Arc<Mutex<Vec<RuntimeToolDefinition>>>,
     enforcer: Option<PermissionEnforcer>,
     context: ToolContext,
+    /// What this process can reach of the tools that run through a road
+    /// outside zo ([`ToolReach`]): what `ToolSearch` finds and a "did you
+    /// mean" offers. Read from `PATH` when the registry is built
+    /// ([`Self::with_tool_reach`] names it instead).
+    reach: ToolReach,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -591,11 +596,64 @@ const DEFERRED_TOOL_HOOKS: &[(&str, &str)] = &[
     ),
 ];
 
+/// What this process can reach of the tools that run through a road outside
+/// zo — today the one the `Computer` tool drives the desktop and the work
+/// browser through. Read through that tool's own lookup
+/// (`computer_tools::ComputerRoad`), so the tools named to the model and the
+/// tools that run agree.
+///
+/// A terminal outside a ZeroCode pane, a container or a CI runner has no
+/// `zerocode-computer` on `PATH`, and every `Computer` call there answers "not
+/// on PATH": a benchmark run on 2026-11-13 found the tool through `ToolSearch`
+/// (the deferred line sells it for OCR) and was refused five times in a row.
+/// So where the road is missing the tool is not offered — not in the deferred
+/// line, not by `ToolSearch`, not as a "did you mean". A call by name still
+/// reaches the tool and its own refusal, and a session's history that holds
+/// its calls still resolves ([`GlobalToolRegistry::resolvable_tool_names`]).
+///
+/// `PATH` does not change under a session, so neither does the prompt line.
+/// `Artifact` is not here: without its shim it publishes into zo's own home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolReach {
+    computer: bool,
+}
+
+impl ToolReach {
+    /// What this process's `PATH` reaches.
+    #[must_use]
+    pub fn here() -> Self {
+        Self::from_search_path(&std::env::var_os("PATH").unwrap_or_default(), cfg!(windows))
+    }
+
+    /// What the search path `path` reaches, looked up by Windows' rule when
+    /// `windows` — the lookup the `Computer` tool's own call makes.
+    #[must_use]
+    pub fn from_search_path(path: &std::ffi::OsStr, windows: bool) -> Self {
+        Self {
+            computer: crate::computer_tools::ComputerRoad::from_search_path(path, windows).is_ok(),
+        }
+    }
+
+    /// Every road there: a pane of the ZeroCode window, the harness it ships.
+    #[must_use]
+    pub const fn everywhere() -> Self {
+        Self { computer: true }
+    }
+
+    /// Whether the model is offered the tool it is shown as `name`.
+    fn offers(self, name: &str) -> bool {
+        self.computer || name != "Computer"
+    }
+}
+
+/// The deferred-tool section of the system prompt, naming what `reach`
+/// offers ([`ToolReach`]).
 #[must_use]
-pub fn deferred_tool_manifest_section() -> String {
+pub fn deferred_tool_manifest_section(reach: ToolReach) -> String {
     let names = deferred_tool_names()
         .iter()
         .map(|name| core_types::tool_names::wire_tool_name(name))
+        .filter(|name| reach.offers(name))
         .map(|name| {
             DEFERRED_TOOL_HOOKS
                 .iter()
@@ -634,6 +692,7 @@ impl GlobalToolRegistry {
             runtime_tools: Arc::new(Mutex::new(Vec::new())),
             enforcer: None,
             context: ToolContext::new(),
+            reach: ToolReach::here(),
         }
     }
 
@@ -659,6 +718,7 @@ impl GlobalToolRegistry {
             runtime_tools: Arc::new(Mutex::new(Vec::new())),
             enforcer: None,
             context: ToolContext::new(),
+            reach: ToolReach::here(),
         })
     }
 
@@ -725,6 +785,15 @@ impl GlobalToolRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = runtime_tools;
         Ok(())
+    }
+
+    /// Offer tools by `reach` instead of what this process's `PATH` reaches —
+    /// for a test, and for a measurement of the harness the window ships,
+    /// whose panes reach every road ([`ToolReach::everywhere`]).
+    #[must_use]
+    pub fn with_tool_reach(mut self, reach: ToolReach) -> Self {
+        self.reach = reach;
+        self
     }
 
     #[must_use]
@@ -1090,7 +1159,7 @@ impl GlobalToolRegistry {
     ) -> ToolSearchOutput {
         let query = query.trim().to_string();
         let normalized_query = misc_tools::normalize_tool_search_query(&query);
-        let specs = self.searchable_tool_specs();
+        let specs = self.offered_tool_specs();
         let matches = misc_tools::search_tool_specs(&query, max_results.max(1), &specs);
         // Return the matched tools' full definitions, not just names: a
         // deferred tool's schema is exactly what the caller is here for —
@@ -1428,6 +1497,18 @@ impl GlobalToolRegistry {
         builtin.chain(runtime).chain(plugin).collect()
     }
 
+    /// [`Self::searchable_tool_specs`] less the tools this process cannot run
+    /// ([`ToolReach`]): what `ToolSearch` finds and a "did you mean" offers.
+    /// The resolvable set keeps them — a call by name meets the tool's own
+    /// refusal, and history that holds their calls still resolves.
+    fn offered_tool_specs(&self) -> Vec<SearchableToolSpec> {
+        let reach = self.reach;
+        self.searchable_tool_specs()
+            .into_iter()
+            .filter(|spec| reach.offers(&spec.name))
+            .collect()
+    }
+
     /// The edit shape the active model is shown; `Edit` before a model is bound.
     fn active_edit_tool(&self) -> api::EditToolForm {
         self.context
@@ -1470,7 +1551,7 @@ impl GlobalToolRegistry {
         // A typo of either spelling of a core tool (`read_fil`, `Reed`) is
         // offered the name a model is shown (`Read`).
         let candidates: Vec<String> = self
-            .searchable_tool_specs()
+            .offered_tool_specs()
             .into_iter()
             .map(|spec| spec.name)
             .chain(CoreTool::ALL.into_iter().map(|tool| tool.handler().to_string()))
@@ -1599,7 +1680,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        deferred_tool_manifest_section, deferred_tool_names, GlobalToolRegistry,
+        deferred_tool_manifest_section, deferred_tool_names, GlobalToolRegistry, ToolReach,
         DEFERRED_TOOL_HOOKS,
     };
     use crate::ToolPolicyDecision;
@@ -1876,7 +1957,7 @@ mod tests {
 
     #[test]
     fn deferred_manifest_carries_capability_hooks() {
-        let section = deferred_tool_manifest_section();
+        let section = deferred_tool_manifest_section(ToolReach::everywhere());
         for (name, hook) in DEFERRED_TOOL_HOOKS {
             assert!(
                 deferred_tool_names().contains(name),
@@ -1924,7 +2005,7 @@ mod tests {
 
     #[test]
     fn deferred_manifest_names_every_deferred_tool_and_nothing_else() {
-        let section = deferred_tool_manifest_section();
+        let section = deferred_tool_manifest_section(ToolReach::everywhere());
         assert!(section.starts_with("# Deferred tools"));
         // Factory-derived: every deferred name appears, and no advertised core
         // tool leaks in.

@@ -975,7 +975,7 @@ fn push_notification_schema_is_measured_and_deferred() {
     let chars = json.chars().count();
     let est_tokens = (chars / 4 + 1) as u64;
     eprintln!("PushNotification schema: {chars} chars ≈ {est_tokens} tokens (chars/4 + 1)");
-    let manifest = crate::deferred_tool_manifest_section();
+    let manifest = crate::deferred_tool_manifest_section(crate::ToolReach::everywhere());
     let manifest_line = ", PushNotification";
     assert!(manifest.contains(manifest_line), "the manifest names the deferred tool");
     eprintln!(
@@ -1013,7 +1013,7 @@ fn jev_is_deferred_still_answers_by_name_and_is_off_until_a_person_says_so() {
     let advertised: std::collections::BTreeSet<String> =
         registry.definitions(None).into_iter().map(|definition| definition.name).collect();
     assert!(!advertised.contains("Jev"), "the wire is full; it stays deferred");
-    let manifest = crate::deferred_tool_manifest_section();
+    let manifest = crate::deferred_tool_manifest_section(crate::ToolReach::everywhere());
     assert!(manifest.contains("Jev (typed judge)"), "{manifest}");
     let found = registry.search("select:Jev", 3, None, None);
     assert!(found.schemas.iter().any(|schema| schema.name == "Jev"));
@@ -1069,7 +1069,9 @@ fn jev_schema_is_measured_and_deferred() {
 /// nothing is added to the system prompt or a schema.
 #[test]
 fn tool_search_leads_a_computer_answer_with_the_work_browser_when_its_shim_is_installed() {
-    let found = GlobalToolRegistry::builtin().search_with_work_browser("select:Computer", 3, None, None, || true);
+    let found = GlobalToolRegistry::builtin()
+        .with_tool_reach(crate::ToolReach::everywhere())
+        .search_with_work_browser("select:Computer", 3, None, None, || true);
     assert_eq!(found.matches, ["Computer"]);
     let text = serde_json::to_string_pretty(&found).expect("serializable");
     let first = text.lines().nth(1).expect("a first field");
@@ -1081,7 +1083,9 @@ fn tool_search_leads_a_computer_answer_with_the_work_browser_when_its_shim_is_in
 /// Without the installed shim the answer is today's, byte for byte.
 #[test]
 fn tool_search_answer_is_unchanged_without_the_work_browser() {
-    let found = GlobalToolRegistry::builtin().search_with_work_browser("select:Computer", 3, None, None, || false);
+    let found = GlobalToolRegistry::builtin()
+        .with_tool_reach(crate::ToolReach::everywhere())
+        .search_with_work_browser("select:Computer", 3, None, None, || false);
     assert_eq!(found.matches, ["Computer"]);
     assert_eq!(serde_json::to_string_pretty(&found).expect("serializable"), todays_tool_search_answer(&found));
 }
@@ -1093,6 +1097,72 @@ fn tool_search_answer_without_computer_carries_no_work_browser_line() {
     let found = GlobalToolRegistry::builtin().search_with_work_browser("select:Jev", 3, None, None, || true);
     assert_eq!(found.matches, ["Jev"]);
     assert_eq!(serde_json::to_string_pretty(&found).expect("serializable"), todays_tool_search_answer(&found));
+}
+
+/// A process with no `zerocode-computer` on its `PATH` — a terminal outside a
+/// ZeroCode pane, a container, a CI runner — cannot run `Computer`, so it is
+/// not offered there: not in the deferred-tool line, not found by `ToolSearch`,
+/// not a "did you mean". It still resolves by name (a call meets the tool's
+/// own "not on PATH" refusal, and history that holds its calls stays valid),
+/// and `Artifact`, which publishes into zo's home without its shim, stays
+/// offered. A benchmark run on 2026-11-13 found `Computer` through
+/// `ToolSearch` and was refused five times in a row.
+#[test]
+fn computer_is_offered_only_where_its_road_is() {
+    let nowhere = crate::ToolReach::from_search_path(std::ffi::OsStr::new(""), false);
+    let everywhere = crate::ToolReach::everywhere();
+    assert_ne!(nowhere, everywhere);
+
+    let without = crate::deferred_tool_manifest_section(nowhere);
+    let with = crate::deferred_tool_manifest_section(everywhere);
+    assert!(with.contains("Computer (Web, desktop apps, OCR.)"), "{with}");
+    assert!(!without.contains("Computer"), "{without}");
+    assert!(without.contains("Artifact (") && with.contains("Artifact ("), "{without}");
+    assert_eq!(
+        with.chars().count() - without.chars().count(),
+        ", Computer (Web, desktop apps, OCR.)".chars().count(),
+        "the two lines differ by that one entry"
+    );
+
+    let offered_by = |reach| GlobalToolRegistry::builtin().with_tool_reach(reach);
+    assert!(offered_by(nowhere).search("select:Computer", 3, None, None).matches.is_empty());
+    for query in ["OCR", "desktop apps", "screenshot click"] {
+        let found = offered_by(nowhere).search(query, 10, None, None);
+        assert!(!found.matches.iter().any(|name| name == "Computer"), "{query}: {:?}", found.matches);
+    }
+    assert_eq!(
+        offered_by(everywhere).search_with_work_browser("select:Computer", 3, None, None, || false).matches,
+        ["Computer"]
+    );
+    assert_eq!(offered_by(nowhere).search("select:Artifact", 3, None, None).matches, ["Artifact"]);
+
+    assert!(offered_by(nowhere).resolvable_tool_names().contains("Computer"), "a call by name still resolves");
+
+    let typo = |reach| {
+        offered_by(reach)
+            .execute("Compter", &serde_json::json!({}))
+            .expect_err("no such tool")
+            .to_string()
+    };
+    assert!(!typo(nowhere).contains("Computer"), "{}", typo(nowhere));
+    assert!(typo(everywhere).contains("did you mean `Computer`"), "{}", typo(everywhere));
+}
+
+/// The reach is read through the `Computer` tool's own lookup: a search path
+/// that holds the shim reaches it, the same path without it does not.
+#[cfg(unix)]
+#[test]
+fn the_reach_is_the_computer_tools_own_lookup() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let shims = tempfile::tempdir().expect("a folder");
+    let path = std::env::join_paths([shims.path()]).expect("a search path");
+    let nowhere = crate::ToolReach::from_search_path(std::ffi::OsStr::new(""), false);
+    assert_eq!(crate::ToolReach::from_search_path(&path, false), nowhere);
+    let shim = shims.path().join(crate::COMPUTER_SHIM);
+    std::fs::write(&shim, "#!/bin/sh\nexit 0\n").expect("a shim");
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("runnable");
+    assert_eq!(crate::ToolReach::from_search_path(&path, false), crate::ToolReach::everywhere());
 }
 
 /// The answer as it read before t-74223: these fields, in this order.

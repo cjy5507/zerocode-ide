@@ -824,7 +824,8 @@ mod tests {
     #[test]
     fn the_deferred_manifest_heading_still_matches_the_tools_crate() {
         assert!(
-            tools::deferred_tool_manifest_section().starts_with(DEFERRED_TOOLS_HEADING),
+            tools::deferred_tool_manifest_section(tools::ToolReach::everywhere())
+                .starts_with(DEFERRED_TOOLS_HEADING),
             "deferred manifest heading moved"
         );
     }

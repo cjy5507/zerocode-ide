@@ -102,7 +102,8 @@ fn measure_harness(workspace: &Path, model: &str) -> PromptInput {
         runtime::PromptMode::Interactive,
     )
     .expect("system prompt should build");
-    system.push(tools::deferred_tool_manifest_section());
+    // The harness the window ships: its panes reach every road.
+    system.push(tools::deferred_tool_manifest_section(tools::ToolReach::everywhere()));
     let registry = tools::GlobalToolRegistry::builtin();
     registry.context().set_active_model(model);
     let definitions = registry.definitions(None);
@@ -354,7 +355,8 @@ fn every_tool_taken_off_the_wire_is_still_reachable_by_name() {
 /// invited to call an address that the live executor rejects.
 #[test]
 fn every_fixed_harness_tool_name_is_registered_or_deferred_reachable() {
-    let registry = tools::GlobalToolRegistry::builtin();
+    // The harness the window ships: its panes reach every road.
+    let registry = tools::GlobalToolRegistry::builtin().with_tool_reach(tools::ToolReach::everywhere());
     let wire: BTreeSet<String> = registry
         .definitions(None)
         .into_iter()
@@ -370,7 +372,7 @@ fn every_fixed_harness_tool_name_is_registered_or_deferred_reachable() {
         );
     }
 
-    let manifest = tools::deferred_tool_manifest_section();
+    let manifest = tools::deferred_tool_manifest_section(tools::ToolReach::everywhere());
     for name in resolvable.difference(&wire) {
         assert!(
             manifest.contains(name),

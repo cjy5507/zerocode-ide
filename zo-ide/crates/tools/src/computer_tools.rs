@@ -773,7 +773,7 @@ impl ComputerRoad {
         Self::from_search_path(&path, cfg!(windows))
     }
 
-    fn from_search_path(path: &std::ffi::OsStr, windows: bool) -> Result<Self, ToolError> {
+    pub(crate) fn from_search_path(path: &std::ffi::OsStr, windows: bool) -> Result<Self, ToolError> {
         zerocode_core::computer_use::computer_cli_on_path(path, windows)
             .map(|program| Self { program })
             .ok_or_else(|| {
