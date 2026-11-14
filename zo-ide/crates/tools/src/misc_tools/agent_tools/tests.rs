@@ -1650,6 +1650,27 @@ fn builtin_harness_instructions_are_role_specific() {
     assert!(builtin_harness_instruction("Verification").contains("report the blocker"));
 }
 
+/// A custom agent's `model:` is the person's selection only where the
+/// definition is theirs; a repository's `.zo/agents/<name>.md` names a model
+/// the implementation gate still weighs (152, review t-107693).
+#[test]
+fn only_the_persons_own_definition_names_their_model() {
+    let persons = CustomAgent {
+        name: "triage".to_string(),
+        description: "triage".to_string(),
+        tools: None,
+        model: Some("claude-fable-5".to_string()),
+        system_prompt: "body".to_string(),
+        permission: None,
+        permission_mode: None,
+        persons: true,
+    };
+    let repositorys = CustomAgent { persons: false, ..persons.clone() };
+    assert_eq!(super::persons_custom_agent_model(Some(&persons)), Some("claude-fable-5"));
+    assert_eq!(super::persons_custom_agent_model(Some(&repositorys)), None);
+    assert_eq!(super::persons_custom_agent_model(None), None);
+}
+
 #[test]
 fn custom_agent_tools_override_resolved_allowlist() {
     let custom = CustomAgent {
@@ -1660,6 +1681,7 @@ fn custom_agent_tools_override_resolved_allowlist() {
         system_prompt: "body".to_string(),
         permission: None,
         permission_mode: None,
+        persons: true,
     };
     let tools = allowed_tools_for_resolved("triage", Some(&custom));
     assert_eq!(tools.len(), 2);

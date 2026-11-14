@@ -68,6 +68,10 @@ pub(crate) struct CustomAgent {
     /// Optional coarse permission mode for the spawned sub-agent. `None`
     /// (the default) keeps `DangerFullAccess` — byte-identical to today.
     pub permission_mode: Option<PermissionMode>,
+    /// Whether the definition sits in a folder of the person's own
+    /// ([`persons_definitions_folder`]). A workspace's `.zo/agents` is the
+    /// repository's, and its `model:` is not the person's selection (152).
+    pub persons: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,12 +145,35 @@ pub(crate) fn load_custom_agent(name: &str) -> Option<CustomAgent> {
             continue;
         }
         if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Some(agent) = parse_custom_agent(name, &contents) {
+            if let Some(mut agent) = parse_custom_agent(name, &contents) {
+                agent.persons = persons_definitions_folder(
+                    &dir,
+                    std::env::var_os("ZO_AGENT_DEFS_DIR").as_deref(),
+                    &runtime::zo_global_config_roots(),
+                );
                 return Some(agent);
             }
         }
     }
     None
+}
+
+/// Whether the definition folder `dir` (canonical) is one of the person's
+/// own: the folder `ZO_AGENT_DEFS_DIR` names — the only one read while it is
+/// set — or `agents` under one of their zo config homes. Every other folder
+/// is a `.zo/agents` a workspace or one of its ancestors holds: the
+/// repository's, committed with it.
+pub(crate) fn persons_definitions_folder(
+    dir: &Path,
+    named: Option<&std::ffi::OsStr>,
+    config_roots: &[PathBuf],
+) -> bool {
+    if named.is_some_and(|named| !named.to_string_lossy().trim().is_empty()) {
+        return true;
+    }
+    config_roots
+        .iter()
+        .any(|root| std::fs::canonicalize(root.join("agents")).is_ok_and(|own| own == dir))
 }
 
 /// List the active custom definitions using the same root order, parser, and
@@ -281,6 +308,8 @@ pub(crate) fn parse_custom_agent(name_hint: &str, contents: &str) -> Option<Cust
         system_prompt: body,
         permission,
         permission_mode,
+        // The text alone is nobody's; the folder it was read from says.
+        persons: false,
     })
 }
 
@@ -620,6 +649,29 @@ mod tests {
             Some(value) => std::env::set_var("ZO_AGENT_DEFS_DIR", value),
             None => std::env::remove_var("ZO_AGENT_DEFS_DIR"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A definition folder is the person's only where they keep their own:
+    /// `agents` under a zo config home of theirs, or the folder they named in
+    /// `ZO_AGENT_DEFS_DIR`. A workspace's `.zo/agents` is the repository's
+    /// (152).
+    #[test]
+    fn a_definition_folder_is_the_persons_only_under_their_config_home_or_where_they_named_it() {
+        let root = std::env::temp_dir().join(format!("zo-agent-defs-{}-persons-folder", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home").join(".zo");
+        let project = root.join("project").join(".zo").join("agents");
+        std::fs::create_dir_all(home.join("agents")).expect("the person's folder");
+        std::fs::create_dir_all(&project).expect("the repository's folder");
+        let own = std::fs::canonicalize(home.join("agents")).expect("canonical");
+        let theirs = std::fs::canonicalize(&project).expect("canonical");
+        let roots = [home.clone()];
+
+        assert!(super::persons_definitions_folder(&own, None, &roots));
+        assert!(!super::persons_definitions_folder(&theirs, None, &roots));
+        assert!(super::persons_definitions_folder(&theirs, Some(std::ffi::OsStr::new("/named")), &roots));
+        assert!(!super::persons_definitions_folder(&theirs, Some(std::ffi::OsStr::new("  ")), &roots));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
