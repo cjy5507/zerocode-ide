@@ -26,6 +26,7 @@ import {
   performanceFailures,
   setQualityLocale,
   setQualityTheme,
+  setQualityViewport,
   settingsPaneIds,
   settlePaint,
   writeQualityReport,
@@ -4050,6 +4051,34 @@ try {
   process.exit(1);
 }
 const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+/* Load, made in the browser alone (2026-11-14): `SETTINGS_CPU_THROTTLE=<n>`
+ * runs every page's CPU n times slower (Chromium's own
+ * `Emulation.setCPUThrottlingRate`) and `SETTINGS_ANIMATION_RATE=<r>` runs its
+ * animations and transitions at r of their speed (`Animation.setPlaybackRate`)
+ * — the two ways a busy machine leaves a check waiting on the page, reproduced
+ * without loading the machine a person is working on. Every page opened after
+ * this point is slowed before it is used. Chromium only. */
+const SLOWED = {
+  cpu: Number(process.env.SETTINGS_CPU_THROTTLE || 1),
+  animation: Number(process.env.SETTINGS_ANIMATION_RATE || 1),
+};
+if (SLOWED.cpu !== 1 || SLOWED.animation !== 1) {
+  if (process.env.SETTINGS_ENGINE === "webkit") {
+    throw new Error("SETTINGS_CPU_THROTTLE and SETTINGS_ANIMATION_RATE speak to Chromium alone");
+  }
+  const open = context.newPage.bind(context);
+  context.newPage = async () => {
+    const page = await open();
+    const cdp = await context.newCDPSession(page);
+    if (SLOWED.cpu !== 1) await cdp.send("Emulation.setCPUThrottlingRate", { rate: SLOWED.cpu });
+    if (SLOWED.animation !== 1) {
+      await cdp.send("Animation.enable");
+      await cdp.send("Animation.setPlaybackRate", { playbackRate: SLOWED.animation });
+    }
+    return page;
+  };
+  console.log(`settings: pages slowed — cpu ×${SLOWED.cpu}, animations ×${SLOWED.animation}`);
+}
 await context.exposeBinding("__SETTINGS_INVOKE__", (source, request) => {
   backend.attach(request.window_id, source.page);
   return backend.invoke(request.window_id, request.command, request.args ?? {}, request.hand ?? null);
@@ -16648,8 +16677,7 @@ async function modelScenePictures(name) {
   for (const theme of ["dark", "light"]) {
     await setQualityTheme(pageA, theme);
     for (const width of [1280, 390]) {
-      await pageA.setViewportSize({ width, height: 900 });
-      await settlePaint(pageA);
+      await setQualityViewport(pageA, { width, height: 900 });
       const wide = await pane.evaluate((root) => {
         const right = root.getBoundingClientRect().right;
         return [...root.querySelectorAll("*")].filter((node) => node.getClientRects().length && node.getBoundingClientRect().right > right + 1)
@@ -16667,8 +16695,7 @@ async function modelScenePictures(name) {
           frame.scrollTop = 0;
           return Math.ceil(frame.scrollHeight + frame.getBoundingClientRect().top + 16);
         });
-        await pageA.setViewportSize({ width, height: Math.min(6000, Math.max(900, tall)) });
-        await settlePaint(pageA);
+        await setQualityViewport(pageA, { width, height: Math.min(6000, Math.max(900, tall)) });
         await pane.screenshot({ path: resolve(process.env.MODEL_SCENE_SHOTS, `${name}-${theme}-${width}.png`), animations: "disabled" });
       }
     }
@@ -16821,8 +16848,7 @@ async function receivePictures(page, name, selector = '[data-connection-group="l
   for (const theme of ["dark", "light"]) {
     await setQualityTheme(page, theme);
     for (const width of [1280, 390]) {
-      await page.setViewportSize({ width, height: 1400 });
-      await settlePaint(page);
+      await setQualityViewport(page, { width, height: 1400 });
       const wide = await part.evaluate((root) => {
         const right = root.getBoundingClientRect().right;
         return [...root.querySelectorAll("*")].filter((node) => node.getClientRects().length && node.getBoundingClientRect().right > right + 1)
@@ -16838,8 +16864,7 @@ async function receivePictures(page, name, selector = '[data-connection-group="l
           frame.scrollTop = 0;
           return Math.ceil(frame.scrollHeight + frame.getBoundingClientRect().top + 16);
         });
-        await page.setViewportSize({ width, height: Math.min(8000, Math.max(1400, tall)) });
-        await settlePaint(page);
+        await setQualityViewport(page, { width, height: Math.min(8000, Math.max(1400, tall)) });
         await part.screenshot({ path: resolve(process.env.MODEL_SCENE_SHOTS, `${name}-${theme}-${width}.png`), animations: "disabled" });
       }
     }

@@ -38,12 +38,105 @@ export async function settingsPaneIds(page) {
 
 export async function setQualityTheme(page, theme) {
   await page.evaluate((code) => setTheme(code), theme);
-  await settlePaint(page);
+  await settleSwitch(page, { theme });
 }
 
 export async function setQualityLocale(page, locale) {
   await page.evaluate((code) => setLocale(code, { refresh: false, persist: false }), locale);
-  await settlePaint(page);
+  await settleSwitch(page, { locale });
+}
+
+export async function setQualityViewport(page, size) {
+  await page.setViewportSize(size);
+  await settleViewport(page, size);
+}
+
+/* A theme or a language switch, ready to be measured: the root says the theme
+ * or the language asked for, and what the switch changed is settled
+ * (`settleChange`). */
+export async function settleSwitch(page, { theme, locale } = {}) {
+  const took = await page.evaluate(({ theme, locale }) => {
+    const root = document.documentElement;
+    const wanted = theme === "light" ? "light" : theme === "dark" ? null : undefined;
+    const found = { theme: root.dataset.theme ?? null, lang: root.lang };
+    const themed = wanted === undefined || found.theme === wanted;
+    const spoken = locale === undefined || locale === "system" || found.lang === locale;
+    return { ok: themed && spoken, found };
+  }, { theme, locale });
+  if (!took.ok) {
+    throw new Error(`settings switch did not take: ${JSON.stringify({ asked: { theme, locale }, found: took.found })}`);
+  }
+  await settleChange(page, "settings switch");
+}
+
+/* A resize, ready to be measured: the page says the size asked for, and what
+ * the resize changed is settled (`settleChange`). Playwright answers once
+ * Chromium holds the new metrics; the page may take them at its next frame,
+ * so the size is looked for frame by frame — counted in the page's own
+ * frames, which a busy machine slows but cannot run out. */
+export async function settleViewport(page, { width, height }) {
+  const took = await page.evaluate(async ({ width, height, frames }) => {
+    for (let frame = 0; ; frame += 1) {
+      const found = { width: innerWidth, height: innerHeight };
+      if (found.width === width && found.height === height) return { ok: true, found };
+      if (frame === frames) return { ok: false, found };
+      await new Promise((done) => requestAnimationFrame(done));
+    }
+  }, { width, height, frames: RESIZE_FRAMES });
+  if (!took.ok) {
+    throw new Error(`viewport did not take: ${JSON.stringify({ asked: { width, height }, found: took.found })}`);
+  }
+  await settleChange(page, "viewport");
+}
+
+/* A resize lands at the page's next frame or so; this many frames later and
+ * still the old size, it did not take. */
+const RESIZE_FRAMES = 60;
+
+/* What a change set, as every element computes it. The transitions it starts
+ * (`--motion-fast` on hundreds of rules for a theme) are carried to their
+ * end, the way Playwright's `animations: "disabled"` carries a finite
+ * animation to its end before a picture, rather than waited out against a
+ * clock. Then one rendering opportunity passes, so work the change left for
+ * the next frame lands, and anything that started there is carried to its end
+ * too. Nothing here races a fixed deadline: on a busy machine frames come
+ * seconds apart, and `settlePaint`'s five seconds ran out twice in the
+ * 「모델 받기」 check of `settings.mjs` (2026-11-13 and 11-14, load 20+) —
+ * once after a resize with the next frame not yet come, once with a theme's
+ * colour transitions still `running`. What reads the page next — axe, a
+ * contrast table, a measured box — reads computed styles and layout, which
+ * the page gives on demand. An animation that will not finish still fails,
+ * with what was found. */
+async function settleChange(page, what) {
+  const finishAnimations = () => page.evaluate(() => {
+    const finite = (animation) => animation.effect?.getTiming().iterations !== Infinity;
+    const moving = (animation) => animation.pending || !["finished", "idle"].includes(animation.playState);
+    // Reading the animations flushes style, which starts the transitions the
+    // change set; each finite one is carried to its end.
+    for (const animation of document.getAnimations({ subtree: true })) {
+      if (!finite(animation) || !moving(animation)) continue;
+      try {
+        animation.finish();
+      } catch {
+        // One that cannot be finished is left running and reported below.
+      }
+    }
+    return document.getAnimations({ subtree: true })
+      .filter((animation) => finite(animation) && moving(animation))
+      .slice(0, 24)
+      .map((animation) => ({
+        target: animation.effect?.target?.id ?? animation.effect?.target?.tagName,
+        name: animation.animationName ?? animation.transitionProperty,
+        state: animation.playState,
+        pending: animation.pending,
+      }));
+  });
+  await finishAnimations();
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  const running = await finishAnimations();
+  if (running.length > 0) {
+    throw new Error(`${what} did not settle: ${JSON.stringify(running)}`);
+  }
 }
 
 export async function axeViolations(page, AxeBuilder, include) {
