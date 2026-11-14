@@ -684,7 +684,7 @@ impl ToolGroup {
     /// Render every call in this group (finished and still running) in the
     /// `turns` view's unified indented step grammar so calls never jump or
     /// split across two formats mid-turn.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     #[must_use]
     pub(super) fn turns_live_rows(
         &self,
@@ -692,20 +692,19 @@ impl ToolGroup {
         elapsed: Duration,
         hangs: bool,
     ) -> Vec<Line> {
-        self.turns_live_rows_budgeted(width, elapsed, hangs, None)
+        let entries = self.turns_live_entries(width, elapsed);
+        super::turns::render_live_entries(&entries, width, hangs, None)
     }
 
-    /// Same as [`Self::turns_live_rows`], capped to `budget` terminal rows so
-    /// large parallel batches or tall live command tails keep running call
-    /// headers and failed steps visible inside the viewport budget.
+    /// Build the ordered list of [`super::turns::LiveEntry`] items for this
+    /// group once so the caller can read its total row count and render within
+    /// a budget without repeating live output snapshots.
     #[must_use]
-    pub(super) fn turns_live_rows_budgeted(
+    pub(super) fn turns_live_entries(
         &self,
         width: usize,
         elapsed: Duration,
-        hangs: bool,
-        budget: Option<usize>,
-    ) -> Vec<Line> {
+    ) -> Vec<super::turns::LiveEntry> {
         use super::turns::LiveEntry;
         let mut entries = Vec::new();
         for call in &self.calls {
@@ -785,7 +784,7 @@ impl ToolGroup {
                 ToolKind::Spawn { .. } | ToolKind::Plan(_) | ToolKind::AgentResult { .. } => {}
             }
         }
-        super::turns::render_live_entries(&entries, width, hangs, budget)
+        entries
     }
 
     fn call_steps(call: &ToolCall) -> Vec<super::turns::Step> {

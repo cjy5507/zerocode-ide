@@ -339,7 +339,7 @@ impl LiveEntry {
         }
     }
 
-    fn total_cost(&self) -> usize {
+    pub(super) fn total_cost(&self) -> usize {
         match self {
             Self::Step(_) => self.base_cost(),
             Self::Running { tail, .. } => 1 + tail.len(),
@@ -368,15 +368,35 @@ pub(super) fn render_live_entries(
         return rows;
     };
     let budget = budget.max(1);
+    let (keep, tail_alloc, used) = select_live_entries(entries, budget);
+    let hidden = keep.iter().filter(|k| !**k).count();
+    let mut rows = Vec::with_capacity(budget);
+    if hidden > 0 && used < budget {
+        let lead = if hangs { glyphs.result_rest } else { glyphs.result_first };
+        rows.push(Line::new(vec![Span::dim(lead), Span::dim(strings::earlier_rows(hidden))]).truncated(width));
+        hangs = true;
+    }
+    for (idx, entry) in entries.iter().enumerate() {
+        if keep[idx] {
+            push_live_entry(&mut rows, entry, &mut hangs, tail_alloc[idx], width);
+        }
+    }
+    rows
+}
+
+fn select_live_entries(entries: &[LiveEntry], budget: usize) -> (Vec<bool>, Vec<usize>, usize) {
     let mut keep = vec![false; entries.len()];
+    let mut kept_count = 0usize;
     let mut used = 0usize;
 
     // 1. Guarantee the newest running call's header row first so an active
     //    spinner/command never disappears even in a 1-row budget.
-    if let Some((idx, entry)) = entries.iter().enumerate().rev().find(|(_, entry)| entry.is_running()) {
-        let cost = entry.base_cost();
+    let newest_running = entries.iter().enumerate().rev().find(|(_, entry)| entry.is_running()).map(|(idx, _)| idx);
+    if let Some(idx) = newest_running {
+        let cost = entries[idx].base_cost();
         if cost <= budget {
             keep[idx] = true;
+            kept_count += 1;
             used += cost;
         }
     }
@@ -390,41 +410,66 @@ pub(super) fn render_live_entries(
             continue;
         }
         let cost = entry.base_cost();
-        let will_hide_any = (0..entries.len()).any(|j| j != idx && !keep[j]);
-        let earlier_row = usize::from(will_hide_any);
+        let earlier_row = usize::from(kept_count + 1 < entries.len());
         if fail_used + cost <= fail_cap && used + cost + earlier_row <= budget {
             keep[idx] = true;
+            kept_count += 1;
             used += cost;
             fail_used += cost;
         }
     }
 
-    // 3. Keep any remaining running call headers (newest first), then fill any
-    //    leftover budget with the newest unkept entries backwards.
+    // 3a. Keep any remaining running call headers (newest first).
     for idx in (0..entries.len()).rev() {
         if keep[idx] || !entries[idx].is_running() {
             continue;
         }
         let cost = entries[idx].base_cost();
-        let will_hide_any = (0..entries.len()).any(|j| j != idx && !keep[j]);
-        if used + cost + usize::from(will_hide_any) <= budget {
+        let earlier_row = usize::from(kept_count + 1 < entries.len());
+        if used + cost + earlier_row <= budget {
             keep[idx] = true;
+            kept_count += 1;
             used += cost;
+        } else {
+            break;
         }
     }
+
+    // 3b. Reserve a floor of live tail lines for the newest running command so
+    //     finished sibling calls cannot starve active command output to zero.
+    let tail_reserve = newest_running
+        .and_then(|idx| match &entries[idx] {
+            LiveEntry::Running { tail, .. } if keep[idx] && !tail.is_empty() => {
+                let avail = budget.saturating_sub(used + usize::from(kept_count < entries.len()));
+                if avail == 0 {
+                    None
+                } else {
+                    Some(tail.len().min((avail / 2).max(1)))
+                }
+            }
+            _ => None,
+        })
+        .unwrap_or(0);
+
+    // 3c. Fill remaining budget from newest unkept entries backwards, stopping
+    //     at the first entry that does not fit (matching TurnFold::live_rows) so
+    //     an older success never jumps ahead of a newer hidden failure.
     for idx in (0..entries.len()).rev() {
         if keep[idx] {
             continue;
         }
         let cost = entries[idx].base_cost();
-        let will_hide_any = (0..entries.len()).any(|j| j != idx && !keep[j]);
-        if used + cost + usize::from(will_hide_any) <= budget {
+        let earlier_row = usize::from(kept_count + 1 < entries.len());
+        if used + tail_reserve + cost + earlier_row <= budget {
             keep[idx] = true;
+            kept_count += 1;
             used += cost;
+        } else {
+            break;
         }
     }
 
-    let hidden = keep.iter().filter(|k| !**k).count();
+    let hidden = entries.len() - kept_count;
     let tail_budget = budget.saturating_sub(used + usize::from(hidden > 0));
     let mut tail_alloc = vec![0usize; entries.len()];
     let mut tail_left = tail_budget;
@@ -438,19 +483,7 @@ pub(super) fn render_live_entries(
             tail_left -= take;
         }
     }
-
-    let mut rows = Vec::with_capacity(budget);
-    if hidden > 0 && used < budget {
-        let lead = if hangs { glyphs.result_rest } else { glyphs.result_first };
-        rows.push(Line::new(vec![Span::dim(lead), Span::dim(strings::earlier_rows(hidden))]).truncated(width));
-        hangs = true;
-    }
-    for (idx, entry) in entries.iter().enumerate() {
-        if keep[idx] {
-            push_live_entry(&mut rows, entry, &mut hangs, tail_alloc[idx], width);
-        }
-    }
-    rows
+    (keep, tail_alloc, used)
 }
 
 fn push_live_entry(
@@ -1084,5 +1117,65 @@ mod tests {
         let rows_1 = plain(&render_live_entries(&[running_1], 98, false, Some(1)));
         assert_eq!(rows_1.len(), 1, "{rows_1:#?}");
         assert!(rows_1[0].contains("Run cargo test"), "{rows_1:#?}");
+    }
+
+    #[test]
+    fn render_live_entries_reserves_command_tail_before_older_finished_siblings() {
+        use super::{render_live_entries, LiveEntry};
+        use crate::tui::ansi::Span;
+        let mut entries: Vec<LiveEntry> = (0..6)
+            .map(|i| LiveEntry::Step(step(StepKind::Read, "Read", &format!("src/f{i}.rs"))))
+            .collect();
+        entries.push(LiveEntry::Running {
+            spinner: Span::raw("⠋"),
+            verb: "Run".to_string(),
+            target: "cargo test".to_string(),
+            address: false,
+            note: None,
+            tail: ["t1", "t2", "t3", "t4"]
+                .into_iter()
+                .map(|line| Line::from_text(format!("    │ {line}")))
+                .collect(),
+        });
+        let rows = plain(&render_live_entries(&entries, 98, false, Some(7)));
+        assert_eq!(rows.len(), 7, "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("Run cargo test")), "{rows:#?}");
+        assert!(rows.iter().any(|row| row.ends_with("│ t4")), "newest tail line starved by finished reads: {rows:#?}");
+    }
+
+    #[test]
+    fn render_live_entries_stops_backfill_at_first_unfit_entry_to_preserve_recency() {
+        use super::{render_live_entries, LiveEntry};
+        use crate::tui::ansi::Span;
+        let fail = |target: &str| {
+            let mut s = step(StepKind::Read, "Read", target);
+            s.ok = false;
+            s.error = Some("No such file".to_string());
+            LiveEntry::Step(s)
+        };
+        let run = |target: &str| LiveEntry::Running {
+            spinner: Span::raw("⠋"),
+            verb: "Read".to_string(),
+            target: target.to_string(),
+            address: false,
+            note: None,
+            tail: Vec::new(),
+        };
+        let entries = vec![
+            LiveEntry::Step(step(StepKind::Read, "Read", "old_ok.rs")),
+            fail("newer_fail.rs"),
+            fail("kept_fail_1.rs"),
+            fail("kept_fail_2.rs"),
+            run("r1.rs"),
+            run("r2.rs"),
+            run("r3.rs"),
+            run("r4.rs"),
+        ];
+        let rows = plain(&render_live_entries(&entries, 98, false, Some(10)));
+        assert!(rows.len() <= 10, "{rows:#?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("old_ok.rs")),
+            "older ok step must not jump ahead of newer hidden failure: {rows:#?}"
+        );
     }
 }

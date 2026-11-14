@@ -2170,20 +2170,30 @@ impl Ui {
     /// 두 번째 값은 "꼬리가 칸을 쥐었는가" — 그때 codex 는 Working 줄을
     /// 감춘다(`sync_active_stream_tail` → `hide_status_indicator`).
     fn active_cell(&self, width: usize) -> (Vec<Line>, bool) {
-        let (cell, tail_owns_slot) = self.live_cell(width);
         let head_row = self.work_head(width);
-        let turns_tool_cell = self.folding()
-            && !tail_owns_slot
-            && self.tool_cell.as_ref().is_some_and(ToolGroup::uses_turns_live_rows);
         let room = turns::live_room(usize::from(self.painter.max_height())).saturating_sub(usize::from(head_row.is_some()));
         let elapsed = self.status.as_ref().map_or(Duration::ZERO, |status| status.elapsed);
+        let active_turns_tool = self.tool_cell.as_ref().filter(|cell| {
+            self.folding() && cell.is_active() && cell.uses_turns_live_rows()
+        });
+        let (cell, tail_owns_slot, turns_entries) = if let Some(tool_cell) = active_turns_tool {
+            (Vec::new(), false, Some(tool_cell.turns_live_entries(width, elapsed)))
+        } else {
+            let (cell, tail_owns_slot) = self.live_cell(width);
+            let entries = (!tail_owns_slot && self.folding())
+                .then(|| {
+                    self.tool_cell
+                        .as_ref()
+                        .filter(|tool_cell| tool_cell.uses_turns_live_rows())
+                        .map(|tool_cell| tool_cell.turns_live_entries(width, elapsed))
+                })
+                .flatten();
+            (cell, tail_owns_slot, entries)
+        };
         if !self.fold.is_pending() {
-            let cell = if turns_tool_cell {
-                self.tool_cell
-                    .as_ref()
-                    .map_or(cell, |tool_cell| tool_cell.turns_live_rows_budgeted(width, elapsed, false, Some(room)))
-            } else {
-                cell
+            let cell = match turns_entries.as_deref() {
+                Some(entries) => turns::render_live_entries(entries, width, false, Some(room)),
+                None => cell,
             };
             return (head_row.into_iter().chain(cell).collect(), tail_owns_slot);
         }
@@ -2194,10 +2204,13 @@ impl Ui {
         // will open with.
         let held = self.fold.held();
         let fold_budget = room.saturating_sub(held.len());
-        let fold_room = if cell.is_empty() {
+        let needed_cell_rows = turns_entries
+            .as_deref()
+            .map_or(cell.len(), |entries| entries.iter().map(turns::LiveEntry::total_cost).sum());
+        let fold_room = if needed_cell_rows == 0 {
             fold_budget.max(1)
         } else {
-            let reserve = cell.len().min(fold_budget.saturating_sub(turns::LIVE_ROWS_MIN).max(1));
+            let reserve = needed_cell_rows.min(fold_budget.saturating_sub(turns::LIVE_ROWS_MIN).max(1));
             fold_budget.saturating_sub(reserve).max(turns::LIVE_ROWS_MIN.min(fold_budget).max(1))
         };
         let mut rows: Vec<Line> = head_row.into_iter().collect();
@@ -2207,14 +2220,13 @@ impl Ui {
         if !held.is_empty() {
             rows.extend(held.iter().cloned());
         }
-        if !cell.is_empty() {
-            let cell = if turns_tool_cell {
-                let cell_budget = room.saturating_sub(used_by_fold).max(1);
-                self.tool_cell.as_ref().map_or(cell, |tool_cell| {
-                    tool_cell.turns_live_rows_budgeted(width, elapsed, self.fold.ends_hanging(), Some(cell_budget))
-                })
-            } else {
-                cell
+        if needed_cell_rows > 0 {
+            let cell = match turns_entries.as_deref() {
+                Some(entries) => {
+                    let cell_budget = room.saturating_sub(used_by_fold).max(1);
+                    turns::render_live_entries(entries, width, self.fold.ends_hanging(), Some(cell_budget))
+                }
+                None => cell,
             };
             rows.extend(cell);
         }
@@ -2252,15 +2264,8 @@ impl Ui {
     /// a finished cell still open for its next call, or a quiet loop's row.
     fn live_cell(&self, width: usize) -> (Vec<Line>, bool) {
         let elapsed = self.status.as_ref().map_or(Duration::ZERO, |status| status.elapsed);
-        let draw_tool = |cell: &ToolGroup| {
-            if self.folding() && cell.uses_turns_live_rows() {
-                cell.turns_live_rows(width, elapsed, self.fold.ends_hanging())
-            } else {
-                cell.lines(width, elapsed)
-            }
-        };
         if let Some(cell) = self.tool_cell.as_ref().filter(|cell| cell.is_active()) {
-            return (draw_tool(cell), false);
+            return (cell.lines(width, elapsed), false);
         }
         let tail = match &self.segment {
             Segment::None => Vec::new(),
@@ -2270,7 +2275,7 @@ impl Ui {
             return (tail, true);
         }
         match self.tool_cell.as_ref() {
-            Some(cell) => (draw_tool(cell), false),
+            Some(cell) => (cell.lines(width, elapsed), false),
             None => (
                 self.quiet_loop_cell
                     .as_ref()
@@ -9612,6 +9617,10 @@ mod tests {
         assert!(
             rows.iter().any(|row| row.contains("Run cargo test")),
             "running command call row must remain visible on 18-row pane: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.ends_with("│ t4")),
+            "live command tail must remain visible on 18-row pane: {rows:#?}"
         );
     }
 

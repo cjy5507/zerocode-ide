@@ -591,4 +591,15 @@ fn multiline_shell_continuations_show_ellipsis_in_turns_view() {
             "expected continuation ellipsis for {line1:?}: {rows:?}"
         );
     }
+    for escaped in ["echo \\(", "echo \\{"] {
+        let group = ToolGroup::new(ToolCall::new(
+            "cmd".to_string(),
+            ToolKind::Command { command: format!("{escaped}\n  echo ok"), background: false },
+        ));
+        let rows = plain(&group.turns_live_rows(98, Duration::ZERO, false));
+        assert!(
+            rows[0].contains(&format!("Run({escaped})  +1 line")),
+            "escaped delimiter must not look unclosed for {escaped:?}: {rows:?}"
+        );
+    }
 }
