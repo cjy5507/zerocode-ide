@@ -210,7 +210,10 @@ fn read_settings(path: &Path) -> Result<Value, Refused> {
 }
 
 /// Set `smart.jev.customHourlyRequests` to `most` under the settings lock,
-/// leaving every other key as it stood; the bound it read before.
+/// leaving every other key as it stood; the bound it read before. The
+/// person's file is replaced as `runtime::replace_file_atomic` replaces one:
+/// with the permissions it had (an owner-only file may still hold an old
+/// secret) and synced before the rename.
 fn set_all_per_hour(path: &Path, most: u64) -> Result<u64, Refused> {
     let _guard = SettingsFileLock::acquire(path).map_err(|error| refused(format!("the settings lock: {error}")))?;
     let mut root = read_settings(path)?;
@@ -224,12 +227,7 @@ fn set_all_per_hour(path: &Path, most: u64) -> Result<u64, Refused> {
         .ok_or_else(|| refused(format!("settings.json's {SMART_SETTINGS_KEY}.{JEV_SETTINGS_KEY} is not an object")))?;
     jev.insert(CUSTOM_HOURLY_REQUESTS_SETTING.to_string(), Value::from(most));
     let bytes = serde_json::to_vec_pretty(&root).map_err(|error| refused(error.to_string()))?;
-    let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let written = std::fs::write(&temp, &bytes).and_then(|()| std::fs::rename(&temp, path));
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(&temp);
-        return Err(refused(format!("{}: {error}", path.display())));
-    }
+    runtime::replace_file_atomic(path, &bytes).map_err(|error| refused(format!("{}: {error}", path.display())))?;
     Ok(before)
 }
 
@@ -345,5 +343,26 @@ mod tests {
         assert!(run(&parse(&words(&["limit", "--all", "0"])).unwrap(), home.path(), 8).is_err());
         let listed = said(&run(&Request::List, home.path(), 9).unwrap());
         assert_eq!(listed["allPerHour"], 240);
+    }
+
+    /// The person's settings file keeps the permissions it had (t-107869):
+    /// a file kept owner-only stays owner-only, and so does any other mode it
+    /// was given, whatever this process's umask; every other key stays.
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_bound_keeps_the_settings_files_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        for mode in [0o600, 0o640] {
+            let held = json!({ "model": "kept", SMART_SETTINGS_KEY: { JEV_SETTINGS_KEY: { CUSTOM_HOURLY_REQUESTS_SETTING: 60 } } });
+            std::fs::write(&path, held.to_string()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(set_all_per_hour(&path, 240), Ok(60));
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode, "a file at {mode:o}");
+            let read: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!((read["model"].as_str(), door::custom_hourly_requests(&read)), (Some("kept"), 240));
+        }
     }
 }

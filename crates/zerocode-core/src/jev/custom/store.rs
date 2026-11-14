@@ -124,6 +124,14 @@ pub fn index_path(home: &Path) -> PathBuf {
     root(home).join(INDEX)
 }
 
+/// The file beside the index that says when each decision asks
+/// ([`ask_when`]): [`set_ask_when`] writes it alone, never the index, so a
+/// reader that holds what it read must watch this file too.
+#[must_use]
+pub fn ask_when_path(home: &Path) -> PathBuf {
+    root(home).join(ASK_WHEN)
+}
+
 /// Every decision the store keeps, in the order they were made; none before
 /// one is.
 ///

@@ -157,26 +157,34 @@ impl Standing {
 /// The window's standing.
 static STANDING: LazyLock<Standing> = LazyLock::new(Standing::default);
 
-/// Put zo's settings file and the decisions' index on the window's file
-/// watcher, and read which seats and decisions ask now — the window's boot.
+/// Put [`watched_files`] on the window's file watcher, and read which seats
+/// and decisions ask now — the window's boot.
 pub(crate) fn watch_settings(watched: &crate::file_watch::WatchSet) {
     if let Some(settings) = crate::api_routers::zo_settings_path() {
-        let mut files = vec![(
-            settings.to_string_lossy().into_owned(),
-            Some(settings.clone()),
-        )];
-        if let Some(home) = settings.parent() {
-            let index = zerocode_core::jev::custom::store::index_path(home);
-            files.push((index.to_string_lossy().into_owned(), Some(index)));
-        }
-        watched.replace_lane(WATCH_LANE, files, false);
+        watched.replace_lane(WATCH_LANE, watched_files(&settings), false);
     }
     STANDING.read(&Wire::of_this_machine());
 }
 
-/// zo's settings file or the decisions' index changed: read which seats and
-/// decisions ask again, and drop the lines waiting in a folder the door no
-/// longer lets act.
+/// What the window watches for the standing, beside zo's `settings` file:
+/// the decisions' index, and the file that says when each decision asks —
+/// `zo jev decisions ask-when` writes that one alone (t-107869), so a window
+/// that did not watch it would go on asking as it read at its boot.
+pub(crate) fn watched_files(settings: &Path) -> Vec<(String, Option<PathBuf>)> {
+    let mut files = vec![settings.to_path_buf()];
+    if let Some(home) = settings.parent() {
+        files.push(zerocode_core::jev::custom::store::index_path(home));
+        files.push(zerocode_core::jev::custom::store::ask_when_path(home));
+    }
+    files
+        .into_iter()
+        .map(|file| (file.to_string_lossy().into_owned(), Some(file)))
+        .collect()
+}
+
+/// zo's settings file, the decisions' index or the file that says when they
+/// ask changed: read which seats and decisions ask again, and drop the lines
+/// waiting in a folder the door no longer lets act.
 pub(crate) fn settings_moved() {
     let wire = Wire::of_this_machine();
     STANDING.read(&wire);

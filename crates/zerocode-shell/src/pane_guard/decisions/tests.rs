@@ -1615,3 +1615,82 @@ fn a_turn_that_edited_nothing_is_left_out_by_a_decision_that_asks_after_edits() 
         "a turn that edited a file was not asked about"
     );
 }
+
+/// What `zo jev decisions ask-when` writes reaches a running window
+/// (t-107869): the file beside the index rides the window's watcher with
+/// zo's settings and the index ([`watched_files`]), so a decision told when
+/// to ask — and told to ask every time again — is read within a tick of the
+/// watcher, though neither the settings nor the index moved.
+#[test]
+fn when_a_decision_asks_reaches_the_running_window_within_a_tick() {
+    use std::time::{Duration, Instant};
+
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Deletes", Point::BeforeCommand);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+    );
+    let standing: &'static Standing = Box::leak(Box::new(home.standing()));
+    let told = |standing: &Standing| -> Vec<AskWhen> {
+        standing
+            .decided()
+            .decisions
+            .kept
+            .iter()
+            .map(|kept| kept.ask_when.clone())
+            .collect()
+    };
+    assert_eq!(told(standing), [AskWhen::default()]);
+    // The window's own watcher, on a short tick of its own, reading on a
+    // change of anything the window watches for the standing.
+    let watched: &'static crate::file_watch::WatchSet =
+        Box::leak(Box::new(crate::file_watch::WatchSet::default()));
+    watched.replace_lane(
+        WATCH_LANE,
+        watched_files(&home.home.path().join("settings.json")),
+        false,
+    );
+    let reading = home.wire.clone();
+    std::thread::spawn(move || {
+        watched.run(Duration::from_millis(40), |events| {
+            if events.iter().any(|change| change.lane == WATCH_LANE) {
+                standing.read(&reading);
+            }
+        });
+    });
+    // Waited for up to a bound only a watcher that never reads reaches: a
+    // loaded runner does not schedule the thread for long stretches.
+    const WATCHER_HEARD_BY: Duration = Duration::from_secs(10);
+    let within_a_tick = |wanted: &[AskWhen]| {
+        let began = Instant::now();
+        while began.elapsed() < WATCHER_HEARD_BY {
+            if told(standing) == wanted {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        false
+    };
+    let words = AskWhen {
+        words: vec!["rm".to_string()],
+        edited: false,
+    };
+    let (_, now) =
+        store::set_ask_when(home.home.path(), &decision.id, &words).expect("its words are kept");
+    assert!(
+        within_a_tick(std::slice::from_ref(&now)),
+        "the words never reached the running window: {:?}",
+        told(standing)
+    );
+    store::set_ask_when(home.home.path(), &decision.id, &AskWhen::default())
+        .expect("its words are taken out");
+    assert!(
+        within_a_tick(&[AskWhen::default()]),
+        "asking every time again never reached the running window: {:?}",
+        told(standing)
+    );
+}
