@@ -503,6 +503,11 @@ fn stand_wire(
         // waits for everything else to have held (`Probing::Later`).
         pane_cli_refusal(state, term, agent, Probing::Later)?;
     }
+    if let Some(reason) =
+        resume.and_then(|session| held_elsewhere(state, agent, session, from_pane))
+    {
+        return Err(reason.into());
+    }
     let found = scm_runtime::detected_agents(false)
         .into_iter()
         .find(|row| row.id == agent)
@@ -523,6 +528,7 @@ fn stand_wire(
         Path::new(cwd),
         env!("CARGO_PKG_VERSION"),
         resume,
+        from_pane,
         tuning,
         &launch_env,
         wire_runtime::WireNews {
@@ -537,6 +543,29 @@ fn stand_wire(
         },
     )
 }
+
+/// Why a conversation is not continued on a wire (152): another live pane,
+/// or another wire, holds it — one conversation, one process (t-68069). The
+/// pane handing its own conversation over is the one holder that is not
+/// another.
+fn held_elsewhere(
+    state: &State<'_, AppState>,
+    agent: &str,
+    session: &str,
+    from_pane: Option<TermId>,
+) -> Option<&'static str> {
+    let record = crate::conversation_wake::vault_record(agent, session)?;
+    let wanted = zerocode_core::conversation_key(agent, &record)?;
+    let pane = crate::conversation_wake::holding_pane(state.inner(), &wanted)
+        .filter(|held| Some(*held) != from_pane);
+    let wire = state.shell_runtime().wires.holding(agent, &record, None);
+    (pane.is_some() || wire.is_some()).then_some(CONVERSATION_HELD_ELSEWHERE)
+}
+
+/// The refusal [`held_elsewhere`] gives, in the hand-over's log line and on
+/// the pane's page (`WIRE_PANE_REFUSALS`).
+pub(crate) const CONVERSATION_HELD_ELSEWHERE: &str =
+    "this conversation is open in another pane or conversation view: no wire started";
 
 /// Why a wire that stood after the window's deadline was stopped (t-84670) —
 /// the refusal its log line and the page carry.

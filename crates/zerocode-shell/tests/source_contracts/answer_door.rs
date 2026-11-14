@@ -379,6 +379,8 @@ fn the_window_says_each_refusal_before_typing_in_the_persons_language() {
         ("PANE_NOT_AT_REST", false),
         ("PANE_BACKGROUND_WORK", false),
         ("PANE_LINE_HOLDS_WORDS", false),
+        // One conversation, one process (152): another pane or wire holds it.
+        ("CONVERSATION_HELD_ELSEWHERE", false),
     ] {
         let words = literal_after(&format!("pub(crate) const {constant}: &str ="));
         assert!(!words.is_empty(), "`{constant}` says nothing");

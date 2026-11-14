@@ -582,6 +582,24 @@ kbd {
   font-size: var(--text-xs);
 }
 
+/* The way to the pane a wire's conversation went on in (152): the notice's own
+ * words carry it, underlined, rather than a second pill inside the first. */
+.pane-chat-notice-go {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--edge-mark);
+  cursor: pointer;
+  transition: text-decoration-color var(--motion-fast) var(--ease-standard);
+}
+
+.pane-chat-notice-go:hover {
+  text-decoration-color: var(--ink-chalk);
+}
+
 /* 「대화를 읽는 중…」 stands hidden until it is late — `--chat-late-ms`, read
  * by `sayLate` — and a read that comes sooner takes the line away unseen
  * (t-54304). A class rather than an animation — reduced motion stills every

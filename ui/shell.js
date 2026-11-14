@@ -9473,7 +9473,7 @@ function vaultRow(session, home = null) {
 /* Reopen a conversation. `worktree` is the workspace a card was dropped on and
  * is absent for the button, which is the whole difference between the two:
  * dropped, the session continues in that workspace; pressed, where it ran. */
-async function resumeVaultSession(session, worktree) {
+async function resumeVaultSession(session, worktree, retried = false) {
   // Moved to first, so the tab is born in the checkout its shell will run in —
   // and a refused move (documents with unsaved typing kept) stops the resume
   // rather than leaving a terminal in a workspace nobody is standing in.
@@ -9484,6 +9484,21 @@ async function resumeVaultSession(session, worktree) {
       worktree: worktree ?? null,
       ...spawnGrid({ placement: "tab" }),
     });
+    // Held on a wire (152): that conversation's page is the answer. A wire the
+    // window holds with no tab of its own is nobody's to reach — it ends, and
+    // the row asks again, once.
+    if (woke.standing && woke.wire != null) {
+      const page = tabs.find((one) => one.kind === "worker" && one.worker?.wire === woke.wire);
+      if (page) {
+        setActiveTab(page.id);
+        toast(t("vault.alreadyOpenWire", "이 대화는 이미 대화 화면에서 열려 있어 새로 열지 않았습니다"), "warn");
+        return;
+      }
+      if (retried) return;
+      await invoke("wire_stop", { id: woke.wire });
+      await resumeVaultSession(session, worktree, true);
+      return;
+    }
     // Held in a pane already: that pane is the answer, as on every other door
     // (t-68069). One with no tab yet is on its way to the stage by itself.
     if (woke.standing) {
@@ -14575,7 +14590,14 @@ async function openWirePage(agent, cwd, { resume = null, fromTerm = null, deadli
   // What the conversation brings from the view it continues — the words that
   // waited, the half-written draft, the row being read (t-54304).
   carry?.(worker);
-  openTab({ id: tabId, kind: "worker", worker });
+  try {
+    openTab({ id: tabId, kind: "worker", worker });
+  } catch (error) {
+    // A wire with no tab is a CLI nothing on screen reaches (152): it ends.
+    invoke("wire_stop", { id: started.id }).catch(() => {});
+    refused(error);
+    return null;
+  }
   if (at >= 0) placeTabAt(tabId, at);
   fillAboveOnce(worker);
   helperClock.sync();
@@ -14658,6 +14680,8 @@ const WIRE_PANE_REFUSALS = [
     () => t("worker.handOverBackgroundWork", "판의 CLI가 끝나면 멈출 배경 작업이 아직 돌고 있습니다")],
   ["the pane's input line is not shown empty — words may be written there: nothing was typed", false,
     () => t("worker.handOverLineHoldsWords", "판의 입력줄에 글이 있을 수 있어 아무것도 입력하지 않았습니다")],
+  ["this conversation is open in another pane or conversation view: no wire started", false,
+    () => t("worker.handOverHeldElsewhere", "이 대화가 다른 터미널이나 대화 화면에서 열려 있어 넘기지 않았습니다")],
 ];
 
 /* Hand a pane's conversation to its wire — the toggle's 「대화」 on a Claude
@@ -14805,12 +14829,20 @@ function carryPaneChat(held, run) {
 }
 
 /* The other way: the wire tab's 「화면」. The CLI's own screen resumes the
- * same session in a new pane that takes the wire tab's seat, and the wire
- * closes (its tab's close stops the child). */
+ * same session in a new pane that takes the wire tab's seat. The wire ends
+ * FIRST (152), the mirror of a pane handing over, whose CLI leaves before the
+ * wire takes the conversation: launched beside a wire still running, two
+ * processes stood on one transcript. So only between turns — a wire that is
+ * out, or asking, keeps the conversation until it rests. */
 async function handWireToScreen(tab) {
   const run = tab.worker;
   const at = tabs.indexOf(tab);
+  if (run.status === "running") {
+    toast(t("worker.wireToScreenBusy", "대화가 아직 일하는 중입니다(차례·질문·승인이 열려 있음) — 끝나면 다시 누르세요"), "warn");
+    return;
+  }
   try {
+    await invoke("wire_stop", { id: run.wire });
     const term = await launchAgentTab({
       agent: run.agent,
       prompt: "",
@@ -14886,7 +14918,7 @@ function holdWireState(run, log) {
  * delta moves only the words (t-22095: the composer was repainted with every
  * one, under the person's typing). */
 function wireStateKey(log) {
-  return JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.usage ?? null, log.tasks ?? [], log.steer ?? null]);
+  return JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.usage ?? null, log.tasks ?? [], log.steer ?? null, log.continued_in ?? null]);
 }
 
 /* A wire session said it has something new — a delta of what it is saying, a
@@ -14959,6 +14991,36 @@ function standAskCard(host, panel, label = t("board.tasks.needsInput", "진행�
     else home.appendChild(card);
   }
   return card;
+}
+
+/* Where a wire's conversation goes on once a pane took it up (152): the wire
+ * ended for that pane (`continued_in`), and its page says so over the turns,
+ * with the way there — a page left saying 「완료」 over a conversation that went
+ * on elsewhere reads as a conversation that stopped. */
+function paintWireContinued(host, run) {
+  const term = run.wireLog?.continued_in ?? null;
+  const shown = host.querySelector(':scope > .pane-chat-notice[data-says="worker.wireContinuedIn"]');
+  if (term === null) {
+    shown?.remove();
+    return;
+  }
+  if (shown?.__term === term) return;
+  shown?.remove();
+  const said = document.createElement("p");
+  said.className = "pane-chat-notice";
+  said.dataset.says = "worker.wireContinuedIn";
+  said.__term = term;
+  said.append(`${t("worker.wireContinuedIn", "이 대화는 터미널 {{term}}번에서 이어집니다 — 이 화면은 끝났습니다", { term })} `);
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "pane-chat-notice-go";
+  go.textContent = t("worker.wireGoToPane", "그 터미널로");
+  go.addEventListener("click", () => {
+    const tab = tabOfTerm(term);
+    if (tab) void focusAgentPane(tab.worktree, tab.id, term, run.agent);
+  });
+  said.append(go);
+  host.querySelector(":scope > .helper-body")?.before(said);
 }
 
 /* The question a wire agent asked, as the card the pane's conversation shows
@@ -19836,6 +19898,7 @@ function paintHelperPage(host, tab) {
     updateHelperStatus(held.status, run);
     if (held.stack) paintChatStack(held.stack, run);
     if (run.wire) paintWireAsk(host, run);
+    if (run.wire) paintWireContinued(host, run);
     return;
   }
   // The page that stood here keeps its reader's place for when it is looked
@@ -19874,6 +19937,7 @@ function paintHelperPage(host, tab) {
     host.insertBefore(workerWhereNode(run, null), body);
   }
   if (run.wire) paintWireAsk(host, run);
+  if (run.wire) paintWireContinued(host, run);
   // 처음 서는 페이지는 끝에서 연다 — 사람이 읽는 것은 언제나 끝이다. 읽던
   // 사람이 위에 두고 간 페이지는 그 행에서 연다(t-6824). 그 자리는 목록이 첫
   // 상자를 얻는 순간 제 감시가 잡는다(`keepToFoot` → `standChatPlace`): 여기서

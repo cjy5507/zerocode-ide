@@ -6018,6 +6018,13 @@ function dropTab(id, { closed = false, nativeClosed = false } = {}) {
   }
   // A conversation's page leaves the leaf's host with its tab (t-6323 B2).
   if (removed.kind === "worker") releaseWorkerPage(removed);
+  // A wire session's page IS the session (152): whichever road takes its tab off
+  // the strip — the ×, a removed worktree's or project's sweep — ends its child.
+  // Only `closeTab` did, and a tab a sweep dropped left its CLI running with
+  // nothing on screen to reach it by.
+  if (removed.kind === "worker" && removed.worker?.wire) {
+    invoke("wire_stop", { id: removed.worker.wire }).catch(() => {});
+  }
   // The workspace board forgets what it was narrowed to, by whichever road its tab left.
   if (removed.kind === "workspaces") forgetWorkspaceBoardNarrowing();
   // The pane host exists because this tab does, so it goes when the tab
@@ -6025,8 +6032,9 @@ function dropTab(id, { closed = false, nativeClosed = false } = {}) {
   // this was missed by every route that drops a tab as bookkeeping rather
   // than as a close, and each one left a host on the stage with shells inside
   // it that still believed they were being looked at. Ending the processes is
-  // a different question and stays with `closeTab`; this only takes away the
-  // element the tab was drawn into.
+  // a different question and stays with `closeTab` — all but a wire's, whose
+  // page is its process (below); this only takes away the element the tab was
+  // drawn into.
   dropPaneHost(id);
   // A drawer that stood in that host goes with it; the toast layer leaves its
   // side now, not at the next toast (t-85293, t-84136 r1 P3-e).
@@ -6486,8 +6494,7 @@ function closeTab(id, started = handNow()) {
     // reopen it (Orca's popup manners), and there is no path to re-read —
     // so it records its dismissal instead of joining the reopen stack.
     if (tab.kind === "worker") {
-      // A wire session's page IS the session: closing it ends the child.
-      if (tab.worker.wire) invoke("wire_stop", { id: tab.worker.wire }).catch(() => {});
+      // A wire session's page IS the session: `dropTab` above ended its child.
       workerDismissed.add(tab.worker.id);
       if (termFloat.hidden) keySink.focus();
       return;

@@ -956,6 +956,26 @@ pub(super) async fn hook_loop(
             };
             codex_queue::bind_session(report.term, &session);
             orchestration::pane_session_reported(report.term, &session, now_epoch_ms());
+            // A wire of this window holding the conversation this pane reports
+            // is a second process on one transcript (152): the pane's CLI runs
+            // already, so the wire ends, and its page says where the
+            // conversation goes on. Never the wire this pane handed it to.
+            let superseded = app.state::<AppState>().shell_runtime().wires.supersede(
+                report.agent.slug(),
+                &session,
+                report.term,
+            );
+            if let Some(wire) = superseded {
+                note_window_event(
+                    app.state::<AppState>().local_data_root(),
+                    &crate::wire_runtime::superseded_line(
+                        report.term,
+                        report.agent.slug(),
+                        &session.id,
+                        wire,
+                    ),
+                );
+            }
             if let Some(word) = word {
                 let state = app.state::<AppState>();
                 note_window_event(

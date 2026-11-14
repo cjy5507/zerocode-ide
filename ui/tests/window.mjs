@@ -59853,8 +59853,14 @@ suite("wire-ends-with-its-page", async ({ browser, origin, ok }) => {
         ...(continued.has(args.id) && { continued_in: continued.get(args.id) }),
       });
       window.__ANSWER__.wire_stop = (args) => { calls.push(["stop", args]); return null; };
+      // The boot's own answer, with the order of the asks written down.
       const launchBefore = window.__ANSWER__.launch_agent_tab;
-      window.__ANSWER__.launch_agent_tab = (args) => { calls.push(["launch", { agent: args.agent, resume: args.resume }]); return launchBefore(args); };
+      window.__ANSWER__.launch_agent_tab = (args) => {
+        calls.push(["launch", { agent: args.agent, resume: args.resume }]);
+        window.__LAUNCHED__ = args;
+        window.__LAUNCHES__ = (window.__LAUNCHES__ ?? 0) + 1;
+        return (window.__NEXT_TERM__ = (window.__NEXT_TERM__ ?? 0) + 1);
+      };
       const stopped = (id) => calls.some(([kind, args]) => kind === "stop" && args?.id === id);
       const at = (kind, test) => calls.findIndex(([one, args]) => one === kind && test(args));
       for (let tries = 0; tries < 200 && !installedAgents().some((row) => row.id === "claude"); tries += 1) {
@@ -59877,7 +59883,7 @@ suite("wire-ends-with-its-page", async ({ browser, origin, ok }) => {
       seen.screenLaunched = await until(() => at("launch", (args) => args?.resume === "s-screen") >= 0);
       seen.stopBeforeLaunch = at("stop", (args) => args?.id === 42) >= 0 &&
         at("stop", (args) => args?.id === 42) < at("launch", (args) => args?.resume === "s-screen");
-      seen.screenTabGone = !tabs.some((tab) => tab.id === screen);
+      seen.screenTabGone = await until(() => !tabs.some((tab) => tab.id === screen));
       // ... and not while the wire is working: nothing stops, nothing launches.
       const busy = await openWirePage("claude", cwd, { resume: "s-busy" });
       status.set(43, "working");
@@ -59932,7 +59938,8 @@ suite("wire-ends-with-its-page", async ({ browser, origin, ok }) => {
       seen.wentThere = await until(() => activeTabId === tabOfTerm(other)?.id);
 
       for (const name of ["wire_start", "wire_log", "wire_stop"]) delete window.__ANSWER__[name];
-      window.__ANSWER__.launch_agent_tab = launchBefore;
+      if (launchBefore) window.__ANSWER__.launch_agent_tab = launchBefore;
+      else delete window.__ANSWER__.launch_agent_tab;
       for (const one of [...tabs]) dropTab(one.id);
       return seen;
     });

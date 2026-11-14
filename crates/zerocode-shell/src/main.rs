@@ -4184,6 +4184,13 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
     }
 
     fn end_panes(&self) {
+        // Every wire's CLI hears the goodbye too (152): it was nobody's pane,
+        // so no hangup reached it, and the sweep below knows panes alone.
+        self.0
+            .state::<AppState>()
+            .shell_runtime()
+            .wires
+            .hang_up_all();
         cmd::managed_judgment::shutdown();
         // The tailnet mapping the phone link made goes with the window.
         phone_link::shutdown();

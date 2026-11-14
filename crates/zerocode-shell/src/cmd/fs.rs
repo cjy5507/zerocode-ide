@@ -1053,13 +1053,23 @@ pub(crate) fn resume_vault_session(
         None => command.to_string(),
     };
 
-    let term = state.take_term_id();
     // One conversation, one process (t-68069): a vault row is a door like any
     // other. This one started a second process on a transcript a live pane was
     // writing; Claude keeps no lease to refuse it. Judged as a wake is, and the
     // pane is written down before anything can ask again. Held in a pane, the
     // answer is that pane, as every other door's is (`ConversationWake`).
     let record = crate::conversation_wake::vault_record(&session.agent, &session.session_id);
+    // Held on a wire, the answer is that wire (152): its page, not a second
+    // process beside it.
+    if let Some(wire) = record.as_ref().and_then(|held| {
+        state
+            .shell_runtime()
+            .wires
+            .holding(&session.agent, held, None)
+    }) {
+        return Ok(crate::conversation_wake::ConversationWake::on_wire(wire));
+    }
+    let term = state.take_term_id();
     let _claim = match &record {
         Some(held) => {
             match crate::conversation_wake::claim_among(&session.agent, held, term, |wanted| {
