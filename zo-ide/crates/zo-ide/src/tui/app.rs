@@ -2170,16 +2170,21 @@ impl Ui {
     /// 두 번째 값은 "꼬리가 칸을 쥐었는가" — 그때 codex 는 Working 줄을
     /// 감춘다(`sync_active_stream_tail` → `hide_status_indicator`).
     fn active_cell(&self, width: usize) -> (Vec<Line>, bool) {
-        let (mut cell, tail_owns_slot) = self.live_cell(width);
+        let (cell, tail_owns_slot) = self.live_cell(width);
         let head_row = self.work_head(width);
         let turns_tool_cell = self.folding()
             && !tail_owns_slot
             && self.tool_cell.as_ref().is_some_and(ToolGroup::uses_turns_live_rows);
         let room = turns::live_room(usize::from(self.painter.max_height())).saturating_sub(usize::from(head_row.is_some()));
+        let elapsed = self.status.as_ref().map_or(Duration::ZERO, |status| status.elapsed);
         if !self.fold.is_pending() {
-            if turns_tool_cell {
-                cell = turns::cap_live_rows(cell, room, false, width);
-            }
+            let cell = if turns_tool_cell {
+                self.tool_cell
+                    .as_ref()
+                    .map_or(cell, |tool_cell| tool_cell.turns_live_rows_budgeted(width, elapsed, false, Some(room)))
+            } else {
+                cell
+            };
             return (head_row.into_iter().chain(cell).collect(), tail_owns_slot);
         }
         // The `turns` view: the finished steps, the texts that led into them
@@ -2203,10 +2208,14 @@ impl Ui {
             rows.extend(held.iter().cloned());
         }
         if !cell.is_empty() {
-            if turns_tool_cell {
+            let cell = if turns_tool_cell {
                 let cell_budget = room.saturating_sub(used_by_fold).max(1);
-                cell = turns::cap_live_rows(cell, cell_budget, self.fold.ends_hanging(), width);
-            }
+                self.tool_cell.as_ref().map_or(cell, |tool_cell| {
+                    tool_cell.turns_live_rows_budgeted(width, elapsed, self.fold.ends_hanging(), Some(cell_budget))
+                })
+            } else {
+                cell
+            };
             rows.extend(cell);
         }
         (rows, tail_owns_slot)
@@ -9570,6 +9579,74 @@ mod tests {
         let rows: Vec<String> = ui.active_cell(98).0.iter().map(Line::plain).collect();
         assert!(rows.len() <= room, "active_cell exceeded live_room ({room}): {} rows: {rows:#?}", rows.len());
         assert!(rows.iter().any(|row| row.contains("earlier")), "missing earlier summary: {rows:#?}");
+    }
+
+    #[test]
+    fn active_cell_keeps_running_command_row_on_eighteen_row_pane_with_tail() {
+        use runtime::message_stream::types::ToolResultBody;
+        let mut ui = test_ui();
+        ui.painter = super::super::painter::Painter::new(std::io::stdout(), 80, 18, 1, false);
+        ui.view = super::super::style::ConversationView::Turns;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        let ids = BlockIdGen::default();
+
+        for i in 0..3 {
+            let call_id = format!("r{i}");
+            ui.block(tool_call(&ids, &call_id, "read_file", &json!({ "path": format!("src/f{i}.rs") })));
+            ui.block(RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId(call_id),
+                is_error: false,
+                body: ToolResultBody::Text { content: "ok\n".to_string(), truncated: false },
+            });
+        }
+        says(&mut ui, &ids, "Running tests.");
+        let handle = runtime::live_output::register(Some("cmd_tail_18"));
+        handle
+            .writer()
+            .append_stdout(b"t1\nt2\nt3\nt4\n");
+        ui.block(tool_call(&ids, "cmd_tail_18", "bash", &json!({ "command": "cargo test" })));
+
+        let rows: Vec<String> = ui.active_cell(80).0.iter().map(Line::plain).collect();
+        drop(handle);
+        assert!(
+            rows.iter().any(|row| row.contains("Run cargo test")),
+            "running command call row must remain visible on 18-row pane: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn active_cell_pins_failed_call_and_reason_when_parallel_batch_overflows_room() {
+        use runtime::message_stream::types::ToolResultBody;
+        let mut ui = test_ui();
+        ui.view = super::super::style::ConversationView::Turns;
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
+        let ids = BlockIdGen::default();
+
+        ui.block(tool_call(&ids, "r0", "read_file", &json!({ "path": "missing.rs" })));
+        for i in 1..=9 {
+            ui.block(tool_call(&ids, &format!("r{i}"), "read_file", &json!({ "path": format!("src/f{i}.rs") })));
+        }
+        ui.block(RenderBlock::ToolResult {
+            id: ids.next(),
+            tool_call_id: ToolCallId("r0".to_string()),
+            is_error: true,
+            body: ToolResultBody::Text { content: "No such file\n".to_string(), truncated: false },
+        });
+
+        let rows: Vec<String> = ui.active_cell(98).0.iter().map(Line::plain).collect();
+        assert!(
+            rows.iter().any(|row| row.contains("Read missing.rs") && row.contains("failed")),
+            "failed step row must stay pinned above earlier collapse: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("No such file")),
+            "failed step reason row must stay pinned under its call: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("2 earlier")),
+            "hidden call count must reflect the 2 hidden running calls, not raw lines: {rows:#?}"
+        );
     }
 
     /// The `turns` view: finished calls are held for one cell, a short text

@@ -405,11 +405,14 @@ fn has_unclosed_shell_line(line: &str) -> bool {
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
-    for ch in line.chars() {
+    let mut last_escaped = false;
+    for ch in line.trim_end().chars() {
         if escaped {
             escaped = false;
+            last_escaped = true;
             continue;
         }
+        last_escaped = false;
         if !in_single && ch == '\\' {
             escaped = true;
             continue;
@@ -426,9 +429,7 @@ fn has_unclosed_shell_line(line: &str) -> bool {
         || escaped
         || trimmed.ends_with('|')
         || trimmed.ends_with("&&")
-        || trimmed.ends_with("||")
-        || trimmed.ends_with('(')
-        || trimmed.ends_with('{')
+        || (!last_escaped && (trimmed.ends_with('(') || trimmed.ends_with('{')))
 }
 
 /// First-line target and optional `+N lines` note for a command in `turns` view.
@@ -619,7 +620,7 @@ impl ToolGroup {
                     return 0;
                 }
                 match &call.kind {
-                    ToolKind::Explore(items) => items.len().max(1),
+                    ToolKind::Explore(items) => items.len(),
                     _ => 1,
                 }
             })
@@ -683,24 +684,34 @@ impl ToolGroup {
     /// Render every call in this group (finished and still running) in the
     /// `turns` view's unified indented step grammar so calls never jump or
     /// split across two formats mid-turn.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub(super) fn turns_live_rows(
         &self,
         width: usize,
         elapsed: Duration,
-        mut hangs: bool,
+        hangs: bool,
     ) -> Vec<Line> {
-        let glyphs = super::style::glyphs();
-        let mut rows = Vec::new();
+        self.turns_live_rows_budgeted(width, elapsed, hangs, None)
+    }
+
+    /// Same as [`Self::turns_live_rows`], capped to `budget` terminal rows so
+    /// large parallel batches or tall live command tails keep running call
+    /// headers and failed steps visible inside the viewport budget.
+    #[must_use]
+    pub(super) fn turns_live_rows_budgeted(
+        &self,
+        width: usize,
+        elapsed: Duration,
+        hangs: bool,
+        budget: Option<usize>,
+    ) -> Vec<Line> {
+        use super::turns::LiveEntry;
+        let mut entries = Vec::new();
         for call in &self.calls {
             if call.done.is_some() {
                 for step in Self::call_steps(call) {
-                    let lead = if hangs { glyphs.result_rest } else { glyphs.result_first };
-                    rows.push(super::turns::step_row(&step, lead, width));
-                    if let Some(why) = super::turns::why_row(&step, width) {
-                        rows.push(why);
-                    }
-                    hangs = true;
+                    entries.push(LiveEntry::Step(step));
                 }
                 continue;
             }
@@ -708,75 +719,73 @@ impl ToolGroup {
             match &call.kind {
                 ToolKind::Command { command, .. } => {
                     let (target, note) = turns_command_target(command);
-                    rows.push(super::turns::running_step_row(
-                        glyph,
-                        super::strings::TOOL_RUN,
-                        &target,
-                        false,
-                        note.as_deref(),
-                        width,
-                    ));
                     let under = format!("{}{LIVE_TAIL_BAR}", super::style::glyphs().result_rest);
-                    rows.extend(live_tail_with_prefix(&call.id, &under, width));
+                    entries.push(LiveEntry::Running {
+                        spinner: glyph,
+                        verb: super::strings::TOOL_RUN.to_string(),
+                        target,
+                        address: false,
+                        note,
+                        tail: live_tail_with_prefix(&call.id, &under, width),
+                    });
                 }
                 ToolKind::Explore(items) => {
                     for item in items {
                         let (verb, target) = explored_target(item);
-                        rows.push(super::turns::running_step_row(
-                            glyph.clone(),
-                            verb,
-                            &plain_text(&target),
-                            false,
-                            None,
-                            width,
-                        ));
+                        entries.push(LiveEntry::Running {
+                            spinner: glyph.clone(),
+                            verb: verb.to_string(),
+                            target: plain_text(&target),
+                            address: false,
+                            note: None,
+                            tail: Vec::new(),
+                        });
                     }
                 }
                 ToolKind::Edit { path } => {
-                    rows.push(super::turns::running_step_row(
-                        glyph,
-                        super::strings::TOOL_EDIT,
-                        &shown_path(path),
-                        false,
-                        None,
-                        width,
-                    ));
+                    entries.push(LiveEntry::Running {
+                        spinner: glyph,
+                        verb: super::strings::TOOL_EDIT.to_string(),
+                        target: shown_path(path),
+                        address: false,
+                        note: None,
+                        tail: Vec::new(),
+                    });
                 }
                 ToolKind::WebSearch { detail } => {
-                    rows.push(super::turns::running_step_row(
-                        glyph,
-                        super::strings::TOOL_SEARCH,
-                        &plain_text(&web_search_target(detail)),
-                        false,
-                        None,
-                        width,
-                    ));
+                    entries.push(LiveEntry::Running {
+                        spinner: glyph,
+                        verb: super::strings::TOOL_SEARCH.to_string(),
+                        target: plain_text(&web_search_target(detail)),
+                        address: false,
+                        note: None,
+                        tail: Vec::new(),
+                    });
                 }
                 ToolKind::WebFetch { url } => {
-                    rows.push(super::turns::running_step_row(
-                        glyph,
-                        super::strings::TOOL_FETCH,
-                        super::strings::address_shown(url),
-                        true,
-                        None,
-                        width,
-                    ));
+                    entries.push(LiveEntry::Running {
+                        spinner: glyph,
+                        verb: super::strings::TOOL_FETCH.to_string(),
+                        target: super::strings::address_shown(url).to_string(),
+                        address: true,
+                        note: None,
+                        tail: Vec::new(),
+                    });
                 }
                 ToolKind::Call { name, detail } => {
-                    rows.push(super::turns::running_step_row(
-                        glyph,
-                        &super::strings::mcp_name_shown(name),
-                        detail,
-                        false,
-                        None,
-                        width,
-                    ));
+                    entries.push(LiveEntry::Running {
+                        spinner: glyph,
+                        verb: super::strings::mcp_name_shown(name),
+                        target: detail.clone(),
+                        address: false,
+                        note: None,
+                        tail: Vec::new(),
+                    });
                 }
                 ToolKind::Spawn { .. } | ToolKind::Plan(_) | ToolKind::AgentResult { .. } => {}
             }
-            hangs = true;
         }
-        rows
+        super::turns::render_live_entries(&entries, width, hangs, budget)
     }
 
     fn call_steps(call: &ToolCall) -> Vec<super::turns::Step> {
@@ -4196,5 +4205,19 @@ mod row_tests {
         assert!(rows.iter().any(|row| row == "  │ test_delete ... ok"), "{rows:#?}");
         assert!(rows.iter().any(|row| row == "  │ test_update ... ok"), "{rows:#?}");
         drop(handle);
+    }
+
+    #[test]
+    fn step_count_with_skips_transient_calls_unless_failed() {
+        let mut group = ToolGroup::new(ToolCall::new(
+            "ts".to_string(),
+            ToolKind::Call { name: "ToolSearch".to_string(), detail: "select:WebFetch".to_string() },
+        ));
+        assert_eq!(group.step_count_with(|id| id != "ts"), 0);
+        assert!(group.complete(
+            "ts",
+            Outcome { ok: false, declined: false, output: "no match".to_string(), change: None, exit_code: None }
+        ));
+        assert_eq!(group.step_count_with(|id| id != "ts"), 1);
     }
 }
