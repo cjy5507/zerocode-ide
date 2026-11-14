@@ -59819,6 +59819,66 @@ suite("plan-card", async ({ browser, origin, ok }) => {
   }
 });
 
+/* The order the window log of 2026-11-14 shows (`term 7 ended` at .833,
+ * `handed … to wire 1` at .910): the pane's CLI leaves while the hand-over is
+ * still out, so `term:exited` comes before `wire_start` answers. The pane
+ * stays until the wire's page stands, then goes — `pane-hands-over-to-wire`
+ * tells the exit only after the answer. (That day the pane stood 82 minutes
+ * longer; this order alone does not do it — 152, not reproduced here.) */
+suite("pane-leaves-while-its-hand-over-is-out", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    const seen = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const settle = () => new Promise((done) => setTimeout(done, 60));
+      const until = async (test) => {
+        for (let n = 0; n < 40 && !test(); n += 1) await settle();
+        return test();
+      };
+      const seen = {};
+      window.__ANSWER__.pane_log = () => ({
+        found: true, next: 2, skipped: false,
+        turns: [{ role: "user", text: "probe" }, { role: "assistant", text: "done" }],
+      });
+      let release = null;
+      window.__ANSWER__.wire_start = (args) => new Promise((done) => {
+        release = () => done({ id: 61, agent: args.agent, protocol: "claude-stream", version: "2.1.325", model: null, session: args.resume ?? null });
+      });
+      window.__ANSWER__.wire_log = () => ({
+        found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], live: [], agent: "claude",
+        protocol: "claude-stream", models: [], modes: [], commands: [], version: "2.1.325",
+      });
+      window.__ANSWER__.wire_stop = () => null;
+      const term = await openTermTab({ placement: "tab" });
+      await window.__PAINTED__();
+      const paneTab = tabOfTerm(term);
+      tell("hook:agent", { term, state: "working", agent: "claude", session: { key: "session_id", id: "s-exit" }, resumable: true });
+      tell("hook:agent", { term, state: "done", agent: "claude", session: { key: "session_id", id: "s-exit" }, resumable: true });
+      await window.__PAINTED__();
+      el("view-toggle-chat").click();
+      seen.asked = await until(() => release !== null);
+      tell("term:exited", { term });
+      await settle();
+      seen.paneWhileHanding = tabs.some((tab) => tab.id === paneTab.id);
+      release?.();
+      seen.wireStood = await until(() => tabs.some((tab) => tab.worker?.wire === 61));
+      seen.paneGone = await until(() => !tabs.some((tab) => tab.id === paneTab.id));
+      for (const name of ["pane_log", "wire_start", "wire_log", "wire_stop"]) delete window.__ANSWER__[name];
+      for (const held of [...tabs]) dropTab(held.id);
+      return seen;
+    });
+    ok(
+      "a pane whose CLI leaves while its hand-over is out stays until the wire's page stands, then goes",
+      seen.asked && seen.paneWhileHanding && seen.wireStood && seen.paneGone,
+      JSON.stringify(seen),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
 /* 152: a wire's child ends with its page, whichever road the page leaves by,
  * and one conversation stays one process. A tab dropped by a road that is not
  * its close (a removed worktree's or project's sweep, `dropTab`) stops its wire;
