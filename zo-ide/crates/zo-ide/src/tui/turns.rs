@@ -310,6 +310,44 @@ impl TurnFold {
     }
 }
 
+/// Cap live step rows from an open `ToolGroup` to `budget`, keeping the
+/// newest rows under `… N earlier` so a large parallel batch stays within
+/// [`live_room`].
+pub(super) fn cap_live_rows(rows: Vec<Line>, budget: usize, continued: bool, width: usize) -> Vec<Line> {
+    let budget = budget.max(1);
+    if rows.len() <= budget {
+        return rows;
+    }
+    let glyphs = super::style::glyphs();
+    let keep = budget.saturating_sub(1);
+    let mut tail_start = rows.len() - keep;
+    let why_prefix = format!("{}{WHY_INDENT}", glyphs.result_rest);
+    let tail_prefix = format!("{}│ ", glyphs.result_rest);
+    while tail_start < rows.len().saturating_sub(1) {
+        let text = rows[tail_start].plain();
+        if text.starts_with(&why_prefix) || text.starts_with(&tail_prefix) {
+            tail_start += 1;
+        } else {
+            break;
+        }
+    }
+    let hidden = tail_start;
+    let lead = if continued { glyphs.result_rest } else { glyphs.result_first };
+    let mut out = Vec::with_capacity(1 + rows.len() - tail_start);
+    out.push(Line::new(vec![Span::dim(lead), Span::dim(strings::earlier_rows(hidden))]).truncated(width));
+    for (idx, mut row) in rows.into_iter().skip(tail_start).enumerate() {
+        if idx == 0 && !continued {
+            if let Some(first) = row.spans.first_mut() {
+                if first.text == glyphs.result_first {
+                    first.text = glyphs.result_rest.to_string();
+                }
+            }
+        }
+        out.push(row);
+    }
+    out
+}
+
 /// A step's row in the viewport: its hung mark, the call as the running row
 /// said it, and what it came to.
 pub(super) fn step_row(step: &Step, lead: &str, width: usize) -> Line {

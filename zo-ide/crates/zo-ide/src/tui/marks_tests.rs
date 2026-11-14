@@ -573,3 +573,22 @@ fn a_long_address_gives_up_its_middle_while_it_runs_and_after() {
         assert!(super::ansi::str_width(row) <= 60, "{row:?}");
     }
 }
+
+#[test]
+fn multiline_shell_continuations_show_ellipsis_in_turns_view() {
+    if !style::in_fresh_run(&path("multiline_shell_continuations_show_ellipsis_in_turns_view")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    for line1 in ["cd repo &&", "test -f a ||", "bash -c (", "if true; then {"] {
+        let group = ToolGroup::new(ToolCall::new(
+            "cmd".to_string(),
+            ToolKind::Command { command: format!("{line1}\n  echo ok"), background: false },
+        ));
+        let rows = plain(&group.turns_live_rows(98, Duration::ZERO, false));
+        assert!(
+            rows[0].contains(&format!("Run({line1} …)  +1 line")),
+            "expected continuation ellipsis for {line1:?}: {rows:?}"
+        );
+    }
+}

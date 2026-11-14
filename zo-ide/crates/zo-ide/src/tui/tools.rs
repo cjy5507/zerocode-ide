@@ -420,7 +420,15 @@ fn has_unclosed_shell_line(line: &str) -> bool {
             in_double = !in_double;
         }
     }
-    in_single || in_double || escaped || line.trim_end().ends_with('|')
+    let trimmed = line.trim_end();
+    in_single
+        || in_double
+        || escaped
+        || trimmed.ends_with('|')
+        || trimmed.ends_with("&&")
+        || trimmed.ends_with("||")
+        || trimmed.ends_with('(')
+        || trimmed.ends_with('{')
 }
 
 /// First-line target and optional `+N lines` note for a command in `turns` view.
@@ -586,6 +594,36 @@ impl ToolGroup {
     #[must_use]
     pub fn call_count(&self) -> usize {
         self.calls.len()
+    }
+
+    /// How many calls in this cell already failed (declined calls do not
+    /// count as failures).
+    #[must_use]
+    pub(super) fn failures(&self) -> usize {
+        self.calls
+            .iter()
+            .filter(|call| call.done.as_ref().is_some_and(|done| !done.ok && !done.declined))
+            .count()
+    }
+
+    /// How many steps this cell contributes to `Working · N steps`, skipping
+    /// transient calls unless they failed and counting each item inside a
+    /// batched `Explore` call so the count matches the folded steps.
+    #[must_use]
+    pub(super) fn step_count_with(&self, stays_a_step: impl Fn(&str) -> bool) -> usize {
+        self.calls
+            .iter()
+            .map(|call| {
+                let failed = call.done.as_ref().is_some_and(|done| !done.ok);
+                if !failed && !stays_a_step(&call.id) {
+                    return 0;
+                }
+                match &call.kind {
+                    ToolKind::Explore(items) => items.len().max(1),
+                    _ => 1,
+                }
+            })
+            .sum()
     }
 
     /// Stable call ids represented by this cell.
