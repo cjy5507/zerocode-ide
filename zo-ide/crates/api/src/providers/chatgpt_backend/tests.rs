@@ -1847,6 +1847,26 @@ fn client_constructs_and_joins_system_instructions() {
     );
 }
 
+/// The ChatGPT road's instructions open with the served model's identity,
+/// never the manual's Claude Code line, and name neither Claude Code nor
+/// Anthropic.
+#[test]
+fn chatgpt_instructions_never_open_as_claude_code() {
+    let mut request = request_with_model("gpt-6.1-sol", None);
+    request.system = Some(crate::types::system_from_string(format!(
+        "{}\nYou carry out software engineering tasks.",
+        crate::providers::CLAUDE_CODE_IDENTITY_LINE
+    )));
+    let instructions = super::ChatGptBackendClient::instructions(&request);
+    let first_line = instructions.lines().next().unwrap_or_default();
+    assert!(first_line.starts_with("You are gpt-6.1"), "{first_line}");
+    assert!(
+        !instructions.contains("Claude Code") && !instructions.contains("Anthropic"),
+        "{instructions}"
+    );
+    assert!(instructions.contains("You carry out software engineering tasks."));
+}
+
 #[test]
 fn instructions_empty_system_stays_empty() {
     // No system blocks → no identity preamble, no batching contract

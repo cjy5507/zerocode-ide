@@ -102,6 +102,41 @@ fn authorize_url_uses_loopback_offline_pkce() {
     assert!(url.contains("code_challenge=challenge"));
 }
 
+/// The Gemini (Antigravity) road opens its system instruction with the served
+/// model's identity, never the manual's Claude Code line, and names neither
+/// Claude Code nor Anthropic.
+#[test]
+fn a_gemini_system_instruction_never_opens_as_claude_code() {
+    let request = MessageRequest {
+        model: "gemini-4-argon".to_string(),
+        max_tokens: 128,
+        messages: vec![InputMessage::user_text("hello")],
+        // The runtime sends the identity line as a block of its own.
+        system: Some(vec![
+            SystemBlock::text(crate::providers::CLAUDE_CODE_IDENTITY_LINE),
+            SystemBlock::text("You carry out software engineering tasks.\n\n# System\n - Work."),
+        ]),
+        tools: None,
+        tool_choice: None,
+        stream: false,
+        thinking: None,
+        output_config: None,
+        effort: None,
+        effort_band_ceiling: None,
+    };
+    let body = build_generate_content_request(&request, Some("proj-1"));
+    let text = body["request"]["systemInstruction"]["parts"][0]["text"]
+        .as_str()
+        .expect("systemInstruction text");
+    let first_line = text.lines().next().unwrap_or_default();
+    assert!(
+        first_line.starts_with("You are gemini-4-argon, a large language model made by Google"),
+        "{first_line}"
+    );
+    assert!(!text.contains("Claude Code") && !text.contains("Anthropic"), "{text}");
+    assert!(text.contains("You carry out software engineering tasks."));
+}
+
 #[test]
 fn builds_code_assist_generate_content_request() {
     let request = MessageRequest {
@@ -162,8 +197,7 @@ fn builds_code_assist_generate_content_request() {
             && system_text.contains("do not claim to be another assistant"),
         "Gemini identity override present: {system_text}"
     );
-    // No other assistant is named to Google's gateway, which refuses such a
-    // system instruction with an opaque 429 (152).
+    // A model that is not Claude is not told it is another assistant.
     assert!(
         !system_text.contains("Claude") && !system_text.contains("Anthropic"),
         "another assistant named to Google: {system_text}"

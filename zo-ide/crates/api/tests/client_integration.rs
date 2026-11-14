@@ -22,6 +22,53 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The Anthropic road keeps the manual's identity line as its first system
+/// block, word for word: the OAuth road requires it there, and the
+/// non-Anthropic identity paragraph never reaches this backend.
+#[tokio::test]
+async fn the_anthropic_road_sends_the_identity_line_as_its_first_system_block() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let body = concat!(
+        "{\"id\":\"msg_identity\",\"type\":\"message\",\"role\":\"assistant\",",
+        "\"content\":[{\"type\":\"text\",\"text\":\"OK\"}],",
+        "\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":\"end_turn\",",
+        "\"stop_sequence\":null,\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}"
+    );
+    let Some(server) = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "application/json", body)],
+    )
+    .await
+    else {
+        return;
+    };
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    let mut request = sample_request(false);
+    request.system = Some(vec![
+        api::SystemBlock::text(api::CLAUDE_CODE_IDENTITY_LINE),
+        api::SystemBlock::text("You carry out software engineering tasks."),
+    ]);
+    client
+        .send_message(&request)
+        .await
+        .expect("request should succeed");
+
+    let captured = state.lock().await;
+    let sent: serde_json::Value =
+        serde_json::from_str(&captured[0].body).expect("json body");
+    assert_eq!(
+        sent["system"][0]["text"],
+        json!(api::CLAUDE_CODE_IDENTITY_LINE),
+        "{}",
+        sent["system"]
+    );
+    assert!(
+        !sent["system"].to_string().contains("a large language model"),
+        "{}",
+        sent["system"]
+    );
+}
+
 #[tokio::test]
 async fn send_message_posts_json_and_parses_response() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));

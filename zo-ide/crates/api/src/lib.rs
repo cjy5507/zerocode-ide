@@ -122,6 +122,7 @@ pub use providers::{
     NON_CLAUDE_ADAPTERS_ENV,
     PlanPriorsTable, ProviderCatalogEntry, ProviderKind, ProviderMetadata, RouterPriors,
     WireRoute, WorkTurnPrior,
+    CLAUDE_CODE_IDENTITY_LINE,
     accepted_efforts, apply_non_anthropic_identity, band_difficulty_for_request, builtin_model_catalog_json, builtin_provider_catalog, catalog_family_id,
     context_window_for_model, custom_provider_catalog, custom_provider_for_model, custom_providers_unreadable, own_fast_model_ref, metadata_for_model, custom_provider_usability_catalog, custom_provider_usable_catalog, declared_model_class, detect_provider_kind, format_provider_model_ref,
     family_alias_for, first_party_lineup, reasoning_passport, REASONING_PASSPORT_LABEL,

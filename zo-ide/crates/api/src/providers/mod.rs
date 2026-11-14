@@ -3610,12 +3610,8 @@ pub const CLAUDE_CODE_IDENTITY_LINE: &str = "You are Claude Code, Anthropic's of
 /// `maker == None` it asserts no specific maker, so a custom/self-hosted
 /// endpoint is never mislabeled.
 ///
-/// No other product or company is named. The manual's Claude Code line was
-/// untrue for these models, and Google's Code Assist gateway answers a
-/// request whose system instruction names another assistant with an opaque
-/// `429 RESOURCE_EXHAUSTED` on every model while the account's quota stands
-/// (2026-11-15: zo's Gemini requests, quota at 9-30%, while `agy` on the
-/// same login answered).
+/// No other product or company is named: the manual's Claude Code line is
+/// untrue for these models.
 ///
 /// The Anthropic backend must never call this: its first system block has to be
 /// the verbatim Claude Code identity line.

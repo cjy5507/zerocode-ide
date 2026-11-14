@@ -111,6 +111,58 @@ fn system_message_identity_override_is_neutral_for_custom_provider() {
     assert!(content.contains("do not claim to be another assistant"));
 }
 
+/// Every OpenAI-compatible road — OpenAI, xAI, Google's Gemini API, the
+/// built-in `DeepSeek` provider, a person's own endpoint, Ollama — opens its
+/// system message with the served model's identity, never the manual's Claude
+/// Code line, and names neither Claude Code nor Anthropic.
+#[test]
+fn no_openai_compatible_road_opens_its_system_message_as_claude_code() {
+    let manual = format!(
+        "{}\nYou carry out software engineering tasks.\n\n# System\n - Work.",
+        crate::providers::CLAUDE_CODE_IDENTITY_LINE
+    );
+    let deepseek = OpenAiCompatConfig::from_user(
+        "DeepSeek",
+        "https://api.deepseek.com",
+        Some("DEEPSEEK_API_KEY"),
+        false,
+    );
+    let own = OpenAiCompatConfig::from_user("Acme", "http://192.0.2.10:8000/v1", None, true);
+    for (config, model) in [
+        (OpenAiCompatConfig::openai(), "gpt-6.1-sol"),
+        (OpenAiCompatConfig::xai(), "grok-5"),
+        (OpenAiCompatConfig::google(), "gemini-4-argon"),
+        (deepseek, "deepseek-v4-flash"),
+        (own, "acme-coder"),
+        (OpenAiCompatConfig::ollama(), "qwen3-coder"),
+    ] {
+        let mut request = effort_request(model, None);
+        request.system = Some(crate::types::system_from_string(manual.clone()));
+        let payload = build_chat_completion_request(&request, config);
+        let system = payload["messages"]
+            .as_array()
+            .and_then(|messages| {
+                messages
+                    .iter()
+                    .find(|message| matches!(message["role"].as_str(), Some("system" | "developer")))
+            })
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_else(|| panic!("{}: a system message", config.provider_name));
+        let first_line = system.lines().next().unwrap_or_default();
+        assert!(
+            first_line.starts_with(&format!("You are {model}, a large language model")),
+            "{}: {first_line}",
+            config.provider_name
+        );
+        assert!(
+            !system.contains("Claude Code") && !system.contains("Anthropic"),
+            "{}: {system}",
+            config.provider_name
+        );
+        assert!(system.contains("You carry out software engineering tasks."));
+    }
+}
+
 #[test]
 fn request_translation_preserves_assistant_tool_call_arguments() {
     let payload = build_chat_completion_request(

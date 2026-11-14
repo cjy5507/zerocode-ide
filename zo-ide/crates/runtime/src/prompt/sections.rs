@@ -102,15 +102,41 @@ fn summarize_config_value(value: &JsonValue) -> String {
     }
 }
 
+/// What the manual says the model does, after the identity line.
+pub(super) const INTRO_ROLE: &str = "You carry out software engineering tasks in the user's \
+     workspace, talking with the user as you go, with the tools this session lists and the \
+     manual below.";
+
+/// [`INTRO_ROLE`] for a session with an Output Style, which may not be coding work.
+pub(super) const INTRO_ROLE_WITH_OUTPUT_STYLE: &str = "You help the user in their workspace, \
+     talking with them as you go, with the tools this session lists and the manual below; the \
+     Output Style below sets how you respond.";
+
+/// The manual's rule for links.
+pub(super) const INTRO_LINK_RULE: &str = "Do not invent or guess a URL. Give a link only when \
+     the user, a workspace file, or a tool result supplied it, or when you are sure it is a real \
+     address that serves the programming task.";
+
+/// The manual's opening: the identity line, then zo's own words for the role
+/// and the link rule.
+///
+/// The identity line stays first for the Anthropic backend, whose OAuth road
+/// requires it verbatim as the first system block; every other backend puts
+/// `api::apply_non_anthropic_identity` in its place.
+///
+/// The two paragraphs after it once copied another product's system prompt
+/// word for word. Google's Code Assist gateway refused every request that
+/// carried them with an opaque `429 RESOURCE_EXHAUSTED` on every model
+/// (2026-11-15, one request each, same login and body otherwise: the
+/// identity paragraph plus those two paragraphs alone, 686 characters, was
+/// refused; the whole manual and tools with these words was served).
 pub(super) fn get_simple_intro_section(has_output_style: bool) -> String {
-    format!(
-        "You are Claude Code, Anthropic's official CLI for Claude.\nYou are an interactive agent that helps users {} Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.",
-        if has_output_style {
-            "according to your \"Output Style\" below, which describes how you should respond to user queries."
-        } else {
-            "with software engineering tasks."
-        }
-    )
+    let role = if has_output_style {
+        INTRO_ROLE_WITH_OUTPUT_STYLE
+    } else {
+        INTRO_ROLE
+    };
+    format!("{}\n{role}\n\n{INTRO_LINK_RULE}", super::CLAUDE_CODE_IDENTITY)
 }
 
 pub(super) fn get_response_style_contract_section() -> String {

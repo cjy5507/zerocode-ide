@@ -749,7 +749,7 @@ pub fn prepend_bullets(items: Vec<String>) -> Vec<String> {
 /// `system` array's FIRST text block must be exactly this string — any other
 /// first block is rejected as a client-fingerprint mismatch, which the API
 /// surfaces as a 429 rate-limit error.
-pub const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+pub const CLAUDE_CODE_IDENTITY: &str = api::CLAUDE_CODE_IDENTITY_LINE;
 
 /// Lower a joined system prompt into wire-level [`api::SystemBlock`]s with the
 /// Claude Code identity isolated and cache breakpoints placed for maximal reuse.

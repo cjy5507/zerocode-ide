@@ -981,6 +981,64 @@ fn context_trust_label_is_static_and_cacheable() {
     );
 }
 
+/// Google's Code Assist gateway refused every request whose manual opened
+/// with another product's intro paragraphs word for word — an opaque
+/// `429 RESOURCE_EXHAUSTED` on every model (2026-11-15). After the identity
+/// line the manual opens in zo's own words, with or without an Output Style.
+#[test]
+fn the_manual_opens_in_zos_own_words_after_the_identity_line() {
+    use super::sections::{INTRO_LINK_RULE, INTRO_ROLE, INTRO_ROLE_WITH_OUTPUT_STYLE};
+    let plain = SystemPromptBuilder::new().render();
+    let styled = SystemPromptBuilder::new()
+        .with_output_style("Plain", "Answer plainly.")
+        .render();
+    for (prompt, role) in [(plain, INTRO_ROLE), (styled, INTRO_ROLE_WITH_OUTPUT_STYLE)] {
+        let opening = format!("{CLAUDE_CODE_IDENTITY}\n{role}\n\n{INTRO_LINK_RULE}");
+        assert!(
+            prompt.starts_with(&opening),
+            "the manual opens with the identity line and zo's intro: {}",
+            prompt.chars().take(600).collect::<String>()
+        );
+        for copied in [
+            "You are an interactive agent",
+            "Use the instructions below and the tools available to you",
+            "You must NEVER generate or guess URLs",
+            "helping the user with programming",
+        ] {
+            assert!(!prompt.contains(copied), "the manual still carries `{copied}`");
+        }
+    }
+    for sentence in [INTRO_ROLE, INTRO_ROLE_WITH_OUTPUT_STYLE, INTRO_LINK_RULE] {
+        assert!(!sentence.contains("  ") && !sentence.contains('\n'), "{sentence:?}");
+    }
+}
+
+/// The real manual as a non-Anthropic backend sends it: the first line is the
+/// served model's own identity, and neither Claude Code nor Anthropic is named
+/// anywhere in it.
+#[test]
+fn the_real_manual_sent_to_another_maker_names_neither_claude_code_nor_anthropic() {
+    use super::sections::INTRO_ROLE;
+    let prompt = SystemPromptBuilder::new().render();
+    for (model, maker) in [
+        ("gemini-4-argon", Some("Google")),
+        ("gpt-6.1-sol", Some("OpenAI")),
+        ("deepseek-v4-flash", None),
+    ] {
+        let sent = api::apply_non_anthropic_identity(&prompt, model, maker);
+        let first_line = sent.lines().next().unwrap_or_default();
+        assert!(
+            first_line.starts_with(&format!("You are {model}, a large language model")),
+            "{model}: {first_line}"
+        );
+        assert!(
+            !sent.contains("Claude Code") && !sent.contains("Anthropic"),
+            "{model}: the manual names another product"
+        );
+        assert!(sent.contains(INTRO_ROLE), "{model}: the manual itself is kept");
+    }
+}
+
 #[test]
 fn split_real_built_prompt_preserves_identity_and_caches_context_trust_label() {
     let prompt = SystemPromptBuilder::new().render();
