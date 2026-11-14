@@ -14,7 +14,9 @@
 //! - out to a model: [`wire_tool_name`], [`schema_to_wire`], [`input_to_wire`];
 //! - in from a model, a hook or a saved session: [`CoreTool::of`] and
 //!   [`input_from_wire`] bring any spelling a model sends back to the
-//!   handler's, and [`handler_call`] does both for a stored call;
+//!   handler's — also for a tool outside the core whose file a model sends
+//!   under the core's wire name (`read_image`) — and [`handler_call`] does
+//!   both for a stored call;
 //! - one tool under two names: [`tool_key`], for permission rules, hook
 //!   matchers and allow-lists.
 
@@ -195,6 +197,23 @@ const FILE_PATH: Field = Field {
     received: &["filePath"],
 };
 
+/// `read_image`'s file. It is shown as `path`, the handler's own name, but a
+/// model that has just called `Read` with `file_path` sends that: a benchmark
+/// run on 2026-11-12 was answered "missing field `path`" and read the picture
+/// again another way.
+const IMAGE_PATH: Field = Field {
+    handler: "path",
+    wire: "path",
+    received: &["file_path", "filePath"],
+};
+
+/// The fields a tool outside the core takes under spellings it is not shown,
+/// by the tool's name: they are read in ([`input_from_wire`]) and never shown
+/// renamed.
+fn fields_received_outside_the_core(name: &str) -> Option<&'static [Field]> {
+    (tool_key(name) == "read_image").then_some(&[IMAGE_PATH])
+}
+
 /// The shell's command, also under codex's `cmd` (`exec_command`).
 const COMMAND: Field = Field {
     handler: "command",
@@ -354,13 +373,16 @@ pub fn input_text_to_wire(name: &str, input: &str) -> Option<String> {
 /// `None` when nothing needed changing, so a caller keeps the bytes it holds.
 #[must_use]
 pub fn input_from_wire(name: &str, input: &Value) -> Option<Value> {
-    let tool = CoreTool::of(name)?;
+    let (fields, settings_only) = match CoreTool::of(name) {
+        Some(tool) => (tool.fields(), tool.settings_only()),
+        None => (fields_received_outside_the_core(name)?, &[][..]),
+    };
     let Value::Object(object) = input else {
         return None;
     };
     let mut object = object.clone();
     let mut changed = false;
-    for field in tool.fields() {
+    for field in fields {
         let other_names = std::iter::once(field.wire)
             .chain(field.received.iter().copied())
             .filter(|name| *name != field.handler);
@@ -368,7 +390,7 @@ pub fn input_from_wire(name: &str, input: &Value) -> Option<Value> {
             changed |= rename(&mut object, sent, field.handler);
         }
     }
-    for knob in tool.settings_only() {
+    for knob in settings_only {
         changed |= object.remove(*knob).is_some();
     }
     changed.then_some(Value::Object(object))
@@ -441,6 +463,31 @@ mod tests {
         // zo's own `task` shorthand is not Claude Code's `Task` in a rule.
         assert_ne!(tool_key("Task"), tool_key("TaskCreate"));
         assert_eq!(tool_key("todo_write"), tool_key("TodoWrite"));
+    }
+
+    /// `read_image` is shown `path`; a model fresh from `Read` sends
+    /// `file_path`. Its file is read from either, the handler's own spelling
+    /// wins when a call sends both, and nothing is shown renamed.
+    #[test]
+    fn read_image_reads_its_file_from_the_spelling_read_is_shown_under() {
+        for key in ["file_path", "filePath", "read_image_path_is_not_this"] {
+            let sent = json!({ key: "shot.png" });
+            let read = input_from_wire("read_image", &sent);
+            if key == "read_image_path_is_not_this" {
+                assert_eq!(read, None, "only the spellings models send");
+            } else {
+                assert_eq!(read, Some(json!({"path": "shot.png"})), "{key}");
+            }
+        }
+        assert_eq!(input_from_wire("read_image", &json!({"path": "a.png"})), None);
+        assert_eq!(
+            input_from_wire("read_image", &json!({"path": "a.png", "file_path": "b.png"})),
+            None,
+            "the handler's own spelling wins"
+        );
+        assert_eq!(input_from_wire("ReadImage", &json!({"file_path": "a.png"})), None, "another tool");
+        assert_eq!(input_to_wire("read_image", &json!({"path": "a.png"})), None, "shown as it is");
+        assert_eq!(handler_call("read_image", r#"{"file_path":"a.png"}"#), None, "not a core tool");
     }
 
     #[test]

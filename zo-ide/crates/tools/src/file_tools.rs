@@ -2228,6 +2228,23 @@ mod read_image_tests {
         path
     }
 
+    /// A model fresh from `Read` sends `read_image` the file under `file_path`.
+    /// Through the one call path every tool takes it is read as `path` before
+    /// anything else reads the call — the permission check included — so the
+    /// picture is staged instead of "missing field `path`".
+    #[test]
+    fn read_image_takes_its_file_under_the_name_read_is_shown() {
+        let ctx = ToolContext::new();
+        let picture = temp_file("read-image-file-path", PNG_1X1);
+        for key in ["file_path", "path"] {
+            let out = crate::execute_tool(&ctx, "read_image", &serde_json::json!({ key: picture.to_string_lossy() }))
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            let staged: serde_json::Value = serde_json::from_str(&out).expect("the staged envelope");
+            assert_eq!(staged["staged"], true, "{key}: {out}");
+        }
+        assert_eq!(ctx.image_sink.lock().expect("image sink").len(), 2, "both pictures reached the model");
+    }
+
     /// `Read` reads a file whatever it is. Pointed at a picture it stages the
     /// picture, as `read_image` does, and what decides is what the file holds:
     /// a picture with no image extension is seen, and text named `.png` is
