@@ -357,7 +357,7 @@ impl IndexedMemoryEntry {
             .into_iter()
             .map(|token| (token, 1))
             .collect::<BTreeMap<_, _>>();
-        for token in tokenize(&format!("{} {} {}", entry.slug, entry.path, entry.summary)) {
+        for token in tokenize(&format!("{} {} {}", entry.slug, pointer_file_name(&entry.path), entry.summary)) {
             token_weights.insert(token, POINTER_TOKEN_WEIGHT);
         }
         Self {
@@ -366,6 +366,23 @@ impl IndexedMemoryEntry {
             classification,
         }
     }
+}
+
+/// The part of an entry's path its pointer tokens are read from: the file's
+/// name, and none of the folders above it.
+///
+/// Where an entry's file sits on this machine — the vault's folder, the
+/// project's memory folder under zo's home, a checkout's name — is no word of
+/// the entry's. Read whole, it gave every entry of a source that folder's
+/// words, so a question holding one of them lifted them all: a checkout named
+/// `…-check` put a bench's planted pitfall page among the five recalled for a
+/// question about `gate_check.sh` (v1.1.151's hand-in check, on main as well).
+/// The folders inside a source are the slug's already — a vault page's slug
+/// is its path under the vault (`wiki/adr/…`), a memory's is its file's name
+/// — and the path's own share of the pointer is what that path is relative to
+/// its source: the file's name. A path with no file name gives none.
+fn pointer_file_name(path: &str) -> &str {
+    Path::new(path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or_default()
 }
 
 /// One read-only corpus page — today, one `wiki/` page of the second brain —
@@ -2511,6 +2528,7 @@ mod tests {
     use crate::memory::MemoryModelTag;
     use core_types::{MemoryEntry, MemoryHit, MemoryRetriever};
     use std::fs;
+    use std::path::Path;
 
     /// A corpus fixture states its vault as `(slug, body, relations)` triples.
     /// Borrowed as `corpus_scan` reads them.
@@ -4675,5 +4693,85 @@ mod tests {
              linked page among the eight keeps its five useless ones",
             share(at_eight, total) - share(at_five, total)
         );
+    }
+
+    /// An entry's pointer tokens are its slug, its summary and its file's
+    /// name — none of the folders the file sits in on this machine.
+    #[test]
+    fn an_entrys_pointer_reads_its_file_name_and_not_the_folders_above_it() {
+        let indexed = super::IndexedMemoryEntry::indexed(
+            MemoryEntry {
+                slug: "zq-note".to_string(),
+                path: "/zq-home/zq-where-check/memory/zq-note.md".to_string(),
+                summary: "a planted note".to_string(),
+            },
+            Some("the body"),
+            crate::memory::MemoryClassification::default(),
+        );
+        let tokens: Vec<&str> = indexed.token_weights.keys().collect();
+        for word in ["zq", "note", "md", "planted", "body"] {
+            assert!(tokens.contains(&word), "{word} in {tokens:?}");
+        }
+        for word in ["home", "where", "check", "memory"] {
+            assert!(!tokens.contains(&word), "{word} from the folders in {tokens:?}");
+        }
+        assert_eq!(super::pointer_file_name("/zq-home/zq-where-check/"), "zq-where-check", "the last name stands");
+        assert_eq!(super::pointer_file_name(""), "");
+        assert_eq!(super::pointer_file_name("zq-note.md"), "zq-note.md");
+    }
+
+    /// Copy the vault at `from` into `to`, files and folders alike.
+    fn copy_vault(from: &Path, to: &Path) {
+        fs::create_dir_all(to).expect("the copy's folder");
+        for entry in fs::read_dir(from).expect("the vault reads") {
+            let entry = entry.expect("an entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("its type").is_dir() {
+                copy_vault(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).expect("the file copies");
+            }
+        }
+    }
+
+    /// The same vault in two folders recalls alike for the same question,
+    /// whatever the folders are named. The reminder bench's vault, under a
+    /// folder named for a word of its own question (`…-check`, as a checkout
+    /// was named in v1.1.151's hand-in check), had every page carry that word
+    /// and its planted pitfall rise among the recalled five.
+    #[test]
+    fn the_same_vault_in_two_folders_named_apart_recalls_alike() {
+        let bench = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/tasks/17-pipe-exit-code/vault");
+        assert!(bench.is_dir(), "the bench vault moved: {}", bench.display());
+        let root = tempfile::tempdir().expect("tempdir");
+        let query = "./run_tests.sh fails. Fix gate_check.sh so it passes, without changing run_tests.sh.";
+        let recalled = |folder: &str| {
+            let at = root.path().join(folder);
+            copy_vault(&bench, &at);
+            let corpus = crate::second_brain::corpus::scan(&crate::second_brain::SecondBrain::at(&at));
+            LexicalMemoryRetriever::from_index_markdown("# Zo memory\n")
+                .with_corpus(corpus)
+                .recall(query, 9)
+                .into_iter()
+                .map(|hit| (hit.entry.slug, hit.score))
+                .collect::<Vec<_>>()
+        };
+        let plain = recalled("zq-vault-plain");
+        assert!(!plain.is_empty(), "the bench question recalls its vault");
+        assert_eq!(recalled("zq-vault-gate-check"), plain);
+    }
+
+    /// The folders inside a vault are still words of its pages: a page under
+    /// `wiki/adr/` is found by `adr`, which its body never says.
+    #[test]
+    fn a_folder_inside_the_vault_is_still_a_word_of_its_pages() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let wiki = root.path().join("wiki");
+        fs::create_dir_all(wiki.join("adr")).expect("the vault's folders");
+        fs::write(wiki.join("adr").join("zq-decision.md"), "# Decision\n\nThe store keeps one writer.\n").expect("a page");
+        fs::write(wiki.join("zq-other.md"), "# Other\n\nA page about the queue.\n").expect("a page");
+        let corpus = crate::second_brain::corpus::scan(&crate::second_brain::SecondBrain::at(root.path()));
+        let hits = LexicalMemoryRetriever::from_index_markdown("# Zo memory\n").with_corpus(corpus).recall("adr", 3);
+        assert_eq!(hits.first().map(|hit| hit.entry.slug.as_str()), Some("wiki/adr/zq-decision"), "{hits:?}");
     }
 }
