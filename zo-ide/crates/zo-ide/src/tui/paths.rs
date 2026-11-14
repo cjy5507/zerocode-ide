@@ -282,12 +282,13 @@ mod tests {
     }
 
     /// An address keeps its host and its last part on Windows too: cut at its
-    /// `/`, never as one name from its front.
+    /// `/`, never as one name from its front. As a row shows it — without its
+    /// scheme (`tui::strings::address_shown`).
     #[test]
     fn an_address_loses_its_middle_where_the_separator_is_a_backslash() {
-        let url = "https://huggingface.co/api/models/acme-research/zq-coder-7b-instruct-preview/tree/main/config.json";
+        let url = "huggingface.co/api/models/acme-research/zq-coder-7b-instruct-preview/tree/main/config.json";
         let cut = as_on_windows(url, 50);
-        assert!(cut.starts_with("https://huggingface.co/"), "{cut}");
+        assert!(cut.starts_with("huggingface.co/"), "{cut}");
         assert!(cut.ends_with("/config.json"), "{cut}");
         assert_eq!(cut.matches('…').count(), 1, "{cut}");
         assert!(display_width(&cut) <= 50, "{cut}");
