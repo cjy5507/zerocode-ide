@@ -95,6 +95,7 @@ fn the_door_asks_in_order_and_names_each_refusal() {
             "not_consented",
             "budget",
             "hourly_budget",
+            "uncounted",
             "settings_changed",
             "resting"
         ]
@@ -1199,8 +1200,8 @@ fn the_hourly_bound_stops_with_hourly_budget() {
     };
     assert_eq!(
         pass_within_the_hour(ask, true, &open, Some(APP), &today, unkept_hour).err(),
-        Some(Refused::HourlyBudget),
-        "an hour the door cannot count is one it may not send past"
+        Some(Refused::Uncounted),
+        "an hour the door cannot count is one it may not send past, and not a full one"
     );
     assert_eq!(count::sent(&today), 61);
 
@@ -1247,7 +1248,7 @@ fn a_shared_hour_write_failure_returns_the_decisions_place() {
         },
     );
 
-    assert_eq!(result.err(), Some(Refused::HourlyBudget));
+    assert_eq!(result.err(), Some(Refused::Uncounted));
     assert_eq!(
         (
             count::sent(&decision),
@@ -1278,7 +1279,7 @@ fn a_shared_hour_write_failure_returns_the_decisions_place() {
         },
     );
     std::fs::set_permissions(&every, writable).unwrap();
-    assert_eq!(result.err(), Some(Refused::HourlyBudget));
+    assert_eq!(result.err(), Some(Refused::Uncounted));
     assert_eq!(
         (
             count::sent(&decision),
@@ -1287,6 +1288,60 @@ fn a_shared_hour_write_failure_returns_the_decisions_place() {
         ),
         (1, 1, 1),
         "an append failure after the decision was counted returns its place",
+    );
+}
+
+/// A lock held a moment longer than one holder takes is waited out
+/// (t-107869): three decisions asked together on a machine at a load of 33
+/// found the lock busy past the door's old 25 ms wait, and the one that lost
+/// was refused as though its hour were full. Held for 80 ms here — past the
+/// old wait, well inside the new — the request is sent and counted once in
+/// each hour and the day.
+#[test]
+fn a_lock_held_for_a_moment_is_waited_out_and_the_request_counted() {
+    use std::thread;
+    use std::time::Duration;
+
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+
+    let home = tempfile::tempdir().unwrap();
+    let hour = "2026-10-17T10";
+    let decision = count::hour_path(home.path(), "d-0000000a", hour);
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    let today = count::requests_path(home.path(), "2026-10-17");
+    std::fs::create_dir_all(every.parent().unwrap()).unwrap();
+    let lock = std::fs::File::create(every.with_file_name(count::HOURS_LOCK_FILE)).unwrap();
+    lock.lock().unwrap();
+    let holder = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(80));
+        drop(lock);
+    });
+    let result = pass_within_the_hour(
+        |asking| may_send(&ROUTING, asking, routing_body("rename a variable")),
+        true,
+        &settings(None),
+        Some(APP),
+        &today,
+        Hour {
+            decision: &decision,
+            decision_most: HOURLY_DEFAULT,
+            every: &every,
+            every_most: ALL_HOURLY_DEFAULT,
+        },
+    );
+    holder.join().unwrap();
+    assert!(
+        result.is_ok(),
+        "a lock held for 80 ms refused a request its hours had room for: {:?}",
+        result.err()
+    );
+    assert_eq!(
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (1, 1, 1),
     );
 }
 
@@ -1383,8 +1438,9 @@ fn the_shared_hour_is_locked_and_the_loser_spends_no_hourly_place() {
     lock.lock().unwrap();
     assert_eq!(
         together(),
-        [Some(Refused::HourlyBudget); 2],
-        "a held hourly lock refuses both requests before they spend anything",
+        [Some(Refused::Uncounted); 2],
+        "a lock held past the door's wait refuses both requests, uncounted and not full, \
+         before they spend anything",
     );
     assert_eq!(
         (

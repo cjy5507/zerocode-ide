@@ -319,6 +319,23 @@ async fn ask_one(
     (outcome, handed)
 }
 
+/// [`JevDoor::pass_within_the_hour`] on the blocking pool: the door reads the
+/// settings file and may wait out a busy hour lock up to the core's bound
+/// (300 ms), and holds no worker of the runtime while it does (t-107869). A
+/// pass that never comes back kept no count: `uncounted`.
+async fn passed_off_the_runtime(
+    door: &JevDoor,
+    key: bool,
+    body: Value,
+    hours: &Hours,
+    most: u64,
+) -> Result<door::Cleared, Refused> {
+    let (door, decision, every) = (door.clone(), hours.decision.clone(), hours.every.clone());
+    tokio::task::spawn_blocking(move || door.pass_within_the_hour(&CUSTOM_DECISIONS, key, body, &decision, most, &every))
+        .await
+        .unwrap_or(Err(Refused::Uncounted))
+}
+
 async fn judged(
     cwd: &Path,
     door: &JevDoor,
@@ -328,14 +345,7 @@ async fn judged(
     row: &mut DecisionRow,
 ) -> Option<Handed> {
     let body = custom::body_of(&asked.definition, lent);
-    let passed = door.pass_within_the_hour(
-        &CUSTOM_DECISIONS,
-        client.is_some(),
-        body,
-        &hours.decision,
-        asked.definition.max_per_hour,
-        &hours.every,
-    );
+    let passed = passed_off_the_runtime(door, client.is_some(), body, hours, asked.definition.max_per_hour).await;
     let (cleared, client) = match (passed, client) {
         (Ok(cleared), Some(client)) => (cleared, client),
         (passed, _) => {

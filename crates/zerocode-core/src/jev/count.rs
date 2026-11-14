@@ -33,9 +33,18 @@ const HOUR_FILE_PREFIX: &str = "hour-";
 /// The lock beside every hour file, shared across decisions and hours.
 pub(super) const HOURS_LOCK_FILE: &str = ".hours.lock";
 
-/// The maximum wait and retry interval for an hour writer, as in the decisions store.
-const HOURS_LOCK_WAIT: Duration = Duration::from_millis(25);
+/// The longest an hour writer waits for the lock, and the first and longest
+/// pause between its tries; each pause doubles up to the longest. A holder
+/// keeps the lock for well under a millisecond, but on a loaded machine it
+/// can be put off the processor for tens of milliseconds while it holds it,
+/// and a launch that forks on another thread keeps a copy until it execs:
+/// 25 ms gave up on three decisions asked together at a load of 33
+/// (t-107869). 300 ms leaves a 1,500 ms request four fifths of its wall when
+/// the whole wait is spent, and a wait that runs out is
+/// [`super::door::Refused::Uncounted`], not a full hour.
+const HOURS_LOCK_WAIT: Duration = Duration::from_millis(300);
 const HOURS_LOCK_POLL: Duration = Duration::from_millis(1);
+const HOURS_LOCK_POLL_MOST: Duration = Duration::from_millis(10);
 
 /// The hour lock is readable and writable by its owner alone.
 #[cfg(unix)]
@@ -138,11 +147,13 @@ pub(super) fn lock_hours(every: &Path) -> io::Result<HeldFileLock> {
     }
     let file = options.open(path)?;
     let until = Instant::now() + HOURS_LOCK_WAIT;
+    let mut pause = HOURS_LOCK_POLL;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(HeldFileLock::locked(file)),
             Err(TryLockError::WouldBlock) if Instant::now() < until => {
-                thread::sleep(HOURS_LOCK_POLL);
+                thread::sleep(pause.min(until.saturating_duration_since(Instant::now())));
+                pause = (pause * 2).min(HOURS_LOCK_POLL_MOST);
             }
             Err(TryLockError::WouldBlock) => {
                 return Err(io::Error::new(

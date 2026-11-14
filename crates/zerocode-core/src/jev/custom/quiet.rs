@@ -159,8 +159,8 @@ impl Quiet {
     /// alone when it is the folder's own ([`Refused::of_the_folder`]) — and
     /// writes its row only when that mark is new, so of every ask that meets
     /// it in its span exactly one says so. An hourly refusal repeats only
-    /// when the hour is truly full (`hour_is_full`, [`crate::jev::door::Hour::is_full`]):
-    /// a lock that stayed busy is a moment's. Anything else — a wall, a
+    /// when the hour is truly full (`hour_is_full`, [`crate::jev::door::Hour::is_full`]);
+    /// a lock that stayed busy is `uncounted`, a moment's. Anything else — a wall, a
     /// malformed reply, a server's wait — writes its row each time.
     pub fn refused(
         &self,
@@ -328,6 +328,13 @@ mod tests {
                 || false
             ));
             assert!(quiet.refused((ID, VERSION), folder, "timeout", now(AT), || true));
+            assert!(quiet.refused(
+                (ID, VERSION),
+                folder,
+                Refused::Uncounted.token(),
+                now(AT),
+                || true
+            ));
             assert!(quiet.refused(
                 (ID, VERSION),
                 folder,

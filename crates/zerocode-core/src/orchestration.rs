@@ -20374,6 +20374,9 @@ fn seat_unjudged(seat: &str, outcome: Option<&str>) -> serde_json::Value {
         (_, _, Some(Refused::HourlyBudget)) => {
             format!("No {seat} judgment: this hour's Jev request limit is spent.")
         }
+        (_, _, Some(Refused::Uncounted)) => {
+            format!("No {seat} judgment: this hour's Jev request count could not be kept.")
+        }
         (_, _, Some(Refused::SettingsChanged)) => {
             format!("No {seat} judgment: the Jev settings changed while it was asked.")
         }

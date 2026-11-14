@@ -612,6 +612,7 @@ const JEV_TOKENS = Object.freeze({
   rules_unavailable: { key: "jev.token.rulesUnavailable", word: "규칙 정의를 확인하거나 다시 준비해야 함" },
   budget: { key: "jev.token.budget", word: "하루 한도 초과", fix: "budget" },
   hourly_budget: { key: "jev.token.hourlyBudget", word: "시간당 한도 초과" },
+  uncounted: { key: "jev.token.uncounted", word: "요청 수를 세지 못함" },
   resting: { key: "jev.token.resting", word: "쉬는 중" },
   timeout: { key: "jev.token.timeout", word: "시간 초과" },
   schema: { key: "jev.token.schema", word: "형식 오류" },

@@ -391,8 +391,15 @@ pub enum Refused {
     /// The day's budget is spent.
     Budget,
     /// A person's decision has sent the most it sends in an hour, or every
-    /// decision together has ([`pass_within_the_hour`], t-62170).
+    /// decision together has ([`pass_within_the_hour`], t-62170): an hour
+    /// is full.
     HourlyBudget,
+    /// The door could not count the request in its hours: their lock stayed
+    /// busy past the door's wait, or an hour file could not be read, counted
+    /// or returned ([`pass_within_the_hour`]). Nothing was sent, and the
+    /// hours may have room, so it is no [`Self::HourlyBudget`]: a ledger, a
+    /// count and a pane tell the two apart (t-107869).
+    Uncounted,
     /// The model pin or a saved question no longer matches the prepared batch.
     SettingsChanged,
     /// The seat rests, so asking now would hold the judgment server for
@@ -405,12 +412,13 @@ pub enum Refused {
 
 impl Refused {
     /// Every refusal, in the order the door asks.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::NoKey,
         Self::Off,
         Self::NotConsented,
         Self::Budget,
         Self::HourlyBudget,
+        Self::Uncounted,
         Self::SettingsChanged,
         Self::Resting,
     ];
@@ -424,6 +432,7 @@ impl Refused {
             Self::NotConsented => "not_consented",
             Self::Budget => "budget",
             Self::HourlyBudget => "hourly_budget",
+            Self::Uncounted => "uncounted",
             Self::SettingsChanged => "settings_changed",
             Self::Resting => "resting",
         }
@@ -453,7 +462,7 @@ impl Refused {
             // the settings file; with no new reading, an hour bounds it.
             Self::NoKey | Self::Off | Self::NotConsented | Self::HourlyBudget => Some(Span::Hour),
             Self::Budget => Some(Span::Day),
-            Self::SettingsChanged | Self::Resting => None,
+            Self::Uncounted | Self::SettingsChanged | Self::Resting => None,
         }
     }
 
@@ -471,6 +480,7 @@ impl Refused {
             | Self::Off
             | Self::Budget
             | Self::HourlyBudget
+            | Self::Uncounted
             | Self::SettingsChanged
             | Self::Resting => false,
         }
@@ -795,10 +805,11 @@ pub struct Hour<'a> {
 /// concurrent request spends that daily place even though the request is refused.
 ///
 /// # Errors
-/// As [`pass`], and [`Refused::HourlyBudget`] when the bounded lock wait
-/// expires, either hour is full, or an hour cannot be read, counted or
-/// returned: an hour's bound is always set, so a count the door cannot keep
-/// is one it may not send past.
+/// As [`pass`]; [`Refused::HourlyBudget`] when either hour is full; and
+/// [`Refused::Uncounted`] when the lock stays busy past its bounded wait or
+/// an hour cannot be read, counted or returned: an hour's bound is always
+/// set, so a count the door cannot keep is one it may not send past — and
+/// not one it may call full.
 pub fn pass_within_the_hour(
     ask: impl FnOnce(&Asking<'_>) -> Result<Cleared, Refused>,
     key: bool,
@@ -814,10 +825,10 @@ pub fn pass_within_the_hour(
         sent_today: count::sent(requests),
     };
     let cleared = ask(&asking)?;
-    let _lock = count::lock_hours(hour.every).map_err(|_| Refused::HourlyBudget)?;
+    let _lock = count::lock_hours(hour.every).map_err(|_| Refused::Uncounted)?;
     let before = (
-        count::sent_in_the_hour(hour.decision).map_err(|_| Refused::HourlyBudget)?,
-        count::sent_in_the_hour(hour.every).map_err(|_| Refused::HourlyBudget)?,
+        count::sent_in_the_hour(hour.decision).map_err(|_| Refused::Uncounted)?,
+        count::sent_in_the_hour(hour.every).map_err(|_| Refused::Uncounted)?,
     );
     if hour.full_at(before) {
         return Err(Refused::HourlyBudget);
@@ -839,10 +850,10 @@ impl Hour<'_> {
         decision >= self.decision_most || every >= self.every_most
     }
 
-    /// Whether either hour is full now: what tells a [`Refused::HourlyBudget`]
-    /// that repeats until the hour ends from one a busy lock or a count that
-    /// did not read gave a moment's ask, which reads as not full. Read without
-    /// the lock, after the door let it go (t-106308).
+    /// Whether either hour is full now, read without the lock after the door
+    /// let it go (t-106308): a [`Refused::HourlyBudget`] repeats until the
+    /// hour ends only while this holds, and a count that does not read reads
+    /// as not full. A busy lock is [`Refused::Uncounted`], never full.
     #[must_use]
     pub fn is_full(self) -> bool {
         match (
@@ -858,15 +869,17 @@ impl Hour<'_> {
 fn return_hours(hour: Hour<'_>, before: (u64, u64)) -> Result<(), Refused> {
     let decision = count::return_hour_to(hour.decision, before.0);
     let every = count::return_hour_to(hour.every, before.1);
-    decision.and(every).map_err(|_| Refused::HourlyBudget)
+    decision.and(every).map_err(|_| Refused::Uncounted)
 }
 
 /// Count one request in an hour file and answer whether the hour had room
-/// for it, as [`take_a_place`] does the day's.
+/// for it, as [`take_a_place`] does the day's: a place past `most` is a full
+/// hour, a file that does not take the count an uncounted one.
 fn take_an_hours_place(hour: &Path, most: u64) -> Result<(), Refused> {
     match count::count_one_in_the_hour(hour) {
         Ok(place) if place <= most => Ok(()),
-        _ => Err(Refused::HourlyBudget),
+        Ok(_) => Err(Refused::HourlyBudget),
+        Err(_) => Err(Refused::Uncounted),
     }
 }
 
