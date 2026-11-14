@@ -1212,12 +1212,121 @@ pub fn normalize_path_components(path: &Path) -> PathBuf {
     normalized
 }
 
+/// The longest plain Windows path, in characters, before the terminating NUL
+/// (`MAX_PATH` is 260 with it). A longer one reaches its file only verbatim.
+const PLAIN_PATH_MOST: usize = 259;
+
+/// The names Windows reads as a device in a plain path, whatever extension
+/// follows them: `C:\work\con.txt` is the console, `\\?\C:\work\con.txt` a file.
+const DOS_DEVICE_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1",
+    "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// `path` in the spelling git and a person read: on Windows a verbatim drive
+/// path (`\\?\C:\…`, what `canonicalize` answers) without its prefix, when
+/// that names the same file ([`plain_drive_spelling`]); any other path as it
+/// is. Git for Windows cannot make a folder under a verbatim path —
+/// `git worktree add \\?\C:\…` stops at `could not create leading directories
+/// of '//?/C:/…'` — and a cwd set to one is read back verbatim, so every
+/// relative path joined onto it is verbatim too.
+#[must_use]
+pub fn without_verbatim_prefix(path: &Path) -> std::borrow::Cow<'_, Path> {
+    #[cfg(windows)]
+    if let Some(plain) = path.to_str().and_then(plain_drive_spelling) {
+        return std::borrow::Cow::Owned(PathBuf::from(plain));
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
+/// `\\?\C:\…` as `C:\…`, only when Windows reads the plain spelling as the
+/// same file: a drive path (a `\\?\UNC\…` share or a device keeps its
+/// prefix), shorter than [`PLAIN_PATH_MOST`], with no empty name, no `.` or
+/// `..`, no `/`, no name ending in a dot or a space and no DOS device name —
+/// each of which a plain path reads as something else. A rule on the text
+/// alone, so it holds the same on every platform it is tested on.
+#[must_use]
+pub fn plain_drive_spelling(text: &str) -> Option<&str> {
+    let plain = text.strip_prefix(r"\\?\")?;
+    let (drive, rest) = plain.split_at_checked(2)?;
+    let mut letters = drive.chars();
+    if !(letters.next()?.is_ascii_alphabetic() && letters.next() == Some(':')) {
+        return None;
+    }
+    let names = rest.strip_prefix('\\')?;
+    if plain.chars().count() > PLAIN_PATH_MOST {
+        return None;
+    }
+    let names = names.strip_suffix('\\').unwrap_or(names);
+    if names.is_empty() {
+        return Some(plain);
+    }
+    let reads_the_same = |name: &str| {
+        let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.contains('/')
+            && !name.ends_with(['.', ' '])
+            && !DOS_DEVICE_NAMES.iter().any(|device| stem.eq_ignore_ascii_case(device))
+    };
+    names.split('\\').all(reads_the_same).then_some(plain)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A verbatim drive path is read without its prefix — what git and the
+    /// person read — and the same text comes back where nothing changes.
+    #[test]
+    fn a_verbatim_drive_path_reads_as_its_plain_spelling() {
+        assert_eq!(plain_drive_spelling(r"\\?\C:\Users\dev\repo\created"), Some(r"C:\Users\dev\repo\created"));
+        assert_eq!(plain_drive_spelling(r"\\?\d:\work\"), Some(r"d:\work\"));
+        assert_eq!(plain_drive_spelling(r"\\?\C:\"), Some(r"C:\"));
+        assert_eq!(plain_drive_spelling(r"C:\Users\dev\repo"), None, "already plain");
+        assert_eq!(plain_drive_spelling("/home/dev/repo"), None);
+    }
+
+    /// Where the plain spelling would name another file, the prefix stays.
+    #[test]
+    fn a_verbatim_path_whose_plain_spelling_reads_otherwise_keeps_its_prefix() {
+        for kept in [
+            r"\\?\UNC\server\share\repo",
+            r"\\?\Volume{0c8a1b2c-0000-0000-0000-100000000000}\repo",
+            r"\\?\C:",
+            r"\\?\C:repo",
+            r"\\?\C:\Users\dev\..\repo",
+            r"\\?\C:\Users\dev\.\repo",
+            r"\\?\C:\Users\dev\\repo",
+            r"\\?\C:\Users\dev\a/b",
+            r"\\?\C:\Users\dev\trailing.",
+            r"\\?\C:\Users\dev\trailing ",
+            r"\\?\C:\Users\dev\con",
+            r"\\?\C:\Users\dev\Nul.txt",
+            r"\\?\C:\Users\dev\lpt9 .log",
+        ] {
+            assert_eq!(plain_drive_spelling(kept), None, "{kept}");
+        }
+        let long = format!(r"\\?\C:\{}", "segment\\".repeat(40));
+        assert_eq!(plain_drive_spelling(&long), None, "past MAX_PATH");
+        assert_eq!(plain_drive_spelling(r"\\?\C:\Users\dev\console"), Some(r"C:\Users\dev\console"));
+    }
+
+    /// The spelling is changed on Windows alone: elsewhere `\\?\` is a name.
+    #[test]
+    fn only_windows_reads_a_verbatim_prefix() {
+        let verbatim = Path::new(r"\\?\C:\Users\dev\repo");
+        let read = without_verbatim_prefix(verbatim);
+        if cfg!(windows) {
+            assert_eq!(read.as_ref(), Path::new(r"C:\Users\dev\repo"));
+        } else {
+            assert_eq!(read.as_ref(), verbatim);
+        }
+    }
 
     #[test]
     fn restrictable_directories_are_plain_directories_only() {

@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use api::sync_bridge::lock_recovered;
+use core_types::paths::without_verbatim_prefix;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -138,7 +139,8 @@ struct EnsuredWorktree {
 
 /// Ensure a git worktree exists at `path`. If the path is already a
 /// directory (worktree, checkout, or plain dir) it is accepted as-is.
-/// Otherwise a new git worktree is created.
+/// Otherwise a new git worktree is created. Git is handed the path's plain
+/// spelling: on Windows it cannot make a worktree at a verbatim one.
 fn ensure_worktree(path: &Path, branch: Option<&str>) -> Result<EnsuredWorktree, String> {
     if path.is_dir() {
         // Already exists — accept it (could be a worktree, checkout, or
@@ -156,7 +158,7 @@ fn ensure_worktree(path: &Path, branch: Option<&str>) -> Result<EnsuredWorktree,
     if let Some(b) = branch {
         cmd.arg("-b").arg(b);
     }
-    cmd.arg(path);
+    cmd.arg(without_verbatim_prefix(path).as_ref());
 
     let output = cmd
         .output()
@@ -170,14 +172,17 @@ fn ensure_worktree(path: &Path, branch: Option<&str>) -> Result<EnsuredWorktree,
 }
 
 /// Prepare a CLI startup worktree through the same disk check and git creation path.
+/// Answers the worktree's resolved path in its plain spelling: it becomes the
+/// session's cwd, and every relative path the session joins onto that cwd
+/// is handed to git.
 pub fn prepare_start_worktree(path: &Path) -> Result<std::path::PathBuf, String> {
     if let Some(warning) = ensure_worktree(path, None)?.warning { eprintln!("{warning}"); }
-    let output = Command::new("git").arg("-C").arg(path).args(["rev-parse", "--show-toplevel"]).output().map_err(|e| e.to_string())?;
+    let output = Command::new("git").arg("-C").arg(without_verbatim_prefix(path).as_ref()).args(["rev-parse", "--show-toplevel"]).output().map_err(|e| e.to_string())?;
     if !output.status.success() { return Err("--worktree requires a git working tree".into()); }
     let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     let canonical = path.canonicalize().map_err(|e| e.to_string())?;
     if root.canonicalize().map_err(|e| e.to_string())? != canonical { return Err("--worktree must name the root of a git working tree".into()); }
-    Ok(canonical)
+    Ok(without_verbatim_prefix(&canonical).into_owned())
 }
 
 pub(crate) fn run_enter_worktree(input: &EnterWorktreeInput) -> Result<String, ToolError> {
@@ -189,6 +194,9 @@ pub(crate) fn run_enter_worktree(input: &EnterWorktreeInput) -> Result<String, T
             .map_err(|e| ToolError::InvalidInput(format!("cannot resolve cwd: {e}")))?
             .join(&target)
     };
+    // The plain spelling, so the worktree is named, entered, reported and
+    // later removed as git and the person name it.
+    let target = without_verbatim_prefix(&target).into_owned();
 
     // Ensure the worktree exists (creates if necessary).
     let EnsuredWorktree { created, warning } = ensure_worktree(&target, input.branch.as_deref())
@@ -267,13 +275,14 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// worktree was added from: git removes a clean worktree and refuses one
 /// holding modified or untracked files, which then stays for the person.
 /// Returns the tail of the exit message. A refusal is reported by its reason,
-/// not by git's own text, which points at `--force`.
+/// not by git's own text, which points at `--force`. Both paths go to git in
+/// their plain spelling, the one its worktree list holds.
 fn remove_created_worktree(repo: &Path, worktree: &Path) -> String {
     let output = Command::new("git")
         .arg("-C")
-        .arg(repo)
+        .arg(without_verbatim_prefix(repo).as_ref())
         .args(["worktree", "remove"])
-        .arg(worktree)
+        .arg(without_verbatim_prefix(worktree).as_ref())
         .output();
     match output {
         Ok(out) if out.status.success() => format!("; removed worktree {}", worktree.display()),
@@ -394,10 +403,17 @@ mod tests {
         /// one file nobody committed.
         fn persons_worktree_with_unsaved_work(&self, name: &str) -> PathBuf {
             let path = self.root().join(name);
-            Self::git(&["worktree", "add", "-q", "-b", name, path.to_str().expect("utf8")], &self.repo());
+            Self::git(&["worktree", "add", "-q", "-b", name, &git_spelling(&path)], &self.repo());
             std::fs::write(path.join("unsaved.txt"), "work in progress\n").expect("write unsaved");
             path
         }
+    }
+
+    /// A path as these tests hand it to git themselves. Their scratch root is
+    /// `canonicalize`d — verbatim on Windows — and so is every path the tool
+    /// is given here, which is how the tool's own plain spelling is tested.
+    fn git_spelling(path: &Path) -> String {
+        without_verbatim_prefix(path).to_str().expect("utf8").to_string()
     }
 
     /// The env lock, with every git these tests start — theirs and the
@@ -444,7 +460,7 @@ mod tests {
         SAVED_CWD.lock().expect("cwd lock").clear();
         let scratch = ScratchRepo::new();
         let persons = scratch.root().join("persons");
-        ScratchRepo::git(&["worktree", "add", "-q", "-b", "persons", persons.to_str().expect("utf8")], &scratch.repo());
+        ScratchRepo::git(&["worktree", "add", "-q", "-b", "persons", &git_spelling(&persons)], &scratch.repo());
         env::set_current_dir(scratch.repo()).expect("cd repo");
 
         enter(&persons);
