@@ -926,22 +926,38 @@ pub(super) fn route_spawn(
     }
 }
 
+/// The override the settings name for `request`, and whether a repository's
+/// committed settings named it: the pin on the helper's kind
+/// (`modelRouter.subagents`) before the one on its role (`roles`), as ever —
+/// except that a pin the person wrote stands over one a repository wrote,
+/// whichever table each sits in. A repository's pin on the `Verification`
+/// kind does not undo the person's on the verifier role (152, review
+/// t-107910).
 fn apply_configured_route_override(
     request: &mut RouteRequest,
     settings: &SmartRuntimeSettings,
 ) {
-    if let RoutingTarget::Subagent(profile) = &request.target {
-        if let Some(override_rule) = settings.subagents.get(profile.key()) {
-            request.override_rule = Some(override_rule.clone());
-            request.repository_override = settings.repository_subagents.contains(profile.key());
-        }
-    }
-    if request.override_rule.is_none() {
-        let role = role_key(request.effective_role());
-        if let Some(override_rule) = settings.roles.get(role) {
-            request.override_rule = Some(override_rule.clone());
-            request.repository_override = settings.repository_roles.contains(role);
-        }
+    let on_the_kind = match &request.target {
+        RoutingTarget::Subagent(profile) => settings
+            .subagents
+            .get(profile.key())
+            .map(|rule| (rule, settings.repository_subagents.contains(profile.key()))),
+        _ => None,
+    };
+    let role = role_key(request.effective_role());
+    let on_the_role = settings
+        .roles
+        .get(role)
+        .map(|rule| (rule, settings.repository_roles.contains(role)));
+    let named = match (on_the_kind, on_the_role) {
+        (Some((_, true)), Some(persons @ (_, false))) => Some(persons),
+        (Some(on_the_kind), _) => Some(on_the_kind),
+        (None, on_the_role) if request.override_rule.is_none() => on_the_role,
+        (None, _) => None,
+    };
+    if let Some((override_rule, repositorys)) = named {
+        request.override_rule = Some(override_rule.clone());
+        request.repository_override = repositorys;
     }
 }
 

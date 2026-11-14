@@ -330,6 +330,36 @@
         }
     }
 
+    /// A pin the person wrote stands over one a repository wrote for the same
+    /// helper, whichever table each sits in: a repository's pin on a kind of
+    /// helper (`modelRouter.subagents`) does not undo the person's on the
+    /// role that kind works in (152, review t-107910).
+    #[test]
+    fn a_persons_role_pin_stands_over_a_repositorys_pin_on_the_kind_of_helper() {
+        const MAIN: &str = "claude-sonnet-5";
+        const PERSONS: &str = "claude-haiku-4-5-20251001";
+        const REPOSITORYS: &str = "gpt-5.6-terra";
+        let inventory = inventory_of(MAIN, &[MAIN, PERSONS, REPOSITORYS]);
+        for (kind, role) in [("Verification", "verifier"), ("code-reviewer", "reviewer"), ("Explore", "fast")] {
+            let repository = json!({ "modelRouter": { "subagents": { kind: { "mode": "pinned", "model": REPOSITORYS } } } });
+            let routed = |label: &str, persons: &Value| {
+                in_a_repository(label, persons, &repository, |settings| {
+                    let profile = runtime::SubagentProfileId::parse(kind).expect("a built-in kind");
+                    let works_as = profile.route_role_hint().expect("the kind's role");
+                    let mut request =
+                        runtime::RouteRequest::for_target(runtime::RoutingTarget::Subagent(profile), works_as, MAIN);
+                    super::apply::route_spawn(&mut request, &settings, &inventory, false)
+                })
+            };
+            let theirs = routed(&format!("kind-over-role-{role}"), &pinned(role, PERSONS));
+            assert_eq!(theirs.resolved_model, PERSONS, "{kind} on {role}: {}", theirs.reason);
+            assert_eq!(theirs.source, runtime::RouteDecisionSource::Pinned, "{kind}");
+            // With nothing of the person's, the repository's pin on the kind routes it.
+            let alone = routed(&format!("kind-alone-{role}"), &json!({}));
+            assert_eq!(alone.resolved_model, REPOSITORYS, "{kind}: {}", alone.reason);
+        }
+    }
+
     /// A route a repository's committed pin decided is written down with its
     /// own word, not `pin`, which the spawn reads as the person's selection;
     /// the challenger arm still leaves it alone, as a model chosen by hand.
