@@ -733,6 +733,7 @@ fn selection_record(
         matches!(model_selection, super::plan_execution::ModelSelection::Pinned).then_some(model),
         effort,
     )
+    .at_the_provider_serving_it()
 }
 
 /// The model the conversation's last answer came from: what a conversation
@@ -903,6 +904,11 @@ impl PlainSession {
             last_answer_model: if resumed { last_answer_model(&session) } else { None },
             preferences: &persisted_preferences,
         });
+        // A conversation that ran at a provider of the person's own reopens
+        // there or not at all — before its record is written again.
+        if let Some(why) = recorded_selection.as_ref().and_then(|recorded| recorded.reopen_refusal(&opening.model)) {
+            return Err(why.into());
+        }
         // What this conversation opens on is its own from here: a `/model` in
         // another session rewrites the default for NEW sessions, not this one.
         // Best-effort like the `.cwd` sidecar — a failed write only leaves the

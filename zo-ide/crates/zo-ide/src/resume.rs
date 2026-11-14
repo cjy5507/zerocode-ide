@@ -274,6 +274,11 @@ pub struct SessionSelection {
     model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     effort: Option<String>,
+    /// The provider of the person's own that served `model` when this was
+    /// recorded, by the name they gave it; none for a model a built-in
+    /// provider serves. A reopen is held to it ([`Self::reopen_refusal`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
 }
 
 impl SessionSelection {
@@ -291,6 +296,46 @@ impl SessionSelection {
                     ))
                 }),
             effort: effort.map(|effort| effort.canonical().to_string()),
+            provider: None,
+        }
+    }
+
+    /// This record, naming the provider of the person's own that serves its
+    /// model now — read the way the session's client is built
+    /// ([`runtime::model_home::ModelHome::of`]) — or none, where a built-in
+    /// provider serves it or the record names no model.
+    #[must_use]
+    pub fn at_the_provider_serving_it(mut self) -> Self {
+        self.provider = self.model().and_then(|model| match runtime::model_home::ModelHome::of(&model) {
+            runtime::model_home::ModelHome::Own(name) => Some(name),
+            _ => None,
+        });
+        self
+    }
+
+    /// Why a conversation that ran at a provider of the person's own may not
+    /// reopen on `model` — `None` where it may. A reopen builds the session
+    /// afresh, from wherever the name reads now: once that provider no
+    /// longer serves the model (its row gone from `providers`, or another of
+    /// theirs listing the model first), the whole conversation would go
+    /// there — a `gpt-…` id to `OpenAI`, a name nobody knows to whichever
+    /// login the machine holds (152, review t-107693). Reopened on another
+    /// model than the one it ran on, it goes where the person sent it.
+    #[must_use]
+    pub fn reopen_refusal(&self, model: &str) -> Option<String> {
+        let provider = self.provider.as_deref()?;
+        let ran_on = self.model()?;
+        let model = model.trim();
+        if ran_on != model && ran_on != crate::cli_args::resolve_model_alias(model) {
+            return None;
+        }
+        match runtime::model_home::ModelHome::of(model) {
+            runtime::model_home::ModelHome::Own(now) if now == provider => None,
+            _ => Some(format!(
+                "This conversation ran on `{model}` at your provider `{provider}`, which no longer serves it \
+                 (its row is gone from `providers`, or another of your providers now lists the model first). \
+                 zo does not reopen it anywhere else: put the row back, or reopen it on another model (`--model <name>`)."
+            )),
         }
     }
 
@@ -458,5 +503,58 @@ mod tests {
         assert_eq!(summary.chars().count(), 80);
         assert!(summary.ends_with('…'));
     }
-}
 
+    /// A conversation that ran at a provider of the person's own reopens
+    /// there or not at all (152): the record names that provider, and a
+    /// reopen that would build the session elsewhere — the row gone, or
+    /// another of the person's providers listing the model first — is
+    /// refused. Reopened on another model, it goes where the person sent it.
+    #[test]
+    fn a_conversation_that_ran_at_a_persons_provider_reopens_there_or_not_at_all() {
+        let _env_lock = crate::test_env_lock();
+        let config_home = crate::support::temp_dir("reopen-own-provider");
+        let _config_home = crate::support::EnvVarGuard::set(
+            "ZO_CONFIG_HOME",
+            Some(config_home.to_str().expect("utf8 config home")),
+        );
+        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
+        let _custom = crate::support::EnvVarGuard::set(api::CUSTOM_PROVIDERS_ENV, None);
+        let declare = |json: &str| api::refresh_custom_providers_from_json(json).expect("custom providers");
+        let own = |name: &str, models: &str| {
+            format!(r#"{{"name":"{name}","base_url":"https://{name}.invalid/v1","requires_auth":false,"models":[{models}]}}"#)
+        };
+        declare(&format!("[{}]", own("zqown", r#""gpt-zq-oss","zq-shared""#)));
+
+        let record = SessionSelection::of(Some("gpt-zq-oss"), Some(Effort::High)).at_the_provider_serving_it();
+        assert_eq!(record.provider.as_deref(), Some("zqown"));
+        assert_eq!(record.reopen_refusal("gpt-zq-oss"), None, "the row stands");
+        let stored = serde_json::to_string(&record).expect("the record serializes");
+        let read_back: SessionSelection = serde_json::from_str(&stored).expect("and reads back");
+        assert_eq!(read_back, record);
+
+        // The row is gone: the name reads as OpenAI's now.
+        declare("[]");
+        let why = record.reopen_refusal("gpt-zq-oss").expect("refused");
+        assert!(why.contains("`zqown`") && why.contains("`gpt-zq-oss`"), "{why}");
+        assert!(!why.contains("  "), "a line join left a run of spaces: {why}");
+        // Reopened on another model, it goes where the person sent it.
+        assert_eq!(record.reopen_refusal("claude-sonnet-5"), None);
+
+        // Another of the person's providers now lists the model first.
+        declare(&format!("[{},{}]", own("zqfirst", r#""zq-shared""#), own("zqown", r#""zq-shared""#)));
+        let shared = SessionSelection {
+            model: Some("zq-shared".to_string()),
+            effort: None,
+            provider: Some("zqown".to_string()),
+        };
+        assert!(shared.reopen_refusal("zq-shared").is_some());
+
+        // A built-in provider's model, and a record from before this field, hold nothing.
+        let built_in = SessionSelection::of(Some("claude-sonnet-5"), None).at_the_provider_serving_it();
+        assert_eq!(built_in.provider, None);
+        let older: SessionSelection =
+            serde_json::from_str(r#"{"model":"gpt-zq-oss","effort":"high"}"#).expect("an older record");
+        assert_eq!(older.reopen_refusal("gpt-zq-oss"), None);
+        declare("[]");
+    }
+}
