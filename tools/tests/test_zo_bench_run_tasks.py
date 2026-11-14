@@ -13,6 +13,7 @@ Run: python3 tools/tests/test_zo_bench_run_tasks.py   (stdlib only)
 
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -62,6 +63,31 @@ class RunsKeepOutOfTheVault(unittest.TestCase):
         self.assertEqual((run_tasks.VAULT_ENV, run_tasks.VAULT_OFF), ("ZEROCODE_SECOND_BRAIN", "off"))
 
 
+class WorkdirsStayStill(unittest.TestCase):
+    def test_the_task_commit_starts_no_git_upkeep_beside_the_judge(self):
+        # Git's background upkeep took and dropped a lock file under `.git`
+        # while the judge copied the tree, and the copy stopped on it.
+        beside = Path(tempfile.mkdtemp(prefix="zo-bench-trace-"))
+        trace = beside / "trace.txt"
+        saved = os.environ.get("GIT_TRACE2")
+        os.environ["GIT_TRACE2"] = str(trace)
+        try:
+            work = run_tasks.prepare_workdir(BENCH / "tasks" / "29-one-line-edit")
+        finally:
+            if saved is None:
+                os.environ.pop("GIT_TRACE2", None)
+            else:
+                os.environ["GIT_TRACE2"] = saved
+        try:
+            traced = trace.read_text(errors="replace").splitlines()
+            self.assertTrue([line for line in traced if "cmd_name commit" in line], "git traced the task's commit")
+            self.assertFalse([line for line in traced if "child_start" in line and "maintenance" in line],
+                             "git's upkeep started beside the judge")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            shutil.rmtree(beside, ignore_errors=True)
+
+
 class RoundTripTasks(unittest.TestCase):
     """Each verifier passes the one right outcome and fails the nearest wrong
     ones — a run that did nothing among them."""
@@ -108,12 +134,12 @@ class RoundTripTasks(unittest.TestCase):
     def test_the_edit_task_wants_the_one_line_and_nothing_else(self):
         task = "29-one-line-edit"
         right = 'name = "demo"\nhost = "127.0.0.1"\nport = 9090\ntimeout_secs = 30\n'
-        self.assertTrue(self.judged(task, "done", lambda work: (work / "config.toml").write_text(right)))
+        # The bytes an edit leaves, `\n` as written: text mode would write
+        # `\r\n` on Windows, which the verifier rightly reads as every line changed.
+        edited = lambda text: lambda work: (work / "config.toml").write_text(text, newline="")
+        self.assertTrue(self.judged(task, "done", edited(right)))
         self.assertFalse(self.judged(task, "done"), "the untouched file is not the edit")
-        self.assertFalse(
-            self.judged(task, "done", lambda work: (work / "config.toml").write_text(right.replace("30", "60"))),
-            "a second line changed",
-        )
+        self.assertFalse(self.judged(task, "done", edited(right.replace("30", "60"))), "a second line changed")
 
     def test_a_tree_only_task_is_judged_as_before_with_the_answer_beside_it(self):
         # Task 24's verifier was written before the answer was handed over;

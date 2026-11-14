@@ -52,6 +52,12 @@ CATALOG_ENV = "ZO_MODEL_CONTEXT_WINDOWS"
 VAULT_ENV = "ZEROCODE_SECOND_BRAIN"
 VAULT_OFF = "off"
 GIT_IDENTITY = ("-c", "user.name=bench", "-c", "user.email=bench@example.invalid")
+# A commit starts git's own upkeep in the background (`git maintenance run
+# --auto --detach`), which takes and drops `.git/objects/maintenance.lock`
+# while the judge copies the tree: the copy then stopped on a lock file gone
+# between its listing and its read (a macOS CI run, 2026-11-13). Nothing here
+# needs that upkeep — the tree lives for one run.
+GIT_NO_UPKEEP = ("-c", "maintenance.auto=false", "-c", "gc.auto=0")
 
 
 def parse_args(argv):
@@ -95,7 +101,7 @@ def prepare_workdir(task):
     work = Path(tempfile.mkdtemp(prefix=f"zo-bench-{task.name}-"))
     shutil.copytree(task / "repo", work, dirs_exist_ok=True)
     for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "task"]):
-        subprocess.run(["git", *GIT_IDENTITY, *args], cwd=work, check=True, capture_output=True)
+        subprocess.run(["git", *GIT_IDENTITY, *GIT_NO_UPKEEP, *args], cwd=work, check=True, capture_output=True)
     return work
 
 

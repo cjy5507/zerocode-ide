@@ -65,7 +65,8 @@ class Foreign(unittest.TestCase):
         folder = self.target / profile / "build" / unit
         write(folder / "output", output)
         write(folder / "out" / "made", "a build product")
-        write(folder / "root-output", str(ran_in or folder) + "/out")
+        # As cargo writes it: the OUT_DIR in the platform's own spelling (`\\` on Windows).
+        write(folder / "root-output", str((ran_in or folder) / "out"))
         write(self.target / profile / ".fingerprint" / unit / "run-build-script-build-script-build.json", "{}")
 
     def test_a_run_copied_from_another_target_goes_and_one_of_this_target_stays(self):
