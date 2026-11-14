@@ -79,10 +79,10 @@ fn system_message_carries_identity_override_for_first_party_provider() {
         content.contains("You are grok-3, a large language model made by xAI"),
         "xAI identity override present: {content}"
     );
-    assert!(content.contains("do not claim to be Claude or to be made by Anthropic"));
+    assert!(content.contains("do not claim to be another assistant or to be made by another company"));
     assert!(
-        content.contains("You are Claude Code, Anthropic's official CLI"),
-        "original body preserved: {content}"
+        !content.contains("Claude") && !content.contains("Anthropic"),
+        "the manual's Claude Code line is replaced, not carried: {content}"
     );
 }
 
@@ -108,7 +108,7 @@ fn system_message_identity_override_is_neutral_for_custom_provider() {
             && !content.contains("made by Google"),
         "custom provider must not get a false maker: {content}"
     );
-    assert!(content.contains("do not claim to be Claude"));
+    assert!(content.contains("do not claim to be another assistant"));
 }
 
 #[test]

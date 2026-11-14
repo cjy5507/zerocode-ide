@@ -3592,21 +3592,33 @@ pub fn maker_for_provider(kind: ProviderKind) -> Option<&'static str> {
     }
 }
 
-/// Prepend the non-Anthropic identity override to a joined system prompt so a
-/// non-Claude model does not introduce itself as Claude. Single source of truth
+/// The identity line the Anthropic backend's first system block must carry
+/// verbatim (OAuth fingerprint requirement), and the line zo's operating
+/// manual opens with.
+pub const CLAUDE_CODE_IDENTITY_LINE: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// Put the non-Anthropic identity in front of a joined system prompt, so a model
+/// that is not Claude does not introduce itself as Claude. Single source of truth
 /// shared by every non-Anthropic backend (ChatGPT/Responses, Gemini Code
 /// Assist, and the OpenAI-compatible chat path).
 ///
 /// Returns `system` unchanged when it is empty (nothing to override). Otherwise
-/// it prepends a one-paragraph override naming the model and — when `maker` is
-/// `Some` — its maker, instructing the model to follow zo's Claude-authored
-/// operating manual and provider-neutral response style contract while keeping
-/// its own identity. With `maker == None` the override still corrects the
-/// Claude claim but asserts no specific maker, so a custom/self-hosted endpoint
-/// is never mislabeled.
+/// it puts a one-paragraph identity naming the model and — when `maker` is
+/// `Some` — its maker in place of the manual's own opening line
+/// ([`CLAUDE_CODE_IDENTITY_LINE`]), instructing the model to follow the
+/// operating manual and its provider-neutral response style contract. With
+/// `maker == None` it asserts no specific maker, so a custom/self-hosted
+/// endpoint is never mislabeled.
+///
+/// No other product or company is named. The manual's Claude Code line was
+/// untrue for these models, and Google's Code Assist gateway answers a
+/// request whose system instruction names another assistant with an opaque
+/// `429 RESOURCE_EXHAUSTED` on every model while the account's quota stands
+/// (2026-11-15: zo's Gemini requests, quota at 9-30%, while `agy` on the
+/// same login answered).
 ///
 /// The Anthropic backend must never call this: its first system block has to be
-/// the verbatim Claude Code identity line (OAuth fingerprint requirement).
+/// the verbatim Claude Code identity line.
 #[must_use]
 pub fn apply_non_anthropic_identity(system: &str, model: &str, maker: Option<&str>) -> String {
     if system.is_empty() {
@@ -3616,11 +3628,14 @@ pub fn apply_non_anthropic_identity(system: &str, model: &str, maker: Option<&st
         Some(maker) => format!("a large language model made by {maker}"),
         None => "a large language model".to_string(),
     };
+    let manual = system
+        .strip_prefix(CLAUDE_CODE_IDENTITY_LINE)
+        .map_or(system, |rest| rest.trim_start_matches(['\r', '\n']));
     format!(
-        "You are {model}, {maker_clause}, operating through the zo coding CLI. The operating \
-         manual below was written for Claude Code; follow its tools, workflow, and provider-neutral \
-         response style contract, but your identity is {model} — do not claim to be Claude or to \
-         be made by Anthropic.\n\n{system}"
+        "You are {model}, {maker_clause}, operating through the zo coding CLI. Follow the \
+         operating manual below — its tools, workflow, and provider-neutral response style \
+         contract — but your identity is {model}: do not claim to be another assistant or to be \
+         made by another company.\n\n{manual}"
     )
 }
 
@@ -5222,13 +5237,24 @@ mod tests {
     fn apply_non_anthropic_identity_overrides_claude_and_names_maker() {
         let system = "You are Claude Code, Anthropic's official CLI for Claude.\nDo work.";
         let out = apply_non_anthropic_identity(system, "gpt-5.5", Some("OpenAI"));
-        // The original Claude-authored body is preserved …
-        assert!(out.contains("Do work."), "body preserved: {out}");
-        // … under an explicit identity override naming the model + maker.
-        assert!(out.contains("You are gpt-5.5, a large language model made by OpenAI"));
+        // The manual is kept …
+        assert!(out.ends_with("\n\nDo work."), "the manual follows the identity: {out}");
+        // … under an identity naming the model + maker, in place of its Claude Code line.
+        assert!(out.starts_with("You are gpt-5.5, a large language model made by OpenAI"));
         assert!(out.contains("provider-neutral response style contract"));
-        assert!(out.contains("do not claim to be Claude or to be made by Anthropic"));
-        assert!(out.ends_with(system), "override is a prefix of the body");
+        assert!(out.contains("do not claim to be another assistant"));
+        // No other product or company is named (152: Google's gateway refuses such a
+        // system instruction with an opaque 429).
+        for named in ["Claude", "Anthropic"] {
+            assert!(!out.contains(named), "{named} in {out}");
+        }
+    }
+
+    /// A manual that does not open with the Claude Code line is kept whole.
+    #[test]
+    fn apply_non_anthropic_identity_keeps_a_manual_without_the_claude_code_line() {
+        let out = apply_non_anthropic_identity("Do work.\nYou are Claude Code, quoted.", "gpt-5.5", None);
+        assert!(out.ends_with("\n\nDo work.\nYou are Claude Code, quoted."), "{out}");
     }
 
     #[test]
@@ -5243,7 +5269,7 @@ mod tests {
                 && !out.contains("made by Google"),
             "no false maker attribution: {out}"
         );
-        assert!(out.contains("do not claim to be Claude"));
+        assert!(out.contains("do not claim to be another assistant"));
     }
 
     #[test]

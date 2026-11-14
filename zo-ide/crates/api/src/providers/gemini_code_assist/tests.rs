@@ -159,8 +159,14 @@ fn builds_code_assist_generate_content_request() {
     assert!(
         system_text.contains("gemini-3-flash-preview")
             && system_text.contains("Google")
-            && system_text.contains("do not claim to be Claude"),
+            && system_text.contains("do not claim to be another assistant"),
         "Gemini identity override present: {system_text}"
+    );
+    // No other assistant is named to Google's gateway, which refuses such a
+    // system instruction with an opaque 429 (152).
+    assert!(
+        !system_text.contains("Claude") && !system_text.contains("Anthropic"),
+        "another assistant named to Google: {system_text}"
     );
     assert_eq!(
         body["request"]["tools"][0]["functionDeclarations"][0]["name"],
