@@ -175,6 +175,24 @@ fn combos_in_priority_order(segment_count: usize) -> Vec<(usize, usize)> {
 /// 경로를 폭 `max_width` 에 맞춰 가운데서 자른다.
 #[must_use]
 pub fn center_truncate_path(path: &str, max_width: usize) -> String {
+    center_truncate_at(path, max_width, separator_of(path, std::path::MAIN_SEPARATOR))
+}
+
+/// 글을 자를 구분자: 글에 이 플랫폼의 구분자(`main`)가 있으면 그것, 없고 `/`가
+/// 있으면 `/`. 주소(`https://host/…`)와 `/`로 쓴 Windows 경로(`C:/work/repo`)는
+/// 어느 플랫폼에서나 `/`에서 잘린다 — Windows의 `\`로만 쪼개면 그 글이 한 마디가
+/// 되어 앞이 잘리고 host가 사라졌다(zo-ide-verify windows, 2026-11-13).
+/// `\`로 쓴 Windows 경로(`C:\a\b`)는 `\`에서 그대로 잘린다.
+fn separator_of(text: &str, main: char) -> char {
+    if !text.contains(main) && text.contains('/') {
+        '/'
+    } else {
+        main
+    }
+}
+
+/// [`center_truncate_path`]를 구분자 `sep` 로.
+fn center_truncate_at(path: &str, max_width: usize, sep: char) -> String {
     if max_width == 0 {
         return String::new();
     }
@@ -182,7 +200,6 @@ pub fn center_truncate_path(path: &str, max_width: usize) -> String {
         return path.to_string();
     }
 
-    let sep = std::path::MAIN_SEPARATOR;
     let has_leading_sep = path.starts_with(sep);
     let has_trailing_sep = path.ends_with(sep);
     let mut raw_segments: Vec<&str> = path.split(sep).collect();
@@ -257,7 +274,42 @@ pub fn center_truncate_path(path: &str, max_width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::center_truncate_path;
+    use super::{center_truncate_at, center_truncate_path, separator_of};
+
+    /// What Windows does with these, on any platform: `\` is its separator.
+    fn as_on_windows(text: &str, width: usize) -> String {
+        center_truncate_at(text, width, separator_of(text, '\\'))
+    }
+
+    /// An address keeps its host and its last part on Windows too: cut at its
+    /// `/`, never as one name from its front.
+    #[test]
+    fn an_address_loses_its_middle_where_the_separator_is_a_backslash() {
+        let url = "https://huggingface.co/api/models/acme-research/zq-coder-7b-instruct-preview/tree/main/config.json";
+        let cut = as_on_windows(url, 50);
+        assert!(cut.starts_with("https://huggingface.co/"), "{cut}");
+        assert!(cut.ends_with("/config.json"), "{cut}");
+        assert_eq!(cut.matches('…').count(), 1, "{cut}");
+        assert!(display_width(&cut) <= 50, "{cut}");
+    }
+
+    /// A Windows path is cut at the separator it is written with: `\`, or `/`.
+    #[test]
+    fn a_windows_path_is_cut_at_the_separator_it_is_written_with() {
+        let back = r"C:\Users\dev\projects\acme-research\zq-coder\src\main.rs";
+        let cut = as_on_windows(back, 30);
+        assert!(cut.starts_with(r"C:\") && cut.ends_with(r"\main.rs"), "{cut}");
+        assert_eq!(cut.matches('…').count(), 1, "{cut}");
+        let forward = "C:/Users/dev/projects/acme-research/zq-coder/src/main.rs";
+        let cut = as_on_windows(forward, 30);
+        assert!(cut.starts_with("C:/") && cut.ends_with("/main.rs"), "{cut}");
+        assert_eq!(cut.matches('…').count(), 1, "{cut}");
+        // Mixed: the platform's own separator still decides.
+        assert_eq!(separator_of(r"C:\Users\dev/src", '\\'), '\\');
+        // Elsewhere `/` is the platform's own, and nothing changes.
+        assert_eq!(separator_of("/home/dev/src", '/'), '/');
+        assert_eq!(separator_of(r"C:\Users\dev", '/'), '/');
+    }
 
     /// codex `test_center_truncate_doesnt_truncate_short_path`.
     #[test]
