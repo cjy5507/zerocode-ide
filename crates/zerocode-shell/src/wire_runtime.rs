@@ -384,6 +384,16 @@ pub(crate) enum Outgoing {
 }
 
 impl WireState {
+    /// Move the session to `status` — never out of `ended` (152). A wire
+    /// whose CLI is gone stays ended, whatever comes after: the handshake's
+    /// `idle` (the session is in the map, and so can be ended, before its
+    /// handshake is done), a line the reader still held, a send.
+    fn becomes(&mut self, status: &'static str) {
+        if self.status != "ended" {
+            self.status = status;
+        }
+    }
+
     fn push(&mut self, turn: TranscriptTurn) {
         self.note_activity(&turn);
         let seq = self.next_seq;
@@ -782,7 +792,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                     questions: Vec::new(),
                     grant: None,
                 });
-                state.status = "asking";
+                state.becomes("asking");
             }
             "item/fileChange/requestApproval" => {
                 let item = text_of(params.get("itemId"));
@@ -802,7 +812,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                     questions: Vec::new(),
                     grant: None,
                 });
-                state.status = "asking";
+                state.becomes("asking");
             }
             "item/permissions/requestApproval" => {
                 let reason = text_of(params.get("reason"));
@@ -842,7 +852,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                     questions: Vec::new(),
                     grant: permissions,
                 });
-                state.status = "asking";
+                state.becomes("asking");
             }
             "item/tool/requestUserInput" => {
                 let questions = params
@@ -882,7 +892,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                     questions,
                     grant: None,
                 });
-                state.status = "asking";
+                state.becomes("asking");
             }
             "mcpServer/elicitation/request" => out.push(Outgoing::Reply {
                 id: id.clone(),
@@ -918,7 +928,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                 .and_then(|turn| turn.get("id"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
-            state.status = "working";
+            state.becomes("working");
         }
         "turn/completed" => {
             let turn = params.get("turn").unwrap_or(&serde_json::Value::Null);
@@ -932,7 +942,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
             }
             state.turn = None;
             state.live.clear();
-            state.status = if failed { "failed" } else { "idle" };
+            state.becomes(if failed { "failed" } else { "idle" });
         }
         "thread/tokenUsage/updated" => {
             // Codex's app-server announces the thread's token usage on its
@@ -965,19 +975,20 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
             let flags = status
                 .get("activeFlags")
                 .and_then(serde_json::Value::as_array);
-            state.status = match status.get("type").and_then(serde_json::Value::as_str) {
+            let next = match status.get("type").and_then(serde_json::Value::as_str) {
                 Some("active") if flags.is_some_and(|flags| !flags.is_empty()) => "asking",
                 Some("active") => "working",
                 Some("systemError") => "failed",
                 Some("idle") if state.turn.is_none() => "idle",
                 _ => state.status,
             };
+            state.becomes(next);
         }
         "error" => {
             let error = params.get("error").unwrap_or(&serde_json::Value::Null);
             state.say("system", text_of(error.get("message")));
             if params.get("willRetry").and_then(serde_json::Value::as_bool) != Some(true) {
-                state.status = "failed";
+                state.becomes("failed");
             }
         }
         "item/started" => {
@@ -1157,7 +1168,7 @@ fn acp_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoing>
                     questions: Vec::new(),
                     grant: None,
                 });
-                state.status = "asking";
+                state.becomes("asking");
             }
             other => out.push(Outgoing::Refuse {
                 id: id.clone(),
@@ -1492,7 +1503,7 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
                     {
                         state.model = Some(model.to_string());
                     }
-                    state.status = "working";
+                    state.becomes("working");
                 }
                 Some("content_block_delta") => {
                     let delta = event.get("delta").unwrap_or(&serde_json::Value::Null);
@@ -1536,7 +1547,7 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
                 Some("can_use_tool") => {
                     state.flush_live();
                     state.asks.push(claude_ask(id, request, state.plan_tool));
-                    state.status = "asking";
+                    state.becomes("asking");
                 }
                 Some(other) => out.push(Outgoing::Refuse {
                     id,
@@ -1559,7 +1570,7 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
                     .map_or_else(|| text_of(message.get("subtype")), str::to_string);
                 state.say("system", words);
             }
-            state.status = if failed { "failed" } else { "idle" };
+            state.becomes(if failed { "failed" } else { "idle" });
         }
         _ => {}
     }
@@ -1891,7 +1902,7 @@ fn take_response(protocol: Protocol, state: &mut WireState, message: &serde_json
         state.prompt_request = None;
         state.flush_live();
         state.open.clear();
-        state.status = match message.get("error") {
+        let next = match message.get("error") {
             Some(error) if !error.is_null() => {
                 let words = text_of(error.get("message"));
                 state.say("system", words);
@@ -1899,6 +1910,7 @@ fn take_response(protocol: Protocol, state: &mut WireState, message: &serde_json
             }
             _ => "idle",
         };
+        state.becomes(next);
     }
 }
 
@@ -2134,7 +2146,7 @@ impl WireSession {
                     .lock()
                     .map_err(|_| "wire state lock".to_string())?;
                 state.say("user", text);
-                state.status = "working";
+                state.becomes("working");
                 drop(state);
                 self.settled();
                 let turn = self
@@ -2155,7 +2167,7 @@ impl WireSession {
                     .lock()
                     .map_err(|_| "wire state lock".to_string())?;
                 state.say("user", text);
-                state.status = "working";
+                state.becomes("working");
                 drop(state);
                 self.settled();
                 let id = self.send_request(
@@ -2174,7 +2186,7 @@ impl WireSession {
                     .lock()
                     .map_err(|_| "wire state lock".to_string())?;
                 state.say("user", text);
-                state.status = "working";
+                state.becomes("working");
                 state.live.clear();
                 drop(state);
                 self.settled();
@@ -2269,7 +2281,7 @@ impl WireSession {
                 .ok_or("that question is no longer open")?;
             let ask = state.asks.remove(at);
             if state.asks.is_empty() && state.status == "asking" {
-                state.status = "working";
+                state.becomes("working");
             }
             ask
         };
@@ -2882,7 +2894,7 @@ fn handshake(
                 })
                 .collect();
             state.version = announced;
-            state.status = "idle";
+            state.becomes("idle");
             Ok(())
         }
         Protocol::AppServer => {
@@ -2919,7 +2931,7 @@ fn handshake(
                 .get("approvalPolicy")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
-            state.status = "idle";
+            state.becomes("idle");
             Ok(())
         }
         Protocol::Acp => {
@@ -2970,7 +2982,7 @@ fn handshake(
                 .lock()
                 .map_err(|_| "wire state lock".to_string())?;
             acp_session_opened(&mut state, &result);
-            state.status = "idle";
+            state.becomes("idle");
             Ok(())
         }
     }
@@ -4881,5 +4893,36 @@ mod tests {
             "term 21 reported claude 419c2fa8, which wire 1 held: two processes on one transcript, \
              wire 1 ended"
         );
+    }
+
+    /// A wire whose CLI is gone stays ended (152): a line its reader still
+    /// held when it was ended, and the handshake's `idle` — the session is in
+    /// the map, so it can be ended, before its handshake is done — stand it up
+    /// again no more. The gate's run of the supersede test read `idle` under
+    /// 「터미널 N에서 이어집니다」 (11-15 00:34).
+    #[test]
+    fn an_ended_wire_stays_ended_whatever_comes_after() {
+        let mut state = WireState {
+            status: "ended",
+            ..WireState::default()
+        };
+        for line in [
+            serde_json::json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m1","model":"m"}},"session_id":"s1","parent_tool_use_id":null}),
+            serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":"s1"}),
+        ] {
+            take(Protocol::ClaudeStream, &mut state, &line);
+        }
+        state.becomes("idle");
+        assert_eq!(state.status, "ended");
+        let mut live = WireState {
+            status: "working",
+            ..WireState::default()
+        };
+        take(
+            Protocol::ClaudeStream,
+            &mut live,
+            &serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":"s1"}),
+        );
+        assert_eq!(live.status, "idle", "a live wire still moves");
     }
 }
