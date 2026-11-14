@@ -1045,9 +1045,14 @@ pub(super) fn smart_turn_routing_with(
         };
     };
 
-    let deep_tier_models = effective_deep_tier_models(
-        &settings.deep_tier_models,
-        settings.deep_tier_models_configured,
+    let deep_tier_models = within_the_persons_allowlist(
+        effective_deep_tier_models(
+            &settings.deep_tier_models,
+            settings.deep_tier_models_configured,
+            main_model,
+            inventory,
+        ),
+        &settings,
         main_model,
         inventory,
     );
@@ -1124,6 +1129,36 @@ pub(super) fn effective_deep_tier_models(
     dynamic
         .into_iter()
         .filter(|model| same_smart_model(model, main_model) || listed(model))
+        .collect()
+}
+
+/// The Architect pool cut to the providers the person's
+/// `smart.providerAllowlist` names. The verify leg and the plan stage pick
+/// from it, and a top-tier model of a provider the person left out is not
+/// one to send their work to (152, review t-107910 · 7). Where the list
+/// leaves no model but the main one, the session's own provider's top-tier
+/// models stay. The main model stays wherever it stood: it is the session,
+/// not a pick.
+fn within_the_persons_allowlist(
+    pool: Vec<String>,
+    settings: &SmartRuntimeSettings,
+    main_model: &str,
+    inventory: &runtime::ModelInventory,
+) -> Vec<String> {
+    if settings.provider_allowlist.is_empty() {
+        return pool;
+    }
+    let is_main = |model: &str| same_smart_model(model, main_model);
+    let allowed: Vec<String> = pool
+        .iter()
+        .filter(|model| is_main(model) || inside_the_allowlist(model, settings, inventory))
+        .cloned()
+        .collect();
+    if allowed.iter().any(|model| !is_main(model)) {
+        return allowed;
+    }
+    pool.into_iter()
+        .filter(|model| is_main(model) || same_provider_family(Some(main_model), model))
         .collect()
 }
 

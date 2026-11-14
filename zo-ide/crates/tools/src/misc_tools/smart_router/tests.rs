@@ -1680,6 +1680,35 @@
         let _ = fs::remove_dir_all(config_home);
     }
 
+    /// The person's allowlist bounds the Architect verify leg and plan stage
+    /// too, which pick from the connected top tier: a top-tier model of a
+    /// provider they left out is not picked, and where the list leaves none,
+    /// the session's own provider's are (152, review t-107910 · 7).
+    #[test]
+    fn the_persons_allowlist_bounds_the_architect_verify_leg_and_plan_stage() {
+        let config_home = temp_config_home("architect-allowlist");
+        let listing = |providers: &[&str], main: &str| {
+            architect_routing(
+                &config_home,
+                &json!({ "enabled": true, "policy": "architect", "providerAllowlist": providers }),
+                main,
+            )
+        };
+        // Crossing is on by default: with nothing to keep it, the verify leg
+        // goes to another provider's top tier.
+        let anthropic = listing(&["anthropic"], "claude-sonnet-5");
+        assert_eq!(anthropic.deep_verify_model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(anthropic.deep_plan_model.as_deref(), Some("claude-fable-5-1"));
+        let openai = listing(&["openai"], "gpt-5.6-terra");
+        assert_eq!(openai.deep_plan_model.as_deref(), Some("gpt-6-astra"), "the pool's first is anthropic's");
+        assert_eq!(openai.deep_verify_model.as_deref(), Some("gpt-6-astra"));
+        // A list that leaves no top-tier model: the session's own provider's.
+        let nothing_listed = listing(&["google"], "claude-sonnet-5");
+        assert_eq!(nothing_listed.deep_verify_model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(nothing_listed.deep_plan_model.as_deref(), Some("claude-fable-5-1"));
+        let _ = fs::remove_dir_all(config_home);
+    }
+
     #[test]
     fn a_configured_pool_naming_no_connected_top_tier_model_falls_back_to_the_dynamic_pool() {
         let config_home = temp_config_home("foreground-pool-fallback");
