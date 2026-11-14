@@ -167,15 +167,7 @@ fn run(
         return answered;
     }
     let mut launch = args::parse(&argv)?;
-    // `--settings <file>`: one more of the person's own settings documents,
-    // read last by every settings loader this process runs — before the
-    // first one does (152).
-    if launch.settings_file.is_some() {
-        runtime::ConfigLoader::set_cli_overrides(runtime::CliConfigOverrides {
-            settings_file: launch.settings_file.clone(),
-            strict_mcp_config: false,
-        });
-    }
+    install_settings_file(&launch);
     if let Some(done) = run_without_a_session(&launch)? {
         return Ok(done);
     }
@@ -601,6 +593,18 @@ fn run_cron(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::E
             ("cron-refused", 1)
         }
     })
+}
+
+/// `--settings <file>`: one more of the person's own settings documents,
+/// read last by every settings loader this process runs — installed before
+/// the first one reads (152).
+fn install_settings_file(launch: &args::Launch) {
+    if launch.settings_file.is_some() {
+        runtime::ConfigLoader::set_cli_overrides(runtime::CliConfigOverrides {
+            settings_file: launch.settings_file.clone(),
+            strict_mcp_config: false,
+        });
+    }
 }
 
 /// The actions that end before a session exists — help, version, the recent
