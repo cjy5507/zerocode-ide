@@ -1159,7 +1159,7 @@ mod tests {
             s.error = Some("No such file".to_string());
             LiveEntry::Step(s)
         };
-        let run = |target: &str| LiveEntry::Running {
+        let running = |target: &str| LiveEntry::Running {
             spinner: Span::raw("⠋"),
             verb: "Read".to_string(),
             target: target.to_string(),
@@ -1172,10 +1172,10 @@ mod tests {
             fail("newer_fail.rs"),
             fail("kept_fail_1.rs"),
             fail("kept_fail_2.rs"),
-            run("r1.rs"),
-            run("r2.rs"),
-            run("r3.rs"),
-            run("r4.rs"),
+            running("r1.rs"),
+            running("r2.rs"),
+            running("r3.rs"),
+            running("r4.rs"),
         ];
         let rows = plain(&render_live_entries(&entries, 98, false, Some(10)));
         assert!(rows.len() <= 10, "{rows:#?}");
