@@ -172,9 +172,10 @@ fn ensure_worktree(path: &Path, branch: Option<&str>) -> Result<EnsuredWorktree,
 }
 
 /// Prepare a CLI startup worktree through the same disk check and git creation path.
-/// Answers the worktree's resolved path in its plain spelling: it becomes the
-/// session's cwd, and every relative path the session joins onto that cwd
-/// is handed to git.
+/// Answers the worktree's resolved path as `canonicalize` gives it — the
+/// session's cwd and the key its sessions are listed under. On Windows that
+/// is verbatim, so `EnterWorktree` reads a path joined onto it in its plain
+/// spelling before git is given it.
 pub fn prepare_start_worktree(path: &Path) -> Result<std::path::PathBuf, String> {
     if let Some(warning) = ensure_worktree(path, None)?.warning { eprintln!("{warning}"); }
     let output = Command::new("git").arg("-C").arg(without_verbatim_prefix(path).as_ref()).args(["rev-parse", "--show-toplevel"]).output().map_err(|e| e.to_string())?;
@@ -182,7 +183,7 @@ pub fn prepare_start_worktree(path: &Path) -> Result<std::path::PathBuf, String>
     let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     let canonical = path.canonicalize().map_err(|e| e.to_string())?;
     if root.canonicalize().map_err(|e| e.to_string())? != canonical { return Err("--worktree must name the root of a git working tree".into()); }
-    Ok(without_verbatim_prefix(&canonical).into_owned())
+    Ok(canonical)
 }
 
 pub(crate) fn run_enter_worktree(input: &EnterWorktreeInput) -> Result<String, ToolError> {
