@@ -455,6 +455,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(|error| format!("startup stage permission-policy: {error:?}"))?;
     crate::conversation_support::queue_unknown_rule_warnings(&feature_config, &tool_registry);
+    crate::conversation_support::queue_unowned_local_settings_warning(&feature_config);
     log_boot_stage("permission-policy", permission_started);
     // Derive context_window and model-family context policy from the actual
     // selected model so compaction thresholds match the real model limits (not

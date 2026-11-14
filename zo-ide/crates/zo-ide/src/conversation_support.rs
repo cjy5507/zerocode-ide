@@ -103,6 +103,40 @@ pub(crate) fn queue_unknown_rule_warnings(
     }
 }
 
+/// The local settings lines this process has queued, for the same reason as
+/// [`WARNED_RULES`].
+static WARNED_LOCAL_SETTINGS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Queue a start-up warning when the workspace's `.zo/settings.local.json`
+/// said something that went unused because no git repository governs the
+/// folder (152), once in this process.
+pub(crate) fn queue_unowned_local_settings_warning(feature_config: &runtime::RuntimeFeatureConfig) {
+    let Some(line) = unowned_local_settings_warning(feature_config.unowned_local_settings()) else {
+        return;
+    };
+    let fresh = WARNED_LOCAL_SETTINGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(line.clone());
+    if fresh {
+        crate::runtime_support::push_startup_warning(line);
+    }
+}
+
+/// The line that says which settings of a folder's local file went unused,
+/// why, and what a person who wrote that file can do — or none when nothing
+/// went unused. The names are the loader's own; nothing of the file's text is
+/// put on the screen.
+fn unowned_local_settings_warning(unused: &[&str]) -> Option<String> {
+    if unused.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "zo did not use {} from .zo/settings.local.json: this folder is in no git repository, so zo cannot tell that you wrote that file (a downloaded folder can bring one). \"Always allow\" here lasts for this session only. If you wrote the file, read it over: in a git repository, zo reads a local file git does not track as yours.",
+        unused.join(", ")
+    ))
+}
+
 /// One line for each configured permission rule whose tool name no tool zo
 /// knows answers to: a rule meets a call by the tool's key
 /// (`core_types::tool_names::tool_key` — case, `-`/`_` and another agent's name
@@ -795,3 +829,59 @@ mod unknown_rule_warning_tests {
     }
 }
 
+
+#[cfg(test)]
+mod unowned_local_settings_warning_tests {
+    use std::fs;
+
+    use super::unowned_local_settings_warning;
+
+    /// Nothing went unused, nothing is said.
+    #[test]
+    fn a_folder_whose_local_file_lost_nothing_is_not_warned_of() {
+        assert_eq!(unowned_local_settings_warning(&[]), None);
+    }
+
+    /// The line names what went unused by the loader's words, says why, says
+    /// that "always allow" lasts for the session there, and tells a person
+    /// who wrote the file what to do (152).
+    #[test]
+    fn the_line_names_what_went_unused_why_and_what_a_person_can_do() {
+        let line = unowned_local_settings_warning(&["hooks", "permissions.allow"]).expect("a line");
+        assert!(
+            line.starts_with("zo did not use hooks, permissions.allow from .zo/settings.local.json:"),
+            "{line}"
+        );
+        for said in [
+            "in no git repository",
+            "\"Always allow\" here lasts for this session only.",
+            "in a git repository, zo reads a local file git does not track as yours",
+        ] {
+            assert!(line.contains(said), "{said:?} is missing from: {line}");
+        }
+    }
+
+    /// From the loader to the line: a folder no git repository governs whose
+    /// local file carries a hook is warned of by that name.
+    #[test]
+    #[cfg_attr(windows, ignore = "a folder's local file is never the person's on Windows, so the loader names nothing there")]
+    fn a_hook_in_the_local_file_of_a_folder_without_git_is_named() {
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let home = root.path().join("home");
+        let cwd = root.path().join("work");
+        fs::create_dir_all(&home).expect("home");
+        fs::create_dir_all(cwd.join(".zo")).expect(".zo");
+        fs::write(
+            cwd.join(".zo").join("settings.local.json"),
+            r#"{"hooks":{"SessionStart":["echo came-with-the-folder"]},"model":"opus"}"#,
+        )
+        .expect("local settings");
+
+        let config = runtime::ConfigLoader::new(&cwd, &home).load().expect("settings load");
+        let line = unowned_local_settings_warning(config.feature_config().unowned_local_settings())
+            .expect("a line");
+
+        assert!(line.starts_with("zo did not use hooks from"), "{line}");
+        assert!(!line.contains("came-with-the-folder"), "text of the file reached the screen: {line}");
+    }
+}

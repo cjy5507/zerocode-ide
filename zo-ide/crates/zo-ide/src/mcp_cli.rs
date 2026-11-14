@@ -695,7 +695,7 @@ fn still_gated(document: &Path, record: Option<&Path>) -> String {
             gate_reason(Some(document))
         ),
         Some(record) => format!(
-            "it still will not load: {} counts only as your own uncommitted file — a git-tracked or symlinked one, or a nested .zo repository, fails closed",
+            "it still will not load: {} counts only as your own uncommitted file in a git repository — a git-tracked or symlinked one, a nested .zo repository, or one in a folder with no git fails closed",
             record.display()
         ),
     }

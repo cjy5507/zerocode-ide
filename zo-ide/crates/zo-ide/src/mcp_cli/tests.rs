@@ -17,7 +17,23 @@ struct Scratch {
 }
 
 impl Scratch {
+    /// The person's project as zo tells one: a git repository that does not
+    /// track the `.zo` files kept there.
     fn new() -> Self {
+        let scratch = Self::without_git();
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(scratch.cwd.path())
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git init");
+        scratch
+    }
+
+    /// A folder no git repository governs — a downloaded one, as zo must
+    /// take it (152).
+    fn without_git() -> Self {
         Self {
             home: tempfile::tempdir().expect("config home"),
             cwd: tempfile::tempdir().expect("workspace"),
@@ -666,6 +682,31 @@ fn a_trust_record_the_gate_cannot_believe_is_written_and_reported_as_still_gated
         .contains("repo"));
     // … and the report says the gate did not take it.
     assert!(printed.contains("uncommitted"), "{printed}");
+    assert!(!scratch
+        .loader()
+        .load()
+        .expect("load")
+        .mcp()
+        .servers()
+        .contains_key("repo"));
+}
+
+/// In a folder no git repository governs, nothing tells a trust record the
+/// person wrote from one the folder came with, so the gate takes neither
+/// (152): `--trust` still writes the name, and the report says the server
+/// will not load and why.
+#[test]
+fn a_trust_record_in_a_folder_without_git_is_written_and_reported_as_still_gated() {
+    let scratch = Scratch::without_git();
+
+    let printed = scratch
+        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
+        .expect("add project");
+
+    assert!(std::fs::read_to_string(scratch.trust_record())
+        .expect("trust record")
+        .contains("repo"));
+    assert!(printed.contains("in a folder with no git"), "{printed}");
     assert!(!scratch
         .loader()
         .load()

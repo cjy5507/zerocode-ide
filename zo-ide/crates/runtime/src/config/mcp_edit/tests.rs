@@ -323,6 +323,9 @@ fn the_written_document_is_owner_only() {
 fn a_trusted_name_un_gates_exactly_that_project_server() {
     let home = tempfile::tempdir().expect("config home");
     let cwd = tempfile::tempdir().expect("workspace");
+    // The person's project: a record in a folder no git repository governs
+    // gives no word that the person wrote it (152).
+    crate::config::tests::init_git_repo_with(cwd.path(), ".zo", false);
     let settings = cwd.path().join(".zo").join("settings.json");
     let expected = http("https://example.test/mcp");
     write_mcp_server(&settings, "consented", &expected).expect("write");
@@ -519,6 +522,7 @@ fn untrusting_a_name_takes_out_every_copy_of_it() {
 fn an_untrusted_name_gates_the_next_server_added_under_it() {
     let home = tempfile::tempdir().expect("config home");
     let cwd = tempfile::tempdir().expect("workspace");
+    crate::config::tests::init_git_repo_with(cwd.path(), ".zo", false);
     let settings = cwd.path().join(".zo").join("settings.json");
     let record = ConfigLoader::new(cwd.path(), home.path()).trusted_mcp_servers_path();
     write_mcp_server(&settings, "consented", &stdio("npx", &[], &[])).expect("write");

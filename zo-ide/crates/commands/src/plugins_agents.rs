@@ -1291,13 +1291,13 @@ fn render_blocked_mcp_section(untrusted: &[&UntrustedMcpServer]) -> Option<Strin
             .to_string(),
     );
     lines.push(
-        "    • add its name to .zo/trusted-mcp-servers.json, or".to_string(),
+        "    • add its name to .zo/trusted-mcp-servers.json (untracked, in a git repository), or".to_string(),
     );
     lines.push(
         "    • set \"enableAllProjectMcpServers\": true in a trusted (User/local) settings file, or"
             .to_string(),
     );
-    lines.push("    • move it to .zo/settings.local.json (git-ignored, operator-authored).".to_string());
+    lines.push("    • move it to .zo/settings.local.json (untracked, in a git repository).".to_string());
     Some(lines.join("\n"))
 }
 

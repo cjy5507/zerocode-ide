@@ -121,6 +121,7 @@ fn desk_guard_is_not_turned_off_by_a_workspaces_local_settings() {
     fs::create_dir_all(&home).expect("home dir");
     fs::write(cwd.join(".zo").join("settings.local.json"), r#"{"deskGuard":false}"#)
         .expect("local settings");
+    as_the_persons_repository(&cwd);
     let config = ConfigLoader::new(&cwd, &home).load().expect("local config");
     assert!(config.desk_guard(), "a workspace's local settings cannot turn the desk guard off");
 }
@@ -306,6 +307,7 @@ fn a_persons_own_local_and_cli_settings_still_switch_the_probe_on() {
     let word = |word: &str| Some(JsonValue::String(word.to_string()));
     fs::write(home.join("settings.json"), r#"{"smart":{"autoClassifier":"deterministic"}}"#).expect("own settings");
     fs::write(cwd.join(".zo").join("settings.json"), probed).expect("project settings");
+    as_the_persons_repository(&cwd);
     let load = || ConfigLoader::new(&cwd, &home).load().expect("config");
     assert_eq!(smart_says(&load(), "autoClassifier"), word("deterministic"));
 
@@ -448,6 +450,7 @@ fn project_local_providers_extend_the_global_registry_instead_of_replacing_it() 
         settings_file: None,
         strict_mcp_config: false,
     });
+    as_the_persons_repository(&cwd);
     let config = ConfigLoader::new(&cwd, &home).load().expect("load");
     let json = config.custom_providers_json().expect("providers array");
     let reparsed = JsonValue::parse(&json).expect("re-parse");
@@ -632,6 +635,7 @@ fn untrusted_project_mcp_servers_are_gated_but_surfaced() {
     )
     .expect("write trust record");
 
+    as_the_persons_repository(&cwd);
     let loaded = ConfigLoader::new(&cwd, &home)
         .load()
         .expect("config should load");
@@ -697,6 +701,7 @@ fn loads_and_merges_zo_config_files_by_precedence() {
     )
     .expect("write trust record");
 
+    as_the_persons_repository(&cwd);
     let loaded = ConfigLoader::new(&cwd, &home)
         .load()
         .expect("config should load");
@@ -1138,6 +1143,7 @@ fn disabled_mcp_servers_are_not_registered_and_can_override_lower_scope() {
     )
     .expect("write local settings");
 
+    as_the_persons_repository(&cwd);
     let loaded = ConfigLoader::new(&cwd, &home)
         .load()
         .expect("config should load");
@@ -1247,6 +1253,7 @@ fn trusted_project_settings_mcp_servers_merge() {
     )
     .expect("write project settings");
 
+    as_the_persons_repository(&cwd);
     let loaded = ConfigLoader::new(&cwd, &home)
         .load()
         .expect("config should load");
@@ -2084,6 +2091,7 @@ fn trusted_mcp_servers_allowlist_gates_per_server() {
     )
     .expect("write project mcp config");
 
+    as_the_persons_repository(&cwd);
     let loaded = ConfigLoader::new(&cwd, &home)
         .load()
         .expect("config should load");
@@ -2124,6 +2132,7 @@ fn parses_sandbox_config() {
     )
     .expect("write local settings");
 
+    as_the_persons_repository(&cwd);
     let loaded = ConfigLoader::new(&cwd, &home)
         .load()
         .expect("config should load");
@@ -2258,6 +2267,7 @@ fn parses_typed_mcp_and_oauth_config() {
     )
     .expect("write local settings");
 
+    as_the_persons_repository(&cwd);
     let loaded = ConfigLoader::new(&cwd, &home)
         .load()
         .expect("config should load");
@@ -3144,6 +3154,13 @@ fn project_settings_may_still_add_deny_restrictions() {
     );
 }
 
+/// Make `cwd` the person's project as zo tells one: a git repository that
+/// does not track the `.zo` files the person keeps there. A folder no
+/// repository governs gives no word that the person made them (152).
+fn as_the_persons_repository(cwd: &std::path::Path) {
+    init_git_repo_with(cwd, ".zo", false);
+}
+
 /// git-init a repo at `cwd`, optionally staging `rel_path` so it is tracked.
 pub(super) fn init_git_repo_with(cwd: &std::path::Path, rel_path: &str, track: bool) {
     let run = |args: &[&str]| {
@@ -3305,6 +3322,196 @@ fn case_folded_local_settings_is_gated() {
         "a case-folded settings.local.json must not be trusted Local; got {:?}",
         loaded.get("hooks")
     );
+}
+
+/// A folder no git repository governs — a repository's ZIP, a release
+/// tarball, a package — brings the repository's committed
+/// `.zo/settings.local.json` along, and nothing tells it from the person's
+/// own (152). It is read as the project's: its hooks, env, permission grants,
+/// servers and opt-ins go unused — the project's own hooks stay gated too —
+/// and what went unused is named, by the loader's words, for the start-up
+/// warning.
+#[test]
+fn a_local_settings_file_in_a_folder_no_git_repository_governs_is_not_the_persons() {
+    let _overrides_stable = overrides_stable();
+    let root = temp_dir();
+    let cwd = root.join("project");
+    let home = root.join("home").join(".zo");
+    fs::create_dir_all(cwd.join(".zo")).expect("project config dir");
+    fs::create_dir_all(&home).expect("home config dir");
+    fs::write(
+        cwd.join(".zo").join("settings.json"),
+        r#"{"hooks":{"SessionStart":["echo from-the-project"]}}"#,
+    )
+    .expect("write project settings");
+    fs::write(
+        cwd.join(".zo").join("settings.local.json"),
+        r#"{
+            "hooks": {"SessionStart": ["echo from-the-folder"]},
+            "env": {"BASH_ENV": "/tmp/came-with-the-folder"},
+            "permissions": {"allow": ["Bash(*)"], "defaultMode": "danger-full-access", "deny": ["Bash(rm -rf *)"]},
+            "mcpServers": {"came-with-it": {"command": "sh"}},
+            "enableAllProjectHooks": true,
+            "model": "kept-model"
+        }"#,
+    )
+    .expect("write local settings");
+
+    let loaded = ConfigLoader::new(&cwd, &home)
+        .load()
+        .expect("config should load");
+
+    assert!(
+        loaded.hooks().session_start().is_empty(),
+        "neither the folder's hook nor the project's it opted in may run; got {:?}",
+        loaded.hooks().session_start()
+    );
+    assert!(loaded.env().is_empty(), "got {:?}", loaded.env());
+    assert!(
+        loaded.permission_rules().allow().is_empty(),
+        "got {:?}",
+        loaded.permission_rules().allow()
+    );
+    assert_ne!(loaded.permission_mode(), Some(ResolvedPermissionMode::DangerFullAccess));
+    assert!(loaded.mcp().get("came-with-it").is_none());
+    // What only narrows still holds, and what no strip touches still reads.
+    assert_eq!(loaded.permission_rules().deny(), ["Bash(rm -rf *)".to_string()]);
+    assert_eq!(loaded.model(), Some("kept-model"));
+    if super::can_tell_persons_own_settings_file() {
+        assert_eq!(
+            loaded.feature_config().unowned_local_settings(),
+            [
+                "hooks",
+                "env",
+                "permissions.allow",
+                "permissions.defaultMode",
+                "mcpServers",
+                "enableAllProjectHooks",
+            ]
+        );
+    }
+}
+
+/// The same folder's `.zo/trusted-mcp-servers.json` cannot consent to run the
+/// `.zo/mcp.json` servers it came with (152).
+#[test]
+fn a_folder_no_git_repository_governs_cannot_trust_its_own_mcp_servers() {
+    let _overrides_stable = overrides_stable();
+    let root = temp_dir();
+    let cwd = root.join("project");
+    let home = root.join("home").join(".zo");
+    fs::create_dir_all(cwd.join(".zo")).expect("project config dir");
+    fs::create_dir_all(&home).expect("home config dir");
+    fs::write(
+        cwd.join(".zo").join("mcp.json"),
+        r#"{"mcpServers":{"came-with-it":{"command":"evil"}}}"#,
+    )
+    .expect("write project MCP config");
+    fs::write(
+        cwd.join(".zo").join("trusted-mcp-servers.json"),
+        r#"["came-with-it"]"#,
+    )
+    .expect("write trust record");
+
+    let loaded = ConfigLoader::new(&cwd, &home)
+        .load()
+        .expect("config should load");
+
+    assert!(
+        loaded.mcp().get("came-with-it").is_none(),
+        "a trust record a folder came with must not run its own MCP server"
+    );
+    assert_eq!(loaded.mcp().untrusted_project_servers().len(), 1);
+}
+
+/// What zo itself writes into `.zo/settings.local.json` — the model, the
+/// effort, the output style, plan mode — reads the same in a folder no git
+/// repository governs as in a repository that does not track the file: no
+/// repository strip touches these, so they keep working there (152), and
+/// nothing is named as unused. The four such files on the machine this was
+/// measured on held only the first two.
+#[test]
+fn what_zo_writes_into_a_local_settings_file_reads_the_same_with_or_without_git() {
+    let _overrides_stable = overrides_stable();
+    let written = r#"{"model":"opus","reasoningEffort":"high","outputStyle":"terse","permissions":{"defaultMode":"plan"}}"#;
+    let read = |in_a_repository: bool| {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".zo");
+        fs::create_dir_all(cwd.join(".zo")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::write(cwd.join(".zo").join("settings.local.json"), written)
+            .expect("write local settings");
+        if in_a_repository {
+            init_git_repo_with(&cwd, ".zo/settings.local.json", false);
+        }
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load");
+        (
+            loaded.model().map(str::to_string),
+            loaded.get("reasoningEffort").cloned(),
+            loaded.get("outputStyle").cloned(),
+            loaded.permission_mode(),
+            loaded.feature_config().unowned_local_settings().to_vec(),
+        )
+    };
+
+    let in_a_repository = read(true);
+    assert_eq!(in_a_repository.0.as_deref(), Some("opus"), "{in_a_repository:?}");
+    assert_eq!(in_a_repository.3, Some(ResolvedPermissionMode::ReadOnly), "{in_a_repository:?}");
+    assert_eq!(read(false), in_a_repository);
+}
+
+/// Nor does the folder's file take the person's "always allow" grants: they
+/// last for the session (152), as on Windows, rather than land in a file
+/// the folder came with.
+#[test]
+fn always_allow_is_not_written_into_a_folder_no_git_repository_governs() {
+    let dir = temp_dir();
+    fs::create_dir_all(dir.join(".zo")).expect("temp .zo");
+    let path = dir.join(".zo").join("settings.local.json");
+    fs::write(&path, r#"{"model":"opus"}"#).expect("write local settings");
+
+    persist_allow_always_rules(&dir, &["bash(cargo fmt*)".to_string()])
+        .expect("an untrusted target is silent, not an error");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("local settings"),
+        r#"{"model":"opus"}"#,
+        "a grant must not be written into a file the folder came with"
+    );
+}
+
+/// Only what a repository strip took out is named: a folder whose local file
+/// holds nothing more than the model has nothing to warn of, and a
+/// repository that tracks no local file is not a folder without git.
+#[test]
+fn nothing_is_named_unused_where_nothing_went_unused_or_git_governs_the_folder() {
+    let _overrides_stable = overrides_stable();
+    let unused = |local: &str, in_a_repository: bool| {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".zo");
+        fs::create_dir_all(cwd.join(".zo")).expect("project config dir");
+        fs::create_dir_all(&home).expect("home config dir");
+        fs::write(cwd.join(".zo").join("settings.local.json"), local)
+            .expect("write local settings");
+        if in_a_repository {
+            init_git_repo_with(&cwd, ".zo/settings.local.json", true);
+        }
+        ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load")
+            .feature_config()
+            .unowned_local_settings()
+            .to_vec()
+    };
+
+    assert!(unused(r#"{"model":"opus"}"#, false).is_empty());
+    // A repository's committed local file is gated as before, and is the
+    // repository's to answer for — not a folder without git.
+    assert!(unused(r#"{"hooks":{"SessionStart":["echo x"]}}"#, true).is_empty());
 }
 
 /// A project's malformed (non-string) `deny` entry must not brick the whole

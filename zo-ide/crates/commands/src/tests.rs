@@ -26,6 +26,19 @@ fn temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("commands-plugin-{label}-{nanos}"))
 }
 
+/// Make `workspace` the person's project as zo tells one: a git repository
+/// that does not track the `.zo` files kept there. In a folder no repository
+/// governs, zo reads them as ones the folder came with.
+fn as_the_persons_repository(workspace: &Path) {
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .arg(workspace)
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git init {}", workspace.display());
+}
+
 fn write_external_plugin(root: &Path, name: &str, version: &str) {
     fs::create_dir_all(root.join(".claude-plugin")).expect("manifest dir");
     fs::write(
@@ -1527,6 +1540,7 @@ fn mcp_auth_list_and_logout_render_against_config() {
     let config_home = temp_dir("mcp-auth-home");
     fs::create_dir_all(workspace.join(".zo")).expect("workspace config dir");
     fs::create_dir_all(&config_home).expect("config home");
+    as_the_persons_repository(&workspace);
     fs::write(
         workspace.join(".zo").join("settings.json"),
         r#"{
@@ -1587,6 +1601,7 @@ fn renders_mcp_reports_from_loaded_config() {
     let config_home = temp_dir("mcp-config-home");
     fs::create_dir_all(workspace.join(".zo")).expect("workspace config dir");
     fs::create_dir_all(&config_home).expect("config home");
+    as_the_persons_repository(&workspace);
     fs::write(
         workspace.join(".zo").join("settings.json"),
         r#"{
