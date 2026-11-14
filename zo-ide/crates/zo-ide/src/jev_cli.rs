@@ -28,6 +28,7 @@ use tools::{JevAnswer, JevCaller, JevQuestion, JevShape, JevVerdict};
 
 use crate::autonomy::limits::HEADLESS_LOOP_EXIT_DONE;
 
+mod decisions;
 mod learning;
 mod rules;
 
@@ -45,6 +46,9 @@ zo jev archive <new-file> [--seat <id>] [--rubric-version <n>] [--include-unrevi
 zo jev rules show [--cwd <dir>] [--json]
 zo jev rules compile <definition.json> [--cwd <dir>] [--json]
 zo jev rules activate <definition-id> [--cwd <dir>] [--json]
+zo jev decisions list
+zo jev decisions ask-when <decision> (--word <word>... [--edited] | --edited | --always)
+zo jev decisions limit (<decision> --per-hour <n> | --all <n>)
 
   summary: count every Jev seat's ledger — today and the last seven days.
   Per seat: its mode (off/shadow/on/auto), rows, how many answered and the
@@ -79,6 +83,20 @@ zo jev rules activate <definition-id> [--cwd <dir>] [--json]
   as the tool would return it.
   Exit codes: ask 0 = yes, 1 = no, 2 = nothing answered (off, refused,
   failed, or a bad command line); choose and score 0 = answered, 2 = not.
+
+  decisions: the person's own decisions (t-107869), as JSON. `list` gives
+  each one's id, name, mode, point, hourly bound and when it asks, and the
+  bound of every decision together. `ask-when` says when one asks: only
+  where one of its words stands in the command about to run (before a
+  command), the turn's last answer (at a turn's end) or the person's
+  request (at a turn's start) — and, at a turn's end, --edited asks only
+  after a turn that edited files; --always takes that back. A moment it
+  leaves out sends no request and writes no row; `summary --json` counts
+  them as leftOut. `limit` sets one decision's hourly bound (a new version
+  of its definition: the same question, counted as one series) or, with
+  --all, every decision's together (smart.jev.customHourlyRequests). Each
+  change prints what was said before, what is said now, and the command
+  that puts it back. A decision is named by its id or its name.
 
   decide: ask one of the person's own decisions by its name (t-62170): one
   they made in ZeroCode to be asked when an agent asks. smart.customDecisions
@@ -153,6 +171,7 @@ enum Request {
     Decide(DecideRequest),
     Learning(learning::Request),
     Rules(rules::Request),
+    Decisions(decisions::Request),
 }
 
 fn usage(exit: u8) -> Refused {
@@ -163,6 +182,7 @@ fn parse(args: &[String]) -> Result<Request, Refused> {
     match args.first().map(String::as_str) {
         Some("review" | "outcome" | "export" | "archive") => learning::parse(args).map(Request::Learning),
         Some("rules") => rules::parse(&args[1..]).map(Request::Rules),
+        Some("decisions") => decisions::parse(&args[1..]).map(Request::Decisions),
         Some("definition") => match &args[1..] {
             [id] if zerocode_core::jev::builtin::seat(id).is_some() => Ok(Request::Definition { id: id.clone(), json: false }),
             [id, flag] if flag == "--json" && zerocode_core::jev::builtin::seat(id).is_some() => Ok(Request::Definition { id: id.clone(), json: true }),
@@ -351,6 +371,7 @@ pub fn run(args: &[String], cwd: &Path, now_ms: i64, offset_s: i64) -> Result<Re
         }
         Request::Learning(request) => learning::run(&request, &runtime::default_config_home(), now_ms),
         Request::Rules(request) => rules::run(&request, cwd, &runtime::default_config_home()),
+        Request::Decisions(request) => decisions::run(&request, &runtime::default_config_home(), now_ms),
         Request::Summary(request) => Ok(run_summary(&request, cwd, now_ms, offset_s)),
         Request::Judge(request) => {
             let parts = if request.stdin { stdin_parts()? } else { Vec::new() };
@@ -606,6 +627,10 @@ fn custom_decisions_json(decisions: &[jev_summary::DecisionReport]) -> Value {
             said["name"] = Value::from(decision.name.as_str());
             said["mode"] = Value::from(decision.mode.key());
             said["earlier"] = decision.earlier.iter().map(version_json).collect::<Vec<Value>>().into();
+            // When it asks, and the moments its words left out (t-107869): a
+            // screen says why a decision did not ask, not only that it did not.
+            said["askWhen"] = serde_json::to_value(&decision.ask_when).unwrap_or(Value::Null);
+            said["leftOut"] = json!({ "today": decision.left_out.today, "week": decision.left_out.week });
             said
         })
         .collect::<Vec<Value>>()

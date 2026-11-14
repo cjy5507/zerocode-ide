@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use zerocode_core::jev::count::REQUESTS_DIR;
-use zerocode_core::jev::custom::{quiet, store};
+use zerocode_core::jev::count::{self, REQUESTS_DIR};
+use zerocode_core::jev::custom::{quiet, store, AskWhen};
 use zerocode_core::jev::promote::{self, Stand, Verdict};
 use zerocode_core::jev::recent::{self, Decision};
 use zerocode_core::jev::summary::{self, Tally};
@@ -325,8 +325,23 @@ pub struct DecisionReport {
     /// Its own mode, as the person set it.
     pub mode: JevMode,
     pub current: VersionReport,
-    /// Every earlier version a row names, the newest first.
+    /// Every earlier version a row names whose question is another, the
+    /// newest first.
     pub earlier: Vec<VersionReport>,
+    /// When it asks ([`zerocode_core::jev::custom::ask_when`]): always, when
+    /// the store's file says nothing.
+    pub ask_when: AskWhen,
+    /// The moments its words left out today and over the week — counted on
+    /// this machine, whichever project they were in.
+    pub left_out: LeftOut,
+}
+
+/// The moments a decision's words left out ([`count::count_left_out`]):
+/// asks that sent no request and wrote no row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeftOut {
+    pub today: u64,
+    pub week: u64,
 }
 
 /// One version of a decision, counted.
@@ -368,6 +383,7 @@ fn custom_decisions_in(
     if decisions.is_empty() {
         return Vec::new();
     }
+    let mut asks_when = store::ask_when(config_home).unwrap_or_default();
     let (_, rows) = rows_of(&CUSTOM_DECISIONS, roots, sessions);
     let today = start_of_day_ms(now_ms, offset_s);
     let week = now_ms - WINDOW_DAYS * MS_PER_DAY;
@@ -382,9 +398,9 @@ fn custom_decisions_in(
                     (decision == entry.id).then_some((version, row))
                 })
                 .collect();
-            let count = |definition: &str| {
+            let count = |versions: &[&str], definition: &str| {
                 let held: Vec<&Value> =
-                    named.iter().filter(|(version, _)| *version == definition).map(|(_, row)| *row).collect();
+                    named.iter().filter(|(version, _)| versions.contains(version)).map(|(_, row)| *row).collect();
                 let owned: Vec<Value> = held.iter().copied().cloned().collect();
                 VersionReport {
                     definition: definition.to_string(),
@@ -393,15 +409,36 @@ fn custom_decisions_in(
                     latest: recent::recent(&owned, 1).into_iter().next(),
                 }
             };
+            // A version that asks the same question as the one asking now —
+            // only its hourly bound, act-from line, folders or name moved —
+            // is the same series, its answers counted with it (t-107869).
+            let meaning = store::definition(config_home, &entry.definition).ok().and_then(|now| now.meaning().ok());
+            let same_question = |version: &str| {
+                meaning.is_some()
+                    && store::definition(config_home, version)
+                        .ok()
+                        .filter(|then| then.id == entry.id)
+                        .and_then(|then| then.meaning().ok())
+                        == meaning
+            };
+            let mut series: Vec<&str> = vec![entry.definition.as_str()];
             let mut earlier: Vec<&str> = Vec::new();
             for &(version, _) in named.iter().rev() {
-                if version != entry.definition && !earlier.contains(&version) {
+                if series.contains(&version) || earlier.contains(&version) {
+                    continue;
+                }
+                if same_question(version) {
+                    series.push(version);
+                } else {
                     earlier.push(version);
                 }
             }
+            let days = count::left_out_over(config_home, &entry.id, &count::day_of(now_ms, offset_minutes), count::LEFT_OUT_DAYS);
             DecisionReport {
-                current: count(&entry.definition),
-                earlier: earlier.into_iter().map(count).collect(),
+                current: count(&series, &entry.definition),
+                earlier: earlier.iter().map(|&version| count(&[version], version)).collect(),
+                ask_when: asks_when.remove(&entry.id).unwrap_or_default(),
+                left_out: LeftOut { today: days.first().copied().unwrap_or(0), week: days.iter().sum() },
                 id: entry.id,
                 name: entry.name,
                 mode: entry.mode,

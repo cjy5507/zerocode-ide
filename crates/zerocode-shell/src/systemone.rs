@@ -1732,6 +1732,12 @@ pub(crate) fn quiet_now_at(now_ms: i64) -> zerocode_core::jev::custom::quiet::No
     zerocode_core::jev::custom::quiet::Now::at(now_ms, local_offset_minutes())
 }
 
+/// The local day a person's decision counts what its words left out in at
+/// `now_ms` ([`count::count_left_out`]), on the clock [`today`] reads.
+pub(crate) fn day_at(now_ms: i64) -> String {
+    count::day_of(now_ms, local_offset_minutes())
+}
+
 /// The local hour a person's decision's request is counted in at `now_ms`
 /// ([`count::hour_of`]), on the clock [`today`] reads.
 pub(crate) fn hour_at(now_ms: i64) -> String {

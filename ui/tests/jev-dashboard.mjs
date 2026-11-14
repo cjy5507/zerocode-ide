@@ -326,10 +326,14 @@ export function jevDashboardFixture(real = null) {
     failures: [...(hourFull ? [{ token: "hourly_budget", rows: hourFull }] : []), ...(timedOut ? [{ token: "timeout", rows: timedOut }] : [])],
     refusals: hourFull ? [{ token: "hourly_budget", rows: hourFull }] : [],
   });
+  // The moments its words left out (t-107869) are zo's machine-wide count
+  // beside the asks: 7 today and 30 this week for the first, none for the rest.
   custom.counted = () => store.decisions.map((kept, at) => (at === 0
     ? { id: kept.draft.id, definition: kept.version, today: decisionWindow(3, 1, 1, 0), week: decisionWindow(12, 5, 4, 1),
-      latest: { at: Date.now() - 4 * 60_000, outcome: "answered", answered: "yes", confidence: 0.82, applied: true } }
-    : { id: kept.draft.id, definition: kept.version, today: decisionWindow(0, 0, 0, 0), week: decisionWindow(0, 0, 0, 0), latest: null }));
+      latest: { at: Date.now() - 4 * 60_000, outcome: "answered", answered: "yes", confidence: 0.82, applied: true },
+      leftOut: { today: 7, week: 30 } }
+    : { id: kept.draft.id, definition: kept.version, today: decisionWindow(0, 0, 0, 0), week: decisionWindow(0, 0, 0, 0), latest: null,
+      leftOut: { today: 0, week: 0 } }));
   window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [], custom };
   const builtin = { saved: {}, calls: [], failNext: false };
   window.__JEV__.builtin = builtin;
@@ -3340,7 +3344,12 @@ export async function testJevCustomDecisions(browser, origin, ok) {
     // asks, the ones that handed its line and the ones its hour refused,
     // today and over the week, and its last answer with how long ago — in
     // the built-in table's own words; one never asked says so in words.
+    // And when it asks (t-107869): the first decision asks only where one of
+    // its words stands in the command — the store's file beside the index,
+    // which the list carries as `askWhen`.
     await page.evaluate(async () => {
+      window.__JEV__.custom.store.decisions[0].askWhen = { words: ["rm", "reset --hard"] };
+      await loadJevCustom();
       await loadJevNumbers({ recent: true });
       await window.__PAINTED__();
       document.querySelector("#jev-view").scrollTop = 0;
@@ -3352,7 +3361,8 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       const figures = (id) => Object.fromEntries([...(view.querySelector(`[data-jev-custom-row="${id}"]`)
         ?.querySelectorAll("[data-jev-custom-figure]") ?? [])].map((one) => [one.dataset.jevCustomFigure,
         { label: one.querySelector("dt")?.textContent.trim() ?? "", said: one.querySelector("dd")?.textContent.trim() ?? "" }]));
-      return { first: figures(first), second: figures(second),
+      const facts = (id) => view.querySelector(`[data-jev-custom-row="${id}"] .jev-custom-facts`)?.textContent ?? "";
+      return { first: figures(first), second: figures(second), firstFacts: facts(first), secondFacts: facts(second),
         head: [...view.querySelectorAll(".jev-table thead th")].map((one) => one.textContent.trim()) };
     }, [firstId, secondId]);
     const figureSaid = (row, figure) => did[row][figure]?.said ?? "";
@@ -3365,9 +3375,15 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       figureSaid("second", "rows") === "0 · 0" && figureSaid("second", "applied") === "0 · 0" && figureSaid("second", "hourFull") === "0 · 0"
         && figureSaid("second", "latest") === "아직 한 번도 묻지 않았습니다",
       JSON.stringify(did.second));
+    ok("a decision says what its words left out today and this week, and which words it asks about — one told nothing says nothing of them",
+      figureSaid("first", "leftOut") === "7 · 30" && figureSaid("second", "leftOut") === "0 · 0"
+        && did.firstFacts.includes("이 말이 있을 때만 묻기: rm · reset --hard") && !did.secondFacts.includes("이 말이 있을 때만")
+        && !did.secondFacts.includes("고친 파일이 있을 때만"),
+      JSON.stringify({ first: did.first.leftOut, second: did.second.leftOut, firstFacts: did.firstFacts, secondFacts: did.secondFacts }));
     ok("a decision's figures wear the built-in table's own column words",
       did.head.includes(did.first.rows?.label) && did.first.applied?.label === "적용 (오늘 · 7일)"
-        && did.first.hourFull?.label === "시간당 한도 초과 (오늘 · 7일)" && did.first.latest?.label === "마지막 답",
+        && did.first.hourFull?.label === "시간당 한도 초과 (오늘 · 7일)" && did.first.leftOut?.label === "거름 (오늘 · 7일)"
+        && did.first.latest?.label === "마지막 답",
       JSON.stringify({ head: did.head, labels: Object.fromEntries(Object.entries(did.first).map(([name, one]) => [name, one.label])) }));
 
     // With a feature's drawer open the decisions' buttons stay in reach

@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use super::{AGENT_TOOL_ASK_OPTIONS, JevMode};
 
 pub mod answered;
+pub mod ask_when;
 pub mod quiet;
 pub mod store;
 
@@ -36,6 +37,7 @@ pub use answered::{
     DecisionRow, Lent, Reading, body_of, deadline_at, earns_its_line, lent_at_turn_end,
     lent_before_command, nearest_level, read, standing,
 };
+pub use ask_when::AskWhen;
 
 /// The shape a definition ([`Definition::to_bytes`]) and the store's own files are written in; a file of another is not read.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -560,17 +562,7 @@ impl Definition {
     /// # Errors
     /// Serialization's own; none for the fields a definition has.
     pub fn to_bytes(&self) -> serde_json::Result<Vec<u8>> {
-        let (kind, options) = match &self.answer {
-            Answer::YesNo { yes, no } => (
-                KIND_YES_NO,
-                WrittenOptions::YesNo {
-                    yes: yes.as_str(),
-                    no: no.as_str(),
-                },
-            ),
-            Answer::Choice(options) => (KIND_CHOICE, WrittenOptions::Choice(options)),
-            Answer::Score(levels) => (KIND_SCORE, WrittenOptions::Score(levels.as_slice())),
-        };
+        let (kind, options) = self.written_options();
         serde_json::to_vec(&Written {
             schema_version: SCHEMA_VERSION,
             id: &self.id,
@@ -586,6 +578,45 @@ impl Definition {
             answered_by: ANSWERED_BY,
             max_per_hour: self.max_per_hour,
         })
+    }
+
+    /// What this version asks, apart from how often, how sure, where and
+    /// under which name: the SHA-256 of its question, its answer's shape and
+    /// meanings, its point and the inputs it reads. Two versions that differ
+    /// only in their hourly bound, their act-from line, their folders or their
+    /// name ask the same question, so their answers are one series — a bound
+    /// raised is not a new question (t-107869), while a word changed in the
+    /// question or a meaning is.
+    ///
+    /// # Errors
+    /// Serialization's own; none for the fields a definition has.
+    pub fn meaning(&self) -> serde_json::Result<String> {
+        let (kind, options) = self.written_options();
+        serde_json::to_vec(&Meant {
+            schema_version: SCHEMA_VERSION,
+            id: &self.id,
+            kind,
+            question: &self.question,
+            options,
+            at: self.at,
+            reads: &self.reads,
+        })
+        .map(|bytes| version_of(&bytes))
+    }
+
+    /// The answer's kind and options as a definition writes them.
+    fn written_options(&self) -> (&'static str, WrittenOptions<'_>) {
+        match &self.answer {
+            Answer::YesNo { yes, no } => (
+                KIND_YES_NO,
+                WrittenOptions::YesNo {
+                    yes: yes.as_str(),
+                    no: no.as_str(),
+                },
+            ),
+            Answer::Choice(options) => (KIND_CHOICE, WrittenOptions::Choice(options)),
+            Answer::Score(levels) => (KIND_SCORE, WrittenOptions::Score(levels.as_slice())),
+        }
     }
 
     /// This version's name: the SHA-256 of [`Self::to_bytes`].
@@ -844,6 +875,19 @@ struct Written<'a> {
     act_from: f64,
     answered_by: &'static str,
     max_per_hour: u64,
+}
+
+/// What [`Definition::meaning`] hashes, in a fixed order.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Meant<'a> {
+    schema_version: u32,
+    id: &'a str,
+    kind: &'static str,
+    question: &'a str,
+    options: WrittenOptions<'a>,
+    at: Point,
+    reads: &'a BTreeSet<Input>,
 }
 
 #[derive(Serialize)]

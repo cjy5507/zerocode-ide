@@ -34,7 +34,7 @@ use runtime::CommandAsk;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zerocode_core::jev::custom::quiet::{self, Quiet};
-use zerocode_core::jev::custom::{self, deadline_at, standing, store, Definition, Lent, Point};
+use zerocode_core::jev::custom::{self, deadline_at, standing, store, AskWhen, Definition, Lent, Point};
 use zerocode_core::jev::door::{self, Refused};
 use zerocode_core::jev::custom::Input;
 use zerocode_core::jev::tool_guard::asks_about;
@@ -94,6 +94,9 @@ struct Asked {
     entry: store::Entry,
     definition: Definition,
     mode: JevMode,
+    /// When it asks ([`custom::ask_when`]), as the store's file beside the
+    /// index says: always, when it says nothing.
+    ask_when: AskWhen,
 }
 
 /// The decisions that ask at `point` in `cwd` at the moment `at`, each where
@@ -111,24 +114,51 @@ fn asking_at(cwd: &Path, point: Point, at: Moment) -> Option<Held> {
     let quiet = quiet_as_read(&home, &root);
     let workspace = PathBuf::from(door::resolved_path(cwd));
     let now = at.quiet_now();
+    let mut asks_when = store::ask_when(&home).unwrap_or_default();
     let asking: Vec<Asked> = store::asking_in(&home, &workspace)
         .unwrap_or_default()
         .into_iter()
         .filter(|(entry, definition)| {
             definition.at == point && !quiet.is(&entry.id, &entry.definition, Some(&workspace), now)
         })
-        .map(|(entry, definition)| Asked { mode: standing(switch, entry.mode), entry, definition })
+        .map(|(entry, definition)| Asked {
+            mode: standing(switch, entry.mode),
+            ask_when: asks_when.remove(&entry.id).unwrap_or_default(),
+            entry,
+            definition,
+        })
         .filter(|asked| asked.mode.asks())
         .collect();
-    (!asking.is_empty()).then_some(Held { asking, at, quiet })
+    (!asking.is_empty()).then_some(Held { asking, point, at, quiet })
 }
 
 /// The decisions one point asks, the moment it asks them at, and the quiet
 /// marks they are held to.
 struct Held {
     asking: Vec<Asked>,
+    point: Point,
     at: Moment,
     quiet: Arc<Quiet>,
+}
+
+impl Held {
+    /// This without the decisions told to leave out what `lent` holds
+    /// ([`custom::ask_when`]) — each counted once in its day instead, with no
+    /// request and no row — and nothing when none is left to ask. zo sees
+    /// every edit its own turn made.
+    fn leaving_out(mut self, lent: &Lent) -> Option<Self> {
+        let point = self.point;
+        let (asking, left_out): (Vec<Asked>, Vec<Asked>) =
+            std::mem::take(&mut self.asking).into_iter().partition(|asked| asked.ask_when.admits_lent(point, lent, true));
+        if !left_out.is_empty() {
+            let (home, day) = (runtime::default_config_home(), self.at.day());
+            for asked in &left_out {
+                let _ = count::count_left_out(&home, &asked.entry.id, &day);
+            }
+        }
+        self.asking = asking;
+        (!self.asking.is_empty()).then_some(self)
+    }
 }
 
 /// The moment a point asks at: Unix milliseconds, and the local clock's
@@ -148,6 +178,11 @@ impl Moment {
     /// `ms`, in Unix milliseconds, on this machine's clock.
     fn at(ms: i64) -> Self {
         Self { ms, offset_minutes: i32::try_from(core_types::date::local_utc_offset_secs() / 60).unwrap_or(0) }
+    }
+
+    /// The local day a moment left out is counted in ([`count::count_left_out`]).
+    fn day(self) -> String {
+        count::day_of(self.ms, self.offset_minutes)
     }
 
     /// The local hour a request at this moment is counted in ([`count::hour_of`]).
@@ -367,7 +402,7 @@ async fn ask_each(
 /// ones on a worker, so they hold up nobody, and the acting ones awaited for
 /// the lines they hand.
 async fn ask_all(cwd: PathBuf, held: Held, lent: Lent) -> Vec<Handed> {
-    let Held { asking, at, quiet } = held;
+    let Held { asking, at, quiet, .. } = held;
     let (acting, recording): (Vec<Asked>, Vec<Asked>) = asking
         .into_iter()
         .filter_map(|asked| kept(&cwd, asked, (at, &quiet)).ok())
@@ -409,6 +444,9 @@ pub(super) async fn at_turn_start(cwd: PathBuf, task: String) -> Vec<String> {
         return Vec::new();
     };
     let lent: Lent = [(Input::Task.key().to_string(), Value::from(task))].into_iter().collect();
+    let Some(held) = held.leaving_out(&lent) else {
+        return Vec::new();
+    };
     ask_all(cwd, held, lent).await.into_iter().map(|handed| handed.line).collect()
 }
 
@@ -449,6 +487,9 @@ pub(super) fn at_turn_end(workspace: &Path, recipient: &str, turn: impl FnOnce()
     };
     let TurnEnd { task, final_text, evidence, edited_paths } = turn();
     let lent = custom::lent_at_turn_end(task, final_text, evidence, edited_paths);
+    let Some(held) = held.leaving_out(&lent) else {
+        return;
+    };
     let (cwd, recipient) = (workspace.to_path_buf(), recipient.to_string());
     let at = super::decision_shadow::unix_millis();
     detach(async move {
@@ -545,6 +586,11 @@ fn before_command_at(project: &Path, ask: &CommandAsk, at: Moment) {
         return;
     };
     let lent = custom::lent_before_command(&ask.command, &ask.cwd, &ask.task);
+    // Left out before anything waits on it: a command none of whose acting
+    // decisions asks hands nothing and is waited for by nobody.
+    let Some(held) = held.leaving_out(&lent) else {
+        return;
+    };
     let acting = held.asking.iter().any(|asked| asked.mode.applies());
     let judged: Judged = ask_all(project.to_path_buf(), held, lent)
         .map(|handed| handed.into_iter().map(|one| one.line).collect())
@@ -658,7 +704,8 @@ pub fn decide(cwd: &Path, name: &str, context: Option<&str>, items: &[String]) -
     // Asked by name, a decision always goes to the door, so its verdict says
     // why nothing was asked every time; only its row is once a span.
     let (at, quiet) = (Moment::now(), quiet_as_read(&home, &root));
-    let asked = match kept(cwd, Asked { entry, definition, mode }, (at, &quiet)) {
+    // Asked by name, a decision is asked on purpose: nothing is left out.
+    let asked = match kept(cwd, Asked { entry, definition, mode, ask_when: AskWhen::default() }, (at, &quiet)) {
         Ok(asked) => asked,
         Err(word) => {
             let note = format!("'{name}' breaks a rule it was kept under ({word}), so nothing was asked; decide this yourself.");

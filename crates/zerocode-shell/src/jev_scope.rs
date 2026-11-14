@@ -637,6 +637,9 @@ pub fn summed_decisions(readings: &[&[DecisionNumbers]]) -> Result<Vec<DecisionN
                     .filter_map(|one| Some((at(one)?, *one)))
                     .max_by_key(|(at, _)| *at)
                     .and_then(|(_, one)| one.latest.clone()),
+                // Counted on this machine, not in a project: every reading
+                // says the same, so it is read once and never added.
+                left_out: of.iter().find_map(|one| one.left_out),
             })
         })
         .collect()

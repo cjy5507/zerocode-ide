@@ -205,6 +205,61 @@ fn append_one(path: &Path) -> io::Result<(u64, bool)> {
     Ok((file.stream_position()?, first))
 }
 
+/// What a decision's left-out file's name starts with, before its id.
+const LEFT_OUT_PREFIX: &str = "left-out-";
+
+/// The local days a decision's left-out counts are kept: the day and the six
+/// before it — the week a summary reads.
+pub const LEFT_OUT_DAYS: usize = 7;
+
+/// The file the decision `id` counts in, for `day` (`YYYY-MM-DD`, local), the
+/// moments its words left out ([`super::custom::ask_when`]): asks that sent
+/// no request and wrote no row.
+#[must_use]
+pub fn left_out_path(config_home: &Path, id: &str, day: &str) -> PathBuf {
+    config_home
+        .join(REQUESTS_DIR)
+        .join(format!("{LEFT_OUT_PREFIX}{id}-{day}{DAY_FILE_SUFFIX}"))
+}
+
+/// Count one moment the decision `id`'s words left out in `day`; the day's
+/// first clears that decision's files older than [`LEFT_OUT_DAYS`].
+///
+/// # Errors
+/// A file that cannot be created or written.
+pub fn count_left_out(config_home: &Path, id: &str, day: &str) -> io::Result<u64> {
+    let path = left_out_path(config_home, id, day);
+    let (place, first_of_the_day) = append_one(&path)?;
+    if first_of_the_day {
+        let oldest_kept = (1..LEFT_OUT_DAYS).try_fold(day.to_string(), |at, _| day_before(&at));
+        if let Some(oldest_kept) = oldest_kept {
+            forget_earlier_days(
+                &path,
+                &format!("{LEFT_OUT_PREFIX}{id}-"),
+                DAY_FILE_SUFFIX,
+                |kept, _| kept >= oldest_kept.as_str(),
+            );
+        }
+    }
+    Ok(place)
+}
+
+/// The moments the decision `id`'s words left out over the `days` local days
+/// ending with `day`: one entry per day, `day` first.
+#[must_use]
+pub fn left_out_over(config_home: &Path, id: &str, day: &str, days: usize) -> Vec<u64> {
+    let mut counts = Vec::with_capacity(days);
+    let mut at = Some(day.to_string());
+    for _ in 0..days {
+        let Some(this) = at else {
+            break;
+        };
+        counts.push(sent(&left_out_path(config_home, id, &this)));
+        at = day_before(&this);
+    }
+    counts
+}
+
 /// The day before `day` (`YYYY-MM-DD`), or `None` for a word that is not a
 /// date. Calendar labels, so no clock is read: the day before a date is the
 /// same on every machine.
@@ -299,7 +354,7 @@ fn hour_named(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::lock_hours;
+    use super::{LEFT_OUT_DAYS, count_left_out, left_out_over, left_out_path, lock_hours};
 
     /// A process launch on another thread that forks before it execs holds a
     /// copy of the hour lock until the exec; the duplicate here is that copy,
@@ -317,6 +372,39 @@ mod tests {
         assert!(
             next.is_ok(),
             "a lock its holder let go is still held by a copy: {next:?}"
+        );
+    }
+
+    #[test]
+    fn a_decisions_left_out_moments_are_counted_by_day_and_kept_a_week() {
+        let home = tempfile::tempdir().unwrap();
+        let id = "d-0000000a";
+        assert_eq!(
+            left_out_over(home.path(), id, "2026-11-14", LEFT_OUT_DAYS),
+            vec![0; LEFT_OUT_DAYS]
+        );
+        for day in ["2026-11-01", "2026-11-07", "2026-11-08"] {
+            count_left_out(home.path(), id, day).unwrap();
+        }
+        count_left_out(home.path(), "d-0000000b", "2026-11-01").unwrap();
+        assert_eq!(count_left_out(home.path(), id, "2026-11-14").unwrap(), 1);
+        assert_eq!(count_left_out(home.path(), id, "2026-11-14").unwrap(), 2);
+        assert!(
+            !left_out_path(home.path(), id, "2026-11-01").exists()
+                && !left_out_path(home.path(), id, "2026-11-07").exists(),
+            "a day before the week is cleared by the day's first count"
+        );
+        assert!(
+            left_out_path(home.path(), id, "2026-11-08").exists(),
+            "the week's first day stays"
+        );
+        assert!(
+            left_out_path(home.path(), "d-0000000b", "2026-11-01").exists(),
+            "another decision's days are its own"
+        );
+        assert_eq!(
+            left_out_over(home.path(), id, "2026-11-14", LEFT_OUT_DAYS),
+            vec![2, 0, 0, 0, 0, 0, 1]
         );
     }
 }

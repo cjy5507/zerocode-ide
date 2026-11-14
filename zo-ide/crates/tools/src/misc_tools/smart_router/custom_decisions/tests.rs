@@ -1077,3 +1077,48 @@ fn a_folder_not_consented_is_quiet_there_alone_and_consent_asks_at_once() {
         assert_eq!(mock.requests().len(), 3);
     });
 }
+
+/// A decision told the words it asks about ([`custom::ask_when`]) leaves out
+/// a command none of them names — no request, no row, one count in its day —
+/// and asks about one that names one as it always did.
+#[test]
+fn a_command_none_of_its_words_names_asks_nothing_and_is_counted_left_out() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let deleting = yes_no("Deleting", Point::BeforeCommand);
+        keep(&deleting, JevMode::On);
+        let home = runtime::default_config_home();
+        let said = AskWhen { words: vec!["rm".to_string()], edited: false };
+        store::set_ask_when(&home, &deleting.id, &said).expect("when it asks is kept");
+        let guard = ToolGuardJudge::at(cwd);
+        guard.command(command_ask(cwd, "1", "cargo build --release"));
+        assert_eq!(run_blocking(guard.command_ran(finished("1"))), None);
+        assert!(unasked(&mock), "a command no word names was asked about");
+        assert!(rows_now(cwd).is_empty(), "a moment left out wrote a row");
+        assert_eq!(count::left_out_over(&home, &deleting.id, &Moment::now().day(), 1), [1]);
+
+        guard.command(command_ask(cwd, "2", "rm -rf build"));
+        let _ = run_blocking(guard.command_ran(finished("2")));
+        assert_eq!(rows_in(cwd, 1).len(), 1, "a command a word names was not asked about");
+        assert_eq!(count::left_out_over(&home, &deleting.id, &Moment::now().day(), 1), [1]);
+    });
+}
+
+/// A turn's-end decision told to ask after edits leaves out a turn that
+/// edited nothing: no request, no row, one count in its day.
+#[test]
+fn a_turn_that_edited_nothing_is_left_out_by_a_decision_that_asks_after_edits() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let checked = yes_no("Checked before done", Point::TurnEnd);
+        keep(&checked, JevMode::On);
+        let home = runtime::default_config_home();
+        let said = AskWhen { words: Vec::new(), edited: true };
+        store::set_ask_when(&home, &checked.id, &said).expect("when it asks is kept");
+        note_project_rule_turn(cwd, "session", "turn-1", &[ConversationMessage::user_text(TASK)]);
+        std::thread::sleep(LATE);
+        assert!(unasked(&mock), "a turn that edited nothing was asked about");
+        assert!(rows_now(cwd).is_empty(), "a moment left out wrote a row");
+        assert_eq!(count::left_out_over(&home, &checked.id, &Moment::now().day(), 1), [1]);
+    });
+}

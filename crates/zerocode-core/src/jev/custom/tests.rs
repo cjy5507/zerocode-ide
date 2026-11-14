@@ -671,3 +671,34 @@ fn a_level_is_shown_counted_from_one_over_the_levels() {
     let most = *OPTIONS.end();
     assert_eq!(shown_level(most - 1, most), format!("{most}/{most}"));
 }
+
+/// A version that differs only in how often, how sure, where or under which
+/// name it asks is the same question, so its answers are one series with the
+/// version before it; a changed word, meaning, point or input is another.
+#[test]
+fn a_bound_raised_is_the_same_question_and_a_changed_word_is_another() {
+    let held = yes_no("d-0000000a", "Checked");
+    let meaning = held.meaning().unwrap();
+    let mut same = held.clone();
+    same.max_per_hour = 60;
+    same.act_from = 0.9;
+    same.name = "Renamed".to_string();
+    same.folders = Folders::Chosen(BTreeSet::from(["/work/product".to_string()]));
+    assert_ne!(same.version().unwrap(), held.version().unwrap());
+    assert_eq!(same.meaning().unwrap(), meaning);
+
+    let mut asked = held.clone();
+    asked.question.push_str(" Say so.");
+    let mut meant = held.clone();
+    meant.answer = Answer::YesNo {
+        yes: "Changed.".to_string(),
+        no: "Not changed.".to_string(),
+    };
+    let mut moved = held.clone();
+    moved.at = Point::BeforeCommand;
+    let mut reads = held.clone();
+    reads.reads.remove(&Input::Evidence);
+    for other in [asked, meant, moved, reads] {
+        assert_ne!(other.meaning().unwrap(), meaning);
+    }
+}

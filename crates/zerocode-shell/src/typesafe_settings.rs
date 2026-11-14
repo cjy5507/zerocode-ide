@@ -1750,6 +1750,9 @@ pub struct KeptDecision {
     pub created_at: String,
     pub updated_at: String,
     pub draft: DecisionDraft,
+    /// When it asks ([`custom::ask_when`]): the store's file beside the
+    /// index, read as is — the screen says why a decision did not ask.
+    pub ask_when: custom::AskWhen,
 }
 
 /// Every decision the person keeps and the folders a decision may be
@@ -1889,12 +1892,15 @@ pub fn tidy_decision_store(home: &Path) {
 /// # Errors
 /// A store that cannot be read.
 pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<CustomDecisions> {
+    // A file that does not read says nothing: each decision asks always.
+    let mut asks_when = custom::store::ask_when(home).unwrap_or_default();
     let decisions = custom::store::list(home)?
         .into_iter()
         .map(|entry| {
             Ok(KeptDecision {
                 draft: DecisionDraft::of(custom::store::definition(home, &entry.definition)?),
                 mode: entry.mode.key(),
+                ask_when: asks_when.remove(&entry.id).unwrap_or_default(),
                 version: entry.definition,
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,
@@ -5080,6 +5086,18 @@ pub struct DecisionNumbers {
     /// Its last ask, as zo lists a seat's recent ones.
     #[serde(default)]
     pub latest: Option<Value>,
+    /// The moments its words left out today and over the week
+    /// ([`custom::ask_when`]) — this machine's, whichever project they were
+    /// in; absent from a zo older than them.
+    #[serde(default)]
+    pub left_out: Option<LeftOut>,
+}
+
+/// The moments a decision's words left out, as zo counts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct LeftOut {
+    pub today: u64,
+    pub week: u64,
 }
 
 /// Everything one `zo jev summary --json` said that the window reads: the

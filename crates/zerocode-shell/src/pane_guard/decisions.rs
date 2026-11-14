@@ -27,7 +27,9 @@
 
 use std::sync::Arc;
 
-use zerocode_core::jev::custom::{self, DecisionRow, Definition, Lent, Point, quiet, store};
+use zerocode_core::jev::custom::{
+    self, AskWhen, DecisionRow, Definition, Lent, Point, quiet, store,
+};
 use zerocode_core::jev::{CUSTOM_DECISIONS, CUSTOM_EVIDENCE_BYTE_CAP, count, door};
 
 use super::*;
@@ -40,6 +42,9 @@ pub(crate) struct Kept {
     pub entry: store::Entry,
     pub definition: Definition,
     pub mode: JevMode,
+    /// When it asks ([`custom::ask_when`]), as the store's file beside the
+    /// index said when the snapshot was read: always, when it says nothing.
+    pub ask_when: AskWhen,
 }
 
 /// The decisions that ask, as zo's settings and the store were last read:
@@ -66,6 +71,9 @@ impl Decisions {
                 kept: Vec::new(),
             };
         };
+        // A file that does not read says nothing: every decision asks as it
+        // did before it was told when.
+        let mut asks_when = store::ask_when(home).unwrap_or_default();
         let kept = store::list(home)
             .unwrap_or_default()
             .into_iter()
@@ -75,10 +83,15 @@ impl Decisions {
                     return None;
                 }
                 let definition = store::definition(home, &entry.definition).ok()?;
-                (definition.id == entry.id).then_some(Kept {
+                if definition.id != entry.id {
+                    return None;
+                }
+                let ask_when = asks_when.remove(&entry.id).unwrap_or_default();
+                Some(Kept {
                     entry,
                     definition,
                     mode,
+                    ask_when,
                 })
             })
             .collect();
@@ -364,6 +377,23 @@ pub(super) fn ask(
             edited,
         } => turn_lent(&root, task, said, &evidence, &edited),
     };
+    // A decision told when to ask leaves out a moment none of its words
+    // names, or a turn that edited nothing (`custom::ask_when`): no request,
+    // no row, one count in its day. An agent whose hooks do not say what it
+    // edited is never taken to have edited nothing.
+    let edits_seen = hook_guard::sight(pane.agent).edited_path.yes();
+    let (kept, left_out): (Vec<Kept>, Vec<Kept>) = kept
+        .into_iter()
+        .partition(|one| one.ask_when.admits_lent(asked.point, &lent, edits_seen));
+    if !left_out.is_empty() {
+        let day = systemone::day_at(i64::try_from(asked.at).unwrap_or_default());
+        for one in &left_out {
+            let _ = count::count_left_out(home, &one.entry.id, &day);
+        }
+    }
+    if kept.is_empty() {
+        return;
+    }
     let asker = Asker {
         home,
         root: &root,

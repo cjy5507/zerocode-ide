@@ -3744,7 +3744,7 @@ function jevCustomRow(list, kept, rules) {
   if (!jevMoved(row, JSON.stringify(kept), JSON.stringify(counted), jevLanguage(), String(Math.floor(Date.now() / 60_000)))) return row;
   paintJevCustomFigures(row, counted);
   jevSay(row.querySelector(".jev-custom-name"), kept.draft.name);
-  row.querySelector(".jev-custom-facts").replaceChildren(...jevCustomFacts(kept.draft));
+  row.querySelector(".jev-custom-facts").replaceChildren(...jevCustomFacts(kept.draft, kept.askWhen));
   const group = row.querySelector("[data-jev-custom-mode]");
   group.setAttribute("aria-label", t("jev.custom.modeOf", "{{name}} 모드", { name: kept.draft.name }));
   const radios = [...group.querySelectorAll("[role='radio']")];
@@ -3768,6 +3768,7 @@ const JEV_CUSTOM_FIGURES = Object.freeze([
   Object.freeze({ figure: "rows", key: "jev.col.rows", word: "요청 (오늘 · 7일)" }),
   Object.freeze({ figure: "applied", key: "jev.custom.applied", word: "적용 (오늘 · 7일)" }),
   Object.freeze({ figure: "hourFull", key: "jev.custom.hourFull", word: "시간당 한도 초과 (오늘 · 7일)" }),
+  Object.freeze({ figure: "leftOut", key: "jev.custom.leftOut", word: "거름 (오늘 · 7일)" }),
   Object.freeze({ figure: "latest", key: "jev.custom.latest", word: "마지막 답" }),
 ]);
 
@@ -3814,6 +3815,13 @@ function paintJevCustomFigures(row, counted) {
   if (others.length > 0) figure("rows").append(jevNode("div", "jev-tokens", ...others.map(jevTokenChip)));
   figure("applied").replaceChildren(...pair((window) => window.applied ?? 0));
   figure("hourFull").replaceChildren(...pair(hourFull));
+  // The moments its words left out are counted apart from its asks — they
+  // sent nothing — and by a zo that knows them: absent, the screen says it
+  // does not know rather than none.
+  const leftOut = known ? counted.leftOut : null;
+  figure("leftOut").replaceChildren(...(leftOut
+    ? [jevFact("today", jevCount(leftOut.today), "jev-fact-strong"), document.createTextNode(" · "), jevFact("week", jevCount(leftOut.week))]
+    : [document.createTextNode("—")]));
   const latest = figure("latest");
   const last = counted?.latest ?? null;
   if (!known) latest.textContent = "—";
@@ -3831,8 +3839,10 @@ function paintJevCustomFigures(row, counted) {
 
 /* What a decision is, fact by fact: its kind of answer, when it asks and
  * what it does there when on, the confidence it acts from — with the whole
- * rule as its tip — its hourly bound, and where it asks. */
-function jevCustomFacts(draft) {
+ * rule as its tip — its hourly bound, where it asks, and what it leaves out
+ * (`askWhen`, the store's file beside the index): the words it asks about
+ * and whether it asks only after edits, so a person sees why it did not ask. */
+function jevCustomFacts(draft, askWhen) {
   const fact = (text) => jevNode("span", "jev-custom-fact", document.createTextNode(text));
   const share = { share: jevPercent(draft.actFrom) };
   const acting = fact(t("jev.custom.actsFrom", "확신 {{share}} 이상", share));
@@ -3845,6 +3855,10 @@ function jevCustomFacts(draft) {
     fact(t("jev.custom.hourly", "한 시간에 {{count}}회까지", { count: jevCount(draft.maxPerHour) })),
     fact(draft.folders === null ? t("jev.custom.everyFolder", "동의한 모든 폴더")
       : t("jev.custom.someFolders", "고른 폴더 {{count}}곳", { count: jevCount(draft.folders.length) })),
+    ...((askWhen?.words ?? []).length > 0
+      ? [fact(t("jev.custom.asksWhenWords", "이 말이 있을 때만 묻기: {{words}}", { words: askWhen.words.join(" · ") }))]
+      : []),
+    ...(askWhen?.edited ? [fact(t("jev.custom.asksWhenEdited", "고친 파일이 있을 때만 묻기"))] : []),
   ];
 }
 

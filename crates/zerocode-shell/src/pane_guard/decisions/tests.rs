@@ -1511,3 +1511,107 @@ fn a_room_too_small_for_the_opening_takes_nothing_and_the_line_waits() {
         Some(briefed(custom::line("Visible", YES_MEANS, 0.9)))
     );
 }
+
+/// A decision told the words it asks about (`custom::ask_when`) leaves out a
+/// command none of them names: no request, no row, one count in its day —
+/// and asks about a command that names one as it always did.
+#[test]
+fn a_command_none_of_its_words_names_sends_nothing_and_is_counted_left_out() {
+    let endpoint = replying(|_| a_noul(0.95));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Deleting", Point::BeforeCommand);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+    );
+    let words = AskWhen {
+        words: vec!["rm".to_string()],
+        edited: false,
+    };
+    store::set_ask_when(home.home.path(), &decision.id, &words).expect("when it asks is kept");
+    let standing = home.standing();
+    let guards = fresh_guards();
+    noted(
+        guards,
+        &home,
+        &standing,
+        vec![about(
+            Some("call-1"),
+            "cargo build --release",
+            project.path(),
+        )],
+    );
+    assert!(
+        endpoint.asked().is_empty(),
+        "a command no word names was asked about"
+    );
+    assert!(home.rows().is_empty(), "a moment left out wrote a row");
+    let day = systemone::day_at(crate::usage_runtime::epoch_ms_now());
+    assert_eq!(
+        count::left_out_over(home.home.path(), &decision.id, &day, 1),
+        [1]
+    );
+
+    noted(
+        guards,
+        &home,
+        &standing,
+        vec![about(Some("call-2"), "rm -rf build", project.path())],
+    );
+    assert_eq!(
+        endpoint.asked().len(),
+        1,
+        "a command a word names was not asked about"
+    );
+    assert_eq!(home.rows().len(), 1);
+    assert_eq!(
+        count::left_out_over(home.home.path(), &decision.id, &day, 1),
+        [1]
+    );
+}
+
+/// A turn's-end decision told to ask after edits leaves out a turn that
+/// edited nothing, and asks after one that edited a file.
+#[test]
+fn a_turn_that_edited_nothing_is_left_out_by_a_decision_that_asks_after_edits() {
+    let endpoint = replying(|_| a_noul(0.9));
+    let project = tempfile::tempdir().expect("a project");
+    let decision = yes_no("Checked", Point::TurnEnd);
+    let home = Home::new(
+        &endpoint,
+        project.path(),
+        JevMode::On,
+        &[(&decision, JevMode::On)],
+    );
+    let after_edits = AskWhen {
+        words: Vec::new(),
+        edited: true,
+    };
+    store::set_ask_when(home.home.path(), &decision.id, &after_edits)
+        .expect("when it asks is kept");
+    let standing = home.standing();
+    let guards = fresh_guards();
+    noted(guards, &home, &standing, vec![turn_ended(false)]);
+    assert!(
+        endpoint.asked().is_empty(),
+        "a turn that edited nothing was asked about"
+    );
+    // The project's own spelling of the path: a temporary folder's unresolved
+    // one (`/var` for `/private/var`) is outside the project.
+    let notes = home.root.join("notes.md");
+    std::fs::write(&notes, "edited\n").expect("the edited file");
+    let edit = Moment::Started {
+        call_id: Some("edit-1".to_string()),
+        tool: "Edit".to_string(),
+        words: None,
+        paths: vec![notes.to_string_lossy().into_owned()],
+    };
+    noted(guards, &home, &standing, vec![edit, turn_ended(false)]);
+    assert_eq!(
+        endpoint.asked().len(),
+        1,
+        "a turn that edited a file was not asked about"
+    );
+}
