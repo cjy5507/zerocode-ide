@@ -1053,6 +1053,14 @@ mod tests {
         );
     }
 
+    /// [`yes_no`] asking at `point`, reading what that point lends.
+    fn asking_at(id: &str, name: &str, point: Point) -> Definition {
+        let mut decision = yes_no(id, name);
+        decision.at = point;
+        decision.reads = point.inputs().iter().copied().collect();
+        decision
+    }
+
     fn asks_when(words: &[&str], edited: bool) -> AskWhen {
         AskWhen {
             words: words.iter().map(|word| (*word).to_string()).collect(),
@@ -1065,8 +1073,7 @@ mod tests {
     #[test]
     fn when_a_decision_asks_is_kept_beside_the_index_and_read_back() {
         let home = tempfile::tempdir().unwrap();
-        let mut before_command = yes_no("d-0000000a", "Build line");
-        before_command.at = Point::BeforeCommand;
+        let before_command = asking_at("d-0000000a", "Build line", Point::BeforeCommand);
         create(home.path(), &before_command, JevMode::On, NOW).unwrap();
         create(
             home.path(),
@@ -1105,8 +1112,7 @@ mod tests {
     #[test]
     fn a_point_that_cannot_take_it_and_a_decision_nobody_keeps_are_refused() {
         let home = tempfile::tempdir().unwrap();
-        let mut asked = yes_no("d-0000000a", "Asked");
-        asked.at = Point::AgentAsks;
+        let asked = asking_at("d-0000000a", "Asked", Point::AgentAsks);
         create(home.path(), &asked, JevMode::On, NOW).unwrap();
         create(
             home.path(),
@@ -1115,8 +1121,7 @@ mod tests {
             NOW,
         )
         .unwrap();
-        let mut before_command = yes_no("d-0000000c", "Command");
-        before_command.at = Point::BeforeCommand;
+        let before_command = asking_at("d-0000000c", "Command", Point::BeforeCommand);
         create(home.path(), &before_command, JevMode::On, NOW).unwrap();
         assert!(matches!(
             set_ask_when(home.path(), "d-0000000a", &asks_when(&["rm"], false)),
@@ -1139,8 +1144,7 @@ mod tests {
     fn a_deleted_decisions_line_goes_with_it() {
         let home = tempfile::tempdir().unwrap();
         for id in ["d-0000000a", "d-0000000b"] {
-            let mut one = yes_no(id, id);
-            one.at = Point::BeforeCommand;
+            let one = asking_at(id, id, Point::BeforeCommand);
             create(home.path(), &one, JevMode::On, NOW).unwrap();
             set_ask_when(home.path(), id, &asks_when(&["rm"], false)).unwrap();
         }
@@ -1159,8 +1163,7 @@ mod tests {
         index.retain(|entry| entry.id != "d-0000000b");
         write_index(&store, index).unwrap();
         assert!(ask_when(home.path()).unwrap().is_empty());
-        let mut again = yes_no("d-0000000c", "Again");
-        again.at = Point::BeforeCommand;
+        let again = asking_at("d-0000000c", "Again", Point::BeforeCommand);
         create(home.path(), &again, JevMode::On, NOW).unwrap();
         set_ask_when(home.path(), "d-0000000c", &asks_when(&["rm"], false)).unwrap();
         let file = fs::read_to_string(store.join(ASK_WHEN)).unwrap();
@@ -1173,8 +1176,7 @@ mod tests {
     #[test]
     fn the_index_and_every_definition_read_the_same_with_the_file_beside_them() {
         let home = tempfile::tempdir().unwrap();
-        let mut before_command = yes_no("d-0000000a", "Build line");
-        before_command.at = Point::BeforeCommand;
+        let before_command = asking_at("d-0000000a", "Build line", Point::BeforeCommand);
         create(home.path(), &before_command, JevMode::On, NOW).unwrap();
         create(
             home.path(),
