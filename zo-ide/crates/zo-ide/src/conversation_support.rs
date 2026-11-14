@@ -39,11 +39,34 @@ pub(crate) fn build_system_prompt_for_mode(
     // Deferred-tool manifest: the model cannot ToolSearch for names it has
     // never seen. Session-stable, so it never disturbs the prompt cache — the
     // tools it names are what this process's `PATH` reaches, and that does not
-    // change under a session (`tools::ToolReach`). Appended here rather than
-    // in the runtime builder because the deferred set is owned by the tools
-    // crate, which depends on runtime — not vice versa.
-    sections.push(tools::deferred_tool_manifest_section(tools::ToolReach::here()));
+    // change under a session (`tools::ToolReach`), less the tools the person's
+    // rules refuse every call of, read once here (`rules_as_read`). Appended
+    // here rather than in the runtime builder because the deferred set is
+    // owned by the tools crate, which depends on runtime — not vice versa.
+    let denied_by = rules_as_read(cwd);
+    sections.push(tools::deferred_tool_manifest_section_for(
+        tools::ToolReach::here(),
+        denied_by.as_ref(),
+    ));
     Ok(sections)
+}
+
+/// The permission rules a session under `cwd` reads, as a policy — what the
+/// prompt asks [`PermissionPolicy::denies_every_call`] of. The same settings
+/// documents and the same rule intake ([`rules_policy`]) the session's own
+/// policy is built from ([`permission_policy`]); the mode does not enter that
+/// answer. `None` when the settings do not load: then every tool is offered,
+/// and every call is judged as it always is.
+fn rules_as_read(cwd: &Path) -> Option<PermissionPolicy> {
+    let config = runtime::ConfigLoader::default_for(cwd).load().ok()?;
+    Some(rules_policy(PermissionMode::ReadOnly, config.feature_config()))
+}
+
+/// A policy in `mode` holding the configured permission rules and nothing
+/// else — the one rule intake of [`permission_policy`] and of what the prompt
+/// offers ([`rules_as_read`]).
+fn rules_policy(mode: PermissionMode, feature_config: &runtime::RuntimeFeatureConfig) -> PermissionPolicy {
+    PermissionPolicy::new(mode).with_permission_rules(feature_config.permission_rules())
 }
 
 /// Whether this session can delegate at all.
@@ -73,9 +96,7 @@ pub(crate) fn permission_policy(
         .map_err(|e| e.to_string())?
         .into_iter()
         .fold(
-            PermissionPolicy::new(mode)
-                .with_permission_rules(feature_config.permission_rules())
-                .with_schedule_workspace(tool_registry.schedule_workspace()),
+            rules_policy(mode, feature_config).with_schedule_workspace(tool_registry.schedule_workspace()),
             |policy, (name, required_permission)| {
                 policy.with_tool_requirement(name, required_permission)
             },
@@ -210,6 +231,54 @@ mod system_prompt_tests {
                 .join("\n\n");
 
         assert!(prompt.contains("SUPPLIED_CWD_RULE"), "{prompt}");
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A tool the settings deny outright (`WebSearch`) is not named in the
+    /// deferred line, while one denied only for some subjects
+    /// (`WebFetch(https://docs.rs/*)`) still is; and the policy the session is
+    /// built with refuses a call to the hidden one in today's words. A
+    /// benchmark run on 2026-11-14 found `WebSearch` through the line, loaded
+    /// it and was refused five times by the bench's own deny rule.
+    #[test]
+    fn a_tool_the_settings_deny_outright_is_not_named_and_its_call_is_refused() {
+        // The settings come from the config home the env names: no other test
+        // may move it, or delete the folder it names, while this one reads it.
+        let _lock = crate::test_env_lock();
+        let root = crate::support::temp_dir("denied-outright");
+        fs::create_dir_all(root.join(".zo")).expect("settings folder");
+        fs::write(
+            root.join(".zo").join("settings.json"),
+            r#"{"permissions":{"deny":["WebSearch","WebFetch(https://docs.rs/*)"]}}"#,
+        )
+        .expect("write settings");
+
+        let prompt =
+            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-opus-5")
+                .expect("system prompt should load")
+                .join("\n\n");
+        let line = prompt
+            .lines()
+            .find(|line| line.starts_with("Hidden but callable:"))
+            .expect("the deferred line");
+        assert!(!line.contains("WebSearch"), "denied outright, so not offered: {line}");
+        assert!(line.contains("WebFetch"), "denied for one subject only, so still offered: {line}");
+
+        let config = runtime::ConfigLoader::default_for(&root).load().expect("settings load");
+        let policy = super::permission_policy(
+            runtime::PermissionMode::DangerFullAccess,
+            config.feature_config(),
+            &tools::GlobalToolRegistry::builtin(),
+        )
+        .expect("the session's policy");
+        assert!(
+            matches!(
+                policy.authorize("WebSearch", r#"{"query":"rust"}"#, None),
+                runtime::PermissionOutcome::Deny { reason }
+                    if reason.contains("Permission to use WebSearch has been denied by rule 'WebSearch'")
+            ),
+            "a call by name meets the refusal it always met"
+        );
         fs::remove_dir_all(root).ok();
     }
 

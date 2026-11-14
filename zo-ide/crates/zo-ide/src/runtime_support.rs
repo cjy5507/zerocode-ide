@@ -454,6 +454,10 @@ pub(crate) fn build_runtime_with_plugin_state(
     let permission_started = std::time::Instant::now();
     let policy = permission_policy(permission_mode, &feature_config, &tool_registry)
         .map_err(|error| format!("startup stage permission-policy: {error:?}"))?;
+    // What `ToolSearch` finds and a "did you mean" offers leave out the tools
+    // this very policy refuses every call of — before the registry is cloned
+    // into the executor and the client below.
+    let tool_registry = tool_registry.with_denied_outright(policy.clone());
     crate::conversation_support::queue_unknown_rule_warnings(&feature_config, &tool_registry);
     crate::conversation_support::queue_unowned_local_settings_warning(&feature_config);
     log_boot_stage("permission-policy", permission_started);

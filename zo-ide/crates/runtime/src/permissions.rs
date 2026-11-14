@@ -410,6 +410,46 @@ impl PermissionPolicy {
         })
     }
 
+    /// Whether the rules refuse every call to `tool_name`, whatever its input
+    /// and whatever the mode — a tool the person denied outright, which the
+    /// model is then not offered (the deferred-tool line, `ToolSearch`, a "did
+    /// you mean"). Read from the very rules `rule_signals` judges a
+    /// call by, and a rule's deny comes before the mode and the hooks there,
+    /// so a tool this answers for is refused in every mode.
+    ///
+    /// - The lists: a `deny` rule naming the tool with no subject (`WebSearch`,
+    ///   not `WebSearch(…)`) — a deny that matches is never outweighed.
+    /// - The ordered rules (which, when there are any, are all that is read):
+    ///   the last rule meeting a call decides, so the tool's last subject-less
+    ///   rule must be a deny and every rule of the tool after it a deny too —
+    ///   a later `allow`/`ask` with a subject lets some input through.
+    ///
+    /// A phase block is not counted: it lifts when the phase ends. Nor is the
+    /// mode: a session's mode changes under it.
+    #[must_use]
+    pub fn denies_every_call(&self, tool_name: &str) -> bool {
+        let tool = tool_key(tool_name);
+        if !self.ordered_rules.is_empty() {
+            let mine = self
+                .ordered_rules
+                .iter()
+                .filter(|rule| rule.rule.tool_name == tool)
+                .collect::<Vec<_>>();
+            let Some(last_whole) = mine
+                .iter()
+                .rposition(|rule| matches!(rule.rule.matcher, PermissionRuleMatcher::Any))
+            else {
+                return false;
+            };
+            return mine[last_whole..]
+                .iter()
+                .all(|rule| rule.action == PermissionRuleAction::Deny);
+        }
+        self.deny_rules
+            .iter()
+            .any(|rule| rule.tool_name == tool && matches!(rule.matcher, PermissionRuleMatcher::Any))
+    }
+
     #[must_use]
     pub fn authorize(
         &self,
@@ -2655,6 +2695,110 @@ mod tests {
             policy.authorize("read_file", "{}", None),
             PermissionOutcome::Allow
         );
+    }
+
+    /// Rule sets over `WebFetch` (whose `url` is a rule's subject), each with
+    /// whether every call to it is refused: (what, deny list, allow list,
+    /// ordered rules, refused outright).
+    #[allow(clippy::type_complexity)] // one table, read row by row
+    fn denied_outright_cases() -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>, Vec<&'static str>, bool)> {
+        vec![
+            ("no rules", vec![], vec![], vec![], false),
+            ("a whole-tool deny", vec!["WebFetch"], vec![], vec![], true),
+            ("the same deny in another spelling", vec!["webfetch"], vec![], vec![], true),
+            ("a deny with a subject", vec!["WebFetch(https://docs.rs/*)"], vec![], vec![], false),
+            ("a whole-tool deny beside an allow", vec!["WebFetch"], vec!["WebFetch"], vec![], true),
+            ("a deny of another tool", vec!["WebSearch"], vec![], vec![], false),
+            ("ordered: a whole-tool deny", vec![], vec![], vec!["WebFetch=deny"], true),
+            ("ordered: a later allow with a subject", vec![], vec![], vec!["WebFetch=deny", "WebFetch(https://docs.rs/*)=allow"], false),
+            ("ordered: a later ask with a subject", vec![], vec![], vec!["WebFetch=deny", "WebFetch(https://docs.rs/*)=ask"], false),
+            ("ordered: an earlier allow under a later whole deny", vec![], vec![], vec!["WebFetch(https://docs.rs/*)=allow", "WebFetch=deny"], true),
+            ("ordered: a later deny with a subject", vec![], vec![], vec!["WebFetch=deny", "WebFetch(https://docs.rs/*)=deny"], true),
+            ("ordered: a whole-tool allow", vec![], vec![], vec!["WebFetch=allow"], false),
+            ("ordered: a later whole allow", vec![], vec![], vec!["WebFetch=deny", "WebFetch=allow"], false),
+            ("ordered: only another tool's rule", vec![], vec![], vec!["bash=deny"], false),
+        ]
+    }
+
+    fn denied_outright_policy(
+        mode: PermissionMode,
+        deny: &[&str],
+        allow: &[&str],
+        ordered: &[&str],
+    ) -> PermissionPolicy {
+        let owned = |rules: &[&str]| rules.iter().map(|rule| (*rule).to_string()).collect::<Vec<_>>();
+        let rules = RuntimePermissionRuleConfig::new(owned(allow), owned(deny), Vec::new()).with_rules(owned(ordered));
+        PermissionPolicy::new(mode)
+            .with_tool_requirement("WebFetch", PermissionMode::ReadOnly)
+            .with_permission_rules(&rules)
+    }
+
+    const DENIED_OUTRIGHT_INPUTS: [&str; 4] = [
+        "{}",
+        r#"{"url":"https://docs.rs/serde"}"#,
+        r#"{"url":"https://example.com/"}"#,
+        "not json",
+    ];
+
+    #[test]
+    fn denies_every_call_reads_whole_tool_rules_only() {
+        for (what, deny, allow, ordered, outright) in denied_outright_cases() {
+            let policy = denied_outright_policy(PermissionMode::DangerFullAccess, &deny, &allow, &ordered);
+            assert_eq!(policy.denies_every_call("WebFetch"), outright, "{what}");
+            assert_eq!(policy.denies_every_call("web_fetch"), outright, "{what}: the tool under its key");
+        }
+    }
+
+    /// Hidden but allowed must never happen: a tool the model is not offered
+    /// is one every call of which is refused, in every mode, with a hook
+    /// saying allow and a person who would say yes.
+    #[test]
+    fn a_tool_denied_outright_is_refused_in_every_mode_and_for_every_input() {
+        use super::PermissionContext;
+        let modes = [
+            PermissionMode::ReadOnly,
+            PermissionMode::WorkspaceWrite,
+            PermissionMode::DangerFullAccess,
+            PermissionMode::Prompt,
+            PermissionMode::Allow,
+        ];
+        for (what, deny, allow, ordered, _) in denied_outright_cases() {
+            for mode in modes {
+                let policy = denied_outright_policy(mode, &deny, &allow, &ordered);
+                if !policy.denies_every_call("WebFetch") {
+                    continue;
+                }
+                for input in DENIED_OUTRIGHT_INPUTS {
+                    let mut yes = RecordingPrompter { seen: Vec::new(), allow: true };
+                    let hook_allows = PermissionContext::new(Some(PermissionOverride::Allow), None);
+                    assert!(
+                        matches!(
+                            policy.authorize_with_context("WebFetch", input, &hook_allows, Some(&mut yes)),
+                            PermissionOutcome::Deny { .. }
+                        ),
+                        "{what} · {mode:?} · {input}: hidden, so it must be refused"
+                    );
+                    assert!(policy.deny_reason("WebFetch", input).is_some(), "{what} · {mode:?} · {input}");
+                }
+            }
+        }
+    }
+
+    /// Shown but refused must not happen by a rule: a tool the model is still
+    /// offered lets at least one call through where the mode allows it.
+    #[test]
+    fn a_tool_not_denied_outright_lets_some_call_through() {
+        for (what, deny, allow, ordered, _) in denied_outright_cases() {
+            let policy = denied_outright_policy(PermissionMode::DangerFullAccess, &deny, &allow, &ordered);
+            if policy.denies_every_call("WebFetch") {
+                continue;
+            }
+            let passes = DENIED_OUTRIGHT_INPUTS.iter().any(|input| {
+                let mut yes = RecordingPrompter { seen: Vec::new(), allow: true };
+                policy.authorize("WebFetch", input, Some(&mut yes)) == PermissionOutcome::Allow
+            });
+            assert!(passes, "{what}: offered, so some call must pass");
+        }
     }
 
     #[test]

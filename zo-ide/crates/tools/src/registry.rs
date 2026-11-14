@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use plugins::PluginTool;
-use runtime::{permission_enforcer::PermissionEnforcer, McpDegradedReport, PermissionMode};
+use runtime::{permission_enforcer::PermissionEnforcer, McpDegradedReport, PermissionMode, PermissionPolicy};
 use serde_json::Value;
 
 use core_types::tool_names::CoreTool;
@@ -107,6 +107,10 @@ pub struct GlobalToolRegistry {
     /// mean" offers. Read from `PATH` when the registry is built
     /// ([`Self::with_tool_reach`] names it instead).
     reach: ToolReach,
+    /// The session's permission rules, when it has told the registry
+    /// ([`Self::with_denied_outright`]): a tool they refuse every call of is
+    /// not offered — not by `ToolSearch`, not as a "did you mean".
+    denied_by: Option<Arc<PermissionPolicy>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -646,14 +650,32 @@ impl ToolReach {
     }
 }
 
+/// Whether the model is offered the tool it is shown as `name`: this process
+/// reaches it ([`ToolReach`]) and `denied_by` — the session's permission
+/// rules — does not refuse every call to it
+/// ([`PermissionPolicy::denies_every_call`]). A tool not offered is still
+/// called by name, and meets the refusal it always met.
+fn offered(reach: ToolReach, denied_by: Option<&PermissionPolicy>, name: &str) -> bool {
+    reach.offers(name) && !denied_by.is_some_and(|policy| policy.denies_every_call(name))
+}
+
 /// The deferred-tool section of the system prompt, naming what `reach`
 /// offers ([`ToolReach`]).
 #[must_use]
 pub fn deferred_tool_manifest_section(reach: ToolReach) -> String {
+    deferred_tool_manifest_section_for(reach, None)
+}
+
+/// The deferred-tool section of the system prompt, naming what `reach`
+/// offers less the tools `denied_by` refuses every call of — the session's
+/// permission rules, read once when the prompt is built (a rule changed under
+/// a session reaches the line in the next one; its calls are judged live).
+#[must_use]
+pub fn deferred_tool_manifest_section_for(reach: ToolReach, denied_by: Option<&PermissionPolicy>) -> String {
     let names = deferred_tool_names()
         .iter()
         .map(|name| core_types::tool_names::wire_tool_name(name))
-        .filter(|name| reach.offers(name))
+        .filter(|name| offered(reach, denied_by, name))
         .map(|name| {
             DEFERRED_TOOL_HOOKS
                 .iter()
@@ -693,6 +715,7 @@ impl GlobalToolRegistry {
             enforcer: None,
             context: ToolContext::new(),
             reach: ToolReach::here(),
+            denied_by: None,
         }
     }
 
@@ -719,6 +742,7 @@ impl GlobalToolRegistry {
             enforcer: None,
             context: ToolContext::new(),
             reach: ToolReach::here(),
+            denied_by: None,
         })
     }
 
@@ -785,6 +809,15 @@ impl GlobalToolRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = runtime_tools;
         Ok(())
+    }
+
+    /// Withhold from the offer the tools `policy` — the session's permission
+    /// policy, the one its calls are judged by — refuses every call of
+    /// ([`PermissionPolicy::denies_every_call`]).
+    #[must_use]
+    pub fn with_denied_outright(mut self, policy: PermissionPolicy) -> Self {
+        self.denied_by = Some(Arc::new(policy));
+        self
     }
 
     /// Offer tools by `reach` instead of what this process's `PATH` reaches —
@@ -1498,14 +1531,16 @@ impl GlobalToolRegistry {
     }
 
     /// [`Self::searchable_tool_specs`] less the tools this process cannot run
-    /// ([`ToolReach`]): what `ToolSearch` finds and a "did you mean" offers.
-    /// The resolvable set keeps them — a call by name meets the tool's own
-    /// refusal, and history that holds their calls still resolves.
+    /// ([`ToolReach`]) and those the session's rules refuse every call of
+    /// ([`Self::with_denied_outright`]): what `ToolSearch` finds and a "did
+    /// you mean" offers. The resolvable set keeps them — a call by name meets
+    /// the tool's own refusal, and history that holds their calls still
+    /// resolves.
     fn offered_tool_specs(&self) -> Vec<SearchableToolSpec> {
-        let reach = self.reach;
+        let denied_by = self.denied_by.as_deref();
         self.searchable_tool_specs()
             .into_iter()
-            .filter(|spec| reach.offers(&spec.name))
+            .filter(|spec| offered(self.reach, denied_by, &spec.name))
             .collect()
     }
 

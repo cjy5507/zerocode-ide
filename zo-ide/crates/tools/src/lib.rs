@@ -232,7 +232,7 @@ pub use misc_tools::push_notification::{
     PushSurface, PUSH_NOTIFICATION_TOOL,
 };
 pub use registry::{
-    deferred_tool_manifest_section, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition,
+    deferred_tool_manifest_section, deferred_tool_manifest_section_for, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition,
     ToggleableTool, ToggleableToolSource, ToolManifestEntry, ToolReach, ToolRegistry, ToolSource,
     ToolSpec,
 };

@@ -1148,6 +1148,50 @@ fn computer_is_offered_only_where_its_road_is() {
     assert!(typo(everywhere).contains("did you mean `Computer`"), "{}", typo(everywhere));
 }
 
+/// A tool the session's rules refuse every call of is not offered: not in the
+/// deferred line, not by `ToolSearch`, not as a "did you mean" — while a call
+/// by name still resolves (it meets the session's refusal, as it always did),
+/// and a deny with a subject (`WebFetch(…)`) leaves its tool offered. A
+/// benchmark run on 2026-11-14 found `WebSearch` through `ToolSearch` and was
+/// refused five times by its own deny rule.
+#[test]
+fn a_tool_denied_outright_is_not_offered() {
+    let rules = runtime::RuntimePermissionRuleConfig::new(
+        Vec::new(),
+        vec!["WebSearch".to_string(), "WebFetch(https://docs.rs/*)".to_string()],
+        Vec::new(),
+    );
+    let policy = runtime::PermissionPolicy::new(runtime::PermissionMode::DangerFullAccess).with_permission_rules(&rules);
+    let reach = crate::ToolReach::everywhere();
+
+    let open = crate::deferred_tool_manifest_section_for(reach, None);
+    let denied = crate::deferred_tool_manifest_section_for(reach, Some(&policy));
+    assert_eq!(open, crate::deferred_tool_manifest_section(reach), "no rules, the line as before");
+    assert!(open.contains("WebSearch"), "{open}");
+    assert!(!denied.contains("WebSearch"), "{denied}");
+    assert!(denied.contains("WebFetch"), "a deny with a subject leaves the tool offered: {denied}");
+
+    let registry = || GlobalToolRegistry::builtin().with_tool_reach(reach);
+    let withheld = || registry().with_denied_outright(policy.clone());
+    assert_eq!(registry().search("select:WebSearch", 3, None, None).matches, ["WebSearch"]);
+    assert!(withheld().search("select:WebSearch", 3, None, None).matches.is_empty());
+    for query in ["web search", "search the web", "WebSearch"] {
+        let found = withheld().search(query, 10, None, None);
+        assert!(!found.matches.iter().any(|name| name == "WebSearch"), "{query}: {:?}", found.matches);
+    }
+    assert_eq!(withheld().search("select:WebFetch", 3, None, None).matches, ["WebFetch"]);
+    assert!(withheld().resolvable_tool_names().contains("WebSearch"), "a call by name still resolves");
+
+    let typo = |registry: GlobalToolRegistry| {
+        registry
+            .execute("WebSerch", &serde_json::json!({}))
+            .expect_err("no such tool")
+            .to_string()
+    };
+    assert!(typo(registry()).contains("did you mean `WebSearch`"), "{}", typo(registry()));
+    assert!(!typo(withheld()).contains("WebSearch"), "{}", typo(withheld()));
+}
+
 /// The reach is read through the `Computer` tool's own lookup: a search path
 /// that holds the shim reaches it, the same path without it does not.
 #[cfg(unix)]
