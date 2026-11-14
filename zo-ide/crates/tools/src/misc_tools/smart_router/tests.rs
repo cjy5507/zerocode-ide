@@ -137,6 +137,77 @@
         let _ = fs::remove_dir_all(&repository);
     }
 
+    /// The window draws the classifier card from `zerocode_core::jev::ClassifierMode`
+    /// and zo routes on `RouteAutoClassifierMode`: one word read two ways is a
+    /// card that names one mode while zo runs another. `"Probed"` drew
+    /// 「키워드 + 빠른 모델 확인」 while zo routed it as `deterministic` and asked
+    /// no model. Every value a settings file can hold reads as the same mode on
+    /// both sides; what is not said at all is read through zo's own settings
+    /// reader, where only its absence means probed.
+    #[test]
+    fn the_windows_card_reads_the_classifier_word_as_zo_routes_on_it() {
+        use zerocode_core::jev::ClassifierMode;
+        let zo_word = |mode: RouteAutoClassifierMode| match mode {
+            RouteAutoClassifierMode::Off => "off",
+            RouteAutoClassifierMode::Deterministic => "deterministic",
+            RouteAutoClassifierMode::Assisted => "assisted",
+            RouteAutoClassifierMode::Probed => "probed",
+        };
+        let written = [
+            json!("off"),
+            json!("deterministic"),
+            json!("assisted"),
+            json!("probed"),
+            json!(" probed "),
+            json!("\tprobed\n"),
+            json!("Probed"),
+            json!("PROBED"),
+            json!("Off"),
+            json!(" OFF "),
+            json!("Assisted"),
+            json!("Deterministic"),
+            json!(""),
+            json!("   "),
+            json!("x"),
+            json!("probed!"),
+            json!(3),
+            json!(1.5),
+            json!(true),
+            Value::Null,
+            json!(["probed"]),
+            json!({ "mode": "probed" }),
+        ];
+        for value in &written {
+            assert_eq!(
+                ClassifierMode::of(Some(value)).key(),
+                zo_word(RouteAutoClassifierMode::from_settings_value(Some(value))),
+                "the card and zo read `autoClassifier: {value}` as different modes",
+            );
+        }
+
+        let config_home = temp_config_home("classifier-card-unsaid");
+        let repository = temp_config_home("classifier-card-unsaid-cwd");
+        fs::create_dir_all(&repository).expect("repository dir");
+        for document in [
+            json!({}),
+            json!({ "smart": {} }),
+            json!({ "smart": "x" }),
+            json!({ "smart": ["probed"] }),
+        ] {
+            write_settings(&config_home, &document);
+            let zo = with_config_home(&config_home, || {
+                super::settings::read_smart_runtime_settings_for(&repository).expect("settings")
+            });
+            assert_eq!(
+                ClassifierMode::in_settings(&document).key(),
+                zo_word(zo.auto_classifier),
+                "the card and zo read {document} as different modes",
+            );
+        }
+        let _ = fs::remove_dir_all(&config_home);
+        let _ = fs::remove_dir_all(&repository);
+    }
+
     /// Nor does the router put the verify leg on another provider, carry a
     /// turn out of quota on at one, or have the checking roles prefer one,
     /// because a repository said so: a person's `false` stands against its

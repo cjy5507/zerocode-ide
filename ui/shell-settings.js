@@ -7818,7 +7818,7 @@ function initTypeSafeEvents() {
     const mode = event.target.value;
     void runKeyCardStep(CLASSIFIER_CARD, () => invoke("set_route_classifier", { mode }), (state) => {
       if (!state.classifier?.reaches) {
-        return t("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다.");
+        return t("settings.classifier.nowOff", "바꿨습니다 — 키워드 판정만 쓰고, 「모델 선택 판단」도 판단을 요청하지 않습니다.");
       }
       return state.classifier.probes
         ? t("settings.classifier.nowProbes", "이제 빠른 등급 모델에게도 묻습니다.")
@@ -8268,10 +8268,10 @@ function jevSeatChoice(state, seat) {
  * rule the seat switches keep, and for the same reason: the words a classifier
  * setting may hold live in `zerocode_core::jev::ClassifierMode` and are
  * spelled nowhere else. What this page reads off a choice is whether the
- * classifier runs at all, whether it reads markers a person wrote, and whether
- * it calls a probe — and the last of those is also whether the routing seat
- * below is ever asked anything. Each is a card with what it does under its
- * name, so the four are told apart without opening anything. */
+ * classifier asks anything at all, whether it reads markers a person wrote,
+ * and whether it calls a probe. Each is a card with what it does under its
+ * name, so the four are told apart without opening anything; what the routing
+ * seat does under them is a line of its own (`paintClassifierGate`). */
 function paintClassifierChoices(host, classifier) {
   host.replaceChildren();
   for (const choice of classifier.modes ?? []) {
@@ -8279,16 +8279,16 @@ function paintClassifierChoices(host, classifier) {
     let about;
     if (!choice.runs) {
       name = t("settings.classifier.modeOff", "끔");
-      about = t("settings.classifier.offAbout", "자동 라우팅을 쓰지 않습니다.");
+      about = t("settings.classifier.offAbout", "난이도를 정할 때 아무에게도 묻지 않습니다. 모델은 키워드 판정으로 고릅니다.");
     } else if (choice.probes) {
       name = t("settings.classifier.modeProbed", "키워드 + 빠른 모델 확인");
-      about = t("settings.classifier.probedAbout", "빠른 모델에 한 번 더 묻습니다(출력 약 200토큰). 늦거나 실패하면 키워드 판정을 씁니다.");
+      about = t("settings.classifier.probedAbout", "이 세션 공급자의 빠른 모델에 한 번 더 묻습니다(출력 약 200토큰). 늦거나 실패하면 키워드 판정을 씁니다.");
     } else if (choice.markers) {
       name = t("settings.classifier.modeMarkers", "키워드 + 과업 표시");
-      about = t("settings.classifier.markersAbout", "사람이 과업에 적어 둔 표시도 읽습니다. 어디에도 묻지 않습니다.");
+      about = t("settings.classifier.markersAbout", "사람이 과업에 적어 둔 표시도 읽습니다. 빠른 모델에는 묻지 않습니다.");
     } else {
       name = t("settings.classifier.modeWords", "키워드만");
-      about = t("settings.classifier.wordsAbout", "과업 글의 키워드로 정합니다. 어디에도 묻지 않습니다.");
+      about = t("settings.classifier.wordsAbout", "과업 글의 키워드로 정합니다. 빠른 모델에는 묻지 않습니다.");
     }
     const card = workerNode("label", "route-classifier-choice");
     const input = workerNode("input");
@@ -8310,12 +8310,22 @@ function paintClassifierGate(state) {
   const classifier = state.classifier;
   const host = el("route-classifier-choices");
   if (host && classifier) paintClassifierChoices(host, classifier);
+  // The feature is reached under every word but `off` (t-6346); the probe is
+  // a separate question neither line below asks.
+  const asks = Boolean(classifier) && (jevSeatChoice(state, classifier.gates)?.asks ?? false);
   const notice = el("route-classifier-unreachable");
-  if (notice) {
-    // The feature is reached under every word but `off` (t-6346); the
-    // probe is a separate question the warning does not ask.
-    const asks = Boolean(classifier) && (jevSeatChoice(state, classifier.gates)?.asks ?? false);
-    notice.hidden = !(asks && !classifier.reaches);
+  if (notice) notice.hidden = !(asks && !classifier.reaches);
+  // Under a word that reaches it, whether the feature is asked as well — said
+  // as the fact it is now rather than as a condition, because a feature Jev
+  // was never switched on for is off without anybody having turned it off.
+  const seat = el("route-classifier-seat");
+  if (seat) {
+    seat.hidden = !classifier?.reaches;
+    if (!seat.hidden) {
+      seat.textContent = asks
+        ? t("settings.classifier.seatAsks", "「모델 선택 판단」이 꺼져 있지 않아, 그 판단에도 묻습니다.")
+        : t("settings.classifier.seatQuiet", "「모델 선택 판단」은 꺼져 있어 묻지 않습니다.");
+    }
   }
 }
 

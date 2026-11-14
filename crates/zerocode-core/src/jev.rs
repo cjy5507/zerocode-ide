@@ -5087,17 +5087,24 @@ pub const CLASSIFIER_SETTING: &str = "autoClassifier";
 /// How a spawn's difficulty is classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassifierMode {
-    /// Not classified at all; smart routing does not run.
+    /// Nothing is asked about a task: neither the fast-model probe nor the
+    /// routing seat (zo's `smart_router/turn.rs` gate and `spawn_is_read`).
+    /// Routing itself goes on from the keyword tables — zo's audit note for
+    /// this word is `off-provider-free-deterministic-active`; only
+    /// `smart.enabled: false` stops it.
     Off,
-    /// The keyword tables alone — no provider is asked anything.
+    /// The keyword tables; the fast model is not asked. The routing seat still
+    /// is, wherever its own mode asks (t-6346).
     Deterministic,
     /// The keyword tables, plus the lane and shape markers a person wrote into
-    /// the task text. Still provider-free: it is a statement about whose words
-    /// to trust, not about asking anybody.
+    /// the task text. The fast model is not asked — it is a statement about
+    /// whose words to trust — and the routing seat is asked as under
+    /// [`Self::Deterministic`].
     Assisted,
-    /// The keyword tables, plus one bounded Fast-tier probe (~200 output
-    /// tokens) whose verdict is fused on top of them — refining, never
-    /// replacing. The only word under which the chat probe is called.
+    /// The keyword tables, plus one bounded probe (~200 output tokens) of the
+    /// fast model of the provider the session is on, fused on top of them —
+    /// refining, never replacing. The only word under which the chat probe is
+    /// called; the routing seat is asked as under [`Self::Deterministic`].
     Probed,
 }
 
@@ -5116,7 +5123,8 @@ impl ClassifierMode {
         }
     }
 
-    /// Whether the classifier runs at all.
+    /// Whether anything is asked about a task under this word — the probe or
+    /// the routing seat. Under `off` the keyword tables still route.
     #[must_use]
     pub const fn runs(self) -> bool {
         !matches!(self, Self::Off)
@@ -5143,7 +5151,11 @@ impl ClassifierMode {
         self.runs()
     }
 
-    /// The mode `value` names: one of the four words, trimmed, in any case.
+    /// The mode `value` names, read as zo routes on it: one of the four words
+    /// once trimmed, letter for letter
+    /// (`RouteAutoClassifierMode::from_settings_word`). `"Probed"` is not a
+    /// word zo routes on, so it is not one here either — read in any case, the
+    /// card named a probing mode while zo asked no model.
     ///
     /// An ABSENT value is [`Self::Probed`] and an unreadable one is
     /// [`Self::Deterministic`] — zo's own split (`smart_router/settings.rs`:
@@ -5151,6 +5163,7 @@ impl ClassifierMode {
     /// `RouteAutoClassifierMode::from_settings_value`, whose unknown-word
     /// answer is deterministic). The two differ on purpose: nobody has chosen
     /// yet, versus somebody wrote something this reader could not honour.
+    /// zo's `tools` holds the two readers to one table of values.
     #[must_use]
     pub fn of(value: Option<&Value>) -> Self {
         let Some(value) = value else {
@@ -5159,11 +5172,7 @@ impl ClassifierMode {
         value
             .as_str()
             .map(str::trim)
-            .and_then(|word| {
-                Self::ALL
-                    .into_iter()
-                    .find(|mode| mode.key().eq_ignore_ascii_case(word))
-            })
+            .and_then(Self::offered)
             .unwrap_or(Self::Deterministic)
     }
 

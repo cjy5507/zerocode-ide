@@ -1540,9 +1540,19 @@ fn the_classifier_words_are_the_ones_zo_routes_on() {
     );
     assert_eq!(ClassifierMode::of(None), ClassifierMode::Probed);
     assert_eq!(
-        ClassifierMode::of(Some(&json!(" PROBED "))),
+        ClassifierMode::of(Some(&json!(" probed "))),
         ClassifierMode::Probed
     );
+    // zo compares the trimmed word letter for letter, so another case is a
+    // word it does not route on — and the card must not name a probe zo
+    // never calls (zo's `tools` reads one table both ways).
+    for other_case in [" PROBED ", "Probed", "Off", "Assisted"] {
+        assert_eq!(
+            ClassifierMode::of(Some(&json!(other_case))),
+            ClassifierMode::Deterministic,
+            "zo routes `{other_case}` as the provider-free word, and so must the card"
+        );
+    }
     assert_eq!(
         ClassifierMode::of(Some(&json!("surprise"))),
         ClassifierMode::Deterministic,

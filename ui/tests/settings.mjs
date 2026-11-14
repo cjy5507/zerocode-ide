@@ -224,12 +224,13 @@ const CLASSIFIER_MODES = Object.freeze([
   Object.freeze({ mode: "assisted", runs: true, markers: true, probes: false, reaches: true }),
   Object.freeze({ mode: "probed", runs: true, markers: false, probes: true, reaches: true }),
 ]);
-/* An absent key is the probing word; anything nobody reads is the
-   provider-free one (`ClassifierMode::of`). */
+/* An absent key is the probing word; anything zo does not route on — another
+   case, no string at all — is the provider-free one, read the way zo reads it
+   (`ClassifierMode::of` over `RouteAutoClassifierMode::from_settings_value`). */
 const classifierMode = (given) => {
   if (given === undefined) return CLASSIFIER_MODES[3];
-  const word = String(given ?? "").trim().toLowerCase();
-  return CLASSIFIER_MODES.find((choice) => choice.mode === word) ?? CLASSIFIER_MODES[1];
+  if (typeof given !== "string") return CLASSIFIER_MODES[1];
+  return CLASSIFIER_MODES.find((choice) => choice.mode === given.trim()) ?? CLASSIFIER_MODES[1];
 };
 const jevSeatModes = (seat) =>
   seat.modes.split(" ").map((word) =>
@@ -10519,6 +10520,43 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   // Nothing written means the probing word, which is zo's own reading of an
   // absent key — so an untouched machine reaches the seat.
   assertEqual(await chosen(), CLASSIFIER_MODES.at(-1).mode, "an untouched settings file did not read as the probing word");
+  // A word that reaches the seat says whether the seat is asked, as it stands:
+  // Jev was never switched on here, so it is not.
+  const seatLine = pageA.locator("#route-classifier-seat");
+  const seatSays = (key, fallback) => pageA.waitForFunction(
+    ([one, words]) => {
+      const line = document.getElementById("route-classifier-seat");
+      return Boolean(line) && !line.hidden && line.textContent === t(one, words);
+    },
+    [key, fallback],
+    { timeout: UI_TIMEOUT },
+  );
+  await seatSays("settings.classifier.seatQuiet", "「모델 선택 판단」은 꺼져 있어 묻지 않습니다.");
+
+  // A word zo does not route on reads as zo reads it: zo routes `"Probed"` as
+  // the provider-free word and asks no model, so the card stands on
+  // 「키워드만」 rather than promising a fast model nobody asks.
+  const keywordsOnly = CLASSIFIER_MODES.find((choice) => choice.runs && !choice.markers && !choice.probes).mode;
+  backend.zoSettings.smart = { [CLASSIFIER_SETTING]: "Probed" };
+  await pageA.evaluate(() => refreshApiRouters());
+  await pageA.waitForFunction(
+    (word) => document.querySelector("#route-classifier-choices input:checked")?.value === word,
+    keywordsOnly,
+    { timeout: UI_TIMEOUT },
+  );
+  assertEqual(
+    await pageA.evaluate(() => document.querySelector("#route-classifier-choices input:checked")
+      ?.closest(".route-classifier-choice")?.querySelector(".route-classifier-name")?.textContent ?? null),
+    await said("settings.classifier.modeWords", "키워드만"),
+    "a word in another case drew a choice zo does not run",
+  );
+  delete backend.zoSettings.smart;
+  await pageA.evaluate(() => refreshApiRouters());
+  await pageA.waitForFunction(
+    (word) => document.querySelector("#route-classifier-choices input:checked")?.value === word,
+    CLASSIFIER_MODES.at(-1).mode,
+    { timeout: UI_TIMEOUT },
+  );
 
   // A word that calls no probe still reaches the routing seat (t-6346): the
   // change says only that no Fast-tier model is asked, and no warning stands.
@@ -10550,6 +10588,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
     await unreachable.isHidden(),
     "the card warned that a word which reaches the feature cannot reach it",
   );
+  await seatSays("settings.classifier.seatAsks", "「모델 선택 판단」이 꺼져 있지 않아, 그 판단에도 묻습니다.");
 
   // Automatic routing off is the one word nothing reaches the feature under:
   // the change says so, and the card says why the feature asks nothing.
@@ -10560,13 +10599,14 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await pageA.waitForFunction(() => !document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
     await statusSaid(pageA, "route-classifier-status"),
-    await said("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다."),
+    await said("settings.classifier.nowOff", "바꿨습니다 — 키워드 판정만 쓰고, 「모델 선택 판단」도 판단을 요청하지 않습니다."),
   );
   assertEqual(
     (await unreachable.textContent()).trim(),
-    await said("settings.typesafe.routingUnreachable", "자동 라우팅이 꺼져 있어 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다."),
+    await said("settings.typesafe.routingUnreachable", "판정 방식이 「끔」이라 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다."),
     "the classifier does not say why the feature it gates cannot be reached",
   );
+  assert(await seatLine.isHidden(), "the off word, which asks nobody, still says what the seat does under it");
 
   // Put the probing word back and the warning goes with it.
   const probing = CLASSIFIER_MODES.at(-1).mode;
@@ -10578,6 +10618,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
     await statusSaid(pageA, "route-classifier-status"),
     await said("settings.classifier.nowProbes", "이제 빠른 등급 모델에게도 묻습니다."),
   );
+  await seatSays("settings.classifier.seatAsks", "「모델 선택 판단」이 꺼져 있지 않아, 그 판단에도 묻습니다.");
 
   // A refused change keeps the card as it stood.
   backend.typesafeSetFailure = true;

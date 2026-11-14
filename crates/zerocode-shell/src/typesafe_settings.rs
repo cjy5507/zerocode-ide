@@ -3543,6 +3543,17 @@ mod tests {
         assert!(set_classifier(&path, "PROBED").is_err());
         assert_eq!(read().mode, ClassifierMode::Probed.key());
 
+        // A word in another case, written by hand, is not one zo routes on:
+        // zo runs it as the provider-free word and asks no model, so the card
+        // stands there too rather than naming a probe nobody calls.
+        std::fs::write(&path, br#"{"smart":{"autoClassifier":"Probed"}}"#).expect("seed");
+        let other_case = read();
+        assert_eq!(other_case.mode, ClassifierMode::Deterministic.key());
+        assert!(!other_case.probes, "the card names a probe zo never calls");
+        assert!(other_case.reaches);
+        std::fs::remove_file(&path).expect("unsay it");
+        assert_eq!(read().mode, ClassifierMode::Probed.key());
+
         // A written word stands, and nothing else of the file moves.
         std::fs::write(
             &path,

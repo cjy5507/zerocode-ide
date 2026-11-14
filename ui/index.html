@@ -7207,13 +7207,16 @@
             </div>
           </div>
           <div class="route-classifier-choices" id="route-classifier-choices" role="radiogroup" aria-labelledby="route-classifier-title"></div>
+          <!-- Under any word but `off`: whether the feature this classifier
+               gates is asked as well, as it stands now (`paintClassifierGate`). -->
+          <p class="settings-hint" id="route-classifier-seat" hidden></p>
           <!-- Shown by `paintClassifierGate` when the feature this
-               classifier gates asks while automatic routing is off: its
+               classifier gates asks while the classifier is off: its
                mode is one nothing can reach (`ClassifierRow.reaches`). Which feature that is, is
                the backend's answer (`classifier.gates`). -->
           <p class="settings-notice settings-notice--row" id="route-classifier-unreachable" data-jev-unreachable
              data-i18n="settings.typesafe.routingUnreachable" hidden>
-            자동 라우팅이 꺼져 있어 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다.
+            판정 방식이 「끔」이라 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다.
           </p>
           <div class="settings-status" id="route-classifier-status" role="status" aria-live="polite"></div>
         </div>
