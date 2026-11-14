@@ -324,7 +324,8 @@ fmt:
 #   tests of the rest of the workspace — the gate runs those (the last lines say
 #   so). The contracts build the window once, so a first run in a fresh checkout
 #   takes minutes on every core, whichever crate the branch changed; a crate's
-#   integration tests add their own minutes (zo-ide's `tests/` are about 6 min).
+#   integration tests add their own minutes (zo-ide's `tests/` take about 3 min
+#   once built).
 #   Then the Windows build of each workspace the branch changed a Rust source or
 #   manifest of (`changed_crates.py` names it): the gate's own `just win-check`
 #   there, never `win-check-if-available` — whose SKIPPED on a cold target is
