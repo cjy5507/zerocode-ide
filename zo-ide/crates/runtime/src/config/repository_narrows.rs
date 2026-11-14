@@ -16,6 +16,13 @@
 //! helpers of its own; and a `providerAllowlist` of theirs was replaced by
 //! the repository's — by `[]`, which is every provider.
 //!
+//! The same held for three settings beside those (152). `smart.policy` other
+//! than `classic` puts the verify leg and the plan stage on the connected top
+//! tier, which no allowlist bounds; `cache.refresh: true` keeps an idle
+//! conversation's cache warm with requests sent while the person is away;
+//! and a Jev use's word — `smart.jevPatchReview: "on"`, a saved built-in
+//! decision, the switch itself — had a use the person set lower ask again.
+//!
 //! So what such a document says is kept only where it asks no more, and
 //! sends nowhere else, than the person's own documents do. A team can still
 //! switch the routing probe off for its repository, or name the providers
@@ -29,6 +36,9 @@
 
 use std::collections::BTreeMap;
 
+use zerocode_core::jev::{builtin, door, JevMode, JevUse, JEV_USES};
+
+use super::parsers::deep_merge_objects;
 use crate::json::JsonValue;
 use crate::model_router::RouteAutoClassifierMode;
 use crate::ClassifierFallback;
@@ -44,9 +54,12 @@ struct Narrowed {
     asks: fn(Option<&JsonValue>) -> u8,
 }
 
-const NARROWED: [Narrowed; 7] = [
+const NARROWED: [Narrowed; 8] = [
     Narrowed { key: "enabled", asks: switch },
     Narrowed { key: "autoClassifier", asks: classifier },
+    // Whether the verify leg and the plan stage go to the router's pick,
+    // inside the allowlist, or to the connected top tier.
+    Narrowed { key: "policy", asks: smart_policy },
     // Whether a turn the provider refused goes on at another model: never,
     // after the person said yes, or at once.
     Narrowed { key: "classifierFallback", asks: refusal_fallback },
@@ -132,6 +145,130 @@ fn host_orchestration(said: Option<&JsonValue>) -> u8 {
     u8::from(!keeps_out)
 }
 
+/// `smart.policy` as its reader takes it (`SmartPolicy::from_settings_value`):
+/// `classic`, trimmed and as written, is Classic; anything else — another
+/// word, another case, nothing — is Architect.
+fn smart_policy(said: Option<&JsonValue>) -> u8 {
+    u8::from(said.and_then(JsonValue::as_str).map(str::trim) != Some("classic"))
+}
+
+/// The conversation cache's settings, beside `smart`.
+const CACHE: &str = "cache";
+
+/// `cache.refresh`: whether an idle conversation's cache is kept warm with
+/// requests sent while the person is away. On unless a boolean says off.
+const CACHE_REFRESH: &str = "refresh";
+
+/// Takes a repository's `cache.refresh` out where it would refresh what the
+/// person's own documents switched off, and a `cache` that is no object —
+/// it would replace the person's whole `cache` and read as the defaults.
+fn narrow_the_cache(
+    repository: &mut BTreeMap<String, JsonValue>,
+    persons: &BTreeMap<String, JsonValue>,
+) {
+    match repository.get_mut(CACHE) {
+        None => {}
+        Some(JsonValue::Object(cache)) => {
+            let own = switch(
+                persons
+                    .get(CACHE)
+                    .and_then(JsonValue::as_object)
+                    .and_then(|cache| cache.get(CACHE_REFRESH)),
+            );
+            if cache.get(CACHE_REFRESH).is_some_and(|said| switch(Some(said)) > own) {
+                cache.remove(CACHE_REFRESH);
+            }
+        }
+        Some(_) => {
+            repository.remove(CACHE);
+        }
+    }
+}
+
+/// How far a Jev use goes in `mode`: `off` asks nothing, `shadow` asks and
+/// records, `auto` asks and acts once its own evidence stands, `on` asks
+/// and acts.
+fn reach(mode: JevMode) -> u8 {
+    match mode {
+        JevMode::Off => 0,
+        JevMode::Shadow => 1,
+        JevMode::Auto => 2,
+        JevMode::On => 3,
+    }
+}
+
+/// A settings document as `zerocode_core::jev` reads one.
+fn as_read(document: &BTreeMap<String, JsonValue>) -> Option<serde_json::Value> {
+    serde_json::from_str(&JsonValue::Object(document.clone()).render()).ok()
+}
+
+/// Takes out of a repository's `smart` what would have a Jev use go further
+/// than the person's own documents have it go: a switch turned on where
+/// theirs is off (and a `jev` that is no object, which would replace
+/// theirs), and for each use read further than theirs read it, the
+/// repository's word for the use, for the use it was split from, and its
+/// saved built-in decision. A use is read the way its reader reads a whole
+/// document (`JevUse::chosen_mode_in`), so a word of the wrong kind counts
+/// as what it reads as.
+fn narrow_the_jev_uses(
+    repository: &mut BTreeMap<String, JsonValue>,
+    persons: &BTreeMap<String, JsonValue>,
+) {
+    let Some(JsonValue::Object(smart)) = repository.get_mut(SMART) else {
+        return;
+    };
+    match smart.get_mut(door::JEV_SETTINGS_KEY) {
+        None => {}
+        Some(JsonValue::Object(jev)) => {
+            let own = persons
+                .get(SMART)
+                .and_then(JsonValue::as_object)
+                .and_then(|smart| smart.get(door::JEV_SETTINGS_KEY))
+                .and_then(JsonValue::as_object)
+                .and_then(|jev| jev.get(door::ENABLED_SETTING))
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false);
+            if !own && jev.get(door::ENABLED_SETTING).and_then(JsonValue::as_bool) == Some(true) {
+                jev.remove(door::ENABLED_SETTING);
+            }
+        }
+        Some(_) => {
+            smart.remove(door::JEV_SETTINGS_KEY);
+        }
+    }
+    // A document that names no use, no saved decision and no switch reads
+    // every use as the person's documents do: nothing to weigh.
+    let names_a_use = smart.contains_key(door::JEV_SETTINGS_KEY)
+        || smart.contains_key(builtin::SETTING)
+        || JEV_USES.iter().any(|seat| smart.contains_key(seat.setting));
+    if !names_a_use {
+        return;
+    }
+    let mut merged = persons.clone();
+    deep_merge_objects(&mut merged, repository);
+    let further: Vec<&JevUse> = match (as_read(persons), as_read(&merged)) {
+        (Some(own), Some(merged)) => JEV_USES
+            .iter()
+            .filter(|seat| reach(seat.chosen_mode_in(&merged)) > reach(seat.chosen_mode_in(&own)))
+            .collect(),
+        // A document that does not read back is not read for the person:
+        // every word of the repository's for a use goes.
+        _ => JEV_USES.iter().collect(),
+    };
+    let Some(JsonValue::Object(smart)) = repository.get_mut(SMART) else {
+        return;
+    };
+    for seat in further {
+        smart.remove(seat.setting);
+        if let Some(follows) = seat.follows {
+            smart.remove(follows);
+        }
+        if let Some(JsonValue::Object(saved)) = smart.get_mut(builtin::SETTING) {
+            saved.remove(seat.id);
+        }
+    }
+}
+
 fn classifier(said: Option<&JsonValue>) -> u8 {
     said.map_or(RouteAutoClassifierMode::UNSAID, |said| {
         RouteAutoClassifierMode::from_settings_word(said.as_str())
@@ -139,9 +276,10 @@ fn classifier(said: Option<&JsonValue>) -> u8 {
     .asks()
 }
 
-/// Takes out of a repository's document every `smart` key that would have the
-/// session ask more, or send to a provider it does not send to, than
-/// `persons` — the person's own documents, merged — says it does.
+/// Takes out of a repository's document every `smart` key, Jev word and
+/// `cache` key that would have the session ask more, or send to a provider
+/// it does not send to, than `persons` — the person's own documents, merged —
+/// says it does.
 pub(super) fn only_narrows(
     repository: &mut BTreeMap<String, JsonValue>,
     persons: &BTreeMap<String, JsonValue>,
@@ -164,6 +302,8 @@ pub(super) fn only_narrows(
             repository.remove(SMART);
         }
     }
+    narrow_the_jev_uses(repository, persons);
+    narrow_the_cache(repository, persons);
 }
 
 #[cfg(test)]
@@ -365,5 +505,151 @@ mod tests {
         let mut repository = untouched.clone();
         only_narrows(&mut repository, &document(r#"{"smart":{"autoClassifier":"off"}}"#));
         assert_eq!(repository, untouched);
+    }
+
+    #[test]
+    fn a_repository_may_keep_the_verify_leg_to_the_router_and_not_send_it_to_the_top_tier() {
+        let says = |word: &str| format!(r#"{{"smart":{{"policy":{word}}}}}"#);
+        // (the person's own, the repository's, whether the repository's stays)
+        for (persons, repository, stays) in [
+            (r#""classic""#, r#""architect""#, false),
+            (r#""classic""#, r#""Classic""#, false),
+            (r#""classic""#, "null", false),
+            (r#""classic""#, "7", false),
+            (r#""classic""#, r#"" classic ""#, true),
+            (r#""architect""#, r#""classic""#, true),
+            (r#""architect""#, r#""architect""#, true),
+        ] {
+            assert_eq!(kept(&says(persons), &says(repository), "policy"), stays, "{persons} / {repository}");
+        }
+        // A person who said nothing is on Architect already.
+        assert!(kept("{}", &says(r#""architect""#), "policy"));
+    }
+
+    fn cache_after(persons: &str, repository: &str) -> Option<BTreeMap<String, JsonValue>> {
+        let mut repository = document(repository);
+        only_narrows(&mut repository, &document(persons));
+        repository.get(CACHE).and_then(JsonValue::as_object).cloned()
+    }
+
+    #[test]
+    fn a_repository_may_stop_an_idle_conversations_refreshes_and_not_start_them() {
+        let off = r#"{"cache":{"refresh":false}}"#;
+        for (persons, repository, stays) in [
+            (off, r#"{"cache":{"refresh":true}}"#, false),
+            (off, r#"{"cache":{"refresh":"no"}}"#, false),
+            (off, r#"{"cache":{"refresh":false}}"#, true),
+            ("{}", r#"{"cache":{"refresh":false}}"#, true),
+            ("{}", r#"{"cache":{"refresh":true}}"#, true),
+        ] {
+            let cache = cache_after(persons, repository).unwrap_or_default();
+            assert_eq!(cache.contains_key(CACHE_REFRESH), stays, "{persons} / {repository}");
+        }
+        // The cache's lifetime sends nothing of its own; it stays as said.
+        let cache = cache_after(off, r#"{"cache":{"refresh":true,"anchorTtl":"1h"}}"#).expect("the cache stays");
+        assert_eq!(cache.get("anchorTtl").and_then(JsonValue::as_str), Some("1h"));
+        for repository in [r#"{"cache":"x"}"#, r#"{"cache":null}"#, r#"{"cache":[]}"#] {
+            let mut said = document(repository);
+            only_narrows(&mut said, &document(off));
+            assert!(!said.contains_key(CACHE), "{repository} would replace the person's whole `cache`");
+        }
+    }
+
+    /// A Jev use that offers `off`, `shadow` and `on`, and follows no other.
+    fn a_use_of_every_reach() -> &'static JevUse {
+        JEV_USES
+            .iter()
+            .find(|seat| {
+                seat.follows.is_none()
+                    && [JevMode::Off, JevMode::Shadow, JevMode::On].iter().all(|mode| seat.modes.contains(mode))
+            })
+            .expect("a use offering off, shadow and on")
+    }
+
+    /// The repository's `smart` once read beside the person's documents.
+    fn smart_after(persons: &serde_json::Value, repository: &serde_json::Value) -> BTreeMap<String, JsonValue> {
+        let mut repository = document(&repository.to_string());
+        only_narrows(&mut repository, &document(&persons.to_string()));
+        repository
+            .get(SMART)
+            .and_then(JsonValue::as_object)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_repository_may_set_a_jev_use_lower_and_never_further() {
+        let seat = a_use_of_every_reach();
+        let switched_on = |word: Option<JevMode>| {
+            let mut smart = serde_json::json!({ "jev": { "enabled": true } });
+            if let Some(mode) = word {
+                smart[seat.setting] = serde_json::json!(mode.key());
+            }
+            serde_json::json!({ "smart": smart })
+        };
+        let says = |mode: JevMode| serde_json::json!({ "smart": { seat.setting: mode.key() } });
+        // (the person's own word, the repository's, whether the repository's stays)
+        for (own, theirs, stays) in [
+            (Some(JevMode::Off), JevMode::On, false),
+            (Some(JevMode::Off), JevMode::Shadow, false),
+            (Some(JevMode::Shadow), JevMode::On, false),
+            (Some(JevMode::On), JevMode::Shadow, true),
+            (Some(JevMode::On), JevMode::Off, true),
+            (Some(JevMode::Off), JevMode::Off, true),
+        ] {
+            let smart = smart_after(&switched_on(own), &says(theirs));
+            assert_eq!(smart.contains_key(seat.setting), stays, "{} {own:?} / {theirs:?}", seat.id);
+        }
+        // Nothing of the person's: Jev is off, and every use with it.
+        assert!(!smart_after(&serde_json::json!({}), &says(JevMode::Shadow)).contains_key(seat.setting));
+        // A word the use does not offer reads as `off`, and may stand.
+        let odd = serde_json::json!({ "smart": { seat.setting: "louder" } });
+        assert!(smart_after(&serde_json::json!({}), &odd).contains_key(seat.setting));
+    }
+
+    #[test]
+    fn a_repository_does_not_switch_jev_on_for_a_person_who_has_it_off() {
+        let on = serde_json::json!({ "smart": { "jev": { "enabled": true, "dailyLimit": 3 } } });
+        let smart = smart_after(&serde_json::json!({}), &on);
+        let jev = smart.get("jev").and_then(JsonValue::as_object).expect("the rest of `jev` stays");
+        assert!(!jev.contains_key("enabled"), "{jev:?}");
+        // Off, it may say.
+        let off = serde_json::json!({ "smart": { "jev": { "enabled": false } } });
+        let persons = serde_json::json!({ "smart": { "jev": { "enabled": true } } });
+        let jev = smart_after(&persons, &off).get("jev").and_then(JsonValue::as_object).cloned().expect("jev");
+        assert_eq!(jev.get("enabled").and_then(JsonValue::as_bool), Some(false));
+        for odd in [serde_json::json!("x"), serde_json::json!(null), serde_json::json!([])] {
+            let smart = smart_after(&persons, &serde_json::json!({ "smart": { "jev": odd } }));
+            assert!(!smart.contains_key("jev"), "{odd} would replace the person's whole `jev`");
+        }
+    }
+
+    #[test]
+    fn a_repositorys_saved_decision_or_older_word_does_not_take_a_use_further() {
+        let off = serde_json::json!({ "smart": { "jev": { "enabled": true } } });
+        // A use a saved built-in decision can set: the first one that reads
+        // `on` from a decision saying so.
+        let decided = JEV_USES
+            .iter()
+            .find(|seat| {
+                let root = serde_json::json!({ "smart": { builtin::SETTING: { seat.id: { "mode": "on" } } } });
+                seat.chosen_mode_in(&root) == JevMode::On
+            })
+            .expect("a use a saved decision sets");
+        let mut persons = off.clone();
+        persons["smart"][decided.setting] = serde_json::json!("off");
+        let repository = serde_json::json!({ "smart": { builtin::SETTING: { decided.id: { "mode": "on" } } } });
+        let smart = smart_after(&persons, &repository);
+        let saved = smart.get(builtin::SETTING).and_then(JsonValue::as_object).cloned().unwrap_or_default();
+        assert!(!saved.contains_key(decided.id), "{} {saved:?}", decided.id);
+
+        // A use split from another reads the older use's word while it has
+        // none of its own: the repository's older word is taken out with it.
+        let split = JEV_USES.iter().find(|seat| seat.follows.is_some()).expect("a use split from another");
+        let older = split.follows.expect("its older use");
+        let mut persons = off;
+        persons["smart"][older] = serde_json::json!("off");
+        let repository = serde_json::json!({ "smart": { older: "on" } });
+        assert!(!smart_after(&persons, &repository).contains_key(older), "{} follows {older}", split.id);
     }
 }
