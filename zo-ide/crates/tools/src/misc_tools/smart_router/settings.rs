@@ -758,8 +758,16 @@ pub(super) fn read_smart_runtime_settings_for(cwd: &Path) -> Option<SmartRuntime
         .and_then(|value| u8::try_from(value).ok())
         .unwrap_or(DEFAULT_HEADROOM_PENALTY_THRESHOLD);
     let plan = PlanShadowSettings::from_settings_value(smart.and_then(|smart| smart.get("plan")));
-    let (subagents, roles) = configured_overrides(&root);
+    let (mut subagents, mut roles) = configured_overrides(&root);
     let (own_subagents, own_roles) = configured_overrides(&persons);
+    // A person's own pin or selector stands as they wrote it. The merge goes
+    // key by key, so a repository's `{"mode": "auto"}` over their pin read as
+    // no pin at all, a pin of its own over theirs as the repository's, and a
+    // `modelRouter` or `roles` that is no object as none of theirs; read off
+    // the person's documents, keyed as the router keys them, theirs is put
+    // back over whatever the merge left.
+    subagents.extend(own_subagents.iter().map(|(key, rule)| (key.clone(), rule.clone())));
+    roles.extend(own_roles.iter().map(|(key, rule)| (key.clone(), rule.clone())));
     let persons_deep_tier =
         deep_tier_models_from_smart(persons.get("smart").and_then(Value::as_object));
     Some(SmartRuntimeSettings {

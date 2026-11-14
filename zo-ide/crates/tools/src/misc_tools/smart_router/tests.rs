@@ -302,6 +302,34 @@
         json!({ "modelRouter": { "roles": { role: { "mode": "pinned", "model": model } } } })
     }
 
+    /// A person's own pin stands as they wrote it: a repository's document
+    /// can neither change it nor take it away (152, review t-107693 D). The
+    /// merge goes key by key, so `{"mode": "auto"}` over a pin read as none,
+    /// and a `modelRouter` or `roles` that is no object wiped the person's.
+    #[test]
+    fn a_repository_neither_changes_nor_takes_away_a_persons_pin() {
+        let persons = pinned("verifier", "Verifier/Model-X");
+        let theirs = Some(runtime::RoleOverride::Pin("Verifier/Model-X".to_string()));
+        for (at, repository) in [
+            json!({ "modelRouter": { "roles": { "verifier": { "mode": "auto" } } } }),
+            json!({ "modelRouter": { "roles": { "verifier": { "mode": "deleted" } } } }),
+            json!({ "modelRouter": { "roles": { "verifier": { "mode": "sideways" } } } }),
+            json!({ "modelRouter": { "roles": { "verifier": "x" } } }),
+            json!({ "modelRouter": { "roles": [] } }),
+            json!({ "modelRouter": "x" }),
+            json!({ "modelRouter": { "roles": { "verifier": { "mode": "pinned", "model": "Other/Model" } } } }),
+            json!({ "modelRouter": { "roles": { "Verifier": { "mode": "pinned", "model": "Other/Model" } } } }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            in_a_repository(&format!("persons-pin-stands-{at}"), &persons, &repository, |settings| {
+                assert_eq!(settings.roles.get("verifier"), theirs.as_ref(), "{repository}");
+                assert!(settings.repository_roles.is_empty(), "{repository}");
+            });
+        }
+    }
+
     /// A pin, and a `deepTierModels` list, are the person's selection only
     /// where the person's own documents say them: what a repository's
     /// committed settings added or changed is told apart, and what both say
@@ -333,8 +361,12 @@
         });
         let keys = |keys: &[&str]| keys.iter().map(ToString::to_string).collect::<std::collections::BTreeSet<_>>();
         in_a_repository("pins-told-apart", &persons, &repository, |settings| {
-            assert_eq!(settings.repository_roles, keys(&["coding", "writing"]));
-            assert_eq!(settings.repository_subagents, keys(&[explore.as_str()]));
+            // The repository's own pin is its; where it changed one of the
+            // person's, the person's stands (152).
+            assert_eq!(settings.repository_roles, keys(&["coding"]));
+            assert!(settings.repository_subagents.is_empty());
+            assert_eq!(settings.roles.get("writing"), Some(&runtime::RoleOverride::Pin("Role/Model-Y".to_string())));
+            assert_eq!(settings.subagents.get(&explore), Some(&runtime::RoleOverride::Pin("Subagent/Model-Z".to_string())));
             assert!(settings.roles.contains_key("verifier"), "said alike: the person's, and routed by");
             assert_eq!(settings.persons_deep_tier_models, [api::resolve_catalog_alias("claude-opus-5")]);
             assert_eq!(settings.deep_tier_models, [api::resolve_catalog_alias("gpt-5.6-sol")], "the pool is the merged list");
