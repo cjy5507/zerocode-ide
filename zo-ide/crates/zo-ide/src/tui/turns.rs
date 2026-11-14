@@ -348,10 +348,11 @@ impl LiveEntry {
 }
 
 /// Render an open `ToolGroup`'s live entries within an optional row `budget`.
-/// When `entries` exceed `budget`, running header rows and failed calls (up to
-/// half the budget) stay visible, oldest tail lines of a running command are
-/// trimmed before its call row is ever dropped, and remaining space goes to
-/// the newest calls under a single `… N earlier` count of hidden entries.
+/// When `entries` exceed `budget`, the newest running call header and failed
+/// calls (newest first, up to half the budget) stay visible, a floor of live
+/// output tail lines is reserved for the newest running command with output,
+/// and remaining space goes to the newest calls under a single `… N earlier`
+/// count of hidden entries.
 pub(super) fn render_live_entries(
     entries: &[LiveEntry],
     width: usize,
@@ -368,8 +369,7 @@ pub(super) fn render_live_entries(
         return rows;
     };
     let budget = budget.max(1);
-    let (keep, tail_alloc, used) = select_live_entries(entries, budget);
-    let hidden = keep.iter().filter(|k| !**k).count();
+    let (keep, tail_alloc, used, hidden) = select_live_entries(entries, budget);
     let mut rows = Vec::with_capacity(budget);
     if hidden > 0 && used < budget {
         let lead = if hangs { glyphs.result_rest } else { glyphs.result_first };
@@ -384,16 +384,15 @@ pub(super) fn render_live_entries(
     rows
 }
 
-fn select_live_entries(entries: &[LiveEntry], budget: usize) -> (Vec<bool>, Vec<usize>, usize) {
+fn select_live_entries(entries: &[LiveEntry], budget: usize) -> (Vec<bool>, Vec<usize>, usize, usize) {
     let mut keep = vec![false; entries.len()];
     let mut kept_count = 0usize;
     let mut used = 0usize;
 
     // 1. Guarantee the newest running call's header row first so an active
     //    spinner/command never disappears even in a 1-row budget.
-    let newest_running = entries.iter().enumerate().rev().find(|(_, entry)| entry.is_running()).map(|(idx, _)| idx);
-    if let Some(idx) = newest_running {
-        let cost = entries[idx].base_cost();
+    if let Some((idx, entry)) = entries.iter().enumerate().rev().find(|(_, entry)| entry.is_running()) {
+        let cost = entry.base_cost();
         if cost <= budget {
             keep[idx] = true;
             kept_count += 1;
@@ -402,7 +401,8 @@ fn select_live_entries(entries: &[LiveEntry], budget: usize) -> (Vec<bool>, Vec<
     }
 
     // 2. Pin failed calls (newest first) within half the budget (at least 2
-    //    rows when affordable so a 1-step failure + reason fits), as TurnFold does.
+    //    rows when affordable so a 1-step failure + reason fits), stopping at
+    //    the first failure that does not fit, as TurnFold::live_rows does.
     let fail_cap = (budget / 2).max(2).min(budget);
     let mut fail_used = 0usize;
     for (idx, entry) in entries.iter().enumerate().rev().filter(|(_, entry)| entry.is_failed()) {
@@ -416,6 +416,8 @@ fn select_live_entries(entries: &[LiveEntry], budget: usize) -> (Vec<bool>, Vec<
             kept_count += 1;
             used += cost;
             fail_used += cost;
+        } else {
+            break;
         }
     }
 
@@ -435,21 +437,25 @@ fn select_live_entries(entries: &[LiveEntry], budget: usize) -> (Vec<bool>, Vec<
         }
     }
 
-    // 3b. Reserve a floor of live tail lines for the newest running command so
-    //     finished sibling calls cannot starve active command output to zero.
-    let tail_reserve = newest_running
-        .and_then(|idx| match &entries[idx] {
-            LiveEntry::Running { tail, .. } if keep[idx] && !tail.is_empty() => {
-                let avail = budget.saturating_sub(used + usize::from(kept_count < entries.len()));
-                if avail == 0 {
-                    None
-                } else {
-                    Some(tail.len().min((avail / 2).max(1)))
-                }
-            }
+    // 3b. Reserve a floor of live tail lines for the newest kept running
+    //     command that actually has output, so finished sibling calls and
+    //     queued quiet calls behind it cannot starve its output to zero.
+    let tail_reserve = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(idx, entry)| match entry {
+            LiveEntry::Running { tail, .. } if keep[idx] && !tail.is_empty() => Some(tail.len()),
             _ => None,
         })
-        .unwrap_or(0);
+        .map_or(0, |tail_len| {
+            let avail = budget.saturating_sub(used + usize::from(kept_count < entries.len()));
+            if avail == 0 {
+                0
+            } else {
+                tail_len.min((avail / 2).max(1))
+            }
+        });
 
     // 3c. Fill remaining budget from newest unkept entries backwards, stopping
     //     at the first entry that does not fit (matching TurnFold::live_rows) so
@@ -483,7 +489,7 @@ fn select_live_entries(entries: &[LiveEntry], budget: usize) -> (Vec<bool>, Vec<
             tail_left -= take;
         }
     }
-    (keep, tail_alloc, used)
+    (keep, tail_alloc, used, hidden)
 }
 
 fn push_live_entry(
@@ -1173,9 +1179,48 @@ mod tests {
         ];
         let rows = plain(&render_live_entries(&entries, 98, false, Some(10)));
         assert!(rows.len() <= 10, "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("2 earlier")), "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("kept_fail_1.rs")), "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("kept_fail_2.rs")), "{rows:#?}");
         assert!(
             !rows.iter().any(|row| row.contains("old_ok.rs")),
             "older ok step must not jump ahead of newer hidden failure: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn render_live_entries_reserves_tail_even_when_quiet_call_is_queued_behind_command() {
+        use super::{render_live_entries, LiveEntry};
+        use crate::tui::ansi::Span;
+        let mut entries: Vec<LiveEntry> = (0..5)
+            .map(|i| LiveEntry::Step(step(StepKind::Read, "Read", &format!("src/f{i}.rs"))))
+            .collect();
+        entries.push(LiveEntry::Running {
+            spinner: Span::raw("⠋"),
+            verb: "Run".to_string(),
+            target: "cargo test".to_string(),
+            address: false,
+            note: None,
+            tail: ["t1", "t2", "t3", "t4"]
+                .into_iter()
+                .map(|line| Line::from_text(format!("    │ {line}")))
+                .collect(),
+        });
+        entries.push(LiveEntry::Running {
+            spinner: Span::raw("⠋"),
+            verb: "Run".to_string(),
+            target: "git status".to_string(),
+            address: false,
+            note: None,
+            tail: Vec::new(),
+        });
+        let rows = plain(&render_live_entries(&entries, 98, false, Some(7)));
+        assert_eq!(rows.len(), 7, "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("Run cargo test")), "{rows:#?}");
+        assert!(rows.iter().any(|row| row.contains("Run git status")), "{rows:#?}");
+        assert!(
+            rows.iter().any(|row| row.ends_with("│ t4")),
+            "quiet queued call behind command must not starve command tail: {rows:#?}"
         );
     }
 }
