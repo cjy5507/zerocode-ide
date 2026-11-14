@@ -136,7 +136,7 @@ class RoundTripTasks(unittest.TestCase):
         right = 'name = "demo"\nhost = "127.0.0.1"\nport = 9090\ntimeout_secs = 30\n'
         # The bytes an edit leaves, `\n` as written: text mode would write
         # `\r\n` on Windows, which the verifier rightly reads as every line changed.
-        edited = lambda text: lambda work: (work / "config.toml").write_text(text, newline="")
+        edited = lambda text: lambda work: (work / "config.toml").write_bytes(text.encode())
         self.assertTrue(self.judged(task, "done", edited(right)))
         self.assertFalse(self.judged(task, "done"), "the untouched file is not the edit")
         self.assertFalse(self.judged(task, "done", edited(right.replace("30", "60"))), "a second line changed")
