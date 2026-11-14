@@ -73,6 +73,10 @@ const ACROSS_WORDS = 26;
 const ACROSS_READ_LEAST_COLS = 20;
 
 const WIDE_RIG = "__WIDE_GLYPH_RIG__";
+// A page language whose fallback face for Han, kana and a full-width letter is
+// not Korean's: with it the page draws them in another face than a Mac whose
+// language is Korean would pick (Hiragino against Apple SD Gothic Neo).
+const OTHER_LANGUAGE = "ja";
 
 async function standRig(page) {
   return page.evaluate(async ({ WIDE_RIG, WIDE_KINDS, BAR_COLOURS, RIDING_WORDS, UNDERLINE_PAINT, ACROSS_WORDS, UNDERLINE_ROWS }) => {
@@ -200,6 +204,39 @@ async function standRig(page) {
     };
     await feed();
   }, { WIDE_RIG, WIDE_KINDS, BAR_COLOURS, RIDING_WORDS, UNDERLINE_PAINT, ACROSS_WORDS, UNDERLINE_ROWS });
+}
+
+/* Row 2's bars under a page language that is not the system's (2026-11-13: on
+ * a CI runner in English every column after a Han character, kana or a
+ * full-width letter moved, because the glyph was measured in the system's
+ * fallback face and drawn in the page's). The page's language is set once at
+ * load in the window; here it moves under a painted screen, so the screen is
+ * measured and the frame fed again, and both are given back after. */
+async function readOtherLanguage(page) {
+  return page.evaluate(async ({ WIDE_RIG, WIDE_KINDS, OTHER_LANGUAGE }) => {
+    const rig = window[WIDE_RIG];
+    const { view } = rig;
+    const root = document.documentElement;
+    const was = root.lang;
+    const shiftsNow = () => {
+      const cell = view.cell.width;
+      const left = rig.rowAt(0).getBoundingClientRect().left;
+      const bars = [...rig.rowAt(2).querySelectorAll("span")].filter((span) => span.textContent === "|");
+      return bars.map((span, at) => span.getBoundingClientRect().left - left - (at * 3 + 2) * cell);
+    };
+    const drawn = () => Object.fromEntries([...WIDE_KINDS].map((ch) => [ch, rig.natural(ch)]));
+    const home = drawn();
+    root.lang = OTHER_LANGUAGE;
+    try {
+      await rig.settle();
+      await rig.feed();
+      return { language: OTHER_LANGUAGE, home, drawn: drawn(), cell: view.cell.width, shifts: shiftsNow() };
+    } finally {
+      root.lang = was;
+      await rig.settle();
+      await rig.feed();
+    }
+  }, { WIDE_RIG, WIDE_KINDS, OTHER_LANGUAGE });
 }
 
 /* The rows as they stand under the window's own font. */
@@ -542,6 +579,7 @@ export async function testWideGlyphs(page, ok) {
   let caret;
   let underlines;
   let reach;
+  let other;
   try {
     rows = await readRows(page);
     const picture = await page.screenshot({ clip: rows.clip });
@@ -550,6 +588,7 @@ export async function testWideGlyphs(page, ok) {
     underlines = await readUnderlines(page);
     reach = await readUnderlineReach(page);
     changes = await readChanges(page);
+    other = await readOtherLanguage(page);
   } finally {
     await page.evaluate((WIDE_RIG) => window[WIDE_RIG]?.leave(), WIDE_RIG);
   }
@@ -562,6 +601,10 @@ export async function testWideGlyphs(page, ok) {
   ok("every kind of double-width glyph — Hangul, Han, kana, a full-width letter, a picture — ends on its own column",
     rows.bars === [...WIDE_KINDS].length && rows.shifts.every((shift) => Math.abs(shift) < COLUMN_SLACK_PX),
     JSON.stringify({ cell: rows.cell, shifts: rows.shifts.map((shift) => Math.round(shift * 100) / 100) }));
+
+  ok("a Han character, kana and a full-width letter end on their own columns when the page's language is not the system's",
+    other.shifts.length === [...WIDE_KINDS].length && other.shifts.every((shift) => Math.abs(shift) < COLUMN_SLACK_PX),
+    JSON.stringify({ ...other, shifts: other.shifts.map((shift) => Math.round(shift * 100) / 100) }));
 
   // What is left between two glyphs is tracking; the rest of the two columns is glyph.
   const filled = 1 - rows.fit.tracking / (2 * rows.cell);
