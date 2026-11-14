@@ -50,10 +50,11 @@ pub const LIVE_ROWS_MAX: usize = 16;
 pub fn live_room(pane_rows: usize) -> usize {
     (pane_rows / 2).clamp(LIVE_ROWS_MIN, LIVE_ROWS_MAX)
 }
-/// How many edited files and how many passed commands a fold names; the rest
-/// are counted.
+/// How many edited files, passed commands, and failed steps a fold names;
+/// the rest are counted.
 const NAMED_EDITS: usize = 4;
 const NAMED_RUNS: usize = 2;
+const NAMED_FAILURES: usize = 4;
 
 /// What a step did, as the fold groups it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,18 +581,36 @@ fn call_row(lead: Vec<Span>, verb: &str, target: &str, address: bool, style: Sty
 }
 
 /// A failed step's call in the fold, in the words its row said while the turn
-/// ran — `Run(cat a.txt)`, the verb alone for a call with no target — so the
-/// call reads the same once it is said (`Run cat a.txt` before, and
-/// `almanac · whoami   failed` with a space for the target it did not have).
-fn call_words(step: &Step) -> Vec<Span> {
+/// ran — `Run(cat a.txt)`, the verb alone for a call with no target — cutting
+/// `target` before `)` and `tail` so the closing paren and `exit N`/`failed`
+/// always stay on the row (`avail` is the pane width minus the hung lead).
+fn failed_cell_spans(step: &Step, avail: usize) -> Vec<Span> {
+    let tail = step_tail(step, false, false);
     if step.target.is_empty() {
-        return vec![Span::dim(step.verb.clone())];
+        let mut row = vec![Span::dim(step.verb.clone())];
+        row.extend(tail);
+        return row;
     }
-    vec![
-        Span::dim(super::tools::call_opening(&step.verb)),
-        Span::raw(step.target.clone()),
-        Span::dim(super::tools::call_closing()),
-    ]
+    let opening = super::tools::call_opening(&step.verb);
+    let closing = super::tools::call_closing();
+    let fixed = super::ansi::str_width(&opening)
+        + super::ansi::str_width(closing)
+        + tail.iter().map(Span::width).sum::<usize>();
+    let budget = avail.saturating_sub(fixed).max(1);
+    let target = if super::ansi::str_width(&step.target) <= budget {
+        step.target.clone()
+    } else if step.kind == StepKind::Fetch {
+        super::paths::center_truncate_path(&step.target, budget)
+    } else {
+        Line::new(vec![Span::raw(step.target.clone())]).truncated(budget).plain()
+    };
+    let mut row = vec![
+        Span::dim(opening),
+        Span::raw(target),
+        Span::dim(closing.to_string()),
+    ];
+    row.extend(tail);
+    row
 }
 
 /// How much deeper than its step the row that says why it failed stands —
@@ -660,16 +679,23 @@ pub fn cell(steps: &[Step], width: usize, now: Instant) -> Vec<Line> {
     // the pane's edge, so a wide pane does not cut what it has room for.
     let column = super::style::current().reading_width(width);
     let glyphs = super::style::glyphs();
+    let avail = width.saturating_sub(super::ansi::str_width(glyphs.result_first));
     let mut body: Vec<Vec<Span>> = Vec::new();
     body.extend(looked_row(steps));
     body.extend(edit_rows(steps));
-    body.extend(run_rows(steps));
+    body.extend(run_rows(steps, avail));
     body.extend(other_row(steps));
-    // What did not go through is never folded away.
-    for step in steps.iter().filter(|step| !step.ok) {
-        let mut row = call_words(step);
-        row.extend(step_tail(step, false, false));
-        body.push(row);
+    // Keep failures visible in the fold, capping long failure runs like edits
+    // and passed commands while the full list stays behind `ctrl+o`.
+    let failed: Vec<&Step> = steps.iter().filter(|step| !step.ok).collect();
+    if failed.len() > NAMED_FAILURES {
+        body.push(vec![Span::new(
+            format!("… +{}", counted(failed.len() - NAMED_FAILURES, "earlier failure", "earlier failures")),
+            Style::new().fg(palette::TOOL_FAIL).dim(),
+        )]);
+    }
+    for step in failed.iter().skip(failed.len().saturating_sub(NAMED_FAILURES)) {
+        body.push(failed_cell_spans(step, avail));
         if let Some(why) = step.error.as_ref() {
             body.push(vec![Span::raw(WHY_INDENT), Span::new(why.clone(), Style::new().fg(palette::TOOL_FAIL).dim())]);
         }
@@ -811,7 +837,7 @@ fn edit_rows(steps: &[Step]) -> Vec<Vec<Span>> {
 
 /// What ran: the newest [`NAMED_RUNS`] that passed, by name, under a count
 /// of the ones before them.
-fn run_rows(steps: &[Step]) -> Vec<Vec<Span>> {
+fn run_rows(steps: &[Step], avail: usize) -> Vec<Vec<Span>> {
     let runs: Vec<&Step> = steps.iter().filter(|step| step.ok && step.kind == StepKind::Run).collect();
     let mut rows = Vec::new();
     if runs.len() > NAMED_RUNS {
@@ -821,8 +847,17 @@ fn run_rows(steps: &[Step]) -> Vec<Vec<Span>> {
         ))]);
     }
     for step in runs.iter().skip(runs.len().saturating_sub(NAMED_RUNS)) {
-        let mut row = vec![Span::dim(format!("{} ", strings::RAN)), Span::raw(step.target.clone())];
-        row.extend(step_tail(step, false, false));
+        let tail = step_tail(step, false, false);
+        let prefix = format!("{} ", strings::RAN);
+        let fixed = super::ansi::str_width(&prefix) + tail.iter().map(Span::width).sum::<usize>();
+        let budget = avail.saturating_sub(fixed).max(1);
+        let target = if super::ansi::str_width(&step.target) <= budget {
+            step.target.clone()
+        } else {
+            Line::new(vec![Span::raw(step.target.clone())]).truncated(budget).plain()
+        };
+        let mut row = vec![Span::dim(prefix), Span::raw(target)];
+        row.extend(tail);
         rows.push(row);
     }
     rows

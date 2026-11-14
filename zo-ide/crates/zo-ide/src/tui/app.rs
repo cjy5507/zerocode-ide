@@ -5234,6 +5234,7 @@ impl Ui {
                                     declined: false,
                                     ok: status == AgentResultStatus::Completed,
                                     output: body.clone(),
+                                    stderr: String::new(),
                                     change: None,
                                     exit_code: None,
                                 },
@@ -10858,6 +10859,7 @@ mod tests {
             declined: false,
             ok: true,
             output: String::new(),
+            stderr: String::new(),
             change: Some(change),
             exit_code: None,
         };
@@ -10888,6 +10890,7 @@ mod tests {
             declined: false,
             ok: true,
             output: "done".to_string(),
+            stderr: String::new(),
             change: None,
             exit_code: None,
         };

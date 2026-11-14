@@ -1312,6 +1312,7 @@ fn ok(output: &str) -> Outcome {
         declined: false,
         ok: true,
         output: output.to_string(),
+        stderr: String::new(),
         change: None,
         exit_code: None,
     }

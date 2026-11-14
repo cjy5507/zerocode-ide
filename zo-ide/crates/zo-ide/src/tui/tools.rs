@@ -399,6 +399,35 @@ fn clean_step_error(first_line: &str, kind: &ToolKind) -> String {
     rest.to_string()
 }
 
+fn looks_like_error_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    line.starts_with("ERROR:")
+        || line.starts_with("FATAL:")
+        || lower.starts_with("error:")
+        || lower.starts_with("fatal:")
+        || lower.contains(": error:")
+        || lower.contains("error[e")
+        || lower.starts_with("traceback (most recent call last)")
+        || (lower.starts_with("thread '") && lower.contains("panicked at"))
+}
+
+fn pick_error_line(text: &str) -> Option<&str> {
+    let mut non_empty = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = non_empty.next()?;
+    if looks_like_error_line(first) {
+        return Some(first);
+    }
+    non_empty.find(|line| looks_like_error_line(line)).or(Some(first))
+}
+
+fn first_failure_reason(done: &Outcome, kind: &ToolKind) -> Option<String> {
+    if done.ok || done.declined {
+        return None;
+    }
+    let line = pick_error_line(&done.stderr).or_else(|| pick_error_line(&done.output))?;
+    Some(crate::util::ansi::sanitize_inline(&clean_step_error(line, kind)))
+}
+
 /// Whether the first line of a multi-line shell command ends mid-quote or with
 /// a line-continuation token (so showing line 1 alone looks syntactically cut).
 fn has_unclosed_shell_line(line: &str) -> bool {
@@ -504,6 +533,9 @@ pub struct Outcome {
     pub declined: bool,
     /// 미리보기로 보일 출력 원문.
     pub output: String,
+    /// `BashResult::stderr` when separate from `stdout`, so failed steps pick
+    /// the real error message rather than an earlier `stdout` header row.
+    pub stderr: String,
     /// Edit·Write 결과의 파일 변경 요약(있으면 헤더가 이것을 쓴다).
     pub change: Option<Change>,
     /// A finished command's exit code — a failed row's result.
@@ -523,10 +555,15 @@ impl Outcome {
             ToolResultBody::Diff(diff) => Some(Change::from_diff(diff, path)),
             _ => None,
         };
+        let stderr = match body {
+            ToolResultBody::Bash(result) => result.stderr.trim_end_matches('\n').to_string(),
+            _ => String::new(),
+        };
         Self {
             ok,
             declined: matches!(body, ToolResultBody::Declined { .. }),
             output: body_text(body),
+            stderr,
             change,
             exit_code: match body {
                 ToolResultBody::Bash(result) => Some(result.exit_code),
@@ -797,10 +834,7 @@ impl ToolGroup {
         let failure = (!done.ok)
             .then(|| failure_result(done).iter().map(|span| span.text.as_str()).collect::<String>());
         // What a failed call said first, for the row under its step.
-        let error = (!done.ok && !done.declined)
-            .then(|| done.output.lines().map(str::trim).find(|line| !line.is_empty()))
-            .flatten()
-            .map(|line| crate::util::ansi::sanitize_inline(&clean_step_error(line, &call.kind)));
+        let error = first_failure_reason(done, &call.kind);
         let step = |kind: StepKind, verb: &str, target: String| Step {
             kind,
             verb: verb.to_string(),
@@ -1041,6 +1075,7 @@ impl ToolGroup {
                     declined: false,
                     ok: false,
                     output: super::strings::TOOL_CALL_INTERRUPTED.to_string(),
+                    stderr: String::new(),
                     change: None,
                     exit_code: None,
                 });
@@ -2420,6 +2455,7 @@ mod tests {
             declined: false,
             ok: true,
             output: output.to_string(),
+            stderr: String::new(),
             change: None,
             exit_code: None,
         }
@@ -2576,6 +2612,7 @@ mod tests {
                 declined: false,
                 ok: false,
                 output: "boom".to_string(),
+                stderr: String::new(),
                 change: None,
                 exit_code: None,
             }
@@ -3167,6 +3204,7 @@ mod tests {
                 declined: false,
                 ok: false,
                 output: "[exit 1]\ntraceback line".to_string(),
+                stderr: String::new(),
                 change: None,
                 exit_code: None,
             },
@@ -3196,6 +3234,7 @@ mod tests {
                 declined: false,
                 ok: false,
                 output: String::new(),
+                stderr: String::new(),
                 change: None,
                 exit_code: None,
             },
@@ -4215,7 +4254,7 @@ mod row_tests {
         assert_eq!(group.step_count_with(|id| id != "ts"), 0);
         assert!(group.complete(
             "ts",
-            Outcome { ok: false, declined: false, output: "no match".to_string(), change: None, exit_code: None }
+            Outcome { ok: false, declined: false, output: "no match".to_string(), stderr: String::new(), change: None, exit_code: None }
         ));
         assert_eq!(group.step_count_with(|id| id != "ts"), 1);
     }

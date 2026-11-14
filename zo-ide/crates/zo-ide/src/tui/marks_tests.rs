@@ -23,7 +23,7 @@ fn plain(lines: &[Line]) -> Vec<String> {
 }
 
 fn finished(output: &str) -> Outcome {
-    Outcome { ok: true, declined: false, output: output.to_string(), change: None, exit_code: None }
+    Outcome { ok: true, declined: false, output: output.to_string(), stderr: String::new(), change: None, exit_code: None }
 }
 
 fn read_row(name: &str) -> ToolGroup {
@@ -302,7 +302,7 @@ fn the_screens_two_turns_are_drawn_again_in_one_vocabulary() {
 }
 
 fn failed(output: &str) -> Outcome {
-    Outcome { ok: false, declined: false, output: output.to_string(), change: None, exit_code: None }
+    Outcome { ok: false, declined: false, output: output.to_string(), stderr: String::new(), change: None, exit_code: None }
 }
 
 /// Finished calls as the fold takes them: `(kind, outcome)` each in a cell of
@@ -509,6 +509,7 @@ fn a_failed_bare_tool_strips_redundant_prefix_and_keeps_its_result_two_columns_o
                 ok: false,
                 declined: false,
                 output: "ERROR:  function left(jsonb, integer) does not exist".to_string(),
+                stderr: String::new(),
                 change: None,
                 exit_code: Some(1),
             },
@@ -602,4 +603,95 @@ fn multiline_shell_continuations_show_ellipsis_in_turns_view() {
             "escaped delimiter must not look unclosed for {escaped:?}: {rows:?}"
         );
     }
+}
+
+#[test]
+fn failed_bash_prefers_stderr_and_error_lines_over_leading_stdout_headers() {
+    use runtime::message_stream::{BashResult, ToolResultBody};
+    if !style::in_fresh_run(&path("failed_bash_prefers_stderr_and_error_lines_over_leading_stdout_headers")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let separate_stderr = Outcome::from_result(
+        false,
+        &ToolResultBody::Bash(BashResult {
+            exit_code: 1,
+            stdout: "count\n-----\n10\n".to_string(),
+            stderr: "ERROR: column \"outcome\" does not exist\n".to_string(),
+            truncated: false,
+        }),
+        "",
+    );
+    let merged_stdout = Outcome::from_result(
+        false,
+        &ToolResultBody::Bash(BashResult {
+            exit_code: 1,
+            stdout: "id | status | goal\nERROR: column \"task_id\" does not exist\n".to_string(),
+            stderr: String::new(),
+            truncated: false,
+        }),
+        "",
+    );
+    let steps = steps_of(vec![
+        (
+            ToolKind::Command {
+                command: "docker exec exploit-lab-postgres-1 psql -U artex -d artex -c \"SELECT COUNT(*) FROM exploration_nodes\"".to_string(),
+                background: false,
+            },
+            separate_stderr,
+        ),
+        (
+            ToolKind::Command {
+                command: "docker exec exploit-lab-postgres-1 psql -U artex -d artex -c \"SELECT id, worker, kind FROM tasks\"".to_string(),
+                background: false,
+            },
+            merged_stdout,
+        ),
+    ]);
+    let cell = plain(&super::turns::cell(&steps, 78, std::time::Instant::now()));
+    assert!(
+        cell.iter().any(|row| row.contains(")  exit 1") && row.contains("Run(docker exec")),
+        "failed command row must keep closing paren and exit 1 on 78-col pane: {cell:#?}"
+    );
+    assert!(
+        cell.iter().any(|row| row.contains("ERROR: column \"outcome\" does not exist")),
+        "must pick stderr error over stdout count header: {cell:#?}"
+    );
+    assert!(
+        cell.iter().any(|row| row.contains("ERROR: column \"task_id\" does not exist")),
+        "must pick ERROR line over stdout table header when merged: {cell:#?}"
+    );
+    assert!(!cell.iter().any(|row| row.trim() == "count"), "{cell:#?}");
+    assert!(!cell.iter().any(|row| row.trim() == "id | status | goal"), "{cell:#?}");
+}
+
+#[test]
+fn committed_fold_caps_long_failure_runs_while_keeping_total_in_head() {
+    if !style::in_fresh_run(&path("committed_fold_caps_long_failure_runs_while_keeping_total_in_head")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let steps = steps_of(
+        (0..10)
+            .map(|i| {
+                (
+                    ToolKind::Command { command: format!("probe_{i}"), background: false },
+                    Outcome {
+                        ok: false,
+                        declined: false,
+                        output: format!("ERROR: probe {i} failed"),
+                        stderr: String::new(),
+                        change: None,
+                        exit_code: Some(1),
+                    },
+                )
+            })
+            .collect(),
+    );
+    let cell = plain(&super::turns::cell(&steps, 98, std::time::Instant::now()));
+    assert!(cell[1].contains("10 steps · 10 failed"), "{cell:#?}");
+    assert!(cell.iter().any(|row| row.contains("… +6 earlier failures")), "{cell:#?}");
+    assert!(!cell.iter().any(|row| row.contains("probe_5")), "{cell:#?}");
+    assert!(cell.iter().any(|row| row.contains("probe_6")), "{cell:#?}");
+    assert!(cell.iter().any(|row| row.contains("probe_9")), "{cell:#?}");
 }
