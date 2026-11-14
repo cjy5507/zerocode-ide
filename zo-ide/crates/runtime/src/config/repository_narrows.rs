@@ -159,9 +159,16 @@ const CACHE: &str = "cache";
 /// requests sent while the person is away. On unless a boolean says off.
 const CACHE_REFRESH: &str = "refresh";
 
+/// `cache.anchorTtl`: how long the conversation's cache is written to last.
+/// The hour costs twice the input on every write, five minutes 1.25 times;
+/// what the person's conversations cost is theirs to choose, so a
+/// repository's word is not read (152, review t-107910).
+const CACHE_ANCHOR_TTL: &str = "anchorTtl";
+
 /// Takes a repository's `cache.refresh` out where it would refresh what the
-/// person's own documents switched off, and a `cache` that is no object —
-/// it would replace the person's whole `cache` and read as the defaults.
+/// person's own documents switched off, its `cache.anchorTtl` always, and a
+/// `cache` that is no object — it would replace the person's whole `cache`
+/// and read as the defaults.
 fn narrow_the_cache(
     repository: &mut BTreeMap<String, JsonValue>,
     persons: &BTreeMap<String, JsonValue>,
@@ -169,6 +176,7 @@ fn narrow_the_cache(
     match repository.get_mut(CACHE) {
         None => {}
         Some(JsonValue::Object(cache)) => {
+            cache.remove(CACHE_ANCHOR_TTL);
             let own = switch(
                 persons
                     .get(CACHE)
@@ -295,6 +303,13 @@ pub(super) fn only_narrows(
                 }
             }
             narrow_the_allowlist(smart, persons);
+            // Which provider Jev's judgments come from is read off the
+            // person's own settings when a request is sent; the merged
+            // document's word only says whether its probabilities can carry
+            // an act (`zerocode_core::jev::calibrated_in`). A repository's
+            // word there would have a use that only records act (152, review
+            // t-107910).
+            smart.remove(judgment_provider::SETTINGS_KEY);
         }
         // Anything but an object replaces the person's whole `smart` in the
         // merge, and every key of it then reads as its default: the widest.
@@ -545,9 +560,12 @@ mod tests {
             let cache = cache_after(persons, repository).unwrap_or_default();
             assert_eq!(cache.contains_key(CACHE_REFRESH), stays, "{persons} / {repository}");
         }
-        // The cache's lifetime sends nothing of its own; it stays as said.
-        let cache = cache_after(off, r#"{"cache":{"refresh":true,"anchorTtl":"1h"}}"#).expect("the cache stays");
-        assert_eq!(cache.get("anchorTtl").and_then(JsonValue::as_str), Some("1h"));
+        // The cache's lifetime is what each write costs: the person's to choose.
+        for persons in [off, "{}", r#"{"cache":{"anchorTtl":"5m"}}"#] {
+            let cache = cache_after(persons, r#"{"cache":{"refresh":false,"anchorTtl":"1h"}}"#).expect("the cache stays");
+            assert!(!cache.contains_key(CACHE_ANCHOR_TTL), "{persons}: {cache:?}");
+            assert!(cache.contains_key(CACHE_REFRESH), "switching refreshes off may stand");
+        }
         for repository in [r#"{"cache":"x"}"#, r#"{"cache":null}"#, r#"{"cache":[]}"#] {
             let mut said = document(repository);
             only_narrows(&mut said, &document(off));
@@ -651,5 +669,21 @@ mod tests {
         persons["smart"][older] = serde_json::json!("off");
         let repository = serde_json::json!({ "smart": { older: "on" } });
         assert!(!smart_after(&persons, &repository).contains_key(older), "{} follows {older}", split.id);
+    }
+
+    /// Which provider Jev's judgments come from is the person's: a
+    /// repository's `smart.judgmentProvider` would have the merged document
+    /// read its probabilities as able to carry an act, and a use the
+    /// person's provider keeps recording would act (152, review t-107910).
+    #[test]
+    fn a_repository_does_not_name_the_judgment_provider() {
+        let persons = r#"{"smart":{"judgmentProvider":{"protocol":"openai_json"}}}"#;
+        for repository in [
+            r#"{"smart":{"judgmentProvider":{"protocol":"system_one"}}}"#,
+            r#"{"smart":{"judgmentProvider":"x"}}"#,
+        ] {
+            assert!(!kept(persons, repository, "judgmentProvider"), "{repository}");
+            assert!(!kept("{}", repository, "judgmentProvider"), "{repository}");
+        }
     }
 }

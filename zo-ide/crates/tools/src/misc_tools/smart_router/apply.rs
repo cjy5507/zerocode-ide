@@ -99,7 +99,11 @@ impl SmartRouteContext {
     /// `None` when Smart routing is off (or settings are unreadable) — the
     /// caller leaves the spawn on its default model.
     fn load(parent_model: &str) -> Option<Self> {
-        let settings = read_smart_runtime_settings()?;
+        Self::load_with(read_smart_runtime_settings()?, parent_model)
+    }
+
+    /// [`Self::load`] over settings already read.
+    fn load_with(settings: SmartRuntimeSettings, parent_model: &str) -> Option<Self> {
         if !settings.enabled {
             return None;
         }
@@ -647,6 +651,31 @@ pub(crate) fn smart_parent_model_for_agent_with_auto_type(
         input.prior_failures,
         None,
         probe.as_ref(),
+    )
+}
+
+/// [`smart_parent_model_for_agent`] over settings already read — what a
+/// test reads from a workspace of its own, where the spawn reads the process's
+/// working folder — and with no routing probe.
+#[cfg(test)]
+pub(super) fn smart_parent_model_for_agent_under(
+    settings: SmartRuntimeSettings,
+    parent_model: &str,
+    input: &AgentInput,
+) -> Option<SmartRouteChoice> {
+    let context = SmartRouteContext::load_with(settings, parent_model)?;
+    smart_model_for_fields(
+        &context,
+        parent_model,
+        routing_subagent_type(input.subagent_type.as_deref(), None),
+        input.name.as_deref(),
+        &input.description,
+        &input.prompt,
+        input.schema.is_some(),
+        input.workflow_member,
+        input.prior_failures,
+        None,
+        None,
     )
 }
 

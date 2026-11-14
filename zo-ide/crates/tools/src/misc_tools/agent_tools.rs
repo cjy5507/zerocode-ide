@@ -805,15 +805,15 @@ fn rate_limit_fallback_models(
     fallbacks
 }
 
-/// One gate for primary implementation picks and their quota fallbacks.
 /// The model a custom agent's definition names, where the definition is the
-/// person's own: a repository's `.zo/agents/<name>.md` is committed with the
-/// repository, and its `model:` is not their selection (152, review
-/// t-107693).
+/// person's own: a `.zo/agents/<name>.md` in the workspace or a folder above
+/// it — committed or not — is the repository's, and its `model:` is not their
+/// selection (152, review t-107693).
 fn persons_custom_agent_model(agent: Option<&CustomAgent>) -> Option<&str> {
     agent.filter(|agent| agent.persons).and_then(|agent| agent.model.as_deref())
 }
 
+/// One gate for primary implementation picks and their quota fallbacks.
 fn implementation_model_refusal(model: &str, parent: Option<&str>, person_pin: bool) -> Option<String> {
     if person_pin { return None; }
     let identity = normalized_agent_model(model);
@@ -825,7 +825,7 @@ fn implementation_model_refusal(model: &str, parent: Option<&str>, person_pin: b
     } else if runtime::is_reserved_orchestrator_model(&identity) {
         "reserved for orchestration"
     } else { return None; };
-    Some(format!("Implementation model `{model}` is {problem}. Do this work inline. Only the person's launch or settings selection authorizes this exception; do not retry this spawn with a model pin."))
+    Some(format!("Implementation model `{model}` is {problem}. Do this work inline. Only the person's launch or settings selection authorizes this exception — an agent definition counts only from the person's own `~/.zo/agents`; do not retry this spawn with a model pin."))
 }
 
 fn route_complexity_for_gate(value: Option<&str>) -> runtime::RouteTaskComplexity {

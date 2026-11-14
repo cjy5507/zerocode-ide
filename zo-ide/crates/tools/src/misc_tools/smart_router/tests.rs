@@ -1919,6 +1919,33 @@
         let _ = fs::remove_dir_all(config_home);
     }
 
+    /// The route a spawn takes under a repository's committed pin is written
+    /// down as the repository's, on the road a spawn takes (`apply.rs`, the
+    /// route's `decision_meta`), and the person's own pin as `pin` (152,
+    /// review t-107910).
+    #[test]
+    fn a_spawn_routed_by_a_repositorys_pin_is_written_down_as_the_repositorys() {
+        let deterministic = json!({ "smart": { "enabled": true, "autoClassifier": "deterministic" } });
+        let mut persons_pin = deterministic.clone();
+        persons_pin["modelRouter"] = pinned("coding", "claude-fable-5")["modelRouter"].clone();
+        let source = |label: &str, persons: &Value, repository: &Value| {
+            in_a_repository(label, persons, repository, |settings| {
+                let mut input = agent_input(Some("general-purpose"));
+                input.description = "implement a scoped fix".to_string();
+                input.prompt = "Implement the change and run its focused test.".to_string();
+                super::apply::smart_parent_model_for_agent_under(settings, "claude-fable-5", &input)
+                    .expect("a coding route carries its metadata")
+                    .decision_meta
+                    .route_source
+            })
+        };
+        assert_eq!(
+            source("route-source-repository", &deterministic, &pinned("coding", "claude-fable-5")),
+            "repository-pin"
+        );
+        assert_eq!(source("route-source-persons", &persons_pin, &json!({})), "pin");
+    }
+
     #[test]
     fn coding_pin_metadata_survives_when_selected_model_equals_parent() {
         let config_home = temp_config_home("coding-pin-same-parent");

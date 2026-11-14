@@ -56,12 +56,13 @@ pub struct Attempt<'a> {
     /// Whether the work sits behind a guard — payment, the operator, the
     /// release lane. A guarded flow is not a place to ask a new question.
     pub guarded: bool,
-    /// Whether a person named the model — a settings pin or an explicit
-    /// `model:` — rather than the router choosing it. The arm measures the
-    /// router's choice against a newcomer; a model somebody chose by hand is
-    /// not that choice, and a comparison against it would say nothing about
-    /// the route (`routeSource` `pin` and `explicit`, the same two words the
-    /// learner already sets aside as availability rather than quality).
+    /// Whether somebody named the model — a settings pin, a repository's
+    /// committed pin, or an explicit `model:` — rather than the router
+    /// choosing it. The arm measures the router's choice against a newcomer;
+    /// a model somebody chose by hand is not that choice, and a comparison
+    /// against it would say nothing about the route (`routeSource` `pin`,
+    /// `repository-pin` and `explicit`, the words the learner already sets
+    /// aside as availability rather than quality).
     pub pinned: bool,
 }
 

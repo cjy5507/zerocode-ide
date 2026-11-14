@@ -374,8 +374,10 @@ pub struct RouteOutcomeRecord {
     /// Wall-clock run duration in milliseconds, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// How this route was decided: `"auto"` | `"pin"` | `"explicit"` |
-    /// `"fallback"` | `"exploration"`. Distinguishes an AUTO-selector pick
+    /// How this route was decided: `"auto"` | `"pin"` | `"repository-pin"` |
+    /// `"explicit"` | `"fallback"` | `"exploration"` (`"repository-pin"`: a
+    /// pin or selector a repository's committed settings named, 152).
+    /// Distinguishes an AUTO-selector pick
     /// (real routing-quality signal) from a config-forced pin/family-selector
     /// override (an AVAILABILITY signal, not a quality one — the live store's
     /// largest bucket was a pin's residue, per the routing plan's live-data
