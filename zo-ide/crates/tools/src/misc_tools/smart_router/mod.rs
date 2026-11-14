@@ -69,7 +69,7 @@ pub(crate) use apply::{
     ROUTE_FALLBACK_MODELS_SMUGGLE_KEY, ROUTE_JUDGED_AGENT_SMUGGLE_KEY,
     ROUTE_MODEL_SMUGGLE_KEY, ROUTE_REASON_SMUGGLE_KEY,
 };
-pub(crate) use apply::route_source_is_a_persons;
+pub(crate) use apply::{route_source_is_a_persons, route_source_was_chosen_by_hand};
 pub(crate) use canonical::canonicalize_route_model_id;
 pub(crate) use challenger::{
     first_design_text as first_challenger_design_text, hands_in_a_source as challenger_hands_in_a_source,

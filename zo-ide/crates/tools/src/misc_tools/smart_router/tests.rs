@@ -330,6 +330,31 @@
         }
     }
 
+    /// A route a repository's committed pin decided is written down with its
+    /// own word, not `pin`, which the spawn reads as the person's selection;
+    /// the challenger arm still leaves it alone, as a model chosen by hand.
+    #[test]
+    fn a_repositorys_pin_is_not_written_down_as_the_persons() {
+        const MAIN: &str = "claude-sonnet-5";
+        const SAME: &str = "claude-haiku-4-5-20251001";
+        let inventory = inventory_of(MAIN, &[MAIN, SAME]);
+        let label = |name: &str, persons: &Value, repository: &Value| {
+            in_a_repository(name, persons, repository, |settings| {
+                let mut request = runtime::RouteRequest::new(RouteRole::Coding, MAIN);
+                let decision = super::apply::route_spawn(&mut request, &settings, &inventory, false);
+                super::apply::route_source_label_for(decision.source, &request)
+            })
+        };
+        assert_eq!(label("label-repository", &json!({}), &pinned("coding", SAME)), "repository-pin");
+        assert_eq!(label("label-persons", &pinned("coding", SAME), &json!({})), "pin");
+        assert_eq!(label("label-both", &pinned("coding", SAME), &pinned("coding", SAME)), "pin");
+        assert!(!super::route_source_is_a_persons("repository-pin"));
+        for chosen in ["pin", "repository-pin", "explicit"] {
+            assert!(super::route_source_was_chosen_by_hand(chosen), "{chosen}");
+        }
+        assert!(!super::route_source_was_chosen_by_hand("auto"));
+    }
+
     /// A pin, and a `deepTierModels` list, are the person's selection only
     /// where the person's own documents say them: what a repository's
     /// committed settings added or changed is told apart, and what both say

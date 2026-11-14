@@ -406,8 +406,9 @@ fn route_role_label(role: RouteRole) -> String {
 }
 
 /// Projects `RouteDecisionSource` (already computed by `route_model`) onto
-/// the v2 schema's `routeSource` vocabulary (`"auto"|"pin"|"explicit"|
-/// "fallback"|"exploration"`). `Pinned` and `ManualSelector` both project to
+/// the v2 schema's `routeSource` vocabulary (`"auto"|"pin"|"repository-pin"|
+/// "explicit"|"fallback"|"exploration"`; `repository-pin` is
+/// [`route_source_label_for`]'s). `Pinned` and `ManualSelector` both project to
 /// `"pin"`: both are a `smart.roles`/`smart.subagents` CONFIG override (an
 /// availability signal), not the unconstrained AUTO ranking — the same
 /// distinction Phase 6's pin-zero-weight learning filter relies on.
@@ -428,14 +429,38 @@ pub(crate) fn route_source_label(source: RouteDecisionSource) -> &'static str {
     }
 }
 
+/// The `routeSource` word of a route a repository's committed pin or
+/// selector decided (`RouteRequest::repository_override`). Not `pin`: that
+/// word is read as the person's selection, which steps past the
+/// implementation gate and keeps no quota fallback (152).
+pub(crate) const REPOSITORY_PIN_SOURCE: &str = "repository-pin";
+
+/// [`route_source_label`] for the route `request` was decided by: a pin or
+/// selector a repository's committed settings named carries
+/// [`REPOSITORY_PIN_SOURCE`].
+pub(super) fn route_source_label_for(source: RouteDecisionSource, request: &RouteRequest) -> &'static str {
+    match source {
+        RouteDecisionSource::Pinned | RouteDecisionSource::ManualSelector if request.repository_override => {
+            REPOSITORY_PIN_SOURCE
+        }
+        source => route_source_label(source),
+    }
+}
+
 /// Whether a persisted `routeSource` word says a PERSON chose the model —
-/// a settings pin or an explicit `model:` — rather than the router
-/// ([`route_source_label`]'s `pin` and `explicit`). The one predicate for
-/// the two words, asked by the spawn (a person's pin is honored verbatim)
-/// and by the challenger arm (a person's pick is not the route it measures),
-/// so neither spells the pair for itself.
+/// a pin in their own settings or an explicit `model:` — rather than the
+/// router or a repository ([`route_source_label`]'s `pin` and `explicit`).
+/// Asked by the spawn: a person's pin is honored verbatim.
 pub(crate) fn route_source_is_a_persons(source: &str) -> bool {
     matches!(source, "pin" | "explicit")
+}
+
+/// Whether a persisted `routeSource` word says somebody named the model by
+/// hand — the person, or a repository's committed pin — rather than the
+/// router picking it. Asked by the challenger arm: a model chosen by hand is
+/// not the route it measures.
+pub(crate) fn route_source_was_chosen_by_hand(source: &str) -> bool {
+    route_source_is_a_persons(source) || source == REPOSITORY_PIN_SOURCE
 }
 
 /// Smuggle key carrying the route reason inside a fan-out member's JSON object;
@@ -1103,7 +1128,7 @@ fn smart_model_for_fields(
             ) {
             format!("{}+probe", route_source_label(decision.source))
         } else {
-            route_source_label(decision.source).to_string()
+            route_source_label_for(decision.source, &request).to_string()
         },
     };
     Some(SmartRouteChoice {

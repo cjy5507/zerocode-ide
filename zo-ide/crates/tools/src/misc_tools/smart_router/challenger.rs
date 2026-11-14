@@ -189,7 +189,7 @@ impl AttemptFacts {
                 .as_deref()
                 .and_then(RouteTaskRisk::from_label)
                 .is_some_and(|risk| matches!(risk, RouteTaskRisk::High | RouteTaskRisk::Critical)),
-            pinned: self.route_source.as_deref().is_some_and(super::route_source_is_a_persons),
+            pinned: self.route_source.as_deref().is_some_and(super::route_source_was_chosen_by_hand),
         }
     }
 }

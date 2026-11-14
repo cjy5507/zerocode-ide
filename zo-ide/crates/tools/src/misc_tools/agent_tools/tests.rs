@@ -1203,6 +1203,31 @@ fn implicit_premium_parent_is_blocked_for_ordinary_coding_but_exact_model_is_all
     }
 }
 
+/// A route a repository's committed pin decided carries `repository-pin`,
+/// which is not the person's selection: the implementation gate holds for
+/// it where the person's `pin` steps past it (152, review t-107693).
+#[test]
+fn a_repositorys_pin_does_not_step_past_the_implementation_gate() {
+    let store = TempAgentStore::new("repository-pin-implementation-gate");
+    let _guard = EnvGuard::clear(AGENT_MODEL_ENV)
+        .set_also(super::labels::AGENT_STORE_ENV, store.path.as_os_str())
+        .set_also("ZO_SMART_POLICY", "classic");
+    let mut routed = sample_agent_input();
+    routed.description = "implement a scoped fix".to_string();
+    routed.prompt = "Implement the change and run its focused test.".to_string();
+    routed.route_role = Some("coding".to_string());
+    routed.route_source = Some("repository-pin".to_string());
+    routed.route_complexity = Some("medium".to_string());
+    let error = execute_agent_with_spawn_and_parent_model(
+        routed,
+        |_| panic!("a repository's pin must not hand implementation to the reserved parent"),
+        Some("claude-fable-5"),
+        None,
+    )
+    .expect_err("a repository's pin is not the person's allowance");
+    assert!(error.to_string().contains("reserved for orchestration"), "{error}");
+}
+
 #[test]
 fn implicit_premium_parent_is_blocked_under_architect_even_at_large_complexity() {
     let store = TempAgentStore::new("implicit-premium-parent-architect");

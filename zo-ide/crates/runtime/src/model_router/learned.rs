@@ -298,8 +298,10 @@ pub fn learned_rate(
     (own_weighted >= MIN_WEIGHTED_DECISIVE_SAMPLES).then(|| won / own_weighted)
 }
 
-/// `records` with `routeSource == "pin"` measure AVAILABILITY (a config
-/// override was reachable and ran), not the AUTO selector's judgement of
+/// `records` with `routeSource` `"pin"` — or `"repository-pin"`, the same
+/// override a repository's committed settings named (152) — measure
+/// AVAILABILITY (a config override was reachable and ran), not the AUTO
+/// selector's judgement of
 /// which model best fits a role — the live-data audit's largest bucket (195+
 /// samples) was exactly this: a past pin's residue, not a quality signal.
 /// Excluded entirely (weight 0) from the learned-specialty aggregate, in
@@ -307,7 +309,8 @@ pub fn learned_rate(
 /// which keeps full weight regardless of `routeSource`: a judgement is about
 /// the WORK itself, independent of how the model doing the work got picked.
 fn is_pin_availability_noise(record: &RouteOutcomeRecord) -> bool {
-    record.route_source.as_deref() == Some("pin") && record.signal.as_deref() != Some("verdict")
+    matches!(record.route_source.as_deref(), Some("pin" | "repository-pin"))
+        && record.signal.as_deref() != Some("verdict")
 }
 
 /// Combined sample weight for one decisive record: P3 recency half-life
@@ -456,6 +459,22 @@ mod tests {
         // 5 weighted decisive samples: ramp = 5/8 = 625 permille.
         assert_eq!(a.confidence_permille, 625);
         assert_eq!(b.confidence_permille, 625);
+    }
+
+    /// A route a repository's committed pin decided is the same availability
+    /// signal as the person's own pin (152).
+    #[test]
+    fn repository_pin_run_records_are_excluded_like_pin_runs() {
+        let mut records = Vec::new();
+        for _ in 0..6 {
+            records.push(record("coder", "model-a", "completed", Some("coding"), Some("repository-pin"), None, None, NOW));
+        }
+        for _ in 0..2 {
+            records.push(record("coder", "model-b", "completed", Some("coding"), Some("auto"), None, None, NOW));
+            records.push(record("coder", "model-b", "failed", Some("coding"), Some("auto"), None, None, NOW));
+        }
+        let hint = LearnedSpecialtyHint::compute(&records, NOW, ToString::to_string);
+        assert_eq!(hint.entry_for(RouteRole::Coding, "model-a"), None);
     }
 
     #[test]
