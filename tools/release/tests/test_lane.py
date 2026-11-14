@@ -3384,18 +3384,26 @@ class LaneEnv(unittest.TestCase):
         self.assertEqual((marks / "term").read_text().strip(), "got")
 
     def test_the_recipe_hands_its_arguments_over_whole(self):
-        if shutil.which("just") is None:
+        just = shutil.which("just")
+        if just is None:
             self.skipTest("just is not installed")
         text = (REPO / "justfile").read_text(encoding="utf-8")
         recipe = text[text.index("\nlane-env recipe *args:\n") + 1:].split("\n\n")[0]
         work = Path(tempfile.mkdtemp(prefix="lane-env-just-"))
         self.addCleanup(shutil.rmtree, work, True)
+        # The recipe's `just` runs on the lane's PATH, not this one: a CI runner keeps its just in a folder the
+        # lane's PATH never names (lane-env: just: No such file or directory, 2026-11-13). The lane's first folder
+        # is $HOME/.cargo/bin, so the just found here stands there, under a HOME of the test's own.
+        home = work / "home"
+        (home / ".cargo" / "bin").mkdir(parents=True)
+        (home / ".cargo" / "bin" / "just").symlink_to(just)
         (work / "tools" / "release").mkdir(parents=True)
         shutil.copy(self.SCRIPT, work / "tools" / "release" / "lane-env.sh")
         shutil.copy(LANE, work / "tools" / "release" / "lane.sh")
         (work / "justfile").write_text("[positional-arguments]\n" + recipe + "\n\n[positional-arguments]\n"
                                        "said *words:\n    printf '<%s>' \"$@\" > said.txt\n")
-        run = subprocess.run(["just", "lane-env", "said", "two words", "x"], cwd=work, capture_output=True, text=True)
+        run = subprocess.run([just, "lane-env", "said", "two words", "x"], cwd=work, capture_output=True, text=True,
+                             env={**os.environ, "HOME": str(home)})
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual((work / "said.txt").read_text(), "<two words><x>")
 
