@@ -1241,9 +1241,9 @@ pub fn without_verbatim_prefix(path: &Path) -> std::borrow::Cow<'_, Path> {
 
 /// `\\?\C:\…` as `C:\…`, only when Windows reads the plain spelling as the
 /// same file: a drive path (a `\\?\UNC\…` share or a device keeps its
-/// prefix), shorter than [`PLAIN_PATH_MOST`], with no empty name, no `.` or
-/// `..`, no `/`, no name ending in a dot or a space and no DOS device name —
-/// each of which a plain path reads as something else. A rule on the text
+/// prefix), at most 259 characters (`MAX_PATH` less its NUL), with no empty
+/// name, no `.` or `..`, no `/`, no name ending in a dot or a space and no DOS
+/// device name — each of which a plain path reads as something else. A rule on the text
 /// alone, so it holds the same on every platform it is tested on.
 #[must_use]
 pub fn plain_drive_spelling(text: &str) -> Option<&str> {
