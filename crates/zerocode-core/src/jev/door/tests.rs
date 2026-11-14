@@ -1650,9 +1650,14 @@ fn an_hour_is_full_at_either_bound_and_unread_is_not_full() {
     assert!(!hour(2, 5).is_full());
     crate::jev::count::count_one_in_the_hour(&every).expect("counted");
     assert!(hour(2, 1).is_full(), "the bound every decision shares");
-    let blocked = home.path().join("a-file");
-    std::fs::write(&blocked, "").expect("a file where the directory should be");
-    let unread = blocked.join("hour");
+    // A name no file system takes. A path under a file was the unread count
+    // here once, but Windows reads that as a folder not there yet (NotFound),
+    // which counts as an empty hour, not an unread one.
+    let unread = home.path().join("hour\0count");
+    assert!(
+        crate::jev::count::sent_in_the_hour(&unread).is_err(),
+        "the count must not read"
+    );
     assert!(
         !Hour {
             decision: &unread,
