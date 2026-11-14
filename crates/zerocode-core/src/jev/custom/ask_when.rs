@@ -546,4 +546,134 @@ mod reach {
             serde_json::to_string_pretty(&report).expect("a report")
         );
     }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Seen {
+        commands: Vec<Command>,
+        turn_ends: Vec<TurnEnd>,
+    }
+
+    #[derive(Deserialize)]
+    struct Command {
+        at: i64,
+        command: String,
+    }
+
+    #[derive(Deserialize)]
+    struct TurnEnd {
+        at: i64,
+    }
+
+    const MS_PER_HOUR: i64 = 3_600_000;
+
+    /// `counts` (one per active hour, any order) at the percentiles a bound
+    /// is chosen by, the most, and how many hours went past each of `over`.
+    fn spread(mut counts: Vec<u64>, over: &[u64]) -> serde_json::Value {
+        counts.sort_unstable();
+        let at = |percent: usize| {
+            counts
+                .get(counts.len().saturating_sub(1) * percent / 100)
+                .copied()
+                .unwrap_or(0)
+        };
+        let past: serde_json::Map<String, serde_json::Value> = over
+            .iter()
+            .map(|bound| {
+                (
+                    bound.to_string(),
+                    serde_json::Value::from(counts.iter().filter(|&&n| n > *bound).count()),
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "p50": at(50), "p90": at(90), "p99": at(99),
+            "most": counts.last().copied().unwrap_or(0),
+            "hoursOver": past,
+        })
+    }
+
+    /// How many asks an hour the words would make before a command (t-107869,
+    /// the bounds chosen after landing), run by hand and never a gate: the
+    /// product's own rules over every command this machine ran — a command
+    /// the read-only rule clears is not asked (`tool_guard::asks_about`), then
+    /// the decision's words — counted by the hour in which any command was
+    /// asked at all. `JEV_ASK_WHEN_COMMANDS` names the commands and turn ends
+    /// (`{"commands":[{"at","command"}],"turnEnds":[{"at"}]}`, scratch only),
+    /// `JEV_ASK_WHEN_WORDS` the words, and `JEV_ASK_WHEN_TURN_END_DECISIONS`
+    /// how many decisions ask at every turn's end, for the bound they share.
+    #[test]
+    #[ignore = "reads this machine's commands; run by hand"]
+    fn how_many_commands_an_hour_the_words_ask_about() {
+        let read = |name: &str| {
+            std::fs::read_to_string(
+                std::env::var(name).unwrap_or_else(|_| panic!("{name} names a file")),
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+        };
+        let seen: Seen = serde_json::from_str(&read("JEV_ASK_WHEN_COMMANDS")).expect("commands");
+        let words: BTreeMap<String, AskWhen> =
+            serde_json::from_str(&read("JEV_ASK_WHEN_WORDS")).expect("words");
+        let turn_end_decisions: u64 = std::env::var("JEV_ASK_WHEN_TURN_END_DECISIONS")
+            .ok()
+            .and_then(|count| count.parse().ok())
+            .expect("JEV_ASK_WHEN_TURN_END_DECISIONS is a count");
+        let asked: Vec<&Command> = seen
+            .commands
+            .iter()
+            .filter(|one| crate::jev::tool_guard::asks_about(&one.command))
+            .collect();
+        let hours: std::collections::BTreeSet<i64> = asked
+            .iter()
+            .map(|one| one.at.div_euclid(MS_PER_HOUR))
+            .collect();
+        let by_hour = |ats: &mut dyn Iterator<Item = i64>| {
+            let mut counted: BTreeMap<i64, u64> = BTreeMap::new();
+            for at in ats {
+                *counted.entry(at.div_euclid(MS_PER_HOUR)).or_default() += 1;
+            }
+            counted
+        };
+        let mut together: BTreeMap<i64, u64> =
+            by_hour(&mut seen.turn_ends.iter().map(|end| end.at))
+                .into_iter()
+                .map(|(hour, ends)| (hour, ends * turn_end_decisions))
+                .collect();
+        let mut decisions = serde_json::Map::new();
+        for (decision, said) in &words {
+            let said = said
+                .fit_for(Point::BeforeCommand)
+                .expect("words a command takes");
+            let counted = by_hour(
+                &mut asked
+                    .iter()
+                    .filter(|one| said.admits(Point::BeforeCommand, &one.command, false))
+                    .map(|one| one.at),
+            );
+            for (hour, asks) in &counted {
+                *together.entry(*hour).or_default() += asks;
+            }
+            let asks: u64 = counted.values().sum();
+            decisions.insert(
+                decision.clone(),
+                serde_json::json!({
+                    "asks": asks,
+                    "hoursAsked": counted.len(),
+                    "perActiveHour": spread(hours.iter().map(|hour| counted.get(hour).copied().unwrap_or(0)).collect(), &[10, 30, 60]),
+                }),
+            );
+        }
+        let report = serde_json::json!({
+            "commandsSeen": seen.commands.len(),
+            "askedAtAll": asked.len(),
+            "activeHours": hours.len(),
+            "turnEnds": seen.turn_ends.len(),
+            "decisions": decisions,
+            "together": spread(hours.iter().map(|hour| together.get(hour).copied().unwrap_or(0)).collect(), &[60, 120, 240]),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("a report")
+        );
+    }
 }
