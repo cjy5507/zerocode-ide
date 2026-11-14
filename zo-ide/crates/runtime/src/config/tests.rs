@@ -1311,6 +1311,8 @@ fn git_probe_failure_cannot_authorize_local_mcp_trust_record() {
     fs::create_dir_all(trust_record.parent().expect("trust record parent"))
         .expect("project config dir");
     fs::write(&trust_record, r#"["repo-approved"]"#).expect("write trust record");
+    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
+    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
     let missing_git = root.join("definitely-missing-git-executable");
 
     assert!(
@@ -1392,6 +1394,8 @@ fn successful_git_query_with_stderr_cannot_authorize_control_file() {
     fs::create_dir_all(trust_record.parent().expect("trust record parent"))
         .expect("project config dir");
     fs::write(&trust_record, r#"["repo-approved"]"#).expect("write trust record");
+    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
+    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
     let fake_git = root.join("fake-git");
     fs::write(
         &fake_git,
@@ -1423,6 +1427,8 @@ fn malformed_git_stage_output_cannot_authorize_control_file() {
     fs::create_dir_all(trust_record.parent().expect("trust record parent"))
         .expect("project config dir");
     fs::write(&trust_record, r#"["repo-approved"]"#).expect("write trust record");
+    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
+    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
     let fake_git = root.join("fake-git");
     fs::write(
         &fake_git,
@@ -1461,6 +1467,8 @@ fn trusted_snapshot_rejects_path_replacement_during_git_probe() {
     fs::create_dir_all(local_settings.parent().expect("local settings parent"))
         .expect("project config dir");
     fs::write(&local_settings, r#"{"model":"original"}"#).expect("local settings");
+    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
+    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
     let fake_git = root.join("fake-git");
     fs::write(
         &fake_git,
@@ -1506,6 +1514,8 @@ fn trusted_snapshot_returns_pre_probe_bytes_after_same_inode_rewrite() {
     let original = r#"{"model":"original"}"#;
     let swapped = r#"{"model":"swapped"}"#;
     fs::write(&local_settings, original).expect("local settings");
+    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
+    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
     let fake_git = root.join("fake-git");
     fs::write(
         &fake_git,
@@ -1749,6 +1759,8 @@ fn trusted_snapshot_rejects_cwd_replacement_during_probe() {
     fs::create_dir_all(local_settings.parent().expect("local settings parent"))
         .expect("project config dir");
     fs::write(&local_settings, r#"{"model":"original"}"#).expect("local settings");
+    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
+    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
     let fake_git = root.join("fake-git");
     fs::write(
         &fake_git,
@@ -1794,6 +1806,8 @@ fn trusted_snapshot_rejects_git_binary_replacement_during_probe() {
     fs::create_dir_all(local_settings.parent().expect("local settings parent"))
         .expect("project config dir");
     fs::write(&local_settings, r#"{"model":"original"}"#).expect("local settings");
+    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
+    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
     let fake_git = root.join("fake-git");
     fs::write(
         &fake_git,
@@ -3389,6 +3403,46 @@ fn a_local_settings_file_in_a_folder_no_git_repository_governs_is_not_the_person
                 "enableAllProjectHooks",
             ]
         );
+    }
+}
+
+/// A folder can answer git as a repository with no `.git` in it — its own
+/// `HEAD`, `objects/`, `refs/` and a `config` naming itself the work tree —
+/// and a repository's ZIP brings such a folder with its local files in it
+/// (review t-107885, G0). With no `.git` from the folder up the gate asks git
+/// nothing, and both files are the folder's own (152).
+#[test]
+fn a_folder_shaped_as_its_own_git_directory_is_no_repository_of_the_persons() {
+    let _overrides_stable = overrides_stable();
+    let root = temp_dir();
+    let cwd = root.join("project");
+    let home = root.join("home").join(".zo");
+    for folder in [cwd.join("objects"), cwd.join("refs"), cwd.join(".zo"), home.clone()] {
+        fs::create_dir_all(folder).expect("a folder");
+    }
+    fs::write(cwd.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    fs::write(cwd.join("config"), "[core]\n\trepositoryformatversion = 0\n\tworktree = .\n").expect("config");
+    fs::write(
+        cwd.join(".zo").join("settings.local.json"),
+        r#"{"hooks":{"SessionStart":["echo came-with-the-zip"]}}"#,
+    )
+    .expect("local settings");
+    fs::write(cwd.join(".zo").join("mcp.json"), r#"{"mcpServers":{"came-with-it":{"command":"evil"}}}"#)
+        .expect("project MCP config");
+    fs::write(cwd.join(".zo").join("trusted-mcp-servers.json"), r#"["came-with-it"]"#).expect("trust record");
+
+    let loaded = ConfigLoader::new(&cwd, &home)
+        .load()
+        .expect("config should load");
+
+    assert!(
+        loaded.hooks().session_start().is_empty(),
+        "a folder shaped as a git directory read its own local file as the person's: {:?}",
+        loaded.hooks().session_start()
+    );
+    assert!(loaded.mcp().get("came-with-it").is_none(), "nor its own trust record");
+    if super::can_tell_persons_own_settings_file() {
+        assert_eq!(loaded.feature_config().unowned_local_settings(), ["hooks"]);
     }
 }
 

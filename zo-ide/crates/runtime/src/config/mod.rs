@@ -1844,6 +1844,15 @@ fn trusted_uncommitted_zo_file_snapshot_with_git(
         }
         ensure_path_absent(&base.join(".zo").join(".git"))?;
         let repository_before = git_repository_fingerprint(&base)?;
+        // Only a folder a `.git` from here up stands in is asked of git. A
+        // folder can answer git as a repository with no `.git` at all — its
+        // own `HEAD`, `objects/`, `refs/` and a `config` naming itself the
+        // work tree — and a ZIP of a repository brings such a folder as well
+        // as the file in it (review t-107885, G0). Nothing a folder with no
+        // `.git` holds tells a file the person made from one it came with.
+        if repository_before.markers.is_empty() {
+            return Err(untrusted_control_file());
+        }
         let git_path = PathBuf::from(git_program);
         if !git_path.is_absolute() {
             return Err(untrusted_control_file());
@@ -1861,16 +1870,10 @@ fn trusted_uncommitted_zo_file_snapshot_with_git(
                 .path
                 .parent()
                 .is_some_and(|root| git_before.starts_with(root))
-        }) || (repository_before.markers.is_empty() && git_before.starts_with(&base))
-        {
+        }) {
             return Err(untrusted_control_file());
         }
-        let tracking = git_tracking_state_with_program(
-            &base,
-            &real,
-            git_before.as_os_str(),
-            repository_before.markers.is_empty(),
-        );
+        let tracking = git_tracking_state_with_program(&base, &real, git_before.as_os_str());
 
         let (Ok(real_after), Ok(base_after)) = (path.canonicalize(), cwd.canonicalize()) else {
             return Err(untrusted_control_file());
@@ -1891,10 +1894,7 @@ fn trusted_uncommitted_zo_file_snapshot_with_git(
             return Err(untrusted_control_file());
         }
         // Git's word that it does not track the file is the only sign the
-        // person made it here. A folder no repository governs has no such
-        // word: a repository's ZIP, a release tarball or a package brings the
-        // repository's committed `.zo` files into one, and read as the
-        // person's they would open hooks, env and permission grants.
+        // person made it here.
         if tracking != GitTrackingState::Untracked {
             return Err(untrusted_control_file());
         }
@@ -2013,19 +2013,18 @@ fn git_repository_fingerprint(cwd: &Path) -> std::io::Result<GitRepositoryFinger
 enum GitTrackingState {
     Tracked,
     Untracked,
-    NotRepository,
     Indeterminate,
 }
 
 /// Determine Git provenance without conflating an untracked file with a Git
 /// failure. Only a successful repository probe followed by a successful index
-/// query can yield `Tracked`/`Untracked`; launch failures, dubious ownership,
-/// repository corruption, and unexpected output fail closed as `Indeterminate`.
+/// query can yield `Tracked`/`Untracked`; launch failures, "not a repository",
+/// dubious ownership, repository corruption, and unexpected output fail
+/// closed as `Indeterminate`.
 fn git_tracking_state_with_program(
     cwd: &Path,
     path: &Path,
     git_program: &std::ffi::OsStr,
-    allow_not_repository: bool,
 ) -> GitTrackingState {
     let configure = |command: &mut std::process::Command| {
         command
@@ -2043,15 +2042,7 @@ fn git_tracking_state_with_program(
         return GitTrackingState::Indeterminate;
     };
     if !probe.status.success() {
-        let stderr = probe.stderr.as_slice().trim_ascii();
-        return if probe.stdout.is_empty()
-            && allow_not_repository
-            && stderr.starts_with(b"fatal: not a git repository")
-        {
-            GitTrackingState::NotRepository
-        } else {
-            GitTrackingState::Indeterminate
-        };
+        return GitTrackingState::Indeterminate;
     }
     if !probe.stderr.as_slice().trim_ascii().is_empty()
         || probe.stdout.as_slice().trim_ascii() != b"true"
