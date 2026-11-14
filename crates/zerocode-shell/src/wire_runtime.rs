@@ -2444,6 +2444,20 @@ impl WireSession {
         zerocode_core::conversation_key(&self.agent, &record)
     }
 
+    /// End this wire for the pane that took its conversation up
+    /// (`WireRuntime::supersede`), and say so: the wire is ended once its CLI
+    /// is gone, as a page's close says it (`WireRuntime::stop`) — not only
+    /// when its reader sees the output close, which may have come before the
+    /// handshake said `idle` over it.
+    fn end_for_a_pane(&self) {
+        self.kill();
+        if let Ok(mut state) = self.state.lock() {
+            state.status = "ended";
+            state.tasks.clear();
+        }
+        self.settled();
+    }
+
     /// Whether a pane took this wire's conversation up (`continued_in`).
     fn superseded(&self) -> bool {
         !self
@@ -2657,13 +2671,9 @@ impl WireRuntime {
         let ending = Arc::clone(&wire);
         let spawned = std::thread::Builder::new()
             .name(format!("wire-{id}-end"))
-            .spawn(move || {
-                ending.kill();
-                ending.settled();
-            });
+            .spawn(move || ending.end_for_a_pane());
         if spawned.is_err() {
-            wire.kill();
-            wire.settled();
+            wire.end_for_a_pane();
         }
         Some(id)
     }
