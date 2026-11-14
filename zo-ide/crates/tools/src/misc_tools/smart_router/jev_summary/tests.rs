@@ -327,6 +327,73 @@ fn each_decision_is_counted_apart_by_version() {
     assert_eq!(report.earlier.iter().map(counted).collect::<Vec<_>>(), [(first, 1, 2, true)], "the one before it");
 }
 
+/// A raised bound asks the same question (t-107869): the version that moved
+/// only its hourly bound counts on with the one before it, while a changed
+/// question starts its own and leaves the old ones as earlier versions. The
+/// words the decision asks on, and the moments they left out today and over
+/// the week, are said beside it.
+#[test]
+fn a_raised_bound_keeps_its_series_and_the_words_and_left_outs_are_said() {
+    use zerocode_core::jev::count;
+    use zerocode_core::jev::custom::{store, Answer, AskWhen, Definition, Point};
+    use zerocode_core::jev::door::ANSWERED_OUTCOME;
+
+    let home = tempfile::tempdir().unwrap();
+    let ledgers = tempfile::tempdir().unwrap();
+    let mut decision = Definition::new(
+        "d-00000010".to_string(),
+        "Deletes".to_string(),
+        "Does this command delete files?".to_string(),
+        Answer::YesNo { yes: "It deletes files.".to_string(), no: "It deletes nothing.".to_string() },
+        Point::BeforeCommand,
+    );
+    let first = store::create(home.path(), &decision, JevMode::On, 1_000).unwrap();
+    decision.max_per_hour = 60;
+    let raised = store::edit(home.path(), &decision, 2_000).unwrap();
+    assert_ne!(first, raised, "a raised bound is a new version");
+    let now = 10 * MS_PER_DAY + MS_PER_DAY / 2;
+    let asked = |version: &str, at: i64| {
+        asked_by(
+            &CUSTOM_DECISIONS,
+            json!({"at": at, "decision": decision.id, "definition": version, "outcome": ANSWERED_OUTCOME, "requests": 1}),
+        )
+    };
+    write(
+        ledgers.path(),
+        CUSTOM_DECISIONS.ledger,
+        &[asked(&first, now - 3 * MS_PER_DAY), asked(&first, now - 2_000), asked(&raised, now - 1_000)],
+    );
+    let said = AskWhen { words: vec!["rm".to_string(), "git clean".to_string()], edited: false };
+    store::set_ask_when(home.path(), &decision.id, &said).unwrap();
+    let today = count::day_of(now, 0);
+    let yesterday = count::day_before(&today).unwrap();
+    for day in [&today, &today, &yesterday] {
+        count::count_left_out(home.path(), &decision.id, day).unwrap();
+    }
+    let counted = |version: &VersionReport| {
+        (version.definition.clone(), version.today.requests, version.week.requests)
+    };
+
+    let reports = custom_decisions_in(home.path(), &[ledgers.path().to_path_buf()], None, now, 0);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    let report = &reports[0];
+    assert_eq!(counted(&report.current), (raised.clone(), 2, 3), "one series across the raised bound");
+    assert!(report.earlier.is_empty(), "{:?}", report.earlier);
+    assert_eq!(report.ask_when, said);
+    assert_eq!(report.left_out, LeftOut { today: 2, week: 3 });
+
+    decision.question = "Does this command remove anything?".to_string();
+    let asked_anew = store::edit(home.path(), &decision, 3_000).unwrap();
+    let reports = custom_decisions_in(home.path(), &[ledgers.path().to_path_buf()], None, now, 0);
+    let report = &reports[0];
+    assert_eq!(counted(&report.current), (asked_anew, 0, 0), "a changed question counts anew");
+    assert_eq!(
+        report.earlier.iter().map(counted).collect::<Vec<_>>(),
+        [(raised, 1, 1), (first, 1, 2)],
+        "the old question's versions are earlier ones, the newest first"
+    );
+}
+
 /// A row a pane's agent asked a decision with (t-106308) — the core's row,
 /// `from` naming the agent, written as the window writes it — is counted in
 /// the decision's week as zo's own rows are.
