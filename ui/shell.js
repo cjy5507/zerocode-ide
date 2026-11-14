@@ -14841,8 +14841,10 @@ async function handWireToScreen(tab) {
     toast(t("worker.wireToScreenBusy", "대화가 아직 일하는 중입니다(차례·질문·승인이 열려 있음) — 끝나면 다시 누르세요"), "warn");
     return;
   }
+  let stopped = false;
   try {
     await invoke("wire_stop", { id: run.wire });
+    stopped = true;
     const term = await launchAgentTab({
       agent: run.agent,
       prompt: "",
@@ -14855,6 +14857,10 @@ async function handWireToScreen(tab) {
     closeTab(tab.id);
   } catch (error) {
     showError(error);
+    // The wire ended and no pane took the conversation up: a page left over a
+    // session that has gone would read as one still there. Its record is on
+    // disk, and the vault reopens it.
+    if (stopped) closeTab(tab.id);
   }
 }
 

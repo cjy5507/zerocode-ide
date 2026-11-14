@@ -556,8 +556,7 @@ fn held_elsewhere(
 ) -> Option<&'static str> {
     let record = crate::conversation_wake::vault_record(agent, session)?;
     let wanted = zerocode_core::conversation_key(agent, &record)?;
-    let pane = crate::conversation_wake::holding_pane(state.inner(), &wanted)
-        .filter(|held| Some(*held) != from_pane);
+    let pane = crate::conversation_wake::holding_pane_but(state.inner(), &wanted, from_pane);
     let wire = state.shell_runtime().wires.holding(agent, &record, None);
     (pane.is_some() || wire.is_some()).then_some(CONVERSATION_HELD_ELSEWHERE)
 }

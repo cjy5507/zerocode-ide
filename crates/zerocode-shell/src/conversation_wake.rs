@@ -696,6 +696,16 @@ pub(crate) fn vault_record(agent: &str, session_id: &str) -> Option<ProviderSess
 /// whose agent still holds the terminal. The one reading both roads ask —
 /// a resume door here, and the ledger's reseat through its host (t-7812).
 pub(crate) fn holding_pane(state: &AppState, wanted: &ConversationKey) -> Option<TermId> {
+    holding_pane_but(state, wanted, None)
+}
+
+/// [`holding_pane`], passing over `except` — the pane handing its own
+/// conversation to a wire (152): a second pane behind it still holds it.
+pub(crate) fn holding_pane_but(
+    state: &AppState,
+    wanted: &ConversationKey,
+    except: Option<TermId>,
+) -> Option<TermId> {
     let naming = {
         let sessions = state.pane_sessions();
         let agents = state.agent_terms();
@@ -703,6 +713,7 @@ pub(crate) fn holding_pane(state: &AppState, wanted: &ConversationKey) -> Option
     };
     naming
         .into_iter()
+        .filter(|held| Some(*held) != except)
         .find(|held| !crate::agent_tools_runtime::shell_in_front_of(state, *held))
 }
 

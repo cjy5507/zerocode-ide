@@ -2475,11 +2475,11 @@ impl WireSession {
     fn collect_if_left(&self) {
         let deadline = Instant::now() + WIRE_END_GRACE;
         loop {
-            match self.child.lock() {
-                Ok(mut child) if matches!(child.try_wait(), Ok(None)) => {}
-                _ => return,
-            }
-            if Instant::now() >= deadline {
+            let runs = match self.child.lock() {
+                Ok(mut child) => matches!(child.try_wait(), Ok(None)),
+                Err(_) => false,
+            };
+            if !runs || Instant::now() >= deadline {
                 return;
             }
             std::thread::sleep(WIRE_END_POLL);
