@@ -578,9 +578,12 @@ fn local_settings_stamp() -> Option<String> {
 /// settings path, with the record's stamp of `EnterPlanMode`'s write, for
 /// `ExitPlanMode` to put back as theirs. Held in this process, where no file
 /// tool reaches — `.zo/tool-state` is not (153).
-static PUT_BACK_ON_LEAVING_PLAN_MODE: std::sync::Mutex<
-    std::collections::BTreeMap<PathBuf, (serde_json::Map<String, Value>, String)>,
-> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+static PUT_BACK_ON_LEAVING_PLAN_MODE: std::sync::Mutex<PutBacks> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// What plan mode keeps, by the settings path: the person's document, and the
+/// record's stamp of `EnterPlanMode`'s write.
+type PutBacks = std::collections::BTreeMap<PathBuf, (serde_json::Map<String, Value>, String)>;
 
 fn forget_put_back(settings_path: &Path) {
     PUT_BACK_ON_LEAVING_PLAN_MODE
