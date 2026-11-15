@@ -389,6 +389,10 @@ impl ProviderSession for Session {
         Self::connect(launch()?)
     }
 
+    fn dismiss(&self) {
+        self.dismiss_helper();
+    }
+
     fn request(&self, method: &str, params: Value) -> Result<Value, SessionFailure> {
         let mut wire = match self.take_wire(QUEUE_FULL_WAIT) {
             Ok(wire) => wire,
@@ -516,6 +520,50 @@ impl Session {
             Err(error) => Err(NoWire::Broken(io_error(
                 "connect to the Computer Use helper",
             )(error))),
+        }
+    }
+
+    /// Ask the helper to go, and signal it if it stays: at the session's end,
+    /// and as soon as the window discards the session — a request of another
+    /// group may still hold it, and a helper left running then would go on
+    /// with that group's steps out of reach of the window's stop, which is
+    /// aimed at the session that stands (t-109578). Asked twice it is gone
+    /// the second time, and nothing is sent or signalled.
+    fn dismiss_helper(&self) {
+        // Its waiting request ends with it, on purpose: that is no loss.
+        if let Some(watching) = &self.watching {
+            watching
+                .leaving
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        // A full queue is not waited out for a goodbye.
+        if let Ok(mut wire) = self.take_wire(Duration::ZERO)
+            && let Ok(line) = serde_json::to_vec(&json!({
+                "id": wire.next_id,
+                "method": "terminate",
+                "params": {},
+                "token": self.token,
+            }))
+        {
+            let _ = wire.stream.write_all(&line);
+            let _ = wire.stream.write_all(b"\n");
+            let _ = wire.stream.flush();
+        }
+        // `terminate` is the helper's own exit; the signal is for a helper
+        // that stopped reading. Only ever aimed at the process this socket
+        // answered from, and only while that pid still runs our executable —
+        // a pid is reusable, a path is not.
+        if let Some(pid) = self.helper_pid {
+            let deadline = std::time::Instant::now() + Duration::from_millis(300);
+            while helper_runs_at(pid) {
+                if std::time::Instant::now() >= deadline {
+                    // SAFETY: `kill` with a positive pid and a plain signal
+                    // number has no memory effects on this process.
+                    let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
         }
     }
 
@@ -663,35 +711,7 @@ impl Drop for Session {
         }
         // The session is over, and its watch with it: nothing is lost.
         super::guard::watch_left();
-        // The session is ending: a full queue is not waited out for a goodbye.
-        if let Ok(mut wire) = self.take_wire(Duration::ZERO)
-            && let Ok(line) = serde_json::to_vec(&json!({
-                "id": wire.next_id,
-                "method": "terminate",
-                "params": {},
-                "token": self.token,
-            }))
-        {
-            let _ = wire.stream.write_all(&line);
-            let _ = wire.stream.write_all(b"\n");
-            let _ = wire.stream.flush();
-        }
-        // `terminate` is the helper's own exit; the signal is for a helper
-        // that stopped reading. Only ever aimed at the process this socket
-        // answered from, and only while that pid still runs our executable —
-        // a pid is reusable, a path is not.
-        if let Some(pid) = self.helper_pid {
-            let deadline = std::time::Instant::now() + Duration::from_millis(300);
-            while helper_runs_at(pid) {
-                if std::time::Instant::now() >= deadline {
-                    // SAFETY: `kill` with a positive pid and a plain signal
-                    // number has no memory effects on this process.
-                    let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
+        self.dismiss_helper();
         cleanup(&self.directory);
     }
 }

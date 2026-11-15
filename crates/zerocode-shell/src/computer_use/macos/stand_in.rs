@@ -648,6 +648,32 @@ mod tests {
         );
     }
 
+    /// A session the window discards may still be held by another group's
+    /// request, with a step under way at its helper, and the window's stop is
+    /// aimed at the session that stands. So the helper of a discarded session
+    /// is asked to go at the discard — not when its last request ends
+    /// (t-109578).
+    #[test]
+    fn the_helper_of_a_discarded_session_is_asked_to_go_at_once() {
+        let helper = StandIn::start(TOKEN, Shape::matching());
+        let Connected(session) = helper.connect_window(TOKEN).expect("connected");
+        let session = Arc::new(session);
+        // Another group's request, still under way on the same session.
+        let in_flight = Arc::clone(&session);
+        let broke = ComputerUseError::new(
+            error_code::ACCESSIBILITY_ERROR,
+            "read Computer Use response: the road broke",
+        );
+        let said = crate::computer_use::discard(&session, broke.clone());
+        assert_eq!(said, broke, "the break is the answer");
+        assert_eq!(
+            helper.wait_heard("terminate", 1, Duration::from_secs(2)),
+            1,
+            "the helper was not asked to go while a request still held its session"
+        );
+        drop((session, in_flight));
+    }
+
     /// Only a queue that is full for a moment is waited out: a refusal from a
     /// helper that is gone is the answer at once, and one that lives but
     /// never takes the connection is given up when the wait is over.

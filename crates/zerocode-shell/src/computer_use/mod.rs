@@ -343,6 +343,11 @@ fn said_of_delivery(
 /// break, or a new session may already stand: only the session this request used
 /// goes.
 fn discard(session: &Arc<platform::Session>, error: ComputerUseError) -> ComputerUseError {
+    // Its helper goes first, before a new session can stand: a request of
+    // another group may still hold this session, and the window's stop is
+    // aimed at the session that stands (t-109578). Before the lock: sending a
+    // helper away can take a moment, and other requests wait on that lock.
+    session.dismiss();
     let mut held = held_client()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

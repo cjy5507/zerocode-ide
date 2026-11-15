@@ -38,6 +38,9 @@ pub(super) trait ProviderSession: Sized + Send + Sync {
     fn helper_pid(&self) -> Option<i32> {
         None
     }
+    /// Send the helper away now, where the platform runs one: asked by the
+    /// window when it discards this session, while requests may still hold it.
+    fn dismiss(&self) {}
 }
 
 #[cfg(test)]
