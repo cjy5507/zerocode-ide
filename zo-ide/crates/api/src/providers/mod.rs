@@ -1410,32 +1410,51 @@ fn catalog_max_output_tokens(raw_model: &str, canonical_model: &str) -> Option<u
     catalog_fact(|catalog| catalog.max_output_tokens_for(raw_model, canonical_model))
 }
 
-/// The effective serialized request-body ceiling, in bytes: a provider/model
-/// declaration or catalog declaration first, then a fresh observation of this
-/// endpoint and model. A successful size is used only after an HTTP 413.
-/// Without one it uses 75% of the rejected size; without any refusal it keeps
-/// the existing behavior (no guessed ceiling).
+/// The serialized request-body ceiling a request for `model` is planned under,
+/// in bytes: a declaration first — the person's provider row or model entry,
+/// then the model catalog — else what the model's endpoint taught by refusing
+/// a body, kept in zo's home for seven days (`endpoint_capabilities`). `None`
+/// means unknown, never unlimited: with no declaration and no refusal there is
+/// no ceiling to plan under, as before.
 #[must_use]
 pub fn max_request_bytes_for_model(model: &str) -> Option<u64> {
     declared_max_request_bytes_for_model(model).or_else(|| {
-        let (endpoint, wire) = if let Some(provider) = custom_provider_for_model(model) {
-            (openai_compat::read_base_url(provider.config), provider.declared_id(model)?.to_string())
-        } else {
-            let metadata = metadata_for_model(model)?;
-            let endpoint = std::env::var(metadata.base_url_env).ok().filter(|url| !url.trim().is_empty())
-                .unwrap_or_else(|| metadata.default_base_url.to_string());
-            (endpoint, wire_model_id(model))
-        };
+        let (endpoint, wire) = endpoint_for_model(model)?;
         endpoint_capabilities::request_body_bounds(&endpoint, &wire)?.ceiling()
     })
 }
 
-fn declared_max_request_bytes_for_model(model: &str) -> Option<u64> {
+/// The ceiling a declaration states for `model`: its own entry or its
+/// provider's row among the person's providers (`max_request_bytes`), else
+/// the model catalog's — the catalog read exactly as v1.1.155 read it.
+pub(crate) fn declared_max_request_bytes_for_model(model: &str) -> Option<u64> {
     let canonical = resolve_model_alias(model);
-    let lower = canonical.to_ascii_lowercase();
-    custom_provider_for_model(model).and_then(|provider| provider.max_request_bytes_for(model))
-        .or_else(|| catalog_fact(|catalog| catalog.max_request_bytes_for(&wire_model_id(model), &lower)))
-        .filter(|&bytes| bytes > 0)
+    custom_provider_limit(
+        model,
+        &canonical,
+        ResolvedCustomProvider::max_request_bytes_for,
+    )
+    .or_else(|| {
+        let canonical_lower = canonical.to_ascii_lowercase();
+        catalog_fact(|catalog| catalog.max_request_bytes_for(model, &canonical_lower))
+    })
+}
+
+/// The endpoint URL and model id a client built for `model` sends to: the
+/// pair that client keeps its endpoint record under. Read the way
+/// [`crate::ProviderClient::from_model`] builds the client — the person's
+/// provider serving the model, else the built-in provider its name reads as —
+/// each at the base URL that client reads.
+fn endpoint_for_model(model: &str) -> Option<(String, String)> {
+    let resolved = resolve_model_alias(model);
+    if let Some(provider) = custom_provider_for_model(&resolved) {
+        let served = provider.declared_id(&resolved)?.to_string();
+        return Some((openai_compat::read_base_url(provider.config), served));
+    }
+    let metadata = metadata_for_model(&resolved)?;
+    let endpoint = std::env::var(metadata.base_url_env)
+        .unwrap_or_else(|_| metadata.default_base_url.to_string());
+    Some((endpoint, wire_model_id(model)))
 }
 
 /// Process-wide shared `reqwest::Client` for every provider call.
@@ -2573,9 +2592,13 @@ impl ResolvedCustomProvider {
             .unwrap_or_default()
     }
 
+    /// `model`'s request-body ceiling on this provider, in bytes: its own,
+    /// else the provider-wide one.
     fn max_request_bytes_for(&self, model: &str) -> Option<u64> {
-        self.stated_limits(model).max_request_bytes.filter(|&value| value > 0)
-            .or(self.max_request_bytes.filter(|&value| value > 0))
+        self.stated_limits(model)
+            .max_request_bytes
+            .or(self.max_request_bytes)
+            .filter(|&value| value > 0)
     }
 
     /// `model`'s context window on this provider: its own, else the

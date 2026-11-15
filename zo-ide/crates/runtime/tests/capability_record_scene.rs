@@ -77,7 +77,7 @@ impl Endpoint {
                 let text = String::from_utf8_lossy(&body);
                 let pictures = text.matches("data:image/png;base64,").count();
                 let reasoning = value["messages"].as_array().unwrap().iter().any(|message| message.get("reasoning_content").is_some());
-                let (status, phrase) = match mode {
+                let (status, status_text) = match mode {
                     "reasoning" if reasoning => (400, "Bad Request"),
                     "required" if !reasoning => (400, "Bad Request"),
                     "body" if body.len() > CEILING => (413, "Payload Too Large"),
@@ -99,7 +99,7 @@ impl Endpoint {
                 } else {
                     json!({"error":{"message":if mode == "required" {"reasoning_content is required"} else if status == 400 {"extra inputs are not permitted: reasoning_content"} else {"request refused"},"type":"invalid_request_error"}})
                 }.to_string();
-                write!(stream, "HTTP/1.1 {status} {phrase}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}", response.len()).unwrap();
+                write!(stream, "HTTP/1.1 {status} {status_text}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}", response.len()).unwrap();
             }
         });
         Self { url, phase, stop, seen, thread: Some(thread) }
@@ -113,7 +113,9 @@ impl Drop for Endpoint {
     }
 }
 
-fn child(endpoint: &Endpoint, home: &Path, mode: &str) {
+/// Run one child session against `endpoint` with `home` as zo's home, and
+/// hand back what it printed.
+fn child(endpoint: &Endpoint, home: &Path, mode: &str) -> String {
     let workspace = home.join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
@@ -135,6 +137,45 @@ fn child(endpoint: &Endpoint, home: &Path, mode: &str) {
         .current_dir(&workspace)
         .stdin(Stdio::null()).output().unwrap();
     assert!(output.status.success(), "child failed:\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The picture cap of each request a child's turn sent, in order.
+fn caps_of(printed: &str) -> Vec<Option<usize>> {
+    printed
+        .lines()
+        .filter_map(|line| line.strip_prefix("picture caps: "))
+        .flat_map(|caps| serde_json::from_str::<Vec<Option<usize>>>(caps).unwrap())
+        .collect()
+}
+
+/// The rows a scene's endpoint saw, printed: the picture counts the tests pin
+/// come from these lines of a real run, not from a hand count.
+fn print_rows(scene: &str, seen: &[Seen]) {
+    for row in seen {
+        eprintln!("scene row: {scene} session {} status {} bytes {} pictures {}", row.session, row.status, row.bytes, row.pictures);
+    }
+}
+
+/// (status, pictures) of each picture request of `session`, in order. The
+/// warm scene's text request carries no picture and is left out.
+fn picture_rows(seen: &[Seen], session: usize) -> Vec<(u16, usize)> {
+    seen.iter().filter(|row| row.session == session && row.pictures > 0).map(|row| (row.status, row.pictures)).collect()
+}
+
+/// The endpoint records a scene left in its zo home.
+fn records(home: &Path) -> Vec<Value> {
+    std::fs::read_dir(home.join("cache/endpoint-capabilities")).unwrap().filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "json"))
+        .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap()).collect()
+}
+
+/// A refusal the client recorded lowers the budget itself, so no request of
+/// the turn carries a cap — nothing slides a window over the newest pictures.
+fn assert_no_cap(printed: &[String]) {
+    let caps: Vec<Option<usize>> = printed.iter().flat_map(|out| caps_of(out)).collect();
+    assert!(!caps.is_empty(), "the children printed their caps");
+    assert!(caps.iter().all(Option::is_none), "{caps:?}");
 }
 
 fn request(messages: Vec<InputMessage>) -> MessageRequest {
@@ -158,7 +199,7 @@ fn picture_session(mode: &str) -> Session {
                 vec![("image/png".to_string(), "A".repeat(4_000))])).unwrap();
         }
     } else {
-        let (picture_count, bytes) = match mode { "body" | "warm" => (8, 4_000), "pair" => (2, 16_000), _ => (3, 4_000) };
+        let (picture_count, bytes) = match mode { "body" | "warm" => (10, 4_000), "pair" => (2, 16_000), "flood" => (22, 5_500), _ => (3, 4_000) };
         session.push_message(runtime::ConversationMessage::user_with_images("pictures", (0..picture_count)
             .map(|_| ("image/png".to_string(), "A".repeat(bytes))).collect())).unwrap();
     }
@@ -168,10 +209,13 @@ fn picture_session(mode: &str) -> Session {
 struct LocalApi {
     client: OpenAiCompatClient,
     rt: tokio::runtime::Runtime,
+    /// The picture cap each request of the turn carried.
+    caps: Arc<Mutex<Vec<Option<usize>>>>,
 }
 
 impl ApiClient for LocalApi {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        self.caps.lock().unwrap().push(request.picture_cap);
         let target = WireTarget::for_model(MODEL).with_picture_cap(request.picture_cap);
         let wire = self.rt.block_on(self.client.send_message(&self::request(
             runtime::convert_messages_for(&request.messages, target),
@@ -217,17 +261,21 @@ fn capability_scene_child() {
             role:"assistant".to_string(), content, thought_signature:None, reasoning_replay:None,
         }];
         rt.block_on(client.send_message(&request(history))).unwrap();
-    } else if matches!(mode.as_str(), "body" | "below" | "pair" | "warm" | "tool") {
+    } else if matches!(mode.as_str(), "body" | "below" | "pair" | "warm" | "tool" | "flood") {
         if mode == "warm" {
             rt.block_on(client.send_message(&request(vec![InputMessage::user_text("small request")]))).unwrap();
         }
         let session = picture_session(&mode);
         let original = session.messages.clone();
-        let mut runtime = ConversationRuntime::new(session, LocalApi { client, rt }, StaticToolExecutor::new(), PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".to_string()]);
+        let caps = Arc::new(Mutex::new(Vec::new()));
+        let api = LocalApi { client, rt, caps: Arc::clone(&caps) };
+        let mut runtime = ConversationRuntime::new(session, api, StaticToolExecutor::new(), PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".to_string()]);
         runtime.set_context_model(MODEL);
         runtime.set_workspace_cwd(std::env::current_dir().unwrap());
         runtime.run_turn("inspect", None).unwrap();
         assert_eq!(&runtime.session().messages[..original.len()], original.as_slice(), "stored images stay byte-identical");
+        // Read by the parent after its own checks (`caps_of`).
+        println!("picture caps: {}", serde_json::to_string(&*caps.lock().unwrap()).unwrap());
     } else {
         assert!(rt.block_on(client.send_message(&request(vec![InputMessage::user_text("hello")]))).is_err());
     }
@@ -251,9 +299,9 @@ fn a_second_process_sends_reasoning_without_another_refusal() {
 fn a_second_process_budgets_before_sending_and_preserves_the_transcript() {
     let home = tempfile::tempdir().unwrap();
     let endpoint = Endpoint::new("body");
-    child(&endpoint, home.path(), "body");
+    let first = child(&endpoint, home.path(), "body");
     endpoint.phase.store(2, Ordering::Relaxed);
-    child(&endpoint, home.path(), "body");
+    let second = child(&endpoint, home.path(), "body");
     let seen = endpoint.seen.lock().unwrap();
     assert_eq!(seen.iter().filter(|row| row.session == 1 && row.status == 413).count(), 1);
     assert_eq!(seen.iter().filter(|row| row.session == 2 && row.status == 413).count(), 0, "second session repeats no body refusal: {seen:?}");
@@ -267,6 +315,8 @@ fn a_second_process_budgets_before_sending_and_preserves_the_transcript() {
     let bounds = &records[0]["body"]["value"];
     assert_eq!(bounds["rejected_bytes"], seen.iter().find(|row| row.status == 413).unwrap().bytes);
     assert_eq!(bounds["largest_accepted_bytes"], seen.iter().filter(|row| row.status == 200).map(|row| row.bytes).max().unwrap());
+    assert_no_cap(&[first, second]);
+    print_rows("body", &seen);
 }
 
 #[test]
@@ -297,8 +347,8 @@ fn a_body_below_the_limit_keeps_its_pictures() {
 #[test]
 fn first_party_request_prefixes_are_recorded_for_comparison() {
     let temporary = tempfile::tempdir().unwrap();
-    let home = std::env::var_os("ZO_PREFIX_SCENE_HOME").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| temporary.path().to_path_buf());
+    let home = std::env::var_os("ZO_PREFIX_SCENE_HOME")
+        .map_or_else(|| temporary.path().to_path_buf(), std::path::PathBuf::from);
     std::fs::create_dir_all(&home).unwrap();
     let mut hashes = serde_json::Map::new();
     for (family, server_mode) in [("claude", "anthropic"), ("gpt", "prefix"), ("gemini", "prefix")] {
@@ -318,37 +368,92 @@ fn first_party_request_prefixes_are_recorded_for_comparison() {
 fn the_exact_preflight_recovers_when_the_latest_pair_exceeds_the_learned_limit() {
     let home = tempfile::tempdir().unwrap();
     let endpoint = Endpoint::new("body");
-    child(&endpoint, home.path(), "pair");
+    let first = child(&endpoint, home.path(), "pair");
     endpoint.phase.store(2, Ordering::Relaxed);
-    child(&endpoint, home.path(), "pair");
+    let second = child(&endpoint, home.path(), "pair");
     let seen = endpoint.seen.lock().unwrap();
     assert_eq!(seen.iter().filter(|row| row.session == 1 && row.status == 413).count(), 1);
     assert_eq!(seen.iter().filter(|row| row.session == 2 && row.status == 413).count(), 0, "the local preflight applies the next step before a second remote refusal: {seen:?}");
     assert!(seen.iter().filter(|row| row.status == 200).all(|row| row.pictures == 1));
+    // The budget cannot go below the newest two, so the newest one is a cap.
+    for printed in [first, second] {
+        assert_eq!(caps_of(&printed).last(), Some(&Some(1)), "{printed}");
+    }
 }
 
 #[test]
 fn a_small_prior_success_does_not_prevent_picture_recovery() {
+    // The same picture scene with and without a small text request first: a
+    // success smaller than three quarters of the refusal says nothing the
+    // refusal does not, so both carry the same pictures in both sessions.
+    let run = |mode: &str| {
+        let home = tempfile::tempdir().unwrap();
+        let endpoint = Endpoint::new("body");
+        let first = child(&endpoint, home.path(), mode);
+        endpoint.phase.store(2, Ordering::Relaxed);
+        let second = child(&endpoint, home.path(), mode);
+        let seen = endpoint.seen.lock().unwrap().clone();
+        print_rows(mode, &seen);
+        assert_no_cap(&[first, second]);
+        [picture_rows(&seen, 1), picture_rows(&seen, 2)]
+    };
+    let warm = run("warm");
+    let plain = run("body");
+    assert_eq!(warm, plain, "a small prior success changes no picture count");
+    assert_eq!(warm, [vec![(413, 10), (200, 3)], vec![(200, 3)]], "the counts of a real run");
+}
+
+#[test]
+fn a_session_well_under_the_learnt_trigger_keeps_every_picture() {
+    // A refusal of ten pictures taught a ceiling of three quarters of that
+    // body; the next session's three pictures are well under the trigger the
+    // budget plans from it, so all three go.
     let home = tempfile::tempdir().unwrap();
     let endpoint = Endpoint::new("body");
-    child(&endpoint, home.path(), "warm");
+    child(&endpoint, home.path(), "body");
     endpoint.phase.store(2, Ordering::Relaxed);
-    child(&endpoint, home.path(), "warm");
-    let seen = endpoint.seen.lock().unwrap();
-    assert_eq!(seen.iter().filter(|row| row.session == 1 && row.status == 413).count(), 1);
-    assert_eq!(seen.iter().filter(|row| row.session == 2 && row.status == 413).count(), 0);
-    assert!(seen.iter().any(|row| row.session == 2 && row.status == 200 && row.pictures >= 2));
+    child(&endpoint, home.path(), "below");
+    let seen = endpoint.seen.lock().unwrap().clone();
+    print_rows("learnt-then-below", &seen);
+    assert_eq!(picture_rows(&seen, 1), [(413, 10), (200, 3)], "{seen:?}");
+    assert_eq!(picture_rows(&seen, 2), [(200, 3)], "every picture of the smaller session goes: {seen:?}");
+}
+
+#[test]
+fn a_first_refusal_far_over_the_limit_settles_in_a_few_refusals() {
+    // The first body is over four times the endpoint's limit. Each refusal is
+    // of a smaller body and the record keeps the smallest; the turn ends in a
+    // success, and the next session sends no refused body. The sizes keep
+    // every planning step about 2% or more from a step boundary.
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::new("body");
+    let first = child(&endpoint, home.path(), "flood");
+    endpoint.phase.store(2, Ordering::Relaxed);
+    let second = child(&endpoint, home.path(), "flood");
+    let seen = endpoint.seen.lock().unwrap().clone();
+    print_rows("flood", &seen);
+    assert_no_cap(&[first, second]);
+    let refused: Vec<usize> = seen.iter().filter(|row| row.status == 413).map(|row| row.bytes).collect();
+    assert!(refused.windows(2).all(|pair| pair[1] < pair[0]), "each refusal is of a smaller body: {refused:?}");
+    assert!(seen.iter().rfind(|row| row.session == 1).is_some_and(|row| row.status == 200), "the first session ends in a success: {seen:?}");
+    assert_eq!(seen.iter().filter(|row| row.session == 2 && row.status == 413).count(), 0, "{seen:?}");
+    let records = records(home.path());
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["body"]["value"]["rejected_bytes"], *refused.iter().min().unwrap());
+    assert_eq!(picture_rows(&seen, 1), [(413, 22), (413, 6), (200, 3)], "the counts of a real run");
+    assert_eq!(picture_rows(&seen, 2), [(200, 3)], "the counts of a real run");
 }
 
 #[test]
 fn stored_tool_pictures_survive_replay_without_a_second_refusal() {
     let home = tempfile::tempdir().unwrap();
     let endpoint = Endpoint::new("body");
-    child(&endpoint, home.path(), "tool");
+    let first = child(&endpoint, home.path(), "tool");
     endpoint.phase.store(2, Ordering::Relaxed);
-    child(&endpoint, home.path(), "tool");
+    let second = child(&endpoint, home.path(), "tool");
     let seen = endpoint.seen.lock().unwrap();
     assert_eq!(seen.iter().filter(|row| row.session == 1 && row.status == 413).count(), 1);
     assert_eq!(seen.iter().filter(|row| row.session == 2 && row.status == 413).count(), 0, "{seen:?}");
     assert!(seen.iter().any(|row| row.session == 2 && row.status == 200 && row.pictures >= 2));
+    assert_no_cap(&[first, second]);
 }

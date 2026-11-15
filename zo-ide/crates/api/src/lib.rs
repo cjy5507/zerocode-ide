@@ -81,6 +81,7 @@ pub use providers::cli_sessions::{
     kimi_code_login_configured, kimi_code_models_url, kimi_code_session, kimi_code_store_label, resolve_xai_credential, xai_credential_configured,
 };
 pub use providers::cloud_gateway::cloud_gateway_active;
+pub use providers::endpoint_capabilities::ceiling_after_refusal;
 pub use providers::gemini_code_assist::{
     FETCH_AVAILABLE_MODELS as GOOGLE_CODE_ASSIST_FETCH_AVAILABLE_MODELS,
     GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID_ENV, GEMINI_CODE_ASSIST_OAUTH_CLIENT_SECRET_ENV,

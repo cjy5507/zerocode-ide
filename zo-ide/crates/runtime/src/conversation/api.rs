@@ -85,10 +85,12 @@ pub struct ApiRequest {
     /// The most pictures (the newest) this request may carry, or `None` to let
     /// the provider's byte budget alone decide what is left out
     /// ([`crate::WireTarget`]). The runtime sets it when a provider refused a
-    /// request body as too large, in whole byte-budget steps. It holds for
-    /// the rest of the turn; clients put it on their lowering target and
-    /// otherwise ignore it. Stored history is never rewritten by it: the next
-    /// turn starts again from the budget.
+    /// request body as too large and the client kept no record of the refusal
+    /// — one it kept already lowers the budget itself — by the budget's rule,
+    /// on three quarters of the refused body. It holds for the rest of the
+    /// turn; clients put it on their lowering target and otherwise ignore it.
+    /// Stored history is never rewritten by it: the next turn starts again
+    /// from the budget.
     pub picture_cap: Option<usize>,
     /// Whether this is a compaction's summary request. Only the record a
     /// quiet stream leaves reads it (t-71285): a summary's quiet is the

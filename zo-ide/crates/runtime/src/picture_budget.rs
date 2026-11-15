@@ -211,26 +211,31 @@ fn picture_wire_bytes(data_b64: &str) -> u64 {
     (data_b64.len() as u64).saturating_add(PICTURE_WIRE_OVERHEAD_BYTES)
 }
 
-/// One more whole byte-budget step after a refusal of the already lowered
-/// request. The newest two stay until only those two are left.
-pub(crate) fn next_picture_step(messages: &[ConversationMessage], carried: usize, ceiling: Option<u64>) -> Option<usize> {
-    if carried <= KEEP_NEWEST_PICTURES { return (carried > 1).then_some(1); }
-    let measured = measure(messages);
-    let already_left_out = measured.sizes.len().saturating_sub(carried);
-    let mut removed = 0;
-    let mut bytes = 0_u64;
-    let ceiling = ceiling.unwrap_or_else(|| {
-        let refused_estimate = measured.sizes.iter().skip(already_left_out)
-            .fold(measured.other, |bytes, size| bytes.saturating_add(*size));
-        percent_of(refused_estimate, SHED_START_PERCENT)
-    });
-    let step = PictureBudget::for_ceiling(ceiling).step;
-    for size in measured.sizes.iter().skip(already_left_out).take(carried - KEEP_NEWEST_PICTURES) {
-        bytes = bytes.saturating_add(*size);
-        removed += 1;
-        if bytes >= step { break; }
+/// How many of the newest pictures the next send of a request refused for its
+/// size carries, when nothing the client recorded from the refusal lowers it
+/// already (a client that keeps no record of the endpoint, a gateway, a refusal
+/// below a declared ceiling): the budget rule above, run on the ceiling one
+/// refusal teaches by itself — [`api::ceiling_after_refusal`] of the refused
+/// body, estimated from the stored history like every plan here.
+///
+/// `carried` is how many of the newest pictures the refused request held. The
+/// answer is always fewer: down to the newest two by the budget, then the
+/// newest one, then `None`.
+pub(crate) fn pictures_after_refusal(
+    messages: &[ConversationMessage],
+    carried: usize,
+) -> Option<usize> {
+    let Measured { sizes, other } = measure(messages);
+    let carried = carried.min(sizes.len());
+    if carried <= KEEP_NEWEST_PICTURES {
+        return (carried > 1).then_some(1);
     }
-    (removed > 0).then_some(carried - removed)
+    let refused = sizes[sizes.len() - carried..]
+        .iter()
+        .fold(other, |bytes, size| bytes.saturating_add(*size));
+    let budget = PictureBudget::for_ceiling(api::ceiling_after_refusal(refused));
+    let keep = sizes.len() - shed_for_budget(&sizes, other, budget);
+    Some(keep.min(carried - 1))
 }
 
 /// What the budget decided for one request, for the lowering and for anyone who
@@ -640,6 +645,63 @@ mod tests {
             super::plan(&messages, PictureLimits::default()),
             PictureShedPlan::default(),
             "no limit, no work"
+        );
+    }
+
+    /// `count` tool pictures of `chars` base64 characters each — only the
+    /// lengths matter to the budget.
+    fn pictures_of(count: usize, chars: usize) -> Vec<ConversationMessage> {
+        let mut messages = vec![ConversationMessage::user_text("go")];
+        for index in 0..count {
+            messages.push(ConversationMessage::tool_result_with_images(
+                format!("toolu_{index}"),
+                "Computer",
+                "ok",
+                false,
+                vec![("image/png".to_string(), "A".repeat(chars))],
+            ));
+        }
+        messages
+    }
+
+    #[test]
+    fn a_refusal_nothing_was_recorded_for_runs_the_budget_on_three_quarters_of_the_body() {
+        let messages = pictures_of(10, 120_000);
+        let Measured { sizes, other } = measure(&messages);
+        let refused = sizes.iter().fold(other, |bytes, size| bytes + size);
+        let budget = PictureBudget::for_ceiling(api::ceiling_after_refusal(refused));
+        let by_the_budget = 10 - shed_count(&sizes, other, Some(budget), None);
+        assert_eq!(pictures_after_refusal(&messages, 10), Some(by_the_budget));
+        // Ten pictures of 120 KB: the ceiling is three quarters of the body and
+        // its trigger three quarters of that, so seven of the oldest leave at
+        // once — not one step at a time, and not all but the newest two.
+        assert_eq!(by_the_budget, 3);
+    }
+
+    #[test]
+    fn each_refusal_carries_fewer_pictures_until_one_is_left() {
+        let messages = pictures_of(10, 120_000);
+        let mut carried = 10;
+        let mut ladder = vec![carried];
+        while let Some(keep) = pictures_after_refusal(&messages, carried) {
+            assert!(keep < carried, "{ladder:?} then {keep}");
+            carried = keep;
+            ladder.push(keep);
+        }
+        assert_eq!(ladder, [10, 3, 2, 1]);
+        assert_eq!(pictures_after_refusal(&messages, 0), None);
+        assert_eq!(pictures_after_refusal(&[ConversationMessage::user_text("hi")], 4), None);
+    }
+
+    #[test]
+    fn the_refused_body_counts_only_the_pictures_it_carried() {
+        // The refused request carried the newest six of ten: its body is those
+        // six, and the answer is fewer than six without passing the newest two.
+        let messages = pictures_of(10, 120_000);
+        let keep = pictures_after_refusal(&messages, 6);
+        assert!(
+            keep.is_some_and(|keep| (KEEP_NEWEST_PICTURES..6).contains(&keep)),
+            "{keep:?}"
         );
     }
 

@@ -785,29 +785,52 @@ impl OpenAiCompatClient {
         request: &MessageRequest,
     ) -> Result<reqwest::Response, ApiError> {
         let mut attempts = 0;
-        // A candidate affects only this retry. It becomes a stored answer
-        // after that same request succeeds, never on a 429 or server error.
-        let mut candidate = None;
+        // What this endpoint answered about `reasoning_content` before, kept
+        // in zo's home (`endpoint_capabilities`). A refusal that may be about
+        // the field is answered once with the other way to send it — with an
+        // answer kept, only a refusal that names the field — and that other
+        // way is kept only once the same request succeeds with it, never on a
+        // 429 or a server error.
         let known = endpoint_capabilities::reasoning_answer(&self.base_url, &request.model);
+        let mut candidate = None;
+        // The refusal of the request as first sent, while the other way is
+        // tried: when that way is refused for the field, the first refusal is
+        // the one that says what is wrong (a context too long goes on to
+        // compaction instead of ending the turn on the field).
+        let mut first_refusal: Option<(ApiError, bool)> = None;
         let config = request_config_for_base_url(self.config(), &self.base_url);
 
         let last_error = loop {
             attempts += 1;
-            let retryable_error = match self.send_raw_request(request, candidate.or(known)).await {
+            let answer = candidate.or(known);
+            let retryable_error = match self.send_raw_request(request, answer).await {
                 Ok((response, key_sent)) => match expect_success(response).await {
                     Ok(response) => {
-                        if let Some(answer) = candidate {
-                            endpoint_capabilities::note_reasoning_answer(&self.base_url, &request.model, Some(answer));
+                        if candidate.is_some() {
+                            endpoint_capabilities::note_reasoning_answer(
+                                &self.base_url,
+                                &request.model,
+                                candidate,
+                            );
                         }
                         return Ok(response);
-                    },
+                    }
                     Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => error,
                     Err(error) => {
-                        if candidate.is_none() && known.is_none() {
-                            if let Some(answer) = reasoning_answer_to_try(&error, request, &config) {
-                                candidate = Some(answer);
+                        if candidate.is_none() {
+                            if let Some(other) =
+                                reasoning_answer_to_try(&error, request, &config, answer)
+                            {
+                                // Not a transient failure: no backoff, and the
+                                // attempt is not spent.
+                                candidate = Some(other);
+                                first_refusal = Some((error, key_sent));
                                 attempts -= 1;
                                 continue;
+                            }
+                        } else if names_the_reasoning_field(&error) {
+                            if let Some((first, first_key_sent)) = first_refusal.take() {
+                                return Err(self.refused_router_key(first, first_key_sent));
                             }
                         }
                         return Err(self.refused_router_key(error, key_sent));
@@ -855,19 +878,20 @@ impl OpenAiCompatClient {
     ) -> Result<(reqwest::Response, bool), ApiError> {
         let request_url = chat_completions_endpoint(&self.base_url);
         let config = request_config_for_base_url(self.config(), &self.base_url);
-        let payload = serde_json::to_vec(&build_chat_completion_request_with_answer(request, config, answer))?;
+        let payload = serde_json::to_vec(&build_chat_completion_request_with_answer(
+            request, config, answer,
+        ))?;
         let bytes = payload.len();
-        // A successful size is a safe target, not proof that a slightly
-        // larger request fails. Only a declaration or an actually rejected
-        // size can stop the exact body here; the picture planner uses the
-        // confirmed size to choose its ordinary steps.
-        let ceiling = super::declared_max_request_bytes_for_model(&request.model).or_else(|| {
-            let bounds = endpoint_capabilities::request_body_bounds(&self.base_url, &request.model)?;
-            let rejected = bounds.rejected_bytes?;
-            if bounds.largest_accepted_bytes.is_some_and(|accepted| accepted >= rejected) { return None; }
-            rejected.checked_sub(1)
-        });
-        if let Some(error) = ceiling.and_then(|limit| endpoint_capabilities::request_too_large_error(bytes, limit)) {
+        // The exact body is known only here. It stops here when it is over a
+        // declared ceiling or no smaller than a size this endpoint refused —
+        // never for being larger than one it took: a size planned under is a
+        // safe target, not a limit (`endpoint_capabilities::preflight`).
+        let refused = endpoint_capabilities::request_body_bounds(&self.base_url, &request.model);
+        if let Some(error) = endpoint_capabilities::preflight(
+            bytes,
+            super::declared_max_request_bytes_for_model(&request.model),
+            refused,
+        ) {
             return Err(error);
         }
         let builder = self
@@ -878,7 +902,13 @@ impl OpenAiCompatClient {
         let builder = self.apply_client_identity(builder);
         let (builder, key_sent) = self.apply_auth(builder).await?;
         let response = builder.send().await.map_err(ApiError::from)?;
-        endpoint_capabilities::note_http_status(&self.base_url, &request.model, response.status(), bytes);
+        endpoint_capabilities::note_http_status(
+            &self.base_url,
+            &request.model,
+            response.status(),
+            bytes,
+            refused,
+        );
         Ok((response, key_sent))
     }
 
@@ -1741,28 +1771,40 @@ fn holds_reasoning_to_send_back(request: &MessageRequest) -> bool {
 }
 
 /// The other way to send a request this endpoint just refused, when the
-/// refusal may be about `reasoning_content` and nothing is known of the
-/// endpoint yet: without the field when the request carried it, with it when
-/// the refusal names the field and the request carried none.
+/// refusal may be about `reasoning_content`: without the field when the
+/// refused body carried it, with it when the refusal names the field and the
+/// body carried none. `sent_with` is the answer the refused body was built
+/// with ([`reasoning_wire`]). An answer kept from before is revisited only
+/// when the refusal names the field — any other refusal (a context too long,
+/// a bad argument) comes back as it was, after one send, as it did before
+/// answers were kept. The same answer again is no other way, and `None`.
 fn reasoning_answer_to_try(
     error: &ApiError,
     request: &MessageRequest,
     config: &OpenAiCompatConfig,
+    sent_with: Option<ReasoningAnswer>,
 ) -> Option<ReasoningAnswer> {
-    if !config.takes_its_reasoning_back()
-        || !refuses_the_body(error)
-    {
+    if !config.takes_its_reasoning_back() || !refuses_the_body(error) {
         return None;
     }
-    if holds_reasoning_to_send_back(request) {
-        Some(ReasoningAnswer::Refused)
-    } else if names_the_reasoning_field(error)
-        && request.messages.iter().any(|message| message.role == "assistant")
-    {
-        Some(ReasoningAnswer::Demanded)
-    } else {
-        None
+    if sent_with.is_some() && !names_the_reasoning_field(error) {
+        return None;
     }
+    let has_a_step = request.messages.iter().any(|message| message.role == "assistant");
+    let carried_the_field = match reasoning_wire(request, config, sent_with) {
+        ReasoningWire::Text => false,
+        ReasoningWire::Field { every_step } => {
+            (every_step && has_a_step) || holds_reasoning_to_send_back(request)
+        }
+    };
+    let other = if carried_the_field {
+        ReasoningAnswer::Refused
+    } else if names_the_reasoning_field(error) && has_a_step {
+        ReasoningAnswer::Demanded
+    } else {
+        return None;
+    };
+    (Some(other) != sent_with).then_some(other)
 }
 
 /// Whether a refusal's own words name `reasoning_content` — the 400 an

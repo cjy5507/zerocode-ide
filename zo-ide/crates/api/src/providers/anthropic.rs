@@ -557,12 +557,14 @@ fn strip_context_management_beta(betas: &str) -> String {
 }
 
 /// Reject a serialized body that already exceeds the endpoint's DECLARED
-/// request-size ceiling, before it is uploaded.
+/// request-size ceiling — or, with none declared, a size this endpoint has
+/// refused — before it is uploaded (`endpoint_capabilities::preflight`).
 ///
-/// Returns `None` — i.e. send it — whenever the catalog declares no ceiling for
-/// this model. An undeclared limit means "unknown", never "unlimited", and
+/// Returns `None` — i.e. send it — whenever nothing is declared and nothing
+/// was refused. An undeclared limit means "unknown", never "unlimited", and
 /// inventing a number would either reject valid requests or miss real ones; the
-/// reactive 413 path still covers that case.
+/// reactive 413 path still covers that case. A size planned under (the largest
+/// one known to pass) is not a limit here: a larger body may pass as well.
 ///
 /// The synthesized error deliberately mirrors a real provider 413 (status,
 /// `request_too_large` type) so it classifies as
@@ -571,9 +573,16 @@ fn strip_context_management_beta(betas: &str) -> String {
 /// provider's own message never carries — the measured size and the ceiling —
 /// because "how far over am I" is the only thing that tells a user whether
 /// compaction can plausibly fix it or an attachment has to go.
-fn request_too_large_preflight(model: &str, payload_len: usize) -> Option<ApiError> {
-    let limit = crate::providers::max_request_bytes_for_model(model)?;
-    super::endpoint_capabilities::request_too_large_error(payload_len, limit)
+fn request_too_large_preflight(
+    model: &str,
+    payload_len: usize,
+    refused: Option<super::endpoint_capabilities::RequestBodyBounds>,
+) -> Option<ApiError> {
+    super::endpoint_capabilities::preflight(
+        payload_len,
+        crate::providers::declared_max_request_bytes_for_model(model),
+        refused,
+    )
 }
 
 fn context_edit_analytics_event(
@@ -1948,6 +1957,7 @@ impl AnthropicClient {
         if let Some(prompt_cache) = &self.prompt_cache {
             prompt_cache.note_sent_payload(request, &payload, sent_effort(&request_body));
         }
+        let refused = self.refused_bodies(&request.model, gateway.is_some());
         // Preflight the body against the endpoint's declared byte ceiling. This
         // is the only point where the EXACT wire size is known, and uploading a
         // body the endpoint will reject costs the whole transfer before the 413
@@ -1955,7 +1965,7 @@ impl AnthropicClient {
         // slowest possible way to learn nothing. The synthesized error is
         // byte-identical in class to a real 413, so it lands in the same
         // `ContextOverflow` recovery (compact, then re-send) one layer up.
-        if let Some(error) = request_too_large_preflight(&request.model, payload.len()) {
+        if let Some(error) = request_too_large_preflight(&request.model, payload.len(), refused) {
             return Err(error);
         }
 
@@ -1992,9 +2002,7 @@ impl AnthropicClient {
             .send()
             .await
             .map(|response| {
-                if gateway.is_none() {
-                    super::endpoint_capabilities::note_http_status(&self.base_url, &request.model, response.status(), sent_bytes);
-                }
+                self.note_body_answer(&request.model, gateway.is_some(), response.status(), sent_bytes, refused);
                 (
                     response,
                     SentOptIns {
@@ -2004,6 +2012,42 @@ impl AnthropicClient {
                 )
             })
             .map_err(ApiError::from)
+    }
+
+    /// What this endpoint has refused for `model`, kept under the model id
+    /// the body names (`endpoint_capabilities`). A gateway's limits are its
+    /// own: nothing is read or written under the first-party URL for a
+    /// request that goes through one.
+    fn refused_bodies(
+        &self,
+        model: &str,
+        through_gateway: bool,
+    ) -> Option<super::endpoint_capabilities::RequestBodyBounds> {
+        if through_gateway {
+            return None;
+        }
+        super::endpoint_capabilities::request_body_bounds(&self.base_url, &crate::wire_model_id(model))
+    }
+
+    /// Note what this endpoint answered a body of `bytes` for `model`: the
+    /// other half of [`Self::refused_bodies`].
+    fn note_body_answer(
+        &self,
+        model: &str,
+        through_gateway: bool,
+        status: reqwest::StatusCode,
+        bytes: usize,
+        known: Option<super::endpoint_capabilities::RequestBodyBounds>,
+    ) {
+        if !through_gateway {
+            super::endpoint_capabilities::note_http_status(
+                &self.base_url,
+                &crate::wire_model_id(model),
+                status,
+                bytes,
+                known,
+            );
+        }
     }
 
     fn record_request_failure(&self, attempt: u32, error: &ApiError) {

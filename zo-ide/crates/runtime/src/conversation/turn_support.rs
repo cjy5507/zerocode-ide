@@ -708,8 +708,9 @@ where
                 self.bound_client_model_override()
             },
             // The pictures this turn's refusals let a request carry: `None`
-            // until a provider refused a body as too large, then the newest
-            // two, then the newest one (`overflow_recovery`).
+            // until a provider refused a body as too large and kept no record
+            // of it, then fewer at each refusal by the picture budget's rule,
+            // down to the newest one (`overflow_recovery`).
             picture_cap: self.overflow_recovery.picture_cap(),
             compaction_summary: false,
         }

@@ -334,8 +334,10 @@ fn a_turn_whose_kept_tail_of_screenshots_passes_the_ceiling_goes_on() {
 
 /// The same recovery when the REFUSAL comes from the wire: an endpoint (a
 /// gateway, a proxy, a ceiling the catalog does not know) answers 413 for a body
-/// the catalog calls fine. The turn leaves the oldest pictures out and sends
-/// again — newest two first, newest one if that is still too much — and goes on.
+/// the catalog calls fine. The turn leaves the oldest pictures out by the
+/// picture budget's rule on three quarters of the refused body — for pictures
+/// this large, all but the newest two — then the newest one if that is still
+/// too much, and goes on.
 #[test]
 fn a_413_from_the_wire_is_answered_by_leaving_pictures_out_and_the_turn_goes_on() {
     let _lock = crate::test_env_lock();

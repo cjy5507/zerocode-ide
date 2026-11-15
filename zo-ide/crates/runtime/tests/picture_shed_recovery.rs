@@ -1,6 +1,11 @@
 //! t-37798 — a provider that refuses a request body as too large is answered by
 //! leaving the older pictures out and sending again, inside the SAME turn.
 //!
+//! How many go is the picture budget's own rule (`picture_budget`), run on the
+//! ceiling the refusal teaches: the gateway below keeps no record of the
+//! endpoint, so the ceiling is three quarters of the refused body — not "all
+//! but the newest two", which re-sent a tiny tail and threw the rest away.
+//!
 //! The wall these tests stand at is a gateway (or a ceiling the catalog does not
 //! know) answering `413 request_too_large`. The turn used to compact once —
 //! which keeps the recent tail, pictures and all — and end on the second 413
@@ -36,13 +41,19 @@ use runtime::{
     ConversationMessage, ConversationRuntime, PermissionMode, PermissionPolicy, RuntimeError,
     RuntimeFeatureConfig, StaticToolExecutor, WireTarget, KEEP_NEWEST_PICTURES,
 };
+
+/// Pictures the retry carries after the one refusal of a body of ten: the
+/// refused body is ~1.2 MB, so the ceiling it teaches is three quarters of
+/// that (~0.9 MB) and the budget's trigger three quarters again (~0.68 MB) —
+/// seven of the oldest leave in one go, in the budget's whole steps.
+const KEPT_AFTER_ONE_REFUSAL: usize = 3;
 use tokio::sync::mpsc;
 
 /// A model whose catalog row declares the 32 MiB ceiling — far above the
 /// gateway's own, so only the REFUSAL can tell the runtime about this limit.
 const MODEL: &str = "claude-opus-5-5";
 
-/// Bytes of the gateway's own body limit: below ten pictures, above two.
+/// Bytes of the gateway's own body limit: below ten pictures, above three.
 const GATEWAY_LIMIT: usize = 600_000;
 
 /// File bytes of one synthetic screenshot; 120,000 characters of base64.
@@ -229,9 +240,13 @@ fn assert_recovered(gateway: &Gateway, before: &[ConversationMessage], after: &S
     assert_eq!(seen[0].cap, None, "the first request goes out as built");
     assert_eq!(seen[0].pictures_on_the_wire, 10, "{seen:?}");
     assert!(seen[0].bytes > GATEWAY_LIMIT, "the gateway refused it: {seen:?}");
-    assert_eq!(seen[1].cap, Some(KEEP_NEWEST_PICTURES), "{seen:?}");
-    assert_eq!(seen[1].pictures_on_the_wire, KEEP_NEWEST_PICTURES, "{seen:?}");
-    assert_eq!(seen[1].pictures_left_out, 8, "each older picture is one note: {seen:?}");
+    assert_eq!(seen[1].cap, Some(KEPT_AFTER_ONE_REFUSAL), "{seen:?}");
+    assert_eq!(seen[1].pictures_on_the_wire, KEPT_AFTER_ONE_REFUSAL, "{seen:?}");
+    assert!(
+        seen[1].pictures_on_the_wire > KEEP_NEWEST_PICTURES,
+        "the budget's step, not the newest two: {seen:?}"
+    );
+    assert_eq!(seen[1].pictures_left_out, 7, "each older picture is one note: {seen:?}");
     assert!(seen[1].bytes <= GATEWAY_LIMIT, "and now it fits: {seen:?}");
     // Nothing stored was rewritten: the pictures are all still in the session.
     assert_eq!(
@@ -267,6 +282,29 @@ fn a_refused_body_leaves_older_pictures_out_and_the_turn_goes_on() {
     assert!(
         summary.auto_compaction.is_none(),
         "no summary is written for a problem pictures solve"
+    );
+    assert_recovered(&gateway, &before, runtime.session());
+}
+
+#[test]
+fn a_ceiling_declared_far_above_the_gateways_is_answered_the_same_way() {
+    // The catalog declares 32 MiB for this model, so its budget leaves no
+    // picture out, and the gateway refuses at 600 KB. The refusal is what
+    // teaches the ceiling, not the declaration: the same three pictures go
+    // again, not all but the newest two.
+    crate::trace_root::isolate();
+    let gateway = Gateway::new(GATEWAY_LIMIT);
+    let before = history(10);
+    let mut runtime = runtime_over(before.clone(), &gateway);
+    runtime.set_context_model(MODEL);
+    // The model's own window comes with it; keep the turn as far from it as
+    // the other tests' turns are.
+    runtime.set_context_window(1_000_000);
+    let turn = runtime.run_turn("keep going", None);
+    assert!(
+        turn.is_ok(),
+        "a body that is too large is answered, not surfaced: {:?}",
+        turn.as_ref().err()
     );
     assert_recovered(&gateway, &before, runtime.session());
 }
@@ -319,7 +357,7 @@ async fn the_streaming_turn_on_an_async_client_recovers_the_same_way() {
     assert!(turn.expect("checked above").auto_compaction.is_none());
     assert_recovered(&gateway, &before, runtime.session());
     assert!(
-        notices.iter().any(|text| text.contains("too large") && text.contains("newest 2 pictures")),
+        notices.iter().any(|text| text.contains("too large") && text.contains("newest 3 pictures")),
         "the person is told what is being done: {notices:?}"
     );
 }
@@ -336,9 +374,10 @@ fn the_refused_pictures_come_back_when_the_next_turn_starts() {
     let seen = gateway.seen();
     // Turn two starts on the catalog's budget again, not on the cap turn one
     // ended with: nothing here says the gateway still refuses it.
+    assert_eq!(seen.len(), 4, "each turn: refused once, taken once: {seen:?}");
     assert_eq!(seen[2].cap, None, "{seen:?}");
     assert_eq!(seen[2].pictures_on_the_wire, 10, "{seen:?}");
-    assert_eq!(seen[3].cap, Some(KEEP_NEWEST_PICTURES), "{seen:?}");
+    assert_eq!(seen[3].cap, Some(KEPT_AFTER_ONE_REFUSAL), "{seen:?}");
 }
 
 #[test]
@@ -351,11 +390,22 @@ fn when_even_one_picture_is_refused_the_turn_says_which_and_how_big() {
     assert!(turn.is_err(), "nothing can make this request fit");
     let error = turn.expect_err("checked above");
     let seen = gateway.seen();
-    let caps: Vec<Option<usize>> = seen.iter().take(3).map(|request| request.cap).collect();
+    let caps: Vec<Option<usize>> = seen.iter().take(4).map(|request| request.cap).collect();
     assert_eq!(
         caps,
-        [None, Some(KEEP_NEWEST_PICTURES), Some(1)],
-        "the ladder goes newest-two, then newest-one, before anything else: {seen:?}"
+        [
+            None,
+            Some(KEPT_AFTER_ONE_REFUSAL),
+            Some(KEEP_NEWEST_PICTURES),
+            Some(1)
+        ],
+        "the ladder goes the budget's step, the newest two, then the newest one, \
+         before anything else: {seen:?}"
+    );
+    let on_the_wire: Vec<usize> = seen.iter().take(4).map(|request| request.pictures_on_the_wire).collect();
+    assert!(
+        on_the_wire.windows(2).all(|pair| pair[1] < pair[0]),
+        "every rung carries fewer pictures: {seen:?}"
     );
     assert_eq!(error.provider_error_class(), Some(ProviderErrorClass::ContextOverflow));
     let text = error.to_string();

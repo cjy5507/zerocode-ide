@@ -786,8 +786,8 @@ fn a_step_without_reasoning(call: &str) -> Vec<InputMessage> {
 }
 
 /// An endpoint a person declared, under `base_url`. The answers an endpoint
-/// gives about the field are kept per base URL and model for the life of the
-/// process, so a test that sends anything names a base URL of its own.
+/// gives about the field are kept per base URL and model (in a temporary home
+/// under test), so a test that sends anything names a base URL of its own.
 fn a_persons_endpoint(base_url: &'static str) -> OpenAiCompatConfig {
     OpenAiCompatConfig::from_user("Gateway", base_url, None, false)
 }
@@ -1152,6 +1152,111 @@ async fn a_refusal_that_does_not_name_the_field_is_not_answered_with_one() {
     assert!(refused.is_err(), "the refusal reaches the caller");
     assert_eq!(server.await.unwrap().len(), 1);
     assert_eq!(reasoning_fields(&build_chat_completion_request(&request, config)), [None]);
+}
+
+#[tokio::test]
+async fn an_answer_kept_from_before_that_the_endpoint_no_longer_gives_is_learnt_again() {
+    // The endpoint once refused the field and now takes no step without it.
+    // The first send goes the kept way and is refused by name; the same
+    // request goes again with the field, and that answer replaces the kept one.
+    let mut history = vec![InputMessage::user_text("count the rows")];
+    history.extend(a_step_without_reasoning("toolu_1"));
+    let request = chat_request("changed-1", history);
+    let (addr, server) = endpoint(the_measured_rule, 2).await;
+    let config = OpenAiCompatConfig {
+        default_base_url: super::leak(&format!("http://{addr}/v1")),
+        ..a_persons_endpoint("http://changed-its-answer.example/v1")
+    };
+    super::note_reasoning_answer(&config, "changed-1", Some(super::ReasoningAnswer::Refused));
+    let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
+
+    let _ = client.stream_message(&request).await.expect("the stream opens on the second send");
+
+    let seen = server.await.unwrap();
+    assert_eq!(reasoning_fields(&seen[0]), [None], "the kept answer: no field");
+    assert_eq!(reasoning_fields(&seen[1]), [Some("")], "the other way: the field on every step");
+    assert_eq!(
+        reasoning_fields(&build_chat_completion_request(&request, config)),
+        [Some("")],
+        "and that is the answer kept now"
+    );
+    super::note_reasoning_answer(&config, "changed-1", None);
+}
+
+/// A long conversation at an endpoint that takes no step without the field:
+/// with the field the request is over the context window, without it the
+/// field is missing.
+#[allow(clippy::unnecessary_wraps)] // an `EndpointRule` answers `Option`; this one always refuses
+fn too_long_and_wants_the_field(body: &serde_json::Value) -> Option<&'static str> {
+    let carries = body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .any(|message| message.get("reasoning_content").is_some());
+    Some(if carries {
+        "This model's maximum context length is 131072 tokens. However, you requested 140000 tokens."
+    } else {
+        "The `reasoning_content` in the thinking mode must be passed back to the API."
+    })
+}
+
+#[tokio::test]
+async fn a_kept_answer_is_not_revisited_for_a_refusal_that_does_not_name_the_field() {
+    // The endpoint is kept as demanding the field, and the request is over its
+    // context window: one send, and the refusal comes back as it was, so the
+    // turn compacts instead of ending on a field it never asked about.
+    let request = chat_request("kept-1", a_step_with_its_own_reasoning(""));
+    let (addr, server) = endpoint(nothing_is_taken, 1).await;
+    let config = OpenAiCompatConfig {
+        default_base_url: super::leak(&format!("http://{addr}/v1")),
+        ..a_persons_endpoint("http://kept-and-too-long.example/v1")
+    };
+    super::note_reasoning_answer(&config, "kept-1", Some(super::ReasoningAnswer::Demanded));
+    let client = OpenAiCompatClient::new("token", config)
+        .with_base_url(format!("http://{addr}/v1"))
+        .with_retry_policy(0, std::time::Duration::ZERO, std::time::Duration::ZERO);
+
+    let refused = client.stream_message(&request).await.expect_err("the refusal reaches the caller");
+
+    assert_eq!(refused.provider_error_class(), crate::ProviderErrorClass::ContextOverflow, "{refused}");
+    let seen = server.await.unwrap();
+    assert_eq!(seen.len(), 1, "one send");
+    assert_eq!(reasoning_fields(&seen[0]), [Some(OWN_REASONING)], "the kept answer: the field");
+    assert_eq!(
+        reasoning_fields(&build_chat_completion_request(&request, config)),
+        [Some(OWN_REASONING)],
+        "the kept answer stays"
+    );
+    super::note_reasoning_answer(&config, "kept-1", None);
+}
+
+#[tokio::test]
+async fn a_context_too_long_comes_back_as_itself_when_the_other_way_is_refused_for_the_field() {
+    // Nothing kept yet: the request carried its reasoning and was refused, so
+    // it goes once without the field — and that is refused for the missing
+    // field. The first refusal, the context too long, is what comes back.
+    let request = chat_request("long-1", a_step_with_its_own_reasoning(""));
+    let (addr, server) = endpoint(too_long_and_wants_the_field, 2).await;
+    let config = OpenAiCompatConfig {
+        default_base_url: super::leak(&format!("http://{addr}/v1")),
+        ..a_persons_endpoint("http://too-long-and-wants-the-field.example/v1")
+    };
+    let client = OpenAiCompatClient::new("token", config)
+        .with_base_url(format!("http://{addr}/v1"))
+        .with_retry_policy(0, std::time::Duration::ZERO, std::time::Duration::ZERO);
+
+    let refused = client.stream_message(&request).await.expect_err("the refusal reaches the caller");
+
+    assert_eq!(refused.provider_error_class(), crate::ProviderErrorClass::ContextOverflow, "{refused}");
+    assert!(refused.to_string().contains("maximum context length"), "{refused}");
+    let seen = server.await.unwrap();
+    assert_eq!(reasoning_fields(&seen[0]), [Some(OWN_REASONING)], "the first send carried it");
+    assert_eq!(reasoning_fields(&seen[1]), [None], "the other way did not");
+    assert_eq!(
+        reasoning_fields(&build_chat_completion_request(&request, config)),
+        [Some(OWN_REASONING)],
+        "nothing was learnt"
+    );
 }
 
 #[test]

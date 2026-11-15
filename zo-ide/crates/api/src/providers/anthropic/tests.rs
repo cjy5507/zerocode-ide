@@ -2148,13 +2148,13 @@ fn request_size_preflight_fires_only_against_a_declared_ceiling() {
     let at_limit = usize::try_from(declared).expect("ceiling fits a usize on this target");
 
     // Under the ceiling: send it.
-    assert!(super::request_too_large_preflight("claude-opus-5", at_limit - 1).is_none());
+    assert!(super::request_too_large_preflight("claude-opus-5", at_limit - 1, None).is_none());
     // Exactly at the ceiling is still acceptable — the limit is inclusive.
-    assert!(super::request_too_large_preflight("claude-opus-5", at_limit).is_none());
+    assert!(super::request_too_large_preflight("claude-opus-5", at_limit, None).is_none());
 
     // Over the ceiling: a 413 that classifies exactly like the provider's own,
     // so `recover_provider_context_overflow` picks it up.
-    let error = super::request_too_large_preflight("claude-opus-5", at_limit + 1)
+    let error = super::request_too_large_preflight("claude-opus-5", at_limit + 1, None)
         .expect("an oversized body must be refused before upload");
     assert_eq!(
         error.provider_error_class(),
@@ -2164,13 +2164,14 @@ fn request_size_preflight_fires_only_against_a_declared_ceiling() {
     // Both numbers are named: the provider's own 413 carries neither, and
     // "how far over" is what tells a user whether compaction can fix it.
     let rendered = error.to_string();
-    assert!(rendered.contains(&declared.to_string()), "{rendered}");
+    assert!(rendered.contains(&format!("endpoint accepts {declared}")), "{rendered}");
     assert!(rendered.contains(&(declared + 1).to_string()), "{rendered}");
 
     // An undeclared model must never be preflighted, at any size.
     assert!(crate::providers::max_request_bytes_for_model("some-unlisted-local-model").is_none());
     assert!(
-        super::request_too_large_preflight("some-unlisted-local-model", usize::MAX / 2).is_none()
+        super::request_too_large_preflight("some-unlisted-local-model", usize::MAX / 2, None)
+            .is_none()
     );
 }
 
