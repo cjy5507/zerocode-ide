@@ -2691,7 +2691,7 @@ async function testTheBandCoversNothingAtTheFoot(browser, origin, ok) {
   }
 
   // Every dialog the window opens over a scrim, at its tallest the scrim lets
-  // it be: no control of it lies under the band, raised (a full bar) or in the
+  // it be: no part of it or of any control in it lies under the band, raised (a full bar) or in the
   // bar's own row (an empty bar, where the band still stands over the bar's
   // 24px and a dialog with a 16px edge reaches into them).
   for (const [width, full] of [[320, true], [900, true], [1800, false]]) {
@@ -2708,6 +2708,7 @@ async function testTheBandCoversNothingAtTheFoot(browser, origin, ok) {
         await hands.settle();
         await wait(150);
         const bandNode = document.getElementById("computer-band");
+        const bandBox = bandNode.getBoundingClientRect();
         const under = [];
         let opened = 0;
         for (const scrim of document.querySelectorAll("body > .scrim, body > .sftp-dialog-scrim")) {
@@ -2717,6 +2718,10 @@ async function testTheBandCoversNothingAtTheFoot(browser, origin, ok) {
           opened += 1;
           const dialog = [...scrim.children].find((one) => one.getClientRects().length > 0);
           const frame = dialog?.getBoundingClientRect();
+          // The dialog itself stays clear of the band: a footer filled in later
+          // (the SFTP editor's close · save) stands at its foot.
+          if (frame && frame.left < bandBox.right - 0.5 && bandBox.left < frame.right - 0.5 &&
+            frame.top < bandBox.bottom - 0.5 && bandBox.top < frame.bottom - 0.5) under.push(scrim.id);
           for (const node of scrim.querySelectorAll("button, input, select, textarea")) {
             if (node.closest("[hidden]") || node.getClientRects().length === 0) continue;
             const box = node.getBoundingClientRect();
@@ -2724,8 +2729,13 @@ async function testTheBandCoversNothingAtTheFoot(browser, origin, ok) {
             // Scrolled out of its own dialog: no hand reaches it there, band or none.
             const y = box.top + box.height / 2;
             if (!frame || y < frame.top || y > frame.bottom) continue;
-            const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
-            if (bandNode.contains(hit)) under.push(`${scrim.id}#${node.id || node.textContent.trim().slice(0, 12)}`);
+            // Any of the control under the band, not only its middle — of
+            // what its dialog shows of it: a dialog that scrolls clips the rest.
+            const top = Math.max(box.top, frame.top);
+            const bottom = Math.min(box.bottom, frame.bottom);
+            const met = box.left < bandBox.right - 0.5 && bandBox.left < box.right - 0.5 &&
+              top < bandBox.bottom - 0.5 && bandBox.top < bottom - 0.5;
+            if (met) under.push(`${scrim.id}#${node.id || node.textContent.trim().slice(0, 12)}`);
           }
           scrim.hidden = true;
         }

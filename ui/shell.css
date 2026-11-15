@@ -28502,9 +28502,12 @@ progress:indeterminate::-webkit-progress-bar {
   height: 13px;
 }
 
+/* Bounded the way every `.qo` is, by the scrim's edges (`max-height: 100%`),
+ * not by the window: `calc(100vh - 48px)` under the scrim's top drop ran the
+ * form 61px past a 640px window's foot, and under the Computer Use band its
+ * buttons (2026-11-16). */
 .jira-create {
   width: min(620px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px);
   overflow-y: auto;
 }
 
@@ -62219,11 +62222,14 @@ body[data-float-anchor-x="left"] .sftp-launcher { transform: translateX(calc(var
  * band (drawn over them) covers neither (2026-11-16). A door kept at the top stays where it is. */
 body[data-float-anchor-y="bottom"] :is(.float-toggle, .sftp-launcher) { translate: 0 calc(-1 * var(--computer-band-room, 0px)); }
 .sftp-parent .sftp-file-name { cursor: pointer; color: var(--ink-mist); }
-.sftp-dialog-scrim { position: fixed; inset: 0; z-index: var(--sftp-dialog-layer); display: grid; place-items: center; padding-bottom: var(--computer-band-clear, 0px); background: var(--scrim); }
+/* One row the size of what the scrim leaves, so the editor's `max-height: 100%` has a height to resolve against; the
+ * foot keeps clear of the Computer Use band as every `.scrim` does. */
+.sftp-dialog-scrim { position: fixed; inset: 0; z-index: var(--sftp-dialog-layer); display: grid; grid-template-rows: minmax(0, 1fr); place-items: center; padding-bottom: var(--computer-band-clear, 0px); background: var(--scrim); }
 .sftp-dialog, .sftp-editor { border: var(--rule-width) solid var(--edge-rule); border-radius: var(--radius-md); background: var(--surface-abyss); color: var(--ink-chalk); box-shadow: var(--shadow-float); }
 .sftp-dialog { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-5); width: var(--dialog-width); }
 .sftp-dialog h3, .sftp-dialog > input { width: 100%; }
-.sftp-editor { width: var(--sftp-editor-width); height: var(--sftp-editor-height); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+/* `max-height: 100%`: bounded by its scrim, whose foot keeps clear of the Computer Use band (2026-11-16). */
+.sftp-editor { width: var(--sftp-editor-width); height: var(--sftp-editor-height); max-height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
 .sftp-editor-head { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4) var(--space-5); border-bottom: var(--rule-width) solid var(--edge-rule); background: var(--surface-deck); }
 .sftp-editor-head > .icon { width: var(--space-5); height: var(--space-5); color: var(--ink-mist); }
 .sftp-editor-identity { min-width: 0; }
