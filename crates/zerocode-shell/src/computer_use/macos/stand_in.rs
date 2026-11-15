@@ -674,6 +674,36 @@ mod tests {
         drop((session, in_flight));
     }
 
+    /// A living helper that takes no connection is busy for a while and
+    /// broken after that: past the patience the session goes — its helper is
+    /// sent away first — so a helper that stopped accepting is not kept for
+    /// good. One connection it takes, and the count begins again.
+    #[test]
+    fn a_helper_that_takes_no_connection_for_long_enough_is_no_busy_one() {
+        use super::super::Untaken;
+        let patience = Duration::from_secs(10);
+        let began = Instant::now();
+        let at = |seconds: u64| began + Duration::from_secs(seconds);
+        let mut untaken = Untaken::default();
+        assert!(
+            !untaken.refused(at(0), at(2), patience),
+            "two seconds: busy"
+        );
+        assert!(
+            !untaken.refused(at(5), at(7), patience),
+            "inside the patience"
+        );
+        assert!(
+            untaken.refused(at(8), at(10), patience),
+            "ten seconds since the first refusal, whatever asked meanwhile"
+        );
+        untaken.taken();
+        assert!(
+            !untaken.refused(at(11), at(13), patience),
+            "a connection it took begins the count again"
+        );
+    }
+
     /// Only a queue that is full for a moment is waited out: a refusal from a
     /// helper that is gone is the answer at once, and one that lives but
     /// never takes the connection is given up when the wait is over.

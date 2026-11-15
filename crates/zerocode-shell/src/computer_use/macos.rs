@@ -75,14 +75,42 @@ const MAX_IDLE_WIRES: usize = 8;
 /// is a queue that was full for one.
 const QUEUE_FULL_WAIT: Duration = Duration::from_secs(2);
 const QUEUE_FULL_PAUSE: Duration = Duration::from_millis(2);
+/// A living helper that has taken no connection for this long, whatever asked,
+/// is no busy helper: the time a helper is given to listen when it starts.
+/// The session goes then, and its helper is sent away before another starts.
+const UNTAKEN_IS_BROKEN: Duration = CONNECT_TIMEOUT;
+
+/// Since when a living helper has taken no connection, across the requests
+/// that asked for one.
+#[derive(Default)]
+struct Untaken(Option<std::time::Instant>);
+
+impl Untaken {
+    /// A connection asked for at `asked` was refused to the last, at `now`.
+    /// Whether the helper has now taken none for `patience`.
+    fn refused(
+        &mut self,
+        asked: std::time::Instant,
+        now: std::time::Instant,
+        patience: Duration,
+    ) -> bool {
+        now.duration_since(*self.0.get_or_insert(asked)) >= patience
+    }
+
+    /// The helper took a connection.
+    fn taken(&mut self) {
+        self.0 = None;
+    }
+}
 
 /// Why a request got no connection to the helper.
 enum NoWire {
     /// The helper lives and took no new connection through the wait. Nothing
     /// was sent, and the session stands: this request alone is refused.
     Busy,
-    /// The road is broken — the helper is gone, or the socket is. The session
-    /// is discarded and the next call starts a new one.
+    /// The road is broken — the helper is gone, the socket is, or the helper
+    /// has taken no connection for [`UNTAKEN_IS_BROKEN`]. The session is
+    /// discarded, its helper sent away, and the next call starts a new one.
     Broken(ComputerUseError),
 }
 // Every waiting request is answered inside the limit every answer has.
@@ -93,6 +121,8 @@ pub(super) struct Session {
     /// one, so requests to different apps run at once and the helper keeps them
     /// in order per app.
     idle: std::sync::Mutex<Vec<Wire>>,
+    /// Since when the helper has taken no new connection, if it has not.
+    untaken: std::sync::Mutex<Untaken>,
     socket: PathBuf,
     token: String,
     /// The window's waiting request (t-66753 B): its own connection, shut
@@ -510,10 +540,21 @@ impl Session {
         {
             return Ok(wire);
         }
+        let asked = std::time::Instant::now();
+        let untaken = || {
+            self.untaken
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
         match connect_past_a_full_queue(&self.socket, wait, || self.helper_lives()) {
-            Ok(stream) => Wire::new(stream, self.token.clone()).map_err(NoWire::Broken),
+            Ok(stream) => {
+                untaken().taken();
+                Wire::new(stream, self.token.clone()).map_err(NoWire::Broken)
+            }
             Err(error)
-                if error.kind() == std::io::ErrorKind::ConnectionRefused && self.helper_lives() =>
+                if error.kind() == std::io::ErrorKind::ConnectionRefused
+                    && self.helper_lives()
+                    && !untaken().refused(asked, std::time::Instant::now(), UNTAKEN_IS_BROKEN) =>
             {
                 Err(NoWire::Busy)
             }
@@ -567,15 +608,12 @@ impl Session {
         }
     }
 
-    /// Whether the helper's process is known to be there still. Only "no such
-    /// process" says it is gone. A helper whose pid was never read is not
-    /// known to live: its refusal is a broken road, as it always was.
+    /// Whether the helper is known to be there still: its pid lives and still
+    /// runs the helper's executable — a pid is reusable, a path is not. A
+    /// helper whose pid was never read is not known to live: its refusal is a
+    /// broken road, as it always was.
     fn helper_lives(&self) -> bool {
-        self.helper_pid.is_some_and(|pid| {
-            // SAFETY: probing with signal 0 sends nothing.
-            let answered = unsafe { libc::kill(pid, 0) } == 0;
-            answered || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-        })
+        self.helper_pid.is_some_and(helper_stands_at)
     }
 
     pub(super) fn panel_watch_ended(&self) -> bool {
@@ -619,6 +657,7 @@ impl Session {
         let wire = Wire::new(stream, token.clone())?;
         let mut client = Self {
             idle: std::sync::Mutex::new(vec![wire]),
+            untaken: std::sync::Mutex::new(Untaken::default()),
             socket: socket.clone(),
             token,
             watching: None,
@@ -735,6 +774,17 @@ fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<libc::pid_t> {
         )
     };
     (rc == 0 && pid > 0).then_some(pid)
+}
+
+/// Whether the helper a session read off its socket is there still. In a
+/// test the helper is a stand-in on a thread of the test's own process, whose
+/// executable is no helper's (`stand_in`): that process stands for it.
+fn helper_stands_at(pid: libc::pid_t) -> bool {
+    #[cfg(test)]
+    if u32::try_from(pid).is_ok_and(|pid| pid == std::process::id()) {
+        return true;
+    }
+    helper_runs_at(pid)
 }
 
 /// Whether `pid` is alive *and* still runs the Computer Use helper executable.
