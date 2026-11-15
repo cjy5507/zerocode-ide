@@ -2772,11 +2772,164 @@ async function testTheBandCoversNothingAtTheFoot(browser, origin, ok) {
   }
 }
 
+/* A menu the person opens takes its own presses (2026-11-16): a sidebar menu
+ * opened at a pane's last line stood under the band, and a press meant for its
+ * lowest items landed on the band — on its stop, its take-back or its end.
+ * Every menu, popover and tooltip the window opens draws over the band; the
+ * composer's menus, which live low in the stacking, stop above it; and the
+ * band still draws over every modal, so its stop is one press away while the
+ * Computer Use confirm card stands, the SFTP manager's too. */
+async function testTheBandTakesNoPressFromAMenu(browser, origin, ok) {
+  for (const [width, full] of [[320, true], [900, true], [1800, false]]) {
+    const { page, faults } = await openComputerPage(browser, origin);
+    try {
+      await page.setViewportSize({ width, height: 640 });
+      if (full) await page.evaluate(fillTheStatusBar, FULL_BAR_GAUGES);
+      else await page.evaluate(() => { window.__HOLD_POLLERS__ = true; });
+      const seen = await evaluateCase(page, async ({ state }) => {
+        const hands = window.__COMPUTER_HANDS__;
+        const wait = (ms) => new Promise((done) => hands.census.native.setTimeout(done, ms));
+        const bandNode = document.getElementById("computer-band");
+        const dock = bandNode.parentElement;
+        const items = (menu, rows) => [...menu.querySelectorAll(rows)].filter((one) => one.getClientRects().length > 0);
+        const lostToTheBand = (nodes) => nodes.filter((one) => {
+          const box = one.getBoundingClientRect();
+          return bandNode.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
+        }).length;
+        const five = Array.from({ length: 5 }, (_, at) => ({ label: `Item ${at + 1}`, run: () => {} }));
+        // The band comes while a sidebar menu stands open at the foot.
+        openSidebarMenu(16, window.innerHeight - 30, five);
+        await wait(250);
+        hands.announce("computer:share-state", state.share);
+        hands.announce("computer:activity", hands.operatorReport(state.activity));
+        await hands.settle();
+        await wait(250);
+        const band = bandNode.getBoundingClientRect();
+        const sidebarMenu = document.querySelector(".sidebar-menu");
+        const late = { items: items(sidebarMenu, ".sidebar-menu-item").length, lost: lostToTheBand(items(sidebarMenu, ".sidebar-menu-item")) };
+        closeSidebarMenu();
+        await wait(250);
+        // Opened at a pane's last line, just over the band.
+        openSidebarMenu(band.left + 8, band.top - 4, five);
+        await wait(250);
+        const sidebar = { items: items(sidebarMenu, ".sidebar-menu-item").length, lost: lostToTheBand(items(sidebarMenu, ".sidebar-menu-item")) };
+        closeSidebarMenu();
+        await wait(250);
+        openTermMenu(band.left + 8, band.top - 4, 1);
+        await wait(250);
+        const termMenu = document.getElementById("term-menu");
+        const term = { items: items(termMenu, "button").length, lost: lostToTheBand(items(termMenu, "button")) };
+        closeTermMenu();
+        await wait(250);
+        // Every menu, popover and tooltip of the window, laid over the band:
+        // the press at the overlap lands on it.
+        const menuish = (node) => /(^|[\s-])(pop|menu|tooltip|popover)([\s-]|$)/.test(String(node.className)) ||
+          ["menu", "listbox", "tooltip"].includes(node.getAttribute("role")) || node.matches(".team-close, .team-close-form");
+        const under = [];
+        let laid = 0;
+        for (const node of document.body.querySelectorAll("*")) {
+          if (dock.contains(node) || !menuish(node) || node.matches(".composer-menu, .composer-slash")) continue;
+          const hidden = node.hidden;
+          const style = node.getAttribute("style");
+          node.hidden = false;
+          const look = getComputedStyle(node);
+          // Only what takes a press can lose one: a tooltip lets the pointer through.
+          if (look.position !== "fixed" || look.pointerEvents === "none") { node.hidden = hidden; continue; }
+          laid += 1;
+          for (const [name, value] of [["display", look.display === "none" ? "block" : look.display],
+            ["left", `${band.left + 4}px`], ["top", `${band.top - 4}px`], ["min-width", "48px"], ["min-height", "24px"],
+            ["visibility", "visible"], ["opacity", "1"], ["transform", "none"], ["translate", "none"]]) node.style.setProperty(name, value, "important");
+          const hit = document.elementFromPoint(band.left + 20, band.top + 8);
+          if (!node.contains(hit)) under.push(`${node.id || node.className} (layer ${look.zIndex})`);
+          if (style == null) node.removeAttribute("style"); else node.setAttribute("style", style);
+          node.hidden = hidden;
+        }
+        // The stop under the Computer Use confirm card, and with the SFTP
+        // manager standing (its ask stands one layer higher).
+        const stopTakes = () => {
+          const stop = document.getElementById("computer-band-stop");
+          const box = stop.getBoundingClientRect();
+          return !stop.hidden && document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === stop;
+        };
+        hands.announce("computer:confirm", { id: "menu-1", kind: "payment", label: "Place order", verb: "mouse-click", timeoutMs: 120000 });
+        await hands.settle();
+        await wait(250);
+        const underConfirm = stopTakes();
+        document.body.classList.add("sftp-active");
+        await wait(50);
+        const underSftpConfirm = stopTakes();
+        document.body.classList.remove("sftp-active");
+        return { place: dock.dataset.place, late, sidebar, term, laid, under, underConfirm, underSftpConfirm };
+      }, { state: BAND_STATES.shared });
+      ok(
+        `at ${width}px wide with ${full ? "a full" : "an empty"} status bar no item of a menu the person opens loses its press to the band — opened over it, or standing when it comes — and every menu, popover and tooltip draws over it`,
+        seen.place === (full ? "raised" : "row") && seen.late?.items === 5 && seen.late.lost === 0 &&
+          seen.sidebar?.items === 5 && seen.sidebar.lost === 0 && seen.term?.items >= 3 && seen.term.lost === 0 &&
+          seen.laid >= 15 && seen.under?.length === 0,
+        JSON.stringify(seen),
+      );
+      ok(
+        `at ${width}px wide the band's stop takes its own press while the Computer Use confirm card stands, and while it stands over the SFTP manager`,
+        seen.underConfirm === true && seen.underSftpConfirm === true,
+        JSON.stringify({ underConfirm: seen.underConfirm, underSftpConfirm: seen.underSftpConfirm }),
+      );
+      if (faults.length > 0) ok(`the menu scenario at ${width}px raised no renderer errors`, false, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  // The composer's menus live low in the stacking, so they stop above the band
+  // instead: in a short narrow window (a band of three lines), under a chip with too little room above it
+  // (the one case they open downward), the open list ends above the band.
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 320, height: 420 });
+    await page.evaluate(fillTheStatusBar, FULL_BAR_GAUGES);
+    const composer = await evaluateCase(page, async ({ state }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:share-state", state.share);
+      hands.announce("computer:activity", hands.operatorReport(state.activity));
+      await hands.settle();
+      await new Promise((done) => hands.census.native.setTimeout(done, 200));
+      const chip = document.createElement("button");
+      chip.style.cssText = "position: fixed; top: 170px; left: 16px; width: 60px; height: 20px;";
+      const menu = document.createElement("div");
+      menu.className = "composer-menu";
+      menu.style.height = "2000px";
+      const holder = document.createElement("div");
+      holder.style.cssText = "position: fixed; top: 0; left: 0; right: 0;";
+      const slash = document.createElement("div");
+      slash.className = "composer-slash";
+      slash.style.height = "2000px";
+      holder.append(slash);
+      document.body.append(chip, menu, holder);
+      standComposerMenu(menu, chip);
+      standComposerSlash(slash, chip);
+      const box = (node) => node.getBoundingClientRect();
+      const seen = {
+        place: document.querySelector(".computer-dock").dataset.place,
+        chip: Math.round(box(chip).bottom),
+        menu: [Math.round(box(menu).top), Math.round(box(menu).bottom)],
+        slash: [Math.round(box(slash).top), Math.round(box(slash).bottom)],
+        bandTop: Math.round(box(document.getElementById("computer-band")).top),
+      };
+      chip.remove(); menu.remove(); holder.remove();
+      return seen;
+    }, { state: BAND_STATES.shared });
+    ok(
+      "in a short narrow window the composer's menus under a chip near the middle end above the band, whichever side they open",
+      composer.place === "raised" && composer.menu?.[1] <= composer.bandTop && composer.slash?.[1] <= composer.bandTop,
+      JSON.stringify(composer),
+    );
+    if (faults.length > 0) ok("the composer menu scenario raised no renderer errors", false, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
 export async function testComputerProgress(browser, origin, ok) {
   await testTheBandClosesItself(browser, origin, ok);
   await testTheBandsPlace(browser, origin, ok);
   await testTheBandCoversNothingInAFullBar(browser, origin, ok);
   await testTheBandCoversNothingAtTheFoot(browser, origin, ok);
+  await testTheBandTakesNoPressFromAMenu(browser, origin, ok);
   await testTheBand(browser, origin, ok);
   await testTheProgressPanel(browser, origin, ok);
   await testTheBandWithThePanel(browser, origin, ok);

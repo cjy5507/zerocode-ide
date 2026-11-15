@@ -41,6 +41,13 @@
   --computer-permission-recovery-top: 4rem;
   --computer-permission-recovery-width: 30rem;
   --computer-permission-recovery-layer: 60;
+  /* The Computer Use band's layer (2026-11-16): over every modal's scrim — the
+   * highest is the ask over the SFTP manager, `--sftp-confirm-layer` 34 — so
+   * its stop is one press away while a confirm card stands; under everything
+   * the person opens (the status bar's popovers at 40, the sidebar menu at 45,
+   * the toasts, menus and tooltips above), so no press meant for one lands on
+   * the band. */
+  --computer-band-layer: 35;
   color-scheme: dark;
   --ui-zoom-factor: 1;
 

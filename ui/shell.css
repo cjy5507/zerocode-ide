@@ -61877,7 +61877,8 @@ button.jev-token:hover {
   bottom: 0;
   left: var(--computer-dock-x, 50%);
   transform: translateX(-50%);
-  z-index: 60;
+  /* Over every scrim, under every menu (tokens.css). */
+  z-index: var(--computer-band-layer);
   display: flex;
   flex-direction: column-reverse;
   align-items: center;

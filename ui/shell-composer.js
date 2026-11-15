@@ -1475,7 +1475,8 @@ function standComposerSlash(pane, anchor) {
   const wants = pane.getBoundingClientRect().height;
   const box = anchor.getBoundingClientRect();
   const above = box.top - MENU_CHIP_GAP - MENU_EDGE_KEEP;
-  const below = window.innerHeight - box.bottom - MENU_CHIP_GAP - MENU_EDGE_KEEP;
+  // Clear of the Computer Use band at the foot, which draws over these menus.
+  const below = window.innerHeight - computerBandClear() - box.bottom - MENU_CHIP_GAP - MENU_EDGE_KEEP;
   const overhead = above >= wants || above >= below;
   pane.style.maxHeight = `${Math.min(cap, Math.max(0, overhead ? above : below))}px`;
   const tall = pane.getBoundingClientRect().height;
@@ -1503,7 +1504,8 @@ function standComposerMenu(menu, chip) {
   const wants = menu.getBoundingClientRect().height;
   const box = chip.getBoundingClientRect();
   const above = box.top - MENU_CHIP_GAP - MENU_EDGE_KEEP;
-  const below = window.innerHeight - box.bottom - MENU_CHIP_GAP - MENU_EDGE_KEEP;
+  // Clear of the Computer Use band at the foot, which draws over these menus.
+  const below = window.innerHeight - computerBandClear() - box.bottom - MENU_CHIP_GAP - MENU_EDGE_KEEP;
   // Home unless home is both too small and the smaller side.
   const overhead = above >= wants || above >= below;
   const room = Math.max(0, overhead ? above : below);

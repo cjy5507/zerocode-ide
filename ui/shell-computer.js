@@ -191,6 +191,13 @@ el("computer-band").addEventListener("mousedown", (event) => {
  * top. `computerBandRaised` (with the band's other state above) holds the grown
  * bar for the band's life. */
 
+/* How far from the window's foot something placed by script keeps its far
+ * edge to clear the band (0 with no band): the composer's menus, which live
+ * low in the stacking and would stand under it. */
+function computerBandClear() {
+  return parseFloat(document.body.style.getPropertyValue("--computer-band-clear")) || 0;
+}
+
 function placeComputerBand() {
   const band = el("computer-band");
   const dock = band.parentElement;
