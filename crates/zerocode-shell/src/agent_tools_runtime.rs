@@ -4109,7 +4109,7 @@ pub(super) fn at_most_at_once<T: Sync, A: Send, G>(
     };
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..items.len().min(at_once.max(1)))
-            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, &run).ok())
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, run).ok())
             .collect();
         if workers.is_empty() {
             run();
