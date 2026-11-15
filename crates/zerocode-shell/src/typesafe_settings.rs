@@ -1632,22 +1632,15 @@ pub fn save_custom_decision_at(
     draft: DecisionDraft,
     now_ms: i64,
 ) -> Result<String, custom::store::Error> {
-    save_custom_decision_as(home, draft, now_ms).map(|(_, version)| version)
+    save_custom_decision_as(home, draft, now_ms)
 }
 
-/// Keep `draft` in the person's store under `home`, zo's config home, at
-/// `now_ms`: a new decision when it has no id, recording before anything
-/// acts on it, else the newest version of the one with its id. The
-/// decision's id — the draft's, or the new one a new decision is made
-/// under — and the version kept.
-fn save_custom_decision_as(
-    home: &Path,
-    draft: DecisionDraft,
-    now_ms: i64,
-) -> Result<(String, String), custom::store::Error> {
+/// `draft` as the store keeps it: whether it edits a decision (it has an
+/// id) or makes one (under a new id), and its definition.
+fn drafted(draft: DecisionDraft) -> Result<(bool, custom::Definition), custom::store::Error> {
     let editing = draft.id.is_some();
     let id = draft.id.clone().unwrap_or_else(custom::new_id);
-    let (definition, twice) = draft.definition(id.clone());
+    let (definition, twice) = draft.definition(id);
     if !twice.is_empty() {
         return Err(custom::store::Error::Refused(
             twice
@@ -1656,20 +1649,33 @@ fn save_custom_decision_as(
                 .collect(),
         ));
     }
-    let version = if editing {
+    Ok((editing, definition))
+}
+
+/// Keep `draft` in the person's store under `home`, zo's config home, at
+/// `now_ms`: a new decision when it has no id, recording before anything
+/// acts on it, else the newest version of the one with its id. The
+/// version kept.
+fn save_custom_decision_as(
+    home: &Path,
+    draft: DecisionDraft,
+    now_ms: i64,
+) -> Result<String, custom::store::Error> {
+    let (editing, definition) = drafted(draft)?;
+    if editing {
         custom::store::edit(home, &definition, now_ms)
     } else {
         custom::store::create(home, &definition, JevMode::Shadow, now_ms)
-    }?;
-    Ok((id, version))
+    }
 }
 
 /// Keep `draft` ([`save_custom_decision_as`]) and what the drawer says of
 /// when the decision asks (`ask_when`, t-108071): checked against the draft's point
 /// before anything is kept — words its point does not take keep nothing —
-/// then kept beside the index by the store's own writer
-/// ([`custom::store::set_ask_when`]) once the definition is. `None` leaves it
-/// as the store holds it.
+/// then kept with the definition under one hold of the store's lock
+/// ([`custom::store::create_told`], [`custom::store::edit_told`], t-108275),
+/// so a save whose words cannot be kept keeps no decision either. `None`
+/// leaves them as the store holds them.
 ///
 /// # Errors
 /// The definition's refusals and the store's; a point that does not take
@@ -1680,13 +1686,17 @@ pub fn save_custom_decision_told_at(
     ask_when: Option<&custom::AskWhen>,
     now_ms: i64,
 ) -> Result<(), DecisionRefusal> {
-    if let Some(said) = ask_when {
-        said.fit_for(draft.at).map_err(DecisionRefusal::unfit)?;
-    }
-    let (id, _) = save_custom_decision_as(home, draft, now_ms)?;
-    if let Some(said) = ask_when {
-        custom::store::set_ask_when(home, &id, said)?;
-    }
+    let Some(said) = ask_when else {
+        save_custom_decision_as(home, draft, now_ms)?;
+        return Ok(());
+    };
+    said.fit_for(draft.at).map_err(DecisionRefusal::unfit)?;
+    let (editing, definition) = drafted(draft)?;
+    if editing {
+        custom::store::edit_told(home, &definition, said, now_ms)
+    } else {
+        custom::store::create_told(home, &definition, JevMode::Shadow, said, now_ms)
+    }?;
     Ok(())
 }
 
@@ -1964,16 +1974,11 @@ impl DecisionRefusal {
     }
 }
 
-impl From<custom::store::AskWhenError> for DecisionRefusal {
-    fn from(error: custom::store::AskWhenError) -> Self {
+impl From<custom::store::ToldError> for DecisionRefusal {
+    fn from(error: custom::store::ToldError) -> Self {
         match error {
-            custom::store::AskWhenError::Missing => Self {
-                refusals: Vec::new(),
-                missing: true,
-                message: String::new(),
-            },
-            custom::store::AskWhenError::Unfit(unfit) => Self::unfit(unfit),
-            custom::store::AskWhenError::Io(error) => error.into(),
+            custom::store::ToldError::Store(error) => error.into(),
+            custom::store::ToldError::Unfit(unfit) => Self::unfit(unfit),
         }
     }
 }
@@ -4851,6 +4856,62 @@ mod tests {
             1,
             "a refused save keeps nothing"
         );
+    }
+
+    /// A told save whose words cannot be kept keeps no decision either
+    /// (t-108275): the definition and when it asks are one save. A store whose
+    /// ask-when file does not read keeps no new decision and no new version,
+    /// and once the file is gone the same save is not refused as a name
+    /// taken. Before, the definition was kept and only the words failed.
+    #[test]
+    fn a_told_save_whose_words_cannot_be_kept_keeps_no_decision_either() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let draft = |name: &str| DecisionDraft {
+            id: None,
+            name: name.to_string(),
+            question: "Does this command remove files?".to_string(),
+            answer: AnswerDraft::YesNo {
+                yes: "It removes files.".to_string(),
+                no: "It keeps every file.".to_string(),
+            },
+            at: custom::Point::BeforeCommand,
+            reads: BTreeSet::from([custom::Input::Command]),
+            folders: None,
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        let told = custom::AskWhen {
+            words: vec!["rm".to_string()],
+            edited: false,
+        };
+        save_custom_decision_told_at(home, draft("Removes files"), Some(&told), 1_000)
+            .expect("kept while the file reads");
+        let kept = custom::store::list(home).expect("listed");
+        assert_eq!(kept.len(), 1);
+
+        let file = custom::store::ask_when_path(home);
+        std::fs::write(&file, "{ not json").expect("a broken file");
+        assert!(
+            save_custom_decision_told_at(home, draft("Moves files"), Some(&told), 2_000).is_err(),
+            "the save says it failed"
+        );
+        let edit = DecisionDraft {
+            id: Some(kept[0].id.clone()),
+            question: "Does this command remove or move files?".to_string(),
+            ..draft("Removes files")
+        };
+        assert!(save_custom_decision_told_at(home, edit, Some(&told), 3_000).is_err());
+        assert_eq!(
+            custom::store::list(home).expect("listed"),
+            kept,
+            "a save whose words cannot be kept keeps no decision and no version"
+        );
+
+        std::fs::remove_file(&file).expect("the broken file goes");
+        save_custom_decision_told_at(home, draft("Moves files"), Some(&told), 4_000)
+            .expect("the same save is not a name taken");
+        assert_eq!(custom::store::list(home).expect("listed").len(), 2);
     }
 
     /// A decision's hour, and the hour every decision shares, are counted

@@ -125,8 +125,9 @@ pub fn index_path(home: &Path) -> PathBuf {
 }
 
 /// The file beside the index that says when each decision asks
-/// ([`ask_when`]): [`set_ask_when`] writes it alone, never the index, so a
-/// reader that holds what it read must watch this file too.
+/// ([`ask_when`]): [`set_ask_when`] writes it alone, never the index, and a
+/// told save ([`create_told`], [`edit_told`]) writes it just before the
+/// index, so a reader that holds what it read must watch this file too.
 #[must_use]
 pub fn ask_when_path(home: &Path) -> PathBuf {
     root(home).join(ASK_WHEN)
@@ -183,7 +184,21 @@ pub fn create(
 ) -> Result<String, Error> {
     let root = root(home);
     let _lock = lock(&root)?;
-    let mut index = read_index(&root)?;
+    let index = read_index(&root)?;
+    let (version, index) = created(&root, index, definition, mode, now_ms)?;
+    write_index(&root, index)?;
+    Ok(version)
+}
+
+/// [`create`] under the lock its caller holds, on the `index` it read there:
+/// the definition written, and the index that lists it, not yet written.
+fn created(
+    root: &Path,
+    mut index: Vec<Entry>,
+    definition: &Definition,
+    mode: JevMode,
+    now_ms: i64,
+) -> Result<(String, Vec<Entry>), Error> {
     let mut refused = check(definition);
     if !MODES.contains(&mode) {
         refused.push(Refusal::Mode);
@@ -204,7 +219,7 @@ pub fn create(
     if !refused.is_empty() {
         return Err(Error::Refused(refused));
     }
-    let version = write_definition(&root, &bytes)?;
+    let version = write_definition(root, &bytes)?;
     let stamp = civil::iso_utc_of(now_ms);
     index.push(Entry {
         id: definition.id.clone(),
@@ -214,8 +229,100 @@ pub fn create(
         created_at: stamp.clone(),
         updated_at: stamp,
     });
-    write_index(&root, index)?;
+    Ok((version, index))
+}
+
+/// Why a save that also says when its decision asks kept nothing.
+#[derive(Debug)]
+pub enum ToldError {
+    /// What [`create`] and [`edit`] refuse.
+    Store(Error),
+    /// The definition's point does not take what it was told
+    /// ([`AskWhen::fit_for`]).
+    Unfit(Unfit),
+}
+
+impl From<Error> for ToldError {
+    fn from(error: Error) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<io::Error> for ToldError {
+    fn from(error: io::Error) -> Self {
+        Self::Store(Error::Io(error))
+    }
+}
+
+/// [`create`] and [`set_ask_when`] at once (t-108275): `definition` kept as
+/// a new decision in `mode`, asking as `said` tells it, under one hold of the
+/// store's lock — so a save that cannot keep its words keeps no decision
+/// either, and no other writer comes between the two.
+///
+/// # Errors
+/// As [`create`]; [`ToldError::Unfit`] for words its point does not take.
+pub fn create_told(
+    home: &Path,
+    definition: &Definition,
+    mode: JevMode,
+    said: &AskWhen,
+    now_ms: i64,
+) -> Result<String, ToldError> {
+    let kept = said.fit_for(definition.at).map_err(ToldError::Unfit)?;
+    let root = root(home);
+    let _lock = lock(&root)?;
+    let before = read_index(&root)?;
+    let held = read_ask_when(&root)?;
+    let (version, after) = created(&root, before.clone(), definition, mode, now_ms)?;
+    keep_told(&root, &before, after, held, &definition.id, kept)?;
     Ok(version)
+}
+
+/// [`edit`] and [`set_ask_when`] at once (t-108275), as [`create_told`]
+/// keeps a new one. What it is told replaces what it asked by before, at
+/// its old point or a new one.
+///
+/// # Errors
+/// As [`edit`]; [`ToldError::Unfit`] for words its point does not take.
+pub fn edit_told(
+    home: &Path,
+    definition: &Definition,
+    said: &AskWhen,
+    now_ms: i64,
+) -> Result<String, ToldError> {
+    let kept = said.fit_for(definition.at).map_err(ToldError::Unfit)?;
+    let root = root(home);
+    let _lock = lock(&root)?;
+    let before = read_index(&root)?;
+    let held = read_ask_when(&root)?;
+    let (version, after, _) = edited(&root, before.clone(), definition, now_ms)?;
+    keep_told(&root, &before, after, held, &definition.id, kept)?;
+    Ok(version)
+}
+
+/// The end of a told save, under the lock its caller holds: the ask-when
+/// file first, then the index that lists the decision's new version. The
+/// index is the save — readers find a decision and its version there — so
+/// words that cannot be written leave it as it was (a definition file no row
+/// names is swept later, [`forget_deleted`]). An index that then cannot be
+/// written puts the file back as it was `held`, as far as it can.
+fn keep_told(
+    root: &Path,
+    before: &[Entry],
+    after: Vec<Entry>,
+    held: BTreeMap<String, AskWhen>,
+    id: &str,
+    kept: AskWhen,
+) -> io::Result<()> {
+    keep_ask_when(root, &after, |decisions| {
+        decisions.remove(id);
+        if !kept.always() {
+            decisions.insert(id.to_string(), kept);
+        }
+    })?;
+    write_index(root, after).inspect_err(|_| {
+        let _ = keep_ask_when(root, before, |decisions| *decisions = held);
+    })
 }
 
 /// Keep `definition` as the newest version of the decision with its id,
@@ -267,10 +374,31 @@ pub fn set_max_per_hour(
 /// [`edit`] under the lock its caller holds, on the `index` it read there.
 fn edit_held(
     root: &Path,
-    mut index: Vec<Entry>,
+    index: Vec<Entry>,
     definition: &Definition,
     now_ms: i64,
 ) -> Result<String, Error> {
+    let (version, index, moved) = edited(root, index, definition, now_ms)?;
+    if moved {
+        // Best effort, as a delete's: a line left behind is read as its new
+        // point keeps it ([`AskWhen::kept_at`]).
+        let _ = keep_ask_when(root, &index, |decisions| {
+            decisions.remove(&definition.id);
+        });
+    }
+    write_index(root, index)?;
+    Ok(version)
+}
+
+/// [`edit`]'s checks and new version under the lock its caller holds, on the
+/// `index` it read there: the version, the index that names it (not yet
+/// written), and whether the decision moved to another point.
+fn edited(
+    root: &Path,
+    mut index: Vec<Entry>,
+    definition: &Definition,
+    now_ms: i64,
+) -> Result<(String, Vec<Entry>, bool), Error> {
     let Some(at) = index.iter().position(|entry| entry.id == definition.id) else {
         return Err(Error::Missing);
     };
@@ -293,15 +421,7 @@ fn edit_held(
     entry.name.clone_from(&definition.name);
     entry.definition.clone_from(&version);
     entry.updated_at = civil::iso_utc_of(now_ms);
-    if moved {
-        // Best effort, as a delete's: a line left behind is read as its new
-        // point keeps it ([`AskWhen::kept_at`]).
-        let _ = keep_ask_when(root, &index, |decisions| {
-            decisions.remove(&definition.id);
-        });
-    }
-    write_index(root, index)?;
-    Ok(version)
+    Ok((version, index, moved))
 }
 
 /// Set the decision `id` to `mode` at `now_ms`. Only the index changes: the
@@ -1366,5 +1486,95 @@ mod tests {
             panic!("a broken file was written past");
         };
         assert_eq!(error.to_string(), said);
+    }
+
+    /// A save told when its decision asks keeps both or neither (t-108275):
+    /// the words are written before the index that lists the decision, under
+    /// one hold of the lock, so a file that will not take them leaves the
+    /// store as it was — no new decision, no new version — and an edit that
+    /// moves the decision keeps what it was told at its new point.
+    #[test]
+    fn a_told_save_keeps_its_words_and_its_decision_together_or_neither() {
+        let home = tempfile::tempdir().unwrap();
+        let first = asking_at("d-0000000a", "Deletes", Point::BeforeCommand);
+        let kept = create_told(
+            home.path(),
+            &first,
+            JevMode::On,
+            &asks_when(&[" rm ", "rm"], false),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(list(home.path()).unwrap()[0].definition, kept);
+        assert_eq!(
+            ask_when(home.path()).unwrap().get("d-0000000a"),
+            Some(&asks_when(&["rm"], false))
+        );
+
+        let moved = asking_at("d-0000000a", "Deletes", Point::TurnEnd);
+        let at_the_end =
+            edit_told(home.path(), &moved, &asks_when(&["delete"], true), NOW + 1).unwrap();
+        assert_ne!(at_the_end, kept, "the move is a new version");
+        assert_eq!(
+            ask_when(home.path()).unwrap().get("d-0000000a"),
+            Some(&asks_when(&["delete"], true)),
+            "what a moved decision is told is kept at its new point"
+        );
+        assert!(matches!(
+            create_told(
+                home.path(),
+                &asking_at("d-0000000b", "Asked", Point::AgentAsks),
+                JevMode::On,
+                &asks_when(&["rm"], false),
+                NOW + 2,
+            ),
+            Err(ToldError::Unfit(Unfit::AskedByAnAgent))
+        ));
+        assert_eq!(
+            list(home.path()).unwrap().len(),
+            1,
+            "an unfit save keeps nothing"
+        );
+
+        let path = ask_when_path(home.path());
+        fs::write(&path, "{ not json").unwrap();
+        let second = asking_at("d-0000000c", "Moves", Point::BeforeCommand);
+        assert!(matches!(
+            create_told(
+                home.path(),
+                &second,
+                JevMode::On,
+                &asks_when(&["mv"], false),
+                NOW + 3
+            ),
+            Err(ToldError::Store(Error::Io(_)))
+        ));
+        let mut changed = moved.clone();
+        changed.question = "Did this turn delete anything a person kept?".to_string();
+        assert!(matches!(
+            edit_told(home.path(), &changed, &AskWhen::default(), NOW + 4),
+            Err(ToldError::Store(Error::Io(_)))
+        ));
+        let listed = list(home.path()).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["d-0000000a"],
+            "words that cannot be kept keep no new decision"
+        );
+        assert_eq!(listed[0].definition, at_the_end, "nor a new version");
+
+        fs::remove_file(&path).unwrap();
+        create_told(
+            home.path(),
+            &second,
+            JevMode::On,
+            &asks_when(&["mv"], false),
+            NOW + 5,
+        )
+        .expect("the same save, once the file is gone, is not a name taken");
+        assert_eq!(list(home.path()).unwrap().len(), 2);
     }
 }
