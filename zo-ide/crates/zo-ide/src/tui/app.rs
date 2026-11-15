@@ -10837,6 +10837,79 @@ mod tests {
         };
         assert!(!guard.swallows(&KeyEvent::from(KeyCode::Char('a')), now + Duration::from_secs(1)));
     }
+
+    /// Crossterm parses `ESC ]` as `Alt+]` and `ESC \` as `Alt+\` when both
+    /// bytes arrive in one read, and a second colour reply (`OSC 11`) follows
+    /// immediately after `OSC 10`. Both replies must be swallowed and the
+    /// following `h` must reach the composer.
+    #[test]
+    fn a_late_crossterm_osc_pair_with_st_is_swallowed_and_leaves_h_alone() {
+        use super::{KeyCode, KeyEvent, KeyModifiers, LateOscGuard};
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let mut guard = LateOscGuard {
+            until: now + Duration::from_secs(3),
+            saw_escape: false,
+            inside: false,
+        };
+        let alt = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT);
+        let plain = KeyEvent::from;
+
+        for payload in ["10;rgb:e0e0/e0e0/e0e0", "11;rgb:1c1c/1e1e/2626"] {
+            assert!(guard.swallows(&alt(']'), now), "Alt+] must open and be swallowed");
+            for ch in payload.chars() {
+                assert!(guard.swallows(&plain(KeyCode::Char(ch)), now), "{ch} reached the composer");
+            }
+            assert!(guard.swallows(&alt('\\'), now), "Alt+\\ must close and be swallowed");
+        }
+
+        assert!(!guard.swallows(&plain(KeyCode::Char('h')), now), "h after replies must reach the composer");
+    }
+
+    /// Crossterm parses `BEL` (`0x07`) as `Ctrl+g`. Multiple BEL-terminated
+    /// replies inside the window must all be swallowed, leaving `h` intact.
+    #[test]
+    fn a_late_crossterm_osc_pair_with_bel_is_swallowed_and_leaves_h_alone() {
+        use super::{KeyCode, KeyEvent, KeyModifiers, LateOscGuard};
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let mut guard = LateOscGuard {
+            until: now + Duration::from_secs(3),
+            saw_escape: false,
+            inside: false,
+        };
+        let alt = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT);
+        let bel = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        let plain = KeyEvent::from;
+
+        for payload in ["10;rgb:e0e0/e0e0/e0e0", "11;rgb:1c1c/1e1e/2626"] {
+            assert!(guard.swallows(&alt(']'), now), "Alt+] must open and be swallowed");
+            for ch in payload.chars() {
+                assert!(guard.swallows(&plain(KeyCode::Char(ch)), now), "{ch} reached the composer");
+            }
+            assert!(guard.swallows(&bel, now), "Ctrl+g (BEL) must close and be swallowed");
+        }
+
+        assert!(!guard.swallows(&plain(KeyCode::Char('h')), now), "h after replies must reach the composer");
+    }
+
+    /// Past the three-second window, `Alt+]` is the operator's again.
+    #[test]
+    fn a_late_crossterm_osc_reply_past_the_window_is_not_swallowed() {
+        use super::{KeyCode, KeyEvent, KeyModifiers, LateOscGuard};
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let mut guard = LateOscGuard {
+            until: now + Duration::from_secs(3),
+            saw_escape: false,
+            inside: false,
+        };
+        let after = now + Duration::from_secs(4);
+        assert!(!guard.swallows(&KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT), after));
+    }
     /// A result that missed its cell must still be drawn as what it is. The
     /// old code forced `ToolKind::Call`, so an edit came back as a generic
     /// `Called edit_file(…)` with the raw patch — no line numbers, no colors,

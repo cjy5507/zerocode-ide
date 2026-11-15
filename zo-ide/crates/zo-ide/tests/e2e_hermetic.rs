@@ -10729,3 +10729,66 @@ async fn e2e_a_full_access_tui_refuses_a_kill_question_without_putting_it() {
     );
 }
 
+#[cfg(unix)]
+async fn assert_late_osc_replies_swallowed(payload: &[u8]) {
+    let rows = 30;
+    let cols = 120;
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("unused\n")
+        .await
+        .expect("start provider");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_controlling_sized(
+        rows,
+        cols,
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[],
+    )
+    .expect("spawn zo in PTY");
+    run.send(b"\x1b[1;1R").expect("answer cursor position query");
+    run.wait_for("Ask zo to do anything", TEST_TIMEOUT);
+    let painted = std::time::Instant::now();
+    std::thread::sleep(Duration::from_millis(150));
+    run.send(payload).expect("send late OSC colour replies");
+    std::thread::sleep(LATE_OSC_WINDOW.saturating_sub(painted.elapsed()));
+    wait_until_quiet(&run, Duration::from_millis(250), TEST_TIMEOUT);
+
+    let visible = settled_screen(&run.snapshot_output(), rows).visible();
+    let joined = visible.join("\n");
+    assert!(
+        !joined.contains("]10;") && !joined.contains("]11;") && !joined.contains("rgb:"),
+        "late OSC colour reply reached the screen:\n{joined}"
+    );
+    assert!(
+        visible.iter().any(|row| row.contains("Ask zo to do anything")),
+        "composer placeholder must remain empty:\n{joined}"
+    );
+    let _ = run.finish();
+    assert!(
+        service.request_bodies().await.is_empty(),
+        "no late reply bytes may reach the model"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_late_osc_colour_replies_never_reach_composer() {
+    assert_late_osc_replies_swallowed(
+        b"\x1b]10;rgb:e0e0/e0e0/e0e0\x1b\\\x1b]11;rgb:1c1c/1e1e/2626\x1b\\",
+    )
+    .await;
+    assert_late_osc_replies_swallowed(
+        b"\x1b]10;rgb:e0e0/e0e0/e0e0\x07\x1b]11;rgb:1c1c/1e1e/2626\x07",
+    )
+    .await;
+    assert_late_osc_replies_swallowed(
+        b"\x1b]10;rgb:e0e0/e0e0/e0e0\x1b\\\x1b]11;rgb:1c1c/1e1e/2626\x1b\\\x1b]10;rgb:d0d0/d0d0/d0d0\x07\x1b]11;rgb:1010/1212/1818\x07",
+    )
+    .await;
+}
+

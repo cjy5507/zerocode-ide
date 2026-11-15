@@ -14,7 +14,7 @@
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::ansi::{Color, Style};
 
@@ -523,11 +523,16 @@ impl LateOscGuard {
             return false;
         }
         if self.inside {
-            // `ESC \` or BEL closes the string; the terminator's own bytes go
-            // with it.
-            if matches!(key.code, KeyCode::Char('\\')) || matches!(key.code, KeyCode::Char('\u{7}')) {
+            // `ESC \` (parsed as `Alt+\` or `Esc` then `\`) or `BEL` (parsed
+            // as `Ctrl+g` by crossterm) closes this reply. Keep the guard
+            // armed until `self.until` because `query_default_colors` sends
+            // two queries (OSC 10 and 11) and multiple replies can follow.
+            let is_st = matches!(key.code, KeyCode::Char('\\'));
+            let is_bel = matches!(key.code, KeyCode::Char('\u{7}'))
+                || (matches!(key.code, KeyCode::Char('g'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL));
+            if is_st || is_bel {
                 self.inside = false;
-                self.until = now;
             }
             return true;
         }
@@ -541,6 +546,11 @@ impl LateOscGuard {
             // swallowed; disarm so the next one reaches the operator.
             self.until = now;
             return false;
+        }
+        // Crossterm parses `ESC ]` arriving in one read as `Alt+]`.
+        if matches!(key.code, KeyCode::Char(']')) && key.modifiers.contains(KeyModifiers::ALT) {
+            self.inside = true;
+            return true;
         }
         if matches!(key.code, KeyCode::Esc) {
             // The reply begins with ESC, and letting that through fires an
