@@ -2082,11 +2082,18 @@ async function status(browser, origin, ok) {
       await T.settle();
       const band = document.getElementById("computer-band");
       const rect = band.getBoundingClientRect();
-      return { bandShown: !band.hidden, bandTop: Math.round(rect.top), popup: T.look().shown };
+      const bar = document.querySelector(".statusbar").getBoundingClientRect();
+      return {
+        bandShown: !band.hidden,
+        // In the status bar's row at the window's foot (2026-11-15), far from
+        // the popup's middle.
+        inStatusRow: rect.top >= bar.top - 0.5 && rect.bottom <= bar.bottom + 0.5,
+        popup: T.look().shown,
+      };
     });
     ok(
-      "the Computer Use band says it is working where it always was and raises no popup",
-      seen.bandShown && seen.bandTop < 80 && seen.popup === false,
+      "the Computer Use band says it is working in the status bar's row and raises no popup",
+      seen.bandShown && seen.inStatusRow && seen.popup === false,
       JSON.stringify(seen),
     );
     ok("the status scenario raised no renderer errors", faults.length === 0, faults.join("\n"));

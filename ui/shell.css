@@ -61827,24 +61827,28 @@ button.jev-token:hover {
 
 /* ---- Computer Use: the band (C4-c) ----
  *
- * It floats over the whole window at the top, centred, above everything a
- * person might be looking at — the operator is acting on THEIR desktop and
- * the one hand must be in reach. It says a fact and asks nothing, so it stays
- * where it is; the questions the operator puts to the person (the last step,
- * the hand-over) stand in the ask popup in the middle of the window. Every
- * colour is a token; the stop is halt, the working dot breathes. The band and
- * the work screen panel below it (t-59372) stand in one dock that takes no
- * clicks itself, so the window beside them stays in reach. It stands just
- * under the title bar, not on it: centred on the bar it covered the middle
- * of the tab strip for as long as the operator worked (2026-11-12). */
+ * It stands in the status bar's own row at the foot of the window, centred,
+ * over the bar's empty middle (2026-11-15, the person: 「해더 아래 뜨는데 위치
+ * 바꿨으면」). Under the header it covered a pane's first lines and the files
+ * panel's tools; centred on the title bar it covered the tab strip
+ * (2026-11-12). Down here it covers no tab, no title, no pane where the person
+ * types and not the ask popup in the middle — only the bar's passive readouts
+ * behind it, for as long as it stands. The operator is acting on the
+ * person's desktop, so the stop and the take-back stay one press away; the
+ * questions the operator puts to the person still stand in the ask popup. The
+ * band and the work screen panel (t-59372) stand in one dock that takes no
+ * clicks itself, the band at the foot and the panel opening upward above it,
+ * the way the status bar's own popovers open. The dock owns its keys
+ * (`data-keyboard-owner`): without that the window takes a focused button's
+ * Enter to the terminal and the stop never hears it. */
 .computer-dock {
   position: fixed;
-  top: calc(var(--titlebar-height) + var(--space-2));
+  bottom: 0;
   left: 50%;
   transform: translateX(-50%);
   z-index: 60;
   display: flex;
-  flex-direction: column;
+  flex-direction: column-reverse;
   align-items: center;
   gap: var(--space-2);
   width: max-content;
@@ -61856,46 +61860,111 @@ button.jev-token:hover {
   pointer-events: auto;
 }
 
+/* One status bar row tall; a narrow window wraps it upward. Geist's raised
+ * control: the raised ground, a 1px ring, the small radius on the edges that
+ * leave the bar. The row's controls are a statusbar tall less a step, so two
+ * lines still sit on the row's rhythm. */
 .computer-band {
+  --computer-band-control: calc(var(--statusbar-height) - var(--space-1));
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   max-width: 100%;
-  padding: var(--space-1) var(--space-3);
-  border-radius: var(--radius-pill);
+  min-height: var(--statusbar-height);
+  box-sizing: border-box;
+  padding: calc(var(--space-1) / 2) var(--space-1) calc(var(--space-1) / 2) var(--space-3);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   background: var(--surface-raised);
-  color: var(--ink-label);
-  font: var(--text-sm) var(--font-ui);
-  box-shadow: var(--shadow-soft);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  box-shadow: var(--shadow-border);
 }
 
+/* The operator's state as a shape as well as a colour: a hollow ring while
+ * nothing is acting, a filled dot that breathes while the operator acts, a
+ * square while a stop stands. */
 .computer-band-dot {
-  width: 8px;
-  height: 8px;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--status-dot);
+  height: var(--status-dot);
+  border: var(--status-dot-ring) solid var(--edge-mark);
   border-radius: var(--radius-pill);
+}
+
+.computer-band.is-active .computer-band-dot {
+  border-color: var(--signal-ready);
   background: var(--signal-ready);
   animation: computer-band-breathe 1.6s ease-in-out infinite;
 }
 
 .computer-band.is-stopped .computer-band-dot {
+  border-color: var(--signal-halt);
+  border-radius: 0;
   background: var(--signal-halt);
   animation: none;
 }
 
-.computer-band-count {
-  color: var(--ink-figure);
-  font-size: var(--text-xs);
+.computer-band-word {
+  color: var(--ink-chalk);
+  font-weight: 500;
 }
 
-.computer-band-stop {
+.computer-band-count {
+  color: var(--ink-figure);
+}
+
+/* The band's controls and the panel's: Geist's small button on the row's
+ * height — the ring for an edge, the deck for a ground, the row's hover. */
+.computer-band > .btn,
+.computer-progress-head > .btn,
+.computer-progress-browser-go {
+  height: var(--computer-band-control, var(--control-height-sm));
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  font-weight: 500;
+  transition: background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.computer-band > .btn:hover:enabled,
+.computer-progress-head > .btn:hover:enabled,
+.computer-progress-browser-go:hover:enabled {
+  background: var(--row-hover);
+  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
+}
+
+/* The stop says what it is in a word and a square, and wears the halt ink. */
+.computer-band > .computer-band-stop {
+  gap: var(--space-1);
   color: var(--signal-halt-ink);
+}
+
+.computer-band-stop::before {
+  flex: none;
+  width: var(--status-dot);
+  height: var(--status-dot);
+  background: currentColor;
+  content: "";
 }
 
 .computer-band-note {
   color: var(--ink-mist);
-  font-size: var(--text-xs);
+}
+
+/* What the share says starts its own group, behind a hairline. */
+.computer-band-share,
+.computer-band-wait {
+  padding-left: var(--space-2);
+  box-shadow: inset var(--rule-width) 0 0 var(--edge-rule);
 }
 
 /* Where an agent pressed in ZeroCode's own window (t-73906): a dashed ring for
@@ -61921,20 +61990,22 @@ button.jev-token:hover {
 }
 
 /* The work screen panel: the newest look of one pane's assignment, small and
- * under the band, never more than a little under half the window's height. The
- * picture is shown whole and is not dragged out. */
+ * above the band, never more than a little under half the window's height.
+ * What floats takes Geist's large radius, the deck, the ring and the soft
+ * drop. The picture is shown whole and is not dragged out. */
 .computer-progress {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: var(--space-2);
   width: min(420px, calc(100vw - 2 * var(--space-3)));
   max-height: 45vh;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
-  background: var(--surface-raised);
-  color: var(--ink-label);
-  font: var(--text-sm) var(--font-ui);
-  box-shadow: var(--shadow-soft);
+  box-sizing: border-box;
+  padding: var(--space-3);
+  border-radius: var(--radius);
+  background: var(--surface-deck);
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+  box-shadow: var(--shadow-border), var(--shadow-soft);
   overflow: hidden;
 }
 
@@ -61947,7 +62018,7 @@ button.jev-token:hover {
 
 .computer-progress-title {
   color: var(--ink-chalk);
-  font-weight: 600;
+  font: var(--type-heading-14);
 }
 
 .computer-progress-subject,
@@ -61957,7 +62028,11 @@ button.jev-token:hover {
 .computer-progress-note,
 .computer-progress-scope {
   margin: 0;
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
+}
+
+.computer-progress-desk {
+  color: var(--ink-chalk);
 }
 
 .computer-progress-browser-hint,
@@ -61998,7 +62073,9 @@ button.jev-token:hover {
   min-height: 0;
   width: 100%;
   object-fit: contain;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border);
   user-select: none;
   -webkit-user-drag: none;
 }

@@ -1181,6 +1181,10 @@ async function testThePanelReadsTheWorkBrowser(browser, origin, ok) {
     const desk = await evaluateCase(page, async ({ subject }) => {
       const hands = window.__COMPUTER_HANDS__;
       hands.recordCommand("computer_progress_frame", () => null);
+      // A window stays shared through these cases: the band stands while
+      // nothing acts, so the panel under it stays open (it closes with the
+      // band, 2026-11-15) and its line says nobody acts.
+      hands.announce("computer:share-state", { target: "safari", label: "Safari", takenBack: false, generation: 1, revision: 1 });
       hands.openPanel(subject);
       await hands.settle();
       const quiet = hands.readControl();
@@ -2074,7 +2078,260 @@ async function testAReloadDuringTheStop(browser, origin, ok) {
   } finally { await page.close(); }
 }
 
+/* The band closes itself (2026-11-15): when the backend says the share ended
+ * (`target: null`) or the operator went quiet for the band's idle time, the
+ * band and the work screen panel both go, with nothing of the last session
+ * left — no picture, no look for the view to open. A stop that stands and a
+ * window the person took back are the person's to lift, so both stay. */
+async function testTheBandClosesItself(browser, origin, ok) {
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    const shareEnds = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:share-state", { target: "safari", label: "Safari", takenBack: false, generation: 1, revision: 1 });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 1, active: false }));
+      hands.announce("computer:frame", { ...subject, seq: 3 });
+      await hands.settle();
+      const frames = hands.recordCommand("computer_progress_frame", () => hands.look(subject, 3));
+      hands.pressBand("view");
+      await hands.settle();
+      document.getElementById("computer-progress-close").focus();
+      const open = { band: hands.readBand(), panel: hands.readPanel() };
+      hands.announce("computer:share-state", { target: null, takenBack: false, generation: 2, revision: 2 });
+      await hands.settle();
+      const ended = { band: hands.readBand(), panel: hands.readPanel() };
+      const focusLeftInHidden = document.activeElement !== document.body &&
+        document.activeElement?.closest("[hidden]") != null;
+      // The next session starts clean: no view to a look of the last one.
+      hands.announce("computer:activity", hands.operatorReport({ revision: 3, active: true }));
+      await hands.settle();
+      const next = hands.readBand();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 4, active: false }));
+      await hands.settle();
+      return { open, ended, focusLeftInHidden, next, asked: frames.length };
+    }, { subject: SUBJECT });
+    ok(
+      "when the share ends the band and the open panel close without a press, and nothing of that session is left",
+      shareEnds.open?.band?.shown === true && shareEnds.open?.panel?.shown === true &&
+        shareEnds.ended?.band?.shown === false && shareEnds.ended?.panel?.shown === false &&
+        shareEnds.ended?.panel?.picture === null && shareEnds.focusLeftInHidden === false &&
+        shareEnds.next?.shown === true && shareEnds.next?.offersView === false,
+      JSON.stringify(shareEnds),
+    );
+
+    const quiet = await evaluateCase(page, async ({ subject, idle }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.recordCommand("computer_progress_frame", () => hands.look(subject, 5));
+      hands.announce("computer:activity", hands.operatorReport({ revision: 5, active: true }));
+      hands.announce("computer:frame", { ...subject, seq: 5 });
+      await hands.settle();
+      hands.pressBand("view");
+      await hands.settle();
+      const open = { band: hands.readBand(), panel: hands.readPanel() };
+      await new Promise((done) => hands.census.native.setTimeout(done, idle));
+      await hands.settle();
+      return { open, after: { band: hands.readBand(), panel: hands.readPanel() } };
+    }, { subject: SUBJECT, idle: 8600 });
+    ok(
+      "after the operator's last action the band and the open panel slip away by themselves",
+      quiet.open?.band?.shown === true && quiet.open?.panel?.shown === true &&
+        quiet.after?.band?.shown === false && quiet.after?.panel?.shown === false,
+      JSON.stringify(quiet),
+    );
+
+    const held = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.recordCommand("computer_progress_frame", () => hands.look(subject, 7));
+      // The person took the window back: the band and the panel stay.
+      hands.announce("computer:share-state", { target: "safari", label: "Safari", takenBack: true, generation: 3, revision: 3 });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 6, active: false }));
+      hands.announce("computer:frame", { ...subject, seq: 7 });
+      await hands.settle();
+      hands.pressBand("view");
+      await hands.settle();
+      const taken = { band: hands.readBand(), panel: hands.readPanel() };
+      // A stop stands with the share gone: still the person's to lift.
+      hands.announce("computer:activity", hands.operatorReport({ revision: 7, stopped: "window", personsStop: true }));
+      hands.announce("computer:share-state", { target: null, takenBack: false, generation: 4, revision: 4 });
+      await hands.settle();
+      const stopped = { band: hands.readBand(), panel: hands.readPanel() };
+      // A share word without a window has nothing to take back or give.
+      hands.announce("computer:activity", hands.operatorReport({ revision: 8, stopped: null, active: false }));
+      hands.announce("computer:share-state", { target: null, takenBack: true, generation: 5, revision: 5 });
+      await hands.settle();
+      return { taken, stopped, orphan: { band: hands.readBand(), panel: hands.readPanel() } };
+    }, { subject: SUBJECT });
+    ok(
+      "a window the person took back and a standing stop keep the band and the panel; a share word with no window does not",
+      held.taken?.band?.shown === true && held.taken?.panel?.shown === true &&
+        held.stopped?.band?.shown === true && held.stopped?.panel?.shown === true &&
+        held.orphan?.band?.shown === false && held.orphan?.panel?.shown === false,
+      JSON.stringify(held),
+    );
+
+    const typing = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      const field = document.createElement("input");
+      field.id = "typing-probe";
+      document.body.append(field);
+      hands.announce("computer:activity", hands.operatorReport({ revision: 9, active: true }));
+      await hands.settle();
+      field.focus();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 10, active: false }));
+      await hands.settle();
+      const kept = document.activeElement === field;
+      field.remove();
+      return { kept, band: hands.readBand() };
+    });
+    ok(
+      "closing by itself never takes the keyboard from where the person types",
+      typing.kept === true && typing.band?.shown === false,
+      JSON.stringify(typing),
+    );
+    ok("the closing scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
+/* Where the band stands (2026-11-15): in the status bar's row at the foot of
+ * the window, not under the header — clear of the tab strip and the title, of
+ * the pane where the person types and of the ask popup — with its stop and its
+ * take-back a press or a key away, and its words readable in both themes. */
+async function testTheBandsPlace(browser, origin, ok) {
+  const states = {
+    working: { activity: { revision: 1, active: true, actions: 12 } },
+    shared: {
+      activity: { revision: 1, active: true, actions: 4 },
+      share: { target: "safari", label: "Safari", takenBack: false, generation: 1, revision: 1 },
+    },
+    taken: {
+      activity: { revision: 1, active: false, actions: 4 },
+      share: { target: "safari", label: "Safari", takenBack: true, generation: 1, revision: 1 },
+    },
+    stopped: { activity: { revision: 1, stopped: "window", personsStop: true } },
+  };
+  for (const width of [900, 1280, 1800]) {
+    for (const [name, state] of Object.entries(states)) {
+      const { page, faults } = await openComputerPage(browser, origin);
+      try {
+        await page.setViewportSize({ width, height: 860 });
+        const seen = await evaluateCase(page, async ({ state }) => {
+          const hands = window.__COMPUTER_HANDS__;
+          if (state.share) hands.announce("computer:share-state", state.share);
+          hands.announce("computer:activity", hands.operatorReport(state.activity));
+          hands.announce("computer:confirm", { id: "place-1", kind: "payment", label: "Place order", verb: "mouse-click", timeoutMs: 120000 });
+          await hands.settle();
+          await new Promise((done) => hands.census.native.setTimeout(done, 300));
+          const rect = (node) => {
+            const box = node?.getBoundingClientRect();
+            return box && box.width > 0 ? { left: box.left, top: box.top, right: box.right, bottom: box.bottom } : null;
+          };
+          const meets = (one, two) => one != null && two != null &&
+            one.left < two.right && two.left < one.right && one.top < two.bottom && two.top < one.bottom;
+          const band = rect(document.getElementById("computer-band"));
+          const ask = rect(document.querySelector("#ask-scrim .permission"));
+          const titlebar = rect(document.querySelector(".titlebar"));
+          const stage = rect(document.querySelector(".stage"));
+          const statusbar = rect(document.querySelector(".statusbar"));
+          return {
+            band, statusbar,
+            onTitle: meets(band, titlebar),
+            onStage: meets(band, stage),
+            onAsk: meets(band, ask),
+            askShown: ask != null,
+            inStatusRow: band != null && statusbar != null && band.top >= statusbar.top - 0.5 &&
+              band.bottom <= statusbar.bottom + 0.5,
+          };
+        }, { state });
+        ok(
+          `at ${width}px wide the ${name} band stands in the status bar's row, clear of the title bar, the pane and the ask popup`,
+          seen.inStatusRow === true && seen.onTitle === false && seen.onStage === false &&
+            seen.askShown === true && seen.onAsk === false,
+          JSON.stringify(seen),
+        );
+        if (faults.length > 0) ok(`the ${name} band at ${width}px raised no renderer errors`, false, faults.join("\n"));
+      } finally { await page.close(); }
+    }
+  }
+
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    const keys = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:share-state", { target: "safari", label: "Safari", takenBack: false, generation: 1, revision: 1 });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 1, active: true }));
+      await hands.settle();
+      const stop = document.getElementById("computer-band-stop");
+      const take = document.getElementById("computer-band-take");
+      const reachable = (button) => !button.hidden && button.tabIndex >= 0 && !button.disabled &&
+        button.getClientRects().length > 0;
+      return { stop: reachable(stop), take: reachable(take), role: document.getElementById("computer-band").getAttribute("role") };
+    });
+    const stops = await page.evaluate(() => window.__COMPUTER_HANDS__.recordCommand("computer_stop", () => ({ stopped: true, reason: "window", revision: 2 })).length);
+    await page.focus("#computer-band-stop");
+    await page.keyboard.press("Enter");
+    const stopped = await page.evaluate(async () => {
+      await window.__COMPUTER_HANDS__.settle();
+      return window.__COUNTS__.computer_stop ?? 0;
+    });
+    ok(
+      "the stop and the take-back are in the keyboard's reach, and Enter on the stop stops",
+      keys.stop === true && keys.take === true && keys.role === "status" && stops === 0 && stopped >= 1,
+      JSON.stringify({ keys, stopped }),
+    );
+
+    const ink = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      // A paint as the eye gets it: laid over the ground it stands on.
+      const channels = (paint, under = "#000") => {
+        const probe = document.createElement("canvas").getContext("2d");
+        probe.fillStyle = under;
+        probe.fillRect(0, 0, 1, 1);
+        probe.fillStyle = paint;
+        probe.fillRect(0, 0, 1, 1);
+        return [...probe.getImageData(0, 0, 1, 1).data];
+      };
+      const luminance = ([r, g, b]) => [r, g, b].map((c) => {
+        const v = c / 255;
+        return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+      }).reduce((sum, v, at) => sum + v * [0.2126, 0.7152, 0.0722][at], 0);
+      const ratio = (one, two) => {
+        const [a, b] = [luminance(one), luminance(two)].sort((x, y) => y - x);
+        return (a + 0.05) / (b + 0.05);
+      };
+      const read = () => {
+        const band = document.getElementById("computer-band");
+        const floor = getComputedStyle(document.body).backgroundColor;
+        const groundPaint = getComputedStyle(band).backgroundColor;
+        const ground = channels(groundPaint, floor);
+        const groundCss = `rgb(${ground.slice(0, 3).join(" ")})`;
+        const of = (id) => ratio(channels(getComputedStyle(document.getElementById(id)).color, groundCss), ground);
+        return { word: of("computer-band-word"), stop: of("computer-band-stop"), count: of("computer-band-count") };
+      };
+      hands.announce("computer:activity", hands.operatorReport({ revision: 3, active: true }));
+      await hands.settle();
+      const dark = read();
+      const theme = document.documentElement.dataset.theme;
+      document.documentElement.dataset.theme = "light";
+      // The window eases every colour change: read once the ease is over.
+      await new Promise((done) => hands.census.native.setTimeout(done, 400));
+      const light = read();
+      if (theme == null) delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = theme;
+      return { dark, light };
+    });
+    const readable = (one) => one != null && one.word >= 4.5 && one.stop >= 4.5 && one.count >= 4.5;
+    ok(
+      "the band's words, count and stop read at 4.5:1 or more on its ground in the dark and the light theme",
+      readable(ink.dark) && readable(ink.light),
+      JSON.stringify(ink),
+    );
+    ok("the band's keys and ink scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
 export async function testComputerProgress(browser, origin, ok) {
+  await testTheBandClosesItself(browser, origin, ok);
+  await testTheBandsPlace(browser, origin, ok);
   await testTheBand(browser, origin, ok);
   await testTheProgressPanel(browser, origin, ok);
   await testTheBandWithThePanel(browser, origin, ok);

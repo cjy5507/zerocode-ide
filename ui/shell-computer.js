@@ -112,11 +112,18 @@ function paintComputerBand() {
   const kept = reach?.kept ?? 0;
   if (kept > computerBandKept) computerBandSlipAway();
   computerBandKept = kept;
-  const shared = computerShareState.target != null || computerShareState.takenBack ||
-    computerShareState.waiting != null;
+  // A window taken back holds the band only while there is a window: a share
+  // word with none has nothing to give back or end.
+  const shared = computerShareState.target != null || computerShareState.waiting != null;
   const show = stopped || state.active || state.stopping || state.resuming || kept > 0 || shared;
+  const wasShown = !band.hidden;
   band.hidden = !show;
+  // The band closes by itself (2026-11-15): when it goes, the work screen
+  // panel and the look its view would open go with it — a stop and a window
+  // taken back keep it standing, so they keep both.
+  if (wasShown && !show) forgetComputerBandSession();
   band.classList.toggle("is-stopped", stopped);
+  band.classList.toggle("is-active", state.active && !stopped);
   say(el("computer-band-word"), () => stopped
     ? t("computer.band.stopped", "Computer Use 정지됨 · {{reason}}", { reason: state.stopped })
     : state.active
@@ -145,6 +152,14 @@ function paintComputerBand() {
   paintComputerProgressControl();
 }
 
+/* What the band leaves when it goes by itself: the open panel — closed the way
+ * its own close does, so a keyboard inside it goes back to where it was and a
+ * keyboard elsewhere stays — and the look of the session that ended. */
+function forgetComputerBandSession() {
+  computerBandLook = null;
+  if (computerProgress) closeComputerProgress();
+}
+
 /* The share's part of the band: which window an agent works in, the press
  * that takes it back, and — once taken — the press that hands it back; and
  * the app an agent waits for, with the press that hands it over. */
@@ -163,7 +178,7 @@ function paintComputerShare() {
   if (!words) line.textContent = "";
   line.hidden = !words;
   el("computer-band-take").hidden = share.target == null || share.takenBack;
-  el("computer-band-give").hidden = !share.takenBack;
+  el("computer-band-give").hidden = share.target == null || !share.takenBack;
   el("computer-band-end").hidden = share.target == null;
   const waiting = share.waitingLabel ?? share.waiting;
   const wait = el("computer-band-wait");
