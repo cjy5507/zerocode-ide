@@ -675,12 +675,13 @@ fn parallel_bench() {
 /// cost with every pointer drawn — a helper built from the commit before
 /// against the one built here, turn about (2026-11-15: the press waited for
 /// its pointer, 240 of 423 ms, and one agent had one pointer however many
-/// apps). Both are builds of this machine: the installed helper answers only
-/// the signed window, never a test.
+/// apps). Build it in a folder named `target`: a helper admits a test only
+/// from `target/debug/deps`, and the build line's own folder is not one.
 ///
 /// ```text
-/// ZEROCODE_PARALLEL_FIXTURE=… ZEROCODE_PARALLEL_BASELINE=<the helper built before> \
-/// ZEROCODE_PARALLEL_BUILT=<the helper built here> ZEROCODE_PARALLEL_OUT=… \
+/// CARGO_TARGET_DIR=<checkout>/target ZEROCODE_PARALLEL_FIXTURE=… \
+/// ZEROCODE_PARALLEL_BASELINE=<the helper built before> ZEROCODE_PARALLEL_BUILT=<the helper built here> \
+/// ZEROCODE_PARALLEL_OUT=… \
 /// cargo test -p zerocode-shell --bin zerocode-shell parallel_bench_pointer -- --ignored --nocapture
 /// ```
 #[test]
