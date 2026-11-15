@@ -966,18 +966,81 @@ fn config_and_plan_mode_keep_the_persons_local_file_theirs_unless_they_widen_it(
         runtime::local_file_recorded(&config_home, &real, &std::fs::read(&local).expect("read"))
     };
     assert!(theirs(), "zo recorded the grant");
-    run_tool("Config", &json!({"setting": "model", "value": "opus"})).expect("set the model");
+    let plain = run_tool("Config", &json!({"setting": "model", "value": "opus"})).expect("set the model");
     assert!(theirs(), "a plain setting keeps the file the person's");
+    assert!(!plain.contains("\"note\""), "nothing to say: {plain}");
     run_tool("EnterPlanMode", &json!({})).expect("enter plan mode");
     assert!(theirs(), "plan mode narrows");
     run_tool("ExitPlanMode", &json!({})).expect("exit plan mode");
     assert!(theirs(), "leaving plan mode puts back nothing wider");
-    run_tool(
+    let widened = run_tool(
         "Config",
         &json!({"setting": "permissions.defaultMode", "value": "dontAsk"}),
     )
     .expect("set the mode");
     assert!(!theirs(), "dontAsk is the person's to record");
+    let said: serde_json::Value = serde_json::from_str(&widened).expect("json");
+    assert!(
+        said["note"].as_str().is_some_and(|note| note.contains("zo settings trust-local")),
+        "the result says the file is no longer recorded: {widened}"
+    );
+
+    std::env::set_current_dir(&original_dir).expect("restore cwd");
+    match original_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    match original_config_home {
+        Some(value) => std::env::set_var("ZO_CONFIG_HOME", value),
+        None => std::env::remove_var("ZO_CONFIG_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A person who recorded `dontAsk` in their local file themselves keeps the
+/// file theirs through plan mode: leaving it puts back exactly what the file
+/// held when plan mode began, kept in this process rather than in
+/// `.zo/tool-state` (153).
+#[test]
+#[cfg(unix)]
+fn leaving_plan_mode_keeps_a_persons_recorded_dont_ask_theirs() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = std::env::temp_dir().join(format!(
+        "zo-plan-put-back-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    let home = root.join("home");
+    let cwd = root.join("cwd");
+    let config_home = home.join(".zo");
+    std::fs::create_dir_all(&config_home).expect("home dir");
+    std::fs::create_dir_all(cwd.join(".zo")).expect("cwd dir");
+    let local = cwd.join(".zo").join("settings.local.json");
+    let own = r#"{"permissions":{"allow":["Bash(cargo fmt*)"],"defaultMode":"dontAsk"}}"#;
+    std::fs::write(&local, own).expect("the person's own file");
+    runtime::remember_local_file(&config_home, &local.canonicalize().expect("canonical"), own.as_bytes())
+        .expect("recorded with trust-local");
+
+    let original_home = std::env::var("HOME").ok();
+    let original_config_home = std::env::var("ZO_CONFIG_HOME").ok();
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("ZO_CONFIG_HOME");
+    std::env::set_current_dir(&cwd).expect("set cwd");
+
+    let theirs = || {
+        let real = local.canonicalize().expect("canonical path");
+        runtime::local_file_recorded(&config_home, &real, &std::fs::read(&local).expect("read"))
+    };
+    run_tool("EnterPlanMode", &json!({})).expect("enter plan mode");
+    assert!(theirs(), "plan mode narrows");
+    let exit = run_tool("ExitPlanMode", &json!({})).expect("exit plan mode");
+    assert!(theirs(), "the person's own dontAsk is put back as theirs: {exit}");
+    assert!(!exit.contains("trust-local"), "nothing to record again: {exit}");
 
     std::env::set_current_dir(&original_dir).expect("restore cwd");
     match original_home {

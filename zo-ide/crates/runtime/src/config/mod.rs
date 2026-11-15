@@ -1603,6 +1603,14 @@ pub fn persist_allow_always_rules(
         return Ok(());
     }
 
+    // The form follows the person's settings, not this file alone: a grant
+    // written into `allow` beside their ordered `rules` would make the next
+    // load refuse the mix, and zo would not start in this folder.
+    let Ok(config) = ConfigLoader::new(cwd, home).load() else {
+        return Ok(());
+    };
+    let persons_use_ordered_rules = trusted_config_uses_ordered_rules(&config.persons_own);
+
     let path = cwd.join(".zo").join(FILE_NAME);
     let Some(original) = writable_zo_file(home, cwd, &path, FILE_NAME) else {
         return Ok(());
@@ -1612,7 +1620,9 @@ pub fn persist_allow_always_rules(
         WritableZoFile::Holding(contents) => contents.as_str(),
     };
 
-    let Some(rendered) = merge_allow_always_rules(&path, original_contents, rules)? else {
+    let Some(rendered) =
+        merge_allow_always_rules_as(&path, original_contents, rules, persons_use_ordered_rules)?
+    else {
         return Ok(());
     };
 
@@ -1658,11 +1668,13 @@ pub enum LocalSettingsWrite {
     /// or it granted nothing) and the change grants nothing it did not, so it
     /// stays theirs.
     KeptAsThePersons,
-    /// Written, not recorded: the file was not the person's, or the change
-    /// grants something only the person may (a `defaultMode` of `dontAsk`).
-    /// The next session reads it as the repository's, and says so; the person
-    /// records it with `zo settings trust-local` if it is theirs.
-    LeftUnrecorded,
+    /// Written, not recorded, as before: the file was not the person's.
+    StillNotThePersons,
+    /// Written, not recorded: the change grants something only the person
+    /// may (a `defaultMode` of `dontAsk`), or the record could not be kept.
+    /// The next session reads the file as the repository's, and says so; the
+    /// person records it with `zo settings trust-local` if they meant it.
+    NoLongerThePersons,
 }
 
 /// Write `after` as `cwd/.zo/settings.local.json` for one of the model's
@@ -1670,7 +1682,9 @@ pub enum LocalSettingsWrite {
 /// person widens what their local file grants: a change that widens it is
 /// written but not recorded, and so is any change to a file that was not
 /// theirs. A plain setting or a narrowing (plan mode) keeps the person's file
-/// theirs. The file is written as every local file zo writes: through the
+/// theirs, and so does putting back `put_back` — what the person's file held
+/// when this process's plan mode began, kept in memory where no file tool
+/// reaches. The file is written as every local file zo writes: through the
 /// folder's own `.zo`, following no link (153).
 ///
 /// # Errors
@@ -1682,6 +1696,7 @@ pub fn write_local_settings_for_a_tool(
     cwd: &Path,
     before: &serde_json::Map<String, serde_json::Value>,
     after: &serde_json::Map<String, serde_json::Value>,
+    put_back: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<LocalSettingsWrite, ConfigError> {
     const FILE_NAME: &str = "settings.local.json";
     let path = cwd.join(".zo").join(FILE_NAME);
@@ -1729,11 +1744,16 @@ pub fn write_local_settings_for_a_tool(
     let rendered = serde_json::to_string_pretty(after)
         .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?;
     local_record::write_local_file(&path, rendered.as_bytes())?;
-    if theirs && !local_record::widens(before, after) && local_record::wrote(home, &path, rendered.as_bytes())
-    {
+    if !theirs {
+        return Ok(LocalSettingsWrite::StillNotThePersons);
+    }
+    // A widening is the person's to make; putting back what their file held
+    // before this process's plan mode is not one.
+    let widened = local_record::widens(before, after) && put_back != Some(after);
+    if !widened && local_record::wrote(home, &path, rendered.as_bytes()) {
         Ok(LocalSettingsWrite::KeptAsThePersons)
     } else {
-        Ok(LocalSettingsWrite::LeftUnrecorded)
+        Ok(LocalSettingsWrite::NoLongerThePersons)
     }
 }
 
@@ -1752,17 +1772,29 @@ fn is_absent(path: &Path) -> bool {
 /// [`persist_allow_always_rules`], so the part that decides **what bytes a
 /// future session will read back** can be tested without a git worktree.
 ///
-/// The form follows the file. `parse_optional_permission_rules` rejects a
-/// document that mixes the ordered `rules` list with the `allow`/`deny`/`ask`
-/// categories, so a file already using the ordered form gets `"<rule>=allow"`
-/// appended to `rules`, and every other file gets the bare rule appended to
-/// `allow`. Writing into the wrong one would make the whole document
-/// unreadable on the next load — which fails open into "ask again", not into
-/// "allow more", but still loses the operator's own settings.
+/// The form follows the person. `parse_optional_permission_rules` rejects a
+/// merged document that mixes the ordered `rules` list with the
+/// `allow`/`deny`/`ask` categories, so where the file or the person's own
+/// settings (`persons_use_ordered_rules`) use the ordered form the grant is
+/// appended to `rules` as `"<rule>=allow"`, and otherwise the bare rule to
+/// `allow`. Writing into the wrong one would make the next load refuse the
+/// mix, and zo would not start in the folder (153).
+#[cfg(test)]
 fn merge_allow_always_rules(
     path: &Path,
     contents: &str,
     rules: &[String],
+) -> Result<Option<String>, ConfigError> {
+    merge_allow_always_rules_as(path, contents, rules, false)
+}
+
+/// `merge_allow_always_rules`, told whether the person's own settings use the
+/// ordered `rules`.
+fn merge_allow_always_rules_as(
+    path: &Path,
+    contents: &str,
+    rules: &[String],
+    persons_use_ordered_rules: bool,
 ) -> Result<Option<String>, ConfigError> {
     let mut root = parse_json_object_contents(path, contents)?;
     let existing = parse_optional_permission_rules(&JsonValue::Object(root.clone()))?;
@@ -1776,7 +1808,7 @@ fn merge_allow_always_rules(
         }
     }
 
-    let ordered = !existing.rules().is_empty();
+    let ordered = persons_use_ordered_rules || !existing.rules().is_empty();
     let persisted = rules
         .iter()
         .map(|rule| {

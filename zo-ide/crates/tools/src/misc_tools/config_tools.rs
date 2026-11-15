@@ -38,6 +38,10 @@ pub struct ConfigOutput {
     #[serde(rename = "newValue")]
     pub(crate) new_value: Option<Value>,
     pub(crate) error: Option<String>,
+    /// Said when the change left the folder's local settings no longer the
+    /// person's by zo's record (153).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +109,7 @@ pub fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
             previous_value: None,
             new_value: None,
             error: Some(format!("Unknown setting: \"{setting}\"")),
+            note: None,
         });
     };
 
@@ -124,12 +129,13 @@ pub fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
         let before = read_json_object(&path)?;
         let mut document = before.clone();
         set_nested_value(&mut document, spec.path, normalized.clone());
-        match spec.scope {
-            ConfigScope::Global => write_json_object(&path, &document)?,
-            ConfigScope::Settings => {
-                write_local_settings(&before, &document)?;
+        let note = match spec.scope {
+            ConfigScope::Global => {
+                write_json_object(&path, &document)?;
+                None
             }
-        }
+            ConfigScope::Settings => no_longer_the_persons(write_local_settings(&before, &document, None)?),
+        };
         Ok(ConfigOutput {
             success: true,
             operation: Some(String::from("set")),
@@ -138,6 +144,7 @@ pub fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
             previous_value,
             new_value: Some(normalized),
             error: None,
+            note,
         })
     } else {
         Ok(ConfigOutput {
@@ -148,6 +155,7 @@ pub fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
             previous_value: None,
             new_value: None,
             error: None,
+            note: None,
         })
     }
 }
@@ -208,11 +216,23 @@ pub fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOut
         PERMISSION_DEFAULT_MODE_PATH,
         Value::String(String::from("plan")),
     );
-    if let Err(error) = write_local_settings(&before, &document) {
-        // No override was made, so none is left to undo.
-        let _ = clear_plan_mode_state(&state_path);
-        return Err(error);
+    let written = match write_local_settings(&before, &document, None) {
+        Ok(written) => written,
+        Err(error) => {
+            // No override was made, so none is left to undo.
+            let _ = clear_plan_mode_state(&state_path);
+            return Err(error);
+        }
+    };
+    let mut put_back = PUT_BACK_ON_LEAVING_PLAN_MODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if written == runtime::LocalSettingsWrite::KeptAsThePersons {
+        put_back.insert(settings_path.clone(), before.clone());
+    } else {
+        put_back.remove(&settings_path);
     }
+    drop(put_back);
 
     Ok(PlanModeOutput {
         success: true,
@@ -231,6 +251,11 @@ pub fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOut
 pub fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutput, String> {
     let settings_path = config_file_for_scope(ConfigScope::Settings)?;
     let state_path = plan_mode_state_file()?;
+    // Taken by every exit, so none outlives the plan mode it was kept for.
+    let put_back = PUT_BACK_ON_LEAVING_PLAN_MODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&settings_path);
     let before = read_json_object(&settings_path)?;
     let mut document = before.clone();
     let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
@@ -285,8 +310,10 @@ pub fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutpu
     }
     // The mode put back comes from `.zo/tool-state`, which the model's file
     // tools can write: one that widens what the file grants is written but not
-    // recorded as the person's (`write_local_settings`).
-    write_local_settings(&before, &document)?;
+    // recorded as the person's — unless the file comes back to exactly what
+    // the person's file held when this process's plan mode began, kept in
+    // memory (`PUT_BACK_ON_LEAVING_PLAN_MODE`).
+    let note = no_longer_the_persons(write_local_settings(&before, &document, put_back.as_ref())?);
     clear_plan_mode_state(&state_path)?;
 
     Ok(PlanModeOutput {
@@ -295,7 +322,10 @@ pub fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutpu
         changed: true,
         active: false,
         managed: false,
-        message: String::from("Restored the prior worktree-local plan mode setting."),
+        message: note.map_or_else(
+            || String::from("Restored the prior worktree-local plan mode setting."),
+            |note| format!("Restored the prior worktree-local plan mode setting. {note}"),
+        ),
         settings_path: settings_path.display().to_string(),
         state_path: state_path.display().to_string(),
         previous_local_mode: state.previous_local_mode,
@@ -490,16 +520,38 @@ pub(crate) fn config_file_for_scope(scope: ConfigScope) -> Result<PathBuf, Strin
 
 /// Write the folder's `.zo/settings.local.json` as a model tool changed it
 /// (`before` → `after`). The file stays the person's only where it was theirs
-/// and the change grants nothing new; a wider `permissions.defaultMode` is
-/// written but left for the person to record (153). Never through a link.
+/// and the change grants nothing new — or the file comes back to `put_back`,
+/// what it held when this process's plan mode began; a wider
+/// `permissions.defaultMode` is written but left for the person to record
+/// (153). Never through a link.
 fn write_local_settings(
     before: &serde_json::Map<String, Value>,
     after: &serde_json::Map<String, Value>,
+    put_back: Option<&serde_json::Map<String, Value>>,
 ) -> Result<runtime::LocalSettingsWrite, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    runtime::write_local_settings_for_a_tool(&config_home_dir(), &cwd, before, after)
+    runtime::write_local_settings_for_a_tool(&config_home_dir(), &cwd, before, after, put_back)
         .map_err(|error| error.to_string())
 }
+
+/// What the tool's result says when its write left the folder's local
+/// settings no longer the person's by zo's record.
+fn no_longer_the_persons(written: runtime::LocalSettingsWrite) -> Option<String> {
+    (written == runtime::LocalSettingsWrite::NoLongerThePersons).then(|| {
+        String::from(
+            "zo did not record .zo/settings.local.json as the person's after this change: it widens \
+             what the file grants, which only they do. The next session reads the file as the \
+             repository's; if they meant it, they run `zo settings trust-local` in their own terminal.",
+        )
+    })
+}
+
+/// The person's own local settings as EnterPlanMode found them, by the
+/// settings path, for ExitPlanMode to put back as theirs. Held in this process,
+/// where no file tool reaches — `.zo/tool-state` is not (153).
+static PUT_BACK_ON_LEAVING_PLAN_MODE: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, serde_json::Map<String, Value>>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
 pub(crate) fn config_home_dir() -> PathBuf {
     runtime::default_config_home()

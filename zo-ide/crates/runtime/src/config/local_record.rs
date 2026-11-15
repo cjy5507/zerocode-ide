@@ -233,7 +233,16 @@ pub fn carries_no_authority(name: &str, bytes: &[u8]) -> bool {
     if name != SETTINGS_FILE {
         return false;
     }
-    match serde_json::from_slice::<serde_json::Value>(bytes) {
+    // Judged as the loader reads it: through its own parser, so a key given
+    // twice counts as the one that applies (the last), whatever another
+    // parser would make of it.
+    let Some(loaded) = std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| crate::json::JsonValue::parse(text).ok())
+    else {
+        return false;
+    };
+    match serde_json::from_str::<serde_json::Value>(&loaded.render()) {
         Ok(serde_json::Value::Object(document)) => authority(&document).is_empty(),
         _ => false,
     }
