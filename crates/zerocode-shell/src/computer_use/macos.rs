@@ -67,6 +67,14 @@ const STOP_WATCH_METHOD: &str = "stopWatch";
 /// How many unused connections to keep. More than this at once is a burst, and
 /// the extra ones are closed when it is over.
 const MAX_IDLE_WIRES: usize = 8;
+/// How long a connection the helper's queue refused is tried again, and the
+/// pause between two tries. The helper's queue holds eight connections it has
+/// not taken yet (`listen(socketFd, 8)`), and the groups of one `parallel`
+/// connect in the same instant: past the queue the system refuses at once.
+/// The helper takes a connection within moments, so a refusal while it lives
+/// is a queue that was full for one.
+const QUEUE_FULL_WAIT: Duration = Duration::from_secs(2);
+const QUEUE_FULL_PAUSE: Duration = Duration::from_millis(2);
 // Every waiting request is answered inside the limit every answer has.
 const _: () = assert!(STOP_WATCH_WAIT.as_secs() < REQUEST_TIMEOUT.as_secs());
 
@@ -480,9 +488,20 @@ impl Session {
         {
             return Ok(wire);
         }
-        let stream = std::os::unix::net::UnixStream::connect(&self.socket)
-            .map_err(io_error("connect to the Computer Use helper"))?;
+        let stream =
+            connect_past_a_full_queue(&self.socket, QUEUE_FULL_WAIT, || self.helper_lives())
+                .map_err(io_error("connect to the Computer Use helper"))?;
         Wire::new(stream, self.token.clone())
+    }
+
+    /// Whether the helper's process is still there. Only "no such process"
+    /// says it is gone; a helper whose pid was never read counts as there.
+    fn helper_lives(&self) -> bool {
+        self.helper_pid.is_none_or(|pid| {
+            // SAFETY: probing with signal 0 sends nothing.
+            let answered = unsafe { libc::kill(pid, 0) } == 0;
+            answered || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        })
     }
 
     pub(super) fn panel_watch_ended(&self) -> bool {
@@ -559,6 +578,33 @@ impl Session {
         // (t-66753 B), not at the window's next command.
         client.watching = StopWatch::start(&socket, &client.token);
         Ok(client)
+    }
+}
+
+/// Connect to the helper at `socket`, trying again while its queue is full.
+/// A refused connection sent nothing. Taken for a broken road it discards the
+/// session, and the next step starts a second helper beside one that still
+/// carries the other groups' steps — out of reach of the window's stop, with
+/// an app's turns and the session's count split between the two (t-109501).
+/// Given up at once when `lives` says the helper is gone, and after `wait`
+/// when it never took the connection.
+fn connect_past_a_full_queue(
+    socket: &Path,
+    wait: Duration,
+    lives: impl Fn() -> bool,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    let started = std::time::Instant::now();
+    loop {
+        match std::os::unix::net::UnixStream::connect(socket) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ConnectionRefused
+                    && started.elapsed() < wait
+                    && lives() =>
+            {
+                std::thread::sleep(QUEUE_FULL_PAUSE);
+            }
+            connected => return connected,
+        }
     }
 }
 

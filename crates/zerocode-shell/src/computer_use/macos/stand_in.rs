@@ -98,6 +98,17 @@ struct Shared {
     closing: AtomicBool,
     /// The fault the next `stopWatch` answer carries, once one is set.
     watch_fault: Mutex<Option<WatchFault>>,
+    /// The door: whether the stand-in takes no connection for now, as a helper
+    /// too busy to accept does, and whether its accepting thread stands there
+    /// waiting. What connects meanwhile fills its queue.
+    door: Mutex<Door>,
+    door_moved: Condvar,
+}
+
+#[derive(Default)]
+struct Door {
+    shut: bool,
+    waited_at: bool,
 }
 
 impl Shared {
@@ -111,6 +122,47 @@ impl Shared {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn door(&self) -> std::sync::MutexGuard<'_, Door> {
+        self.door.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The accepting thread waits here for as long as the door is shut, and
+    /// says that it does.
+    fn wait_at_the_door(&self) {
+        let mut door = self.door();
+        while door.shut {
+            door.waited_at = true;
+            self.door_moved.notify_all();
+            door = self
+                .door_moved
+                .wait(door)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        door.waited_at = false;
+    }
+
+    fn move_the_door(&self, shut: bool) {
+        self.door().shut = shut;
+        self.door_moved.notify_all();
+    }
+
+    /// Wait until the accepting thread stands at the shut door: from then on
+    /// it takes nothing out of the queue.
+    fn wait_for_the_doorkeeper(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut door = self.door();
+        while !door.waited_at {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("the stand-in's accepting thread never came to the door");
+            door = self
+                .door_moved
+                .wait_timeout(door, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
 }
 
 /// The stand-in: its folder, its socket and what it shares with the threads
@@ -118,6 +170,8 @@ impl Shared {
 pub(crate) struct StandIn {
     directory: PathBuf,
     socket: PathBuf,
+    /// The listening socket, for the length of its queue.
+    listening: std::os::unix::io::RawFd,
     shared: Arc<Shared>,
     accepting: Option<std::thread::JoinHandle<()>>,
 }
@@ -141,6 +195,7 @@ impl StandIn {
             .expect("the stand-in's folder is its own");
         let socket = directory.join("provider.sock");
         let listener = UnixListener::bind(&socket).expect("the stand-in listens");
+        let listening = std::os::unix::io::AsRawFd::as_raw_fd(&listener);
         let shared = Arc::new(Shared {
             token: token.to_string(),
             shape,
@@ -149,15 +204,19 @@ impl StandIn {
             heard: Mutex::new(Vec::new()),
             closing: AtomicBool::new(false),
             watch_fault: Mutex::new(None),
+            door: Mutex::new(Door::default()),
+            door_moved: Condvar::new(),
         });
         let accepting = {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
-                for stream in listener.incoming() {
+                loop {
+                    shared.wait_at_the_door();
+                    let stream = listener.accept();
                     if shared.closing.load(Ordering::Acquire) {
                         return;
                     }
-                    let Ok(stream) = stream else { continue };
+                    let Ok((stream, _)) = stream else { continue };
                     let shared = Arc::clone(&shared);
                     std::thread::spawn(move || serve(&stream, &shared));
                 }
@@ -166,9 +225,43 @@ impl StandIn {
         Self {
             directory,
             socket,
+            listening,
             shared,
             accepting: Some(accepting),
         }
+    }
+
+    /// Take no connection for now, with a queue of one, and fill that queue:
+    /// what comes back keeps it full until it is dropped. The next connection
+    /// is refused at once, as the helper's is when the groups of a `parallel`
+    /// connect faster than it accepts.
+    pub(crate) fn shut_the_door(&self) -> Vec<UnixStream> {
+        self.shared.move_the_door(true);
+        // SAFETY: the stand-in owns this listening socket for its whole life.
+        assert_eq!(
+            unsafe { libc::listen(self.listening, 1) },
+            0,
+            "a queue of one"
+        );
+        // The accepting thread may be inside an accept already: this
+        // connection takes it out, and then it waits at the door.
+        let mut filling = vec![UnixStream::connect(&self.socket).expect("the stand-in listens")];
+        self.shared.wait_for_the_doorkeeper();
+        loop {
+            match UnixStream::connect(&self.socket) {
+                Ok(stream) => filling.push(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    return filling;
+                }
+                Err(error) => panic!("the stand-in's queue: {error}"),
+            }
+            assert!(filling.len() < 64, "the queue never filled");
+        }
+    }
+
+    /// Take connections again.
+    pub(crate) fn open_the_door(&self) {
+        self.shared.move_the_door(false);
     }
 
     /// What a launch hands the connection, for a window holding `token`: a
@@ -244,6 +337,7 @@ impl Drop for StandIn {
     fn drop(&mut self) {
         self.shared.closing.store(true, Ordering::Release);
         self.shared.changed.notify_all();
+        self.shared.move_the_door(false);
         // The accept loop wakes on a connection of its own and sees it is
         // closing.
         if UnixStream::connect(&self.socket).is_ok()
@@ -448,6 +542,87 @@ mod tests {
             1,
             "the session's end asks the helper to go"
         );
+    }
+
+    /// The groups of one `parallel` connect in the same instant, and the
+    /// helper's queue holds eight (t-109501). A connection the full queue
+    /// refused sent nothing: it is tried again, every request is answered, and
+    /// the session — the one helper the window's stop reaches — is the one
+    /// that answers them all.
+    #[test]
+    fn requests_past_the_helpers_full_queue_are_all_answered_on_the_one_session() {
+        const AT_ONCE: usize = 16;
+        let helper = StandIn::start(TOKEN, Shape::matching());
+        let window = helper.connect_window(TOKEN).expect("connected");
+        let filling = helper.shut_the_door();
+        let answers: Vec<Result<Value, String>> = std::thread::scope(|scope| {
+            let asking: Vec<_> = (0..AT_ONCE)
+                .map(|_| {
+                    scope.spawn(|| {
+                        window.0.request("status", json!({})).map_err(|failure| {
+                            let (super::super::SessionFailure::Transport(error)
+                            | super::super::SessionFailure::Provider(error)) = failure;
+                            format!("{}: {}", error.code, error.message)
+                        })
+                    })
+                })
+                .collect();
+            // The queue stays full while they try: longer than a few tries.
+            std::thread::sleep(Duration::from_millis(60));
+            helper.open_the_door();
+            asking
+                .into_iter()
+                .map(|asked| asked.join().expect("a request"))
+                .collect()
+        });
+        drop(filling);
+        for answer in &answers {
+            assert!(answer.is_ok(), "the full queue cost a request: {answer:?}");
+        }
+        let heard = helper.heard();
+        assert_eq!(
+            heard
+                .iter()
+                .filter(|heard| heard.method == "status")
+                .count(),
+            AT_ONCE,
+            "every request reached the one helper"
+        );
+        assert_eq!(
+            heard
+                .iter()
+                .filter(|heard| heard.method == "handshake")
+                .count(),
+            1,
+            "and no second session was made for any of them"
+        );
+    }
+
+    /// Only a queue that is full for a moment is waited out: a refusal from a
+    /// helper that is gone is the answer at once, and one that lives but
+    /// never takes the connection is given up when the wait is over.
+    #[test]
+    fn a_refused_connection_is_tried_again_only_while_the_helper_lives_and_the_wait_lasts() {
+        let helper = StandIn::start(TOKEN, Shape::matching());
+        let filling = helper.shut_the_door();
+        let connect = |wait, lives: bool| {
+            let started = Instant::now();
+            let answer = super::super::connect_past_a_full_queue(&helper.socket, wait, || lives);
+            (
+                answer.map(drop).map_err(|error| error.kind()),
+                started.elapsed(),
+            )
+        };
+        let (gone, took) = connect(Duration::from_secs(5), false);
+        assert_eq!(gone, Err(std::io::ErrorKind::ConnectionRefused));
+        assert!(
+            took < Duration::from_secs(1),
+            "waited {took:?} for a helper that is gone"
+        );
+        let (never_taken, took) = connect(Duration::from_millis(40), true);
+        assert_eq!(never_taken, Err(std::io::ErrorKind::ConnectionRefused));
+        assert!(took >= Duration::from_millis(40), "gave up after {took:?}");
+        drop(filling);
     }
 
     /// A helper of another protocol is refused at the handshake, in the

@@ -15,7 +15,7 @@ pub const FOREGROUND: &str = "foreground";
 pub const MAY_BORROW_DESKTOP: &str = "mayBorrowDesktop";
 /// Whether this platform's provider can act in a window without the shared
 /// desktop. Where it cannot, the person's shared desktop is the only road.
-const HAS_BACKGROUND_ROAD: bool = cfg!(target_os = "macos");
+pub(crate) const HAS_BACKGROUND_ROAD: bool = cfg!(target_os = "macos");
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

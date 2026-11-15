@@ -685,3 +685,97 @@ impl Fixture {
             .unwrap_or(self.acks);
     }
 }
+
+/// Many requests to one helper in the same instant, as the groups of one
+/// `parallel` make them (t-109501). The helper's queue holds eight
+/// connections it has not taken yet, and a connection it refuses must cost no
+/// request and no session. Sixteen apps, then sixty-four, each pressed by a
+/// thread of its own, all let go at once, round after round. Build it in a
+/// folder named `target`: the helper admits a test only from there.
+///
+/// ```text
+/// CARGO_TARGET_DIR=<checkout>/target ZEROCODE_PARALLEL_FIXTURE=… \
+/// ZEROCODE_PARALLEL_BUILT=<the helper built here> ZEROCODE_PARALLEL_OUT=… \
+/// cargo test -p zerocode-shell --bin zerocode-shell parallel_bench_at_once -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "drives the signed helper against owned fixtures; run by hand, see the module comment"]
+fn parallel_bench_at_once() {
+    const ROUNDS: usize = 5;
+    let program = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_FIXTURE").expect("fixture"));
+    let built = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BUILT").expect("built helper"));
+    let out = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_OUT").expect("report path"));
+    let root = out
+        .parent()
+        .expect("report folder")
+        .join("fixtures-at-once");
+    let session = Session::connect(launch_at(&built).expect("built")).expect("built answers");
+    let mut report = json!({});
+    for apps in [16_usize, 64] {
+        let fixtures: Vec<Fixture> = (0..apps)
+            .map(|at| Fixture::start(&program, &root, &format!("at-once-{apps}-{at}"), 8))
+            .collect();
+        let prepared: Vec<(String, u64)> = fixtures
+            .iter()
+            .map(|fixture| {
+                let app = fixture.app();
+                let number = number_of(&look(&session, &app), "button Target", 0);
+                (app, number)
+            })
+            .collect();
+        let (mut rounds, mut presses, mut refused) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..ROUNDS {
+            let gate = std::sync::Barrier::new(apps);
+            let started = Instant::now();
+            let said: Vec<(f64, Result<Value, String>)> = std::thread::scope(|scope| {
+                let mut pressing = Vec::with_capacity(apps);
+                for (app, number) in &prepared {
+                    let (session, gate) = (&session, &gate);
+                    pressing.push(scope.spawn(move || {
+                        gate.wait();
+                        call(
+                            session,
+                            "click",
+                            &json!({
+                                "app": app, "elementIndex": number, "background": true,
+                                "noScreenshot": true, "afterAct": "changes",
+                            }),
+                        )
+                    }));
+                }
+                pressing
+                    .into_iter()
+                    .map(|press| press.join().expect("a press"))
+                    .collect()
+            });
+            rounds.push(started.elapsed().as_secs_f64() * 1000.0);
+            for (ms, answer) in said {
+                match answer {
+                    Ok(_) => presses.push(ms),
+                    Err(why) => refused.push(why),
+                }
+            }
+        }
+        let landed: usize = fixtures.iter().map(|fixture| fixture.events().len()).sum();
+        refused.sort();
+        refused.dedup();
+        report[format!("{apps}_at_once")] = json!({
+            "rounds": ROUNDS,
+            "asked": apps * ROUNDS,
+            "answered": presses.len(),
+            "landed": landed,
+            "refusals": refused,
+            "round_ms": stats(rounds),
+            "press_ms": stats(presses),
+        });
+        drop(fixtures);
+    }
+    // A request the session answers after all of it says the session was never discarded.
+    let (_, still) = call(&session, "status", &json!({}));
+    report["session_still_answers"] = json!(still.is_ok());
+    report["helper_pid"] = json!(session.helper_pid());
+
+    let text = serde_json::to_string_pretty(&report).expect("a report");
+    std::fs::write(&out, &text).expect("the report");
+    println!("{text}");
+}

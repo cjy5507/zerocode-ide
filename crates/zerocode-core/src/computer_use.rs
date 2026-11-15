@@ -4251,19 +4251,35 @@ fn app_on_the_desktop_hand(method: ComputerMethod) -> crate::computer_use_protoc
     )
 }
 
+/// Whether `--background` on a batch or a parallel itself is read and changes
+/// nothing. Where the platform acts in a window without the shared desktop
+/// (`background_road`), the walk stays in the background under either input
+/// policy and only a step that says --foreground takes the desktop: the flag
+/// says what already holds, and models write it there from the manual's first
+/// line. Where there is no such road it stays a refusal, as it is on a lone
+/// step: dropped quietly, an agent would go on by the person's pointer
+/// believing it had asked not to.
+fn walk_background_says_nothing_new(
+    method: ComputerMethod,
+    flags: &BTreeMap<String, Option<String>>,
+    background_road: bool,
+) -> bool {
+    background_road
+        && matches!(method, ComputerMethod::Batch | ComputerMethod::Parallel)
+        && flags.get("background") == Some(&None)
+}
+
 /// [`parse_command`] past its verb: the flags it was given, read and checked.
 fn parse_flags(
     method: ComputerMethod,
     mut flags: BTreeMap<String, Option<String>>,
 ) -> Result<ComputerCommand, String> {
     let json = flags.contains_key("json");
-    // A batch and a parallel stay in the background under either input policy:
-    // only a step that says --foreground takes the desktop. `--background` on
-    // the walk itself says what already holds, so it is read and changes
-    // nothing — models write it there from the manual's first line.
-    if matches!(method, ComputerMethod::Batch | ComputerMethod::Parallel)
-        && flags.get("background") == Some(&None)
-    {
+    if walk_background_says_nothing_new(
+        method,
+        &flags,
+        crate::computer_use_protocol::execution::HAS_BACKGROUND_ROAD,
+    ) {
         flags.remove("background");
     }
     reject_unknown(method, &flags)?;
@@ -11648,18 +11664,67 @@ mod tests {
         assert!(other.ends_with("look after it"), "{other}");
     }
 
-    /// `--background` on the walk itself says what already holds under either
-    /// input policy: it is read and changes nothing.
+    /// Where the platform has a background road, `--background` on the walk
+    /// itself says what already holds: it is read and changes nothing. Where
+    /// it has none the flag is refused, as on a lone step, so an agent that
+    /// asked for the background never goes on by the person's pointer unaware.
     #[test]
-    fn background_on_a_batch_or_a_parallel_is_read_and_changes_nothing() {
+    fn background_on_a_batch_or_a_parallel_is_read_only_where_there_is_a_background_road() {
+        use crate::computer_use_protocol::execution::HAS_BACKGROUND_ROAD;
         let steps = json!([["click", "--app", "A", "--element-index", "4"]]).to_string();
-        let batch = parse_command(&words(&["batch", "--background", "--commands", &steps]))
-            .expect("a batch that says background");
-        assert_eq!(batch.params.get("background"), None);
         let groups = json!([[["click", "--app", "A", "--element-index", "4"]]]).to_string();
-        let parallel = parse_command(&words(&["parallel", "--commands", &groups, "--background"]))
-            .expect("a parallel that says background");
-        assert_eq!(parallel.params.get("background"), None);
+        for walk in [
+            words(&["batch", "--background", "--commands", &steps]),
+            words(&["parallel", "--commands", &groups, "--background"]),
+        ] {
+            let parsed = parse_command(&walk);
+            if HAS_BACKGROUND_ROAD {
+                let parsed = parsed.expect("a walk that says background");
+                assert_eq!(parsed.params.get("background"), None, "{walk:?}");
+            } else {
+                let refused = parsed.expect_err("no background road here");
+                assert!(refused.contains("--background"), "{walk:?}: {refused}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_walks_background_is_dropped_only_as_a_bare_flag_on_a_walk_with_a_background_road() {
+        let bare = BTreeMap::from([("background".to_string(), None)]);
+        let valued = BTreeMap::from([("background".to_string(), Some("false".to_string()))]);
+        for walk in [ComputerMethod::Batch, ComputerMethod::Parallel] {
+            assert!(walk_background_says_nothing_new(walk, &bare, true));
+            assert!(
+                !walk_background_says_nothing_new(walk, &bare, false),
+                "with no background road the flag is not dropped quietly"
+            );
+            assert!(!walk_background_says_nothing_new(walk, &valued, true));
+            assert!(!walk_background_says_nothing_new(
+                walk,
+                &BTreeMap::new(),
+                true
+            ));
+        }
+        assert!(!walk_background_says_nothing_new(
+            ComputerMethod::Click,
+            &bare,
+            true
+        ));
+    }
+
+    /// A value on the walk's `--background` is no bare flag: it is refused as
+    /// before, whatever the platform.
+    #[test]
+    fn a_valued_background_on_a_batch_is_still_refused() {
+        let steps = json!([["click", "--app", "A", "--element-index", "4"]]).to_string();
+        let refused = parse_command(&words(&[
+            "batch",
+            "--background=false",
+            "--commands",
+            &steps,
+        ]))
+        .expect_err("a value where a bare flag goes");
+        assert!(refused.contains("background"), "{refused}");
     }
 
     #[test]

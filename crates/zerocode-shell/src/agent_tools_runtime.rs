@@ -4035,12 +4035,6 @@ pub(super) async fn emulator_step(
     answer
 }
 
-/// A batch (§2.5): its steps in order, each down the road a lone command
-/// takes (`step`), stopping at the first refusal, at a stop, or before a step
-/// that could not finish before the bridge gives up at `deadline_ms` (or once
-/// the caller has gone) — and answering every step that ran. A batch the stop
-/// refuses whole leaves its first refused action with `refused`, as that
-/// action would have left itself alone.
 /// One look of a `parallel`, answered in a batch's shape so every group of the
 /// answer reads alike. A look is no act: it takes no turn, and a stopped
 /// operator still answers it.
@@ -4067,10 +4061,71 @@ pub(super) fn look_group(
     }
 }
 
-/// Several batches at once, each on its own thread, each stopped, confirmed and
-/// logged step by step as any batch is. Their steps name different apps, so the
-/// helper runs them side by side; two that name one app take turns there. A
-/// group that is one look reads its app beside the rest.
+/// How many groups of one `parallel` are at work at the same time. A request
+/// holds as many groups as it likes, and those past this many take their turn
+/// as a place comes free. Sixty-four at once is what was measured to land
+/// every press (2026-11-15); more at once is not measured, and each group at
+/// work holds a thread here and a connection and a thread in the helper.
+const PARALLEL_AT_ONCE: usize = 64;
+
+/// `work` done on every one of `items`, at most `at_once` of them at the same
+/// time, their answers in the items' order. Each worker thread begins with
+/// `enter`, and what that gives stays for the worker's life. A worker the
+/// system would not start leaves its share to the others, and with none
+/// started this thread does them all. A panic in `work` is that item's answer
+/// alone, through `refused`.
+pub(super) fn at_most_at_once<T: Sync, A: Send, G>(
+    items: &[T],
+    at_once: usize,
+    enter: impl Fn() -> G + Sync,
+    work: impl Fn(&T) -> A + Sync,
+    refused: impl Fn(String) -> A + Sync,
+) -> Vec<A> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, PoisonError};
+
+    let next = AtomicUsize::new(0);
+    let answers: Vec<Mutex<Option<A>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    let run = || {
+        let _held = enter();
+        loop {
+            let at = next.fetch_add(1, Ordering::Relaxed);
+            let Some(item) = items.get(at) else { return };
+            let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(item)))
+                .unwrap_or_else(|panic| {
+                    refused(crate::system_runtime::panic_payload(panic.as_ref()))
+                });
+            *answers[at].lock().unwrap_or_else(PoisonError::into_inner) = Some(answer);
+        }
+    };
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..items.len().min(at_once.max(1)))
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, &run).ok())
+            .collect();
+        if workers.is_empty() {
+            run();
+        }
+        for worker in workers {
+            // A worker that ended badly left its item unanswered: said below.
+            let _ = worker.join();
+        }
+    });
+    answers
+        .into_iter()
+        .map(|answer| {
+            answer
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .unwrap_or_else(|| refused("its worker ended before it".to_string()))
+        })
+        .collect()
+}
+
+/// Several batches at once, each stopped, confirmed and logged step by step as
+/// any batch is. Their steps name different apps, so the helper runs them side
+/// by side; two that name one app take turns there. A group that is one look
+/// reads its app beside the rest. As many groups as the request holds, and
+/// [`PARALLEL_AT_ONCE`] of them at work at a time.
 fn run_parallel(
     app: &AppHandle,
     root: &Path,
@@ -4088,62 +4143,47 @@ fn run_parallel(
 
     let actor = run_evidence::actor();
     let policy = computer_use::input_policy::capture();
-    let answers: Vec<zerocode_hookd::TeamAnswer> = std::thread::scope(|scope| {
-        let running: Vec<_> = parallel_steps(command)
-            .into_iter()
-            .map(|steps| {
-                let actor = actor.clone();
-                // As many groups as the request holds: a thread the system
-                // would not start is that group's refusal, never a panic.
-                std::thread::Builder::new().spawn_scoped(scope, move || {
-                    let _acting = actor.map(run_evidence::acting_for);
-                    let _input_policy = computer_use::input_policy::enter_captured(policy);
-                    let step = |step: &[String]| {
-                        desktop_step(
-                            app,
-                            root,
-                            evidence,
-                            step,
-                            step,
-                            Asking::Person,
-                            cwd.map(Path::new),
-                        )
-                    };
-                    if parallel_group_is_a_look(&steps) {
-                        return look_group(&steps[0], step);
-                    }
-                    let batch = ComputerCommand {
-                        method: ComputerMethod::Batch,
-                        params: serde_json::json!({ BATCH_COMMANDS_FLAG: steps }),
-                        json: true,
-                    };
-                    run_batch(
-                        &batch,
-                        deadline_ms,
-                        step,
-                        |step, refusal| leave_step(app, root, evidence, step, step, refusal),
-                        caller_waits,
-                        // A parallel group's apps are the whole request's: held to its end.
-                        |_| {},
-                    )
-                })
-            })
-            .collect();
-        running
-            .into_iter()
-            .map(|group| match group {
-                Ok(running) => running.join().unwrap_or_else(|panic| {
-                    computer_refused(format!(
-                        "computer task failed: {}",
-                        crate::system_runtime::panic_payload(panic.as_ref())
-                    ))
-                }),
-                Err(error) => computer_refused(format!(
-                    "computer task failed: this group could not start ({error}); nothing of it was done"
-                )),
-            })
-            .collect()
-    });
+    let answers: Vec<zerocode_hookd::TeamAnswer> = at_most_at_once(
+        &parallel_steps(command),
+        PARALLEL_AT_ONCE,
+        || {
+            (
+                actor.clone().map(run_evidence::acting_for),
+                computer_use::input_policy::enter_captured(policy),
+            )
+        },
+        |steps| {
+            let step = |step: &[String]| {
+                desktop_step(
+                    app,
+                    root,
+                    evidence,
+                    step,
+                    step,
+                    Asking::Person,
+                    cwd.map(Path::new),
+                )
+            };
+            if parallel_group_is_a_look(steps) {
+                return look_group(&steps[0], step);
+            }
+            let batch = ComputerCommand {
+                method: ComputerMethod::Batch,
+                params: serde_json::json!({ BATCH_COMMANDS_FLAG: steps }),
+                json: true,
+            };
+            run_batch(
+                &batch,
+                deadline_ms,
+                step,
+                |step, refusal| leave_step(app, root, evidence, step, step, refusal),
+                caller_waits,
+                // A parallel group's apps are the whole request's: held to its end.
+                |_| {},
+            )
+        },
+        |why| computer_refused(format!("computer task failed: {why}")),
+    );
     let ok = answers.iter().all(|answer| answer.exit_code == 0);
     let groups: Vec<serde_json::Value> = answers
         .iter()
@@ -4160,6 +4200,12 @@ fn run_parallel(
     }
 }
 
+/// A batch (§2.5): its steps in order, each down the road a lone command
+/// takes (`step`), stopping at the first refusal, at a stop, or before a step
+/// that could not finish before the bridge gives up at `deadline_ms` (or once
+/// the caller has gone) — and answering every step that ran. A batch the stop
+/// refuses whole leaves its first refused action with `refused`, as that
+/// action would have left itself alone.
 pub(super) fn run_batch(
     command: &zerocode_core::computer_use::ComputerCommand,
     deadline_ms: u64,

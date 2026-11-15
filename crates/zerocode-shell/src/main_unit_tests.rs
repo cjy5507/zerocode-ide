@@ -23127,6 +23127,80 @@ pub(crate) mod computer_desktop_wait {
     /// never refuses another's run.
     pub(crate) static ONE_HAND: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// A parallel holds as many groups as it is given and works on a bounded
+    /// number at a time (t-109501): each at work holds a thread and a
+    /// connection to the helper. Every group is answered, in the order given.
+    #[test]
+    fn a_parallel_answers_every_group_in_order_with_a_bounded_number_at_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const GROUPS: usize = 200;
+        const AT_ONCE: usize = 8;
+        let groups: Vec<usize> = (0..GROUPS).collect();
+        let at_work = AtomicUsize::new(0);
+        let most = AtomicUsize::new(0);
+        let entered = AtomicUsize::new(0);
+        let answers = crate::agent_tools_runtime::at_most_at_once(
+            &groups,
+            AT_ONCE,
+            || entered.fetch_add(1, Ordering::SeqCst),
+            |group| {
+                let now = at_work.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                at_work.fetch_sub(1, Ordering::SeqCst);
+                group * 2
+            },
+            |why| panic!("no group fails here: {why}"),
+        );
+        let doubled: Vec<usize> = (0..GROUPS).map(|group| group * 2).collect();
+        assert_eq!(answers, doubled);
+        let most = most.load(Ordering::SeqCst);
+        assert!(most <= AT_ONCE, "{most} groups were at work at once");
+        assert!(most > 1, "the groups ran one after another");
+        assert_eq!(
+            entered.load(Ordering::SeqCst),
+            AT_ONCE,
+            "a worker begins once and takes group after group"
+        );
+    }
+
+    #[test]
+    fn a_parallel_of_fewer_groups_than_its_bound_starts_no_idle_worker() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let entered = AtomicUsize::new(0);
+        let answers = crate::agent_tools_runtime::at_most_at_once(
+            &["a", "b", "c"],
+            64,
+            || entered.fetch_add(1, Ordering::SeqCst),
+            |group| group.to_uppercase(),
+            |why| why,
+        );
+        assert_eq!(answers, ["A", "B", "C"]);
+        assert_eq!(entered.load(Ordering::SeqCst), 3);
+    }
+
+    /// A group that panics is refused by itself: the groups beside it and
+    /// after it are answered, and the request never panics with it.
+    #[test]
+    fn a_group_that_panics_is_its_own_refusal_and_the_rest_are_answered() {
+        let answers = crate::agent_tools_runtime::at_most_at_once(
+            &[1, 2, 3, 4],
+            2,
+            || (),
+            |group| {
+                assert_ne!(*group, 2, "the second group broke");
+                group.to_string()
+            },
+            |why| format!("refused: {why}"),
+        );
+        assert_eq!(answers[0], "1");
+        assert!(
+            answers[1].starts_with("refused: ") && answers[1].contains("the second group broke"),
+            "{answers:?}"
+        );
+        assert_eq!(answers[2..], ["3", "4"]);
+    }
+
     /// A parallel's look answers in a batch's shape — one step, carrying the
     /// look's whole result — so every group of a parallel's answer reads alike.
     #[test]
