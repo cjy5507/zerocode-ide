@@ -1608,6 +1608,11 @@ pub fn persist_allow_always_rules(
         return Ok(());
     }
 
+    // Never through a `.zo` that links to another folder: the file would be
+    // made and recorded where this folder's loader never reads it.
+    if !local_record::may_write(home, &path) {
+        return Ok(());
+    }
     // Only the `.zo` folder itself is made: the folders above it are the
     // project's, and their permissions are not zo's to change.
     if let Some(dot_zo) = path.parent() {

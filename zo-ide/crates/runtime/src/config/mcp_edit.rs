@@ -178,8 +178,9 @@ fn refuse_a_file_zo_did_not_write(home: &Path, path: &Path) -> Result<(), Config
         std::io::ErrorKind::PermissionDenied,
         format!(
             "{} was not written by zo as it stands (it came with this folder, or it changed \
-             since zo wrote it), so zo does not write into it. If it is yours, run \
-             `zo settings trust-local` in your own terminal, then try again.",
+             since zo wrote it), or the folder's .zo is a link to another folder, so zo does \
+             not write into it. If the file is yours, run `zo settings trust-local` in your \
+             own terminal, then try again.",
             path.display()
         ),
     )))

@@ -3478,6 +3478,45 @@ fn a_link_at_the_local_files_path_is_never_written_through() {
     assert!(!home.join(super::local_record::RECORD_FILE).exists());
 }
 
+/// Nor through a `.zo` that is a link to another folder: a grant made in a
+/// folder whose `.zo` points at a neighbouring project's would otherwise be
+/// made there, recorded as the person's, and applied in that project (153).
+#[test]
+#[cfg(unix)]
+fn a_dot_zo_that_links_to_another_folder_is_never_written_through() {
+    let dir = temp_dir();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("home");
+    let neighbour = dir.join("neighbour").join(".zo");
+    fs::create_dir_all(&neighbour).expect("the neighbouring project's .zo");
+    let project = dir.join("project");
+    fs::create_dir_all(&project).expect("project");
+    std::os::unix::fs::symlink(&neighbour, project.join(".zo")).expect("link");
+
+    persist_allow_always_rules(&home, &project, &["bash(cargo fmt*)".to_string()])
+        .expect("a linked .zo is silent, not an error");
+    assert!(
+        !neighbour.join("settings.local.json").exists(),
+        "nothing is made through the link"
+    );
+    assert!(!home.join(super::local_record::RECORD_FILE).exists(), "nothing is recorded");
+
+    // A `.zo` pointing at the config home itself is refused the same way.
+    let other = dir.join("other");
+    fs::create_dir_all(&other).expect("other");
+    std::os::unix::fs::symlink(&home, other.join(".zo")).expect("link to the home");
+    persist_allow_always_rules(&home, &other, &["bash(cargo fmt*)".to_string()])
+        .expect("silent, not an error");
+    assert!(!home.join("settings.local.json").exists(), "nothing is made in the home");
+
+    // The folder's own `.zo` still gets its grant, made where none stood.
+    let own = dir.join("own");
+    fs::create_dir_all(&own).expect("own");
+    persist_allow_always_rules(&home, &own, &["bash(cargo fmt*)".to_string()])
+        .expect("the folder's own .zo");
+    assert!(own.join(".zo").join("settings.local.json").is_file());
+}
+
 /// No grants, no write.
 #[test]
 fn no_grants_writes_nothing() {

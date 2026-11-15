@@ -139,6 +139,42 @@ fn zo_writes_only_where_nothing_stands_or_where_it_wrote() {
     assert!(may_write(&folder.home, &own));
 }
 
+/// zo writes a local file only in the folder's own `.zo`: through a `.zo` that
+/// links to a neighbouring project's or to the config home, `zo mcp --trust`
+/// and `add --project` would write where this folder's loader never reads.
+/// The config home's own documents are written as ever, even when the home is
+/// itself a link (a dotfiles folder).
+#[test]
+fn zo_writes_a_local_file_only_in_the_folders_own_dot_zo() {
+    let folder = Folder::with_local("{}");
+    let root = folder.cwd.parent().expect("root").to_path_buf();
+    let neighbour = root.join("neighbour").join(".zo");
+    fs::create_dir_all(&neighbour).expect("the neighbouring project's .zo");
+    let linked = root.join("linked");
+    fs::create_dir_all(&linked).expect("linked");
+    std::os::unix::fs::symlink(&neighbour, linked.join(".zo")).expect("link");
+    for name in super::RECORDED_FILES {
+        assert!(!may_write(&folder.home, &linked.join(".zo").join(name)), "{name}");
+    }
+    let to_home = root.join("to-home");
+    fs::create_dir_all(&to_home).expect("to-home");
+    std::os::unix::fs::symlink(&folder.home, to_home.join(".zo")).expect("link to the home");
+    let through = to_home.join(".zo").join("trusted-mcp-servers.json");
+    assert!(!may_write(&folder.home, &through), "the home, reached through a folder's .zo");
+
+    let fresh = root.join("fresh");
+    fs::create_dir_all(&fresh).expect("fresh");
+    assert!(may_write(&folder.home, &fresh.join(".zo").join("settings.local.json")), "no .zo yet");
+    assert!(may_write(&folder.home, &folder.home.join("trusted-mcp-servers.json")));
+    let dotfiles = root.join("dotfiles").join("zo");
+    fs::create_dir_all(&dotfiles).expect("dotfiles");
+    let person = root.join("person");
+    fs::create_dir_all(&person).expect("person");
+    std::os::unix::fs::symlink(&dotfiles, person.join(".zo")).expect("a linked config home");
+    let linked_home = person.join(".zo");
+    assert!(may_write(&linked_home, &linked_home.join("trusted-mcp-servers.json")));
+}
+
 /// Entries for files that are gone are dropped when the record is next written.
 #[test]
 #[cfg(unix)]

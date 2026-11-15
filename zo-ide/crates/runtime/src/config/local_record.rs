@@ -109,6 +109,11 @@ pub fn forget(home: &Path, real: &Path) -> std::io::Result<bool> {
 /// (whose own documents are the person's whatever the record says).
 #[must_use]
 pub fn is_recorded_kind(home: &Path, path: &Path) -> bool {
+    names_a_local_file(path) && !in_config_home(home, path)
+}
+
+/// `<folder>/.zo/<one of RECORDED_FILES>`, by its name alone.
+fn names_a_local_file(path: &Path) -> bool {
     let named = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -117,7 +122,29 @@ pub fn is_recorded_kind(home: &Path, path: &Path) -> bool {
         .parent()
         .and_then(Path::file_name)
         .is_some_and(|parent| parent == ".zo");
-    named && in_dot_zo && !in_config_home(home, path)
+    named && in_dot_zo
+}
+
+/// Whether the `.zo` holding `path` is the folder's own: a real folder at
+/// exactly `<folder>/.zo`, not a link to another folder — the loader reads a
+/// local file only there. A `.zo` not made yet is: zo makes a real one.
+fn dot_zo_in_place(path: &Path) -> bool {
+    let Some(dot_zo) = path.parent() else {
+        return false;
+    };
+    let folder = dot_zo
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match std::fs::symlink_metadata(dot_zo) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Ok(metadata) if metadata.file_type().is_dir() => dot_zo
+            .canonicalize()
+            .ok()
+            .zip(folder.canonicalize().ok())
+            .is_some_and(|(real, base)| real == base.join(".zo")),
+        _ => false,
+    }
 }
 
 fn in_config_home(home: &Path, path: &Path) -> bool {
@@ -133,8 +160,17 @@ fn in_config_home(home: &Path, path: &Path) -> bool {
 /// Whether zo may write `path`: it is not a recorded kind, or it is absent, or
 /// the bytes on it now are what zo last wrote. Writing over a file the folder
 /// came with would make its contents the person's.
+///
+/// A local file is made only in the folder's own `.zo`: through a `.zo` that
+/// links to another folder (a neighbouring project's, or the config home), zo
+/// would make and record a file the loader never reads here, and it would
+/// apply there. The config home's own documents are written as ever, even when
+/// the home is itself a link.
 #[must_use]
 pub fn may_write(home: &Path, path: &Path) -> bool {
+    if names_a_local_file(path) && path.parent() != Some(home) && !dot_zo_in_place(path) {
+        return false;
+    }
     if !is_recorded_kind(home, path) {
         return true;
     }
