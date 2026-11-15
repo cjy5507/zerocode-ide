@@ -1576,7 +1576,7 @@ fn local_settings_scope(home: &Path, cwd: &Path, path: &Path) -> ConfigSource {
 /// Persist live `AllowAlways` grants into the project-local settings.
 ///
 /// zo writes into the folder's `.zo/settings.local.json` when it may take that
-/// file as the person's ([`writable_zo_file`]): one it wrote before (its bytes
+/// file as the person's (`writable_zo_file`): one it wrote before (its bytes
 /// match the record), one that grants nothing a repository's reading of it
 /// would not (an older zo's file holding the model, say), or a new one where
 /// none stands. A file that grants something zo did not write — one the folder
@@ -1604,22 +1604,21 @@ pub fn persist_allow_always_rules(
     }
 
     let path = cwd.join(".zo").join(FILE_NAME);
-    let Some(original_contents) = writable_zo_file(home, cwd, &path, FILE_NAME) else {
+    let Some(original) = writable_zo_file(home, cwd, &path, FILE_NAME) else {
         return Ok(());
     };
+    let original_contents = match &original {
+        WritableZoFile::Absent => "{}",
+        WritableZoFile::Holding(contents) => contents.as_str(),
+    };
 
-    let Some(rendered) = merge_allow_always_rules(
-        &path,
-        original_contents.as_deref().unwrap_or("{}"),
-        rules,
-    )?
-    else {
+    let Some(rendered) = merge_allow_always_rules(&path, original_contents, rules)? else {
         return Ok(());
     };
 
     // Abort if the file changed while the candidate was being built; never
     // merge over a newer operator edit or a changed trust decision.
-    if writable_zo_file(home, cwd, &path, FILE_NAME) != Some(original_contents) {
+    if writable_zo_file(home, cwd, &path, FILE_NAME).as_ref() != Some(&original) {
         return Ok(());
     }
 
@@ -1628,20 +1627,28 @@ pub fn persist_allow_always_rules(
     Ok(())
 }
 
-/// `cwd/.zo/<file_name>` as zo may write into it, read once: `Some(None)`
-/// where nothing stands and the folder's own `.zo` would hold it,
-/// `Some(Some(contents))` for a real file at exactly that path whose bytes
-/// are what zo last wrote or grant nothing a repository's reading would not
-/// ([`local_record::carries_no_authority`]), and `None` otherwise — a file
-/// that grants something zo did not write, a link, a linked `.zo`.
-fn writable_zo_file(home: &Path, cwd: &Path, path: &Path, file_name: &str) -> Option<Option<String>> {
+/// `cwd/.zo/<file_name>` as zo may write into it, read once.
+#[derive(Debug, PartialEq, Eq)]
+enum WritableZoFile {
+    /// Nothing stands there, and the folder's own `.zo` would hold it.
+    Absent,
+    /// A real file at exactly that path whose bytes are what zo last wrote or
+    /// grant nothing a repository's reading would not
+    /// ([`local_record::carries_no_authority`]): these bytes.
+    Holding(String),
+}
+
+/// [`WritableZoFile`] for `cwd/.zo/<file_name>`, or `None` where zo may not
+/// write: a file that grants something zo did not write, a link, a linked
+/// `.zo`.
+fn writable_zo_file(home: &Path, cwd: &Path, path: &Path, file_name: &str) -> Option<WritableZoFile> {
     if is_absent(path) {
-        return local_record::may_write(home, path).then_some(None);
+        return local_record::may_write(home, path).then_some(WritableZoFile::Absent);
     }
     let (real, contents) = zo_file_snapshot(cwd, path, file_name)?;
     (local_record::recorded(home, &real, contents.as_bytes())
         || local_record::carries_no_authority(file_name, contents.as_bytes()))
-    .then_some(Some(contents))
+    .then_some(WritableZoFile::Holding(contents))
 }
 
 /// How a write by one of the model's tools left the folder's local settings.

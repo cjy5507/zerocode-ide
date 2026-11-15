@@ -3027,7 +3027,7 @@ fn always_allow_is_not_written_into_a_file_the_folder_came_with() {
         "a grant must not be written into a file the folder came with"
     );
     #[cfg(unix)]
-    assert!(ConfigLoader::new(&dir, &home)
+    assert!(ConfigLoader::new(&*dir, &home)
         .load()
         .expect("config should load")
         .feature_config()
@@ -3048,13 +3048,13 @@ fn always_allow_joins_a_local_file_that_grants_nothing() {
     fs::create_dir_all(&home).expect("home");
     let path = dir.join(".zo").join("settings.local.json");
     fs::write(&path, r#"{"model":"opus","reasoningEffort":"high"}"#).expect("an older zo's file");
-    let before = ConfigLoader::new(&dir, &home).load().expect("config should load");
+    let before = ConfigLoader::new(&*dir, &home).load().expect("config should load");
     assert!(!before.feature_config().always_allow_for_the_session_only());
     assert!(before.feature_config().unowned_local_settings().is_empty());
 
     persist_allow_always_rules(&home, &dir, &["Bash(cargo fmt*)".to_string()]).expect("persist");
 
-    let loaded = ConfigLoader::new(&dir, &home).load().expect("config should load");
+    let loaded = ConfigLoader::new(&*dir, &home).load().expect("config should load");
     assert!(
         loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()),
         "{:?}",
@@ -3717,7 +3717,7 @@ fn a_tools_plain_or_narrowing_change_keeps_the_persons_file_theirs() {
             "{mode}"
         );
     }
-    let loaded = ConfigLoader::new(&dir, &home).load().expect("config should load");
+    let loaded = ConfigLoader::new(&*dir, &home).load().expect("config should load");
     assert!(loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()));
 }
 
@@ -3744,7 +3744,7 @@ fn a_tools_widening_change_is_written_but_left_for_the_person_to_record() {
         super::LocalSettingsWrite::LeftUnrecorded
     );
     assert!(fs::read_to_string(&path).expect("local settings").contains("dontAsk"));
-    let loaded = ConfigLoader::new(&dir, &home).load().expect("config should load");
+    let loaded = ConfigLoader::new(&*dir, &home).load().expect("config should load");
     assert!(!loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()));
     assert!(loaded.feature_config().always_allow_for_the_session_only());
 }

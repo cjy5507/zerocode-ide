@@ -206,7 +206,7 @@ fn the_config_homes_own_local_files_are_written_only_as_any_folders_are() {
 fn plain_settings_carry_no_authority_and_what_a_repository_strips_does() {
     let settings = |json: &str| carries_no_authority("settings.local.json", json.as_bytes());
     for plain in [
-        r#"{}"#,
+        r"{}",
         r#"{"model":"opus","reasoningEffort":"high","alwaysThinkingEnabled":true}"#,
         r#"{"outputStyle":"Explanatory","language":"ko"}"#,
         r#"{"autoMemoryEnabled":false,"autoDreamEnabled":false,"recallHintEnabled":true}"#,
@@ -233,8 +233,8 @@ fn plain_settings_carry_no_authority_and_what_a_repository_strips_does() {
             r#"{"permissions":{"defaultMode":"danger-full-access"}}"#,
             r#"{"permissions":["allow"]}"#,
             r#"{"permissionMode":"dontAsk"}"#,
-            r#"not json"#,
-            r#"[]"#,
+            r"not json",
+            r"[]",
         ]
         .map(String::from),
     );
@@ -256,12 +256,12 @@ fn a_change_widens_only_when_it_grants_what_was_not_granted() {
     for (before, after, widened) in [
         (granted, r#"{"permissions":{"allow":["Bash(cargo*)"],"defaultMode":"dontAsk"},"model":"opus"}"#, false),
         (granted, r#"{"permissions":{"allow":["Bash(cargo*)"],"defaultMode":"plan"}}"#, false),
-        (granted, r#"{}"#, false),
-        (r#"{}"#, r#"{"permissions":{"defaultMode":"acceptEdits"}}"#, false),
-        (r#"{}"#, r#"{"permissions":{"defaultMode":"dontAsk"}}"#, true),
+        (granted, r"{}", false),
+        (r"{}", r#"{"permissions":{"defaultMode":"acceptEdits"}}"#, false),
+        (r"{}", r#"{"permissions":{"defaultMode":"dontAsk"}}"#, true),
         (r#"{"permissions":{"defaultMode":"plan"}}"#, r#"{"permissions":{"defaultMode":"danger-full-access"}}"#, true),
         (granted, r#"{"permissions":{"allow":["Bash(*)"],"defaultMode":"dontAsk"}}"#, true),
-        (r#"{}"#, r#"{"hooks":{}}"#, true),
+        (r"{}", r#"{"hooks":{}}"#, true),
     ] {
         assert_eq!(widens(&object(before), &object(after)), widened, "{before} -> {after}");
     }
