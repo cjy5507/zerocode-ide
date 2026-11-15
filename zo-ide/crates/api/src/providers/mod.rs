@@ -5404,7 +5404,7 @@ mod tests {
 
     mod harness_profile {
         use super::{EnvVarGuard, MODEL_CONTEXT_WINDOWS_ENV};
-        use crate::providers::{harness_profile_for_model, EditToolForm};
+        use crate::providers::{harness_profile_for_model, EditToolForm, HarnessValueSource};
 
         struct OwnProviders(EnvVarGuard);
 
@@ -5431,7 +5431,6 @@ mod tests {
         fn names_evidence_for_defaults_declarations_and_inherited_values() {
             let _lock = crate::test_env_lock();
             let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
-            use crate::HarnessValueSource;
             let _providers = OwnProviders::new();
             for (model, expected) in [
                 ("claude-opus-5-5", HarnessValueSource::Default),
