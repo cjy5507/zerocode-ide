@@ -771,13 +771,19 @@ fn parallel_bench_pointer() {
                 scope.spawn(move || press_as(session, app, *number, "one-agent"));
             }
         });
-        // The pointers are drawn on the helper's main queue just after the answers.
-        std::thread::sleep(Duration::from_millis(600));
-        let (_, said) = call(session, "status", &json!({}));
-        pointers.insert(
-            label.into(),
-            said.expect("a status")["backgroundPointer"]["pointers"].clone(),
-        );
+        // The pointers are drawn on the helper's main queue just after the
+        // answers: the most it shows while they stay is what a person sees.
+        let deadline = Instant::now() + Duration::from_millis(1_500);
+        let mut most = 0;
+        while most < APPS as u64 && Instant::now() < deadline {
+            let (_, said) = call(session, "status", &json!({}));
+            let shown = said.expect("a status")["backgroundPointer"]["pointers"]
+                .as_u64()
+                .expect("a count of pointers");
+            most = most.max(shown);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        pointers.insert(label.into(), json!(most));
     }
     report["one_agent_in_four_apps_pointers"] = Value::Object(pointers);
     report["four_apps_pressed"] = json!(

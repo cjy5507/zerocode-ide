@@ -2865,10 +2865,10 @@ final class Provider {
         guard let delta = boundedInteger(max(1, (extent * pages).rounded()), as: Int32.self) else {
             throw ProviderError.coded("invalid_argument", "pages is out of range")
         }
-        // Read once: the pointer's move is not waited for, so nothing can change
-        // between this and the events, and a refused scroll draws no pointer.
         try requireBackgroundWindow(snapshot, at: point)
         try travel(to: point, in: snapshot)
+        // The window may have moved or closed while the pointer travelled.
+        try requireBackgroundWindow(snapshot, at: point)
         try Input.windowScroll(at: point, direction: direction, delta: delta, snapshot: snapshot)
         return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
     }
