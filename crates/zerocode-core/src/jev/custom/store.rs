@@ -301,11 +301,22 @@ pub fn edit_told(
 }
 
 /// The end of a told save, under the lock its caller holds: the ask-when
-/// file first, then the index that lists the decision's new version. The
+/// file first — what it `held` before the save, with this decision's line
+/// told anew — then the index that lists the decision's new version. The
 /// index is the save — readers find a decision and its version there — so
-/// words that cannot be written leave it as it was (a definition file no row
-/// names is swept later, [`forget_deleted`]). An index that then cannot be
-/// written puts the file back as it was `held`, as far as it can.
+/// words that cannot be written leave it as it was. The definition file
+/// written before them stays, unread: a new decision's is swept later
+/// ([`forget_deleted`]); an edit's waits beside the decision's other
+/// versions, is taken again by the same edit saved again, and goes when the
+/// decision is deleted. An index that then cannot be written puts the file
+/// back whole as it was `held`, when the save changed it.
+///
+/// Two ways still leave the new words in the file with the index as it was:
+/// that put-back failing too, which the error then says
+/// ([`index_not_written`]), and the process ending between the two writes.
+/// An edit's earlier version then keeps the new words until the decision is
+/// saved again; a new decision's line names no row, and every reader drops
+/// it.
 fn keep_told(
     root: &Path,
     before: &[Entry],
@@ -314,15 +325,48 @@ fn keep_told(
     id: &str,
     kept: AskWhen,
 ) -> io::Result<()> {
-    keep_ask_when(root, &after, |decisions| {
+    let told = changed_by(&held, &after, |decisions| {
         decisions.remove(id);
         if !kept.always() {
             decisions.insert(id.to_string(), kept);
         }
-    })?;
-    write_index(root, after).inspect_err(|_| {
-        let _ = keep_ask_when(root, before, |decisions| *decisions = held);
+    });
+    let changed = told != held;
+    if changed {
+        write_ask_when(root, told)?;
+    }
+    write_index(root, after).map_err(|error| {
+        let put_back = if changed {
+            write_ask_when(root, held)
+        } else {
+            Ok(())
+        };
+        let edit = before.iter().any(|entry| entry.id == id);
+        index_not_written(error, put_back, edit, &root.join(ASK_WHEN))
     })
+}
+
+/// The error of a told save whose index was not written, once the ask-when
+/// file was `put_back`: the index error itself, unless the put-back failed
+/// on an `edit` — then it says, in the index error's kind, that the
+/// decision's earlier version keeps the new words. A new decision's words
+/// left behind name no row, so its error stays the index error alone.
+fn index_not_written(
+    error: io::Error,
+    put_back: io::Result<()>,
+    edit: bool,
+    path: &Path,
+) -> io::Error {
+    match put_back {
+        Err(failed) if edit => io::Error::new(
+            error.kind(),
+            format!(
+                "{error}; {} could not be put back either ({failed}), so the decision's earlier version keeps the new words until it is saved again",
+                path.display()
+            ),
+        ),
+        _ => error,
+    }
 }
 
 /// Keep `definition` as the newest version of the decision with its id,
@@ -710,22 +754,38 @@ fn read_ask_when(root: &Path) -> io::Result<BTreeMap<String, AskWhen>> {
     Ok(file.decisions)
 }
 
-/// Change the ask-when file by `change`, under the lock the caller holds,
-/// keeping only lines that say something for a decision `index` lists. A
-/// file left saying nothing is removed rather than written empty.
+/// Change the ask-when file by `change` ([`changed_by`]), under the lock the
+/// caller holds; a file that would say the same is not written.
 fn keep_ask_when(
     root: &Path,
     index: &[Entry],
     change: impl FnOnce(&mut BTreeMap<String, AskWhen>),
 ) -> io::Result<()> {
-    let path = root.join(ASK_WHEN);
     let held = read_ask_when(root)?;
-    let mut decisions = held.clone();
-    change(&mut decisions);
-    decisions.retain(|id, said| !said.always() && index.iter().any(|entry| entry.id == *id));
+    let decisions = changed_by(&held, index, change);
     if decisions == held {
         return Ok(());
     }
+    write_ask_when(root, decisions)
+}
+
+/// What an ask-when file that `held` these lines says once `change` is made,
+/// keeping only lines that say something for a decision `index` lists.
+fn changed_by(
+    held: &BTreeMap<String, AskWhen>,
+    index: &[Entry],
+    change: impl FnOnce(&mut BTreeMap<String, AskWhen>),
+) -> BTreeMap<String, AskWhen> {
+    let mut decisions = held.clone();
+    change(&mut decisions);
+    decisions.retain(|id, said| !said.always() && index.iter().any(|entry| entry.id == *id));
+    decisions
+}
+
+/// Write the ask-when file whole as `decisions`, under the lock the caller
+/// holds; a file left saying nothing is removed rather than written empty.
+fn write_ask_when(root: &Path, decisions: BTreeMap<String, AskWhen>) -> io::Result<()> {
+    let path = root.join(ASK_WHEN);
     if decisions.is_empty() {
         return match fs::remove_file(&path) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
@@ -739,7 +799,20 @@ fn keep_ask_when(
     replace(&path, &serde_json::to_vec(&file).map_err(io::Error::other)?)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to fail this thread's next index write before it
+    /// touches the disk (t-108275's review): a told save's put-back runs only
+    /// after the words were written and the index was not, and no portable
+    /// file refuses that write while the index still reads.
+    static FAIL_NEXT_INDEX_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn write_index(root: &Path, decisions: Vec<Entry>) -> io::Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_INDEX_WRITE.with(|fail| fail.replace(false)) {
+        return Err(io::Error::other("a test failed this index write"));
+    }
     let index = IndexFile {
         schema_version: SCHEMA_VERSION,
         decisions,
@@ -1576,5 +1649,139 @@ mod tests {
         )
         .expect("the same save, once the file is gone, is not a name taken");
         assert_eq!(list(home.path()).unwrap().len(), 2);
+    }
+
+    /// `save` with this thread's next index write failing — and the save
+    /// reached that write.
+    fn with_the_index_failing<T>(save: impl FnOnce() -> T) -> T {
+        FAIL_NEXT_INDEX_WRITE.with(|fail| fail.set(true));
+        let saved = save();
+        assert!(
+            !FAIL_NEXT_INDEX_WRITE.with(std::cell::Cell::get),
+            "the save reached its index write"
+        );
+        saved
+    }
+
+    /// A told save whose index cannot be written puts the ask-when file back
+    /// whole, as it was read before the save (t-108275's review): no file
+    /// stays no file, an edit's old words and another decision's come back
+    /// as they were, a new decision's words go with it, and words the save
+    /// took out — the file it removed — come back. The index lists nothing
+    /// new.
+    #[test]
+    fn a_told_save_whose_index_is_not_written_puts_the_words_back_as_they_were() {
+        let home = tempfile::tempdir().unwrap();
+        let store = root(home.path());
+        let file = || read_ask_when(&store).unwrap();
+        let deletes = asking_at("d-0000000a", "Deletes", Point::BeforeCommand);
+        let first = create(home.path(), &deletes, JevMode::On, NOW).unwrap();
+        let mut reworded = deletes.clone();
+        reworded.question = "Does this command delete anything a person kept?".to_string();
+
+        assert!(matches!(
+            with_the_index_failing(|| edit_told(
+                home.path(),
+                &reworded,
+                &asks_when(&["rm"], false),
+                NOW + 1
+            )),
+            Err(ToldError::Store(Error::Io(_)))
+        ));
+        assert!(
+            !ask_when_path(home.path()).exists(),
+            "no file before is no file after"
+        );
+
+        let moves = asking_at("d-0000000b", "Moves", Point::BeforeCommand);
+        create_told(
+            home.path(),
+            &moves,
+            JevMode::On,
+            &asks_when(&["mv"], false),
+            NOW + 2,
+        )
+        .unwrap();
+        set_ask_when(home.path(), "d-0000000a", &asks_when(&["rm"], false)).unwrap();
+        let held = file();
+        assert_eq!(held.len(), 2);
+        assert!(
+            with_the_index_failing(|| edit_told(
+                home.path(),
+                &reworded,
+                &asks_when(&["unlink"], false),
+                NOW + 3
+            ))
+            .is_err()
+        );
+        assert_eq!(file(), held, "an edit's old words and another's come back");
+        let copies = asking_at("d-0000000c", "Copies", Point::BeforeCommand);
+        assert!(
+            with_the_index_failing(|| create_told(
+                home.path(),
+                &copies,
+                JevMode::On,
+                &asks_when(&["cp"], false),
+                NOW + 4
+            ))
+            .is_err()
+        );
+        assert_eq!(file(), held, "a new decision's words go with it");
+
+        set_ask_when(home.path(), "d-0000000b", &AskWhen::default()).unwrap();
+        let held = file();
+        assert_eq!(held.keys().collect::<Vec<_>>(), ["d-0000000a"]);
+        assert!(
+            with_the_index_failing(|| edit_told(
+                home.path(),
+                &reworded,
+                &AskWhen::default(),
+                NOW + 5
+            ))
+            .is_err()
+        );
+        assert_eq!(file(), held, "words the save took out come back");
+
+        let listed = list(home.path()).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["d-0000000a", "d-0000000b"],
+            "a save whose index was not written lists no new decision"
+        );
+        assert_eq!(listed[0].definition, first, "nor a new version");
+    }
+
+    /// A told edit whose words cannot be put back says so, in its index
+    /// error's kind; a put-back that worked, and a new decision's, leave the
+    /// index error as it was (t-108275's review).
+    #[test]
+    fn an_edit_whose_words_cannot_be_put_back_says_its_earlier_version_keeps_them() {
+        let path = Path::new("decisions").join(ASK_WHEN);
+        let index = || io::Error::new(io::ErrorKind::PermissionDenied, "the index is read-only");
+        let refused = || Err(io::Error::other("the folder is read-only"));
+
+        let said = index_not_written(index(), refused(), true, &path);
+        assert_eq!(said.kind(), io::ErrorKind::PermissionDenied);
+        let said = said.to_string();
+        assert!(said.starts_with("the index is read-only; "), "{said}");
+        assert!(
+            said.contains("could not be put back either (the folder is read-only)"),
+            "{said}"
+        );
+        assert!(
+            said.ends_with(
+                "the decision's earlier version keeps the new words until it is saved again"
+            ),
+            "{said}"
+        );
+        for (put_back, edit) in [(Ok(()), true), (refused(), false), (Ok(()), false)] {
+            assert_eq!(
+                index_not_written(index(), put_back, edit, &path).to_string(),
+                "the index is read-only"
+            );
+        }
     }
 }
