@@ -88,6 +88,36 @@ impl EditToolForm {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HarnessProfile {
     pub edit_tool: EditToolForm,
+    /// Where the resolved edit shape came from; never changes the wire form.
+    pub edit_tool_source: HarnessValueSource,
+}
+
+/// Evidence behind one resolved harness value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessValueSource {
+    /// A measurement recorded in the catalog.
+    Measured,
+    /// An operator or model declaration.
+    Declared,
+    /// A different lineup's transport default.
+    Inherited,
+    /// The common fallback when no declaration applies.
+    #[default]
+    Default,
+}
+
+impl HarnessValueSource {
+    /// Stable spelling used by `zo --prompt-input`.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::Declared => "declared",
+            Self::Inherited => "inherited",
+            Self::Default => "default",
+        }
+    }
 }
 
 /// A catalog row's partial harness declaration: absent fields fall through.
@@ -95,6 +125,13 @@ pub struct HarnessProfile {
 #[serde(default)]
 struct HarnessDecl {
     edit_tool: Option<EditToolForm>,
+    edit_tool_source: Option<HarnessValueSource>,
+}
+
+impl HarnessDecl {
+    fn edit_tool(self) -> Option<(EditToolForm, HarnessValueSource)> {
+        Some((self.edit_tool?, self.edit_tool_source.unwrap_or(HarnessValueSource::Declared)))
+    }
 }
 
 /// The catalog's `harness` section: lineup defaults keyed by the provider
@@ -106,6 +143,13 @@ struct HarnessSection {
 }
 
 impl HarnessSection {
+    fn for_family(&self, family: &str) -> Option<&HarnessDecl> {
+        self.by_provider.iter().find(|(key, _)| {
+            key.eq_ignore_ascii_case(family)
+                || first_party_lineup(family).is_some_and(|provider| provider_kind_from_key(key) == Some(provider))
+        }).map(|(_, decl)| decl)
+    }
+
     fn for_provider(&self, provider: ProviderKind) -> Option<&HarnessDecl> {
         self.by_provider
             .iter()
@@ -801,25 +845,29 @@ impl ModelContextCatalog {
             .filter(|capabilities| !capabilities.is_empty())
     }
 
-    /// The edit shape this catalog declares for a model: its row's own
-    /// `harness`, then its lineup's `harness.by_provider` row. The lineup is
-    /// the row's `provider`, else `named_provider` (the id's own naming), so a
-    /// model no row lists still takes its lineup's default.
+    /// The model row, then its name-token family, then the serving transport.
+    /// A missing family declaration keeps the existing transport behavior.
     fn edit_tool_for(
         &self,
         raw_model: &str,
         canonical_model: &str,
         named_provider: Option<ProviderKind>,
-    ) -> Option<EditToolForm> {
+    ) -> Option<(EditToolForm, HarnessValueSource)> {
         let entry = self.find_entry(raw_model, canonical_model);
-        if let Some(form) = entry.and_then(|row| row.harness).and_then(|decl| decl.edit_tool) {
-            return Some(form);
+        if let Some(value) = entry.and_then(|row| row.harness).and_then(HarnessDecl::edit_tool) {
+            return Some(value);
+        }
+        let family = harness_family_from_name(canonical_model);
+        if let Some(value) = family.and_then(|family| self.harness.for_family(family)).and_then(|decl| decl.edit_tool()) {
+            return Some(value);
         }
         let provider = entry
             .and_then(|row| row.provider.as_deref())
             .and_then(provider_kind_from_key)
             .or(named_provider)?;
-        self.harness.for_provider(provider)?.edit_tool
+        let (form, source) = self.harness.for_provider(provider)?.edit_tool()?;
+        let same_family = family.and_then(first_party_lineup) == Some(provider);
+        Some((form, if same_family { source } else { HarnessValueSource::Inherited }))
     }
 
     fn demotes_to_for(&self, raw_model: &str, canonical_model: &str) -> Option<String> {
@@ -1064,10 +1112,18 @@ pub fn harness_profile_for_model(model: &str) -> HarnessProfile {
     let canonical = resolve_catalog_alias(bare);
     let lower = canonical.to_ascii_lowercase();
     let named_provider = catalog_provider_of(&canonical);
-    HarnessProfile {
-        edit_tool: catalog_fact(|catalog| catalog.edit_tool_for(bare, &lower, named_provider))
-            .unwrap_or_default(),
-    }
+    let (edit_tool, edit_tool_source) = catalog_fact(|catalog| catalog.edit_tool_for(bare, &lower, named_provider))
+        .unwrap_or_default();
+    HarnessProfile { edit_tool, edit_tool_source }
+}
+
+/// A model's name-token family, from the same cold-start table the router uses.
+/// No provider inference is made here: an unknown name has no family.
+fn harness_family_from_name(model: &str) -> Option<&'static str> {
+    let lower = model.to_ascii_lowercase();
+    router_priors().frontier_family_tokens.iter()
+        .find(|token| !token.is_empty() && lower.contains(&token.to_ascii_lowercase()))
+        .map(String::as_str)
 }
 
 /// Whether `model`'s catalog row declares `capability` (`imagegen`,
@@ -5349,6 +5405,59 @@ mod tests {
     mod harness_profile {
         use super::{EnvVarGuard, MODEL_CONTEXT_WINDOWS_ENV};
         use crate::providers::{harness_profile_for_model, EditToolForm};
+
+        struct OwnProviders(EnvVarGuard);
+
+        impl OwnProviders {
+            fn new() -> Self {
+                let guard = EnvVarGuard::set(crate::CUSTOM_PROVIDERS_ENV,
+                    Some(r#"[{"name":"acme","base_url":"http://127.0.0.1:1/v1","requires_auth":false,"models":["deepseek-flash","acme-coder-1"]}]"#));
+                crate::refresh_custom_providers_from_env();
+                Self(guard)
+            }
+        }
+
+        impl Drop for OwnProviders {
+            fn drop(&mut self) {
+                match &self.0.original {
+                    Some(value) => std::env::set_var(crate::CUSTOM_PROVIDERS_ENV, value),
+                    None => std::env::remove_var(crate::CUSTOM_PROVIDERS_ENV),
+                }
+                crate::refresh_custom_providers_from_env();
+            }
+        }
+
+        #[test]
+        fn names_evidence_for_defaults_declarations_and_inherited_values() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+            use crate::HarnessValueSource;
+            let _providers = OwnProviders::new();
+            for (model, expected) in [
+                ("claude-opus-5-5", HarnessValueSource::Default),
+                ("gemini-3.6-flash", HarnessValueSource::Default),
+                ("gpt-6.1-sol", HarnessValueSource::Measured),
+                ("deepseek-flash", HarnessValueSource::Inherited),
+                ("acme-coder-1", HarnessValueSource::Inherited),
+            ] {
+                assert_eq!(harness_profile_for_model(model).edit_tool_source, expected, "{model}");
+            }
+            let _overlay = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV,
+                Some(r#"{"models":[{"ids":["deepseek-flash"],"harness":{"edit_tool":"edit"}}]}"#));
+            let profile = harness_profile_for_model("deepseek-flash");
+            assert_eq!(profile.edit_tool, EditToolForm::Edit);
+            assert_eq!(profile.edit_tool_source, HarnessValueSource::Declared);
+        }
+
+        #[test]
+        fn reads_an_unlisted_models_family_before_its_transport() {
+            let _lock = crate::test_env_lock();
+            let _providers = OwnProviders::new();
+            let _overlay = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV,
+                Some(r#"{"harness":{"by_provider":{"deepseek":{"edit_tool":"edit"},"openai":{"edit_tool":"apply_patch"}}}}"#));
+            assert_eq!(harness_profile_for_model("deepseek-flash").edit_tool, EditToolForm::Edit);
+            assert_eq!(harness_profile_for_model("acme-coder-1").edit_tool, EditToolForm::ApplyPatch);
+        }
 
         #[test]
         fn shows_a_gpt_model_apply_patch() {

@@ -118,7 +118,7 @@ pub use providers::{
     BandDifficulty,
     CUSTOM_PROVIDERS_ENV, EXPERIMENTAL_PROVIDERS_ENV, MODEL_CLASSES_ENV,
     MODEL_CONTEXT_WINDOWS_ENV, MODEL_EFFORT_CEILINGS_ENV, ULTRA_BAND_ENV,
-    CustomProviderUsability, EditToolForm, HarnessProfile, KeySource, ModelClass, ModelFitHint,
+    CustomProviderUsability, EditToolForm, HarnessProfile, HarnessValueSource, KeySource, ModelClass, ModelFitHint,
     NON_CLAUDE_ADAPTERS_ENV,
     PlanPriorsTable, ProviderCatalogEntry, ProviderKind, ProviderMetadata, RouterPriors,
     WireRoute, WorkTurnPrior,

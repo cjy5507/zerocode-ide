@@ -357,6 +357,7 @@ impl PromptInput {
         let _ = writeln!(out, "  {:<18}{}", "Provider family", self.provider_family);
         let _ = writeln!(out, "  {:<18}{}", "Model", self.model);
         let _ = writeln!(out, "  {:<18}{}", "Edit tool", self.harness.edit_tool.key());
+        let _ = writeln!(out, "  {:<18}{}", "Edit tool source", self.harness.edit_tool_source.key());
         let _ = writeln!(out, "  {:<18}{}", "Workspace", self.workspace);
         let _ = writeln!(
             out,
