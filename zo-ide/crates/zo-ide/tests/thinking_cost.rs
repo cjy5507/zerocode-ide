@@ -88,7 +88,7 @@ fn a_delta_and_a_frame_with_the_thinking_word() {
     let plain = Status::working(Duration::from_secs(12));
     let mut worded = Status::working(Duration::from_secs(12));
     worded.set_header(Some("Reading the failing test before the renderer"));
-    worded.set_inline_message(Some("jev · claude-opus-5 max · stuck_check_red".to_string()));
+    worded.set_inline_message(Some("jev · claude-opus-5 · effort max · stuck_check_red".to_string()));
     worded.set_details(
         [
             "agents 2 · running 2 · done 0".to_string(),

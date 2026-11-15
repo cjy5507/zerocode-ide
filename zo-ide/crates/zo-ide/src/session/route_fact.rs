@@ -7,11 +7,13 @@
 //! effort governor's observer, which the runtime tells every step's decision
 //! — the model and effort the next request carries and the one-word reason.
 //! Both write the same [`RouteFact`] into a `watch` channel the interactive
-//! front reads between frames, so a person sees `jev · opus max ·
+//! front reads between frames, so a person sees `jev · opus · effort max ·
 //! stuck_check_red` the moment the governor moves the wire, on the same row
 //! codex keeps its inline context.
 
 use tokio::sync::watch;
+
+use crate::tui::strings::RouteReason;
 
 /// Who decided the route the fact describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,13 +40,14 @@ impl RouteJudge {
 }
 
 /// One decided route: the seat, the wire model when it is not the session's,
-/// the effort the request carries and the one-word reason.
+/// the effort the request carries and the reason (either the judged task size
+/// at turn start or a step-governor token).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RouteFact {
     pub(crate) who: RouteJudge,
     pub(crate) model: Option<String>,
     pub(crate) effort: &'static str,
-    pub(crate) reason: &'static str,
+    pub(crate) reason: RouteReason<'static>,
 }
 
 impl RouteFact {
@@ -64,7 +67,7 @@ impl RouteFact {
             who: if assessment.judged { RouteJudge::Jev } else { RouteJudge::Probe },
             model: None,
             effort: effort?.label(),
-            reason: assessment.complexity.as_label(),
+            reason: RouteReason::TaskSize(assessment.complexity.as_label()),
         })
     }
 
@@ -81,7 +84,7 @@ impl RouteFact {
             who: if row.jev.is_some() { RouteJudge::Jev } else { RouteJudge::Step },
             model: row.step_model.clone(),
             effort: row.effort_after,
-            reason: row.reason,
+            reason: RouteReason::StepWord(row.reason),
         })
     }
 }
@@ -100,6 +103,7 @@ pub(crate) fn channel() -> RouteFactSender {
 #[cfg(test)]
 mod tests {
     use super::{RouteFact, RouteJudge};
+    use crate::tui::strings::{route_fact, RouteReason};
 
     fn assessment(provenance: runtime::RouteAssessmentProvenance, judged: bool) -> tools::TurnProbeAssessment {
         tools::TurnProbeAssessment {
@@ -117,11 +121,35 @@ mod tests {
         assert_eq!(RouteFact::turn_start(assessment(P::TrustedProbe, true), None), None);
         assert_eq!(
             RouteFact::turn_start(assessment(P::TrustedProbe, true), Some(api::EffortLevel::Xhigh)),
-            Some(RouteFact { who: RouteJudge::Jev, model: None, effort: "xhigh", reason: "large" })
+            Some(RouteFact {
+                who: RouteJudge::Jev,
+                model: None,
+                effort: "xhigh",
+                reason: RouteReason::TaskSize("large"),
+            })
         );
+        let probe = RouteFact::turn_start(assessment(P::TrustedProbe, false), Some(api::EffortLevel::High))
+            .expect("trusted probe with effort");
+        assert_eq!(probe.who, RouteJudge::Probe);
+        assert_eq!(probe.reason, RouteReason::TaskSize("large"));
+
+        let medium_both = RouteFact::turn_start(
+            tools::TurnProbeAssessment {
+                complexity: runtime::RouteTaskComplexity::Medium,
+                ..assessment(P::TrustedProbe, false)
+            },
+            Some(api::EffortLevel::Medium),
+        )
+        .expect("medium task and medium effort");
+        assert_eq!(medium_both.reason, RouteReason::TaskSize("medium"));
         assert_eq!(
-            RouteFact::turn_start(assessment(P::TrustedProbe, false), Some(api::EffortLevel::High)).map(|fact| fact.who),
-            Some(RouteJudge::Probe)
+            route_fact(
+                medium_both.who.word(),
+                medium_both.model.as_deref(),
+                medium_both.effort,
+                medium_both.reason,
+            ),
+            "probe · effort medium · medium task"
         );
     }
 
@@ -163,7 +191,7 @@ mod tests {
                 who: RouteJudge::Step,
                 model: Some("claude-opus-5".to_string()),
                 effort: "max",
-                reason: "stuck_check_red",
+                reason: RouteReason::StepWord("stuck_check_red"),
             }
         );
         assert_eq!(RouteFact::step(&row(true, 2, true)).map(|fact| fact.who), Some(RouteJudge::Jev));

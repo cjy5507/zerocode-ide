@@ -97,15 +97,33 @@ pub const THOUGHT: &str = "Thought";
 pub const THOUGHT_FOR: &str = "Thought for";
 pub const THINKING_HIDDEN: &str = "thinking hidden · /thinking shows it";
 
+/// What kind of word `route_fact`'s `reason` carries, so a turn-start task
+/// size is told apart from an effort level while a step-governor reason token
+/// stays verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteReason<'a> {
+    /// The task size judged at turn start (`small`, `medium`, `large`, …):
+    /// formatted as `<size> task`.
+    TaskSize(&'a str),
+    /// A single step-governor reason token (`stuck_check_red`, …): formatted as
+    /// itself.
+    StepWord(&'a str),
+}
+
 /// The status row's word for a route Jev (or the step table) chose this
-/// turn: `jev · opus max · stuck_check_red` (t-5872). `who` is the seat that
-/// decided, `model` the wire model when it differs from the session's,
-/// `effort` the level the next request carries, `reason` one ledger token.
+/// turn: `jev · opus · effort max · stuck_check_red` (t-5872). `who` is the
+/// seat that decided, `model` the wire model when it differs from the
+/// session's, `effort` the level the next request carries, and `reason` either
+/// the judged task size at turn start or one step-governor token.
 #[must_use]
-pub fn route_fact(who: &str, model: Option<&str>, effort: &str, reason: &str) -> String {
+pub fn route_fact(who: &str, model: Option<&str>, effort: &str, reason: RouteReason<'_>) -> String {
+    let reason_word = match reason {
+        RouteReason::TaskSize(size) => format!("{size} task"),
+        RouteReason::StepWord(word) => word.to_string(),
+    };
     match model {
-        Some(model) => format!("{who} · {model} {effort} · {reason}"),
-        None => format!("{who} · {effort} · {reason}"),
+        Some(model) => format!("{who} · {model} · effort {effort} · {reason_word}"),
+        None => format!("{who} · effort {effort} · {reason_word}"),
     }
 }
 /// The words for a row its provider's list stopped naming — a discovered
@@ -610,5 +628,34 @@ mod opening_tests {
         assert_eq!(size_shown(1024), "1.0 KB");
         assert_eq!(size_shown(3174), "3.1 KB");
         assert_eq!(size_shown(1_572_864), "1.5 MB");
+    }
+}
+
+#[cfg(test)]
+mod route_fact_tests {
+    use super::{route_fact, RouteReason};
+
+    #[test]
+    fn route_fact_labels_effort_and_distinguishes_task_size_from_step_reason() {
+        assert_eq!(
+            route_fact("probe", None, "max", RouteReason::TaskSize("medium")),
+            "probe · effort max · medium task"
+        );
+        assert_eq!(
+            route_fact("jev", None, "xhigh", RouteReason::TaskSize("large")),
+            "jev · effort xhigh · large task"
+        );
+        assert_eq!(
+            route_fact("step", None, "high", RouteReason::StepWord("stuck_check_red")),
+            "step · effort high · stuck_check_red"
+        );
+        assert_eq!(
+            route_fact("jev", Some("opus"), "max", RouteReason::StepWord("stuck_check_red")),
+            "jev · opus · effort max · stuck_check_red"
+        );
+        assert_eq!(
+            route_fact("probe", None, "medium", RouteReason::TaskSize("medium")),
+            "probe · effort medium · medium task"
+        );
     }
 }
