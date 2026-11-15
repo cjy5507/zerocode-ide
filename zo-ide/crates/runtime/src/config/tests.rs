@@ -3003,26 +3003,101 @@ fn always_allow_is_kept_in_the_home_folder() {
     }
 }
 
-/// A file the folder came with does not take the person's "always allow"
-/// grants: they last for the session rather than land in it, where they would
-/// make what it says the person's.
+/// A local file that grants something zo did not write — the folder came with
+/// it — does not take the person's "always allow" grants: they last for the
+/// session rather than land in it, where they would make what it grants the
+/// person's, and the session start says so (153).
 #[test]
 fn always_allow_is_not_written_into_a_file_the_folder_came_with() {
+    let _overrides_stable = overrides_stable();
     let dir = temp_dir();
     fs::create_dir_all(dir.join(".zo")).expect("temp .zo");
     let home = dir.join("home");
     fs::create_dir_all(&home).expect("home");
     let path = dir.join(".zo").join("settings.local.json");
-    fs::write(&path, r#"{"model":"opus"}"#).expect("write local settings");
+    let came_with = r#"{"model":"opus","hooks":{"SessionStart":["echo came-with-the-folder"]}}"#;
+    fs::write(&path, came_with).expect("write local settings");
 
     persist_allow_always_rules(&home, &dir, &["bash(cargo fmt*)".to_string()])
         .expect("an untrusted target is silent, not an error");
 
     assert_eq!(
         fs::read_to_string(&path).expect("local settings"),
-        r#"{"model":"opus"}"#,
+        came_with,
         "a grant must not be written into a file the folder came with"
     );
+    #[cfg(unix)]
+    assert!(ConfigLoader::new(&dir, &home)
+        .load()
+        .expect("config should load")
+        .feature_config()
+        .always_allow_for_the_session_only());
+}
+
+/// A local file that grants nothing a repository's reading would not — an
+/// older zo's, holding the model and the effort — takes the person's "always
+/// allow": zo merges into the bytes it read and records the result, so the
+/// next session has the grant, and nothing was said at the start (153).
+#[test]
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn always_allow_joins_a_local_file_that_grants_nothing() {
+    let _overrides_stable = overrides_stable();
+    let dir = temp_dir();
+    let home = dir.join("home");
+    fs::create_dir_all(dir.join(".zo")).expect("temp .zo");
+    fs::create_dir_all(&home).expect("home");
+    let path = dir.join(".zo").join("settings.local.json");
+    fs::write(&path, r#"{"model":"opus","reasoningEffort":"high"}"#).expect("an older zo's file");
+    let before = ConfigLoader::new(&dir, &home).load().expect("config should load");
+    assert!(!before.feature_config().always_allow_for_the_session_only());
+    assert!(before.feature_config().unowned_local_settings().is_empty());
+
+    persist_allow_always_rules(&home, &dir, &["Bash(cargo fmt*)".to_string()]).expect("persist");
+
+    let loaded = ConfigLoader::new(&dir, &home).load().expect("config should load");
+    assert!(
+        loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()),
+        "{:?}",
+        loaded.permission_rules().allow()
+    );
+    let written = fs::read_to_string(&path).expect("local settings");
+    for kept in ["\"model\"", "\"opus\"", "\"reasoningEffort\"", "\"high\""] {
+        assert!(written.contains(kept), "{kept} was lost: {written}");
+    }
+}
+
+/// What a file is taken for without a record reads the same with one: the
+/// plain settings, and the restrictions and the mode a repository may set,
+/// merge alike from a file read as the repository's and from one read as the
+/// person's — so taking such a file as the person's grants nothing (153).
+#[test]
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn a_file_of_plain_settings_reads_the_same_recorded_or_not() {
+    let _overrides_stable = overrides_stable();
+    let plain = r#"{"model":"opus","reasoningEffort":"high","alwaysThinkingEnabled":true,"outputStyle":"Explanatory","language":"ko","autoMemoryEnabled":false,"autoDreamEnabled":false,"recallHintEnabled":false,"permissions":{"deny":["Bash(rm -rf*)"],"ask":["Bash(git push*)"],"defaultMode":"acceptEdits"}}"#;
+    assert!(super::local_record::carries_no_authority(
+        "settings.local.json",
+        plain.as_bytes()
+    ));
+    let merged = |recorded: bool| {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".zo");
+        fs::create_dir_all(cwd.join(".zo")).expect("project .zo");
+        fs::create_dir_all(&home).expect("home config dir");
+        let path = cwd.join(".zo").join("settings.local.json");
+        fs::write(&path, plain).expect("local settings");
+        if recorded {
+            let real = path.canonicalize().expect("canonical path");
+            super::local_record::remember(&home, &real, plain.as_bytes()).expect("record");
+        }
+        ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load")
+            .merged()
+            .clone()
+    };
+    assert_eq!(merged(false), merged(true));
 }
 
 /// Only what a repository strip took out is named: a local file holding no
@@ -3545,6 +3620,211 @@ fn a_dot_zo_that_links_to_another_folder_is_never_written_through() {
     persist_allow_always_rules(&home, &own, &["bash(cargo fmt*)".to_string()])
         .expect("the folder's own .zo");
     assert!(own.join(".zo").join("settings.local.json").is_file());
+}
+
+/// In the person's home folder the config home's own local files are written
+/// only as any folder's are — where nothing stands, or bytes zo wrote, or
+/// plain settings: a trust list unpacked into `~/.zo` takes neither a
+/// `--trust` nor an `--untrust` (even an empty one — a name is always a
+/// widening), nothing is recorded and no planted server is trusted; a planted
+/// settings file that grants something takes no "always allow", one of plain
+/// settings does. The two rules hold together (153).
+#[test]
+#[cfg(unix)]
+fn the_home_folders_local_files_are_written_only_as_any_folders_are() {
+    let _overrides_stable = overrides_stable();
+    let root = temp_dir();
+    let cwd = root.join("person");
+    let home = cwd.join(".zo");
+    fs::create_dir_all(&home).expect("home config dir");
+    let trusted = home.join(super::TRUSTED_MCP_SERVERS_FILE);
+    for planted in [r#"["planted"]"#, "[]"] {
+        fs::write(&trusted, planted).expect("a trust list unpacked into ~/.zo");
+        assert!(super::trust_mcp_server(&home, &trusted, "mine").is_err(), "{planted}: --trust");
+        assert_eq!(fs::read_to_string(&trusted).expect("trust list"), planted);
+    }
+    fs::write(&trusted, r#"["planted"]"#).expect("a trust list unpacked into ~/.zo");
+    assert!(super::untrust_mcp_server(&home, &trusted, "planted").is_err(), "--untrust");
+    assert!(
+        !home.join(super::local_record::RECORD_FILE).exists(),
+        "nothing is recorded"
+    );
+    fs::write(
+        home.join("mcp.json"),
+        r#"{"mcpServers":{"planted":{"command":"planted"}}}"#,
+    )
+    .expect("a planted server");
+    let loaded = ConfigLoader::new(&cwd, &home).load().expect("config should load");
+    assert!(!loaded.mcp().servers().contains_key("planted"), "a planted name is not trusted");
+
+    let local = home.join("settings.local.json");
+    let granting = r#"{"hooks":{"SessionStart":["echo planted"]}}"#;
+    fs::write(&local, granting).expect("planted settings");
+    persist_allow_always_rules(&home, &cwd, &["Bash(cargo fmt*)".to_string()]).expect("silent");
+    assert_eq!(fs::read_to_string(&local).expect("local settings"), granting);
+    fs::write(&local, r#"{"model":"opus"}"#).expect("plain settings");
+    persist_allow_always_rules(&home, &cwd, &["Bash(cargo fmt*)".to_string()]).expect("persist");
+    let loaded = ConfigLoader::new(&cwd, &home).load().expect("config should load");
+    assert!(loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()));
+}
+
+fn read_object(path: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
+    match serde_json::from_str(&fs::read_to_string(path).expect("read")).expect("json") {
+        serde_json::Value::Object(document) => document,
+        other => panic!("not a JSON object: {other}"),
+    }
+}
+
+fn set_default_mode(document: &mut serde_json::Map<String, serde_json::Value>, mode: &str) {
+    let permissions = document
+        .entry("permissions")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    permissions
+        .as_object_mut()
+        .expect("permissions object")
+        .insert("defaultMode".to_string(), serde_json::Value::String(mode.to_string()));
+}
+
+/// A plain change by one of the model's tools (Config's `model`) and plan
+/// mode's narrowing keep the person's file theirs, and so does a mode a
+/// repository may pin (`acceptEdits`) put back on leaving plan mode: the
+/// grant zo recorded still applies after them (153).
+#[test]
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn a_tools_plain_or_narrowing_change_keeps_the_persons_file_theirs() {
+    let _overrides_stable = overrides_stable();
+    let dir = temp_dir();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("home");
+    persist_allow_always_rules(&home, &dir, &["Bash(cargo fmt*)".to_string()]).expect("persist");
+    let path = dir.join(".zo").join("settings.local.json");
+    let changed = |change: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+        let before = read_object(&path);
+        let mut after = before.clone();
+        change(&mut after);
+        super::write_local_settings_for_a_tool(&home, &dir, &before, &after).expect("written")
+    };
+    assert_eq!(
+        changed(&|document| {
+            document.insert("model".to_string(), serde_json::Value::String("opus".to_string()));
+        }),
+        super::LocalSettingsWrite::KeptAsThePersons
+    );
+    for mode in ["acceptEdits", "plan", "acceptEdits"] {
+        assert_eq!(
+            changed(&|document| set_default_mode(document, mode)),
+            super::LocalSettingsWrite::KeptAsThePersons,
+            "{mode}"
+        );
+    }
+    let loaded = ConfigLoader::new(&dir, &home).load().expect("config should load");
+    assert!(loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()));
+}
+
+/// A change by one of the model's tools that widens what the person's file
+/// grants — a `defaultMode` of `dontAsk`, as Config may set it or as leaving
+/// plan mode may put it back from `.zo/tool-state` — is written but not
+/// recorded: the next session reads the file as the repository's, with the
+/// person's grant, and says "always allow" lasts the session (153).
+#[test]
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn a_tools_widening_change_is_written_but_left_for_the_person_to_record() {
+    let _overrides_stable = overrides_stable();
+    let dir = temp_dir();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("home");
+    persist_allow_always_rules(&home, &dir, &["Bash(cargo fmt*)".to_string()]).expect("persist");
+    let path = dir.join(".zo").join("settings.local.json");
+    let before = read_object(&path);
+    let mut after = before.clone();
+    set_default_mode(&mut after, "dontAsk");
+
+    assert_eq!(
+        super::write_local_settings_for_a_tool(&home, &dir, &before, &after).expect("written"),
+        super::LocalSettingsWrite::LeftUnrecorded
+    );
+    assert!(fs::read_to_string(&path).expect("local settings").contains("dontAsk"));
+    let loaded = ConfigLoader::new(&dir, &home).load().expect("config should load");
+    assert!(!loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()));
+    assert!(loaded.feature_config().always_allow_for_the_session_only());
+}
+
+/// A tool's change to a file that grants something zo did not write is
+/// written as asked and stays the repository's; one through a `.zo` that links
+/// to another folder is refused, and one to a file that changed since the
+/// tool read it is not written (153).
+#[test]
+#[cfg(unix)]
+fn a_tool_writes_no_file_into_the_persons_record_it_was_not_theirs() {
+    let _overrides_stable = overrides_stable();
+    let dir = temp_dir();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("home");
+    let project = dir.join("project");
+    fs::create_dir_all(project.join(".zo")).expect("project .zo");
+    let path = project.join(".zo").join("settings.local.json");
+    fs::write(&path, r#"{"hooks":{"SessionStart":["echo came-with-the-folder"]}}"#).expect("came with");
+    let before = read_object(&path);
+    let mut after = before.clone();
+    after.insert("model".to_string(), serde_json::Value::String("opus".to_string()));
+    assert_eq!(
+        super::write_local_settings_for_a_tool(&home, &project, &before, &after).expect("written"),
+        super::LocalSettingsWrite::LeftUnrecorded
+    );
+    assert!(fs::read_to_string(&path).expect("local settings").contains("opus"));
+    assert!(!home.join(super::local_record::RECORD_FILE).exists(), "nothing is recorded");
+
+    let stale = before;
+    assert!(
+        super::write_local_settings_for_a_tool(&home, &project, &stale, &after).is_err(),
+        "the file changed since the tool read it"
+    );
+
+    let neighbour = dir.join("neighbour").join(".zo");
+    fs::create_dir_all(&neighbour).expect("the neighbouring project's .zo");
+    let linked = dir.join("linked");
+    fs::create_dir_all(&linked).expect("linked");
+    std::os::unix::fs::symlink(&neighbour, linked.join(".zo")).expect("link");
+    assert!(
+        super::write_local_settings_for_a_tool(&home, &linked, &serde_json::Map::new(), &after)
+            .is_err()
+    );
+    assert!(!neighbour.join("settings.local.json").exists(), "nothing is made through the link");
+}
+
+/// Whether "always allow" lasts the session only follows what zo would do:
+/// yes for a local file that grants something zo did not write; no for one it
+/// wrote, one of plain settings, or none at all (153).
+#[test]
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn always_allow_lasts_the_session_only_where_zo_would_not_write() {
+    let _overrides_stable = overrides_stable();
+    let session_only = |local: Option<&str>, recorded: bool| {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".zo");
+        fs::create_dir_all(cwd.join(".zo")).expect("project .zo");
+        fs::create_dir_all(&home).expect("home config dir");
+        if let Some(local) = local {
+            let path = cwd.join(".zo").join("settings.local.json");
+            fs::write(&path, local).expect("local settings");
+            if recorded {
+                let real = path.canonicalize().expect("canonical path");
+                super::local_record::remember(&home, &real, local.as_bytes()).expect("record");
+            }
+        }
+        ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load")
+            .feature_config()
+            .always_allow_for_the_session_only()
+    };
+    let granting = r#"{"permissions":{"allow":["Bash(*)"]}}"#;
+    assert!(session_only(Some(granting), false));
+    assert!(session_only(Some(r#"{"smart":{"autoClassifier":"off"}}"#), false));
+    assert!(!session_only(Some(granting), true));
+    assert!(!session_only(Some(r#"{"model":"opus"}"#), false));
+    assert!(!session_only(None, false));
 }
 
 /// No grants, no write.

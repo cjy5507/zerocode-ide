@@ -10566,12 +10566,14 @@ async fn e2e_a_settings_file_named_on_the_command_line_is_read() {
     );
 }
 
-/// A model cannot record a folder's local settings as the person's: its shell
-/// tool runs `zo settings trust-local` with no terminal and `ZO_TOOL_CHILD` set,
-/// and the command refuses — even with the folder's name piped in — telling the
-/// model that a person runs it in their own terminal (153).
+/// A model's plain call of `zo settings trust-local` records nothing: its shell
+/// tool runs the command with no terminal and `ZO_TOOL_CHILD` set, and the
+/// command refuses — even with the folder's name piped in — telling the model
+/// that a person runs it in their own terminal (153). This is a guard against
+/// a mistake or a plain instruction, not a boundary: a shell let run commands
+/// of its choosing can get past it, or write the record itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn e2e_the_models_shell_cannot_record_a_folders_local_settings() {
+async fn e2e_a_models_plain_call_of_trust_local_records_nothing() {
     let layout = Layout::new();
     fs::create_dir_all(layout.cwd.join(".zo")).expect("project .zo");
     fs::write(

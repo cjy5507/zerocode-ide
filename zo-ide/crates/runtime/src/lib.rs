@@ -165,7 +165,7 @@ pub use config::{
     slot_holds_literal_secret, persons_own_literal_secrets, can_tell_persons_own_settings_file,
     McpLiteralSecret, persons_own_settings_secrets, PersonsOwnSettingsSecrets, SkippedSettingsFile,
     forget_local_file, is_recorded_local_file_kind, local_file_recorded, remember_local_file,
-    LOCAL_RECORD_FILE, RECORDED_LOCAL_FILES,
+    write_local_settings_for_a_tool, LocalSettingsWrite, LOCAL_RECORD_FILE, RECORDED_LOCAL_FILES,
 };
 pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{

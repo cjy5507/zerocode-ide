@@ -927,3 +927,66 @@ fn schedule_wakeup_rejects_empty_prompt() {
     .expect_err("ScheduleWakeup should reject empty prompt");
     assert!(error.to_string().contains("must not be empty"));
 }
+
+/// Config and plan mode write the folder's local settings through zo's record
+/// (153): a plain setting and plan mode's narrowing keep a file zo recorded as
+/// the person's theirs, and a `defaultMode` of `dontAsk` is written but left
+/// for the person to record.
+#[test]
+#[cfg(unix)]
+fn config_and_plan_mode_keep_the_persons_local_file_theirs_unless_they_widen_it() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = std::env::temp_dir().join(format!(
+        "zo-config-record-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    let home = root.join("home");
+    let cwd = root.join("cwd");
+    let config_home = home.join(".zo");
+    std::fs::create_dir_all(&config_home).expect("home dir");
+    std::fs::create_dir_all(&cwd).expect("cwd dir");
+
+    let original_home = std::env::var("HOME").ok();
+    let original_config_home = std::env::var("ZO_CONFIG_HOME").ok();
+    let original_dir = std::env::current_dir().expect("cwd");
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("ZO_CONFIG_HOME");
+    std::env::set_current_dir(&cwd).expect("set cwd");
+
+    runtime::persist_allow_always_rules(&config_home, &cwd, &["Bash(cargo fmt*)".to_string()])
+        .expect("persist a grant");
+    let local = cwd.join(".zo").join("settings.local.json");
+    let theirs = || {
+        let real = local.canonicalize().expect("canonical path");
+        runtime::local_file_recorded(&config_home, &real, &std::fs::read(&local).expect("read"))
+    };
+    assert!(theirs(), "zo recorded the grant");
+    run_tool("Config", &json!({"setting": "model", "value": "opus"})).expect("set the model");
+    assert!(theirs(), "a plain setting keeps the file the person's");
+    run_tool("EnterPlanMode", &json!({})).expect("enter plan mode");
+    assert!(theirs(), "plan mode narrows");
+    run_tool("ExitPlanMode", &json!({})).expect("exit plan mode");
+    assert!(theirs(), "leaving plan mode puts back nothing wider");
+    run_tool(
+        "Config",
+        &json!({"setting": "permissions.defaultMode", "value": "dontAsk"}),
+    )
+    .expect("set the mode");
+    assert!(!theirs(), "dontAsk is the person's to record");
+
+    std::env::set_current_dir(&original_dir).expect("restore cwd");
+    match original_home {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    match original_config_home {
+        Some(value) => std::env::set_var("ZO_CONFIG_HOME", value),
+        None => std::env::remove_var("ZO_CONFIG_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -158,11 +158,9 @@ fn write_trusted_names(home: &Path, path: &Path, names: &[String]) -> Result<(),
         )));
     }
     refuse_a_file_zo_did_not_write(home, path)?;
-    create_parent_directory(path)?;
     // Owner-only like every document this module writes: a name another local
     // account could append is a server this one would run.
-    write_private_file(path, rendered.as_bytes(), &ParentDirPolicy::LeaveParent)
-        .map_err(ConfigError::Io)?;
+    write_document(path, &rendered)?;
     super::local_record::wrote(home, path, rendered.as_bytes());
     Ok(())
 }
@@ -177,13 +175,27 @@ fn refuse_a_file_zo_did_not_write(home: &Path, path: &Path) -> Result<(), Config
     Err(ConfigError::Io(std::io::Error::new(
         std::io::ErrorKind::PermissionDenied,
         format!(
-            "{} was not written by zo as it stands (it came with this folder, or it changed \
-             since zo wrote it), or the folder's .zo is a link to another folder, so zo does \
-             not write into it. If the file is yours, run `zo settings trust-local` in your \
-             own terminal, then try again.",
+            "{} was not written by zo as it stands (it came with this folder, an older zo \
+             wrote it before zo kept a record, or it changed since zo wrote it), or the \
+             folder's .zo is a link to another folder, so zo does not write into it. If the \
+             file is yours, run `zo settings trust-local` in your own terminal, then try again.",
             path.display()
         ),
     )))
+}
+
+/// Write `rendered` to `path`, owner-only: a folder's local file through its
+/// own `.zo`, following no link ([`super::local_record::write_local_file`]);
+/// any other document (the user settings, a project's `settings.json`) as
+/// before.
+fn write_document(path: &Path, rendered: &str) -> Result<(), ConfigError> {
+    if super::local_record::is_recorded_kind(path) {
+        return super::local_record::write_local_file(path, rendered.as_bytes())
+            .map_err(ConfigError::Io);
+    }
+    create_parent_directory(path)?;
+    write_private_file(path, rendered.as_bytes(), &ParentDirPolicy::LeaveParent)
+        .map_err(ConfigError::Io)
 }
 
 /// Read the document through the loader's own parser. A file that is not there
@@ -269,11 +281,9 @@ fn commit(
         }
     }
     refuse_a_file_zo_did_not_write(home, path)?;
-    create_parent_directory(path)?;
     // The file is owner-only: an `env` block under `mcpServers` carries the
     // server's tokens.
-    write_private_file(path, rendered.as_bytes(), &ParentDirPolicy::LeaveParent)
-        .map_err(ConfigError::Io)?;
+    write_document(path, &rendered)?;
     super::local_record::wrote(home, path, rendered.as_bytes());
     Ok(())
 }

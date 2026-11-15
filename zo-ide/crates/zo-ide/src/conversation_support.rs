@@ -132,7 +132,10 @@ static WARNED_LOCAL_SETTINGS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new
 /// said something that went unused because zo did not write that file as it
 /// stands (153), once in this process.
 pub(crate) fn queue_unowned_local_settings_warning(feature_config: &runtime::RuntimeFeatureConfig) {
-    let Some(line) = unowned_local_settings_warning(feature_config.unowned_local_settings()) else {
+    let Some(line) = unowned_local_settings_warning(
+        feature_config.unowned_local_settings(),
+        feature_config.always_allow_for_the_session_only(),
+    ) else {
         return;
     };
     let fresh = WARNED_LOCAL_SETTINGS
@@ -144,18 +147,38 @@ pub(crate) fn queue_unowned_local_settings_warning(feature_config: &runtime::Run
     }
 }
 
+/// Why zo did not take a folder's local file as the person's, as the start-up
+/// line says it: a file the folder came with, one an older zo wrote before it
+/// kept a record, or one changed since — by hand, or by a change of zo's own
+/// tools that widens what it grants, which only the person records (153).
+const NOT_WRITTEN_BY_ZO: &str = "(it came with this folder, an older zo wrote it before zo kept a record, or it changed since, by hand or by a change that widens what it grants)";
+
+/// What a person who wrote that file does about it.
+const RECORD_IT_YOURSELF: &str =
+    "If it is yours, read it over, then run `zo settings trust-local` in your own terminal.";
+
 /// The line that says which settings of a folder's local file went unused,
-/// why, and what a person who wrote that file can do — or none when nothing
-/// went unused. The names are the loader's own; nothing of the file's text is
-/// put on the screen.
-fn unowned_local_settings_warning(unused: &[&str]) -> Option<String> {
-    if unused.is_empty() {
-        return None;
+/// why, and what a person who wrote that file can do, and whether an "always
+/// allow" granted there lasts for the session only — or none when neither
+/// holds. The names are the loader's own; nothing of the file's text is put
+/// on the screen.
+fn unowned_local_settings_warning(unused: &[&str], session_only: bool) -> Option<String> {
+    let until_then = if session_only {
+        " Until then, \"always allow\" here lasts for this session only."
+    } else {
+        ""
+    };
+    if !unused.is_empty() {
+        return Some(format!(
+            "zo did not use {} from .zo/settings.local.json: zo did not write that file as it stands {NOT_WRITTEN_BY_ZO}. {RECORD_IT_YOURSELF}{until_then}",
+            unused.join(", ")
+        ));
     }
-    Some(format!(
-        "zo did not use {} from .zo/settings.local.json: zo did not write that file as it stands (it came with this folder, or it changed since zo wrote it). If it is yours, read it over, then run `zo settings trust-local` in your own terminal.",
-        unused.join(", ")
-    ))
+    session_only.then(|| {
+        format!(
+            "\"Always allow\" here lasts for this session only: zo did not write .zo/settings.local.json as it stands {NOT_WRITTEN_BY_ZO}, and it grants something. {RECORD_IT_YOURSELF}"
+        )
+    })
 }
 
 /// One line for each configured permission rule whose tool name no tool zo
@@ -905,28 +928,45 @@ mod unowned_local_settings_warning_tests {
 
     use super::unowned_local_settings_warning;
 
-    /// Nothing went unused, nothing is said.
+    /// Nothing went unused and an "always allow" is kept: nothing is said.
     #[test]
     fn a_folder_whose_local_file_lost_nothing_is_not_warned_of() {
-        assert_eq!(unowned_local_settings_warning(&[]), None);
+        assert_eq!(unowned_local_settings_warning(&[], false), None);
     }
 
     /// The line names what went unused by the loader's words, says why, and
     /// sends a person who wrote the file to their own terminal (153).
     #[test]
     fn the_line_names_what_went_unused_why_and_what_a_person_can_do() {
-        let line = unowned_local_settings_warning(&["hooks", "permissions.allow"]).expect("a line");
+        let line =
+            unowned_local_settings_warning(&["hooks", "permissions.allow"], true).expect("a line");
         assert!(
             line.starts_with("zo did not use hooks, permissions.allow from .zo/settings.local.json:"),
             "{line}"
         );
         for said in [
             "zo did not write that file as it stands",
+            "an older zo wrote it before zo kept a record",
             "run `zo settings trust-local` in your own terminal",
+            "\"always allow\" here lasts for this session only",
         ] {
             assert!(line.contains(said), "{said:?} is missing from: {line}");
         }
         assert!(!line.contains("git"), "git is no longer the reason: {line}");
+    }
+
+    /// A file that lost nothing to the repository's rules but grants
+    /// something zo keeps out of (an `enabledPlugins`, a `smart` the person's
+    /// own settings match) still keeps "always allow" to the session, and the
+    /// person is told so once, with what to do (153).
+    #[test]
+    fn an_always_allow_kept_to_the_session_is_said_once_with_what_to_do() {
+        let line = unowned_local_settings_warning(&[], true).expect("a line");
+        assert!(
+            line.starts_with("\"Always allow\" here lasts for this session only:"),
+            "{line}"
+        );
+        assert!(line.contains("run `zo settings trust-local` in your own terminal"), "{line}");
     }
 
     /// From the loader to the line: a folder whose local file zo did not write
@@ -946,10 +986,44 @@ mod unowned_local_settings_warning_tests {
         .expect("local settings");
 
         let config = runtime::ConfigLoader::new(&cwd, &home).load().expect("settings load");
-        let line = unowned_local_settings_warning(config.feature_config().unowned_local_settings())
-            .expect("a line");
+        let features = config.feature_config();
+        let line = unowned_local_settings_warning(
+            features.unowned_local_settings(),
+            features.always_allow_for_the_session_only(),
+        )
+        .expect("a line");
 
         assert!(line.starts_with("zo did not use hooks from"), "{line}");
+        assert!(line.contains("lasts for this session only"), "{line}");
         assert!(!line.contains("came-with-the-folder"), "text of the file reached the screen: {line}");
+    }
+
+    /// From the loader to the line: a local file holding plain settings only
+    /// (an older zo's, say) is one zo writes into, so nothing is said; one
+    /// holding a `smart` setting that only narrows lost nothing but is kept
+    /// out of, so the session-only line is said (153).
+    #[test]
+    #[cfg_attr(windows, ignore = "a folder's local file is never the person's on Windows, so the loader names nothing there")]
+    fn a_plain_local_file_is_not_warned_of_and_a_granting_one_keeps_always_allow_to_the_session() {
+        let said = |local: &str| {
+            let root = tempfile::tempdir().expect("a scratch folder");
+            let home = root.path().join("home");
+            let cwd = root.path().join("work");
+            fs::create_dir_all(&home).expect("home");
+            fs::create_dir_all(cwd.join(".zo")).expect(".zo");
+            fs::write(cwd.join(".zo").join("settings.local.json"), local).expect("local settings");
+            let config = runtime::ConfigLoader::new(&cwd, &home).load().expect("settings load");
+            let features = config.feature_config();
+            unowned_local_settings_warning(
+                features.unowned_local_settings(),
+                features.always_allow_for_the_session_only(),
+            )
+        };
+        assert_eq!(said(r#"{"model":"opus","reasoningEffort":"high"}"#), None);
+        let line = said(r#"{"smart":{"autoClassifier":"off"}}"#).expect("a line");
+        assert!(
+            line.starts_with("\"Always allow\" here lasts for this session only:"),
+            "{line}"
+        );
     }
 }

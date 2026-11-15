@@ -121,9 +121,15 @@ pub fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
         let previous_value = get_nested_value(&effective_document, spec.path).cloned();
         // Global updates intentionally begin with just the primary document.
         // Lower-priority roots remain inherited instead of being copied into it.
-        let mut document = read_json_object(&path)?;
+        let before = read_json_object(&path)?;
+        let mut document = before.clone();
         set_nested_value(&mut document, spec.path, normalized.clone());
-        write_json_object(&path, &document)?;
+        match spec.scope {
+            ConfigScope::Global => write_json_object(&path, &document)?,
+            ConfigScope::Settings => {
+                write_local_settings(&before, &document)?;
+            }
+        }
         Ok(ConfigOutput {
             success: true,
             operation: Some(String::from("set")),
@@ -151,7 +157,8 @@ const PERMISSION_DEFAULT_MODE_PATH: &[&str] = &["permissions", "defaultMode"];
 pub fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOutput, String> {
     let settings_path = config_file_for_scope(ConfigScope::Settings)?;
     let state_path = plan_mode_state_file()?;
-    let mut document = read_json_object(&settings_path)?;
+    let before = read_json_object(&settings_path)?;
+    let mut document = before.clone();
     let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
     let current_is_plan =
         matches!(current_local_mode.as_ref(), Some(Value::String(value)) if value == "plan");
@@ -201,7 +208,11 @@ pub fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOut
         PERMISSION_DEFAULT_MODE_PATH,
         Value::String(String::from("plan")),
     );
-    write_json_object(&settings_path, &document)?;
+    if let Err(error) = write_local_settings(&before, &document) {
+        // No override was made, so none is left to undo.
+        let _ = clear_plan_mode_state(&state_path);
+        return Err(error);
+    }
 
     Ok(PlanModeOutput {
         success: true,
@@ -220,7 +231,8 @@ pub fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOut
 pub fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutput, String> {
     let settings_path = config_file_for_scope(ConfigScope::Settings)?;
     let state_path = plan_mode_state_file()?;
-    let mut document = read_json_object(&settings_path)?;
+    let before = read_json_object(&settings_path)?;
+    let mut document = before.clone();
     let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
     let current_is_plan =
         matches!(current_local_mode.as_ref(), Some(Value::String(value)) if value == "plan");
@@ -271,7 +283,10 @@ pub fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutpu
     } else {
         remove_nested_value(&mut document, PERMISSION_DEFAULT_MODE_PATH);
     }
-    write_json_object(&settings_path, &document)?;
+    // The mode put back comes from `.zo/tool-state`, which the model's file
+    // tools can write: one that widens what the file grants is written but not
+    // recorded as the person's (`write_local_settings`).
+    write_local_settings(&before, &document)?;
     clear_plan_mode_state(&state_path)?;
 
     Ok(PlanModeOutput {
@@ -471,6 +486,19 @@ pub(crate) fn config_file_for_scope(scope: ConfigScope) -> Result<PathBuf, Strin
         ConfigScope::Global => config_home_dir().join("settings.json"),
         ConfigScope::Settings => cwd.join(".zo").join("settings.local.json"),
     })
+}
+
+/// Write the folder's `.zo/settings.local.json` as a model tool changed it
+/// (`before` → `after`). The file stays the person's only where it was theirs
+/// and the change grants nothing new; a wider `permissions.defaultMode` is
+/// written but left for the person to record (153). Never through a link.
+fn write_local_settings(
+    before: &serde_json::Map<String, Value>,
+    after: &serde_json::Map<String, Value>,
+) -> Result<runtime::LocalSettingsWrite, String> {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    runtime::write_local_settings_for_a_tool(&config_home_dir(), &cwd, before, after)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn config_home_dir() -> PathBuf {

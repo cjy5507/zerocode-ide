@@ -4,19 +4,25 @@
 //!
 //! zo reads those files as the person's only when their bytes are what zo last
 //! wrote there (`runtime::config::local_record`). A file the folder came with,
-//! or one the person edited by hand, reads as the repository's until the person
-//! records it here. A folder's instructions can ask a model to run this
-//! command, so it records nothing unless a person at a terminal of their own
-//! types the folder's name:
+//! one an older zo wrote before it kept a record, or one the person edited by
+//! hand reads as the repository's until the person records it here.
+//!
+//! A folder's instructions can ask a model to run this command, so it refuses
+//! the plain ways a model's call reaches it:
 //!
 //! 1. standard input and standard error are both terminals — zo's shell tool
 //!    gives its children an empty standard input;
 //! 2. no `ZO_TOOL_CHILD` (every child of zo's shell tool carries it) and no
 //!    `ZO_AGENT_ID` (a helper pane);
-//! 3. no zo process above this one (Unix), so a terminal faked inside a zo
-//!    session (`script`) is refused too;
+//! 3. no zo process above this one, as far as `ps` names it (Unix);
 //! 4. the confirmation is the folder's name typed in full, not `y` — `yes |`
 //!    answers nothing.
+//!
+//! These guard against a mistake and a plain instruction; they are not a
+//! security boundary. A shell that can run commands of its choosing gets past
+//! each of them (`env -u`, a faked terminal, a job that outlives its parent),
+//! and it can write the record itself more simply still. The boundary is what
+//! that shell is let do: zo's permission prompts and the sandbox.
 
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -29,6 +35,11 @@ as they are now, as yours: their hooks, env, \"always allow\" rules and MCP
 servers then apply here without being stripped. Run it yourself in a terminal;
 zo asks you to type the folder's name. --forget takes the folder's files out of
 the record.";
+
+/// What a run says where no record is kept: it is trusted by Unix ownership.
+pub const NO_RECORD_ON_THIS_SYSTEM: &str = "zo keeps no record of local files on this system (it \
+     trusts one by Unix ownership), so a folder's .zo/settings.local.json and \
+     .zo/trusted-mcp-servers.json read as the repository's here.";
 
 /// What a refused run says.
 pub const NOT_THE_PERSONS_TERMINAL: &str = "zo records a folder's local settings as yours only \
@@ -60,6 +71,9 @@ pub fn run(args: &[String], cwd: &Path) -> Result<String, String> {
             "--help" | "-h" | "help" => return Ok(USAGE.to_string()),
             other => return Err(format!("unexpected argument {other}\n\n{USAGE}")),
         }
+    }
+    if !cfg!(unix) {
+        return Err(NO_RECORD_ON_THIS_SYSTEM.to_string());
     }
     refuse_unless_the_persons_terminal(&Surroundings::of_this_process())?;
     let folder = folder

@@ -11,8 +11,6 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use core_types::paths::{write_private_file, ParentDirPolicy};
-
 use crate::json::JsonValue;
 use crate::sandbox::SandboxConfig;
 
@@ -230,10 +228,15 @@ pub struct RuntimeFeatureConfig {
     /// Settings `secondBrain`: the knowledge vault zo consults and adds to.
     second_brain: RuntimeSecondBrainConfig,
     /// What the workspace's `.zo/settings.local.json` said that went unused
-    /// because no git repository governs the folder, so the file is read as
-    /// one the folder came with (152). Names from the loader's own list —
-    /// never text from the file.
+    /// because zo did not write that file as it stands, so it is read as the
+    /// repository's (153). Names from the loader's own list — never text from
+    /// the file.
     unowned_local_settings: Vec<&'static str>,
+    /// Whether an "always allow" granted in this workspace lasts for the
+    /// session only: its `.zo/settings.local.json` is a file zo did not write
+    /// as it stands and that grants something, so zo does not write into it
+    /// (153).
+    always_allow_for_the_session_only: bool,
 }
 
 impl Default for RuntimeFeatureConfig {
@@ -265,6 +268,7 @@ impl Default for RuntimeFeatureConfig {
             tui_inline_mode: None,
             second_brain: RuntimeSecondBrainConfig::default(),
             unowned_local_settings: Vec::new(),
+            always_allow_for_the_session_only: false,
         }
     }
 }
@@ -823,6 +827,16 @@ impl ConfigLoader {
         let local_settings_not_recorded = local_settings_contents.is_none()
             && can_tell_persons_own_settings_file()
             && is_real_file(&local_settings_path);
+        // … and an "always allow" granted here is kept for the session only
+        // when zo would not write into that file either: it grants something.
+        let always_allow_for_the_session_only = local_settings_not_recorded
+            && writable_zo_file(
+                &self.config_home,
+                &self.cwd,
+                &local_settings_path,
+                "settings.local.json",
+            )
+            .is_none();
         let mut unowned_local_settings = Vec::new();
         let trusted_local_settings_snapshot = local_settings_contents
             .as_deref()
@@ -1141,6 +1155,7 @@ impl ConfigLoader {
             tui_inline_mode: parse_tui_inline_mode(&merged_value)?,
             second_brain: parse_second_brain_config(&merged_value)?,
             unowned_local_settings,
+            always_allow_for_the_session_only,
         };
 
         Ok(RuntimeConfig {
@@ -1224,6 +1239,23 @@ const PROJECT_OPT_INS: [&str; 11] = [
     "enableAllProjectLsp",
 ];
 
+/// The sections of a project document the repository strips take out or cut
+/// down (beside `permissions`, `mcpServers` and the opt-ins), by the names
+/// [`settings_left_unused`] tells the person.
+const REPOSITORY_STRIPPED_SECTIONS: [&str; 11] = [
+    "hooks",
+    "env",
+    "statusLine",
+    "lspServers",
+    "providers",
+    "oauth",
+    "sandbox",
+    "ship",
+    "plugins",
+    "smart",
+    "permissionMode",
+];
+
 /// What a project document said that the repository strips took out or cut
 /// down, named by the loader's own words: read off the document as it was
 /// written (`said`) and as it merges (`kept`), so no text of the file is
@@ -1234,19 +1266,6 @@ fn settings_left_unused(
     kept: &BTreeMap<String, JsonValue>,
     mcp_servers_gated: bool,
 ) -> Vec<&'static str> {
-    const SECTIONS: [&str; 11] = [
-        "hooks",
-        "env",
-        "statusLine",
-        "lspServers",
-        "providers",
-        "oauth",
-        "sandbox",
-        "ship",
-        "plugins",
-        "smart",
-        "permissionMode",
-    ];
     const PERMISSIONS: [(&str, &str); 5] = [
         ("allow", "permissions.allow"),
         ("rules", "permissions.rules"),
@@ -1254,7 +1273,7 @@ fn settings_left_unused(
         ("deny", "permissions.deny"),
         ("ask", "permissions.ask"),
     ];
-    let mut unused: Vec<&'static str> = SECTIONS
+    let mut unused: Vec<&'static str> = REPOSITORY_STRIPPED_SECTIONS
         .into_iter()
         .filter(|key| said.get(*key) != kept.get(*key))
         .collect();
@@ -1556,19 +1575,23 @@ fn local_settings_scope(home: &Path, cwd: &Path, path: &Path) -> ConfigSource {
 
 /// Persist live `AllowAlways` grants into the project-local settings.
 ///
-/// zo writes the person's `.zo/settings.local.json`: one it wrote before (its
-/// bytes match the record), or a new one where none stands. A file there that
-/// zo did not write — one the folder came with, or one changed since — is not
-/// written into: merging into it would make what it says the person's. After
-/// the write the bytes are recorded, so the next session reads the file as the
-/// person's, in a folder with or without git (153).
+/// zo writes into the folder's `.zo/settings.local.json` when it may take that
+/// file as the person's ([`writable_zo_file`]): one it wrote before (its bytes
+/// match the record), one that grants nothing a repository's reading of it
+/// would not (an older zo's file holding the model, say), or a new one where
+/// none stands. A file that grants something zo did not write — one the folder
+/// came with, or one changed since — is not written into: merging into it
+/// would make what it grants the person's. The session start says so
+/// ([`RuntimeFeatureConfig::always_allow_for_the_session_only`]). The bytes
+/// decided on are the ones merged, and the bytes written are the ones
+/// recorded, so the next session reads the file as the person's, in a folder
+/// with or without git (153).
 ///
 /// Existing settings are preserved, and the candidate document is parsed again
 /// after rendering so a malformed rule or a lossy JSON round-trip fails closed
-/// before any write. A grant that cannot be persisted is deliberately silent:
-/// the session already honored it, and refusing to write is always the narrow
-/// outcome. Only a malformed document or rule is reported, and even then
-/// nothing is written.
+/// before any write. Only a malformed document or rule is reported, and even
+/// then nothing is written. Where the record cannot be trusted (no Unix
+/// ownership) nothing is written: a grant lasts for the session, as before.
 pub fn persist_allow_always_rules(
     home: &Path,
     cwd: &Path,
@@ -1576,15 +1599,13 @@ pub fn persist_allow_always_rules(
 ) -> Result<(), ConfigError> {
     const FILE_NAME: &str = "settings.local.json";
 
-    if rules.is_empty() {
+    if rules.is_empty() || !cfg!(unix) {
         return Ok(());
     }
 
     let path = cwd.join(".zo").join(FILE_NAME);
-    let original_contents = match persons_zo_file_snapshot(home, cwd, &path, FILE_NAME) {
-        Some(contents) => Some(contents),
-        None if is_absent(&path) => None,
-        None => return Ok(()),
+    let Some(original_contents) = writable_zo_file(home, cwd, &path, FILE_NAME) else {
+        return Ok(());
     };
 
     let Some(rendered) = merge_allow_always_rules(
@@ -1598,29 +1619,115 @@ pub fn persist_allow_always_rules(
 
     // Abort if the file changed while the candidate was being built; never
     // merge over a newer operator edit or a changed trust decision.
-    let current_contents = persons_zo_file_snapshot(home, cwd, &path, FILE_NAME);
-    let unchanged = match (&original_contents, &current_contents) {
-        (Some(original), Some(current)) => original == current,
-        (None, None) => is_absent(&path),
-        _ => false,
-    };
-    if !unchanged {
+    if writable_zo_file(home, cwd, &path, FILE_NAME) != Some(original_contents) {
         return Ok(());
     }
 
-    // Never through a `.zo` that links to another folder: the file would be
-    // made and recorded where this folder's loader never reads it.
-    if !local_record::may_write(home, &path) {
-        return Ok(());
-    }
-    // Only the `.zo` folder itself is made: the folders above it are the
-    // project's, and their permissions are not zo's to change.
-    if let Some(dot_zo) = path.parent() {
-        std::fs::create_dir_all(dot_zo)?;
-    }
-    write_private_file(&path, rendered.as_bytes(), &ParentDirPolicy::LeaveParent)?;
+    local_record::write_local_file(&path, rendered.as_bytes())?;
     local_record::wrote(home, &path, rendered.as_bytes());
     Ok(())
+}
+
+/// `cwd/.zo/<file_name>` as zo may write into it, read once: `Some(None)`
+/// where nothing stands and the folder's own `.zo` would hold it,
+/// `Some(Some(contents))` for a real file at exactly that path whose bytes
+/// are what zo last wrote or grant nothing a repository's reading would not
+/// ([`local_record::carries_no_authority`]), and `None` otherwise — a file
+/// that grants something zo did not write, a link, a linked `.zo`.
+fn writable_zo_file(home: &Path, cwd: &Path, path: &Path, file_name: &str) -> Option<Option<String>> {
+    if is_absent(path) {
+        return local_record::may_write(home, path).then_some(None);
+    }
+    let (real, contents) = zo_file_snapshot(cwd, path, file_name)?;
+    (local_record::recorded(home, &real, contents.as_bytes())
+        || local_record::carries_no_authority(file_name, contents.as_bytes()))
+    .then_some(Some(contents))
+}
+
+/// How a write by one of the model's tools left the folder's local settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalSettingsWrite {
+    /// Recorded: the file was the person's (zo wrote it, nothing stood there,
+    /// or it granted nothing) and the change grants nothing it did not, so it
+    /// stays theirs.
+    KeptAsThePersons,
+    /// Written, not recorded: the file was not the person's, or the change
+    /// grants something only the person may (a `defaultMode` of `dontAsk`).
+    /// The next session reads it as the repository's, and says so; the person
+    /// records it with `zo settings trust-local` if it is theirs.
+    LeftUnrecorded,
+}
+
+/// Write `after` as `cwd/.zo/settings.local.json` for one of the model's
+/// tools (Config, plan mode), which read the file as `before`. Only the
+/// person widens what their local file grants: a change that widens it is
+/// written but not recorded, and so is any change to a file that was not
+/// theirs. A plain setting or a narrowing (plan mode) keeps the person's file
+/// theirs. The file is written as every local file zo writes: through the
+/// folder's own `.zo`, following no link (153).
+///
+/// # Errors
+///
+/// When the file or its `.zo` is a link, when the file changed since the tool
+/// read it, or when it cannot be written.
+pub fn write_local_settings_for_a_tool(
+    home: &Path,
+    cwd: &Path,
+    before: &serde_json::Map<String, serde_json::Value>,
+    after: &serde_json::Map<String, serde_json::Value>,
+) -> Result<LocalSettingsWrite, ConfigError> {
+    const FILE_NAME: &str = "settings.local.json";
+    let path = cwd.join(".zo").join(FILE_NAME);
+    let standing = if is_absent(&path) {
+        None
+    } else {
+        Some(zo_file_snapshot(cwd, &path, FILE_NAME).ok_or_else(|| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is a link or is reached through one, so zo does not write it",
+                    path.display()
+                ),
+            ))
+        })?)
+    };
+    let read_now = match &standing {
+        Some((_, contents)) if !contents.trim().is_empty() => {
+            match serde_json::from_str::<serde_json::Value>(contents) {
+                Ok(serde_json::Value::Object(document)) => document,
+                _ => {
+                    return Err(ConfigError::Parse(format!(
+                        "{}: config file must contain a JSON object",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        _ => serde_json::Map::new(),
+    };
+    if &read_now != before {
+        return Err(ConfigError::Io(std::io::Error::other(format!(
+            "{} changed while it was being edited; try again",
+            path.display()
+        ))));
+    }
+    let theirs = cfg!(unix)
+        && match &standing {
+            None => local_record::may_write(home, &path),
+            Some((real, contents)) => {
+                local_record::recorded(home, real, contents.as_bytes())
+                    || local_record::carries_no_authority(FILE_NAME, contents.as_bytes())
+            }
+        };
+    let rendered = serde_json::to_string_pretty(after)
+        .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?;
+    local_record::write_local_file(&path, rendered.as_bytes())?;
+    if theirs && !local_record::widens(before, after) && local_record::wrote(home, &path, rendered.as_bytes())
+    {
+        Ok(LocalSettingsWrite::KeptAsThePersons)
+    } else {
+        Ok(LocalSettingsWrite::LeftUnrecorded)
+    }
 }
 
 /// Whether nothing at all stands at `path` (not even a dangling link).
@@ -2766,6 +2873,14 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn unowned_local_settings(&self) -> &[&'static str] {
         &self.unowned_local_settings
+    }
+
+    /// Whether an "always allow" granted in this workspace lasts for the
+    /// session only, because its `.zo/settings.local.json` is a file zo did not
+    /// write as it stands and that grants something (153).
+    #[must_use]
+    pub fn always_allow_for_the_session_only(&self) -> bool {
+        self.always_allow_for_the_session_only
     }
 
     #[must_use]
