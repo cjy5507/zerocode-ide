@@ -1118,6 +1118,104 @@ fn required_a_hand_over_stands_through_the_quiet_and_goes_with_its_app() {
     );
 }
 
+/// With sharing required, the app that waits for the person stops waiting
+/// once no request has asked for it through the quiet. When a request for
+/// something else is what finds that, the band is told all the same: its
+/// "waiting" line and the hand-over under it go with the wait (t-109811).
+#[test]
+fn required_a_wait_that_ends_during_another_request_is_told_to_the_band() {
+    let (_person, _asked) = person_requiring(Decision::TimedOut);
+    assert!(admit(ComputerMethod::Click, &click("Notes")).is_err());
+    assert_eq!(state()["waiting"], "notes", "it waits for the person");
+    stand_in::advance(SHARE_ASK_AGAIN_MS);
+    let told = stand_in::notices().len();
+    drop(admit(ComputerMethod::Observe, &json!({})).expect("a look while nothing is handed over"));
+    let now = state();
+    assert!(now["waiting"].is_null(), "{now}");
+    assert!(
+        stand_in::notices().len() > told,
+        "the wait ended and the band heard nothing: {now}"
+    );
+    assert_eq!(
+        stand_in::notices().last(),
+        Some(&now),
+        "the band was told what stands now"
+    );
+}
+
+/// An act holds its app by the bundle identifier the helper names it by, and
+/// a free look names it by the agent's word alone. The look is a use of the
+/// app all the same — under the word the agent acted by, the app's name, its
+/// identifier or its process — so an agent that only reads for more than a
+/// minute keeps its app on the band, and the look still asks the helper
+/// nothing (t-109811).
+#[test]
+fn a_look_by_any_word_of_an_app_in_use_keeps_it_in_use() {
+    for word in [
+        "iPhone Mirroring",
+        "iPhone 미러링",
+        "com.apple.ScreenContinuity",
+        "pid:4242",
+    ] {
+        let round_trips = Rc::new(Cell::new(0));
+        let _helper = naming_helper(&round_trips);
+        let (_person, _) = person(Decision::Allowed);
+        admit(ComputerMethod::Click, &click("iPhone Mirroring")).expect("goes at once");
+        round_trips.set(0);
+        stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+        drop(admit(ComputerMethod::Observe, &json!({ "app": word })).expect("a look"));
+        assert_eq!(
+            round_trips.get(),
+            0,
+            "{word}: a free look asks the helper nothing"
+        );
+        stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+        assert!(lapse(), "{word}: the look reached it inside the minute");
+        assert_eq!(state()["target"], "com.apple.screencontinuity", "{word}");
+        stand_in::advance(1);
+        assert!(
+            !lapse(),
+            "{word}: a minute after the look nothing is in use"
+        );
+        assert!(state()["target"].is_null(), "{word}");
+        // Each pass starts from a share of its own.
+        super::HELD.with(|held| *held.borrow_mut() = super::Held::default());
+    }
+}
+
+/// A look under way — a wait that lasts — is a use of its app at every step.
+#[test]
+fn a_look_under_way_keeps_its_app_in_use() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    let _look = admit(ComputerMethod::Observe, &json!({ "app": "Sample" })).expect("a look");
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    ensure_current().expect("its next step");
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    assert!(lapse(), "a step of the look reached it inside the minute");
+    assert_eq!(state()["target"], "com.example.sample");
+    stand_in::advance(1);
+    assert!(!lapse());
+    assert!(state()["target"].is_null());
+}
+
+/// A word names the app it was acted by only while that app is in use: once
+/// the app left, a look by the word brings nothing back.
+#[test]
+fn a_look_brings_no_app_back_into_use() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    stand_in::advance(SHARE_USE_LAPSES_MS);
+    drop(admit(ComputerMethod::Observe, &json!({ "app": "Sample" })).expect("a look"));
+    let now = state();
+    assert!(now["target"].is_null(), "{now}");
+    assert_eq!(now["panels"], json!([]), "{now}");
+}
+
 /// The host's own answer, not a test's: a child that was waited for is gone,
 /// and this process is not.
 #[cfg(unix)]

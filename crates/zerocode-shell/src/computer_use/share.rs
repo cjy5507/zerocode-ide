@@ -75,6 +75,10 @@ struct Held {
     /// The process each app in use was last acted in as, by the app's key: an
     /// app whose process ended is no longer in use.
     pids: BTreeMap<String, i64>,
+    /// The words agents named each app in use by, a word's key to its app's
+    /// key: a look that names the app by one of them is a use of it
+    /// ([`in_use_as`]).
+    words: BTreeMap<String, String>,
 }
 
 /// What the helper's controls stand beside: the app the band leads with,
@@ -153,6 +157,9 @@ struct Admitted {
     app: Option<String>,
     acts: bool,
     whole_screen: bool,
+    /// The app in use a free look reads, by the app's own key: each step of
+    /// the look is a use of it ([`in_use_as`]).
+    looks_in: Option<String>,
 }
 
 thread_local! {
@@ -350,12 +357,22 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
     if acts && let Some(named) = named.as_ref().filter(|named| named.unread) {
         return Err(unread_name(&named.label));
     }
+    // A free look is named by the agent's word alone, and it is a use of the
+    // app it reads all the same.
+    let looks_in = if acts || held_to_the_share {
+        None
+    } else {
+        params
+            .get("app")
+            .and_then(Value::as_str)
+            .and_then(|word| with_held(|held| in_use_as(held, word)))
+    };
     loop {
         refresh_required();
         let before = with_held(|held| presented(held));
         let now = now_ms();
-        let (gate, generation, after) = with_held(|held| {
-            let_go(held, now);
+        let (left, gate, generation, after) = with_held(|held| {
+            let left = let_go(held, now);
             let gate = held.share.gate(
                 Reach {
                     app: named.as_ref().map(|named| named.key.as_str()),
@@ -374,10 +391,20 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                 if let Some(pid) = named.pid {
                     held.pids.insert(named.key.clone(), pid);
                 }
+                if let Some(word) = params.get("app").and_then(Value::as_str) {
+                    held.words.insert(app_key(word), named.key.clone());
+                }
             }
-            (gate, held.share.generation(), presented(held))
+            if matches!(gate, Gate::Go)
+                && let Some(app) = looks_in.as_deref()
+            {
+                held.share.used(app, now);
+            }
+            (left, gate, held.share.generation(), presented(held))
         });
-        if before != after {
+        // What left may be the app that waits for the person, which is none
+        // of the apps in use: the band shows its line too.
+        if left || before != after {
             tell();
         }
         match gate {
@@ -409,6 +436,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                     app: named.as_ref().map(|named| named.key.clone()),
                     acts,
                     whole_screen: screen,
+                    looks_in,
                 })));
             }
             Gate::Refuse(refused) => return Err(refused),
@@ -471,7 +499,7 @@ pub(crate) fn ensure_current() -> Result<(), ComputerUseError> {
             now,
         );
         if holds.is_ok()
-            && let Some(app) = admitted.app.as_deref()
+            && let Some(app) = admitted.looks_in.as_deref().or(admitted.app.as_deref())
         {
             held.share.used(app, now);
         }
@@ -495,8 +523,40 @@ fn let_go(held: &mut Held, now: u64) -> bool {
         held.labels.retain(|key, _| kept(key));
         held.panel_windows.retain(|key, _| in_use.contains(key));
         held.pids.retain(|key, _| in_use.contains(key));
+        held.words.retain(|_, key| in_use.contains(key));
     }
     left
+}
+
+/// The app in use that `word` means, from what the window already holds of
+/// the apps in use: the words agents named them by, their keys, the names the
+/// helper gave them, their processes. An act holds its app by the bundle
+/// identifier the helper names it by, and a free look — not worth the helper's
+/// round trip — names it by the agent's word alone; without this a look moved
+/// nothing, and an agent that only read for a minute lost its app from the
+/// band (t-109811). Nothing is judged by it: a free look goes whatever it
+/// names, so a word another app has taken since can only keep the first app
+/// on the band a little longer.
+fn in_use_as(held: &Held, word: &str) -> Option<String> {
+    let wanted = app_key(word);
+    let in_use = |key: &str| held.share.targets().any(|target| target == key);
+    if let Some(key) = held.words.get(&wanted).filter(|key| in_use(key)) {
+        return Some(key.clone());
+    }
+    let pid = wanted
+        .strip_prefix("pid:")
+        .and_then(|pid| pid.parse::<i64>().ok());
+    held.share
+        .targets()
+        .find(|key| {
+            *key == wanted
+                || held
+                    .labels
+                    .get(*key)
+                    .is_some_and(|label| app_key(label) == wanted)
+                || pid.is_some_and(|pid| held.pids.get(*key) == Some(&pid))
+        })
+        .map(str::to_string)
 }
 
 /// Whether the process `pid` has ended: the host's word, and in a test the
@@ -606,6 +666,7 @@ pub(crate) fn end(app: &str, generation: u64) -> Value {
         held.labels.clear();
         held.panel_windows.clear();
         held.pids.clear();
+        held.words.clear();
         true
     });
     if ended {
