@@ -1682,10 +1682,25 @@ pub enum LocalSettingsWrite {
     /// Written, not recorded, as before: the file was not the person's.
     StillNotThePersons,
     /// Written, not recorded: the change grants something only the person
-    /// may (a `defaultMode` of `dontAsk`), or the record could not be kept.
-    /// The next session reads the file as the repository's, and says so; the
-    /// person records it with `zo settings trust-local` if they meant it.
+    /// may (a `defaultMode` of `dontAsk`). The next session reads the file as
+    /// the repository's, and says so; the person records it with
+    /// `zo settings trust-local` if they meant it.
     NoLongerThePersons,
+    /// Written, and the change was the person's to keep, but the record could
+    /// not be written (its lock stayed busy, or it is not the person's alone —
+    /// the warning on stderr says which). The next session reads the file as
+    /// the repository's.
+    RecordNotKept,
+}
+
+/// The stamp of the record's line for `cwd/.zo/settings.local.json`
+/// (`local_record::stamp`): what a tool that kept something to put back
+/// compares, so any write since — zo's, or the person recording the file
+/// again — makes it stale (153).
+#[must_use]
+pub fn local_settings_record_stamp(home: &Path, cwd: &Path) -> Option<String> {
+    let real = cwd.canonicalize().ok()?.join(".zo").join("settings.local.json");
+    local_record::stamp(home, &real)
 }
 
 /// Write `after` as `cwd/.zo/settings.local.json` for one of the model's
@@ -1752,20 +1767,50 @@ pub fn write_local_settings_for_a_tool(
                     || local_record::carries_no_authority(FILE_NAME, contents.as_bytes())
             }
         };
+    // A person whose own settings use the ordered `rules`: a recorded local
+    // file holding `allow`, `deny` or `ask` would join theirs in the merge and
+    // the load would refuse the mix — zo would not start in this folder. Read
+    // as the repository's, the file has those dropped beside ordered rules, as
+    // every project document has, so it is left unrecorded.
+    // Settings that do not load now are not made the person's either.
+    let mixes_with_the_persons_rules = holds_category_lists(after)
+        && !ConfigLoader::new(cwd, home)
+            .load()
+            .is_ok_and(|config| !trusted_config_uses_ordered_rules(&config.persons_own));
     let rendered = serde_json::to_string_pretty(after)
         .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?;
     local_record::write_local_file(&path, rendered.as_bytes())?;
-    if !theirs {
+    if !theirs || mixes_with_the_persons_rules {
         return Ok(LocalSettingsWrite::StillNotThePersons);
     }
     // A widening is the person's to make; putting back what their file held
     // before this process's plan mode is not one.
     let widened = local_record::widens(before, after) && put_back != Some(after);
-    if !widened && local_record::wrote(home, &path, rendered.as_bytes()) {
+    if widened {
+        return Ok(LocalSettingsWrite::NoLongerThePersons);
+    }
+    if local_record::wrote(home, &path, rendered.as_bytes()) {
         Ok(LocalSettingsWrite::KeptAsThePersons)
     } else {
-        Ok(LocalSettingsWrite::NoLongerThePersons)
+        Ok(LocalSettingsWrite::RecordNotKept)
     }
+}
+
+/// Whether a local settings document holds a non-empty `allow`, `deny` or
+/// `ask` list under `permissions` — the category form the loader refuses to
+/// mix with ordered `rules`.
+fn holds_category_lists(document: &serde_json::Map<String, serde_json::Value>) -> bool {
+    document
+        .get("permissions")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|permissions| {
+            ["allow", "deny", "ask"].iter().any(|list| {
+                permissions
+                    .get(*list)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|rules| !rules.is_empty())
+            })
+        })
 }
 
 /// Whether the local settings `contents` hold ordered `rules` of their own.

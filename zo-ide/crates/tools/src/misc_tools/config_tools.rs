@@ -134,7 +134,12 @@ pub fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
                 write_json_object(&path, &document)?;
                 None
             }
-            ConfigScope::Settings => no_longer_the_persons(write_local_settings(&before, &document, None)?),
+            ConfigScope::Settings => {
+                // What plan mode kept to put back was the file before this
+                // write; it is not the person's to put back after it.
+                forget_put_back(&path);
+                note_on(write_local_settings(&before, &document, None)?)
+            }
         };
         Ok(ConfigOutput {
             success: true,
@@ -224,11 +229,18 @@ pub fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOut
             return Err(error);
         }
     };
+    // Kept with the record's stamp of this very write: a write since — zo's,
+    // or the person recording the file again — makes it stale.
+    let stamp = if written == runtime::LocalSettingsWrite::KeptAsThePersons {
+        local_settings_stamp()
+    } else {
+        None
+    };
     let mut put_back = PUT_BACK_ON_LEAVING_PLAN_MODE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if written == runtime::LocalSettingsWrite::KeptAsThePersons {
-        put_back.insert(settings_path.clone(), before.clone());
+    if let Some(stamp) = stamp {
+        put_back.insert(settings_path.clone(), (before.clone(), stamp));
     } else {
         put_back.remove(&settings_path);
     }
@@ -251,11 +263,14 @@ pub fn execute_enter_plan_mode(_input: EnterPlanModeInput) -> Result<PlanModeOut
 pub fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutput, String> {
     let settings_path = config_file_for_scope(ConfigScope::Settings)?;
     let state_path = plan_mode_state_file()?;
-    // Taken by every exit, so none outlives the plan mode it was kept for.
+    // Taken by every exit, so none outlives the plan mode it was kept for, and
+    // used only while the record still holds the line EnterPlanMode's write
+    // left: a write since makes it stale.
     let put_back = PUT_BACK_ON_LEAVING_PLAN_MODE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&settings_path);
+        .remove(&settings_path)
+        .and_then(|(document, stamp)| (local_settings_stamp() == Some(stamp)).then_some(document));
     let before = read_json_object(&settings_path)?;
     let mut document = before.clone();
     let current_local_mode = get_nested_value(&document, PERMISSION_DEFAULT_MODE_PATH).cloned();
@@ -313,7 +328,7 @@ pub fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutpu
     // recorded as the person's — unless the file comes back to exactly what
     // the person's file held when this process's plan mode began, kept in
     // memory (`PUT_BACK_ON_LEAVING_PLAN_MODE`).
-    let note = no_longer_the_persons(write_local_settings(&before, &document, put_back.as_ref())?);
+    let note = note_on(write_local_settings(&before, &document, put_back.as_ref())?);
     clear_plan_mode_state(&state_path)?;
 
     Ok(PlanModeOutput {
@@ -535,23 +550,54 @@ fn write_local_settings(
 }
 
 /// What the tool's result says when its write left the folder's local
-/// settings no longer the person's by zo's record.
-fn no_longer_the_persons(written: runtime::LocalSettingsWrite) -> Option<String> {
-    (written == runtime::LocalSettingsWrite::NoLongerThePersons).then(|| {
-        String::from(
+/// settings not the person's by zo's record, and why.
+fn note_on(written: runtime::LocalSettingsWrite) -> Option<String> {
+    match written {
+        runtime::LocalSettingsWrite::NoLongerThePersons => Some(String::from(
             "zo did not record .zo/settings.local.json as the person's after this change: it widens \
              what the file grants, which only they do. The next session reads the file as the \
              repository's; if they meant it, they run `zo settings trust-local` in their own terminal.",
-        )
-    })
+        )),
+        runtime::LocalSettingsWrite::RecordNotKept => Some(String::from(
+            "zo could not write its record of .zo/settings.local.json after this change (the warning \
+             says why), so the next session reads the file as the repository's; if it is theirs, \
+             they run `zo settings trust-local` in their own terminal.",
+        )),
+        runtime::LocalSettingsWrite::KeptAsThePersons
+        | runtime::LocalSettingsWrite::StillNotThePersons => None,
+    }
+}
+
+/// The record's stamp of the folder's local settings, as it stands now.
+fn local_settings_stamp() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    runtime::local_settings_record_stamp(&config_home_dir(), &cwd)
 }
 
 /// The person's own local settings as `EnterPlanMode` found them, by the
-/// settings path, for `ExitPlanMode` to put back as theirs. Held in this process,
-/// where no file tool reaches — `.zo/tool-state` is not (153).
+/// settings path, with the record's stamp of `EnterPlanMode`'s write, for
+/// `ExitPlanMode` to put back as theirs. Held in this process, where no file
+/// tool reaches — `.zo/tool-state` is not (153).
 static PUT_BACK_ON_LEAVING_PLAN_MODE: std::sync::Mutex<
-    std::collections::BTreeMap<PathBuf, serde_json::Map<String, Value>>,
+    std::collections::BTreeMap<PathBuf, (serde_json::Map<String, Value>, String)>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn forget_put_back(settings_path: &Path) {
+    PUT_BACK_ON_LEAVING_PLAN_MODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(settings_path);
+}
+
+/// Forget everything plan mode kept to put back: the person changed the
+/// session's mode themselves (`/plan off`, Shift+Tab), so what plan mode
+/// would restore is no longer theirs to have restored (153).
+pub fn forget_plan_mode_put_backs() {
+    PUT_BACK_ON_LEAVING_PLAN_MODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
 
 pub(crate) fn config_home_dir() -> PathBuf {
     runtime::default_config_home()

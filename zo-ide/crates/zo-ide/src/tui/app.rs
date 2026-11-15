@@ -1923,6 +1923,9 @@ impl Ui {
     /// whole switch did.
     fn apply_live_permission_mode(&mut self, mode: PermissionMode) -> bool {
         self.permission_mode = mode;
+        // The person set the mode themselves: what plan mode kept to put back
+        // on leaving it is no longer theirs to have restored (153).
+        tools::forget_plan_mode_put_backs();
         write_permission_cell(self.permission_cell.as_deref(), mode)
     }
 

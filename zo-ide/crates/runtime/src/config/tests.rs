@@ -3917,6 +3917,71 @@ fn a_key_given_twice_is_judged_as_the_loader_reads_it() {
     }
 }
 
+/// A tool's write keeps a local file holding `deny` or `ask` unrecorded for a
+/// person whose own settings use the ordered `rules`: recorded, it would join
+/// theirs and the next load would refuse the mix — zo would not start in the
+/// folder. Read as the repository's, its lists are dropped beside ordered
+/// rules, and the person's own deny stays in force (153).
+#[test]
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn a_tool_keeps_a_listing_local_file_unrecorded_beside_the_persons_ordered_rules() {
+    let _overrides_stable = overrides_stable();
+    let root = temp_dir();
+    let cwd = root.join("project");
+    let home = root.join("home").join(".zo");
+    fs::create_dir_all(cwd.join(".zo")).expect("project .zo");
+    fs::create_dir_all(&home).expect("home config dir");
+    fs::write(
+        home.join("settings.json"),
+        r#"{"permissions":{"rules":["Bash(git status*)=allow","Bash(rm*)=deny"]}}"#,
+    )
+    .expect("ordered rules");
+    let path = cwd.join(".zo").join("settings.local.json");
+    fs::write(&path, r#"{"permissions":{"deny":["Bash(curl*)"]}}"#).expect("a listing local file");
+    let before = read_object(&path);
+    let mut after = before.clone();
+    after.insert("model".to_string(), serde_json::Value::String("opus".to_string()));
+
+    assert_eq!(
+        super::write_local_settings_for_a_tool(&home, &cwd, &before, &after, None).expect("written"),
+        super::LocalSettingsWrite::StillNotThePersons
+    );
+    let loaded = ConfigLoader::new(&cwd, &home)
+        .load()
+        .expect("the next load reads the person's rules beside the local file");
+    let rules = loaded
+        .merged()
+        .get("permissions")
+        .and_then(JsonValue::as_object)
+        .and_then(|permissions| permissions.get("rules"))
+        .and_then(JsonValue::as_array)
+        .map(<[JsonValue]>::to_vec)
+        .unwrap_or_default();
+    assert!(
+        rules.contains(&JsonValue::String("Bash(rm*)=deny".to_string())),
+        "the person's deny stays in force here: {rules:?}"
+    );
+}
+
+/// When the record cannot be written (a config home others can write), a
+/// tool's change that was the person's to keep says so as its own answer, not
+/// as a widening (153).
+#[test]
+#[cfg(unix)]
+fn a_tool_says_when_the_record_could_not_be_kept() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _overrides_stable = overrides_stable();
+    let dir = temp_dir();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("home");
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o777)).expect("a home others can write");
+    let mut after = serde_json::Map::new();
+    after.insert("model".to_string(), serde_json::Value::String("opus".to_string()));
+    let written = super::write_local_settings_for_a_tool(&home, &dir, &serde_json::Map::new(), &after, None);
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).expect("close the home again");
+    assert_eq!(written.expect("written"), super::LocalSettingsWrite::RecordNotKept);
+}
+
 /// Whether "always allow" lasts the session only follows what zo would do:
 /// yes for a local file that grants something zo did not write; no for one it
 /// wrote, one of plain settings, or none at all (153).

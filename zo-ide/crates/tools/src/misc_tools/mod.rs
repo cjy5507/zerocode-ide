@@ -140,7 +140,8 @@ pub use agent_tools::{
 pub(crate) use audit::run_audit;
 pub(crate) use config_tools::write_plan_artifact;
 pub use config_tools::{
-    execute_config, execute_enter_plan_mode, execute_exit_plan_mode, ConfigInput, ConfigOutput,
+    execute_config, execute_enter_plan_mode, execute_exit_plan_mode, forget_plan_mode_put_backs,
+    ConfigInput, ConfigOutput,
     ConfigValue, EnterPlanModeInput, ExitPlanModeInput, PlanModeOutput,
 };
 #[allow(unused_imports)]

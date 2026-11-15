@@ -95,6 +95,17 @@ pub fn recorded(home: &Path, real: &Path, bytes: &[u8]) -> bool {
         .is_some_and(|entry| entry.sha256 == sha256_hex(bytes))
 }
 
+/// The record's line for the file whose canonical path is `real`, as one
+/// opaque word (its hash and when it was written): a write since — zo's, or
+/// the person recording the file again — gives another. `None` where the file
+/// has no line or the record cannot be trusted.
+#[must_use]
+pub fn stamp(home: &Path, real: &Path) -> Option<String> {
+    read_entries(home)?
+        .get(&key(real))
+        .map(|entry| format!("{}:{}", entry.sha256, entry.at))
+}
+
 /// Remember that zo wrote `bytes` to the file whose canonical path is `real`.
 /// Entries whose file is gone are dropped, and past a thousand the oldest.
 /// The record is read and written under its lock: sessions ending together (a
@@ -112,7 +123,7 @@ pub fn remember(home: &Path, real: &Path, bytes: &[u8]) -> std::io::Result<()> {
         key(real),
         Entry {
             sha256: sha256_hex(bytes),
-            at: now_seconds(),
+            at: now_millis(),
         },
     );
     while entries.len() > MAX_ENTRIES {
@@ -372,10 +383,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
         })
 }
 
-fn now_seconds() -> u64 {
+/// When a line was written, in milliseconds — fine enough that two writes of
+/// the same bytes moments apart are told apart ([`stamp`]). A record an
+/// earlier zo wrote holds seconds, every one smaller than any millisecond
+/// count since, so "oldest first" still holds.
+fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn untrusted_record(home: &Path) -> std::io::Error {
