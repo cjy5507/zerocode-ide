@@ -219,7 +219,9 @@ pub fn build_message_request(
 
     MessageRequest {
         model: wire_model.clone(),
-        max_tokens: max_tokens_for_model(&wire_model),
+        // The cap is the selected provider's: two providers listing the same
+        // wire id may serve it with different limits.
+        max_tokens: max_tokens_for_model(selected_model),
         messages,
         system: (!request.system_prompt.is_empty()).then(|| {
             let joined = request.system_prompt.join("\n\n");

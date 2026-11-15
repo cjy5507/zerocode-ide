@@ -465,6 +465,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     // selected model so compaction thresholds match the real model limits (not
     // the optional feature_config.model() which may be None/200k default).
     let selected_model = model.clone();
+    api::custom_models::refresh_custom_model_capabilities(&selected_model);
     let effective_context_window = api::context_window_for_model(&selected_model);
     let tool_executor = CliToolExecutor::new(
         allowed_tools.clone(),
@@ -2451,7 +2452,8 @@ impl ApiClient for AnthropicRuntimeClient {
         let effort_band_ceiling = requested.band_ceiling;
         let message_request = MessageRequest {
             model: wire_model.clone(),
-            max_tokens: crate::max_tokens_for_model(&wire_model),
+            // The selected provider's cap, as `build_message_request` takes it.
+            max_tokens: crate::max_tokens_for_model(selected_model),
             messages,
             system: (!request.system_prompt.is_empty()).then(|| {
                 let joined = request.system_prompt.join("\n\n");

@@ -31,6 +31,10 @@ pub(crate) struct ProviderRuntimeClient {
     handle: tokio::runtime::Handle,
     client: ProviderClient,
     model: String,
+    /// The model as selected, provider name included (`Second/x`); `model` is
+    /// its wire id. The output cap is the selection's: two of the person's
+    /// providers may list one wire id with different limits.
+    selection: String,
     allowed_tools: BTreeSet<String>,
     /// Inherited parent-session MCP tool schemas (already filtered by the
     /// allow-set), appended to the builtin definitions each turn so the model
@@ -332,6 +336,7 @@ impl ProviderRuntimeClient {
             handle: shared_agent_runtime().handle().clone(),
             client,
             model,
+            selection,
             allowed_tools,
             mcp_tools: Vec::new(),
             structured_schema: None,
@@ -399,6 +404,13 @@ impl ProviderRuntimeClient {
         }
     }
 
+    /// The output cap a request carries: the selected model's (or the per-turn
+    /// override's), provider name included, so two of the person's providers
+    /// listing one wire id each keep their own limit.
+    fn request_max_tokens(&self, model_override: Option<&str>) -> u32 {
+        max_tokens_for_model(model_override.unwrap_or(self.selection.as_str()))
+    }
+
     fn switch_runtime_model(
         &mut self,
         message_request: &mut MessageRequest,
@@ -420,9 +432,10 @@ impl ProviderRuntimeClient {
             None => client,
         };
         let from = std::mem::replace(&mut self.model, resolved.clone());
+        self.selection = selection;
         self.client = client;
         message_request.model.clone_from(&resolved);
-        message_request.max_tokens = max_tokens_for_model(&resolved);
+        message_request.max_tokens = self.request_max_tokens(None);
         if let Some(path) = self.manifest_path.as_deref() {
             record_agent_runtime_model(path, &resolved);
         }
@@ -1109,12 +1122,12 @@ impl ProviderRuntimeClient {
             request
                 .model_override
                 .as_deref()
-                .unwrap_or(self.model.as_str()),
+                .unwrap_or(self.selection.as_str()),
         );
         let compaction_summary = request.compaction_summary;
         let mut message_request = MessageRequest {
             model: wire_model.clone(),
-            max_tokens: max_tokens_for_model(&wire_model),
+            max_tokens: self.request_max_tokens(request.model_override.as_deref()),
             messages,
             // CC 429-parity: lower the system prompt through the same
             // identity-splitting path the foreground turn uses. The Claude Max
@@ -2028,6 +2041,7 @@ impl ProviderRuntimeClient {
             handle,
             client,
             model: model.to_string(),
+            selection: model.to_string(),
             allowed_tools,
             mcp_tools: Vec::new(),
             structured_schema: None,
@@ -2872,5 +2886,56 @@ mod tests {
             Some(api::EffortLevel::Xhigh),
             "a deep-gate floor must still raise a lower named tier, mirroring runtime_bridge"
         );
+    }
+
+    /// Two of the person's providers list one wire id with different output
+    /// caps. A helper's request carries its selected provider's cap, through
+    /// the real constructor and through a mid-run model switch: the client
+    /// keeps the selection, not only the wire id. Declared caps show the
+    /// difference without a network; a `/models` reading takes the same lookup.
+    #[test]
+    fn a_helpers_request_carries_its_selected_providers_output_cap() {
+        struct ClearProviders;
+        impl Drop for ClearProviders {
+            fn drop(&mut self) {
+                let _ = api::refresh_custom_providers_from_json("[]");
+            }
+        }
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _clear = ClearProviders;
+        api::refresh_custom_providers_from_json(
+            r#"[{"name":"First","base_url":"http://127.0.0.1:9/v1","requires_auth":false,
+                 "models":[{"id":"vendor/shared","max_output_tokens":2048}]},
+                {"name":"Second","base_url":"http://127.0.0.1:9/v2","requires_auth":false,
+                 "models":[{"id":"vendor/shared","max_output_tokens":8192}]}]"#,
+        )
+        .expect("the person's providers");
+        let mut client = super::ProviderRuntimeClient::new_with_history(
+            "First/vendor/shared",
+            std::collections::BTreeSet::new(),
+            std::sync::Arc::default(),
+            std::sync::Arc::default(),
+            false,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            false,
+        )
+        .expect("a client on the person's provider");
+        assert_eq!(client.request_max_tokens(None), 2048);
+        let mut request: api::MessageRequest = serde_json::from_value(
+            json!({"model": "vendor/shared", "max_tokens": 1, "messages": []}),
+        )
+        .expect("a request");
+        client
+            .switch_runtime_model(&mut request, "Second/vendor/shared")
+            .expect("the switch to the other provider");
+        assert_eq!(request.model, "vendor/shared");
+        assert_eq!(request.max_tokens, 8192, "the switch carried another provider's output cap");
+        assert_eq!(client.request_max_tokens(None), 8192, "the next turn carried another provider's output cap");
     }
 }

@@ -76,6 +76,7 @@ pub use providers::chatgpt_backend::{
     ChatGptBackendClient, ORIGINATOR as CHATGPT_ORIGINATOR, USER_AGENT as CHATGPT_USER_AGENT,
 };
 pub use providers::cli_sessions;
+pub use providers::custom_models;
 pub use providers::cli_sessions::{
     CliSession, XaiCredential, XaiCredentialSource, grok_session, grok_store_label,
     kimi_code_login_configured, kimi_code_models_url, kimi_code_session, kimi_code_store_label, resolve_xai_credential, xai_credential_configured,
@@ -138,7 +139,7 @@ pub use providers::{
     model_family, model_has_capability, parse_effort_level, plan_priors, router_priors,
     shipped_router_priors,
     maker_for_provider, max_request_bytes_for_model, max_supported_effort, max_tokens_for_model,
-    model_supports_xhigh,
+    model_supports_vision, model_supports_xhigh,
     non_claude_adapters_enabled, openai_fast_tier_enabled, openai_fast_variant_pair,
     orchestration_reserved_models, provider_catalog, provider_enabled,
     provider_usable_for_smart_inventory, refresh_custom_providers_from_env,

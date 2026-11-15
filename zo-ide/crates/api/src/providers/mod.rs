@@ -14,6 +14,7 @@ pub(crate) mod aws_sigv4;
 pub mod chatgpt_backend;
 pub mod cli_sessions;
 pub mod endpoint_capabilities;
+pub mod custom_models;
 pub(crate) mod cloud_gateway;
 pub mod gemini_code_assist;
 pub(crate) mod google_auth;
@@ -100,6 +101,8 @@ pub struct HarnessProfile {
 pub enum HarnessValueSource {
     /// A measurement recorded in the catalog.
     Measured,
+    /// A value read from the selected endpoint's model list.
+    Read,
     /// An operator or model declaration.
     Declared,
     /// A different lineup's transport default.
@@ -115,6 +118,7 @@ impl HarnessValueSource {
     pub const fn key(self) -> &'static str {
         match self {
             Self::Measured => "measured",
+            Self::Read => "read",
             Self::Declared => "declared",
             Self::Inherited => "inherited",
             Self::Default => "default",
@@ -1817,7 +1821,11 @@ struct ModelCapability {
     canonical_model_id: String,
     provider: Option<ProviderKind>,
     context_window: Option<u64>,
+    /// Where `context_window` came from, decided by the same walk.
+    context_window_source: HarnessValueSource,
     max_output_tokens: Option<u32>,
+    /// Where `max_output_tokens` came from, decided by the same walk.
+    max_output_tokens_source: HarnessValueSource,
     adaptive_thinking: Option<bool>,
 }
 
@@ -1852,24 +1860,32 @@ impl ModelCapability {
 
         // An explicit `<provider>/<model>` states its limits through the named
         // provider first: the wire id below has the provider stripped, and the
-        // same bare id may be a first-party model with another window.
+        // same bare id may be a first-party model with another window. What the
+        // selected endpoint's `/models` said comes after every declaration and
+        // before the name-shape guesses and the common fallback.
         let named = named_provider_ref(model);
-        let context_window = named
+        let read = custom_models::selected_reading(model);
+        let (context_window, context_window_source) = named
             .as_ref()
             .and_then(|(provider, declared)| provider.context_window_for(declared))
-            .unwrap_or_else(|| context_window_for_canonical(&wire, &canonical_lower));
-        let max_output_tokens = named
+            .map_or_else(
+                || context_window_for_canonical(&wire, &canonical_lower, read.context_window),
+                |window| (window, HarnessValueSource::Declared),
+            );
+        let (max_output_tokens, max_output_tokens_source) = named
             .as_ref()
             .and_then(|(provider, declared)| provider.max_output_tokens_for(declared))
             .map_or_else(
-                || max_output_tokens_for_model_id(&wire, model_id),
-                |value| u32::try_from(value).unwrap_or(u32::MAX),
+                || max_output_tokens_for_model_id(&wire, model_id, read.max_output_tokens),
+                |value| (u32::try_from(value).unwrap_or(u32::MAX), HarnessValueSource::Declared),
             );
 
         Self {
             provider,
             context_window: Some(context_window),
+            context_window_source,
             max_output_tokens: Some(max_output_tokens),
+            max_output_tokens_source,
             adaptive_thinking: Some(adaptive_thinking_for_canonical(&canonical_lower)),
             canonical_model_id,
         }
@@ -2519,6 +2535,10 @@ pub struct ResolvedCustomProvider {
     pub max_output_tokens: Option<u64>,
     /// Operator-declared request-body ceiling in bytes.
     pub max_request_bytes: Option<u64>,
+    /// Explicit endpoint-wide image-input declaration, including `false`.
+    pub supports_vision: Option<bool>,
+    /// A person supplied this connection, rather than a shipped seed.
+    pub(crate) declared_by_person: bool,
     /// The limits a declared model states for itself, keyed by its id exactly
     /// as declared (the spelling [`Self::canonical_model`] answers with), so
     /// the lookup is one hash. Empty for a provider of plain ids.
@@ -2548,6 +2568,8 @@ impl From<openai_compat::CustomProviderConfig> for ResolvedCustomProvider {
             context_window: custom.context_window.filter(|&value| value > 0),
             max_output_tokens: custom.max_output_tokens.filter(|&value| value > 0),
             max_request_bytes: custom.max_request_bytes.filter(|&value| value > 0),
+            supports_vision: custom.supports_vision,
+            declared_by_person: true,
             model_limits,
             fit_hint: custom.to_fit_hint(),
             config: custom.to_static_config(),
@@ -2617,6 +2639,23 @@ impl ResolvedCustomProvider {
             .max_output_tokens
             .or(self.max_output_tokens)
             .filter(|&value| value > 0)
+    }
+
+    /// Whether this endpoint takes `model`'s pictures, and on what evidence:
+    /// the model's own declaration (an explicit `false` included), else the
+    /// provider-wide one, else the catalog's `no_vision` row, else what the
+    /// endpoint's `/models` said. `None` when nothing states it, which leaves
+    /// the endpoint's `false` default.
+    fn vision_for(&self, model: &str) -> Option<custom_models::CapabilityValue<bool>> {
+        let declared = |value| custom_models::CapabilityValue { value, source: HarnessValueSource::Declared };
+        self.stated_limits(model).supports_vision
+            .or(self.supports_vision)
+            // A catalog row (shipped or the person's overlay) that says the
+            // model reads no pictures is a declaration: a reading never wins it.
+            .or_else(|| (!model_supports_vision(model)).then_some(false))
+            .map(declared)
+            .or_else(|| custom_models::read_limits(self, model).supports_vision
+                .map(|value| custom_models::CapabilityValue { value, source: HarnessValueSource::Read }))
     }
 
     /// The registered model id matching `model`, used as the canonical id sent
@@ -2735,6 +2774,8 @@ fn builtin_seed_providers() -> Vec<ResolvedCustomProvider> {
             context_window: None,
             max_output_tokens: None,
             max_request_bytes: None,
+            supports_vision: Some(false),
+            declared_by_person: false,
             model_limits: HashMap::new(),
             fit_hint: None,
         });
@@ -4047,12 +4088,27 @@ const LEGACY_OPUS_MAX_OUTPUT_TOKENS: u32 = 32_000;
 
 #[must_use]
 pub fn max_tokens_for_model(model: &str) -> u32 {
-    model_capability_for_model(model)
-        .max_output_tokens
-        .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
+    max_tokens_with_source(model).value
 }
 
-fn max_output_tokens_for_model_id(raw_model: &str, model_id: &str) -> u32 {
+/// [`max_tokens_for_model`] with the source the same walk found it in.
+fn max_tokens_with_source(model: &str) -> custom_models::CapabilityValue<u32> {
+    let capability = model_capability_for_model(model);
+    custom_models::CapabilityValue {
+        value: capability.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+        source: capability.max_output_tokens_source,
+    }
+}
+
+/// The output cap and its source. `read` is what the selected endpoint's
+/// `/models` said; it is used only where nothing declares a cap, and only
+/// when it is below the default.
+fn max_output_tokens_for_model_id(
+    raw_model: &str,
+    model_id: &str,
+    read: Option<u64>,
+) -> (u32, HarnessValueSource) {
+    let declared = |value: u64| (u32::try_from(value).unwrap_or(u32::MAX), HarnessValueSource::Declared);
     // Anthropic's current model table documents 128k synchronous max output for
     // Fable/Mythos 5, Sonnet 5, and Opus 4.6+; the streaming guide explicitly
     // uses `claude-opus-4-8` with `max_tokens: 128000` as the large-output path
@@ -4068,14 +4124,14 @@ fn max_output_tokens_for_model_id(raw_model: &str, model_id: &str) -> u32 {
         || model_id_matches_prefix_segment(model_id, "claude-opus-4-7")
         || model_id_matches_prefix_segment(model_id, "claude-opus-4-6")
     {
-        return EXTENDED_MAX_OUTPUT_TOKENS;
+        return (EXTENDED_MAX_OUTPUT_TOKENS, HarnessValueSource::Declared);
     }
     if model_id_matches_prefix_segment(model_id, "claude-opus-4-1")
         || model_id_matches_prefix_segment(model_id, "claude-opus-4-0")
         || model_id == "claude-opus-4"
         || model_id_matches_prefix_segment(model_id, "claude-opus-4-20250514")
     {
-        return LEGACY_OPUS_MAX_OUTPUT_TOKENS;
+        return (LEGACY_OPUS_MAX_OUTPUT_TOKENS, HarnessValueSource::Declared);
     }
     // Non-Anthropic models: honour the docs-verified catalog cap (GPT-5.5 128k,
     // DeepSeek V4 384k) before the conservative default, so large refactors and
@@ -4083,12 +4139,20 @@ fn max_output_tokens_for_model_id(raw_model: &str, model_id: &str) -> u32 {
     // Anthropic path was widened to 128k to avoid, previously still present for
     // every other provider because the catalog field was never read.
     if let Some(max_out) = custom_provider_max_output_tokens(raw_model, model_id) {
-        return u32::try_from(max_out).unwrap_or(u32::MAX);
+        return declared(max_out);
     }
     if let Some(max_out) = catalog_max_output_tokens(raw_model, model_id) {
-        return u32::try_from(max_out).unwrap_or(u32::MAX);
+        return declared(max_out);
     }
-    DEFAULT_MAX_OUTPUT_TOKENS
+    // Undeclared. What `/models` says is the most the model can write, while
+    // `max_tokens` is what one request asks for: a read cap only lowers the
+    // request below the default and never raises it, since asking for the
+    // ceiling on every request changes how long each answer may run.
+    read.and_then(|max_out| u32::try_from(max_out).ok())
+        .filter(|&max_out| max_out < DEFAULT_MAX_OUTPUT_TOKENS)
+        .map_or((DEFAULT_MAX_OUTPUT_TOKENS, HarnessValueSource::Default), |max_out| {
+            (max_out, HarnessValueSource::Read)
+        })
 }
 
 /// Whether `model` uses Anthropic *adaptive* thinking — the server sizes the
@@ -4730,12 +4794,25 @@ pub fn resolve_effort_band(
 /// correctly.
 #[must_use]
 pub fn context_window_for_model(model: &str) -> u64 {
-    model_capability_for_model(model)
-        .context_window
-        .unwrap_or(200_000)
+    context_window_with_source(model).value
 }
 
-fn context_window_for_canonical(raw_model: &str, canonical_lower: &str) -> u64 {
+/// [`context_window_for_model`] with the source the same walk found it in.
+fn context_window_with_source(model: &str) -> custom_models::CapabilityValue<u64> {
+    let capability = model_capability_for_model(model);
+    custom_models::CapabilityValue {
+        value: capability.context_window.unwrap_or(200_000),
+        source: capability.context_window_source,
+    }
+}
+
+/// The context window and its source. `read` is what the selected endpoint's
+/// `/models` said; it is used only where nothing declares a window.
+fn context_window_for_canonical(
+    raw_model: &str,
+    canonical_lower: &str,
+    read: Option<u64>,
+) -> (u64, HarnessValueSource) {
     // DECLARED FIRST. The operator's own custom-provider declaration, then the
     // catalog (which already honours the `ZO_MODEL_CONTEXT_WINDOWS` override).
     //
@@ -4751,13 +4828,19 @@ fn context_window_for_canonical(raw_model: &str, canonical_lower: &str) -> u64 {
     // sonnet-5 → 1M, haiku → 258k), so this only changes the answer for a model
     // somebody actually declared. `context_window_declaration_beats_the_name_guess`
     // pins both halves of that.
-    if let Some(window) = custom_provider_context_window(raw_model, canonical_lower) {
-        return window;
+    if let Some(window) = custom_provider_context_window(raw_model, canonical_lower)
+        .or_else(|| catalog_model_context_window(raw_model, canonical_lower))
+    {
+        return (window, HarnessValueSource::Declared);
     }
-    if let Some(window) = catalog_model_context_window(raw_model, canonical_lower) {
-        return window;
-    }
+    // Undeclared: the endpoint's own `/models` answer outranks a name guess.
+    read.map_or_else(
+        || (context_window_guess(canonical_lower), HarnessValueSource::Default),
+        |window| (window, HarnessValueSource::Read),
+    )
+}
 
+fn context_window_guess(canonical_lower: &str) -> u64 {
     // Undeclared, from here down: name-shape guesses, last resort.
     //
     // Current flagship Claude models with documented native 1M windows.

@@ -696,6 +696,39 @@ fn a_model_that_reads_no_pictures_is_not_sent_a_tools_picture() {
 }
 
 #[test]
+fn a_person_endpoint_that_takes_pictures_still_sends_none_to_a_model_that_reads_none() {
+    // The person says their endpoint takes `image_url` for every model behind
+    // it; this model's catalog row says `no_vision`. A tool's picture is
+    // nobody's choice, so the row still keeps it out.
+    struct ClearProviders;
+    impl Drop for ClearProviders {
+        fn drop(&mut self) {
+            let _ = crate::providers::refresh_custom_providers_from_json("[]");
+        }
+    }
+    let _lock = crate::test_env_lock();
+    let _clear = ClearProviders;
+    crate::providers::refresh_custom_providers_from_json(
+        r#"[{"name":"Fixture","base_url":"https://vlm.example/v1","requires_auth":false,
+             "supports_vision":true,"models":["gpt-5.3-codex-spark"]}]"#,
+    )
+    .unwrap();
+    let config = crate::providers::custom_provider_for_model("Fixture/gpt-5.3-codex-spark")
+        .expect("the person's provider")
+        .config;
+    assert!(config.supports_vision && config.is_declared_by_the_person());
+    assert!(!crate::providers::model_supports_vision("gpt-5.3-codex-spark"));
+    // The runtime sends the model half of `Fixture/gpt-5.3-codex-spark`.
+    let payload = build_chat_completion_request(
+        &chat_request("gpt-5.3-codex-spark", a_step_whose_first_result_is_a_picture()),
+        config,
+    );
+
+    assert_eq!(roles(&payload), ["user", "assistant", "tool", "tool"]);
+    assert!(!payload.to_string().contains("image_url"), "{payload}");
+}
+
+#[test]
 fn zos_own_endpoints_are_not_sent_a_tools_picture() {
     // xAI, OpenAI and Google take `image_url`, but that is said of the endpoint
     // and not of each model behind it (no catalog row describes an xAI model).

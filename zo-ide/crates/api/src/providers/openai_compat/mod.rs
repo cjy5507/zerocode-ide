@@ -347,11 +347,10 @@ pub struct CustomProviderConfig {
     #[serde(default)]
     pub max_request_bytes: Option<u64>,
     /// Whether this endpoint accepts multimodal `image_url` content parts.
-    /// Defaults `false`: a vision-less OpenAI-compatible server (e.g. a
-    /// DeepSeek-style gateway) rejects `image_url` with a hard 400, so images
-    /// are degraded to a text placeholder unless the operator opts in here.
+    /// An explicit value wins over `/models`; when neither states support,
+    /// images are degraded to a text placeholder.
     #[serde(default)]
-    pub supports_vision: bool,
+    pub supports_vision: Option<bool>,
     /// Read-only advisory VRAM estimate for local models. Zo displays this
     /// only when the `model-fit-hints` feature is enabled; it never selects or
     /// serves a model from the estimate.
@@ -419,6 +418,7 @@ pub struct ModelLimits {
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u64>,
     pub max_request_bytes: Option<u64>,
+    pub supports_vision: Option<bool>,
 }
 
 impl ModelLimits {
@@ -428,6 +428,7 @@ impl ModelLimits {
         self.context_window.is_some_and(|value| value > 0)
             || self.max_output_tokens.is_some_and(|value| value > 0)
             || self.max_request_bytes.is_some_and(|value| value > 0)
+            || self.supports_vision.is_some()
     }
 }
 
@@ -459,6 +460,8 @@ enum CustomModelWire {
         max_output_tokens: Option<u64>,
         #[serde(default)]
         max_request_bytes: Option<u64>,
+        #[serde(default)]
+        supports_vision: Option<bool>,
     },
 }
 
@@ -474,12 +477,14 @@ impl From<CustomModelWire> for CustomModel {
                 context_window,
                 max_output_tokens,
                 max_request_bytes,
+                supports_vision,
             } => Self {
                 id,
                 limits: ModelLimits {
                     context_window,
                     max_output_tokens,
                     max_request_bytes,
+                    supports_vision,
                 },
             },
         }
@@ -522,7 +527,7 @@ impl CustomProviderConfig {
         );
         // Operator opt-in: a vision-capable custom endpoint re-enables `image_url`
         // parts that `from_user` conservatively disabled.
-        config.supports_vision = self.supports_vision;
+        config.supports_vision = self.supports_vision.unwrap_or(false);
         // Same shape of opt-in for the effort field: without it a gateway-served
         // reasoning model gets no `reasoning_effort` at all.
         config.supports_reasoning_effort = self.supports_reasoning_effort;
@@ -923,6 +928,18 @@ impl OpenAiCompatClient {
             builder = builder.header(*name, *value);
         }
         builder
+    }
+
+    /// Read model metadata with this connection's auth and client headers.
+    pub(super) async fn read_model_capabilities(&self) -> Result<(), ApiError> {
+        let endpoint = super::custom_models::models_endpoint(&self.base_url);
+        let builder = self.http.get(endpoint).timeout(Duration::from_secs(2));
+        let builder = self.apply_client_identity(builder);
+        let (builder, _) = self.apply_auth(builder).await?;
+        let response = expect_success(builder.send().await?).await?;
+        let body = response.json::<ModelsListResponse>().await?;
+        super::custom_models::remember(&self.base_url, &body.data);
+        Ok(())
     }
 
     fn authenticate(&self, builder: reqwest::RequestBuilder, key: &str) -> reqwest::RequestBuilder {
@@ -1835,7 +1852,12 @@ fn build_chat_completion_request(request: &MessageRequest, config: OpenAiCompatC
         endpoint_capabilities::reasoning_answer(config.default_base_url, &request.model))
 }
 
-fn build_chat_completion_request_with_answer(request: &MessageRequest, config: OpenAiCompatConfig, answer: Option<ReasoningAnswer>) -> Value {
+fn build_chat_completion_request_with_answer(request: &MessageRequest, mut config: OpenAiCompatConfig, answer: Option<ReasoningAnswer>) -> Value {
+    // The person's endpoint may take this model's pictures by declaration or
+    // by what its `/models` said; the request is built for that answer.
+    if let Some(vision) = super::custom_models::vision_for_config(&config, &request.model) {
+        config.supports_vision = vision;
+    }
     let mut messages = Vec::new();
     if let Some(blocks) = request.system.as_ref().filter(|v| !v.is_empty()) {
         let text: String = blocks
@@ -2495,8 +2517,10 @@ struct ModelsListResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ModelListEntry {
-    id: String,
+pub(super) struct ModelListEntry {
+    pub(super) id: String,
+    #[serde(flatten)]
+    pub(super) attributes: serde_json::Map<String, Value>,
 }
 
 /// List the model ids a running local OpenAI-compatible server advertises at
@@ -2519,7 +2543,10 @@ pub async fn discover_models(base_url: &str) -> Vec<String> {
         return Vec::new();
     }
     match response.json::<ModelsListResponse>().await {
-        Ok(body) => body.data.into_iter().map(|entry| entry.id).collect(),
+        Ok(body) => {
+            super::custom_models::remember(base_url, &body.data);
+            body.data.into_iter().map(|entry| entry.id).collect()
+        }
         Err(_) => Vec::new(),
     }
 }
@@ -2540,6 +2567,7 @@ pub async fn discover_models_with_bearer(
         .await?;
     let response = expect_success(response).await?;
     let body = response.json::<ModelsListResponse>().await?;
+    super::custom_models::remember(base_url, &body.data);
     Ok(body.data.into_iter().map(|entry| entry.id).collect())
 }
 

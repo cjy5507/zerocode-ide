@@ -348,6 +348,20 @@ impl PromptInput {
         )
     }
 
+    fn custom_model_rows(&self) -> String {
+        let Some(values) = api::custom_models::custom_model_capabilities(&self.model) else {
+            return String::new();
+        };
+        let mut out = String::new();
+        let _ = writeln!(out, "  {:<18}{} tokens ({})", "Context window",
+            values.context_window.value, values.context_window.source.key());
+        let _ = writeln!(out, "  {:<18}{} tokens ({})", "Output cap",
+            values.max_output_tokens.value, values.max_output_tokens.source.key());
+        let _ = writeln!(out, "  {:<18}{} ({})", "Image input",
+            values.supports_vision.value, values.supports_vision.source.key());
+        out
+    }
+
     /// The report, in the `/status` two-column shape.
     #[must_use]
     pub fn render(&self) -> String {
@@ -358,6 +372,7 @@ impl PromptInput {
         let _ = writeln!(out, "  {:<18}{}", "Model", self.model);
         let _ = writeln!(out, "  {:<18}{}", "Edit tool", self.harness.edit_tool.key());
         let _ = writeln!(out, "  {:<18}{}", "Edit tool source", self.harness.edit_tool_source.key());
+        out.push_str(&self.custom_model_rows());
         let _ = writeln!(out, "  {:<18}{}", "Workspace", self.workspace);
         let _ = writeln!(
             out,
