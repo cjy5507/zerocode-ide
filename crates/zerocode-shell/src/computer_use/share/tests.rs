@@ -7,7 +7,8 @@ use zerocode_core::computer_use_protocol::error_code;
 
 use super::stand_in;
 use super::{
-    Decision, SHARE_ASK_AGAIN_MS, admit, ensure_current, give_back, hand_over, state, take_control,
+    Decision, SHARE_ASK_AGAIN_MS, SHARE_USE_LAPSES_MS, admit, ensure_current, give_back, hand_over,
+    lapse, state, take_control,
 };
 
 fn person(answer: Decision) -> (stand_in::Standing, Rc<Cell<u32>>) {
@@ -986,4 +987,153 @@ fn an_app_entered_while_the_helper_restarts_is_not_entered_again_under_its_other
         );
     }
     assert_eq!(asked.get(), 1, "no card for a name nobody can read");
+}
+
+/// The person, 2026-11-15: "표시가 끝나면 자동 종료되게.. 내가 누르지 않아도
+/// 끊기거나 종료되면". A request lets go of the app whose minute is up before
+/// it is judged, so the band names what is in use now.
+#[test]
+fn a_request_lets_go_of_the_app_nothing_reached_for_a_minute() {
+    let (_person, asked) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    stand_in::advance(SHARE_USE_LAPSES_MS);
+    admit(ComputerMethod::Click, &click("Other")).expect("goes at once");
+    let now = state();
+    assert_eq!(now["label"], "Other", "{now}");
+    assert_eq!(now["panels"].as_array().map(Vec::len), Some(1), "{now}");
+    assert_eq!(asked.get(), 0, "letting go asks nobody");
+}
+
+/// With no request at all the window's own look lets go: the band closes with
+/// no press, and is told so.
+#[test]
+fn the_windows_look_lets_go_of_a_quiet_app_and_tells_the_band() {
+    let (_person, asked) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    assert!(lapse(), "still in use: the look goes on");
+    assert_eq!(state()["target"], "sample");
+    stand_in::advance(1);
+    assert!(!lapse(), "nothing is left to look for");
+    let now = state();
+    assert!(now["target"].is_null(), "{now}");
+    assert!(now["label"].is_null(), "{now}");
+    assert_eq!(now["panels"], json!([]), "{now}");
+    assert_eq!(stand_in::notices().last(), Some(&now), "the band was told");
+    admit(ComputerMethod::Click, &click("Sample")).expect("joins again at once");
+    assert_eq!(state()["target"], "sample");
+    assert_eq!(asked.get(), 0, "a lapse is no answer of the person's");
+}
+
+#[test]
+fn an_app_whose_process_ended_leaves_at_once() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    admit(ComputerMethod::Click, &click("iPhone 미러링")).expect("goes at once");
+    assert!(lapse());
+    assert_eq!(state()["label"], "iPhone 미러링, Sample", "both run");
+    stand_in::ended(&[4343]);
+    assert!(lapse(), "one is still in use");
+    let now = state();
+    assert_eq!(now["label"], "iPhone 미러링", "{now}");
+    assert_eq!(now["target"], "com.apple.screencontinuity", "{now}");
+    stand_in::ended(&[4343, 4242]);
+    assert!(!lapse());
+    assert!(state()["target"].is_null());
+}
+
+#[test]
+fn a_request_under_way_keeps_its_app_in_use() {
+    let (_person, _) = person(Decision::Allowed);
+    let _request = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    ensure_current().expect("its next step");
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    assert!(lapse());
+    assert_eq!(
+        state()["target"],
+        "sample",
+        "a step reached it inside the minute"
+    );
+    stand_in::advance(1);
+    assert!(!lapse());
+    assert!(state()["target"].is_null());
+    assert!(
+        ensure_current().is_ok(),
+        "the request itself is not refused"
+    );
+}
+
+/// What the person took is theirs to hand back: the band stays under their
+/// hand whatever ended meanwhile.
+#[test]
+fn nothing_leaves_while_the_person_holds_control() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    take_control();
+    stand_in::advance(10 * SHARE_USE_LAPSES_MS);
+    stand_in::ended(&[4343]);
+    assert!(!lapse(), "nothing to look for under the person's hand");
+    let taken = state();
+    assert_eq!(taken["target"], "com.example.sample", "{taken}");
+    assert_eq!(taken["takenBack"], true);
+    give_back();
+    assert!(!lapse());
+    assert!(
+        state()["target"].is_null(),
+        "handed back, the ended app goes"
+    );
+}
+
+/// Where the person requires sharing, a quiet minute ends nothing: letting the
+/// hand-over go would open every other window to an agent's look mid-task. It
+/// goes with its app, and the person's yes stands for when the app is back.
+#[test]
+fn required_a_hand_over_stands_through_the_quiet_and_goes_with_its_app() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, asked) = person_requiring(Decision::Allowed);
+    drop(admit(ComputerMethod::Click, &click("Sample")).expect("handed over"));
+    assert_eq!(asked.get(), 1);
+    stand_in::advance(10 * SHARE_USE_LAPSES_MS);
+    assert!(lapse());
+    assert_eq!(state()["target"], "com.example.sample");
+    assert_eq!(
+        refused(ComputerMethod::Observe, &json!({"app": "iPhone 미러링"})).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "a look outside what was handed over is still refused"
+    );
+    stand_in::ended(&[4343]);
+    assert!(!lapse());
+    assert!(state()["target"].is_null());
+    drop(admit(ComputerMethod::Click, &click("Sample")).expect("the yes stands"));
+    assert_eq!(
+        asked.get(),
+        1,
+        "no second card for an app the person handed over"
+    );
+}
+
+/// The host's own answer, not a test's: a child that was waited for is gone,
+/// and this process is not.
+#[cfg(unix)]
+#[test]
+fn a_process_that_was_waited_for_has_ended_and_this_one_has_not() {
+    let mut child = crate::proc::quiet_command("/usr/bin/true")
+        .spawn()
+        .expect("a child");
+    let pid = i64::from(child.id());
+    child.wait().expect("the child ended");
+    assert!(super::host_says_ended(pid));
+    assert!(!super::host_says_ended(i64::from(std::process::id())));
+    assert!(!super::host_says_ended(0), "no process is not an ended one");
+    assert!(!super::host_says_ended(-1));
+    assert!(
+        !super::host_says_ended(i64::MAX),
+        "a number no process can have proves nothing"
+    );
 }

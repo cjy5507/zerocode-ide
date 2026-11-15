@@ -640,3 +640,176 @@ fn a_step_in_flight_is_judged_as_the_gate_judges_without_moving_anything() {
     }
     assert!(judged > 1_000, "{judged} judged");
 }
+
+/// No app is gone.
+fn all_run(_: &str) -> bool {
+    false
+}
+
+/// The person, 2026-11-15: "표시가 끝나면 자동 종료되게.. 내가 누르지 않아도
+/// 끊기거나 종료되면". A use nothing has reached for a minute is over.
+#[test]
+fn an_app_nothing_reached_for_a_minute_leaves_the_ones_in_use_by_itself() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("notes")), 0), Gate::Go);
+    assert!(!share.lapse(SHARE_USE_LAPSES_MS - 1, all_run));
+    assert_eq!(share.target(), Some("notes"), "still inside its minute");
+    assert!(share.lapse(SHARE_USE_LAPSES_MS, all_run));
+    assert_eq!(share.target(), None);
+    assert_eq!(share.targets().count(), 0);
+    assert!(
+        !share.lapse(SHARE_USE_LAPSES_MS, all_run),
+        "nothing is left to go"
+    );
+}
+
+#[test]
+fn an_app_that_no_longer_runs_leaves_at_once_and_the_others_stay() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("notes")), 0), Gate::Go);
+    assert_eq!(share.gate(act(Some("safari")), 1), Gate::Go);
+    assert!(share.lapse(2, |app| app == "safari"));
+    assert_eq!(share.targets().collect::<Vec<_>>(), ["notes"]);
+    assert_eq!(
+        share.target(),
+        Some("notes"),
+        "the band leads with what is left"
+    );
+}
+
+#[test]
+fn every_act_keeps_its_app_in_use_and_so_does_a_request_under_way() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("notes")), 0), Gate::Go);
+    assert_eq!(share.gate(act(Some("notes")), 50_000), Gate::Go);
+    assert!(!share.lapse(100_000, all_run), "acted in 50 s ago");
+    share.used("notes", 105_000);
+    assert!(
+        !share.lapse(160_000, all_run),
+        "a request reached it 55 s ago"
+    );
+    assert!(share.lapse(165_000, all_run));
+    share.used("notes", 170_000);
+    assert_eq!(
+        share.targets().count(),
+        0,
+        "a step under way puts nothing back"
+    );
+}
+
+#[test]
+fn the_band_leads_with_the_app_used_last_of_those_still_in_use() {
+    let mut share = Share::default();
+    for (app, at) in [("mail", 0), ("notes", 10_000), ("safari", 20_000)] {
+        assert_eq!(share.gate(act(Some(app)), at), Gate::Go);
+    }
+    assert_eq!(share.target(), Some("safari"));
+    assert!(share.lapse(20_001, |app| app == "safari"));
+    assert_eq!(share.target(), Some("notes"));
+    assert!(
+        share.lapse(SHARE_USE_LAPSES_MS, all_run),
+        "mail's minute is up"
+    );
+    assert_eq!(share.targets().collect::<Vec<_>>(), ["notes"]);
+}
+
+/// A lapse is no answer of the person's: a use that comes back asks nothing,
+/// and what they ended or refused stays ended or refused.
+#[test]
+fn what_the_person_said_of_an_app_stands_when_its_use_lapses() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("notes")), 0), Gate::Go);
+    assert!(share.lapse(SHARE_USE_LAPSES_MS, all_run));
+    assert_eq!(
+        share.gate(act(Some("notes")), SHARE_USE_LAPSES_MS),
+        Gate::Go
+    );
+    assert_eq!(share.target(), Some("notes"), "it joined again, unasked");
+
+    let generation = share.generation();
+    assert!(share.end("notes", generation));
+    assert!(!share.lapse(10 * SHARE_USE_LAPSES_MS, all_run));
+    assert_eq!(
+        share.gate(act(Some("notes")), 10 * SHARE_USE_LAPSES_MS),
+        Gate::Ask("notes".into()),
+        "what the person ended still asks"
+    );
+    share.answered("notes", Answer::Declined, 10 * SHARE_USE_LAPSES_MS);
+    assert!(!share.lapse(20 * SHARE_USE_LAPSES_MS, all_run));
+    assert_eq!(
+        code(share.gate(act(Some("notes")), 20 * SHARE_USE_LAPSES_MS)).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "what the person refused stays refused"
+    );
+}
+
+/// What the person took is theirs to hand back: nothing leaves under their hand,
+/// not an app that quit either.
+#[test]
+fn nothing_leaves_while_the_person_holds_control() {
+    let mut share = Share::default();
+    assert_eq!(share.gate(act(Some("notes")), 0), Gate::Go);
+    share.take_back();
+    assert!(!share.may_lapse());
+    assert!(!share.lapse(10 * SHARE_USE_LAPSES_MS, |_| true));
+    assert_eq!(share.target(), Some("notes"));
+    assert!(share.taken_back());
+    share.give_back();
+    assert!(share.may_lapse());
+    assert!(share.lapse(10 * SHARE_USE_LAPSES_MS, all_run));
+    assert_eq!(share.target(), None);
+    assert!(!share.may_lapse(), "nothing in use, nothing waiting");
+}
+
+/// Where the person requires sharing, a hand-over let go for a quiet minute
+/// would let an agent look at every other window again mid-task: only an app
+/// that is gone leaves, and the person's yes stands for when it is back.
+#[test]
+fn required_a_hand_over_stands_through_a_quiet_minute_and_goes_with_its_app() {
+    let mut share = Share::default();
+    share.set_required(true);
+    share.answered("notes", Answer::Shared, 0);
+    assert!(!share.lapse(10 * SHARE_USE_LAPSES_MS, all_run));
+    assert_eq!(share.target(), Some("notes"));
+    assert_eq!(
+        code(share.gate(look(Some("safari")), 10 * SHARE_USE_LAPSES_MS)).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "a look outside what was handed over is still refused"
+    );
+    assert!(share.lapse(10 * SHARE_USE_LAPSES_MS, |app| app == "notes"));
+    assert_eq!(share.target(), None);
+    assert_eq!(
+        share.gate(act(Some("notes")), 10 * SHARE_USE_LAPSES_MS),
+        Gate::Go,
+        "the person said yes to it: no second card when it runs again"
+    );
+    assert_eq!(share.target(), Some("notes"));
+}
+
+/// The band says an agent waits for an app only while one asks for it.
+#[test]
+fn required_the_app_that_waits_stops_waiting_once_nothing_asks_for_it() {
+    let mut share = Share::default();
+    share.set_required(true);
+    assert_eq!(share.gate(act(Some("notes")), 0), Gate::Ask("notes".into()));
+    share.answered("notes", Answer::Silent, 0);
+    assert_eq!(share.waiting(), Some("notes"));
+    assert!(share.may_lapse());
+    // A retry inside the quiet is refused with no card, and says it is still wanted.
+    assert_eq!(
+        code(share.gate(act(Some("notes")), 100_000)).as_deref(),
+        Some(error_code::SHARE_REQUIRED)
+    );
+    assert!(
+        !share.lapse(SHARE_ASK_AGAIN_MS, all_run),
+        "asked for 20 s ago"
+    );
+    assert_eq!(share.waiting(), Some("notes"));
+    assert!(share.lapse(100_000 + SHARE_ASK_AGAIN_MS, all_run));
+    assert_eq!(share.waiting(), None);
+    assert_eq!(
+        share.gate(act(Some("notes")), 100_000 + SHARE_ASK_AGAIN_MS),
+        Gate::Ask("notes".into()),
+        "the next act asks the person again"
+    );
+}

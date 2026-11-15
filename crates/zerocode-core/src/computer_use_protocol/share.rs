@@ -13,6 +13,14 @@
 //! asks them with a card, and silence keeps it refused. "Take control" refuses
 //! every act until the person hands it back.
 //!
+//! A use ends by itself too ([`Share::lapse`]): an app that no longer runs, or
+//! that nothing has reached for a minute, leaves the ones in use and the band
+//! lets it go with no press (the person, 2026-11-15: "표시가 끝나면 자동
+//! 종료되게.. 내가 누르지 않아도 끊기거나 종료되면"). That is no answer of the
+//! person's: what they said of the app stands, and the app joins again at its
+//! next act. What the person took is not let go for them, and where they
+//! require sharing a hand-over stands for as long as its app runs.
+//!
 //! When the person requires sharing (their setting, off by default) the old rule
 //! stands: nothing acts in an app they have not handed over, an unnamed act is
 //! refused, silence is no lasting no (t-74826) but makes the app wait, and while
@@ -34,6 +42,14 @@ pub const SHARE_ASK_MS: u64 = 30_000;
 /// band offers the hand-over the whole time, so a person who comes back
 /// never waits for a card.
 pub const SHARE_ASK_AGAIN_MS: u64 = 120_000;
+
+/// How long an app stays one of those in use after the last request that
+/// reached it; past it the use is over and the app leaves by itself. Longer
+/// than a model's turn between two acts of one task (8 to 17 s a round trip,
+/// and 31 to 68 s from a prompt to the first act, measured 2026-11-15 over six
+/// CLI and model pairs), so an app seldom leaves and comes back mid-task; one
+/// that does joins again at once.
+pub const SHARE_USE_LAPSES_MS: u64 = 60_000;
 
 /// What the person said when asked about an app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +116,11 @@ pub struct Share {
     silent_at: BTreeMap<String, u64>,
     /// The app whose card went unanswered last, while no answer replaced it.
     waiting: Option<String>,
+    /// When a request last asked for the app that waits (ms).
+    waiting_asked_at: u64,
+    /// When each app in use was last reached (ms). One with no record yet is
+    /// counted from the look that first finds it ([`Self::lapse`]).
+    used_at: BTreeMap<String, u64>,
     taken_back: bool,
     generation: u64,
 }
@@ -145,10 +166,76 @@ impl Share {
             }
             self.answers.insert(ended, Standing::Ended);
         }
+        self.used_at.clear();
         self.latest = None;
         self.taken_back = false;
         self.generation += 1;
         true
+    }
+
+    /// The apps whose use is over leave the ones in use, by themselves: an app
+    /// that `gone` says no longer runs, and an app nothing has reached for
+    /// [`SHARE_USE_LAPSES_MS`]. What the person said of each stands — a yes, a
+    /// no, an end — so a use that comes back asks nothing new, and nothing they
+    /// refused returns. The app that waits for the person stops waiting once no
+    /// request has asked for it through [`SHARE_ASK_AGAIN_MS`].
+    ///
+    /// Nothing leaves while the person holds control: what they took is theirs
+    /// to hand back. And where they require sharing, only an app that is gone
+    /// leaves: a hand-over let go for a quiet minute would open every other
+    /// window to an agent's look again in the middle of its work.
+    ///
+    /// Whether anything the band shows left.
+    pub fn lapse(&mut self, now_ms: u64, gone: impl Fn(&str) -> bool) -> bool {
+        if self.taken_back {
+            return false;
+        }
+        for app in &self.targets {
+            self.used_at.entry(app.clone()).or_insert(now_ms);
+        }
+        let in_use = self.targets.len();
+        let (used_at, quiet_ends_it) = (&self.used_at, !self.required);
+        self.targets.retain(|app| {
+            let quiet = used_at
+                .get(app)
+                .is_none_or(|at| now_ms >= at.saturating_add(SHARE_USE_LAPSES_MS));
+            !gone(app) && !(quiet_ends_it && quiet)
+        });
+        let mut left = self.targets.len() != in_use;
+        let targets = &self.targets;
+        self.used_at.retain(|app, _| targets.contains(app));
+        if self
+            .latest
+            .as_ref()
+            .is_some_and(|app| !self.targets.contains(app))
+        {
+            // The band leads with the one used last of those still in use.
+            self.latest = self
+                .used_at
+                .iter()
+                .max_by_key(|(_, at)| **at)
+                .map(|(app, _)| app.clone());
+        }
+        if self.waiting.is_some()
+            && now_ms >= self.waiting_asked_at.saturating_add(SHARE_ASK_AGAIN_MS)
+        {
+            self.waiting = None;
+            left |= self.required;
+        }
+        left
+    }
+
+    /// Whether anything stands that [`Self::lapse`] could let go.
+    #[must_use]
+    pub fn may_lapse(&self) -> bool {
+        !self.taken_back && (!self.targets.is_empty() || self.waiting.is_some())
+    }
+
+    /// A request under way reached `app` again at `now_ms`: its use goes on.
+    pub fn used(&mut self, app: &str, now_ms: u64) {
+        if let Some(at) = self.used_at.get_mut(app) {
+            *at = now_ms;
+        }
     }
 
     /// Whether an act must wait for an explicit share (off by default).
@@ -226,19 +313,30 @@ impl Share {
     /// What `reach` may do now, at `now_ms` on the window's clock. An app that
     /// may be acted in joins the ones in use.
     pub fn gate(&mut self, reach: Reach<'_>, now_ms: u64) -> Gate {
-        match self.judge(reach, now_ms) {
+        let judged = self.judge(reach, now_ms);
+        // A request for the app that waits says an agent still wants it.
+        if reach.app.is_some()
+            && self.waiting.as_deref() == reach.app
+            && matches!(judged, Judged::Ask(_) | Judged::Refuse(_))
+        {
+            self.waiting_asked_at = now_ms;
+        }
+        match judged {
             Judged::Go => {
-                if reach.acts
-                    && let Some(app) = reach.app
+                if let Some(app) = reach.app
                     && self.targets.contains(app)
                 {
-                    self.latest = Some(app.to_string());
-                    self.panel_follows(app, now_ms);
+                    self.used_at.insert(app.to_string(), now_ms);
+                    if reach.acts {
+                        self.latest = Some(app.to_string());
+                        self.panel_follows(app, now_ms);
+                    }
                 }
                 Gate::Go
             }
             Judged::ShareAgain(app) => {
                 self.targets.insert(app.clone());
+                self.used_at.insert(app.clone(), now_ms);
                 self.panel_follows(&app, now_ms);
                 self.latest = Some(app);
                 Gate::Go
@@ -367,6 +465,7 @@ impl Share {
                 .insert(app.to_string(), Standing::Answered(answer));
             self.silent_at.insert(app.to_string(), now_ms);
             self.waiting = Some(app.to_string());
+            self.waiting_asked_at = now_ms;
             return;
         }
         self.settle(app, answer);
