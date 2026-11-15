@@ -2279,6 +2279,48 @@ async function testTheBandsPlace(browser, origin, ok) {
       JSON.stringify({ keys, stopped }),
     );
 
+    // The window's focus ring draws on a band button the keyboard holds.
+    const ring = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:activity", hands.operatorReport({ revision: 3, active: true, stopped: null }));
+      await hands.settle();
+      const take = document.getElementById("computer-band-take");
+      take.focus();
+      await new Promise((done) => hands.census.native.setTimeout(done, 300));
+      const ringWidth = getComputedStyle(document.documentElement).getPropertyValue("--ring-width").trim();
+      return { visible: take.matches(":focus-visible"), shadow: getComputedStyle(take).boxShadow, ringWidth };
+    });
+    ok(
+      "a band button the keyboard holds wears the window's focus ring",
+      ring.visible === true && Boolean(ring.ringWidth) && ring.shadow.includes(ring.ringWidth),
+      JSON.stringify(ring),
+    );
+
+    // A press with the pointer acts and leaves the keyboard where the person
+    // types; a band that goes lets go of a keyboard left on its buttons.
+    await page.evaluate(() => {
+      window.__COMPUTER_HANDS__.recordCommand("computer_take_control", () => null);
+      document.getElementById("key-sink").focus();
+    });
+    await page.click("#computer-band-take");
+    const pressed = await page.evaluate(async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      await hands.settle();
+      const kept = document.activeElement?.id ?? null;
+      const taken = window.__COUNTS__.computer_take_control ?? 0;
+      document.getElementById("computer-band-end").focus();
+      hands.announce("computer:share-state", { target: null, takenBack: false, generation: 9, revision: 9 });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 4, active: false, stopped: null }));
+      await hands.settle();
+      const band = document.getElementById("computer-band");
+      return { kept, taken, bandShown: !band.hidden, heldByBand: band.contains(document.activeElement) };
+    });
+    ok(
+      "a pointer press on the band acts without taking the keyboard from the terminal, and a band that goes lets go of the keyboard",
+      pressed.kept === "key-sink" && pressed.taken >= 1 && pressed.bandShown === false && pressed.heldByBand === false,
+      JSON.stringify(pressed),
+    );
+
     const ink = await evaluateCase(page, async () => {
       const hands = window.__COMPUTER_HANDS__;
       // A paint as the eye gets it: laid over the ground it stands on.
@@ -2327,6 +2369,36 @@ async function testTheBandsPlace(browser, origin, ok) {
     );
     ok("the band's keys and ink scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
   } finally { await page.close(); }
+
+  // At 320px wide the band wraps upward and every button stays on screen,
+  // apart from the others, and takes its own press.
+  const narrow = await openComputerPage(browser, origin);
+  try {
+    await narrow.page.setViewportSize({ width: 320, height: 640 });
+    const seen = await evaluateCase(narrow.page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.announce("computer:share-state", { target: "safari", label: "Safari", takenBack: false, generation: 1, revision: 1 });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 1, active: true, actions: 12 }));
+      await hands.settle();
+      const buttons = [...document.querySelectorAll("#computer-band button")].filter((one) => !one.hidden);
+      const boxes = buttons.map((one) => one.getBoundingClientRect());
+      const inside = boxes.every((box) => box.left >= 0 && box.top >= 0 &&
+        box.right <= window.innerWidth + 0.5 && box.bottom <= window.innerHeight + 0.5);
+      const apart = boxes.every((one, at) => boxes.every((two, other) => other === at ||
+        one.right <= two.left || two.right <= one.left || one.bottom <= two.top || two.bottom <= one.top));
+      const own = (id) => {
+        const box = document.getElementById(id).getBoundingClientRect();
+        return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest("button")?.id === id;
+      };
+      return { buttons: buttons.length, inside, apart, stop: own("computer-band-stop"), take: own("computer-band-take") };
+    });
+    ok(
+      "on a 320px wide window the band's buttons stay on screen, apart, and the stop and take-back take their own press",
+      seen.buttons >= 3 && seen.inside === true && seen.apart === true && seen.stop === true && seen.take === true,
+      JSON.stringify(seen),
+    );
+    ok("the narrow band scenario raised no renderer errors", narrow.faults.length === 0, narrow.faults.join("\n"));
+  } finally { await narrow.page.close(); }
 }
 
 export async function testComputerProgress(browser, origin, ok) {

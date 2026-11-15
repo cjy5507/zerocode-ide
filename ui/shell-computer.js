@@ -158,7 +158,18 @@ function paintComputerBand() {
 function forgetComputerBandSession() {
   computerBandLook = null;
   if (computerProgress) closeComputerProgress();
+  // A keyboard left on a band button that just went is let go, so the next
+  // key reaches the terminal rather than a button nobody sees.
+  if (el("computer-band").contains(document.activeElement)) document.activeElement.blur();
 }
+
+/* A band button pressed with the pointer acts without taking the keyboard: a
+ * person typing in a pane who presses the stop keeps typing there. The
+ * keyboard reaches the buttons with Tab, and the dock owns the keys of a
+ * button it holds (`data-keyboard-owner`). */
+el("computer-band").addEventListener("mousedown", (event) => {
+  if (event.target.closest("button")) event.preventDefault();
+});
 
 /* The share's part of the band: which window an agent works in, the press
  * that takes it back, and — once taken — the press that hands it back; and

@@ -61927,7 +61927,6 @@ button.jev-token:hover {
   border: 0;
   border-radius: var(--radius-md);
   background: var(--surface-deck);
-  box-shadow: var(--shadow-border);
   color: var(--ink-chalk);
   font: var(--type-label-12);
   font-weight: 500;
@@ -61935,11 +61934,16 @@ button.jev-token:hover {
     box-shadow var(--motion-fast) var(--ease-standard);
 }
 
+/* The edge is drawn at no weight (`:where`), so the window's own focus ring
+ * (`:focus-visible`) still draws over it. */
+:where(.computer-band > .btn, .computer-progress-head > .btn, .computer-progress-browser-go) {
+  box-shadow: var(--shadow-border);
+}
+
 .computer-band > .btn:hover:enabled,
 .computer-progress-head > .btn:hover:enabled,
 .computer-progress-browser-go:hover:enabled {
   background: var(--row-hover);
-  box-shadow: 0 0 0 var(--rule-width) var(--ink-mist);
 }
 
 /* The stop says what it is in a word and a square, and wears the halt ink. */
@@ -61964,7 +61968,7 @@ button.jev-token:hover {
 .computer-band-share,
 .computer-band-wait {
   padding-left: var(--space-2);
-  box-shadow: inset var(--rule-width) 0 0 var(--edge-rule);
+  box-shadow: inset var(--rule-width) 0 0 var(--edge-mark);
 }
 
 /* Where an agent pressed in ZeroCode's own window (t-73906): a dashed ring for
