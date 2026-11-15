@@ -16735,8 +16735,11 @@ function paintFloatTrigger(preview = null) {
     neighbour.setProperty("--float-trigger-top", `${spot.top}px`);
     neighbour.setProperty("--float-trigger-size", `${FLOAT_TRIGGER_SIZE}px`);
   }
-  const nearest = floatTriggerAnchor(spot).anchorX;
+  const { anchorX: nearest, anchorY: edge } = floatTriggerAnchor(spot);
   if (document.body.dataset.floatAnchorX !== nearest) document.body.dataset.floatAnchorX = nearest;
+  // Which edge holds it, so a door kept at the foot rises with the line the
+  // status bar grows for the Computer Use band (shell.css).
+  if (document.body.dataset.floatAnchorY !== edge) document.body.dataset.floatAnchorY = edge;
   return spot;
 }
 

@@ -113,9 +113,11 @@ function paintComputerBand() {
   const kept = reach?.kept ?? 0;
   if (kept > computerBandKept) computerBandSlipAway();
   computerBandKept = kept;
-  // A window taken back holds the band only while there is a window: a share
-  // word with none has nothing to give back or end.
-  const shared = computerShareState.target != null || computerShareState.waiting != null;
+  // A window taken back holds the band, window or none (2026-11-16, t-110042):
+  // the backend refuses every action while the person holds control, so the
+  // band's give-back is their one way to lift it.
+  const shared = computerShareState.target != null || computerShareState.takenBack ||
+    computerShareState.waiting != null;
   const show = stopped || state.active || state.stopping || state.resuming || kept > 0 || shared;
   const wasShown = !band.hidden;
   band.hidden = !show;
@@ -183,7 +185,10 @@ el("computer-band").addEventListener("mousedown", (event) => {
  * band goes, so a band that widens and narrows as the share comes and goes
  * does not resize the panes back and forth. The work screen panel above the
  * band is moved back inside the window when the band stands near an edge.
- * `computerBandRaised` (with the band's other state above) holds the grown
+ * What else stands at the window's foot keeps clear of the band (2026-11-16):
+ * the corner card, the toasts, the floating doors and the SFTP manager rise
+ * by the grown line, and every scrim's dialog keeps its edge above the band's
+ * top. `computerBandRaised` (with the band's other state above) holds the grown
  * bar for the band's life. */
 
 function placeComputerBand() {
@@ -205,19 +210,26 @@ function placeComputerBand() {
     computerBandRaised = false;
     place("row");
     write("--computer-band-room", null);
+    write("--computer-band-clear", null);
     write("--computer-dock-x", null);
     write("--computer-panel-shift", null);
     return;
   }
+  // A surface that draws no status bar (the board pop-out) has no row to
+  // stand in: the band takes its own line at the window's foot, which the
+  // surface gives it the way the main window's bar grows one.
+  const drawn = spacer.getClientRects().length > 0;
   const free = spacer.getBoundingClientRect();
   const tokens = getComputedStyle(document.documentElement);
   const line = parseFloat(tokens.getPropertyValue("--statusbar-height")) || 0;
+  const step = parseFloat(tokens.getPropertyValue("--space-2")) || 0;
   const box = band.getBoundingClientRect();
-  if (!computerBandRaised && (box.width > free.width || box.height > line + 0.5)) computerBandRaised = true;
+  const room = Math.ceil(box.height);
+  if (!computerBandRaised && (!drawn || box.width > free.width || box.height > line + 0.5)) computerBandRaised = true;
   let middle = window.innerWidth / 2;
   if (computerBandRaised) {
     place("raised");
-    write("--computer-band-room", Math.ceil(box.height));
+    write("--computer-band-room", room);
     write("--computer-dock-x", null);
   } else {
     place("row");
@@ -225,6 +237,11 @@ function placeComputerBand() {
     middle = Math.round(free.left + free.width / 2);
     write("--computer-dock-x", middle);
   }
+  // How far from the window's foot an overlay keeps its content to clear the
+  // band, which is drawn over every scrim so its stop stays in reach: the
+  // band's own top and a step. A dialog's edge never comes lower (shell.css
+  // `.scrim`); what stands at the foot rises by `--computer-band-room` instead.
+  write("--computer-band-clear", room + (computerBandRaised && drawn ? line : 0) + step);
   const panel = el("computer-progress");
   const reach = panel.hidden ? null : panel.getBoundingClientRect().width / 2;
   const margin = parseFloat(tokens.getPropertyValue("--space-3")) || 0;
@@ -259,7 +276,7 @@ function paintComputerShare() {
   if (!words) line.textContent = "";
   line.hidden = !words;
   el("computer-band-take").hidden = share.target == null || share.takenBack;
-  el("computer-band-give").hidden = share.target == null || !share.takenBack;
+  el("computer-band-give").hidden = !share.takenBack;
   el("computer-band-end").hidden = share.target == null;
   const waiting = share.waitingLabel ?? share.waiting;
   const wait = el("computer-band-wait");

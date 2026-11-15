@@ -22291,6 +22291,12 @@ button.helper-sib:hover {
    * against. Without it a tall dialog is measured against the full height and
    * still runs off the bottom. */
   padding: 4vh;
+  /* While the Computer Use band stands at the window's foot (over the scrim,
+   * so its stop stays in reach), the dialog keeps clear of it: the bottom edge
+   * is at least `--computer-band-clear`, the band's reach from the foot and a
+   * step (shell-computer.js `placeComputerBand`). Every scrim below that sets
+   * its own edge keeps the same floor. */
+  padding-bottom: max(4vh, var(--computer-band-clear, 0px));
 }
 
 /* Quick open sits high like a launcher, not centred like a decision. Orca's
@@ -22299,7 +22305,7 @@ button.helper-sib:hover {
 .scrim--top {
   place-items: start center;
   padding-top: var(--palette-drop);
-  padding-bottom: 6vh;
+  padding-bottom: max(6vh, var(--computer-band-clear, 0px));
 }
 
 /* The peek is centred, and its margin is 20px rather than the dialog scrim's
@@ -22310,6 +22316,7 @@ button.helper-sib:hover {
 .scrim--peek {
   place-items: center;
   padding: 20px;
+  padding-bottom: max(20px, var(--computer-band-clear, 0px));
 }
 
 /* The finder is WIDER than a dialog — see `--palette-width` for why the
@@ -24347,6 +24354,7 @@ button.integration-context-action:hover {
 .detail-card-scrim {
   place-items: center;
   padding: var(--space-6);
+  padding-bottom: max(var(--space-6), var(--computer-band-clear, 0px));
 }
 
 /* 720px은 기존 항목 상세가 읽기 좋은 본문 폭과 84vh 상한에서 이미 쓰던
@@ -24603,6 +24611,7 @@ button.integration-context-action:hover {
 @media (max-width: 720px) {
   .detail-card-scrim {
     padding: var(--space-3);
+    padding-bottom: max(var(--space-3), var(--computer-band-clear, 0px));
   }
 
   .detail-card {
@@ -32618,13 +32627,15 @@ select {
  * in the window or on the desktop, so it must not stand over it: no backdrop,
  * the corner instead of the middle, and only the card itself takes the pointer.
  * It rests on the toast lift, not on the window's edge, so the status bar's
- * right end (usage gauges, model) stays readable. The toasts already step to
- * the other corner while any scrim stands. */
+ * right end (usage gauges, model) stays readable — and rises with the line the
+ * bar grows for the Computer Use band, so the band (drawn over every scrim)
+ * covers none of it (2026-11-16). The toasts already step to the other corner
+ * while any scrim stands. */
 #ask-scrim[data-docked] {
   background: transparent;
   pointer-events: none;
   place-items: end end;
-  padding: var(--space-4) var(--space-4) var(--toast-lift);
+  padding: var(--space-4) var(--space-4) calc(var(--toast-lift) + var(--computer-band-room, 0px));
 }
 
 #ask-scrim[data-docked] > .permission {
@@ -33467,11 +33478,12 @@ select {
  *
  * `pointer-events: none` on the layer and `auto` on the notes: the column is
  * as tall as the window and must not swallow clicks meant for the stage
- * underneath it. */
+ * underneath it. The lift grows with the line the status bar grows for the
+ * Computer Use band, so the band covers no toast (2026-11-16). */
 .toasts {
   position: fixed;
   right: var(--space-4);
-  bottom: var(--toast-lift);
+  bottom: calc(var(--toast-lift) + var(--computer-band-room, 0px));
   z-index: 55;
   display: flex;
   flex-direction: column;
@@ -46827,10 +46839,16 @@ button.board-build-failure-part:focus-visible {
 :root[data-surface="popout"] body {
   /* The titlebar and the status bar are the main window's chrome; this window
    * wears the operating system's own frame instead (there is no close button
-   * inside it, and the OS frame is the only way out). With no bar, what stands
-   * under the bar (the Computer Use dock) stands at the top. */
+   * inside it, and the OS frame is the only way out). With no bar, the
+   * Computer Use band stands at the window's own foot, on a line the board
+   * gives it (`--computer-band-room`, shell-computer.js `placeComputerBand`) —
+   * the line the main window's bar grows for it — so it covers no card. */
   --titlebar-height: 0px;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) var(--computer-band-room, 0px);
+}
+
+:root[data-surface="popout"] .computer-dock[data-place="raised"] {
+  bottom: 0;
 }
 
 :root[data-surface="popout"] .titlebar,
@@ -47882,6 +47900,7 @@ button.board-build-failure-part:focus-visible {
 .scrim--onboard {
   z-index: 32;
   padding: var(--space-4);
+  padding-bottom: max(var(--space-4), var(--computer-band-clear, 0px));
 }
 
 .onboard {
@@ -55205,6 +55224,7 @@ h4.knowledge-inspector-head::after {
 .jev-custom-scrim {
   place-items: center;
   padding: var(--space-4);
+  padding-bottom: max(var(--space-4), var(--computer-band-clear, 0px));
 }
 
 .jev-custom-drawer {
@@ -62119,7 +62139,9 @@ button.jev-token:hover {
 /* SFTP file manager: native file work on the same neutral surfaces as the editor. */
 .sftp-manager {
   position: fixed;
-  inset: var(--titlebar-height) var(--space-3) var(--space-6);
+  /* Its foot rises with the line the status bar grows for the Computer Use
+   * band, as the bar's own popovers do. */
+  inset: var(--titlebar-height) var(--space-3) calc(var(--space-6) + var(--computer-band-room, 0px));
   z-index: var(--sftp-layer);
   display: flex;
   flex-direction: column;
@@ -62193,8 +62215,11 @@ button.jev-token:hover {
 /* Beside the floating-workspace door, on its inner side, at its height — the two doors read as one corner. */
 .sftp-launcher { position: fixed; left: var(--float-trigger-left); top: var(--float-trigger-top); height: var(--float-trigger-size); transform: translateX(calc(-100% - var(--space-2))); z-index: 19; }
 body[data-float-anchor-x="left"] .sftp-launcher { transform: translateX(calc(var(--float-trigger-size) + var(--space-2))); }
+/* The two doors kept at the window's foot rise with the line the status bar grows for the Computer Use band, so the
+ * band (drawn over them) covers neither (2026-11-16). A door kept at the top stays where it is. */
+body[data-float-anchor-y="bottom"] :is(.float-toggle, .sftp-launcher) { translate: 0 calc(-1 * var(--computer-band-room, 0px)); }
 .sftp-parent .sftp-file-name { cursor: pointer; color: var(--ink-mist); }
-.sftp-dialog-scrim { position: fixed; inset: 0; z-index: var(--sftp-dialog-layer); display: grid; place-items: center; background: var(--scrim); }
+.sftp-dialog-scrim { position: fixed; inset: 0; z-index: var(--sftp-dialog-layer); display: grid; place-items: center; padding-bottom: var(--computer-band-clear, 0px); background: var(--scrim); }
 .sftp-dialog, .sftp-editor { border: var(--rule-width) solid var(--edge-rule); border-radius: var(--radius-md); background: var(--surface-abyss); color: var(--ink-chalk); box-shadow: var(--shadow-float); }
 .sftp-dialog { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-5); width: var(--dialog-width); }
 .sftp-dialog h3, .sftp-dialog > input { width: 100%; }
