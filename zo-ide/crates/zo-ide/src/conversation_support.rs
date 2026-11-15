@@ -129,8 +129,8 @@ pub(crate) fn queue_unknown_rule_warnings(
 static WARNED_LOCAL_SETTINGS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// Queue a start-up warning when the workspace's `.zo/settings.local.json`
-/// said something that went unused because no git repository governs the
-/// folder (152), once in this process.
+/// said something that went unused because zo did not write that file as it
+/// stands (153), once in this process.
 pub(crate) fn queue_unowned_local_settings_warning(feature_config: &runtime::RuntimeFeatureConfig) {
     let Some(line) = unowned_local_settings_warning(feature_config.unowned_local_settings()) else {
         return;
@@ -153,7 +153,7 @@ fn unowned_local_settings_warning(unused: &[&str]) -> Option<String> {
         return None;
     }
     Some(format!(
-        "zo did not use {} from .zo/settings.local.json: this folder is in no git repository, so zo cannot tell that you wrote that file (a downloaded folder can bring one). \"Always allow\" here lasts for this session only. If you wrote the file, read it over: in a git repository, zo reads a local file git does not track as yours.",
+        "zo did not use {} from .zo/settings.local.json: zo did not write that file as it stands (it came with this folder, or it changed since zo wrote it). If it is yours, read it over, then run `zo settings trust-local` in your own terminal.",
         unused.join(", ")
     ))
 }
@@ -911,9 +911,8 @@ mod unowned_local_settings_warning_tests {
         assert_eq!(unowned_local_settings_warning(&[]), None);
     }
 
-    /// The line names what went unused by the loader's words, says why, says
-    /// that "always allow" lasts for the session there, and tells a person
-    /// who wrote the file what to do (152).
+    /// The line names what went unused by the loader's words, says why, and
+    /// sends a person who wrote the file to their own terminal (153).
     #[test]
     fn the_line_names_what_went_unused_why_and_what_a_person_can_do() {
         let line = unowned_local_settings_warning(&["hooks", "permissions.allow"]).expect("a line");
@@ -922,19 +921,19 @@ mod unowned_local_settings_warning_tests {
             "{line}"
         );
         for said in [
-            "in no git repository",
-            "\"Always allow\" here lasts for this session only.",
-            "in a git repository, zo reads a local file git does not track as yours",
+            "zo did not write that file as it stands",
+            "run `zo settings trust-local` in your own terminal",
         ] {
             assert!(line.contains(said), "{said:?} is missing from: {line}");
         }
+        assert!(!line.contains("git"), "git is no longer the reason: {line}");
     }
 
-    /// From the loader to the line: a folder no git repository governs whose
-    /// local file carries a hook is warned of by that name.
+    /// From the loader to the line: a folder whose local file zo did not write
+    /// and which carries a hook is warned of by that name.
     #[test]
     #[cfg_attr(windows, ignore = "a folder's local file is never the person's on Windows, so the loader names nothing there")]
-    fn a_hook_in_the_local_file_of_a_folder_without_git_is_named() {
+    fn a_hook_in_a_local_file_zo_did_not_write_is_named() {
         let root = tempfile::tempdir().expect("a scratch folder");
         let home = root.path().join("home");
         let cwd = root.path().join("work");

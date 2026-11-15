@@ -630,7 +630,7 @@ fn add(
 ) -> Result<Report, String> {
     let config = server_from_spec(name, spec)?;
     let path = scope_path(request, loader);
-    let edit = runtime::write_mcp_server(&path, name, &config)
+    let edit = runtime::write_mcp_server(loader.config_home(), &path, name, &config)
         .map_err(|error| format!("{name} could not be written: {error}"))?;
     // Consent is its own act, and its own document. A project settings file is
     // carried by the repository to everyone who clones it, so the name reaches
@@ -678,7 +678,7 @@ fn add(
 /// which is the file the repository carries.
 fn trust(loader: &ConfigLoader, name: &str) -> Result<(PathBuf, McpEdit), String> {
     let path = loader.trusted_mcp_servers_path();
-    let edit = runtime::trust_mcp_server(&path, name)
+    let edit = runtime::trust_mcp_server(loader.config_home(), &path, name)
         .map_err(|error| format!("{name} could not be trusted: {error}"))?;
     Ok((path, edit))
 }
@@ -686,8 +686,8 @@ fn trust(loader: &ConfigLoader, name: &str) -> Result<(PathBuf, McpEdit), String
 /// The line a project `add` ends on while the server still will not load.
 /// Without consent the fix is the flag. With it the record exists and the gate
 /// did not believe it, which is a different sentence and a different fix — the
-/// record authorizes only as the operator's own uncommitted file, so that a
-/// repository cannot ship consent to run its own MCP command.
+/// record authorizes only while its bytes are what zo wrote there (153), so
+/// that a repository cannot ship consent to run its own MCP command.
 fn still_gated(document: &Path, record: Option<&Path>) -> String {
     match record {
         None => format!(
@@ -695,7 +695,7 @@ fn still_gated(document: &Path, record: Option<&Path>) -> String {
             gate_reason(Some(document))
         ),
         Some(record) => format!(
-            "it still will not load: {} counts only as your own uncommitted file in a git repository — a git-tracked or symlinked one, a nested .zo repository, or one in a folder with no git fails closed",
+            "it still will not load: {} counts only while it is what zo wrote there — one this folder came with, one changed since, or a link fails closed (run `zo settings trust-local` in your own terminal if it is yours)",
             record.display()
         ),
     }
@@ -703,7 +703,7 @@ fn still_gated(document: &Path, record: Option<&Path>) -> String {
 
 fn remove(request: &Request, loader: &ConfigLoader, name: &str) -> Result<Report, String> {
     let path = scope_path(request, loader);
-    let edit = runtime::remove_mcp_server(&path, name)
+    let edit = runtime::remove_mcp_server(loader.config_home(), &path, name)
         .map_err(|error| format!("{name} could not be removed: {error}"))?;
     let refusal = || format!("no MCP server named '{name}' in {}", path.display());
     if edit == McpEdit::Absent && !request.project {
@@ -751,7 +751,7 @@ fn remove(request: &Request, loader: &ConfigLoader, name: &str) -> Result<Report
 /// Take the name out of the gate's own document — the inverse of [`trust`].
 fn untrust(loader: &ConfigLoader, name: &str) -> Result<(PathBuf, McpEdit), String> {
     let path = loader.trusted_mcp_servers_path();
-    let edit = runtime::untrust_mcp_server(&path, name)
+    let edit = runtime::untrust_mcp_server(loader.config_home(), &path, name)
         .map_err(|error| format!("its name could not be taken out of the trust record: {error}"))?;
     Ok((path, edit))
 }

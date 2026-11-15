@@ -26,17 +26,17 @@ fn temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("commands-plugin-{label}-{nanos}"))
 }
 
-/// Make `workspace` the person's project as zo tells one: a git repository
-/// that does not track the `.zo` files kept there. In a folder no repository
-/// governs, zo reads them as ones the folder came with.
-fn as_the_persons_repository(workspace: &Path) {
-    let status = std::process::Command::new("git")
-        .arg("init")
-        .arg("--quiet")
-        .arg(workspace)
-        .status()
-        .expect("git runs");
-    assert!(status.success(), "git init {}", workspace.display());
+/// Record `workspace`'s `.zo` control files, as they are now, as written by
+/// zo in the config home `config_home`: the person's own (153). Call it after
+/// the files are written.
+fn as_the_persons(workspace: &Path, config_home: &Path) {
+    for name in runtime::RECORDED_LOCAL_FILES {
+        let path = workspace.join(".zo").join(name);
+        if let Ok(bytes) = fs::read(&path) {
+            let real = path.canonicalize().expect("canonical path");
+            runtime::remember_local_file(config_home, &real, &bytes).expect("record");
+        }
+    }
 }
 
 fn write_external_plugin(root: &Path, name: &str, version: &str) {
@@ -1540,7 +1540,6 @@ fn mcp_auth_list_and_logout_render_against_config() {
     let config_home = temp_dir("mcp-auth-home");
     fs::create_dir_all(workspace.join(".zo")).expect("workspace config dir");
     fs::create_dir_all(&config_home).expect("config home");
-    as_the_persons_repository(&workspace);
     fs::write(
         workspace.join(".zo").join("settings.json"),
         r#"{
@@ -1562,6 +1561,7 @@ fn mcp_auth_list_and_logout_render_against_config() {
         r#"["stdioonly","remote"]"#,
     )
     .expect("trust project servers");
+    as_the_persons(&workspace, &config_home);
 
     std::env::set_var("ZO_CONFIG_HOME", &config_home);
 
@@ -1601,7 +1601,6 @@ fn renders_mcp_reports_from_loaded_config() {
     let config_home = temp_dir("mcp-config-home");
     fs::create_dir_all(workspace.join(".zo")).expect("workspace config dir");
     fs::create_dir_all(&config_home).expect("config home");
-    as_the_persons_repository(&workspace);
     fs::write(
         workspace.join(".zo").join("settings.json"),
         r#"{
@@ -1647,6 +1646,7 @@ fn renders_mcp_reports_from_loaded_config() {
         r#"["alpha","remote"]"#,
     )
     .expect("trust project servers");
+    as_the_persons(&workspace, &config_home);
 
     let loader = ConfigLoader::new(&workspace, &config_home);
     let list = crate::plugins_agents::render_mcp_report_for(&loader, &workspace, None)

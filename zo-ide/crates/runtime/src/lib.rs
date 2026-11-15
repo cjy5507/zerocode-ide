@@ -106,6 +106,7 @@ pub use bash::{
 };
 #[cfg(windows)]
 pub use bash::end_process_tree_command;
+pub use bash::TOOL_CHILD_ENV;
 pub use tool_cancel::{
     ToolCancelSignal, ToolCancelWatch, ToolDispatchOutcome, CANCELLED_TOOL_RESULT,
 };
@@ -163,6 +164,8 @@ pub use config::{
     write_mcp_server, mcp_literal_secrets, move_mcp_literal_to_reference,
     slot_holds_literal_secret, persons_own_literal_secrets, can_tell_persons_own_settings_file,
     McpLiteralSecret, persons_own_settings_secrets, PersonsOwnSettingsSecrets, SkippedSettingsFile,
+    forget_local_file, is_recorded_local_file_kind, local_file_recorded, remember_local_file,
+    LOCAL_RECORD_FILE, RECORDED_LOCAL_FILES,
 };
 pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{

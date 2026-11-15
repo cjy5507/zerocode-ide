@@ -1301,8 +1301,16 @@ fn orchestration_path() -> Option<&'static std::ffi::OsString> {
 /// stops Git Credential Manager from popping its own prompt. Legitimate
 /// non-interactive auth (token-in-URL, credential helper, ssh-agent) is
 /// untouched — only the dead-end interactive path is closed.
-const NONINTERACTIVE_ENV: &[(&str, &str)] =
-    &[("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")];
+const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
+    ("GIT_TERMINAL_PROMPT", "0"),
+    ("GCM_INTERACTIVE", "never"),
+    (TOOL_CHILD_ENV, "1"),
+];
+
+/// Set on every child of zo's shell tool: what runs there was started by a
+/// model, and `zo settings trust-local` refuses to record a folder's local
+/// settings as the person's from it (153).
+pub const TOOL_CHILD_ENV: &str = "ZO_TOOL_CHILD";
 
 /// Git environment variables that silently redirect *every* git invocation at a
 /// different repository. Stripped from every shell child so an inherited
@@ -1719,7 +1727,7 @@ mod tests {
 
     use super::{
         default_bash_timeout_ms, execute_bash, execute_bash_with_tasks, BashCommandInput,
-        DrainGate, DEFAULT_BASH_TIMEOUT_MS,
+        DrainGate, DEFAULT_BASH_TIMEOUT_MS, TOOL_CHILD_ENV,
     };
     use crate::sandbox::{FilesystemIsolationMode, SandboxStatus};
     use crate::task_registry::{TaskRegistry, TaskStatus};
@@ -2612,6 +2620,27 @@ mod tests {
             output.stdout, "0",
             "GIT_TERMINAL_PROMPT must be 0 so children never prompt on the terminal"
         );
+    }
+
+    /// What zo's shell tool runs carries `ZO_TOOL_CHILD`, so a command that
+    /// must come from the person (`zo settings trust-local`) can tell it was
+    /// started by a model (153).
+    #[test]
+    fn the_shell_tools_children_carry_zo_tool_child() {
+        let output = execute_bash(BashCommandInput {
+            command: format!("printf '%s' \"${TOOL_CHILD_ENV}\""),
+            timeout: Some(SPAWN_TEST_TIMEOUT_MS),
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(false),
+            namespace_restrictions: Some(false),
+            isolate_network: Some(false),
+            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+            allowed_mounts: None,
+            cwd: None,
+        })
+        .expect("bash command should execute");
+        assert_eq!(output.stdout, "1", "a child of the shell tool must carry {TOOL_CHILD_ENV}");
     }
 
     #[test]

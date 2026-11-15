@@ -1917,7 +1917,7 @@ impl PlainSession {
             .as_mut()
             .map(ConversationRuntime::take_granted_permission_rules)
             .unwrap_or_default();
-        let _ = runtime::persist_allow_always_rules(&self.cwd, &granted_rules);
+        let _ = runtime::persist_allow_always_rules(&runtime::default_config_home(), &self.cwd, &granted_rules);
 
         if let Some(runtime) = self.runtime.try_runtime_mut() {
             if let Err(error) = super::process_lifecycle::record_session_end(

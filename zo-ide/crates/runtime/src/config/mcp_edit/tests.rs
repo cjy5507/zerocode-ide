@@ -97,7 +97,7 @@ fn every_transport_survives_a_write_and_a_parse() {
     ];
     for (name, config) in &cases {
         assert_eq!(
-            write_mcp_server(&path, name, config).expect("write"),
+            write_mcp_server(&home_for(&path), &path, name, config).expect("write"),
             McpEdit::Added,
             "{name} was not added"
         );
@@ -127,9 +127,9 @@ fn every_transport_survives_a_write_and_a_parse() {
 fn a_stdio_server_is_written_without_a_transport_tag_and_a_remote_one_with_it() {
     let dir = tempfile::tempdir().expect("temporary settings dir");
     let path = dir.path().join("settings.json");
-    write_mcp_server(&path, "local", &stdio("npx", &[], &[])).expect("write stdio");
+    write_mcp_server(&home_for(&path), &path, "local", &stdio("npx", &[], &[])).expect("write stdio");
     write_mcp_server(
-        &path,
+        &home_for(&path), &path,
         "remote",
         &McpServerConfig::Sse(McpRemoteServerConfig {
             url: "https://example.test/sse".to_string(),
@@ -166,7 +166,7 @@ fn an_edit_keeps_every_other_key_in_the_document() {
         r#"{"model":"fable","smart":{"autoClassifier":"off"},"mcpServers":{"kept":{"command":"kept"}}}"#,
     )
     .expect("seed settings");
-    write_mcp_server(&path, "added", &http("https://example.test/mcp")).expect("write");
+    write_mcp_server(&home_for(&path), &path, "added", &http("https://example.test/mcp")).expect("write");
     let contents = std::fs::read_to_string(&path).expect("settings");
     let root = parse_json_object_contents(&path, &contents).expect("parse");
     assert_eq!(root["model"].as_str(), Some("fable"));
@@ -185,15 +185,15 @@ fn writing_the_same_definition_twice_reports_no_change_and_a_different_one_repla
     let path = dir.path().join("settings.json");
     let first = stdio("npx", &["one"], &[]);
     assert_eq!(
-        write_mcp_server(&path, "server", &first).expect("write"),
+        write_mcp_server(&home_for(&path), &path, "server", &first).expect("write"),
         McpEdit::Added
     );
     assert_eq!(
-        write_mcp_server(&path, "server", &first).expect("write"),
+        write_mcp_server(&home_for(&path), &path, "server", &first).expect("write"),
         McpEdit::Unchanged
     );
     assert_eq!(
-        write_mcp_server(&path, "server", &stdio("npx", &["two"], &[])).expect("write"),
+        write_mcp_server(&home_for(&path), &path, "server", &stdio("npx", &["two"], &[])).expect("write"),
         McpEdit::Replaced
     );
 }
@@ -203,16 +203,16 @@ fn removing_a_name_nobody_wrote_is_absent_and_the_last_removal_takes_the_section
     let dir = tempfile::tempdir().expect("temporary settings dir");
     let path = dir.path().join("settings.json");
     assert_eq!(
-        remove_mcp_server(&path, "ghost").expect("remove"),
+        remove_mcp_server(&home_for(&path), &path, "ghost").expect("remove"),
         McpEdit::Absent
     );
-    write_mcp_server(&path, "only", &stdio("npx", &[], &[])).expect("write");
+    write_mcp_server(&home_for(&path), &path, "only", &stdio("npx", &[], &[])).expect("write");
     assert_eq!(
-        remove_mcp_server(&path, "ghost").expect("remove"),
+        remove_mcp_server(&home_for(&path), &path, "ghost").expect("remove"),
         McpEdit::Absent
     );
     assert_eq!(
-        remove_mcp_server(&path, "only").expect("remove"),
+        remove_mcp_server(&home_for(&path), &path, "only").expect("remove"),
         McpEdit::Removed
     );
     let contents = std::fs::read_to_string(&path).expect("settings");
@@ -230,8 +230,8 @@ fn what_the_writer_wrote_is_what_the_loader_loads_in_the_user_scope() {
     let expected = stdio("npx", &["-y", "@modelcontextprotocol/server-everything"], &[
         ("EXAMPLE_TOKEN", "fixture-value"),
     ]);
-    write_mcp_server(&path, "everything", &expected).expect("write");
-    write_mcp_server(&path, "remote", &http("https://example.test/mcp")).expect("write");
+    write_mcp_server(home.path(), &path, "everything", &expected).expect("write");
+    write_mcp_server(home.path(), &path, "remote", &http("https://example.test/mcp")).expect("write");
 
     let config = load_at(&home, &cwd);
     let servers = config.mcp().servers();
@@ -239,7 +239,7 @@ fn what_the_writer_wrote_is_what_the_loader_loads_in_the_user_scope() {
     assert_eq!(servers["everything"].scope, crate::ConfigSource::User);
     assert_eq!(servers["remote"].config, http("https://example.test/mcp"));
 
-    remove_mcp_server(&path, "everything").expect("remove");
+    remove_mcp_server(home.path(), &path, "everything").expect("remove");
     let config = load_at(&home, &cwd);
     assert!(!config.mcp().servers().contains_key("everything"));
     assert!(config.mcp().servers().contains_key("remote"));
@@ -255,7 +255,7 @@ fn a_project_scoped_server_is_gated_until_the_operator_opts_the_project_in() {
     let cwd = tempfile::tempdir().expect("workspace");
     let path = cwd.path().join(".zo").join("settings.json");
     let expected = http("https://example.test/mcp");
-    write_mcp_server(&path, "repo-server", &expected).expect("write");
+    write_mcp_server(home.path(), &path, "repo-server", &expected).expect("write");
 
     let config = load_at(&home, &cwd);
     assert!(!config.mcp().servers().contains_key("repo-server"));
@@ -282,7 +282,7 @@ fn a_document_that_is_not_an_object_is_refused_before_anything_is_written() {
     let dir = tempfile::tempdir().expect("temporary settings dir");
     let path = dir.path().join("settings.json");
     std::fs::write(&path, "[]").expect("seed settings");
-    let error = write_mcp_server(&path, "server", &stdio("npx", &[], &[])).expect_err("refusal");
+    let error = write_mcp_server(&home_for(&path), &path, "server", &stdio("npx", &[], &[])).expect_err("refusal");
     assert!(
         error.to_string().contains("must be a JSON object"),
         "{error}"
@@ -295,7 +295,7 @@ fn an_mcp_servers_section_that_is_not_an_object_is_refused() {
     let dir = tempfile::tempdir().expect("temporary settings dir");
     let path = dir.path().join("settings.json");
     std::fs::write(&path, r#"{"mcpServers":[]}"#).expect("seed settings");
-    let error = write_mcp_server(&path, "server", &stdio("npx", &[], &[])).expect_err("refusal");
+    let error = write_mcp_server(&home_for(&path), &path, "server", &stdio("npx", &[], &[])).expect_err("refusal");
     assert!(error.to_string().contains(mcp_keys::SERVERS), "{error}");
 }
 
@@ -307,7 +307,7 @@ fn the_written_document_is_owner_only() {
 
     let dir = tempfile::tempdir().expect("temporary settings dir");
     let path = dir.path().join("nested").join("settings.json");
-    write_mcp_server(&path, "server", &stdio("npx", &[], &[("TOKEN", "t")])).expect("write");
+    write_mcp_server(&home_for(&path), &path, "server", &stdio("npx", &[], &[("TOKEN", "t")])).expect("write");
     let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
     assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
 }
@@ -323,17 +323,14 @@ fn the_written_document_is_owner_only() {
 fn a_trusted_name_un_gates_exactly_that_project_server() {
     let home = tempfile::tempdir().expect("config home");
     let cwd = tempfile::tempdir().expect("workspace");
-    // The person's project: a record in a folder no git repository governs
-    // gives no word that the person wrote it (152).
-    crate::config::tests::init_git_repo_with(cwd.path(), ".zo", false);
     let settings = cwd.path().join(".zo").join("settings.json");
     let expected = http("https://example.test/mcp");
-    write_mcp_server(&settings, "consented", &expected).expect("write");
-    write_mcp_server(&settings, "sibling", &stdio("npx", &[], &[])).expect("write");
+    write_mcp_server(home.path(), &settings, "consented", &expected).expect("write");
+    write_mcp_server(home.path(), &settings, "sibling", &stdio("npx", &[], &[])).expect("write");
 
     let record = ConfigLoader::new(cwd.path(), home.path()).trusted_mcp_servers_path();
     assert_eq!(
-        trust_mcp_server(&record, "consented").expect("trust"),
+        trust_mcp_server(home.path(), &record, "consented").expect("trust"),
         McpEdit::Added
     );
 
@@ -346,8 +343,8 @@ fn a_trusted_name_un_gates_exactly_that_project_server() {
 }
 
 /// Consent is a set of names. The record is created where nothing stood, the
-/// names a person put there stay in the order they wrote them, and recording
-/// one twice is not a second entry.
+/// names a person put there — once they record the file as theirs — stay in
+/// the order they wrote them, and recording one twice is not a second entry.
 #[test]
 fn trusting_a_name_twice_is_unchanged_and_the_names_already_there_survive() {
     let dir = tempfile::tempdir().expect("temporary project dir");
@@ -356,17 +353,26 @@ fn trusting_a_name_twice_is_unchanged_and_the_names_already_there_survive() {
         .join(".zo")
         .join(mcp_keys::TRUSTED_SERVERS_FILE);
     assert_eq!(
-        trust_mcp_server(&record, "first").expect("trust"),
+        trust_mcp_server(&home_for(&record), &record, "first").expect("trust"),
         McpEdit::Added,
         "the record is written even where no .zo directory stood"
     );
-    std::fs::write(&record, "[\"first\",\"handwritten\"]").expect("a person edits the record");
+    let by_hand = "[\"first\",\"handwritten\"]";
+    std::fs::write(&record, by_hand).expect("a person edits the record");
+    // Edited by hand, the record is not what zo wrote: zo does not write into
+    // it until the person records it as theirs (153).
+    let refused = trust_mcp_server(&home_for(&record), &record, "second")
+        .expect_err("a record edited by hand is not zo's to add to");
+    assert!(refused.to_string().contains("zo settings trust-local"), "{refused}");
+    let real = record.canonicalize().expect("canonical");
+    crate::config::local_record::remember(&home_for(&record), &real, by_hand.as_bytes())
+        .expect("the person records it");
     assert_eq!(
-        trust_mcp_server(&record, "second").expect("trust"),
+        trust_mcp_server(&home_for(&record), &record, "second").expect("trust"),
         McpEdit::Added
     );
     assert_eq!(
-        trust_mcp_server(&record, "second").expect("trust"),
+        trust_mcp_server(&home_for(&record), &record, "second").expect("trust"),
         McpEdit::Unchanged
     );
     let names = parse_trusted_mcp_server_names(
@@ -386,7 +392,7 @@ fn a_trust_record_that_is_not_an_array_of_names_is_refused_before_anything_is_wr
         ("[1]", "must be strings"),
     ] {
         std::fs::write(&record, seeded).expect("seed record");
-        let error = trust_mcp_server(&record, "name").expect_err("refusal");
+        let error = trust_mcp_server(&home_for(&record), &record, "name").expect_err("refusal");
         assert!(error.to_string().contains(complaint), "{error}");
         assert_eq!(
             std::fs::read_to_string(&record).expect("trust record"),
@@ -406,7 +412,7 @@ fn the_trust_record_is_owner_only() {
         .path()
         .join(".zo")
         .join(mcp_keys::TRUSTED_SERVERS_FILE);
-    trust_mcp_server(&record, "consented").expect("trust");
+    trust_mcp_server(&home_for(&record), &record, "consented").expect("trust");
     let mode = std::fs::metadata(&record)
         .expect("metadata")
         .permissions()
@@ -425,11 +431,11 @@ fn untrusting_takes_out_exactly_that_name_and_keeps_the_rest_owner_only() {
         .join(".zo")
         .join(mcp_keys::TRUSTED_SERVERS_FILE);
     for name in ["first", "gone", "last"] {
-        trust_mcp_server(&record, name).expect("trust");
+        trust_mcp_server(&home_for(&record), &record, name).expect("trust");
     }
 
     assert_eq!(
-        untrust_mcp_server(&record, "gone").expect("untrust"),
+        untrust_mcp_server(&home_for(&record), &record, "gone").expect("untrust"),
         McpEdit::Removed
     );
 
@@ -459,7 +465,7 @@ fn untrusting_a_name_never_trusted_writes_nothing_and_creates_no_record() {
     let zo = dir.path().join(".zo");
     let record = zo.join(mcp_keys::TRUSTED_SERVERS_FILE);
     assert_eq!(
-        untrust_mcp_server(&record, "ghost").expect("untrust"),
+        untrust_mcp_server(&home_for(&record), &record, "ghost").expect("untrust"),
         McpEdit::Absent
     );
     assert!(!zo.exists(), "untrusting created {}", zo.display());
@@ -468,7 +474,7 @@ fn untrusting_a_name_never_trusted_writes_nothing_and_creates_no_record() {
     let handwritten = "[ \"kept\" ]\n";
     std::fs::write(&record, handwritten).expect("a person writes the record");
     assert_eq!(
-        untrust_mcp_server(&record, "ghost").expect("untrust"),
+        untrust_mcp_server(&home_for(&record), &record, "ghost").expect("untrust"),
         McpEdit::Absent
     );
     assert_eq!(
@@ -485,7 +491,7 @@ fn untrusting_from_a_record_that_is_not_an_array_of_names_is_refused_before_anyt
     let record = dir.path().join(mcp_keys::TRUSTED_SERVERS_FILE);
     let seeded = r#"{"name":"name"}"#;
     std::fs::write(&record, seeded).expect("seed record");
-    let error = untrust_mcp_server(&record, "name").expect_err("refusal");
+    let error = untrust_mcp_server(&home_for(&record), &record, "name").expect_err("refusal");
     assert!(error.to_string().contains("JSON array"), "{error}");
     assert_eq!(
         std::fs::read_to_string(&record).expect("trust record"),
@@ -502,7 +508,7 @@ fn untrusting_a_name_takes_out_every_copy_of_it() {
     std::fs::write(&record, r#"["twice","kept","twice"]"#).expect("a person writes the record");
 
     assert_eq!(
-        untrust_mcp_server(&record, "twice").expect("untrust"),
+        untrust_mcp_server(&home_for(&record), &record, "twice").expect("untrust"),
         McpEdit::Removed
     );
 
@@ -522,27 +528,34 @@ fn untrusting_a_name_takes_out_every_copy_of_it() {
 fn an_untrusted_name_gates_the_next_server_added_under_it() {
     let home = tempfile::tempdir().expect("config home");
     let cwd = tempfile::tempdir().expect("workspace");
-    crate::config::tests::init_git_repo_with(cwd.path(), ".zo", false);
     let settings = cwd.path().join(".zo").join("settings.json");
     let record = ConfigLoader::new(cwd.path(), home.path()).trusted_mcp_servers_path();
-    write_mcp_server(&settings, "consented", &stdio("npx", &[], &[])).expect("write");
-    trust_mcp_server(&record, "consented").expect("trust");
+    write_mcp_server(home.path(), &settings, "consented", &stdio("npx", &[], &[])).expect("write");
+    trust_mcp_server(home.path(), &record, "consented").expect("trust");
     assert!(load_at(&home, &cwd)
         .mcp()
         .servers()
         .contains_key("consented"));
 
-    remove_mcp_server(&settings, "consented").expect("remove");
+    remove_mcp_server(home.path(), &settings, "consented").expect("remove");
     assert_eq!(
-        untrust_mcp_server(&record, "consented").expect("untrust"),
+        untrust_mcp_server(home.path(), &record, "consented").expect("untrust"),
         McpEdit::Removed
     );
 
     // The same name, a different command: what a later `add` could bring.
-    write_mcp_server(&settings, "consented", &stdio("uvx", &["other"], &[])).expect("write");
+    write_mcp_server(home.path(), &settings, "consented", &stdio("uvx", &["other"], &[])).expect("write");
     let config = load_at(&home, &cwd);
     assert!(!config.mcp().servers().contains_key("consented"));
     let untrusted = config.mcp().untrusted_project_servers();
     assert_eq!(untrusted.len(), 1);
     assert_eq!(untrusted[0].name, "consented");
+}
+
+/// The config home a test's record is kept in: beside the `.zo` folder it
+/// writes in, inside the test's own folder — never the person's.
+fn home_for(path: &std::path::Path) -> std::path::PathBuf {
+    path.parent()
+        .and_then(std::path::Path::parent)
+        .map_or_else(|| path.to_path_buf(), |folder| folder.join("home"))
 }

@@ -1,4 +1,5 @@
 mod allow_always_narrow;
+mod local_record;
 mod mcp_edit;
 mod mcp_secrets;
 mod parsers;
@@ -15,6 +16,11 @@ use core_types::paths::{write_private_file, ParentDirPolicy};
 use crate::json::JsonValue;
 use crate::sandbox::SandboxConfig;
 
+pub use self::local_record::{
+    forget as forget_local_file, is_recorded_kind as is_recorded_local_file_kind,
+    recorded as local_file_recorded, remember as remember_local_file,
+    RECORD_FILE as LOCAL_RECORD_FILE, RECORDED_FILES as RECORDED_LOCAL_FILES,
+};
 pub use self::allow_always_narrow::{
     narrow_broad_allow_always_rules, take_allow_always_narrow_notice, AllowAlwaysNarrowing,
     NarrowedRule,
@@ -676,7 +682,7 @@ impl ConfigLoader {
     #[must_use]
     pub fn discover(&self) -> Vec<ConfigEntry> {
         let path = self.cwd.join(".zo").join("settings.local.json");
-        self.discover_with_local_scope(local_settings_scope(&self.cwd, &path))
+        self.discover_with_local_scope(local_settings_scope(&self.config_home, &self.cwd, &path))
     }
 
     fn discover_with_local_scope(&self, local_scope: ConfigSource) -> Vec<ConfigEntry> {
@@ -740,17 +746,15 @@ impl ConfigLoader {
     /// Names of project `.zo/mcp.json` servers the user has explicitly trusted.
     ///
     /// The record is a JSON array under `.zo/trusted-mcp-servers.json`, but it
-    /// is honored only when it is the operator's real, uncommitted local file.
-    /// A tracked file, symlink, nested `.zo` repository, or canonical-path
-    /// mismatch fails closed to an empty allowlist so a repository cannot
+    /// is honored only when its bytes are what zo last wrote there by the
+    /// person's record; anything else (a file the folder came with, a link, a
+    /// folded alias) fails closed to an empty allowlist so a repository cannot
     /// self-authorize its own MCP command.
     fn trusted_project_mcp_servers(&self) -> Result<BTreeSet<String>, ConfigError> {
         let path = self.trusted_mcp_servers_path();
-        let Some(contents) = trusted_uncommitted_zo_file_snapshot(
-            &self.cwd,
-            &path,
-            mcp_keys::TRUSTED_SERVERS_FILE,
-        ) else {
+        let Some(contents) =
+            persons_zo_file_snapshot(&self.config_home, &self.cwd, &path, mcp_keys::TRUSTED_SERVERS_FILE)
+        else {
             return Ok(BTreeSet::new());
         };
         parse_trusted_mcp_server_names(&path, &contents)
@@ -784,7 +788,7 @@ impl ConfigLoader {
     /// waits for the first (at most two seconds) and then reads what it
     /// wrote. The narrowing never fails the load.
     pub fn load_for_session(&self) -> Result<RuntimeConfig, ConfigError> {
-        let _ = narrow_broad_allow_always_rules(&self.cwd);
+        let _ = narrow_broad_allow_always_rules(&self.config_home, &self.cwd);
         self.load()
     }
 
@@ -800,24 +804,25 @@ impl ConfigLoader {
         let mut lsp_servers = BTreeMap::new();
 
         let local_settings_path = self.cwd.join(".zo").join("settings.local.json");
-        let local_settings_contents = trusted_uncommitted_zo_file_snapshot(
-            &self.cwd,
-            &local_settings_path,
-            "settings.local.json",
-        );
+        let local_settings_contents =
+            persons_zo_file_snapshot(
+                &self.config_home,
+                &self.cwd,
+                &local_settings_path,
+                "settings.local.json",
+            );
         let local_settings_source = if local_settings_contents.is_some() {
             ConfigSource::Local
         } else {
             ConfigSource::Project
         };
-        // A real local file the gate did not take, in a folder no git
-        // repository governs, came with the folder (152): what it says that
-        // the repository strips take out below goes unused, and the person
-        // is told so by name.
-        let local_settings_without_git = local_settings_contents.is_none()
+        // A real local file zo did not write as it stands — the folder came
+        // with it, or it changed since — reads as the repository's (153):
+        // what it says that the repository strips take out below goes
+        // unused, and the person is told so by name.
+        let local_settings_not_recorded = local_settings_contents.is_none()
             && can_tell_persons_own_settings_file()
-            && is_real_file(&local_settings_path)
-            && governed_by_no_repository(&self.cwd);
+            && is_real_file(&local_settings_path);
         let mut unowned_local_settings = Vec::new();
         let trusted_local_settings_snapshot = local_settings_contents
             .as_deref()
@@ -944,7 +949,7 @@ impl ConfigLoader {
             let Some(mut value) = value else {
                 continue;
             };
-            let unowned_before = (local_settings_without_git
+            let unowned_before = (local_settings_not_recorded
                 && entry.source == ConfigSource::Project
                 && entry.path == local_settings_path)
                 .then(|| (value.clone(), untrusted_project_mcp.len()));
@@ -1536,52 +1541,39 @@ pub const fn can_tell_persons_own_settings_file() -> bool {
     cfg!(any(target_os = "macos", target_os = "linux"))
 }
 
-/// Scope for `cwd/.zo/settings.local.json`. It is trusted (`Local`) only when
-/// it is genuinely the operator's own real, uncommitted file; otherwise it is
-/// reclassified `Project` so every supply-chain strip applies. Fails CLOSED, so
-/// any indirection a repo could commit to smuggle a payload onto disk without the
-/// literal path being tracked is untrusted.
-fn local_settings_scope(cwd: &Path, path: &Path) -> ConfigSource {
-    if is_trusted_local_settings(cwd, path) {
+/// Scope for `cwd/.zo/settings.local.json`: the person's (`Local`) only when
+/// its bytes are what zo last wrote at exactly that path, by the person's
+/// record ([`persons_zo_file_snapshot`]); otherwise `Project`, so every
+/// supply-chain strip applies. A link, a linked `.zo`, a folded alias of the
+/// name and a file the folder arrived with all read as `Project`.
+fn local_settings_scope(home: &Path, cwd: &Path, path: &Path) -> ConfigSource {
+    if is_persons_zo_file(home, cwd, path, "settings.local.json") {
         ConfigSource::Local
     } else {
         ConfigSource::Project
     }
 }
 
-/// Whether `settings.local.json` may be trusted as `Local`. True only for the
-/// operator's own real, uncommitted file. It fails closed to `Project` on every
-/// indirection a repo can commit to smuggle a payload onto disk at (or aliasing)
-/// this path without the literal path being tracked:
-/// * the leaf being a symlink;
-/// * the real on-disk path not being EXACTLY `<canonical cwd>/.zo/settings.local.json`
-///   — this rejects a symlinked `.zo` / intermediate symlink AND a
-///   case-/Unicode-folded name (`.zo/Settings.local.json`) that a
-///   case-insensitive FS (macOS, Windows — the default target) aliases to the
-///   literal path, which `git ls-files` (case-sensitive index lookup) misses;
-/// * a `.zo` submodule / nested repo (`.zo/.git`) whose file lands on a
-///   recursive clone yet is a gitlink (untracked) in the outer repo;
-/// * a git-tracked (committed) path;
-/// * a folder no git repository governs: a downloaded copy of a repository
-///   brings its committed file along with nothing to tell it from the
-///   person's own;
-/// * an absent file (moot — nothing loads).
-fn is_trusted_local_settings(cwd: &Path, path: &Path) -> bool {
-    is_trusted_uncommitted_zo_file(cwd, path, "settings.local.json")
-}
-
-/// Persist live `AllowAlways` grants into the trusted project-local settings.
+/// Persist live `AllowAlways` grants into the project-local settings.
 ///
-/// The file must already be the operator's trusted, uncommitted
-/// `.zo/settings.local.json`; this function never creates or authorizes a
-/// project settings file. Existing settings are preserved, and the candidate
-/// document is parsed again after rendering so a malformed rule or a lossy JSON
-/// round-trip fails closed before any write.
+/// zo writes the person's `.zo/settings.local.json`: one it wrote before (its
+/// bytes match the record), or a new one where none stands. A file there that
+/// zo did not write — one the folder came with, or one changed since — is not
+/// written into: merging into it would make what it says the person's. After
+/// the write the bytes are recorded, so the next session reads the file as the
+/// person's, in a folder with or without git (153).
 ///
-/// A grant that cannot be persisted is deliberately silent: the session already
-/// honored it, and refusing to write is always the narrow outcome. Only a
-/// malformed document or rule is reported, and even then nothing is written.
-pub fn persist_allow_always_rules(cwd: &Path, rules: &[String]) -> Result<(), ConfigError> {
+/// Existing settings are preserved, and the candidate document is parsed again
+/// after rendering so a malformed rule or a lossy JSON round-trip fails closed
+/// before any write. A grant that cannot be persisted is deliberately silent:
+/// the session already honored it, and refusing to write is always the narrow
+/// outcome. Only a malformed document or rule is reported, and even then
+/// nothing is written.
+pub fn persist_allow_always_rules(
+    home: &Path,
+    cwd: &Path,
+    rules: &[String],
+) -> Result<(), ConfigError> {
     const FILE_NAME: &str = "settings.local.json";
 
     if rules.is_empty() {
@@ -1589,30 +1581,49 @@ pub fn persist_allow_always_rules(cwd: &Path, rules: &[String]) -> Result<(), Co
     }
 
     let path = cwd.join(".zo").join(FILE_NAME);
-    if !is_trusted_uncommitted_zo_file(cwd, &path, FILE_NAME) {
-        return Ok(());
-    }
-    let Some(original_contents) = trusted_uncommitted_zo_file_snapshot(cwd, &path, FILE_NAME)
+    let original_contents = match persons_zo_file_snapshot(home, cwd, &path, FILE_NAME) {
+        Some(contents) => Some(contents),
+        None if is_absent(&path) => None,
+        None => return Ok(()),
+    };
+
+    let Some(rendered) = merge_allow_always_rules(
+        &path,
+        original_contents.as_deref().unwrap_or("{}"),
+        rules,
+    )?
     else {
         return Ok(());
     };
 
-    let Some(rendered) = merge_allow_always_rules(&path, &original_contents, rules)? else {
-        return Ok(());
+    // Abort if the file changed while the candidate was being built; never
+    // merge over a newer operator edit or a changed trust decision.
+    let current_contents = persons_zo_file_snapshot(home, cwd, &path, FILE_NAME);
+    let unchanged = match (&original_contents, &current_contents) {
+        (Some(original), Some(current)) => original == current,
+        (None, None) => is_absent(&path),
+        _ => false,
     };
-
-    // Abort if the trusted file changed while the candidate was being built;
-    // never merge over a newer operator edit or a changed trust decision.
-    let Some(current_contents) = trusted_uncommitted_zo_file_snapshot(cwd, &path, FILE_NAME)
-    else {
-        return Ok(());
-    };
-    if current_contents != original_contents {
+    if !unchanged {
         return Ok(());
     }
 
+    // Only the `.zo` folder itself is made: the folders above it are the
+    // project's, and their permissions are not zo's to change.
+    if let Some(dot_zo) = path.parent() {
+        std::fs::create_dir_all(dot_zo)?;
+    }
     write_private_file(&path, rendered.as_bytes(), &ParentDirPolicy::LeaveParent)?;
+    local_record::wrote(home, &path, rendered.as_bytes());
     Ok(())
+}
+
+/// Whether nothing at all stands at `path` (not even a dangling link).
+fn is_absent(path: &Path) -> bool {
+    matches!(
+        std::fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
 }
 
 /// Merge `rules` into `contents`, returning the document to write, or `None`
@@ -1736,171 +1747,50 @@ fn merge_allow_always_rules(
     Ok(Some(rendered))
 }
 
-/// Trust a project-local Zo control file only when it is the operator's real,
-/// uncommitted file at the exact expected path. This shared gate prevents a
-/// repository from self-authorizing through tracked files, symlinks, aliases,
-/// a nested `.zo` repository, or a folder no git repository governs — where
-/// nothing tells a file the person made from one the folder arrived with.
-fn is_trusted_uncommitted_zo_file(cwd: &Path, path: &Path, file_name: &str) -> bool {
-    trusted_uncommitted_zo_file_snapshot(cwd, path, file_name).is_some()
-}
-
-fn trusted_uncommitted_zo_file_snapshot(
+/// The contents of `cwd/.zo/<file_name>` when they are the person's own: a
+/// real file at exactly that path whose bytes are what zo last wrote there, by
+/// the person's record in the config home `home` ([`local_record`]). A file
+/// the folder arrived with, one
+/// changed since zo wrote it, and one at a path the record does not name read
+/// as the repository's. What git says about the file is no evidence (153).
+fn persons_zo_file_snapshot(
+    home: &Path,
     cwd: &Path,
     path: &Path,
     file_name: &str,
 ) -> Option<String> {
-    let git_program = resolve_trusted_git_program(cwd)?;
-    trusted_uncommitted_zo_file_snapshot_with_git(
-        cwd,
-        path,
-        file_name,
-        git_program.as_os_str(),
-    )
+    let (real, contents) = zo_file_snapshot(cwd, path, file_name)?;
+    local_record::recorded(home, &real, contents.as_bytes()).then_some(contents)
 }
 
-fn resolve_trusted_git_program(cwd: &Path) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    resolve_trusted_git_program_from(cwd, &path)
+/// Whether `cwd/.zo/<file_name>` is the person's own ([`persons_zo_file_snapshot`]).
+fn is_persons_zo_file(home: &Path, cwd: &Path, path: &Path, file_name: &str) -> bool {
+    persons_zo_file_snapshot(home, cwd, path, file_name).is_some()
 }
 
-fn resolve_trusted_git_program_from(cwd: &Path, path: &std::ffi::OsStr) -> Option<PathBuf> {
-    let canonical_cwd = cwd.canonicalize().ok()?;
-    let untrusted_roots = git_control_roots(&canonical_cwd).ok()?;
-    for directory in std::env::split_paths(path) {
-        if !directory.is_absolute() {
-            continue;
-        }
-        let executable = if cfg!(windows) { "git.exe" } else { "git" };
-        let Ok(candidate) = directory.join(executable).canonicalize() else {
-            continue;
-        };
-        let Ok(metadata) = std::fs::metadata(&candidate) else {
-            continue;
-        };
-        if metadata.is_file()
-            && git_candidate_is_executable(&metadata)
-            && !untrusted_roots.iter().any(|root| candidate.starts_with(root))
-        {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-fn git_control_roots(cwd: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut roots = Vec::new();
-    for ancestor in cwd.ancestors() {
-        match std::fs::symlink_metadata(ancestor.join(".git")) {
-            Ok(_) => roots.push(ancestor.to_path_buf()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    if roots.is_empty() {
-        roots.push(cwd.to_path_buf());
-    }
-    Ok(roots)
-}
-
-#[cfg(unix)]
-fn git_candidate_is_executable(metadata: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    metadata.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn git_candidate_is_executable(_metadata: &std::fs::Metadata) -> bool {
-    true
-}
-
-#[cfg(test)]
-fn is_trusted_uncommitted_zo_file_with_git(
-    cwd: &Path,
-    path: &Path,
-    file_name: &str,
-    git_program: &std::ffi::OsStr,
-) -> bool {
-    trusted_uncommitted_zo_file_snapshot_with_git(cwd, path, file_name, git_program).is_some()
-}
-
-fn trusted_uncommitted_zo_file_snapshot_with_git(
-    cwd: &Path,
-    path: &Path,
-    file_name: &str,
-    git_program: &std::ffi::OsStr,
-) -> Option<String> {
+/// `cwd/.zo/<file_name>` read once, with its canonical path, when it is a real
+/// file at exactly that path: not a link, not reached through a linked `.zo`,
+/// not a case- or Unicode-folded alias of the name. The bytes returned are the
+/// ones the record is checked against and the ones parsed.
+fn zo_file_snapshot(cwd: &Path, path: &Path, file_name: &str) -> Option<(PathBuf, String)> {
     let relative = PathBuf::from(".zo").join(file_name);
     if path != cwd.join(&relative) {
         return None;
     }
-
-    crate::secure_fs::read_to_string_no_symlink_with_validation(cwd, &relative, || {
-        let (Ok(real), Ok(base)) = (path.canonicalize(), cwd.canonicalize()) else {
-            return Err(untrusted_control_file());
-        };
-        if real != base.join(&relative) {
-            return Err(untrusted_control_file());
-        }
-        ensure_path_absent(&base.join(".zo").join(".git"))?;
-        let repository_before = git_repository_fingerprint(&base)?;
-        // Only a folder a `.git` from here up stands in is asked of git. A
-        // folder can answer git as a repository with no `.git` at all — its
-        // own `HEAD`, `objects/`, `refs/` and a `config` naming itself the
-        // work tree — and a ZIP of a repository brings such a folder as well
-        // as the file in it (review t-107885, G0). Nothing a folder with no
-        // `.git` holds tells a file the person made from one it came with.
-        if repository_before.markers.is_empty() {
-            return Err(untrusted_control_file());
-        }
-        let git_path = PathBuf::from(git_program);
-        if !git_path.is_absolute() {
-            return Err(untrusted_control_file());
-        }
-        let Ok(git_before) = git_path.canonicalize() else {
-            return Err(untrusted_control_file());
-        };
-        let git_metadata = std::fs::metadata(&git_before)?;
-        if !git_metadata.is_file() || !git_candidate_is_executable(&git_metadata) {
-            return Err(untrusted_control_file());
-        }
-        let git_identity = filesystem_identity(&git_metadata)?;
-        if repository_before.markers.iter().any(|marker| {
-            marker
-                .path
-                .parent()
-                .is_some_and(|root| git_before.starts_with(root))
-        }) {
-            return Err(untrusted_control_file());
-        }
-        let tracking = git_tracking_state_with_program(&base, &real, git_before.as_os_str());
-
-        let (Ok(real_after), Ok(base_after)) = (path.canonicalize(), cwd.canonicalize()) else {
-            return Err(untrusted_control_file());
-        };
-        if real_after != real || base_after != base {
-            return Err(untrusted_control_file());
-        }
-        let Ok(git_after) = git_path.canonicalize() else {
-            return Err(untrusted_control_file());
-        };
-        if git_after != git_before
-            || filesystem_identity(&std::fs::metadata(&git_after)?)? != git_identity
-        {
-            return Err(untrusted_control_file());
-        }
-        ensure_path_absent(&base_after.join(".zo").join(".git"))?;
-        if git_repository_fingerprint(&base_after)? != repository_before {
-            return Err(untrusted_control_file());
-        }
-        // Git's word that it does not track the file is the only sign the
-        // person made it here.
-        if tracking != GitTrackingState::Untracked {
-            return Err(untrusted_control_file());
-        }
-        Ok(())
-    })
-    .ok()
+    let mut checked = None;
+    let contents =
+        crate::secure_fs::read_to_string_no_symlink_with_validation(cwd, &relative, || {
+            let (Ok(real), Ok(base)) = (path.canonicalize(), cwd.canonicalize()) else {
+                return Err(untrusted_control_file());
+            };
+            if real != base.join(&relative) {
+                return Err(untrusted_control_file());
+            }
+            checked = Some(real);
+            Ok(())
+        })
+        .ok()?;
+    Some((checked?, contents))
 }
 
 fn untrusted_control_file() -> std::io::Error {
@@ -1908,25 +1798,6 @@ fn untrusted_control_file() -> std::io::Error {
         std::io::ErrorKind::PermissionDenied,
         "project-local Zo control file provenance could not be trusted",
     )
-}
-
-fn ensure_path_absent(path: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        _ => Err(untrusted_control_file()),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GitRepositoryFingerprint {
-    cwd: FilesystemIdentity,
-    markers: Vec<GitAdminMarkerIdentity>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GitAdminMarkerIdentity {
-    path: PathBuf,
-    identity: FilesystemIdentity,
 }
 
 #[cfg(unix)]
@@ -1966,139 +1837,9 @@ fn filesystem_identity(metadata: &std::fs::Metadata) -> std::io::Result<Filesyst
     })
 }
 
-#[cfg(not(unix))]
-fn filesystem_identity(_metadata: &std::fs::Metadata) -> std::io::Result<FilesystemIdentity> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "trusted project control files require Unix filesystem identities",
-    ))
-}
-
-/// Whether no folder from `cwd` up holds a `.git` — the folders the control
-/// file gate refuses as governed by no repository, found the way the gate
-/// finds them.
-fn governed_by_no_repository(cwd: &Path) -> bool {
-    cwd.canonicalize()
-        .ok()
-        .and_then(|cwd| git_repository_fingerprint(&cwd).ok())
-        .is_some_and(|fingerprint| fingerprint.markers.is_empty())
-}
-
 /// Whether `path` is a regular file itself, not a link to one.
 fn is_real_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
-}
-
-fn git_repository_fingerprint(cwd: &Path) -> std::io::Result<GitRepositoryFingerprint> {
-    let cwd_identity = filesystem_identity(&std::fs::metadata(cwd)?)?;
-    let mut markers = Vec::new();
-    for ancestor in cwd.ancestors() {
-        let path = ancestor.join(".git");
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => markers.push(GitAdminMarkerIdentity {
-                path,
-                identity: filesystem_identity(&metadata)?,
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(GitRepositoryFingerprint {
-        cwd: cwd_identity,
-        markers,
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitTrackingState {
-    Tracked,
-    Untracked,
-    Indeterminate,
-}
-
-/// Determine Git provenance without conflating an untracked file with a Git
-/// failure. Only a successful repository probe followed by a successful index
-/// query can yield `Tracked`/`Untracked`; launch failures, "not a repository",
-/// dubious ownership, repository corruption, and unexpected output fail
-/// closed as `Indeterminate`.
-fn git_tracking_state_with_program(
-    cwd: &Path,
-    path: &Path,
-    git_program: &std::ffi::OsStr,
-) -> GitTrackingState {
-    let configure = |command: &mut std::process::Command| {
-        command
-            .current_dir(cwd)
-            .env("LC_ALL", "C")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_CEILING_DIRECTORIES");
-    };
-
-    let mut probe = std::process::Command::new(git_program);
-    configure(&mut probe);
-    let Ok(probe) = probe.args(["rev-parse", "--is-inside-work-tree"]).output() else {
-        return GitTrackingState::Indeterminate;
-    };
-    if !probe.status.success() {
-        return GitTrackingState::Indeterminate;
-    }
-    if !probe.stderr.as_slice().trim_ascii().is_empty()
-        || probe.stdout.as_slice().trim_ascii() != b"true"
-    {
-        return GitTrackingState::Indeterminate;
-    }
-
-    let Ok(relative) = path.strip_prefix(cwd) else {
-        return GitTrackingState::Indeterminate;
-    };
-    let mut query = std::process::Command::new(git_program);
-    configure(&mut query);
-    let Ok(query) = query
-        .args(["ls-files", "--stage", "-z", "--"])
-        .arg(relative)
-        .output()
-    else {
-        return GitTrackingState::Indeterminate;
-    };
-    if !query.status.success() || !query.stderr.as_slice().trim_ascii().is_empty() {
-        return GitTrackingState::Indeterminate;
-    }
-    if query.stdout.is_empty() {
-        GitTrackingState::Untracked
-    } else if valid_git_stage_output(&query.stdout) {
-        GitTrackingState::Tracked
-    } else {
-        GitTrackingState::Indeterminate
-    }
-}
-
-fn valid_git_stage_output(output: &[u8]) -> bool {
-    let Some(records) = output.strip_suffix(b"\0") else {
-        return false;
-    };
-    !records.is_empty()
-        && records.split(|byte| *byte == 0).all(|record| {
-            let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
-                return false;
-            };
-            let header = &record[..tab];
-            let path = &record[tab + 1..];
-            let mut fields = header.split(|byte| *byte == b' ');
-            let (Some(mode), Some(object_id), Some(stage)) =
-                (fields.next(), fields.next(), fields.next())
-            else {
-                return false;
-            };
-            fields.next().is_none()
-                && mode.len() == 6
-                && mode.iter().all(|byte| matches!(byte, b'0'..=b'7'))
-                && object_id.len() >= 40
-                && object_id.iter().all(u8::is_ascii_hexdigit)
-                && matches!(stage, b"0" | b"1" | b"2" | b"3")
-                && !path.is_empty()
-        })
 }
 
 /// Remove the executable-path plugin keys from an untrusted project settings
@@ -3014,7 +2755,7 @@ impl RuntimeFeatureConfig {
     }
 
     /// The settings of the workspace's `.zo/settings.local.json` that went
-    /// unused because no git repository governs the folder (152), by name;
+    /// unused because zo did not write that file as it stands (153), by name;
     /// empty when the file is the person's, absent, or said nothing that
     /// went unused.
     #[must_use]

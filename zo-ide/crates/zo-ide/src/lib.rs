@@ -31,6 +31,7 @@ pub mod decision_shadow_cli;
 pub mod jev_cli;
 pub mod mcp_cli;
 pub mod settings_cli;
+pub mod trust_local_cli;
 pub mod scoreboard_cli;
 pub mod vault_cli;
 pub mod custom_provider_env;

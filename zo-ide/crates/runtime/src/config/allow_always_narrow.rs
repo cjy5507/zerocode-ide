@@ -38,7 +38,7 @@ use core_types::paths::{restrict_permissions_owner_only, write_private_file, Par
 
 use super::parsers::{parse_json_object_contents, parse_optional_permission_rules};
 use super::{
-    trusted_uncommitted_zo_file_snapshot, zo_project_state_dir, ConfigError,
+    persons_zo_file_snapshot, zo_project_state_dir, ConfigError,
     RuntimePermissionRuleConfig,
 };
 use crate::json::JsonValue;
@@ -109,8 +109,8 @@ pub enum AllowAlwaysNarrowing {
 /// Narrow the broad allow rules in `<cwd>/.zo/settings.local.json`, once per
 /// project. See the module documentation for what is narrowed and what is not.
 #[must_use]
-pub fn narrow_broad_allow_always_rules(cwd: &Path) -> AllowAlwaysNarrowing {
-    narrow_in(cwd, &state_folder(cwd), LOCK_WAIT)
+pub fn narrow_broad_allow_always_rules(home: &Path, cwd: &Path) -> AllowAlwaysNarrowing {
+    narrow_in(home, cwd, &state_folder(cwd), LOCK_WAIT)
 }
 
 /// The notice for a session a person watches, taken so it is said once: how
@@ -130,15 +130,18 @@ fn settings_relative() -> PathBuf {
     Path::new(".zo").join(SETTINGS_FILE)
 }
 
-fn narrow_in(cwd: &Path, folder: &Path, lock_wait: Duration) -> AllowAlwaysNarrowing {
+fn narrow_in(home: &Path, cwd: &Path, folder: &Path, lock_wait: Duration) -> AllowAlwaysNarrowing {
     let path = cwd.join(settings_relative());
     narrow_with(
         cwd,
         folder,
         lock_wait,
-        &mut || trusted_uncommitted_zo_file_snapshot(cwd, &path, SETTINGS_FILE),
+        &mut || persons_zo_file_snapshot(home, cwd, &path, SETTINGS_FILE),
         &mut |bytes| {
-            write_atomic_owner_only_named_temp(cwd, &settings_relative(), bytes, Durability::Flushed)
+            write_atomic_owner_only_named_temp(cwd, &settings_relative(), bytes, Durability::Flushed)?;
+            // The narrowed file is still the person's: zo wrote these bytes.
+            super::local_record::wrote(home, &path, bytes);
+            Ok(())
         },
     )
 }
@@ -510,7 +513,7 @@ mod tests {
         NOTICE_FILE, SETTINGS_FILE, STATE_FOLDER,
     };
     use crate::config::tests::{init_git_repo_with, overrides_stable};
-    use crate::config::{trusted_uncommitted_zo_file_snapshot, ConfigLoader, RuntimeConfig};
+    use crate::config::{persons_zo_file_snapshot, ConfigLoader, RuntimeConfig};
     use crate::json::JsonValue;
     use crate::permissions::{PermissionMode, PermissionOutcome, PermissionPolicy};
     use crate::test_root::TestRoot;
@@ -525,9 +528,10 @@ mod tests {
     /// Saved by v1.1.143 for the approved `rm [ab]`; its class meets `rm a`.
     const NEVER_MATCHED: &str = "bash(rm [ab])";
 
-    /// A project whose `.zo/settings.local.json` holds `settings`, uncommitted
-    /// in a git repository (the person's trusted file, unless `commit`), with
-    /// a zo state folder of its own.
+    /// A project whose `.zo/settings.local.json` holds `settings` — recorded as
+    /// written by zo (the person's file) unless `commit`, which commits it to a
+    /// git repository instead — with a config home and a zo state folder of
+    /// its own.
     struct Project {
         _root: TestRoot,
         cwd: PathBuf,
@@ -543,7 +547,14 @@ mod tests {
             fs::create_dir_all(cwd.join(".zo")).expect("project .zo");
             fs::create_dir_all(&home).expect("home .zo");
             fs::write(cwd.join(".zo").join(SETTINGS_FILE), settings).expect("write settings");
-            init_git_repo_with(&cwd, ".zo/settings.local.json", commit);
+            if commit {
+                init_git_repo_with(&cwd, ".zo/settings.local.json", true);
+            } else {
+                let path = cwd.join(".zo").join(SETTINGS_FILE);
+                let real = path.canonicalize().expect("canonical");
+                crate::config::local_record::remember(&home, &real, settings.as_bytes())
+                    .expect("record");
+            }
             let folder = root.join("state").join(STATE_FOLDER);
             Self { _root: root, cwd, home, folder }
         }
@@ -557,7 +568,7 @@ mod tests {
         }
 
         fn narrow(&self) -> AllowAlwaysNarrowing {
-            narrow_in(&self.cwd, &self.folder, LOCK_WAIT)
+            narrow_in(&self.home, &self.cwd, &self.folder, LOCK_WAIT)
         }
 
         fn load(&self) -> RuntimeConfig {
@@ -810,6 +821,12 @@ mod tests {
         fs::write(project.settings_path(), &by_hand).expect("person edits");
         assert_eq!(project.narrow(), AllowAlwaysNarrowing::AlreadyDone);
         assert_eq!(project.settings(), by_hand);
+        // Edited by hand, the file is not what zo wrote: it is the person's
+        // again once they record it (`zo settings trust-local`, 153).
+        assert_ne!(decide(&project.load(), "npm run build"), PermissionOutcome::Allow);
+        let real = project.settings_path().canonicalize().expect("canonical");
+        crate::config::local_record::remember(&project.home, &real, by_hand.as_bytes())
+            .expect("the person records it");
         assert_eq!(decide(&project.load(), "npm run build"), PermissionOutcome::Allow);
     }
 
@@ -865,14 +882,14 @@ mod tests {
     fn a_write_that_fails_part_way_leaves_the_file_on_disk_as_it_was() {
         let before = format!(r#"{{ "permissions": {{ "allow": ["{BROAD}"], "deny": ["bash(rm *)"] }} }}"#);
         let project = Project::new(&before, false);
-        let (cwd, zo) = (project.cwd.clone(), project.cwd.join(".zo"));
+        let (cwd, zo, home) = (project.cwd.clone(), project.cwd.join(".zo"), project.home.clone());
         let path = project.settings_path();
         let mut failed = false;
         let outcome = narrow_with(
             &project.cwd,
             &project.folder,
             LOCK_WAIT,
-            &mut || trusted_uncommitted_zo_file_snapshot(&cwd, &path, SETTINGS_FILE),
+            &mut || persons_zo_file_snapshot(&home, &cwd, &path, SETTINGS_FILE),
             &mut |bytes| {
                 crate::secure_fs::write_atomic_owner_only_observed(
                     &cwd,
@@ -924,7 +941,7 @@ mod tests {
         let project = Project::new(&before, false);
         let lock = project.hold_lock();
         std::thread::scope(|scope| {
-            let waiter = scope.spawn(|| narrow_in(&project.cwd, &project.folder, Duration::from_secs(30)));
+            let waiter = scope.spawn(|| narrow_in(&project.home, &project.cwd, &project.folder, Duration::from_secs(30)));
             std::thread::sleep(Duration::from_millis(300));
             assert!(!waiter.is_finished(), "the second zo waits for the lock");
             assert_eq!(project.settings(), before);
@@ -946,7 +963,7 @@ mod tests {
         let project = Project::new(&before, false);
         let lock = project.hold_lock();
         assert_eq!(
-            narrow_in(&project.cwd, &project.folder, Duration::from_millis(100)),
+            narrow_in(&project.home, &project.cwd, &project.folder, Duration::from_millis(100)),
             AllowAlwaysNarrowing::Busy
         );
         assert_eq!(project.settings(), before);

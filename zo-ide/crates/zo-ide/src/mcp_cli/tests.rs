@@ -17,8 +17,8 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// The person's project as zo tells one: a git repository that does not
-    /// track the `.zo` files kept there.
+    /// A git repository. What zo writes in its `.zo` is the person's there as
+    /// anywhere (153); git itself is no evidence either way.
     fn new() -> Self {
         let scratch = Self::without_git();
         let status = std::process::Command::new("git")
@@ -31,8 +31,8 @@ impl Scratch {
         scratch
     }
 
-    /// A folder no git repository governs — a downloaded one, as zo must
-    /// take it (152).
+    /// A folder no git repository governs: zo's own writes are the person's
+    /// there too (153).
     fn without_git() -> Self {
         Self {
             home: tempfile::tempdir().expect("config home"),
@@ -88,7 +88,7 @@ impl Scratch {
         self.run(&["add", name, "--project", "--trust", "--", "npx"])
             .expect("add trusted");
         assert_eq!(
-            runtime::remove_mcp_server(&self.project_settings(), name).expect("old remove"),
+            runtime::remove_mcp_server(self.home.path(), &self.project_settings(), name).expect("old remove"),
             McpEdit::Removed
         );
     }
@@ -662,15 +662,16 @@ fn trusting_a_name_twice_leaves_one_entry_and_keeps_the_names_already_there() {
 }
 
 /// `--trust` writes the record; whether the gate BELIEVES it is the loader's
-/// answer. A `.zo/.git` marker is one of the shapes that fails closed (a
-/// repository must not be able to authorize its own MCP command), and the
-/// report carries that answer rather than the writer's hope.
+/// answer. A config home other accounts can write keeps no record zo can trust
+/// (one of them could put consent there), and the report carries that answer
+/// rather than the writer's hope (153).
 #[test]
+#[cfg(unix)]
 fn a_trust_record_the_gate_cannot_believe_is_written_and_reported_as_still_gated() {
+    use std::os::unix::fs::PermissionsExt as _;
     let scratch = Scratch::new();
-    let zo = scratch.cwd.path().join(".zo");
-    std::fs::create_dir_all(&zo).expect("project config dir");
-    std::fs::write(zo.join(".git"), "gitdir: elsewhere\n").expect("nested repository marker");
+    let open = std::fs::Permissions::from_mode(0o777);
+    std::fs::set_permissions(scratch.home.path(), open).expect("a home others can write");
 
     let printed = scratch
         .run(&["add", "repo", "--project", "--trust", "--", "npx"])
@@ -681,7 +682,7 @@ fn a_trust_record_the_gate_cannot_believe_is_written_and_reported_as_still_gated
         .expect("trust record")
         .contains("repo"));
     // … and the report says the gate did not take it.
-    assert!(printed.contains("uncommitted"), "{printed}");
+    assert!(printed.contains("counts only while it is what zo wrote there"), "{printed}");
     assert!(!scratch
         .loader()
         .load()
@@ -689,14 +690,16 @@ fn a_trust_record_the_gate_cannot_believe_is_written_and_reported_as_still_gated
         .mcp()
         .servers()
         .contains_key("repo"));
+    std::fs::set_permissions(scratch.home.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("close the home again");
 }
 
-/// In a folder no git repository governs, nothing tells a trust record the
-/// person wrote from one the folder came with, so the gate takes neither
-/// (152): `--trust` still writes the name, and the report says the server
-/// will not load and why.
+/// `--trust` lasts in a folder without git too: zo writes the name, records
+/// what it wrote, and the server loads (153 — before, a folder with no git
+/// took no consent, and the report said the server would not load).
 #[test]
-fn a_trust_record_in_a_folder_without_git_is_written_and_reported_as_still_gated() {
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership")]
+fn a_trust_given_in_a_folder_without_git_lasts() {
     let scratch = Scratch::without_git();
 
     let printed = scratch
@@ -706,8 +709,8 @@ fn a_trust_record_in_a_folder_without_git_is_written_and_reported_as_still_gated
     assert!(std::fs::read_to_string(scratch.trust_record())
         .expect("trust record")
         .contains("repo"));
-    assert!(printed.contains("in a folder with no git"), "{printed}");
-    assert!(!scratch
+    assert!(!printed.contains("will not load"), "{printed}");
+    assert!(scratch
         .loader()
         .load()
         .expect("load")

@@ -2,13 +2,10 @@ use super::parsers::{
     deep_merge_objects, parse_optional_permission_rules, parse_permission_mode_label,
 };
 use super::{
-    is_trusted_uncommitted_zo_file_with_git, merge_allow_always_rules,
-    persist_allow_always_rules, ConfigLoader, ConfigSource, HookMatcher,
+    merge_allow_always_rules, persist_allow_always_rules, ConfigLoader, ConfigSource, HookMatcher,
     HookRule, LspServerConfig, McpServerConfig, McpTransport, ResolvedPermissionMode,
     RuntimeHookConfig, RuntimePluginConfig, ZO_SETTINGS_SCHEMA_NAME,
 };
-#[cfg(unix)]
-use super::{resolve_trusted_git_program_from, trusted_uncommitted_zo_file_snapshot_with_git};
 use crate::json::JsonValue;
 use crate::sandbox::FilesystemIsolationMode;
 use std::fs;
@@ -1299,544 +1296,6 @@ fn git_tracked_mcp_trust_record_cannot_self_authorize_project_server() {
         "a repository-tracked trust record must not authorize its own MCP server"
     );
     assert_eq!(loaded.mcp().untrusted_project_servers().len(), 1);
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[test]
-fn git_probe_failure_cannot_authorize_local_mcp_trust_record() {
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let trust_record = cwd.join(".zo").join("trusted-mcp-servers.json");
-    fs::create_dir_all(trust_record.parent().expect("trust record parent"))
-        .expect("project config dir");
-    fs::write(&trust_record, r#"["repo-approved"]"#).expect("write trust record");
-    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
-    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
-    let missing_git = root.join("definitely-missing-git-executable");
-
-    assert!(
-        !is_trusted_uncommitted_zo_file_with_git(
-            &cwd,
-            &trust_record,
-            "trusted-mcp-servers.json",
-            missing_git.as_os_str(),
-        ),
-        "an indeterminate Git provenance check must fail closed"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[test]
-fn corrupt_git_directory_cannot_authorize_local_mcp_trust_record() {
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let trust_record = cwd.join(".zo").join("trusted-mcp-servers.json");
-    fs::create_dir_all(trust_record.parent().expect("trust record parent"))
-        .expect("project config dir");
-    fs::write(&trust_record, r#"["repo-approved"]"#).expect("write trust record");
-    fs::create_dir_all(cwd.join(".git")).expect("corrupt git directory");
-    fs::write(
-        cwd.join(".git").join("config"),
-        "[core]\nrepositoryformatversion = 0\n",
-    )
-    .expect("partial git config");
-
-    assert!(
-        !is_trusted_uncommitted_zo_file_with_git(
-            &cwd,
-            &trust_record,
-            "trusted-mcp-servers.json",
-            std::ffi::OsStr::new("git"),
-        ),
-        "a corrupt .git directory must remain indeterminate"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[test]
-fn broken_gitfile_cannot_authorize_local_mcp_trust_record() {
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let trust_record = cwd.join(".zo").join("trusted-mcp-servers.json");
-    fs::create_dir_all(trust_record.parent().expect("trust record parent"))
-        .expect("project config dir");
-    fs::write(&trust_record, r#"["repo-approved"]"#).expect("write trust record");
-    fs::write(
-        cwd.join(".git"),
-        format!("gitdir: {}\n", root.join("missing-git-dir").display()),
-    )
-    .expect("broken gitfile");
-
-    assert!(
-        !is_trusted_uncommitted_zo_file_with_git(
-            &cwd,
-            &trust_record,
-            "trusted-mcp-servers.json",
-            std::ffi::OsStr::new("git"),
-        ),
-        "a broken .git gitfile must remain indeterminate"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn successful_git_query_with_stderr_cannot_authorize_control_file() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let trust_record = cwd.join(".zo").join("trusted-mcp-servers.json");
-    fs::create_dir_all(trust_record.parent().expect("trust record parent"))
-        .expect("project config dir");
-    fs::write(&trust_record, r#"["repo-approved"]"#).expect("write trust record");
-    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
-    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
-    let fake_git = root.join("fake-git");
-    fs::write(
-        &fake_git,
-        "#!/bin/sh\nprintf 'true\\n'\nprintf 'unexpected warning\\n' >&2\nexit 0\n",
-    )
-    .expect("fake git");
-    let mut permissions = fs::metadata(&fake_git).expect("fake git metadata").permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
-
-    assert!(!is_trusted_uncommitted_zo_file_with_git(
-        &cwd,
-        &trust_record,
-        "trusted-mcp-servers.json",
-        fake_git.as_os_str(),
-    ));
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn malformed_git_stage_output_cannot_authorize_control_file() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let trust_record = cwd.join(".zo").join("trusted-mcp-servers.json");
-    fs::create_dir_all(trust_record.parent().expect("trust record parent"))
-        .expect("project config dir");
-    fs::write(&trust_record, r#"["repo-approved"]"#).expect("write trust record");
-    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
-    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
-    let fake_git = root.join("fake-git");
-    fs::write(
-        &fake_git,
-        r#"#!/bin/sh
-if [ "$1" = "rev-parse" ]; then
-  printf 'true\n'
-  exit 0
-fi
-printf 'malformed\000'
-exit 0
-"#,
-    )
-    .expect("fake git");
-    let mut permissions = fs::metadata(&fake_git).expect("fake git metadata").permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
-
-    assert!(!is_trusted_uncommitted_zo_file_with_git(
-        &cwd,
-        &trust_record,
-        "trusted-mcp-servers.json",
-        fake_git.as_os_str(),
-    ));
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn trusted_snapshot_rejects_path_replacement_during_git_probe() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let local_settings = cwd.join(".zo").join("settings.local.json");
-    fs::create_dir_all(local_settings.parent().expect("local settings parent"))
-        .expect("project config dir");
-    fs::write(&local_settings, r#"{"model":"original"}"#).expect("local settings");
-    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
-    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
-    let fake_git = root.join("fake-git");
-    fs::write(
-        &fake_git,
-        r#"#!/bin/sh
-if [ "$1" = "rev-parse" ]; then
-  mv .zo/settings.local.json .zo/original-settings.local.json
-  printf '{"model":"swapped"}' > .zo/settings.local.json
-  printf 'true\n'
-  exit 0
-fi
-exit 0
-"#,
-    )
-    .expect("fake git");
-    let mut permissions = fs::metadata(&fake_git).expect("fake git metadata").permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
-
-    assert!(
-        trusted_uncommitted_zo_file_snapshot_with_git(
-            &cwd,
-            &local_settings,
-            "settings.local.json",
-            fake_git.as_os_str(),
-        )
-        .is_none(),
-        "the retained descriptor must reject a path replaced during provenance validation"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn trusted_snapshot_returns_pre_probe_bytes_after_same_inode_rewrite() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let local_settings = cwd.join(".zo").join("settings.local.json");
-    fs::create_dir_all(local_settings.parent().expect("local settings parent"))
-        .expect("project config dir");
-    let original = r#"{"model":"original"}"#;
-    let swapped = r#"{"model":"swapped"}"#;
-    fs::write(&local_settings, original).expect("local settings");
-    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
-    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
-    let fake_git = root.join("fake-git");
-    fs::write(
-        &fake_git,
-        r#"#!/bin/sh
-if [ "$1" = "rev-parse" ]; then
-  printf '{"model":"swapped"}' > .zo/settings.local.json
-  printf 'true\n'
-  exit 0
-fi
-exit 0
-"#,
-    )
-    .expect("fake git");
-    let mut permissions = fs::metadata(&fake_git).expect("fake git metadata").permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
-
-    let snapshot = trusted_uncommitted_zo_file_snapshot_with_git(
-        &cwd,
-        &local_settings,
-        "settings.local.json",
-        fake_git.as_os_str(),
-    )
-    .expect("same-inode rewrite may not replace the retained pre-probe snapshot");
-
-    assert_eq!(snapshot, original);
-    assert_eq!(fs::read_to_string(&local_settings).expect("swapped file"), swapped);
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn trusted_git_resolver_skips_repository_owned_relative_and_non_executable_candidates() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let repository = root.join("repository");
-    let cwd = repository.join("nested");
-    let project_bin = repository.join("bin");
-    let non_executable_bin = root.join("non-executable-bin");
-    let external_bin = root.join("trusted-bin");
-    for directory in [
-        &cwd,
-        &project_bin,
-        &non_executable_bin,
-        &external_bin,
-        &repository.join(".git"),
-    ] {
-        fs::create_dir_all(directory).expect("test directory");
-    }
-    for executable in [project_bin.join("git"), external_bin.join("git")] {
-        fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("fake git");
-        let mut permissions = fs::metadata(&executable).expect("git metadata").permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&executable, permissions).expect("make git executable");
-    }
-    let non_executable = non_executable_bin.join("git");
-    fs::write(&non_executable, "not executable\n").expect("non-executable git");
-    let mut permissions = fs::metadata(&non_executable)
-        .expect("non-executable metadata")
-        .permissions();
-    permissions.set_mode(0o600);
-    fs::set_permissions(&non_executable, permissions).expect("keep git non-executable");
-
-    let path = std::env::join_paths([
-        project_bin,
-        non_executable_bin,
-        external_bin.clone(),
-    ])
-    .expect("PATH");
-    assert_eq!(
-        resolve_trusted_git_program_from(&cwd, &path),
-        Some(
-            external_bin
-                .join("git")
-                .canonicalize()
-                .expect("external git canonical path")
-        )
-    );
-    assert_eq!(
-        resolve_trusted_git_program_from(&cwd, std::ffi::OsStr::new(".")),
-        None,
-        "relative PATH candidates must never be resolved from the project"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn trusted_git_resolver_rejects_candidates_inside_nested_and_enclosing_repositories() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let outer_repository = root.join("outer-repository");
-    let nested_repository = outer_repository.join("nested-repository");
-    let cwd = nested_repository.join("src");
-    let outer_bin = outer_repository.join("bin");
-    let nested_bin = nested_repository.join("bin");
-    let external_bin = root.join("trusted-bin");
-    for directory in [
-        &cwd,
-        &outer_bin,
-        &nested_bin,
-        &external_bin,
-        &outer_repository.join(".git"),
-        &nested_repository.join(".git"),
-    ] {
-        fs::create_dir_all(directory).expect("test directory");
-    }
-    for executable in [
-        outer_bin.join("git"),
-        nested_bin.join("git"),
-        external_bin.join("git"),
-    ] {
-        fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("fake git");
-        let mut permissions = fs::metadata(&executable).expect("git metadata").permissions();
-        permissions.set_mode(0o700);
-        fs::set_permissions(&executable, permissions).expect("make git executable");
-    }
-
-    let path = std::env::join_paths([outer_bin, nested_bin, external_bin.clone()]).expect("PATH");
-    assert_eq!(
-        resolve_trusted_git_program_from(&cwd, &path),
-        Some(
-            external_bin
-                .join("git")
-                .canonicalize()
-                .expect("external git canonical path")
-        ),
-        "Git candidates inside both the nearest and enclosing repositories must be rejected"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn retained_validation_rejects_git_under_enclosing_marker_added_after_resolution() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let outer_repository = root.join("outer-repository");
-    let nested_repository = outer_repository.join("nested-repository");
-    let cwd = nested_repository.join("src");
-    let local_settings = cwd.join(".zo").join("settings.local.json");
-    let outer_git = outer_repository.join("bin").join("git");
-    fs::create_dir_all(local_settings.parent().expect("local settings parent"))
-        .expect("project config dir");
-    fs::create_dir_all(nested_repository.join(".git")).expect("nested git marker");
-    fs::create_dir_all(outer_git.parent().expect("outer git parent")).expect("outer git parent");
-    fs::write(&local_settings, r#"{"model":"original"}"#).expect("local settings");
-    fs::write(
-        &outer_git,
-        r#"#!/bin/sh
-if [ "$1" = "rev-parse" ]; then
-  printf 'true\n'
-fi
-exit 0
-"#,
-    )
-    .expect("fake git");
-    let mut permissions = fs::metadata(&outer_git).expect("fake git metadata").permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&outer_git, permissions).expect("make fake git executable");
-
-    let path = std::env::join_paths([outer_git.parent().expect("outer git parent")])
-        .expect("PATH");
-    let resolved = resolve_trusted_git_program_from(&cwd, &path)
-        .expect("the nested repository does not own the outer Git executable");
-
-    fs::create_dir_all(outer_repository.join(".git")).expect("enclosing git marker");
-    assert!(
-        trusted_uncommitted_zo_file_snapshot_with_git(
-            &cwd,
-            &local_settings,
-            "settings.local.json",
-            resolved.as_os_str(),
-        )
-        .is_none(),
-        "retained validation must reject a Git executable inside every enclosing repository observed before execution"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn trusted_snapshot_rejects_git_marker_replacement_during_probe() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let local_settings = cwd.join(".zo").join("settings.local.json");
-    fs::create_dir_all(local_settings.parent().expect("local settings parent"))
-        .expect("project config dir");
-    fs::write(&local_settings, r#"{"model":"original"}"#).expect("local settings");
-    fs::create_dir_all(cwd.join(".git")).expect("git marker");
-    fs::write(cwd.join(".git").join("HEAD"), "ref: refs/heads/main\n").expect("git HEAD");
-    let fake_git = root.join("fake-git");
-    fs::write(
-        &fake_git,
-        r#"#!/bin/sh
-if [ "$1" = "rev-parse" ]; then
-  mv .git .git-original
-  mkdir .git
-  printf 'true\n'
-  exit 0
-fi
-exit 0
-"#,
-    )
-    .expect("fake git");
-    let mut permissions = fs::metadata(&fake_git).expect("fake git metadata").permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
-
-    assert!(
-        trusted_uncommitted_zo_file_snapshot_with_git(
-            &cwd,
-            &local_settings,
-            "settings.local.json",
-            fake_git.as_os_str(),
-        )
-        .is_none(),
-        "replacing the repository marker during provenance validation must fail closed"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn trusted_snapshot_rejects_cwd_replacement_during_probe() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let local_settings = cwd.join(".zo").join("settings.local.json");
-    fs::create_dir_all(local_settings.parent().expect("local settings parent"))
-        .expect("project config dir");
-    fs::write(&local_settings, r#"{"model":"original"}"#).expect("local settings");
-    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
-    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
-    let fake_git = root.join("fake-git");
-    fs::write(
-        &fake_git,
-        r#"#!/bin/sh
-if [ "$1" = "rev-parse" ]; then
-  project=$(pwd -P)
-  mv "$project" "$project-original"
-  mkdir -p "$project/.zo"
-  printf '{"model":"replacement"}' > "$project/.zo/settings.local.json"
-  printf 'true\n'
-  exit 0
-fi
-exit 0
-"#,
-    )
-    .expect("fake git");
-    let mut permissions = fs::metadata(&fake_git).expect("fake git metadata").permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
-
-    assert!(
-        trusted_uncommitted_zo_file_snapshot_with_git(
-            &cwd,
-            &local_settings,
-            "settings.local.json",
-            fake_git.as_os_str(),
-        )
-        .is_none(),
-        "replacing cwd during provenance validation must fail closed"
-    );
-
-    fs::remove_dir_all(root).expect("cleanup temp dir");
-}
-
-#[cfg(unix)]
-#[test]
-fn trusted_snapshot_rejects_git_binary_replacement_during_probe() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let root = temp_dir();
-    let cwd = root.join("project");
-    let local_settings = cwd.join(".zo").join("settings.local.json");
-    fs::create_dir_all(local_settings.parent().expect("local settings parent"))
-        .expect("project config dir");
-    fs::write(&local_settings, r#"{"model":"original"}"#).expect("local settings");
-    // A `.git` marker, so the gate goes on to ask git (152: none, and it asks nothing).
-    fs::create_dir_all(cwd.join(".git")).expect("a git marker");
-    let fake_git = root.join("fake-git");
-    fs::write(
-        &fake_git,
-        r#"#!/bin/sh
-if [ "$1" = "rev-parse" ]; then
-  printf '#!/bin/sh\nexit 0\n' > "$0.replacement"
-  chmod 700 "$0.replacement"
-  mv "$0.replacement" "$0"
-  printf 'true\n'
-  exit 0
-fi
-exit 0
-"#,
-    )
-    .expect("fake git");
-    let mut permissions = fs::metadata(&fake_git).expect("fake git metadata").permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&fake_git, permissions).expect("make fake git executable");
-
-    assert!(
-        trusted_uncommitted_zo_file_snapshot_with_git(
-            &cwd,
-            &local_settings,
-            "settings.local.json",
-            fake_git.as_os_str(),
-        )
-        .is_none(),
-        "replacing the Git executable during provenance validation must fail closed"
-    );
 
     fs::remove_dir_all(root).expect("cleanup temp dir");
 }
@@ -3168,11 +2627,12 @@ fn project_settings_may_still_add_deny_restrictions() {
     );
 }
 
-/// Make `cwd` the person's project as zo tells one: a git repository that
-/// does not track the `.zo` files the person keeps there. A folder no
-/// repository governs gives no word that the person made them (152).
+/// Make `cwd` the person's project for a test about something else: on this
+/// thread, every `.zo` control file under it reads as one zo wrote, whenever it
+/// is written. What makes a file the person's — the record — is tested in
+/// `local_record::tests` and below.
 fn as_the_persons_repository(cwd: &std::path::Path) {
-    init_git_repo_with(cwd, ".zo", false);
+    super::local_record::treat_as_recorded_on_this_thread(cwd);
 }
 
 /// git-init a repo at `cwd`, optionally staging `rel_path` so it is tracked.
@@ -3222,31 +2682,36 @@ fn git_tracked_local_settings_is_reclassified_as_gated_project() {
 
 /// The user's OWN uncommitted `settings.local.json` stays trusted (Local): its
 /// hooks are honored, so the git-tracking gate does not break the legit use.
+/// A local file is the person's when zo wrote its bytes there, by the record in
+/// the person's config home — and only then: a file git does not track is not
+/// enough (153).
 #[test]
-#[cfg_attr(windows, ignore = "a trusted Local .zo/settings.local.json is Unix-only: its provenance gate needs Unix filesystem identities (filesystem_identity returns Unsupported on Windows, runtime/src/config/mod.rs:1714), so on Windows the file fails closed to gated Project scope")]
-fn untracked_local_settings_stays_trusted_local() {
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn a_local_settings_file_is_the_persons_when_zo_wrote_it_not_when_git_leaves_it_untracked() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
     let cwd = root.join("project");
     let home = root.join("home").join(".zo");
     fs::create_dir_all(cwd.join(".zo")).expect("project config dir");
     fs::create_dir_all(&home).expect("home config dir");
-    fs::write(
-        cwd.join(".zo").join("settings.local.json"),
-        r#"{"hooks":{"SessionStart":["echo local"]}}"#,
-    )
-    .expect("write local settings");
-    // A git repo exists, but the file is NOT staged/committed → untracked → Local.
+    let path = cwd.join(".zo").join("settings.local.json");
+    let bytes = r#"{"hooks":{"SessionStart":["echo local"]}}"#;
+    fs::write(&path, bytes).expect("write local settings");
     init_git_repo_with(&cwd, ".zo/settings.local.json", false);
+    let hooks = || {
+        ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("config should load")
+            .hooks()
+            .session_start()
+            .to_vec()
+    };
 
-    let loaded = ConfigLoader::new(&cwd, &home)
-        .load()
-        .expect("config should load");
-    assert_eq!(
-        loaded.hooks().session_start(),
-        &[HookRule::any("echo local")],
-        "an uncommitted settings.local.json stays trusted Local"
-    );
+    assert!(hooks().is_empty(), "untracked by git, not written by zo: the repository's");
+
+    let real = path.canonicalize().expect("canonical path");
+    super::local_record::remember(&home, &real, bytes.as_bytes()).expect("record");
+    assert_eq!(hooks(), [HookRule::any("echo local")], "written by zo: the person's");
 }
 
 /// A repo that commits `.zo` as a SYMLINK to a payload dir must not bypass the
@@ -3478,56 +2943,49 @@ fn a_folder_no_git_repository_governs_cannot_trust_its_own_mcp_servers() {
     assert_eq!(loaded.mcp().untrusted_project_servers().len(), 1);
 }
 
-/// What zo itself writes into `.zo/settings.local.json` — the model, the
-/// effort, the output style, plan mode — reads the same in a folder no git
-/// repository governs as in a repository that does not track the file: no
-/// repository strip touches these, so they keep working there (152), and
-/// nothing is named as unused. The four such files on the machine this was
-/// measured on held only the first two.
+/// "Always allow" lasts past the session in a folder with git and in one
+/// without: zo makes the local file, records what it wrote, and the next
+/// session reads it as the person's (153 — before, a folder without git kept
+/// the grant for the session only, and no folder got a file zo had to make).
 #[test]
-fn what_zo_writes_into_a_local_settings_file_reads_the_same_with_or_without_git() {
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn always_allow_is_kept_in_a_folder_with_or_without_git() {
     let _overrides_stable = overrides_stable();
-    let written = r#"{"model":"opus","reasoningEffort":"high","outputStyle":"terse","permissions":{"defaultMode":"plan"}}"#;
-    let read = |in_a_repository: bool| {
+    for with_git in [true, false] {
         let root = temp_dir();
         let cwd = root.join("project");
         let home = root.join("home").join(".zo");
-        fs::create_dir_all(cwd.join(".zo")).expect("project config dir");
+        fs::create_dir_all(&cwd).expect("project dir");
         fs::create_dir_all(&home).expect("home config dir");
-        fs::write(cwd.join(".zo").join("settings.local.json"), written)
-            .expect("write local settings");
-        if in_a_repository {
-            init_git_repo_with(&cwd, ".zo/settings.local.json", false);
+        if with_git {
+            init_git_repo_with(&cwd, ".zo", false);
         }
-        let loaded = ConfigLoader::new(&cwd, &home)
-            .load()
-            .expect("config should load");
-        (
-            loaded.model().map(str::to_string),
-            loaded.get("reasoningEffort").cloned(),
-            loaded.get("outputStyle").cloned(),
-            loaded.permission_mode(),
-            loaded.feature_config().unowned_local_settings().to_vec(),
-        )
-    };
 
-    let in_a_repository = read(true);
-    assert_eq!(in_a_repository.0.as_deref(), Some("opus"), "{in_a_repository:?}");
-    assert_eq!(in_a_repository.3, Some(ResolvedPermissionMode::ReadOnly), "{in_a_repository:?}");
-    assert_eq!(read(false), in_a_repository);
+        persist_allow_always_rules(&home, &cwd, &["Bash(cargo fmt*)".to_string()])
+            .expect("persist");
+
+        let loaded = ConfigLoader::new(&cwd, &home).load().expect("config should load");
+        assert!(
+            loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()),
+            "with git {with_git}: {:?}",
+            loaded.permission_rules().allow()
+        );
+    }
 }
 
-/// Nor does the folder's file take the person's "always allow" grants: they
-/// last for the session (152), as on Windows, rather than land in a file
-/// the folder came with.
+/// A file the folder came with does not take the person's "always allow"
+/// grants: they last for the session rather than land in it, where they would
+/// make what it says the person's.
 #[test]
-fn always_allow_is_not_written_into_a_folder_no_git_repository_governs() {
+fn always_allow_is_not_written_into_a_file_the_folder_came_with() {
     let dir = temp_dir();
     fs::create_dir_all(dir.join(".zo")).expect("temp .zo");
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("home");
     let path = dir.join(".zo").join("settings.local.json");
     fs::write(&path, r#"{"model":"opus"}"#).expect("write local settings");
 
-    persist_allow_always_rules(&dir, &["bash(cargo fmt*)".to_string()])
+    persist_allow_always_rules(&home, &dir, &["bash(cargo fmt*)".to_string()])
         .expect("an untrusted target is silent, not an error");
 
     assert_eq!(
@@ -3537,22 +2995,28 @@ fn always_allow_is_not_written_into_a_folder_no_git_repository_governs() {
     );
 }
 
-/// Only what a repository strip took out is named: a folder whose local file
-/// holds nothing more than the model has nothing to warn of, and a
-/// repository that tracks no local file is not a folder without git.
+/// Only what a repository strip took out is named: a local file holding no
+/// more than the model has nothing to warn of, one zo wrote is the person's,
+/// and one a repository commits with hooks in it is named like any other zo
+/// did not write (153).
 #[test]
-fn nothing_is_named_unused_where_nothing_went_unused_or_git_governs_the_folder() {
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn only_a_local_file_zo_did_not_write_has_its_stripped_settings_named() {
     let _overrides_stable = overrides_stable();
-    let unused = |local: &str, in_a_repository: bool| {
+    let unused = |local: &str, committed: bool, recorded: bool| {
         let root = temp_dir();
         let cwd = root.join("project");
         let home = root.join("home").join(".zo");
         fs::create_dir_all(cwd.join(".zo")).expect("project config dir");
         fs::create_dir_all(&home).expect("home config dir");
-        fs::write(cwd.join(".zo").join("settings.local.json"), local)
-            .expect("write local settings");
-        if in_a_repository {
+        let path = cwd.join(".zo").join("settings.local.json");
+        fs::write(&path, local).expect("write local settings");
+        if committed {
             init_git_repo_with(&cwd, ".zo/settings.local.json", true);
+        }
+        if recorded {
+            let real = path.canonicalize().expect("canonical path");
+            super::local_record::remember(&home, &real, local.as_bytes()).expect("record");
         }
         ConfigLoader::new(&cwd, &home)
             .load()
@@ -3561,11 +3025,12 @@ fn nothing_is_named_unused_where_nothing_went_unused_or_git_governs_the_folder()
             .unowned_local_settings()
             .to_vec()
     };
+    let hooks = r#"{"hooks":{"SessionStart":["echo x"]}}"#;
 
-    assert!(unused(r#"{"model":"opus"}"#, false).is_empty());
-    // A repository's committed local file is gated as before, and is the
-    // repository's to answer for — not a folder without git.
-    assert!(unused(r#"{"hooks":{"SessionStart":["echo x"]}}"#, true).is_empty());
+    assert!(unused(r#"{"model":"opus"}"#, false, false).is_empty());
+    assert!(unused(hooks, false, true).is_empty(), "zo wrote it: the person's");
+    assert_eq!(unused(hooks, true, false), ["hooks"]);
+    assert_eq!(unused(hooks, false, false), ["hooks"]);
 }
 
 /// A project's malformed (non-string) `deny` entry must not brick the whole
@@ -3993,28 +3458,30 @@ fn a_subject_containing_an_equals_sign_survives_the_ordered_form() {
     );
 }
 
-/// The trust gate is the outer wall: an ordinary directory is not a trusted
-/// `.zo/settings.local.json`, so nothing is created and nothing is written.
+/// A link at the local file's path is never written through: zo makes the file
+/// only where nothing stands, and writes over only a file it wrote (153).
 #[test]
-fn an_untrusted_directory_is_never_written_to() {
+#[cfg(unix)]
+fn a_link_at_the_local_files_path_is_never_written_through() {
     let dir = temp_dir();
     fs::create_dir_all(dir.join(".zo")).expect("temp .zo");
-    let path = dir.join(".zo").join("settings.local.json");
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("home");
+    let elsewhere = dir.join("elsewhere.json");
+    fs::write(&elsewhere, "{}").expect("target");
+    std::os::unix::fs::symlink(&elsewhere, dir.join(".zo").join("settings.local.json"))
+        .expect("link");
 
-    persist_allow_always_rules(&dir, &["bash(cargo fmt*)".to_string()])
-        .expect("an untrusted target is silent, not an error");
-    assert!(
-        !path.exists(),
-        "persistence must never create a settings file it was not already trusted to edit"
-    );
-
-    fs::remove_dir_all(&dir).ok();
+    persist_allow_always_rules(&home, &dir, &["bash(cargo fmt*)".to_string()])
+        .expect("a link is silent, not an error");
+    assert_eq!(fs::read_to_string(&elsewhere).expect("target"), "{}");
+    assert!(!home.join(super::local_record::RECORD_FILE).exists());
 }
 
-/// No grants, no write — and no git work either.
+/// No grants, no write.
 #[test]
 fn no_grants_writes_nothing() {
     let dir = temp_dir();
-    persist_allow_always_rules(&dir, &[]).expect("an empty grant list is a no-op");
+    persist_allow_always_rules(&dir.join("home"), &dir, &[]).expect("an empty grant list is a no-op");
     assert!(!dir.join(".zo").exists());
 }

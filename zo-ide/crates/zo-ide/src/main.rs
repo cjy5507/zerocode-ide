@@ -504,6 +504,18 @@ fn run_auto_dream(args: &[String]) -> Answered {
 /// value, exit 0 when it did what was asked and 1 when it did not.
 fn run_settings(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
+    if args.first().map(String::as_str) == Some("trust-local") {
+        return Ok(match zo_ide::trust_local_cli::run(&args[1..], &cwd) {
+            Ok(text) => {
+                println!("{text}");
+                success("settings")
+            }
+            Err(message) => {
+                eprintln!("zo settings trust-local: {message}");
+                ("settings-refused", 1)
+            }
+        });
+    }
     Ok(match zo_ide::settings_cli::run(args, &cwd) {
         Ok(answer) => {
             println!("{}", answer.json);
