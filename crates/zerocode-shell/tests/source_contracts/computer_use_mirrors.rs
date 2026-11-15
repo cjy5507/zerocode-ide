@@ -1081,7 +1081,9 @@ fn the_skill_says_a_walk_the_person_took_over_stops_and_is_no_defect() {
 /// deadline again (t-109578, t-109675): counted from its own start a late
 /// group runs past the bridge, and every group's answer is lost with it.
 /// `run_parallel` names the request's deadline twice — where it takes it and
-/// where it counts it down — and hands the look and the batch the count.
+/// where it counts it down — and hands the look and the batch the count. The
+/// count has one beginning, taken before any group waits for a place: one
+/// taken inside a group's own work is that group's start again (t-109717).
 #[test]
 fn a_parallels_groups_are_given_what_is_left_of_the_requests_time() {
     let runtime =
@@ -1100,5 +1102,24 @@ fn a_parallels_groups_are_given_what_is_left_of_the_requests_time() {
     assert!(
         body.contains("look_group(&steps[0], left_ms(), step)"),
         "a look group begins with what is left:\n{body}"
+    );
+    let began = body
+        .find("let began = std::time::Instant::now();")
+        .expect("the request's time is counted from one beginning");
+    let pool = body
+        .find("at_most_at_once(")
+        .expect("the groups go through the pool");
+    assert!(
+        began < pool,
+        "the count begins after a group has waited for its place:\n{body}"
+    );
+    assert_eq!(
+        body.matches("Instant::now()").count(),
+        1,
+        "a group counts from a beginning of its own:\n{body}"
+    );
+    assert!(
+        body.contains("deadline_ms.saturating_sub("),
+        "what is left is not counted down from the request's deadline:\n{body}"
     );
 }

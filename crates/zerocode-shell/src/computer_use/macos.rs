@@ -960,7 +960,24 @@ fn rows_moved(
     moved
 }
 
+/// Forget the last reading, so the next one counts as moved whatever it
+/// says. A row changed outside a reading — it was reset, or the person was
+/// sent to System Settings to set it — and a helper that starts before the
+/// row is set again starts under the row as it stands in between: a reading
+/// that then finds the rows as they were last read would leave that helper
+/// standing, blind to a grant given after it started (t-109717).
+fn forget_rows_read() {
+    *ROWS_READ
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
 fn permission_status_macos() -> Result<ComputerPermissionReport, ComputerUseError> {
+    // A test says what its thread's probe reads, and no helper app starts.
+    #[cfg(test)]
+    if let Some(report) = stand_in::probe_report() {
+        return Ok(report);
+    }
     permission_probe(None).map(|(report, _)| report)
 }
 
@@ -1338,8 +1355,20 @@ fn permission_next_step(target: &PermissionTarget, row: &ComputerPermissionRow) 
 pub(super) fn open_permission(
     permission_id: Option<ComputerPermissionId>,
 ) -> Result<ComputerPermissionSetup, ComputerUseError> {
-    super::shutdown();
-    let report = permission_status_macos()?;
+    let report = if permission_id.is_some() {
+        // A named permission is asked of the OS and the person sent to its
+        // list: the session ends here, and the last reading is forgotten.
+        super::shutdown();
+        forget_rows_read();
+        permission_status_macos()?
+    } else {
+        // A plain status ask is a reading like the window's own — an agent
+        // makes one as the first call of every run — and ends the session
+        // only when a row moved (t-109717).
+        let report = permission_status_macos()?;
+        settle_session_for(&report.permissions);
+        report
+    };
     let plan = permission_plan(permission_id, &report.permissions);
     let mut setup = ComputerPermissionSetup {
         identity: report.identity,
@@ -1413,6 +1442,8 @@ fn reset_row(
         .args(reset_args(target, &row.bundle_id)?)
         .output()
         .map_err(io_error("reset Computer Use permission"))?;
+    // The reset ran: the row is no longer what the last reading said.
+    forget_rows_read();
     if !output.status.success() {
         let why = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(ComputerUseError::new(

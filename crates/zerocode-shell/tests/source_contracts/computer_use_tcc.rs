@@ -319,3 +319,48 @@ fn tccutil_runs_through_one_three_word_road_and_the_row_door_asks_the_table() {
         "the door's question is not the table's"
     );
 }
+
+/// A row that changes outside a reading leaves the last reading forgotten, so
+/// the next one ends the session of a helper that started in between
+/// (t-109717): a reset forgets once `tccutil` ran, a named permission where
+/// its session ends. A plain status ask is a reading — it ends the session
+/// only by its rows — and so is the window's own, which ends none itself.
+#[test]
+fn a_row_changed_outside_a_reading_forgets_the_last_reading() {
+    let macos = shipped("computer_use/macos.rs");
+    let reset = block_after(&macos, "fn reset_row(");
+    let ran = reset.find(".output()").expect("the reset runs");
+    let forgot = reset
+        .find("forget_rows_read();")
+        .expect("a reset forgets the last reading");
+    assert!(
+        ran < forgot,
+        "the reading is forgotten before the reset ran:\n{reset}"
+    );
+    let open = block_after(&macos, "pub(super) fn open_permission(");
+    assert_eq!(
+        open.matches("super::shutdown();").count(),
+        1,
+        "only a named permission ends the session outright:\n{open}"
+    );
+    let ends = open
+        .find("super::shutdown();")
+        .expect("a named permission ends the session");
+    let forgets = open
+        .find("forget_rows_read();")
+        .expect("a named permission forgets the last reading");
+    assert!(
+        ends < forgets,
+        "a named permission forgets before its session ends:\n{open}"
+    );
+    assert!(
+        open.contains("settle_session_for(&report.permissions);"),
+        "a plain status ask is not settled by its rows:\n{open}"
+    );
+    let reading = block_after(&macos, "pub(super) fn permission_status(");
+    assert!(
+        !reading.contains("shutdown(")
+            && reading.contains("settle_session_for(&report.permissions);"),
+        "the window's reading ends the session itself:\n{reading}"
+    );
+}

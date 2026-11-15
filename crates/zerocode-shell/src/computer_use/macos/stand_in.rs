@@ -19,7 +19,9 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use zerocode_core::computer_use::{COMPUTER_USE_PROTOCOL_VERSION, guard_table};
+use zerocode_core::computer_use::{
+    COMPUTER_USE_PROTOCOL_VERSION, ComputerPermissionReport, ComputerPermissionState, guard_table,
+};
 
 use super::{Launched, Session, peer_pid};
 use crate::computer_use::ComputerUseError;
@@ -486,6 +488,34 @@ fn answer(method: &str, params: &Value, shared: &Shared) -> Result<Value, String
     }
 }
 
+thread_local! {
+    /// The rows this thread's permission probe reads, once a test says them.
+    static PROBE_READS: std::cell::RefCell<Option<Vec<ComputerPermissionState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// From here on the permission probe of this thread reads `rows`, and starts
+/// no helper app to read them: the probe is the helper app launched to write
+/// what macOS grants it, and a test stands in for that answer too.
+fn probe_reads(rows: &[ComputerPermissionState]) {
+    PROBE_READS.with_borrow_mut(|reads| *reads = Some(rows.to_vec()));
+}
+
+/// The report of a probe that read what a test said, on a thread whose test
+/// said it.
+pub(super) fn probe_report() -> Option<ComputerPermissionReport> {
+    let permissions = PROBE_READS.with_borrow(Clone::clone)?;
+    Some(ComputerPermissionReport {
+        identity: None,
+        platform: "darwin".into(),
+        helper_app_path: None,
+        helper_unavailable_reason: None,
+        permissions,
+        judged_rows: Vec::new(),
+        tcc_rows: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,40 +734,19 @@ mod tests {
     /// that moved no row leaves the session and its helper alone — every act
     /// under way goes on — and one that moved a row ends the session, its
     /// helper sent away, so the next call starts one that sees the new row
-    /// (t-109675).
+    /// (t-109675). The readings are the window's own, `permission_status`,
+    /// the probe answered here: an end written back into that road fails
+    /// this test (t-109717).
     #[test]
     fn a_permission_reading_ends_the_session_only_when_a_row_moved() {
-        use zerocode_core::computer_use::{
-            ComputerPermissionId, ComputerPermissionState, ComputerPermissionStatus,
-        };
+        use zerocode_core::computer_use::ComputerPermissionStatus;
         let _hand = crate::tests::computer_desktop_wait::ONE_HAND
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let rows = |screenshots| {
-            [
-                (
-                    ComputerPermissionId::Accessibility,
-                    ComputerPermissionStatus::Granted,
-                ),
-                (ComputerPermissionId::Screenshots, screenshots),
-            ]
-            .map(|(id, status)| ComputerPermissionState { id, status })
-        };
-        let granted = rows(ComputerPermissionStatus::Granted);
-        // The first reading: no session stands yet, and none is ended.
-        *super::super::ROWS_READ
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = None;
-        super::super::settle_session_for(&granted);
+        let granted = rows_with_screenshots(ComputerPermissionStatus::Granted);
+        let (helper, session) = a_session_standing_after_a_reading_of(&granted);
 
-        let helper = StandIn::start(TOKEN, Shape::matching());
-        let Connected(session) = helper.connect_window(TOKEN).expect("connected");
-        let session = Arc::new(session);
-        *crate::computer_use::held_client()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&session));
-
-        super::super::settle_session_for(&granted);
+        assert_eq!(super::super::permission_status().permissions, granted);
         assert!(
             crate::computer_use::session_stands(),
             "a reading that moved no row ended the session"
@@ -752,7 +761,9 @@ mod tests {
             .map_err(|_| "the session no longer answers")
             .expect("what the session has under way goes on");
 
-        super::super::settle_session_for(&rows(ComputerPermissionStatus::NotGranted));
+        let denied = rows_with_screenshots(ComputerPermissionStatus::NotGranted);
+        probe_reads(&denied);
+        assert_eq!(super::super::permission_status().permissions, denied);
         assert!(
             !crate::computer_use::session_stands(),
             "a row moved and the session still stands"
@@ -763,6 +774,121 @@ mod tests {
             "a row moved and the helper was not sent away"
         );
         drop(session);
+    }
+
+    /// An agent's plain `permissions` is a reading too — the skill makes it
+    /// the first call of every run. With the rows as they were last read it
+    /// leaves the session, its helper and what other agents have under way
+    /// alone; with a row moved it ends the session, as the window's own
+    /// reading does (t-109717).
+    #[test]
+    fn a_plain_permissions_ask_ends_the_session_only_when_a_row_moved() {
+        use zerocode_core::computer_use::{ComputerPermissionId, ComputerPermissionStatus};
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let granted = rows_with_screenshots(ComputerPermissionStatus::Granted);
+        let (helper, session) = a_session_standing_after_a_reading_of(&granted);
+
+        let said = super::super::open_permission(None).expect("the rows");
+        assert_eq!(said.permissions.as_deref(), Some(&granted[..]));
+        assert!(
+            crate::computer_use::session_stands(),
+            "a plain ask that moved no row ended the session"
+        );
+        assert_eq!(
+            helper.wait_heard("terminate", 1, Duration::from_millis(300)),
+            0,
+            "a plain ask that moved no row sent the helper away"
+        );
+        session
+            .request("status", json!({}))
+            .map_err(|_| "the session no longer answers")
+            .expect("what the session has under way goes on");
+
+        probe_reads(&rows_with_screenshots(ComputerPermissionStatus::NotGranted));
+        let said = super::super::open_permission(None).expect("the rows");
+        assert_eq!(
+            said.permission_id,
+            Some(ComputerPermissionId::Screenshots),
+            "the ask names the row that is missing"
+        );
+        assert!(
+            !crate::computer_use::session_stands(),
+            "a row moved and the session still stands"
+        );
+        assert_eq!(
+            helper.wait_heard("terminate", 1, Duration::from_secs(2)),
+            1,
+            "a row moved and the helper was not sent away"
+        );
+        drop(session);
+    }
+
+    /// A row that was reset, or a permission the person was sent to System
+    /// Settings for, changed outside a reading, and the last reading is
+    /// forgotten there. The next reading then ends the session though it
+    /// finds the rows as they were: a helper that started in between started
+    /// under the row as it stood then, and sees no grant given since
+    /// (t-109717).
+    #[test]
+    fn a_reading_after_the_last_was_forgotten_ends_the_session() {
+        use zerocode_core::computer_use::ComputerPermissionStatus;
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let granted = rows_with_screenshots(ComputerPermissionStatus::Granted);
+        let (helper, session) = a_session_standing_after_a_reading_of(&granted);
+
+        super::super::forget_rows_read();
+        assert_eq!(super::super::permission_status().permissions, granted);
+        assert!(
+            !crate::computer_use::session_stands(),
+            "the rows read as before, and a helper started in between still stands"
+        );
+        assert_eq!(
+            helper.wait_heard("terminate", 1, Duration::from_secs(2)),
+            1,
+            "that helper was not sent away"
+        );
+        drop(session);
+    }
+
+    /// The two rows as a probe reads them: Accessibility granted, Screen
+    /// Recording as said.
+    fn rows_with_screenshots(
+        screenshots: zerocode_core::computer_use::ComputerPermissionStatus,
+    ) -> [ComputerPermissionState; 2] {
+        use zerocode_core::computer_use::{ComputerPermissionId, ComputerPermissionStatus};
+        [
+            (
+                ComputerPermissionId::Accessibility,
+                ComputerPermissionStatus::Granted,
+            ),
+            (ComputerPermissionId::Screenshots, screenshots),
+        ]
+        .map(|(id, status)| ComputerPermissionState { id, status })
+    }
+
+    /// A stand-in helper whose session is the one that stands, after a first
+    /// reading of `rows` — the probe's from here on — that had none before it.
+    fn a_session_standing_after_a_reading_of(
+        rows: &[ComputerPermissionState],
+    ) -> (StandIn, Arc<Session>) {
+        super::super::forget_rows_read();
+        probe_reads(rows);
+        assert_eq!(
+            super::super::permission_status().permissions,
+            rows,
+            "the reading is the probe's"
+        );
+        let helper = StandIn::start(TOKEN, Shape::matching());
+        let Connected(session) = helper.connect_window(TOKEN).expect("connected");
+        let session = Arc::new(session);
+        *crate::computer_use::held_client()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&session));
+        (helper, session)
     }
 
     /// A reading is compared with the one before it, which it replaces.
