@@ -695,3 +695,241 @@ fn committed_fold_caps_long_failure_runs_while_keeping_total_in_head() {
     assert!(cell.iter().any(|row| row.contains("probe_6")), "{cell:#?}");
     assert!(cell.iter().any(|row| row.contains("probe_9")), "{cell:#?}");
 }
+
+#[test]
+fn marks_blockquote_uses_dim_bar_and_body_ink() {
+    if !style::in_fresh_run(&path("marks_blockquote_uses_dim_bar_and_body_ink")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let lines = super::markdown::render("> 주의");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let prefix = &lines[0].spans[0];
+    assert_eq!(prefix.text, "│ ");
+    assert!(prefix.style.dim);
+    assert_eq!(prefix.style.fg, None);
+    let body = &lines[0].spans[1];
+    assert_eq!(body.text, "주의");
+    assert_eq!(body.style.fg, None);
+
+    let two_lines = super::markdown::render_wrapped("> first line\n> second line", Some(80));
+    assert_eq!(two_lines.len(), 2, "{two_lines:?}");
+    for line in &two_lines {
+        assert_eq!(line.spans[0].text, "│ ");
+        assert!(line.spans[0].style.dim);
+        assert_eq!(line.spans[0].style.fg, None);
+    }
+
+    let quote = super::markdown::render("> one two three four five six seven");
+    let hanging = quote[0]
+        .continuation
+        .as_ref()
+        .expect("blockquote carries hanging bar");
+    assert_eq!(hanging.text, "│ ");
+    assert!(hanging.style.dim);
+    assert_eq!(hanging.style.fg, None);
+    let wrapped = super::wrap::wrap_line(&quote[0], 16, hanging);
+    assert!(wrapped.len() >= 2, "{wrapped:?}");
+    for line in &wrapped {
+        assert_eq!(line.spans[0].text, "│ ");
+        assert!(line.spans[0].style.dim);
+        assert_eq!(line.spans[0].style.fg, None);
+    }
+    let cell_rows = prefixed(&quote, 16, &Prefix::hang(), true);
+    assert!(cell_rows.len() >= 2, "{cell_rows:?}");
+    for row in &cell_rows {
+        assert_eq!(row.spans[1].text, "│ ");
+        assert!(row.spans[1].style.dim);
+        assert_eq!(row.spans[1].style.fg, None);
+    }
+}
+
+#[test]
+fn marks_headings_drop_italic_and_keep_no_colour_without_palette() {
+    if !style::in_fresh_run(&path("marks_headings_drop_italic_and_keep_no_colour_without_palette")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let lines = super::markdown::render("# One\n\n## Two\n\n### Three\n\n#### Four");
+    let headings: Vec<_> = lines.iter().filter(|line| !line.spans.is_empty()).collect();
+    assert_eq!(headings.len(), 4, "{headings:?}");
+    for (idx, line) in headings.iter().enumerate() {
+        for span in &line.spans {
+            assert!(span.style.bold, "heading {idx} should be bold: {span:?}");
+            assert!(!span.style.italic, "heading {idx} should not be italic: {span:?}");
+            assert_eq!(span.style.underline, idx == 0, "only H1 is underlined: {span:?}");
+            assert_eq!(span.style.fg, None, "no palette means no heading colour: {span:?}");
+        }
+    }
+    let palette = super::palette::TerminalPalette::new(
+        (224, 224, 224),
+        (28, 30, 38),
+        super::palette::ColorLevel::TrueColor,
+    );
+    let h1 = super::markdown::heading_style_for_palette(
+        pulldown_cmark::HeadingLevel::H1,
+        Some(palette),
+    );
+    let h2 = super::markdown::heading_style_for_palette(
+        pulldown_cmark::HeadingLevel::H2,
+        Some(palette),
+    );
+    let h3 = super::markdown::heading_style_for_palette(
+        pulldown_cmark::HeadingLevel::H3,
+        Some(palette),
+    );
+    assert!(h1.bold && h1.underline && !h1.italic);
+    assert_eq!(h1.fg, Some(super::palette::HEADING_ACCENT));
+    assert!(h2.bold && !h2.underline && !h2.italic);
+    assert_eq!(h2.fg, Some(super::palette::HEADING_ACCENT));
+    assert!(h3.bold && !h3.underline && !h3.italic);
+    assert_eq!(h3.fg, None);
+}
+
+#[test]
+fn marks_ordered_marker_has_no_foreground_colour() {
+    if !style::in_fresh_run(&path("marks_ordered_marker_has_no_foreground_colour")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let lines = super::markdown::render("1. 가");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let marker = &lines[0].spans[0];
+    assert_eq!(marker.text, "1. ");
+    assert_eq!(marker.style.fg, None);
+}
+
+#[test]
+fn marks_table_header_drops_syntect_colour_without_palette() {
+    if !style::in_fresh_run(&path("marks_table_header_drops_syntect_colour_without_palette")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let lines = super::markdown::render("| a | b |\n| - | - |\n| 1 | 2 |");
+    assert!(lines.len() >= 3, "{lines:?}");
+    assert!(lines[0].style.bold, "header row should be bold: {:?}", lines[0].style);
+    assert_eq!(lines[0].style.fg, None, "no palette means no header colour: {:?}", lines[0].style);
+    for span in &lines[0].spans {
+        assert_eq!(span.style.fg, None, "no palette means no header span colour: {span:?}");
+    }
+    let dark = super::palette::TerminalPalette::new(
+        (224, 224, 224),
+        (28, 30, 38),
+        super::palette::ColorLevel::TrueColor,
+    );
+    let light = super::palette::TerminalPalette::new(
+        (46, 52, 52),
+        (255, 255, 255),
+        super::palette::ColorLevel::TrueColor,
+    );
+    for palette in [dark, light] {
+        let header = super::tables::header_style_for_palette(Some(palette));
+        assert!(header.bold);
+        assert_eq!(header.fg, Some(super::palette::HEADING_ACCENT));
+        let sep = super::tables::separator_style_for_palette(Some(palette));
+        let Some(super::ansi::Color::Rgb(r, g, b)) = sep.fg else {
+            panic!("truecolor separator must emit RGB fg: {sep:?}");
+        };
+        let ratio = super::palette::contrast_ratio((r, g, b), palette.background());
+        assert!(
+            (3.0..4.5).contains(&ratio),
+            "separator contrast {ratio:.2} out of [3.0, 4.5) for {:?}",
+            palette.background()
+        );
+    }
+}
+
+#[test]
+fn marks_quiet_fold_edit_counts_are_not_dimmed() {
+    use runtime::message_stream::{DiffHunk, DiffLine, DiffLineKind, DiffView, ToolResultBody};
+    if !style::in_fresh_run(&path("marks_quiet_fold_edit_counts_are_not_dimmed")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let view = DiffView {
+        old_path: Some("src/lib.rs".to_string()),
+        new_path: Some("src/lib.rs".to_string()),
+        language: None,
+        hunks: vec![DiffHunk {
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            lines: vec![
+                DiffLine {
+                    kind: DiffLineKind::Removed,
+                    text: "old".to_string(),
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: "new".to_string(),
+                },
+            ],
+        }],
+    };
+    let mut group = ToolGroup::new(ToolCall::new(
+        "a".to_string(),
+        ToolKind::Edit {
+            path: "src/lib.rs".to_string(),
+        },
+    ));
+    assert!(group.complete(
+        "a",
+        Outcome::from_result(false, &ToolResultBody::Diff(view), "src/lib.rs"),
+    ));
+    let mut fold = super::turns::TurnFold::default();
+    fold.take_steps(group.steps());
+    let rows = fold.live_rows(100, 16);
+    let plus = rows[0]
+        .spans
+        .iter()
+        .find(|s| s.text == "+1")
+        .expect("+1 span in quiet fold row");
+    let minus = rows[0]
+        .spans
+        .iter()
+        .find(|s| s.text == "-1")
+        .expect("-1 span in quiet fold row");
+    assert!(!plus.style.dim, "+1 must not be dimmed: {plus:?}");
+    assert_eq!(plus.style.fg, Some(super::ansi::Color::GREEN));
+    assert!(!minus.style.dim, "-1 must not be dimmed: {minus:?}");
+    assert_eq!(minus.style.fg, Some(super::ansi::Color::RED));
+}
+
+#[test]
+fn marks_shimmer_keeps_contrast_at_least_three_to_one() {
+    if !style::in_fresh_run(&path("marks_shimmer_keeps_contrast_at_least_three_to_one")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let dark = super::palette::TerminalPalette::new(
+        (224, 224, 224),
+        (28, 30, 38),
+        super::palette::ColorLevel::TrueColor,
+    );
+    let light = super::palette::TerminalPalette::new(
+        (46, 52, 52),
+        (255, 255, 255),
+        super::palette::ColorLevel::TrueColor,
+    );
+    for palette in [dark, light] {
+        for ms in (0..=2000).step_by(50) {
+            let spans = super::shimmer::shimmer_spans_for_palette(
+                "Working",
+                Duration::from_millis(ms),
+                Some(palette),
+            );
+            for span in spans {
+                let Some(super::ansi::Color::Rgb(r, g, b)) = span.style.fg else {
+                    panic!("truecolor shimmer must emit RGB fg: {span:?}");
+                };
+                let ratio = super::palette::contrast_ratio((r, g, b), palette.background());
+                assert!(
+                    ratio >= 3.0,
+                    "contrast {ratio:.2} < 3.0 at {ms}ms for {:?}: {span:?}",
+                    palette.background()
+                );
+            }
+        }
+    }
+}

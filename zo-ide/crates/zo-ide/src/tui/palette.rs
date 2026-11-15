@@ -28,6 +28,9 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100)
 pub const SHIMMER_BASE: (u8, u8, u8) = (128, 128, 128);
 /// shimmer 밴드의 꼭대기 재료 — 응답이 없을 때의 캡처 값.
 pub const SHIMMER_PEAK: (u8, u8, u8) = (255, 255, 255);
+/// Minimum WCAG contrast ratio against the terminal background for muted
+/// marks elements (table rules and the deepest shimmer trough).
+pub const MIN_MUTED_CONTRAST: f64 = 3.0;
 
 /// Max tier 컴포저 caret `›` 의 캡처 폴백.
 pub const COMPOSER_CARET: Color = Color::Rgb(255, 178, 66);
@@ -66,8 +69,10 @@ pub const TOOL_OK: Color = Color::Indexed(2);
 pub const TOOL_FAIL: Color = Color::Indexed(1);
 /// `Exploring` 목록과 MCP 셀의 도구 이름.
 pub const TOOL_LABEL: Color = Color::Indexed(6);
+/// Accent for marks headings (H1/H2) and table headers.
+pub const HEADING_ACCENT: Color = Color::Rgb(249, 226, 175);
 /// 표 헤더 행의 전경색.
-pub const TABLE_HEADER: Color = Color::Rgb(249, 226, 175);
+pub const TABLE_HEADER: Color = HEADING_ACCENT;
 /// `/resume` 목록에서 고른 행 — 감사에서 확인된 어두운 배경 갈래
 /// (`Color::Yellow`). 행 배경 tint는 측정값에 적응하지만, 밝은 테마의 전경
 /// remap은 #19와 함께 유예되어 이 토큰은 보존한다.
@@ -136,7 +141,27 @@ impl TerminalPalette {
     /// foreground, which reversed that polarity.
     #[must_use]
     pub fn shimmer_colors(self) -> ((u8, u8, u8), (u8, u8, u8)) {
-        (self.foreground, self.background)
+        let peak = if super::style::current().style == super::style::TuiStyle::Marks {
+            self.muted_foreground_for_contrast(MIN_MUTED_CONTRAST)
+        } else {
+            self.background
+        };
+        (self.foreground, peak)
+    }
+
+    /// Lightest blend of `foreground` over `background` (starting at 20 % in
+    /// 5 % steps) that still clears `min_contrast` against `background`.
+    #[must_use]
+    pub fn muted_foreground_for_contrast(self, min_contrast: f64) -> (u8, u8, u8) {
+        for step in 4..=20 {
+            #[allow(clippy::cast_precision_loss)]
+            let alpha = step as f32 * 0.05;
+            let candidate = blend_rgb(self.foreground, self.background, alpha);
+            if contrast_ratio(candidate, self.background) >= min_contrast {
+                return candidate;
+            }
+        }
+        self.foreground
     }
 
     /// 실제 깊이에서 표현할 수 있는 전경/배경색으로 낮춘다.

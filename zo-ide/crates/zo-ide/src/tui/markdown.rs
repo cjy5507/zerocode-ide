@@ -70,12 +70,33 @@ pub mod probe {
 /// 헤딩 수준별 스타일 — codex `MarkdownStyles::default` 에서 h4 이하도 굵게
 /// (t-48216): 해시가 없으니 굵기가 제목을 알린다.
 fn heading_style(level: HeadingLevel) -> Style {
-    match level {
+    heading_style_for_palette(level, super::palette::terminal_palette())
+}
+
+pub(crate) fn heading_style_for_palette(
+    level: HeadingLevel,
+    terminal_palette: Option<super::palette::TerminalPalette>,
+) -> Style {
+    let base = match level {
         HeadingLevel::H1 => Style::new().bold().underline(),
-        HeadingLevel::H2 => Style::new().bold(),
-        HeadingLevel::H3 | HeadingLevel::H4 | HeadingLevel::H5 | HeadingLevel::H6 => {
-            Style::new().bold().italic()
-        }
+        HeadingLevel::H2
+        | HeadingLevel::H3
+        | HeadingLevel::H4
+        | HeadingLevel::H5
+        | HeadingLevel::H6 => Style::new().bold(),
+    };
+    if super::style::current().style != super::style::TuiStyle::Marks {
+        return match level {
+            HeadingLevel::H1 | HeadingLevel::H2 => base,
+            HeadingLevel::H3
+            | HeadingLevel::H4
+            | HeadingLevel::H5
+            | HeadingLevel::H6 => base.italic(),
+        };
+    }
+    match (level, terminal_palette) {
+        (HeadingLevel::H1 | HeadingLevel::H2, Some(_)) => base.fg(super::palette::HEADING_ACCENT),
+        _ => base,
     }
 }
 
@@ -630,12 +651,18 @@ impl Writer<'_> {
                     self.push_blank();
                     self.needs_newline = false;
                 }
+                let marks = super::style::current().style == super::style::TuiStyle::Marks;
+                let (bar_text, bar_style, body_style) = if marks {
+                    ("│ ", Style::new().dim(), Style::new())
+                } else {
+                    ("> ", BLOCKQUOTE_STYLE, BLOCKQUOTE_STYLE)
+                };
                 self.indent.push(Indent {
-                    prefix: vec![Span::new("> ", BLOCKQUOTE_STYLE)],
+                    prefix: vec![Span::new(bar_text, bar_style)],
                     marker: None,
                     is_list: false,
                 });
-                self.inline.push(BLOCKQUOTE_STYLE);
+                self.inline.push(body_style);
             }
             // codex `start_codeblock` 은 언어 이름을 **찍지 않는다** — 언어
             // 이름표가 있으면 본문을 모아 두었다가 `end_codeblock` 에서
@@ -736,13 +763,18 @@ impl Writer<'_> {
         let depth = self.list_indices.len();
         let width = depth.saturating_mul(4).saturating_sub(3).max(1);
         let ordered = self.list_indices.last().copied().flatten().is_some();
+        let ordered_style = if super::style::current().style == super::style::TuiStyle::Marks {
+            Style::new()
+        } else {
+            ORDERED_MARKER_STYLE
+        };
         let marker = match self.list_indices.last_mut() {
             Some(Some(index)) => {
                 let shown = *index;
                 *index += 1;
                 Some(vec![Span::new(
                     format!("{shown:width$}. "),
-                    ORDERED_MARKER_STYLE,
+                    ordered_style,
                 )])
             }
             Some(None) => Some(vec![Span::raw(format!(

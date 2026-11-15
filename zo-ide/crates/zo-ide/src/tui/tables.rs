@@ -239,13 +239,23 @@ struct ColumnMetrics {
 
 /// 헤더 스타일 — codex 는 syntect 스코프에서 만들고 `.bold()` 를 얹는다.
 fn header_style() -> Style {
-    super::highlight::foreground_style_for_scopes(&[
-        "entity.name.type",
-        "support.type",
-        "variable",
-    ])
-    .unwrap_or_else(|| Style::new().fg(palette::TABLE_HEADER))
-    .bold()
+    header_style_for_palette(palette::terminal_palette())
+}
+
+pub(crate) fn header_style_for_palette(
+    terminal_palette: Option<palette::TerminalPalette>,
+) -> Style {
+    if super::style::current().style != super::style::TuiStyle::Marks {
+        return super::highlight::foreground_style_for_scopes(&[
+            "entity.name.type",
+            "support.type",
+            "variable",
+        ])
+        .unwrap_or_else(|| Style::new().fg(palette::TABLE_HEADER))
+        .bold();
+    }
+    let style = Style::new().bold();
+    terminal_palette.map_or(style, |_| style.fg(palette::HEADING_ACCENT))
 }
 
 /// 구분선 스타일 — codex `table_separator_style_for` 는 터미널 전경·배경을
@@ -255,18 +265,24 @@ fn separator_style() -> Style {
     separator_style_for_palette(palette::terminal_palette())
 }
 
-fn separator_style_for_palette(terminal_palette: Option<palette::TerminalPalette>) -> Style {
+pub(crate) fn separator_style_for_palette(
+    terminal_palette: Option<palette::TerminalPalette>,
+) -> Style {
     let Some(terminal_palette) = terminal_palette else {
         return Style::new().dim();
     };
     if terminal_palette.color_level() == palette::ColorLevel::Ansi16 {
         return Style::new().dim();
     }
-    let (red, green, blue) = palette::blend_rgb(
-        terminal_palette.foreground(),
-        terminal_palette.background(),
-        0.20,
-    );
+    let (red, green, blue) = if super::style::current().style == super::style::TuiStyle::Marks {
+        terminal_palette.muted_foreground_for_contrast(palette::MIN_MUTED_CONTRAST)
+    } else {
+        palette::blend_rgb(
+            terminal_palette.foreground(),
+            terminal_palette.background(),
+            0.20,
+        )
+    };
     Style::new().fg(super::ansi::Color::Rgb(red, green, blue))
 }
 

@@ -645,11 +645,18 @@ fn step_tail(step: &Step, quiet: bool, per_call: bool) -> Vec<Span> {
         return vec![Span::raw(RESULT_GAP), Span::new(word, style)];
     }
     if let Some((added, removed)) = step.change {
+        let count = |color: Color| {
+            if super::style::current().style == super::style::TuiStyle::Marks {
+                Style::new().fg(color)
+            } else {
+                tint(color)
+            }
+        };
         return vec![
             Span::raw(RESULT_GAP),
-            Span::new(format!("+{added}"), tint(Color::GREEN)),
+            Span::new(format!("+{added}"), count(Color::GREEN)),
             Span::raw(" "),
-            Span::new(format!("-{removed}"), tint(Color::RED)),
+            Span::new(format!("-{removed}"), count(Color::RED)),
         ];
     }
     let mut tail = Vec::new();
