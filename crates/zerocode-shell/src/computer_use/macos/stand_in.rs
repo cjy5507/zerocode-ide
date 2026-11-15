@@ -239,16 +239,22 @@ impl StandIn {
     /// connect faster than it accepts.
     pub(crate) fn shut_the_door(&self) -> Vec<UnixStream> {
         self.shared.move_the_door(true);
+        // The accepting thread may be inside an accept already: this
+        // connection takes it out, and then it waits at the door. It is made
+        // while the queue is still its whole length, so it is never the one
+        // refused: under load the queue may already hold a connection of the
+        // window's own — its waiting request's — that the stand-in has not
+        // taken yet, and with the queue cut to one first this connection was
+        // refused (2026-11-16, in the whole suite, once in 4,867 tests).
+        let mut filling = vec![UnixStream::connect(&self.socket).expect("the stand-in listens")];
+        self.shared.wait_for_the_doorkeeper();
+        // From here the accepting thread takes nothing out of the queue.
         // SAFETY: the stand-in owns this listening socket for its whole life.
         assert_eq!(
             unsafe { libc::listen(self.listening, 1) },
             0,
             "a queue of one"
         );
-        // The accepting thread may be inside an accept already: this
-        // connection takes it out, and then it waits at the door.
-        let mut filling = vec![UnixStream::connect(&self.socket).expect("the stand-in listens")];
-        self.shared.wait_for_the_doorkeeper();
         loop {
             match UnixStream::connect(&self.socket) {
                 Ok(stream) => filling.push(stream),
