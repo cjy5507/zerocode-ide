@@ -966,33 +966,25 @@ final class Provider {
 
     private static let actsWithNoPoint: Set<String> = ["typeText", "pasteText", "pressKey", "hotkey", "setValue", "performSecondaryAction"]
 
-    /// The pointer the person watches gets to `point` before the act lands
-    /// there, as a hand does (agent-desktop's travel). Nothing of the person's
-    /// moves: it is the helper's own drawn pointer. A stop meanwhile, up to the
-    /// moment the act would go, ends the act with nothing sent. Says where the
-    /// pointer was drawn, nil when none could be, so a ring marks this act's
-    /// point and never an earlier one.
+    /// The pointer the person watches sets off for `point` as the act goes, as
+    /// a hand does (agent-desktop's travel). The act does not wait for it to
+    /// get there: the wait was 240 of a press's 423 ms (2026-11-15), and the
+    /// person's rule is speed. Nothing of the person's moves: it is the helper's
+    /// own drawn pointer. A stop read here, the moment before the act goes, ends
+    /// the act with nothing sent. Says where the pointer was sent and when it
+    /// arrives, nil when none could be drawn, so a ring marks this act's point
+    /// as the pointer gets there and never an earlier one.
     @discardableResult
-    private func travel(to point: CGPoint, in snapshot: Snapshot) throws -> CGPoint? {
-        let move = BackgroundPointerOverlay.travel(
+    private func travel(to point: CGPoint, in snapshot: Snapshot) throws -> PointerArrival? {
+        let arrival = BackgroundPointerOverlay.travel(
             pid: snapshot.app.pid, windowID: snapshot.windowId, bounds: snapshot.windowBounds,
             point: point, agent: RequestContext.current.agent
         )
-        let arrival = SmoothPointerPath.waitOut(
-            dueNs: DispatchTime.now().uptimeNanoseconds &+ (move?.nanoseconds ?? 0),
-            pollNs: Self.travelPollNanoseconds,
-            nowNs: { DispatchTime.now().uptimeNanoseconds },
-            isStopped: { OperatorGuardHost.isStopped() },
-            sleepNs: { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) }
-        )
-        guard arrival == .arrived else {
+        guard !OperatorGuardHost.isStopped() else {
             throw ProviderError.coded("stopped", "the person stopped Computer Use while the pointer moved to the point; nothing was sent")
         }
-        return move?.point
+        return arrival
     }
-
-    /// How often a pointer's move looks for the person's stop.
-    private static let travelPollNanoseconds: UInt64 = 15_000_000
 
     /// Where an act with no point of its own happens, so a person can see it: the
     /// control it names, else the focus. Clicks and scrolls show their own point.
@@ -2123,20 +2115,20 @@ final class Provider {
                    plainLeftClick: modifiers.isEmpty && count == 1 && button == .left
                ) {
                 try requireReachable(record, in: snapshot, at: requestedPoint)
-                var shown: CGPoint?
+                var shown: PointerArrival?
                 if let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
                     shown = try travel(to: point, in: snapshot)
                 }
                 guard try performActionChecked(record.element, action) else {
                     throw ProviderError.coded("accessibility_error", "the background semantic action failed; no fallback was attempted")
                 }
-                BackgroundPointerOverlay.pressed(at: shown, agent: RequestContext.current.agent)
+                BackgroundPointerOverlay.pressed(shown, agent: RequestContext.current.agent)
                 return actionMetadata(path: "accessibility", actionName: action)
             }
             // Pressing a field is asking for its focus, and a web view ignores events
             // sent to a window that is not key.
             let pressesAField = record.map { modifiers.isEmpty && count == 1 && button == .left && MarkPin.textEntryRoles.contains($0.role) } ?? false
-            var shownAtField: CGPoint?
+            var shownAtField: PointerArrival?
             if pressesAField, let record,
                let point = requestedPoint ?? center(record.visible ?? record.localFrame, in: snapshot.windowBounds) {
                 shownAtField = try travel(to: point, in: snapshot)
@@ -2144,7 +2136,7 @@ final class Provider {
             if pressesAField, let record,
                AXUIElementSetAttributeValue(record.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
                 try requireReachable(record, in: snapshot, at: requestedPoint)
-                BackgroundPointerOverlay.pressed(at: shownAtField, agent: RequestContext.current.agent)
+                BackgroundPointerOverlay.pressed(shownAtField, agent: RequestContext.current.agent)
                 return actionMetadata(path: "accessibility", actionName: "AXFocused")
             }
             let point: CGPoint
@@ -2163,7 +2155,7 @@ final class Provider {
                 try self.requireBackgroundWindow(snapshot, at: point)
                 if let record { try self.requireOnTop(record, in: snapshot, background: true, at: point) }
             }
-            BackgroundPointerOverlay.pressed(at: shown, agent: RequestContext.current.agent)
+            BackgroundPointerOverlay.pressed(shown, agent: RequestContext.current.agent)
             return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
         }
         // Why: agents expect a click into a target app to make the next
@@ -2873,10 +2865,10 @@ final class Provider {
         guard let delta = boundedInteger(max(1, (extent * pages).rounded()), as: Int32.self) else {
             throw ProviderError.coded("invalid_argument", "pages is out of range")
         }
+        // Read once: the pointer's move is not waited for, so nothing can change
+        // between this and the events, and a refused scroll draws no pointer.
         try requireBackgroundWindow(snapshot, at: point)
         try travel(to: point, in: snapshot)
-        // The window may have moved or closed while the pointer travelled.
-        try requireBackgroundWindow(snapshot, at: point)
         try Input.windowScroll(at: point, direction: direction, delta: delta, snapshot: snapshot)
         return actionMetadata(path: "window", verification: unverifiedAction(reason: "synthetic_input"))
     }

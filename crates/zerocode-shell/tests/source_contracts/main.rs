@@ -12,6 +12,7 @@ mod browser_workspace;
 mod bundle_resources;
 mod cli_login;
 mod close_guard;
+mod computer_pointer;
 mod computer_progress;
 mod computer_use_mirrors;
 mod computer_use_tcc;

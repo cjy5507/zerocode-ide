@@ -670,6 +670,128 @@ fn parallel_bench() {
     println!("{text}");
 }
 
+/// What a press costs when the drawn pointer has to travel to it, and how many
+/// pointers one agent working in four apps shows — the installed helper against
+/// the built one, turn about (2026-11-15: the installed press waited for its
+/// pointer, 240 of 423 ms, and one agent had one pointer however many apps).
+///
+/// ```text
+/// ZEROCODE_PARALLEL_FIXTURE=… ZEROCODE_PARALLEL_BASELINE=… ZEROCODE_PARALLEL_BUILT=… ZEROCODE_PARALLEL_OUT=… \
+/// cargo test -p zerocode-shell --bin zerocode-shell parallel_bench_pointer -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "drives the signed helper against owned fixtures; run by hand, see the module comment"]
+fn parallel_bench_pointer() {
+    const ROUNDS: usize = 12;
+    const APPS: usize = 4;
+    let program = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_FIXTURE").expect("fixture"));
+    let baseline = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BASELINE").expect("baseline"));
+    let built = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BUILT").expect("built helper"));
+    let out = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_OUT").expect("report path"));
+    let root = out.parent().expect("report folder").join("fixtures");
+    let old = Session::connect(launch_at(&baseline).expect("baseline")).expect("baseline answers");
+    let new = Session::connect(launch_at(&built).expect("built")).expect("built answers");
+    let press_as = |session: &Session, app: &str, number: u64, agent: &str| {
+        let (ms, answer) = call(
+            session,
+            "click",
+            &json!({
+                "app": app, "elementIndex": number, "background": true,
+                "noScreenshot": true, "afterAct": "changes", "agent": agent,
+            }),
+        );
+        answer.expect("a press");
+        ms
+    };
+    let mut report = json!({});
+
+    // ---- a press whose pointer travels, and one whose pointer is already there
+    // Eight rows keep the last button inside the window, so its pointer is drawn.
+    let travel = Fixture::start(&program, &root, "travel", 8);
+    let app = travel.app();
+    let mut by_helper = serde_json::Map::new();
+    let (mut far, mut same): (Vec<Vec<f64>>, Vec<Vec<f64>>) =
+        (vec![vec![], vec![]], vec![vec![], vec![]]);
+    let targets: Vec<(u64, u64)> = [&old, &new]
+        .iter()
+        .map(|session| {
+            let state = look(session, &app);
+            (
+                number_of(&state, "button Target", 0),
+                number_of(&state, "button Submit", 0),
+            )
+        })
+        .collect();
+    for round in 0..ROUNDS {
+        for (at, session) in [&old, &new].into_iter().enumerate() {
+            let (top, bottom) = targets[at];
+            far[at].push(press_as(
+                session,
+                &app,
+                if round % 2 == 0 { bottom } else { top },
+                "bench",
+            ));
+        }
+    }
+    for _ in 0..ROUNDS {
+        for (at, session) in [&old, &new].into_iter().enumerate() {
+            same[at].push(press_as(session, &app, targets[at].0, "bench"));
+        }
+    }
+    for (at, label) in ["installed", "new"].into_iter().enumerate() {
+        by_helper.insert(
+            label.into(),
+            json!({
+                "press_to_a_far_point_ms": stats(std::mem::take(&mut far[at])),
+                "press_on_the_same_point_ms": stats(std::mem::take(&mut same[at])),
+            }),
+        );
+    }
+    report["press_ms"] = Value::Object(by_helper);
+    report["travel_pressed"] = json!({"events": travel.events().len(), "asked": ROUNDS * 4});
+    drop(travel);
+
+    // ---- one agent in four apps at once: how many pointers the helper shows
+    let apps: Vec<Fixture> = (0..APPS)
+        .map(|at| Fixture::start(&program, &root, &format!("pointer{at}"), 10))
+        .collect();
+    let mut pointers = serde_json::Map::new();
+    for (label, session) in [("installed", &old), ("new", &new)] {
+        let prepared: Vec<(String, u64)> = apps
+            .iter()
+            .map(|fixture| {
+                let app = fixture.app();
+                let number = number_of(&look(session, &app), "button Target", 0);
+                (app, number)
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            for (app, number) in &prepared {
+                let press_as = &press_as;
+                scope.spawn(move || press_as(session, app, *number, "one-agent"));
+            }
+        });
+        // The pointers are drawn on the helper's main queue just after the answers.
+        std::thread::sleep(Duration::from_millis(600));
+        let (_, said) = call(session, "status", &json!({}));
+        pointers.insert(
+            label.into(),
+            said.expect("a status")["backgroundPointer"]["pointers"].clone(),
+        );
+    }
+    report["one_agent_in_four_apps_pointers"] = Value::Object(pointers);
+    report["four_apps_pressed"] = json!(
+        apps.iter()
+            .map(|fixture| fixture.events().len())
+            .collect::<Vec<_>>()
+    );
+    drop(apps);
+
+    let text = serde_json::to_string_pretty(&report).expect("a report");
+    std::fs::write(&out, &text).expect("the report");
+    println!("{text}");
+}
+
 impl Fixture {
     /// Send a line and do not wait: the app is about to stop answering.
     fn ctl_no_wait(&self, line: &str) {

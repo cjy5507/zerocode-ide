@@ -179,6 +179,36 @@ struct AgentColorBook {
     }
 }
 
+/// One drawn pointer: an agent has one for each app it works in, so an agent
+/// working in several apps at once is seen in each of them.
+struct PointerKey: Hashable, Sendable {
+    let agent: String
+    let pid: pid_t
+}
+
+/// The pointers in view. An agent wears its colour while any of its pointers
+/// is in view, so the roster says when its first comes and its last goes.
+struct PointerRoster {
+    private var inView = Set<PointerKey>()
+
+    var count: Int { inView.count }
+
+    /// The pointer came into view. True when it is its agent's first.
+    @discardableResult
+    mutating func shown(_ key: PointerKey) -> Bool {
+        let first = !inView.contains { $0.agent == key.agent }
+        inView.insert(key)
+        return first
+    }
+
+    /// The pointer went. True when its agent has none left in view.
+    @discardableResult
+    mutating func gone(_ key: PointerKey) -> Bool {
+        guard inView.remove(key) != nil else { return false }
+        return !inView.contains { $0.agent == key.agent }
+    }
+}
+
 /// The agent that last acted on each app, as the helper heard it while drawing
 /// that agent's pointer. The newest act wins; the oldest app is forgotten
 /// past `limit`, so a long session does not grow it.

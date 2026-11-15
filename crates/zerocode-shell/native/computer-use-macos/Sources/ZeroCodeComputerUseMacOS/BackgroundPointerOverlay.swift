@@ -5,8 +5,9 @@ import ZeroCodeComputerUseMacOSCore
 
 @MainActor
 final class BackgroundPointerOverlay {
-    /// One agent's pointer: where it goes and what draws it. Several agents work
-    /// at once, so each has its own and they move at the same time.
+    /// One pointer: an agent's, in one app. Several agents work at once and one
+    /// agent works in several apps at once, so each (agent, app) has its own
+    /// and they move at the same time.
     private final class Slot {
         var panel: PointerPanel?
         var expiry: DispatchSourceTimer?
@@ -16,7 +17,7 @@ final class BackgroundPointerOverlay {
         /// Whether the person has the window under the pointer covered: its
         /// press ring is drawn as faint as the pointer.
         var covered = false
-        /// The agent's one press ring, moved to each press and shown again: a
+        /// The pointer's one press ring, moved to each press and shown again: a
         /// window made for every press stayed in the app after it went (300
         /// presses left 323 windows and 23 MB; one ring each, 10 and 1.2 MB).
         var ring: (panel: PointerPanel, layer: CAShapeLayer)?
@@ -26,23 +27,25 @@ final class BackgroundPointerOverlay {
     private static let shared = BackgroundPointerOverlay()
     nonisolated private static let identityLock = NSLock()
     nonisolated(unsafe) private static var pointerWindowIDs: Set<UInt32> = []
-    nonisolated(unsafe) private static var pending: [String: (anchor: WindowPointerAnchor, seconds: Double?)] = [:]
-    /// Where each agent's pointer was last sent and when (screen points), so the
-    /// next move is timed from where a person sees it.
-    nonisolated(unsafe) private static var lastPoint: [String: (point: CGPoint, at: Date)] = [:]
+    nonisolated(unsafe) private static var pending: [PointerKey: (anchor: WindowPointerAnchor, seconds: Double?)] = [:]
+    /// Where each pointer was last sent and when (screen points), so the next
+    /// move is timed from where a person sees it.
+    nonisolated(unsafe) private static var lastPoint: [PointerKey: (point: CGPoint, at: Date)] = [:]
     nonisolated(unsafe) private static var latest: WindowPointerAnchor?
-    nonisolated(unsafe) private static var displayed: [String: WindowPointerAnchor] = [:]
+    nonisolated(unsafe) private static var displayed: [PointerKey: WindowPointerAnchor] = [:]
     nonisolated(unsafe) private static var presentationQueued = false
     /// Which agent last acted on each app: its take-control mark wears that colour.
     nonisolated(unsafe) private static var acting = AgentActingLog()
-    private var slots: [String: Slot] = [:]
+    private var slots: [PointerKey: Slot] = [:]
+    /// Which pointers are in view: an agent keeps its colour while any of its is.
+    private var roster = PointerRoster()
     private static let arrowSize = CGSize(width: 28, height: 34)
     /// How long a pointer stays after its agent's last act: through the model's
     /// turn between one act and the next (8-17 s a round trip), so it moves on
     /// from where it was instead of blinking out and in again.
     nonisolated private static let staysSeconds = 15
-    /// Steps a second of a move: the display's own rate. The act does not wait
-    /// for the move; its length is `SmoothPointerPath.glideSeconds`.
+    /// Steps a second of a move: the display's own rate. No act waits for the
+    /// move; its length is `SmoothPointerPath.glideSeconds`.
     private static let glideStepsPerSecond = 60.0
     /// How far the arc of a move stands off the straight line, as a share of
     /// its length; each agent keeps its own side.
@@ -55,8 +58,6 @@ final class BackgroundPointerOverlay {
     /// Over a window the person has covered it shows the agent is there, without
     /// reading as something happening in what they are looking at.
     private static let coveredAlpha: CGFloat = 0.55
-    /// More pointers than this tell a person nothing: the oldest gives way.
-    private static let maxPointers = 8
     nonisolated private static let unnamedAgent = ""
 
     private init() {}
@@ -91,19 +92,20 @@ final class BackgroundPointerOverlay {
         return ["latest": described(accepted), "displayed": described(shown), "pointers": count, "pending": queued]
     }
 
-    /// Moves the agent's pointer to `point` and says how long the move takes,
-    /// so the act lands when the pointer is there, as a person's hand does
-    /// (agent-desktop's travel, 90-320 ms), and the point it was sent to. Nil
-    /// when no pointer can be drawn there: the act then goes at once, with no
-    /// ring. A pointer already on the point does not move, and 0 is the wait.
+    /// Sends the agent's pointer in this app off to `point` and says where it
+    /// was sent and when it gets there (a hand's reach, agent-desktop's travel
+    /// of 90-320 ms). The act does not wait for it: the ring of its press does
+    /// (`pressed`). Nil when no pointer can be drawn there: no ring either. A
+    /// pointer already on the point does not move and is there at once.
     nonisolated static func travel(
         pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String? = nil
-    ) -> (nanoseconds: UInt64, point: CGPoint)? {
+    ) -> PointerArrival? {
         guard !OperatorGuardHost.isStopped(),
               DesktopScreen.displays().contains(where: { $0.bounds.contains(point) }),
               WindowPointerAnchor(pid: pid, windowID: windowID, bounds: bounds, point: point) != nil else { return nil }
+        let setOffNs = DispatchTime.now().uptimeNanoseconds
         identityLock.lock()
-        let last = lastPoint[agent ?? unnamedAgent]
+        let last = lastPoint[PointerKey(agent: agent ?? unnamedAgent, pid: pid)]
         identityLock.unlock()
         // A pointer still on the screen moves on from where it is; a new one
         // comes in from beside the point, as the panel does.
@@ -112,16 +114,22 @@ final class BackgroundPointerOverlay {
         let distance = hypot(point.x - from.x, point.y - from.y)
         let seconds = distance < SmoothPointerPath.arrivedPoints ? 0 : SmoothPointerPath.glideSeconds(distance: distance)
         show(pid: pid, windowID: windowID, bounds: bounds, point: point, agent: agent, seconds: seconds > 0 ? seconds : nil)
-        return (UInt64(seconds * 1_000_000_000), point)
+        return PointerArrival(point: point, pid: pid, setOffNs: setOffNs, moveSeconds: seconds)
     }
 
-    /// A press went through at `point`, where `travel` drew the agent's pointer
-    /// for this act: a ring spreads there. Nil, no pointer drawn, draws none.
-    nonisolated static func pressed(at point: CGPoint?, agent: String? = nil) {
-        guard let point else { return }
-        DispatchQueue.main.async {
-            let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
-            shared.ripple(at: CGPoint(x: point.x, y: displayHeight - point.y), agent: agent ?? unnamedAgent)
+    /// A press went through where `travel` sent the agent's pointer for this
+    /// act: a ring spreads there once the pointer has arrived, so a person sees
+    /// the pointer get there and then the press, though the press did not wait.
+    /// Nil, no pointer drawn, draws none.
+    nonisolated static func pressed(_ arrival: PointerArrival?, agent: String? = nil) {
+        guard let arrival else { return }
+        let key = PointerKey(agent: agent ?? unnamedAgent, pid: arrival.pid)
+        let left = arrival.secondsLeft(nowNs: DispatchTime.now().uptimeNanoseconds)
+        DispatchQueue.main.asyncAfter(deadline: .now() + left) {
+            MainActor.assumeIsolated {
+                let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
+                shared.ripple(at: CGPoint(x: arrival.point.x, y: displayHeight - arrival.point.y), key: key)
+            }
         }
     }
 
@@ -133,10 +141,11 @@ final class BackgroundPointerOverlay {
 
     nonisolated private static func show(pid: pid_t, windowID: UInt32, bounds: CGRect, point: CGPoint, agent: String?, seconds: Double?) {
         guard let anchor = WindowPointerAnchor(pid: pid, windowID: windowID, bounds: bounds, point: point) else { return }
+        let key = PointerKey(agent: agent ?? unnamedAgent, pid: pid)
         identityLock.lock()
-        acting.record(pid: pid, agent: agent ?? unnamedAgent)
-        lastPoint[agent ?? unnamedAgent] = (point, Date())
-        pending[agent ?? unnamedAgent] = (anchor, seconds)
+        acting.record(pid: pid, agent: key.agent)
+        lastPoint[key] = (point, Date())
+        pending[key] = (anchor, seconds)
         latest = anchor
         let enqueue = !presentationQueued
         presentationQueued = true
@@ -148,7 +157,7 @@ final class BackgroundPointerOverlay {
                 pending = [:]
                 presentationQueued = false
                 identityLock.unlock()
-                for (agent, waited) in waiting { shared.present(waited.anchor, agent: agent, seconds: waited.seconds) }
+                for (key, waited) in waiting { shared.present(waited.anchor, key: key, seconds: waited.seconds) }
             }
         }
     }
@@ -168,7 +177,8 @@ final class BackgroundPointerOverlay {
         DispatchQueue.main.async { shared.clearAll() }
     }
 
-    private func present(_ anchor: WindowPointerAnchor, agent: String, seconds: Double?) {
+    private func present(_ anchor: WindowPointerAnchor, key: PointerKey, seconds: Double?) {
+        let agent = key.agent
         let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
         let cocoaPoint = CGPoint(x: anchor.point.x, y: displayHeight - anchor.point.y)
         let size = PointerView.size(arrow: Self.arrowSize, agent: agent)
@@ -176,16 +186,16 @@ final class BackgroundPointerOverlay {
               NSScreen.screens.contains(where: { $0.frame.contains(cocoaPoint) }),
               let frame = anchor.panelFrame(mainDisplayHeight: displayHeight, size: size)
         else {
-            clear(agent: agent)
+            retire(key)
             return
         }
-        if slots[agent] == nil, slots.count >= Self.maxPointers, let oldest = slots.keys.first {
-            retire(agent: oldest)
-        }
-        let slot = slots[agent] ?? Slot()
-        slots[agent] = slot
-        // Coming into view, it takes a colour no other agent in view wears.
-        let recoloured = AgentColor.pointerShown(agent)
+        // As many pointers as there are (agent, app) pairs at work: none gives
+        // way to another, and each goes when its own time is up (`retire`).
+        let slot = slots[key] ?? Slot()
+        slots[key] = slot
+        // Coming into view, the agent takes a colour no other agent in view
+        // wears; a pointer it already shows in another app keeps that colour.
+        let recoloured = roster.shown(key) && AgentColor.pointerShown(agent)
         let shown: PointerPanel
         if let panel = slot.panel {
             shown = panel
@@ -207,7 +217,9 @@ final class BackgroundPointerOverlay {
             shown.setAccessibilityElement(false)
             slot.panel = shown
         }
-        if recoloured { shown.contentView?.needsDisplay = true }
+        if recoloured {
+            for (other, slot) in slots where other.agent == agent { slot.panel?.contentView?.needsDisplay = true }
+        }
         guard let windowID = UInt32(exactly: shown.windowNumber), windowID > 0 else { return }
         Self.identityLock.lock()
         Self.pointerWindowIDs.insert(windowID)
@@ -226,14 +238,14 @@ final class BackgroundPointerOverlay {
         slot.covered = !inView
         glide(slot, panel: shown, from: from, to: frame.origin, agent: agent, seconds: seconds)
         Self.identityLock.lock()
-        Self.displayed[agent] = shown.isVisible ? anchor : nil
+        Self.displayed[key] = shown.isVisible ? anchor : nil
         Self.identityLock.unlock()
         if let expiry = slot.expiry {
             expiry.schedule(deadline: .now() + .seconds(Self.staysSeconds))
         } else {
             let expiry = DispatchSource.makeTimerSource(queue: .main)
             expiry.setEventHandler { [weak self] in
-                MainActor.assumeIsolated { self?.clear(agent: agent) }
+                MainActor.assumeIsolated { self?.retire(key) }
             }
             expiry.schedule(deadline: .now() + .seconds(Self.staysSeconds))
             expiry.resume()
@@ -272,9 +284,10 @@ final class BackgroundPointerOverlay {
 
     /// A ring spreading from where a press landed: the agent's colour, gone in
     /// `rippleSeconds`, and like the pointer no part of any screenshot. Each
-    /// agent has one, made at its first press and moved to every press after.
-    private func ripple(at point: CGPoint, agent: String) {
-        guard !OperatorGuardHost.isStopped(), let slot = slots[agent] else { return }
+    /// pointer has one, made at its first press and moved to every press after.
+    private func ripple(at point: CGPoint, key: PointerKey) {
+        let agent = key.agent
+        guard !OperatorGuardHost.isStopped(), let slot = slots[key] else { return }
         let size = Self.rippleSize
         let ring = slot.ring ?? makeRing(agent: agent)
         slot.ring = ring
@@ -346,38 +359,35 @@ final class BackgroundPointerOverlay {
         ring.strokeColor = color.cgColor
     }
 
-    private func clear(agent: String) {
-        AgentColor.pointerGone(agent)
-        guard let slot = slots[agent] else { return }
-        slot.expiry?.cancel()
-        slot.expiry = nil
-        slot.glide?.cancel()
-        slot.glide = nil
-        slot.ringDrop?.cancel()
-        slot.ringDrop = nil
-        slot.ring?.panel.orderOut(nil)
-        slot.panel?.orderOut(nil)
+    /// A pointer and its ring give way: when its time is up, when the person
+    /// stops Computer Use, when it cannot be drawn where it was sent. Their
+    /// windows close and leave the helper's list. One wanted again is made
+    /// again, so what the helper holds is what moved in the last
+    /// `staysSeconds`, however many apps and agents came by since it started.
+    private func retire(_ key: PointerKey) {
         Self.identityLock.lock()
-        Self.displayed[agent] = nil
+        Self.displayed[key] = nil
+        Self.lastPoint[key] = nil
         Self.identityLock.unlock()
-    }
-
-    /// An agent's pointer and ring give way for good: their windows close and
-    /// leave the helper's list.
-    private func retire(agent: String) {
-        clear(agent: agent)
-        guard let slot = slots.removeValue(forKey: agent) else { return }
+        if roster.gone(key) { AgentColor.pointerGone(key.agent) }
+        guard let slot = slots.removeValue(forKey: key) else { return }
+        slot.expiry?.cancel()
+        slot.glide?.cancel()
+        slot.ringDrop?.cancel()
         let panels: [NSPanel] = [slot.panel, slot.ring?.panel].compactMap { $0 }
         Self.identityLock.lock()
         for panel in panels {
             if let windowID = UInt32(exactly: panel.windowNumber) { Self.pointerWindowIDs.remove(windowID) }
         }
         Self.identityLock.unlock()
-        for panel in panels { panel.close() }
+        for panel in panels {
+            panel.orderOut(nil)
+            panel.close()
+        }
     }
 
     private func clearAll() {
-        for agent in Array(slots.keys) { clear(agent: agent) }
+        for key in Array(slots.keys) { retire(key) }
     }
 
     private static func windows() -> [WindowPointerAnchor.Window] {

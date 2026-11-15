@@ -62,7 +62,8 @@ public enum SmoothPointerPath {
 
     /// How long a hand takes to reach a point `distance` points away: longer
     /// for a longer reach, by less and less (Fitts), within agent-desktop's
-    /// 90-320 ms travel. The act waits for it, so it stays short.
+    /// 90-320 ms travel. The drawn pointer takes this long; the act does not
+    /// wait for it (`PointerArrival`).
     public static func glideSeconds(distance: Double) -> Double {
         let reach = minGlideSeconds + glideSecondsPerDoubling * log2(1 + max(0, distance) / glideTargetPoints)
         return min(maxGlideSeconds, reach)
@@ -74,25 +75,6 @@ public enum SmoothPointerPath {
     /// The size of what a hand aims at, in Fitts' sense: a control's width.
     public static let glideTargetPoints = 24.0
     /// Closer than this the pointer already stands where the act lands (a
-    /// fallback acting on the same point): it does not move, and the act does
-    /// not wait.
+    /// fallback acting on the same point): it does not move.
     public static let arrivedPoints = 0.5
-
-    /// How waiting out a move ended.
-    public enum Arrival: Equatable, Sendable { case arrived, stopped }
-
-    /// Waits until `dueNs`, looking for the person's stop every `pollNs` and
-    /// once more when the time is up, so a stop that comes during the last
-    /// sleep still sends nothing.
-    public static func waitOut(
-        dueNs: UInt64, pollNs: UInt64,
-        nowNs: () -> UInt64, isStopped: () -> Bool, sleepNs: (UInt64) -> Void
-    ) -> Arrival {
-        while true {
-            if isStopped() { return .stopped }
-            let now = nowNs()
-            guard now < dueNs else { return .arrived }
-            sleepNs(min(max(1, pollNs), dueNs - now))
-        }
-    }
 }
