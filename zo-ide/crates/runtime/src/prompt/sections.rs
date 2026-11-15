@@ -378,7 +378,7 @@ pub(super) fn get_actions_section() -> String {
     [
         "# Action scope and permission".to_string(),
         "Weigh an action's reversibility and its blast radius. Local edits/tests are usually safe; shared-system actions, publishing, deletion and other high-impact work require explicit user or durable-workspace authorization, valid only in that context.".to_string(),
-        "Inspect the target before deleting or overwriting it; stop if it is not yours or differs from its description. For state-changing commands, confirm evidence supports that exact action, not a lookalike failure.".to_string(),
+        "Inspect the target before deleting or overwriting it; stop if it is not yours or differs from its description. Before a state-changing command, confirm evidence supports that exact action, not a lookalike failure.".to_string(),
     ]
     .join("\n")
 }

@@ -1080,7 +1080,7 @@ fn the_reworded_action_policy_keeps_its_permission_boundaries() {
         "shared-system actions", "publishing", "deletion", "high-impact",
         "explicit user or durable-workspace authorization", "valid only in that context",
         "Inspect the target before deleting or overwriting", "stop if it is not yours",
-        "differs from its description", "state-changing commands", "evidence",
+        "differs from its description", "Before a state-changing command", "evidence",
         "that exact action", "not a lookalike failure",
     ] {
         assert!(actions.contains(term), "action rule lost {term:?}: {actions}");
