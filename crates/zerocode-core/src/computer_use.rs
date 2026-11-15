@@ -1208,29 +1208,32 @@ pub fn batch_steps(command: &ComputerCommand) -> Vec<Vec<String>> {
         .unwrap_or_default()
 }
 
-/// The most batches one `parallel` runs at once. Past this, an agent is launching
-/// more work than a person could follow on the band.
-pub const COMPUTER_PARALLEL_MAX_GROUPS: usize = 8;
+/// How a `parallel` reads several apps in one call: one look to a group.
+const PARALLEL_LOOK_EXAMPLE: &str =
+    r#"'[[["get-app-state","--app","<one app>"]],[["get-app-state","--app","<another>"]]]'"#;
 
 /// A `parallel`'s groups: a JSON array of batches, each checked as a batch is,
-/// and each run at once with the others.
+/// and each run at once with the others. A group may instead be one look at
+/// one app, so several apps are read in one call. As many groups as there are
+/// apps to work in: two groups that name one app take turns there, and the
+/// measured sixty-four at once pressed nothing wrong (2026-11-15).
 pub fn parallel_groups(raw: &str) -> Result<Vec<Vec<Vec<String>>>, String> {
     let groups: Vec<Value> = serde_json::from_str(raw).map_err(|_| {
         format!(
             "--{BATCH_COMMANDS_FLAG} is a JSON array of batches, each an array of command lines"
         )
     })?;
-    if groups.is_empty() || groups.len() > COMPUTER_PARALLEL_MAX_GROUPS {
-        return Err(format!(
-            "a parallel holds 1 to {COMPUTER_PARALLEL_MAX_GROUPS} batches (this one has {})",
-            groups.len()
-        ));
+    if groups.is_empty() {
+        return Err("a parallel holds one batch or more (this one has none)".into());
     }
     groups
         .iter()
         .enumerate()
         .map(|(at, group)| {
             let batch = at + 1;
+            if let Some(look) = parallel_look(group) {
+                return look.map_err(|why| format!("batch {batch}: {why}"));
+            }
             let steps = batch_commands(&group.to_string())
                 .map_err(|why| format!("batch {batch}: {why}"))?;
             match steps
@@ -1246,6 +1249,61 @@ pub fn parallel_groups(raw: &str) -> Result<Vec<Vec<Vec<String>>>, String> {
             }
         })
         .collect()
+}
+
+/// A `parallel` group that is a look, or `None` for a group of acts and waits
+/// (a batch). A look goes alone in its group and names its app: its answer is
+/// that app's whole reading, and nothing a later step in the group could make
+/// stale stands beside it.
+fn parallel_look(group: &Value) -> Option<Result<Vec<Vec<String>>, String>> {
+    let steps: Vec<Vec<String>> = serde_json::from_value(group.clone()).ok()?;
+    let looks = |step: &Vec<String>| {
+        step.first()
+            .and_then(|verb| verb_method(verb))
+            .is_some_and(ComputerMethod::looks_at_an_app)
+    };
+    let at = steps.iter().position(looks)?;
+    let verb = steps[at][0].clone();
+    if steps.len() > 1 {
+        return Some(Err(format!(
+            "step {} ({verb}): a look goes alone in its group, one app to a group — {PARALLEL_LOOK_EXAMPLE}; acts and waits go in a batch of their own",
+            at + 1
+        )));
+    }
+    let checked = flags_apart(&steps[0])
+        .map(|step| walked_step(step, true))
+        .and_then(|step| {
+            let command = parse_command(&step)?;
+            if command.params.get("app").is_none() {
+                return Err(format!(
+                    "a look in a parallel names its app with --app — {PARALLEL_LOOK_EXAMPLE}"
+                ));
+            }
+            Ok(step)
+        })
+        .map(|step| vec![step])
+        .map_err(|why| format!("step 1 ({verb}): {why}"));
+    Some(checked)
+}
+
+/// Whether a `parallel` group, as [`parallel_groups`] checked it, is one look
+/// rather than a batch of acts and waits.
+#[must_use]
+pub fn parallel_group_is_a_look(steps: &[Vec<String>]) -> bool {
+    matches!(steps, [look] if look
+        .first()
+        .and_then(|verb| verb_method(verb))
+        .is_some_and(ComputerMethod::looks_at_an_app))
+}
+
+/// Whether the request is a `parallel` of looks alone: it reads and acts on
+/// nothing, so a stopped operator answers it as it answers every look.
+#[must_use]
+pub fn parallel_only_looks(command: &ComputerCommand) -> bool {
+    command.method == ComputerMethod::Parallel
+        && parallel_steps(command)
+            .iter()
+            .all(|group| parallel_group_is_a_look(group))
 }
 
 /// The batches a parsed `parallel` carries.
@@ -1311,8 +1369,17 @@ pub fn batch_commands(raw: &str) -> Result<Vec<Vec<String>>, String> {
             .and_then(|turned| verb_method(turned))
             .ok_or_else(|| format!("step {n}: `{verb}` is not a {COMPUTER_CLI} command"))?;
         if !method.batches() {
+            // A look sent as a step is most often several apps read at once:
+            // the refusal says the call that does that.
+            let instead = if method.looks_at_an_app() {
+                format!(
+                    "look before or after it — to read several apps in one call: {COMPUTER_CLI} parallel --{BATCH_COMMANDS_FLAG} {PARALLEL_LOOK_EXAMPLE}"
+                )
+            } else {
+                "look after it".to_owned()
+            };
             return Err(format!(
-                "step {n}: `{verb}` cannot be a batch step — a batch holds the hand's actions and the waits; look after it"
+                "step {n}: `{verb}` cannot be a batch step — a batch holds the hand's actions and the waits; {instead}"
             ));
         }
         // An element's number outlives a look on macOS, so a step may name one
@@ -2908,6 +2975,17 @@ impl ComputerMethod {
         )
     }
 
+    /// Whether the verb is a look at one app that sends it nothing: its tree,
+    /// its text, a control found in it, its windows. A `parallel` holds one to
+    /// a group, so several apps are read in one call.
+    #[must_use]
+    pub const fn looks_at_an_app(self) -> bool {
+        matches!(
+            self,
+            Self::GetAppState | Self::Find | Self::Read | Self::ListWindows
+        )
+    }
+
     /// Whether the verb waits — for time, a condition, the ears or the
     /// screen — holding the desk by its own table and nothing else: a stop
     /// ends it at once, and a walk clips it to the room its call has left
@@ -4176,9 +4254,18 @@ fn app_on_the_desktop_hand(method: ComputerMethod) -> crate::computer_use_protoc
 /// [`parse_command`] past its verb: the flags it was given, read and checked.
 fn parse_flags(
     method: ComputerMethod,
-    flags: BTreeMap<String, Option<String>>,
+    mut flags: BTreeMap<String, Option<String>>,
 ) -> Result<ComputerCommand, String> {
     let json = flags.contains_key("json");
+    // A batch and a parallel stay in the background under either input policy:
+    // only a step that says --foreground takes the desktop. `--background` on
+    // the walk itself says what already holds, so it is read and changes
+    // nothing — models write it there from the manual's first line.
+    if matches!(method, ComputerMethod::Batch | ComputerMethod::Parallel)
+        && flags.get("background") == Some(&None)
+    {
+        flags.remove("background");
+    }
     reject_unknown(method, &flags)?;
     if flags.contains_key("instant")
         && let Some(refusal) = crate::computer_use_protocol::reflex::instant_pointer_refusal(
@@ -5764,6 +5851,7 @@ pub fn usage() -> String {
     let text = [
         "zerocode-computer — inspect and operate local desktop apps",
         "  --background: macOS app/window-scoped input; no activation, shared pointer, clipboard or desktop fallback",
+        "  zerocode-computer <verb> --help   that verb's lines alone",
         "",
         "  zerocode-computer capabilities [--json]",
         "  zerocode-computer permissions [--id accessibility|screenshots [--reset]] [--json]",
@@ -5818,7 +5906,8 @@ pub fn usage() -> String {
         "  zerocode-computer window-move --id <window-id> --x X --y Y [--json]",
         "  zerocode-computer window-resize --id <window-id> --width W --height H [--json]",
         "  zerocode-computer parallel --commands '[[<a batch>],[<another batch>]]' [--json]",
-        "      (several apps at once: each batch keeps its own order, they run together, and the answer holds every batch's result)",
+        "      (several apps at once, as many as there are apps: each batch keeps its own order, they run together, and result.groups holds every batch's result;",
+        "       a group may be one look instead, so several apps are read in one call: '[[[\"get-app-state\",\"--app\",\"A\"]],[[\"get-app-state\",\"--app\",\"B\"]]]')",
         "  zerocode-computer clipboard-read [--json]",
         "  zerocode-computer clipboard-write --text <text> [--json]",
         "",
@@ -5913,6 +6002,60 @@ pub fn usage() -> String {
     format!(
         "{text}\n\n  one judgement, many actions — the hand's steps in order, each stopped, confirmed and logged as if alone (pace: {pace}):\n  zerocode-computer batch --{BATCH_COMMANDS_FLAG} '[[\"mouse-click\",\"--x\",\"10\",\"--y\",\"20\"],[\"type\",\"--text\",\"hi\"]]' [--json]\n      (at most {COMPUTER_BATCH_MAX_STEPS} steps, waiting {COMPUTER_BATCH_MAX_WAIT_MS} ms together; stops at the first refusal; a type or key with no app goes to the app the nearest step before it acted in; after a press on a mark, or a hold-key or a system chord after an app, it is refused; look after it)"
     )
+}
+
+/// The manual's lines for one verb: each line that spells the verb, with what
+/// is said under it. `None` when no line of the manual spells that word.
+#[must_use]
+pub fn usage_for(verb: &str) -> Option<String> {
+    let manual = usage();
+    let spells = |line: &str| {
+        line.trim_start()
+            .strip_prefix(COMPUTER_CLI)
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|verbs| verbs.split('|').any(|one| one == verb))
+    };
+    let is_verb_line = |line: &str| line.trim_start().starts_with(COMPUTER_CLI);
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut said: Vec<&str> = Vec::new();
+    let mut under: Option<usize> = None;
+    for line in manual.lines() {
+        if is_verb_line(line) {
+            under = spells(line).then(|| indent(line));
+            if under.is_some() {
+                said.push(line);
+            }
+        } else if let Some(depth) = under {
+            // What a verb's line says under itself is indented past it; a
+            // heading or a blank line ends it.
+            if !line.trim().is_empty() && indent(line) > depth {
+                said.push(line);
+            } else {
+                under = None;
+            }
+        }
+    }
+    (!said.is_empty()).then(|| {
+        format!(
+            "{}\n\n  the whole manual: {COMPUTER_CLI} --help\n",
+            said.join("\n")
+        )
+    })
+}
+
+/// What `<verb> --help` and `help <verb>` answer: that verb's lines, or the
+/// whole manual for a word it does not spell. `None` when help was not asked.
+/// Only the word right after the verb asks: a later `--help` is a value.
+#[must_use]
+pub fn help_asked(argv: &[String]) -> Option<String> {
+    let is_help = |word: &String| word == "--help" || word == "-h";
+    let verb = match argv {
+        [first, verb, ..] if first == "help" => verb,
+        [verb, second, ..] if is_help(second) => verb,
+        [first] if first == "help" || is_help(first) => return Some(format!("{}\n", usage())),
+        _ => return None,
+    };
+    Some(usage_for(verb).unwrap_or_else(|| format!("{}\n", usage())))
 }
 
 /// The launched-agent-only shim. Tokens travel through a 0600 curl config,
@@ -11392,6 +11535,187 @@ mod tests {
         .expect("keys that name their app");
         assert_eq!(groups[0][1][0], "type-text");
         assert_eq!(groups[1][0][0], "type-text");
+    }
+
+    /// The person's rule (2026-11-15): no bound on how many apps are worked in
+    /// at once. Sixty-four at once pressed nothing wrong when measured.
+    #[test]
+    fn a_parallel_holds_as_many_batches_as_it_is_given() {
+        let many: Vec<Value> = (0..64)
+            .map(|at| {
+                json!([[
+                    "click",
+                    "--app",
+                    format!("pid:{}", 100 + at),
+                    "--element-index",
+                    "4"
+                ]])
+            })
+            .collect();
+        let groups = parallel_groups(&Value::Array(many).to_string()).expect("sixty-four batches");
+        assert_eq!(groups.len(), 64);
+    }
+
+    #[test]
+    fn a_parallel_with_no_batch_is_refused() {
+        let refused = parallel_groups("[]").expect_err("nothing to run");
+        assert!(refused.contains("one batch or more"), "{refused}");
+    }
+
+    /// Three of six models sent their first looks this way (2026-11-15) and
+    /// were refused: a group may be one look, so several apps are read at once.
+    #[test]
+    fn a_parallel_group_may_be_one_look_at_one_app() {
+        let groups = parallel_groups(
+            &json!([
+                [["get-app-state", "--app", "A", "--no-screenshot"]],
+                [["find", "--app", "B", "--text", "Save"]],
+                [["click", "--app", "C", "--element-index", "4"]],
+            ])
+            .to_string(),
+        )
+        .expect("two looks and a batch");
+        assert_eq!(groups[0][0][0], "get-app-state");
+        assert!(
+            groups[0][0].contains(&"--json".to_owned()),
+            "{:?}",
+            groups[0]
+        );
+        assert!(parallel_group_is_a_look(&groups[0]));
+        assert!(parallel_group_is_a_look(&groups[1]));
+        assert!(!parallel_group_is_a_look(&groups[2]));
+    }
+
+    #[test]
+    fn a_look_shares_its_group_with_nothing() {
+        for group in [
+            json!([
+                ["get-app-state", "--app", "A"],
+                ["click", "--app", "A", "--element-index", "4"]
+            ]),
+            json!([
+                ["get-app-state", "--app", "A"],
+                ["get-app-state", "--app", "B"]
+            ]),
+            json!([
+                ["click", "--app", "A", "--element-index", "4"],
+                ["read", "--app", "A"]
+            ]),
+        ] {
+            let refused =
+                parallel_groups(&json!([group]).to_string()).expect_err("a look with company");
+            assert!(refused.starts_with("batch 1: step"), "{refused}");
+            assert!(refused.contains("alone in its group"), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_look_in_a_parallel_names_its_app() {
+        let refused = parallel_groups(&json!([[["read", "--ocr"]]]).to_string())
+            .expect_err("a look at the whole screen");
+        assert!(refused.contains("names its app with --app"), "{refused}");
+    }
+
+    #[test]
+    fn a_parallel_of_looks_alone_is_told_apart_from_one_that_acts() {
+        let parsed = |groups: Value| {
+            parse_command(&words(&["parallel", "--commands", &groups.to_string()]))
+                .expect("a parallel")
+        };
+        assert!(parallel_only_looks(&parsed(json!([
+            [["get-app-state", "--app", "A"]],
+            [["read", "--app", "B"]],
+        ]))));
+        assert!(!parallel_only_looks(&parsed(json!([
+            [["get-app-state", "--app", "A"]],
+            [["click", "--app", "B", "--element-index", "4"]],
+        ]))));
+    }
+
+    /// A look sent as a batch step is most often several apps read at once:
+    /// the refusal names the call that does it.
+    #[test]
+    fn a_look_sent_as_a_batch_step_is_told_how_several_apps_are_read_at_once() {
+        let refused = batch_commands(&json!([["get-app-state", "--app", "A"]]).to_string())
+            .expect_err("a look is no batch step");
+        assert!(refused.contains("cannot be a batch step"), "{refused}");
+        assert!(
+            refused.contains("zerocode-computer parallel --commands"),
+            "{refused}"
+        );
+        let other = batch_commands(&json!([["quit", "--app", "A"]]).to_string())
+            .expect_err("quit is no batch step");
+        assert!(other.ends_with("look after it"), "{other}");
+    }
+
+    /// `--background` on the walk itself says what already holds under either
+    /// input policy: it is read and changes nothing.
+    #[test]
+    fn background_on_a_batch_or_a_parallel_is_read_and_changes_nothing() {
+        let steps = json!([["click", "--app", "A", "--element-index", "4"]]).to_string();
+        let batch = parse_command(&words(&["batch", "--background", "--commands", &steps]))
+            .expect("a batch that says background");
+        assert_eq!(batch.params.get("background"), None);
+        let groups = json!([[["click", "--app", "A", "--element-index", "4"]]]).to_string();
+        let parallel = parse_command(&words(&["parallel", "--commands", &groups, "--background"]))
+            .expect("a parallel that says background");
+        assert_eq!(parallel.params.get("background"), None);
+    }
+
+    #[test]
+    fn help_after_a_verb_answers_that_verbs_lines_alone() {
+        let said = help_asked(&words(&["parallel", "--help"])).expect("help was asked");
+        assert!(
+            said.contains("zerocode-computer parallel --commands"),
+            "{said}"
+        );
+        assert!(said.contains("a group may be one look"), "{said}");
+        assert!(!said.contains("zerocode-computer click"), "{said}");
+        assert!(
+            said.contains("the whole manual: zerocode-computer --help"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn help_is_asked_by_the_word_after_the_verb_and_by_no_later_word() {
+        assert!(help_asked(&words(&["batch", "-h"])).is_some());
+        assert!(
+            help_asked(&words(&["help", "batch"]))
+                .is_some_and(|said| said.contains("zerocode-computer batch --commands"))
+        );
+        assert_eq!(
+            help_asked(&words(&["type-text", "--app", "A", "--text", "--help"])),
+            None
+        );
+        assert_eq!(help_asked(&words(&["status"])), None);
+    }
+
+    #[test]
+    fn help_for_a_word_the_manual_does_not_spell_is_the_whole_manual() {
+        let said = help_asked(&words(&["nonsense", "--help"])).expect("help was asked");
+        assert!(
+            said.starts_with("zerocode-computer — inspect and operate local desktop apps"),
+            "{said}"
+        );
+    }
+
+    /// Every verb the manual spells answers its own lines: the first of them
+    /// spells the verb.
+    #[test]
+    fn every_verb_the_manual_spells_has_lines_of_its_own() {
+        let manual = usage();
+        for method in ComputerMethod::ALL {
+            let verb = method.verb_name();
+            let spelled = manual.lines().any(|line| {
+                line.trim_start()
+                    .strip_prefix(COMPUTER_CLI)
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .is_some_and(|verbs| verbs.split('|').any(|one| one == verb))
+            });
+            assert_eq!(usage_for(verb).is_some(), spelled, "{verb}");
+        }
+        assert!(usage_for("click").is_some_and(|said| said.lines().count() >= 3));
     }
 
     /// A press at a screen point and a window focused by its number put the

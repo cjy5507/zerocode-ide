@@ -56,7 +56,12 @@ naming it (`app_unresponsive`, after about a second).
 - **Dense windows and menus:** `--skeleton`, `--root`, `--surface` (`observation.md`).
 - **Several apps in one call.** `zerocode-computer parallel --commands
   '[[<batch for one app>],[<batch for another>]]' --json`: each batch keeps its
-  own order, they run together, and `result.groups` holds each batch's answer.
+  own order, they run together, and `result.groups` holds each batch's answer —
+  as many batches as there are apps. Read several apps the same way, one look
+  to a group: `parallel --commands
+  '[[["get-app-state","--app","A"]],[["get-app-state","--app","B"]]]' --json`.
+  A look is no batch step: look first, then send the acts. `zerocode-computer
+  <verb> --help` answers that verb's own lines.
   Open apps first: `open --url <address> [--with <app>]` and `launch --app <app>`
   come up behind, without taking focus.
 - **Sign-ins stay the person's.** Fill what you know; a password goes through

@@ -6,6 +6,7 @@
 //! same app are held back. A request waits its turn instead of being refused, up
 //! to a bound. Looks, passive sensors and the emergency stop never wait.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -80,7 +81,7 @@ impl SequenceGate {
         Arc::clone(gates.entry(target.to_owned()).or_default())
     }
 
-    /// Wait for the request's turn in the places [`names_of`] named.
+    /// Wait for the request's turn in the places [`places_of`] named.
     /// `None`: it needs none.
     pub async fn enter(
         &self,
@@ -194,80 +195,110 @@ fn busy(target: &str) -> ComputerUseError {
     )
 }
 
-/// For a batch, the apps each step is the last one to act in, by the step's
-/// number as the walk counts them (from 1): after that step the batch never
-/// acts in them again, so they can be let go ([`SequenceLease::release`]). A
-/// batch that comes back to an app keeps it until its last step there, so
-/// steps that rely on each other in one app are never cut apart. Empty for any
-/// other request. It asks the helper what each app is called, as [`names_of`]
-/// does, so it runs off the async loop.
-#[must_use]
-pub fn last_steps(command: &ComputerCommand) -> HashMap<usize, Vec<String>> {
-    last_steps_by(command, &the_helpers_name)
+/// Where a request takes its turn, and when a batch is done with each place.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Places {
+    /// The places the request acts in.
+    pub names: BTreeSet<String>,
+    /// For a batch, the places each step is the last one to act in, by the
+    /// step's number as the walk counts them (from 1): after that step the
+    /// batch never acts in them again, so they can be let go
+    /// ([`SequenceLease::release`]). A batch that comes back to an app keeps
+    /// it until its last step there, so steps that rely on each other in one
+    /// app are never cut apart. Empty for any other request.
+    pub last_steps: HashMap<usize, Vec<String>>,
 }
 
-fn last_steps_by(
-    command: &ComputerCommand,
-    name: &dyn Fn(&Value) -> String,
-) -> HashMap<usize, Vec<String>> {
-    if command.method != ComputerMethod::Batch {
-        return HashMap::new();
-    }
-    let mut last: HashMap<String, usize> = HashMap::new();
-    for (at, step) in batch_steps(command).iter().enumerate() {
-        if let Ok(step) = parse_command(step)
-            && step.method.acts()
-        {
-            last.insert(name(&step.params), at + 1);
-        }
-    }
-    let mut by_step: HashMap<usize, Vec<String>> = HashMap::new();
-    for (app, step) in last {
-        by_step.entry(step).or_default().push(app);
-    }
-    by_step
-}
-
-/// The places a request acts in. It asks the helper what each app is called and
-/// may read a saved recipe, so it runs off the async loop.
+/// The places a request acts in. It asks the helper what each app is called —
+/// once for each way an app is written in the request — and may read a saved
+/// recipe, so it runs off the async loop.
 #[must_use]
-pub fn names_of(command: &ComputerCommand, root: &Path) -> BTreeSet<String> {
-    named_by(command, &the_helpers_name, &|recipe| {
+pub fn places_of(command: &ComputerCommand, root: &Path) -> Places {
+    places_by(command, &the_helpers_name, &|recipe| {
         apps_a_recipe_names(recipe, root)
     })
 }
 
-fn named_by(
+/// One answer for each way a place is written within one request. Asking the
+/// helper is a round trip, and a batch names the same app step after step: a
+/// batch of twenty presses in one app asked forty times (2026-11-15).
+struct AskedOnce<'a> {
+    ask: &'a dyn Fn(&Value) -> String,
+    said: RefCell<HashMap<String, String>>,
+}
+
+impl<'a> AskedOnce<'a> {
+    fn new(ask: &'a dyn Fn(&Value) -> String) -> Self {
+        Self {
+            ask,
+            said: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn name(&self, params: &Value) -> String {
+        let spelled = asked_by(params);
+        if let Some(known) = self.said.borrow().get(&spelled) {
+            return known.clone();
+        }
+        let name = (self.ask)(params);
+        self.said.borrow_mut().insert(spelled, name.clone());
+        name
+    }
+}
+
+/// What a place is asked by: the app as it is written, else the window's
+/// number, else the desktop — the words [`the_helpers_name`] sends.
+fn asked_by(params: &Value) -> String {
+    match named_app(params) {
+        Some(app) => format!("app:{app}"),
+        None => params
+            .get("windowId")
+            .map_or_else(|| DESKTOP.to_owned(), |window| format!("window:{window}")),
+    }
+}
+
+fn places_by(
     command: &ComputerCommand,
     name: &dyn Fn(&Value) -> String,
     recipe_apps: &dyn Fn(&ComputerCommand) -> Vec<String>,
-) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
+) -> Places {
+    let asked = AskedOnce::new(name);
+    let mut places = Places::default();
     let steps = match command.method {
         ComputerMethod::Batch => batch_steps(command),
         ComputerMethod::Parallel => parallel_steps(command).into_iter().flatten().collect(),
         ComputerMethod::RecipeRun => {
             // A recipe may use the pointer between its apps, so it holds the desk too.
-            names.insert(name(&command.params));
-            names.insert(DESKTOP.to_owned());
+            places.names.insert(asked.name(&command.params));
+            places.names.insert(DESKTOP.to_owned());
             for app in recipe_apps(command) {
-                names.insert(name(&json!({ "app": app })));
+                places.names.insert(asked.name(&json!({ "app": app })));
             }
-            return names;
+            return places;
         }
         _ => {
-            names.insert(name(&command.params));
-            return names;
+            places.names.insert(asked.name(&command.params));
+            return places;
         }
     };
-    for step in steps {
-        if let Ok(step) = parse_command(&step)
+    let mut last: HashMap<String, usize> = HashMap::new();
+    for (at, step) in steps.iter().enumerate() {
+        if let Ok(step) = parse_command(step)
             && step.method.acts()
         {
-            names.insert(name(&step.params));
+            let place = asked.name(&step.params);
+            last.insert(place.clone(), at + 1);
+            places.names.insert(place);
         }
     }
-    names
+    // Only a batch lets a place go early: a parallel's groups run at once, so
+    // each holds its apps to the request's end.
+    if command.method == ComputerMethod::Batch {
+        for (place, step) in last {
+            places.last_steps.entry(step).or_default().push(place);
+        }
+    }
+    places
 }
 
 /// The app a request names, by its own word or by the marked look it presses in.
@@ -284,6 +315,18 @@ fn named_app(params: &Value) -> Option<String> {
         })
 }
 
+/// The lane of an app written by its process number (`pid:N`): the helper
+/// names that lane by the number itself (`RequestLane`, `parsePid`), so the
+/// window needs no round trip to learn it. `None` for any other spelling.
+#[cfg(any(target_os = "macos", test))]
+fn pid_lane(app: &str) -> Option<String> {
+    use zerocode_core::computer_use_protocol::identity::AppQuery;
+    match AppQuery::parse(app) {
+        Ok(AppQuery::Pid(pid)) => Some(format!("pid:{pid}")),
+        _ => None,
+    }
+}
+
 /// The name as it was written, for when the helper cannot say.
 fn written_name(params: &Value) -> String {
     named_app(params).map_or_else(|| DESKTOP.to_owned(), |app| app.trim().to_lowercase())
@@ -294,6 +337,9 @@ fn written_name(params: &Value) -> String {
 #[cfg(all(target_os = "macos", not(test)))]
 fn the_helpers_name(params: &Value) -> String {
     use super::session::ProviderSession as _;
+    if let Some(lane) = named_app(params).as_deref().and_then(pid_lane) {
+        return lane;
+    }
     let asked = named_app(params)
         .map(|app| json!({ "app": app }))
         .or_else(|| {
@@ -359,7 +405,7 @@ mod tests {
 
     /// What a request holds, with a helper that knows every app by its lowercase word.
     fn names(command: &ComputerCommand) -> BTreeSet<String> {
-        named_by(command, &written_name, &|_| Vec::new())
+        places_by(command, &written_name, &|_| Vec::new()).names
     }
 
     async fn turn(
@@ -439,7 +485,7 @@ mod tests {
             &["click", "--app", "Mail", "--x", "1", "--y", "1"],
             &["click", "--app", "Notes", "--x", "3", "--y", "3"],
         ]);
-        let last = last_steps_by(&notes_then_back, &written_name);
+        let last = places_by(&notes_then_back, &written_name, &|_| Vec::new()).last_steps;
         assert_eq!(last.get(&3), Some(&vec!["mail".to_string()]), "{last:?}");
         assert_eq!(
             last.get(&4),
@@ -452,7 +498,9 @@ mod tests {
             json!({"app": "Notes", "x": 1, "y": 1}),
         );
         assert!(
-            last_steps_by(&plain, &written_name).is_empty(),
+            places_by(&plain, &written_name, &|_| Vec::new())
+                .last_steps
+                .is_empty(),
             "only a batch lets go early"
         );
     }
@@ -631,12 +679,12 @@ mod tests {
         let gate = SequenceGate::default();
         let owner = batch(&[&["click", "--app", "Notes", "--x", "1", "--y", "1"]]);
         let _owner = gate
-            .enter_within(&owner, &named_by(&owner, &one_name, &none), SHORT)
+            .enter_within(&owner, &places_by(&owner, &one_name, &none).names, SHORT)
             .await
             .unwrap();
         for spelling in ["com.apple.Notes", "pid:42"] {
             let same = command(ComputerMethod::Click, json!({ "app": spelling }));
-            let names = named_by(&same, &one_name, &none);
+            let names = places_by(&same, &one_name, &none).names;
             assert_eq!(
                 gate.enter_within(&same, &names, SHORT)
                     .await
@@ -651,12 +699,107 @@ mod tests {
     #[test]
     fn a_recipe_holds_every_app_its_steps_name() {
         let recipe = command(ComputerMethod::RecipeRun, json!({ "name": "errand" }));
-        let held = named_by(&recipe, &written_name, &|_| {
+        let held = places_by(&recipe, &written_name, &|_| {
             vec!["Notes".to_owned(), "KakaoTalk".to_owned()]
-        });
+        })
+        .names;
         assert_eq!(
             held.into_iter().collect::<Vec<_>>(),
             ["desktop", "kakaotalk", "notes"]
         );
+    }
+
+    /// The helper is asked what an app is called once for each way the request
+    /// writes it, however many steps name it: a batch of twenty presses in one
+    /// app asked forty times before (2026-11-15).
+    #[test]
+    fn a_batch_asks_the_helper_once_for_each_app_it_names() {
+        let asks = std::cell::Cell::new(0_u32);
+        let counted = |params: &Value| {
+            asks.set(asks.get() + 1);
+            written_name(params)
+        };
+        let lines: Vec<Vec<String>> = (0..20)
+            .map(|at| {
+                let app = if at % 5 == 4 { "Mail" } else { "Notes" };
+                ["click", "--app", app, "--x", "1", "--y", "1"]
+                    .map(str::to_owned)
+                    .to_vec()
+            })
+            .collect();
+        let twenty = command(ComputerMethod::Batch, json!({ "commands": lines }));
+        let places = places_by(&twenty, &counted, &|_| Vec::new());
+        assert_eq!(asks.get(), 2, "one ask for Notes and one for Mail");
+        assert_eq!(
+            places.names.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["mail", "notes"]
+        );
+        assert_eq!(
+            places.last_steps.get(&20),
+            Some(&vec!["mail".to_string()]),
+            "{:?}",
+            places.last_steps
+        );
+    }
+
+    /// Two spellings of one app are two asks: only the helper knows they are
+    /// one app, and its answer is what makes them one place.
+    #[test]
+    fn two_spellings_of_an_app_are_asked_apart_and_held_as_the_helper_names_them() {
+        let asks = std::cell::Cell::new(0_u32);
+        let one_app = |_: &Value| {
+            asks.set(asks.get() + 1);
+            "pid:41".to_owned()
+        };
+        let two = batch(&[
+            &["click", "--app", "Notes", "--x", "1", "--y", "1"],
+            &["click", "--app", "com.apple.Notes", "--x", "2", "--y", "2"],
+        ]);
+        let places = places_by(&two, &one_app, &|_| Vec::new());
+        assert_eq!(asks.get(), 2);
+        assert_eq!(places.names.into_iter().collect::<Vec<_>>(), ["pid:41"]);
+    }
+
+    /// A parallel's groups run at once, so none of its apps is let go early.
+    #[test]
+    fn a_parallel_names_its_apps_and_lets_none_go_before_its_end() {
+        let groups = json!([
+            [["click", "--app", "Notes", "--x", "1", "--y", "1"]],
+            [["click", "--app", "Mail", "--x", "1", "--y", "1"]],
+        ]);
+        let parallel = command(ComputerMethod::Parallel, json!({ "commands": groups }));
+        let places = places_by(&parallel, &written_name, &|_| Vec::new());
+        assert_eq!(
+            places.names.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["mail", "notes"]
+        );
+        assert!(places.last_steps.is_empty(), "{:?}", places.last_steps);
+    }
+
+    /// A look takes no turn: a parallel of looks alone holds no place, so it
+    /// waits behind nobody's batch.
+    #[test]
+    fn a_parallel_of_looks_holds_no_place() {
+        let groups = json!([
+            [["get-app-state", "--app", "Notes", "--json"]],
+            [["get-app-state", "--app", "Mail", "--json"]],
+        ]);
+        let looks = command(ComputerMethod::Parallel, json!({ "commands": groups }));
+        assert!(
+            places_by(&looks, &written_name, &|_| Vec::new())
+                .names
+                .is_empty()
+        );
+    }
+
+    /// An app written by its process number is its own lane name, as the
+    /// helper names it: no round trip is needed to learn it.
+    #[test]
+    fn an_app_written_by_its_pid_is_its_own_lane() {
+        assert_eq!(pid_lane("pid:4821").as_deref(), Some("pid:4821"));
+        assert_eq!(pid_lane("  pid:07 ").as_deref(), Some("pid:7"));
+        for named in ["Notes", "pid:", "pid:0", "pid:x", "PID:7"] {
+            assert_eq!(pid_lane(named), None, "{named}");
+        }
     }
 }

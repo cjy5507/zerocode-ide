@@ -3,12 +3,15 @@
 //! computer usable (2026-11-01), so a browser is an app like any other: the work
 //! browser stays the faster road for a page with no login, and the skill says so.
 
-use zerocode_core::computer_use::ComputerCommand;
+use zerocode_core::computer_use::{ComputerCommand, parallel_only_looks};
 
 use super::ComputerUseError;
 
 pub(crate) fn command(command: &ComputerCommand) -> Result<(), ComputerUseError> {
+    // A parallel of looks alone acts on nothing: each look passes the door on
+    // its own, as a lone look does, so a stopped operator still answers it.
     if command.method.acts()
+        && !parallel_only_looks(command)
         && let Some(refused) = crate::agent_tools_runtime::door_refusal(command)
     {
         return Err(refused);

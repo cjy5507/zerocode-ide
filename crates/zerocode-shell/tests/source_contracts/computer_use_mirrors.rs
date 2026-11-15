@@ -23,6 +23,12 @@ const MARK_PIN: &str = include_str!(
 const DESKTOP_APPS: &str = include_str!(
     "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/DesktopApps.swift"
 );
+const BACKGROUND_INPUT: &str = include_str!(
+    "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/BackgroundInput.swift"
+);
+const REQUEST_LANE: &str = include_str!(
+    "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/RequestLane.swift"
+);
 const IOS_BRIDGE: &str = include_str!("../../native/ios-emulator-helper/AccessibilityBridge.swift");
 const IOS_HELPER: &str = include_str!("../../native/ios-emulator-helper/main.swift");
 const IOS_HID: &str = include_str!("../../src/emulator/ios_hid.rs");
@@ -56,6 +62,46 @@ fn literals_after<'a>(source: &'a str, marker: &str) -> Vec<&'a str> {
         .skip(1)
         .filter_map(|rest| rest.split('"').next())
         .collect()
+}
+
+/// The verbs that may run in the background are listed once in each language:
+/// the window refuses by its list before the helper refuses by its own, so a
+/// verb in one list alone is either refused twice over or never offered.
+#[test]
+fn the_helpers_background_verbs_are_the_cores() {
+    use zerocode_core::computer_use_protocol::execution::METHODS;
+    let list = BACKGROUND_INPUT
+        .split("public static let methods: Set<String> = [")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("the helper's background verbs");
+    let mut helper: Vec<&str> = list
+        .split(',')
+        .map(|word| word.trim().trim_matches('"'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut core = METHODS.to_vec();
+    helper.sort_unstable();
+    core.sort_unstable();
+    assert_eq!(helper, core);
+}
+
+/// The window names the lane of an app written `pid:N` by the number itself and
+/// asks the helper nothing (`sequence::pid_lane`): the helper names that lane
+/// the same way, and reads the same spellings as a pid.
+#[test]
+fn the_helper_names_the_lane_of_an_app_written_by_its_pid_as_the_window_does() {
+    for held in [
+        r#"if let pid = parsePid(written) { return "pid:\(pid)" }"#,
+        r#"guard query.hasPrefix("pid:") else { return nil }"#,
+        "guard let pid = Int32(query.dropFirst(4)), pid > 0 else { return nil }",
+    ] {
+        assert!(HELPER.contains(held), "the helper lost `{held}`");
+    }
+    assert!(
+        REQUEST_LANE.contains(r#"return resolve(app) ?? "app:\(app.lowercased())""#),
+        "a named app's lane is what `resolve` answers"
+    );
 }
 
 #[test]

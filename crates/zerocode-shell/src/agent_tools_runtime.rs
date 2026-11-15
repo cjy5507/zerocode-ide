@@ -3329,6 +3329,13 @@ pub(super) async fn computer_loop(
             if request.answer.is_closed() {
                 return;
             }
+            // `<verb> --help` is answered here, before any parse: the verb's
+            // own lines of the manual. It reads nothing, acts on nothing and
+            // waits for nobody's turn, so it is no step and leaves no line.
+            if let Some(help) = zerocode_core::computer_use::help_asked(&request.argv) {
+                let _ = request.answer.send(computer_said(help));
+                return;
+            }
             // One spelling of the agent's words from here on (t-66753 C2):
             // every check, log and saved step below reads `--name value`,
             // whichever the agent wrote; words that cannot be read so are
@@ -3349,16 +3356,13 @@ pub(super) async fn computer_loop(
             let _sequence = if let Some(command) = parsed.as_ref() {
                 let names = if computer_use::sequence::takes_a_turn(command.method) {
                     let (asked, root) = (command.clone(), local_data_root.clone());
-                    let (names, last) = tauri::async_runtime::spawn_blocking(move || {
-                        (
-                            computer_use::sequence::names_of(&asked, &root),
-                            computer_use::sequence::last_steps(&asked),
-                        )
+                    let places = tauri::async_runtime::spawn_blocking(move || {
+                        computer_use::sequence::places_of(&asked, &root)
                     })
                     .await
                     .unwrap_or_default();
-                    last_steps = last;
-                    names
+                    last_steps = places.last_steps;
+                    places.names
                 } else {
                     std::collections::BTreeSet::new()
                 };
@@ -4037,9 +4041,36 @@ pub(super) async fn emulator_step(
 /// the caller has gone) — and answering every step that ran. A batch the stop
 /// refuses whole leaves its first refused action with `refused`, as that
 /// action would have left itself alone.
+/// One look of a `parallel`, answered in a batch's shape so every group of the
+/// answer reads alike. A look is no act: it takes no turn, and a stopped
+/// operator still answers it.
+fn look_group(
+    look: &[String],
+    mut step: impl FnMut(&[String]) -> zerocode_hookd::TeamAnswer,
+) -> zerocode_hookd::TeamAnswer {
+    use zerocode_core::computer_use::{batch_answer, walk_step_report};
+    let started = std::time::Instant::now();
+    let answer = step(look);
+    let report = walk_step_report(
+        1,
+        look,
+        answer.exit_code == 0,
+        evidence_runtime::envelope(&answer).as_ref(),
+        &answer.stderr,
+    );
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let said = batch_answer(vec![report], 1, elapsed_ms, false);
+    if said["ok"] == serde_json::Value::Bool(true) {
+        computer_said(format!("{said}\n"))
+    } else {
+        computer_refused(said.to_string())
+    }
+}
+
 /// Several batches at once, each on its own thread, each stopped, confirmed and
 /// logged step by step as any batch is. Their steps name different apps, so the
-/// helper runs them side by side; two that name one app take turns there.
+/// helper runs them side by side; two that name one app take turns there. A
+/// group that is one look reads its app beside the rest.
 fn run_parallel(
     app: &AppHandle,
     root: &Path,
@@ -4051,7 +4082,8 @@ fn run_parallel(
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::confirm::Asking;
     use zerocode_core::computer_use::{
-        BATCH_COMMANDS_FLAG, ComputerCommand, ComputerMethod, parallel_steps,
+        BATCH_COMMANDS_FLAG, ComputerCommand, ComputerMethod, parallel_group_is_a_look,
+        parallel_steps,
     };
 
     let actor = run_evidence::actor();
@@ -4061,9 +4093,25 @@ fn run_parallel(
             .into_iter()
             .map(|steps| {
                 let actor = actor.clone();
-                scope.spawn(move || {
+                // As many groups as the request holds: a thread the system
+                // would not start is that group's refusal, never a panic.
+                std::thread::Builder::new().spawn_scoped(scope, move || {
                     let _acting = actor.map(run_evidence::acting_for);
                     let _input_policy = computer_use::input_policy::enter_captured(policy);
+                    let step = |step: &[String]| {
+                        desktop_step(
+                            app,
+                            root,
+                            evidence,
+                            step,
+                            step,
+                            Asking::Person,
+                            cwd.map(Path::new),
+                        )
+                    };
+                    if parallel_group_is_a_look(&steps) {
+                        return look_group(&steps[0], step);
+                    }
                     let batch = ComputerCommand {
                         method: ComputerMethod::Batch,
                         params: serde_json::json!({ BATCH_COMMANDS_FLAG: steps }),
@@ -4072,17 +4120,7 @@ fn run_parallel(
                     run_batch(
                         &batch,
                         deadline_ms,
-                        |step| {
-                            desktop_step(
-                                app,
-                                root,
-                                evidence,
-                                step,
-                                step,
-                                Asking::Person,
-                                cwd.map(Path::new),
-                            )
-                        },
+                        step,
                         |step, refusal| leave_step(app, root, evidence, step, step, refusal),
                         caller_waits,
                         // A parallel group's apps are the whole request's: held to its end.
@@ -4093,13 +4131,16 @@ fn run_parallel(
             .collect();
         running
             .into_iter()
-            .map(|group| {
-                group.join().unwrap_or_else(|panic| {
+            .map(|group| match group {
+                Ok(running) => running.join().unwrap_or_else(|panic| {
                     computer_refused(format!(
                         "computer task failed: {}",
                         crate::system_runtime::panic_payload(panic.as_ref())
                     ))
-                })
+                }),
+                Err(error) => computer_refused(format!(
+                    "computer task failed: this group could not start ({error}); nothing of it was done"
+                )),
             })
             .collect()
     });
