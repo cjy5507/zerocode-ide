@@ -1435,6 +1435,7 @@ where
                 return Err(StreamingTurnError::from(error));
             }
             let request = self.assemble_request(Arc::from(Vec::new()), wrap_up_choice);
+            self.note_request_pictures();
             // The compaction/resume status reminder has now ridden this request;
             // drop it so it does not re-instruct `session_recall` on every later
             // turn (a re-orientation loop). A fresh compaction re-seeds it, so it

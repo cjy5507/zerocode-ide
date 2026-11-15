@@ -573,20 +573,7 @@ fn strip_context_management_beta(betas: &str) -> String {
 /// compaction can plausibly fix it or an attachment has to go.
 fn request_too_large_preflight(model: &str, payload_len: usize) -> Option<ApiError> {
     let limit = crate::providers::max_request_bytes_for_model(model)?;
-    let measured = payload_len as u64;
-    if measured <= limit {
-        return None;
-    }
-    Some(ApiError::Api {
-        status: reqwest::StatusCode::PAYLOAD_TOO_LARGE,
-        error_type: Some("request_too_large".to_string()),
-        message: Some(format!(
-            "Request exceeds the maximum size: {measured} bytes serialized, endpoint accepts {limit}"
-        )),
-        body: String::new(),
-        retryable: false,
-        retry_after: None,
-    })
+    super::endpoint_capabilities::request_too_large_error(payload_len, limit)
 }
 
 fn context_edit_analytics_event(
@@ -1951,6 +1938,7 @@ impl AnthropicClient {
             gateway.adapt_body(&mut request_body);
         }
         let payload = serde_json::to_vec(&request_body).map_err(ApiError::Json)?;
+        let sent_bytes = payload.len();
         // The prefix each marker closes, hashed off these exact bytes for the
         // request ledger: every rewrite above (thinking stripped, the served
         // model id, a gateway's body) comes after the fingerprints the ledger
@@ -2004,6 +1992,9 @@ impl AnthropicClient {
             .send()
             .await
             .map(|response| {
+                if gateway.is_none() {
+                    super::endpoint_capabilities::note_http_status(&self.base_url, &request.model, response.status(), sent_bytes);
+                }
                 (
                     response,
                     SentOptIns {

@@ -2840,6 +2840,7 @@ where
                     return Err(error);
                 }
             };
+            self.note_request_pictures();
             let events = match self.sync_stream_events(request) {
                 Ok(events) => events,
                 Err(error) => {

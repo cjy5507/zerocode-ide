@@ -1039,6 +1039,7 @@ async fn an_endpoint_that_takes_no_step_without_the_field_takes_a_turn_whose_sec
     history.extend(a_step_without_reasoning("call_2"));
     let request = chat_request("ruled-1", history);
     let (addr, server) = endpoint(the_measured_rule, 1).await;
+    let config = OpenAiCompatConfig { default_base_url: super::leak(&format!("http://{addr}/v1")), ..config };
     let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
 
     let _ = client.stream_message(&request).await.expect("the endpoint takes the turn as first sent");
@@ -1059,6 +1060,7 @@ async fn an_endpoint_that_asks_for_the_field_is_sent_the_request_again_with_it()
     history.extend(a_step_without_reasoning("toolu_2"));
     let request = chat_request("asker-1", history);
     let (addr, server) = endpoint(the_measured_rule, 2).await;
+    let config = OpenAiCompatConfig { default_base_url: super::leak(&format!("http://{addr}/v1")), ..config };
     let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
 
     let _ = client.stream_message(&request).await.expect("the stream opens on the second send");
@@ -1083,6 +1085,7 @@ async fn an_endpoint_that_refuses_reasoning_content_is_sent_the_request_again_wi
     let config = a_persons_endpoint("http://refuses-reasoning.example/v1");
     let request = chat_request("refuser-1", a_step_with_its_own_reasoning(""));
     let (addr, server) = endpoint(no_field_it_does_not_know, 2).await;
+    let config = OpenAiCompatConfig { default_base_url: super::leak(&format!("http://{addr}/v1")), ..config };
     let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
 
     let _ = client.stream_message(&request).await.expect("the stream opens on the second send");
@@ -1118,6 +1121,7 @@ async fn a_refusal_that_is_not_about_the_reasoning_leaves_it_riding() {
     let config = a_persons_endpoint("http://refuses-everything.example/v1");
     let request = chat_request("refuser-2", a_step_with_its_own_reasoning(""));
     let (addr, server) = endpoint(nothing_is_taken, 2).await;
+    let config = OpenAiCompatConfig { default_base_url: super::leak(&format!("http://{addr}/v1")), ..config };
     let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
 
     let refused = client.stream_message(&request).await;
@@ -1140,6 +1144,7 @@ async fn a_refusal_that_does_not_name_the_field_is_not_answered_with_one() {
     history.extend(a_step_without_reasoning("call_1"));
     let request = chat_request("refuser-3", history);
     let (addr, server) = endpoint(nothing_is_taken, 1).await;
+    let config = OpenAiCompatConfig { default_base_url: super::leak(&format!("http://{addr}/v1")), ..config };
     let client = OpenAiCompatClient::new("token", config).with_base_url(format!("http://{addr}/v1"));
 
     let refused = client.stream_message(&request).await;

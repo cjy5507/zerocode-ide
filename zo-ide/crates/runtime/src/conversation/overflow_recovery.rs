@@ -9,9 +9,9 @@
 //!
 //! A refusal for bytes is therefore answered, cheapest first:
 //!
-//! 1. leave all but the newest [`KEEP_NEWEST_PICTURES`] pictures out of the
-//!    request and send it again — instant, free, nothing stored is rewritten;
-//! 2. leave all but the newest one out;
+//! 1. apply the byte budget learned from the exact rejected body size;
+//! 2. leave out one more whole budget step of the oldest pictures, until only
+//!    the newest two remain, then keep one;
 //! 3. compact (the text may be the wall after all);
 //! 4. end the turn, saying which picture is the newest and how big the rest of
 //!    the request is.
@@ -25,13 +25,8 @@
 use api::ProviderErrorClass;
 
 use super::{ApiClient, ConversationRuntime, RuntimeError, ToolExecutor};
-use crate::picture_budget::{count_pictures, newest_picture_note, KEEP_NEWEST_PICTURES};
+use crate::picture_budget::{count_pictures, newest_picture_note};
 use crate::{plan_picture_shed, WireTarget};
-
-/// How many of the newest pictures each rung of the answer keeps, in the order
-/// the rungs are tried. The first is the budget's own floor; the last is what
-/// is left when only the picture the model is acting on remains.
-const PICTURE_CAP_RUNGS: [usize; 2] = [KEEP_NEWEST_PICTURES, 1];
 
 /// Which ceiling the provider refused the request for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +67,7 @@ pub(super) enum OverflowStep {
 pub(super) struct OverflowRecovery {
     picture_cap: Option<usize>,
     compacted: bool,
+    last_carried: Option<usize>,
 }
 
 impl OverflowRecovery {
@@ -80,26 +76,18 @@ impl OverflowRecovery {
         self.picture_cap
     }
 
-    /// The next step after a refusal, given how many pictures the refused request
-    /// carried. Each call spends a rung: the same refusal never gets the same
-    /// answer twice, so the ladder ends.
-    pub(super) fn next(&mut self, refusal: Refusal, carried: usize) -> OverflowStep {
+    /// Spend the next byte-budget step, if it removes pictures. The caller
+    /// computes the step from the same byte rules used before dispatch.
+    pub(super) fn next(&mut self, refusal: Refusal, next_cap: Option<usize>) -> OverflowStep {
         if refusal == Refusal::Bytes {
-            if let Some(keep) = Self::next_picture_cap(carried) {
+            if let Some(keep) = next_cap {
                 self.picture_cap = Some(keep);
                 return OverflowStep::LeaveOutPictures { keep };
             }
         }
-        if self.compacted {
-            return OverflowStep::GiveUp;
-        }
+        if self.compacted { return OverflowStep::GiveUp; }
         self.compacted = true;
         OverflowStep::Compact
-    }
-
-    /// The first rung that keeps fewer pictures than the refused request carried.
-    fn next_picture_cap(carried: usize) -> Option<usize> {
-        PICTURE_CAP_RUNGS.into_iter().find(|&keep| keep < carried)
     }
 }
 
@@ -117,8 +105,26 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// The answer to a request the provider refused as over its context
     /// ceiling: spends the next rung of this turn's ladder.
     pub(super) fn next_overflow_step(&mut self, error: &RuntimeError) -> OverflowStep {
-        let carried = self.pictures_carried();
-        self.overflow_recovery.next(Refusal::of(error), carried)
+        let refusal = Refusal::of(error);
+        let carried = self.overflow_recovery.last_carried.take().unwrap_or_else(|| self.pictures_carried());
+        let next_cap = if refusal == Refusal::Bytes {
+            // The HTTP client recorded the exact refused bytes before this
+            // error reached us. Use the next session's budget on this retry.
+            let planned = self.pictures_carried();
+            if planned < carried {
+                Some(planned)
+            } else {
+                let ceiling = self.effective_request_model().and_then(api::max_request_bytes_for_model);
+                crate::picture_budget::next_picture_step(&self.session.messages, carried, ceiling)
+            }
+        } else { None };
+        self.overflow_recovery.next(refusal, next_cap.filter(|&keep| keep < carried))
+    }
+
+    /// Freeze the count before dispatch: a 413 may teach a smaller budget
+    /// while the request is in flight, so re-reading it cannot count that body.
+    pub(super) fn note_request_pictures(&mut self) {
+        self.overflow_recovery.last_carried = Some(self.pictures_carried());
     }
 
     /// How many pictures the request that was just refused carried: the stored
@@ -157,50 +163,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_byte_refusal_cuts_pictures_before_it_compacts() {
+    fn a_byte_refusal_spends_the_budget_steps_before_it_compacts() {
         let mut recovery = OverflowRecovery::default();
-        assert_eq!(
-            recovery.next(Refusal::Bytes, 30),
-            OverflowStep::LeaveOutPictures {
-                keep: KEEP_NEWEST_PICTURES
-            }
-        );
-        assert_eq!(recovery.picture_cap(), Some(KEEP_NEWEST_PICTURES));
-        // The refused request now carries two: keep the newest one.
-        assert_eq!(
-            recovery.next(Refusal::Bytes, KEEP_NEWEST_PICTURES),
-            OverflowStep::LeaveOutPictures { keep: 1 }
-        );
-        assert_eq!(recovery.picture_cap(), Some(1));
-        // One picture: nothing is left to cut, so compaction — once.
-        assert_eq!(recovery.next(Refusal::Bytes, 1), OverflowStep::Compact);
-        assert_eq!(recovery.next(Refusal::Bytes, 1), OverflowStep::GiveUp);
+        for keep in [15, 7, 2, 1] {
+            assert_eq!(recovery.next(Refusal::Bytes, Some(keep)), OverflowStep::LeaveOutPictures { keep });
+            assert_eq!(recovery.picture_cap(), Some(keep));
+        }
+        assert_eq!(recovery.next(Refusal::Bytes, None), OverflowStep::Compact);
+        assert_eq!(recovery.next(Refusal::Bytes, None), OverflowStep::GiveUp);
     }
 
     #[test]
     fn a_token_refusal_keeps_its_one_compaction() {
         let mut recovery = OverflowRecovery::default();
-        assert_eq!(recovery.next(Refusal::Tokens, 30), OverflowStep::Compact);
-        assert_eq!(recovery.next(Refusal::Tokens, 30), OverflowStep::GiveUp);
+        assert_eq!(recovery.next(Refusal::Tokens, Some(15)), OverflowStep::Compact);
+        assert_eq!(recovery.next(Refusal::Tokens, Some(15)), OverflowStep::GiveUp);
         assert_eq!(recovery.picture_cap(), None, "tokens never ask for a cap");
     }
 
     #[test]
     fn a_rung_that_would_change_nothing_is_skipped() {
-        // No picture on the wire at all: straight to compaction, as before.
         let mut recovery = OverflowRecovery::default();
-        assert_eq!(recovery.next(Refusal::Bytes, 0), OverflowStep::Compact);
-        // Exactly two on the wire (the budget already left the rest out): keeping
-        // two changes nothing, so the first rung is skipped and one is kept.
-        let mut recovery = OverflowRecovery::default();
-        assert_eq!(
-            recovery.next(Refusal::Bytes, KEEP_NEWEST_PICTURES),
-            OverflowStep::LeaveOutPictures { keep: 1 }
-        );
-        assert_eq!(recovery.next(Refusal::Bytes, 1), OverflowStep::Compact);
-        // One picture: nothing to cut.
-        let mut recovery = OverflowRecovery::default();
-        assert_eq!(recovery.next(Refusal::Bytes, 1), OverflowStep::Compact);
+        assert_eq!(recovery.next(Refusal::Bytes, None), OverflowStep::Compact);
     }
 
     #[test]

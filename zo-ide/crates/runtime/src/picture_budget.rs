@@ -39,8 +39,8 @@ use crate::{ContentBlock, ConversationMessage};
 /// base64 — and not the system prompt, the tool definitions or JSON escaping.
 /// Those are small beside 32 MiB (a full 1M-token transcript of text is about
 /// 4 MB), and the NEXT step's pictures arrive after the estimate; the quarter
-/// left over covers both, so the exact check that follows (the client's own
-/// preflight against the same ceiling) passes without a second round.
+/// left over covers both. After serialization the client also checks the
+/// exact body against a declaration or a size already refused by the server.
 pub const SHED_START_PERCENT: u64 = 75;
 
 /// Share of the ceiling one shedding step leaves out, oldest pictures first.
@@ -79,9 +79,9 @@ pub struct PictureBudget {
 }
 
 impl PictureBudget {
-    /// The budget for a provider that declares `ceiling` bytes — the same
-    /// catalog value the client's preflight refuses against, never a second
-    /// number.
+    /// The budget for a declared ceiling or a learned planning target. An
+    /// observed successful size is a safe target, not proof that a larger
+    /// body would fail.
     #[must_use]
     pub fn for_ceiling(ceiling: u64) -> Self {
         Self {
@@ -96,8 +96,8 @@ fn percent_of(value: u64, percent: u64) -> u64 {
     value / 100 * percent + value % 100 * percent / 100
 }
 
-/// What one request may carry in pictures: the provider's budget, when it
-/// declares a ceiling, and a hard cap a refusal asked for.
+/// What one request may carry in pictures: the provider's declared or learned
+/// byte budget, and a hard cap a refusal asked for.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PictureLimits {
     pub(crate) budget: Option<PictureBudget>,
@@ -105,9 +105,8 @@ pub(crate) struct PictureLimits {
 }
 
 impl PictureLimits {
-    /// The limits of the provider serving `model`: the budget of its declared
-    /// body ceiling, or none when the catalog declares none ("unknown", never
-    /// "unlimited" — a guessed ceiling would shed pictures for nothing).
+    /// The effective endpoint ceiling: a declaration first, then a fresh
+    /// record learned from HTTP 413. With neither, no budget is invented.
     pub(crate) fn for_model(model: &str) -> Self {
         Self {
             budget: api::max_request_bytes_for_model(model).map(PictureBudget::for_ceiling),
@@ -210,6 +209,28 @@ fn measure(messages: &[ConversationMessage]) -> Measured {
 
 fn picture_wire_bytes(data_b64: &str) -> u64 {
     (data_b64.len() as u64).saturating_add(PICTURE_WIRE_OVERHEAD_BYTES)
+}
+
+/// One more whole byte-budget step after a refusal of the already lowered
+/// request. The newest two stay until only those two are left.
+pub(crate) fn next_picture_step(messages: &[ConversationMessage], carried: usize, ceiling: Option<u64>) -> Option<usize> {
+    if carried <= KEEP_NEWEST_PICTURES { return (carried > 1).then_some(1); }
+    let measured = measure(messages);
+    let already_left_out = measured.sizes.len().saturating_sub(carried);
+    let mut removed = 0;
+    let mut bytes = 0_u64;
+    let ceiling = ceiling.unwrap_or_else(|| {
+        let refused_estimate = measured.sizes.iter().skip(already_left_out)
+            .fold(measured.other, |bytes, size| bytes.saturating_add(*size));
+        percent_of(refused_estimate, SHED_START_PERCENT)
+    });
+    let step = PictureBudget::for_ceiling(ceiling).step;
+    for size in measured.sizes.iter().skip(already_left_out).take(carried - KEEP_NEWEST_PICTURES) {
+        bytes = bytes.saturating_add(*size);
+        removed += 1;
+        if bytes >= step { break; }
+    }
+    (removed > 0).then_some(carried - removed)
 }
 
 /// What the budget decided for one request, for the lowering and for anyone who

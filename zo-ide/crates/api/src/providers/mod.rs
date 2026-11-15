@@ -13,6 +13,7 @@ pub mod anthropic;
 pub(crate) mod aws_sigv4;
 pub mod chatgpt_backend;
 pub mod cli_sessions;
+pub mod endpoint_capabilities;
 pub(crate) mod cloud_gateway;
 pub mod gemini_code_assist;
 pub(crate) mod google_auth;
@@ -1409,19 +1410,32 @@ fn catalog_max_output_tokens(raw_model: &str, canonical_model: &str) -> Option<u
     catalog_fact(|catalog| catalog.max_output_tokens_for(raw_model, canonical_model))
 }
 
-/// The declared maximum serialized request-body size (bytes) for a model, from
-/// the env override catalog first then the built-in — mirrors
-/// `catalog_model_context_window` for the `max_request_bytes` field.
-///
-/// `None` means "undeclared", never "unlimited": callers must skip the check
-/// rather than substitute a guess. A custom provider declares its own ceiling
-/// through the same `ZO_MODEL_CONTEXT_WINDOWS` catalog as every other model
-/// fact, so no code change is needed to teach zo about a new endpoint.
+/// The effective serialized request-body ceiling, in bytes: a provider/model
+/// declaration or catalog declaration first, then a fresh observation of this
+/// endpoint and model. A successful size is used only after an HTTP 413.
+/// Without one it uses 75% of the rejected size; without any refusal it keeps
+/// the existing behavior (no guessed ceiling).
 #[must_use]
 pub fn max_request_bytes_for_model(model: &str) -> Option<u64> {
+    declared_max_request_bytes_for_model(model).or_else(|| {
+        let (endpoint, wire) = if let Some(provider) = custom_provider_for_model(model) {
+            (openai_compat::read_base_url(provider.config), provider.declared_id(model)?.to_string())
+        } else {
+            let metadata = metadata_for_model(model)?;
+            let endpoint = std::env::var(metadata.base_url_env).ok().filter(|url| !url.trim().is_empty())
+                .unwrap_or_else(|| metadata.default_base_url.to_string());
+            (endpoint, wire_model_id(model))
+        };
+        endpoint_capabilities::request_body_bounds(&endpoint, &wire)?.ceiling()
+    })
+}
+
+fn declared_max_request_bytes_for_model(model: &str) -> Option<u64> {
     let canonical = resolve_model_alias(model);
-    let canonical_lower = canonical.to_ascii_lowercase();
-    catalog_fact(|catalog| catalog.max_request_bytes_for(model, &canonical_lower))
+    let lower = canonical.to_ascii_lowercase();
+    custom_provider_for_model(model).and_then(|provider| provider.max_request_bytes_for(model))
+        .or_else(|| catalog_fact(|catalog| catalog.max_request_bytes_for(&wire_model_id(model), &lower)))
+        .filter(|&bytes| bytes > 0)
 }
 
 /// Process-wide shared `reqwest::Client` for every provider call.
@@ -2484,6 +2498,8 @@ pub struct ResolvedCustomProvider {
     /// Optional operator-provided max output cap for every declared model
     /// that states none of its own.
     pub max_output_tokens: Option<u64>,
+    /// Operator-declared request-body ceiling in bytes.
+    pub max_request_bytes: Option<u64>,
     /// The limits a declared model states for itself, keyed by its id exactly
     /// as declared (the spelling [`Self::canonical_model`] answers with), so
     /// the lookup is one hash. Empty for a provider of plain ids.
@@ -2512,6 +2528,7 @@ impl From<openai_compat::CustomProviderConfig> for ResolvedCustomProvider {
         Self {
             context_window: custom.context_window.filter(|&value| value > 0),
             max_output_tokens: custom.max_output_tokens.filter(|&value| value > 0),
+            max_request_bytes: custom.max_request_bytes.filter(|&value| value > 0),
             model_limits,
             fit_hint: custom.to_fit_hint(),
             config: custom.to_static_config(),
@@ -2554,6 +2571,11 @@ impl ResolvedCustomProvider {
             .and_then(|declared| self.model_limits.get(declared))
             .copied()
             .unwrap_or_default()
+    }
+
+    fn max_request_bytes_for(&self, model: &str) -> Option<u64> {
+        self.stated_limits(model).max_request_bytes.filter(|&value| value > 0)
+            .or(self.max_request_bytes.filter(|&value| value > 0))
     }
 
     /// `model`'s context window on this provider: its own, else the
@@ -2689,6 +2711,7 @@ fn builtin_seed_providers() -> Vec<ResolvedCustomProvider> {
             config: deepseek_seed_config(),
             context_window: None,
             max_output_tokens: None,
+            max_request_bytes: None,
             model_limits: HashMap::new(),
             fit_hint: None,
         });
