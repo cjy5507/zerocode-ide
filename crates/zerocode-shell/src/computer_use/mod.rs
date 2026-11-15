@@ -257,7 +257,12 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     input_policy::ensure_current()?;
     let acts = acts_on_something(method);
     match session.request(method, params) {
-        Ok(answer) => Ok(answer),
+        Ok(answer) => {
+            // A look's answer names the app it read: where that app is in
+            // use, the share counts the look as a use of it (t-109874).
+            share::heard(&answer);
+            Ok(answer)
+        }
         Err(SessionFailure::Provider(error)) => {
             Err(said_of_delivery(error, acts, card_held_the_borrow))
         }

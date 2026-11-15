@@ -1251,6 +1251,65 @@ fn an_app_that_quit_leaves_while_the_person_is_asked() {
     assert!(state()["target"].is_null());
 }
 
+/// A look's answer names the app it read. A press by a mark names no app at
+/// all, and the word of a look may be one no name of the app's spells
+/// (`Notes` where the helper says `메모`): the first look answered ties the
+/// word to the app in use, and that look and every later one by the word is a
+/// use of it — with nothing asked of the helper (t-109874).
+#[test]
+fn a_looks_answer_ties_its_word_to_the_app_in_use() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _) = person(Decision::Allowed);
+    // As a mark's press reaches its app: by its process, no word of the agent's.
+    admit(ComputerMethod::Click, &click("pid:4242")).expect("goes at once");
+    round_trips.set(0);
+    let look = json!({ "app": "Mirroring" });
+    let answer = json!({"snapshot": {"app": {
+        "name": "iPhone 미러링", "bundleId": "com.apple.ScreenContinuity", "pid": 4242,
+    }}});
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    {
+        let _look = admit(ComputerMethod::Observe, &look).expect("a look");
+        super::heard(&answer);
+    }
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    assert!(lapse(), "the look's answer named the app in use");
+    drop(admit(ComputerMethod::Observe, &look).expect("a look"));
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    assert!(
+        lapse(),
+        "from then on the word names it as the look comes in"
+    );
+    assert_eq!(state()["target"], "com.apple.screencontinuity");
+    assert_eq!(round_trips.get(), 0, "no look asked the helper anything");
+    stand_in::advance(1);
+    assert!(!lapse());
+    assert!(state()["target"].is_null());
+}
+
+/// An answer about an app that is not in use ties nothing and keeps nothing
+/// in use.
+#[test]
+fn an_answer_about_an_app_that_is_not_in_use_ties_nothing() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    let other = json!({"snapshot": {"app": {
+        "name": "iPhone 미러링", "bundleId": "com.apple.ScreenContinuity", "pid": 4242,
+    }}});
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    {
+        let _look = admit(ComputerMethod::Observe, &json!({ "app": "Mirroring" })).expect("a look");
+        super::heard(&other);
+    }
+    stand_in::advance(1);
+    assert!(!lapse(), "a look at another app kept this one in use");
+    assert!(state()["target"].is_null());
+    assert_eq!(state()["panels"], json!([]), "and brought nothing into use");
+}
+
 /// The host's own answer, not a test's: a child that was waited for is gone,
 /// and this process is not.
 #[cfg(unix)]

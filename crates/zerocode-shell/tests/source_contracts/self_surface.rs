@@ -361,6 +361,26 @@ fn every_step_asks_the_share_and_the_band_is_the_persons() {
     }
 }
 
+/// A look's answer names the app it read, and the one road to the helper
+/// hands every answer to the share, which counts a free look as a use of the
+/// app in use that it read (t-109874): a look whose word no act carried — a
+/// mark's press names no app at all — is tied to its app by that answer.
+#[test]
+fn the_road_to_the_helper_hands_its_answers_to_the_share() {
+    let call = code_only(include_str!("../../src/computer_use/mod.rs"));
+    let body = block_after(&call, "pub fn call(method: &str, params: Value)");
+    let asked = body
+        .find("session.request(method, params)")
+        .expect("call asks the helper");
+    let heard = body
+        .find("share::heard(&answer);")
+        .expect("call hands the answer to the share");
+    assert!(
+        asked < heard,
+        "the share hears an answer before the helper gave it:\n{body}"
+    );
+}
+
 /// The ledger's ack of a letter is the person's: the desk and the inbox both
 /// reach it, and the marks on their controls are the first wall (t-74825).
 #[test]

@@ -571,6 +571,51 @@ fn in_use_as(held: &Held, word: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What a free look's answer says of the app it read. The helper names the
+/// app in every look it answers, so where that app is in use the look is a
+/// use of it under whatever word the agent gave, and the word names the app
+/// from then on ([`in_use_as`]) — at no round trip. A word no act carried and
+/// no name of the app's spells would otherwise never be matched: a mark's
+/// press names no app at all, and `Notes` is `메모` on a Korean Mac
+/// (t-109874). Nothing is judged by it.
+pub(super) fn heard(answer: &Value) {
+    let word = ADMITTED.with(|held| {
+        let held = held.borrow();
+        let admitted = held.as_ref()?;
+        if admitted.acts || admitted.looks_in.is_some() {
+            return None;
+        }
+        admitted.app.clone()
+    });
+    let Some(word) = word else { return };
+    let Some(app) = answer
+        .pointer("/snapshot/app")
+        .or_else(|| answer.get("app"))
+    else {
+        return;
+    };
+    let Some(name) = app.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    let key = named_app_key(app.get("bundleId").and_then(Value::as_str), name);
+    let now = now_ms();
+    let in_use = with_held(|held| {
+        if !held.share.targets().any(|target| target == key) {
+            return false;
+        }
+        held.share.used(&key, now);
+        held.words.insert(word, key.clone());
+        true
+    });
+    if in_use {
+        ADMITTED.with(|held| {
+            if let Some(admitted) = held.borrow_mut().as_mut() {
+                admitted.looks_in = Some(key);
+            }
+        });
+    }
+}
+
 /// Whether the person is being asked something now — a press's question, a
 /// card, their own turn: the window's word, and in a test the test's, so no
 /// test depends on a question another test has open.
