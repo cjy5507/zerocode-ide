@@ -199,7 +199,8 @@ impl Share {
             let quiet = used_at
                 .get(app)
                 .is_none_or(|at| now_ms >= at.saturating_add(SHARE_USE_LAPSES_MS));
-            !gone(app) && !(quiet_ends_it && quiet)
+            let over = gone(app) || (quiet_ends_it && quiet);
+            !over
         });
         let mut left = self.targets.len() != in_use;
         let targets = &self.targets;
