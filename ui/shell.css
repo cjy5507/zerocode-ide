@@ -55227,7 +55227,7 @@ h4.knowledge-inspector-head::after {
 .jev-custom-scrim {
   place-items: center;
   padding: var(--space-4);
-  padding-bottom: max(var(--space-4), var(--computer-band-clear, 0px));
+  padding-bottom: max(var(--space-4), var(--computer-band-clear, var(--space-4)));
 }
 
 .jev-custom-drawer {
