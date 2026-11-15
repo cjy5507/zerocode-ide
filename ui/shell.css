@@ -56,7 +56,11 @@ body {
    * title bar's right buttons, the right panel and the bar's own right end
    * all stood past the edge (t-77622). */
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: var(--titlebar-height) minmax(0, 1fr) var(--statusbar-height);
+  /* The status bar's row grows by `--computer-band-room` while the Computer
+   * Use band stands on a line of its own above the bar's (shell-computer.js
+   * `placeComputerBand`); the panes give the room. */
+  grid-template-rows: var(--titlebar-height) minmax(0, 1fr)
+    calc(var(--statusbar-height) + var(--computer-band-room, 0px));
   background:
     radial-gradient(900px 440px at 10% -18%, var(--ambient-mint), transparent 70%),
     radial-gradient(760px 400px at 92% -20%, var(--ambient-copper), transparent 72%),
@@ -7918,7 +7922,7 @@ svg.wt-agent-dot {
 .ports-pop {
   position: fixed;
   right: var(--space-2);
-  bottom: calc(var(--statusbar-height) + var(--space-1));
+  bottom: calc(var(--statusbar-height) + var(--computer-band-room, 0px) + var(--space-1));
   z-index: 40;
   width: 320px;
   border: var(--rule-width) solid var(--edge-rule);
@@ -14432,7 +14436,7 @@ body.is-dragging-pane {
  * the label at 500 above and the spent/reset line below. */
 .usage-pop {
   position: fixed;
-  bottom: calc(var(--statusbar-height) + var(--space-1));
+  bottom: calc(var(--statusbar-height) + var(--computer-band-room, 0px) + var(--space-1));
   z-index: 40;
   /* 260 이었다: 한 공급자의 창 두세 개를 담는 폭. 이제 공급자마다 이름·플랜·
    * 수치가 한 줄에 앉으므로 원본의 폭을 그대로 쓴다(`UsageRosterPanel.tsx:231`
@@ -15628,7 +15632,7 @@ body.is-dragging-pane {
 .term-float {
   position: fixed;
   right: var(--space-5);
-  bottom: calc(var(--statusbar-height) + var(--space-5));
+  bottom: calc(var(--statusbar-height) + var(--computer-band-room, 0px) + var(--space-5));
   width: var(--term-float-width);
   height: var(--term-float-height);
   display: flex;
@@ -49161,7 +49165,7 @@ button.board-build-failure-part:focus-visible {
   display: flex;
   flex-direction: column;
   width: min(26rem, calc(100vw - var(--space-4)));
-  max-height: calc(100vh - var(--statusbar-height) - var(--space-4));
+  max-height: calc(100vh - var(--statusbar-height) - var(--computer-band-room, 0px) - var(--space-4));
 }
 
 .resource-head {
@@ -61827,14 +61831,18 @@ button.jev-token:hover {
 
 /* ---- Computer Use: the band (C4-c) ----
  *
- * It stands in the status bar's own row at the foot of the window, centred,
- * over the bar's empty middle (2026-11-15, the person: 「해더 아래 뜨는데 위치
- * 바꿨으면」). Under the header it covered a pane's first lines and the files
- * panel's tools; centred on the title bar it covered the tab strip
- * (2026-11-12). Down here it covers no tab, no title, no pane where the person
- * types and not the ask popup in the middle — only the bar's passive readouts
- * behind it, for as long as it stands. The operator is acting on the
- * person's desktop, so the stop and the take-back stay one press away; the
+ * It stands in the status bar at the foot of the window (2026-11-15, the
+ * person: 「해더 아래 뜨는데 위치 바꿨으면」). Under the header it covered a
+ * pane's first lines and the files panel's tools; centred on the title bar it
+ * covered the tab strip (2026-11-12). Down here it covers no tab, no title, no
+ * pane where the person types and not the ask popup in the middle — and none
+ * of the bar's own readouts (2026-11-16): it stands in the bar's empty middle
+ * when it fits there (`data-place="row"`, `--computer-dock-x`), and otherwise
+ * on a line of its own that the bar grows above its readouts
+ * (`data-place="raised"`, `--computer-band-room`), which the panes give up;
+ * shell-computer.js `placeComputerBand` measures and chooses. The operator is
+ * acting on the person's desktop, so the stop and the take-back stay one
+ * press away; the
  * questions the operator puts to the person still stand in the ask popup. The
  * band and the work screen panel (t-59372) stand in one dock that takes no
  * clicks itself, the band at the foot and the panel opening upward above it,
@@ -61844,7 +61852,7 @@ button.jev-token:hover {
 .computer-dock {
   position: fixed;
   bottom: 0;
-  left: 50%;
+  left: var(--computer-dock-x, 50%);
   transform: translateX(-50%);
   z-index: 60;
   display: flex;
@@ -61858,6 +61866,16 @@ button.jev-token:hover {
 
 .computer-dock > * {
   pointer-events: auto;
+}
+
+.computer-dock[data-place="raised"] {
+  bottom: var(--statusbar-height);
+}
+
+/* The line the band takes when the bar grows for it sits on the bar's own
+ * deck, above the bar's readouts, which keep their line at the foot. */
+.statusbar {
+  padding-top: var(--computer-band-room, 0px);
 }
 
 /* One status bar row tall; a narrow window wraps it upward. Geist's raised
@@ -61998,6 +62016,7 @@ button.jev-token:hover {
  * What floats takes Geist's large radius, the deck, the ring and the soft
  * drop. The picture is shown whole and is not dragged out. */
 .computer-progress {
+  translate: var(--computer-panel-shift, 0px) 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);

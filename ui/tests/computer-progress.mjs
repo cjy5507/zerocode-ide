@@ -2401,9 +2401,147 @@ async function testTheBandsPlace(browser, origin, ok) {
   } finally { await narrow.page.close(); }
 }
 
+/* A full status bar (2026-11-16): the person's window shows all six plan
+ * gauges, and the band stood over their left end — the usage button and up to
+ * five gauges at 900, 1280 and 1800px. The band covers nothing the bar shows,
+ * in every state and above all in the two that do not lift by themselves (a
+ * standing stop, a window taken back), and still nothing of the title, the
+ * pane where the person types or the ask popup. */
+const FULL_BAR_GAUGES = ["sb-codex", "sb-antigravity", "sb-kimi", "sb-grok", "sb-opencode-go"];
+
+function fillTheStatusBar(gauges) {
+  window.__HOLD_POLLERS__ = true;
+  for (const id of ["sb-claude", ...gauges]) {
+    const gauge = document.getElementById(id);
+    gauge.hidden = false;
+    for (const part of gauge.querySelectorAll(".sb-usage-bar, .sb-claude-pct")) part.hidden = false;
+    gauge.querySelector(".sb-claude-pct").textContent = "5h 42% · 7d 18%";
+  }
+  document.getElementById("sb-model").textContent = "claude-opus-5-5";
+  document.getElementById("sb-usage").textContent = "ctx 182k / 1M";
+}
+
+async function testTheBandCoversNothingInAFullBar(browser, origin, ok) {
+  const states = {
+    working: { activity: { revision: 1, active: true, actions: 12 } },
+    shared: {
+      activity: { revision: 1, active: true, actions: 4 },
+      share: { target: "safari", label: "Safari", takenBack: false, generation: 1, revision: 1 },
+    },
+    taken: {
+      activity: { revision: 1, active: false, actions: 4 },
+      share: { target: "safari", label: "Safari", takenBack: true, generation: 1, revision: 1 },
+    },
+    waiting: {
+      activity: { revision: 1, active: false, actions: 0 },
+      share: { target: null, waiting: "notes", waitingLabel: "메모", generation: 1, revision: 1 },
+    },
+    stopped: { activity: { revision: 1, stopped: "window", personsStop: true, actions: 7 } },
+  };
+  for (const width of [320, 900, 1280, 1800]) {
+    for (const [name, state] of Object.entries(states)) {
+      const { page, faults } = await openComputerPage(browser, origin);
+      try {
+        await page.setViewportSize({ width, height: 860 });
+        await page.evaluate(fillTheStatusBar, FULL_BAR_GAUGES);
+        const seen = await evaluateCase(page, async ({ state }) => {
+          const hands = window.__COMPUTER_HANDS__;
+          if (state.share) hands.announce("computer:share-state", state.share);
+          hands.announce("computer:activity", hands.operatorReport(state.activity));
+          hands.announce("computer:confirm", { id: "full-1", kind: "payment", label: "Place order", verb: "mouse-click", timeoutMs: 120000 });
+          await hands.settle();
+          await new Promise((done) => hands.census.native.setTimeout(done, 300));
+          const rect = (node) => {
+            if (!node || node.closest("[hidden]") || node.getClientRects().length === 0) return null;
+            const box = node.getBoundingClientRect();
+            return box.width > 0 && box.height > 0
+              ? { left: box.left, top: box.top, right: box.right, bottom: box.bottom } : null;
+          };
+          const meets = (one, two) => one != null && two != null &&
+            one.left < two.right - 0.5 && two.left < one.right - 0.5 && one.top < two.bottom - 0.5 && two.top < one.bottom - 0.5;
+          const band = rect(document.getElementById("computer-band"));
+          // What the bar shows: each item standing in it, each gauge inside the
+          // usage button too, never the empty middle.
+          const shown = [...document.querySelectorAll(".statusbar > *, .statusbar .sb-claude")]
+            .filter((node) => !node.classList.contains("sb-spacer"))
+            .map((node) => ({ name: node.id || node.className, box: rect(node) }))
+            .filter((item) => item.box != null);
+          const gauges = shown.filter((item) => item.name.startsWith("sb-") && document.getElementById(item.name)?.classList.contains("sb-claude"));
+          return {
+            band,
+            gauges: gauges.length,
+            covered: shown.filter((item) => meets(band, item.box)).map((item) => item.name),
+            onTitle: meets(band, rect(document.querySelector(".titlebar"))),
+            onWorkbench: meets(band, rect(document.getElementById("workbench"))),
+            onAsk: meets(band, rect(document.querySelector("#ask-scrim .permission"))),
+            askShown: rect(document.querySelector("#ask-scrim .permission")) != null,
+            onScreen: band != null && band.left >= -0.5 && band.right <= window.innerWidth + 0.5 &&
+              band.bottom <= window.innerHeight + 0.5,
+          };
+        }, { state });
+        ok(
+          `in a full status bar at ${width}px wide the ${name} band covers nothing the bar shows, nor the title, the pane or the ask popup`,
+          seen.band != null && seen.gauges === 6 && seen.covered.length === 0 && seen.onTitle === false &&
+            seen.onWorkbench === false && seen.askShown === true && seen.onAsk === false && seen.onScreen === true,
+          JSON.stringify(seen),
+        );
+        if (faults.length > 0) ok(`the full bar ${name} band at ${width}px raised no renderer errors`, false, faults.join("\n"));
+      } finally { await page.close(); }
+    }
+  }
+
+  // A whole session at 1800px: the working band fits the empty middle, the
+  // share widens it past the middle, the share ends while the operator still
+  // acts, the band goes. The panes give room once and get it back once — the
+  // band does not hop between the middle and its own line as it narrows.
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    await page.setViewportSize({ width: 1800, height: 860 });
+    await page.evaluate(fillTheStatusBar, FULL_BAR_GAUGES);
+    const session = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      const wait = (ms) => new Promise((done) => hands.census.native.setTimeout(done, ms));
+      const workbench = document.getElementById("workbench");
+      const heights = [Math.round(workbench.getBoundingClientRect().height)];
+      const watch = new ResizeObserver(() => {
+        const height = Math.round(workbench.getBoundingClientRect().height);
+        if (height !== heights.at(-1)) heights.push(height);
+      });
+      watch.observe(workbench);
+      const place = () => document.querySelector(".computer-dock").dataset.place;
+      const steps = {};
+      hands.announce("computer:activity", hands.operatorReport({ revision: 1, active: true, actions: 2 }));
+      await hands.settle(); await wait(150);
+      steps.working = place();
+      hands.announce("computer:share-state", { target: "safari", label: "Safari", takenBack: false, generation: 1, revision: 1 });
+      await hands.settle(); await wait(150);
+      steps.shared = place();
+      hands.announce("computer:share-state", { target: null, takenBack: false, generation: 1, revision: 2 });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 2, active: true, actions: 5 }));
+      await hands.settle(); await wait(150);
+      steps.narrowed = place();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 3, active: false, actions: 5 }));
+      await hands.settle(); await wait(8600);
+      steps.gone = document.getElementById("computer-band").hidden;
+      await wait(150);
+      watch.disconnect();
+      return { steps, heights, room: getComputedStyle(document.body).getPropertyValue("--computer-band-room") };
+    });
+    ok(
+      "over a session the band stands in the middle while it fits, takes its own line once it does not, keeps it until it goes, and gives the panes their room back",
+      session.steps.working === "row" && session.steps.shared === "raised" && session.steps.narrowed === "raised" &&
+        session.steps.gone === true && session.heights.length === 3 && session.heights[0] === session.heights[2] &&
+        session.heights[1] < session.heights[0] && session.room === "",
+      JSON.stringify(session),
+    );
+    ok("the full bar session raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
 export async function testComputerProgress(browser, origin, ok) {
   await testTheBandClosesItself(browser, origin, ok);
   await testTheBandsPlace(browser, origin, ok);
+  await testTheBandCoversNothingInAFullBar(browser, origin, ok);
   await testTheBand(browser, origin, ok);
   await testTheProgressPanel(browser, origin, ok);
   await testTheBandWithThePanel(browser, origin, ok);

@@ -90,6 +90,7 @@ function sayComputerStopReach(node, reach) {
  * `computerBandKept` is how many the band last said the resume left paused. */
 let computerBandReach = null;
 let computerBandKept = 0;
+let computerBandRaised = false;
 
 function computerStopReachKey(reach) {
   return reach ? `${reach.stopped}/${reach.failed}/${reach.pausing}/${reach.kept}` : null;
@@ -150,6 +151,7 @@ function paintComputerBand() {
   el("computer-band-view").hidden = computerBandLook == null;
   paintComputerShare();
   paintComputerProgressControl();
+  placeComputerBand();
 }
 
 /* What the band leaves when it goes by itself: the open panel — closed the way
@@ -170,6 +172,74 @@ function forgetComputerBandSession() {
 el("computer-band").addEventListener("mousedown", (event) => {
   if (event.target.closest("button")) event.preventDefault();
 });
+
+/* Where the band stands in the status bar, so it covers nothing the bar shows
+ * (2026-11-16: with all six plan gauges on, the band centred on the window
+ * stood over the usage button and up to five gauges). It stands in the bar's
+ * own empty middle when it fits there whole, on one line. When it does not —
+ * a full bar at 900px leaves no middle at all — the bar grows by the band's
+ * height and the band stands in that new top line: the panes give the room,
+ * so it covers no pane line either. Once grown, the bar stays grown until the
+ * band goes, so a band that widens and narrows as the share comes and goes
+ * does not resize the panes back and forth. The work screen panel above the
+ * band is moved back inside the window when the band stands near an edge.
+ * `computerBandRaised` (with the band's other state above) holds the grown
+ * bar for the band's life. */
+
+function placeComputerBand() {
+  const band = el("computer-band");
+  const dock = band.parentElement;
+  const spacer = document.querySelector(".statusbar > .sb-spacer");
+  // The lengths live on the body, which holds the grid, the bar, the dock and
+  // the bar's popovers, and are written only when they move: a style written
+  // on the root element remeasures every terminal (shell-term.js).
+  const body = document.body.style;
+  const write = (name, length) => {
+    const value = length == null ? "" : `${length}px`;
+    if (body.getPropertyValue(name) === value) return;
+    if (value) body.setProperty(name, value);
+    else body.removeProperty(name);
+  };
+  const place = (where) => { if (dock.dataset.place !== where) dock.dataset.place = where; };
+  if (band.hidden || !spacer) {
+    computerBandRaised = false;
+    place("row");
+    write("--computer-band-room", null);
+    write("--computer-dock-x", null);
+    write("--computer-panel-shift", null);
+    return;
+  }
+  const free = spacer.getBoundingClientRect();
+  const tokens = getComputedStyle(document.documentElement);
+  const line = parseFloat(tokens.getPropertyValue("--statusbar-height")) || 0;
+  const box = band.getBoundingClientRect();
+  if (!computerBandRaised && (box.width > free.width || box.height > line + 0.5)) computerBandRaised = true;
+  let middle = window.innerWidth / 2;
+  if (computerBandRaised) {
+    place("raised");
+    write("--computer-band-room", Math.ceil(box.height));
+    write("--computer-dock-x", null);
+  } else {
+    place("row");
+    write("--computer-band-room", null);
+    middle = Math.round(free.left + free.width / 2);
+    write("--computer-dock-x", middle);
+  }
+  const panel = el("computer-progress");
+  const reach = panel.hidden ? null : panel.getBoundingClientRect().width / 2;
+  const margin = parseFloat(tokens.getPropertyValue("--space-3")) || 0;
+  const shift = reach == null ? 0
+    : Math.max(margin + reach - middle, Math.min(0, window.innerWidth - margin - reach - middle));
+  write("--computer-panel-shift", shift ? Math.round(shift) : null);
+}
+
+{
+  const watch = new ResizeObserver(() => placeComputerBand());
+  watch.observe(el("computer-band"));
+  watch.observe(el("computer-progress"));
+  const spacer = document.querySelector(".statusbar > .sb-spacer");
+  if (spacer) watch.observe(spacer);
+}
 
 /* The share's part of the band: which window an agent works in, the press
  * that takes it back, and — once taken — the press that hands it back; and
