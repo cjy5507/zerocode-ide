@@ -10910,6 +10910,44 @@ mod tests {
         let after = now + Duration::from_secs(4);
         assert!(!guard.swallows(&KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT), after));
     }
+
+    /// A marks startup probe sends up to nineteen queries (OSC 10, OSC 11,
+    /// sixteen OSC 4 slots, and the end-sentinel OSC 10). All nineteen late
+    /// replies must be swallowed in sequence, leaving a following `h` intact.
+    #[test]
+    fn nineteen_late_osc_replies_are_all_swallowed_and_leave_h_alone() {
+        use super::{KeyCode, KeyEvent, KeyModifiers, LateOscGuard};
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let mut guard = LateOscGuard {
+            until: now + Duration::from_secs(3),
+            saw_escape: false,
+            inside: false,
+        };
+        let alt = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT);
+        let plain = KeyEvent::from;
+
+        let mut payloads = vec![
+            "10;rgb:6565/7b7b/8383".to_string(),
+            "11;rgb:fdfd/f6f6/e3e3".to_string(),
+        ];
+        for slot in 0..16 {
+            payloads.push(format!("4;{slot};rgb:2a2a/a1a1/9898"));
+        }
+        payloads.push("10;rgb:6565/7b7b/8383".to_string());
+        assert_eq!(payloads.len(), 19);
+
+        for payload in payloads {
+            assert!(guard.swallows(&alt(']'), now), "Alt+] must open and be swallowed");
+            for ch in payload.chars() {
+                assert!(guard.swallows(&plain(KeyCode::Char(ch)), now), "{ch} reached the composer");
+            }
+            assert!(guard.swallows(&alt('\\'), now), "Alt+\\ must close and be swallowed");
+        }
+
+        assert!(!guard.swallows(&plain(KeyCode::Char('h')), now), "h after 19 replies must reach the composer");
+    }
     /// A result that missed its cell must still be drawn as what it is. The
     /// old code forced `ToolKind::Call`, so an edit came back as a generic
     /// `Called edit_file(…)` with the raw patch — no line numbers, no colors,

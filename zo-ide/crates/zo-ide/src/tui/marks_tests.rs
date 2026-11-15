@@ -191,6 +191,96 @@ fn marks_secondary_text_uses_measured_ink_and_respects_fallbacks() {
 }
 
 #[test]
+fn marks_lifts_low_contrast_ansi_inks_and_keeps_compliant_and_fallback_bytes() {
+    use super::ansi::{write_spans_for_palette, Color, Span, Style};
+    use super::palette::{contrast_ratio, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("marks_lifts_low_contrast_ansi_inks_and_keeps_compliant_and_fallback_bytes")) {
+        return;
+    }
+    style::init(&Preferences::default());
+
+    let mut solarized_slots = [None; 16];
+    solarized_slots[1] = Some((220, 50, 47));
+    solarized_slots[2] = Some((133, 153, 0));
+    solarized_slots[3] = Some((181, 137, 0));
+    solarized_slots[6] = Some((42, 161, 152));
+    let solarized_ground = (253, 246, 227);
+    let solarized_ink = (101, 123, 131);
+    let solarized = TerminalPalette::new(solarized_ink, solarized_ground, ColorLevel::TrueColor)
+        .with_ansi16(solarized_slots);
+    let solarized_no_ansi16 =
+        TerminalPalette::new(solarized_ink, solarized_ground, ColorLevel::TrueColor);
+    let solarized_ansi16_level =
+        TerminalPalette::new(solarized_ink, solarized_ground, ColorLevel::Ansi16)
+            .with_ansi16(solarized_slots);
+    let solarized_floor = contrast_ratio(solarized_ink, solarized_ground) * 0.75;
+
+    let mut horizon_slots = [None; 16];
+    horizon_slots[1] = Some((233, 86, 120));
+    horizon_slots[6] = Some((89, 225, 227));
+    let horizon = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor)
+        .with_ansi16(horizon_slots);
+
+    let render = |style: Style, palette: Option<TerminalPalette>| {
+        let mut out = String::new();
+        write_spans_for_palette(&Line::new(vec![Span::new("x", style)]), palette, &mut out);
+        out
+    };
+    let parse_fg_rgb = |rendered: &str| -> (u8, u8, u8) {
+        let (_, rest) = rendered
+            .split_once("38;2;")
+            .unwrap_or_else(|| panic!("expected 38;2; RGB SGR in {rendered:?}"));
+        let (params, _) = rest.split_once('m').expect("SGR terminator");
+        let mut parts = params.split(';');
+        (
+            parts.next().expect("red").parse().expect("u8"),
+            parts.next().expect("green").parse().expect("u8"),
+            parts.next().expect("blue").parse().expect("u8"),
+        )
+    };
+
+    for color in [Color::CYAN, Color::GREEN, Color::YELLOW] {
+        let rendered = render(Style::new().fg(color), Some(solarized));
+        let rgb = parse_fg_rgb(&rendered);
+        assert!(
+            contrast_ratio(rgb, solarized_ground) >= solarized_floor,
+            "{color:?} lifted to {rgb:?} should clear floor {solarized_floor}: {rendered:?}"
+        );
+    }
+
+    for color in [Color::CYAN, Color::RED] {
+        assert_eq!(
+            render(Style::new().fg(color), Some(horizon)),
+            render(Style::new().fg(color), None),
+            "compliant Horizon Dark {color:?} should keep slot bytes"
+        );
+    }
+
+    let dim_cyan = render(Style::new().fg(Color::CYAN).dim(), Some(solarized));
+    assert!(!dim_cyan.contains("\u{1b}[2m"), "dim should turn off: {dim_cyan:?}");
+    let dim_rgb = parse_fg_rgb(&dim_cyan);
+    assert!(
+        contrast_ratio(dim_rgb, solarized_ground) >= solarized_floor,
+        "dim cyan {dim_rgb:?} should clear floor {solarized_floor}"
+    );
+
+    let cyan = Style::new().fg(Color::CYAN);
+    let baseline = render(cyan, None);
+    assert_eq!(render(cyan, Some(solarized_no_ansi16)), baseline);
+    assert_eq!(render(cyan, Some(solarized_ansi16_level)), baseline);
+
+    assert_eq!(
+        render(Style::new().fg(Color::Indexed(6)), Some(solarized)),
+        render(Style::new().fg(Color::Base(6)), Some(solarized)),
+    );
+    assert_eq!(
+        render(Style::new().fg(Color::Indexed(200)), Some(solarized)),
+        render(Style::new().fg(Color::Indexed(200)), None),
+    );
+}
+
+#[test]
 fn a_flush_code_row_starts_at_column_zero_and_prose_keeps_its_prefix() {
     if !style::in_fresh_run(&path("a_flush_code_row_starts_at_column_zero_and_prose_keeps_its_prefix")) {
         return;
