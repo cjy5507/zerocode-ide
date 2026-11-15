@@ -4852,6 +4852,9 @@ el("jev-custom-form").addEventListener("input", jevCustomEdited);
 el("jev-custom-form").addEventListener("click", jevCustomOptionPressed);
 el("jev-custom-form").addEventListener("submit", (event) => event.preventDefault());
 el("jev-custom-form").addEventListener("keydown", (event) => {
+  // The Enter that ends a Hangul composition is the input method's, said by
+  // `isComposing` or the legacy 229: it puts no half-made word in (t-108245).
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key === "Enter" && event.target.matches?.("[name='askWhen']")) {
     event.preventDefault();
     jevCustomAddWord(el("jev-custom-form"));

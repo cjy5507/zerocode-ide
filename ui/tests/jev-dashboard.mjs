@@ -3623,6 +3623,30 @@ export async function testJevCustomDecisions(browser, origin, ok) {
         && atWords.field && !atWords.edited && !atWords.agent && drawerFaults.wide.length === 0 && drawerFaults.narrow.length === 0,
       JSON.stringify({ atWords, drawerFaults }));
 
+    // A Hangul word goes in only once its syllables are composed (t-108245
+    // review ②): the Enter that ends a composition belongs to the input
+    // method — whether the engine says so by `isComposing` or by the legacy
+    // 229 — and puts no half-made chip in; the word stays in its field.
+    const composing = await page.evaluate(() => {
+      const form = el("jev-custom-form");
+      const input = form.querySelector("[name='askWhen']");
+      const count = () => form.querySelectorAll("[data-jev-custom-words] .jev-custom-word").length;
+      const before = count();
+      const seen = [];
+      for (const init of [{ isComposing: true }, { keyCode: 229 }]) {
+        input.value = "지우";
+        const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init });
+        input.dispatchEvent(enter);
+        seen.push({ composing: enter.isComposing, code: enter.keyCode, chips: count(), held: input.value });
+      }
+      input.value = "";
+      return { before, seen };
+    });
+    ok("an Enter that ends a Hangul composition puts no half-made word in — by isComposing or by 229 — and the word stays in its field",
+      composing.seen.length === 2 && composing.seen[0].composing === true && composing.seen[1].code === 229
+        && composing.seen.every((one) => one.chips === composing.before && one.held === "지우"),
+      JSON.stringify(composing));
+
     // In the drawer a word goes in by Enter or 「넣기」 — trimmed, its inner
     // spaces one, once — and out by its ×; one past the settings answer's
     // length is said at the field and kept there; typing asks core's check
