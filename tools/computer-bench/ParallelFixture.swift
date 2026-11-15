@@ -116,6 +116,10 @@ final class Fixture: NSObject, NSApplicationDelegate {
             // Stands in for the app a person has in front.
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
+        case "place":
+            // Left and up from where every fixture starts, so each has a place of its own.
+            let home = window.frame.origin
+            window.setFrameOrigin(NSPoint(x: home.x - Double(parts[1])!, y: home.y + Double(parts[2])!))
         case "raise":
             // In front of everything without taking the focus: a picture holds this window alone.
             window.level = .floating

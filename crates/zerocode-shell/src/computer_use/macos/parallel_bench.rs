@@ -670,13 +670,17 @@ fn parallel_bench() {
     println!("{text}");
 }
 
-/// What a press costs when the drawn pointer has to travel to it, and how many
-/// pointers one agent working in four apps shows — the installed helper against
-/// the built one, turn about (2026-11-15: the installed press waited for its
-/// pointer, 240 of 423 ms, and one agent had one pointer however many apps).
+/// What a press costs when the drawn pointer has to travel to it, how many
+/// pointers one agent working in four apps shows, and what many apps at once
+/// cost with every pointer drawn — a helper built from the commit before
+/// against the one built here, turn about (2026-11-15: the press waited for
+/// its pointer, 240 of 423 ms, and one agent had one pointer however many
+/// apps). Both are builds of this machine: the installed helper answers only
+/// the signed window, never a test.
 ///
 /// ```text
-/// ZEROCODE_PARALLEL_FIXTURE=… ZEROCODE_PARALLEL_BASELINE=… ZEROCODE_PARALLEL_BUILT=… ZEROCODE_PARALLEL_OUT=… \
+/// ZEROCODE_PARALLEL_FIXTURE=… ZEROCODE_PARALLEL_BASELINE=<the helper built before> \
+/// ZEROCODE_PARALLEL_BUILT=<the helper built here> ZEROCODE_PARALLEL_OUT=… \
 /// cargo test -p zerocode-shell --bin zerocode-shell parallel_bench_pointer -- --ignored --nocapture
 /// ```
 #[test]
@@ -684,6 +688,8 @@ fn parallel_bench() {
 fn parallel_bench_pointer() {
     const ROUNDS: usize = 12;
     const APPS: usize = 4;
+    const MANY: usize = 24;
+    const MANY_ROUNDS: usize = 6;
     let program = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_FIXTURE").expect("fixture"));
     let baseline = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BASELINE").expect("baseline"));
     let built = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BUILT").expect("built helper"));
@@ -702,6 +708,25 @@ fn parallel_bench_pointer() {
         );
         answer.expect("a press");
         ms
+    };
+    // The pointers are drawn on the helper's main queue just after the answers:
+    // the most it shows while they stay, and how long until it shows `wanted`.
+    let pointers_shown = |session: &Session, wanted: usize| {
+        let started = Instant::now();
+        let mut most = 0;
+        while most < wanted && started.elapsed() < Duration::from_millis(1_500) {
+            let (_, said) = call(session, "status", &json!({}));
+            let shown = said.expect("a status")["backgroundPointer"]["pointers"]
+                .as_u64()
+                .and_then(|shown| usize::try_from(shown).ok())
+                .expect("a count of pointers");
+            most = most.max(shown);
+            if most < wanted {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let took = (most >= wanted).then(|| started.elapsed().as_secs_f64() * 1000.0);
+        (most, took)
     };
     let mut report = json!({});
 
@@ -738,7 +763,7 @@ fn parallel_bench_pointer() {
             same[at].push(press_as(session, &app, targets[at].0, "bench"));
         }
     }
-    for (at, label) in ["installed", "new"].into_iter().enumerate() {
+    for (at, label) in ["before", "new"].into_iter().enumerate() {
         by_helper.insert(
             label.into(),
             json!({
@@ -752,11 +777,15 @@ fn parallel_bench_pointer() {
     drop(travel);
 
     // ---- one agent in four apps at once: how many pointers the helper shows
-    let apps: Vec<Fixture> = (0..APPS)
+    let mut apps: Vec<Fixture> = (0..APPS)
         .map(|at| Fixture::start(&program, &root, &format!("pointer{at}"), 10))
         .collect();
+    // Each in a place of its own, so a person sees each pointer apart.
+    for (at, fixture) in apps.iter_mut().enumerate() {
+        fixture.ctl(&format!("place {} 0", at * 150));
+    }
     let mut pointers = serde_json::Map::new();
-    for (label, session) in [("installed", &old), ("new", &new)] {
+    for (label, session) in [("before", &old), ("new", &new)] {
         let prepared: Vec<(String, u64)> = apps
             .iter()
             .map(|fixture| {
@@ -771,19 +800,7 @@ fn parallel_bench_pointer() {
                 scope.spawn(move || press_as(session, app, *number, "one-agent"));
             }
         });
-        // The pointers are drawn on the helper's main queue just after the
-        // answers: the most it shows while they stay is what a person sees.
-        let deadline = Instant::now() + Duration::from_millis(1_500);
-        let mut most = 0;
-        while most < APPS as u64 && Instant::now() < deadline {
-            let (_, said) = call(session, "status", &json!({}));
-            let shown = said.expect("a status")["backgroundPointer"]["pointers"]
-                .as_u64()
-                .expect("a count of pointers");
-            most = most.max(shown);
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        pointers.insert(label.into(), json!(most));
+        pointers.insert(label.into(), json!(pointers_shown(session, APPS).0));
     }
     report["one_agent_in_four_apps_pointers"] = Value::Object(pointers);
     report["four_apps_pressed"] = json!(
@@ -792,6 +809,80 @@ fn parallel_bench_pointer() {
             .collect::<Vec<_>>()
     );
     drop(apps);
+
+    // ---- one agent in many apps at once: every pointer drawn, every press timed.
+    // Each round presses the other of two far buttons, so every pointer travels.
+    let mut many: Vec<Fixture> = (0..MANY)
+        .map(|at| Fixture::start(&program, &root, &format!("many{at}"), 8))
+        .collect();
+    // Six to a row, each in a place of its own: every pointer has its own way to go.
+    for (at, fixture) in many.iter_mut().enumerate() {
+        fixture.ctl(&format!("place {} {}", (at % 6) * 150, (at / 6) * 100));
+    }
+    let targets: Vec<Vec<(String, u64, u64)>> = [&old, &new]
+        .iter()
+        .map(|session| {
+            many.iter()
+                .map(|fixture| {
+                    let app = fixture.app();
+                    let state = look(session, &app);
+                    (
+                        app,
+                        number_of(&state, "button Target", 0),
+                        number_of(&state, "button Submit", 0),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    let (mut rounds, mut presses): (Vec<Vec<f64>>, Vec<Vec<f64>>) =
+        (vec![vec![], vec![]], vec![vec![], vec![]]);
+    let mut first_shown = [(0, None), (0, None)];
+    for round in 0..MANY_ROUNDS {
+        for (at, session) in [&old, &new].into_iter().enumerate() {
+            let started = Instant::now();
+            let took: Vec<f64> = std::thread::scope(|scope| {
+                let mut pressing = Vec::with_capacity(MANY);
+                for (app, top, bottom) in &targets[at] {
+                    let press_as = &press_as;
+                    let number = if round % 2 == 0 { *bottom } else { *top };
+                    pressing.push(scope.spawn(move || press_as(session, app, number, "one-agent")));
+                }
+                pressing
+                    .into_iter()
+                    .map(|press| press.join().expect("a press"))
+                    .collect()
+            });
+            rounds[at].push(started.elapsed().as_secs_f64() * 1000.0);
+            presses[at].extend(took);
+            if round == 0 {
+                first_shown[at] = pointers_shown(session, MANY);
+            }
+        }
+    }
+    let mut by_helper = serde_json::Map::new();
+    for (at, (label, session)) in [("before", &old), ("new", &new)].into_iter().enumerate() {
+        let (pointers, all_shown_ms) = first_shown[at];
+        by_helper.insert(
+            label.into(),
+            json!({
+                "round_ms": stats(std::mem::take(&mut rounds[at])),
+                "press_ms": stats(std::mem::take(&mut presses[at])),
+                "pointers": pointers,
+                "all_pointers_shown_ms": all_shown_ms.map(f64::round),
+                "helper_resident_kib": session.helper_pid().map(super::background_tests::resident_kib),
+            }),
+        );
+    }
+    report["one_agent_in_many_apps"] = json!({
+        "apps": MANY, "rounds": MANY_ROUNDS, "by_helper": by_helper,
+    });
+    report["many_apps_pressed"] = json!(
+        many.iter()
+            .map(|fixture| fixture.events().len())
+            .collect::<Vec<_>>()
+    );
+    drop(many);
 
     let text = serde_json::to_string_pretty(&report).expect("a report");
     std::fs::write(&out, &text).expect("the report");
