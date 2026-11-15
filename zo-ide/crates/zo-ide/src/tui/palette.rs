@@ -172,17 +172,45 @@ impl TerminalPalette {
         self.foreground
     }
 
+    fn text_contrast_floor(self, background: (u8, u8, u8)) -> f64 {
+        let body_contrast = contrast_ratio(self.foreground, background);
+        (body_contrast * SECONDARY_CONTRAST_BODY_SHARE).min(MIN_SECONDARY_CONTRAST)
+    }
+
     /// Measured secondary-text ink against `background`: blends `foreground`
     /// over `background` starting at 60 % in 5 % steps until it clears
     /// `min(4.5, body_contrast * 0.75)`.
     #[must_use]
     pub fn secondary_foreground(self, background: (u8, u8, u8)) -> (u8, u8, u8) {
-        let body_contrast = contrast_ratio(self.foreground, background);
-        let floor = (body_contrast * SECONDARY_CONTRAST_BODY_SHARE).min(MIN_SECONDARY_CONTRAST);
+        let floor = self.text_contrast_floor(background);
         for step in 0..8 {
             #[allow(clippy::cast_precision_loss)]
             let alpha = SECONDARY_INK_START_SHARE + step as f32 * SECONDARY_INK_STEP;
             let candidate = blend_rgb(self.foreground, background, alpha);
+            if contrast_ratio(candidate, background) >= floor {
+                return candidate;
+            }
+        }
+        self.foreground
+    }
+
+    /// Pull `color` toward `self.foreground` in 5 % steps until its contrast
+    /// against `background` reaches the text contrast floor, returning `color`
+    /// unchanged when it already clears the floor.
+    #[must_use]
+    pub fn ensure_text_contrast(
+        self,
+        color: (u8, u8, u8),
+        background: (u8, u8, u8),
+    ) -> (u8, u8, u8) {
+        let floor = self.text_contrast_floor(background);
+        if contrast_ratio(color, background) >= floor {
+            return color;
+        }
+        for step in 1..20 {
+            #[allow(clippy::cast_precision_loss)]
+            let alpha = step as f32 * SECONDARY_INK_STEP;
+            let candidate = blend_rgb(self.foreground, color, alpha);
             if contrast_ratio(candidate, background) >= floor {
                 return candidate;
             }
@@ -281,13 +309,19 @@ pub(crate) fn band_background(terminal_palette: TerminalPalette, style: super::s
 /// The band a code block stands on: the terminal's background moved a step
 /// toward its opposite — less than the band the person's words stand on.
 #[must_use]
-pub(crate) fn code_background(terminal_palette: TerminalPalette) -> Color {
+pub(crate) fn code_background_rgb(terminal_palette: TerminalPalette) -> (u8, u8, u8) {
     let (overlay, alpha) = if terminal_palette.has_light_background() {
         ((0, 0, 0), 0.03)
     } else {
         ((255, 255, 255), 0.05)
     };
-    let (red, green, blue) = blend_rgb(overlay, terminal_palette.background(), alpha);
+    blend_rgb(overlay, terminal_palette.background(), alpha)
+}
+
+/// The band a code block stands on, wrapped as an RGB [`Color`].
+#[must_use]
+pub(crate) fn code_background(terminal_palette: TerminalPalette) -> Color {
+    let (red, green, blue) = code_background_rgb(terminal_palette);
     Color::Rgb(red, green, blue)
 }
 
@@ -369,6 +403,65 @@ pub(crate) fn secondary_foreground_cached(palette: TerminalPalette) -> (u8, u8, 
         }
     }
     palette.secondary_foreground(palette.background())
+}
+
+struct ContrastCacheEntry {
+    palette: TerminalPalette,
+    color: (u8, u8, u8),
+    background: (u8, u8, u8),
+    adjusted: (u8, u8, u8),
+}
+
+/// Cached [`TerminalPalette::ensure_text_contrast`] keyed by `(palette, color, background)`.
+#[must_use]
+fn ensure_text_contrast_cached(
+    palette: TerminalPalette,
+    color: (u8, u8, u8),
+    background: (u8, u8, u8),
+) -> (u8, u8, u8) {
+    thread_local! {
+        static ADJUSTED_TEXT_COLORS: std::cell::RefCell<Vec<ContrastCacheEntry>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    ADJUSTED_TEXT_COLORS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(entry) = cache.iter().find(|entry| {
+            entry.palette == palette && entry.color == color && entry.background == background
+        }) {
+            return entry.adjusted;
+        }
+        let adjusted = palette.ensure_text_contrast(color, background);
+        cache.push(ContrastCacheEntry {
+            palette,
+            color,
+            background,
+            adjusted,
+        });
+        adjusted
+    })
+}
+
+/// Adjusts an RGB foreground `color` to meet the marks text contrast floor
+/// against `background_of(palette)` when running in marks style on a
+/// non-ANSI-16 palette; leaves all other cases untouched.
+#[must_use]
+pub(crate) fn ensure_marks_fg_contrast(
+    palette: Option<TerminalPalette>,
+    color: Color,
+    background_of: impl FnOnce(TerminalPalette) -> (u8, u8, u8),
+) -> Color {
+    if super::style::current().style != super::style::TuiStyle::Marks {
+        return color;
+    }
+    let (Some(palette), Color::Rgb(red, green, blue)) = (palette, color) else {
+        return color;
+    };
+    if palette.color_level() == ColorLevel::Ansi16 {
+        return color;
+    }
+    let (red, green, blue) =
+        ensure_text_contrast_cached(palette, (red, green, blue), background_of(palette));
+    Color::Rgb(red, green, blue)
 }
 
 /// raw TTY의 이벤트 스트림이 열리기 전에 팔레트를 한 번 초기화한다.
@@ -733,6 +826,28 @@ mod tests {
         let band = (42, 43, 50);
         let band_ink = horizon.secondary_foreground(band);
         assert!(super::contrast_ratio(band_ink, band) >= 4.5);
+    }
+
+    #[test]
+    fn ensure_text_contrast_pulls_low_contrast_colours_and_keeps_compliant_ones() {
+        let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+        let model = light.ensure_text_contrast((213, 144, 48), (255, 255, 255));
+        assert_ne!(model, (213, 144, 48));
+        assert!(super::contrast_ratio(model, (255, 255, 255)) >= 4.5);
+
+        let cyan = light.ensure_text_contrast((23, 146, 153), (247, 247, 247));
+        assert_ne!(cyan, (23, 146, 153));
+        assert!(super::contrast_ratio(cyan, (247, 247, 247)) >= 4.5);
+
+        let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+        assert_eq!(dark.ensure_text_contrast((147, 153, 178), (39, 41, 48)), (147, 153, 178));
+        assert_eq!(dark.ensure_text_contrast((246, 226, 183), (28, 30, 38)), (246, 226, 183));
+
+        let solarized = TerminalPalette::new((101, 123, 131), (253, 246, 227), ColorLevel::TrueColor);
+        let solarized_bg = (253, 246, 227);
+        let body_contrast = super::contrast_ratio((101, 123, 131), solarized_bg);
+        let adjusted = solarized.ensure_text_contrast((213, 144, 48), solarized_bg);
+        assert!(super::contrast_ratio(adjusted, solarized_bg) >= body_contrast * 0.75);
     }
 
 }

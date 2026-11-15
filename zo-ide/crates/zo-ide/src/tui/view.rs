@@ -1657,8 +1657,29 @@ fn dreamer_footer(dream: &str, width: usize) -> Line {
 }
 
 fn footer_theme_style(scopes: &[&str], fallback: Color) -> Style {
-    super::highlight::foreground_style_for_scopes(scopes)
-        .map_or_else(|| Style::new().fg(fallback), palette::soften_status_line_style)
+    footer_theme_style_for_palette(scopes, fallback, palette::terminal_palette())
+}
+
+pub(crate) fn footer_theme_style_for_palette(
+    scopes: &[&str],
+    fallback: Color,
+    terminal_palette: Option<palette::TerminalPalette>,
+) -> Style {
+    super::highlight::foreground_style_for_scopes_for_palette(scopes, terminal_palette)
+        .map_or_else(
+            || Style::new().fg(fallback),
+            |style| {
+                let mut style = palette::soften_status_line_style(style);
+                if let Some(fg) = style.fg {
+                    style.fg = Some(palette::ensure_marks_fg_contrast(
+                        terminal_palette,
+                        fg,
+                        palette::TerminalPalette::background,
+                    ));
+                }
+                style
+            },
+        )
 }
 
 /// Join the ordinary cwd with `ZeroCode`'s measured worktree identity.

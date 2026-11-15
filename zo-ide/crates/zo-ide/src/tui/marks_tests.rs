@@ -999,3 +999,80 @@ fn marks_shimmer_keeps_contrast_at_least_three_to_one() {
         }
     }
 }
+
+#[test]
+fn marks_syntax_highlight_keeps_text_contrast_floor_on_light_palette() {
+    use super::ansi::Color;
+    use super::palette::{code_background, contrast_ratio, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("marks_syntax_highlight_keeps_text_contrast_floor_on_light_palette")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+    let Color::Rgb(bg_r, bg_g, bg_b) = code_background(light) else {
+        panic!("code_background must return RGB");
+    };
+    let code = "fn main() {\n    let x = \"hi\"; // note\n    println!(\"{x}\");\n}\n";
+    let lines = super::highlight::highlight_code_to_lines_for_palette(code, "rust", Some(light));
+    for line in &lines {
+        for span in &line.spans {
+            if let Some(Color::Rgb(r, g, b)) = span.style.fg {
+                let ratio = contrast_ratio((r, g, b), (bg_r, bg_g, bg_b));
+                assert!(
+                    ratio >= 4.5,
+                    "syntax span {span:?} has contrast {ratio:.2} < 4.5 on ({bg_r}, {bg_g}, {bg_b})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn marks_footer_colours_keep_contrast_floor_on_light_and_keep_dark_values() {
+    use super::ansi::Color;
+    use super::palette::{self, contrast_ratio, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("marks_footer_colours_keep_contrast_floor_on_light_and_keep_dark_values")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+    let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let model_scopes = &["entity.name.type", "support.type", "variable"];
+    let cwd_scopes = &["string", "markup.underline.link"];
+
+    let light_model = super::view::footer_theme_style_for_palette(
+        model_scopes,
+        palette::FOOTER_MODEL,
+        Some(light),
+    );
+    let Some(Color::Rgb(r, g, b)) = light_model.fg else {
+        panic!("light model must be RGB: {light_model:?}");
+    };
+    assert!(contrast_ratio((r, g, b), light.background()) >= 4.5);
+
+    let light_cwd = super::view::footer_theme_style_for_palette(
+        cwd_scopes,
+        palette::FOOTER_CWD,
+        Some(light),
+    );
+    let Some(Color::Rgb(r, g, b)) = light_cwd.fg else {
+        panic!("light cwd must be RGB: {light_cwd:?}");
+    };
+    assert!(contrast_ratio((r, g, b), light.background()) >= 4.5);
+
+    let dark_model = super::view::footer_theme_style_for_palette(
+        model_scopes,
+        palette::FOOTER_MODEL,
+        Some(dark),
+    );
+    assert_eq!(dark_model.fg, Some(Color::Rgb(246, 226, 183)));
+
+    let dark_cwd = super::view::footer_theme_style_for_palette(
+        cwd_scopes,
+        palette::FOOTER_CWD,
+        Some(dark),
+    );
+    assert_eq!(dark_cwd.fg, Some(Color::Rgb(171, 223, 167)));
+}
