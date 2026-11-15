@@ -598,6 +598,56 @@ mod tests {
         );
     }
 
+    /// A helper that lives and takes no connection through the wait refuses
+    /// that request alone — nothing of it was sent — and the session stands:
+    /// no second helper is started beside one that may still be at work, out
+    /// of reach of the window's stop (t-109578).
+    #[test]
+    fn a_living_helper_that_takes_no_connection_refuses_the_request_and_keeps_the_session() {
+        let helper = StandIn::start(TOKEN, Shape::matching());
+        let window = helper.connect_window(TOKEN).expect("connected");
+        // With no idle connection the next request needs a new one.
+        let held = window
+            .0
+            .idle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop();
+        let filling = helper.shut_the_door();
+        let refused = match window.0.request("status", json!({})) {
+            Err(super::super::SessionFailure::Provider(refused)) => refused,
+            Err(super::super::SessionFailure::Transport(broken)) => {
+                panic!(
+                    "the session is discarded for a helper that lives: {}",
+                    broken.message
+                )
+            }
+            Ok(answer) => panic!("a full queue answered: {answer}"),
+        };
+        assert_eq!(refused.code, error_code::ACTION_TIMEOUT);
+        assert_eq!(
+            refused.delivery.as_deref(),
+            Some(zerocode_core::computer_use_protocol::NOT_DELIVERED),
+            "nothing of the request was sent"
+        );
+        helper.open_the_door();
+        drop((filling, held));
+        window
+            .0
+            .request("status", json!({}))
+            .map_err(|_| "the same session answers once the helper takes connections again")
+            .expect("answered");
+        assert_eq!(
+            helper
+                .heard()
+                .iter()
+                .filter(|heard| heard.method == "handshake")
+                .count(),
+            1,
+            "one session, one helper, from first to last"
+        );
+    }
+
     /// Only a queue that is full for a moment is waited out: a refusal from a
     /// helper that is gone is the answer at once, and one that lives but
     /// never takes the connection is given up when the wait is over.

@@ -75,6 +75,16 @@ const MAX_IDLE_WIRES: usize = 8;
 /// is a queue that was full for one.
 const QUEUE_FULL_WAIT: Duration = Duration::from_secs(2);
 const QUEUE_FULL_PAUSE: Duration = Duration::from_millis(2);
+
+/// Why a request got no connection to the helper.
+enum NoWire {
+    /// The helper lives and took no new connection through the wait. Nothing
+    /// was sent, and the session stands: this request alone is refused.
+    Busy,
+    /// The road is broken — the helper is gone, or the socket is. The session
+    /// is discarded and the next call starts a new one.
+    Broken(ComputerUseError),
+}
 // Every waiting request is answered inside the limit every answer has.
 const _: () = assert!(STOP_WATCH_WAIT.as_secs() < REQUEST_TIMEOUT.as_secs());
 
@@ -380,7 +390,13 @@ impl ProviderSession for Session {
     }
 
     fn request(&self, method: &str, params: Value) -> Result<Value, SessionFailure> {
-        let mut wire = self.take_wire().map_err(SessionFailure::Transport)?;
+        let mut wire = match self.take_wire(QUEUE_FULL_WAIT) {
+            Ok(wire) => wire,
+            // No second helper beside one that lives: it may still carry
+            // another group's steps, and the window's stop reaches one helper.
+            Err(NoWire::Busy) => return Err(SessionFailure::Provider(helper_took_no_connection())),
+            Err(NoWire::Broken(error)) => return Err(SessionFailure::Transport(error)),
+        };
         let answer = wire.request(method, params);
         // A wire that broke, or whose reply no longer lines up, is not reused.
         if !matches!(answer, Err(SessionFailure::Transport(_))) {
@@ -479,7 +495,9 @@ fn launch_at(app: &Path) -> Result<Launched, ComputerUseError> {
 }
 
 impl Session {
-    fn take_wire(&self) -> Result<Wire, ComputerUseError> {
+    /// A connection with no request on it: an idle one, or a new one — tried
+    /// again through `wait` while the helper's queue is full.
+    fn take_wire(&self, wait: Duration) -> Result<Wire, NoWire> {
         if let Some(wire) = self
             .idle
             .lock()
@@ -488,16 +506,24 @@ impl Session {
         {
             return Ok(wire);
         }
-        let stream =
-            connect_past_a_full_queue(&self.socket, QUEUE_FULL_WAIT, || self.helper_lives())
-                .map_err(io_error("connect to the Computer Use helper"))?;
-        Wire::new(stream, self.token.clone())
+        match connect_past_a_full_queue(&self.socket, wait, || self.helper_lives()) {
+            Ok(stream) => Wire::new(stream, self.token.clone()).map_err(NoWire::Broken),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ConnectionRefused && self.helper_lives() =>
+            {
+                Err(NoWire::Busy)
+            }
+            Err(error) => Err(NoWire::Broken(io_error(
+                "connect to the Computer Use helper",
+            )(error))),
+        }
     }
 
-    /// Whether the helper's process is still there. Only "no such process"
-    /// says it is gone; a helper whose pid was never read counts as there.
+    /// Whether the helper's process is known to be there still. Only "no such
+    /// process" says it is gone. A helper whose pid was never read is not
+    /// known to live: its refusal is a broken road, as it always was.
     fn helper_lives(&self) -> bool {
-        self.helper_pid.is_none_or(|pid| {
+        self.helper_pid.is_some_and(|pid| {
             // SAFETY: probing with signal 0 sends nothing.
             let answered = unsafe { libc::kill(pid, 0) } == 0;
             answered || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
@@ -581,6 +607,19 @@ impl Session {
     }
 }
 
+/// The refusal of a request for which the living helper took no connection:
+/// nothing of it was sent, and the same helper answers the next one.
+fn helper_took_no_connection() -> ComputerUseError {
+    ComputerUseError::new(
+        error_code::ACTION_TIMEOUT,
+        format!(
+            "the Computer Use helper took no new connection for {} s; nothing was sent. It is the same helper still: try again in a moment",
+            QUEUE_FULL_WAIT.as_secs()
+        ),
+    )
+    .with_delivery(Some(zerocode_core::computer_use_protocol::NOT_DELIVERED))
+}
+
 /// Connect to the helper at `socket`, trying again while its queue is full.
 /// A refused connection sent nothing. Taken for a broken road it discards the
 /// session, and the next step starts a second helper beside one that still
@@ -624,7 +663,8 @@ impl Drop for Session {
         }
         // The session is over, and its watch with it: nothing is lost.
         super::guard::watch_left();
-        if let Ok(mut wire) = self.take_wire()
+        // The session is ending: a full queue is not waited out for a goodbye.
+        if let Ok(mut wire) = self.take_wire(Duration::ZERO)
             && let Ok(line) = serde_json::to_vec(&json!({
                 "id": wire.next_id,
                 "method": "terminate",
