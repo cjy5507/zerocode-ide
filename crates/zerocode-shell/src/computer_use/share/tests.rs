@@ -1288,6 +1288,67 @@ fn a_looks_answer_ties_its_word_to_the_app_in_use() {
     assert!(state()["target"].is_null());
 }
 
+/// A read of an app's text and a search of its elements answer with the name
+/// the helper gave the app and no more (`read`, `find`, `wait-for`): the look
+/// is tied to the one app in use that bears the name (t-109874).
+#[test]
+fn an_answer_that_carries_the_apps_name_alone_ties_the_look_too() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("pid:4242")).expect("goes at once");
+    round_trips.set(0);
+    let look = json!({ "app": "Mirroring" });
+    let read = json!({
+        "source": "accessibility", "snapshotId": "s-1", "app": "iPhone 미러링",
+        "window": {"id": 7, "title": "a window"}, "text": "what it reads",
+    });
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    {
+        let _look = admit(ComputerMethod::Observe, &look).expect("a look");
+        super::heard(&read);
+    }
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    assert!(lapse(), "the read named the app in use by its name");
+    assert_eq!(state()["target"], "com.apple.screencontinuity");
+    drop(admit(ComputerMethod::Observe, &look).expect("a look"));
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    assert!(
+        lapse(),
+        "from then on the word names it as the look comes in"
+    );
+    assert_eq!(round_trips.get(), 0, "no look asked the helper anything");
+    stand_in::advance(1);
+    assert!(!lapse());
+}
+
+/// A name two apps in use bear names neither: the look is tied to none.
+#[test]
+fn a_name_two_apps_in_use_bear_ties_a_look_to_neither() {
+    let (_person, _) = person(Decision::Allowed);
+    let _helper = crate::computer_use::test_helper::stand(|_, params| {
+        let (bundle, pid) = if params["named"] == "one" {
+            ("com.example.one", 1)
+        } else {
+            ("com.example.two", 2)
+        };
+        Ok(json!({"apps": [{
+            "name": "Twin", "bundleId": bundle, "pid": pid, "isRunning": true,
+        }], "named": true}))
+    });
+    admit(ComputerMethod::Click, &click("one")).expect("goes at once");
+    admit(ComputerMethod::Click, &click("two")).expect("goes at once");
+    assert_eq!(state()["label"], "Twin, Twin", "two apps of one name");
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    {
+        let _look = admit(ComputerMethod::Observe, &json!({ "app": "the twin" })).expect("a look");
+        super::heard(&json!({ "app": "Twin" }));
+    }
+    stand_in::advance(1);
+    assert!(!lapse(), "a look that named neither kept one in use");
+    assert!(state()["target"].is_null());
+}
+
 /// An answer about an app that is not in use ties nothing and keeps nothing
 /// in use.
 #[test]

@@ -571,6 +571,30 @@ fn in_use_as(held: &Held, word: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The app in use that an answer names, by the app's key. A look at an app's
+/// tree answers with the app whole, and its bundle identifier is its key. A
+/// read of its text and a search of its elements answer with the name the
+/// helper gave it and no more: then the one app in use that bears the name,
+/// and none where two do.
+fn in_use_named_by(held: &Held, app: &Value) -> Option<String> {
+    if let Some(name) = app.as_str() {
+        let wanted = app_key(name);
+        let mut bearing = held.share.targets().filter(|key| {
+            held.labels
+                .get(*key)
+                .is_some_and(|label| app_key(label) == wanted)
+        });
+        let key = bearing.next()?;
+        return bearing.next().is_none().then(|| key.to_string());
+    }
+    let name = app.get("name")?.as_str()?;
+    let key = named_app_key(app.get("bundleId").and_then(Value::as_str), name);
+    held.share
+        .targets()
+        .any(|target| target == key)
+        .then_some(key)
+}
+
 /// What a free look's answer says of the app it read. The helper names the
 /// app in every look it answers, so where that app is in use the look is a
 /// use of it under whatever word the agent gave, and the word names the app
@@ -594,20 +618,14 @@ pub(super) fn heard(answer: &Value) {
     else {
         return;
     };
-    let Some(name) = app.get("name").and_then(Value::as_str) else {
-        return;
-    };
-    let key = named_app_key(app.get("bundleId").and_then(Value::as_str), name);
     let now = now_ms();
-    let in_use = with_held(|held| {
-        if !held.share.targets().any(|target| target == key) {
-            return false;
-        }
+    let tied = with_held(|held| {
+        let key = in_use_named_by(held, app)?;
         held.share.used(&key, now);
         held.words.insert(word, key.clone());
-        true
+        Some(key)
     });
-    if in_use {
+    if let Some(key) = tied {
         ADMITTED.with(|held| {
             if let Some(admitted) = held.borrow_mut().as_mut() {
                 admitted.looks_in = Some(key);
