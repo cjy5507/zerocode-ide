@@ -195,7 +195,8 @@ final class BackgroundPointerOverlay {
         slots[key] = slot
         // Coming into view, the agent takes a colour no other agent in view
         // wears; a pointer it already shows in another app keeps that colour.
-        let recoloured = roster.shown(key) && AgentColor.pointerShown(agent)
+        roster.shown(key)
+        let recoloured = AgentColor.pointerShown(agent)
         let shown: PointerPanel
         if let panel = slot.panel {
             shown = panel
@@ -217,9 +218,7 @@ final class BackgroundPointerOverlay {
             shown.setAccessibilityElement(false)
             slot.panel = shown
         }
-        if recoloured {
-            for (other, slot) in slots where other.agent == agent { slot.panel?.contentView?.needsDisplay = true }
-        }
+        if recoloured { shown.contentView?.needsDisplay = true }
         guard let windowID = UInt32(exactly: shown.windowNumber), windowID > 0 else { return }
         Self.identityLock.lock()
         Self.pointerWindowIDs.insert(windowID)
@@ -365,9 +364,12 @@ final class BackgroundPointerOverlay {
     /// again, so what the helper holds is what moved in the last
     /// `staysSeconds`, however many apps and agents came by since it started.
     private func retire(_ key: PointerKey) {
+        // Where a pointer stood stops counting after `staysSeconds` (`travel`),
+        // so what is older goes here; an act that came this moment keeps its own.
+        let stale = Date().addingTimeInterval(-Double(Self.staysSeconds))
         Self.identityLock.lock()
         Self.displayed[key] = nil
-        Self.lastPoint[key] = nil
+        Self.lastPoint = Self.lastPoint.filter { $0.value.at > stale }
         Self.identityLock.unlock()
         if roster.gone(key) { AgentColor.pointerGone(key.agent) }
         guard let slot = slots.removeValue(forKey: key) else { return }

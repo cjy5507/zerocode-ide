@@ -25,11 +25,12 @@ final class PointerRosterTests: XCTestCase {
         XCTAssertEqual(roster.count, 2)
     }
 
-    func testAnAgentComesIntoViewWithItsFirstPointerOnly() {
+    func testAnotherAgentsPointerInTheSameAppDoesNotKeepAnAgentInView() {
         var roster = PointerRoster()
-        XCTAssertTrue(roster.shown(PointerKey(agent: "claude", pid: 11)))
-        XCTAssertFalse(roster.shown(PointerKey(agent: "claude", pid: 12)), "already in view by its first pointer")
-        XCTAssertTrue(roster.shown(PointerKey(agent: "codex", pid: 12)))
+        roster.shown(PointerKey(agent: "claude", pid: 11))
+        roster.shown(PointerKey(agent: "codex", pid: 11))
+        XCTAssertTrue(roster.gone(PointerKey(agent: "claude", pid: 11)))
+        XCTAssertEqual(roster.count, 1)
     }
 
     func testAnAgentLeavesViewWithItsLastPointerOnly() {
