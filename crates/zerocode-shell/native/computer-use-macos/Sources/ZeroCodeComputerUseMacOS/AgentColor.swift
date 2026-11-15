@@ -204,6 +204,39 @@ struct PointerRoster {
     }
 }
 
+/// The pointers that wait to be drawn. They are drawn one at a time, the
+/// longest waiting first, so none is drawn twice while another waits; one that
+/// waits again before its turn keeps the turn and takes its newest place.
+struct PointerWaiting<Place> {
+    private var places: [PointerKey: Place] = [:]
+    private var order: [PointerKey] = []
+
+    var isEmpty: Bool { order.isEmpty }
+
+    /// `key` waits to be drawn at `place`. True when none waited before it:
+    /// the drawing is to be begun.
+    @discardableResult
+    mutating func enter(_ key: PointerKey, at place: Place) -> Bool {
+        let first = order.isEmpty
+        if places.updateValue(place, forKey: key) == nil { order.append(key) }
+        return first
+    }
+
+    /// The pointer that has waited longest, and where it is to be drawn.
+    mutating func next() -> (key: PointerKey, place: Place)? {
+        guard !order.isEmpty else { return nil }
+        let key = order.removeFirst()
+        guard let place = places.removeValue(forKey: key) else { return nil }
+        return (key, place)
+    }
+
+    /// None waits any more.
+    mutating func forget() {
+        places = [:]
+        order = []
+    }
+}
+
 /// The agent that last acted on each app, as the helper heard it while drawing
 /// that agent's pointer. The newest act wins; the oldest app is forgotten
 /// past `limit`, so a long session does not grow it.

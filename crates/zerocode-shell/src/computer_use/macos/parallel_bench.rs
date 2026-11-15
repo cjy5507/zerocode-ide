@@ -113,6 +113,26 @@ fn call(session: &Session, method: &str, params: &Value) -> (f64, Result<Value, 
     )
 }
 
+/// Opens `wanted` connections to the helper one after another and leaves them
+/// idle, so that as many requests in the same instant each find one. A helper's
+/// listen queue holds eight, and what the window does when it is full — it
+/// tries again — is another measurement's (`parallel_bench_at_once`): here no
+/// request is to wait on it, whichever helper it reaches.
+fn warm(session: &Session, wanted: usize) {
+    let opened: Vec<_> = (0..wanted)
+        .map(|_| {
+            session
+                .take_wire(super::QUEUE_FULL_WAIT)
+                .unwrap_or_else(|_| panic!("a connection to the helper"))
+        })
+        .collect();
+    session
+        .idle
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(opened);
+}
+
 fn stats(mut samples: Vec<f64>) -> Value {
     samples.sort_by(f64::total_cmp);
     let at = |fraction: f64| {
@@ -671,12 +691,14 @@ fn parallel_bench() {
 }
 
 /// What a press costs when the drawn pointer has to travel to it, how many
-/// pointers one agent working in four apps shows, and what many apps at once
-/// cost with every pointer drawn — a helper built from the commit before
-/// against the one built here, turn about (2026-11-15: the press waited for
-/// its pointer, 240 of 423 ms, and one agent had one pointer however many
-/// apps). Build it in a folder named `target`: a helper admits a test only
-/// from `target/debug/deps`, and the build line's own folder is not one.
+/// pointers one agent working in four apps shows, what many apps at once cost
+/// with every pointer drawn, and how soon the helper's main thread hears a
+/// stop while those pointers are drawn — a helper built from the commit
+/// before against the one built here, turn about (2026-11-15: the press
+/// waited for its pointer, 240 of 423 ms, and one agent had one pointer
+/// however many apps). Build it in a folder named `target`: a helper admits a
+/// test only from `target/debug/deps`, and the build line's own folder is not
+/// one.
 ///
 /// ```text
 /// CARGO_TARGET_DIR=<checkout>/target ZEROCODE_PARALLEL_FIXTURE=… \
@@ -691,6 +713,9 @@ fn parallel_bench_pointer() {
     const APPS: usize = 4;
     const MANY: usize = 24;
     const MANY_ROUNDS: usize = 6;
+    const STOP_ROUNDS: usize = 24;
+    /// How long after the presses set off the stop is sent, round by round.
+    const STOP_AFTER_MS: [u64; 4] = [10, 20, 40, 80];
     let program = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_FIXTURE").expect("fixture"));
     let baseline = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BASELINE").expect("baseline"));
     let built = PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BUILT").expect("built helper"));
@@ -850,6 +875,7 @@ fn parallel_bench_pointer() {
     let mut first_shown = [(0, None), (0, None)];
     for round in 0..MANY_ROUNDS {
         for (at, session) in [&old, &new].into_iter().enumerate() {
+            warm(session, MANY);
             let started = Instant::now();
             let took: Vec<f64> = std::thread::scope(|scope| {
                 let mut pressing = Vec::with_capacity(MANY);
@@ -892,6 +918,99 @@ fn parallel_bench_pointer() {
             .map(|fixture| fixture.events().len())
             .collect::<Vec<_>>()
     );
+
+    // ---- how soon the helper's main thread hears a stop while many pointers
+    // are being drawn (t-109788). The person's stop chord is heard on that
+    // thread, and the chord is theirs to press: the window's own stop is sent
+    // instead. The helper takes it on a queue of its own and then clears the
+    // pointers on the main thread, behind whatever that thread is doing — the
+    // wait the chord would have. Timed from the signal to the first pointer
+    // gone; the stop is lifted after, as the window lifts its own.
+    let stop_heard = |session: &Session, targets: &[(String, u64, u64)], round: usize| {
+        let pid = session.helper_pid().expect("the helper's pid");
+        let pointers = || {
+            let (_, said) = call(session, "status", &json!({}));
+            said.ok()
+                .and_then(|said| said["backgroundPointer"]["pointers"].as_u64())
+                .unwrap_or(0)
+        };
+        warm(session, MANY + 2);
+        let heard = std::thread::scope(|scope| {
+            for (app, top, bottom) in targets {
+                let number = if round.is_multiple_of(2) {
+                    *bottom
+                } else {
+                    *top
+                };
+                // A press the stop catches is refused: its answer is no part of this.
+                scope.spawn(move || {
+                    let _ = call(
+                        session,
+                        "click",
+                        &json!({
+                            "app": app, "elementIndex": number, "background": true,
+                            "noScreenshot": true, "afterAct": "changes", "agent": "one-agent",
+                        }),
+                    );
+                });
+            }
+            std::thread::sleep(Duration::from_millis(
+                STOP_AFTER_MS[round % STOP_AFTER_MS.len()],
+            ));
+            let mut shown = pointers();
+            let waited = Instant::now();
+            while shown == 0 && waited.elapsed() < Duration::from_millis(500) {
+                std::thread::sleep(Duration::from_millis(2));
+                shown = pointers();
+            }
+            if shown == 0 {
+                return None;
+            }
+            let sent = Instant::now();
+            // SAFETY: a signal to the helper this bench started — the one the
+            // window's stop sends it.
+            let signalled = unsafe { libc::kill(pid, libc::SIGUSR1) };
+            assert_eq!(signalled, 0, "the stop signal");
+            loop {
+                let now = pointers();
+                if now < shown {
+                    return Some(sent.elapsed().as_secs_f64() * 1000.0);
+                }
+                shown = now;
+                if sent.elapsed() > Duration::from_secs(5) {
+                    return None;
+                }
+            }
+        });
+        let (_, lifted) = call(session, "resume", &json!({"lifter": "person"}));
+        lifted.expect("the stop is lifted");
+        std::thread::sleep(Duration::from_millis(250));
+        heard
+    };
+    let (mut heard, mut untimed): (Vec<Vec<f64>>, [u32; 2]) = (vec![vec![], vec![]], [0; 2]);
+    for round in 0..STOP_ROUNDS {
+        for (at, session) in [&old, &new].into_iter().enumerate() {
+            match stop_heard(session, &targets[at], round) {
+                Some(ms) => heard[at].push(ms),
+                None => untimed[at] += 1,
+            }
+        }
+    }
+    let mut by_helper = serde_json::Map::new();
+    for (at, label) in ["before", "new"].into_iter().enumerate() {
+        let longest = heard[at].iter().copied().fold(0.0_f64, f64::max);
+        by_helper.insert(
+            label.into(),
+            json!({
+                "heard_ms": stats(std::mem::take(&mut heard[at])),
+                "longest_ms": (longest * 10.0).round() / 10.0,
+                "not_timed": untimed[at],
+            }),
+        );
+    }
+    report["a_stop_while_many_pointers_are_drawn"] = json!({
+        "apps": MANY, "rounds": STOP_ROUNDS, "stop_after_ms": STOP_AFTER_MS, "by_helper": by_helper,
+    });
     drop(many);
 
     let text = serde_json::to_string_pretty(&report).expect("a report");

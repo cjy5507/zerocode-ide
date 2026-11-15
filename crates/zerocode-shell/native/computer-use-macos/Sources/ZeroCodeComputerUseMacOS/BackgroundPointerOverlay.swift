@@ -27,13 +27,14 @@ final class BackgroundPointerOverlay {
     private static let shared = BackgroundPointerOverlay()
     nonisolated private static let identityLock = NSLock()
     nonisolated(unsafe) private static var pointerWindowIDs: Set<UInt32> = []
-    nonisolated(unsafe) private static var pending: [PointerKey: (anchor: WindowPointerAnchor, seconds: Double?)] = [:]
+    /// The pointers that wait to be drawn, and where: one a turn of the main
+    /// queue, the longest waiting first (`drawNext`).
+    nonisolated(unsafe) private static var waiting = PointerWaiting<(anchor: WindowPointerAnchor, seconds: Double?)>()
     /// Where each pointer was last sent and when (screen points), so the next
     /// move is timed from where a person sees it.
     nonisolated(unsafe) private static var lastPoint: [PointerKey: (point: CGPoint, at: Date)] = [:]
     nonisolated(unsafe) private static var latest: WindowPointerAnchor?
     nonisolated(unsafe) private static var displayed: [PointerKey: WindowPointerAnchor] = [:]
-    nonisolated(unsafe) private static var presentationQueued = false
     /// Which agent last acted on each app: its take-control mark wears that colour.
     nonisolated(unsafe) private static var acting = AgentActingLog()
     private var slots: [PointerKey: Slot] = [:]
@@ -58,6 +59,9 @@ final class BackgroundPointerOverlay {
     /// Over a window the person has covered it shows the agent is there, without
     /// reading as something happening in what they are looking at.
     private static let coveredAlpha: CGFloat = 0.55
+    /// How many pointers one reading of the window list serves before it is
+    /// read again: the pointers of one moment are drawn over one list.
+    private static let pointersToAWindowList = 16
     nonisolated private static let unnamedAgent = ""
 
     private init() {}
@@ -81,7 +85,7 @@ final class BackgroundPointerOverlay {
         let accepted = latest
         let shown = displayed.values.first
         let count = displayed.count
-        let queued = presentationQueued
+        let queued = !waiting.isEmpty
         identityLock.unlock()
         func described(_ anchor: WindowPointerAnchor?) -> Any {
             guard let anchor else { return NSNull() }
@@ -145,21 +149,33 @@ final class BackgroundPointerOverlay {
         identityLock.lock()
         acting.record(pid: pid, agent: key.agent)
         lastPoint[key] = (point, Date())
-        pending[key] = (anchor, seconds)
+        let first = waiting.enter(key, at: (anchor, seconds))
         latest = anchor
-        let enqueue = !presentationQueued
-        presentationQueued = true
         identityLock.unlock()
-        if enqueue {
-            DispatchQueue.main.async {
-                identityLock.lock()
-                let waiting = pending
-                pending = [:]
-                presentationQueued = false
-                identityLock.unlock()
-                for (key, waited) in waiting { shared.present(waited.anchor, key: key, seconds: waited.seconds) }
-            }
+        if first {
+            DispatchQueue.main.async { drawNext(over: nil, served: 0) }
         }
+    }
+
+    /// Draws the pointer that has waited longest and leaves the rest to the
+    /// main queue's next turns. All that waited used to be drawn in one turn,
+    /// and the main thread is where the person's stop chord is heard: one agent
+    /// at work in twenty-four apps was twenty-four drawings in a row, each
+    /// reading the window list twice and asking the app under its point through
+    /// accessibility (t-109788). A turn now draws one, over a window list read
+    /// once for `pointersToAWindowList` of them, so the chord waits for one
+    /// drawing at most however many pointers are at work.
+    private static func drawNext(over read: [WindowPointerAnchor.Window]?, served: Int) {
+        identityLock.lock()
+        let next = waiting.next()
+        let more = !waiting.isEmpty
+        identityLock.unlock()
+        guard let next else { return }
+        let list = read ?? Self.windows()
+        shared.present(next.place.anchor, key: next.key, seconds: next.place.seconds, over: list)
+        guard more else { return }
+        let fresh = served + 1 < pointersToAWindowList
+        DispatchQueue.main.async { drawNext(over: fresh ? list : nil, served: fresh ? served + 1 : 0) }
     }
 
     /// The named agent that last acted on the app `pid`, nil when none did.
@@ -171,13 +187,15 @@ final class BackgroundPointerOverlay {
 
     nonisolated static func hide() {
         identityLock.lock()
-        pending = [:]
+        waiting.forget()
         lastPoint = [:]
         identityLock.unlock()
         DispatchQueue.main.async { shared.clearAll() }
     }
 
-    private func present(_ anchor: WindowPointerAnchor, key: PointerKey, seconds: Double?) {
+    private func present(
+        _ anchor: WindowPointerAnchor, key: PointerKey, seconds: Double?, over windows: [WindowPointerAnchor.Window]
+    ) {
         let agent = key.agent
         let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
         let cocoaPoint = CGPoint(x: anchor.point.x, y: displayHeight - anchor.point.y)
@@ -223,8 +241,14 @@ final class BackgroundPointerOverlay {
         Self.identityLock.lock()
         Self.pointerWindowIDs.insert(windowID)
         Self.identityLock.unlock()
-        let inView = DesktopSelf.ownerPid(at: anchor.point) == anchor.pid
-            && anchor.visible(in: Self.windows(), ignoringWindowIDs: Self.windowIDs())
+        // Covered or not is read off the window list alone. Whose window a
+        // press at the point lands on (`DesktopSelf.ownerPid`) reads the list
+        // again and asks the app under the point through accessibility, for up
+        // to 1.5 s when that app is busy with the very press this pointer is
+        // drawn for — on the main thread. All it adds to the list is a
+        // Dock-level overlay over the point, and such a window stands above a
+        // pointer and draws over it wherever it draws at all.
+        let inView = anchor.visible(in: windows, ignoringWindowIDs: Self.windowIDs())
         shown.alphaValue = inView ? 1 : Self.coveredAlpha
         shown.setContentSize(frame.size)
         // A pointer still on the screen moves on from where it is; one that had
