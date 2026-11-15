@@ -262,6 +262,11 @@ async fn run_frontend(
         if let Some(text) = runtime::take_allow_always_narrow_notice(&session.cwd) {
             crate::runtime_support::push_startup_warning(text);
         }
+        if let Some(text) =
+            runtime::take_allow_always_session_only_notice(&runtime::default_config_home(), &session.cwd)
+        {
+            crate::runtime_support::push_startup_warning(text);
+        }
     }
     for text in crate::runtime_support::drain_startup_warnings() {
         let _ = renderer.push(system_note(SystemLevel::Warn, &text));

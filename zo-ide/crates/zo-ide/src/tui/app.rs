@@ -6379,6 +6379,15 @@ impl App {
         if let Some(text) = runtime::take_allow_always_narrow_notice(&self.session().cwd) {
             crate::runtime_support::push_startup_warning(text);
         }
+        // … and so is the word that "always allow" given here last time
+        // lasted that session only, for a person whose settings use the
+        // ordered `rules` (153).
+        if let Some(text) = runtime::take_allow_always_session_only_notice(
+            &runtime::default_config_home(),
+            &self.session().cwd,
+        ) {
+            crate::runtime_support::push_startup_warning(text);
+        }
         // What the runtime build found wrong in the settings — a permission
         // rule that names no zo tool (t-81312) — is a startup warning.
         for text in crate::runtime_support::drain_startup_warnings() {

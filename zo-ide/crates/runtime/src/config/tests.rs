@@ -3841,13 +3841,14 @@ fn leaving_plan_mode_puts_back_the_persons_own_mode_as_theirs() {
     );
 }
 
-/// A person whose own settings use the ordered `rules` gets an "always allow"
-/// written as a rule, not into `allow`: the next load merges their settings
-/// with the local file and refuses a mix, which would keep zo from starting in
-/// the folder (153).
+/// A person whose own settings use the ordered `rules` keeps an "always
+/// allow" for the session: written into `allow` it would make the next load
+/// refuse the mix, and a `rules` list in the local file would replace theirs
+/// in the folder — their deny with it. Their deny stays in force there, and
+/// the next session a person watches says once which rule to add (153).
 #[test]
 #[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
-fn always_allow_follows_the_persons_ordered_rules() {
+fn always_allow_leaves_the_persons_ordered_rules_whole() {
     let _overrides_stable = overrides_stable();
     let root = temp_dir();
     let cwd = root.join("project");
@@ -3856,18 +3857,30 @@ fn always_allow_follows_the_persons_ordered_rules() {
     fs::create_dir_all(&home).expect("home config dir");
     fs::write(
         home.join("settings.json"),
-        r#"{"permissions":{"rules":["Bash(git status*)=allow"]}}"#,
+        r#"{"permissions":{"rules":["Bash(git status*)=allow","Bash(rm*)=deny"]}}"#,
     )
     .expect("ordered rules");
 
     persist_allow_always_rules(&home, &cwd, &["Bash(cargo fmt*)".to_string()]).expect("persist");
 
-    let written = fs::read_to_string(cwd.join(".zo").join("settings.local.json")).expect("local settings");
-    assert!(written.contains("Bash(cargo fmt*)=allow"), "{written}");
-    assert!(!written.contains("\"allow\""), "no category list beside the rules: {written}");
-    ConfigLoader::new(&cwd, &home)
+    let loaded = ConfigLoader::new(&cwd, &home)
         .load()
-        .expect("the next load reads the person's rules and the local file together");
+        .expect("the next load reads the person's settings as they were");
+    let rules = loaded
+        .merged()
+        .get("permissions")
+        .and_then(JsonValue::as_object)
+        .and_then(|permissions| permissions.get("rules"))
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        rules.contains(&JsonValue::String("Bash(rm*)=deny".to_string())),
+        "the person's deny stays in force here: {rules:?}"
+    );
+    let notice = super::take_allow_always_session_only_notice(&home, &cwd).expect("word for the next session");
+    assert!(notice.contains("`Bash(cargo fmt*)=allow`"), "{notice}");
+    assert_eq!(super::take_allow_always_session_only_notice(&home, &cwd), None, "said once");
 }
 
 /// A key given twice is judged as the loader reads it, the last one applying:

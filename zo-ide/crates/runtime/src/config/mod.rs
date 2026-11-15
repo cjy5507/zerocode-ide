@@ -1592,6 +1592,10 @@ fn local_settings_scope(home: &Path, cwd: &Path, path: &Path) -> ConfigSource {
 /// before any write. Only a malformed document or rule is reported, and even
 /// then nothing is written. Where the record cannot be trusted (no Unix
 /// ownership) nothing is written: a grant lasts for the session, as before.
+/// So it does for a person whose own settings use the ordered `rules`, unless
+/// this file holds `rules` of its own: a list here would replace theirs in
+/// this folder, deny and ask with it. The next session a person watches here
+/// names the rules to add ([`take_allow_always_session_only_notice`]).
 pub fn persist_allow_always_rules(
     home: &Path,
     cwd: &Path,
@@ -1603,9 +1607,6 @@ pub fn persist_allow_always_rules(
         return Ok(());
     }
 
-    // The form follows the person's settings, not this file alone: a grant
-    // written into `allow` beside their ordered `rules` would make the next
-    // load refuse the mix, and zo would not start in this folder.
     let Ok(config) = ConfigLoader::new(cwd, home).load() else {
         return Ok(());
     };
@@ -1620,9 +1621,19 @@ pub fn persist_allow_always_rules(
         WritableZoFile::Holding(contents) => contents.as_str(),
     };
 
-    let Some(rendered) =
-        merge_allow_always_rules_as(&path, original_contents, rules, persons_use_ordered_rules)?
-    else {
+    // A person whose own settings use the ordered `rules`: a grant written into
+    // `allow` beside them makes the next load refuse the mix (zo would not
+    // start here), and a `rules` list in this file would replace theirs in this
+    // folder — their deny and ask with it, since a later scope's list wins
+    // whole. Unless this file holds `rules` of its own already, the grant
+    // lasts the session, and the next session a person watches here says
+    // which rules to add to their own (153).
+    if persons_use_ordered_rules && !holds_ordered_rules(&path, original_contents) {
+        leave_session_only_notice(home, cwd, rules);
+        return Ok(());
+    }
+
+    let Some(rendered) = merge_allow_always_rules(&path, original_contents, rules)? else {
         return Ok(());
     };
 
@@ -1757,6 +1768,68 @@ pub fn write_local_settings_for_a_tool(
     }
 }
 
+/// Whether the local settings `contents` hold ordered `rules` of their own.
+fn holds_ordered_rules(path: &Path, contents: &str) -> bool {
+    parse_json_object_contents(path, contents)
+        .ok()
+        .and_then(|root| parse_optional_permission_rules(&JsonValue::Object(root)).ok())
+        .is_some_and(|existing| !existing.rules().is_empty())
+}
+
+/// Where a session whose "always allow" grants lasted that session only leaves
+/// word for the next session a person watches in the same folder: the
+/// folder's state under the config home (153).
+fn session_only_notice_path(home: &Path, cwd: &Path) -> PathBuf {
+    home.join("projects")
+        .join(project_slug(cwd))
+        .join("state")
+        .join("allow-always-session-only.json")
+}
+
+/// Add `rules` to the word left for the next session in this folder.
+fn leave_session_only_notice(home: &Path, cwd: &Path, rules: &[String]) {
+    let path = session_only_notice_path(home, cwd);
+    let mut kept: Vec<String> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    for rule in rules {
+        if !kept.contains(rule) {
+            kept.push(rule.clone());
+        }
+    }
+    if let Ok(bytes) = serde_json::to_vec(&kept) {
+        let _ = core_types::paths::write_private_file(
+            &path,
+            &bytes,
+            &core_types::paths::ParentDirPolicy::CreateAndRestrict,
+        );
+    }
+}
+
+/// The word a session left when its "always allow" grants lasted that session
+/// only because the person's own settings use the ordered `rules`, taken so it
+/// is said once, to a session a person watches: the rules to add to their own
+/// `rules` to keep them (153).
+#[must_use]
+pub fn take_allow_always_session_only_notice(home: &Path, cwd: &Path) -> Option<String> {
+    let path = session_only_notice_path(home, cwd);
+    let text = std::fs::read_to_string(&path).ok()?;
+    std::fs::remove_file(&path).ok()?;
+    let rules: Vec<String> = serde_json::from_str(&text).ok()?;
+    if rules.is_empty() {
+        return None;
+    }
+    let to_add = rules
+        .iter()
+        .map(|rule| format!("`{rule}=allow`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "The \"always allow\" given here last time lasted that session only: your settings use the ordered `rules`, and a `rules` list in this folder's local file would replace yours here, your deny and ask with it. To keep it, add to your own `rules`: {to_add}"
+    ))
+}
+
 /// Whether nothing at all stands at `path` (not even a dangling link).
 fn is_absent(path: &Path) -> bool {
     matches!(
@@ -1772,29 +1845,18 @@ fn is_absent(path: &Path) -> bool {
 /// [`persist_allow_always_rules`], so the part that decides **what bytes a
 /// future session will read back** can be tested without a git worktree.
 ///
-/// The form follows the person. `parse_optional_permission_rules` rejects a
-/// merged document that mixes the ordered `rules` list with the
-/// `allow`/`deny`/`ask` categories, so where the file or the person's own
-/// settings (`persons_use_ordered_rules`) use the ordered form the grant is
-/// appended to `rules` as `"<rule>=allow"`, and otherwise the bare rule to
-/// `allow`. Writing into the wrong one would make the next load refuse the
-/// mix, and zo would not start in the folder (153).
-#[cfg(test)]
+/// The form follows the file. `parse_optional_permission_rules` rejects a
+/// document that mixes the ordered `rules` list with the `allow`/`deny`/`ask`
+/// categories, so a file already using the ordered form gets `"<rule>=allow"`
+/// appended to `rules`, and every other file gets the bare rule appended to
+/// `allow`. Writing into the wrong one would make the whole document
+/// unreadable on the next load. A person whose own settings use the ordered
+/// form gets no grant written into a file without it
+/// ([`persist_allow_always_rules`]).
 fn merge_allow_always_rules(
     path: &Path,
     contents: &str,
     rules: &[String],
-) -> Result<Option<String>, ConfigError> {
-    merge_allow_always_rules_as(path, contents, rules, false)
-}
-
-/// `merge_allow_always_rules`, told whether the person's own settings use the
-/// ordered `rules`.
-fn merge_allow_always_rules_as(
-    path: &Path,
-    contents: &str,
-    rules: &[String],
-    persons_use_ordered_rules: bool,
 ) -> Result<Option<String>, ConfigError> {
     let mut root = parse_json_object_contents(path, contents)?;
     let existing = parse_optional_permission_rules(&JsonValue::Object(root.clone()))?;
@@ -1808,7 +1870,7 @@ fn merge_allow_always_rules_as(
         }
     }
 
-    let ordered = persons_use_ordered_rules || !existing.rules().is_empty();
+    let ordered = !existing.rules().is_empty();
     let persisted = rules
         .iter()
         .map(|rule| {
