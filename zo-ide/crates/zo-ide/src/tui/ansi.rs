@@ -101,6 +101,9 @@ pub struct Style {
     pub bg: Option<Color>,
     pub bold: bool,
     pub dim: bool,
+    /// Keeps SGR 2 (`\x1b[2m`) even when the marks look resolves dim spans
+    /// to measured RGB ink, so the window can still read `cell.style.dim`.
+    pub sgr_dim: bool,
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
@@ -114,6 +117,7 @@ impl Style {
             bg: None,
             bold: false,
             dim: false,
+            sgr_dim: false,
             italic: false,
             underline: false,
             strike: false,
@@ -144,6 +148,15 @@ impl Style {
         self
     }
 
+    /// Marks the span as dim while requiring SGR 2 (`\x1b[2m`) instead of
+    /// measured secondary RGB ink.
+    #[must_use]
+    pub const fn sgr_dim(mut self) -> Self {
+        self.dim = true;
+        self.sgr_dim = true;
+        self
+    }
+
     #[must_use]
     pub const fn italic(mut self) -> Self {
         self.italic = true;
@@ -163,7 +176,24 @@ impl Style {
     }
 
     fn resolved_for(mut self, palette: Option<TerminalPalette>) -> Self {
+        let keep_sgr_dim = self.sgr_dim;
+        self.sgr_dim = false;
         if let Some(palette) = palette {
+            if !keep_sgr_dim
+                && self.dim
+                && self.fg.is_none()
+                && palette.color_level() != palette::ColorLevel::Ansi16
+                && super::style::current().style == super::style::TuiStyle::Marks
+            {
+                let ink = match self.bg {
+                    Some(Color::Rgb(red, green, blue)) => {
+                        palette.secondary_foreground((red, green, blue))
+                    }
+                    _ => palette::secondary_foreground_cached(palette),
+                };
+                self.dim = false;
+                self.fg = Some(Color::Rgb(ink.0, ink.1, ink.2));
+            }
             self.fg = self.fg.and_then(|color| palette.resolve(color));
             self.bg = self.bg.and_then(|color| palette.resolve(color));
         }
@@ -194,6 +224,7 @@ impl Style {
         }
         self.bold |= other.bold;
         self.dim |= other.dim;
+        self.sgr_dim |= other.sgr_dim;
         self.italic |= other.italic;
         self.underline |= other.underline;
         self.strike |= other.strike;
@@ -955,5 +986,16 @@ mod background_tests {
         let mut out = String::new();
         write_spans_for_palette(&line, None, &mut out);
         assert_eq!(out, "\u{1b}[32;48;2;48;48;48mx");
+    }
+
+    #[test]
+    fn codex_look_keeps_sgr_dim_even_with_a_palette() {
+        use crate::tui::palette::{ColorLevel, TerminalPalette};
+
+        let horizon = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+        let line = Line::new(vec![Span::dim("12 lines")]);
+        let mut out = String::new();
+        write_spans_for_palette(&line, Some(horizon), &mut out);
+        assert_eq!(out, "\u{1b}[2m12 lines");
     }
 }

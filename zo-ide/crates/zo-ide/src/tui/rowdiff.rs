@@ -77,7 +77,7 @@ const fn stable_width(ch: char) -> bool {
 /// 둔다 — "희미한 공백"과 "그냥 공백"이 같은 칸이 되어야 다시 쓰지 않는다.
 fn seen(ch: char, style: Style) -> Style {
     if ch == ' ' {
-        Style { fg: None, bold: false, dim: false, italic: false, ..style }
+        Style { fg: None, bold: false, dim: false, sgr_dim: false, italic: false, ..style }
     } else {
         style
     }

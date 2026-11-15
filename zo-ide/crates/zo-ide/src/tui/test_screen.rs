@@ -38,7 +38,7 @@ impl ScreenCell {
         match self.glyph {
             Glyph::Blank | Glyph::Narrow(' ') => (
                 Glyph::Blank,
-                Style { fg: None, bold: false, dim: false, italic: false, ..self.style },
+                Style { fg: None, bold: false, dim: false, sgr_dim: false, italic: false, ..self.style },
             ),
             glyph => (glyph, self.style),
         }

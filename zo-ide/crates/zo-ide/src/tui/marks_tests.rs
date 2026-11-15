@@ -125,6 +125,72 @@ fn the_composer_keeps_the_mark_the_window_reads() {
 }
 
 #[test]
+fn the_composer_placeholder_keeps_sgr_dim_under_a_measured_palette() {
+    use super::ansi::write_spans_for_palette;
+    use super::palette::{ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("the_composer_placeholder_keeps_sgr_dim_under_a_measured_palette")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let horizon = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let (rows, _cursor) = super::composer::Composer::new().render(WIDTH, "Ask zo to do anything");
+    let rendered: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let mut out = String::new();
+            write_spans_for_palette(row, Some(horizon), &mut out);
+            out
+        })
+        .collect();
+    assert!(
+        rendered.iter().any(|row| row.contains("\u{1b}[2mAsk zo to do anything")),
+        "{rendered:?}"
+    );
+}
+
+#[test]
+fn marks_secondary_text_uses_measured_ink_and_respects_fallbacks() {
+    use super::ansi::{write_spans_for_palette, Color, Span, Style};
+    use super::palette::{ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("marks_secondary_text_uses_measured_ink_and_respects_fallbacks")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let horizon = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let ansi16 = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::Ansi16);
+
+    let render = |spans: Vec<Span>, palette: Option<TerminalPalette>| {
+        let mut out = String::new();
+        write_spans_for_palette(&Line::new(spans), palette, &mut out);
+        out
+    };
+
+    let dim_horizon = render(vec![Span::dim("12 lines")], Some(horizon));
+    assert!(dim_horizon.contains("38;2;") && !dim_horizon.contains("\u{1b}[2m"), "{dim_horizon:?}");
+
+    let sgr_dim_horizon = render(vec![Span::new("Ask zo to do anything", Style::new().sgr_dim())], Some(horizon));
+    assert!(sgr_dim_horizon.contains("\u{1b}[2m") && !sgr_dim_horizon.contains("38;2;"), "{sgr_dim_horizon:?}");
+
+    let dim_none = render(vec![Span::dim("12 lines")], None);
+    assert!(dim_none.contains("\u{1b}[2m") && !dim_none.contains("38;2;"), "{dim_none:?}");
+
+    let dim_ansi16 = render(vec![Span::dim("12 lines")], Some(ansi16));
+    assert!(dim_ansi16.contains("\u{1b}[2m") && !dim_ansi16.contains("38;2;"), "{dim_ansi16:?}");
+
+    let colored_dim_horizon = render(vec![Span::new("warn", Style::new().fg(Color::CYAN).dim())], Some(horizon));
+    let colored_dim_none = render(vec![Span::new("warn", Style::new().fg(Color::CYAN).dim())], None);
+    assert_eq!(colored_dim_horizon, colored_dim_none);
+
+    let adjacent = render(
+        vec![Span::dim("a"), Span::new("b", Style::new().sgr_dim())],
+        None,
+    );
+    assert_eq!(adjacent, "\u{1b}[2mab");
+}
+
+#[test]
 fn a_flush_code_row_starts_at_column_zero_and_prose_keeps_its_prefix() {
     if !style::in_fresh_run(&path("a_flush_code_row_starts_at_column_zero_and_prose_keeps_its_prefix")) {
         return;

@@ -31,6 +31,14 @@ pub const SHIMMER_PEAK: (u8, u8, u8) = (255, 255, 255);
 /// Minimum WCAG contrast ratio against the terminal background for muted
 /// marks elements (table rules and the deepest shimmer trough).
 pub const MIN_MUTED_CONTRAST: f64 = 3.0;
+/// Minimum WCAG contrast ratio for secondary (dim) text in the marks look.
+pub const MIN_SECONDARY_CONTRAST: f64 = 4.5;
+/// Maximum share of the body-text contrast ratio that secondary text may
+/// require on low-contrast themes (e.g. Solarized), so dim text stays softer
+/// than body text.
+pub const SECONDARY_CONTRAST_BODY_SHARE: f64 = 0.75;
+const SECONDARY_INK_START_SHARE: f32 = 0.60;
+const SECONDARY_INK_STEP: f32 = 0.05;
 
 /// Max tier 컴포저 caret `›` 의 캡처 폴백.
 pub const COMPOSER_CARET: Color = Color::Rgb(255, 178, 66);
@@ -158,6 +166,24 @@ impl TerminalPalette {
             let alpha = step as f32 * 0.05;
             let candidate = blend_rgb(self.foreground, self.background, alpha);
             if contrast_ratio(candidate, self.background) >= min_contrast {
+                return candidate;
+            }
+        }
+        self.foreground
+    }
+
+    /// Measured secondary-text ink against `background`: blends `foreground`
+    /// over `background` starting at 60 % in 5 % steps until it clears
+    /// `min(4.5, body_contrast * 0.75)`.
+    #[must_use]
+    pub fn secondary_foreground(self, background: (u8, u8, u8)) -> (u8, u8, u8) {
+        let body_contrast = contrast_ratio(self.foreground, background);
+        let floor = (body_contrast * SECONDARY_CONTRAST_BODY_SHARE).min(MIN_SECONDARY_CONTRAST);
+        for step in 0..8 {
+            #[allow(clippy::cast_precision_loss)]
+            let alpha = SECONDARY_INK_START_SHARE + step as f32 * SECONDARY_INK_STEP;
+            let candidate = blend_rgb(self.foreground, background, alpha);
+            if contrast_ratio(candidate, background) >= floor {
                 return candidate;
             }
         }
@@ -323,11 +349,26 @@ pub fn contrast_ratio(foreground: (u8, u8, u8), background: (u8, u8, u8)) -> f64
 }
 
 static TERMINAL_PALETTE: OnceLock<Option<TerminalPalette>> = OnceLock::new();
+static DEFAULT_SECONDARY_INK: OnceLock<(TerminalPalette, (u8, u8, u8))> = OnceLock::new();
 
 /// startup probe가 성공했을 때만 적응 팔레트를 돌려준다.
 #[must_use]
 pub(crate) fn terminal_palette() -> Option<TerminalPalette> {
     TERMINAL_PALETTE.get().copied().flatten()
+}
+
+/// Returns the cached secondary-text RGB for `palette`'s default background
+/// when `palette` matches the probed terminal palette.
+#[must_use]
+pub(crate) fn secondary_foreground_cached(palette: TerminalPalette) -> (u8, u8, u8) {
+    if let Some(active) = terminal_palette() {
+        if active == palette {
+            return DEFAULT_SECONDARY_INK
+                .get_or_init(|| (active, active.secondary_foreground(active.background())))
+                .1;
+        }
+    }
+    palette.secondary_foreground(palette.background())
 }
 
 /// raw TTY의 이벤트 스트림이 열리기 전에 팔레트를 한 번 초기화한다.
@@ -655,6 +696,43 @@ mod tests {
             soften_status_line_style(Style::new().fg(Color::Rgb(166, 227, 161))).fg,
             Some(Color::Rgb(171, 223, 167))
         );
+    }
+
+    #[test]
+    fn secondary_foreground_keeps_a_contrast_floor_across_themes() {
+        let horizon = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+        let horizon_ink = horizon.secondary_foreground(horizon.background());
+        assert_eq!(horizon_ink, super::blend_rgb((224, 224, 224), (28, 30, 38), 0.60));
+        assert!(super::contrast_ratio(horizon_ink, (28, 30, 38)) >= 4.5);
+
+        let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+        let light_ink = light.secondary_foreground(light.background());
+        assert!(super::contrast_ratio(light_ink, (255, 255, 255)) >= 4.5);
+        assert!(
+            super::contrast_ratio(light_ink, (255, 255, 255))
+                < super::contrast_ratio((46, 52, 52), (255, 255, 255))
+        );
+
+        let solarized_light =
+            TerminalPalette::new((101, 123, 131), (253, 246, 227), ColorLevel::TrueColor);
+        let solarized_light_body = super::contrast_ratio((101, 123, 131), (253, 246, 227));
+        let solarized_light_ink = solarized_light.secondary_foreground(solarized_light.background());
+        let solarized_light_contrast =
+            super::contrast_ratio(solarized_light_ink, (253, 246, 227));
+        assert!(solarized_light_contrast >= solarized_light_body * 0.75);
+        assert!(solarized_light_contrast < solarized_light_body);
+
+        let solarized_dark =
+            TerminalPalette::new((131, 148, 150), (0, 43, 54), ColorLevel::TrueColor);
+        let solarized_dark_body = super::contrast_ratio((131, 148, 150), (0, 43, 54));
+        let solarized_dark_ink = solarized_dark.secondary_foreground(solarized_dark.background());
+        let solarized_dark_contrast = super::contrast_ratio(solarized_dark_ink, (0, 43, 54));
+        assert!(solarized_dark_contrast >= solarized_dark_body * 0.75);
+        assert!(solarized_dark_contrast < solarized_dark_body);
+
+        let band = (42, 43, 50);
+        let band_ink = horizon.secondary_foreground(band);
+        assert!(super::contrast_ratio(band_ink, band) >= 4.5);
     }
 
 }

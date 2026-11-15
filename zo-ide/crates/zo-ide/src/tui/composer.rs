@@ -760,7 +760,7 @@ impl Composer {
             let line = Line::new(vec![
                 caret,
                 Span::raw(CARET_GAP),
-                Span::dim(placeholder.to_string()),
+                Span::new(placeholder.to_string(), Style::new().sgr_dim()),
             ])
             .truncated(width);
             return (vec![line], (2, 0));
