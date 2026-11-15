@@ -239,6 +239,101 @@ fn a_mark_click_is_the_pinned_element_of_the_looks_own_window() {
     assert_eq!(unknown.code, "element_not_found");
 }
 
+/// A `parallel` reads as many apps at once as its groups, each a marked look
+/// if the agent asks, and presses by those marks in a later request. The
+/// looks of every agent and pane are kept in one table: it held eight — the
+/// batches a `parallel` once held — and a ninth look pushed the first out
+/// before its mark was pressed (2026-11-16). After more looks than a
+/// `parallel` works on at once, the first one's marks are still pressed.
+#[test]
+fn the_marks_of_a_look_are_pressed_after_as_many_looks_as_a_parallel_makes() {
+    let faces = keypad(4);
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let clean = picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let looks: Vec<String> = (0..=crate::agent_tools_runtime::PARALLEL_AT_ONCE)
+        .map(|at| {
+            let app = format!("Many-{at}");
+            let place = format!("place-many-{at}");
+            let mut params = Map::new();
+            params.insert("app".into(), app.as_str().into());
+            let marked = mark_look(
+                &params,
+                &app_answer(&faces, &app),
+                &shot(&clean, 9_000 + at as u64, placed, &place),
+                None,
+                &mut no_helper(),
+            );
+            marked.answer["lookId"]
+                .as_str()
+                .expect("a marked look has an id")
+                .to_string()
+        })
+        .collect();
+    let first = pinned_click(&json!({ "mark": 1, "look": looks[0] }))
+        .unwrap_or_else(|why| panic!("the first look was pushed out: {}", why.message));
+    assert_eq!(first.params["elementIndex"], 1);
+    let last = pinned_click(&json!({ "mark": 4, "look": looks[looks.len() - 1] })).unwrap();
+    assert_eq!(last.params["elementIndex"], 4);
+}
+
+/// What the table of kept looks can come to. A kept look holds no picture —
+/// its marks' places and words — so with names as long as a legend line a
+/// full look (`MARK_CAP` marks) stays under 64 KiB, and the whole table
+/// (`MARK_LOOKS_KEPT` looks, every one of them full) under 16 MiB.
+#[test]
+fn a_kept_look_holds_its_marks_places_and_words_and_no_picture() {
+    use zerocode_core::computer_use::{MARK_CAP, MARK_LOOKS_KEPT};
+    let faces: Vec<ElementFace> = keypad(24)
+        .into_iter()
+        .map(|mut face| {
+            let name = format!("a control whose name fills a legend line {:02}", face.index);
+            face.signature = format!("{}\u{1f}{name}", face.role);
+            face.name = Some(name);
+            face
+        })
+        .collect();
+    let placed = ShotFrame::new((100.0, 50.0), 1.6).unwrap();
+    let clean = picture(320, 512, |_, _| [255, 255, 255, 255]);
+    let mut params = Map::new();
+    params.insert("app".into(), "Weigh".into());
+    let marked = mark_look(
+        &params,
+        &app_answer(&faces, "Weigh"),
+        &shot(&clean, 9_900, placed, "place-weigh"),
+        None,
+        &mut no_helper(),
+    );
+    let look = marked.answer["lookId"].as_str().unwrap();
+    let (marks, bytes) = {
+        let held = tables();
+        let table = held.get(look).expect("the look is kept");
+        let bytes: usize = table
+            .marks
+            .iter()
+            .map(|mark| {
+                std::mem::size_of_val(mark)
+                    + mark.role.len()
+                    + mark.label.as_ref().map_or(0, String::len)
+                    + mark.signature.len()
+                    + mark.name.len()
+                    + mark.context.len()
+            })
+            .sum();
+        (table.marks.len(), bytes)
+    };
+    assert!(marks > 0, "the look placed no mark");
+    let a_full_look = bytes / marks * MARK_CAP;
+    assert!(
+        a_full_look < 64 * 1024,
+        "a full look holds {a_full_look} bytes"
+    );
+    assert!(
+        a_full_look * MARK_LOOKS_KEPT < 16 * 1024 * 1024,
+        "the table of kept looks comes to {} bytes",
+        a_full_look * MARK_LOOKS_KEPT
+    );
+}
+
 #[test]
 fn a_marked_value_is_bound_to_the_observed_field_and_its_old_value() {
     let mut field = face(3, "AXTextField", (10.0, 50.0, 130.0, 30.0), "Query");

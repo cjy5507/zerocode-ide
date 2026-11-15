@@ -554,9 +554,16 @@ pub const MARK_CLIP_ROLES: &[&str] = &["AXScrollArea"];
 /// meet the other: a mark is pressed only when what is on top at its centre
 /// is the control, inside it, or around it.
 pub const MARK_HIT_DEPTH: usize = 32;
-/// How many marked looks are kept at once: an agent clicks by its latest; an
-/// id this far behind is refused and looked again.
-pub const MARK_LOOKS_KEPT: usize = 8;
+/// How many marked looks the window keeps at once, for every agent and pane
+/// together. A mark is pressed by its look's id, and an id pushed out by
+/// newer looks is refused and looked again. A `parallel` works on sixty-four
+/// groups at a time, each of which may be a marked look that a later request
+/// presses by, so four such turns are kept (the window holds the two numbers
+/// to each other). It was eight — the batches a `parallel` once held: with
+/// that bound gone, a ninth look pushed the first out before its mark was
+/// pressed (2026-11-16). A kept look holds no picture: its marks' places and
+/// words, some tens of KiB.
+pub const MARK_LOOKS_KEPT: usize = 256;
 /// The presses the element path tries, in order: the macOS helper's actions
 /// (`performClickAction`, a source contract holds it) and the Windows
 /// provider's UIA patterns (which read this table). An element of any role

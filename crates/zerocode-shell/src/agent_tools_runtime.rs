@@ -4075,7 +4075,11 @@ pub(super) fn look_group(
 /// as a place comes free. Sixty-four at once is what was measured to land
 /// every press (2026-11-15); more at once is not measured, and each group at
 /// work holds a thread here and a connection and a thread in the helper.
-const PARALLEL_AT_ONCE: usize = 64;
+pub(crate) const PARALLEL_AT_ONCE: usize = 64;
+// Every group at work may be a marked look whose numbers a later request
+// presses by, and the looks of every agent and pane are kept in one table:
+// it holds four such turns, so no look is pushed out by its own request's.
+const _: () = assert!(zerocode_core::computer_use::MARK_LOOKS_KEPT >= 4 * PARALLEL_AT_ONCE);
 
 /// `work` done on every one of `items`, at most `at_once` of them at the same
 /// time, their answers in the items' order. Each worker thread begins with
