@@ -2973,6 +2973,36 @@ fn always_allow_is_kept_in_a_folder_with_or_without_git() {
     }
 }
 
+/// In the person's home folder the local file is the config home's own
+/// (`~/.zo/settings.local.json`): a grant made there is recorded like any
+/// other, so the next session reads it as the person's, and a later grant
+/// merges into it and keeps it theirs (153).
+#[test]
+#[cfg_attr(windows, ignore = "the record of local files is Unix-only: it is trusted by Unix ownership, so on Windows a local file reads as the repository's")]
+fn always_allow_is_kept_in_the_home_folder() {
+    let _overrides_stable = overrides_stable();
+    let root = temp_dir();
+    let cwd = root.join("person");
+    let home = cwd.join(".zo");
+    fs::create_dir_all(&home).expect("home config dir");
+
+    persist_allow_always_rules(&home, &cwd, &["Bash(cargo fmt*)".to_string()]).expect("persist");
+    let loaded = ConfigLoader::new(&cwd, &home).load().expect("config should load");
+    assert!(
+        loaded.permission_rules().allow().contains(&"Bash(cargo fmt*)".to_string()),
+        "the next session: {:?}",
+        loaded.permission_rules().allow()
+    );
+
+    persist_allow_always_rules(&home, &cwd, &["Bash(cargo test*)".to_string()])
+        .expect("persist again");
+    let loaded = ConfigLoader::new(&cwd, &home).load().expect("config should load");
+    let allow = loaded.permission_rules().allow();
+    for rule in ["Bash(cargo fmt*)", "Bash(cargo test*)"] {
+        assert!(allow.contains(&rule.to_string()), "{rule}: {allow:?}");
+    }
+}
+
 /// A file the folder came with does not take the person's "always allow"
 /// grants: they last for the session rather than land in it, where they would
 /// make what it says the person's.

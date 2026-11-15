@@ -104,9 +104,10 @@ pub fn forget(home: &Path, real: &Path) -> std::io::Result<bool> {
     Ok(removed)
 }
 
-/// Whether `path` is one of the project-local control files the record speaks
-/// for: `<folder>/.zo/<one of RECORDED_FILES>`, outside the config home `home`
-/// (whose own documents are the person's whatever the record says).
+/// Whether `path` is one of the project-local control files zo writes only
+/// where nothing stands or where it wrote them: `<folder>/.zo/<one of
+/// RECORDED_FILES>`, outside the config home `home` (whose own documents zo
+/// writes whatever the record says).
 #[must_use]
 pub fn is_recorded_kind(home: &Path, path: &Path) -> bool {
     names_a_local_file(path) && !in_config_home(home, path)
@@ -186,15 +187,22 @@ pub fn may_write(home: &Path, path: &Path) -> bool {
     }
 }
 
-/// After zo wrote `bytes` to `path`, remember them when `path` is a recorded
-/// kind. A failure is reported once on stderr: the write stands, and the file
-/// reads as the repository's until zo writes it again.
+/// After zo wrote `bytes` to `path`, remember them when `path` is a local
+/// file — the config home's own as well: in the person's home folder,
+/// `~/.zo/settings.local.json` is that folder's local file, and the loader
+/// reads it as the person's only by the record. A failure is reported once on
+/// stderr: the write stands, and the file reads as the repository's until zo
+/// writes it again.
 pub fn wrote(home: &Path, path: &Path, bytes: &[u8]) {
-    if !is_recorded_kind(home, path) {
+    if !names_a_local_file(path) {
         return;
     }
-    let result = path.canonicalize().and_then(|real| remember(home, &real, bytes));
-    if let Err(error) = result {
+    let Err(error) = path.canonicalize().and_then(|real| remember(home, &real, bytes)) else {
+        return;
+    };
+    // The config home's own documents need the record only in the person's
+    // home folder; a record that cannot be kept is not worth a word for them.
+    if is_recorded_kind(home, path) {
         eprintln!(
             "[zo] warning: wrote {} but could not record it as yours: {error}",
             path.display()
