@@ -710,6 +710,15 @@ fn parallel_bench_pointer() {
         answer.expect("a press");
         ms
     };
+    // A number belongs to the agent whose look gave it: the look is the presser's.
+    let look_as = |session: &Session, app: &str, agent: &str| {
+        let (_, answer) = call(
+            session,
+            "getAppState",
+            &json!({"app": app, "noScreenshot": true, "background": true, "agent": agent}),
+        );
+        answer.expect("a look")
+    };
     // The pointers are drawn on the helper's main queue just after the answers:
     // the most it shows while they stay, and how long until it shows `wanted`.
     let pointers_shown = |session: &Session, wanted: usize| {
@@ -741,7 +750,7 @@ fn parallel_bench_pointer() {
     let targets: Vec<(u64, u64)> = [&old, &new]
         .iter()
         .map(|session| {
-            let state = look(session, &app);
+            let state = look_as(session, &app, "bench");
             (
                 number_of(&state, "button Target", 0),
                 number_of(&state, "button Submit", 0),
@@ -791,8 +800,8 @@ fn parallel_bench_pointer() {
             .iter()
             .map(|fixture| {
                 let app = fixture.app();
-                let number = number_of(&look(session, &app), "button Target", 0);
-                (app, number)
+                let state = look_as(session, &app, "one-agent");
+                (app, number_of(&state, "button Target", 0))
             })
             .collect();
         std::thread::scope(|scope| {
@@ -826,7 +835,7 @@ fn parallel_bench_pointer() {
             many.iter()
                 .map(|fixture| {
                     let app = fixture.app();
-                    let state = look(session, &app);
+                    let state = look_as(session, &app, "one-agent");
                     (
                         app,
                         number_of(&state, "button Target", 0),
