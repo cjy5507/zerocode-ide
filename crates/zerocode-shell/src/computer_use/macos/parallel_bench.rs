@@ -133,6 +133,47 @@ fn warm(session: &Session, wanted: usize) {
         .extend(opened);
 }
 
+/// How long the helper lets a pointer stay after its agent's last act: its own
+/// number, read where the helper has it.
+fn pointer_stays() -> Duration {
+    let seconds = include_str!(
+        "../../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOS/BackgroundPointerOverlay.swift"
+    )
+    .split("static let staysSeconds = ")
+    .nth(1)
+    .and_then(|rest| rest.lines().next())
+    .and_then(|seconds| seconds.trim().parse().ok())
+    .expect("how long the helper's pointer stays");
+    Duration::from_secs(seconds)
+}
+
+/// Waits until the helper shows no pointer and has none left to draw. A pointer
+/// stays for a while after its agent's last act, whatever became of its app, and
+/// the helper's count is of every agent's pointers in every app: what one
+/// section counts starts here, clear of the section before (2026-11-16: four
+/// apps read five, the fifth the press before them had left). Waited out and
+/// never stopped: what a stop costs is a section's own measure.
+fn none_shown(session: &Session) {
+    /// A timer's turn on a busy machine, past the pointer's own time.
+    const LATE: Duration = Duration::from_secs(5);
+    let bound = pointer_stays() + LATE;
+    let started = Instant::now();
+    loop {
+        let (_, said) = call(session, "status", &json!({}));
+        let status = said.expect("a status");
+        let pointer = &status["backgroundPointer"];
+        // The helper before says nothing of pointers waiting: it draws them at once.
+        if pointer["pointers"].as_u64() == Some(0) && pointer["pending"].as_bool() != Some(true) {
+            return;
+        }
+        assert!(
+            started.elapsed() < bound,
+            "a pointer outstays its time: {pointer}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn stats(mut samples: Vec<f64>) -> Value {
     samples.sort_by(f64::total_cmp);
     let at = |fraction: f64| {
@@ -696,9 +737,12 @@ fn parallel_bench() {
 /// stop while those pointers are drawn — a helper built from the commit
 /// before against the one built here, turn about (2026-11-15: the press
 /// waited for its pointer, 240 of 423 ms, and one agent had one pointer
-/// however many apps). Build it in a folder named `target`: a helper admits a
-/// test only from `target/debug/deps`, and the build line's own folder is not
-/// one.
+/// however many apps). A count of pointers starts with none shown
+/// (`none_shown`), and what each helper holds is read with four apps counted
+/// and after the first and the last stop, so pointers drawn and cleared over
+/// and over show what they leave behind. Build it in a folder named `target`:
+/// a helper admits a test only from `target/debug/deps`, and the build line's
+/// own folder is not one.
 ///
 /// ```text
 /// CARGO_TARGET_DIR=<checkout>/target ZEROCODE_PARALLEL_FIXTURE=… \
@@ -763,6 +807,7 @@ fn parallel_bench_pointer() {
         let took = (most >= wanted).then(|| started.elapsed().as_secs_f64() * 1000.0);
         (most, took)
     };
+    let resident_of = |session: &Session| helper_rss_kib(session.helper_pid());
     let mut report = json!({});
 
     // ---- a press whose pointer travels, and one whose pointer is already there
@@ -820,7 +865,10 @@ fn parallel_bench_pointer() {
         fixture.ctl(&format!("place {} 0", at * 150));
     }
     let mut pointers = serde_json::Map::new();
+    // What each helper holds, moment by moment: (moment, before, new).
+    let mut resident: Vec<(&str, u64, u64)> = Vec::new();
     for (label, session) in [("before", &old), ("new", &new)] {
+        none_shown(session);
         let prepared: Vec<(String, u64)> = apps
             .iter()
             .map(|fixture| {
@@ -837,6 +885,7 @@ fn parallel_bench_pointer() {
         });
         pointers.insert(label.into(), json!(pointers_shown(session, APPS).0));
     }
+    resident.push(("four_apps_counted", resident_of(&old), resident_of(&new)));
     report["one_agent_in_four_apps_pointers"] = Value::Object(pointers);
     report["four_apps_pressed"] = json!(
         apps.iter()
@@ -875,6 +924,9 @@ fn parallel_bench_pointer() {
     let mut first_shown = [(0, None), (0, None)];
     for round in 0..MANY_ROUNDS {
         for (at, session) in [&old, &new].into_iter().enumerate() {
+            if round == 0 {
+                none_shown(session);
+            }
             warm(session, MANY);
             let started = Instant::now();
             let took: Vec<f64> = std::thread::scope(|scope| {
@@ -995,15 +1047,31 @@ fn parallel_bench_pointer() {
                 None => untimed[at] += 1,
             }
         }
+        // A stop clears every pointer, and each round after draws them again:
+        // what a helper holds after the first round against after the last is
+        // what the rounds between left behind, with no pointer shown at either.
+        let moment = match round + 1 {
+            1 => "first_stop_lifted",
+            STOP_ROUNDS => "last_stop_lifted",
+            _ => continue,
+        };
+        none_shown(&old);
+        none_shown(&new);
+        resident.push((moment, resident_of(&old), resident_of(&new)));
     }
     let mut by_helper = serde_json::Map::new();
     for (at, label) in ["before", "new"].into_iter().enumerate() {
-        let longest = heard[at].iter().copied().fold(0.0_f64, f64::max);
+        // Every round's, slowest last: twenty-four are too few for a p95 to
+        // show the slowest one.
+        let mut all = std::mem::take(&mut heard[at]);
+        all.sort_by(f64::total_cmp);
+        let all: Vec<f64> = all.iter().map(|ms| (ms * 10.0).round() / 10.0).collect();
         by_helper.insert(
             label.into(),
             json!({
-                "heard_ms": stats(std::mem::take(&mut heard[at])),
-                "longest_ms": (longest * 10.0).round() / 10.0,
+                "heard_ms": stats(all.clone()),
+                "longest_ms": all.last().copied().unwrap_or_default(),
+                "all_ms": all,
                 "not_timed": untimed[at],
             }),
         );
@@ -1011,6 +1079,12 @@ fn parallel_bench_pointer() {
     report["a_stop_while_many_pointers_are_drawn"] = json!({
         "apps": MANY, "rounds": STOP_ROUNDS, "stop_after_ms": STOP_AFTER_MS, "by_helper": by_helper,
     });
+    report["helper_resident_kib_at"] = Value::Object(
+        resident
+            .into_iter()
+            .map(|(moment, before, new)| (moment.to_owned(), json!({"before": before, "new": new})))
+            .collect(),
+    );
     drop(many);
 
     let text = serde_json::to_string_pretty(&report).expect("a report");
