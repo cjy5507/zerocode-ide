@@ -546,8 +546,8 @@ fn no_longer_the_persons(written: runtime::LocalSettingsWrite) -> Option<String>
     })
 }
 
-/// The person's own local settings as EnterPlanMode found them, by the
-/// settings path, for ExitPlanMode to put back as theirs. Held in this process,
+/// The person's own local settings as `EnterPlanMode` found them, by the
+/// settings path, for `ExitPlanMode` to put back as theirs. Held in this process,
 /// where no file tool reaches — `.zo/tool-state` is not (153).
 static PUT_BACK_ON_LEAVING_PLAN_MODE: std::sync::Mutex<
     std::collections::BTreeMap<PathBuf, serde_json::Map<String, Value>>,

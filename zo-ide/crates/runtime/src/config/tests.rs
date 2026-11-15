@@ -3872,7 +3872,7 @@ fn always_allow_leaves_the_persons_ordered_rules_whole() {
         .and_then(JsonValue::as_object)
         .and_then(|permissions| permissions.get("rules"))
         .and_then(JsonValue::as_array)
-        .cloned()
+        .map(<[JsonValue]>::to_vec)
         .unwrap_or_default();
     assert!(
         rules.contains(&JsonValue::String("Bash(rm*)=deny".to_string())),
