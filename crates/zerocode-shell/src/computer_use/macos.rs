@@ -905,9 +905,7 @@ fn signing_identity(details: &str) -> Option<zerocode_core::computer_use::Comput
 
 #[must_use]
 pub(super) fn permission_status() -> ComputerPermissionReport {
-    // A granted ScreenCapture row is only observed by a new helper process.
-    super::shutdown();
-    match permission_status_macos() {
+    let report = match permission_status_macos() {
         Ok(report) => report,
         Err(error) => ComputerPermissionReport {
             identity: helper_signing_identity(),
@@ -922,7 +920,44 @@ pub(super) fn permission_status() -> ComputerPermissionReport {
                 .map(|helper| tcc_rows(&helper, None))
                 .unwrap_or_default(),
         },
+    };
+    settle_session_for(&report.permissions);
+    report
+}
+
+/// The rows as the window last read them: what a helper started since counts on.
+static ROWS_READ: std::sync::Mutex<Option<Vec<(ComputerPermissionId, ComputerPermissionStatus)>>> =
+    std::sync::Mutex::new(None);
+
+/// A granted ScreenCapture row is only observed by a new helper process, so
+/// a reading that moved a row ends the session, and the next call starts a
+/// helper that sees it. A reading that moved none leaves the session and what
+/// it has under way alone: the window reads the rows whenever it is focused,
+/// and ending a session sends its helper away with every act it carries
+/// (t-109675).
+fn settle_session_for(rows: &[ComputerPermissionState]) {
+    let moved = rows_moved(
+        &mut ROWS_READ
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        rows,
+    );
+    if moved {
+        super::shutdown();
     }
+}
+
+/// Whether `rows` differ from the ones `read` last, which they replace. The
+/// first reading has none to compare with and counts as moved: nothing says
+/// what a helper that already stands started under.
+fn rows_moved(
+    read: &mut Option<Vec<(ComputerPermissionId, ComputerPermissionStatus)>>,
+    rows: &[ComputerPermissionState],
+) -> bool {
+    let rows: Vec<_> = rows.iter().map(|row| (row.id, row.status)).collect();
+    let moved = read.as_ref() != Some(&rows);
+    *read = Some(rows);
+    moved
 }
 
 fn permission_status_macos() -> Result<ComputerPermissionReport, ComputerUseError> {
@@ -1789,6 +1824,11 @@ mod tests {
         super::super::call("handshake", json!({})).unwrap();
         assert!(super::super::session_stands());
         let refreshed = permission_status();
+        assert!(
+            super::super::session_stands(),
+            "a reading that moved no row leaves the session standing"
+        );
+        super::super::shutdown();
         assert!(!super::super::session_stands());
         assert!(
             refreshed

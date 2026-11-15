@@ -700,6 +700,101 @@ mod tests {
         drop(session);
     }
 
+    /// The window reads the permission rows whenever it is focused. A reading
+    /// that moved no row leaves the session and its helper alone — every act
+    /// under way goes on — and one that moved a row ends the session, its
+    /// helper sent away, so the next call starts one that sees the new row
+    /// (t-109675).
+    #[test]
+    fn a_permission_reading_ends_the_session_only_when_a_row_moved() {
+        use zerocode_core::computer_use::{
+            ComputerPermissionId, ComputerPermissionState, ComputerPermissionStatus,
+        };
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let rows = |screenshots| {
+            [
+                (
+                    ComputerPermissionId::Accessibility,
+                    ComputerPermissionStatus::Granted,
+                ),
+                (ComputerPermissionId::Screenshots, screenshots),
+            ]
+            .map(|(id, status)| ComputerPermissionState { id, status })
+        };
+        let granted = rows(ComputerPermissionStatus::Granted);
+        // The first reading: no session stands yet, and none is ended.
+        *super::super::ROWS_READ
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        super::super::settle_session_for(&granted);
+
+        let helper = StandIn::start(TOKEN, Shape::matching());
+        let Connected(session) = helper.connect_window(TOKEN).expect("connected");
+        let session = Arc::new(session);
+        *crate::computer_use::held_client()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&session));
+
+        super::super::settle_session_for(&granted);
+        assert!(
+            crate::computer_use::session_stands(),
+            "a reading that moved no row ended the session"
+        );
+        assert_eq!(
+            helper.wait_heard("terminate", 1, Duration::from_millis(300)),
+            0,
+            "a reading that moved no row sent the helper away"
+        );
+        session
+            .request("status", json!({}))
+            .map_err(|_| "the session no longer answers")
+            .expect("what the session has under way goes on");
+
+        super::super::settle_session_for(&rows(ComputerPermissionStatus::NotGranted));
+        assert!(
+            !crate::computer_use::session_stands(),
+            "a row moved and the session still stands"
+        );
+        assert_eq!(
+            helper.wait_heard("terminate", 1, Duration::from_secs(2)),
+            1,
+            "a row moved and the helper was not sent away"
+        );
+        drop(session);
+    }
+
+    /// A reading is compared with the one before it, which it replaces.
+    #[test]
+    fn the_rows_moved_when_they_differ_from_the_last_reading() {
+        use zerocode_core::computer_use::{
+            ComputerPermissionId, ComputerPermissionState, ComputerPermissionStatus,
+        };
+        let rows = |status| {
+            [ComputerPermissionState {
+                id: ComputerPermissionId::Screenshots,
+                status,
+            }]
+        };
+        let mut read = None;
+        let granted = rows(ComputerPermissionStatus::Granted);
+        assert!(
+            super::super::rows_moved(&mut read, &granted),
+            "the first reading has none before it"
+        );
+        assert!(!super::super::rows_moved(&mut read, &granted));
+        assert!(super::super::rows_moved(
+            &mut read,
+            &rows(ComputerPermissionStatus::NotGranted)
+        ));
+        assert!(
+            super::super::rows_moved(&mut read, &granted),
+            "granted again is a row that moved"
+        );
+        assert!(!super::super::rows_moved(&mut read, &granted));
+    }
+
     /// A living helper that takes no connection is busy for a while and
     /// broken after that: past the patience the session goes — its helper is
     /// sent away first — so a helper that stopped accepting is not kept for

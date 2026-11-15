@@ -1075,3 +1075,30 @@ fn the_skill_says_a_walk_the_person_took_over_stops_and_is_no_defect() {
         );
     }
 }
+
+/// The bridge waits one deadline for the whole `parallel`, so a group that
+/// waited for a place is given what is left of the request's time, not that
+/// deadline again (t-109578, t-109675): counted from its own start a late
+/// group runs past the bridge, and every group's answer is lost with it.
+/// `run_parallel` names the request's deadline twice — where it takes it and
+/// where it counts it down — and hands the look and the batch the count.
+#[test]
+fn a_parallels_groups_are_given_what_is_left_of_the_requests_time() {
+    let runtime =
+        super::quiet_children::code_only(include_str!("../../src/agent_tools_runtime.rs"));
+    let body = super::support::block_after(&runtime, "fn run_parallel(");
+    assert_eq!(
+        body.matches("deadline_ms").count(),
+        2,
+        "a group is handed the request's whole deadline again:\n{body}"
+    );
+    assert_eq!(
+        body.matches("left_ms()").count(),
+        2,
+        "the look and the batch are each handed what is left:\n{body}"
+    );
+    assert!(
+        body.contains("look_group(&steps[0], left_ms(), step)"),
+        "a look group begins with what is left:\n{body}"
+    );
+}
