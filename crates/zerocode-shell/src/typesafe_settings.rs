@@ -1623,20 +1623,31 @@ impl DecisionDraft {
     }
 }
 
-/// Keep `draft` in the person's store under `home`, zo's config home, at
-/// `now_ms`: a new decision when it has no id, recording before anything
-/// acts on it, else the newest version of the one with its id. Its version.
-///
-/// # Errors
-/// Whatever keeps it from the store.
+/// [`save_custom_decision_as`] with the version alone: the window saves
+/// through [`save_custom_decision_told_at`], and the tests keep a draft
+/// this way.
+#[cfg(test)]
 pub fn save_custom_decision_at(
     home: &Path,
     draft: DecisionDraft,
     now_ms: i64,
 ) -> Result<String, custom::store::Error> {
+    save_custom_decision_as(home, draft, now_ms).map(|(_, version)| version)
+}
+
+/// Keep `draft` in the person's store under `home`, zo's config home, at
+/// `now_ms`: a new decision when it has no id, recording before anything
+/// acts on it, else the newest version of the one with its id. The
+/// decision's id — the draft's, or the new one a new decision is made
+/// under — and the version kept.
+fn save_custom_decision_as(
+    home: &Path,
+    draft: DecisionDraft,
+    now_ms: i64,
+) -> Result<(String, String), custom::store::Error> {
     let editing = draft.id.is_some();
     let id = draft.id.clone().unwrap_or_else(custom::new_id);
-    let (definition, twice) = draft.definition(id);
+    let (definition, twice) = draft.definition(id.clone());
     if !twice.is_empty() {
         return Err(custom::store::Error::Refused(
             twice
@@ -1645,11 +1656,79 @@ pub fn save_custom_decision_at(
                 .collect(),
         ));
     }
-    if editing {
+    let version = if editing {
         custom::store::edit(home, &definition, now_ms)
     } else {
         custom::store::create(home, &definition, JevMode::Shadow, now_ms)
+    }?;
+    Ok((id, version))
+}
+
+/// Keep `draft` ([`save_custom_decision_as`]) and what the drawer says of
+/// when the decision asks (`ask_when`, t-108071): checked against the draft's point
+/// before anything is kept — words its point does not take keep nothing —
+/// then kept beside the index by the store's own writer
+/// ([`custom::store::set_ask_when`]) once the definition is. `None` leaves it
+/// as the store holds it.
+///
+/// # Errors
+/// The definition's refusals and the store's; a point that does not take
+/// `ask_when`, as a refusal of the field `askWhen`.
+pub fn save_custom_decision_told_at(
+    home: &Path,
+    draft: DecisionDraft,
+    ask_when: Option<&custom::AskWhen>,
+    now_ms: i64,
+) -> Result<(), DecisionRefusal> {
+    if let Some(said) = ask_when {
+        said.fit_for(draft.at).map_err(DecisionRefusal::unfit)?;
     }
+    let (id, _) = save_custom_decision_as(home, draft, now_ms)?;
+    if let Some(said) = ask_when {
+        custom::store::set_ask_when(home, &id, said)?;
+    }
+    Ok(())
+}
+
+/// The most the bound every decision shares may be set to: every decision a
+/// person may keep, each at the most one may send in an hour.
+#[must_use]
+pub fn custom_hourly_all_most() -> u64 {
+    u64::try_from(custom::DECISIONS_MAX)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(*custom::HOURLY_REQUESTS.end())
+}
+
+/// Set the bound every decision shares in an hour
+/// (`smart.jev.customHourlyRequests`) to `most`, one to
+/// [`custom_hourly_all_most`], through the one door the switch writes by —
+/// under the settings lock, the file's mode kept (t-108071).
+///
+/// # Errors
+/// A bound out of range, a `jev` that is not an object, and the writer's own.
+pub fn set_custom_hourly_all(path: &Path, most: u64) -> Result<(), String> {
+    let ceiling = custom_hourly_all_most();
+    if !(1..=ceiling).contains(&most) {
+        return Err(format!(
+            "모든 결정을 합친 한 시간 상한은 1~{ceiling}회입니다"
+        ));
+    }
+    update_smart(path, |smart| {
+        let jev = smart
+            .entry(door::JEV_SETTINGS_KEY)
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Value::Object(jev) = jev else {
+            return Err(format!(
+                "settings.json의 {SMART_SETTINGS_KEY}.{}가 JSON 객체가 아니라 바꾸지 않았습니다",
+                door::JEV_SETTINGS_KEY
+            ));
+        };
+        jev.insert(
+            door::CUSTOM_HOURLY_REQUESTS_SETTING.to_string(),
+            Value::from(most),
+        );
+        Ok(())
+    })
 }
 
 /// What the dashboard's editor of a person's decisions reads before any is
@@ -1671,6 +1750,12 @@ pub struct CustomDecisionRules {
     /// The most requests every decision sends together in an hour, as the
     /// person's settings hold it.
     pub hourly_all: u64,
+    /// The most that bound may be set to: every decision a person may keep,
+    /// each at the most one may send ([`custom_hourly_all_most`]).
+    pub hourly_all_most: u64,
+    /// How many words a decision may be told to ask on, and how long each
+    /// ([`custom::ask_when`]).
+    pub ask_when: AskWhenBounds,
     pub act_from: Within<f64>,
     pub act_from_default: f64,
     /// The word each kind of answer travels under, in the editor's order.
@@ -1679,6 +1764,14 @@ pub struct CustomDecisionRules {
     pub points: Vec<DecisionPoint>,
     /// The modes a decision offers, each by what it does.
     pub modes: Vec<ModeChoice>,
+}
+
+/// How many words a decision keeps, and how many characters each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskWhenBounds {
+    pub words_most: usize,
+    pub word_chars_most: usize,
 }
 
 /// The least and the most a bound allows, both allowed.
@@ -1707,6 +1800,11 @@ impl CustomDecisionRules {
             hourly: Within::of(&custom::HOURLY_REQUESTS),
             hourly_default: custom::HOURLY_DEFAULT,
             hourly_all: door::custom_hourly_requests(document),
+            hourly_all_most: custom_hourly_all_most(),
+            ask_when: AskWhenBounds {
+                words_most: custom::ask_when::WORDS_MAX,
+                word_chars_most: custom::ask_when::WORD_MAX_CHARS,
+            },
             act_from: Within::of(&custom::ACT_FROM),
             act_from_default: custom::ACT_FROM_DEFAULT,
             kinds: AnswerDraft::EVERY_KIND
@@ -1753,6 +1851,9 @@ pub struct KeptDecision {
     /// When it asks ([`custom::ask_when`]): the store's file beside the
     /// index, read as is — the screen says why a decision did not ask.
     pub ask_when: custom::AskWhen,
+    /// The requests it sent in this hour, by the door's own count of its hour
+    /// file: what its hourly bound is filling with (t-108071).
+    pub hour_sent: u64,
 }
 
 /// Every decision the person keeps and the folders a decision may be
@@ -1765,6 +1866,9 @@ pub struct CustomDecisions {
     pub folders: Vec<String>,
     /// Whether the person consented to every folder.
     pub everywhere: bool,
+    /// The requests every decision together sent in this hour, against the
+    /// bound they share.
+    pub every_hour_sent: u64,
 }
 
 /// What core says of a draft before anything keeps it: the rules it breaks
@@ -1839,6 +1943,41 @@ pub struct DecisionRefusal {
     pub message: String,
 }
 
+/// The field a refusal of what a decision was told about when to ask points
+/// at: the drawer's group of it.
+const ASK_WHEN_FIELD: &str = "askWhen";
+
+impl DecisionRefusal {
+    /// A point that does not take what the drawer said of when it asks.
+    fn unfit(unfit: custom::ask_when::Unfit) -> Self {
+        Self {
+            refusals: vec![RefusalWords {
+                word: unfit.word(),
+                field: Some(ASK_WHEN_FIELD),
+                line: None,
+                option: None,
+                level: None,
+            }],
+            missing: false,
+            message: String::new(),
+        }
+    }
+}
+
+impl From<custom::store::AskWhenError> for DecisionRefusal {
+    fn from(error: custom::store::AskWhenError) -> Self {
+        match error {
+            custom::store::AskWhenError::Missing => Self {
+                refusals: Vec::new(),
+                missing: true,
+                message: String::new(),
+            },
+            custom::store::AskWhenError::Unfit(unfit) => Self::unfit(unfit),
+            custom::store::AskWhenError::Io(error) => error.into(),
+        }
+    }
+}
+
 impl From<custom::store::Error> for DecisionRefusal {
     fn from(error: custom::store::Error) -> Self {
         match error {
@@ -1892,6 +2031,25 @@ pub fn tidy_decision_store(home: &Path) {
 /// # Errors
 /// A store that cannot be read.
 pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<CustomDecisions> {
+    custom_decisions_in_hour(
+        home,
+        settings,
+        &crate::systemone::hour_at(crate::now_epoch_ms()),
+    )
+}
+
+/// [`custom_decisions_at`], each decision's requests counted in the local
+/// hour `hour` (`YYYY-MM-DDTHH`) as the door counts them — a count that does
+/// not read shows as none.
+///
+/// # Errors
+/// A store that cannot be read.
+pub fn custom_decisions_in_hour(
+    home: &Path,
+    settings: &Value,
+    hour: &str,
+) -> std::io::Result<CustomDecisions> {
+    let sent = |key: &str| count::sent_in_the_hour(&count::hour_path(home, key, hour)).unwrap_or(0);
     // A file that does not read says nothing: each decision asks always.
     let mut asks_when = custom::store::ask_when(home).unwrap_or_default();
     let decisions = custom::store::list(home)?
@@ -1907,6 +2065,7 @@ pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<Cus
                 draft: DecisionDraft::of(definition),
                 mode: entry.mode.key(),
                 ask_when,
+                hour_sent: sent(&entry.id),
                 version: entry.definition,
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,
@@ -1918,6 +2077,7 @@ pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<Cus
         decisions,
         folders: door.folders().map(str::to_string).collect(),
         everywhere: door.everywhere(),
+        every_hour_sent: sent(custom::EVERY_DECISION),
     })
 }
 
@@ -4330,6 +4490,11 @@ mod tests {
                 },
                 "hourlyDefault": custom::HOURLY_DEFAULT,
                 "hourlyAll": hourly_all,
+                "hourlyAllMost": custom_hourly_all_most(),
+                "askWhen": {
+                    "wordsMost": custom::ask_when::WORDS_MAX,
+                    "wordCharsMost": custom::ask_when::WORD_MAX_CHARS,
+                },
                 "actFrom": { "least": custom::ACT_FROM.start(), "most": custom::ACT_FROM.end() },
                 "actFromDefault": custom::ACT_FROM_DEFAULT,
                 "kinds": kinds,
@@ -4343,14 +4508,15 @@ mod tests {
         );
     }
 
-    /// The editor's five doors (t-62170 stage 3) are registered with the
-    /// webview, answered by the settings harness's fake backend, and asked
-    /// by the dashboard: a door the page asks that nobody registered is a
-    /// button that does nothing, and one the harness never answers is one no
-    /// page test presses. There is no door that brings a deleted decision
-    /// back: none is registered, answered or asked.
+    /// The editor's six doors (t-62170 stage 3, and the bound every decision
+    /// shares, t-108071) are registered with the webview, answered by the
+    /// settings harness's fake backend, and asked by the dashboard: a door
+    /// the page asks that nobody registered is a button that does nothing,
+    /// and one the harness never answers is one no page test presses. There
+    /// is no door that brings a deleted decision back: none is registered,
+    /// answered or asked.
     #[test]
-    fn the_decision_editor_asks_five_registered_doors_the_harness_answers() {
+    fn the_decision_editor_asks_six_registered_doors_the_harness_answers() {
         let main = include_str!("main.rs");
         let handlers = main
             .split_once("tauri::generate_handler![")
@@ -4364,6 +4530,7 @@ mod tests {
             "save_custom_decision",
             "delete_custom_decision",
             "set_custom_decision_mode",
+            "set_custom_hourly_all",
         ] {
             assert!(
                 handlers.contains(&format!("{command},")),
@@ -4503,6 +4670,300 @@ mod tests {
                 );
             }
         }
+        // What the drawer says of when a decision asks is refused under the
+        // rule's own word too, each said at the drawer's part for it
+        // (t-108071). A rule core adds turns this red until a person can
+        // read it.
+        use custom::ask_when::Unfit;
+        for unfit in [
+            Unfit::AskedByAnAgent,
+            Unfit::EditedOutsideATurnsEnd,
+            Unfit::EmptyWord,
+            Unfit::LongWord,
+            Unfit::ControlCharacter,
+            Unfit::TooManyWords,
+        ] {
+            let node = match unfit {
+                Unfit::AskedByAnAgent
+                | Unfit::EditedOutsideATurnsEnd
+                | Unfit::EmptyWord
+                | Unfit::LongWord
+                | Unfit::ControlCharacter
+                | Unfit::TooManyWords => worded("refusal", unfit.word()),
+            };
+            assert!(
+                node.contains(&format!("data-jev-refusal-at=\"{ASK_WHEN_FIELD}\"")),
+                "{} is not said at the drawer's part for when it asks",
+                unfit.word()
+            );
+        }
+        assert!(
+            dashboard.contains(&format!("jevCustomGroup(\"{ASK_WHEN_FIELD}\"")),
+            "the drawer has no part for when a decision asks"
+        );
+    }
+
+    /// The harness's fake backend sets the bound every decision shares the
+    /// way the window does (t-108071): under the door's own key, up to the
+    /// window's own most, through the door the head's 「상한 고치기」 asks.
+    #[test]
+    fn the_settings_harness_mirrors_the_shared_hourly_bound() {
+        let harness = include_str!("../../../ui/tests/settings.mjs");
+        assert!(
+            harness.contains(&format!(
+                "const CUSTOM_HOURLY_REQUESTS_SETTING = \"{}\"",
+                door::CUSTOM_HOURLY_REQUESTS_SETTING
+            )),
+            "the harness writes the shared bound under another key than the door reads"
+        );
+        assert!(
+            harness.contains(&format!(
+                "const CUSTOM_HOURLY_ALL_MOST = {};",
+                custom_hourly_all_most()
+            )),
+            "the harness bounds the shared bound otherwise than the window"
+        );
+        assert!(harness.contains("case \"set_custom_hourly_all\""));
+    }
+
+    /// A draft the editor saves with what it says of when the decision asks
+    /// (t-108071) keeps its words as core keeps them — trimmed, inner spaces
+    /// one, each once; an edit that says nothing of them leaves them, and
+    /// one that says nothing is set asks every time again. Words a point
+    /// does not take are refused under the field the drawer marks, and the
+    /// store keeps nothing of that save.
+    #[test]
+    fn a_told_save_keeps_when_it_asks_and_an_unfit_one_keeps_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let settings = serde_json::json!({});
+        let draft = |name: &str, at: custom::Point, read: custom::Input| DecisionDraft {
+            id: None,
+            name: name.to_string(),
+            question: "Does this command remove files?".to_string(),
+            answer: AnswerDraft::YesNo {
+                yes: "It removes files.".to_string(),
+                no: "It keeps every file.".to_string(),
+            },
+            at,
+            reads: BTreeSet::from([read]),
+            folders: None,
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        let told = custom::AskWhen {
+            words: vec![
+                " git   clean ".to_string(),
+                "rm".to_string(),
+                "rm".to_string(),
+            ],
+            edited: false,
+        };
+        save_custom_decision_told_at(
+            home,
+            draft(
+                "Removes files",
+                custom::Point::BeforeCommand,
+                custom::Input::Command,
+            ),
+            Some(&told),
+            1_000,
+        )
+        .expect("kept with its words");
+        let kept = custom_decisions_at(home, &settings)
+            .expect("listed")
+            .decisions[0]
+            .clone();
+        assert_eq!(
+            kept.ask_when,
+            custom::AskWhen {
+                words: vec!["git clean".to_string(), "rm".to_string()],
+                edited: false,
+            },
+            "the words are kept as core keeps them"
+        );
+        let edit = DecisionDraft {
+            question: "Does this command remove or move files?".to_string(),
+            ..kept.draft.clone()
+        };
+        save_custom_decision_told_at(home, edit.clone(), None, 2_000).expect("edited");
+        let edited = custom_decisions_at(home, &settings)
+            .expect("listed")
+            .decisions[0]
+            .clone();
+        assert_ne!(edited.version, kept.version, "the edit is a new version");
+        assert_eq!(
+            edited.ask_when, kept.ask_when,
+            "an edit told nothing of its words keeps them"
+        );
+        save_custom_decision_told_at(home, edit, Some(&custom::AskWhen::default()), 3_000)
+            .expect("told it asks every time");
+        assert!(
+            custom_decisions_at(home, &settings)
+                .expect("listed")
+                .decisions[0]
+                .ask_when
+                .always(),
+            "told nothing, it asks every time again"
+        );
+        let refused_at = |refusal: DecisionRefusal| {
+            refusal
+                .refusals
+                .iter()
+                .map(|one| (one.word, one.field))
+                .collect::<Vec<_>>()
+        };
+        let agent = save_custom_decision_told_at(
+            home,
+            draft(
+                "Which check first",
+                custom::Point::AgentAsks,
+                custom::Input::Context,
+            ),
+            Some(&told),
+            4_000,
+        )
+        .expect_err("an agent's own ask takes no words");
+        assert_eq!(
+            refused_at(agent),
+            vec![("asked_by_an_agent", Some(ASK_WHEN_FIELD))]
+        );
+        let outside = save_custom_decision_told_at(
+            home,
+            draft(
+                "Moves files",
+                custom::Point::BeforeCommand,
+                custom::Input::Command,
+            ),
+            Some(&custom::AskWhen {
+                words: Vec::new(),
+                edited: true,
+            }),
+            5_000,
+        )
+        .expect_err("only a turn's end knows what it edited");
+        assert_eq!(
+            refused_at(outside),
+            vec![("edited_outside_a_turns_end", Some(ASK_WHEN_FIELD))]
+        );
+        assert_eq!(
+            custom::store::list(home).expect("listed").len(),
+            1,
+            "a refused save keeps nothing"
+        );
+    }
+
+    /// A decision's hour, and the hour every decision shares, are counted
+    /// from the hour files the door fills them by (t-108071): what the screen
+    /// shows is what the door will refuse at, and a new hour starts at none.
+    #[test]
+    fn a_decisions_hour_is_counted_as_the_door_counts_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let settings = serde_json::json!({});
+        save_custom_decision_at(
+            home,
+            DecisionDraft {
+                id: None,
+                name: "Release notes".to_string(),
+                question: "Does this turn need release notes?".to_string(),
+                answer: AnswerDraft::YesNo {
+                    yes: "It changes what a person sees.".to_string(),
+                    no: "Nothing a person sees moved.".to_string(),
+                },
+                at: custom::Point::TurnEnd,
+                reads: BTreeSet::from([custom::Input::Task]),
+                folders: None,
+                act_from: custom::ACT_FROM_DEFAULT,
+                max_per_hour: custom::HOURLY_DEFAULT,
+            },
+            1_000,
+        )
+        .expect("kept");
+        let id = custom::store::list(home).expect("listed")[0].id.clone();
+        let hour = "2026-11-15T10";
+        for _ in 0..3 {
+            count::count_one_in_the_hour(&count::hour_path(home, &id, hour)).expect("counted");
+        }
+        for _ in 0..5 {
+            count::count_one_in_the_hour(&count::hour_path(home, custom::EVERY_DECISION, hour))
+                .expect("counted");
+        }
+        let now = custom_decisions_in_hour(home, &settings, hour).expect("listed");
+        assert_eq!(
+            (now.decisions[0].hour_sent, now.every_hour_sent),
+            (3, 5),
+            "the hour is the door's own count"
+        );
+        let next = custom_decisions_in_hour(home, &settings, "2026-11-15T11").expect("listed");
+        assert_eq!(
+            (next.decisions[0].hour_sent, next.every_hour_sent),
+            (0, 0),
+            "a new hour starts at none"
+        );
+    }
+
+    /// The bound every decision shares is set from the screen (t-108071)
+    /// one to [`custom_hourly_all_most`], under `smart.jev` beside every
+    /// other key, read back by the door as written, the file kept private;
+    /// a bound out of range or a `jev` of another shape writes nothing.
+    #[test]
+    fn the_shared_hourly_bound_is_set_in_range_beside_every_other_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let read = |path: &std::path::Path| -> Value {
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json")
+        };
+        let before = serde_json::json!({
+            "theme": "dark",
+            SMART_SETTINGS_KEY: {
+                "other": 1,
+                door::JEV_SETTINGS_KEY: { "enabled": true, door::WORKSPACES_SETTING: ["/work/acme"] },
+            },
+        });
+        std::fs::write(&path, before.to_string()).expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("private");
+        }
+        let ceiling = custom_hourly_all_most();
+        for out in [0, ceiling + 1] {
+            assert!(
+                set_custom_hourly_all(&path, out).is_err(),
+                "{out} is out of range"
+            );
+        }
+        assert_eq!(read(&path), before, "a bound out of range writes nothing");
+        set_custom_hourly_all(&path, ceiling).expect("the most is in range");
+        set_custom_hourly_all(&path, 80).expect("set");
+        let after = read(&path);
+        assert_eq!(
+            door::custom_hourly_requests(&after),
+            80,
+            "the door reads what the screen set"
+        );
+        let mut expected = before;
+        expected[SMART_SETTINGS_KEY][door::JEV_SETTINGS_KEY]
+            [door::CUSTOM_HOURLY_REQUESTS_SETTING] = serde_json::json!(80);
+        assert_eq!(after, expected, "nothing else moved");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "the write loosened the settings file to {mode:o}"
+            );
+        }
+        let other = serde_json::json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: [1] } });
+        std::fs::write(&path, other.to_string()).expect("write");
+        assert!(
+            set_custom_hourly_all(&path, 80).is_err(),
+            "a jev that is not an object is not changed"
+        );
+        assert_eq!(read(&path), other, "and is left as it was");
     }
 
     /// A decision made in the window comes back from the store as the editor

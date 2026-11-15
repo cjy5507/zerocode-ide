@@ -203,6 +203,13 @@ const JEV_SEATS = Object.freeze([
    (`door::switch_on`). `typesafe_settings.rs` holds these to the core's. */
 const JEV_SETTINGS_KEY = "jev";
 const JEV_EVERY_WORKSPACE = "*";
+/* The bound every person's decision shares in an hour, under the door's
+   object (`door::CUSTOM_HOURLY_REQUESTS_SETTING`), and the most it may be set
+   to (`typesafe_settings::custom_hourly_all_most`: every decision a person
+   may keep, each at the most one may send) — `typesafe_settings.rs` holds
+   both to the core's. */
+const CUSTOM_HOURLY_REQUESTS_SETTING = "customHourlyRequests";
+const CUSTOM_HOURLY_ALL_MOST = 2400;
 /* The model pin every Jev request names (`zerocode_core::jev::MODEL_SETTING`)
    and the alias an unpinned request asks (`DEFAULT_MODEL`), as
    `typesafe_settings` answers them — `typesafe_settings.rs` holds these to
@@ -3596,15 +3603,40 @@ class StatefulBackend {
         const store = this.customDecisions;
         const kept = store.decisions.find((one) => one.draft.id === args.draft.id);
         const version = JSON.stringify(args.draft);
+        // When it asks rides beside the draft (t-108071) and is kept as told;
+        // left out, the store keeps what it held.
+        const told = args.askWhen ? { askWhen: clone(args.askWhen) } : {};
         if (kept) {
-          Object.assign(kept, { draft: clone(args.draft), version });
+          Object.assign(kept, { draft: clone(args.draft), version, ...told });
         } else {
           const recording = JEV_SEATS.find((seat) => seat.setting === "customDecisions").modes.split(" ")[1];
           this.customMade = (this.customMade ?? 0) + 1;
           const id = `cd-${String(this.customMade).padStart(8, "0")}`;
-          store.decisions.push({ mode: recording, version, createdAt: "", updatedAt: "", draft: { ...clone(args.draft), id } });
+          store.decisions.push({ mode: recording, version, createdAt: "", updatedAt: "", askWhen: {}, hourSent: 0,
+            draft: { ...clone(args.draft), id }, ...told });
         }
         return clone(store);
+      }
+      case "set_custom_hourly_all": {
+        // Mirrors `typesafe_settings::set_custom_hourly_all`: one to every
+        // decision a person may keep at the most one may send in an hour,
+        // under a `smart.jev` that must be an object; out of range writes
+        // nothing.
+        if (this.typesafeSetFailure) {
+          throw { kind: "failed", message: "fixture refused the bound" };
+        }
+        const most = Number(args.most);
+        if (!Number.isInteger(most) || most < 1 || most > CUSTOM_HOURLY_ALL_MOST) {
+          throw { kind: "failed", message: `not a bound: ${args.most}` };
+        }
+        const smart = { ...(this.zoSettings.smart ?? {}) };
+        const jev = smart[JEV_SETTINGS_KEY] ?? {};
+        if (jev === null || typeof jev !== "object" || Array.isArray(jev)) {
+          throw { kind: "failed", message: "smart.jev is not an object" };
+        }
+        smart[JEV_SETTINGS_KEY] = { ...jev, [CUSTOM_HOURLY_REQUESTS_SETTING]: most };
+        this.zoSettings.smart = smart;
+        return this.typesafeSettings();
       }
       case "set_custom_decision_mode": {
         const store = this.customDecisions;

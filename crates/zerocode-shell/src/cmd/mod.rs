@@ -188,7 +188,7 @@ pub(crate) use typesafe::{
 };
 pub(crate) use typesafe::{
     check_custom_decision, delete_custom_decision, list_custom_decisions, save_custom_decision,
-    set_custom_decision_mode,
+    set_custom_decision_mode, set_custom_hourly_all,
 };
 pub(crate) use typesafe::{
     judgment_latest_request, judgment_models, preflight_judgment_provider, set_judgment_provider,

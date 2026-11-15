@@ -54992,14 +54992,18 @@ h4.knowledge-inspector-head::after {
   min-width: 0;
 }
 
-/* The words a decision asks about: a line of their own under its facts, one
-   chip a word, wrapping between chips. */
+/* When a decision asks (t-108071): a line of its own under its facts — the
+   words it asks on as chips, the first few and then how many more, or
+   every time — and the road to change them, wrapping between chips. */
 .jev-custom-asks {
   display: flex;
-  flex-basis: 100%;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1);
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  line-height: var(--leading-body);
 }
 
 .jev-custom-asks-label {
@@ -55007,6 +55011,8 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-custom-word {
+  display: inline-flex;
+  align-items: center;
   min-width: 0;
   padding: var(--jev-chip-pad-block) var(--space-2);
   border-radius: var(--radius-pill);
@@ -55016,6 +55022,133 @@ h4.knowledge-inspector-head::after {
   font-family: var(--font-mono);
   line-height: var(--jev-token-line);
   overflow-wrap: anywhere;
+}
+
+/* A chip that is not a word — every time, whenever an agent calls, how
+   many more — speaks in the page's own face and ink. */
+.jev-custom-word[data-kind="always"],
+.jev-custom-word[data-kind="more"] {
+  color: var(--ink-mist);
+  font-family: inherit;
+}
+
+/* A press that reads as words: 「말 고치기」, 「말 넣기」, 「상한 고치기」. */
+.jev-custom-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--jev-meta-size);
+  text-decoration: underline;
+  text-underline-offset: var(--jev-link-offset);
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    text-decoration-thickness var(--motion-fast) var(--ease-standard);
+}
+
+.jev-custom-link:hover {
+  color: var(--ink-chalk);
+  text-decoration-thickness: var(--jev-link-hover-thickness);
+}
+
+/* An hour's requests against its bound: a thin track, filled by the share
+   the painter sets; the last fifth takes the caution tone, and its word
+   stands beside the figure — never the colour alone. */
+.jev-custom-meter {
+  display: block;
+  height: var(--space-1);
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--meter-track);
+}
+
+.jev-custom-meter-fill {
+  display: block;
+  width: calc(var(--jev-meter-share, 0) * 100%);
+  height: 100%;
+  border-radius: inherit;
+  background: var(--meter-fill);
+  transition:
+    width var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+}
+
+.jev-custom-meter[data-tone] .jev-custom-meter-fill {
+  background: var(--signal-wait);
+}
+
+.jev-custom-tone {
+  color: var(--jev-tone-under);
+  font-size: var(--jev-meta-size);
+  font-weight: var(--jev-weight-strong);
+}
+
+/* A decision's hour leads its figures: the figure, its bound and the word,
+   with the meter under them. Two cells wide, so 「거의 참」 fits beside. */
+.jev-custom-figure[data-jev-custom-figure="hour"] {
+  min-width: calc(var(--jev-cell-min) * 2);
+}
+
+.jev-custom-figure[data-jev-custom-figure="hour"] dd {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.jev-custom-hour {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+}
+
+.jev-custom-hour-most {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+/* Today's figures read first (the draft's change 4): today large, the week
+   small beside it. */
+.jev-custom-figure .jev-fact-strong {
+  font: var(--type-heading-16);
+}
+
+/* The head's hour every decision shares: its sentence with the figure
+   strong, the meter, the word, and 「상한 고치기」 — which opens the bound's
+   own field in place. */
+.jev-custom-every {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-custom-every-words .jev-fact-strong {
+  color: var(--ink-chalk);
+  font: var(--type-heading-16);
+}
+
+.jev-custom-every > .jev-custom-meter {
+  flex: none;
+  width: calc(var(--space-6) * 4);
+}
+
+.jev-custom-every-editor {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.jev-custom-every-editor .jev-custom-input {
+  width: calc(var(--space-6) * 3);
+  padding-block: var(--space-1);
+}
+
+.jev-custom-every-editor [aria-invalid="true"] {
+  border-color: var(--signal-halt);
 }
 
 .jev-custom-mode {
@@ -55201,6 +55334,49 @@ h4.knowledge-inspector-head::after {
   color: var(--signal-halt);
   border: var(--jev-line) solid var(--signal-halt);
   border-radius: var(--radius-sm);
+}
+
+/* The drawer's words (t-108071): each a chip its × takes away, then the
+   field and 「넣기」 to put one in, and how many of the most. */
+.jev-custom-words-edit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.jev-custom-word-remove {
+  margin-inline-start: var(--space-1);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.jev-custom-word-remove:hover {
+  color: var(--ink-chalk);
+}
+
+.jev-custom-word-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.jev-custom-word-add .jev-custom-input {
+  flex: 1 1 calc(var(--space-6) * 6);
+  width: auto;
+  min-width: 0;
+}
+
+.jev-custom-word-count {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  font-variant-numeric: tabular-nums;
 }
 
 .jev-custom-version {

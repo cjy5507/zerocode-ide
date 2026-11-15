@@ -305,6 +305,10 @@ export function jevDashboardFixture(real = null) {
   const rules = {
     feature: "custom", decisionsMax: 3, nameMaxChars: 30, questionMaxChars: 900, meaningMaxChars: 300,
     options: { least: 2, most: 6 }, hourly: { least: 2, most: 90 }, hourlyDefault: 17, hourlyAll: 55,
+    // The most the shared bound may be set to, and how many words a decision
+    // keeps and how long each (t-108071): the fixture's own, none of them
+    // core's, so the page can only have read them from here.
+    hourlyAllMost: 270, askWhen: { wordsMost: 30, wordCharsMost: 48 },
     actFrom: { least: 0.55, most: 0.9 }, actFromDefault: 0.75,
     kinds: ["yes_no", "choice", "score"],
     points: [
@@ -315,8 +319,8 @@ export function jevDashboardFixture(real = null) {
     ],
     modes: modes.filter((choice) => !choice.automatic),
   };
-  const store = { decisions: [], folders: ["/Users/p/project", "/Users/p/shop"], everywhere: false };
-  const custom = { rules, store, saves: [], checks: 0, lines: [], modes: [], deletes: [], made: 0 };
+  const store = { decisions: [], folders: ["/Users/p/project", "/Users/p/shop"], everywhere: false, everyHourSent: 0 };
+  const custom = { rules, store, saves: [], checks: 0, lines: [], modes: [], deletes: [], made: 0, askWhens: [], hourlyAlls: [] };
   // What zo counts for each decision (2026-11-13): the first one asked 3
   // times today and 12 this week — 5 handed its line, 4 refused by its hour,
   // 1 timed out — and last answered yes four minutes ago; every other one
@@ -430,21 +434,47 @@ export function jevDashboardFixture(real = null) {
     return { refusals: refusalsOf(draft), version: versionOf(draft), line,
       questions: { [draft.id ?? "draft"]: { question: draft.question, answer } } };
   };
-  window.__ANSWER__.save_custom_decision = ({ draft }) => {
+  // What the drawer says of when a decision asks rides beside its draft
+  // (t-108071), as core keeps it (`AskWhen::fit_for`): each word trimmed, its
+  // inner spaces one, once; words an agent's own ask does not take and
+  // 「고친 파일이 있을 때만」 off a turn's end refused at the drawer's part.
+  const fitted = (askWhen, at) => {
+    const words = [...new Set((askWhen?.words ?? []).map((word) => word.trim().split(/\s+/u).filter(Boolean).join(" ")))];
+    const edited = Boolean(askWhen?.edited);
+    if (words.length === 0 && !edited) return { kept: {} };
+    if (at === "agent_asks") return { refused: refusal("asked_by_an_agent", { field: "askWhen" }) };
+    if (edited && at !== "turn_end") return { refused: refusal("edited_outside_a_turns_end", { field: "askWhen" }) };
+    return { kept: { ...(words.length > 0 ? { words } : {}), ...(edited ? { edited } : {}) } };
+  };
+  window.__ANSWER__.save_custom_decision = ({ draft, askWhen = null }) => {
     custom.saves.push(structuredClone(draft));
-    const refusals = refusalsOf(draft);
+    custom.askWhens.push(structuredClone(askWhen));
+    const told = askWhen === null ? null : fitted(askWhen, draft.at);
+    const refusals = [...refusalsOf(draft), ...(told?.refused ? [told.refused] : [])];
     if (refusals.length > 0) throw { refusals };
     const kept = store.decisions.find((one) => one.draft.id === draft.id);
     if (kept) {
-      Object.assign(kept, { draft: structuredClone(draft), version: versionOf(draft), updatedAt: stamp() });
+      // A decision moved to another point asks every time until told again,
+      // as the store's edit leaves it.
+      const said = told ? told.kept : kept.draft.at === draft.at ? kept.askWhen : {};
+      Object.assign(kept, { draft: structuredClone(draft), version: versionOf(draft), updatedAt: stamp(), askWhen: said });
     } else {
       custom.made += 1;
       store.decisions.push({
         mode: rules.modes.find((choice) => choice.asks && !choice.applies).mode, version: versionOf(draft),
-        createdAt: stamp(), updatedAt: stamp(), draft: { ...structuredClone(draft), id: `cd-${custom.made.toString(16).padStart(8, "0")}` },
+        createdAt: stamp(), updatedAt: stamp(), askWhen: told?.kept ?? {}, hourSent: 0,
+        draft: { ...structuredClone(draft), id: `cd-${custom.made.toString(16).padStart(8, "0")}` },
       });
     }
     return structuredClone(store);
+  };
+  // The bound every decision shares, set from the head (t-108071): the
+  // settings writer's answer, one to the rules' most.
+  window.__ANSWER__.set_custom_hourly_all = ({ most }) => {
+    custom.hourlyAlls.push(most);
+    if (!Number.isInteger(most) || most < 1 || most > rules.hourlyAllMost) throw { kind: "failed", message: `not a bound: ${most}` };
+    rules.hourlyAll = most;
+    return settings();
   };
   window.__ANSWER__.set_custom_decision_mode = ({ id, mode }) => {
     custom.modes.push({ id, mode });
@@ -3284,11 +3314,12 @@ export async function testJevCustomDecisions(browser, origin, ok) {
           && partBox.bottom <= table.getBoundingClientRect().top + 1,
         firstScreen: Boolean(partBox) && partBox.height > 0 && partBox.top >= box.top - 1 && partBox.top < bottom,
         count: part?.querySelector("[data-jev-custom-count]")?.textContent.trim() ?? "",
+        every: part?.querySelector("[data-jev-custom-every]")?.textContent.trim() ?? "",
       };
     });
     ok("with a decision the part stands between the strip and the built-in table, starting on the first screen, and no second 「새 결정」 on the switch line",
       placed.part && !placed.guide && placed.afterStrip && placed.beforeTable && placed.firstScreen
-        && placed.count.includes(String(rules.decisionsMax)) && placed.count.includes(String(rules.hourlyAll)),
+        && placed.count.includes(String(rules.decisionsMax)) && placed.every.includes(String(rules.hourlyAll)),
       JSON.stringify(placed));
 
     await press("#jev-view [data-jev-custom-new]");
@@ -3362,10 +3393,11 @@ export async function testJevCustomDecisions(browser, origin, ok) {
         ?.querySelectorAll("[data-jev-custom-figure]") ?? [])].map((one) => [one.dataset.jevCustomFigure,
         { label: one.querySelector("dt")?.textContent.trim() ?? "", said: one.querySelector("dd")?.textContent.trim() ?? "" }]));
       const facts = (id) => view.querySelector(`[data-jev-custom-row="${id}"] .jev-custom-facts`)?.textContent ?? "";
-      const words = (id) => [...(view.querySelector(`[data-jev-custom-row="${id}"]`)?.querySelectorAll(".jev-custom-word") ?? [])]
-        .map((one) => one.textContent);
+      const asks = (id) => view.querySelector(`[data-jev-custom-row="${id}"] [data-jev-custom-asks]`)?.textContent ?? "";
+      const words = (id) => [...(view.querySelector(`[data-jev-custom-row="${id}"] [data-jev-custom-asks]`)
+        ?.querySelectorAll(".jev-custom-word:not([data-kind])") ?? [])].map((one) => one.textContent);
       return { first: figures(first), second: figures(second), firstFacts: facts(first), secondFacts: facts(second),
-        firstWords: words(first), secondWords: words(second),
+        firstAsks: asks(first), secondAsks: asks(second), firstWords: words(first), secondWords: words(second),
         head: [...view.querySelectorAll(".jev-table thead th")].map((one) => one.textContent.trim()) };
     }, [firstId, secondId]);
     const figureSaid = (row, figure) => did[row][figure]?.said ?? "";
@@ -3380,11 +3412,12 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       JSON.stringify(did.second));
     ok("a decision says what its words left out today and this week, and which words it asks about — one told nothing says nothing of them",
       figureSaid("first", "leftOut") === "7 · 30" && figureSaid("second", "leftOut") === "0 · 0"
-        && did.firstFacts.includes("이 말이 있을 때만 묻기") && JSON.stringify(did.firstWords) === JSON.stringify(["rm", "reset --hard"])
-        && !did.secondFacts.includes("이 말이 있을 때만") && did.secondWords.length === 0
-        && !did.secondFacts.includes("고친 파일이 있을 때만"),
+        && did.firstAsks.includes("이 말이 있을 때만 묻기") && JSON.stringify(did.firstWords) === JSON.stringify(["rm", "reset --hard"])
+        && did.firstAsks.includes("말 고치기") && !did.firstFacts.includes("이 말이 있을 때만")
+        && !did.secondAsks.includes("이 말이 있을 때만") && did.secondWords.length === 0
+        && did.secondAsks.includes("매번 묻기") && did.secondAsks.includes("말 넣기") && !did.secondAsks.includes("고친 파일이 있을 때만"),
       JSON.stringify({ first: did.first.leftOut, second: did.second.leftOut, firstFacts: did.firstFacts, secondFacts: did.secondFacts,
-        firstWords: did.firstWords }));
+        firstAsks: did.firstAsks, secondAsks: did.secondAsks, firstWords: did.firstWords }));
     ok("a decision's figures wear the built-in table's own column words",
       did.head.includes(did.first.rows?.label) && did.first.applied?.label === "적용 (오늘 · 7일)"
         && did.first.hourFull?.label === "시간당 한도 초과 (오늘 · 7일)" && did.first.leftOut?.label === "거름 (오늘 · 7일)"
@@ -3428,6 +3461,269 @@ export async function testJevCustomDecisions(browser, origin, ok) {
     await settlePaint(page);
     ok("a decision's many words and an agent's long point stand clear of the row's modes and buttons and inside the row — wide, middle and narrow",
       crowded.wide.length === 0 && crowded.middle.length === 0 && crowded.narrow.length === 0, JSON.stringify(crowded));
+
+    // The hour (t-108071, the draft's changes 1 and 3): each decision's hour
+    // leads its figures — what it sent this hour against its own bound, on a
+    // meter, with 「거의 참」 in words from the last fifth — and the head says
+    // what every decision sent together against the bound they share. Both
+    // counts are the store's (`hourSent`, `everyHourSent`), none zo's.
+    await page.evaluate(async ([first, second]) => {
+      const custom = window.__JEV__.custom;
+      const one = custom.store.decisions.find((kept) => kept.draft.id === first);
+      one.hourSent = Math.ceil(one.draft.maxPerHour * 0.9);
+      custom.store.decisions.find((kept) => kept.draft.id === second).hourSent = 2;
+      custom.store.everyHourSent = one.hourSent + 2;
+      await loadJevCustom();
+      await window.__PAINTED__();
+      document.querySelector("#jev-view").scrollTop = 0;
+    }, [firstId, secondId]);
+    await settlePaint(page);
+    await picture("hour");
+    const hour = await page.evaluate(([first, second]) => {
+      const view = document.querySelector("#jev-view");
+      const custom = window.__JEV__.custom;
+      const of = (id) => {
+        const cell = view.querySelector(`[data-jev-custom-row="${id}"] [data-jev-custom-figure="hour"]`);
+        const meter = cell?.querySelector("[role='meter']");
+        const fill = meter?.querySelector(".jev-custom-meter-fill");
+        return {
+          leads: Boolean(cell) && cell.parentElement.firstElementChild === cell, label: cell?.querySelector("dt")?.textContent.trim() ?? "",
+          said: cell?.querySelector(".jev-custom-hour")?.textContent.trim() ?? "",
+          figure: cell?.querySelector('[data-jev-fact="hour"]')?.textContent ?? "",
+          now: meter?.getAttribute("aria-valuenow") ?? null, most: meter?.getAttribute("aria-valuemax") ?? null,
+          tone: meter?.dataset.tone ?? "", named: meter?.getAttribute("aria-label") ?? "",
+          share: meter && fill ? Math.round((fill.getBoundingClientRect().width / meter.getBoundingClientRect().width) * 100) : null,
+          bound: custom.store.decisions.find((kept) => kept.draft.id === id)?.draft.maxPerHour ?? null,
+          sent: custom.store.decisions.find((kept) => kept.draft.id === id)?.hourSent ?? null,
+        };
+      };
+      const every = view.querySelector("[data-jev-custom-every]");
+      const meter = every?.querySelector("[role='meter']");
+      return {
+        first: of(first), second: of(second),
+        every: {
+          said: every?.querySelector(".jev-custom-every-words")?.textContent.trim() ?? "",
+          figure: every?.querySelector('[data-jev-fact="every"]')?.textContent ?? "",
+          size: every?.querySelector('[data-jev-fact="every"]') ? getComputedStyle(every.querySelector('[data-jev-fact="every"]')).fontSize : "",
+          now: meter?.getAttribute("aria-valuenow") ?? null, most: meter?.getAttribute("aria-valuemax") ?? null, tone: meter?.dataset.tone ?? "",
+          edit: every?.querySelector("[data-jev-custom-every-edit]")?.textContent.trim() ?? "",
+        },
+        sent: custom.store.everyHourSent, all: custom.rules.hourlyAll,
+      };
+    }, [firstId, secondId]);
+    ok("each decision's hour leads its figures: what it sent this hour against its own bound, on a meter, 「거의 참」 said in words from the last fifth",
+      hour.first.leads && hour.first.label === "이번 시간" && hour.first.figure === String(hour.first.sent)
+        && hour.first.now === String(hour.first.sent) && hour.first.most === String(hour.first.bound) && hour.first.tone === "near"
+        && hour.first.said.includes("거의 참") && hour.first.said.includes(`/ ${hour.first.bound}`)
+        && Math.abs(hour.first.share - Math.round((hour.first.sent / hour.first.bound) * 100)) <= 2
+        && hour.first.named.includes(String(hour.first.sent)) && hour.first.named.includes(String(hour.first.bound))
+        && hour.second.now === "2" && hour.second.tone === "" && !hour.second.said.includes("거의 참"),
+      JSON.stringify(hour));
+    ok("the head says what every decision sent together this hour, its figure strong, against the bound they share, beside 「상한 고치기」",
+      hour.every.figure === String(hour.sent) && hour.every.size === "16px" && hour.every.said.includes(String(hour.all))
+        && hour.every.now === String(hour.sent) && hour.every.most === String(hour.all) && hour.every.tone === ""
+        && hour.every.edit === "상한 고치기",
+      JSON.stringify(hour.every));
+
+    // The shared bound is set from the head (t-108071): 「상한 고치기」 opens
+    // its field in place with the bound in it; a number past the settings
+    // answer's most is said there and asks nothing; one in range goes
+    // through the settings door, and the head says it at once.
+    await press("#jev-view [data-jev-custom-every-edit]");
+    await waitFor(() => document.activeElement?.matches?.("#jev-view [data-jev-custom-every-editor] input"));
+    const bound = await page.evaluate(() => {
+      const every = document.querySelector("#jev-view [data-jev-custom-every]");
+      const input = every?.querySelector("[data-jev-custom-every-editor] input");
+      return { shown: Boolean(input) && input.getClientRects().length > 0, value: input?.value ?? "", max: input?.max ?? "",
+        focus: document.activeElement === input, edit: every?.querySelector("[data-jev-custom-every-edit]")?.hidden ?? null,
+        named: input?.getAttribute("aria-label") ?? "" };
+    });
+    await page.fill("#jev-view [data-jev-custom-every-editor] input", String(rules.hourlyAllMost + 1));
+    await press("#jev-view [data-jev-custom-every-save]");
+    await settlePaint(page);
+    const past = await page.evaluate(() => {
+      const toasts = [...document.querySelectorAll(".toast")];
+      const said = toasts.map((one) => one.textContent.trim());
+      for (const one of toasts) one.style.display = "none";
+      return { asked: window.__JEV__.custom.hourlyAlls.length,
+        invalid: document.querySelector("#jev-view [data-jev-custom-every-editor] input")?.getAttribute("aria-invalid") ?? null,
+        open: document.querySelector("#jev-view [data-jev-custom-every-editor]")?.hidden === false, said };
+    });
+    await page.fill("#jev-view [data-jev-custom-every-editor] input", "80");
+    await page.press("#jev-view [data-jev-custom-every-editor] input", "Enter");
+    await waitFor(() => window.__JEV__.custom.hourlyAlls.length === 1
+      && document.querySelector("#jev-view [data-jev-custom-every-editor]")?.hidden === true);
+    await settlePaint(page);
+    const set = await page.evaluate(() => {
+      const every = document.querySelector("#jev-view [data-jev-custom-every]");
+      return { asked: window.__JEV__.custom.hourlyAlls.slice(), all: window.__JEV__.custom.rules.hourlyAll,
+        said: every?.querySelector(".jev-custom-every-words")?.textContent.trim() ?? "",
+        most: every?.querySelector("[role='meter']")?.getAttribute("aria-valuemax") ?? null,
+        focus: document.activeElement === every?.querySelector("[data-jev-custom-every-edit]") };
+    });
+    ok("「상한 고치기」 opens the shared bound in place; past the settings answer's most it is said and nothing is asked, and 80 is set through the settings door",
+      bound.shown && bound.value === String(rules.hourlyAll) && bound.max === String(rules.hourlyAllMost) && bound.focus && bound.edit === true
+        && bound.named.length > 0 && past.asked === 0 && past.invalid === "true" && past.open
+        && past.said.some((line) => line.includes(String(rules.hourlyAllMost)))
+        && set.asked.join() === "80" && set.all === 80 && set.said.includes("80") && set.most === "80" && set.focus,
+      JSON.stringify({ bound, past, set }));
+
+    // The words (t-108071, the draft's changes 2 and 5): a row shows the
+    // first six as chips and how many more, the rest in its tip; 「말 고치기」
+    // opens the drawer at its words with the keyboard in the field.
+    const nine = ["rm", "rmdir", "unlink", "mv", "cp", "restore", "prune", "clean", "reset --hard"];
+    await page.evaluate(async ([first, words]) => {
+      window.__JEV__.custom.store.decisions.find((kept) => kept.draft.id === first).askWhen = { words };
+      await loadJevCustom();
+      await window.__PAINTED__();
+    }, [firstId, nine]);
+    await settlePaint(page);
+    const chips = await page.evaluate((first) => {
+      const line = document.querySelector(`#jev-view [data-jev-custom-row="${first}"] [data-jev-custom-asks]`);
+      const more = line?.querySelector('.jev-custom-word[data-kind="more"]');
+      return { words: [...(line?.querySelectorAll(".jev-custom-word:not([data-kind])") ?? [])].map((one) => one.textContent),
+        more: more?.textContent ?? "", tip: more?.dataset.tip ?? "", edit: line?.querySelector("[data-jev-custom-asks-edit]")?.textContent.trim() ?? "" };
+    }, firstId);
+    ok("a decision's words stand as chips — the first six, then how many more with the rest in its tip — beside 「말 고치기」",
+      JSON.stringify(chips.words) === JSON.stringify(nine.slice(0, 6)) && chips.more === "+3" && chips.tip === nine.slice(6).join(" · ")
+        && chips.edit === "말 고치기",
+      JSON.stringify(chips));
+    await press(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-asks-edit]`);
+    await drawerOpen();
+    await checked();
+    await waitFor(() => document.activeElement?.matches?.("#jev-custom-form [name='askWhen']"));
+    const groupSeen = () => page.evaluate(() => {
+      const group = el("jev-custom-form")?.querySelector("[data-jev-custom-field='askWhen']");
+      const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
+      return {
+        focus: document.activeElement === group?.querySelector("[name='askWhen']"),
+        words: [...(group?.querySelectorAll("[data-jev-custom-words] .jev-custom-word") ?? [])].map((one) => one.dataset.word),
+        count: group?.querySelector("[data-jev-custom-word-count]")?.textContent ?? "",
+        about: group?.querySelector("[data-jev-custom-ask-when-about]")?.textContent ?? "",
+        field: shown(group?.querySelector("[name='askWhen']")), chips: shown(group?.querySelector("[data-jev-custom-words]"))
+          || (group?.querySelectorAll("[data-jev-custom-words] .jev-custom-word").length ?? 0) === 0,
+        edited: shown(group?.querySelector("[name='askEdited']")), agent: shown(group?.querySelector("[data-jev-custom-ask-when-agent]")),
+        legend: group?.querySelector("legend")?.textContent.trim() ?? "",
+      };
+    });
+    const atWords = await groupSeen();
+    const drawerFaults = {};
+    for (const [name, size] of [["wide", FIRST_SCREEN], ["narrow", NARROW]]) {
+      await page.setViewportSize(size);
+      await settlePaint(page);
+      drawerFaults[name] = await page.evaluate(() => window.__JEV_TEXT_FAULTS__(el("jev-custom-form").querySelector("[data-jev-custom-field='askWhen']")));
+    }
+    await page.setViewportSize(FIRST_SCREEN);
+    await settlePaint(page);
+    await picture("drawer-words", true, "#jev-custom-form [data-jev-custom-field='askWhen']");
+    ok("「말 고치기」 opens the drawer at its words: the keyboard in the field, each word a chip, how many of the settings answer's most, and where a turn's start looks for them",
+      atWords.focus && JSON.stringify(atWords.words) === JSON.stringify(nine) && atWords.count === `9/${rules.askWhen.wordsMost}`
+        && atWords.legend === "이 말이 있을 때만 묻기" && atWords.about.includes("사람의 요청")
+        && atWords.about.includes(String(rules.askWhen.wordCharsMost)) && atWords.about.includes(String(rules.askWhen.wordsMost))
+        && atWords.field && !atWords.edited && !atWords.agent && drawerFaults.wide.length === 0 && drawerFaults.narrow.length === 0,
+      JSON.stringify({ atWords, drawerFaults }));
+
+    // In the drawer a word goes in by Enter or 「넣기」 — trimmed, its inner
+    // spaces one, once — and out by its ×; one past the settings answer's
+    // length is said at the field and kept there; typing asks core's check
+    // nothing. Saving sends when it asks beside the draft, the row says it,
+    // and the keyboard is back on 「말 고치기」.
+    const checksBefore = await page.evaluate(() => window.__JEV__.custom.checks);
+    await page.fill("#jev-custom-form [name='askWhen']", "  git   clean ");
+    await page.press("#jev-custom-form [name='askWhen']", "Enter");
+    await press('#jev-custom-form [data-jev-custom-words] .jev-custom-word[data-word="rm"] [data-jev-custom-word-remove]');
+    await page.fill("#jev-custom-form [name='askWhen']", "mv");
+    await press("#jev-custom-form [data-jev-custom-word-add]");
+    const tooLong = "x".repeat(rules.askWhen.wordCharsMost + 1);
+    await page.fill("#jev-custom-form [name='askWhen']", tooLong);
+    await press("#jev-custom-form [data-jev-custom-word-add]");
+    // A check the typing had asked for comes after its pause: wait for the
+    // drawer to say it is not busy, so a late one is counted too.
+    await checked();
+    await settlePaint(page);
+    const edited = await page.evaluate(() => {
+      const form = el("jev-custom-form");
+      const input = form.querySelector("[name='askWhen']");
+      const toasts = [...document.querySelectorAll(".toast")];
+      const said = toasts.map((one) => one.textContent.trim());
+      for (const one of toasts) one.style.display = "none";
+      return { words: [...form.querySelectorAll("[data-jev-custom-words] .jev-custom-word")].map((one) => one.dataset.word),
+        count: form.querySelector("[data-jev-custom-word-count]")?.textContent ?? "", invalid: input.getAttribute("aria-invalid"),
+        held: input.value, removeNamed: form.querySelector("[data-jev-custom-word-remove]")?.getAttribute("aria-label") ?? "",
+        checks: window.__JEV__.custom.checks, said };
+    });
+    const expected = [...nine.filter((word) => word !== "rm"), "git clean"];
+    ok("a word goes in trimmed and once, a chip's × takes it out, one too long is said at the field and kept there — and none of it asks core's check",
+      JSON.stringify(edited.words) === JSON.stringify(expected) && edited.count === `${expected.length}/${rules.askWhen.wordsMost}`
+        && edited.invalid === "true" && edited.held === tooLong && edited.removeNamed.includes("빼기")
+        && edited.said.some((line) => line.includes(String(rules.askWhen.wordCharsMost))) && edited.checks === checksBefore,
+      JSON.stringify({ ...edited, expected, checksBefore }));
+    await page.fill("#jev-custom-form [name='askWhen']", "");
+    const savesBeforeWords = await page.evaluate(() => window.__JEV__.custom.saves.length);
+    await press("#jev-custom-save");
+    await drawerClosed();
+    await waitFor((before) => window.__JEV__.custom.saves.length === before + 1, savesBeforeWords);
+    await settlePaint(page);
+    const told = await page.evaluate((first) => {
+      const custom = window.__JEV__.custom;
+      const line = document.querySelector(`#jev-view [data-jev-custom-row="${first}"] [data-jev-custom-asks]`);
+      return { sent: custom.askWhens.at(-1), kept: custom.store.decisions.find((one) => one.draft.id === first)?.askWhen ?? null,
+        shown: [...(line?.querySelectorAll(".jev-custom-word:not([data-kind])") ?? [])].map((one) => one.textContent),
+        more: line?.querySelector('.jev-custom-word[data-kind="more"]')?.textContent ?? "",
+        focus: document.activeElement === line?.querySelector("[data-jev-custom-asks-edit]") };
+    }, firstId);
+    ok("saving sends when it asks beside the draft; the row shows the words kept, and the keyboard is back on 「말 고치기」",
+      JSON.stringify(told.sent) === JSON.stringify({ words: expected, edited: false })
+        && JSON.stringify(told.kept?.words) === JSON.stringify(expected) && JSON.stringify(told.shown) === JSON.stringify(expected.slice(0, 6))
+        && told.more === `+${expected.length - 6}` && told.focus,
+      JSON.stringify({ ...told, expected }));
+
+    // At a turn's end 「고친 파일이 있을 때만」 is offered beside the words and
+    // saved with them; a decision an agent asks by name has no words part —
+    // the drawer says it is never filtered — and saves none.
+    await press(`#jev-view [data-jev-custom-row="${secondId}"] [data-jev-custom-edit]`);
+    await drawerOpen();
+    await checked();
+    await page.locator('#jev-custom-form [name="at"][value="turn_end"]').check();
+    await checked();
+    const atEnd = await groupSeen();
+    await page.locator('#jev-custom-form [name="askEdited"]').check();
+    const savesBeforeEnd = await page.evaluate(() => window.__JEV__.custom.saves.length);
+    await press("#jev-custom-save");
+    await drawerClosed();
+    await waitFor((before) => window.__JEV__.custom.saves.length === before + 1, savesBeforeEnd);
+    await settlePaint(page);
+    const endSaved = await page.evaluate((second) => ({
+      sent: window.__JEV__.custom.askWhens.at(-1),
+      kept: window.__JEV__.custom.store.decisions.find((one) => one.draft.id === second)?.askWhen ?? null,
+      line: document.querySelector(`#jev-view [data-jev-custom-row="${second}"] [data-jev-custom-asks]`)?.textContent ?? "",
+    }), secondId);
+    ok("at a turn's end 「고친 파일이 있을 때만」 is offered and saved with the draft, and the row says it",
+      atEnd.edited && atEnd.field && !atEnd.agent && atEnd.about.includes("마지막 답")
+        && JSON.stringify(endSaved.sent) === JSON.stringify({ words: [], edited: true }) && endSaved.kept?.edited === true
+        && endSaved.line.includes("고친 파일이 있을 때만 묻기") && endSaved.line.includes("말 고치기"),
+      JSON.stringify({ atEnd, endSaved }));
+    await press(`#jev-view [data-jev-custom-row="${secondId}"] [data-jev-custom-edit]`);
+    await drawerOpen();
+    await checked();
+    await page.locator('#jev-custom-form [name="at"][value="agent_asks"]').check();
+    await checked();
+    const atAgent = await groupSeen();
+    const savesBeforeAgent = await page.evaluate(() => window.__JEV__.custom.saves.length);
+    await press("#jev-custom-save");
+    await drawerClosed();
+    await waitFor((before) => window.__JEV__.custom.saves.length === before + 1, savesBeforeAgent);
+    await settlePaint(page);
+    const agentSaved = await page.evaluate((second) => ({
+      sent: window.__JEV__.custom.askWhens.at(-1),
+      kept: window.__JEV__.custom.store.decisions.find((one) => one.draft.id === second)?.askWhen ?? null,
+      line: document.querySelector(`#jev-view [data-jev-custom-row="${second}"] [data-jev-custom-asks]`)?.textContent ?? "",
+      press: document.querySelector(`#jev-view [data-jev-custom-row="${second}"] [data-jev-custom-asks-edit]`) !== null,
+    }), secondId);
+    ok("a decision an agent asks by name has no words part — the drawer says it is never filtered — and saves none",
+      !atAgent.field && !atAgent.edited && atAgent.agent && JSON.stringify(agentSaved.sent) === JSON.stringify({ words: [], edited: false })
+        && JSON.stringify(agentSaved.kept) === "{}" && agentSaved.line.includes("에이전트가 부를 때마다") && !agentSaved.press,
+      JSON.stringify({ atAgent, agentSaved }));
 
     // With a feature's drawer open the decisions' buttons stay in reach
     // (2026-11-12: the drawer covered 「편집」 and 「삭제」, read as "there is
@@ -3488,9 +3784,10 @@ export async function testJevCustomDecisions(browser, origin, ok) {
         && editing.remove && versioned && notice.shown && notice.text.includes("새 판"),
       JSON.stringify({ editing, versioned, notice }));
     await picture("drawer-version");
+    const savedBefore = await page.evaluate(() => window.__JEV__.custom.saves.length);
     await press("#jev-custom-save");
     await drawerClosed();
-    await waitFor(() => window.__JEV__.custom.saves.length === 3);
+    await waitFor((before) => window.__JEV__.custom.saves.length === before + 1, savedBefore);
     const kept = await page.evaluate((id) => {
       const custom = window.__JEV__.custom;
       const decision = custom.store.decisions.find((one) => one.draft.id === id);

@@ -310,14 +310,30 @@ pub(crate) fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
 
 /// Keep a draft: a new decision recording before anything acts on it, an
 /// edit as its next version with its mode kept. The store checks it again
-/// under its lock.
+/// under its lock. With `ask_when`, what the drawer says of when it asks is
+/// kept beside it by the store's own writer — refused, with nothing kept,
+/// where the draft's point does not take it.
 #[tauri::command(async)]
 pub(crate) fn save_custom_decision(
     draft: DecisionDraft,
+    ask_when: Option<zerocode_core::jev::custom::AskWhen>,
 ) -> Result<CustomDecisions, DecisionRefusal> {
-    typesafe_settings::save_custom_decision_at(&decisions_home()?, draft, crate::now_epoch_ms())?;
+    typesafe_settings::save_custom_decision_told_at(
+        &decisions_home()?,
+        draft,
+        ask_when.as_ref(),
+        crate::now_epoch_ms(),
+    )?;
     crate::pane_guard::decisions_moved();
     decisions_now()
+}
+
+/// Set the bound every decision shares in an hour, through the settings
+/// writer every Jev switch takes (t-108071).
+#[tauri::command(async)]
+pub(crate) fn set_custom_hourly_all(most: u64) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::set_custom_hourly_all(&settings_path()?, most)?;
+    settings_now()
 }
 
 /// Delete a decision for good: nothing keeps it to be brought back.

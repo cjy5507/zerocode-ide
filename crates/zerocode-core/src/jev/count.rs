@@ -166,8 +166,13 @@ pub(super) fn lock_hours(every: &Path) -> io::Result<HeldFileLock> {
     }
 }
 
-/// An hour's count, with an unreadable count refused instead of read as zero.
-pub(super) fn sent_in_the_hour(path: &Path) -> io::Result<u64> {
+/// An hour's count, with an unreadable count refused instead of read as zero:
+/// what the door fills a decision's — or every decision's — hourly bound by
+/// in the hour file `path` ([`hour_path`]), and what a screen shows of it.
+///
+/// # Errors
+/// A file there that cannot be read.
+pub fn sent_in_the_hour(path: &Path) -> io::Result<u64> {
     match fs::metadata(path) {
         Ok(metadata) => Ok(metadata.len()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),

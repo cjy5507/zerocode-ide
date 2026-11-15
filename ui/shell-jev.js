@@ -1482,7 +1482,11 @@ async function refreshJevDashboard({ force = false } = {}) {
 const jevPoll = idlePoller({
   wanted: jevViewsShowing,
   every: JEV_POLL_MS,
-  tick: () => void loadJevNumbers({ recent: true }),
+  // The decisions' hour moves with every ask, so their list is read again too.
+  tick: () => {
+    void loadJevNumbers({ recent: true });
+    void loadJevCustom();
+  },
   onResume: () => void refreshJevDashboard(),
 });
 
@@ -3540,6 +3544,8 @@ function jevCustomBounds(rules) {
     hourlyMost: jevCount(rules.hourly.most), hourlyAll: jevCount(rules.hourlyAll),
     actLeast: jevPercent(rules.actFrom.least), actMost: jevPercent(rules.actFrom.most),
     decisionsMax: jevCount(rules.decisionsMax),
+    hourlyAllMost: jevCount(rules.hourlyAllMost ?? rules.hourlyAll),
+    wordsMost: jevCount(rules.askWhen?.wordsMost ?? 0), wordCharsMost: jevCount(rules.askWhen?.wordCharsMost ?? 0),
   };
 }
 
@@ -3624,7 +3630,8 @@ function jevCustomPart() {
   list.dataset.jevCustomList = "";
   const part = jevNode("section", "jev-custom",
     jevNode("header", "jev-custom-head",
-      jevNode("div", "jev-custom-heading", jevText("settings.typesafe.custom", "내가 만든 결정", "h2", "jev-custom-title"), count), add),
+      jevNode("div", "jev-custom-heading", jevText("settings.typesafe.custom", "내가 만든 결정", "h2", "jev-custom-title"), count,
+        jevCustomEveryLine()), add),
     list);
   part.dataset.jevCustom = "";
   part.dataset.keyboardOwner = "jev-custom";
@@ -3648,6 +3655,18 @@ function wireJevCustom(host) {
       openJevCustomDrawer(null, button);
       return;
     }
+    if (button.matches("[data-jev-custom-every-edit]")) {
+      openJevCustomEvery(part);
+      return;
+    }
+    if (button.matches("[data-jev-custom-every-save]")) {
+      void saveJevCustomEvery(part);
+      return;
+    }
+    if (button.matches("[data-jev-custom-every-cancel]")) {
+      closeJevCustomEvery(part);
+      return;
+    }
     // A token a person clears, under a decision's asks, takes them where
     // it is cleared — as the same word does in the table.
     if (button.dataset.jevFix) {
@@ -3658,10 +3677,22 @@ function wireJevCustom(host) {
     const kept = jevCustom?.decisions.find((one) => one.draft.id === id);
     if (!kept) return;
     if (button.matches("[data-jev-custom-edit]")) openJevCustomDrawer(kept, button);
+    else if (button.matches("[data-jev-custom-asks-edit]")) openJevCustomDrawer(kept, button, { at: "askWhen" });
     else if (button.matches("[data-jev-custom-delete]")) openJevCustomDelete(kept, button);
     else if (button.getAttribute("role") === "radio") void setJevCustomMode(kept, button.dataset.mode);
   });
   part.addEventListener("keydown", (event) => {
+    if (event.target.matches?.("[data-jev-custom-every-editor] input")) {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void saveJevCustomEvery(part);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeJevCustomEvery(part);
+      }
+      return;
+    }
     const radio = event.target.closest("[data-jev-custom-mode] [role='radio']");
     const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
     if (!radio || !step) return;
@@ -3692,7 +3723,8 @@ function paintJevCustom(view) {
     jevLanguage(), String(Math.floor(Date.now() / 60_000)))) return;
   const bounds = jevCustomBounds(rules);
   jevSay(part.querySelector("[data-jev-custom-count]"), t("jev.custom.count",
-    "{{count}}/{{decisionsMax}}개 · 모두 합쳐 한 시간에 {{hourlyAll}}회까지 묻습니다", { ...bounds, count: jevCount(decisions.length) }));
+    "{{count}}/{{decisionsMax}}개", { ...bounds, count: jevCount(decisions.length) }));
+  paintJevCustomEvery(part, store, rules);
   const add = part.querySelector("[data-jev-custom-new]");
   add.disabled = decisions.length >= rules.decisionsMax;
   if (add.disabled) add.dataset.tip = t("jev.custom.full", "내가 만든 결정은 {{decisionsMax}}개까지입니다. 하나를 지우면 새로 만들 수 있습니다.", bounds);
@@ -3735,8 +3767,10 @@ function jevCustomRow(list, kept, rules) {
       holder.dataset.jevCustomFigure = figure.figure;
       return holder;
     }));
+    const asks = jevNode("p", "jev-custom-asks");
+    asks.dataset.jevCustomAsks = "";
     row = jevNode("li", "jev-custom-row",
-      jevNode("div", "jev-custom-about", jevNode("strong", "jev-custom-name"), jevNode("p", "jev-custom-facts")),
+      jevNode("div", "jev-custom-about", jevNode("strong", "jev-custom-name"), jevNode("p", "jev-custom-facts"), asks),
       modes, jevNode("div", "jev-custom-actions", edit, remove), figures);
     row.dataset.jevCustomRow = id;
     list.append(row);
@@ -3744,8 +3778,10 @@ function jevCustomRow(list, kept, rules) {
   const counted = jevDecisionNumbers?.find((one) => one.id === id) ?? null;
   if (!jevMoved(row, JSON.stringify(kept), JSON.stringify(counted), jevLanguage(), String(Math.floor(Date.now() / 60_000)))) return row;
   paintJevCustomFigures(row, counted);
+  paintJevCustomHour(row, kept);
   jevSay(row.querySelector(".jev-custom-name"), kept.draft.name);
-  row.querySelector(".jev-custom-facts").replaceChildren(...jevCustomFacts(kept.draft, kept.askWhen));
+  row.querySelector(".jev-custom-facts").replaceChildren(...jevCustomFacts(kept.draft));
+  paintJevCustomAsks(row, kept);
   const group = row.querySelector("[data-jev-custom-mode]");
   group.setAttribute("aria-label", t("jev.custom.modeOf", "{{name}} 모드", { name: kept.draft.name }));
   const radios = [...group.querySelectorAll("[role='radio']")];
@@ -3766,6 +3802,7 @@ function jevCustomRow(list, kept, rules) {
  * refused, and its last answer with how long ago — each figure under its
  * name, as the table's own rows wear their column's name on a narrow page. */
 const JEV_CUSTOM_FIGURES = Object.freeze([
+  Object.freeze({ figure: "hour", key: "jev.custom.hourFigure", word: "이번 시간" }),
   Object.freeze({ figure: "rows", key: "jev.col.rows", word: "요청 (오늘 · 7일)" }),
   Object.freeze({ figure: "applied", key: "jev.custom.applied", word: "적용 (오늘 · 7일)" }),
   Object.freeze({ figure: "hourFull", key: "jev.custom.hourFull", word: "시간당 한도 초과 (오늘 · 7일)" }),
@@ -3840,10 +3877,9 @@ function paintJevCustomFigures(row, counted) {
 
 /* What a decision is, fact by fact: its kind of answer, when it asks and
  * what it does there when on, the confidence it acts from — with the whole
- * rule as its tip — its hourly bound, where it asks, and what it leaves out
- * (`askWhen`, the store's file beside the index): the words it asks about
- * and whether it asks only after edits, so a person sees why it did not ask. */
-function jevCustomFacts(draft, askWhen) {
+ * rule as its tip — and where it asks. Its hourly bound stands in its hour's
+ * meter and what it leaves out in its asks line (t-108071). */
+function jevCustomFacts(draft) {
   const fact = (text) => jevNode("span", "jev-custom-fact", document.createTextNode(text));
   const share = { share: jevPercent(draft.actFrom) };
   const acting = fact(t("jev.custom.actsFrom", "확신 {{share}} 이상", share));
@@ -3853,21 +3889,214 @@ function jevCustomFacts(draft, askWhen) {
     fact(jevCustomSay("kind", draft.answer.kind)),
     fact(`${jevCustomSay("point", draft.at)} — ${jevCustomSay("point-act", draft.at)}`),
     acting,
-    fact(t("jev.custom.hourly", "한 시간에 {{count}}회까지", { count: jevCount(draft.maxPerHour) })),
     fact(draft.folders === null ? t("jev.custom.everyFolder", "동의한 모든 폴더")
       : t("jev.custom.someFolders", "고른 폴더 {{count}}곳", { count: jevCount(draft.folders.length) })),
-    ...((askWhen?.words ?? []).length > 0 ? [jevCustomAsksWords(askWhen.words)] : []),
-    ...(askWhen?.edited ? [fact(t("jev.custom.asksWhenEdited", "고친 파일이 있을 때만 묻기"))] : []),
   ];
 }
 
-/* The words a decision asks about: its name for them, then one chip a word,
- * on a line of their own that wraps between chips — never one long line that
- * runs under the row's modes and buttons and off its edge (11-15, t-108080). */
-function jevCustomAsksWords(words) {
-  return jevNode("span", "jev-custom-fact jev-custom-asks",
-    jevNode("span", "jev-custom-asks-label", document.createTextNode(t("jev.custom.asksWhenWords", "이 말이 있을 때만 묻기"))),
-    ...words.map((word) => jevNode("span", "jev-custom-word", document.createTextNode(word))));
+/* A share of an hour's bound from which its meter says the hour is nearly
+ * spent: the last fifth, where a busy hour runs out within minutes. */
+const JEV_CUSTOM_NEAR = 0.8;
+
+/* The words a row shows before it counts the rest: one line at the width
+ * the decisions part usually has (the draft p-9f4f9ae7db3104bb, t-108071). */
+const JEV_CUSTOM_WORDS_SHOWN = 6;
+
+/* A meter of an hour's requests against its bound, its fill read off the
+ * share the painter sets (`--jev-meter-share`). */
+function jevCustomMeter() {
+  const meter = jevNode("span", "jev-custom-meter", jevNode("span", "jev-custom-meter-fill"));
+  meter.setAttribute("role", "meter");
+  meter.setAttribute("aria-valuemin", "0");
+  return meter;
+}
+
+/* Fill `meter` with `sent` of `most` under the words `label`; the tone a
+ * nearly spent or spent hour takes, or none — said in words beside it too,
+ * never by its colour alone. */
+function paintJevCustomMeter(meter, sent, most, label) {
+  const share = most > 0 ? Math.min(1, sent / most) : 0;
+  meter.setAttribute("aria-valuenow", String(sent));
+  meter.setAttribute("aria-valuemax", String(most));
+  meter.setAttribute("aria-label", label);
+  meter.style.setProperty("--jev-meter-share", String(share));
+  const tone = share >= 1 ? "spent" : share >= JEV_CUSTOM_NEAR ? "near" : "";
+  if (tone) meter.dataset.tone = tone;
+  else delete meter.dataset.tone;
+  return tone;
+}
+
+/* The word a tone says beside its meter. */
+function jevCustomToneWord(tone) {
+  const word = tone === "spent"
+    ? jevText("jev.custom.hourSpent", "다 씀", "span", "jev-custom-tone")
+    : jevText("jev.custom.hourNear", "거의 참", "span", "jev-custom-tone");
+  word.dataset.tone = tone;
+  return word;
+}
+
+/* A decision's hour: what it sent this hour against its own bound, as the
+ * door counts it (`hourSent`, the store's hour file), on a meter. */
+function paintJevCustomHour(row, kept) {
+  const holder = row.querySelector('[data-jev-custom-figure="hour"] dd');
+  if (!holder.querySelector(".jev-custom-meter")) holder.replaceChildren(jevNode("span", "jev-custom-hour"), jevCustomMeter());
+  const sent = kept.hourSent ?? 0;
+  const most = kept.draft.maxPerHour;
+  const tone = paintJevCustomMeter(holder.querySelector(".jev-custom-meter"), sent, most,
+    t("jev.custom.hourMeter", "이번 시간 {{sent}} / {{most}}회", { sent: jevCount(sent), most: jevCount(most) }));
+  holder.querySelector(".jev-custom-hour").replaceChildren(jevFact("hour", jevCount(sent), "jev-fact-strong"),
+    jevNode("span", "jev-custom-hour-most", document.createTextNode(`/ ${jevCount(most)}`)),
+    ...(tone ? [jevCustomToneWord(tone)] : []));
+}
+
+/* When a decision asks, under its facts (t-108071): the words it asks on as
+ * chips — the first few, then how many more — or every time, or whenever an
+ * agent asks it by name; and the road to change them in its drawer. The
+ * line wraps between chips, never under the row's buttons (t-108080). */
+function paintJevCustomAsks(row, kept) {
+  const said = kept.askWhen ?? {};
+  const words = said.words ?? [];
+  const chip = (text, kind = "") => {
+    const node = jevNode("span", "jev-custom-word", document.createTextNode(text));
+    if (kind) node.dataset.kind = kind;
+    return node;
+  };
+  const edited = said.edited ? [chip(t("jev.custom.asksWhenEdited", "고친 파일이 있을 때만 묻기"), "always")] : [];
+  let parts;
+  let change = null;
+  if (kept.draft.at === "agent_asks") {
+    parts = [jevText("jev.custom.asksWhenLabel", "묻는 때", "span", "jev-custom-asks-label"),
+      chip(t("jev.custom.asksAgent", "에이전트가 부를 때마다"), "always")];
+  } else if (words.length > 0) {
+    const rest = words.slice(JEV_CUSTOM_WORDS_SHOWN);
+    const more = rest.length > 0 ? [chip(`+${jevCount(rest.length)}`, "more")] : [];
+    if (more.length > 0) more[0].dataset.tip = rest.join(" · ");
+    parts = [jevText("jev.custom.asksWhenWords", "이 말이 있을 때만 묻기", "span", "jev-custom-asks-label"),
+      ...words.slice(0, JEV_CUSTOM_WORDS_SHOWN).map((word) => chip(word)), ...more, ...edited];
+    change = { key: "jev.custom.asksEdit", word: "말 고치기" };
+  } else {
+    parts = [jevText("jev.custom.asksWhenLabel", "묻는 때", "span", "jev-custom-asks-label"),
+      ...(edited.length > 0 ? edited : [chip(t("jev.custom.asksAlways", "매번 묻기"), "always")])];
+    change = edited.length > 0 ? { key: "jev.custom.asksEdit", word: "말 고치기" } : { key: "jev.custom.asksAdd", word: "말 넣기" };
+  }
+  // The press that opens the drawer at the words is built once and kept: a
+  // drawer saved from it hands the keyboard back to it, which a press made
+  // afresh with the line would have lost.
+  const line = row.querySelector("[data-jev-custom-asks]");
+  let press = line.querySelector("[data-jev-custom-asks-edit]");
+  if (!press) {
+    press = jevNode("button", "jev-custom-link");
+    press.type = "button";
+    press.dataset.jevCustomAsksEdit = "";
+  }
+  for (const child of [...line.childNodes]) if (child !== press) child.remove();
+  if (change) {
+    jevSay(press, t(change.key, change.word));
+    if (press.parentNode !== line) line.append(press);
+    press.before(...parts);
+  } else {
+    press.remove();
+    line.append(...parts);
+  }
+}
+
+/* The head's hour every decision shares: what they sent together this hour
+ * against the bound they share, on a meter, and 「상한 고치기」 — which opens
+ * the bound's own field in place (t-108071). Built once; painted from the
+ * store and the rules in hand. */
+function jevCustomEveryLine() {
+  const words = jevNode("span", "jev-custom-every-words");
+  const tone = jevNode("span", "jev-custom-every-tone");
+  const edit = jevText("jev.custom.everyEdit", "상한 고치기", "button", "jev-custom-link");
+  edit.type = "button";
+  edit.dataset.jevCustomEveryEdit = "";
+  const input = document.createElement("input");
+  input.type = "number";
+  input.name = "hourlyAll";
+  input.className = "jev-custom-input jev-custom-number";
+  input.step = "1";
+  input.min = "1";
+  input.dataset.i18nAria = "jev.custom.everyLabel";
+  input.setAttribute("aria-label", t("jev.custom.everyLabel", "모두 합친 한 시간 상한"));
+  const save = jevText("app.save", "저장", "button", "btn");
+  save.type = "button";
+  save.dataset.jevCustomEverySave = "";
+  const cancel = jevText("app.cancel", "취소", "button", "btn");
+  cancel.type = "button";
+  cancel.dataset.jevCustomEveryCancel = "";
+  const editor = jevNode("div", "jev-custom-every-editor", input, save, cancel);
+  editor.dataset.jevCustomEveryEditor = "";
+  editor.hidden = true;
+  const line = jevNode("div", "jev-custom-every", words, jevCustomMeter(), tone, edit, editor);
+  line.dataset.jevCustomEvery = "";
+  return line;
+}
+
+/* Where a translated sentence holds a figure drawn strong, the sentence is
+ * cut in two at this mark: the figure stands between its halves. */
+const JEV_CUSTOM_MARK = "\u0000";
+
+/* Paint the head's shared hour from the store's count and the rules' bound:
+ * the hour's figure strong inside its sentence, as the draft drew it. */
+function paintJevCustomEvery(part, store, rules) {
+  const sent = store.everyHourSent ?? 0;
+  const most = rules.hourlyAll;
+  const sentence = (figure) => t("jev.custom.every", "이번 시간 모두 합쳐 {{sent}} / {{most}}회", { sent: figure, most: jevCount(most) });
+  const words = sentence(jevCount(sent));
+  const [before, after = ""] = sentence(JEV_CUSTOM_MARK).split(JEV_CUSTOM_MARK);
+  part.querySelector(".jev-custom-every-words").replaceChildren(document.createTextNode(before),
+    jevFact("every", jevCount(sent), "jev-fact-strong"), document.createTextNode(after));
+  const tone = paintJevCustomMeter(part.querySelector(".jev-custom-every .jev-custom-meter"), sent, most, words);
+  part.querySelector(".jev-custom-every-tone").replaceChildren(...(tone ? [jevCustomToneWord(tone)] : []));
+}
+
+/* Open the shared bound's field in place, its value the rules', the
+ * keyboard in it. */
+function openJevCustomEvery(part) {
+  const rules = jevCustomRules();
+  if (!rules) return;
+  const editor = part.querySelector("[data-jev-custom-every-editor]");
+  const input = editor.querySelector("input");
+  input.value = String(rules.hourlyAll);
+  input.max = String(rules.hourlyAllMost ?? rules.hourlyAll);
+  input.removeAttribute("aria-invalid");
+  editor.hidden = false;
+  part.querySelector("[data-jev-custom-every-edit]").hidden = true;
+  input.focus();
+  input.select();
+}
+
+/* Fold the shared bound's field away; the keyboard goes back to the press
+ * that opened it. */
+function closeJevCustomEvery(part) {
+  part.querySelector("[data-jev-custom-every-editor]").hidden = true;
+  const edit = part.querySelector("[data-jev-custom-every-edit]");
+  edit.hidden = false;
+  edit.focus();
+}
+
+/* Keep the shared bound through the settings writer every Jev switch takes
+ * (`set_custom_hourly_all`): a number out of its range is said at the field
+ * and nothing is asked; the settings answer stands in for the card's. */
+async function saveJevCustomEvery(part) {
+  const rules = jevCustomRules();
+  const input = part.querySelector("[data-jev-custom-every-editor] input");
+  if (!rules || !input) return;
+  const most = Number(input.value);
+  const ceiling = rules.hourlyAllMost ?? rules.hourlyAll;
+  if (!Number.isInteger(most) || most < 1 || most > ceiling) {
+    input.setAttribute("aria-invalid", "true");
+    toast(t("jev.custom.everyRange", "1~{{hourlyAllMost}}회 사이로 정합니다.", jevCustomBounds(rules)), "halt");
+    return;
+  }
+  try {
+    // The settings answer paints the card and every Jev view, this head too.
+    paintTypeSafe(await invoke("set_custom_hourly_all", { most }));
+  } catch (failure) {
+    toast(jevCustomFailure(failure), "halt");
+    return;
+  }
+  closeJevCustomEvery(part);
 }
 
 /* Move `kept` to `mode` through the store; the radios stand where the
@@ -3960,7 +4189,7 @@ function jevCustomModelLine() {
 
 /* The drawer's fields for `draft`, built afresh each time it opens: the
  * kinds, points and inputs are the settings answer's of the moment. */
-function jevCustomFormOf(form, draft, rules) {
+function jevCustomFormOf(form, draft, rules, askWhen = {}) {
   const notice = jevText("jev.custom.version", "저장하면 새 판으로 기록이 나뉩니다. 지금까지의 기록은 이전 판으로 따로 남습니다.", "p", "jev-custom-version");
   notice.dataset.jevCustomVersion = "";
   notice.hidden = true;
@@ -4023,7 +4252,7 @@ function jevCustomFormOf(form, draft, rules) {
     kinds,
     jevCustomGroup("question", jevText("jev.custom.questionLegend", "질문", "legend"),
       jevCustomAbout("jev.custom.questionAbout", "Jev에 묻는 글입니다. {{questionMax}}자까지 적습니다. 비밀번호나 키는 적지 마세요."), question),
-    answer, points, acts, reads,
+    answer, points, acts, jevCustomAskWhenGroup(askWhen, rules), reads,
     jevCustomGroup("actFrom", jevText("jev.custom.actFromLegend", "확신도 기준", "legend"),
       jevCustomAbout("jev.custom.actFromAbout", "확신이 이보다 낮은 답은 기록만 하고 넘기지 않습니다. 동률인 답도 기준과 상관없이 넘기지 않습니다. 동률은 가장 높은 확률을 보기 둘 이상이 나눠 가진 답입니다. {{actLeast}}~{{actMost}} 사이에서 고릅니다."),
       jevNode("div", "jev-custom-range", actFrom, shown)),
@@ -4181,6 +4410,169 @@ function jevCustomPointFields(form, at, reads, rules) {
   for (const tick of holder.querySelectorAll(".jev-custom-choice")) tick.remove();
   holder.append(...point.inputs.map((input) => jevCustomTick("checkbox", "reads", input, reads.includes(input), jevCustomSay("input", input))));
   say(form.querySelector("[data-jev-custom-act]"), () => t("jev.custom.act", "켜면 하는 일: {{act}}", { act: jevCustomSay("point-act", point.at) }));
+  jevCustomAskWhenShown(form, point.at, rules);
+}
+
+/* Where a point looks for a decision's words, said over its part of the
+ * drawer; a decision an agent asks by name has none. */
+const JEV_CUSTOM_ASK_ABOUT = Object.freeze({
+  before_command: Object.freeze({ key: "jev.custom.askWhenAboutCommand", word: "명령에 이 말이 하나라도 있으면 묻습니다." }),
+  turn_end: Object.freeze({ key: "jev.custom.askWhenAboutTurnEnd", word: "에이전트의 마지막 답에 이 말이 하나라도 있으면 묻습니다." }),
+  turn_start: Object.freeze({ key: "jev.custom.askWhenAboutTurnStart", word: "사람의 요청에 이 말이 하나라도 있으면 묻습니다." }),
+});
+
+/* The drawer's part for when the decision asks (t-108071): its words, each
+ * a chip a press takes away, a field and 「넣기」 to add one, how many of the
+ * most, and — at a turn's end — 「고친 파일이 있을 때만」. A decision an agent
+ * asks by name says it is never filtered instead. */
+function jevCustomAskWhenGroup(said, rules) {
+  const chips = jevNode("div", "jev-custom-words-edit", ...(said.words ?? []).map(jevCustomWordChip));
+  chips.dataset.jevCustomWords = "";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.name = "askWhen";
+  input.className = "jev-custom-input";
+  input.spellcheck = false;
+  input.dataset.i18nPlaceholder = "jev.custom.askWhenPlaceholder";
+  input.placeholder = t("jev.custom.askWhenPlaceholder", "말 넣기 — 예: git clean");
+  input.dataset.i18nAria = "jev.custom.askWhenAddLabel";
+  input.setAttribute("aria-label", t("jev.custom.askWhenAddLabel", "넣을 말"));
+  const add = jevText("jev.custom.askWhenAddWord", "넣기", "button", "btn");
+  add.type = "button";
+  add.dataset.jevCustomWordAdd = "";
+  const counted = jevNode("output", "jev-custom-word-count");
+  counted.dataset.jevCustomWordCount = "";
+  const adding = jevNode("div", "jev-custom-word-add", input, add, counted);
+  adding.dataset.jevCustomWordAdding = "";
+  const edited = jevCustomTick("checkbox", "askEdited", "edited", Boolean(said.edited),
+    jevText("jev.custom.asksWhenEdited", "고친 파일이 있을 때만 묻기"),
+    jevText("jev.custom.askWhenEditedAbout", "셸 명령으로 고친 파일은 세지 않습니다.", "small"));
+  edited.dataset.jevCustomEdited = "";
+  const about = jevNode("p", "jev-custom-about-line");
+  about.dataset.jevCustomAskWhenAbout = "";
+  const agent = jevText("jev.custom.askWhenAgent", "에이전트가 이름으로 묻는 결정은 거르지 않습니다.", "p", "jev-custom-about-line");
+  agent.dataset.jevCustomAskWhenAgent = "";
+  return jevCustomGroup("askWhen", jevText("jev.custom.asksWhenWords", "이 말이 있을 때만 묻기", "legend"),
+    about, chips, adding, edited, agent);
+}
+
+/* One word in the drawer, with the press that takes it away. */
+function jevCustomWordChip(word) {
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "jev-custom-word-remove";
+  remove.dataset.jevCustomWordRemove = "";
+  remove.textContent = "×";
+  labelButton(remove, t("jev.custom.askWhenRemove", "{{word}} 빼기", { word }));
+  const chip = jevNode("span", "jev-custom-word", document.createTextNode(word), remove);
+  chip.dataset.word = word;
+  return chip;
+}
+
+/* Show the part for the point chosen: no words where an agent asks by name,
+ * 「고친 파일이 있을 때만」 only at a turn's end, and the sentence of where its
+ * words are looked for. */
+function jevCustomAskWhenShown(form, at, rules) {
+  const group = form.querySelector("[data-jev-custom-field='askWhen']");
+  if (!group) return;
+  const agent = at === "agent_asks";
+  for (const node of group.querySelectorAll("[data-jev-custom-words], [data-jev-custom-word-adding], [data-jev-custom-ask-when-about]")) {
+    node.hidden = agent;
+  }
+  group.querySelector("[data-jev-custom-edited]").hidden = at !== "turn_end";
+  group.querySelector("[data-jev-custom-ask-when-agent]").hidden = !agent;
+  const about = JEV_CUSTOM_ASK_ABOUT[at];
+  if (about) {
+    say(group.querySelector("[data-jev-custom-ask-when-about]"), () => [t(about.key, about.word),
+      t("jev.custom.askWhenBounds", "비워 두면 매번 묻습니다. 말 하나는 {{wordCharsMost}}자, {{wordsMost}}개까지 넣습니다.",
+        jevCustomBounds(rules))].join(" "));
+  }
+  jevCustomWordsCounted(form, rules);
+}
+
+/* The words the drawer holds, in the order they were put in. */
+function jevCustomWordsOf(form) {
+  return [...form.querySelectorAll("[data-jev-custom-words] .jev-custom-word")].map((chip) => chip.dataset.word);
+}
+
+/* How many words of the most, and 「넣기」 off at the most. */
+function jevCustomWordsCounted(form, rules) {
+  const most = rules.askWhen?.wordsMost ?? 0;
+  const held = jevCustomWordsOf(form).length;
+  form.querySelector("[data-jev-custom-word-count]").textContent = `${jevCount(held)}/${jevCount(most)}`;
+  form.querySelector("[data-jev-custom-word-add]").disabled = most > 0 && held >= most;
+}
+
+/* When the drawer says the decision asks, as the store keeps it: nothing
+ * where an agent asks by name, 「고친 파일이 있을 때만」 only at a turn's end. */
+function jevCustomAskWhenOf(form) {
+  const at = form.querySelector("[name='at']:checked")?.value ?? "";
+  if (at === "agent_asks") return { words: [], edited: false };
+  return { words: jevCustomWordsOf(form), edited: at === "turn_end" && Boolean(form.querySelector("[name='askEdited']")?.checked) };
+}
+
+/* The drawer's whole state — its draft and when it asks — an unsaved close
+ * is told by. */
+function jevCustomDrawerState(form) {
+  const typed = form.querySelector("[name='askWhen']")?.value.trim() ?? "";
+  return JSON.stringify({ draft: jevCustomDraftOf(form), askWhen: jevCustomAskWhenOf(form), typed });
+}
+
+/* Put the field's word in as core keeps one — trimmed, its inner spaces one
+ * — once; one too long or holding a control character is said at the field
+ * and not put in. */
+function jevCustomAddWord(form) {
+  const rules = jevCustomRules();
+  const input = form.querySelector("[name='askWhen']");
+  if (!rules || !input) return;
+  const word = input.value.trim().split(/\s+/u).filter(Boolean).join(" ");
+  input.removeAttribute("aria-invalid");
+  if (!word) return;
+  const refused = /\p{Cc}/u.test(input.value) ? "control_character"
+    : [...word].length > (rules.askWhen?.wordCharsMost ?? Infinity) ? "long_word" : "";
+  const held = jevCustomWordsOf(form);
+  const full = !held.includes(word) && held.length >= (rules.askWhen?.wordsMost ?? Infinity);
+  if (refused || full) {
+    input.setAttribute("aria-invalid", "true");
+    toast(jevCustomSay("refusal", refused || "too_many_words", jevCustomBounds(rules)), "halt");
+    return;
+  }
+  if (!held.includes(word)) form.querySelector("[data-jev-custom-words]").append(jevCustomWordChip(word));
+  input.value = "";
+  input.focus();
+  jevCustomWordsMoved(form, rules);
+}
+
+/* The words moved: how many are held, and an unsaved notice said before is
+ * said again only at the next close. */
+function jevCustomWordsMoved(form, rules) {
+  jevCustomWordsCounted(form, rules);
+  if (!jevCustomDrawer) return;
+  jevCustomDrawer.warned = false;
+  el("jev-custom-unsaved").hidden = true;
+  jevCustomAskWhenRetold();
+}
+
+/* A save the store refused for what was said of when it asks keeps 「저장」
+ * off until core's check is asked again: once the words or the box move,
+ * it is, and 「저장」 is judged anew. */
+function jevCustomAskWhenRetold() {
+  if (jevCustomDrawer?.check?.refusals?.some((one) => one.field === "askWhen")) jevCustomCheckSoon(0);
+}
+
+/* 「넣기」 puts the field's word in; a chip's × takes its word away and hands
+ * the keyboard to the field. */
+function jevCustomWordPressed(button) {
+  const form = el("jev-custom-form");
+  const rules = jevCustomRules();
+  if (!rules) return;
+  if (button.matches("[data-jev-custom-word-add]")) {
+    jevCustomAddWord(form);
+    return;
+  }
+  button.closest(".jev-custom-word")?.remove();
+  form.querySelector("[name='askWhen']")?.focus();
+  jevCustomWordsMoved(form, rules);
 }
 
 /* What stands in the drawer for the choices made: the act-from line in
@@ -4195,7 +4587,7 @@ function jevCustomFieldsShown(form) {
 /* Open the drawer on `kept` — a decision the store keeps — or on a new one,
  * with the keyboard in its name; `opener` takes the keyboard back, and the
  * part's own 「새 결정」 does when the opener is gone. */
-function openJevCustomDrawer(kept, opener) {
+function openJevCustomDrawer(kept, opener, { at = "" } = {}) {
   const rules = jevCustomRules();
   if (!rules || jevCustomDrawer) return;
   const form = el("jev-custom-form");
@@ -4204,12 +4596,19 @@ function openJevCustomDrawer(kept, opener) {
   say(el("jev-custom-title"), () => (kept ? t("jev.custom.editTitle", "결정 고치기") : t("jev.custom.newTitle", "새 결정")));
   el("jev-custom-delete").hidden = !kept;
   el("jev-custom-unsaved").hidden = true;
-  jevCustomFormOf(form, kept?.draft ?? jevCustomBlank(rules), rules);
-  jevCustomDrawer.opened = JSON.stringify(jevCustomDraftOf(form));
+  jevCustomFormOf(form, kept?.draft ?? jevCustomBlank(rules), rules, kept?.askWhen ?? {});
+  jevCustomDrawer.opened = jevCustomDrawerState(form);
   showModal(el("jev-custom-scrim"), {
     opener,
     fallback: () => view?.querySelector("[data-jev-custom-new]") ?? null,
   });
+  // A row's 「말 고치기」 opens the drawer at its words, the keyboard in the field.
+  if (at === "askWhen") {
+    requestAnimationFrame(() => {
+      form.querySelector("[data-jev-custom-field='askWhen']")?.scrollIntoView({ block: "start" });
+      form.querySelector("[name='askWhen']")?.focus();
+    });
+  }
   jevCustomCheckSoon(0);
 }
 
@@ -4219,7 +4618,7 @@ function openJevCustomDrawer(kept, opener) {
 function closeJevCustomDrawer({ saved = false } = {}) {
   const drawer = jevCustomDrawer;
   if (!drawer) return;
-  const unsaved = !saved && JSON.stringify(jevCustomDraftOf(el("jev-custom-form"))) !== drawer.opened;
+  const unsaved = !saved && jevCustomDrawerState(el("jev-custom-form")) !== drawer.opened;
   if (unsaved && !drawer.warned) {
     drawer.warned = true;
     el("jev-custom-unsaved").hidden = false;
@@ -4238,6 +4637,15 @@ function jevCustomEdited(event) {
   const form = el("jev-custom-form");
   const rules = jevCustomRules();
   const target = event.target;
+  drawer.warned = false;
+  el("jev-custom-unsaved").hidden = true;
+  // When it asks is not in the draft core checks: a word typed or the box
+  // ticked asks nothing of it.
+  if (target.name === "askWhen" || target.name === "askEdited") {
+    target.removeAttribute("aria-invalid");
+    jevCustomAskWhenRetold();
+    return;
+  }
   if (target.name === "kind") jevCustomAnswerFields(form, jevCustomBlankAnswer(target.value, rules), rules);
   if (target.name === "at") {
     const point = rules.points.find((one) => one.at === target.value);
@@ -4245,13 +4653,16 @@ function jevCustomEdited(event) {
   }
   if (target.name === "actFrom") target.value = String(Math.round(Number(target.value) * 100) / 100);
   jevCustomFieldsShown(form);
-  drawer.warned = false;
-  el("jev-custom-unsaved").hidden = true;
   jevCustomCheckSoon();
 }
 
 /* Add an option or a level, or take one away. */
 function jevCustomOptionPressed(event) {
+  const word = event.target.closest("[data-jev-custom-word-add], [data-jev-custom-word-remove]");
+  if (word && jevCustomDrawer) {
+    jevCustomWordPressed(word);
+    return;
+  }
   const button = event.target.closest("[data-jev-custom-add], [data-jev-custom-remove], [data-jev-custom-move]");
   const form = el("jev-custom-form");
   const rules = jevCustomRules();
@@ -4355,11 +4766,19 @@ async function saveJevCustomDrawer() {
   const drawer = jevCustomDrawer;
   const save = el("jev-custom-save");
   if (!drawer || save.disabled) return;
+  // A word typed and not yet put in is put in first, as 「넣기」 would; one
+  // refused stays in its field, said there, and nothing is saved.
+  const typed = el("jev-custom-form").querySelector("[name='askWhen']");
+  if (typed && typed.value.trim() && !typed.closest("[hidden]")) {
+    jevCustomAddWord(el("jev-custom-form"));
+    if (typed.value.trim()) return;
+  }
   drawer.saving = true;
   save.disabled = true;
   const draft = jevCustomDraftOf(el("jev-custom-form"));
+  const askWhen = jevCustomAskWhenOf(el("jev-custom-form"));
   try {
-    jevCustom = await invoke("save_custom_decision", { draft });
+    jevCustom = await invoke("save_custom_decision", { draft, askWhen });
   } catch (failure) {
     drawer.saving = false;
     if (jevCustomDrawer !== drawer) return;
@@ -4432,6 +4851,12 @@ el("jev-custom-scrim").addEventListener("mousedown", (event) => {
 el("jev-custom-form").addEventListener("input", jevCustomEdited);
 el("jev-custom-form").addEventListener("click", jevCustomOptionPressed);
 el("jev-custom-form").addEventListener("submit", (event) => event.preventDefault());
+el("jev-custom-form").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && event.target.matches?.("[name='askWhen']")) {
+    event.preventDefault();
+    jevCustomAddWord(el("jev-custom-form"));
+  }
+});
 el("jev-custom-delete-ok").addEventListener("click", () => void confirmJevCustomDelete());
 el("jev-custom-delete-cancel").addEventListener("click", closeJevCustomDelete);
 el("jev-custom-delete-scrim").addEventListener("mousedown", (event) => {
