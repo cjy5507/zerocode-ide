@@ -4044,7 +4044,7 @@ pub(super) async fn emulator_step(
 /// One look of a `parallel`, answered in a batch's shape so every group of the
 /// answer reads alike. A look is no act: it takes no turn, and a stopped
 /// operator still answers it.
-fn look_group(
+pub(super) fn look_group(
     look: &[String],
     mut step: impl FnMut(&[String]) -> zerocode_hookd::TeamAnswer,
 ) -> zerocode_hookd::TeamAnswer {

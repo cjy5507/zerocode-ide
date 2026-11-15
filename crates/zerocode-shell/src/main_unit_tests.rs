@@ -23127,6 +23127,50 @@ pub(crate) mod computer_desktop_wait {
     /// never refuses another's run.
     pub(crate) static ONE_HAND: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// A parallel's look answers in a batch's shape — one step, carrying the
+    /// look's whole result — so every group of a parallel's answer reads alike.
+    #[test]
+    fn a_parallels_look_answers_in_a_batchs_shape_with_its_own_result() {
+        let look: Vec<String> = ["get-app-state", "--app", "Fixture", "--json"]
+            .map(str::to_owned)
+            .to_vec();
+        let mut asked = Vec::new();
+        let answer = crate::agent_tools_runtime::look_group(&look, |step| {
+            asked.push(step.to_vec());
+            crate::agent_tools_runtime::computer_said(
+                serde_json::json!({ "ok": true, "result": { "snapshot": { "treeText": "0 window" } } })
+                    .to_string(),
+            )
+        });
+        assert_eq!(asked, [look], "the look goes down the lone command's road once");
+        assert_eq!(answer.exit_code, 0);
+        let said = envelope(&answer);
+        assert_eq!(
+            (&said["result"]["ran"], &said["result"]["of"]),
+            (&serde_json::json!(1), &serde_json::json!(1))
+        );
+        assert_eq!(said["result"]["steps"][0]["verb"], "get-app-state");
+        assert_eq!(
+            said["result"]["steps"][0]["result"]["snapshot"]["treeText"],
+            "0 window"
+        );
+    }
+
+    /// A look the door refused is that group's refusal, by the look's own code.
+    #[test]
+    fn a_parallels_refused_look_is_refused_by_the_looks_own_code() {
+        let look: Vec<String> = ["get-app-state", "--app", "Gone", "--json"]
+            .map(str::to_owned)
+            .to_vec();
+        let answer = crate::agent_tools_runtime::look_group(&look, |_| {
+            crate::agent_tools_runtime::computer_cli_error(true, "app_not_found", "app 'Gone' not found")
+        });
+        assert_eq!(answer.exit_code, 1);
+        let said = envelope(&answer);
+        assert_eq!(said["error"]["code"], "app_not_found");
+        assert_eq!(said["result"]["refusedAt"], 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_omitted_background_flag_does_not_allow_a_shared_desktop_process() {
