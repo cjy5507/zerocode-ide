@@ -565,7 +565,7 @@ fn doing_tasks_section_requires_solo_competing_hypotheses() {
     let sections = SystemPromptBuilder::new().build();
     let doing = sections
         .iter()
-        .find(|s| s.starts_with("# Doing tasks"))
+        .find(|s| s.starts_with("# Task work"))
         .expect("doing-tasks section should be present");
     // Solo turns must still widen the angle: form competing explanations and rule
     // out the wrong ones, not lock onto the first plausible cause.
@@ -595,8 +595,8 @@ fn a_prompt_ablation_arm_drops_what_it_names_and_keeps_what_it_must() {
     let heading_of = |sections: &[String], prefix: &str| {
         sections.iter().any(|s| s.starts_with(prefix))
     };
-    assert!(heading_of(&full, "# Doing tasks"));
-    assert!(heading_of(&full, "# Executing actions with care"));
+    assert!(heading_of(&full, "# Task work"));
+    assert!(heading_of(&full, "# Action scope and permission"));
 
     // Named: it leaves, and nothing else does.
     let held = PromptAblation::parse("doing_tasks").expect("parses");
@@ -610,7 +610,7 @@ fn a_prompt_ablation_arm_drops_what_it_names_and_keeps_what_it_must() {
         })
         .cloned()
         .collect();
-    assert!(!heading_of(&arm, "# Doing tasks"), "the named section must leave");
+    assert!(!heading_of(&arm, "# Task work"), "the named section must leave");
     assert_eq!(arm.len() + 1, full.len(), "exactly one section leaves");
 
     // Blanket: the safety sections stay anyway.
@@ -626,7 +626,7 @@ fn a_prompt_ablation_arm_drops_what_it_names_and_keeps_what_it_must() {
         .cloned()
         .collect();
     assert!(
-        heading_of(&floor, "# Executing actions with care"),
+        heading_of(&floor, "# Action scope and permission"),
         "`all` must not disarm the care-with-actions policy"
     );
     assert!(
@@ -639,7 +639,7 @@ fn a_prompt_ablation_arm_drops_what_it_names_and_keeps_what_it_must() {
     );
 }
 
-/// `# Executing actions with care` must ship, and ship cacheably.
+/// `# Action scope and permission` must ship, and ship cacheably.
 ///
 /// Found by ablation: each of the twelve static sections was removed in turn
 /// and the prompt suite re-run. Eleven turned something red. This one turned
@@ -658,7 +658,7 @@ fn build_includes_actions_section_before_boundary() {
         .expect("dynamic boundary should be present");
     let actions = sections
         .iter()
-        .position(|s| s.starts_with("# Executing actions with care"))
+        .position(|s| s.starts_with("# Action scope and permission"))
         .expect("the care-with-actions section must ship");
     assert!(
         actions < boundary,
@@ -667,11 +667,11 @@ fn build_includes_actions_section_before_boundary() {
     // The two rules it exists for, named so a rewrite cannot quietly drop one.
     let body = &sections[actions];
     assert!(
-        body.contains("reversibility and blast radius"),
+        body.contains("reversibility") && body.contains("blast radius"),
         "the blast-radius rule must survive a rewrite: {body}"
     );
     assert!(
-        body.contains("Before deleting or overwriting"),
+        body.contains("before deleting or overwriting"),
         "the look-before-you-delete rule must survive a rewrite: {body}"
     );
 }
@@ -1010,6 +1010,109 @@ fn the_manual_opens_in_zos_own_words_after_the_identity_line() {
     }
     for sentence in [INTRO_ROLE, INTRO_ROLE_WITH_OUTPUT_STYLE, INTRO_LINK_RULE] {
         assert!(!sentence.contains("  ") && !sentence.contains('\n'), "{sentence:?}");
+    }
+}
+
+#[test]
+fn the_manual_sections_use_zos_own_words() {
+    for styled in [false, true] {
+        let mut builder = SystemPromptBuilder::new();
+        if styled {
+            builder = builder.with_output_style("Plain", "Answer plainly.");
+        }
+        let prompt = builder.render();
+        for copied in [
+            "# Doing tasks\n",
+            "# Executing actions with care\n",
+            "Tools are executed in a user-selected permission mode.",
+            "If a tool is not allowed automatically, the user may be prompted to approve or deny it.",
+            "A denied call means the user declined it — adjust your approach; do not retry the same call verbatim.",
+            "Tool results and user messages may include <system-reminder> or other tags carrying system information.",
+            "Users may configure hooks that behave like user feedback when they block or redirect a tool call.",
+            "The system may automatically compress prior messages as context grows; a summary plus the remaining context carries into the next window so work continues — do not wrap up early or hand off mid-task just because the conversation is long.",
+            "Do not create files unless they are required to complete the task.",
+            "Be careful not to introduce security vulnerabilities such as command injection, XSS, or SQL injection.",
+            "Consider reversibility and blast radius.",
+            "Local edits/tests are usually safe; shared-system, publishing, deletion, and other high-impact actions need explicit user or durable-workspace authorization, which never transfers between contexts.",
+            "Before deleting or overwriting, inspect the target and stop if it differs from its description or is not yours.",
+            "Before state-changing commands, verify the evidence supports that exact action rather than a lookalike failure.",
+        ] {
+            assert!(!prompt.contains(copied), "the manual still carries {copied:?}");
+        }
+    }
+}
+
+#[test]
+fn the_reworded_manual_keeps_its_system_and_task_rules() {
+    let system = super::get_simple_system_section();
+    assert!(system.starts_with("# System\n"));
+    for term in [
+        "permission mode", "user chose", "automatic permission", "approval or refusal",
+        "user's decision", "instead of repeating that exact call", "<system-reminder>",
+        "system information", "external sources", "prompt injection", "hooks",
+        "stop or redirect", "user feedback", "compressed automatically", "summary",
+        "retained context", "next window", "no reason to finish early or hand work off",
+    ] {
+        assert!(system.contains(term), "system rule lost {term:?}: {system}");
+    }
+    assert_eq!(system.lines().filter(|line| line.starts_with(" - ")).count(), 6);
+
+    let tasks = super::get_simple_doing_tasks_section();
+    assert!(tasks.starts_with("# Task work\n"));
+    for term in [
+        "Create a file only when completing the request requires it",
+        "security vulnerabilities", "command injection", "XSS", "SQL injection",
+        "Read relevant code before changing it", "tightly scoped", "character-for-character",
+        "diagnose the failure", "competing explanations", "verify visually",
+        "include failures", "name skipped checks",
+    ] {
+        assert!(tasks.contains(term), "task rule lost {term:?}: {tasks}");
+    }
+    assert_eq!(tasks.lines().filter(|line| line.starts_with(" - ")).count(), 11);
+}
+
+#[test]
+fn the_reworded_action_policy_keeps_its_permission_boundaries() {
+    let actions = super::get_actions_section();
+    assert!(actions.starts_with("# Action scope and permission\n"));
+    for term in [
+        "reversibility", "blast radius", "Local edits/tests are usually safe",
+        "shared-system actions", "publishing", "deletion", "high-impact",
+        "explicit user or durable-workspace authorization", "valid only in that context",
+        "Inspect the target before deleting or overwriting", "stop if it is not yours",
+        "differs from its description", "state-changing commands", "evidence",
+        "that exact action", "not a lookalike failure",
+    ] {
+        assert!(actions.contains(term), "action rule lost {term:?}: {actions}");
+    }
+}
+
+#[test]
+fn the_reworded_manual_does_not_grow() {
+    // Full v1.1.153 prompt budgets, with a fixed environment and model. The
+    // unchanged OAuth identity line is measured separately from the manual.
+    for (mode, styled, max_chars, max_bytes) in [
+        (PromptMode::Interactive, false, 15_962, 16_010),
+        (PromptMode::Interactive, true, 16_014, 16_062),
+        (PromptMode::Autonomous, false, 15_984, 16_032),
+        (PromptMode::Autonomous, true, 16_036, 16_084),
+        (PromptMode::Subagent, false, 15_063, 15_103),
+        (PromptMode::Subagent, true, 15_115, 15_155),
+    ] {
+        let mut builder = SystemPromptBuilder::new()
+            .with_mode(mode)
+            .with_os("test", "0")
+            .with_model("prompt-budget-test");
+        if styled {
+            builder = builder.with_output_style("Plain", "Answer plainly.");
+        }
+        let prompt = builder.render();
+        assert!(prompt.starts_with(CLAUDE_CODE_IDENTITY));
+        let chars = prompt.chars().count() - CLAUDE_CODE_IDENTITY.chars().count();
+        let bytes = prompt.len() - CLAUDE_CODE_IDENTITY.len();
+        eprintln!("{mode:?} styled={styled}: {chars}/{max_chars} chars, {bytes}/{max_bytes} bytes (identity excluded)");
+        assert!(chars <= max_chars, "{mode:?} styled={styled}: {chars} characters");
+        assert!(bytes <= max_bytes, "{mode:?} styled={styled}: {bytes} bytes");
     }
 }
 
@@ -1556,7 +1659,7 @@ fn the_delegation_rubric_is_on_by_default_and_off_without_the_spawn_family() {
         "with nothing to delegate to, the rubric must come out"
     );
     // Only that section leaves. The rest of the harness is unrelated to spawning.
-    for kept in ["# Doing tasks", "# Responding to the user"] {
+    for kept in ["# Task work", "# Responding to the user"] {
         assert!(off.contains(kept), "{kept} must survive: unrelated to delegation");
     }
     assert!(

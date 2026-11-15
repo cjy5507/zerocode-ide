@@ -32,10 +32,10 @@ pub const PROMPT_ABLATION_ENV: &str = "ZO_ABLATE_PROMPT";
 /// an experiment's clothes.
 const NOT_ABLATABLE: &[&str] = &["executing_actions_with_care", "context_trust_label_v1"];
 
-/// A heading (`"# Doing tasks"`) to its stable ablation key (`"doing_tasks"`).
+/// A heading (`"# Task work"`) to its stable ablation key (`"doing_tasks"`).
 ///
-/// Derived from the shipped heading rather than written out, so the vocabulary
-/// an experiment types cannot drift from the sections that actually exist.
+/// Most keys come from the shipped heading. Renamed sections keep their
+/// original keys so existing experiment specs and safety exclusions still work.
 ///
 /// Idempotent: a key fed back in returns itself, so a spec may be typed either
 /// way. Dropping `_` instead of keeping it as a separator was the first bug
@@ -43,7 +43,7 @@ const NOT_ABLATABLE: &[&str] = &["executing_actions_with_care", "context_trust_l
 /// comparison miss, so a safety section became holdable.
 #[must_use]
 pub fn section_key(heading: &str) -> String {
-    heading
+    let key = heading
         .trim_start_matches('#')
         .trim()
         .chars()
@@ -60,7 +60,12 @@ pub fn section_key(heading: &str) -> String {
         .split('_')
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
-        .join("_")
+        .join("_");
+    match key.as_str() {
+        "task_work" => "doing_tasks".to_string(),
+        "action_scope_and_permission" => "executing_actions_with_care".to_string(),
+        _ => key,
+    }
 }
 
 /// A malformed holdout spec.
@@ -184,6 +189,7 @@ mod tests {
     #[test]
     fn a_key_comes_from_the_heading_that_ships() {
         assert_eq!(section_key("# Doing tasks"), "doing_tasks");
+        assert_eq!(section_key("# Task work"), "doing_tasks");
         assert_eq!(
             section_key("# Delegation and workflow routing"),
             "delegation_and_workflow_routing"
@@ -191,6 +197,26 @@ mod tests {
         assert_eq!(section_key("# Context Trust Label v1"), "context_trust_label_v1");
         // Already a key: idempotent, so a spec may be typed either way.
         assert_eq!(section_key("doing_tasks"), "doing_tasks");
+    }
+
+    #[test]
+    fn renamed_headings_keep_their_experiment_keys_and_safety_exclusions() {
+        for spec in ["doing_tasks", "# Doing tasks", "task_work", "# Task work"] {
+            let arm = PromptAblation::parse(spec).expect("task work is ablatable");
+            assert!(arm.suppresses("# Task work"), "{spec}");
+            assert_eq!(arm.keys(), vec!["doing_tasks"]);
+        }
+        for spec in [
+            "executing_actions_with_care",
+            "# Executing actions with care",
+            "action_scope_and_permission",
+            "# Action scope and permission",
+        ] {
+            let error = PromptAblation::parse(spec).expect_err("action policy must stay");
+            assert!(error.not_ablatable, "{spec}");
+        }
+        let all = PromptAblation::parse("all").expect("blanket arm");
+        assert!(!all.suppresses("# Action scope and permission"));
     }
 
     /// A treatment that silently failed to apply is worse than no measurement,
