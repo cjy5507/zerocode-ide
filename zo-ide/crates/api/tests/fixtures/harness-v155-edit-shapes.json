@@ -1,0 +1,298 @@
+{
+  "source": "v1.1.155",
+  "models": [
+    {
+      "ids": [
+        "gpt-5.6-sol"
+      ],
+      "edit_tool": "apply_patch"
+    },
+    {
+      "ids": [
+        "gpt-5.6-terra"
+      ],
+      "edit_tool": "apply_patch"
+    },
+    {
+      "ids": [
+        "gpt-5.6-luna"
+      ],
+      "edit_tool": "apply_patch"
+    },
+    {
+      "ids": [
+        "gpt",
+        "gpt-5.5",
+        "gpt-5.5-fast",
+        "gpt-5.5-2026-04-23"
+      ],
+      "edit_tool": "apply_patch"
+    },
+    {
+      "ids": [
+        "gpt-5.3-codex-spark"
+      ],
+      "edit_tool": "apply_patch"
+    },
+    {
+      "ids": [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "claude-fable-5-1"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "claude-fable-5"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "claude-opus-5-5"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "claude-opus-5"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "claude-opus-4-8"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "claude-sonnet-5"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "claude-haiku-4-5-20251001"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "gemini-3.6-flash"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "gemini-3.5-flash"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro-preview-customtools",
+        "gemini-3-pro-preview"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "gemini-3.1-flash-lite"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "gemini-3-flash",
+        "gemini-3-flash-preview"
+      ],
+      "edit_tool": "edit"
+    },
+    {
+      "ids": [
+        "o1",
+        "o3",
+        "o4"
+      ],
+      "edit_tool": "apply_patch"
+    },
+    {
+      "ids": [
+        "gpt-5"
+      ],
+      "edit_tool": "apply_patch"
+    }
+  ],
+  "aliases": [
+    {
+      "alias": "anthropic-latest",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "claude-latest",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "fable",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "claude-fable",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "claude-fable-5",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "opus",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "opus[1m]",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "claude-opus-4-8",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "sonnet",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "haiku",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "claude-opus",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "claude-opus[1m]",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "claude-sonnet",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "claude-haiku",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "openai-latest",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "gpt-5.6-sol",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "gpt-5.6-terra",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "gpt-5.6-luna",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "gpt-5.6",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "sol",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "terra",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "luna",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "spark",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "gpt-5.3-codex-spark",
+      "edit_tool": "apply_patch"
+    },
+    {
+      "alias": "google-latest",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3.6-flash",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3.1-pro-preview",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3.1-pro-preview-customtools",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3-pro-preview",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3.5-flash",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3-flash",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3-flash-preview",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3.1-flash-lite",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-pro",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-flash",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-flash-lite",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "gemini-3.5-pro",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "xai-latest",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "grok",
+      "edit_tool": "edit"
+    },
+    {
+      "alias": "ollama",
+      "edit_tool": "edit"
+    }
+  ]
+}

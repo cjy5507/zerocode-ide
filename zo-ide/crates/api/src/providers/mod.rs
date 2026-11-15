@@ -80,8 +80,9 @@ impl EditToolForm {
 
 /// The harness a model is driven with: what it is shown, as opposed to how a
 /// request reaches it (`wire`, effort, window). Resolved per model by
-/// [`harness_profile_for_model`]: the model's catalog row, then its lineup's
-/// `harness.by_provider` row, then the default — each field on its own, so a
+/// [`harness_profile_for_model`]: the model's catalog row, its name-token
+/// family's exact `harness.by_provider` key, its serving lineup, then the
+/// default — each field on its own, so a
 /// row states only where it differs. An operator overlay
 /// ([`MODEL_CONTEXT_WINDOWS_ENV`]) is read before the shipped catalog, which is
 /// how an experiment arm changes one field without a build.
@@ -134,8 +135,8 @@ impl HarnessDecl {
     }
 }
 
-/// The catalog's `harness` section: lineup defaults keyed by the provider
-/// spelling catalog rows use (`openai`, `anthropic`, `google`).
+/// The catalog's `harness` section: exact name-token family keys, or lineup
+/// defaults keyed by the provider spelling catalog rows use.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct HarnessSection {
@@ -144,10 +145,7 @@ struct HarnessSection {
 
 impl HarnessSection {
     fn for_family(&self, family: &str) -> Option<&HarnessDecl> {
-        self.by_provider.iter().find(|(key, _)| {
-            key.eq_ignore_ascii_case(family)
-                || first_party_lineup(family).is_some_and(|provider| provider_kind_from_key(key) == Some(provider))
-        }).map(|(_, decl)| decl)
+        self.by_provider.iter().find(|(key, _)| key.eq_ignore_ascii_case(family)).map(|(_, decl)| decl)
     }
 
     fn for_provider(&self, provider: ProviderKind) -> Option<&HarnessDecl> {
@@ -5424,6 +5422,93 @@ mod tests {
                     None => std::env::remove_var(crate::CUSTOM_PROVIDERS_ENV),
                 }
                 crate::refresh_custom_providers_from_env();
+            }
+        }
+
+        struct ShippedRegistry;
+
+        impl ShippedRegistry {
+            fn new() -> Self {
+                super::super::reset_model_registry_for_tests();
+                Self
+            }
+        }
+
+        impl Drop for ShippedRegistry {
+            fn drop(&mut self) { super::super::reset_model_registry_for_tests(); }
+        }
+
+        // Frozen v1.1.155 resolution: model declaration, serving lineup, default.
+        // Keep this independent of the new name-family lookup.
+        fn v155_edit_tool(model: &str) -> EditToolForm {
+            let catalog = super::super::builtin_model_context_catalog();
+            let canonical = super::super::resolve_catalog_alias(model);
+            let entry = catalog.find_entry(model, &canonical);
+            if let Some(form) = entry.and_then(|row| row.harness).and_then(|decl| decl.edit_tool) {
+                return form;
+            }
+            let provider = entry.and_then(|row| row.provider.as_deref())
+                .and_then(super::super::provider_kind_from_key)
+                .or_else(|| super::super::catalog_provider_of(&canonical));
+            provider.and_then(|provider| catalog.harness.for_provider(provider))
+                .and_then(|decl| decl.edit_tool).unwrap_or_default()
+        }
+
+        #[test]
+        fn shipped_twenty_rows_and_forty_aliases_keep_the_v155_edit_tools() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+            let _providers = OwnProviders::new();
+            let _ollama = EnvVarGuard::set("OLLAMA_BASE_URL", None);
+            let _registry = ShippedRegistry::new();
+            let catalog = super::super::builtin_model_context_catalog();
+            let expected: serde_json::Value = serde_json::from_str(include_str!("../../tests/fixtures/harness-v155-edit-shapes.json")).expect("frozen v155 edit shapes");
+            let models = expected["models"].as_array().expect("model rows");
+            let aliases = expected["aliases"].as_array().expect("alias rows");
+            assert_eq!(catalog.models.len(), 20);
+            assert_eq!(models.len(), catalog.models.len());
+            assert_eq!(catalog.aliases.len(), 40);
+            assert_eq!(aliases.len(), catalog.aliases.len());
+            for (row, expected) in catalog.models.iter().zip(models) {
+                assert_eq!(serde_json::json!(row.ids), expected["ids"], "the shipped model rows moved");
+                for id in &row.ids {
+                    assert_eq!(v155_edit_tool(id).key(), expected["edit_tool"].as_str().unwrap(), "v155 model {id}");
+                    assert_eq!(harness_profile_for_model(id).edit_tool.key(), expected["edit_tool"].as_str().unwrap(), "model {id}");
+                }
+            }
+            for (row, expected) in catalog.aliases.iter().zip(aliases) {
+                assert_eq!(row.alias, expected["alias"].as_str().unwrap(), "the shipped alias rows moved");
+                assert_eq!(v155_edit_tool(&row.alias).key(), expected["edit_tool"].as_str().unwrap(), "v155 alias {}", row.alias);
+                assert_eq!(harness_profile_for_model(&row.alias).edit_tool.key(), expected["edit_tool"].as_str().unwrap(), "alias {}", row.alias);
+            }
+        }
+
+        #[test]
+        fn a_name_token_without_an_exact_family_bundle_keeps_the_legacy_shape() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+            let _providers = OwnProviders::new();
+            let _registry = ShippedRegistry::new();
+            for endpoint in [None, Some("http://127.0.0.1:1/v1")] {
+                let _ollama = EnvVarGuard::set("OLLAMA_BASE_URL", endpoint);
+                for id in ["chatgpt-4o-latest", "local-gpt-helper", "local-codex-helper"] {
+                    assert_eq!(v155_edit_tool(id), EditToolForm::Edit, "baseline {id}");
+                    assert_eq!(harness_profile_for_model(id).edit_tool, EditToolForm::Edit,
+                        "a name token must not change the legacy edit shape for {id}");
+                }
+            }
+        }
+
+        #[test]
+        fn reasoning_lineups_without_a_family_token_inherit_the_openai_shape() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+            let _providers = OwnProviders::new();
+            let _registry = ShippedRegistry::new();
+            for id in ["o1", "o3", "o4"] {
+                let profile = harness_profile_for_model(id);
+                assert_eq!(profile.edit_tool, EditToolForm::ApplyPatch, "{id}");
+                assert_eq!(profile.edit_tool_source, HarnessValueSource::Inherited, "{id}");
             }
         }
 
