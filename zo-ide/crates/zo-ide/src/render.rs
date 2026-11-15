@@ -153,6 +153,7 @@ impl TableState {
 struct RenderState {
     emphasis: usize,
     strong: usize,
+    strikethrough: usize,
     heading_level: Option<u8>,
     quote: usize,
     list_stack: Vec<ListKind>,
@@ -175,6 +176,9 @@ impl RenderState {
         }
         if self.emphasis > 0 {
             codes.push(3);
+        }
+        if self.strikethrough > 0 {
+            codes.push(9);
         }
 
         let mut color = if let Some(level) = self.heading_level {
@@ -290,8 +294,17 @@ impl TerminalRenderer {
                 state.heading_level = None;
                 output.push_str("\n\n");
             }
-            Event::End(TagEnd::Item) | Event::SoftBreak | Event::HardBreak => {
+            Event::End(TagEnd::Item) => {
                 state.append_raw(output, "\n");
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                state.append_raw(output, "\n");
+                if state.quote > 0 && !*in_code_block && state.table.is_none() {
+                    let bar = paint("│ ", self.color_theme.quote);
+                    for _ in 0..state.quote {
+                        state.append_raw(output, &bar);
+                    }
+                }
             }
             Event::Start(Tag::List(first_item)) => {
                 let kind = match first_item {
@@ -324,6 +337,10 @@ impl TerminalRenderer {
             Event::End(TagEnd::Emphasis) => state.emphasis = state.emphasis.saturating_sub(1),
             Event::Start(Tag::Strong) => state.strong += 1,
             Event::End(TagEnd::Strong) => state.strong = state.strong.saturating_sub(1),
+            Event::Start(Tag::Strikethrough) => state.strikethrough += 1,
+            Event::End(TagEnd::Strikethrough) => {
+                state.strikethrough = state.strikethrough.saturating_sub(1);
+            }
             Event::Code(code) => {
                 let rendered = paint(&format!("`{code}`"), self.color_theme.inline_code);
                 state.append_raw(output, &rendered);
@@ -617,8 +634,20 @@ fn apply_code_block_background(line: &str) -> String {
     format!("\u{1b}[48;5;236m{with_background}\u{1b}[0m{trailing_newline}")
 }
 
+fn parse_fence_run(trimmed: &str) -> Option<(char, usize, &str)> {
+    let first = trimmed.as_bytes().first().copied()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let len = trimmed.bytes().take_while(|&b| b == first).count();
+    if len < 3 {
+        return None;
+    }
+    Some((first as char, len, &trimmed[len..]))
+}
+
 fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
-    let mut in_fence = false;
+    let mut open_fence: Option<(char, usize)> = None;
     let mut last_boundary = None;
 
     for (offset, line) in markdown.split_inclusive('\n').scan(0usize, |cursor, line| {
@@ -627,16 +656,21 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
         Some((start, line))
     }) {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            if !in_fence {
-                last_boundary = Some(offset + line.len());
+        if let Some((open_char, open_len)) = open_fence {
+            if let Some((marker, len, rest)) = parse_fence_run(trimmed) {
+                if marker == open_char && len >= open_len && rest.trim().is_empty() {
+                    open_fence = None;
+                    last_boundary = Some(offset + line.len());
+                }
             }
             continue;
         }
 
-        if in_fence {
-            continue;
+        if let Some((marker, len, info)) = parse_fence_run(trimmed) {
+            if marker != '`' || !info.contains('`') {
+                open_fence = Some((marker, len));
+                continue;
+            }
         }
 
         if trimmed.is_empty() {
@@ -648,7 +682,7 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
 }
 
 fn visible_width(input: &str) -> usize {
-    strip_ansi(input).chars().count()
+    unicode_width::UnicodeWidthStr::width(strip_ansi(input).as_str())
 }
 
 #[cfg(test)]
@@ -817,5 +851,81 @@ mod tests {
         assert!(heading.contains("\u{1b}[1;96mTitle\u{1b}[0m"), "{heading:?}");
         let code = renderer.render_markdown("run `ls` now");
         assert!(code.contains("\u{1b}[92m`ls`\u{1b}[0m"), "{code:?}");
+    }
+
+    #[test]
+    fn renders_cjk_tables_with_display_width_alignment() {
+        let renderer = TerminalRenderer::new();
+        let output = renderer.render_markdown(
+            "| 항목 | 설명 |\n| ---- | ---- |\n| 한글 | Korean |\n| ascii | 폭 |\n",
+        );
+        let plain = strip_ansi(&output);
+        let lines: Vec<&str> = plain.lines().collect();
+        assert_eq!(lines.len(), 4, "{plain:?}");
+
+        let expected_width = unicode_width::UnicodeWidthStr::width(lines[0]);
+        for (idx, line) in lines.iter().enumerate() {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(*line),
+                expected_width,
+                "row {idx} display width mismatch: {lines:#?}"
+            );
+        }
+
+        let bar_positions = |line: &str| -> Vec<usize> {
+            let mut cols = Vec::new();
+            let mut col = 0;
+            for ch in line.chars() {
+                if ch == '│' || ch == '┼' {
+                    cols.push(col);
+                }
+                col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            }
+            cols
+        };
+        let expected_cols = bar_positions(lines[0]);
+        assert_eq!(expected_cols.len(), 3, "{lines:#?}");
+        for (idx, line) in lines.iter().enumerate() {
+            assert_eq!(
+                bar_positions(line),
+                expected_cols,
+                "row {idx} border alignment mismatch: {lines:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_state_keeps_outer_fence_open_across_nested_or_mismatched_fences() {
+        let renderer = TerminalRenderer::new();
+        let mut state = MarkdownStreamState::default();
+
+        assert_eq!(state.push(&renderer, "````markdown\n"), None);
+        assert_eq!(state.push(&renderer, "```rust\nlet x = 1;\n```\n"), None);
+        assert_eq!(state.push(&renderer, "~~~\nnested\n~~~\n"), None);
+        assert_eq!(state.push(&renderer, "\n"), None);
+
+        let flushed = state
+            .push(&renderer, "````\n")
+            .expect("closing 4-backtick fence flushes the outer block");
+        let plain = strip_ansi(&flushed);
+        assert!(plain.contains("```rust"), "{plain:?}");
+        assert!(plain.contains("let x = 1;"), "{plain:?}");
+        assert!(plain.contains("~~~"), "{plain:?}");
+    }
+
+    #[test]
+    fn renders_strikethrough_and_multiline_blockquotes() {
+        let renderer = TerminalRenderer::new();
+
+        let strike = renderer.render_markdown("use ~~deprecated~~ now");
+        assert!(
+            strike.contains("\u{1b}[9mdeprecated\u{1b}[0m"),
+            "strikethrough must emit SGR 9: {strike:?}"
+        );
+
+        let quote = renderer.render_markdown("> first line\n> second line");
+        let quote_plain = strip_ansi(&quote);
+        let quote_lines: Vec<&str> = quote_plain.lines().collect();
+        assert_eq!(quote_lines, vec!["│ first line", "│ second line"]);
     }
 }

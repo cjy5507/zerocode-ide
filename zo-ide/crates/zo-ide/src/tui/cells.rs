@@ -1384,6 +1384,7 @@ impl MarkdownStream {
         let opens = self.pending.trim_start();
         if self.holdback.state() != holdback::State::None
             || self.open_code_fence.is_some()
+            || self.holdback.in_fence()
             || opens.starts_with("```")
             || opens.starts_with("~~~")
             || opens.starts_with('|')
@@ -1391,12 +1392,13 @@ impl MarkdownStream {
             return Vec::new();
         }
         let block = &self.committed[self.stable_cut..];
-        if block.len() + self.pending.len() > UNFINISHED_MAX_SOURCE {
+        let pending = close_unfinished_inline_spans(&self.pending);
+        if block.len() + pending.len() > UNFINISHED_MAX_SOURCE {
             return Vec::new();
         }
-        let mut source = String::with_capacity(block.len() + self.pending.len() + 1);
+        let mut source = String::with_capacity(block.len() + pending.len() + 1);
         source.push_str(block);
-        source.push_str(&self.pending);
+        source.push_str(&pending);
         source.push('\n');
         let written = self.segment(&source, !self.stable_marker);
         // The rows from the stable prefix on, built as `render_mutable_tail`
@@ -1739,6 +1741,120 @@ impl MarkdownStream {
         }
         self.render_mutable_tail();
     }
+}
+
+fn update_inline_delimiter_stack(
+    stack: &mut Vec<&'static str>,
+    delim: &'static str,
+    prev_char: Option<char>,
+    next_char: Option<char>,
+) {
+    let can_close = prev_char.is_some_and(|ch| !ch.is_whitespace());
+    if can_close {
+        if let Some(pos) = stack.iter().rposition(|&open| open == delim) {
+            stack.truncate(pos);
+            return;
+        }
+    }
+    let followed_by_non_ws = next_char.is_some_and(|ch| !ch.is_whitespace());
+    let valid_single_star = delim != "*" || !prev_char.is_some_and(char::is_alphanumeric);
+    if followed_by_non_ws && valid_single_star {
+        stack.push(delim);
+    }
+}
+
+/// Closes unclosed inline code and emphasis/strong/strikethrough spans on the
+/// still-unfinished line so `pulldown-cmark` styles streaming spans immediately
+/// without raw delimiter flicker.
+fn close_unfinished_inline_spans(pending: &str) -> std::borrow::Cow<'_, str> {
+    let mut stack: Vec<&'static str> = Vec::new();
+    let mut open_code: Option<usize> = None;
+    let mut code_has_non_backtick = false;
+    let mut prev_char: Option<char> = None;
+
+    let bytes = pending.as_bytes();
+    let mut i = 0;
+    while i < pending.len() {
+        if let Some(open_len) = open_code {
+            if bytes[i] == b'`' {
+                let run_len = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+                if run_len == open_len {
+                    open_code = None;
+                    code_has_non_backtick = false;
+                }
+                i += run_len;
+                prev_char = Some('`');
+            } else {
+                code_has_non_backtick = true;
+                let ch = pending[i..].chars().next().expect("i < pending.len()");
+                i += ch.len_utf8();
+                prev_char = Some(ch);
+            }
+            continue;
+        }
+
+        if bytes[i] == b'\\' {
+            i += 1;
+            prev_char = pending[i..].chars().next().map_or(Some('\\'), |ch| {
+                i += ch.len_utf8();
+                Some(ch)
+            });
+            continue;
+        }
+
+        if bytes[i] == b'`' {
+            let run_len = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+            open_code = Some(run_len);
+            code_has_non_backtick = false;
+            i += run_len;
+            prev_char = Some('`');
+            continue;
+        }
+
+        let delim = if pending[i..].starts_with("**") {
+            Some("**")
+        } else if pending[i..].starts_with("~~") {
+            Some("~~")
+        } else if bytes[i] == b'*' {
+            Some("*")
+        } else {
+            None
+        };
+
+        if let Some(delim) = delim {
+            let next_char = pending[i + delim.len()..].chars().next();
+            update_inline_delimiter_stack(&mut stack, delim, prev_char, next_char);
+            i += delim.len();
+            prev_char = delim.chars().next_back();
+            continue;
+        }
+
+        let ch = pending[i..].chars().next().expect("i < pending.len()");
+        i += ch.len_utf8();
+        prev_char = Some(ch);
+    }
+
+    let close_code = open_code
+        .filter(|&n| (1..=2).contains(&n) && code_has_non_backtick && !pending.ends_with('`'));
+    if close_code.is_none() && stack.is_empty() {
+        return std::borrow::Cow::Borrowed(pending);
+    }
+
+    let mut out = String::with_capacity(pending.len() + close_code.unwrap_or(0) + stack.len() * 2);
+    out.push_str(pending);
+    if let Some(n) = close_code {
+        for _ in 0..n {
+            out.push('`');
+        }
+    }
+    if !stack.is_empty() {
+        let trimmed_len = out.trim_end_matches([' ', '\t']).len();
+        out.truncate(trimmed_len);
+        for delim in stack.into_iter().rev() {
+            out.push_str(delim);
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -2282,6 +2398,10 @@ mod tests {
             ("| a | b |\n| --- | --- |\n", "| 1 | 2"),
             ("intro\n\n", "```rust"),
             ("intro\n\n```rust\nlet a = 1;\n", "let b = 2;"),
+            ("intro\n\n", "```"),
+            ("intro\n\n```\nplain code\n", "more plain code"),
+            ("intro\n\n", "~~~"),
+            ("intro\n\n~~~\ntilde code\n", "more tilde code"),
         ] {
             let mut stream = MarkdownStream::answer(40).showing_unfinished(true);
             stream.push(before);
@@ -2291,6 +2411,101 @@ mod tests {
             stream.refresh_unfinished();
             assert_eq!(plain_tail(&stream), standing, "{before:?} + {line:?}");
         }
+    }
+
+    #[test]
+    fn an_unfinished_line_styles_open_inline_spans_without_delimiter_flicker() {
+        let mut bold_stream = MarkdownStream::answer(60).showing_unfinished(true);
+        bold_stream.push("Here is **bol");
+        bold_stream.refresh_unfinished();
+        assert!(
+            !plain_tail(&bold_stream).join("\n").contains("**"),
+            "open bold should not leak raw **: {:?}",
+            plain_tail(&bold_stream)
+        );
+        assert!(
+            bold_stream
+                .tail()
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.text.contains("bol") && span.style.bold),
+            "open bold should style 'bol': {:?}",
+            bold_stream.tail()
+        );
+
+        bold_stream.push("d ");
+        bold_stream.refresh_unfinished();
+        assert!(
+            !plain_tail(&bold_stream).join("\n").contains("**"),
+            "trailing space mid-bold should not leak raw **: {:?}",
+            plain_tail(&bold_stream)
+        );
+        assert!(
+            bold_stream
+                .tail()
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.text.contains("bold") && span.style.bold),
+            "trailing space mid-bold should keep 'bold' bold: {:?}",
+            bold_stream.tail()
+        );
+
+        let mut code_stream = MarkdownStream::answer(60).showing_unfinished(true);
+        code_stream.push("Here is `cod");
+        code_stream.refresh_unfinished();
+        assert!(
+            !plain_tail(&code_stream).join("\n").contains('`'),
+            "open inline code should not leak raw backtick: {:?}",
+            plain_tail(&code_stream)
+        );
+        assert!(
+            code_stream
+                .tail()
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| {
+                    span.text.contains("cod")
+                        && span.style.fg == Some(crate::tui::ansi::Color::CYAN)
+                }),
+            "open inline code should style 'cod': {:?}",
+            code_stream.tail()
+        );
+
+        let mut strike_stream = MarkdownStream::answer(60).showing_unfinished(true);
+        strike_stream.push("~~old");
+        strike_stream.refresh_unfinished();
+        assert!(
+            !plain_tail(&strike_stream).join("\n").contains("~~"),
+            "open strikethrough should not leak raw ~~: {:?}",
+            plain_tail(&strike_stream)
+        );
+        assert!(
+            strike_stream
+                .tail()
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.text.contains("old") && span.style.strike),
+            "open strikethrough should style 'old': {:?}",
+            strike_stream.tail()
+        );
+
+        let mut list_stream = MarkdownStream::answer(60).showing_unfinished(true);
+        list_stream.push("- item");
+        list_stream.refresh_unfinished();
+        let list_plain = plain_tail(&list_stream).join("\n");
+        assert!(
+            list_plain.contains("item") && !list_plain.contains('*'),
+            "list marker should not invent *: {list_plain:?}"
+        );
+
+        let mut mul_stream = MarkdownStream::answer(60).showing_unfinished(true);
+        mul_stream.push("a * b");
+        mul_stream.refresh_unfinished();
+        let mul_plain = plain_tail(&mul_stream).join("\n");
+        assert!(
+            mul_plain.ends_with("a * b") && mul_plain.matches('*').count() == 1,
+            "infix 'a * b' should not invent closing *: {mul_plain:?}"
+        );
     }
 
     /// A stream that was not asked to keeps codex's silence, and thinking is

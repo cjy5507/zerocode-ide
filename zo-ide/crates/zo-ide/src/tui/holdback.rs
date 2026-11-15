@@ -156,6 +156,11 @@ impl Scanner {
         }
     }
 
+    #[must_use]
+    pub fn in_fence(&self) -> bool {
+        self.fence_tracker.kind() != FenceKind::Outside
+    }
+
     /// 새로 확정된 원문으로 스캐너를 전진시킨다. 조각에는 이제 커밋해도 되는
     /// 원문(보통 개행으로 끝나는 줄들)만 온다 — 끝나지 않은 행을 구조 신호로
     /// 읽지 않게 하기 위한 규율이다(원본 주석).
