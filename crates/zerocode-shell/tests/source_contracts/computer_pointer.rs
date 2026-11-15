@@ -59,3 +59,24 @@ fn an_agent_has_a_pointer_for_each_app_it_works_in_and_none_gives_way_to_another
         "a bound on how many pointers are drawn is back"
     );
 }
+
+/// A pointer's window that is off the helper's own list while still on the
+/// screen reads as somebody's window over the target, and an act that checks
+/// what covers its point is refused for it.
+#[test]
+fn a_pointer_that_goes_leaves_the_screen_before_it_leaves_the_helpers_list() {
+    let start = OVERLAY
+        .find("private func retire(_ key: PointerKey)")
+        .expect("the overlay's retire");
+    let retire = &OVERLAY[start..];
+    let closed = retire
+        .find("panel.close()")
+        .expect("retire closes the pointer's windows");
+    let struck = retire
+        .find("Self.pointerWindowIDs.subtract(")
+        .expect("retire strikes them from the helper's list");
+    assert!(
+        closed < struck,
+        "a pointer is struck from the helper's list while it is still on the screen"
+    );
+}
