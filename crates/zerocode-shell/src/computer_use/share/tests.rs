@@ -1216,6 +1216,41 @@ fn a_look_brings_no_app_back_into_use() {
     assert_eq!(now["panels"], json!([]), "{now}");
 }
 
+/// A press the person is asked about waits for their answer up to two
+/// minutes, and nothing reaches its app meanwhile. The minute does not run
+/// while they think: allowed after it, the press would otherwise go with its
+/// app — and the band's take-control — gone from the band. The minute begins
+/// when the card closes (t-109811).
+#[test]
+fn nothing_goes_quiet_while_the_person_is_asked() {
+    let (_person, _) = person(Decision::Allowed);
+    let _request = admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    stand_in::asking(true);
+    stand_in::advance(SHARE_USE_LAPSES_MS + SHARE_USE_LAPSES_MS / 2);
+    assert!(lapse(), "the look goes on while the card stands");
+    assert_eq!(state()["target"], "sample", "its app stays on the band");
+    ensure_current().expect("allowed, the press goes with its app on the band");
+    stand_in::asking(false);
+    stand_in::advance(SHARE_USE_LAPSES_MS - 1);
+    assert!(lapse(), "the minute begins when the card closes");
+    stand_in::advance(1);
+    assert!(!lapse());
+    assert!(state()["target"].is_null());
+}
+
+/// An app that quit leaves at once, whatever the person is being asked.
+#[test]
+fn an_app_that_quit_leaves_while_the_person_is_asked() {
+    let round_trips = Rc::new(Cell::new(0));
+    let _helper = naming_helper(&round_trips);
+    let (_person, _) = person(Decision::Allowed);
+    admit(ComputerMethod::Click, &click("Sample")).expect("goes at once");
+    stand_in::asking(true);
+    stand_in::ended(&[4343]);
+    assert!(!lapse(), "nothing is left to look for");
+    assert!(state()["target"].is_null());
+}
+
 /// The host's own answer, not a test's: a child that was waited for is gone,
 /// and this process is not.
 #[cfg(unix)]

@@ -511,7 +511,19 @@ pub(crate) fn ensure_current() -> Result<(), ComputerUseError> {
 /// ended, and where sharing is not required one nothing reached for a minute.
 /// What the window kept for an app goes with it. Whether anything the band
 /// shows left.
+///
+/// The minute does not run while the person is being asked something. A press
+/// they are asked about waits for their answer up to two minutes and nothing
+/// reaches its app meanwhile: allowed after the minute, it would go with its
+/// app — and the band's take-control — gone from the band (t-109811). An app
+/// that quit leaves all the same.
 fn let_go(held: &mut Held, now: u64) -> bool {
+    if person_is_asked() {
+        let in_use: Vec<String> = held.share.targets().map(str::to_string).collect();
+        for app in &in_use {
+            held.share.used(app, now);
+        }
+    }
     let pids = &held.pids;
     let left = held
         .share
@@ -557,6 +569,20 @@ fn in_use_as(held: &Held, word: &str) -> Option<String> {
                 || pid.is_some_and(|pid| held.pids.get(*key) == Some(&pid))
         })
         .map(str::to_string)
+}
+
+/// Whether the person is being asked something now — a press's question, a
+/// card, their own turn: the window's word, and in a test the test's, so no
+/// test depends on a question another test has open.
+fn person_is_asked() -> bool {
+    #[cfg(test)]
+    {
+        stand_in::ASKING.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        super::confirm::asking()
+    }
 }
 
 /// Whether the process `pid` has ended: the host's word, and in a test the
@@ -862,6 +888,13 @@ pub(crate) mod stand_in {
         pub(super) static NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         /// The processes a test says have ended: none until it says.
         pub(super) static ENDED: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+        /// Whether a test says the person is being asked something.
+        pub(super) static ASKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// On this thread the person is, or is no longer, being asked something.
+    pub(crate) fn asking(asked: bool) {
+        ASKING.with(|asking| asking.set(asked));
     }
 
     /// On this thread the processes in `pids` have ended and every other runs.
@@ -884,6 +917,7 @@ pub(crate) mod stand_in {
             REQUIRED.with(|read| read.borrow_mut().take());
             NOTICES.with(|notices| notices.borrow_mut().clear());
             ENDED.with(|ended| ended.borrow_mut().clear());
+            ASKING.with(|asking| asking.set(false));
         }
     }
 
