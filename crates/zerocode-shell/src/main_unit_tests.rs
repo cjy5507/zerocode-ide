@@ -23209,7 +23209,7 @@ pub(crate) mod computer_desktop_wait {
             .map(str::to_owned)
             .to_vec();
         let mut asked = Vec::new();
-        let answer = crate::agent_tools_runtime::look_group(&look, |step| {
+        let answer = crate::agent_tools_runtime::look_group(&look, u64::MAX, |step| {
             asked.push(step.to_vec());
             crate::agent_tools_runtime::computer_said(
                 serde_json::json!({ "ok": true, "result": { "snapshot": { "treeText": "0 window" } } })
@@ -23236,13 +23236,75 @@ pub(crate) mod computer_desktop_wait {
         let look: Vec<String> = ["get-app-state", "--app", "Gone", "--json"]
             .map(str::to_owned)
             .to_vec();
-        let answer = crate::agent_tools_runtime::look_group(&look, |_| {
+        let answer = crate::agent_tools_runtime::look_group(&look, u64::MAX, |_| {
             crate::agent_tools_runtime::computer_cli_error(true, "app_not_found", "app 'Gone' not found")
         });
         assert_eq!(answer.exit_code, 1);
         let said = envelope(&answer);
         assert_eq!(said["error"]["code"], "app_not_found");
         assert_eq!(said["result"]["refusedAt"], 1);
+    }
+
+    /// A group that waited for a place has what is left of the request's
+    /// time (t-109578): the bridge gives up on the whole request, so a look
+    /// that could not end inside what is left is not begun, and its group
+    /// says it is late in a batch's words.
+    #[test]
+    fn a_parallels_look_with_no_time_left_is_not_begun_and_says_it_is_late() {
+        let look: Vec<String> = ["get-app-state", "--app", "Fixture", "--json"]
+            .map(str::to_owned)
+            .to_vec();
+        for left_ms in [0, 1] {
+            let mut asked = 0;
+            let answer = crate::agent_tools_runtime::look_group(&look, left_ms, |_| {
+                asked += 1;
+                crate::agent_tools_runtime::computer_said("{\"ok\":true}".to_string())
+            });
+            assert_eq!(asked, 0, "with {left_ms} ms left the look was begun");
+            assert_ne!(answer.exit_code, 0);
+            let said = envelope(&answer);
+            assert_eq!(
+                said["error"]["code"],
+                zerocode_core::computer_use_protocol::error_code::BATCH_DEADLINE
+            );
+            assert_eq!(
+                (&said["result"]["ran"], &said["result"]["of"]),
+                (&serde_json::json!(0), &serde_json::json!(1))
+            );
+        }
+    }
+
+    /// The same for a group of acts: given no time, it starts no step.
+    #[test]
+    fn a_parallels_batch_with_no_time_left_starts_no_step_and_says_it_is_late() {
+        let _hand = ONE_HAND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let command = zerocode_core::computer_use::parse_command(&words(&[
+            "batch",
+            "--commands",
+            r#"[["wait","--ms","10"],["wait","--ms","10"]]"#,
+            "--json",
+        ]))
+        .expect("a batch");
+        let mut ran = 0;
+        let answer = crate::agent_tools_runtime::run_batch(
+            &command,
+            0,
+            |_| {
+                ran += 1;
+                crate::agent_tools_runtime::computer_said("{\"ok\":true}".to_string())
+            },
+            |_, _| {},
+            || true,
+            |_| {},
+        );
+        assert_eq!(ran, 0, "a step was begun with no time left");
+        assert_ne!(answer.exit_code, 0);
+        let said = envelope(&answer);
+        assert_eq!(
+            said["error"]["code"],
+            zerocode_core::computer_use_protocol::error_code::BATCH_DEADLINE
+        );
+        assert_eq!(said["result"]["ran"], 0);
     }
 
     #[cfg(unix)]

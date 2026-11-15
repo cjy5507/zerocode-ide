@@ -4037,12 +4037,21 @@ pub(super) async fn emulator_step(
 
 /// One look of a `parallel`, answered in a batch's shape so every group of the
 /// answer reads alike. A look is no act: it takes no turn, and a stopped
-/// operator still answers it.
+/// operator still answers it. With `left_ms` of the request's time left, a
+/// look that could not end inside it is not begun: its group is late, as a
+/// batch that could start no step is.
 pub(super) fn look_group(
     look: &[String],
+    left_ms: u64,
     mut step: impl FnMut(&[String]) -> zerocode_hookd::TeamAnswer,
 ) -> zerocode_hookd::TeamAnswer {
-    use zerocode_core::computer_use::{batch_answer, walk_step_report};
+    use zerocode_core::computer_use::{
+        batch_answer, walk_budget_ms, walk_step_holds_ms, walk_step_report,
+    };
+    let budget = walk_budget_ms(left_ms);
+    if budget == 0 || walk_step_holds_ms(look, false) > budget {
+        return computer_refused(batch_answer(Vec::new(), 1, 0, true).to_string());
+    }
     let started = std::time::Instant::now();
     let answer = step(look);
     let report = walk_step_report(
@@ -4143,6 +4152,14 @@ fn run_parallel(
 
     let actor = run_evidence::actor();
     let policy = computer_use::input_policy::capture();
+    // The bridge waits `deadline_ms` for the whole request, so a group that
+    // waited for a place has what is left of that time, not a deadline of its
+    // own: counted from its own start it would run past the bridge, and the
+    // answer of every group would be lost with it (t-109578).
+    let began = std::time::Instant::now();
+    let left_ms = || {
+        deadline_ms.saturating_sub(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX))
+    };
     let answers: Vec<zerocode_hookd::TeamAnswer> = at_most_at_once(
         &parallel_steps(command),
         PARALLEL_AT_ONCE,
@@ -4165,7 +4182,7 @@ fn run_parallel(
                 )
             };
             if parallel_group_is_a_look(steps) {
-                return look_group(&steps[0], step);
+                return look_group(&steps[0], left_ms(), step);
             }
             let batch = ComputerCommand {
                 method: ComputerMethod::Batch,
@@ -4174,7 +4191,7 @@ fn run_parallel(
             };
             run_batch(
                 &batch,
-                deadline_ms,
+                left_ms(),
                 step,
                 |step, refusal| leave_step(app, root, evidence, step, step, refusal),
                 caller_waits,

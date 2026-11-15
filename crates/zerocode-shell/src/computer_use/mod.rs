@@ -179,10 +179,9 @@ fn ensure_share_panel() -> bool {
         // A provider may already be starting; this is not a failed launch.
         return false;
     };
-    if held
-        .as_ref()
-        .is_some_and(|session| session.panel_watch_ended())
-    {
+    if let Some(session) = held.as_ref().filter(|session| session.panel_watch_ended()) {
+        // Its helper goes before another is started (t-109578).
+        session.dismiss();
         discard_session(&mut held);
     }
     if held.is_none()
@@ -443,7 +442,12 @@ pub fn shutdown() {
         let mut held = client
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if held.take().is_some() {
+        if let Some(session) = held.take() {
+            // Its helper goes with it, before the next call can start
+            // another: a request of another agent may still hold this
+            // session, and the window's stop is aimed at the one that stands
+            // (t-109578).
+            session.dismiss();
             SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
         }
     }

@@ -674,6 +674,32 @@ mod tests {
         drop((session, in_flight));
     }
 
+    /// `shutdown` ends the session for a fresh one (the permission roads call
+    /// it). A request of another agent may still hold that session, so its
+    /// helper is sent away at the shutdown — not when that request ends
+    /// (t-109578).
+    #[test]
+    fn the_helper_of_a_session_that_is_shut_down_is_asked_to_go_at_once() {
+        // The session that stands is the process's: one test holds it at a time.
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let helper = StandIn::start(TOKEN, Shape::matching());
+        let Connected(session) = helper.connect_window(TOKEN).expect("connected");
+        let session = Arc::new(session);
+        *crate::computer_use::held_client()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&session));
+        crate::computer_use::shutdown();
+        assert_eq!(
+            helper.wait_heard("terminate", 1, Duration::from_secs(2)),
+            1,
+            "the helper was not asked to go while a request still held its session"
+        );
+        assert!(!crate::computer_use::session_stands());
+        drop(session);
+    }
+
     /// A living helper that takes no connection is busy for a while and
     /// broken after that: past the patience the session goes — its helper is
     /// sent away first — so a helper that stopped accepting is not kept for
