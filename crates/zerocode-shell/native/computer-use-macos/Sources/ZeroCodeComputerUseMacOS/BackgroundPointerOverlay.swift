@@ -377,15 +377,16 @@ final class BackgroundPointerOverlay {
         slot.glide?.cancel()
         slot.ringDrop?.cancel()
         let panels: [NSPanel] = [slot.panel, slot.ring?.panel].compactMap { $0 }
-        Self.identityLock.lock()
-        for panel in panels {
-            if let windowID = UInt32(exactly: panel.windowNumber) { Self.pointerWindowIDs.remove(windowID) }
-        }
-        Self.identityLock.unlock()
+        // Off the screen first, off the helper's list after: a window list read
+        // meanwhile never takes a pointer for somebody's window over the target.
+        let windowIDs = panels.compactMap { UInt32(exactly: $0.windowNumber) }
         for panel in panels {
             panel.orderOut(nil)
             panel.close()
         }
+        Self.identityLock.lock()
+        Self.pointerWindowIDs.subtract(windowIDs)
+        Self.identityLock.unlock()
     }
 
     private func clearAll() {
