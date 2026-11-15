@@ -54934,14 +54934,23 @@ h4.knowledge-inspector-head::after {
   color: var(--ink-mist);
 }
 
-/* A narrow part puts the mode and the buttons on a line of their own. */
+/* A narrow part puts the mode and the buttons on a line of their own, and
+   the buttons under the modes when that line cannot hold both: a line that
+   wraps, never a grid track the modes run out of and over the buttons
+   (11-15, t-108080). */
 @container jev-custom (width < 36em) {
   .jev-custom-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "about about"
-      "modes actions"
-      "figures figures";
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .jev-custom-row > .jev-custom-about,
+  .jev-custom-row > .jev-custom-figures {
+    flex-basis: 100%;
+  }
+
+  .jev-custom-row > .jev-custom-actions {
+    margin-inline-start: auto;
   }
 }
 
@@ -54976,8 +54985,37 @@ h4.knowledge-inspector-head::after {
   gap: var(--space-1) var(--space-3);
 }
 
+/* A fact that fits stays on one line; one wider than the column folds inside
+   it rather than run under the row's modes and buttons and off its edge
+   (11-15, t-108080). */
 .jev-custom-fact {
-  white-space: nowrap;
+  min-width: 0;
+}
+
+/* The words a decision asks about: a line of their own under its facts, one
+   chip a word, wrapping between chips. */
+.jev-custom-asks {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.jev-custom-asks-label {
+  margin-inline-end: var(--space-1);
+}
+
+.jev-custom-word {
+  min-width: 0;
+  padding: var(--jev-chip-pad-block) var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-well);
+  box-shadow: var(--shadow-border-small);
+  color: var(--ink-chalk);
+  font-family: var(--font-mono);
+  line-height: var(--jev-token-line);
+  overflow-wrap: anywhere;
 }
 
 .jev-custom-mode {

@@ -3362,7 +3362,10 @@ export async function testJevCustomDecisions(browser, origin, ok) {
         ?.querySelectorAll("[data-jev-custom-figure]") ?? [])].map((one) => [one.dataset.jevCustomFigure,
         { label: one.querySelector("dt")?.textContent.trim() ?? "", said: one.querySelector("dd")?.textContent.trim() ?? "" }]));
       const facts = (id) => view.querySelector(`[data-jev-custom-row="${id}"] .jev-custom-facts`)?.textContent ?? "";
+      const words = (id) => [...(view.querySelector(`[data-jev-custom-row="${id}"]`)?.querySelectorAll(".jev-custom-word") ?? [])]
+        .map((one) => one.textContent);
       return { first: figures(first), second: figures(second), firstFacts: facts(first), secondFacts: facts(second),
+        firstWords: words(first), secondWords: words(second),
         head: [...view.querySelectorAll(".jev-table thead th")].map((one) => one.textContent.trim()) };
     }, [firstId, secondId]);
     const figureSaid = (row, figure) => did[row][figure]?.said ?? "";
@@ -3377,14 +3380,54 @@ export async function testJevCustomDecisions(browser, origin, ok) {
       JSON.stringify(did.second));
     ok("a decision says what its words left out today and this week, and which words it asks about — one told nothing says nothing of them",
       figureSaid("first", "leftOut") === "7 · 30" && figureSaid("second", "leftOut") === "0 · 0"
-        && did.firstFacts.includes("이 말이 있을 때만 묻기: rm · reset --hard") && !did.secondFacts.includes("이 말이 있을 때만")
+        && did.firstFacts.includes("이 말이 있을 때만 묻기") && JSON.stringify(did.firstWords) === JSON.stringify(["rm", "reset --hard"])
+        && !did.secondFacts.includes("이 말이 있을 때만") && did.secondWords.length === 0
         && !did.secondFacts.includes("고친 파일이 있을 때만"),
-      JSON.stringify({ first: did.first.leftOut, second: did.second.leftOut, firstFacts: did.firstFacts, secondFacts: did.secondFacts }));
+      JSON.stringify({ first: did.first.leftOut, second: did.second.leftOut, firstFacts: did.firstFacts, secondFacts: did.secondFacts,
+        firstWords: did.firstWords }));
     ok("a decision's figures wear the built-in table's own column words",
       did.head.includes(did.first.rows?.label) && did.first.applied?.label === "적용 (오늘 · 7일)"
         && did.first.hourFull?.label === "시간당 한도 초과 (오늘 · 7일)" && did.first.leftOut?.label === "거름 (오늘 · 7일)"
         && did.first.latest?.label === "마지막 답",
       JSON.stringify({ head: did.head, labels: Object.fromEntries(Object.entries(did.first).map(([name, one]) => [name, one.label])) }));
+
+    // A decision with many words and one whose point is said in long words
+    // (an agent's own ask) stand clear of the row's modes and buttons and
+    // inside the row, wide and narrow (11-15, t-108080: the words ran under
+    // 「끔 · 기록만 · 켜짐」 and 「편집 · 삭제」 and off the row's right edge).
+    const crowdedOf = async (size) => {
+      await page.setViewportSize(size);
+      await settlePaint(page);
+      return page.evaluate(async () => {
+        await window.__PAINTED__();
+        return window.__JEV_TEXT_FAULTS__(document.querySelector("#jev-view [data-jev-custom]"));
+      });
+    };
+    await page.evaluate(async ([first, second]) => {
+      const store = window.__JEV__.custom.store.decisions;
+      const many = store.find((one) => one.draft.id === first);
+      const agent = store.find((one) => one.draft.id === second);
+      window.__JEV_CROWDED_HELD__ = { askWhen: many.askWhen, at: agent.draft.at, reads: agent.draft.reads };
+      many.askWhen = { words: ["rm", "rmdir", "unlink", "mv", "cp", "restore", "prune", "-delete", "--delete", "clean", "checkout",
+        "delete", "remove", "drop", "uninstall", "rmtree", "rmsync", "rmi", "--force", "reset", "branch -D"] };
+      agent.draft.at = "agent_asks";
+      agent.draft.reads = ["context", "items"];
+      await loadJevCustom();
+      await window.__PAINTED__();
+    }, [firstId, secondId]);
+    const crowded = { wide: await crowdedOf(FIRST_SCREEN), middle: await crowdedOf({ width: 1440, height: 1000 }), narrow: await crowdedOf(NARROW) };
+    await page.setViewportSize(FIRST_SCREEN);
+    await page.evaluate(async ([first, second]) => {
+      const store = window.__JEV__.custom.store.decisions;
+      const held = window.__JEV_CROWDED_HELD__;
+      store.find((one) => one.draft.id === first).askWhen = held.askWhen;
+      Object.assign(store.find((one) => one.draft.id === second).draft, { at: held.at, reads: held.reads });
+      await loadJevCustom();
+      await window.__PAINTED__();
+    }, [firstId, secondId]);
+    await settlePaint(page);
+    ok("a decision's many words and an agent's long point stand clear of the row's modes and buttons and inside the row — wide, middle and narrow",
+      crowded.wide.length === 0 && crowded.middle.length === 0 && crowded.narrow.length === 0, JSON.stringify(crowded));
 
     // With a feature's drawer open the decisions' buttons stay in reach
     // (2026-11-12: the drawer covered 「편집」 and 「삭제」, read as "there is

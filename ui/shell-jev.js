@@ -3856,11 +3856,18 @@ function jevCustomFacts(draft, askWhen) {
     fact(t("jev.custom.hourly", "한 시간에 {{count}}회까지", { count: jevCount(draft.maxPerHour) })),
     fact(draft.folders === null ? t("jev.custom.everyFolder", "동의한 모든 폴더")
       : t("jev.custom.someFolders", "고른 폴더 {{count}}곳", { count: jevCount(draft.folders.length) })),
-    ...((askWhen?.words ?? []).length > 0
-      ? [fact(t("jev.custom.asksWhenWords", "이 말이 있을 때만 묻기: {{words}}", { words: askWhen.words.join(" · ") }))]
-      : []),
+    ...((askWhen?.words ?? []).length > 0 ? [jevCustomAsksWords(askWhen.words)] : []),
     ...(askWhen?.edited ? [fact(t("jev.custom.asksWhenEdited", "고친 파일이 있을 때만 묻기"))] : []),
   ];
+}
+
+/* The words a decision asks about: its name for them, then one chip a word,
+ * on a line of their own that wraps between chips — never one long line that
+ * runs under the row's modes and buttons and off its edge (11-15, t-108080). */
+function jevCustomAsksWords(words) {
+  return jevNode("span", "jev-custom-fact jev-custom-asks",
+    jevNode("span", "jev-custom-asks-label", document.createTextNode(t("jev.custom.asksWhenWords", "이 말이 있을 때만 묻기"))),
+    ...words.map((word) => jevNode("span", "jev-custom-word", document.createTextNode(word))));
 }
 
 /* Move `kept` to `mode` through the store; the radios stand where the
