@@ -245,6 +245,39 @@ pub fn live_tail(text: &str, max_columns: usize) -> Option<String> {
     Some(format!("…{from_a_word}"))
 }
 
+/// Like [`live_tail`], but drops whole-line `**heading**` lines (and an
+/// unclosed `**heading` still being written on the last line) because the
+/// working row above already displays the heading in the marks look.
+#[must_use]
+pub fn live_tail_without_headings(text: &str, max_columns: usize) -> Option<String> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let last = lines.len().saturating_sub(1);
+    let body: Vec<&str> = lines
+        .into_iter()
+        .enumerate()
+        .filter(|&(index, line)| !(is_heading_line(line) || (index == last && is_open_heading_line(line))))
+        .map(|(_, line)| line)
+        .collect();
+    if body.is_empty() {
+        return None;
+    }
+    live_tail(&body.join(" "), max_columns)
+}
+
+fn is_heading_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed
+        .strip_prefix("**")
+        .and_then(|rest| rest.strip_suffix("**"))
+        .is_some_and(|inner| !inner.trim().is_empty() && !inner.contains("**"))
+}
+
+fn is_open_heading_line(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("**")
+        .is_some_and(|rest| !rest.contains("**"))
+}
+
 /// Halve `buffer` from the front, on a character boundary, once it grows past
 /// `keep` bytes. The tail is where the newest sentence is.
 pub fn bound_scan(buffer: &mut String, keep: usize) {
@@ -353,7 +386,7 @@ mod tests {
 
     use super::{
         bound_scan, cell, first_bold_heading, leading_bold_heading, live_heading, live_tail,
-        LIVE_HEADING_MAX_COLUMNS,
+        live_tail_without_headings, LIVE_HEADING_MAX_COLUMNS,
     };
     use crate::tui::ansi::Line;
     use crate::tui::folds::{FoldIds, FoldMode};
@@ -565,5 +598,45 @@ mod tests {
         let tail = live_tail(korean, 24).expect("words");
         assert!(tail.width() <= 24, "{tail} is {} columns", tail.width());
         assert!(tail.starts_with('…') && tail.ends_with("출력기를 고친다"), "{tail}");
+    }
+
+    #[test]
+    fn live_tail_without_headings_drops_heading_lines_and_keeps_inline_bold() {
+        assert_eq!(
+            live_tail_without_headings(
+                "**Reading the parser**\n\nThe person says settings are not read.",
+                80,
+            )
+            .as_deref(),
+            Some("The person says settings are not read.")
+        );
+        assert_eq!(
+            live_tail_without_headings("**Reading the parser**", 80),
+            None
+        );
+        assert_eq!(
+            live_tail_without_headings(
+                "**Reading the parser**\n\nFirst part.\n\n**Checking the lexer**\n\nSecond part.",
+                80,
+            )
+            .as_deref(),
+            Some("First part. Second part.")
+        );
+        assert_eq!(
+            live_tail_without_headings("문장 안의 **강조**는 남는다.", 80).as_deref(),
+            Some("문장 안의 강조는 남는다.")
+        );
+        assert_eq!(
+            live_tail_without_headings("**Reading the par", 80),
+            None
+        );
+        assert_eq!(
+            live_tail_without_headings("앞 문장.\n\n**Checking the le", 80).as_deref(),
+            Some("앞 문장.")
+        );
+        assert_eq!(
+            live_tail_without_headings("**Note** 이어지는 글", 80).as_deref(),
+            Some("Note 이어지는 글")
+        );
     }
 }

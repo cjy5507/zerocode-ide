@@ -2026,7 +2026,12 @@ impl Ui {
             // Four fifths of the rows' room: a row wraps at a word, so words
             // that fill two rows to the column can take a third.
             let columns = super::view::status_detail_columns(self.width()) * thinking::TAIL_ROWS * 4 / 5;
-            details.extend(thinking::live_tail(&self.thinking_said, columns));
+            let tail = if super::style::current().style == super::style::TuiStyle::Marks {
+                thinking::live_tail_without_headings(&self.thinking_said, columns)
+            } else {
+                thinking::live_tail(&self.thinking_said, columns)
+            };
+            details.extend(tail);
         }
         if let Some(status) = self.status.as_mut() {
             status.set_details_max_lines(details.len().max(STATUS_DETAILS_DEFAULT_MAX_LINES));

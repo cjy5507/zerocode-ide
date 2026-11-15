@@ -1328,7 +1328,13 @@ impl MarkdownStream {
             // Every row that is not in the scrollback yet — a queued row
             // stays on screen until the tick that hands it over — and then
             // the line still being written.
-            let mut tail = self.rendered[self.at(self.emitted)..].to_vec();
+            let from = self.at(self.emitted);
+            let to = if self.is_pending_pipe_header() {
+                self.at(self.enqueued).max(from)
+            } else {
+                self.rendered.len()
+            };
+            let mut tail = self.rendered[from..to].to_vec();
             tail.extend(self.unfinished_rows().iter().cloned());
             return tail;
         }
@@ -1336,6 +1342,15 @@ impl MarkdownStream {
             return Vec::new();
         }
         self.rendered[self.at(self.enqueued)..].to_vec()
+    }
+
+    fn is_pending_pipe_header(&self) -> bool {
+        let holdback::State::PendingHeader { header_start } = self.holdback.state() else {
+            return false;
+        };
+        self.committed
+            .get(header_start..)
+            .is_some_and(|rest| rest.trim_start().starts_with('|'))
     }
 
     /// The rows of the line still being written, as [`Self::refresh_unfinished`]
@@ -1388,6 +1403,7 @@ impl MarkdownStream {
             || opens.starts_with("```")
             || opens.starts_with("~~~")
             || opens.starts_with('|')
+            || is_bare_markup(&self.pending)
         {
             return Vec::new();
         }
@@ -1855,6 +1871,21 @@ fn close_unfinished_inline_spans(pending: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// Whether `text` (after trimming outer whitespace) consists solely of raw
+/// markdown opener/rule marks (`` ` ``, `~`, or `-*_=` with whitespace) so an
+/// unfinished line should wait for real content before drawing.
+fn is_bare_markup(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.chars().all(|ch| ch == '`')
+        || trimmed.chars().all(|ch| ch == '~')
+        || trimmed
+            .chars()
+            .all(|ch| matches!(ch, '-' | '*' | '_' | '=') || ch.is_whitespace())
 }
 
 #[cfg(test)]
@@ -2560,6 +2591,96 @@ mod tests {
             let _ = stream.tail();
         }
         assert_eq!(crate::tui::markdown::probe::read().0, 0, "a frame with no new text renders nothing");
+    }
+
+    #[test]
+    fn char_by_char_stream_shows_no_raw_marks_or_unconfirmed_pipe_header() {
+        let input = "앞 글입니다.\n\n```rust\nlet x = 1;\n```\n\n| 입력 | 전 | 후 |\n|---|---|---|\n| 빈 줄 | 1개 | 3개 |\n\n---\n\n끝 글입니다.\n";
+        let mut stream = MarkdownStream::answer(60).showing_unfinished(true);
+        let mut said = Vec::new();
+        for ch in input.chars() {
+            let mut buf = [0u8; 4];
+            stream.push(ch.encode_utf8(&mut buf));
+            stream.refresh_unfinished();
+            said.extend(stream.tick(Instant::now()).iter().map(Line::plain));
+            for row in stream.tail() {
+                let plain = row.plain();
+                let trimmed = plain.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                assert!(
+                    !trimmed.chars().all(|c| c == '`'),
+                    "backticks-only row leaked while streaming: {trimmed:?}"
+                );
+                assert!(
+                    !trimmed.chars().all(|c| c == '~'),
+                    "tildes-only row leaked while streaming: {trimmed:?}"
+                );
+                assert!(
+                    !trimmed
+                        .chars()
+                        .all(|c| matches!(c, '-' | '*' | '_' | '=') || c.is_whitespace()),
+                    "rule-marks-only row leaked while streaming: {trimmed:?}"
+                );
+                assert!(
+                    !(trimmed.starts_with('|') && trimmed.ends_with('|')),
+                    "unconfirmed pipe header row leaked while streaming: {trimmed:?}"
+                );
+            }
+        }
+        said.extend(stream.finish().iter().map(Line::plain));
+
+        let mut full = MarkdownStream::answer(60);
+        full.push(input);
+        let expected: Vec<String> = full.finish().iter().map(Line::plain).collect();
+        assert_eq!(said, expected);
+    }
+
+    #[test]
+    fn a_non_table_pipe_line_appears_once_the_next_line_settles_it() {
+        let mut stream = MarkdownStream::answer(60).showing_unfinished(true);
+        stream.push("| 그냥 글 |\n");
+        stream.refresh_unfinished();
+        assert!(
+            stream.tail().iter().all(|row| !row.plain().contains("그냥 글")),
+            "pending pipe header is held back before its next line: {:?}",
+            plain_tail(&stream)
+        );
+
+        stream.push("다음 줄입니다.\n");
+        stream.refresh_unfinished();
+        let mut visible: Vec<String> = stream.tick(Instant::now()).iter().map(Line::plain).collect();
+        visible.extend(plain_tail(&stream));
+        assert!(
+            visible.iter().any(|row| row.contains("그냥 글")),
+            "non-table pipe line should appear once the next line settles it: {visible:?}"
+        );
+        assert!(
+            visible.iter().any(|row| row.contains("다음 줄입니다.")),
+            "following line should also be visible: {visible:?}"
+        );
+    }
+
+    #[test]
+    fn prose_with_an_inline_pipe_stays_visible_while_streaming() {
+        let mut stream = MarkdownStream::answer(60).showing_unfinished(true);
+        stream.push("값은 a | b 입니다");
+        stream.refresh_unfinished();
+        assert!(
+            plain_tail(&stream).iter().any(|row| row.contains("값은 a | b 입니다")),
+            "inline pipe prose should be visible while writing: {:?}",
+            plain_tail(&stream)
+        );
+
+        stream.push("\n");
+        stream.refresh_unfinished();
+        let mut visible: Vec<String> = stream.tick(Instant::now()).iter().map(Line::plain).collect();
+        visible.extend(plain_tail(&stream));
+        assert!(
+            visible.iter().any(|row| row.contains("값은 a | b 입니다")),
+            "inline pipe prose should remain visible after newline: {visible:?}"
+        );
     }
 
     #[test]
