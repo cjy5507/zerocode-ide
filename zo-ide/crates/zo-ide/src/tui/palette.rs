@@ -176,8 +176,7 @@ impl TerminalPalette {
     /// pastel foregrounds would lose their contrast.
     #[must_use]
     pub fn has_light_background(self) -> bool {
-        let (red, green, blue) = self.background;
-        u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114 > 128_000
+        is_light_background(self.background)
     }
 
     /// Colours for the moving status band. Codex uses the terminal foreground
@@ -424,6 +423,15 @@ pub(crate) fn soften_status_line_style(mut style: Style) -> Style {
         style.fg = Some(Color::Rgb(soften(red), soften(green), soften(blue)));
     }
     style
+}
+
+/// Whether a ground is bright enough that the capture's pastel foregrounds
+/// would lose their contrast on it — the one place this rule is written
+/// (`TerminalPalette::has_light_background` and the theme's lightness fit
+/// both ask it).
+#[must_use]
+pub(crate) fn is_light_background((red, green, blue): (u8, u8, u8)) -> bool {
+    u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114 > 128_000
 }
 
 /// WCAG relative-luminance contrast ratio for a measured RGB foreground and

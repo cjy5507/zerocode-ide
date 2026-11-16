@@ -11,7 +11,7 @@ use two_face::theme::EmbeddedThemeName;
 use crate::preferences::Preferences;
 
 use super::ansi::Role;
-use super::palette::{contrast_ratio, TerminalPalette};
+use super::palette::{contrast_ratio, is_light_background, TerminalPalette};
 
 /// `ZO_THEME`: overrides `"theme"` from `settings.json` for one run.
 pub const THEME_ENV: &str = "ZO_THEME";
@@ -448,10 +448,6 @@ pub(crate) fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (u8, u8, 
         channel(0.0),
         channel(-1.0 / 3.0),
     )
-}
-
-fn is_light_background((red, green, blue): (u8, u8, u8)) -> bool {
-    u32::from(red) * 299 + u32::from(green) * 587 + u32::from(blue) * 114 > 128_000
 }
 
 /// Adjusts `color`'s HSL lightness in 1%p steps away from `background` until
