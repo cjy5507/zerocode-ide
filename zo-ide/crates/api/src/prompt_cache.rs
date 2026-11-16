@@ -3907,8 +3907,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
 }
 
 fn request_hash_hex(request: &MessageRequest) -> String {
-    #[cfg(test)]
-    tests::REQUEST_HASHES.with(|hashes| hashes.set(hashes.get() + 1));
+    note_request_hash();
     format!(
         "{REQUEST_FINGERPRINT_PREFIX}-{:016x}",
         hash_serializable(request)
@@ -4179,6 +4178,19 @@ fn stable_hash_bytes(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+/// Counts one hash of a whole request (`request_hash_hex`) in a test build,
+/// where a test reads the count. A shipped build counts nothing. The counting
+/// half stands here, above the tests: a check that reads this source for
+/// shipped code stops at the file's first test marker, so one inside a
+/// function hid everything below it.
+#[cfg(not(test))]
+fn note_request_hash() {}
+
+#[cfg(test)]
+fn note_request_hash() {
+    tests::REQUEST_HASHES.with(|hashes| hashes.set(hashes.get() + 1));
 }
 
 #[cfg(test)]

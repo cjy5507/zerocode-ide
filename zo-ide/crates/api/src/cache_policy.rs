@@ -256,8 +256,7 @@ impl IdleProfile {
 
     /// The prefix of every returned pause longer than `elapsed`.
     fn returned_beyond(&self, elapsed: Duration) -> u64 {
-        #[cfg(test)]
-        tests::LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+        note_lookup();
         let longer = self.returned.partition_point(|(pause, _)| *pause > elapsed);
         longer.checked_sub(1).map_or(0, |last| self.returned[last].1)
     }
@@ -567,6 +566,20 @@ fn session_gaps(rows: &[crate::prompt_cache::RequestLedgerRow]) -> Vec<IdleGap> 
             }
         })
         .collect()
+}
+
+/// Counts one lookup of the recorded pauses (`IdleProfile::returned_beyond`)
+/// in a test build, where a test reads the count to say how a search grows.
+/// A shipped build counts nothing. The counting half stands at the foot of
+/// the file, with the tests: a check that reads this source for shipped code
+/// stops at the file's first test marker, so one inside a function hid
+/// everything below it.
+#[cfg(not(test))]
+fn note_lookup() {}
+
+#[cfg(test)]
+fn note_lookup() {
+    tests::LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
 }
 
 #[cfg(test)]
