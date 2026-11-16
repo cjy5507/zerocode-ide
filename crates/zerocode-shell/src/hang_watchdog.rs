@@ -9,6 +9,18 @@
 //! finds its own nap a whole beat late, or finds the wall clock run ahead of
 //! uptime since the beat before (a sleep, wherever this thread was), or finds
 //! no screen awake, withdraws the episode and warms up again.
+//!
+//! Nor is a wait a hang (t-110411). The ping is a closure on the main
+//! thread's queue, and the queue runs one closure at a time: the one that
+//! pumps Chromium does not return while a menu Chromium opened runs its own
+//! event loop inside it. On 2026-11-15 21:24 a browser pane's menu stood open
+//! for 16.2 s; the ping behind it was filed as a hang, and the sample found
+//! the main thread in `mach_msg` under `_NSPopUpMenu` in 78 of 81. It was
+//! waiting for the person. So a beat that finds its ping unanswered asks the
+//! main run loop whether it waits, and in which mode, and while it waits in
+//! AppKit's event-tracking mode the ping's clock starts again from that beat.
+//! The queue did stand all that time, and the watch says so under that name
+//! — `main queue held` — with no hang's record, task or badge.
 
 use std::fmt;
 use std::sync::Arc;
@@ -52,6 +64,13 @@ struct Tick {
     /// A hang seen still unanswered, said again every
     /// [`STILL_OPEN_EVERY_MS`] while it stays open.
     still: Option<u64>,
+    /// How long the main thread's queue has stood behind an event loop the
+    /// person holds open: said once it has stood the first threshold, and
+    /// again every [`STILL_OPEN_EVERY_MS`] while it stands.
+    held: Option<u64>,
+    /// How long a queue said held stood in all, said on the beat its ping
+    /// is answered.
+    held_ended: Option<u64>,
 }
 
 /// How often a hang still open is said again (t-75646): the 3 min 40 s of
@@ -71,6 +90,10 @@ struct Beat {
     nap: u64,
     /// Whether any screen is awake to show the window.
     seen: bool,
+    /// Whether the main thread waits in an event loop the person holds
+    /// open ([`MainLoop::holds`]). Asked only on a beat that finds the last
+    /// ping unanswered.
+    held: bool,
 }
 
 /// Why the observer cannot testify for the time just past.
@@ -112,6 +135,20 @@ struct Watch {
     count: u64,
     /// The previous beat's `(uptime, wall)` — the evidence of a sleep.
     last: Option<(u64, u64)>,
+    /// The ping the main thread cannot answer from where the person holds it.
+    held: Option<Held>,
+}
+
+/// A ping left unanswered by a main thread that waits in an event loop the
+/// person holds open (t-110411).
+#[derive(Clone, Copy, Debug)]
+struct Held {
+    /// When the ping was sent: the queue has stood since.
+    from: u64,
+    /// The length its next line is due at.
+    due: u64,
+    /// Whether a line was said, so that its end is said too.
+    said: bool,
 }
 
 impl Watch {
@@ -124,6 +161,7 @@ impl Watch {
             still_at: 0,
             count: 0,
             last: None,
+            held: None,
         }
     }
 
@@ -152,6 +190,7 @@ impl Watch {
         if !limits.watchdog {
             self.warm_until = now.saturating_add(limits.warmup_ms);
             self.pending = None;
+            self.held = None;
             return tick;
         }
         if let Some(why) = absence {
@@ -167,12 +206,35 @@ impl Watch {
             self.warm_until = now.saturating_add(limits.warmup_ms);
             self.noted = false;
             self.badged = false;
+            self.held = None;
             return tick;
         }
         if now < self.warm_until {
             return tick;
         }
         if let Some(sent) = self.pending {
+            if beat.held && answered.is_none() && !self.noted {
+                // The main thread waits where the person holds it, and none
+                // of that is time it failed to answer: the ping's clock
+                // starts again from this beat. A main thread that turns busy
+                // without answering is judged from its last wait, and one
+                // busy reading inside a menu costs a beat of the threshold.
+                // The queue behind the ping stands all the same, which is
+                // said under its own name. A hang already seen stays one.
+                let held = self.held.get_or_insert(Held {
+                    from: sent,
+                    due: limits.first_ms,
+                    said: false,
+                });
+                let stood = now.saturating_sub(held.from);
+                if stood >= held.due {
+                    held.due = stood.saturating_add(STILL_OPEN_EVERY_MS);
+                    held.said = true;
+                    tick.held = Some(stood);
+                }
+                self.pending = Some(now);
+                return tick;
+            }
             // Judge when the main thread answered, not when THIS thread was
             // next scheduled. A busy diagnostics thread cannot frame a healthy UI.
             let ms = answered.unwrap_or(now).saturating_sub(sent);
@@ -196,6 +258,11 @@ impl Watch {
             }
             if seen_open {
                 tick.ended = Some(ms);
+            }
+            if let (Some(held), Some(at)) = (self.held.take(), answered)
+                && held.said
+            {
+                tick.held_ended = Some(at.saturating_sub(held.from));
             }
         }
         self.pending = Some(now);
@@ -485,11 +552,16 @@ impl Monitor {
                 .max(first_ms + Limits::DEFAULT.ping_ms),
             ..Limits::DEFAULT
         };
+        // Asked only of a main thread that has not answered its ping, so a
+        // beat that finds the ping answered pays nothing for it (t-110411).
+        let main_loop =
+            (self.watch.pending.is_some() && self.answer.peek().is_none()).then(main_loop_now);
         let beat = Beat {
             now,
             wall: wall_ms(),
             nap: u64::try_from(nap.as_millis()).unwrap_or(u64::MAX),
             seen: screens_awake(),
+            held: main_loop.as_ref().is_some_and(MainLoop::holds),
         };
         let (
             Beaten {
@@ -521,6 +593,27 @@ impl Monitor {
             crate::note_window_event(
                 app.state::<crate::AppState>().local_data_root(),
                 &format!("hang ended: {ms}ms"),
+            );
+        }
+        if let Some(ms) = tick.held {
+            // The queue stood and the main thread did not hang: it goes on the
+            // log under that name, with no hang's record, task or badge, so a
+            // menu nobody closes still leaves its lines.
+            let scope = crate::crumbs::main_scope();
+            crate::crumbs::record(
+                "main_queue_held",
+                format_args!("ms={ms} main_scope={scope}"),
+            );
+            crate::note_window_event(
+                app.state::<crate::AppState>().local_data_root(),
+                &format!("main queue held: {ms}ms main_scope={scope}"),
+            );
+        }
+        if let Some(ms) = tick.held_ended {
+            crate::crumbs::record("main_queue_held_ended", format_args!("ms={ms}"));
+            crate::note_window_event(
+                app.state::<crate::AppState>().local_data_root(),
+                &format!("main queue held ended: {ms}ms"),
             );
         }
         if queue {
@@ -594,6 +687,16 @@ impl Monitor {
             // 20 255 ms of 2026-10-21 had to be traced to a settings read by
             // hand, from the command's name alone.
             crate::note_window_event(state.local_data_root(), &format!("hang io: {io}"));
+            // What the main run loop said of itself on this beat (t-110411): a
+            // wait in a mode the watch does not excuse is named here, so the
+            // record of the next such hang says which mode it was.
+            if let Some(main_loop) = &main_loop {
+                crate::crumbs::record("hang_loop", format_args!("{main_loop}"));
+                crate::note_window_event(
+                    state.local_data_root(),
+                    &format!("hang loop: {main_loop}"),
+                );
+            }
             let (sample, sampled) = if answered.is_none() {
                 let sample_from = self.start.elapsed().as_millis() as u64;
                 let sample = crate::hang_sample::sample_main_thread();
@@ -680,6 +783,65 @@ fn wall_ms() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
+/// What the main thread's run loop is doing, as another thread reads it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MainLoop {
+    /// Working — or not asked, where nothing is.
+    Running,
+    /// Waiting for an event, in the run loop mode named.
+    Waiting(String),
+}
+
+/// The mode AppKit tracks events in modally — a menu's own loop among them.
+const EVENT_TRACKING_MODE: &str = "NSEventTrackingRunLoopMode";
+
+impl MainLoop {
+    /// Whether the main thread waits in an event loop the person holds open.
+    /// Only the event-tracking mode is taken for one. A main thread that
+    /// waits in its modal-panel mode may stand there for another thread's
+    /// answer, which is a hang, and no record has shown a person held there;
+    /// a hang's `hang_loop` line names the mode, so one that should be
+    /// excused shows itself first.
+    fn holds(&self) -> bool {
+        matches!(self, Self::Waiting(mode) if mode == EVENT_TRACKING_MODE)
+    }
+}
+
+impl fmt::Display for MainLoop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => f.write_str("running"),
+            Self::Waiting(mode) => write!(f, "waiting mode={mode}"),
+        }
+    }
+}
+
+/// The main run loop, asked from this thread. Whether it waits is one flag
+/// read under no lock (`CFRunLoopIsWaiting`, which Apple documents for
+/// reading another thread's run loop). Its mode is read under the run loop's
+/// own lock, which the loop gives up for its wait and around every callout
+/// (CFRunLoop.c) — so the mode is asked only of a loop found waiting, and a
+/// main thread at work is never asked for it.
+#[cfg(target_os = "macos")]
+fn main_loop_now() -> MainLoop {
+    let Some(main) = objc2_core_foundation::CFRunLoop::main() else {
+        return MainLoop::Running;
+    };
+    if !main.is_waiting() {
+        return MainLoop::Running;
+    }
+    main.current_mode().map_or(MainLoop::Running, |mode| {
+        MainLoop::Waiting(mode.to_string())
+    })
+}
+
+/// Elsewhere nothing is asked: a main thread that does not answer is at work.
+#[cfg(not(target_os = "macos"))]
+fn main_loop_now() -> MainLoop {
+    MainLoop::Running
+}
+
 /// Whether any screen is awake to show the window. CoreGraphics counts a
 /// display active only while it is awake and drawable, and a lid-closed
 /// DarkWake has none. Asked from this thread on 2026-09-24 under load
@@ -714,6 +876,7 @@ mod tests {
             wall: now,
             nap: Limits::DEFAULT.ping_ms,
             seen: true,
+            held: false,
         }
     }
 
@@ -1040,6 +1203,204 @@ mod tests {
         assert_eq!(watch.count, 1, "one hang, however often it is said");
     }
 
+    /// A beat that finds the main thread waiting where the person holds it.
+    fn held(now: u64) -> Beat {
+        Beat {
+            held: true,
+            ..beat(now)
+        }
+    }
+
+    /// 2026-11-15 21:24 (t-110411): a browser pane's menu stood open for
+    /// 16.2 s, the ping queued behind the closure that pumps Chromium went
+    /// unanswered, and the watch filed a hang — with the main thread in
+    /// `mach_msg` under `_NSPopUpMenu` in 78 of 81 samples. A main thread
+    /// that waits for the person is not hung: no hang, no badge, no count.
+    /// The queue behind the ping did stand, and that is said: at the first
+    /// threshold, every ten seconds after, and its whole length at the end.
+    #[test]
+    fn a_main_thread_waiting_in_a_menu_is_held_and_not_hung() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        let closed = sent + 16_200;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let mut now = sent;
+        let mut said = Vec::new();
+        while now + limits.ping_ms < closed {
+            now += limits.ping_ms;
+            let tick = watch.step(held(now), None, limits);
+            assert_eq!(
+                (tick.hang, tick.badge, tick.still, tick.ping),
+                (None, None, None, false)
+            );
+            said.extend(tick.held);
+        }
+        assert_eq!(
+            said,
+            [limits.first_ms, limits.first_ms + STILL_OPEN_EVERY_MS]
+        );
+        let tick = watch.step(beat(now + limits.ping_ms), Some(closed), limits);
+        assert_eq!(
+            (tick.hang, tick.ended, tick.held_ended),
+            (None, None, Some(16_200))
+        );
+        assert!(tick.ping, "the watch pings again once the menu is closed");
+        assert_eq!(watch.count, 0, "a wait is not counted as a hang");
+    }
+
+    /// The clock that stops for a wait starts when the wait is over. A main
+    /// thread that leaves the menu and turns busy without answering is hung
+    /// from its last waiting beat, and filed one threshold after it.
+    #[test]
+    fn a_main_thread_that_turns_busy_after_a_menu_is_judged_from_its_last_wait() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let mut now = sent;
+        while now < sent + 5_000 {
+            now += limits.ping_ms;
+            assert_eq!(watch.step(held(now), None, limits).hang, None);
+        }
+        let last_wait = now;
+        let mut seen = None;
+        while now < last_wait + limits.second_ms {
+            now += limits.ping_ms;
+            let tick = watch.step(beat(now), None, limits);
+            seen = seen.or(tick.hang.map(|ms| (now, ms)));
+        }
+        assert_eq!(seen, Some((last_wait + limits.first_ms, limits.first_ms)));
+        assert_eq!(watch.count, 1);
+    }
+
+    /// A menu's loop works for a moment at every event it is given, and a
+    /// beat may find it there. One busy reading costs a beat of the
+    /// threshold, not a hang.
+    #[test]
+    fn one_busy_reading_inside_a_menu_files_no_hang() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let mut now = sent;
+        for beat_no in 1..=80_u64 {
+            now += limits.ping_ms;
+            // Every fourth beat finds the loop at work.
+            let looked = if beat_no % 4 == 0 {
+                beat(now)
+            } else {
+                held(now)
+            };
+            let tick = watch.step(looked, None, limits);
+            assert_eq!((tick.hang, tick.badge), (None, None), "at beat {beat_no}");
+        }
+        assert_eq!(watch.count, 0);
+    }
+
+    /// A hang already seen is not taken back by a wait that follows it: the
+    /// main thread was busy for the threshold first, and the record stands
+    /// until the ping is answered.
+    #[test]
+    fn a_hang_already_seen_is_not_taken_back_by_a_wait() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let mut now = sent;
+        let mut seen = None;
+        while now < sent + limits.first_ms {
+            now += limits.ping_ms;
+            seen = seen.or(watch.step(beat(now), None, limits).hang);
+        }
+        assert_eq!(seen, Some(limits.first_ms));
+        let mut badge = None;
+        while now < sent + 9_000 {
+            now += limits.ping_ms;
+            let tick = watch.step(held(now), None, limits);
+            assert_eq!(tick.held, None);
+            badge = badge.or(tick.badge);
+        }
+        assert_eq!(badge, Some(limits.second_ms));
+        let tick = watch.step(beat(now + limits.ping_ms), Some(now), limits);
+        assert_eq!((tick.ended, tick.held_ended), (Some(9_000), None));
+        assert_eq!(watch.count, 1);
+    }
+
+    /// An answer that arrives on a beat that also read a wait is an answer:
+    /// the ping is judged by when it was answered, and its clock is not
+    /// started again.
+    #[test]
+    fn an_answer_on_a_beat_that_read_a_wait_is_judged_as_an_answer() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let tick = watch.step(held(sent + 2_300), Some(sent + 2_266), limits);
+        assert_eq!((tick.hang, tick.held, tick.ping), (Some(2_266), None, true));
+    }
+
+    /// A wait read while the watch warms up, or on a beat the observer was
+    /// not there for, changes nothing: neither judges, with it or without,
+    /// and an absence ends the hold's own count with the episode.
+    #[test]
+    fn a_wait_read_in_warm_up_or_in_an_absence_changes_nothing() {
+        let limits = Limits::DEFAULT;
+        let mut warming = Watch::new(0);
+        assert_eq!(
+            warming.step(held(limits.warmup_ms - 1), None, limits),
+            Tick::default()
+        );
+
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let mut now = sent;
+        let mut said = Vec::new();
+        while now < sent + 3_000 {
+            now += limits.ping_ms;
+            said.extend(watch.step(held(now), None, limits).held);
+        }
+        assert_eq!(said, [limits.first_ms]);
+        let late = Beat {
+            nap: limits.ping_ms * 3,
+            ..held(now + limits.ping_ms)
+        };
+        assert_eq!(watch.step(late, None, limits), Tick::default());
+        assert!(watch.held.is_none() && watch.pending.is_none());
+        assert_eq!(
+            watch.step(held(now + limits.ping_ms * 2), None, limits),
+            Tick::default(),
+            "the watch warms up again, as after any absence"
+        );
+    }
+
+    /// Only a wait in AppKit's event-tracking mode is taken for the person's
+    /// hold: a main thread at work, one waiting at the top of its loop and
+    /// one in a modal panel's loop are judged as they were.
+    #[test]
+    fn only_a_wait_in_the_event_tracking_mode_holds_the_main_thread() {
+        let waiting = |mode: &str| MainLoop::Waiting(mode.to_string());
+        assert!(waiting("NSEventTrackingRunLoopMode").holds());
+        assert!(!waiting("kCFRunLoopDefaultMode").holds());
+        assert!(!waiting("NSModalPanelRunLoopMode").holds());
+        assert!(!MainLoop::Running.holds());
+        assert_eq!(
+            waiting("NSModalPanelRunLoopMode").to_string(),
+            "waiting mode=NSModalPanelRunLoopMode"
+        );
+        assert_eq!(MainLoop::Running.to_string(), "running");
+    }
+
+    /// The question is asked of another thread's run loop. Under the test
+    /// harness no thread runs the main one, so it is found not waiting — and
+    /// the mode, read under the run loop's lock, is not asked at all.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_main_run_loop_nobody_runs_is_not_found_waiting() {
+        assert_eq!(main_loop_now(), MainLoop::Running);
+    }
+
     /// Made-up moments for the actor watch alone: `ms` past one origin.
     struct Clock(Instant);
 
@@ -1169,6 +1530,7 @@ mod tests {
                 wall: self.wall,
                 nap,
                 seen: true,
+                held: false,
             };
             let (beaten, lines) = self.monitor.judge(beat, self.limits, || Some(serving));
             if beaten.queue {

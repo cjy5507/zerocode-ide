@@ -316,6 +316,12 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFArray",
     "CFDictionary",
     "CFNumber",
+    # The hang watchdog asks the main run loop whether it waits, and in which
+    # mode, before it calls an unanswered ping a hang
+    # (`hang_watchdog::main_loop_now`, t-110411): `CFRunLoopIsWaiting` and
+    # `CFRunLoopCopyCurrentMode`. `objc2-core-graphics` turns this feature on
+    # already; the watchdog names what it uses.
+    "CFRunLoop",
     "CFString",
 ] }
 
