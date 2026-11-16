@@ -14,8 +14,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use runtime::model_router::PlanEvidenceRecords;
 use runtime::{
-    choose_plan, plan_candidates, plan_evidence_from_records, score_plan, ModelBand, ModelOption,
+    choose_plan, plan_candidates, score_plan, ModelBand, ModelOption,
     ModelPrice, PlanCacheState, PlanCandidate, PlanContext, PlanPriors, RouteOutcomeRecord,
     RouteTaskComplexity, ScoredPlan, ModelInventory, SwitchTrigger,
 };
@@ -276,10 +277,16 @@ pub fn build_plan_shadow(inputs: PlanShadowInputs<'_>) -> PlanShadowRow {
             .find(|option| option.id == model)
             .map_or(ModelBand::Rest, |option| option.band)
     };
+    // The store is read once for all the candidates: which rows can be
+    // somebody's evidence does not depend on the plan that asks.
+    let records = inputs
+        .ctx
+        .cohort
+        .map(|cohort| PlanEvidenceRecords::new(inputs.records, cohort, canonicalize_route_model_id));
     let evidence = |candidate: &PlanCandidate| {
-        inputs.ctx.cohort.and_then(|cohort| {
-            plan_evidence_from_records(inputs.records, candidate, cohort, canonicalize_route_model_id)
-        })
+        records
+            .as_ref()
+            .and_then(|records| records.evidence(candidate, &canonicalize_route_model_id(&candidate.model)))
     };
     let scored: Vec<ScoredPlan> = plan_candidates(&inputs.ctx, inputs.models)
         .into_iter()
@@ -521,6 +528,62 @@ mod tests {
         let line = serde_json::to_string(&row).unwrap();
         let back: PlanShadowRow = serde_json::from_str(&line).unwrap();
         assert_eq!(back, row);
+    }
+
+    /// The store reaches the scorer: verified verdicts of the turn's cohort
+    /// move the candidates of the model they are about and of no other, and
+    /// without a cohort a record is nobody's evidence.
+    #[test]
+    fn verified_verdicts_of_the_cohort_reach_the_candidates_of_their_model_and_no_other() {
+        let models = vec![
+            ModelOption { id: "a".into(), band: ModelBand::Top, efforts: vec!["high".into()] },
+            ModelOption { id: "b".into(), band: ModelBand::Second, efforts: vec!["high".into()] },
+        ];
+        let priors = priors();
+        let price = |_: &str| Some(ModelPrice { input: 3.0, cache_read: 0.3, cache_write: 3.75, output: 15.0 });
+        let cohort = plan_cohort_for_turn("implement the change and run the tests", RouteTaskComplexity::Medium, runtime::RouteTaskRisk::Medium)
+            .expect("a coding turn has a cohort");
+        let (kind, target) = cohort.route_key.split_once(':').expect("a route key is kind:target");
+        let verdict = |attempt: &str| {
+            RouteOutcomeRecord::new(kind, target, "a", "completed")
+                .with_attempt_key(attempt)
+                .with_role(Some(cohort.role.clone()))
+                .with_complexity(Some(cohort.complexity.clone()))
+                .with_risk(Some(cohort.risk.clone()))
+                .with_effort_level(Some("high".into()))
+                .with_shape(PlanShape::Solo)
+                .with_signal("verdict")
+                .with_decision(runtime::DecisionKind::Verify)
+                .with_verdict_basis(runtime::VerdictBasis::Model)
+        };
+        let store = [verdict("one"), verdict("two"), verdict("three")];
+        let row = |cohort: Option<&runtime::PlanCohort>, records: &[RouteOutcomeRecord]| {
+            let mut ctx = context("a");
+            ctx.cohort = cohort;
+            build_plan_shadow(PlanShadowInputs {
+                session_id: "session-1",
+                attempt: None,
+                recorded_at: 1,
+                ctx,
+                models: &models,
+                priors: &priors,
+                records,
+                price: &price,
+                cache: &[],
+                actual: actual("a"),
+                trigger: None,
+                category: None,
+            })
+        };
+        let of = |row: &PlanShadowRow, model: &str| -> Vec<PlanShadowCandidate> {
+            row.candidates.iter().filter(|candidate| candidate.model == model).cloned().collect()
+        };
+        let (unread, read, no_cohort) = (row(Some(&cohort), &[]), row(Some(&cohort), &store), row(None, &store));
+        assert_eq!(unread.candidate_count, read.candidate_count);
+        assert!(!of(&unread, "a").is_empty() && !of(&unread, "b").is_empty(), "both models are in the row");
+        assert_ne!(of(&read, "a"), of(&unread, "a"), "three verified verdicts about `a` moved none of its candidates");
+        assert_eq!(of(&read, "b"), of(&unread, "b"), "a verdict about `a` moved a candidate of `b`");
+        assert_eq!(no_cohort.candidates, unread.candidates, "without a cohort a record is nobody's evidence");
     }
 
     #[test]

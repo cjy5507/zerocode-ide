@@ -45,7 +45,7 @@ pub use plan::{
     choose_plan, plan_candidates, plan_evidence_from_records, score_plan,
     CacheState as PlanCacheState, ChoiceReason,
     CostBreakdown, CostTerm, ModelOption, ModelPrice, PlanCandidate, PlanChoice, PlanCohort, PlanContext,
-    PlanEstimate, PlanEvidence, PlanPriors, ScoredPlan, SwitchTrigger, VerifyMode,
+    PlanEstimate, PlanEvidence, PlanEvidenceRecords, PlanPriors, ScoredPlan, SwitchTrigger, VerifyMode,
 };
 pub use accuracy::{
     orchestration_accuracy, read_orchestration_accuracy, AccuracyReport, ACCURACY_MIN_DECISIVE,

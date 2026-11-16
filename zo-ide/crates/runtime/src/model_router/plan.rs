@@ -248,6 +248,9 @@ impl PlanEvidence {
 
 /// Verified attempts in the same route, task role, difficulty and risk.
 /// Missing dimensions are not wildcards; a repeated verdict is one sample.
+///
+/// One candidate's question. A caller with many candidates reads the store
+/// once ([`PlanEvidenceRecords`]) and asks that.
 #[must_use]
 pub fn plan_evidence_from_records(
     records: &[super::outcome::RouteOutcomeRecord],
@@ -255,61 +258,151 @@ pub fn plan_evidence_from_records(
     cohort: &PlanCohort,
     canonical: impl Fn(&str) -> String,
 ) -> Option<PlanEvidence> {
-    use super::outcome::{DecisionKind, VerdictBasis, VerdictSubject, learning_samples};
     let model = canonical(&candidate.model);
-    let shape = candidate.shape.label();
-    let matching = |record: &super::outcome::RouteOutcomeRecord| {
-        canonical(&record.selected_model) == model
-            && cohort.matches(record)
-            && record.intervened != Some(true)
-            && record.run_id.as_deref().is_some_and(|attempt| !attempt.is_empty())
-            && record.effort_level.as_deref() == candidate.effort.as_deref()
-            && record.shape.as_deref() == Some(shape.as_str())
-    };
-    let mut evidence = PlanEvidence::default();
-    let mut durations = Vec::new();
-    let mut outputs = Vec::new();
-    let mut seen = false;
-    for record in learning_samples(records) {
-        if !matching(&record) || record.decision_kind() != DecisionKind::Verify
-            || record.verdict_subject_kind() != VerdictSubject::Work
-        { continue; }
-        let checked = match candidate.verify {
-            VerifyMode::Objective => record.verdict_basis_kind() == VerdictBasis::Objective,
-            VerifyMode::ModelJudge => record.verdict_basis_kind() == VerdictBasis::Model,
-            VerifyMode::None => false,
+    PlanEvidenceRecords::new(records, cohort, canonical).evidence(candidate, &model)
+}
+
+/// The outcome store as the candidates of one plan read it.
+///
+/// Which samples teach, which rows are of the cohort, what each row's model
+/// is called: none of that depends on the candidate asking. It used to be
+/// worked out again for every candidate — the sample mask and its two maps
+/// over the whole store, and each row's model named twice — so the store was
+/// read as many times as the plan had candidates, before the turn's request
+/// went out. Here the store is read once. A candidate then walks only the
+/// rows that can be somebody's evidence and compares what does depend on it:
+/// the model, the effort, the shape and how the result was checked.
+pub struct PlanEvidenceRecords<'a> {
+    /// Settled verdicts about the work, of the cohort, in store order.
+    verdicts: Vec<EvidenceVerdict>,
+    /// Finished runs of the cohort, in store order.
+    runs: Vec<EvidenceRun<'a>>,
+}
+
+/// A verdict a candidate may count: who it is about and how it was reached.
+struct EvidenceVerdict {
+    model: String,
+    effort: Option<String>,
+    shape: Option<String>,
+    basis: super::outcome::VerdictBasis,
+    passed: bool,
+}
+
+/// A run a candidate may take its medians from.
+struct EvidenceRun<'a> {
+    model: String,
+    effort: Option<&'a str>,
+    shape: Option<&'a str>,
+    attempt: &'a str,
+    duration_ms: Option<u64>,
+    output_tokens: u64,
+}
+
+impl<'a> PlanEvidenceRecords<'a> {
+    /// Read `records` for `cohort`, naming each row's model with `canonical`.
+    #[must_use]
+    pub fn new(
+        records: &'a [super::outcome::RouteOutcomeRecord],
+        cohort: &PlanCohort,
+        canonical: impl Fn(&str) -> String,
+    ) -> Self {
+        use super::outcome::{DecisionKind, VerdictSubject, learning_samples};
+        // What every candidate asks of a row before anything of its own.
+        let of_cohort = |record: &super::outcome::RouteOutcomeRecord| {
+            cohort.matches(record)
+                && record.intervened != Some(true)
+                && record.run_id.as_deref().is_some_and(|attempt| !attempt.is_empty())
         };
-        if !checked { continue; }
-        match record.status.as_str() {
-            "completed" => evidence.verified_passes = evidence.verified_passes.saturating_add(1),
-            "failed" => evidence.verified_failures = evidence.verified_failures.saturating_add(1),
-            _ => continue,
+        let verdicts = learning_samples(records)
+            .filter(|record| {
+                of_cohort(record)
+                    && record.decision_kind() == DecisionKind::Verify
+                    && record.verdict_subject_kind() == VerdictSubject::Work
+                    && matches!(record.status.as_str(), "completed" | "failed")
+            })
+            .map(|record| EvidenceVerdict {
+                model: canonical(&record.selected_model),
+                effort: record.effort_level.clone(),
+                shape: record.shape.clone(),
+                basis: record.verdict_basis_kind(),
+                passed: record.status == "completed",
+            })
+            .collect();
+        let runs = records
+            .iter()
+            .filter(|record| {
+                of_cohort(record)
+                    && record.decision_kind() == DecisionKind::Model
+                    && record.signal.is_none()
+                    && (!record.is_seat_sample() || record.admitted)
+                    && matches!(record.status.as_str(), "completed" | "failed" | "stopped")
+            })
+            .filter_map(|record| {
+                Some(EvidenceRun {
+                    model: canonical(&record.selected_model),
+                    effort: record.effort_level.as_deref(),
+                    shape: record.shape.as_deref(),
+                    attempt: record.run_id.as_deref()?,
+                    duration_ms: record.duration_ms,
+                    output_tokens: record.output_tokens,
+                })
+            })
+            .collect();
+        Self { verdicts, runs }
+    }
+
+    /// What the store knows about `candidate`, whose model `canonical` names
+    /// `model`.
+    #[must_use]
+    pub fn evidence(&self, candidate: &PlanCandidate, model: &str) -> Option<PlanEvidence> {
+        use super::outcome::VerdictBasis;
+        let shape = candidate.shape.label();
+        let effort = candidate.effort.as_deref();
+        let mut evidence = PlanEvidence::default();
+        let mut seen = false;
+        for verdict in &self.verdicts {
+            if verdict.model != model
+                || verdict.effort.as_deref() != effort
+                || verdict.shape.as_deref() != Some(shape.as_str())
+            { continue; }
+            let checked = match candidate.verify {
+                VerifyMode::Objective => verdict.basis == VerdictBasis::Objective,
+                VerifyMode::ModelJudge => verdict.basis == VerdictBasis::Model,
+                VerifyMode::None => false,
+            };
+            if !checked { continue; }
+            if verdict.passed {
+                evidence.verified_passes = evidence.verified_passes.saturating_add(1);
+            } else {
+                evidence.verified_failures = evidence.verified_failures.saturating_add(1);
+            }
+            seen = true;
         }
-        seen = true;
-    }
-    let mut runs = std::collections::BTreeMap::new();
-    for record in records.iter().filter(|record| matching(record)
-        && record.decision_kind() == DecisionKind::Model && record.signal.is_none()
-        && (!record.is_seat_sample() || record.admitted)
-        && matches!(record.status.as_str(), "completed" | "failed" | "stopped"))
-    {
-        runs.insert(record.run_id.as_deref(), record);
-    }
-    for record in runs.values() {
-        seen = true;
-        if let Some(duration) = record.duration_ms {
-            durations.push(duration);
+        // One run an attempt: the later row of the same attempt stands.
+        let mut by_attempt = std::collections::BTreeMap::new();
+        for run in self.runs.iter().filter(|run| {
+            run.model == model && run.effort == effort && run.shape == Some(shape.as_str())
+        }) {
+            by_attempt.insert(run.attempt, run);
         }
-        if record.output_tokens > 0 {
-            outputs.push(record.output_tokens);
+        let mut durations = Vec::new();
+        let mut outputs = Vec::new();
+        for run in by_attempt.values() {
+            seen = true;
+            if let Some(duration) = run.duration_ms {
+                durations.push(duration);
+            }
+            if run.output_tokens > 0 {
+                outputs.push(run.output_tokens);
+            }
         }
+        if !seen {
+            return None;
+        }
+        evidence.median_duration_ms = median(&mut durations);
+        evidence.median_output_tokens = median(&mut outputs);
+        Some(evidence)
     }
-    if !seen {
-        return None;
-    }
-    evidence.median_duration_ms = median(&mut durations);
-    evidence.median_output_tokens = median(&mut outputs);
-    Some(evidence)
 }
 
 fn median(values: &mut [u64]) -> Option<u64> {
@@ -1131,6 +1224,169 @@ mod tests {
     fn evidence_cohort() -> PlanCohort {
         PlanCohort::new("main", "turn", super::super::target::RouteRole::Coding,
             RouteTaskComplexity::Medium, super::super::policy::RouteTaskRisk::Low).unwrap()
+    }
+
+    /// The evidence as it was read before the store was read once for the
+    /// candidates of a plan: the whole question, asked of the whole store.
+    fn evidence_read_per_candidate(
+        records: &[super::super::outcome::RouteOutcomeRecord],
+        candidate: &PlanCandidate,
+        cohort: &PlanCohort,
+        canonical: impl Fn(&str) -> String,
+    ) -> Option<PlanEvidence> {
+        use super::super::outcome::{DecisionKind, VerdictBasis, VerdictSubject, learning_samples};
+        let model = canonical(&candidate.model);
+        let shape = candidate.shape.label();
+        let matching = |record: &super::super::outcome::RouteOutcomeRecord| {
+            canonical(&record.selected_model) == model
+                && cohort.matches(record)
+                && record.intervened != Some(true)
+                && record.run_id.as_deref().is_some_and(|attempt| !attempt.is_empty())
+                && record.effort_level.as_deref() == candidate.effort.as_deref()
+                && record.shape.as_deref() == Some(shape.as_str())
+        };
+        let mut evidence = PlanEvidence::default();
+        let mut durations = Vec::new();
+        let mut outputs = Vec::new();
+        let mut seen = false;
+        for record in learning_samples(records) {
+            if !matching(&record) || record.decision_kind() != DecisionKind::Verify
+                || record.verdict_subject_kind() != VerdictSubject::Work
+            { continue; }
+            let checked = match candidate.verify {
+                VerifyMode::Objective => record.verdict_basis_kind() == VerdictBasis::Objective,
+                VerifyMode::ModelJudge => record.verdict_basis_kind() == VerdictBasis::Model,
+                VerifyMode::None => false,
+            };
+            if !checked { continue; }
+            match record.status.as_str() {
+                "completed" => evidence.verified_passes = evidence.verified_passes.saturating_add(1),
+                "failed" => evidence.verified_failures = evidence.verified_failures.saturating_add(1),
+                _ => continue,
+            }
+            seen = true;
+        }
+        let mut runs = std::collections::BTreeMap::new();
+        for record in records.iter().filter(|record| matching(record)
+            && record.decision_kind() == DecisionKind::Model && record.signal.is_none()
+            && (!record.is_seat_sample() || record.admitted)
+            && matches!(record.status.as_str(), "completed" | "failed" | "stopped"))
+        {
+            runs.insert(record.run_id.as_deref(), record);
+        }
+        for record in runs.values() {
+            seen = true;
+            if let Some(duration) = record.duration_ms {
+                durations.push(duration);
+            }
+            if record.output_tokens > 0 {
+                outputs.push(record.output_tokens);
+            }
+        }
+        if !seen {
+            return None;
+        }
+        evidence.median_duration_ms = median(&mut durations);
+        evidence.median_output_tokens = median(&mut outputs);
+        Some(evidence)
+    }
+
+    /// A store with something of everything a candidate's question turns on:
+    /// two names of one model, another model, another effort, another shape,
+    /// both ways a result is checked, a failed and a stopped run, an attempt
+    /// with two rows, a verdict that names a model its run did not end on, and
+    /// rows that are nobody's evidence.
+    fn a_store_of_many_plans() -> Vec<super::super::outcome::RouteOutcomeRecord> {
+        use super::super::outcome::{DecisionKind, RouteOutcomeRecord, VerdictBasis, VerdictSubject};
+        let run = |attempt: &str, status: &str, duration_ms: u64, output_tokens: u64| {
+            observed_run(attempt, status).with_duration_ms(Some(duration_ms)).with_output_tokens(output_tokens)
+        };
+        let verdict = |attempt: &str, status: &str, basis: VerdictBasis| {
+            observed_run(attempt, status).with_signal("verdict").with_decision(DecisionKind::Verify).with_verdict_basis(basis)
+        };
+        let of_model = |model: &str, record: RouteOutcomeRecord| RouteOutcomeRecord { selected_model: model.into(), ..record };
+        let of_effort = |effort: &str, record: RouteOutcomeRecord| RouteOutcomeRecord { effort_level: Some(effort.into()), ..record };
+        let split = PlanShape::Parallel { width: 2 };
+        vec![
+            run("one", "completed", 30_000, 2_000),
+            run("one", "failed", 50_000, 2_400),
+            run("two", "stopped", 10_000, 0),
+            verdict("one", "completed", VerdictBasis::Objective),
+            verdict("two", "failed", VerdictBasis::Objective),
+            verdict("three", "completed", VerdictBasis::Model),
+            verdict("three-again", "failed", VerdictBasis::Model),
+            of_model("alias-a", run("four", "completed", 70_000, 900)),
+            of_model("alias-a", verdict("four", "completed", VerdictBasis::Objective)),
+            of_model("b", run("five", "completed", 20_000, 700)),
+            of_model("b", verdict("five", "failed", VerdictBasis::Objective)),
+            of_effort("max", run("six", "completed", 90_000, 5_000)),
+            of_effort("max", verdict("six", "completed", VerdictBasis::Objective)),
+            run("seven", "completed", 11_000, 100).with_shape(split),
+            verdict("seven", "completed", VerdictBasis::Objective).with_shape(split),
+            // Said of `a`, about an attempt that ended on `b`.
+            of_model("b", run("eight", "completed", 15_000, 300)),
+            verdict("eight", "completed", VerdictBasis::Objective),
+            // Nobody's evidence.
+            RouteOutcomeRecord { intervened: Some(true), ..run("nine", "completed", 1, 1) },
+            RouteOutcomeRecord { run_id: None, ..verdict("ten", "completed", VerdictBasis::Objective) },
+            RouteOutcomeRecord { role: Some("analysis".into()), ..run("eleven", "completed", 2, 2) },
+            verdict("twelve", "failed", VerdictBasis::Objective).with_verdict_subject(VerdictSubject::Validator),
+            verdict("thirteen", "running", VerdictBasis::Objective),
+        ]
+    }
+
+    /// Every candidate a plan could hold over that store: four model names,
+    /// three efforts, two shapes, three ways to check.
+    fn every_candidate_of_the_store() -> Vec<PlanCandidate> {
+        let mut candidates = Vec::new();
+        for model in ["a", "alias-a", "b", "zzz"] {
+            for effort in [Some("high"), Some("max"), None] {
+                for shape in [PlanShape::Solo, PlanShape::Parallel { width: 2 }] {
+                    for verify in [VerifyMode::Objective, VerifyMode::ModelJudge, VerifyMode::None] {
+                        candidates.push(PlanCandidate { model: model.into(), effort: effort.map(str::to_string), shape, verify });
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    fn one_name_for_a(model: &str) -> String {
+        model.strip_prefix("alias-").unwrap_or(model).to_string()
+    }
+
+    #[test]
+    fn the_store_read_once_answers_every_candidate_as_the_store_read_for_each_did() {
+        let (rows, cohort) = (a_store_of_many_plans(), evidence_cohort());
+        let read_once = PlanEvidenceRecords::new(&rows, &cohort, one_name_for_a);
+        let mut answered = std::collections::BTreeSet::new();
+        for candidate in every_candidate_of_the_store() {
+            let before = evidence_read_per_candidate(&rows, &candidate, &cohort, one_name_for_a);
+            assert_eq!(read_once.evidence(&candidate, &one_name_for_a(&candidate.model)), before, "{candidate:?}");
+            assert_eq!(plan_evidence_from_records(&rows, &candidate, &cohort, one_name_for_a), before, "{candidate:?}");
+            if let Some(evidence) = before {
+                answered.insert((evidence.verified_passes, evidence.verified_failures, evidence.median_duration_ms));
+            }
+        }
+        // The comparison is of something: the store answers several plans, and differently.
+        assert!(answered.len() >= 5, "the store answers too few plans apart to compare anything: {answered:?}");
+    }
+
+    #[test]
+    fn a_candidate_asks_the_store_read_once_and_no_row_is_named_again() {
+        let (rows, cohort) = (a_store_of_many_plans(), evidence_cohort());
+        let named = std::cell::Cell::new(0_usize);
+        let canonical = |model: &str| {
+            named.set(named.get() + 1);
+            one_name_for_a(model)
+        };
+        let read_once = PlanEvidenceRecords::new(&rows, &cohort, canonical);
+        let for_the_store = named.get();
+        assert!(for_the_store > 0 && for_the_store <= 2 * rows.len(), "{for_the_store} names for {} rows", rows.len());
+        for candidate in every_candidate_of_the_store() {
+            let _ = read_once.evidence(&candidate, "a");
+        }
+        assert_eq!(named.get(), for_the_store, "a candidate's question named a row of the store again");
     }
 
     fn observed_run(attempt: &str, status: &str) -> super::super::outcome::RouteOutcomeRecord {
