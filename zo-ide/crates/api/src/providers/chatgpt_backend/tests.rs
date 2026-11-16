@@ -4930,7 +4930,20 @@ const SCENE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
 /// The production bundle ceiling (120 s), at the same ratio to the window.
 const SCENE_CEILING: std::time::Duration = std::time::Duration::from_millis(150);
 /// Slack on a scene's expected duration: scheduler and socket overhead.
-const SCENE_SLACK: std::time::Duration = std::time::Duration::from_millis(50);
+///
+/// What it must stay under is the gap between the end a scene asserts and the
+/// end it rules out, and in every scene that gap is one ceiling: a window and
+/// the ceiling against two windows (450 against 600 ms), the ceiling against a
+/// whole window (150 against 300 ms), the ceiling against a whole backoff (150
+/// against 600 ms). So two thirds of a ceiling still tells the two ends apart
+/// in all three, and a busy machine has room: at 50 ms one run ended 201.4 ms
+/// in, under a load of 34 to 66, and the same scene reached 191 ms at a load
+/// of 28 (2026-11-16; alone it takes 152 to 155 ms).
+const SCENE_SLACK: std::time::Duration = std::time::Duration::from_millis(100);
+const _: () = assert!(
+    SCENE_SLACK.as_millis() < SCENE_CEILING.as_millis(),
+    "a slack of a whole ceiling could not tell a scene's end from the end it rules out"
+);
 /// A reconnect backoff four ceilings long: even its lowest jitter outlasts the bundle, so a
 /// scene can show what a pause the bundle cannot afford does to the turn's end.
 const SCENE_LONG_BACKOFF: std::time::Duration = std::time::Duration::from_millis(600);
