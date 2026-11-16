@@ -46,8 +46,9 @@ const ANSI_SLOT_NAMES: [&str; 16] = [
 type ColourField = for<'t> fn(&'t mut Theme, &str) -> Option<&'t mut Option<(u8, u8, u8)>>;
 
 /// Reads every `<slug>.json` directly inside `dir` into a theme, sorted by
-/// name, and says each mistake as one warning line. A missing folder is no
-/// themes and no warning.
+/// name, and says each mistake as one warning line. A name that starts with
+/// `.` is passed over without a word, and a missing folder is no themes and
+/// no warning.
 #[must_use]
 pub fn load_from(dir: &Path) -> (Vec<Theme>, Vec<String>) {
     let mut warnings = Vec::new();
@@ -90,8 +91,17 @@ impl Notes<'_> {
 }
 
 /// The theme in `path`, or `None` — said, unless it is no theme file at all
-/// (another extension, or a folder).
+/// (another extension, a folder, or a name that starts with `.`).
 fn read_theme_file(path: &Path, folder: &Path, warnings: &mut Vec<String>) -> Option<Theme> {
+    // An editor's lock file beside a theme being edited (`.#mine.json`),
+    // macOS's `._mine.json` and any other hidden name: no theme file, and
+    // nothing to say each time the names are read.
+    if path
+        .file_name()
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
+    {
+        return None;
+    }
     if path.extension().and_then(OsStr::to_str) != Some("json") {
         return None;
     }
@@ -733,6 +743,28 @@ mod tests {
         }
         let expected_warnings = if cfg!(unix) { 4 } else { 3 };
         assert_eq!(warnings.len(), expected_warnings, "{warnings:?}");
+    }
+
+    /// An editor's lock file beside a theme being edited (`.#mine.json`, a
+    /// link to nowhere), macOS's `._` twin of it and any other name that
+    /// starts with `.` are no theme files: no theme, and nothing said.
+    #[test]
+    fn a_dot_file_in_the_themes_folder_is_no_theme_and_no_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let theme = r##"{"colors":{"accent":"#112233"}}"##;
+        write_theme(dir.path(), "mine.json", theme);
+        write_theme(dir.path(), ".hidden.json", theme);
+        write_theme(dir.path(), "._mine.json", "\0\u{5}\u{16}\u{7}");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.path().join("no-such-target"), dir.path().join(".#mine.json"))
+            .expect("lock link");
+        #[cfg(not(unix))]
+        write_theme(dir.path(), ".#mine.json", "a lock");
+
+        let (themes, warnings) = load_from(dir.path());
+        let names: Vec<&str> = themes.iter().map(|theme| theme.name.as_str()).collect();
+        assert_eq!(names, ["mine"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
