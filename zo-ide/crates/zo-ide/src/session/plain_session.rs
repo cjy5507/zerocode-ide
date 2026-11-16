@@ -168,8 +168,8 @@ pub struct PlainSession {
     allowed_tools: Option<AllowedToolSet>,
     /// [`OpenOptions::allowed_tools`] as the launch named it, for the sessions
     /// a TUI opens from this one ([`Self::launch_flags`]) — not the list this
-    /// one resolved (`allowed_tools`), which a reopen takes from its stored
-    /// prompt.
+    /// one resolved (`allowed_tools`), which a reopen nobody attends takes
+    /// from beside its stored prompt.
     launch_allowed_tools: Option<AllowedToolSet>,
     system_prompt: Vec<String>,
     pub(crate) runtime: BuiltRuntime,
@@ -947,10 +947,10 @@ impl PlainSession {
         let denied_tools = crate::runtime_support::disallowed_tool_names();
         let offer = tools::ToolOffer::new(allowed_tools.as_ref(), denied_tools.as_ref());
         // Only a list the harness profile chose is kept beside a prompt built
-        // now, for a reopen. A launch list (`--allowed-tools`, `zo review`, a
-        // pane's brief) is the launch's to name again: a session it opened
-        // keeps none, and a reopen that names none is given every tool, as
-        // zo 1.1.159 gave it.
+        // now, for a reopen nobody attends. A launch list (`--allowed-tools`,
+        // `zo review`, a pane's brief) is the launch's to name again: a
+        // session it opened keeps none, and a reopen that names none is given
+        // every tool, as zo 1.1.159 gave it.
         let kept_tools = if options.allowed_tools.is_some() { None } else { allowed_tools.as_ref() };
         let prompt_started = std::time::Instant::now();
         crate::runtime_support::log_boot_stage("open/session-handle", opened);
@@ -3018,11 +3018,14 @@ pub fn permission_label(mode: PermissionMode) -> &'static str {
 }
 
 /// The tool list a session opens with: the list the launch named, else, for a
-/// `root` session, the one kept beside the prompt it stored when it reopens on
-/// that prompt (`stored`: the list its harness profile chose when it opened,
-/// or every tool), and otherwise the one the opening model's
-/// harness profile holds it to (`tools::harness_tool_set`) — the list
-/// `--allowed-tools` would name. A pane child keeps what its parent resolved.
+/// `root` session a run nobody attends (`headless`) reopens on the prompt it
+/// stored (`stored`), the list kept beside that prompt (the one its harness
+/// profile chose when it opened, or every tool), and otherwise the one the
+/// opening model's harness profile holds it to (`tools::harness_tool_set`) —
+/// the list `--allowed-tools` would name. A person who reopens a session gets
+/// what this opening decides, as a new session would; the prompt it stored
+/// may then teach fewer tools than it is given. A pane child keeps what its
+/// parent resolved.
 /// A `headless_core` profile holds only a run nobody attends (`headless`, the
 /// judgment that picks the prompt's `Operating autonomously`) to that list,
 /// and only while `attached` says the person attached nothing of their own
@@ -3037,10 +3040,10 @@ fn opening_tool_list(
 ) -> Option<AllowedToolSet> {
     launch.cloned().or_else(|| {
         root.then(|| match stored {
-            // The list kept beside the stored prompt, whatever this opening
-            // would choose for a new session now.
-            Some(stored) => stored.tools.clone(),
-            None => tools::harness_tool_set(model, || headless && !attached()),
+            // A run nobody attends keeps the list kept beside the stored
+            // prompt, whatever this opening would choose for a new run now.
+            Some(stored) if headless => stored.tools.clone(),
+            _ => tools::harness_tool_set(model, || headless && !attached()),
         })
         .flatten()
     })
@@ -3074,9 +3077,9 @@ struct StoredPrompt {
     /// bytes not moving.
     sections: Vec<String>,
     /// `None` is every tool: what a session stores when its profile chose no
-    /// list or its launch named one, and what a session stored before this
-    /// list was kept beside its prompt (zo 1.1.159 and earlier) reopens with,
-    /// as it always did. An unreadable list reads the same way.
+    /// list or its launch named one. A session stored before this list was
+    /// kept beside its prompt (zo 1.1.159 and earlier) reads the same way, as
+    /// it always did, and so does an unreadable list.
     tools: Option<AllowedToolSet>,
 }
 
@@ -3096,15 +3099,16 @@ fn load_stored_prompt(session_path: &Path) -> Option<StoredPrompt> {
 
 /// Store a prompt built or carried now with the tool list a reopen keeps
 /// (`tool_list`): the one the session's harness profile chose and the prompt
-/// was built for, so a reopen sends the same text with the same tools. A
-/// launch list is the launch's to name again and is not kept: a reopen that
-/// names none is given every tool. Every tool is stored as no list, which
-/// also takes away a list an earlier prompt of this session left — only a
-/// file that reads as one: beside a transcript reopened by its path the name
-/// may be the person's, and a file that does not read as a list reads as
-/// every tool anyway. The list is written first and the prompt only once it
-/// stands, so a prompt never sits beside a list it was not built for; without
-/// a prompt a reopen builds afresh. Best effort, like the prompt always was.
+/// was built for, so a reopen nobody attends sends the same text with the
+/// same tools. A launch list is the launch's to name again and is not kept:
+/// a reopen that names none is given every tool. Every tool is stored as no
+/// list, which also takes away a list an earlier prompt of this session left
+/// — only a file that reads as one: beside a transcript reopened by its path
+/// the name may be the person's, and a file that does not read as a list
+/// reads as every tool anyway. The list is written first and the prompt only
+/// once it stands, so a prompt never sits beside a list it was not built for;
+/// without a prompt a reopen builds afresh. Best effort, like the prompt
+/// always was.
 fn store_system_prompt(session_path: &Path, sections: &[String], tool_list: Option<&AllowedToolSet>) {
     let list = session_tool_list_path(session_path);
     let listed = match tool_list {
@@ -4097,16 +4101,18 @@ mod opening_tool_list_tests {
         assert_eq!(looked.get(), 2, "only a headless root run without a list looks for the person's tools");
     }
 
-    /// A reopen sends the prompt it stored, so a root session without a launch
-    /// list is given the tools that prompt was built for, whoever reopens it
-    /// and whatever its profile would give a new session now: a run 1.1.158
-    /// opened on every tool keeps every tool where a new run would get the
-    /// core four, and a run opened on the core four keeps them when a person
-    /// reopens it at the terminal. A launch list still wins, a pane child
-    /// keeps what its parent resolved, and nobody looks for the person's
+    /// A reopen sends the prompt it stored. When a run nobody attends reopens
+    /// a root session without a launch list, the session is given the list
+    /// kept beside that prompt, whatever its profile would give a new run now:
+    /// a run 1.1.158 opened on every tool keeps every tool where a new run
+    /// would get the core four, and a run opened on the core four keeps them.
+    /// A person who reopens a session gets what the run decides now, as a new
+    /// session would and as 1.1.159 gave it — every tool under `headless_core`,
+    /// even beside a prompt built for four. A launch list still wins, a pane
+    /// child keeps what its parent resolved, and nobody looks for the person's
     /// tools.
     #[test]
-    fn a_reopen_is_given_the_tools_its_stored_prompt_was_built_for() {
+    fn a_reopen_nobody_attends_keeps_its_list_and_a_person_gets_what_the_run_decides() {
         let _lock = crate::test_env_lock();
         let _overlay = crate::support::EnvVarGuard::set(
             api::MODEL_CONTEXT_WINDOWS_ENV,
@@ -4119,8 +4125,16 @@ mod opening_tool_list_tests {
             opening_tool_list(launch, root, Some(stored), headless, "acme-coder-1", || panic!("a reopen does not look for the person's tools"))
         };
 
+        let a_new_session_a_person_opens = opening_tool_list(None, true, None, false, "acme-coder-1", || panic!("a person's run is not held"));
+        assert_eq!(a_new_session_a_person_opens, None, "a new session a person opens under headless_core gets every tool");
+
         assert_eq!(reopen(None, true, &stored(None), true), None, "a run opened on every tool keeps every tool");
-        assert_eq!(reopen(None, true, &stored(Some(&core)), false), Some(core.clone()), "a person reopening a core run keeps the core four");
+        assert_eq!(
+            reopen(None, true, &stored(Some(&core)), false),
+            a_new_session_a_person_opens,
+            "a person reopening a core run gets what the run decides now: every tool"
+        );
+        assert_eq!(reopen(None, true, &stored(None), false), a_new_session_a_person_opens, "a person reopening a run opened on every tool gets the same");
         assert_eq!(reopen(None, true, &stored(Some(&core)), true), Some(core.clone()), "a core run reopened nobody attending keeps them");
         assert_eq!(reopen(Some(&launch), true, &stored(Some(&core)), false), Some(launch.clone()), "a launch list wins");
         assert_eq!(reopen(None, false, &stored(Some(&core)), true), None, "a pane child keeps what its parent resolved");

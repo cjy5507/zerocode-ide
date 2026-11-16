@@ -14,9 +14,11 @@
 //! tools the session can reach: the four sections that teach a tool, the
 //! deferred-tool paragraph and a background command's start line follow the
 //! tools the session was given. A reopened session sends the text it stored
-//! when it opened, and is given the tools its profile chose for that text: a
-//! session a launch list opened keeps no list and reopens on every tool, as
-//! 1.1.159 did.
+//! when it opened. A run nobody attends that reopens it is given the tools its
+//! profile chose for that text; a session a launch list opened keeps no list
+//! and reopens on every tool, as 1.1.159 did. A person who reopens a session
+//! gets what the run decides then — every run here is one nobody attends, so
+//! `plain_session`'s own table shows that side.
 
 #[expect(dead_code, reason = "the env guard is shared; its HTTP server and model reader are not used here")]
 #[path = "support/custom_models.rs"]
@@ -594,9 +596,10 @@ fn a_run_opened_on_every_tool_reopens_on_every_tool() {
     assert_eq!(tool_names(&reopened.1), tool_names(&opened.1), "a run opened on every tool reopens on every tool");
 }
 
-/// The other way: a run opened on the core four, reopened where a new run
-/// would get every tool — a person reopening it at the terminal — keeps the
-/// core four its stored text was built for.
+/// The other way: a run opened on the core four, reopened by a run nobody
+/// attends where a new run would get every tool (`tool_set: full`), keeps the
+/// core four its stored text was built for. A person who reopens it gets what
+/// the run decides then (`plain_session`'s table).
 #[test]
 fn a_run_opened_on_the_core_four_reopens_on_them() {
     let server = ChatServer::new();
