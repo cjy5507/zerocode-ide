@@ -1,6 +1,6 @@
 use std::ffi::OsString;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -76,23 +76,15 @@ impl Server {
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 };
-                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-                let mut bytes = Vec::new();
-                let mut chunk = [0; 4096];
-                loop {
-                    let n = stream.read(&mut chunk).unwrap_or(0);
-                    if n == 0 { break; }
-                    bytes.extend_from_slice(&chunk[..n]);
-                    let text = String::from_utf8_lossy(&bytes);
-                    if let Some((head, rest)) = text.split_once("\r\n\r\n") {
-                        let length = head.lines().find_map(|line| {
-                            let (key, value) = line.split_once(':')?;
-                            key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
-                        }).unwrap_or(0);
-                        if rest.len() >= length { break; }
-                    }
+                // macOS gives an accepted stream the listener's non-blocking
+                // mode: read it blocking, so the timeout waits for a request
+                // still on its way instead of the read taking it for none.
+                if stream.set_nonblocking(false).is_err() || stream.set_read_timeout(Some(Duration::from_secs(2))).is_err() {
+                    continue;
                 }
-                let request = String::from_utf8(bytes).unwrap();
+                // A connection that ends, fails or times out before its
+                // request is whole is closed unanswered and left unrecorded.
+                let Some(request) = read_request(&mut stream) else { continue };
                 let (status, body) = if request.starts_with("POST ") {
                     ("200 OK", r#"{"id":"fixture","model":"vendor/model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#)
                 } else { (status.as_str(), body.as_str()) };
@@ -118,6 +110,28 @@ impl Drop for Server {
     }
 }
 
+/// One whole request: the head through its blank line and the body its
+/// Content-Length names. `None` when the connection ends, fails or times out
+/// first, so a partial request is never answered.
+fn read_request(stream: &mut TcpStream) -> Option<String> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return None,
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+        let Some(end) = bytes.windows(4).position(|four| four == b"\r\n\r\n") else { continue };
+        let length = String::from_utf8_lossy(&bytes[..end]).lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
+        }).unwrap_or(0);
+        if bytes.len() >= end + 4 + length { return Some(String::from_utf8_lossy(&bytes).into_owned()); }
+    }
+}
+
 pub fn read(server: &Server) -> Result<Vec<String>, api::ApiError> {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(
         api::discover_models_with_bearer(&server.base, "fixture-key")
@@ -129,8 +143,7 @@ pub fn read(server: &Server) -> Result<Vec<String>, api::ApiError> {
 /// file that shares only the provider guard still leaves those unused.
 mod tests {
     use super::*;
-    use std::io::ErrorKind;
-    use std::net::{Shutdown, TcpStream};
+    use std::net::Shutdown;
 
     fn connect(server: &Server) -> TcpStream {
         let address = server.base.trim_start_matches("http://").trim_end_matches("/v1");
