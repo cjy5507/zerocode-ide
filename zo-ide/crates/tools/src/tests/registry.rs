@@ -748,6 +748,41 @@ fn normalize_allowed_tools_accepts_aliases_and_mixed_separators() {
     );
 }
 
+/// A core tool set is the list the `--allowed-tools` flag names for the same
+/// edit shape, so a profile and the flag open one session; a full one leaves
+/// the offer to the registry.
+#[test]
+fn a_core_tool_set_is_the_list_the_allowed_tools_flag_names() {
+    // Built before the lock is taken: the helper takes `env_lock` itself, and
+    // std's mutex does not re-enter.
+    let registry = crate::tests::builtin_registry_outside_cwd_windows();
+    let flag = |list: &str| registry.normalize_allowed_tools(&[list.to_string()]).expect("the flag's names");
+    let (patcher, editor, plain) = {
+        let _guard = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os(api::MODEL_CONTEXT_WINDOWS_ENV);
+        std::env::set_var(
+            api::MODEL_CONTEXT_WINDOWS_ENV,
+            r#"{"models":[
+                {"ids":["acme-patcher-1"],"harness":{"edit_tool":"apply_patch","tool_set":"core"}},
+                {"ids":["acme-editor-1"],"harness":{"tool_set":"core"}},
+                {"ids":["acme-plain-1"],"harness":{"edit_tool":"apply_patch"}}]}"#,
+        );
+        let sets = (
+            crate::harness_tool_set("acme-patcher-1"),
+            crate::harness_tool_set("acme-editor-1"),
+            crate::harness_tool_set("acme-plain-1"),
+        );
+        match previous {
+            Some(value) => std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, value),
+            None => std::env::remove_var(api::MODEL_CONTEXT_WINDOWS_ENV),
+        }
+        sets
+    };
+    assert_eq!(patcher, flag("bash,read_file,write_file,apply_patch"));
+    assert_eq!(editor, flag("bash,read_file,write_file,edit_file"));
+    assert_eq!(plain, None, "a full tool set leaves the offer to the registry");
+}
+
 #[test]
 fn normalize_shell_command_collapses_whitespace_before_lowercasing() {
     assert_eq!(

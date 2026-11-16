@@ -348,6 +348,22 @@ impl PromptInput {
         )
     }
 
+    /// The harness profile's values, each with the evidence behind it.
+    fn harness_rows(&self) -> String {
+        let harness = &self.harness;
+        let mut out = String::new();
+        let _ = writeln!(out, "  {:<18}{}", "Edit tool", harness.edit_tool.key());
+        let _ = writeln!(out, "  {:<18}{}", "Edit tool source", harness.edit_tool_source.key());
+        for (label, value, source) in [
+            ("Prompt set", harness.prompt_set.key(), harness.prompt_set_source),
+            ("Tool set", harness.tool_set.key(), harness.tool_set_source),
+            ("Finish rule", harness.finish_rule.key(), harness.finish_rule_source),
+        ] {
+            let _ = writeln!(out, "  {label:<18}{value} ({})", source.key());
+        }
+        out
+    }
+
     fn custom_model_rows(&self) -> String {
         let Some(values) = api::custom_models::custom_model_capabilities(&self.model) else {
             return String::new();
@@ -370,8 +386,7 @@ impl PromptInput {
         let _ = writeln!(out, "Prompt input");
         let _ = writeln!(out, "  {:<18}{}", "Provider family", self.provider_family);
         let _ = writeln!(out, "  {:<18}{}", "Model", self.model);
-        let _ = writeln!(out, "  {:<18}{}", "Edit tool", self.harness.edit_tool.key());
-        let _ = writeln!(out, "  {:<18}{}", "Edit tool source", self.harness.edit_tool_source.key());
+        out.push_str(&self.harness_rows());
         out.push_str(&self.custom_model_rows());
         let _ = writeln!(out, "  {:<18}{}", "Workspace", self.workspace);
         let _ = writeln!(

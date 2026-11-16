@@ -19,9 +19,9 @@ use sections::{
     get_actions_section, get_clarification_section, get_context_trust_label_section,
     get_default_coding_harness_section, get_delegation_section, get_grounding_in_code_section,
     get_memory_protocol_section, get_responding_section, get_response_style_contract_section,
-    get_simple_doing_tasks_section, get_simple_intro_section, get_simple_system_section,
-    get_skills_and_docs_section, get_turn_discipline_section, render_config_section,
-    render_memory_index, render_second_brain_section,
+    get_finish_rule_section, get_simple_doing_tasks_section, get_simple_intro_section,
+    get_simple_system_section, get_skills_and_docs_section, get_turn_discipline_section,
+    render_config_section, render_memory_index, render_second_brain_section, TASK_WORK_HEADING,
 };
 
 /// Which interaction surface the prompt is built for. The behavioral contract
@@ -552,19 +552,16 @@ impl SystemPromptBuilder {
     #[must_use]
     pub fn build(&self) -> Vec<String> {
         let mut sections = Vec::new();
-        // An experiment arm may hold static policy out (`ZO_ABLATE_PROMPT`).
-        // A malformed spec is loud rather than ignored — see
-        // [`ablation::PromptAblation`] — but this is a `#[must_use] -> Vec`,
-        // so the loudness lands on stderr here and the run continues on the
-        // production arm rather than silently reporting a holdout it did not
-        // apply.
-        let held_out = match ablation::PromptAblation::from_env() {
-            Ok(set) => set,
-            Err(error) => {
-                eprintln!("zo: {error}; continuing with the full prompt");
-                ablation::PromptAblation::none()
-            }
-        };
+        // The model's harness profile (`api::harness_profile_for_model`): its
+        // prompt set picks the arm and its finish rule closes `# Task work`.
+        // No model bound, no profile: the defaults, which are the prompt built
+        // before the profile had these values.
+        let profile = self
+            .model
+            .as_deref()
+            .map(api::harness_profile_for_model)
+            .unwrap_or_default();
+        let arm = prompt_arm(profile.prompt_set);
         sections.push(get_simple_intro_section(self.output_style_name.is_some()));
         sections.push(get_response_style_contract_section());
         if let (Some(name), Some(prompt)) = (&self.output_style_name, &self.output_style_prompt) {
@@ -575,7 +572,7 @@ impl SystemPromptBuilder {
         sections.push(get_clarification_section());
         sections.push(get_default_coding_harness_section());
         sections.push(get_grounding_in_code_section());
-        sections.push(get_simple_doing_tasks_section());
+        sections.push(get_simple_doing_tasks_section(profile.finish_rule));
         if self.spawn_family {
             sections.push(get_delegation_section());
         }
@@ -587,25 +584,9 @@ impl SystemPromptBuilder {
         sections.push(get_memory_protocol_section());
         sections.push(get_context_trust_label_section());
         // Filter once, here, rather than at each push: the arm is a property of
-        // the whole static region, and a `retain` cannot forget a section a
+        // the whole static region, and a filter cannot forget a section a
         // future push adds.
-        if !held_out.is_production_arm() {
-            // Say the arm out loud, once. A treatment that applies silently is
-            // the failure this module's own docs name — the operator cannot
-            // tell a measured holdout from a spec that never took, and stderr
-            // is durable here (an interactive run sends it to
-            // `~/.zo/logs/zo-ide.log`).
-            eprintln!(
-                "zo: prompt ablation arm — holding out {}",
-                held_out.keys().join(", ")
-            );
-            sections.retain(|section| {
-                section
-                    .lines()
-                    .next()
-                    .is_none_or(|heading| !held_out.suppresses(heading))
-            });
-        }
+        let mut sections = hold_out(sections, &arm, profile.finish_rule);
         sections.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY.to_string());
         sections.push(self.environment_section());
         if let Some(project_context) = &self.project_context {
@@ -761,6 +742,62 @@ fn render_sandbox_line(status: &SandboxStatus) -> String {
             limits.join("; ")
         )
     }
+}
+
+/// The arm a prompt is built on: what `ZO_ABLATE_PROMPT` holds out, or every
+/// ablatable section under a core prompt set, so what an experiment measured
+/// and what a profile ships are one prompt.
+///
+/// A malformed spec is loud rather than ignored — see
+/// [`ablation::PromptAblation`] — but the builder is a `#[must_use] -> Vec`,
+/// so the loudness lands on stderr and the run continues on the production
+/// arm rather than silently reporting a holdout it did not apply.
+fn prompt_arm(prompt_set: api::PromptSet) -> ablation::PromptAblation {
+    let experiment = match ablation::PromptAblation::from_env() {
+        Ok(set) => set,
+        Err(error) => {
+            eprintln!("zo: {error}; continuing with the full prompt");
+            ablation::PromptAblation::none()
+        }
+    };
+    let announce = !experiment.is_production_arm();
+    let arm = match prompt_set {
+        api::PromptSet::Core => ablation::PromptAblation::all(),
+        api::PromptSet::Full => experiment,
+    };
+    // Say an experiment's arm out loud, once. A treatment that applies
+    // silently is the failure the ablation module's own docs name — the
+    // operator cannot tell a measured holdout from a spec that never took,
+    // and stderr is durable here (an interactive run sends it to
+    // `~/.zo/logs/zo-ide.log`). A profile's core set is no experiment:
+    // `zo --prompt-input` shows it, with its source.
+    if announce {
+        eprintln!("zo: prompt ablation arm — holding out {}", arm.keys().join(", "));
+    }
+    arm
+}
+
+/// `sections` less what `arm` holds out. A held-out `# Task work` keeps the
+/// finish rule when it is on: the rule is a profile value of its own, so a
+/// core prompt that declares it still carries it, under its heading.
+fn hold_out(
+    sections: Vec<String>,
+    arm: &ablation::PromptAblation,
+    finish_rule: api::FinishRule,
+) -> Vec<String> {
+    if arm.is_production_arm() {
+        return sections;
+    }
+    sections
+        .into_iter()
+        .filter_map(|section| match section.lines().next() {
+            Some(heading) if arm.suppresses(heading) => {
+                (finish_rule == api::FinishRule::On && heading == TASK_WORK_HEADING)
+                    .then(get_finish_rule_section)
+            }
+            _ => Some(section),
+        })
+        .collect()
 }
 
 /// Heading of the environment-context section carrying the `Model family:`

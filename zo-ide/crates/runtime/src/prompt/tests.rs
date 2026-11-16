@@ -639,6 +639,49 @@ fn a_prompt_ablation_arm_drops_what_it_names_and_keeps_what_it_must() {
     );
 }
 
+/// A core prompt set is the `all` arm by another door: whichever says it —
+/// the experiment switch or the model's harness profile — the prompt is one,
+/// byte for byte, and a declared full set is the prompt as it was. The arm is
+/// applied here the way `build` applies the switch, because setting the
+/// switch itself would reach every prompt this binary builds meanwhile.
+#[test]
+fn a_core_prompt_set_builds_the_prompt_the_all_arm_builds() {
+    use super::ablation::PromptAblation;
+
+    let _guard = env_lock();
+    let saved = std::env::var_os(api::MODEL_CONTEXT_WINDOWS_ENV);
+    let overlay = |harness: &str| format!(r#"{{"models":[{{"ids":["acme-coder-1"],"harness":{harness}}}]}}"#);
+    let build = || SystemPromptBuilder::new().with_model("acme-coder-1").build();
+
+    std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, overlay("{}"));
+    let full = build();
+    std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, overlay(r#"{"prompt_set":"core"}"#));
+    let core = build();
+    std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, overlay(r#"{"prompt_set":"full"}"#));
+    let declared_full = build();
+    match saved {
+        Some(value) => std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, value),
+        None => std::env::remove_var(api::MODEL_CONTEXT_WINDOWS_ENV),
+    }
+
+    // The arm reaches the static region only, as `build` applies it.
+    let every = PromptAblation::all();
+    let boundary = full
+        .iter()
+        .position(|section| section == SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+        .expect("dynamic boundary should be present");
+    let (static_region, dynamic_region) = full.split_at(boundary);
+    let all_arm: Vec<String> = static_region
+        .iter()
+        .filter(|section| section.lines().next().is_none_or(|heading| !every.suppresses(heading)))
+        .chain(dynamic_region)
+        .cloned()
+        .collect();
+    assert_ne!(all_arm, full, "the arm must hold sections out");
+    assert_eq!(core, all_arm, "a core prompt set is the `all` arm");
+    assert_eq!(declared_full, full, "a declared full prompt set is the prompt as it was");
+}
+
 /// `# Action scope and permission` must ship, and ship cacheably.
 ///
 /// Found by ablation: each of the twelve static sections was removed in turn
@@ -1057,7 +1100,7 @@ fn the_reworded_manual_keeps_its_system_and_task_rules() {
     }
     assert_eq!(system.lines().filter(|line| line.starts_with(" - ")).count(), 6);
 
-    let tasks = super::get_simple_doing_tasks_section();
+    let tasks = super::get_simple_doing_tasks_section(api::FinishRule::Off);
     assert!(tasks.starts_with("# Task work\n"));
     for term in [
         "Create a file only when completing the request requires it",

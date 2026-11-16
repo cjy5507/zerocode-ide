@@ -924,6 +924,16 @@ impl PlainSession {
             model_selection,
             origins: selection_origins,
         } = opening;
+        // The tools the session is given: a list the launch named, else the
+        // one the opening model's harness profile holds a root session to
+        // (`tools::harness_tool_set`) — the list `--allowed-tools` would name,
+        // read once here like the system prompt. A pane child keeps what its
+        // parent resolved.
+        let allowed_tools = options.allowed_tools.clone().or_else(|| {
+            (options.parent_registry.is_none() && options.teammate_harness.is_none())
+                .then(|| tools::harness_tool_set(&model))
+                .flatten()
+        });
         let prompt_started = std::time::Instant::now();
         crate::runtime_support::log_boot_stage("open/session-handle", opened);
         // A teammate runs the prompt its parent resolved, as written — never
@@ -959,7 +969,7 @@ impl PlainSession {
             &handle.id,
             model.clone(),
             system_prompt.clone(),
-            options.allowed_tools.clone(),
+            allowed_tools.clone(),
             options.permission_mode,
             thinking_config_for(effort),
             effort.and_then(Effort::level),
@@ -1016,7 +1026,7 @@ impl PlainSession {
             model,
             permission_mode: options.permission_mode,
             named_permission_mode: options.named_permission_mode,
-            allowed_tools: options.allowed_tools,
+            allowed_tools,
             system_prompt,
             runtime,
             tasks,

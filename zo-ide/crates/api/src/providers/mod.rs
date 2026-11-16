@@ -80,6 +80,72 @@ impl EditToolForm {
     }
 }
 
+/// Which system-prompt sections a model is shown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptSet {
+    /// Every section.
+    #[default]
+    Full,
+    /// The sections an experiment may not hold out, and nothing else of the
+    /// static policy: the prompt the `ZO_ABLATE_PROMPT=all` arm builds.
+    Core,
+}
+
+impl PromptSet {
+    /// The catalog spelling (`full` | `core`).
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Core => "core",
+        }
+    }
+}
+
+/// Which tools a session driving the model is given.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSet {
+    /// The registry's advertisement, as configured.
+    #[default]
+    Full,
+    /// The shell, `Read`, `Write` and the model's edit shape: the session an
+    /// `--allowed-tools` list naming those four opens.
+    Core,
+}
+
+impl ToolSet {
+    /// The catalog spelling (`full` | `core`).
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Core => "core",
+        }
+    }
+}
+
+/// Whether `# Task work` closes with the rule that a passed check ends the work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishRule {
+    #[default]
+    Off,
+    On,
+}
+
+impl FinishRule {
+    /// The catalog spelling (`off` | `on`).
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+}
+
 /// The harness a model is driven with: what it is shown, as opposed to how a
 /// request reaches it (`wire`, effort, window). Resolved per model by
 /// [`harness_profile_for_model`]: the model's catalog row, its name-token
@@ -88,11 +154,21 @@ impl EditToolForm {
 /// row states only where it differs. An operator overlay
 /// ([`MODEL_CONTEXT_WINDOWS_ENV`]) is read before the shipped catalog, which is
 /// how an experiment arm changes one field without a build.
+///
+/// Every value carries where it came from; a source never changes what the
+/// model is shown. The defaults (`edit`, `full`, `full`, `off`) are the harness
+/// every lineup had before the value existed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HarnessProfile {
     pub edit_tool: EditToolForm,
     /// Where the resolved edit shape came from; never changes the wire form.
     pub edit_tool_source: HarnessValueSource,
+    pub prompt_set: PromptSet,
+    pub prompt_set_source: HarnessValueSource,
+    pub tool_set: ToolSet,
+    pub tool_set_source: HarnessValueSource,
+    pub finish_rule: FinishRule,
+    pub finish_rule_source: HarnessValueSource,
 }
 
 /// Evidence behind one resolved harness value.
@@ -127,16 +203,42 @@ impl HarnessValueSource {
 }
 
 /// A catalog row's partial harness declaration: absent fields fall through.
+/// A value declared without its `*_source` is `declared`.
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(default)]
 struct HarnessDecl {
     edit_tool: Option<EditToolForm>,
     edit_tool_source: Option<HarnessValueSource>,
+    prompt_set: Option<PromptSet>,
+    prompt_set_source: Option<HarnessValueSource>,
+    tool_set: Option<ToolSet>,
+    tool_set_source: Option<HarnessValueSource>,
+    finish_rule: Option<FinishRule>,
+    finish_rule_source: Option<HarnessValueSource>,
 }
 
+/// One declared value with its evidence.
+type HarnessValue<T> = (T, HarnessValueSource);
+
 impl HarnessDecl {
-    fn edit_tool(self) -> Option<(EditToolForm, HarnessValueSource)> {
-        Some((self.edit_tool?, self.edit_tool_source.unwrap_or(HarnessValueSource::Declared)))
+    fn declared<T>(value: Option<T>, source: Option<HarnessValueSource>) -> Option<HarnessValue<T>> {
+        Some((value?, source.unwrap_or(HarnessValueSource::Declared)))
+    }
+
+    fn edit_tool(self) -> Option<HarnessValue<EditToolForm>> {
+        Self::declared(self.edit_tool, self.edit_tool_source)
+    }
+
+    fn prompt_set(self) -> Option<HarnessValue<PromptSet>> {
+        Self::declared(self.prompt_set, self.prompt_set_source)
+    }
+
+    fn tool_set(self) -> Option<HarnessValue<ToolSet>> {
+        Self::declared(self.tool_set, self.tool_set_source)
+    }
+
+    fn finish_rule(self) -> Option<HarnessValue<FinishRule>> {
+        Self::declared(self.finish_rule, self.finish_rule_source)
     }
 }
 
@@ -848,29 +950,32 @@ impl ModelContextCatalog {
             .filter(|capabilities| !capabilities.is_empty())
     }
 
-    /// The model row, then its name-token family, then the serving transport.
-    /// A missing family declaration keeps the existing transport behavior.
-    fn edit_tool_for(
+    /// One harness value: the model row, then its name-token family, then the
+    /// serving transport, each layer read for this field alone. A missing
+    /// family declaration keeps the existing transport behavior, and a value a
+    /// lineup lends to a model of another family is `inherited`.
+    fn harness_value_for<T>(
         &self,
         raw_model: &str,
         canonical_model: &str,
         named_provider: Option<ProviderKind>,
-    ) -> Option<(EditToolForm, HarnessValueSource)> {
+        field: fn(HarnessDecl) -> Option<HarnessValue<T>>,
+    ) -> Option<HarnessValue<T>> {
         let entry = self.find_entry(raw_model, canonical_model);
-        if let Some(value) = entry.and_then(|row| row.harness).and_then(HarnessDecl::edit_tool) {
+        if let Some(value) = entry.and_then(|row| row.harness).and_then(field) {
             return Some(value);
         }
         let family = harness_family_from_name(canonical_model);
-        if let Some(value) = family.and_then(|family| self.harness.for_family(family)).and_then(|decl| decl.edit_tool()) {
+        if let Some(value) = family.and_then(|family| self.harness.for_family(family)).copied().and_then(field) {
             return Some(value);
         }
         let provider = entry
             .and_then(|row| row.provider.as_deref())
             .and_then(provider_kind_from_key)
             .or(named_provider)?;
-        let (form, source) = self.harness.for_provider(provider)?.edit_tool()?;
+        let (value, source) = self.harness.for_provider(provider).copied().and_then(field)?;
         let same_family = family.and_then(first_party_lineup) == Some(provider);
-        Some((form, if same_family { source } else { HarnessValueSource::Inherited }))
+        Some((value, if same_family { source } else { HarnessValueSource::Inherited }))
     }
 
     fn demotes_to_for(&self, raw_model: &str, canonical_model: &str) -> Option<String> {
@@ -1048,16 +1153,20 @@ fn builtin_model_context_catalog() -> &'static ModelContextCatalog {
 /// built-in [`model_context_windows.json`]. The override is read fresh, not
 /// cached, so a test can set and unset it per case.
 fn catalog_fact<T>(pick: impl Fn(&ModelContextCatalog) -> Option<T>) -> Option<T> {
-    if let Ok(raw) = std::env::var(MODEL_CONTEXT_WINDOWS_ENV) {
-        if !raw.trim().is_empty() {
-            if let Ok(catalog) = serde_json::from_str::<ModelContextCatalog>(&raw) {
-                if let Some(fact) = pick(&catalog) {
-                    return Some(fact);
-                }
-            }
-        }
+    override_catalog()
+        .as_ref()
+        .and_then(&pick)
+        .or_else(|| pick(builtin_model_context_catalog()))
+}
+
+/// The [`MODEL_CONTEXT_WINDOWS_ENV`] override catalog, parsed; `None` when it is
+/// unset, empty or not a catalog.
+fn override_catalog() -> Option<ModelContextCatalog> {
+    let raw = std::env::var(MODEL_CONTEXT_WINDOWS_ENV).ok()?;
+    if raw.trim().is_empty() {
+        return None;
     }
-    pick(builtin_model_context_catalog())
+    serde_json::from_str(&raw).ok()
 }
 
 /// The catalog's declared family for `model`, when a row states one.
@@ -1115,9 +1224,44 @@ pub fn harness_profile_for_model(model: &str) -> HarnessProfile {
     let canonical = resolve_catalog_alias(bare);
     let lower = canonical.to_ascii_lowercase();
     let named_provider = catalog_provider_of(&canonical);
-    let (edit_tool, edit_tool_source) = catalog_fact(|catalog| catalog.edit_tool_for(bare, &lower, named_provider))
-        .unwrap_or_default();
-    HarnessProfile { edit_tool, edit_tool_source }
+    // The layers [`catalog_fact`] reads, with the override parsed once for
+    // all four values: each value still takes the first layer that sets it.
+    let overlay = override_catalog();
+    let layers = [overlay.as_ref(), Some(builtin_model_context_catalog())];
+    let road = HarnessRoad { layers: &layers, bare, canonical: &lower, named_provider };
+    let (edit_tool, edit_tool_source) = road.value(HarnessDecl::edit_tool);
+    let (prompt_set, prompt_set_source) = road.value(HarnessDecl::prompt_set);
+    let (tool_set, tool_set_source) = road.value(HarnessDecl::tool_set);
+    let (finish_rule, finish_rule_source) = road.value(HarnessDecl::finish_rule);
+    HarnessProfile {
+        edit_tool,
+        edit_tool_source,
+        prompt_set,
+        prompt_set_source,
+        tool_set,
+        tool_set_source,
+        finish_rule,
+        finish_rule_source,
+    }
+}
+
+/// One model's way through the catalog layers to its harness values.
+struct HarnessRoad<'a> {
+    layers: &'a [Option<&'a ModelContextCatalog>],
+    bare: &'a str,
+    canonical: &'a str,
+    named_provider: Option<ProviderKind>,
+}
+
+impl HarnessRoad<'_> {
+    /// The first layer's value for `field`, else the default.
+    fn value<T: Default>(&self, field: fn(HarnessDecl) -> Option<HarnessValue<T>>) -> HarnessValue<T> {
+        self.layers
+            .iter()
+            .flatten()
+            .find_map(|catalog| catalog.harness_value_for(self.bare, self.canonical, self.named_provider, field))
+            .unwrap_or_default()
+    }
 }
 
 /// A model's name-token family, from the same cold-start table the router uses.
@@ -5531,7 +5675,9 @@ mod tests {
 
     mod harness_profile {
         use super::{EnvVarGuard, MODEL_CONTEXT_WINDOWS_ENV};
-        use crate::providers::{harness_profile_for_model, EditToolForm, HarnessValueSource};
+        use crate::providers::{
+            harness_profile_for_model, EditToolForm, FinishRule, HarnessValueSource, PromptSet, ToolSet,
+        };
 
         struct OwnProviders(EnvVarGuard);
 
@@ -5736,6 +5882,63 @@ mod tests {
             let profile = harness_profile_for_model("claude-opus-5-5");
 
             assert_eq!(profile.edit_tool, EditToolForm::ApplyPatch);
+        }
+
+        /// The prompt set, tool set and finish rule are defaults wherever they
+        /// are not declared: every shipped row id, every shipped alias and the
+        /// unlisted names keep the harness they had before the values existed.
+        #[test]
+        fn the_new_values_keep_their_defaults_on_every_shipped_and_unlisted_name() {
+            let _lock = crate::test_env_lock();
+            let _shipped = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, None);
+            let _providers = OwnProviders::new();
+            let _ollama = EnvVarGuard::set("OLLAMA_BASE_URL", None);
+            let _registry = ShippedRegistry::new();
+            let catalog = super::super::builtin_model_context_catalog();
+            let crowd = [
+                "deepseek-flash", "acme-coder-1", "gpt-9.9-nova", "chatgpt-4o-latest",
+                "local-gpt-helper", "local-codex-helper", "o1", "o3", "o4",
+            ];
+            let names: Vec<&str> = catalog.models.iter()
+                .flat_map(|row| row.ids.iter().map(String::as_str))
+                .chain(catalog.aliases.iter().map(|row| row.alias.as_str()))
+                .chain(crowd)
+                .collect();
+            assert!(names.len() > catalog.aliases.len() + crowd.len(), "the shipped rows are read");
+            for name in names {
+                let profile = harness_profile_for_model(name);
+                assert_eq!((profile.prompt_set, profile.prompt_set_source), (PromptSet::Full, HarnessValueSource::Default), "{name}");
+                assert_eq!((profile.tool_set, profile.tool_set_source), (ToolSet::Full, HarnessValueSource::Default), "{name}");
+                assert_eq!((profile.finish_rule, profile.finish_rule_source), (FinishRule::Off, HarnessValueSource::Default), "{name}");
+            }
+        }
+
+        /// Each new value takes the edit shape's road, field by field: the
+        /// model row, then the name family's key, then the serving lineup,
+        /// whose value a model of another family inherits.
+        #[test]
+        fn the_new_values_take_the_edit_shapes_road_field_by_field() {
+            let _lock = crate::test_env_lock();
+            let _providers = OwnProviders::new();
+            let _overlay = EnvVarGuard::set(MODEL_CONTEXT_WINDOWS_ENV, Some(r#"{
+                "models":[{"ids":["deepseek-flash"],"harness":{"finish_rule":"on","finish_rule_source":"measured"}}],
+                "harness":{"by_provider":{
+                    "deepseek":{"prompt_set":"core"},
+                    "openai":{"tool_set":"core","tool_set_source":"measured"}}}}"#));
+
+            let row = harness_profile_for_model("deepseek-flash");
+            assert_eq!((row.finish_rule, row.finish_rule_source), (FinishRule::On, HarnessValueSource::Measured));
+            assert_eq!((row.prompt_set, row.prompt_set_source), (PromptSet::Core, HarnessValueSource::Declared));
+            assert_eq!((row.tool_set, row.tool_set_source), (ToolSet::Core, HarnessValueSource::Inherited));
+            assert_eq!(row.edit_tool, EditToolForm::ApplyPatch, "a value the row leaves out still falls through");
+
+            let lineup = harness_profile_for_model("gpt-6.1-sol");
+            assert_eq!((lineup.tool_set, lineup.tool_set_source), (ToolSet::Core, HarnessValueSource::Measured));
+            assert_eq!((lineup.prompt_set, lineup.prompt_set_source), (PromptSet::Full, HarnessValueSource::Default));
+            assert_eq!((lineup.finish_rule, lineup.finish_rule_source), (FinishRule::Off, HarnessValueSource::Default));
+
+            let elsewhere = harness_profile_for_model("claude-opus-5-5");
+            assert_eq!((elsewhere.tool_set, elsewhere.prompt_set, elsewhere.finish_rule), (ToolSet::Full, PromptSet::Full, FinishRule::Off));
         }
     }
 

@@ -116,6 +116,16 @@ impl PromptAblation {
         Self::default()
     }
 
+    /// Every ablatable section held out: the `all` arm, and the prompt a core
+    /// prompt set (`api::PromptSet::Core`) is shown.
+    #[must_use]
+    pub fn all() -> Self {
+        Self {
+            keys: BTreeSet::new(),
+            all: true,
+        }
+    }
+
     /// Read the spec from the environment. An absent or empty variable is the
     /// production arm; a malformed one is an error the caller must surface.
     pub fn from_env() -> Result<Self, PromptAblationError> {
@@ -248,6 +258,12 @@ mod tests {
                 "`all` must not disarm {forbidden} — nobody named it"
             );
         }
+    }
+
+    #[test]
+    fn the_core_prompt_sets_arm_is_the_all_arm() {
+        assert_eq!(PromptAblation::all(), PromptAblation::parse("all").expect("parses"));
+        assert!(!PromptAblation::all().is_production_arm());
     }
 
     #[test]

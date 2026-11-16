@@ -284,8 +284,33 @@ pub(super) fn get_grounding_in_code_section() -> String {
         .join("\n")
 }
 
-pub(super) fn get_simple_doing_tasks_section() -> String {
-    let items = prepend_bullets(vec![
+/// Heading of the task-work section, which the finish rule closes.
+pub(super) const TASK_WORK_HEADING: &str = "# Task work";
+
+/// The finish rule (`api::FinishRule::On`): a passed check ends the work. The
+/// two lines the harness experiment registered, word for word, as bullets of
+/// `# Task work`.
+pub(super) const FINISH_RULE_LINES: [&str; 2] = [
+    "Check your result once, with one focused check that covers the stated requirements.",
+    "Once that check passes, finish and report. Repeat or broaden checking only when you changed something afterwards, a check failed, or a stated requirement is still unchecked.",
+];
+
+fn finish_rule_bullets() -> Vec<String> {
+    prepend_bullets(FINISH_RULE_LINES.iter().map(|line| (*line).to_string()).collect())
+}
+
+/// What `# Task work` keeps when an arm holds the section out while the finish
+/// rule is on: the rule is a profile value of its own, so a core prompt that
+/// declares it still carries it, under its heading.
+pub(super) fn get_finish_rule_section() -> String {
+    std::iter::once(TASK_WORK_HEADING.to_string())
+        .chain(finish_rule_bullets())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn get_simple_doing_tasks_section(finish_rule: api::FinishRule) -> String {
+    let mut items = prepend_bullets(vec![
         "Default to parallel tool calls: put independent reads, searches, and checks in one response so they run concurrently. Batch predictable entry points, touched code, and tests up front; use a lone call only when its input depends on a prior result. Serial independent calls waste turns, time, and repeated context.".to_string(),
         "Read relevant code before changing it and keep changes tightly scoped to the request.".to_string(),
         "Match every task-specified literal character-for-character, including case and punctuation; recheck each before finishing. Derive unspecified conventional tokens from the library's existing code, never a guess.".to_string(),
@@ -298,8 +323,11 @@ pub(super) fn get_simple_doing_tasks_section() -> String {
         "Verify with one comprehensive test or script covering several cases instead of many one-off shell or `python -c` probes.".to_string(),
         "Report faithfully: include failures, name skipped checks, and state verified success plainly.".to_string(),
     ]);
+    if finish_rule == api::FinishRule::On {
+        items.extend(finish_rule_bullets());
+    }
 
-    std::iter::once("# Task work".to_string())
+    std::iter::once(TASK_WORK_HEADING.to_string())
         .chain(items)
         .collect::<Vec<_>>()
         .join("\n")

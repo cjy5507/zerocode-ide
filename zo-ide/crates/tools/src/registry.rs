@@ -493,6 +493,36 @@ fn edit_form_of(name: &str) -> Option<api::EditToolForm> {
     }
 }
 
+/// The builtin that realizes an edit shape: [`edit_form_of`] read backwards.
+const fn edit_tool_handler(form: api::EditToolForm) -> &'static str {
+    match form {
+        api::EditToolForm::Edit => CoreTool::Edit.handler(),
+        api::EditToolForm::ApplyPatch => core_types::tool_names::APPLY_PATCH,
+    }
+}
+
+/// The tools a model's harness profile holds a session to
+/// (`api::HarnessProfile::tool_set`). `None` under `full`, which leaves the
+/// offer to the registry; under `core`, the shell, `Read`, `Write` and the
+/// model's own edit shape — the set `--allowed-tools
+/// bash,read_file,write_file,<edit shape>` names, so a profile and the flag
+/// open one session.
+#[must_use]
+pub fn harness_tool_set(model: &str) -> Option<BTreeSet<String>> {
+    let profile = api::harness_profile_for_model(model);
+    (profile.tool_set == api::ToolSet::Core).then(|| {
+        [
+            CoreTool::Bash.handler(),
+            CoreTool::Read.handler(),
+            CoreTool::Write.handler(),
+            edit_tool_handler(profile.edit_tool),
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    })
+}
+
 /// Whether a session whose model edits in `edit_tool` shape is shown — on the
 /// wire or through `ToolSearch` — the builtin `name`: every tool but the other
 /// edit shape, which stays registered, permissioned and callable by name.
