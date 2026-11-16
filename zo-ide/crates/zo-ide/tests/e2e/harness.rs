@@ -851,8 +851,10 @@ fn configure_command(
         .env("ANTHROPIC_API_KEY", "test-dummy-key")
         .env("ZO_DISABLE_KEYCHAIN", "1")
         // The goldens pin codex's bytes; the interactive front's own default
-        // is the marks look (`tui::style`).
+        // is the marks look (`tui::style`). A theme the developer's pane
+        // exports is not the suite's either: a test that wants one names it.
         .env(zo_ide::tui::style::STYLE_ENV, "codex")
+        .env_remove(zo_ide::tui::theme::THEME_ENV)
         // 세션이 열릴 때 사용량 프로브가 세 provider 를 긁는다. 이 하네스의
         // HOME·설정 홈이 임시 폴더라 자격증명이 없어 이미 나가지 못하지만,
         // 오프라인 보장을 우연이 아니라 **선언**으로 두려고 킬 스위치를 켠다.
