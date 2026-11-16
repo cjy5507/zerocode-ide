@@ -14,7 +14,9 @@
 //! tools the session can reach: the four sections that teach a tool, the
 //! deferred-tool paragraph and a background command's start line follow the
 //! tools the session was given. A reopened session sends the text it stored
-//! when it opened, and is given the tools that text was built for.
+//! when it opened, and is given the tools its profile chose for that text: a
+//! session a launch list opened keeps no list and reopens on every tool, as
+//! 1.1.159 did.
 
 #[expect(dead_code, reason = "the env guard is shared; its HTTP server and model reader are not used here")]
 #[path = "support/custom_models.rs"]
@@ -606,6 +608,51 @@ fn a_run_opened_on_the_core_four_reopens_on_them() {
         assert!(!text.contains(heading), "the stored text was built without `{heading}`");
     }
     assert_eq!(tool_names(&reopened.1), ["Bash", "Read", "Write", "apply_patch"], "a run opened on the core four reopens on them");
+}
+
+/// Every file under `folder`, at any depth, whose name ends with `suffix`.
+fn files_ending(folder: &Path, suffix: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut folders = vec![folder.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for path in std::fs::read_dir(&folder).expect("a scene folder").map(|entry| entry.expect("a folder entry").path()) {
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.to_string_lossy().ends_with(suffix) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// A run a launch list opened (`--allowed-tools`, the way `zo review` opens
+/// its run) stores no tool list beside its text: the list is the launch's to
+/// name again. Reopened without one, it is given every tool, as 1.1.159 gave
+/// it — even where a new run would get the core four (`headless_core`) — and
+/// it sends the text it stored. Only a list the profile chose is stored.
+#[test]
+fn a_run_a_launch_list_opened_reopens_on_every_tool() {
+    let server = ChatServer::new();
+    let overlay_env = api::MODEL_CONTEXT_WINDOWS_ENV;
+    let headless_core = overlay(json!({"tool_set": "headless_core"}));
+    let stored_list = format!(".{}", runtime::session_control::SESSION_TOOLS_EXTENSION);
+
+    let scene = Scene::new();
+    let opened = scene.request(&server, &[(overlay_env, &headless_core)], &["--allowed-tools", "bash,read_file"]);
+    let (texts, lists) = (files_ending(&scene.store, ".system-prompt.json"), files_ending(&scene.store, &stored_list));
+    let reopened = scene.request(&server, &[(overlay_env, &headless_core)], &["--continue"]);
+    let every_tool = Scene::new().request(&server, &[(overlay_env, &overlay(json!({"tool_set": "full"})))], &[]);
+    let held = Scene::new();
+    held.request(&server, &[(overlay_env, &headless_core)], &[]);
+
+    assert_eq!(tool_names(&opened.1), ["Bash", "Read"], "the launch list opens the run");
+    let text = system_text(&reopened.0);
+    assert!(text.starts_with(&system_text(&opened.0)), "a reopened run sends the text it stored:\n{text}");
+    assert_eq!(tool_names(&reopened.1), tool_names(&every_tool.1), "a run a launch list opened reopens on every tool");
+    assert_eq!(texts.len(), 1, "the run stored its text: {texts:?}");
+    assert_eq!(lists, Vec::<PathBuf>::new(), "a launch list is not stored beside the text");
+    assert_eq!(files_ending(&held.store, &stored_list).len(), 1, "a list the profile chose is stored beside the text");
 }
 
 /// The `--prompt-input` digest of every shipped model row id, every shipped

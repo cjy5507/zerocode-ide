@@ -930,7 +930,7 @@ impl PlainSession {
             origins: selection_origins,
         } = opening;
         // A reopened session sends the prompt it stored when it opened, read
-        // once here with the tool list it was built for.
+        // once here with the tool list kept beside it.
         let stored_prompt = resumed.then(|| load_stored_prompt(&handle.path)).flatten();
         // The tools the session is given (`opening_tool_list`), read once
         // here like the system prompt.
@@ -946,6 +946,12 @@ impl PlainSession {
         // names no other tool (`tools::ToolOffer`).
         let denied_tools = crate::runtime_support::disallowed_tool_names();
         let offer = tools::ToolOffer::new(allowed_tools.as_ref(), denied_tools.as_ref());
+        // Only a list the harness profile chose is kept beside a prompt built
+        // now, for a reopen. A launch list (`--allowed-tools`, `zo review`, a
+        // pane's brief) is the launch's to name again: a session it opened
+        // keeps none, and a reopen that names none is given every tool, as
+        // zo 1.1.159 gave it.
+        let kept_tools = if options.allowed_tools.is_some() { None } else { allowed_tools.as_ref() };
         let prompt_started = std::time::Instant::now();
         crate::runtime_support::log_boot_stage("open/session-handle", opened);
         // A teammate runs the prompt its parent resolved, as written — never
@@ -953,7 +959,7 @@ impl PlainSession {
         // drift). A resumed teammate replays the stored one, like any session.
         let system_prompt = match options.teammate_harness.as_ref() {
             Some(harness) if !harness.system_prompt.is_empty() => {
-                carried_system_prompt(&handle.path, stored_prompt, &harness.system_prompt, allowed_tools.as_ref())
+                carried_system_prompt(&handle.path, stored_prompt, &harness.system_prompt, kept_tools)
             }
             _ => session_system_prompt(
                 &cwd,
@@ -966,7 +972,7 @@ impl PlainSession {
                     runtime::PromptMode::Interactive
                 },
                 offer,
-                allowed_tools.as_ref(),
+                kept_tools,
             )?,
         };
         crate::runtime_support::log_boot_stage("open/system-prompt", prompt_started);
@@ -3012,8 +3018,9 @@ pub fn permission_label(mode: PermissionMode) -> &'static str {
 }
 
 /// The tool list a session opens with: the list the launch named, else, for a
-/// `root` session, the one its prompt was built for when it reopens on the
-/// prompt it stored (`stored`), and otherwise the one the opening model's
+/// `root` session, the one kept beside the prompt it stored when it reopens on
+/// that prompt (`stored`: the list its harness profile chose when it opened,
+/// or every tool), and otherwise the one the opening model's
 /// harness profile holds it to (`tools::harness_tool_set`) — the list
 /// `--allowed-tools` would name. A pane child keeps what its parent resolved.
 /// A `headless_core` profile holds only a run nobody attends (`headless`, the
@@ -3030,8 +3037,8 @@ fn opening_tool_list(
 ) -> Option<AllowedToolSet> {
     launch.cloned().or_else(|| {
         root.then(|| match stored {
-            // The stored prompt teaches the tools it was built for, whatever
-            // this opening would choose for a new session now.
+            // The list kept beside the stored prompt, whatever this opening
+            // would choose for a new session now.
             Some(stored) => stored.tools.clone(),
             None => tools::harness_tool_set(model, || headless && !attached()),
         })
@@ -3045,9 +3052,10 @@ fn session_system_prompt_path(session_path: &Path) -> PathBuf {
     session_path.with_extension("system-prompt.json")
 }
 
-/// `<id>.tools` — the tool list a stored prompt was built for. Its extension
-/// is neither `jsonl` nor `json`, so no session listing takes it for a
-/// transcript, and the retention sweep takes it with its session
+/// `<id>.tools` — the tool list a session's harness profile chose for its
+/// stored prompt; a launch list is not kept (`store_system_prompt`). Its
+/// extension is neither `jsonl` nor `json`, so no session listing takes it for
+/// a transcript, and the retention sweep takes it with its session
 /// (`runtime::session_control::SESSION_SIDECAR_EXTENSIONS`).
 fn session_tool_list_path(session_path: &Path) -> PathBuf {
     session_path.with_extension(runtime::session_control::SESSION_TOOLS_EXTENSION)
@@ -3059,16 +3067,16 @@ struct SessionToolList {
     tools: AllowedToolSet,
 }
 
-/// The prompt a session stored when it opened, and the tool list it was built
-/// for.
+/// The prompt a session stored when it opened, and the tool list kept beside
+/// it.
 struct StoredPrompt {
     /// Sent again as they were: the provider's cache prefix depends on the
     /// bytes not moving.
     sections: Vec<String>,
-    /// `None` is every tool: what a session given no list stores, and what a
-    /// session stored before this list was kept beside its prompt (zo 1.1.159
-    /// and earlier) reopens with, as it always did. An unreadable list reads
-    /// the same way.
+    /// `None` is every tool: what a session stores when its profile chose no
+    /// list or its launch named one, and what a session stored before this
+    /// list was kept beside its prompt (zo 1.1.159 and earlier) reopens with,
+    /// as it always did. An unreadable list reads the same way.
     tools: Option<AllowedToolSet>,
 }
 
@@ -3086,15 +3094,17 @@ fn load_stored_prompt(session_path: &Path) -> Option<StoredPrompt> {
     Some(StoredPrompt { sections, tools })
 }
 
-/// Store a prompt built or carried now with the tool list it was built for,
-/// so a reopen sends the same text with the same tools. Every tool is stored
-/// as no list, which also takes away a list an earlier prompt of this session
-/// left — only a file that reads as one: beside a transcript reopened by its
-/// path the name may be the person's, and a file that does not read as a list
-/// reads as every tool anyway. The list is written first and the prompt only
-/// once it stands, so a prompt never sits beside a list it was not built for;
-/// without a prompt a reopen builds afresh. Best effort, like the prompt
-/// always was.
+/// Store a prompt built or carried now with the tool list a reopen keeps
+/// (`tool_list`): the one the session's harness profile chose and the prompt
+/// was built for, so a reopen sends the same text with the same tools. A
+/// launch list is the launch's to name again and is not kept: a reopen that
+/// names none is given every tool. Every tool is stored as no list, which
+/// also takes away a list an earlier prompt of this session left — only a
+/// file that reads as one: beside a transcript reopened by its path the name
+/// may be the person's, and a file that does not read as a list reads as
+/// every tool anyway. The list is written first and the prompt only once it
+/// stands, so a prompt never sits beside a list it was not built for; without
+/// a prompt a reopen builds afresh. Best effort, like the prompt always was.
 fn store_system_prompt(session_path: &Path, sections: &[String], tool_list: Option<&AllowedToolSet>) {
     let list = session_tool_list_path(session_path);
     let listed = match tool_list {
@@ -3137,8 +3147,8 @@ fn carried_system_prompt(
 }
 
 /// A session's prompt: the one it stored when it reopens on it (`stored`),
-/// else one built now for what the session reaches (`offer`, from
-/// `tool_list`) and stored with that list.
+/// else one built now for what the session reaches (`offer`) and stored with
+/// `tool_list`, the list a reopen keeps.
 fn session_system_prompt(
     cwd: &Path,
     model: &str,
