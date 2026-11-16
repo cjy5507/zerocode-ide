@@ -1,7 +1,11 @@
+/// The harness values every `--prompt-input` report shows. A value missing
+/// from the block would pass the walk below unseen, so each one is required.
+const PROFILE_VALUES: [&str; 4] = ["Edit tool", "Prompt set", "Tool set", "Finish rule"];
+
 /// Walk the complete profile block, so future rows cannot silently lose sources.
 pub fn assert_sources(rendered: &str) {
     let mut pending: Option<&str> = None;
-    let mut fields = 0;
+    let mut fields = Vec::new();
     let profile = rendered.lines()
         .skip_while(|row| !row.trim_start().starts_with("Edit tool "))
         .take_while(|row| !row.trim_start().starts_with("Workspace "));
@@ -16,7 +20,7 @@ pub fn assert_sources(rendered: &str) {
             continue;
         }
         assert!(pending.is_none(), "{} has no source", pending.unwrap_or_default());
-        fields += 1;
+        fields.push(label);
         if let Some((_, source)) = value.rsplit_once(" (") {
             let source = source.strip_suffix(')').expect("source closes with a parenthesis");
             assert!(valid_source(source), "unknown source: {row}");
@@ -25,7 +29,9 @@ pub fn assert_sources(rendered: &str) {
         }
     }
     assert!(pending.is_none(), "{} has no source", pending.unwrap_or_default());
-    assert!(fields > 0, "the report has no profile values");
+    for value in PROFILE_VALUES {
+        assert!(fields.contains(&value), "the report does not show {value}:\n{rendered}");
+    }
 }
 
 fn valid_source(source: &str) -> bool {
