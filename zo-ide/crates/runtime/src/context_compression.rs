@@ -197,11 +197,18 @@ fn compress_wire_view(output: &str, tool_name: &str, rewrite: WireRewrite) -> St
 /// than that — up to 483, whose views come to 1.3 MB — and building one
 /// request's views cost them as much as with no memo at all (8 to 12 ms in a
 /// test build).
-/// Eight mebibytes is six times the largest of those sets, which leaves room
-/// for the sub-agents of a fan-out. It is a ceiling, not a reservation: what
-/// a process holds is the views of the results it has, about a megabyte for
-/// the longest of those conversations.
-const WIRE_MEMO_MAX_BYTES: usize = 8 * 1024 * 1024;
+///
+/// Four mebibytes is three times the largest of those sets, which leaves room
+/// for the sub-agents of a fan-out. It is what a process that runs long ends
+/// up holding, not only a ceiling: a result a request saw among its newest is
+/// kept twice — the lossless view made then, not asked for again once
+/// history has moved past it, and the view history gets — and nothing but
+/// this budget lets a view go, not a compaction and not the end of a
+/// conversation. Once it is full the oldest views go first, in use or not,
+/// and one in use is made again by the next request: a few views a request
+/// while the views in use are well under the budget, every view again as
+/// they near it.
+const WIRE_MEMO_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Most views it keeps, whatever their size: the bound on the map itself when
 /// the results are very many and very small.
