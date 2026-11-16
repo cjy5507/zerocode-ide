@@ -19,9 +19,10 @@
 //!   session.
 //! - **Without a listing** — a server seen for the first time, a listing a day
 //!   old, a client asking another protocol version — the real server starts
-//!   at once and what it answers is kept. One the session does not use is
-//!   stopped [`IDLE_AFTER_LEARNING`] later and started again by a call, as
-//!   above.
+//!   at once and what it answers is kept, once its start and its tools were
+//!   answered and not refused: a `tools/list` that fails is asked again by
+//!   the next session. One the session does not use is stopped
+//!   [`IDLE_AFTER_LEARNING`] later and started again by a call, as above.
 //! - **A server that does not start** answers that request with an error that
 //!   names it ([`NOT_STARTED`]), and its listing is forgotten: the next
 //!   session starts it at once, where Claude's own status shows the failure.
@@ -131,11 +132,17 @@ impl Listing {
             && self.complete()
     }
 
+    /// Whether the server's start and its tools are held as answers. A server
+    /// that answered `tools/list` with an error while it was learned is not
+    /// listed: kept, the error would answer every session for a day with no
+    /// tool to call, and so nothing would start the server to ask again.
     fn complete(&self) -> bool {
-        self.answers
-            .get("initialize")
-            .is_some_and(|answer| answer.get("result").is_some())
-            && self.answers.contains_key("tools/list")
+        let answered = |method: &str| {
+            self.answers
+                .get(method)
+                .is_some_and(|answer| answer.get("result").is_some())
+        };
+        answered("initialize") && answered("tools/list")
     }
 
     /// The answer to `method` under the client's `id`, when one is kept.

@@ -14,7 +14,8 @@ use super::{LISTING_STANDS_FOR, Listing, Listings, StandIn, listing_key};
 /// A server that logs each method it hears, lists the tools its tools file
 /// holds, answers `pong` to a call, and ends without a word when the tool
 /// called is `die`. Beside its tools file, a `.slow` file makes it answer its
-/// start a second late.
+/// start a second late, and a `.fails` file makes it answer `tools/list` with
+/// an error.
 const SERVER: &str = r#"#!/bin/sh
 log="$1"; tools="$2"
 echo "start" >> "$log"
@@ -25,7 +26,9 @@ while IFS= read -r line; do
   [ -z "$id" ] && continue
   case "$method" in
     initialize) [ -f "$tools.slow" ] && sleep 1; printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"},"instructions":"FIXTURE-INSTRUCTIONS"}}\n' "$id" ;;
-    tools/list) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":%s}}\n' "$id" "$(cat "$tools")" ;;
+    tools/list)
+      if [ -f "$tools.fails" ]; then printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"backend unavailable"}}\n' "$id"
+      else printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":%s}}\n' "$id" "$(cat "$tools")"; fi ;;
     tools/call)
       case "$line" in *'"name":"die"'*) echo "died" >> "$log"; exit 0 ;; esac
       printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"pong"}]}}\n' "$id" ;;
@@ -395,6 +398,44 @@ fn a_changed_tool_list_is_kept_for_the_next_session() {
     third.close();
 }
 
+/// A tool list the server answers with an error while it is learned is not
+/// kept: the next session starts the server at once and is answered by it.
+/// Kept, the error would answer every session for a day, with no tool to call
+/// and so nothing to start the server and ask again.
+#[test]
+fn a_tool_list_that_fails_while_learned_is_asked_again_by_the_next_session() {
+    let fixture = Fixture::new("fails");
+    let failing = fixture.dir.join("tools.json.fails");
+    std::fs::write(&failing, "").expect("the failing mark");
+    let mut first = fixture.session(Duration::from_secs(600));
+    let (_, tools) = first.open();
+    assert_eq!(
+        tools["error"]["message"], "backend unavailable",
+        "the server's own error reaches the client: {tools}"
+    );
+    assert_eq!(first.close(), 0);
+    let kept = fixture
+        .listings()
+        .recall(&fixture.key())
+        .map(|listing| listing.answers["tools/list"].to_string());
+    assert_eq!(kept, None, "a failed tool list is not kept");
+
+    std::fs::remove_file(&failing).expect("the server lists again");
+    let mut second = fixture.session(Duration::from_secs(600));
+    let (_, tools) = second.open();
+    assert_eq!(
+        fixture.starts(),
+        2,
+        "the next session starts the server at once"
+    );
+    assert_eq!(
+        tool_names(&tools),
+        ["ping"],
+        "and is answered by it: {tools}"
+    );
+    assert_eq!(second.close(), 0);
+}
+
 /// A server started only to learn what it offers is stopped once the session
 /// has asked it nothing else for a while, and the next call starts it again.
 #[test]
@@ -522,7 +563,7 @@ fn a_server_that_ends_before_answering_fails_what_it_was_handed() {
 }
 
 /// A listing answers for a day, of its own shape, once it holds the server's
-/// start and its tools; one dated ahead of now does not.
+/// start and its tools as answers, not errors; one dated ahead of now does not.
 #[test]
 fn a_listing_stands_for_a_day_when_whole() {
     let now = SystemTime::now();
@@ -550,6 +591,15 @@ fn a_listing_stands_for_a_day_when_whole() {
     );
     listing.version = 2;
     assert!(!listing.stands(now, LISTING_STANDS_FOR), "another shape");
+    listing.version = super::LISTING_VERSION;
+    listing.answers.insert(
+        "tools/list".into(),
+        json!({"error": {"code": -32603, "message": "backend unavailable"}}),
+    );
+    assert!(
+        !listing.stands(now, LISTING_STANDS_FOR),
+        "a tool list that failed"
+    );
 }
 
 /// The key is the name and a hash of the command line: the same line gives
