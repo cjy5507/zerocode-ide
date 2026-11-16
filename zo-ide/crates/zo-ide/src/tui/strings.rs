@@ -87,6 +87,14 @@ pub fn compaction_progress(streamed_chars: u64) -> String {
 pub const THINKING: &str = "Thinking";
 /// The `/thinking` popup row.
 pub const THINKING_COMMAND_DESCRIPTION: &str = "show or hide the model's thinking";
+/// The `/theme` popup row.
+pub const THEME_COMMAND_DESCRIPTION: &str = "choose zo's color theme";
+/// The `/theme` picker's title and the row under it.
+pub const THEME_PICKER_TITLE: &str = "Select Theme";
+pub const THEME_PICKER_NOTE: &str =
+    "A move shows the theme at once — enter saves it, esc keeps the one before.";
+/// The `/theme` picker's word for the `terminal` row.
+pub const THEME_TERMINAL_ROW: &str = "the terminal's own colors";
 /// What `/thinking` says it did, one word each way.
 pub const THINKING_SHOWN: &str = "thinking shown · /thinking hides it";
 /// The marks look's three steps of `/thinking`: one row, the whole block, none.

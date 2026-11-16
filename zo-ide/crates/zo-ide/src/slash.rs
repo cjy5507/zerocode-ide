@@ -31,6 +31,10 @@ pub enum Slash {
     /// no command for it — its `hide_agent_reasoning` is a config key — and
     /// it stands beside `/fast` as the other display toggle.
     Thinking,
+    /// zo's own: choose the screen's colour theme (`tui::theme`). Bare, it
+    /// opens the picker; with a name it sets and saves that theme. It stands
+    /// after `/thinking`, so `/th` and enter is still `/thinking`.
+    Theme,
     Permissions,
     /// `/plan off` approves the plan the model submitted in plan mode — the
     /// plan card's own words — by leaving read-only for workspace-write, as
@@ -257,6 +261,7 @@ impl Slash {
         Self::Model,
         Self::Fast,
         Self::Thinking,
+        Self::Theme,
         Self::Permissions,
         Self::Plan,
         Self::New,
@@ -286,6 +291,7 @@ impl Slash {
             Self::Model => "/model",
             Self::Fast => "/fast",
             Self::Thinking => "/thinking",
+            Self::Theme => "/theme",
             Self::Permissions => "/permissions",
             Self::Plan => "/plan",
             Self::New => "/new",
@@ -324,6 +330,7 @@ impl Slash {
             Self::Model => "choose what model and reasoning effort to use",
             Self::Fast => fast::COMMAND_DESCRIPTION,
             Self::Thinking => crate::tui::strings::THINKING_COMMAND_DESCRIPTION,
+            Self::Theme => crate::tui::strings::THEME_COMMAND_DESCRIPTION,
             Self::Permissions => "read-only, workspace-write or danger-full-access",
             Self::Plan => crate::tui::strings::PLAN_COMMAND_DESCRIPTION,
             Self::New => "start a new chat during a conversation",
@@ -780,6 +787,7 @@ mod tests {
                 "/model",
                 "/fast",
                 "/thinking",
+                "/theme",
                 "/permissions",
                 "/plan",
                 "/new",

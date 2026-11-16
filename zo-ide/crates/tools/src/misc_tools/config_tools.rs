@@ -353,6 +353,11 @@ pub fn execute_exit_plan_mode(_input: ExitPlanModeInput) -> Result<PlanModeOutpu
 #[allow(clippy::too_many_lines)] // a flat setting table, clearer unsplit
 pub(crate) fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
     Some(match setting {
+        // zo's color theme, by slug (`dracula`) or visible name. The
+        // interactive screen reads it when it starts — `/theme` there sets
+        // it at once — and it colors zo's own screen, not the terminal.
+        // Free-form (no `options`): the person's own themes are named here
+        // too, so the valid set is open-ended.
         "theme" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::String,

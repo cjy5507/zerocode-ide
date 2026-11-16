@@ -253,6 +253,13 @@ const FRESH_RUN_ENV: &str = "ZO_TUI_LOOK_FRESH_RUN";
 /// `false`, so the test body runs only where a look may be fixed.
 #[cfg(test)]
 pub(crate) fn in_fresh_run(test: &str) -> bool {
+    in_fresh_run_with(test, &[])
+}
+
+/// [`in_fresh_run`], with `env` set in the fresh run — the colour depth a
+/// test draws at (`COLORTERM`), which the screen reads from the environment.
+#[cfg(test)]
+pub(crate) fn in_fresh_run_with(test: &str, env: &[(&str, &str)]) -> bool {
     if std::env::var_os(FRESH_RUN_ENV).is_some() {
         return true;
     }
@@ -262,6 +269,7 @@ pub(crate) fn in_fresh_run(test: &str) -> bool {
         .env(FRESH_RUN_ENV, "1")
         .env_remove(STYLE_ENV)
         .env_remove(super::theme::THEME_ENV)
+        .envs(env.iter().copied())
         .output()
         .expect("run the test alone");
     let stdout = String::from_utf8_lossy(&output.stdout);

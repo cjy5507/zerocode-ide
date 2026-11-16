@@ -866,6 +866,10 @@ pub struct Picker {
     pub rows: Vec<PickerRow>,
     pub selected: usize,
     pub footer: String,
+    /// Sample rows drawn under the choices, above the footer — what the
+    /// choice under the cursor looks like (`/theme`). Empty for a picker with
+    /// nothing to show. The choices come first: see [`Self::lines`].
+    pub preview: Vec<Line>,
 }
 
 /// 피커가 옵션 줄 말고 쓰는 행 수 — 빈 줄 둘·제목·안내·빈 줄·빈 줄·푸터.
@@ -876,6 +880,10 @@ pub struct Picker {
 /// rows above the head and prints them back when it closes
 /// (`Painter::set_popup_height`), so a tall picker costs nothing afterwards.
 const PICKER_CHROME: usize = 7;
+
+/// The fewest choices a picker keeps on screen before its preview is given
+/// a row: the choices are what the picker is for.
+const PREVIEW_MIN_CHOICES: usize = 5;
 
 impl Picker {
     pub fn up(&mut self) {
@@ -897,6 +905,12 @@ impl Picker {
 
     /// `max_rows` 는 뷰포트가 쓸 수 있는 최대 높이다. 옵션이 그보다 많으면
     /// 고른 줄이 보이는 창만 그린다 — 잘라 버리면 아래쪽 모델은 영영 못 고른다.
+    ///
+    /// A [`Self::preview`] stands under the choices with a blank row above
+    /// it, and the choices scroll in the rows that are left. The choices
+    /// come first: the preview keeps its rows only while five choices (or
+    /// all of them, when there are fewer) still show, gives up its last rows
+    /// before that, and is not drawn on a pane too short for both.
     #[must_use]
     pub fn lines(&self, width: usize, max_rows: usize) -> Vec<Line> {
         self.lines_with_focus(width, max_rows, palette::COMMAND_TOKEN)
@@ -917,12 +931,66 @@ impl Picker {
             );
         }
         out.push(Line::empty());
-        let budget = max_rows.saturating_sub(PICKER_CHROME).max(1);
+        let room = max_rows.saturating_sub(PICKER_CHROME);
+        let preview = self.preview_rows(room);
+        // The preview's rows and the blank row above them.
+        let taken = if preview == 0 { 0 } else { preview + 1 };
+        let budget = room.saturating_sub(taken).max(1);
         out.extend(selection_rows(&self.rows, self.selected, width, budget, focus));
+        if preview > 0 {
+            out.push(Line::empty());
+            out.extend(self.preview.iter().take(preview).map(|row| {
+                let mut row = row.clone();
+                row.spans.insert(0, Span::raw("  "));
+                row.truncated(width)
+            }));
+        }
         out.push(Line::empty());
         out.push(Line::new(vec![Span::raw("  "), Span::dim(self.footer.clone())]).truncated(width));
         out
     }
+
+    /// How many of the preview's rows a window with `room` rows under the
+    /// title shows — see [`Self::lines`].
+    fn preview_rows(&self, room: usize) -> usize {
+        let choices = self.rows.len().min(PREVIEW_MIN_CHOICES);
+        (1..=self.preview.len())
+            .rev()
+            .find(|rows| room > choices + rows)
+            .unwrap_or(0)
+    }
+}
+
+/// The `/theme` picker's sample, in the theme that is on now: a heading, a
+/// sentence with inline code and a link, a line of code in the theme's
+/// syntax colours and a count of changed lines — what a theme colours. The
+/// code's colours are fixed when the line is built, so the sample is built
+/// again after every change of theme. The link's address is left out: the
+/// sample shows a link's colour, and leads nowhere.
+#[must_use]
+pub fn theme_preview() -> Vec<Line> {
+    let prose = |source: &str| {
+        super::markdown::render(source)
+            .into_iter()
+            .filter(|row| !row.plain().trim().is_empty())
+            .map(|mut row| {
+                for span in &mut row.spans {
+                    span.link = None;
+                }
+                row
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut rows = prose("## Heading");
+    rows.extend(prose("Text with `inline code` and a [link](https://example.com)."));
+    rows.extend(super::highlight::highlight_code_to_lines("fn main() { let answer = 42; }", "rust"));
+    rows.push(Line::new(vec![
+        Span::raw("src/main.rs  "),
+        Span::new("+1", Style::new().fg(Color::GREEN)),
+        Span::raw(" "),
+        Span::new("-1", Style::new().fg(Color::RED)),
+    ]));
+    rows
 }
 
 /// 번호 선택 행들 — codex `bottom_pane/selection_popup_common.rs::render_rows`
@@ -2219,6 +2287,7 @@ pub fn shortcut_card() -> Vec<String> {
         "/plan off|on          approve the plan · back to plan mode".to_string(),
         format!("/fast                 {}", super::fast::COMMAND_DESCRIPTION),
         format!("/thinking             {}", super::strings::THINKING_COMMAND_DESCRIPTION),
+        "/theme [name]         choose zo's color theme — no name opens the picker".to_string(),
         "/new [name]           start a new chat — optional name".to_string(),
         "/resume [id]          resume a saved chat — no id opens the picker".to_string(),
         "/find [text]          search saved conversation and tool output".to_string(),
@@ -2905,6 +2974,7 @@ mod tests {
                 .collect(),
             selected: 0,
             footer: "enter or esc".to_string(),
+            preview: Vec::new(),
         };
         // Chrome is six rows here (no note); a budget of four lines holds two
         // wrapped rows, and the selection is the first of them.
@@ -2964,6 +3034,7 @@ mod tests {
                 .collect(),
             selected: 4,
             footer: "enter or esc".to_string(),
+            preview: Vec::new(),
         };
         let tall: Vec<String> = picker.lines(80, 39).iter().map(Line::plain).collect();
         assert_eq!(
@@ -2985,6 +3056,97 @@ mod tests {
             ["  3. choice 3  ", "  4. choice 4  ", "› 5. choice 5  "]
         );
         assert_eq!(short.len(), 10, "the window gave up rows, not the chrome");
+    }
+
+    /// The `/theme` picker's sample is four rows — a heading, a sentence
+    /// with inline code and a link, a line of code, a changed-lines count —
+    /// carried by the roles and colour slots a theme draws, and its link
+    /// leads nowhere.
+    #[test]
+    fn the_theme_preview_is_a_heading_a_sentence_a_code_line_and_a_count() {
+        use crate::tui::ansi::{Color, Role};
+        let rows = super::theme_preview();
+        let plain: Vec<String> = rows.iter().map(Line::plain).collect();
+        assert_eq!(rows.len(), 4, "{plain:#?}");
+        assert!(plain[0].contains("Heading"), "{plain:#?}");
+        assert!(plain[1].contains("inline code") && plain[1].contains("link"), "{plain:#?}");
+        assert!(plain[2].contains("fn main()"), "{plain:#?}");
+        assert!(plain[3].contains("+1 -1"), "{plain:#?}");
+        let colour_of = |row: usize, text: &str| {
+            rows[row].spans.iter().find(|span| span.text.contains(text)).and_then(|span| span.style.fg)
+        };
+        assert_eq!(colour_of(1, "inline code"), Some(Color::Role(Role::Code)));
+        assert_eq!(colour_of(1, "link"), Some(Color::Role(Role::Link)));
+        assert_eq!(colour_of(3, "+1"), Some(Color::GREEN));
+        assert_eq!(colour_of(3, "-1"), Some(Color::RED));
+        assert!(rows[2].spans.len() > 1, "the code line is one colour: {:?}", rows[2].spans);
+        assert!(
+            rows.iter().flat_map(|row| &row.spans).all(|span| span.link.is_none()),
+            "the sample's link has an address"
+        );
+    }
+
+    /// A picker's preview stands under its choices, above the footer. The
+    /// choices come first: the preview takes its rows only while the window
+    /// keeps five of them, gives up its last rows before that, and goes
+    /// altogether on a pane too short for both.
+    #[test]
+    fn a_picker_preview_stands_under_the_choices_and_yields_to_them() {
+        let picker = Picker {
+            title: "Choose".to_string(),
+            title_style: Style::new().bold(),
+            note: "Many choices".to_string(),
+            rows: (1..=31)
+                .map(|index| PickerRow {
+                    label: format!("choice {index}"),
+                    description: String::new(),
+                    dim: false,
+                })
+                .collect(),
+            selected: 0,
+            footer: "enter or esc".to_string(),
+            preview: ["sample one", "sample two", "sample three", "sample four"]
+                .into_iter()
+                .map(Line::from_text)
+                .collect(),
+        };
+        let drawn = |height: usize| -> Vec<String> {
+            picker.lines(80, height).iter().map(Line::plain).collect()
+        };
+        let choices = |rows: &[String]| rows.iter().filter(|row| row.contains(". choice ")).count();
+        let samples = |rows: &[String]| -> Vec<String> {
+            rows.iter().filter(|row| row.contains("sample")).map(|row| row.trim().to_string()).collect()
+        };
+
+        // A tall pane: every choice, a blank row, the four samples, a blank
+        // row, the footer.
+        let tall = drawn(60);
+        assert_eq!(choices(&tall), 31, "{tall:#?}");
+        assert_eq!(
+            &tall[tall.len() - 7..],
+            ["", "  sample one", "  sample two", "  sample three", "  sample four", "", "  enter or esc"],
+            "{tall:#?}"
+        );
+
+        // An ordinary pane (a 24-row terminal offers 23): the samples keep
+        // their four rows and the choices scroll in what is left.
+        let ordinary = drawn(23);
+        assert_eq!(ordinary.len(), 23, "{ordinary:#?}");
+        assert_eq!(samples(&ordinary).len(), 4, "{ordinary:#?}");
+        assert_eq!(choices(&ordinary), 11, "{ordinary:#?}");
+
+        // Room for five choices and one sample row, not for two.
+        let tight = drawn(14);
+        assert_eq!(choices(&tight), 5, "{tight:#?}");
+        assert_eq!(samples(&tight), ["sample one"], "{tight:#?}");
+
+        // Too short for five choices and a sample: the choices alone.
+        let short = drawn(13);
+        assert_eq!(choices(&short), 6, "{short:#?}");
+        assert!(samples(&short).is_empty(), "{short:#?}");
+        let floor = drawn(10);
+        assert_eq!(choices(&floor), 3, "{floor:#?}");
+        assert!(samples(&floor).is_empty(), "{floor:#?}");
     }
 
     /// The hint has its own row now, so a long path cannot take its seat.

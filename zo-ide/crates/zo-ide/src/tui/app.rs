@@ -446,6 +446,16 @@ struct PermissionPicker {
     view: Picker,
 }
 
+/// 떠 있는 `/theme` 피커. The theme under the cursor is on while it is up —
+/// a move turns it on at once — so the picker keeps what to go back to.
+struct ThemePicker {
+    /// The slug of each row, in the rows' order.
+    slugs: Vec<String>,
+    view: Picker,
+    /// The theme in use when the picker opened: what esc goes back to.
+    original: super::theme::Theme,
+}
+
 /// 턴 중에 눌렀지만 지금 돌 수 없는 일 — 턴이 끝나면 [`App`] 이 푼다.
 ///
 /// codex 는 턴 중에도 `/model`·`/permissions`·`/status` 를 바로 돌린다
@@ -698,6 +708,8 @@ struct Ui {
     session_page: usize,
     /// 떠 있는 `/permissions` 피커. 모델·재개 피커와 같은 뷰포트 자리를 쓴다.
     permissions: Option<PermissionPicker>,
+    /// 떠 있는 `/theme` 피커 — the same place on the screen again.
+    theme_picker: Option<ThemePicker>,
     /// Alt+A session-scoped in-process agent overview.
     agents: Option<agents::Overview>,
     /// The `?` card or the F2 viewer, while one is up.
@@ -797,6 +809,9 @@ struct Ui {
     /// A display label is not a path: `canonicalize("~/…")` cannot match the
     /// absolute path stored in a session sidecar.
     session_cwd: std::path::PathBuf,
+    /// The settings file a theme chosen here is saved to
+    /// ([`crate::preferences::preferences_path`]; a test names its own).
+    settings_path: PathBuf,
     /// Cwd plus measured `wt/<branch> ← <base>` for the footer only.
     /// Status/session cards keep [`Self::cwd`] so their Codex cell bytes stay put.
     footer_location: String,
@@ -2131,6 +2146,7 @@ impl Ui {
         self.published_activity = PublishedActivity::Never;
         self.parked = None;
         self.permissions = None;
+        self.cancel_theme_picker();
         self.agents = None;
         self.footer_view = None;
         self.warnings.clear();
@@ -2311,6 +2327,14 @@ impl Ui {
     }
 
     fn paint(&mut self) {
+        let cursor = self.paint_rows();
+        self.painter.end(cursor);
+    }
+
+    /// [`Self::paint`] up to the frame's end: the rows are in the painter's
+    /// frame, not yet written out, and the cursor's place is handed back. A
+    /// test reads the frame's bytes here.
+    fn paint_rows(&mut self) -> Option<(u16, u16)> {
         let now = Instant::now();
         // 페이저는 뷰포트를 통째로 쓴다. 렌더가 창 높이를 정하므로 여기서
         // 미리 접어 두고(`&mut`), 프레임에는 그 줄들을 빌려준다 — 아래의
@@ -2422,7 +2446,7 @@ impl Ui {
         };
         let built = view::build_parts(&frame);
         let dense = self.work_opens_dense(tail_owns_slot) || self.tail_continues_its_answer(tail_owns_slot);
-        self.place(built, whole, dense);
+        self.place(built, whole, dense)
     }
 
     /// Whether the work in the viewport stands on the row right under the
@@ -2458,7 +2482,7 @@ impl Ui {
     /// without the gap row they open with when `dense` — and the rest keeps
     /// the floor: a turn reads from the person's words down while it runs,
     /// the way it stands once it is said.
-    fn place(&mut self, built: view::Built, whole: bool, dense: bool) {
+    fn place(&mut self, built: view::Built, whole: bool, dense: bool) -> Option<(u16, u16)> {
         let view::Built { mut rows, mut cursor, work_rows } = built;
         if whole {
             let height = u16::try_from(rows.len()).unwrap_or(u16::MAX);
@@ -2493,8 +2517,7 @@ impl Ui {
             }
         }
         self.painter.paint(&rows);
-        let cursor = cursor.map(|(col, row)| self.painter.absolute(col, row));
-        self.painter.end(cursor);
+        cursor.map(|(col, row)| self.painter.absolute(col, row))
     }
 
     /// History is held until the frame that follows it has sized the head.
@@ -2828,6 +2851,7 @@ impl Ui {
             .as_ref()
             .map(|picker| &picker.view)
             .or_else(|| self.permissions.as_ref().map(|picker| &picker.view))
+            .or_else(|| self.theme_picker.as_ref().map(|picker| &picker.view))
             .or_else(|| self.agents.as_ref().and_then(agents::Overview::picker))
     }
 
@@ -2964,6 +2988,9 @@ impl Ui {
                 }
                 if self.permissions.is_some() {
                     return self.permission_picker_key(*key);
+                }
+                if self.theme_picker_key(*key) {
+                    return KeyOutcome::Nothing;
                 }
                 if self.parked.is_some() {
                     self.parked_key(*key);
@@ -3367,6 +3394,7 @@ impl Ui {
         if self.picker.is_some()
             || self.sessions.is_some()
             || self.permissions.is_some()
+            || self.theme_picker.is_some()
             || self.parked.is_some()
             || self.warnings_open()
         {
@@ -3746,6 +3774,7 @@ impl Ui {
             rows,
             selected,
             footer: PICKER_FOOTER.to_string(),
+            preview: Vec::new(),
         }
     }
 
@@ -3787,6 +3816,7 @@ impl Ui {
                 .collect(),
             selected,
             footer: PICKER_FOOTER.to_string(),
+            preview: Vec::new(),
         }
     }
 
@@ -3878,8 +3908,169 @@ impl Ui {
                 rows,
                 selected,
                 footer: PICKER_FOOTER.to_string(),
+                preview: Vec::new(),
             },
         });
+    }
+
+    // ------------------------------------------------------------------
+    // `/theme` 피커
+    // ------------------------------------------------------------------
+
+    /// `/theme`: every theme in one list — `terminal` first, then the
+    /// built-in ones and the person's own by their visible names, each with
+    /// its slug beside it — the theme in use marked and under the cursor,
+    /// and a sample under the list. The frame and the keys are the numbered
+    /// pickers' ([`Picker`]).
+    fn open_theme_picker(&mut self) {
+        if self.overlay().is_some() || self.sessions.is_some() {
+            return;
+        }
+        let original = super::theme::active();
+        let mut slugs = Vec::new();
+        let mut rows = Vec::new();
+        let mut selected = 0;
+        for name in &super::theme::names() {
+            let slug: &str = name;
+            let Some(theme) = super::theme::find(slug) else {
+                continue;
+            };
+            let mut label = super::theme::shown_name(&theme).to_string();
+            if theme.name == original.name {
+                label.push_str(" (current)");
+                selected = rows.len();
+            }
+            let description = if theme.is_terminal() {
+                super::strings::THEME_TERMINAL_ROW.to_string()
+            } else {
+                slug.to_string()
+            };
+            rows.push(PickerRow { label, description, dim: false });
+            slugs.push(slug.to_string());
+        }
+        self.theme_picker = Some(ThemePicker {
+            slugs,
+            original,
+            view: Picker {
+                title: super::strings::THEME_PICKER_TITLE.to_string(),
+                title_style: Style::new().bold(),
+                note: super::strings::THEME_PICKER_NOTE.to_string(),
+                rows,
+                selected,
+                footer: PICKER_FOOTER.to_string(),
+                preview: view::theme_preview(),
+            },
+        });
+    }
+
+    /// A key for the `/theme` picker — `false`, and nothing done, when it is
+    /// not open. Its keys are the numbered pickers' own: ↑↓ move, a number
+    /// picks its row and confirms, enter confirms, esc (ctrl-c too) leaves.
+    /// What is its own: a move turns the theme under the cursor on at once,
+    /// and leaving goes back to the theme the picker opened on.
+    fn theme_picker_key(&mut self, key: KeyEvent) -> bool {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return false;
+        };
+        let before = picker.view.selected;
+        let mut confirm = false;
+        match key.code {
+            KeyCode::Up => picker.view.up(),
+            KeyCode::Down => picker.view.down(),
+            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                let digit = ch.to_digit(10).unwrap_or(0) as usize;
+                confirm = picker.view.select_number(digit);
+            }
+            KeyCode::Enter => confirm = true,
+            _ => {}
+        }
+        if picker.view.selected != before {
+            self.show_theme_under_cursor();
+        }
+        if confirm {
+            self.confirm_theme_picker();
+        } else if key.code == KeyCode::Esc || (control && key.code == KeyCode::Char('c')) {
+            self.cancel_theme_picker();
+        }
+        true
+    }
+
+    /// Turn the theme under the picker's cursor on, and draw the sample in
+    /// it. The painter writes the screen's rows again by itself: it reads
+    /// the theme's revision ([`super::theme::revision`]).
+    fn show_theme_under_cursor(&mut self) {
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return;
+        };
+        let Some(theme) = picker
+            .slugs
+            .get(picker.view.selected)
+            .and_then(|slug| super::theme::find(slug))
+        else {
+            return;
+        };
+        let _ = super::theme::set(theme);
+        picker.view.preview = view::theme_preview();
+    }
+
+    /// Enter in the picker: the theme under the cursor is the person's
+    /// choice. A row whose theme is gone since the list was made (a theme
+    /// file removed) chooses nothing and goes back, as esc does.
+    fn confirm_theme_picker(&mut self) {
+        let Some(picker) = self.theme_picker.take() else {
+            return;
+        };
+        let chosen = picker
+            .slugs
+            .get(picker.view.selected)
+            .and_then(|slug| super::theme::find(slug));
+        if let Some(theme) = chosen {
+            self.choose_theme(&theme);
+        } else {
+            let _ = super::theme::set(picker.original);
+        }
+    }
+
+    /// Esc in the picker — and a conversation replaced under it: the theme
+    /// it opened on is on again, and nothing was saved.
+    fn cancel_theme_picker(&mut self) {
+        if let Some(picker) = self.theme_picker.take() {
+            let _ = super::theme::set(picker.original);
+        }
+    }
+
+    /// `/theme <name>`: the theme the word names
+    /// ([`super::theme::resolve_name`]) is turned on and saved. A word that
+    /// names none — a path-shaped one is never looked up — changes nothing
+    /// and is answered with the names there are.
+    fn apply_typed_theme(&mut self, name: &str) {
+        if let Ok(theme) = super::theme::resolve_name(name) {
+            self.choose_theme(&theme);
+        } else {
+            let text = format!(
+                "no theme is named {name:?} — the themes: {}",
+                super::theme::names_line()
+            );
+            self.note(SystemLevel::Info, &text);
+        }
+    }
+
+    /// Where the picker's enter and `/theme <name>` end: `theme` is on, it
+    /// is saved as the person's choice — `terminal` is the choice taken out
+    /// — and one line says so, with whatever keeps it from showing here or
+    /// from lasting ([`theme_chosen_note`]). A file that could not be
+    /// written leaves the theme on for this run.
+    fn choose_theme(&mut self, theme: &super::theme::Theme) {
+        let _ = super::theme::set(theme.clone());
+        let slug = (!theme.is_terminal()).then_some(theme.name.as_str());
+        let not_saved = crate::preferences::save_theme_to(&self.settings_path, slug)
+            .err()
+            .map(|error| error.to_string());
+        let env_theme = std::env::var(super::theme::THEME_ENV).ok();
+        let (level, text) =
+            theme_chosen_note(theme, not_saved.as_deref(), theme_unseen_here(), env_theme.as_deref());
+        self.note(level, &text);
     }
 
     /// enter — 1단계면 effort 단계로 잇고, 2단계면 둘을 함께 확정한다.
@@ -4635,6 +4826,11 @@ impl Ui {
             }
             return true;
         }
+        // A theme is the screen's alone: chosen while a turn runs it is on,
+        // and saved, at once — nothing waits for the turn's end.
+        if self.theme_picker_key(*key) {
+            return true;
+        }
         if self.sessions.is_some() {
             // codex `SlashCommand::Resume` 은 `available_during_task()`
             // 가 참이라 턴 중에도 피커가 돈다. 고른 세션으로 갈아 끼우는
@@ -4841,6 +5037,10 @@ impl Ui {
                 }
             }
             Some(Slash::Thinking) => self.toggle_thinking(),
+            // A theme is the screen's own: no session is asked, so a turn in
+            // progress neither delays the picker nor the saving of a name.
+            Some(Slash::Theme) if arg.is_empty() => self.open_theme_picker(),
+            Some(Slash::Theme) => self.apply_typed_theme(arg),
             Some(Slash::Plan) => self.turn_plan(arg),
             Some(Slash::Permissions) if arg.is_empty() => {
                 self.open_permissions_picker();
@@ -5873,6 +6073,7 @@ impl App {
             session_scan_cancel: std::sync::Arc::default(),
             session_page: 0,
                 permissions: None,
+                theme_picker: None,
                 agents: None,
                 footer_view: None,
                 warnings: warnings::Retained::default(),
@@ -5905,6 +6106,7 @@ impl App {
                 permission_cell: Some(session.permission_cell()),
                 cwd,
                 session_cwd,
+                settings_path: crate::preferences::preferences_path(),
                 footer_location,
                 startup_quit_grace_until: Some(Instant::now() + STARTUP_QUIT_GRACE),
                 session_id: status.session_id.clone(),
@@ -6747,6 +6949,8 @@ impl App {
                 self.set_fast_mode(enabled);
             }
             Some(Slash::Thinking) => self.ui.toggle_thinking(),
+            Some(Slash::Theme) if arg.is_empty() => self.ui.open_theme_picker(),
+            Some(Slash::Theme) => self.ui.apply_typed_theme(arg),
             Some(Slash::Plan) => match plan_command(arg, self.ui.permission_mode) {
                 PlanCommand::Switch(mode) => {
                     self.session_mut().set_permission_mode(mode);
@@ -8118,6 +8322,51 @@ impl TerminationSignals {
 }
 
 /// What a `/word` that is neither zo's nor a prompt command answers.
+/// What the screen says once a theme is chosen — by the picker's enter or by
+/// `/theme <name>`: the theme, and whatever keeps the choice from showing or
+/// from lasting. `not_saved` is the reason the settings file was not written,
+/// `unseen` what keeps a named theme off this screen, and `env_theme` the
+/// run's `ZO_THEME`, which a start reads before the setting.
+fn theme_chosen_note(
+    chosen: &super::theme::Theme,
+    not_saved: Option<&str>,
+    unseen: Option<super::theme::Unseen>,
+    env_theme: Option<&str>,
+) -> (SystemLevel, String) {
+    let name = super::theme::shown_name(chosen);
+    if let Some(reason) = not_saved {
+        return (
+            SystemLevel::Error,
+            format!("theme → {name} for this session — not saved: {reason}"),
+        );
+    }
+    let mut text = format!("theme → {name}");
+    // `terminal` is what the codex look and a 16-color terminal draw anyway.
+    match unseen.filter(|_| !chosen.is_terminal()) {
+        Some(super::theme::Unseen::CodexLook) => {
+            text.push_str(" — saved; it shows in the marks look, and this is the codex look");
+        }
+        Some(super::theme::Unseen::SixteenColours) => {
+            text.push_str(" — saved; this terminal draws 16 colors, so zo keeps the terminal's own");
+        }
+        None => {}
+    }
+    if env_theme.is_some_and(|value| !value.trim().is_empty()) {
+        text.push_str(" · ZO_THEME is set and decides the next start");
+    }
+    (SystemLevel::Info, text)
+}
+
+/// What keeps a named theme off this process's screen, if anything: its
+/// look, and the colour depth it draws at.
+fn theme_unseen_here() -> Option<super::theme::Unseen> {
+    let level = super::palette::terminal_palette().map_or_else(
+        super::palette::color_level_from_env,
+        super::palette::TerminalPalette::color_level,
+    );
+    super::theme::unseen(super::style::current().style, level)
+}
+
 fn not_in_zo(name: &str) -> String {
     format!("/{name} is not in zo — use zerocode IDE for it (? for shortcuts)")
 }
@@ -8183,6 +8432,7 @@ fn test_ui() -> Ui {
             session_scan_cancel: std::sync::Arc::default(),
             session_page: 0,
         permissions: None,
+        theme_picker: None,
         agents: None,
         footer_view: None,
         warnings: warnings::Retained::default(),
@@ -8218,6 +8468,7 @@ fn test_ui() -> Ui {
         permission_cell: None,
         cwd: "/test".to_string(),
         session_cwd: std::path::PathBuf::from("/test"),
+        settings_path: std::env::temp_dir().join(format!("zo-test-ui-{}.json", std::process::id())),
         footer_location: "/test".to_string(),
         startup_quit_grace_until: None,
         last_interrupt: None,
@@ -13013,5 +13264,327 @@ mod model_window_tests {
             100_000
         });
         assert_eq!((tokens, asked), (100_000, 2), "a new model is resolved once");
+    }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        test_ui, theme_chosen_note, Event, KeyCode, KeyEvent, KeyModifiers, Line, Painter,
+        SystemLevel, Ui,
+    };
+    use crate::preferences::Preferences;
+    use crate::tui::{slash, style, theme};
+
+    /// The path of one of this module's tests inside the crate — what a
+    /// fresh run of it is asked for by.
+    fn test_path(name: &str) -> String {
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        format!("{module}::{name}")
+    }
+
+    fn press(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// A settings file of the test's own holding `contents`, in a folder of
+    /// its own (returned first, to remove afterwards).
+    fn settings_file(label: &str, contents: &str) -> (PathBuf, PathBuf) {
+        let folder = crate::support::temp_dir(label);
+        let settings = folder.join("settings.json");
+        std::fs::write(&settings, contents).expect("seed the settings file");
+        (folder, settings)
+    }
+
+    /// A screen whose theme choices are saved to `settings`.
+    fn ui_saving_to(settings: &Path) -> Ui {
+        let mut ui = test_ui();
+        ui.settings_path = settings.to_path_buf();
+        ui
+    }
+
+    /// Everything the screen has said and not yet drawn, as plain text.
+    fn said(ui: &Ui) -> String {
+        ui.pending_history.iter().map(Line::plain).collect::<Vec<_>>().join("\n")
+    }
+
+    /// The open theme picker's row whose label starts with `label`.
+    fn row_of(ui: &Ui, label: &str) -> usize {
+        ui.overlay()
+            .expect("the theme picker is open")
+            .rows
+            .iter()
+            .position(|row| row.label.starts_with(label))
+            .unwrap_or_else(|| panic!("no row for {label}"))
+    }
+
+    fn read(settings: &Path) -> String {
+        std::fs::read_to_string(settings).expect("read the settings file")
+    }
+
+    /// Criteria 1 and 2: `/th` lists `/theme` with its words — after
+    /// `/thinking`, so `/th` and enter is still `/thinking` — and `/theme`
+    /// opens the picker: `terminal` first, then every theme by its visible
+    /// name, the theme in use marked and under the cursor.
+    #[test]
+    fn slash_theme_is_listed_and_opens_the_picker() {
+        let listed: Vec<&str> = slash::matches("/th").iter().map(|command| command.name()).collect();
+        assert_eq!(listed, ["/thinking", "/theme"]);
+        if !style::in_fresh_run(&test_path("slash_theme_is_listed_and_opens_the_picker")) {
+            return;
+        }
+        style::init(&Preferences::default());
+        let (folder, settings) = settings_file("theme-open", "{}\n");
+        let mut ui = ui_saving_to(&settings);
+
+        ui.composer.insert_str("/th");
+        let popup = ui.popup().expect("the / popup");
+        let row = popup.rows.iter().find(|row| row.name == "/theme").expect("/theme in the popup");
+        assert!(row.description.contains("theme"), "{:?}", row.description);
+        ui.composer.clear();
+
+        // The road a line takes while a turn runs; an idle line calls the
+        // same `open_theme_picker`.
+        ui.turn_slash("theme");
+        assert!(!said(&ui).contains("is not in zo"), "{}", said(&ui));
+        let picker = ui.overlay().expect("/theme opens the picker");
+        let slugs = theme::names();
+        assert_eq!(picker.rows.len(), slugs.len());
+        assert_eq!(picker.rows[0].label, "terminal (current)");
+        assert_eq!(picker.selected, 0);
+        for (row, slug) in picker.rows.iter().zip(&slugs).skip(1) {
+            let slug: &str = slug;
+            assert_eq!(row.label, theme::find(slug).expect("a listed theme").label, "{slug}");
+        }
+        assert!(!picker.preview.is_empty(), "the picker shows a sample");
+        assert_eq!(picker.footer, super::PICKER_FOOTER);
+        assert_eq!(read(&settings), "{}\n", "opening the picker saves nothing");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Criteria 3 and 4: a move turns its theme on at once and writes
+    /// nothing; esc (ctrl-c too) goes back to the theme the picker opened
+    /// on; enter writes `"theme"` and no other byte; `terminal` takes the
+    /// key out again; a number picks its row as enter does.
+    #[test]
+    fn theme_picker_applies_on_move_restores_on_esc_and_saves_on_enter() {
+        if !style::in_fresh_run(&test_path("theme_picker_applies_on_move_restores_on_esc_and_saves_on_enter")) {
+            return;
+        }
+        style::init(&Preferences::default());
+        let initial = "{\n    \"z\": 1,\n    \"a\": true\n}\n";
+        let saved = "{\n    \"z\": 1,\n    \"a\": true,\n    \"theme\": \"dracula\"\n}\n";
+        let (folder, settings) = settings_file("theme-picker", initial);
+        let mut ui = ui_saving_to(&settings);
+        assert!(theme::active().is_terminal());
+
+        ui.open_theme_picker();
+        let slugs = theme::names();
+        let second: &str = slugs.get(1).expect("a theme after terminal");
+        let before = theme::revision();
+        let _ = ui.idle_event(&press(KeyCode::Down));
+        assert_eq!(theme::active().name, second, "a move turns the theme under the cursor on");
+        assert!(theme::revision() > before);
+        assert_eq!(ui.overlay().expect("still open").selected, 1);
+        let _ = ui.idle_event(&press(KeyCode::Up));
+        assert!(theme::active().is_terminal(), "and moving back turns it off");
+        let _ = ui.idle_event(&press(KeyCode::Down));
+        let _ = ui.idle_event(&press(KeyCode::Down));
+        assert_eq!(read(&settings), initial, "a move saves nothing");
+
+        let _ = ui.idle_event(&press(KeyCode::Esc));
+        assert!(ui.overlay().is_none(), "esc closes the picker");
+        assert!(theme::active().is_terminal(), "esc goes back to the theme it opened on");
+        assert_eq!(std::fs::read(&settings).expect("read"), initial.as_bytes(), "esc leaves the file as it was");
+        assert!(!said(&ui).contains("theme →"), "esc chose nothing: {}", said(&ui));
+
+        ui.open_theme_picker();
+        let dracula = row_of(&ui, "Dracula");
+        for _ in 0..dracula {
+            let _ = ui.idle_event(&press(KeyCode::Down));
+        }
+        assert_eq!(theme::active().name, "dracula");
+        let _ = ui.idle_event(&press(KeyCode::Enter));
+        assert!(ui.overlay().is_none(), "enter closes the picker");
+        assert_eq!(theme::active().name, "dracula");
+        assert_eq!(read(&settings), saved, "only the theme member is new");
+        assert!(said(&ui).contains("theme → Dracula"), "{}", said(&ui));
+
+        // Opened again: the saved theme is the current one and under the
+        // cursor; leaving by ctrl-c from another row goes back to it.
+        ui.open_theme_picker();
+        let picker = ui.overlay().expect("open again");
+        assert_eq!(picker.selected, dracula);
+        assert_eq!(picker.rows[dracula].label, "Dracula (current)");
+        assert_eq!(picker.rows[0].label, "terminal");
+        let _ = ui.idle_event(&press(KeyCode::Up));
+        assert_ne!(theme::active().name, "dracula");
+        let _ = ui.idle_event(&Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(ui.overlay().is_none());
+        assert_eq!(theme::active().name, "dracula");
+        assert_eq!(read(&settings), saved);
+
+        // A number picks its row and confirms, as in the other pickers; row
+        // one is `terminal`, whose saving is the key's removal.
+        ui.open_theme_picker();
+        let _ = ui.idle_event(&press(KeyCode::Char('1')));
+        assert!(ui.overlay().is_none());
+        assert!(theme::active().is_terminal());
+        assert_eq!(read(&settings), initial, "terminal takes the key out and leaves the rest");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Criterion 3's other half: a theme chosen is drawn at once where the
+    /// words did not change. The footer's model name is the same role in
+    /// every theme, so only its bytes tell — and the picker's own sample
+    /// follows the cursor the same way.
+    #[test]
+    fn theme_picker_repaints_the_head_without_other_change() {
+        let test = test_path("theme_picker_repaints_the_head_without_other_change");
+        if !style::in_fresh_run_with(&test, &[("COLORTERM", "truecolor")]) {
+            return;
+        }
+        style::init(&Preferences::default());
+        let (folder, settings) = settings_file("theme-repaint", "{}\n");
+        let mut ui = ui_saving_to(&settings);
+        // `test_ui` draws without colour, which writes the text alone.
+        ui.painter = Painter::new(std::io::stdout(), 120, 40, 1, true);
+        // Dracula's blue, #bd93f9, is its accent and so the model's colour;
+        // its green, #50fa7b, is inline code's and an added line's.
+        let model_in_dracula = format!("\u{1b}[38;2;189;147;249;49m{}", ui.model);
+        let dracula_green = "38;2;80;250;123";
+
+        let _ = ui.paint_rows();
+        let first = ui.painter.take_frame();
+        assert!(first.contains(&ui.model) && !first.contains(&model_in_dracula), "{first:?}");
+        let _ = ui.paint_rows();
+        let idle = ui.painter.take_frame();
+        assert!(!idle.contains(&ui.model), "an unchanged frame wrote the footer again: {idle:?}");
+
+        // In the picker: the sample is drawn in the theme under the cursor.
+        ui.open_theme_picker();
+        let _ = ui.paint_rows();
+        let opened = ui.painter.take_frame();
+        assert!(!opened.contains(dracula_green), "{opened:?}");
+        let dracula = row_of(&ui, "Dracula");
+        for _ in 0..dracula {
+            let _ = ui.idle_event(&press(KeyCode::Down));
+        }
+        let _ = ui.paint_rows();
+        let moved = ui.painter.take_frame();
+        assert!(moved.contains(dracula_green), "the sample kept the old theme's colours: {moved:?}");
+        let _ = ui.idle_event(&press(KeyCode::Esc));
+        let _ = ui.paint_rows();
+        let closed = ui.painter.take_frame();
+        assert!(closed.contains(&ui.model) && !closed.contains(&model_in_dracula), "{closed:?}");
+
+        // By name, with no picker over the head: the footer's words are the
+        // same and its row is written again in the theme's colour.
+        ui.apply_typed_theme("dracula");
+        let _ = ui.paint_rows();
+        let after = ui.painter.take_frame();
+        assert!(after.contains(&model_in_dracula), "the footer kept the terminal's colour: {after:?}");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Criterion 6: a slug or a visible name, in any case, is set and saved
+    /// and said; a name no theme has — or one shaped like a path — changes
+    /// nothing and is answered with the names there are.
+    #[test]
+    fn slash_theme_with_a_name_sets_and_saves_and_refuses_an_unknown_or_path_shaped_one() {
+        if !style::in_fresh_run(&test_path(
+            "slash_theme_with_a_name_sets_and_saves_and_refuses_an_unknown_or_path_shaped_one",
+        )) {
+            return;
+        }
+        style::init(&Preferences::default());
+        let initial = "{\n  \"z\": 1\n}\n";
+        let (folder, settings) = settings_file("theme-typed", initial);
+        let mut ui = ui_saving_to(&settings);
+
+        for (typed, slug, label) in [
+            ("Dracula", "dracula", "Dracula"),
+            ("tokyo night", "tokyo-night", "Tokyo Night"),
+            ("NORD", "nord", "Nord"),
+        ] {
+            ui.pending_history.clear();
+            ui.apply_typed_theme(typed);
+            assert_eq!(theme::active().name, slug, "{typed:?}");
+            assert_eq!(crate::preferences::load_from_path(&settings).theme.as_deref(), Some(slug), "{typed:?}");
+            assert!(said(&ui).contains(&format!("theme → {label}")), "{typed:?}: {}", said(&ui));
+        }
+        assert_eq!(read(&settings), "{\n  \"z\": 1,\n  \"theme\": \"nord\"\n}\n");
+
+        let before = read(&settings);
+        for bad in ["../x", "a/b", "..\\x", "nord.json", "no-such-theme"] {
+            ui.pending_history.clear();
+            ui.apply_typed_theme(bad);
+            assert_eq!(theme::active().name, "nord", "{bad:?} changed the theme");
+            assert_eq!(read(&settings), before, "{bad:?} changed the settings");
+            let answer = said(&ui);
+            assert!(
+                answer.contains("terminal") && answer.contains("dracula") && answer.contains("nord"),
+                "{bad:?} is answered with the names there are: {answer}"
+            );
+        }
+        assert!(ui.overlay().is_none(), "a name opens no picker");
+
+        ui.apply_typed_theme("terminal");
+        assert!(theme::active().is_terminal());
+        assert_eq!(read(&settings), initial, "terminal takes the key out again");
+
+        // The same while a turn runs (criterion 7): the line is not put off.
+        ui.turn_slash("theme dracula");
+        assert_eq!(theme::active().name, "dracula");
+        assert_eq!(crate::preferences::load_from_path(&settings).theme.as_deref(), Some("dracula"));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Criterion 7: a key reaches the open picker on both roads — an idle
+    /// screen's and a running turn's. A turn cannot be started in a unit
+    /// test, so the two call sites are counted where they are written.
+    #[test]
+    fn the_theme_picker_takes_its_keys_idle_and_mid_turn() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tui/app.rs"))
+            .expect("read this file");
+        let call = concat!("self.theme_picker", "_key(");
+        assert_eq!(source.matches(call).count(), 2, "the idle road and the mid-turn road");
+        let arms = concat!("Some(Slash::", "Theme)");
+        assert_eq!(source.matches(arms).count(), 4, "bare and named, idle and mid-turn");
+    }
+
+    /// Criterion 8: the choice is saved in the codex look and on a 16-colour
+    /// terminal too, and one line says why it does not show there; a file
+    /// that could not be written and a `ZO_THEME` that will win the next
+    /// start are said the same way.
+    #[test]
+    fn a_chosen_theme_says_what_keeps_it_from_showing_or_lasting() {
+        let dracula = theme::find("dracula").expect("the dracula theme");
+        let terminal = theme::Theme::terminal();
+
+        assert_eq!(theme_chosen_note(&dracula, None, None, None), (SystemLevel::Info, "theme → Dracula".to_string()));
+        assert_eq!(theme_chosen_note(&terminal, None, None, None), (SystemLevel::Info, "theme → terminal".to_string()));
+
+        let (level, codex) = theme_chosen_note(&dracula, None, Some(theme::Unseen::CodexLook), None);
+        assert_eq!(level, SystemLevel::Info);
+        assert!(codex.starts_with("theme → Dracula") && codex.contains("marks look"), "{codex}");
+        let (_, sixteen) = theme_chosen_note(&dracula, None, Some(theme::Unseen::SixteenColours), None);
+        assert!(sixteen.starts_with("theme → Dracula") && sixteen.contains("16 colors"), "{sixteen}");
+        // `terminal` is what both of those draw anyway: nothing to add.
+        for unseen in [theme::Unseen::CodexLook, theme::Unseen::SixteenColours] {
+            assert_eq!(theme_chosen_note(&terminal, None, Some(unseen), None).1, "theme → terminal");
+        }
+
+        let (_, env) = theme_chosen_note(&dracula, None, None, Some("nord"));
+        assert!(env.starts_with("theme → Dracula") && env.contains("ZO_THEME"), "{env}");
+
+        let (level, failed) = theme_chosen_note(&dracula, Some("permission denied"), None, None);
+        assert_eq!(level, SystemLevel::Error);
+        assert!(
+            failed.contains("Dracula") && failed.contains("not saved") && failed.contains("permission denied"),
+            "{failed}"
+        );
     }
 }

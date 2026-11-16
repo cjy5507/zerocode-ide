@@ -363,27 +363,30 @@ pub fn revision() -> u64 {
 
 /// Chooses the startup theme from `env_theme` (`ZO_THEME`) then `preferences.theme`,
 /// returning a warning message if an explicit value was invalid or unknown.
+/// An empty value in either place is no value.
 #[must_use]
 pub fn choose(preferences: &Preferences, env_theme: Option<&str>) -> (Theme, Option<String>) {
-    let Some(name) = env_theme.or(preferences.theme.as_deref()) else {
+    /// An empty value, or blanks alone, is no choice.
+    fn chosen(value: Option<&str>) -> Option<&str> {
+        value.filter(|value| !value.trim().is_empty())
+    }
+    // An empty `ZO_THEME` leaves the choice to the setting, and an empty
+    // setting to `terminal`.
+    let Some(name) = chosen(env_theme).or_else(|| chosen(preferences.theme.as_deref())) else {
         return (Theme::terminal(), None);
     };
-    if !is_valid_slug(name) {
-        return (
+    // The reading `/theme <name>` uses: a visible name names its theme too.
+    match resolve_name(name) {
+        Ok(theme) => (theme, None),
+        Err(ThemeResolveError::Invalid) => (
             Theme::terminal(),
             Some(format!("invalid theme name {name:?}; using terminal")),
-        );
+        ),
+        Err(ThemeResolveError::Unknown) => (
+            Theme::terminal(),
+            Some(format!("unknown theme {name:?}; using terminal")),
+        ),
     }
-    if let Some(theme) = find(name) {
-        return (theme, None);
-    }
-    if TERMINAL_ALIASES.contains(&name) {
-        return (Theme::terminal(), None);
-    }
-    (
-        Theme::terminal(),
-        Some(format!("unknown theme {name:?}; using terminal")),
-    )
 }
 
 /// Initializes the process theme from `ZO_THEME` and `preferences`, queuing any
@@ -506,6 +509,107 @@ pub fn fit_lightness(
     }
 }
 
+/// Why [`resolve_name`] took no theme for a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeResolveError {
+    /// Empty, or shaped like a path: it holds `/`, `\` or a dot.
+    Invalid,
+    /// A name no theme has.
+    Unknown,
+}
+
+/// The theme a person's word names — one reading for the `theme` setting,
+/// `ZO_THEME` and `/theme <name>`: a slug (`dracula`), a visible name
+/// without case (`Dracula`), or either with spaces where the slug has
+/// hyphens (`Tokyo Night`, `solarized dark`). An old `theme` value (`dark`,
+/// `light`, `system`, `auto`, `default`, in any case) that names no theme is
+/// `terminal`.
+///
+/// # Errors
+/// [`ThemeResolveError::Invalid`] for an empty or path-shaped name, which is
+/// never looked up; [`ThemeResolveError::Unknown`] for a name no theme has.
+pub fn resolve_name(name: &str) -> Result<Theme, ThemeResolveError> {
+    let name = name.trim();
+    if name.is_empty() || name.contains(['/', '\\', '.']) {
+        return Err(ThemeResolveError::Invalid);
+    }
+    if let Some(theme) = find(name) {
+        return Ok(theme);
+    }
+    // `Tokyo Night`, `solarized dark`, `DRACULA`: the slug the name is spelled as.
+    let folded = name.to_lowercase();
+    let slug = folded.split_whitespace().collect::<Vec<_>>().join("-");
+    if let Some(theme) = find(&slug) {
+        return Ok(theme);
+    }
+    // A theme whose visible name is not its slug respelled.
+    for listed in &names() {
+        let listed: &str = listed;
+        if let Some(theme) = find(listed).filter(|theme| theme.label.to_lowercase() == folded) {
+            return Ok(theme);
+        }
+    }
+    if TERMINAL_ALIASES.contains(&slug.as_str()) {
+        return Ok(Theme::terminal());
+    }
+    Err(if is_valid_slug(&slug) {
+        ThemeResolveError::Unknown
+    } else {
+        ThemeResolveError::Invalid
+    })
+}
+
+/// The name a theme is said by on the screen: its visible name, and for
+/// `terminal` the slug — the word the setting takes.
+#[must_use]
+pub fn shown_name(theme: &Theme) -> &str {
+    if theme.is_terminal() {
+        &theme.name
+    } else {
+        &theme.label
+    }
+}
+
+/// What keeps a named theme off the screen (it is saved all the same): the
+/// codex look draws codex's bytes under every theme, and a 16-colour
+/// terminal cannot draw a theme's colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unseen {
+    CodexLook,
+    SixteenColours,
+}
+
+/// Whether a named theme shows in `look` at colour depth `level` — `None`
+/// when it does. The rule the drawing side follows where it resolves a role.
+#[must_use]
+pub fn unseen(
+    look: super::style::TuiStyle,
+    level: super::palette::ColorLevel,
+) -> Option<Unseen> {
+    if look != super::style::TuiStyle::Marks {
+        Some(Unseen::CodexLook)
+    } else if level == super::palette::ColorLevel::Ansi16 {
+        Some(Unseen::SixteenColours)
+    } else {
+        None
+    }
+}
+
+/// Every theme's slug on one line, `terminal` first — what an unknown name
+/// is answered with.
+#[must_use]
+pub fn names_line() -> String {
+    let mut line = String::new();
+    for name in &names() {
+        let name: &str = name;
+        if !line.is_empty() {
+            line.push_str(", ");
+        }
+        line.push_str(name);
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -610,7 +714,10 @@ mod tests {
 
         // Invalid slugs and unknown names fall back to terminal with distinct warnings,
         // and `find` rejects non-slugs directly.
-        let invalid = ["../x", "/tmp/a", "", "Dracula"];
+        // A visible name is not a slug either, but it names its theme
+        // (`a_label_is_taken_for_its_theme_at_start`).
+        assert!(find("Dracula").is_none(), "find takes slugs only");
+        let invalid = ["../x", "/tmp/a"];
         for bad in invalid {
             assert!(find(bad).is_none(), "find({bad:?}) must reject non-slug");
             let (theme, warn) = choose(&dracula_pref, Some(bad));
@@ -680,17 +787,132 @@ mod tests {
             );
         }
 
-        let invalid_pref = Preferences {
+        // An old value in another case is the same old value.
+        let cased_pref = Preferences {
             theme: Some("Dark".to_string()),
             ..Preferences::default()
         };
-        for (theme, warn) in [choose(&invalid_pref, None), choose(&default, Some("Dark"))] {
+        for (theme, warn) in [choose(&cased_pref, None), choose(&default, Some("Dark"))] {
             assert!(theme.is_terminal());
-            assert!(
-                warn.as_deref()
-                    .is_some_and(|msg| msg.contains("invalid theme name")),
-                "\"Dark\" should still warn about invalid theme name: {warn:?}"
+            assert_eq!(warn, None, "\"Dark\" must not warn");
+        }
+    }
+
+    #[test]
+    fn a_label_is_taken_for_its_theme_at_start() {
+        use super::{resolve_name, ThemeResolveError};
+        let default = Preferences::default();
+        for (input, expected_slug) in [
+            ("Dracula", "dracula"),
+            ("DRACULA", "dracula"),
+            ("Tokyo Night", "tokyo-night"),
+            ("tokyo night", "tokyo-night"),
+            ("solarized dark", "solarized-dark"),
+            (" dracula ", "dracula"),
+            ("Terminal", "terminal"),
+            ("Dark", "terminal"),
+            ("AUTO", "terminal"),
+        ] {
+            let pref = Preferences {
+                theme: Some(input.to_string()),
+                ..Preferences::default()
+            };
+            for (theme, warn) in [choose(&pref, None), choose(&default, Some(input))] {
+                assert_eq!(theme.name, expected_slug, "{input:?}");
+                assert_eq!(warn, None, "{input:?}");
+            }
+            assert_eq!(resolve_name(input).map(|theme| theme.name).as_deref(), Ok(expected_slug), "{input:?}");
+        }
+        // A name shaped like a path is never looked up, in any spelling.
+        for bad in ["../x", "a.b", "a/b", "a\\b", "..", "themes/dracula", "dracula.json"] {
+            let pref = Preferences {
+                theme: Some(bad.to_string()),
+                ..Preferences::default()
+            };
+            for (theme, warn) in [choose(&pref, None), choose(&default, Some(bad))] {
+                assert!(theme.is_terminal(), "{bad:?}");
+                assert!(
+                    warn.as_deref().is_some_and(|msg| msg.contains("invalid theme name")),
+                    "{bad:?} should warn invalid theme name: {warn:?}"
+                );
+            }
+            assert_eq!(resolve_name(bad).map(|theme| theme.name), Err(ThemeResolveError::Invalid), "{bad:?}");
+        }
+        for empty in ["", "  "] {
+            assert_eq!(resolve_name(empty).map(|theme| theme.name), Err(ThemeResolveError::Invalid), "{empty:?}");
+        }
+        for unknown in ["no-such-theme", "No Such Theme"] {
+            assert_eq!(
+                resolve_name(unknown).map(|theme| theme.name),
+                Err(ThemeResolveError::Unknown),
+                "{unknown:?}"
             );
         }
+        // Every theme whose slug is its visible name in small letters and
+        // hyphens — each built-in one — is named by that name, in any case.
+        for slug in &names() {
+            let slug: &str = slug;
+            let theme = find(slug).expect("a listed theme");
+            if theme.label.to_lowercase().replace(' ', "-") != slug {
+                continue;
+            }
+            for word in [theme.label.clone(), theme.label.to_uppercase(), slug.to_uppercase()] {
+                assert_eq!(resolve_name(&word).map(|found| found.name).as_deref(), Ok(slug), "{word:?}");
+            }
+        }
+    }
+
+    /// An empty value — `ZO_THEME=""`, `"theme": ""`, blanks alone — is no
+    /// choice, not a bad name: an empty environment value leaves the choice
+    /// to the setting, and an empty setting is `terminal`. Neither warns.
+    #[test]
+    fn an_empty_theme_value_is_no_choice() {
+        let dracula = Preferences {
+            theme: Some("dracula".to_string()),
+            ..Preferences::default()
+        };
+        for empty in ["", " ", "\t "] {
+            let (theme, warn) = choose(&dracula, Some(empty));
+            assert_eq!(theme.name, "dracula", "an empty ZO_THEME ({empty:?}) leaves the setting");
+            assert_eq!(warn, None, "{empty:?}");
+
+            let unset = Preferences {
+                theme: Some(empty.to_string()),
+                ..Preferences::default()
+            };
+            for (theme, warn) in [choose(&unset, None), choose(&unset, Some(empty))] {
+                assert!(theme.is_terminal(), "{empty:?}");
+                assert_eq!(warn, None, "an empty value ({empty:?}) must not warn");
+            }
+            let (theme, warn) = choose(&unset, Some("nord"));
+            assert_eq!(theme.name, "nord", "a named ZO_THEME over an empty setting ({empty:?})");
+            assert_eq!(warn, None, "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn a_named_theme_is_unseen_in_the_codex_look_and_on_sixteen_colours() {
+        use super::{unseen, Unseen};
+        use crate::tui::style::TuiStyle;
+        for level in [ColorLevel::TrueColor, ColorLevel::Ansi256] {
+            assert_eq!(unseen(TuiStyle::Marks, level), None, "{level:?}");
+            assert_eq!(unseen(TuiStyle::Codex, level), Some(Unseen::CodexLook), "{level:?}");
+        }
+        assert_eq!(unseen(TuiStyle::Marks, ColorLevel::Ansi16), Some(Unseen::SixteenColours));
+        // The look is said first: it is the one the person can change from here.
+        assert_eq!(unseen(TuiStyle::Codex, ColorLevel::Ansi16), Some(Unseen::CodexLook));
+    }
+
+    #[test]
+    fn the_names_line_lists_every_theme_terminal_first() {
+        let line = super::names_line();
+        let listed: Vec<&str> = line.split(", ").collect();
+        let slugs = names();
+        assert_eq!(listed.len(), slugs.len(), "{line}");
+        for (listed, slug) in listed.iter().zip(&slugs) {
+            let slug: &str = slug;
+            assert_eq!(*listed, slug);
+        }
+        assert!(line.starts_with("terminal, "), "{line}");
     }
 }

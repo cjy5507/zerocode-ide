@@ -181,6 +181,233 @@ pub fn save(model: &str, effort: Effort) -> io::Result<()> {
     save_to_path(&preferences_path(), model, effort)
 }
 
+/// Write the chosen theme into the settings document at `path`: `"theme"` is
+/// set to `slug`, or removed for `None` (the `terminal` theme is the absence
+/// of a choice). Only that member changes — every other key, value, their
+/// order and the file's own indentation stay byte for byte — and the file is
+/// replaced whole (a sibling temporary file, then a rename). A missing file
+/// is created for a slug and left missing for `None`.
+///
+/// The path is an argument so that a test never reaches the person's
+/// settings; the screens pass [`preferences_path`].
+///
+/// # Errors
+/// The file could not be read, locked or written, or it holds something
+/// other than one JSON object — it is left as it was, never rewritten.
+pub fn save_theme_to(path: &Path, slug: Option<&str>) -> io::Result<()> {
+    // `terminal` on a file that is not there: nothing to take out, and no
+    // folder or lock file made for it.
+    if slug.is_none() && !path.exists() {
+        return Ok(());
+    }
+    let _guard = runtime::file_ops::SettingsFileLock::acquire(path)?;
+    let current = match fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let Some(next) = with_top_level_string(current.as_deref(), THEME_KEY, slug)? else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    crate::write_atomic(path, next.as_bytes())
+}
+
+/// `text` — a settings document, or none yet — with its top-level member
+/// `key` set to the string `value`, or removed for `None`, and every other
+/// byte as it was. `Ok(None)` when there is nothing to write.
+///
+/// The other writers of this file read it into a map and print the map
+/// again, which re-orders and re-indents what a person wrote by hand. This
+/// one finds the member in the text and changes those bytes alone; the
+/// result is read back, and nothing is returned to write unless it is the
+/// document asked for.
+fn with_top_level_string(
+    text: Option<&str>,
+    key: &str,
+    value: Option<&str>,
+) -> io::Result<Option<String>> {
+    let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+        return Ok(value.map(|value| format!("{{\n  {}: {}\n}}\n", json_string(key), json_string(value))));
+    };
+    let not_one_object =
+        || io::Error::new(io::ErrorKind::InvalidData, "the settings file is not one JSON object");
+    let Ok(Value::Object(mut wanted)) = serde_json::from_str::<Value>(text) else {
+        return Err(not_one_object());
+    };
+    let edited = if let Some(value) = value {
+        wanted.insert(key.to_string(), Value::String(value.to_string()));
+        set_member(text, key, &json_string(value))
+    } else {
+        wanted.remove(key);
+        remove_member(text, key)
+    }
+    .ok_or_else(not_one_object)?;
+    if serde_json::from_str::<Value>(&edited).ok() != Some(Value::Object(wanted)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the settings file could not be changed in place",
+        ));
+    }
+    Ok((edited != text).then_some(edited))
+}
+
+/// `text` as a JSON string, quotes and escapes included.
+fn json_string(text: &str) -> String {
+    Value::String(text.to_string()).to_string()
+}
+
+/// Where one member of a JSON object stands in the object's text: its key
+/// (quotes included), its value, and the comma after it when one follows.
+struct MemberSpan {
+    key: std::ops::Range<usize>,
+    value: std::ops::Range<usize>,
+    comma: Option<usize>,
+}
+
+/// The offsets of the braces of the object `text` is, and its members in
+/// between. `text` is JSON already read as an object; `None` only for a
+/// layout this reading does not follow, and then nothing is edited.
+fn object_layout(text: &str) -> Option<(usize, Vec<MemberSpan>, usize)> {
+    let bytes = text.as_bytes();
+    let past_space = |mut at: usize| {
+        while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        at
+    };
+    let open = past_space(0);
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut members = Vec::new();
+    let mut at = past_space(open + 1);
+    loop {
+        match bytes.get(at)? {
+            b'}' => return Some((open, members, at)),
+            b'"' => {}
+            _ => return None,
+        }
+        let key_end = string_end(bytes, at)?;
+        let colon = past_space(key_end);
+        if bytes.get(colon) != Some(&b':') {
+            return None;
+        }
+        let value_start = past_space(colon + 1);
+        let value_stop = value_end(bytes, value_start)?;
+        let after = past_space(value_stop);
+        let comma = (bytes.get(after) == Some(&b',')).then_some(after);
+        members.push(MemberSpan { key: at..key_end, value: value_start..value_stop, comma });
+        at = comma.map_or(after, |comma| past_space(comma + 1));
+    }
+}
+
+/// The offset just past the string whose opening quote is at `start`.
+fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut at = start + 1;
+    loop {
+        match bytes.get(at)? {
+            b'\\' => at += 2,
+            b'"' => return Some(at + 1),
+            _ => at += 1,
+        }
+    }
+}
+
+/// The offset just past the value that starts at `start`: a string, an
+/// object or an array to its closing mark, anything else to the comma, the
+/// brace or the space that ends it.
+fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start) == Some(&b'"') {
+        return string_end(bytes, start);
+    }
+    let mut depth = 0_usize;
+    let mut at = start;
+    loop {
+        let byte = *bytes.get(at)?;
+        if byte == b'"' {
+            at = string_end(bytes, at)?;
+            continue;
+        }
+        // Inside no bracket of its own, the value ends before the comma, the
+        // closing mark of what holds it, or the space after it.
+        if depth == 0 && (matches!(byte, b',' | b'}' | b']') || byte.is_ascii_whitespace()) {
+            return Some(at);
+        }
+        match byte {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+}
+
+/// Whether `member`'s key, read as the JSON string it is, is `key`.
+fn member_is_named(text: &str, member: &MemberSpan, key: &str) -> bool {
+    text.get(member.key.clone())
+        .and_then(|quoted| serde_json::from_str::<String>(quoted).ok())
+        .is_some_and(|name| name == key)
+}
+
+/// `text` with its member `key` holding `rendered` (a JSON value's text):
+/// the value replaced where the member stands — the last one, the one a
+/// reader takes, when the key is written twice — or a new member after the
+/// last, written as the last one is: after the same whitespace and with the
+/// same spacing at its colon.
+fn set_member(text: &str, key: &str, rendered: &str) -> Option<String> {
+    let (open, members, close) = object_layout(text)?;
+    if let Some(member) = members.iter().rev().find(|member| member_is_named(text, member, key)) {
+        return Some([text.get(..member.value.start)?, rendered, text.get(member.value.end..)?].concat());
+    }
+    let key = json_string(key);
+    let Some(last) = members.last() else {
+        return Some([text.get(..=open)?, "\n  ", key.as_str(), ": ", rendered, "\n", text.get(close..)?].concat());
+    };
+    let lead_from = members
+        .iter()
+        .rev()
+        .nth(1)
+        .and_then(|before| before.comma)
+        .map_or(open + 1, |comma| comma + 1);
+    let lead = text.get(lead_from..last.key.start)?;
+    let colon = text.get(last.key.end..last.value.start)?;
+    Some([text.get(..last.value.end)?, ",", lead, key.as_str(), colon, rendered, text.get(last.value.end..)?].concat())
+}
+
+/// `text` without its member `key` — every one, when the key is written
+/// twice — and without the comma that went with it.
+fn remove_member(text: &str, key: &str) -> Option<String> {
+    let mut text = text.to_string();
+    loop {
+        let (open, members, close) = object_layout(&text)?;
+        let Some(index) = members.iter().position(|member| member_is_named(&text, member, key)) else {
+            return Some(text);
+        };
+        let member = members.get(index)?;
+        let before = index.checked_sub(1).and_then(|before| members.get(before));
+        let cut = match (before, members.get(index + 1)) {
+            // Not the last: the member, its comma and the space up to the next.
+            (_, Some(next)) => member.key.start..next.key.start,
+            // The last of several: the comma before it goes with it.
+            (Some(before), None) => before.value.end..member.value.end,
+            // The only one.
+            (None, None) => open + 1..close,
+        };
+        if !(text.is_char_boundary(cut.start) && text.is_char_boundary(cut.end)) {
+            return None;
+        }
+        text.replace_range(cut, "");
+    }
+}
+
 /// Persist choices to a specific settings path. The path's parent is created
 /// on demand; this is the only write side effect of this module.
 ///
@@ -399,6 +626,149 @@ mod tests {
             assert_eq!(load_from_path(&settings).theme.as_deref(), expected, "{document}");
         }
         let _ = fs::remove_dir_all(settings.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn saving_terminal_removes_the_theme_key() {
+        let settings = path("theme-save-remove");
+        let seeded = "{\n    \"z\": 1,\n    \"theme\": \"dracula\",\n    \"a\": true\n}\n";
+        fs::write(&settings, seeded).expect("seed settings");
+
+        super::save_theme_to(&settings, None).expect("remove theme");
+        let after_remove = fs::read_to_string(&settings).expect("read after remove");
+        assert_eq!(after_remove, "{\n    \"z\": 1,\n    \"a\": true\n}\n");
+
+        super::save_theme_to(&settings, Some("nord")).expect("save nord");
+        let after_add = fs::read_to_string(&settings).expect("read after add");
+        assert_eq!(
+            after_add,
+            "{\n    \"z\": 1,\n    \"a\": true,\n    \"theme\": \"nord\"\n}\n"
+        );
+
+        super::save_theme_to(&settings, Some("dracula")).expect("update to dracula");
+        let after_update = fs::read_to_string(&settings).expect("read after update");
+        assert_eq!(
+            after_update,
+            "{\n    \"z\": 1,\n    \"a\": true,\n    \"theme\": \"dracula\"\n}\n"
+        );
+
+        let _ = fs::remove_dir_all(settings.parent().expect("test parent"));
+    }
+
+    /// Saving a theme is an edit of one member of the person's file, not a
+    /// rewrite of it: each case is the file before, the theme saved (`None`
+    /// is `terminal`) and the file after — `None` where nothing is written.
+    #[test]
+    fn a_saved_theme_changes_one_member_and_no_other_byte() {
+        let cases: &[(Option<&str>, Option<&str>, Option<&str>)] = &[
+            // No file yet, an empty one, an empty object.
+            (None, Some("dracula"), Some("{\n  \"theme\": \"dracula\"\n}\n")),
+            (None, None, None),
+            (Some(""), Some("dracula"), Some("{\n  \"theme\": \"dracula\"\n}\n")),
+            (Some("{}"), Some("dracula"), Some("{\n  \"theme\": \"dracula\"\n}")),
+            (Some("{ }\n"), Some("dracula"), Some("{\n  \"theme\": \"dracula\"\n}\n")),
+            (Some("{}\n"), None, None),
+            // One line, as a tool writes it: the new member takes the last one's spacing.
+            (
+                Some(r#"{"smart":{"autoClassifier":"off"}}"#),
+                Some("dracula"),
+                Some(r#"{"smart":{"autoClassifier":"off"},"theme":"dracula"}"#),
+            ),
+            (Some(r#"{"a": 1, "b": [2, 3]}"#), Some("nord"), Some(r#"{"a": 1, "b": [2, 3], "theme": "nord"}"#)),
+            // First, last and only member: the comma that goes with it.
+            (Some(r#"{"theme":"nord","a":1}"#), None, Some(r#"{"a":1}"#)),
+            (Some(r#"{"a":1,"theme":"nord"}"#), None, Some(r#"{"a":1}"#)),
+            (Some(r#"{"a":1,"theme":"nord","b":2}"#), None, Some(r#"{"a":1,"b":2}"#)),
+            (Some(r#"{"theme":"nord"}"#), None, Some("{}")),
+            (Some("{\n  \"theme\": \"nord\"\n}\n"), None, Some("{}\n")),
+            (Some("{\n  \"theme\": \"nord\",\n  \"a\": 1\n}\n"), None, Some("{\n  \"a\": 1\n}\n")),
+            (Some("{\n  \"a\": 1,\n  \"theme\": \"nord\"\n}\n"), None, Some("{\n  \"a\": 1\n}\n")),
+            // A changed value, in place; the same value writes nothing.
+            (Some(r#"{"theme":"nord","a":1}"#), Some("dracula"), Some(r#"{"theme":"dracula","a":1}"#)),
+            (Some(r#"{"theme": 123, "a": 1}"#), Some("nord"), Some(r#"{"theme": "nord", "a": 1}"#)),
+            (Some(r#"{"theme":"nord","a":1}"#), Some("nord"), None),
+            (Some(r#"{"a":1}"#), None, None),
+            // A `theme` inside another member, and one spelled in a string, are not the setting.
+            (
+                Some(r#"{"ui":{"theme":"x"},"note":"\"theme\": \"y\" }","theme":"nord"}"#),
+                Some("dracula"),
+                Some(r#"{"ui":{"theme":"x"},"note":"\"theme\": \"y\" }","theme":"dracula"}"#),
+            ),
+            (Some(r#"{"ui":{"theme":"x"}}"#), None, None),
+            (Some(r#"{"ui":{"theme":"x"}}"#), Some("nord"), Some(r#"{"ui":{"theme":"x"},"theme":"nord"}"#)),
+            // Tabs, no newline at the end, a brace inside a string.
+            (
+                Some("{\n\t\"a\": [1, {\"b\": \"}\"}],\n\t\"theme\": \"nord\"\n}"),
+                Some("dracula"),
+                Some("{\n\t\"a\": [1, {\"b\": \"}\"}],\n\t\"theme\": \"dracula\"\n}"),
+            ),
+            (
+                Some("{\n\t\"a\": [1, {\"b\": \"}\"}]\n}"),
+                Some("dracula"),
+                Some("{\n\t\"a\": [1, {\"b\": \"}\"}],\n\t\"theme\": \"dracula\"\n}"),
+            ),
+            // Windows line ends stay Windows line ends.
+            (
+                Some("{\r\n  \"a\": 1\r\n}\r\n"),
+                Some("dracula"),
+                Some("{\r\n  \"a\": 1,\r\n  \"theme\": \"dracula\"\r\n}\r\n"),
+            ),
+            // The key written with an escape is the same key; written twice, the last one is read.
+            (Some(r#"{"theme":"nord","a":1}"#), None, Some(r#"{"a":1}"#)),
+            (Some(r#"{"theme":"a","x":1,"theme":"b"}"#), None, Some(r#"{"x":1}"#)),
+            (
+                Some(r#"{"theme":"a","x":1,"theme":"b"}"#),
+                Some("c"),
+                Some(r#"{"theme":"a","x":1,"theme":"c"}"#),
+            ),
+        ];
+        for (before, slug, after) in cases {
+            let written = super::with_top_level_string(*before, super::THEME_KEY, *slug)
+                .unwrap_or_else(|error| panic!("{before:?} with {slug:?}: {error}"));
+            assert_eq!(written.as_deref(), *after, "{before:?} with {slug:?}");
+        }
+        // Something other than one JSON object is not edited at all.
+        for damaged in ["not json", "[1]", r#"{"a":1,}"#, r#"{"a":1} trailing"#, "\"theme\""] {
+            for slug in [Some("dracula"), None] {
+                let refused = super::with_top_level_string(Some(damaged), super::THEME_KEY, slug);
+                assert_eq!(
+                    refused.map_err(|error| error.kind()),
+                    Err(std::io::ErrorKind::InvalidData),
+                    "{damaged:?} with {slug:?}"
+                );
+            }
+        }
+    }
+
+    /// The file side of [`super::save_theme_to`]: a missing file (its folder
+    /// too) is created for a theme and left missing for `terminal`, and a
+    /// damaged file is refused and left as it was.
+    #[test]
+    fn a_saved_theme_creates_a_missing_file_and_leaves_a_damaged_one_alone() {
+        let home = path("theme-save-files");
+        let folder = home.parent().expect("test parent").to_path_buf();
+        let missing = folder.join("not-yet").join("settings.json");
+        super::save_theme_to(&missing, None).expect("terminal on a missing file");
+        assert!(!missing.exists(), "saving terminal created a settings file");
+        super::save_theme_to(&missing, Some("dracula")).expect("save into a missing folder");
+        assert_eq!(fs::read_to_string(&missing).expect("read the new file"), "{\n  \"theme\": \"dracula\"\n}\n");
+        assert_eq!(load_from_path(&missing).theme.as_deref(), Some("dracula"));
+
+        let damaged = folder.join("damaged.json");
+        fs::write(&damaged, "{ \"model\": \"x\", ").expect("seed a damaged file");
+        for slug in [Some("dracula"), None] {
+            let refused = super::save_theme_to(&damaged, slug).expect_err("a damaged file is refused");
+            assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData, "{slug:?}");
+            assert_eq!(fs::read_to_string(&damaged).expect("read"), "{ \"model\": \"x\", ", "{slug:?}");
+        }
+        assert!(
+            fs::read_dir(&folder).expect("list").flatten().all(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                !name.contains(".lock") && !name.contains(".tmp")
+            }),
+            "a lock or a temporary file was left behind"
+        );
+        let _ = fs::remove_dir_all(&folder);
     }
 
     /// A family head is persisted by its alias, and a release id already on

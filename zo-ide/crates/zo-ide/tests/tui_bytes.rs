@@ -1005,6 +1005,7 @@ fn the_r8_permissions_picker_matches_codex_preset_copy() {
             .collect(),
         selected: 0,
         footer: "Press enter to confirm or esc to go back".to_string(),
+        preview: Vec::new(),
     };
     let lines = picker.lines(120, 40);
     let plain: Vec<String> = lines.iter().map(Line::plain).collect();
@@ -1173,6 +1174,7 @@ fn the_model_picker_matches_the_captured_screen() {
         ],
         selected: 2,
         footer: "Press enter to confirm or esc to go back".to_string(),
+        preview: Vec::new(),
     };
     let lines = picker.lines(120, 39);
     let plain: Vec<String> = lines.iter().map(Line::plain).collect();
@@ -1588,6 +1590,7 @@ fn the_effort_picker_offers_all_eight_rungs_in_the_bounded_window() {
         rows,
         selected: 3,
         footer: "Press enter to confirm or esc to go back".to_string(),
+        preview: Vec::new(),
     };
     let lines = picker.lines(120, 39);
     let plain: Vec<String> = lines.iter().map(Line::plain).collect();

@@ -685,6 +685,12 @@ fn handle_slash<W: Write>(
             }
             SlashOutcome::Continue
         }
+        Some(Slash::Theme) => {
+            let env_theme = std::env::var(crate::tui::theme::THEME_ENV).ok();
+            let settings = crate::preferences::preferences_path();
+            handle_theme_slash(arg, &settings, env_theme.as_deref(), renderer);
+            SlashOutcome::Continue
+        }
         Some(Slash::Compact) => SlashOutcome::Compact((!arg.is_empty()).then(|| arg.to_string())),
         Some(Slash::Goal) => {
             match session.goal_command(arg) {
@@ -744,6 +750,48 @@ fn handle_slash<W: Write>(
             | Slash::Clear,
         ) => unknown_command(renderer, name),
         None => unlisted_command(renderer, &session.cwd, session.permission_mode, session.named_permission_mode.is_some(), name, arg),
+    }
+}
+
+/// `/theme` on the plain screen, which draws no theme of its own: bare, it
+/// prints the theme an interactive start would take — `env_theme`
+/// (`ZO_THEME`) before the `theme` setting in `settings` — and the names
+/// there are; with a name it saves that theme into `settings` for the
+/// interactive screen. The settings path and the environment's value are
+/// arguments, so a test reaches neither the person's file nor this process's
+/// environment.
+fn handle_theme_slash<W: Write>(
+    arg: &str,
+    settings: &std::path::Path,
+    env_theme: Option<&str>,
+    renderer: &mut Renderer<W>,
+) {
+    use crate::tui::theme;
+    if arg.is_empty() {
+        let preferences = crate::preferences::load_from_path(settings);
+        let (current, warning) = theme::choose(&preferences, env_theme);
+        // An empty `ZO_THEME` chooses nothing (`theme::choose`).
+        let by_env = if env_theme.is_some_and(|value| !value.trim().is_empty()) {
+            " (ZO_THEME 이 정함)"
+        } else {
+            ""
+        };
+        note(renderer, &format!("theme {}{by_env} — 바꾸려면 /theme <이름>", current.name));
+        if let Some(warning) = warning {
+            note(renderer, &warning);
+        }
+        note(renderer, &format!("themes: {}", theme::names_line()));
+        return;
+    }
+    let Ok(chosen) = theme::resolve_name(arg) else {
+        note(renderer, &format!("{arg:?} 라는 테마는 없습니다 — themes: {}", theme::names_line()));
+        return;
+    };
+    let name = theme::shown_name(&chosen);
+    let slug = (!chosen.is_terminal()).then_some(chosen.name.as_str());
+    match crate::preferences::save_theme_to(settings, slug) {
+        Ok(()) => note(renderer, &format!("theme → {name} — 저장했습니다. 대화형 화면에 쓰입니다")),
+        Err(error) => note_error(renderer, &format!("theme → {name} 을 저장하지 못했습니다: {error}")),
     }
 }
 
@@ -1724,5 +1772,63 @@ mod tests {
                 command.name()
             );
         }
+    }
+
+    /// Criterion 9: on the plain screen `/theme` prints the theme a start
+    /// would take and the names there are, and `/theme <name>` saves the
+    /// theme — one member of the settings file — and says where it shows. A
+    /// name no theme has, or one shaped like a path, saves nothing.
+    #[test]
+    fn plain_front_theme_prints_names_and_saves() {
+        let dir = crate::support::temp_dir("plain-front-theme");
+        let settings = dir.join("settings.json");
+        let initial = "{\n  \"z\": 1\n}\n";
+        std::fs::write(&settings, initial).expect("seed settings");
+        let run = |arg: &str, env_theme: Option<&str>| -> String {
+            let mut written = Vec::new();
+            {
+                let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
+                super::handle_theme_slash(arg, &settings, env_theme, &mut renderer);
+            }
+            String::from_utf8_lossy(&written).into_owned()
+        };
+
+        let listed = run("", None);
+        assert!(listed.contains("theme terminal"), "the theme in use: {listed:?}");
+        for name in &crate::tui::theme::names() {
+            let name: &str = name;
+            assert!(listed.contains(name), "{name} is not listed: {listed:?}");
+        }
+        assert_eq!(std::fs::read_to_string(&settings).expect("read"), initial, "listing saves nothing");
+
+        let set = run("Dracula", None);
+        assert!(set.contains("theme → Dracula") && set.contains("대화형 화면에 쓰입니다"), "{set:?}");
+        assert_eq!(
+            std::fs::read_to_string(&settings).expect("read"),
+            "{\n  \"z\": 1,\n  \"theme\": \"dracula\"\n}\n",
+            "only the theme member is new"
+        );
+        assert!(run("", None).contains("theme dracula"), "the saved theme is the one in use");
+        // `ZO_THEME` is read before the setting, and the listing says so.
+        let under_env = run("", Some("nord"));
+        assert!(under_env.contains("theme nord") && under_env.contains("ZO_THEME"), "{under_env:?}");
+
+        let saved = std::fs::read_to_string(&settings).expect("read");
+        for bad in ["../bad", "a/b", "dracula.json", "no-such-theme"] {
+            let refused = run(bad, None);
+            assert!(refused.contains("terminal") && refused.contains("dracula"), "{bad}: {refused:?}");
+            assert!(!refused.contains("theme →"), "{bad}: {refused:?}");
+            assert_eq!(std::fs::read_to_string(&settings).expect("read"), saved, "{bad} changed the settings");
+        }
+
+        // An empty `ZO_THEME` is no choice: the setting stands, and nothing
+        // is said of the environment.
+        let empty_env = run("", Some(" "));
+        assert!(empty_env.contains("theme dracula") && !empty_env.contains("ZO_THEME"), "{empty_env:?}");
+
+        let cleared = run("terminal", None);
+        assert!(cleared.contains("theme → terminal"), "{cleared:?}");
+        assert_eq!(std::fs::read_to_string(&settings).expect("read"), initial, "terminal takes the key out");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

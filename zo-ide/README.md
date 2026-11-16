@@ -46,7 +46,7 @@ zo decision-shadow eval --labels labels.jsonl   # probe·typed 판단을 사람�
 ```
 `zo commands --json`은 현재 폴더에서 호출할 수 있는 내장·사용자·활성 플러그인 명령과 출처를 보여 준다. 발견 중에는 명령이나 훅을 실행하지 않는다. 내장 명령이 같은 이름의 사용자·플러그인 명령보다 우선한다.
 
-내장 슬래시: `/model /fast /thinking /permissions /new /resume /fork /rename /export /compact /rewind /goal /loop /status /context /warnings /help /exit /clear`.
+내장 슬래시: `/model /fast /thinking /theme /permissions /new /resume /fork /rename /export /compact /rewind /goal /loop /status /context /warnings /help /exit /clear`.
 추론 강도는 `/model`에서 고른다.
 
 ```sh

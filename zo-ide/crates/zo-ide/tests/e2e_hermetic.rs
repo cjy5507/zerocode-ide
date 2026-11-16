@@ -10854,3 +10854,84 @@ async fn e2e_late_osc_colour_replies_never_reach_composer() {
     .await;
 }
 
+/// `/theme dracula` in a real terminal (T3): the line is zo's own — no
+/// "is not in zo" — the footer is written again in the theme's colours
+/// though its words did not change, and the choice is one new member of the
+/// run's own `settings.json` (the layout's temporary home; the person's is
+/// never read or written).
+///
+/// The footer is told from the rest of the screen by its folder: only the
+/// footer's folder is drawn in the `cwd` role, Dracula's cyan (#8be9fd). The
+/// model's name stands before it on the same row in the accent (#bd93f9) —
+/// a colour the command word above also takes, so it is looked for on the
+/// footer's row, not anywhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_theme_command_draws_dracula_and_saves_to_settings() {
+    const FOOTER_CWD: &[u8] = b"\x1b[38;2;139;233;253;49m";
+    const FOOTER_MODEL: &[u8] = b"\x1b[38;2;189;147;249;49m";
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("unused")
+        .await
+        .expect("start text script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[
+            (zo_ide::tui::style::STYLE_ENV, "marks"),
+            ("COLORTERM", "truecolor"),
+        ],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("What should we do?", TEST_TIMEOUT);
+    let before = run.snapshot_output();
+    assert!(
+        find_bytes(&before, FOOTER_CWD).is_none() && find_bytes(&before, FOOTER_MODEL).is_none(),
+        "the footer was in Dracula's colours before the theme was chosen"
+    );
+
+    let at = run.output_len();
+    run.send(b"/theme dracula\r").expect("send /theme dracula");
+    run.wait_until(at, TEST_TIMEOUT, |bytes| {
+        find_bytes(bytes, FOOTER_CWD).is_some() || find_bytes(bytes, b"is not in zo").is_some()
+    });
+    let output = run.finish();
+    let after = &output[at..];
+    assert!(
+        find_bytes(after, b"is not in zo").is_none(),
+        "/theme is zo's own command: {:?}",
+        String::from_utf8_lossy(after)
+    );
+    let folder = find_bytes(after, FOOTER_CWD).expect("the footer's folder in the theme's cyan");
+    let row = &after[..folder];
+    let model = row
+        .windows(FOOTER_MODEL.len())
+        .rposition(|window| window == FOOTER_MODEL)
+        .expect("the footer's model name in the theme's accent, before its folder");
+    // No cursor move (`ESC[<row>;<col>H`) between the two: one row.
+    let between = &row[model..];
+    let moved = between.windows(2).enumerate().any(|(index, pair)| {
+        pair == b"\x1b[" && {
+            let rest = &between[index + 2..];
+            let digits = rest.iter().take_while(|byte| byte.is_ascii_digit() || **byte == b';').count();
+            rest.get(digits) == Some(&b'H')
+        }
+    });
+    assert!(
+        !moved,
+        "the model's colour and the folder's are on different rows: {:?}",
+        String::from_utf8_lossy(between)
+    );
+
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(layout.home.join("settings.json")).expect("read settings.json"),
+    )
+    .expect("valid settings.json");
+    assert_eq!(saved["theme"], "dracula");
+    assert_eq!(saved["smart"]["autoClassifier"], "off", "the other settings are kept: {saved}");
+    assert!(service.request_bodies().await.is_empty(), "/theme asked the model");
+}

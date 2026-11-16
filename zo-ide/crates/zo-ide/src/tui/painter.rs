@@ -218,6 +218,12 @@ pub struct Painter<W: Write> {
     /// [`Self::set_lifted_height`]. `None` is the one block every other
     /// caller sizes.
     lift: Option<Lift>,
+    /// The theme's revision ([`super::theme::revision`]) the cached rows
+    /// were written under. A row is compared by its spans, and a span holds
+    /// a role or a colour slot, which is the same in every theme: when the
+    /// theme changes (`/theme`) the cache is dropped, so the next frame
+    /// writes every row of the head again in the new colours.
+    theme_revision: u64,
 }
 
 /// A head whose first rows stand directly under the transcript while the rest
@@ -301,6 +307,7 @@ impl<W: Write> Painter<W> {
             reached: top == first,
             slack: 0,
             lift: None,
+            theme_revision: super::theme::revision(),
         }
     }
 
@@ -1188,6 +1195,11 @@ impl<W: Write> Painter<W> {
     /// 직전에 쓴 행과 칸 단위로 견주어 다른 구간만 쓴다(`rowdiff`) — 칸으로 나눌 수
     /// 없거나 직전 모습을 모르는 행, 그리고 그 편이 더 짧은 행만 통째로 쓴다.
     pub fn paint(&mut self, rows: &[Line]) {
+        let theme_revision = super::theme::revision();
+        if theme_revision != self.theme_revision {
+            self.theme_revision = theme_revision;
+            self.invalidate();
+        }
         // 이 프레임에 아무도 쓰지 않았다면 커서는 지난 프레임이 놓은 자리에 있다.
         self.at = if self.frame.is_empty() { self.last_cursor } else { None };
         self.open();
@@ -3385,5 +3397,56 @@ mod wire_cost_tests {
             frame.len(),
             rows.len()
         );
+    }
+}
+
+/// A theme chosen while the screen is up (`/theme`): a row whose spans are
+/// the same roles as before is other bytes afterwards.
+#[cfg(test)]
+mod theme_tests {
+    use super::Painter;
+    use crate::preferences::Preferences;
+    use crate::tui::ansi::{Line, Span, Style};
+    use crate::tui::{palette, style, theme};
+
+    /// The row comparison reads a span's role, and a role is the same role in
+    /// every theme: without the theme's revision in the comparison the footer
+    /// kept the colours it was first drawn in until its words changed.
+    #[test]
+    fn a_theme_change_rewrites_rows_that_hold_the_same_roles() {
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        let test = format!("{module}::a_theme_change_rewrites_rows_that_hold_the_same_roles");
+        if !style::in_fresh_run_with(&test, &[("COLORTERM", "truecolor")]) {
+            return;
+        }
+        style::init(&Preferences::default());
+        let rows = [
+            Line::new(vec![Span::raw("  "), Span::new("model", Style::new().fg(palette::FOOTER_MODEL))]),
+            Line::new(vec![Span::raw("  "), Span::new("/command", Style::new().fg(palette::COMMAND_TOKEN))]),
+        ];
+        // Dracula's accent — its blue, #bd93f9 — is the footer model's colour
+        // and the command token's.
+        let accent = "\u{1b}[38;2;189;147;249;49m";
+        let mut painter = Painter::new(Vec::new(), 40, 12, 1, true);
+        painter.set_height(2);
+        painter.paint(&rows);
+        let first = painter.take_frame();
+        assert!(first.contains("model") && !first.contains(accent), "{first:?}");
+
+        assert!(theme::set(theme::find("dracula").expect("the dracula theme")));
+        painter.paint(&rows);
+        let second = painter.take_frame();
+        assert!(second.contains(&format!("{accent}model")), "the model row kept its old colour: {second:?}");
+        assert!(second.contains(&format!("{accent}/command")), "the command row kept its old colour: {second:?}");
+
+        // The same theme again is the same screen: nothing is written twice.
+        painter.paint(&rows);
+        let third = painter.take_frame();
+        assert!(!third.contains("model") && !third.contains("/command"), "{third:?}");
+
+        assert!(theme::set(theme::Theme::terminal()));
+        painter.paint(&rows);
+        let back = painter.take_frame();
+        assert!(back.contains("model") && !back.contains(accent), "{back:?}");
     }
 }

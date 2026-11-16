@@ -526,6 +526,7 @@ fn list_view(agents: &[SubagentProgress], selected: usize) -> Picker {
             .collect(),
         selected: selected.min(agents.len().saturating_sub(1)),
         footer: format!("enter details · {OPEN_KEY_LABEL}/esc close"),
+        preview: Vec::new(),
     }
 }
 
@@ -584,6 +585,7 @@ fn detail_view(agent: &SubagentProgress, selected: usize) -> Picker {
         selected: selected.min(rows.len().saturating_sub(1)),
         rows,
         footer: "m message · s stop · up/down scroll · esc agents".to_string(),
+        preview: Vec::new(),
     }
 }
 
@@ -606,6 +608,7 @@ fn stop_view(label: &str) -> Picker {
         ],
         selected: 0,
         footer: "enter confirm · esc details".to_string(),
+        preview: Vec::new(),
     }
 }
 

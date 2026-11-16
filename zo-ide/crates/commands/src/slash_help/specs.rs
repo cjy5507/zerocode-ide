@@ -404,7 +404,7 @@ pub(super) const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "theme",
         aliases: &[],
-        summary: "Switch the terminal color theme",
+        summary: "Choose zo's color theme",
         argument_hint: Some("[theme-name]"),
         resume_supported: true,
         category: CommandCategory::Appearance,
