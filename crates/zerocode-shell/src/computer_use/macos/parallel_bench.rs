@@ -463,6 +463,37 @@ fn helper_rss_kib(pid: Option<i32>) -> u64 {
         .unwrap_or(0)
 }
 
+/// What a helper holds as macOS counts it, in KiB: its footprint — what the
+/// Activity Monitor shows and memory pressure is charged for — and its
+/// resident pages, which also count what it gave back and the system has not
+/// yet taken. The resident size alone said 197 MiB of a helper whose windows
+/// had gone (2026-11-16); both are read so the two are never taken for each
+/// other. Zeros when the helper cannot be read.
+fn helper_holds_kib(pid: Option<i32>) -> (u64, u64) {
+    let Some(pid) = pid else { return (0, 0) };
+    // SAFETY: zero is a valid `rusage_info_v4` (integers and a byte array).
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: the buffer is a live `rusage_info_v4`, the size the V4 flavor
+    // writes; the call reads nothing else of ours.
+    let read = unsafe {
+        libc::proc_pid_rusage(
+            pid,
+            libc::RUSAGE_INFO_V4,
+            std::ptr::from_mut(&mut info).cast(),
+        )
+    };
+    if read != 0 {
+        return (0, 0);
+    }
+    (info.ri_phys_footprint / 1024, info.ri_resident_size / 1024)
+}
+
+/// The same reading as the report writes it.
+fn held(pid: Option<i32>) -> Value {
+    let (footprint, resident) = helper_holds_kib(pid);
+    json!({"footprint_kib": footprint, "resident_kib": resident})
+}
+
 #[test]
 #[ignore = "drives the signed helper against an owned fixture; run by hand, see the module comment"]
 #[allow(clippy::too_many_lines)]
@@ -807,7 +838,7 @@ fn parallel_bench_pointer() {
         let took = (most >= wanted).then(|| started.elapsed().as_secs_f64() * 1000.0);
         (most, took)
     };
-    let resident_of = |session: &Session| helper_rss_kib(session.helper_pid());
+    let held_by = |session: &Session| held(session.helper_pid());
     let mut report = json!({});
 
     // ---- a press whose pointer travels, and one whose pointer is already there
@@ -866,7 +897,7 @@ fn parallel_bench_pointer() {
     }
     let mut pointers = serde_json::Map::new();
     // What each helper holds, moment by moment: (moment, before, new).
-    let mut resident: Vec<(&str, u64, u64)> = Vec::new();
+    let mut holds: Vec<(&str, Value, Value)> = Vec::new();
     for (label, session) in [("before", &old), ("new", &new)] {
         none_shown(session);
         let prepared: Vec<(String, u64)> = apps
@@ -885,7 +916,7 @@ fn parallel_bench_pointer() {
         });
         pointers.insert(label.into(), json!(pointers_shown(session, APPS).0));
     }
-    resident.push(("four_apps_counted", resident_of(&old), resident_of(&new)));
+    holds.push(("four_apps_counted", held_by(&old), held_by(&new)));
     report["one_agent_in_four_apps_pointers"] = Value::Object(pointers);
     report["four_apps_pressed"] = json!(
         apps.iter()
@@ -958,7 +989,7 @@ fn parallel_bench_pointer() {
                 "press_ms": stats(std::mem::take(&mut presses[at])),
                 "pointers": pointers,
                 "all_pointers_shown_ms": all_shown_ms.map(f64::round),
-                "helper_resident_kib": session.helper_pid().map(super::background_tests::resident_kib),
+                "helper_holds": held_by(session),
             }),
         );
     }
@@ -1057,7 +1088,7 @@ fn parallel_bench_pointer() {
         };
         none_shown(&old);
         none_shown(&new);
-        resident.push((moment, resident_of(&old), resident_of(&new)));
+        holds.push((moment, held_by(&old), held_by(&new)));
     }
     let mut by_helper = serde_json::Map::new();
     for (at, label) in ["before", "new"].into_iter().enumerate() {
@@ -1079,8 +1110,8 @@ fn parallel_bench_pointer() {
     report["a_stop_while_many_pointers_are_drawn"] = json!({
         "apps": MANY, "rounds": STOP_ROUNDS, "stop_after_ms": STOP_AFTER_MS, "by_helper": by_helper,
     });
-    report["helper_resident_kib_at"] = Value::Object(
-        resident
+    report["helper_holds_at"] = Value::Object(
+        holds
             .into_iter()
             .map(|(moment, before, new)| (moment.to_owned(), json!({"before": before, "new": new})))
             .collect(),

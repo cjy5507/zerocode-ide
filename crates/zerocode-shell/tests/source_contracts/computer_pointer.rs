@@ -221,6 +221,39 @@ fn the_pointers_are_drawn_one_a_turn(overlay: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A pointer's windows come onto the screen and leave it with every press
+/// and every time its fifteen seconds are up, and AppKit animates a panel in
+/// and out unless told not to. What those animations drew stayed in the
+/// helper: one agent in twenty-four apps left it 150 MiB larger (v1.1.157),
+/// and the same windows with the animation off cost a tenth of it
+/// (2026-11-16, a probe outside the helper). So every window the overlay
+/// makes turns the animation off — the pointer's and the ring's alike, and
+/// any that is added later.
+fn no_window_of_a_pointer_is_animated_by_the_system(overlay: &str) -> Result<(), String> {
+    let made = overlay.matches("= PointerPanel(").count();
+    let quiet = overlay.matches(".animationBehavior = .none").count();
+    if made == 0 {
+        return Err(
+            "the overlay no longer makes its windows as `PointerPanel(`: this rule reads nothing"
+                .into(),
+        );
+    }
+    if quiet != made {
+        return Err(format!(
+            "the overlay makes {made} kinds of window and turns the system's animation off for {quiet}"
+        ));
+    }
+    for (at, _) in overlay.match_indices("= PointerPanel(") {
+        let next = overlay[at + 1..]
+            .find("= PointerPanel(")
+            .map_or(overlay.len(), |next| at + 1 + next);
+        if !overlay[at..next].contains(".animationBehavior = .none") {
+            return Err("a window is made and another is told twice not to animate".into());
+        }
+    }
+    Ok(())
+}
+
 fn holds(rule: Result<(), String>) {
     if let Err(why) = rule {
         panic!("{why}");
@@ -250,6 +283,11 @@ fn a_pointer_that_goes_leaves_the_screen_before_it_leaves_the_helpers_list() {
 #[test]
 fn the_pointers_are_drawn_one_a_turn_and_ask_no_app() {
     holds(the_pointers_are_drawn_one_a_turn(OVERLAY));
+}
+
+#[test]
+fn a_pointers_windows_come_and_go_without_the_systems_animation() {
+    holds(no_window_of_a_pointer_is_animated_by_the_system(OVERLAY));
 }
 
 /// `source` with `was` written over by `now` — a part-way return. The place
@@ -324,4 +362,16 @@ fn a_part_way_return_is_refused() {
         "let inView = anchor.visible(in: Self.windows(), ignoringWindowIDs: Self.windowIDs())",
     );
     assert!(the_pointers_are_drawn_one_a_turn(&reads_each_time).is_err());
+    // The system's animation back on one kind of window: the ring's, which
+    // every press orders front and out.
+    let ring_animated = returned(OVERLAY, "        panel.animationBehavior = .none\n", "");
+    assert!(no_window_of_a_pointer_is_animated_by_the_system(&ring_animated).is_err());
+    // Told twice for the pointer and not at all for the ring: the count alone
+    // would hold.
+    let told_twice = returned(
+        &ring_animated,
+        "            shown.animationBehavior = .none\n",
+        "            shown.animationBehavior = .none\n            shown.animationBehavior = .none\n",
+    );
+    assert!(no_window_of_a_pointer_is_animated_by_the_system(&told_twice).is_err());
 }

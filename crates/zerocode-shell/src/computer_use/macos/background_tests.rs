@@ -524,7 +524,7 @@ fn the_concurrent_oracle_rejects_a_helper_event_on_the_shared_pointer() {
     assert_background_state(&state, &state, PointerOracle::Concurrent, 400001);
 }
 
-pub(super) fn resident_kib(pid: i32) -> u64 {
+fn resident_kib(pid: i32) -> u64 {
     let output = crate::proc::quiet_command("/bin/ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()

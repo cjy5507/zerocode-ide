@@ -228,6 +228,13 @@ final class BackgroundPointerOverlay {
             shown.ignoresMouseEvents = true
             shown.hidesOnDeactivate = false
             shown.isReleasedWhenClosed = false
+            // AppKit animates a panel onto the screen and off it unless told
+            // not to, and the process keeps what each animation drew: the
+            // windows of twenty-four pointers, shown and taken away once, left
+            // 200 MiB resident where the same windows left 35 with it off
+            // (2026-11-16, a probe outside the helper). The pointer glides in
+            // by itself and needs none of it.
+            shown.animationBehavior = .none
             shown.level = .floating
             // The person's to see, and no part of what an agent reads off the screen.
             shown.sharingType = .none
@@ -353,6 +360,9 @@ final class BackgroundPointerOverlay {
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
+        // Ordered front and out again by every press: the ring fades by its
+        // own layer, and the window's animation is what the memory went to.
+        panel.animationBehavior = .none
         panel.level = .floating
         panel.sharingType = .none
         panel.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary, .canJoinAllSpaces]
