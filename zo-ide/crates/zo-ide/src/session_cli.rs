@@ -93,7 +93,11 @@ pub(crate) fn fork_session(source: &Session, source_path: &Path, name: Option<&s
     let handle = crate::session_registry::create_managed_session_handle_at(&child.session_id, cwd).map_err(|e| e.to_string())?;
     let child = child.with_persistence_path(handle.path.clone());
     child.save_to_path(&handle.path).map_err(|e| e.to_string())?;
-    for extension in ["system-prompt.json", "prefs.json"] {
+    // The stored prompt goes on with the tool list it was built for
+    // (`<stem>.tools`), so the fork is given the tools that prompt teaches.
+    // The list goes first: a fork that stops between the two holds no prompt
+    // beside a list it was not built for, and builds its prompt afresh.
+    for extension in [runtime::session_control::SESSION_TOOLS_EXTENSION, "system-prompt.json", "prefs.json"] {
         let from = source_path.with_extension(extension);
         if from.is_file() {
             let data = std::fs::read(from).map_err(|e| e.to_string())?;
@@ -141,5 +145,29 @@ mod tests {
 
         let child = super::fork_session(&source, &source_path, None, &cwd).expect("fork");
         assert_eq!(load_session_selection(&child).as_ref(), Some(&selection));
+    }
+
+    /// A fork replays the prompt its source stored, so it takes the tool list
+    /// that prompt was built for with it.
+    #[test]
+    fn a_fork_keeps_the_stored_prompt_and_the_tool_list_it_was_built_for() {
+        let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
+        let cwd = home.zo_home.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("workspace");
+        let sessions = home.zo_home.join("projects").join("acme-parent").join("sessions");
+        std::fs::create_dir_all(&sessions).expect("parent sessions");
+        let source_path = sessions.join("parent.jsonl");
+        let source = core_types::Session::new();
+        source.save_to_path(&source_path).expect("parent transcript");
+        let stored = [("system-prompt.json", r##"["# Zo"]"##), (runtime::session_control::SESSION_TOOLS_EXTENSION, r#"{"tools":["bash","read_file"]}"#)];
+        for (extension, body) in stored {
+            std::fs::write(source_path.with_extension(extension), body).expect("parent record");
+        }
+
+        let child = super::fork_session(&source, &source_path, None, &cwd).expect("fork");
+        for (extension, body) in stored {
+            assert_eq!(std::fs::read_to_string(child.with_extension(extension)).ok().as_deref(), Some(body), "{extension}");
+        }
     }
 }

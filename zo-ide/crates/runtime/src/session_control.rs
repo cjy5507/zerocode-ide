@@ -19,6 +19,11 @@ pub const SESSION_CWD_EXTENSION: &str = "cwd";
 /// The extension of the sidecar beside a transcript that names where its agent
 /// registry lives (`<stem>.registry`, zo-ide's `resume`).
 pub const SESSION_REGISTRY_EXTENSION: &str = "registry";
+/// The extension of the sidecar beside a transcript that names the tool list
+/// its stored prompt was built for (`<stem>.tools`, zo-ide's `plain_session`),
+/// so a reopen is given the tools that prompt teaches. A session given every
+/// tool has none.
+pub const SESSION_TOOLS_EXTENSION: &str = "tools";
 /// The sidecars a transcript owns under its own stem whose extension is
 /// neither `jsonl` nor `json` — on purpose: a resumable-file listing must never
 /// take one for a transcript. For the same reason the retention sweep, which
@@ -27,7 +32,7 @@ pub const SESSION_REGISTRY_EXTENSION: &str = "registry";
 /// 30-day horizon, beside one project's 64 transcripts on 2026-11-10). The
 /// sweep now takes one once nothing else of its session is left (see
 /// [`sidecar_is_ownerless`]) and it is past the same horizon itself.
-pub const SESSION_SIDECAR_EXTENSIONS: [&str; 2] = [SESSION_CWD_EXTENSION, SESSION_REGISTRY_EXTENSION];
+pub const SESSION_SIDECAR_EXTENSIONS: [&str; 3] = [SESSION_CWD_EXTENSION, SESSION_REGISTRY_EXTENSION, SESSION_TOOLS_EXTENSION];
 
 const SESSION_REFERENCE_ALIASES: &[&str] = &[LATEST_SESSION_REFERENCE, "last", "recent"];
 
@@ -192,8 +197,9 @@ pub struct SessionCleanupReport {
     /// Orphan `<session>.lock` files reclaimed — see
     /// [`core_types::session::try_reclaim_orphan_lock`].
     pub removed_locks: usize,
-    /// `<stem>.cwd` / `<stem>.registry` sidecars taken with their transcript,
-    /// or left by an earlier sweep ([`SESSION_SIDECAR_EXTENSIONS`]).
+    /// `<stem>.cwd` / `<stem>.registry` / `<stem>.tools` sidecars taken with
+    /// their transcript, or left by an earlier sweep
+    /// ([`SESSION_SIDECAR_EXTENSIONS`]).
     pub removed_sidecars: usize,
     pub removed_dirs: usize,
     pub reclaimed_bytes: u64,
@@ -936,10 +942,10 @@ mod tests {
         let root = temp_dir();
         let sessions = root.join("slug").join("sessions");
         fs::create_dir_all(&sessions).expect("sessions dir");
-        for name in ["old.jsonl", "old.cwd", "old.registry", "ancient.cwd", "ancient.registry", "opening.cwd"] {
+        for name in ["old.jsonl", "old.cwd", "old.registry", "old.tools", "ancient.cwd", "ancient.registry", "opening.cwd"] {
             fs::write(sessions.join(name), "x").expect(name);
         }
-        for name in ["old.jsonl", "old.cwd", "old.registry", "ancient.cwd", "ancient.registry"] {
+        for name in ["old.jsonl", "old.cwd", "old.registry", "old.tools", "ancient.cwd", "ancient.registry"] {
             age(&sessions.join(name), 40);
         }
         let cutoff = SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
@@ -947,8 +953,8 @@ mod tests {
         let report = cleanup_expired_sessions_under(&root, cutoff);
 
         assert_eq!(report.removed_sessions, 1, "{report:?}");
-        assert_eq!(report.removed_sidecars, 4, "old's two and ancient's two: {report:?}");
-        for gone in ["old.jsonl", "old.cwd", "old.registry", "ancient.cwd", "ancient.registry"] {
+        assert_eq!(report.removed_sidecars, 5, "old's three and ancient's two: {report:?}");
+        for gone in ["old.jsonl", "old.cwd", "old.registry", "old.tools", "ancient.cwd", "ancient.registry"] {
             assert!(!sessions.join(gone).exists(), "{gone} outlived the sweep");
         }
         assert!(sessions.join("opening.cwd").exists(), "a session being opened keeps its sidecar");
@@ -1021,7 +1027,7 @@ mod tests {
 
         drop(live);
         let released = cleanup_expired_sessions_under(&root, cutoff);
-        assert_eq!((released.removed_locks, released.removed_sidecars), (1, 2), "{released:?}");
+        assert_eq!((released.removed_locks, released.removed_sidecars), (1, super::SESSION_SIDECAR_EXTENSIONS.len()), "{released:?}");
         let _ = fs::remove_dir_all(&root);
     }
 

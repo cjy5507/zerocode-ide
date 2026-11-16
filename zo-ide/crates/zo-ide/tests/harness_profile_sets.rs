@@ -13,7 +13,8 @@
 //! for every other session. Whatever the tool set, the system text names only
 //! tools the session can reach: the four sections that teach a tool, the
 //! deferred-tool paragraph and a background command's start line follow the
-//! tools the session was given.
+//! tools the session was given. A reopened session sends the text it stored
+//! when it opened, and is given the tools that text was built for.
 
 #[expect(dead_code, reason = "the env guard is shared; its HTTP server and model reader are not used here")]
 #[path = "support/custom_models.rs"]
@@ -560,6 +561,51 @@ fn a_background_start_names_only_what_the_run_reaches() {
 
     let full = Scene::new().tool_result(&server, &[(overlay_env, &overlay(json!({"tool_set": "full"})))]);
     assert!(full.contains(TASK_TOOLS_LINE), "a run with the task tools reads as before: {full}");
+}
+
+/// The request a run sends when it opens under `opened_on`, and the one it
+/// sends when that conversation is reopened (`--continue`) under
+/// `reopened_on`, in one scene.
+fn opened_and_reopened(server: &ChatServer, opened_on: &str, reopened_on: &str) -> ((Vec<Value>, Value), (Vec<Value>, Value)) {
+    let scene = Scene::new();
+    let overlay_env = api::MODEL_CONTEXT_WINDOWS_ENV;
+    let opened = scene.request(server, &[(overlay_env, opened_on)], &[]);
+    let reopened = scene.request(server, &[(overlay_env, reopened_on)], &["--continue"]);
+    (opened, reopened)
+}
+
+/// A reopened run sends the system text it stored when it opened, so it is
+/// given the tools that text was built for. A run 1.1.158 opened on every tool
+/// — every deepseek run nobody attends — and reopened where a new run would
+/// get the core four (`headless_core`) keeps every tool, and its text teaches
+/// no tool it lacks.
+#[test]
+fn a_run_opened_on_every_tool_reopens_on_every_tool() {
+    let server = ChatServer::new();
+    let (opened, reopened) = opened_and_reopened(&server, &overlay(json!({"tool_set": "full"})), &overlay(json!({"tool_set": "headless_core"})));
+
+    let text = system_text(&reopened.0);
+    assert!(text.starts_with(&system_text(&opened.0)), "a reopened run sends the text it stored:\n{text}");
+    for heading in UNREACHED_TEXT {
+        assert!(text.contains(heading), "the stored text teaches `{heading}`");
+    }
+    assert_eq!(tool_names(&reopened.1), tool_names(&opened.1), "a run opened on every tool reopens on every tool");
+}
+
+/// The other way: a run opened on the core four, reopened where a new run
+/// would get every tool — a person reopening it at the terminal — keeps the
+/// core four its stored text was built for.
+#[test]
+fn a_run_opened_on_the_core_four_reopens_on_them() {
+    let server = ChatServer::new();
+    let (opened, reopened) = opened_and_reopened(&server, &overlay(json!({"tool_set": "headless_core"})), &overlay(json!({"tool_set": "full"})));
+
+    let text = system_text(&reopened.0);
+    assert!(text.starts_with(&system_text(&opened.0)), "a reopened run sends the text it stored:\n{text}");
+    for heading in UNREACHED_TEXT {
+        assert!(!text.contains(heading), "the stored text was built without `{heading}`");
+    }
+    assert_eq!(tool_names(&reopened.1), ["Bash", "Read", "Write", "apply_patch"], "a run opened on the core four reopens on them");
 }
 
 /// The `--prompt-input` digest of every shipped model row id, every shipped

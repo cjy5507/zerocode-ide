@@ -166,6 +166,11 @@ pub struct PlainSession {
     /// opens from this one.
     pub named_permission_mode: Option<PermissionMode>,
     allowed_tools: Option<AllowedToolSet>,
+    /// [`OpenOptions::allowed_tools`] as the launch named it, for the sessions
+    /// a TUI opens from this one ([`Self::launch_flags`]) — not the list this
+    /// one resolved (`allowed_tools`), which a reopen takes from its stored
+    /// prompt.
+    launch_allowed_tools: Option<AllowedToolSet>,
     system_prompt: Vec<String>,
     pub(crate) runtime: BuiltRuntime,
     tasks: Arc<runtime::task_registry::TaskRegistry>,
@@ -924,11 +929,15 @@ impl PlainSession {
             model_selection,
             origins: selection_origins,
         } = opening;
+        // A reopened session sends the prompt it stored when it opened, read
+        // once here with the tool list it was built for.
+        let stored_prompt = resumed.then(|| load_stored_prompt(&handle.path)).flatten();
         // The tools the session is given (`opening_tool_list`), read once
         // here like the system prompt.
         let allowed_tools = opening_tool_list(
             options.allowed_tools.as_ref(),
             options.parent_registry.is_none() && options.teammate_harness.is_none(),
+            stored_prompt.as_ref(),
             options.headless,
             &model,
             || super::runtime_builder::person_attached_tools(&cwd, options.mcp_config.as_deref()),
@@ -944,19 +953,20 @@ impl PlainSession {
         // drift). A resumed teammate replays the stored one, like any session.
         let system_prompt = match options.teammate_harness.as_ref() {
             Some(harness) if !harness.system_prompt.is_empty() => {
-                carried_system_prompt(&handle.path, resumed, &harness.system_prompt)
+                carried_system_prompt(&handle.path, stored_prompt, &harness.system_prompt, allowed_tools.as_ref())
             }
             _ => session_system_prompt(
                 &cwd,
                 &model,
                 &handle.path,
-                resumed,
+                stored_prompt,
                 if options.headless {
                     runtime::PromptMode::Autonomous
                 } else {
                     runtime::PromptMode::Interactive
                 },
                 offer,
+                allowed_tools.as_ref(),
             )?,
         };
         crate::runtime_support::log_boot_stage("open/system-prompt", prompt_started);
@@ -1032,6 +1042,7 @@ impl PlainSession {
             permission_mode: options.permission_mode,
             named_permission_mode: options.named_permission_mode,
             allowed_tools,
+            launch_allowed_tools: options.allowed_tools,
             system_prompt,
             runtime,
             tasks,
@@ -2512,7 +2523,7 @@ impl PlainSession {
     pub fn launch_flags(&self) -> LaunchFlags {
         LaunchFlags {
             named_permission_mode: self.named_permission_mode,
-            allowed_tools: self.allowed_tools.clone(),
+            allowed_tools: self.launch_allowed_tools.clone(),
             disable_spawn_family: self.disable_spawn_family,
             mcp_config: self.mcp_config.clone(),
         }
@@ -3001,23 +3012,31 @@ pub fn permission_label(mode: PermissionMode) -> &'static str {
 }
 
 /// The tool list a session opens with: the list the launch named, else, for a
-/// `root` session, the one the opening model's harness profile holds it to
-/// (`tools::harness_tool_set`) — the list `--allowed-tools` would name. A pane
-/// child keeps what its parent resolved. A `headless_core` profile holds only a
-/// run nobody attends (`headless`, the judgment that picks the prompt's
-/// `Operating autonomously`) to that list, and only while `attached` says the
-/// person attached nothing of their own
+/// `root` session, the one its prompt was built for when it reopens on the
+/// prompt it stored (`stored`), and otherwise the one the opening model's
+/// harness profile holds it to (`tools::harness_tool_set`) — the list
+/// `--allowed-tools` would name. A pane child keeps what its parent resolved.
+/// A `headless_core` profile holds only a run nobody attends (`headless`, the
+/// judgment that picks the prompt's `Operating autonomously`) to that list,
+/// and only while `attached` says the person attached nothing of their own
 /// ([`super::runtime_builder::person_attached_tools`]) — asked only then.
 fn opening_tool_list(
     launch: Option<&AllowedToolSet>,
     root: bool,
+    stored: Option<&StoredPrompt>,
     headless: bool,
     model: &str,
     attached: impl FnOnce() -> bool,
 ) -> Option<AllowedToolSet> {
-    launch
-        .cloned()
-        .or_else(|| root.then(|| tools::harness_tool_set(model, || headless && !attached())).flatten())
+    launch.cloned().or_else(|| {
+        root.then(|| match stored {
+            // The stored prompt teaches the tools it was built for, whatever
+            // this opening would choose for a new session now.
+            Some(stored) => stored.tools.clone(),
+            None => tools::harness_tool_set(model, || headless && !attached()),
+        })
+        .flatten()
+    })
 }
 
 /// `<id>.system-prompt.json` — 세션이 만들어질 때의 프롬프트를 보존해 재개 시
@@ -3026,45 +3045,111 @@ fn session_system_prompt_path(session_path: &Path) -> PathBuf {
     session_path.with_extension("system-prompt.json")
 }
 
-/// A teammate's prompt: the carried sections, stored beside the transcript
-/// exactly like a built one so a resume of this session replays it verbatim
-/// (the provider cache prefix depends on the bytes not moving).
-fn carried_system_prompt(session_path: &Path, resumed: bool, carried: &[String]) -> Vec<String> {
-    if resumed {
-        if let Some(stored) = std::fs::read(session_system_prompt_path(session_path))
-            .ok()
-            .and_then(|raw| serde_json::from_slice::<Vec<String>>(&raw).ok())
-            .filter(|sections| !sections.is_empty())
-        {
-            return stored;
-        }
+/// `<id>.tools` — the tool list a stored prompt was built for. Its extension
+/// is neither `jsonl` nor `json`, so no session listing takes it for a
+/// transcript, and the retention sweep takes it with its session
+/// (`runtime::session_control::SESSION_SIDECAR_EXTENSIONS`).
+fn session_tool_list_path(session_path: &Path) -> PathBuf {
+    session_path.with_extension(runtime::session_control::SESSION_TOOLS_EXTENSION)
+}
+
+/// What `<id>.tools` holds.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SessionToolList {
+    tools: AllowedToolSet,
+}
+
+/// The prompt a session stored when it opened, and the tool list it was built
+/// for.
+struct StoredPrompt {
+    /// Sent again as they were: the provider's cache prefix depends on the
+    /// bytes not moving.
+    sections: Vec<String>,
+    /// `None` is every tool: what a session given no list stores, and what a
+    /// session stored before this list was kept beside its prompt (zo 1.1.159
+    /// and earlier) reopens with, as it always did. An unreadable list reads
+    /// the same way.
+    tools: Option<AllowedToolSet>,
+}
+
+/// A reopened session's stored prompt and its tool list; `None` when no
+/// usable prompt was stored, and the session builds one afresh.
+fn load_stored_prompt(session_path: &Path) -> Option<StoredPrompt> {
+    let sections = std::fs::read(session_system_prompt_path(session_path))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Vec<String>>(&raw).ok())
+        .filter(|sections| !sections.is_empty())?;
+    let tools = std::fs::read(session_tool_list_path(session_path))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<SessionToolList>(&raw).ok())
+        .map(|list| list.tools);
+    Some(StoredPrompt { sections, tools })
+}
+
+/// Store a prompt built or carried now with the tool list it was built for,
+/// so a reopen sends the same text with the same tools. Every tool is stored
+/// as no list, which also takes away a list an earlier prompt of this session
+/// left — only a file that reads as one: beside a transcript reopened by its
+/// path the name may be the person's, and a file that does not read as a list
+/// reads as every tool anyway. The list is written first and the prompt only
+/// once it stands, so a prompt never sits beside a list it was not built for;
+/// without a prompt a reopen builds afresh. Best effort, like the prompt
+/// always was.
+fn store_system_prompt(session_path: &Path, sections: &[String], tool_list: Option<&AllowedToolSet>) {
+    let list = session_tool_list_path(session_path);
+    let listed = match tool_list {
+        Some(tools) => serde_json::to_vec(&SessionToolList { tools: tools.clone() })
+            .map_err(std::io::Error::other)
+            .and_then(|payload| {
+                core_types::paths::write_private_file(&list, &payload, &core_types::paths::ParentDirPolicy::LeaveParent)
+            }),
+        None => match std::fs::read(&list) {
+            Ok(raw) if serde_json::from_slice::<SessionToolList>(&raw).is_ok() => std::fs::remove_file(&list),
+            _ => Ok(()),
+        },
+    };
+    if listed.is_err() {
+        return;
     }
-    if let Ok(payload) = serde_json::to_vec(carried) {
+    if let Ok(payload) = serde_json::to_vec(sections) {
         let _ = core_types::paths::write_private_file(
             &session_system_prompt_path(session_path),
             &payload,
             &core_types::paths::ParentDirPolicy::LeaveParent,
         );
     }
+}
+
+/// A teammate's prompt: the carried sections, stored beside the transcript
+/// exactly like a built one so a resume of this session replays it verbatim
+/// (the provider cache prefix depends on the bytes not moving).
+fn carried_system_prompt(
+    session_path: &Path,
+    stored: Option<StoredPrompt>,
+    carried: &[String],
+    tool_list: Option<&AllowedToolSet>,
+) -> Vec<String> {
+    if let Some(stored) = stored {
+        return stored.sections;
+    }
+    store_system_prompt(session_path, carried, tool_list);
     carried.to_vec()
 }
 
+/// A session's prompt: the one it stored when it reopens on it (`stored`),
+/// else one built now for what the session reaches (`offer`, from
+/// `tool_list`) and stored with that list.
 fn session_system_prompt(
     cwd: &Path,
     model: &str,
     session_path: &Path,
-    resumed: bool,
+    stored: Option<StoredPrompt>,
     prompt_mode: runtime::PromptMode,
     offer: tools::ToolOffer<'_>,
+    tool_list: Option<&AllowedToolSet>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    if resumed {
-        if let Some(stored) = std::fs::read(session_system_prompt_path(session_path))
-            .ok()
-            .and_then(|raw| serde_json::from_slice::<Vec<String>>(&raw).ok())
-            .filter(|sections| !sections.is_empty())
-        {
-            return Ok(stored);
-        }
+    if let Some(stored) = stored {
+        return Ok(stored.sections);
     }
     let built = crate::conversation_support::build_system_prompt_for_mode(
         cwd,
@@ -3072,13 +3157,7 @@ fn session_system_prompt(
         model,
         offer,
     )?;
-    if let Ok(payload) = serde_json::to_vec(&built) {
-        let _ = core_types::paths::write_private_file(
-            &session_system_prompt_path(session_path),
-            &payload,
-            &core_types::paths::ParentDirPolicy::LeaveParent,
-        );
-    }
+    store_system_prompt(session_path, &built, tool_list);
     Ok(built)
 }
 
@@ -3976,7 +4055,7 @@ mod resume_progress_tests {
 
 #[cfg(test)]
 mod opening_tool_list_tests {
-    use super::{opening_tool_list, AllowedToolSet};
+    use super::{load_stored_prompt, opening_tool_list, session_system_prompt_path, session_tool_list_path, store_system_prompt, AllowedToolSet, StoredPrompt};
 
     /// `headless_core` holds only a root run nobody attends, with nothing of
     /// the person's attached, to the core list. A session a person attends, a
@@ -3994,7 +4073,7 @@ mod opening_tool_list_tests {
         let launch: AllowedToolSet = ["bash".to_string()].into();
         let looked = std::cell::Cell::new(0_u32);
         let open = |launch: Option<&AllowedToolSet>, root: bool, headless: bool, attached: bool| {
-            opening_tool_list(launch, root, headless, "acme-coder-1", || {
+            opening_tool_list(launch, root, None, headless, "acme-coder-1", || {
                 looked.set(looked.get() + 1);
                 attached
             })
@@ -4006,5 +4085,68 @@ mod opening_tool_list_tests {
         assert_eq!(open(Some(&launch), true, true, false), Some(launch.clone()), "a launch list wins");
         assert_eq!(open(None, false, true, false), None, "a pane child keeps what its parent resolved");
         assert_eq!(looked.get(), 2, "only a headless root run without a list looks for the person's tools");
+    }
+
+    /// A reopen sends the prompt it stored, so a root session without a launch
+    /// list is given the tools that prompt was built for, whoever reopens it
+    /// and whatever its profile would give a new session now: a run 1.1.158
+    /// opened on every tool keeps every tool where a new run would get the
+    /// core four, and a run opened on the core four keeps them when a person
+    /// reopens it at the terminal. A launch list still wins, a pane child
+    /// keeps what its parent resolved, and nobody looks for the person's
+    /// tools.
+    #[test]
+    fn a_reopen_is_given_the_tools_its_stored_prompt_was_built_for() {
+        let _lock = crate::test_env_lock();
+        let _overlay = crate::support::EnvVarGuard::set(
+            api::MODEL_CONTEXT_WINDOWS_ENV,
+            Some(r#"{"models":[{"ids":["acme-coder-1"],"harness":{"edit_tool":"apply_patch","tool_set":"headless_core"}}]}"#),
+        );
+        let core: AllowedToolSet = ["bash", "read_file", "write_file", "apply_patch"].map(String::from).into();
+        let launch: AllowedToolSet = ["bash".to_string()].into();
+        let stored = |tools: Option<&AllowedToolSet>| StoredPrompt { sections: vec!["# Zo".to_string()], tools: tools.cloned() };
+        let reopen = |launch: Option<&AllowedToolSet>, root: bool, stored: &StoredPrompt, headless: bool| {
+            opening_tool_list(launch, root, Some(stored), headless, "acme-coder-1", || panic!("a reopen does not look for the person's tools"))
+        };
+
+        assert_eq!(reopen(None, true, &stored(None), true), None, "a run opened on every tool keeps every tool");
+        assert_eq!(reopen(None, true, &stored(Some(&core)), false), Some(core.clone()), "a person reopening a core run keeps the core four");
+        assert_eq!(reopen(None, true, &stored(Some(&core)), true), Some(core.clone()), "a core run reopened nobody attending keeps them");
+        assert_eq!(reopen(Some(&launch), true, &stored(Some(&core)), false), Some(launch.clone()), "a launch list wins");
+        assert_eq!(reopen(None, false, &stored(Some(&core)), true), None, "a pane child keeps what its parent resolved");
+    }
+
+    /// The tool list is stored beside the prompt and read back with it. Every
+    /// tool is no list, and takes away one an earlier prompt of the session
+    /// left, but no file that is not such a list; a prompt stored before lists
+    /// were kept, or beside a file that does not read as a list, reads as every
+    /// tool; a list without a usable prompt is no stored prompt at all.
+    #[test]
+    fn a_stored_prompt_keeps_the_tool_list_it_was_built_for() {
+        let folder = tempfile::tempdir().expect("a session folder");
+        let session = folder.path().join("session-1.jsonl");
+        let sections = vec!["# Zo".to_string(), "fixed".to_string()];
+        let core: AllowedToolSet = ["bash", "read_file", "write_file", "apply_patch"].map(String::from).into();
+        let read = || load_stored_prompt(&session).map(|stored| (stored.sections, stored.tools));
+
+        store_system_prompt(&session, &sections, Some(&core));
+        assert_eq!(read(), Some((sections.clone(), Some(core.clone()))));
+
+        store_system_prompt(&session, &sections, None);
+        assert!(!session_tool_list_path(&session).exists(), "every tool is no list");
+        assert_eq!(read(), Some((sections.clone(), None)));
+
+        std::fs::write(session_tool_list_path(&session), b"not a list").expect("an unreadable list");
+        assert_eq!(read(), Some((sections.clone(), None)), "a list that cannot be read is every tool");
+        store_system_prompt(&session, &sections, None);
+        assert_eq!(
+            std::fs::read(session_tool_list_path(&session)).ok().as_deref(),
+            Some(&b"not a list"[..]),
+            "a file that is no list of this store's is left as it was"
+        );
+
+        store_system_prompt(&session, &sections, Some(&core));
+        std::fs::remove_file(session_system_prompt_path(&session)).expect("the prompt goes");
+        assert!(read().is_none(), "a list without a prompt is no stored prompt");
     }
 }
