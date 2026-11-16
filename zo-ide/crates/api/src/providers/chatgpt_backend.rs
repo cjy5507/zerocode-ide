@@ -1881,12 +1881,12 @@ impl ChatGptBackendClient {
         let instructions = Self::instructions(request);
         let mut body =
             build_responses_request_for_session(request, &instructions, true, self.cache_scope());
-        debug_dump_chatgpt("request", &body.to_string());
+        debug_dump_chatgpt("request", || body.to_string());
         if continue_held {
             if let Some(held) = self.take_held() {
                 match held.continue_with(body).await {
                     Ok(socket) => {
-                        debug_dump_chatgpt("transport", "websocket-continued");
+                        debug_dump_chatgpt("transport", || "websocket-continued");
                         return Ok(socket);
                     }
                     Err(returned) => body = returned,
@@ -1910,7 +1910,7 @@ impl ChatGptBackendClient {
             headers.push(("chatgpt-account-id", account_id.clone()));
         }
         let mut socket = websocket::ResponsesWebsocket::connect(&url, &headers).await?;
-        debug_dump_chatgpt("transport", "websocket");
+        debug_dump_chatgpt("transport", || "websocket");
         socket.send_create(body).await?;
         Ok(socket)
     }
@@ -1959,7 +1959,7 @@ impl ChatGptBackendClient {
         let instructions = Self::instructions(request);
         let body =
             build_responses_request_for_session(request, &instructions, true, self.cache_scope());
-        debug_dump_chatgpt("request", &body.to_string());
+        debug_dump_chatgpt("request", || body.to_string());
         let response = self
             .apply_headers(self.http.post(&self.base_url))
             .json(&body)
@@ -3054,7 +3054,7 @@ impl ChatGptStream {
         if !gone {
             return Ok(false);
         }
-        debug_dump_chatgpt("transport", "websocket-continuation-refused");
+        debug_dump_chatgpt("transport", || "websocket-continuation-refused");
         self.transport = self.client.open_transport(&self.request, false).await?;
         self.state = ResponsesStreamState::new(self.request.model.clone())
             .with_session_id(self.client.cache_scope().to_string());
@@ -3863,9 +3863,10 @@ fn parse_responses_response(value: &Value, model: &str, session_id: &str) -> Mes
 /// `ZO_CHATGPT_DEBUG` is set, writes the request body / error response to
 /// `/tmp/zo-chatgpt-<tag>.txt` so the exact wire shape can be compared
 /// against codex. No-op (and silent on failure) otherwise — never affects the
-/// request itself.
-fn debug_dump_chatgpt(tag: &str, content: &str) {
-    super::debug_dump("ZO_CHATGPT_DEBUG", "chatgpt", tag, content);
+/// request itself, and never builds `content` (a whole request body, on the
+/// request road) for a switch that is off.
+fn debug_dump_chatgpt<C: AsRef<[u8]>>(tag: &str, content: impl FnOnce() -> C) {
+    super::debug_dump_with("ZO_CHATGPT_DEBUG", "chatgpt", tag, content);
 }
 
 /// ChatGPT's code for an exhausted plan window — the wall only the clock, or
@@ -3923,7 +3924,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         .and_then(|v| v.parse::<u64>().ok())
         .map(std::time::Duration::from_secs);
     let body = response.text().await.unwrap_or_default();
-    debug_dump_chatgpt("error", &format!("status {status}\n{body}"));
+    debug_dump_chatgpt("error", || format!("status {status}\n{body}"));
     // Parse the OpenAI `{"error":{...}}` envelope so the transcript shows the
     // human-readable message, not the raw JSON body (parity with the API-key
     // `openai_compat` path).

@@ -2619,19 +2619,43 @@ pub fn refresh_model_registry_from_json(raw: &str) {
     install_router_priors(raw);
 }
 
-/// Drop every override and go back to the shipped catalog. Tests only: the
-/// registry is process-global, so a case that installs an override must undo it.
 /// Diagnostic dump of a provider's wire traffic. When the named environment
 /// variable is set, `content` is written to `/tmp/zo-<provider>-<tag>.txt` so
 /// the exact request or error body can be read beside the provider's own
 /// documentation (`ZO_CHATGPT_DEBUG`, `ZO_GEMINI_DEBUG`). A no-op — and silent
 /// on a write failure — otherwise; it never touches the request itself.
 pub(crate) fn debug_dump(env: &str, provider: &str, tag: &str, content: &str) {
-    if std::env::var_os(env).is_some() {
-        let _ = std::fs::write(format!("/tmp/zo-{provider}-{tag}.txt"), content);
+    debug_dump_with(env, provider, tag, || content);
+}
+
+/// [`debug_dump`] for content that has to be built first — a request body
+/// serialized to text. `content` runs only when the switch is set: handed
+/// over as ready text, every request serialized its whole conversation once
+/// more for a switch nobody had set.
+pub(crate) fn debug_dump_with<C: AsRef<[u8]>>(
+    env: &str,
+    provider: &str,
+    tag: &str,
+    content: impl FnOnce() -> C,
+) {
+    debug_dump_when(std::env::var_os(env).is_some(), provider, tag, content);
+}
+
+/// [`debug_dump_with`] with the switch already read: `content` is built only
+/// when `enabled`.
+fn debug_dump_when<C: AsRef<[u8]>>(
+    enabled: bool,
+    provider: &str,
+    tag: &str,
+    content: impl FnOnce() -> C,
+) {
+    if enabled {
+        let _ = std::fs::write(format!("/tmp/zo-{provider}-{tag}.txt"), content());
     }
 }
 
+/// Drop every override and go back to the shipped catalog. Tests only: the
+/// registry is process-global, so a case that installs an override must undo it.
 #[cfg(test)]
 pub(crate) fn reset_model_registry_for_tests() {
     *MODEL_REGISTRY_STORE
@@ -3428,6 +3452,20 @@ fn env_non_empty(key: &str) -> bool {
 /// custom-provider model ids are never rerouted.
 #[must_use]
 pub fn resolve_model_alias(model: &str) -> String {
+    resolve_model_alias_asking(model, provider_enabled, non_claude_adapters_enabled)
+}
+
+/// [`resolve_model_alias`] with its two connection questions handed in:
+/// `enabled` for one provider, `experimental` for the broad non-Claude gate.
+/// Both read login files and the environment, so the broad gate is asked at
+/// most once, and only when a row's own provider is not enabled — an
+/// Anthropic alias (and an explicit `provider/model`) resolves without
+/// opening a file. It used to be read on the way in, for every name.
+fn resolve_model_alias_asking(
+    model: &str,
+    enabled: impl Fn(ProviderKind) -> bool,
+    experimental: impl FnOnce() -> bool,
+) -> String {
     let trimmed = model.trim();
 
     // Explicit provider/model keeps the selection token intact for routing /
@@ -3437,10 +3475,11 @@ pub fn resolve_model_alias(model: &str) -> String {
     }
 
     let lower = trimmed.to_ascii_lowercase();
-    let allow_experimental = non_claude_adapters_enabled();
+    let allow_experimental = std::cell::LazyCell::new(experimental);
+    let reachable = |entry: &ProviderCatalogEntry| enabled(entry.provider) || *allow_experimental;
 
     if let Some(entry) = model_registry().iter().find(|entry| entry.alias == lower) {
-        if provider_enabled(entry.provider) || allow_experimental {
+        if reachable(entry) {
             return entry.canonical_model_id.to_string();
         }
         return trimmed.to_string();
@@ -3467,7 +3506,7 @@ pub fn resolve_model_alias(model: &str) -> String {
         .any(|entry| entry.canonical_model_id.eq_ignore_ascii_case(&lower));
     if !is_known_canonical {
         if let Some(entry) = nearest_alias_entry(&lower) {
-            if provider_enabled(entry.provider) || allow_experimental {
+            if reachable(entry) {
                 return entry.canonical_model_id.to_string();
             }
         }
@@ -3494,7 +3533,7 @@ pub fn resolve_model_alias(model: &str) -> String {
             .iter()
             .find(|entry| entry.canonical_model_id.eq_ignore_ascii_case(candidate))
         {
-            if provider_enabled(entry.provider) || allow_experimental {
+            if reachable(entry) {
                 return entry.canonical_model_id.to_string();
             }
         }
@@ -3515,12 +3554,28 @@ const MIN_MODEL_TOKEN_LEN: usize = 3;
 /// `None` for anything else.
 #[must_use]
 pub fn exact_model_reference(token: &str) -> Option<&'static str> {
+    exact_model_reference_asking(token, provider_enabled, non_claude_adapters_enabled)
+}
+
+/// [`exact_model_reference`] with its two connection questions handed in, as
+/// [`resolve_model_alias_asking`] takes them.
+///
+/// The word is matched against a row's names first and the connection is
+/// asked only for a row it names. The caller hands over a person's prose one
+/// word at a time, and the questions read login files: asked before the
+/// names, every word of a prompt re-read the OpenAI login for each OpenAI row
+/// and the Google login and ADC file for each Google row.
+fn exact_model_reference_asking(
+    token: &str,
+    enabled: impl Fn(ProviderKind) -> bool,
+    experimental: impl FnOnce() -> bool,
+) -> Option<&'static str> {
     let lower = token.trim().to_ascii_lowercase();
     if lower.len() < MIN_MODEL_TOKEN_LEN {
         return None;
     }
-    let allow_experimental = non_claude_adapters_enabled();
-    let reachable = |entry: &ProviderCatalogEntry| provider_enabled(entry.provider) || allow_experimental;
+    let allow_experimental = std::cell::LazyCell::new(experimental);
+    let reachable = |entry: &ProviderCatalogEntry| enabled(entry.provider) || *allow_experimental;
     // The displayed short form: dots to hyphens, optionally behind the
     // provider's own id prefix (`opus-5` → `claude-opus-5`), the same
     // reformatting `resolve_model_alias` accepts — read per entry so each
@@ -3529,14 +3584,25 @@ pub fn exact_model_reference(token: &str) -> Option<&'static str> {
     model_registry()
         .iter()
         .find(|entry| {
-            let prefixed = provider_id_prefix(entry.provider).map(|prefix| format!("{prefix}-{dashed}"));
-            reachable(entry)
-                && (entry.alias == lower
-                    || entry.canonical_model_id.eq_ignore_ascii_case(&lower)
-                    || entry.canonical_model_id.eq_ignore_ascii_case(&dashed)
-                    || prefixed.is_some_and(|prefixed| entry.canonical_model_id.eq_ignore_ascii_case(&prefixed)))
+            let named = entry.alias == lower
+                || entry.canonical_model_id.eq_ignore_ascii_case(&lower)
+                || entry.canonical_model_id.eq_ignore_ascii_case(&dashed)
+                || provider_id_prefix(entry.provider)
+                    .is_some_and(|prefix| is_prefixed_id(entry.canonical_model_id, prefix, &dashed));
+            named && reachable(entry)
         })
         .map(|entry| entry.canonical_model_id)
+}
+
+/// Whether `id` is `{prefix}-{rest}`, ASCII case aside — the comparison
+/// `id.eq_ignore_ascii_case(&format!("{prefix}-{rest}"))` makes, without
+/// building the string for every row of the registry.
+fn is_prefixed_id(id: &str, prefix: &str, rest: &str) -> bool {
+    let (id, prefix, rest) = (id.as_bytes(), prefix.as_bytes(), rest.as_bytes());
+    id.len() == prefix.len() + 1 + rest.len()
+        && id[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && id[prefix.len()] == b'-'
+        && id[prefix.len() + 1..].eq_ignore_ascii_case(rest)
 }
 
 /// The registry row whose alias names `family` under `provider`, in either
@@ -9767,6 +9833,229 @@ mod tests {
             assert!(!rejects_forced_tool_choice(model), "{model}");
             assert!(!preserved_thinking_generation(model), "{model}");
         }
+    }
+
+    /// The order `exact_model_reference` read a word in before the name went
+    /// first: the connection of every row, then its names. Kept as the
+    /// spelling the answers are compared against.
+    fn exact_reference_connection_first(
+        token: &str,
+        enabled: impl Fn(ProviderKind) -> bool,
+        experimental: bool,
+    ) -> Option<&'static str> {
+        let lower = token.trim().to_ascii_lowercase();
+        if lower.len() < super::MIN_MODEL_TOKEN_LEN {
+            return None;
+        }
+        let dashed = lower.replace('.', "-");
+        super::model_registry()
+            .iter()
+            .find(|entry| {
+                let prefixed = super::provider_id_prefix(entry.provider).map(|prefix| format!("{prefix}-{dashed}"));
+                (enabled(entry.provider) || experimental)
+                    && (entry.alias == lower
+                        || entry.canonical_model_id.eq_ignore_ascii_case(&lower)
+                        || entry.canonical_model_id.eq_ignore_ascii_case(&dashed)
+                        || prefixed.is_some_and(|prefixed| entry.canonical_model_id.eq_ignore_ascii_case(&prefixed)))
+            })
+            .map(|entry| entry.canonical_model_id)
+    }
+
+    /// Every spelling a row can be named by, and words that name none.
+    fn words_a_person_might_type() -> Vec<String> {
+        let mut words: Vec<String> = ["table", "review", "implementation", "the", "pro", "5.5", "claude-", "-opus"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for entry in super::model_registry() {
+            words.push(entry.alias.to_string());
+            words.push(entry.alias.to_ascii_uppercase());
+            words.push(entry.canonical_model_id.to_string());
+            words.push(entry.canonical_model_id.replace('-', "."));
+            if let Some(prefix) = super::provider_id_prefix(entry.provider) {
+                if let Some(short) = entry.canonical_model_id.strip_prefix(prefix) {
+                    words.push(short.trim_start_matches('-').to_string());
+                    words.push(short.trim_start_matches('-').replace('-', "."));
+                }
+            }
+        }
+        words
+    }
+
+    /// The first registry row that is not Anthropic's and that a word can
+    /// name: the row every alias lookup of its name lands on.
+    fn a_row_of_another_provider() -> &'static ProviderCatalogEntry {
+        super::model_registry()
+            .iter()
+            .enumerate()
+            .find(|(at, entry)| {
+                entry.provider != ProviderKind::Anthropic
+                    && entry.alias.len() >= super::MIN_MODEL_TOKEN_LEN
+                    && !super::model_registry()[..*at].iter().any(|earlier| earlier.alias == entry.alias)
+            })
+            .map(|(_, entry)| entry)
+            .expect("a row of another provider")
+    }
+
+    /// A person's prose is read one word at a time, and almost none of the
+    /// words is a model. Such a word used to ask the connection of every row
+    /// of the registry (a login file each) before its names were compared;
+    /// it now asks nothing.
+    #[test]
+    fn a_word_that_names_no_model_asks_about_no_connection() {
+        let _lock = crate::test_env_lock();
+        let asked = std::cell::Cell::new(0_u32);
+        for word in ["table", "review", "implementation", "검토해줘", "the"] {
+            let named = super::exact_model_reference_asking(
+                word,
+                |_| {
+                    asked.set(asked.get() + 1);
+                    true
+                },
+                || {
+                    asked.set(asked.get() + 1);
+                    true
+                },
+            );
+            assert_eq!(named, None, "{word} names a model");
+        }
+        assert_eq!(asked.get(), 0, "a word naming no row asked about a connection");
+        // What the same five words cost in the order this replaced: one
+        // question per row and word, and the broad gate once per word.
+        assert!(super::model_registry().len() >= 10, "the registry the old order walked");
+    }
+
+    /// A word that does name a model asks about that row's provider and no
+    /// other, and the broad gate only when that provider is not enabled.
+    #[test]
+    fn a_word_that_names_a_model_asks_only_about_the_row_it_names() {
+        let _lock = crate::test_env_lock();
+        let (asked, broad) = (std::cell::Cell::new(0_u32), std::cell::Cell::new(0_u32));
+        let named = super::exact_model_reference_asking(
+            "opus",
+            |provider| {
+                asked.set(asked.get() + 1);
+                provider == ProviderKind::Anthropic
+            },
+            || {
+                broad.set(broad.get() + 1);
+                false
+            },
+        );
+        assert_eq!(named.map(str::to_string), Some(resolve_model_alias("opus")));
+        assert_eq!((asked.get(), broad.get()), (1, 0));
+
+        // A row whose provider is not enabled falls to the broad gate — once,
+        // however many rows the word names.
+        let other = a_row_of_another_provider();
+        broad.set(0);
+        let named = super::exact_model_reference_asking(
+            other.alias,
+            |_| false,
+            || {
+                broad.set(broad.get() + 1);
+                false
+            },
+        );
+        assert_eq!((named, broad.get()), (None, 1), "{}", other.alias);
+    }
+
+    /// Looking at the name before the connection changes what is asked, never
+    /// what is answered: every spelling of every row, under every answer the
+    /// two questions can give.
+    #[test]
+    fn the_name_first_order_answers_as_the_connection_first_order_did() {
+        let _lock = crate::test_env_lock();
+        let anthropic_only = |provider: ProviderKind| provider == ProviderKind::Anthropic;
+        for word in words_a_person_might_type() {
+            for experimental in [false, true] {
+                assert_eq!(
+                    super::exact_model_reference_asking(&word, |_| false, || experimental),
+                    exact_reference_connection_first(&word, |_| false, experimental),
+                    "{word:?}, nothing enabled, broad gate {experimental}"
+                );
+                assert_eq!(
+                    super::exact_model_reference_asking(&word, anthropic_only, || experimental),
+                    exact_reference_connection_first(&word, anthropic_only, experimental),
+                    "{word:?}, Anthropic enabled, broad gate {experimental}"
+                );
+            }
+            assert_eq!(
+                super::exact_model_reference_asking(&word, |_| true, || false),
+                exact_reference_connection_first(&word, |_| true, false),
+                "{word:?}, everything enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prefixed_id_is_compared_as_the_built_string_was() {
+        for (id, prefix, rest) in [
+            ("claude-opus-5", "claude", "opus-5"),
+            ("Claude-Opus-5", "claude", "OPUS-5"),
+            ("claude-opus-5", "claude", "opus"),
+            ("claude-opus-5", "claude", "opus-5-1"),
+            ("claudeXopus-5", "claude", "opus-5"),
+            ("claude-", "claude", ""),
+            ("claude", "claude", ""),
+            ("", "claude", "opus"),
+            ("gemini-3.6-flash", "gemini", "3.6-flash"),
+        ] {
+            assert_eq!(
+                super::is_prefixed_id(id, prefix, rest),
+                id.eq_ignore_ascii_case(&format!("{prefix}-{rest}")),
+                "{id:?} against {prefix:?}-{rest:?}"
+            );
+        }
+    }
+
+    /// `resolve_model_alias` runs for every model name the program handles.
+    /// The broad non-Claude gate reads the OpenAI and Google logins; an
+    /// Anthropic alias and an explicit `provider/model` never needed it.
+    #[test]
+    fn a_name_that_needs_no_broad_gate_resolves_without_asking_it() {
+        let _lock = crate::test_env_lock();
+        let broad = std::cell::Cell::new(0_u32);
+        let count = || {
+            broad.set(broad.get() + 1);
+            false
+        };
+        let anthropic_only = |provider: ProviderKind| provider == ProviderKind::Anthropic;
+        assert_eq!(
+            super::resolve_model_alias_asking("opus", anthropic_only, count),
+            resolve_model_alias("opus")
+        );
+        assert_eq!(
+            super::resolve_model_alias_asking("claude-opus-5", anthropic_only, count),
+            resolve_model_alias("claude-opus-5")
+        );
+        assert_eq!(
+            super::resolve_model_alias_asking("anthropic/claude-opus-5", |_| false, count),
+            "anthropic/claude-opus-5"
+        );
+        assert_eq!(broad.get(), 0, "the broad gate was read for a name that never uses it");
+
+        // A row of a provider that is not enabled still falls to the gate,
+        // which is then read once for the whole resolution.
+        let other = a_row_of_another_provider();
+        assert_eq!(super::resolve_model_alias_asking(other.alias, |_| false, count), other.alias);
+        assert_eq!(broad.get(), 1);
+        assert_eq!(
+            super::resolve_model_alias_asking(other.alias, |_| false, || true),
+            other.canonical_model_id
+        );
+    }
+
+    /// The dump of a request body is the body serialized once more. With the
+    /// switch off, that text is never built.
+    #[test]
+    fn a_dump_nobody_switched_on_never_builds_its_content() {
+        let built = std::cell::Cell::new(false);
+        super::debug_dump_when(false, "test", "request", || {
+            built.set(true);
+            String::new()
+        });
+        assert!(!built.get());
     }
 }
 
