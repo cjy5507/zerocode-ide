@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::ansi::{Color, Hyperlink, Line, Span, Style};
+use super::ansi::{Color, Hyperlink, Line, Role, Span, Style};
 use super::highlight::{
     MAX_HIGHLIGHT_LINE_BYTES, StreamingCodeHighlighter, highlight_code_to_lines,
 };
@@ -70,12 +70,30 @@ pub mod probe {
 /// 헤딩 수준별 스타일 — codex `MarkdownStyles::default` 에서 h4 이하도 굵게
 /// (t-48216): 해시가 없으니 굵기가 제목을 알린다.
 fn heading_style(level: HeadingLevel) -> Style {
-    heading_style_for_palette(level, super::palette::terminal_palette())
+    let palette = super::palette::terminal_palette();
+    let color_level = palette.map_or_else(
+        super::palette::color_level_from_env,
+        super::palette::TerminalPalette::color_level,
+    );
+    heading_style_with_level(level, palette, color_level)
 }
 
+#[cfg(test)]
 pub(crate) fn heading_style_for_palette(
     level: HeadingLevel,
     terminal_palette: Option<super::palette::TerminalPalette>,
+) -> Style {
+    let color_level = terminal_palette.map_or(
+        super::palette::ColorLevel::TrueColor,
+        super::palette::TerminalPalette::color_level,
+    );
+    heading_style_with_level(level, terminal_palette, color_level)
+}
+
+fn heading_style_with_level(
+    level: HeadingLevel,
+    terminal_palette: Option<super::palette::TerminalPalette>,
+    color_level: super::palette::ColorLevel,
 ) -> Style {
     let base = match level {
         HeadingLevel::H1 => Style::new().bold().underline(),
@@ -94,14 +112,16 @@ pub(crate) fn heading_style_for_palette(
             | HeadingLevel::H6 => base.italic(),
         };
     }
-    match (level, terminal_palette) {
-        (HeadingLevel::H1 | HeadingLevel::H2, Some(_)) => base.fg(super::palette::HEADING_ACCENT),
+    let named_theme_active =
+        !super::theme::is_terminal() && color_level != super::palette::ColorLevel::Ansi16;
+    match (level, terminal_palette.is_some() || named_theme_active) {
+        (HeadingLevel::H1 | HeadingLevel::H2, true) => base.fg(super::palette::HEADING_ACCENT),
         _ => base,
     }
 }
 
 const CODE_STYLE: Style = Style {
-    fg: Some(Color::CYAN),
+    fg: Some(Color::Role(Role::Code)),
     bg: None,
     bold: false,
     dim: false,
@@ -111,7 +131,7 @@ const CODE_STYLE: Style = Style {
     strike: false,
 };
 const LINK_STYLE: Style = Style {
-    fg: Some(Color::CYAN),
+    fg: Some(Color::Role(Role::Link)),
     bg: None,
     bold: false,
     dim: false,
@@ -1421,7 +1441,10 @@ mod tests {
         let italic = line.spans.iter().find(|span| span.text == "italic").expect("italic");
         assert!(italic.style.italic);
         let code = line.spans.iter().find(|span| span.text == "code").expect("code");
-        assert_eq!(code.style.fg, Some(crate::tui::ansi::Color::CYAN));
+        assert_eq!(
+            code.style.fg,
+            Some(crate::tui::ansi::Color::Role(crate::tui::ansi::Role::Code))
+        );
     }
 
     /// 링크의 이름표는 글자와 스타일(청록 밑줄)이 그대로이고, 주소는 이름표를 감싼
@@ -1434,7 +1457,11 @@ mod tests {
         for label in ["문서", "notes"] {
             let span = line.spans.iter().find(|span| span.text == label).expect("label");
             assert!(span.style.underline, "{label}");
-            assert_eq!(span.style.fg, Some(crate::tui::ansi::Color::CYAN), "{label}");
+            assert_eq!(
+                span.style.fg,
+                Some(crate::tui::ansi::Color::Role(crate::tui::ansi::Role::Link)),
+                "{label}"
+            );
         }
         let mut rendered = String::new();
         crate::tui::ansi::write_spans(line, &mut rendered);
@@ -1569,7 +1596,10 @@ mod tests {
     fn the_header_row_carries_the_line_style() {
         let source = concat!("| A | B |\n", "| --- | --- |\n", "| 1 | 2 |\n");
         let lines = render_wrapped(source, Some(60));
-        assert_eq!(lines[0].style.fg, Some(crate::tui::palette::TABLE_HEADER));
+        assert_eq!(
+            lines[0].style.fg,
+            Some(crate::tui::ansi::Role::Heading.terminal_color())
+        );
         assert!(lines[0].style.bold);
         assert_eq!(lines[1].style, crate::tui::ansi::Style::new());
         assert_eq!(lines[2].style, crate::tui::ansi::Style::new());

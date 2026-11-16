@@ -72,8 +72,7 @@ pub mod probe {
 // -- 프로세스 전역 --------------------------------------------------------
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-static DARK_THEME: OnceLock<Theme> = OnceLock::new();
-static LIGHT_THEME: OnceLock<Theme> = OnceLock::new();
+static EXTRA_THEMES: OnceLock<two_face::theme::EmbeddedLazyThemeSet> = OnceLock::new();
 
 /// syntect/bat 은 ANSI 팔레트 의미를 알파에 싣는다: `a=0` 이면 RGB 자리에
 /// 팔레트 번호가, `a=1` 이면 "터미널 기본색"이 온다. 그 밖(불투명 `0xFF` 와
@@ -85,29 +84,47 @@ fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
+fn use_named_syntax_theme(color_level: super::palette::ColorLevel) -> bool {
+    !super::theme::is_terminal()
+        && super::style::current().style == super::style::TuiStyle::Marks
+        && color_level != super::palette::ColorLevel::Ansi16
+}
+
+fn production_color_level(palette: Option<super::palette::TerminalPalette>) -> super::palette::ColorLevel {
+    palette.map_or_else(
+        super::palette::color_level_from_env,
+        super::palette::TerminalPalette::color_level,
+    )
+}
+
+fn test_seam_color_level(palette: Option<super::palette::TerminalPalette>) -> super::palette::ColorLevel {
+    palette.map_or(
+        super::palette::ColorLevel::TrueColor,
+        super::palette::TerminalPalette::color_level,
+    )
+}
+
 /// Catppuccin Mocha, or Latte on a terminal whose measured background is
-/// light — Mocha's pastels on a white page lose their contrast. Chosen once:
-/// the startup probe (`palette::initialize_if_raw_tty`) runs before any code
-/// is drawn, and a terminal that never answered keeps Mocha, as before.
-fn theme_for(palette: Option<super::palette::TerminalPalette>) -> &'static Theme {
+/// light — or the active named theme's syntax theme when running in marks look
+/// at 256-colour or truecolour depth.
+fn theme_for(
+    palette: Option<super::palette::TerminalPalette>,
+    color_level: super::palette::ColorLevel,
+) -> &'static Theme {
     let light = palette.is_some_and(super::palette::TerminalPalette::has_light_background);
-    if light {
-        LIGHT_THEME.get_or_init(|| {
-            two_face::theme::extra()
-                .get(two_face::theme::EmbeddedThemeName::CatppuccinLatte)
-                .clone()
-        })
+    let embedded = if use_named_syntax_theme(color_level) {
+        super::theme::with_active(|active| active.syntax_theme(light))
+    } else if light {
+        two_face::theme::EmbeddedThemeName::CatppuccinLatte
     } else {
-        DARK_THEME.get_or_init(|| {
-            two_face::theme::extra()
-                .get(two_face::theme::EmbeddedThemeName::CatppuccinMocha)
-                .clone()
-        })
-    }
+        two_face::theme::EmbeddedThemeName::CatppuccinMocha
+    };
+    EXTRA_THEMES.get_or_init(two_face::theme::extra).get(embedded)
 }
 
 fn theme() -> &'static Theme {
-    theme_for(super::palette::terminal_palette())
+    let palette = super::palette::terminal_palette();
+    theme_for(palette, production_color_level(palette))
 }
 
 // -- 안전 한계(원본 `Guardrail constants`) --------------------------------
@@ -171,42 +188,55 @@ fn convert_style(
 /// theme, so each scope list's answer is kept; the theme is fixed for the
 /// process, so an answer never goes stale (t-48216).
 pub(crate) fn foreground_style_for_scopes(scope_names: &[&str]) -> Option<Style> {
-    foreground_style_for_scopes_for_palette(scope_names, super::palette::terminal_palette())
+    let palette = super::palette::terminal_palette();
+    foreground_style_for_scopes_with_level(scope_names, palette, production_color_level(palette))
 }
 
 pub(crate) fn foreground_style_for_scopes_for_palette(
     scope_names: &[&str],
     palette: Option<super::palette::TerminalPalette>,
 ) -> Option<Style> {
+    foreground_style_for_scopes_with_level(scope_names, palette, test_seam_color_level(palette))
+}
+
+fn foreground_style_for_scopes_with_level(
+    scope_names: &[&str],
+    palette: Option<super::palette::TerminalPalette>,
+    color_level: super::palette::ColorLevel,
+) -> Option<Style> {
     let light = palette.is_some_and(super::palette::TerminalPalette::has_light_background);
+    let named = use_named_syntax_theme(color_level);
+    let revision = super::theme::revision();
     SCOPE_STYLES.with(|answers| {
         let known = answers
             .borrow()
             .iter()
-            .find(|(cached_light, scopes, _)| {
-                *cached_light == light
+            .find(|(cached_rev, cached_light, cached_named, scopes, _)| {
+                *cached_rev == revision
+                    && *cached_light == light
+                    && *cached_named == named
                     && scopes.iter().map(String::as_str).eq(scope_names.iter().copied())
             })
-            .map(|(_, _, style)| *style);
+            .map(|(_, _, _, _, style)| *style);
         if let Some(style) = known {
             return style;
         }
         #[cfg(test)]
         HIGHLIGHTERS_BUILT.with(|built| built.set(built.get() + 1));
-        let highlighter = Highlighter::new(theme_for(palette));
+        let highlighter = Highlighter::new(theme_for(palette, color_level));
         let style = scope_names.iter().find_map(|scope_name| {
             let scope = Scope::new(scope_name).ok()?;
             let foreground = highlighter.style_mod_for_stack(&[scope]).foreground?;
             convert_syntect_color(foreground).map(|color| Style::new().fg(color))
         });
         let scopes = scope_names.iter().map(|scope| (*scope).to_string()).collect();
-        answers.borrow_mut().push((light, scopes, style));
+        answers.borrow_mut().push((revision, light, named, scopes, style));
         style
     })
 }
 
-/// Cached `(light_background, scope_names, style)` entry for [`SCOPE_STYLES`].
-type ScopeStyleCacheEntry = (bool, Vec<String>, Option<Style>);
+/// Cached `(theme_revision, light_background, use_named_theme, scope_names, style)` entry for [`SCOPE_STYLES`].
+type ScopeStyleCacheEntry = (u64, bool, bool, Vec<String>, Option<Style>);
 
 thread_local! {
     static SCOPE_STYLES: std::cell::RefCell<Vec<ScopeStyleCacheEntry>> =
@@ -289,6 +319,7 @@ fn highlight_to_line_spans(
     code: &str,
     lang: &str,
     palette: Option<super::palette::TerminalPalette>,
+    color_level: super::palette::ColorLevel,
 ) -> Option<Vec<Vec<Span>>> {
     // 빈 입력은 강조할 것이 없다. 평문 경로가 빈 줄 하나를 옳게 만든다.
     if code.is_empty() {
@@ -307,7 +338,7 @@ fn highlight_to_line_spans(
     }
 
     let syntax = find_syntax(lang)?;
-    let mut highlighter = HighlightLines::new(syntax, theme_for(palette));
+    let mut highlighter = HighlightLines::new(syntax, theme_for(palette, color_level));
     let mut lines: Vec<Vec<Span>> = Vec::new();
 
     for line in LinesWithEndings::from(code) {
@@ -333,15 +364,9 @@ pub(crate) fn exceeds_highlight_limits(total_bytes: usize, total_lines: usize) -
 /// public fallback so an unavailable language can stay distinguishable from a
 /// successfully highlighted line.
 pub(crate) fn highlight_block_to_lines(code: &str, lang: &str) -> Option<Vec<Line>> {
-    highlight_block_to_lines_for_palette(code, lang, super::palette::terminal_palette())
-}
-
-pub(crate) fn highlight_block_to_lines_for_palette(
-    code: &str,
-    lang: &str,
-    palette: Option<super::palette::TerminalPalette>,
-) -> Option<Vec<Line>> {
-    highlight_to_line_spans(code, lang, palette).map(|lines| lines.into_iter().map(Line::new).collect())
+    let palette = super::palette::terminal_palette();
+    highlight_to_line_spans(code, lang, palette, production_color_level(palette))
+        .map(|lines| lines.into_iter().map(Line::new).collect())
 }
 
 /// Append-only syntax highlighting for complete lines in an open code fence.
@@ -354,6 +379,7 @@ pub(crate) struct StreamingCodeHighlighter {
 struct HighlightedCode {
     bytes: usize,
     lines: usize,
+    theme_revision: u64,
     syntax: (HighlightState, ParseState),
 }
 
@@ -372,6 +398,7 @@ impl StreamingCodeHighlighter {
         let Some(syntax) = syntax else {
             return Some(Self { state: None });
         };
+        let theme_revision = super::theme::revision();
         let mut highlighter = HighlightLines::new(syntax, theme());
         for line in LinesWithEndings::from(code) {
             #[cfg(test)]
@@ -382,6 +409,7 @@ impl StreamingCodeHighlighter {
             state: Some(HighlightedCode {
                 bytes: code.len(),
                 lines,
+                theme_revision,
                 syntax: highlighter.state(),
             }),
         })
@@ -403,6 +431,9 @@ impl StreamingCodeHighlighter {
                 .lines()
                 .any(|line| line.len() > MAX_HIGHLIGHT_LINE_BYTES)
         {
+            return None;
+        }
+        if state.theme_revision != super::theme::revision() {
             return None;
         }
         let (highlight_state, parse_state) = state.syntax;
@@ -428,17 +459,28 @@ impl StreamingCodeHighlighter {
 /// — 부르는 쪽은 언제나 결과를 그대로 그리면 된다.
 #[must_use]
 pub fn highlight_code_to_lines(code: &str, lang: &str) -> Vec<Line> {
-    highlight_code_to_lines_for_palette(code, lang, super::palette::terminal_palette())
+    let palette = super::palette::terminal_palette();
+    highlight_code_to_lines_with_level(code, lang, palette, production_color_level(palette))
 }
 
+#[cfg(test)]
 #[must_use]
 pub(crate) fn highlight_code_to_lines_for_palette(
     code: &str,
     lang: &str,
     palette: Option<super::palette::TerminalPalette>,
 ) -> Vec<Line> {
-    if let Some(lines) = highlight_block_to_lines_for_palette(code, lang, palette) {
-        lines
+    highlight_code_to_lines_with_level(code, lang, palette, test_seam_color_level(palette))
+}
+
+fn highlight_code_to_lines_with_level(
+    code: &str,
+    lang: &str,
+    palette: Option<super::palette::TerminalPalette>,
+    color_level: super::palette::ColorLevel,
+) -> Vec<Line> {
+    if let Some(lines) = highlight_to_line_spans(code, lang, palette, color_level) {
+        lines.into_iter().map(Line::new).collect()
     } else {
         // 폴백: 원문 한 줄에 우리 줄 하나. `split('\n')` 이 아니라 `lines()` 다
         // — pulldown-cmark 가 주는 담장 본문은 개행으로 끝나므로 `split` 이면

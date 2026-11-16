@@ -2496,7 +2496,7 @@ mod tests {
                 .flat_map(|line| &line.spans)
                 .any(|span| {
                     span.text.contains("cod")
-                        && span.style.fg == Some(crate::tui::ansi::Color::CYAN)
+                        && span.style.fg == Some(crate::tui::ansi::Color::Role(crate::tui::ansi::Role::Code))
                 }),
             "open inline code should style 'cod': {:?}",
             code_stream.tail()

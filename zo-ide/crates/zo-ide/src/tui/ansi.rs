@@ -22,7 +22,35 @@ use std::sync::Arc;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::palette::{self, TerminalPalette};
+use super::palette::{self, ColorLevel, TerminalPalette};
+
+/// Semantic colour roles carried to `Style::resolved_for` so the active theme
+/// and measured background decide the final ink right before emitting SGR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    Code,
+    Link,
+    Heading,
+    Caret,
+    Model,
+    Cwd,
+    Warning,
+}
+
+impl Role {
+    /// Today's concrete colour for this role in the default `terminal` theme.
+    #[must_use]
+    pub const fn terminal_color(self) -> Color {
+        match self {
+            Self::Code | Self::Link => Color::CYAN,
+            Self::Heading => Color::Rgb(249, 226, 175),
+            Self::Caret => Color::Rgb(255, 178, 66),
+            Self::Model => Color::Rgb(246, 226, 183),
+            Self::Cwd => Color::Rgb(171, 223, 167),
+            Self::Warning => Color::Rgb(196, 167, 103),
+        }
+    }
+}
 
 /// 전경색. 30번대 기본색·256색·트루컬러 셋 다 캡처에 나온다
 /// (`ESC[38;5;6m` 은 부팅 카드의 `/model`, `ESC[38;2;…m` 은 shimmer·푸터).
@@ -36,6 +64,8 @@ pub enum Color {
     Indexed(u8),
     /// `ESC[38;2;<r>;<g>;<b>m`.
     Rgb(u8, u8, u8),
+    /// A semantic role resolved in `Style::resolved_for_level`.
+    Role(Role),
 }
 
 impl Color {
@@ -64,6 +94,7 @@ impl Color {
             Self::Rgb(r, g, b) => {
                 let _ = write!(out, "38;2;{r};{g};{b}");
             }
+            Self::Role(role) => role.terminal_color().params(out),
         }
     }
 
@@ -83,6 +114,7 @@ impl Color {
             Self::Rgb(r, g, b) => {
                 let _ = write!(out, "48;2;{r};{g};{b}");
             }
+            Self::Role(role) => role.terminal_color().background_params(out),
         }
     }
 }
@@ -175,38 +207,115 @@ impl Style {
         self
     }
 
-    fn resolved_for(mut self, palette: Option<TerminalPalette>) -> Self {
+    fn resolved_for_level(
+        mut self,
+        palette: Option<TerminalPalette>,
+        color_level: ColorLevel,
+    ) -> Self {
         let keep_sgr_dim = self.sgr_dim;
         self.sgr_dim = false;
-        if let Some(palette) = palette {
-            let explicit_bg = match self.bg {
-                Some(Color::Rgb(red, green, blue)) => Some((red, green, blue)),
-                _ => None,
-            };
-            let marks_truecolor = !keep_sgr_dim
-                && palette.color_level() != palette::ColorLevel::Ansi16
-                && super::style::current().style == super::style::TuiStyle::Marks;
-            if marks_truecolor {
-                if self.dim && self.fg.is_none() {
-                    let ink = match explicit_bg {
-                        Some(bg) => palette.secondary_foreground(bg),
-                        None => palette::secondary_foreground_cached(palette),
-                    };
+        let use_named_theme = !super::theme::is_terminal()
+            && super::style::current().style == super::style::TuiStyle::Marks
+            && color_level != ColorLevel::Ansi16;
+        if !use_named_theme {
+            self.fg = self.fg.map(lower_role_to_terminal);
+            self.bg = self.bg.map(lower_role_to_terminal);
+            if let Some(palette) = palette {
+                self.resolve_terminal_palette(palette, keep_sgr_dim);
+            }
+            return self;
+        }
+        self.resolve_named_theme(palette, color_level, keep_sgr_dim);
+        self
+    }
+
+    fn resolve_terminal_palette(&mut self, palette: TerminalPalette, keep_sgr_dim: bool) {
+        self.resolve_terminal_fg(palette, keep_sgr_dim);
+        self.bg = self.bg.and_then(|color| palette.resolve(color));
+    }
+
+    fn resolve_terminal_fg(&mut self, palette: TerminalPalette, keep_sgr_dim: bool) {
+        let explicit_bg = explicit_rgb(self.bg);
+        let marks_truecolor = !keep_sgr_dim
+            && palette.color_level() != ColorLevel::Ansi16
+            && super::style::current().style == super::style::TuiStyle::Marks;
+        if marks_truecolor {
+            if self.dim && self.fg.is_none() {
+                let ink = match explicit_bg {
+                    Some(bg) => palette.secondary_foreground(bg),
+                    None => palette::secondary_foreground_cached(palette),
+                };
+                self.dim = false;
+                self.fg = Some(Color::Rgb(ink.0, ink.1, ink.2));
+            } else if let Some(slot) = self.fg.and_then(ansi16_slot) {
+                if let Some(ink) =
+                    palette::resolved_ansi16_ink(palette, slot, self.dim, explicit_bg)
+                {
                     self.dim = false;
                     self.fg = Some(Color::Rgb(ink.0, ink.1, ink.2));
-                } else if let Some(slot) = self.fg.and_then(ansi16_slot) {
-                    if let Some(ink) =
-                        palette::resolved_ansi16_ink(palette, slot, self.dim, explicit_bg)
-                    {
-                        self.dim = false;
-                        self.fg = Some(Color::Rgb(ink.0, ink.1, ink.2));
+                }
+            }
+        }
+        self.fg = self.fg.and_then(|color| palette.resolve(color));
+    }
+
+    fn resolve_named_theme(
+        &mut self,
+        palette: Option<TerminalPalette>,
+        color_level: ColorLevel,
+        keep_sgr_dim: bool,
+    ) {
+        let explicit_bg = explicit_rgb(self.bg);
+        match self.fg {
+            None => {
+                if let Some(palette) = palette {
+                    self.resolve_terminal_fg(palette, keep_sgr_dim);
+                }
+            }
+            Some(fg) => {
+                let theme_rgb = super::theme::with_active(|theme| match fg {
+                    Color::Role(role) => theme.role_color(role),
+                    other => ansi16_slot(other).and_then(|slot| theme.ansi_slot(slot)),
+                });
+                if let Some(rgb) = theme_rgb {
+                    let resolved_rgb = match palette {
+                        Some(palette) => {
+                            let bg = explicit_bg.unwrap_or_else(|| palette.background());
+                            let base = if !keep_sgr_dim && self.dim {
+                                self.dim = false;
+                                palette::blend_rgb(rgb, bg, 0.60)
+                            } else {
+                                rgb
+                            };
+                            palette::ensure_text_contrast_cached(palette, base, bg)
+                        }
+                        None => rgb,
+                    };
+                    self.fg = Some(if color_level == ColorLevel::Ansi256 {
+                        Color::Indexed(palette::nearest_xterm_index(resolved_rgb))
+                    } else {
+                        Color::Rgb(resolved_rgb.0, resolved_rgb.1, resolved_rgb.2)
+                    });
+                } else {
+                    self.fg = Some(lower_role_to_terminal(fg));
+                    if let Some(palette) = palette {
+                        self.resolve_terminal_fg(palette, keep_sgr_dim);
                     }
                 }
             }
-            self.fg = self.fg.and_then(|color| palette.resolve(color));
-            self.bg = self.bg.and_then(|color| palette.resolve(color));
         }
-        self
+        if let Some(Color::Role(role)) = self.bg {
+            let bg_color = super::theme::with_active(|theme| theme.role_color(role))
+                .map_or_else(|| role.terminal_color(), |(r, g, b)| Color::Rgb(r, g, b));
+            self.bg = Some(bg_color);
+        }
+        if let Some(palette) = palette {
+            self.bg = self.bg.and_then(|color| palette.resolve_depth(color));
+        } else if color_level == ColorLevel::Ansi256 {
+            if let Some(Color::Rgb(red, green, blue)) = self.bg {
+                self.bg = Some(Color::Indexed(palette::nearest_xterm_index((red, green, blue))));
+            }
+        }
     }
 
     /// This span's style on a row whose style is `line`: the row's colours
@@ -240,6 +349,20 @@ impl Style {
         self
     }
 
+}
+
+const fn lower_role_to_terminal(color: Color) -> Color {
+    match color {
+        Color::Role(role) => role.terminal_color(),
+        other => other,
+    }
+}
+
+const fn explicit_rgb(color: Option<Color>) -> Option<(u8, u8, u8)> {
+    match color {
+        Some(Color::Rgb(red, green, blue)) => Some((red, green, blue)),
+        _ => None,
+    }
 }
 
 const fn ansi16_slot(color: Color) -> Option<u8> {
@@ -552,13 +675,18 @@ pub fn char_width(ch: char) -> usize {
 pub struct StyleWriter {
     current: Style,
     palette: Option<TerminalPalette>,
+    color_level: ColorLevel,
 }
 
 impl Default for StyleWriter {
     fn default() -> Self {
+        let palette = palette::terminal_palette();
+        let color_level =
+            palette.map_or_else(palette::color_level_from_env, TerminalPalette::color_level);
         Self {
             current: Style::new(),
-            palette: palette::terminal_palette(),
+            palette,
+            color_level,
         }
     }
 }
@@ -571,9 +699,11 @@ impl StyleWriter {
     }
 
     fn with_palette(palette: Option<TerminalPalette>) -> Self {
+        let color_level = palette.map_or(ColorLevel::TrueColor, TerminalPalette::color_level);
         Self {
             current: Style::new(),
             palette,
+            color_level,
         }
     }
 
@@ -606,7 +736,7 @@ impl StyleWriter {
     /// 그 공백을 쓰려고 스타일을 바꿀 필요가 없다.
     #[must_use]
     pub fn blank_looks_alike(&self, style: Style) -> bool {
-        let wanted = style.resolved_for(self.palette);
+        let wanted = style.resolved_for_level(self.palette, self.color_level);
         self.current.bg == wanted.bg
             && self.current.underline == wanted.underline
             && self.current.strike == wanted.strike
@@ -614,7 +744,7 @@ impl StyleWriter {
 
     /// `style` 로 전이하는 데 필요한 바이트를 `out` 에 붙인다.
     pub fn transition(&mut self, style: Style, out: &mut String) {
-        let style = style.resolved_for(self.palette);
+        let style = style.resolved_for_level(self.palette, self.color_level);
         let previous = self.current;
         self.current = style;
         Self::modifier_diff(previous, style, out);
@@ -686,9 +816,24 @@ impl StyleWriter {
         bg: Option<Color>,
         out: &mut String,
     ) {
-        let fg = palette.map_or(fg, |palette| fg.and_then(|color| palette.resolve(color)));
-        let bg = palette.map_or(bg, |palette| bg.and_then(|color| palette.resolve(color)));
-        Self::set_colors(fg, bg, out);
+        let color_level = palette.map_or(ColorLevel::TrueColor, TerminalPalette::color_level);
+        Self::set_colors_for_palette_and_level(palette, color_level, fg, bg, out);
+    }
+
+    fn set_colors_for_palette_and_level(
+        palette: Option<TerminalPalette>,
+        color_level: ColorLevel,
+        fg: Option<Color>,
+        bg: Option<Color>,
+        out: &mut String,
+    ) {
+        let resolved = Style {
+            fg,
+            bg,
+            ..Style::new()
+        }
+        .resolved_for_level(palette, color_level);
+        Self::set_colors(resolved.fg, resolved.bg, out);
     }
 
     /// crossterm `SetForegroundColor` — 전경만 켜고 끄는 한 SGR
@@ -733,8 +878,12 @@ pub const LINE_TAIL: &str = "\u{1b}[39m\u{1b}[49m\u{1b}[0m";
 #[must_use]
 pub fn line_lead(line: &Line) -> String {
     let mut out = String::new();
-    StyleWriter::set_colors_for_palette(
-        palette::terminal_palette(),
+    let palette = palette::terminal_palette();
+    let color_level =
+        palette.map_or_else(palette::color_level_from_env, TerminalPalette::color_level);
+    StyleWriter::set_colors_for_palette_and_level(
+        palette,
+        color_level,
         line.style.fg,
         line.style.bg,
         &mut out,
@@ -750,7 +899,8 @@ pub fn line_lead(line: &Line) -> String {
 /// 줄에 색이 있으면 첫 스팬에서 `SetColors` 가 **한 번 더** 나간다. 표 헤더
 /// 행의 실측이 그렇다.
 pub fn write_spans(line: &Line, out: &mut String) {
-    write_spans_for_palette(line, palette::terminal_palette(), out);
+    let mut writer = StyleWriter::new();
+    write_spans_with_writer(line, &mut writer, out);
 }
 
 /// 명시한 터미널 팔레트로 한 줄의 스팬을 바이트화한다.
@@ -764,6 +914,10 @@ pub fn write_spans_for_palette(
     out: &mut String,
 ) {
     let mut writer = StyleWriter::with_palette(palette);
+    write_spans_with_writer(line, &mut writer, out);
+}
+
+fn write_spans_with_writer(line: &Line, writer: &mut StyleWriter, out: &mut String) {
     // 링크가 바뀌는 자리에서는 옛 링크를 스타일 전이 앞에서 닫고 새 링크를 그
     // 뒤에서 연다. 행 끝까지 열린 링크는 행이 끝나기 전에 닫는다 — 줄바꿈·
     // 커서 이동·지우기가 링크 안에 들면 그 칸들까지 링크가 된다.

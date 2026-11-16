@@ -1166,3 +1166,584 @@ fn marks_footer_colours_keep_contrast_floor_on_light_and_keep_dark_values() {
     );
     assert_eq!(dark_cwd.fg, Some(Color::Rgb(171, 223, 167)));
 }
+
+fn parse_fg_rgb(rendered: &str) -> (u8, u8, u8) {
+    let (_, rest) = rendered
+        .split_once("38;2;")
+        .unwrap_or_else(|| panic!("expected 38;2; RGB SGR in {rendered:?}"));
+    let (params, _) = rest.split_once('m').expect("SGR terminator");
+    let mut parts = params.split(';');
+    let r = parts.next().expect("red").parse().expect("u8");
+    let g = parts.next().expect("green").parse().expect("u8");
+    let b_raw = parts.next().expect("blue");
+    let b = b_raw.split(';').next().unwrap_or(b_raw).parse().expect("u8");
+    (r, g, b)
+}
+
+#[test]
+fn terminal_theme_resolves_every_role_to_todays_colour() {
+    use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};
+    use super::palette::{ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("terminal_theme_resolves_every_role_to_todays_colour")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let _ = super::theme::set(super::theme::Theme::terminal());
+
+    let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+
+    let render = |role: Role, palette: Option<TerminalPalette>| {
+        let mut out = String::new();
+        write_spans_for_palette(
+            &Line::new(vec![Span::new("x", Style::new().fg(Color::Role(role)))]),
+            palette,
+            &mut out,
+        );
+        out
+    };
+
+    let cases = [
+        (Role::Code, "\u{1b}[36;49mx", "\u{1b}[36;49mx", "\u{1b}[36;49mx"),
+        (Role::Link, "\u{1b}[36;49mx", "\u{1b}[36;49mx", "\u{1b}[36;49mx"),
+        (
+            Role::Heading,
+            "\u{1b}[38;2;249;226;175;49mx",
+            "\u{1b}[38;2;249;226;175;49mx",
+            "\u{1b}[38;2;108;76;21;49mx",
+        ),
+        (
+            Role::Caret,
+            "\u{1b}[38;2;255;178;66;49mx",
+            "\u{1b}[38;2;255;178;66;49mx",
+            "\u{1b}[38;2;143;83;0;49mx",
+        ),
+        (
+            Role::Model,
+            "\u{1b}[38;2;246;226;183;49mx",
+            "\u{1b}[38;2;246;226;183;49mx",
+            "\u{1b}[38;2;106;78;17;49mx",
+        ),
+        (
+            Role::Cwd,
+            "\u{1b}[38;2;171;223;167;49mx",
+            "\u{1b}[38;2;171;223;167;49mx",
+            "\u{1b}[38;2;40;96;48;49mx",
+        ),
+        (
+            Role::Warning,
+            "\u{1b}[38;2;196;167;103;49mx",
+            "\u{1b}[38;2;196;167;103;49mx",
+            "\u{1b}[38;2;139;98;20;49mx",
+        ),
+    ];
+
+    for (role, none_sgr, dark_sgr, light_sgr) in cases {
+        assert_eq!(render(role, None), none_sgr, "{role:?} None");
+        assert_eq!(render(role, Some(dark)), dark_sgr, "{role:?} dark");
+        assert_eq!(render(role, Some(light)), light_sgr, "{role:?} light");
+    }
+}
+
+#[test]
+fn dracula_draws_roles_and_slots_in_theme_colours_on_a_dark_ground() {
+    use super::ansi::{write_spans_for_palette, Color, Span, Style};
+    use super::palette::{self, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("dracula_draws_roles_and_slots_in_theme_colours_on_a_dark_ground")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let dracula = super::theme::find("dracula").expect("dracula theme");
+    let _ = super::theme::set(dracula);
+
+    let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let render_line = |line: &Line| {
+        let mut out = String::new();
+        write_spans_for_palette(line, Some(dark), &mut out);
+        out
+    };
+    let render_style = |style: Style| render_line(&Line::new(vec![Span::new("x", style)]));
+
+    // Inline code = #50fa7b
+    let code_lines = super::markdown::render("`code`");
+    let code_sgr = render_line(&code_lines[0]);
+    assert!(code_sgr.contains("38;2;80;250;123"), "inline code: {code_sgr:?}");
+
+    // Link = #8be9fd + underline
+    let link_lines = super::markdown::render("[site](https://example.com)");
+    let link_sgr = render_line(&link_lines[0]);
+    assert!(
+        link_sgr.contains("\u{1b}[4m") && link_sgr.contains("38;2;139;233;253"),
+        "link: {link_sgr:?}"
+    );
+
+    // H1, H2 and table header = #bd93f9
+    for level in [
+        pulldown_cmark::HeadingLevel::H1,
+        pulldown_cmark::HeadingLevel::H2,
+    ] {
+        let heading = super::markdown::heading_style_for_palette(level, Some(dark));
+        let heading_sgr = render_style(heading);
+        assert!(
+            heading_sgr.contains("38;2;189;147;249"),
+            "heading {level:?}: {heading_sgr:?}"
+        );
+    }
+    let header_sgr = render_style(super::tables::header_style_for_palette(Some(dark)));
+    assert!(header_sgr.contains("38;2;189;147;249"), "table header: {header_sgr:?}");
+
+    // Cyan slots -> accent (#bd93f9), bright cyan -> brightBlue (#d6acff)
+    for cyan in [Color::CYAN, Color::Indexed(6)] {
+        let sgr = render_style(Style::new().fg(cyan));
+        assert!(sgr.contains("38;2;189;147;249"), "{cyan:?}: {sgr:?}");
+    }
+    for bright_cyan in [Color::BrightBase(6), Color::Indexed(14)] {
+        let sgr = render_style(Style::new().fg(bright_cyan));
+        assert!(sgr.contains("38;2;214;172;255"), "{bright_cyan:?}: {sgr:?}");
+    }
+
+    // Red, green, yellow, magenta slots
+    for (slot, expected) in [
+        (Color::RED, "38;2;255;85;85"),
+        (Color::GREEN, "38;2;80;250;123"),
+        (Color::YELLOW, "38;2;241;250;140"),
+        (Color::MAGENTA, "38;2;255;121;198"),
+    ] {
+        let sgr = render_style(Style::new().fg(slot));
+        assert!(sgr.contains(expected), "{slot:?}: {sgr:?}");
+    }
+
+    // Footer model = #bd93f9, cwd = #8be9fd, caret = #ff79c6, warning = #f1fa8c
+    let model_style = super::view::footer_theme_style_for_palette(
+        &["entity.name.type", "support.type", "variable"],
+        palette::FOOTER_MODEL,
+        Some(dark),
+    );
+    assert!(render_style(model_style).contains("38;2;189;147;249"));
+    let cwd_style = super::view::footer_theme_style_for_palette(
+        &["string", "markup.underline.link"],
+        palette::FOOTER_CWD,
+        Some(dark),
+    );
+    assert!(render_style(cwd_style).contains("38;2;139;233;253"));
+    assert!(render_style(Style::new().fg(palette::COMPOSER_CARET)).contains("38;2;255;121;198"));
+    assert!(render_style(Style::new().fg(palette::WARNING_NOTICE)).contains("38;2;241;250;140"));
+
+    // Dimmed ANSI slot mixes 40% toward background, clears floor, and turns off SGR 2.
+    let dim_red = render_style(Style::new().fg(Color::RED).dim());
+    assert!(!dim_red.contains("\u{1b}[2m"), "dimmed slot must turn off SGR 2: {dim_red:?}");
+    let dim_red_rgb = parse_fg_rgb(&dim_red);
+    assert!(
+        palette::contrast_ratio(dim_red_rgb, dark.background()) >= 4.5,
+        "dimmed red {dim_red_rgb:?} below floor"
+    );
+
+    // Code block uses Dracula syntax theme (keyword `if` = #ff79c6)
+    let syntax_lines = super::highlight::highlight_code_to_lines_for_palette(
+        "fn main() { if true {} }\n",
+        "rust",
+        Some(dark),
+    );
+    let if_span = syntax_lines[0]
+        .spans
+        .iter()
+        .find(|span| span.text == "if")
+        .expect("if span");
+    assert_eq!(if_span.style.fg, Some(Color::Rgb(255, 121, 198)));
+}
+
+#[test]
+fn a_named_theme_fits_by_lightness_on_a_light_ground_and_keeps_roles_apart() {
+    use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};
+    use super::palette::{contrast_ratio, ColorLevel, TerminalPalette};
+    use super::theme::rgb_to_hsl;
+
+    if !style::in_fresh_run(&path("a_named_theme_fits_by_lightness_on_a_light_ground_and_keeps_roles_apart")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let dracula = super::theme::find("dracula").expect("dracula theme");
+    let _ = super::theme::set(dracula.clone());
+
+    let bg = (255, 255, 255);
+    let fg = (46, 52, 52);
+    let light = TerminalPalette::new(fg, bg, ColorLevel::TrueColor);
+    let floor = (contrast_ratio(fg, bg) * 0.75).min(4.5);
+
+    let resolve_rgb = |color: Color| -> (u8, u8, u8) {
+        let mut out = String::new();
+        write_spans_for_palette(&Line::new(vec![Span::new("x", Style::new().fg(color))]), Some(light), &mut out);
+        parse_fg_rgb(&out)
+    };
+
+    let hue_diff = |a: f64, b: f64| {
+        let d = (a - b).abs() % 360.0;
+        d.min(360.0 - d)
+    };
+
+    let role_colors = [
+        (Role::Code, dracula.role_color(Role::Code).unwrap()),
+        (Role::Link, dracula.role_color(Role::Link).unwrap()),
+        (Role::Heading, dracula.role_color(Role::Heading).unwrap()),
+        (Role::Caret, dracula.role_color(Role::Caret).unwrap()),
+        (Role::Model, dracula.role_color(Role::Model).unwrap()),
+        (Role::Cwd, dracula.role_color(Role::Cwd).unwrap()),
+        (Role::Warning, dracula.role_color(Role::Warning).unwrap()),
+    ];
+
+    let mut fitted_roles = Vec::new();
+    for (role, orig) in role_colors {
+        let fitted = resolve_rgb(Color::Role(role));
+        assert!(
+            contrast_ratio(fitted, bg) >= floor,
+            "{role:?} {fitted:?} below floor {floor:.2}"
+        );
+        let (h0, s0, _) = rgb_to_hsl(orig);
+        let (h1, s1, _) = rgb_to_hsl(fitted);
+        assert!(hue_diff(h0, h1) <= 3.0, "{role:?} hue drift: {h0:.2} -> {h1:.2}");
+        assert!((s0 - s1).abs() <= 0.05, "{role:?} sat drift: {s0:.3} -> {s1:.3}");
+        fitted_roles.push((orig, fitted));
+    }
+
+    // Distinct role colours stay > 25° apart in hue.
+    for i in 0..fitted_roles.len() {
+        for j in (i + 1)..fitted_roles.len() {
+            if fitted_roles[i].0 == fitted_roles[j].0 {
+                continue;
+            }
+            let h_a = rgb_to_hsl(fitted_roles[i].1).0;
+            let h_b = rgb_to_hsl(fitted_roles[j].1).0;
+            assert!(
+                hue_diff(h_a, h_b) > 25.0,
+                "roles {i} and {j} too close in hue: {h_a:.2} vs {h_b:.2}"
+            );
+        }
+    }
+
+    for slot in [Color::RED, Color::GREEN, Color::YELLOW, Color::MAGENTA, Color::CYAN] {
+        let fitted = resolve_rgb(slot);
+        assert!(
+            contrast_ratio(fitted, bg) >= floor,
+            "{slot:?} {fitted:?} below floor {floor:.2}"
+        );
+    }
+}
+
+#[test]
+fn a_named_theme_is_off_in_the_codex_look_and_on_sixteen_colour_terminals() {
+    use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};
+    use super::palette::{self, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("a_named_theme_is_off_in_the_codex_look_and_on_sixteen_colour_terminals")) {
+        return;
+    }
+
+    let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let ansi16 = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::Ansi16);
+
+    let snapshot = |pal: Option<TerminalPalette>| {
+        let mut out = String::new();
+        for color in [
+            Color::Role(Role::Code),
+            Color::Role(Role::Link),
+            Color::Role(Role::Heading),
+            Color::Role(Role::Caret),
+            Color::Role(Role::Model),
+            Color::Role(Role::Cwd),
+            Color::Role(Role::Warning),
+            Color::CYAN,
+            Color::Indexed(6),
+            Color::RED,
+            Color::GREEN,
+            Color::YELLOW,
+            Color::MAGENTA,
+        ] {
+            write_spans_for_palette(
+                &Line::new(vec![Span::new("x", Style::new().fg(color))]),
+                pal,
+                &mut out,
+            );
+        }
+        let footer_model = super::view::footer_theme_style_for_palette(
+            &["entity.name.type", "support.type", "variable"],
+            palette::FOOTER_MODEL,
+            pal,
+        );
+        write_spans_for_palette(&Line::new(vec![Span::new("m", footer_model)]), pal, &mut out);
+        for line in super::highlight::highlight_code_to_lines_for_palette("fn main() {}\n", "rust", pal) {
+            write_spans_for_palette(&line, pal, &mut out);
+        }
+        out
+    };
+
+    // Before style::init, style::current().style is TuiStyle::Codex.
+    assert_eq!(style::current().style, style::TuiStyle::Codex);
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    let codex_terminal = snapshot(Some(dark));
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    let codex_dracula = snapshot(Some(dark));
+    assert_eq!(codex_dracula, codex_terminal, "codex look ignores named theme");
+
+    // Now fix marks look and check 16-colour terminals.
+    style::init(&Preferences::default());
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    let ansi16_terminal = snapshot(Some(ansi16));
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    let ansi16_dracula = snapshot(Some(ansi16));
+    assert_eq!(ansi16_dracula, ansi16_terminal, "16-colour terminal ignores named theme");
+}
+
+#[test]
+fn switching_themes_twice_leaves_no_stale_colour() {
+    use std::fmt::Write as _;
+
+    use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};
+    use super::palette::{self, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("switching_themes_twice_leaves_no_stale_colour")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+
+    let capture = || {
+        let mut writer_out = String::new();
+        for color in [
+            Color::CYAN,
+            Color::RED,
+            Color::Role(Role::Code),
+            Color::Role(Role::Model),
+            Color::Role(Role::Warning),
+        ] {
+            write_spans_for_palette(
+                &Line::new(vec![Span::new("x", Style::new().fg(color))]),
+                Some(dark),
+                &mut writer_out,
+            );
+        }
+        let footer_model = super::view::footer_theme_style_for_palette(
+            &["entity.name.type", "support.type", "variable"],
+            palette::FOOTER_MODEL,
+            Some(dark),
+        );
+        write_spans_for_palette(&Line::new(vec![Span::new("m", footer_model)]), Some(dark), &mut writer_out);
+
+        let mut highlight_out = String::new();
+        for line in super::highlight::highlight_code_to_lines_for_palette(
+            "fn main() { if true {} }\n",
+            "rust",
+            Some(dark),
+        ) {
+            write_spans_for_palette(&line, Some(dark), &mut highlight_out);
+        }
+        (writer_out, highlight_out)
+    };
+
+    let expected_writer = |slots: [(u8, u8, u8); 5], footer: (u8, u8, u8)| {
+        let mut expected = String::new();
+        for (red, green, blue) in slots {
+            let _ = write!(expected, "\u{1b}[38;2;{red};{green};{blue};49mx");
+        }
+        let (red, green, blue) = footer;
+        let _ = write!(expected, "\u{1b}[38;2;{red};{green};{blue};49mm");
+        expected
+    };
+
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    let (term_writer_first, term_hl_first) = capture();
+
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    let (dracula_writer_first, dracula_hl_first) = capture();
+    assert_eq!(
+        dracula_writer_first,
+        expected_writer(
+            [(189, 147, 249), (255, 85, 85), (80, 250, 123), (189, 147, 249), (241, 250, 140)],
+            (189, 147, 249),
+        ),
+        "dracula writer bytes"
+    );
+    assert_ne!(dracula_hl_first, term_hl_first);
+    assert!(dracula_hl_first.contains("38;2;255;121;198"), "dracula keyword pink #ff79c6: {dracula_hl_first:?}");
+
+    let _ = super::theme::set(super::theme::find("nord").expect("nord"));
+    let (nord_writer, nord_hl) = capture();
+    // Nord's #bf616a (191, 97, 106) has 4.06:1 contrast against #1c1e26,
+    // so fit_lightness lifts it 3%p to (195, 108, 116) to clear the 4.5 floor.
+    assert_eq!(
+        nord_writer,
+        expected_writer(
+            [(129, 161, 193), (195, 108, 116), (163, 190, 140), (129, 161, 193), (235, 203, 139)],
+            (129, 161, 193),
+        ),
+        "nord writer bytes"
+    );
+    assert_ne!(nord_hl, dracula_hl_first);
+    assert_ne!(nord_hl, term_hl_first);
+    assert!(nord_hl.contains("38;2;129;161;193"), "nord accent #81a1c1: {nord_hl:?}");
+
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    let (term_writer_second, term_hl_second) = capture();
+    assert_eq!(term_writer_second, term_writer_first, "returning to terminal leaves no stale writer colour");
+    assert_eq!(term_hl_second, term_hl_first, "returning to terminal leaves no stale highlight colour");
+
+    // A second round (terminal -> dracula -> nord -> dracula) bumps theme
+    // revisions further and checks that nord leaves no stale colour behind.
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    let _ = capture();
+    let _ = super::theme::set(super::theme::find("nord").expect("nord"));
+    let _ = capture();
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    let (dracula_writer_second, dracula_hl_second) = capture();
+    assert_eq!(dracula_writer_second, dracula_writer_first, "dracula -> nord -> dracula writer bytes");
+    assert_eq!(dracula_hl_second, dracula_hl_first, "dracula -> nord -> dracula highlight bytes");
+}
+
+#[test]
+fn syntax_theme_follows_the_named_theme() {
+    use super::ansi::Color;
+    use super::palette::{ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("syntax_theme_follows_the_named_theme")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+
+    let keyword_color = || {
+        let lines = super::highlight::highlight_code_to_lines_for_palette(
+            "fn main() { if true {} }\n",
+            "rust",
+            Some(dark),
+        );
+        lines[0]
+            .spans
+            .iter()
+            .find(|span| span.text == "if")
+            .and_then(|span| span.style.fg)
+    };
+
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    assert_eq!(keyword_color(), Some(Color::Rgb(203, 166, 247)));
+
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    assert_eq!(keyword_color(), Some(Color::Rgb(255, 121, 198)));
+}
+
+#[test]
+fn the_composer_placeholder_keeps_sgr_dim_under_a_named_theme() {
+    use super::ansi::write_spans_for_palette;
+    use super::palette::{ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("the_composer_placeholder_keeps_sgr_dim_under_a_named_theme")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    let horizon = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let (rows, _cursor) = super::composer::Composer::new().render(WIDTH, "Ask zo to do anything");
+    let rendered: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let mut out = String::new();
+            write_spans_for_palette(row, Some(horizon), &mut out);
+            out
+        })
+        .collect();
+    assert!(
+        rendered.iter().any(|row| row.contains("\u{1b}[2mAsk zo to do anything")),
+        "{rendered:?}"
+    );
+    let placeholder_row = rendered
+        .iter()
+        .find(|row| row.contains("Ask zo to do anything"))
+        .expect("placeholder row");
+    let (_, after_caret) = placeholder_row.split_once('›').expect("composer caret");
+    let (before_placeholder, _) = after_caret
+        .split_once("Ask zo to do anything")
+        .expect("placeholder text");
+    assert!(
+        before_placeholder.contains("\u{1b}[2m") && !before_placeholder.contains("38;2;"),
+        "placeholder must keep SGR 2 without RGB fg: {before_placeholder:?}"
+    );
+}
+
+#[test]
+fn named_theme_lightness_fit_is_cached_per_revision_and_pair() {
+    use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};
+    use super::palette::{contrast_computes, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("named_theme_lightness_fit_is_cached_per_revision_and_pair")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+    let line = Line::new(vec![Span::new("x", Style::new().fg(Color::Role(Role::Code)))]);
+
+    let before = contrast_computes();
+    let mut first = String::new();
+    write_spans_for_palette(&line, Some(light), &mut first);
+    let after_first = contrast_computes();
+    assert_eq!(after_first - before, 1, "first resolve computes once");
+
+    let mut second = String::new();
+    write_spans_for_palette(&line, Some(light), &mut second);
+    assert_eq!(second, first);
+    assert_eq!(
+        contrast_computes(),
+        after_first,
+        "second resolve for same (revision, palette, colour, background) hits cache"
+    );
+
+    let _ = super::theme::set(super::theme::find("nord").expect("nord"));
+    let mut third = String::new();
+    write_spans_for_palette(&line, Some(light), &mut third);
+    assert_eq!(
+        contrast_computes(),
+        after_first + 1,
+        "theme revision change recomputes contrast fit"
+    );
+}
+
+#[test]
+fn an_empty_named_theme_resolves_roles_like_terminal_on_a_light_ground() {
+    use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};
+    use super::palette::{ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("an_empty_named_theme_resolves_roles_like_terminal_on_a_light_ground")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+
+    let render_all = || {
+        [
+            Role::Code,
+            Role::Link,
+            Role::Heading,
+            Role::Caret,
+            Role::Model,
+            Role::Cwd,
+            Role::Warning,
+        ]
+        .map(|role| {
+            let mut out = String::new();
+            write_spans_for_palette(
+                &Line::new(vec![Span::new("x", Style::new().fg(Color::Role(role)))]),
+                Some(light),
+                &mut out,
+            );
+            out
+        })
+    };
+
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    let expected = render_all();
+
+    let _ = super::theme::set(super::theme::Theme::empty("sparse", "Sparse"));
+    let actual = render_all();
+    assert_eq!(actual, expected);
+}
+

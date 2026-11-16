@@ -239,11 +239,28 @@ struct ColumnMetrics {
 
 /// 헤더 스타일 — codex 는 syntect 스코프에서 만들고 `.bold()` 를 얹는다.
 fn header_style() -> Style {
-    header_style_for_palette(palette::terminal_palette())
+    let palette = palette::terminal_palette();
+    let color_level = palette.map_or_else(
+        palette::color_level_from_env,
+        palette::TerminalPalette::color_level,
+    );
+    header_style_with_level(palette, color_level)
 }
 
+#[cfg(test)]
 pub(crate) fn header_style_for_palette(
     terminal_palette: Option<palette::TerminalPalette>,
+) -> Style {
+    let color_level = terminal_palette.map_or(
+        palette::ColorLevel::TrueColor,
+        palette::TerminalPalette::color_level,
+    );
+    header_style_with_level(terminal_palette, color_level)
+}
+
+fn header_style_with_level(
+    terminal_palette: Option<palette::TerminalPalette>,
+    color_level: palette::ColorLevel,
 ) -> Style {
     if super::style::current().style != super::style::TuiStyle::Marks {
         return super::highlight::foreground_style_for_scopes(&[
@@ -255,7 +272,13 @@ pub(crate) fn header_style_for_palette(
         .bold();
     }
     let style = Style::new().bold();
-    terminal_palette.map_or(style, |_| style.fg(palette::HEADING_ACCENT))
+    let named_theme_active =
+        !super::theme::is_terminal() && color_level != palette::ColorLevel::Ansi16;
+    if terminal_palette.is_some() || named_theme_active {
+        style.fg(palette::HEADING_ACCENT)
+    } else {
+        style
+    }
 }
 
 /// 구분선 스타일 — codex `table_separator_style_for` 는 터미널 전경·배경을

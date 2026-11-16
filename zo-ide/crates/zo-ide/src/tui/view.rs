@@ -1657,14 +1657,39 @@ fn dreamer_footer(dream: &str, width: usize) -> Line {
 }
 
 fn footer_theme_style(scopes: &[&str], fallback: Color) -> Style {
-    footer_theme_style_for_palette(scopes, fallback, palette::terminal_palette())
+    let palette = palette::terminal_palette();
+    let color_level = palette.map_or_else(
+        palette::color_level_from_env,
+        palette::TerminalPalette::color_level,
+    );
+    footer_theme_style_with_level(scopes, fallback, palette, color_level)
 }
 
+#[cfg(test)]
 pub(crate) fn footer_theme_style_for_palette(
     scopes: &[&str],
     fallback: Color,
     terminal_palette: Option<palette::TerminalPalette>,
 ) -> Style {
+    let color_level = terminal_palette.map_or(
+        palette::ColorLevel::TrueColor,
+        palette::TerminalPalette::color_level,
+    );
+    footer_theme_style_with_level(scopes, fallback, terminal_palette, color_level)
+}
+
+fn footer_theme_style_with_level(
+    scopes: &[&str],
+    fallback: Color,
+    terminal_palette: Option<palette::TerminalPalette>,
+    color_level: palette::ColorLevel,
+) -> Style {
+    if !super::theme::is_terminal()
+        && super::style::current().style == super::style::TuiStyle::Marks
+        && color_level != palette::ColorLevel::Ansi16
+    {
+        return Style::new().fg(fallback);
+    }
     super::highlight::foreground_style_for_scopes_for_palette(scopes, terminal_palette)
         .map_or_else(
             || Style::new().fg(fallback),
@@ -2778,8 +2803,8 @@ mod tests {
     fn the_footer_colours_model_and_cwd_apart() {
         let line = footer("m", "high", None, "/tmp", 40, None, None, false, None, None, None, None);
         assert_eq!(line.plain(), "  m high · /tmp");
-        assert_eq!(line.spans[1].style.fg, Some(crate::tui::palette::FOOTER_MODEL));
-        assert_eq!(line.spans[3].style.fg, Some(crate::tui::palette::FOOTER_CWD));
+        assert_eq!(line.spans[1].style.fg, Some(crate::tui::ansi::Role::Model.terminal_color()));
+        assert_eq!(line.spans[3].style.fg, Some(crate::tui::ansi::Role::Cwd.terminal_color()));
     }
 
     /// The wire note sits between the model and the path, in the warn tint,
@@ -2852,7 +2877,7 @@ mod tests {
             .iter()
             .find(|span| span.text == location)
             .expect("footer location span");
-        assert_eq!(location_span.style.fg, Some(crate::tui::palette::FOOTER_CWD));
+        assert_eq!(location_span.style.fg, Some(crate::tui::ansi::Role::Cwd.terminal_color()));
 
         let long = footer_location(
             "/private/tmp/a/very/long/repository/path",

@@ -343,7 +343,10 @@ mod tests {
         assert_eq!(style_of("3 warnings"), Style::new().fg(palette::WARNING_NOTICE));
         assert_eq!(style_of("f2"), Style::new().bold());
         assert_eq!(style_of(" to view"), Style::new().dim());
-        assert_eq!(palette::WARNING_NOTICE, Color::Rgb(196, 167, 103));
+        assert_eq!(
+            crate::tui::ansi::Role::Warning.terminal_color(),
+            Color::Rgb(196, 167, 103)
+        );
     }
 
     /// The design's quiet row: the transcript keys, then that the terminal's

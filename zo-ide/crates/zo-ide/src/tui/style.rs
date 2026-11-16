@@ -261,6 +261,7 @@ pub(crate) fn in_fresh_run(test: &str) -> bool {
         .args(["--exact", "--nocapture", "--test-threads=1"])
         .env(FRESH_RUN_ENV, "1")
         .env_remove(STYLE_ENV)
+        .env_remove(super::theme::THEME_ENV)
         .output()
         .expect("run the test alone");
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -45,6 +45,8 @@ pub const CONVERSATION_VIEW_KEY: &str = "conversationView";
 /// The widest prose and tool rows are drawn, in columns; `0` is the pane's
 /// whole width. Tables, code and command output keep the pane's width.
 pub const MAX_PROSE_WIDTH_KEY: &str = "maxProseWidth";
+/// The interactive TUI's colour theme slug (`tui::theme`).
+pub const THEME_KEY: &str = "theme";
 
 /// The one recognized `workspaceTrust` value: the interactive trust gate is
 /// retired and every folder opens in full access, no prompt, outranking even
@@ -82,6 +84,8 @@ pub struct Preferences {
     pub conversation_view: Option<String>,
     /// `maxProseWidth`, when the document gives a count.
     pub max_prose_width: Option<usize>,
+    /// Raw `theme` slug; `tui::theme` validates and resolves it.
+    pub theme: Option<String>,
 }
 
 impl Preferences {
@@ -163,6 +167,7 @@ pub fn load_from_path(path: &Path) -> Preferences {
             .get(MAX_PROSE_WIDTH_KEY)
             .and_then(Value::as_u64)
             .and_then(|columns| usize::try_from(columns).ok()),
+        theme: object.get(THEME_KEY).and_then(Value::as_str).map(str::to_string),
     }
 }
 
@@ -376,6 +381,22 @@ mod tests {
         ] {
             fs::write(&settings, document).expect("seed settings");
             assert_eq!(load_from_path(&settings).builds_at_once, read, "{document}");
+        }
+        let _ = fs::remove_dir_all(settings.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn theme_is_a_string_or_nothing() {
+        let settings = path("theme-read");
+        for (document, expected) in [
+            (r#"{"theme":"dracula"}"#, Some("dracula")),
+            (r#"{"theme":""}"#, Some("")),
+            (r#"{"theme":123}"#, None),
+            (r#"{"theme":true}"#, None),
+            (r"{}", None),
+        ] {
+            fs::write(&settings, document).expect("seed settings");
+            assert_eq!(load_from_path(&settings).theme.as_deref(), expected, "{document}");
         }
         let _ = fs::remove_dir_all(settings.parent().expect("test parent"));
     }
