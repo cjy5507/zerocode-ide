@@ -418,6 +418,14 @@ final class ShareTargetControl {
         made.isOpaque = false
         made.backgroundColor = .clear
         made.hasShadow = true
+        // AppKit animates a panel onto the screen and off it unless told not
+        // to, and the process keeps what each animation drew: the controls of
+        // twenty-four apps, taken off the screen once, left 86 to 111 MiB
+        // resident where the same panels left 43 with it off (2026-11-16, a
+        // probe outside the helper). A control hides whenever its corner is
+        // covered and comes back when it is not. Its opening under the
+        // person's pointer is its own animation, and eases as before.
+        made.animationBehavior = .none
         let button = ShareTakeButton(title: label, target: nil, action: nil)
         button.onPointer = { [weak self] over in self?.onPointer?(over) }
         button.setAccessibilityLabel(label)

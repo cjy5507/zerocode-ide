@@ -14,6 +14,7 @@ mod cli_login;
 mod close_guard;
 mod computer_pointer;
 mod computer_progress;
+mod computer_take_control;
 mod computer_use_mirrors;
 mod computer_use_tcc;
 mod continue_gate;
