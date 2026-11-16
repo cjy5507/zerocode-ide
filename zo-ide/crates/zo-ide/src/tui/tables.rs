@@ -258,7 +258,7 @@ pub(crate) fn header_style_for_palette(
     header_style_with_level(terminal_palette, color_level)
 }
 
-fn header_style_with_level(
+pub(crate) fn header_style_with_level(
     terminal_palette: Option<palette::TerminalPalette>,
     color_level: palette::ColorLevel,
 ) -> Style {

@@ -1678,7 +1678,7 @@ pub(crate) fn footer_theme_style_for_palette(
     footer_theme_style_with_level(scopes, fallback, terminal_palette, color_level)
 }
 
-fn footer_theme_style_with_level(
+pub(crate) fn footer_theme_style_with_level(
     scopes: &[&str],
     fallback: Color,
     terminal_palette: Option<palette::TerminalPalette>,
@@ -1690,7 +1690,7 @@ fn footer_theme_style_with_level(
     {
         return Style::new().fg(fallback);
     }
-    super::highlight::foreground_style_for_scopes_for_palette(scopes, terminal_palette)
+    super::highlight::foreground_style_for_scopes_with_level(scopes, terminal_palette, color_level)
         .map_or_else(
             || Style::new().fg(fallback),
             |style| {

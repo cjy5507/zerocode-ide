@@ -90,7 +90,7 @@ pub(crate) fn heading_style_for_palette(
     heading_style_with_level(level, terminal_palette, color_level)
 }
 
-fn heading_style_with_level(
+pub(crate) fn heading_style_with_level(
     level: HeadingLevel,
     terminal_palette: Option<super::palette::TerminalPalette>,
     color_level: super::palette::ColorLevel,

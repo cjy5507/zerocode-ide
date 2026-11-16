@@ -1167,6 +1167,65 @@ fn marks_footer_colours_keep_contrast_floor_on_light_and_keep_dark_values() {
     assert_eq!(dark_cwd.fg, Some(Color::Rgb(171, 223, 167)));
 }
 
+/// A sixteen-colour terminal that answered no colour question has no
+/// palette, and there the writer draws a named theme as `terminal`. So every
+/// place that asks the syntax theme for an ink at a depth it was handed — the
+/// footer's model and folder, the headings, the table head, a code block —
+/// must draw the same bytes as `terminal` there too.
+#[test]
+fn a_named_theme_on_a_sixteen_colour_terminal_that_answers_no_colour_draws_the_footer_as_terminal_does() {
+    use super::ansi::{write_spans_for_palette_and_level, Span};
+    use super::palette::{self, ColorLevel};
+    use pulldown_cmark::HeadingLevel;
+
+    if !style::in_fresh_run(&path(
+        "a_named_theme_on_a_sixteen_colour_terminal_that_answers_no_colour_draws_the_footer_as_terminal_does",
+    )) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let depth = ColorLevel::Ansi16;
+    let write = |line: &Line, out: &mut String| write_spans_for_palette_and_level(line, None, depth, out);
+    let footer = || {
+        let mut out = String::new();
+        for (scopes, fallback) in [
+            (&["entity.name.type", "support.type", "variable"][..], palette::FOOTER_MODEL),
+            (&["string", "markup.underline.link"][..], palette::FOOTER_CWD),
+        ] {
+            let style = super::view::footer_theme_style_with_level(scopes, fallback, None, depth);
+            write(&Line::new(vec![Span::new("footer", style)]), &mut out);
+        }
+        out
+    };
+    let the_rest = || {
+        let mut out = String::new();
+        for level in [HeadingLevel::H1, HeadingLevel::H2] {
+            let style = super::markdown::heading_style_with_level(level, None, depth);
+            write(&Line::new(vec![Span::new("heading", style)]), &mut out);
+        }
+        let head = super::tables::header_style_with_level(None, depth);
+        write(&Line::new(vec![Span::new("head", head)]), &mut out);
+        for line in super::highlight::highlight_code_to_lines_with_level(
+            "fn main() { if true { let x = \"hi\"; } }\n",
+            "rust",
+            None,
+            depth,
+        ) {
+            write(&line, &mut out);
+        }
+        out
+    };
+
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    let terminal_footer = footer();
+    let terminal_rest = the_rest();
+    assert!(terminal_footer.contains("38;2;"), "the footer asks the syntax theme: {terminal_footer:?}");
+
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    assert_eq!(footer(), terminal_footer, "the footer's model and folder draw as `terminal` does");
+    assert_eq!(the_rest(), terminal_rest, "headings, the table head and a code block draw as `terminal` does");
+}
+
 fn parse_fg_rgb(rendered: &str) -> (u8, u8, u8) {
     let (_, rest) = rendered
         .split_once("38;2;")

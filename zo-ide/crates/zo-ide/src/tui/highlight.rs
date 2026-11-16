@@ -97,6 +97,7 @@ fn production_color_level(palette: Option<super::palette::TerminalPalette>) -> s
     )
 }
 
+#[cfg(test)]
 fn test_seam_color_level(palette: Option<super::palette::TerminalPalette>) -> super::palette::ColorLevel {
     palette.map_or(
         super::palette::ColorLevel::TrueColor,
@@ -192,14 +193,7 @@ pub(crate) fn foreground_style_for_scopes(scope_names: &[&str]) -> Option<Style>
     foreground_style_for_scopes_with_level(scope_names, palette, production_color_level(palette))
 }
 
-pub(crate) fn foreground_style_for_scopes_for_palette(
-    scope_names: &[&str],
-    palette: Option<super::palette::TerminalPalette>,
-) -> Option<Style> {
-    foreground_style_for_scopes_with_level(scope_names, palette, test_seam_color_level(palette))
-}
-
-fn foreground_style_for_scopes_with_level(
+pub(crate) fn foreground_style_for_scopes_with_level(
     scope_names: &[&str],
     palette: Option<super::palette::TerminalPalette>,
     color_level: super::palette::ColorLevel,
@@ -473,7 +467,7 @@ pub(crate) fn highlight_code_to_lines_for_palette(
     highlight_code_to_lines_with_level(code, lang, palette, test_seam_color_level(palette))
 }
 
-fn highlight_code_to_lines_with_level(
+pub(crate) fn highlight_code_to_lines_with_level(
     code: &str,
     lang: &str,
     palette: Option<super::palette::TerminalPalette>,

@@ -917,6 +917,24 @@ pub fn write_spans_for_palette(
     write_spans_with_writer(line, &mut writer, out);
 }
 
+/// [`write_spans_for_palette`] at a colour depth handed in: a terminal that
+/// answered no colour question has no palette, and the writer then takes its
+/// depth from the environment, which a test must not read.
+#[cfg(test)]
+pub(crate) fn write_spans_for_palette_and_level(
+    line: &Line,
+    palette: Option<TerminalPalette>,
+    color_level: ColorLevel,
+    out: &mut String,
+) {
+    let mut writer = StyleWriter {
+        current: Style::new(),
+        palette,
+        color_level,
+    };
+    write_spans_with_writer(line, &mut writer, out);
+}
+
 fn write_spans_with_writer(line: &Line, writer: &mut StyleWriter, out: &mut String) {
     // 링크가 바뀌는 자리에서는 옛 링크를 스타일 전이 앞에서 닫고 새 링크를 그
     // 뒤에서 연다. 행 끝까지 열린 링크는 행이 끝나기 전에 닫는다 — 줄바꿈·
