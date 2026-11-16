@@ -13437,9 +13437,11 @@ mod theme_tests {
     }
 
     /// Criterion 3's other half: a theme chosen is drawn at once where the
-    /// words did not change. The footer's model name is the same role in
-    /// every theme, so only its bytes tell — and the picker's own sample
-    /// follows the cursor the same way.
+    /// words did not change. The open picker covers the footer, so the row
+    /// that tells there is its sample's sentence: its words and its roles
+    /// (inline code, a link) are the same in every theme, and only its
+    /// bytes show the theme under the cursor — and the first theme again
+    /// when the cursor goes back.
     #[test]
     fn theme_picker_repaints_the_head_without_other_change() {
         let test = test_path("theme_picker_repaints_the_head_without_other_change");
@@ -13455,6 +13457,12 @@ mod theme_tests {
         // its green, #50fa7b, is inline code's and an added line's.
         let model_in_dracula = format!("\u{1b}[38;2;189;147;249;49m{}", ui.model);
         let dracula_green = "38;2;80;250;123";
+        // The escape a frame wrote right before the sample's inline code —
+        // `None` when the frame did not write that row.
+        let code_colour = |frame: &str| {
+            let before = &frame[..frame.find("inline code")?];
+            before.rfind('\u{1b}').map(|start| before[start..].to_string())
+        };
 
         let _ = ui.paint_rows();
         let first = ui.painter.take_frame();
@@ -13468,6 +13476,7 @@ mod theme_tests {
         let _ = ui.paint_rows();
         let opened = ui.painter.take_frame();
         assert!(!opened.contains(dracula_green), "{opened:?}");
+        let in_terminal = code_colour(&opened).expect("the sample's sentence is drawn");
         let dracula = row_of(&ui, "Dracula");
         for _ in 0..dracula {
             let _ = ui.idle_event(&press(KeyCode::Down));
@@ -13475,13 +13484,26 @@ mod theme_tests {
         let _ = ui.paint_rows();
         let moved = ui.painter.take_frame();
         assert!(moved.contains(dracula_green), "the sample kept the old theme's colours: {moved:?}");
+        let in_dracula = code_colour(&moved);
+        assert!(
+            in_dracula.as_deref().is_some_and(|sgr| sgr != in_terminal && sgr.contains(dracula_green)),
+            "the sentence's row kept the old theme's colours ({in_dracula:?}): {moved:?}"
+        );
+        for _ in 0..dracula {
+            let _ = ui.idle_event(&press(KeyCode::Up));
+        }
+        let _ = ui.paint_rows();
+        let back = ui.painter.take_frame();
+        assert_eq!(code_colour(&back), Some(in_terminal), "the sentence's row kept Dracula's colours: {back:?}");
         let _ = ui.idle_event(&press(KeyCode::Esc));
         let _ = ui.paint_rows();
         let closed = ui.painter.take_frame();
         assert!(closed.contains(&ui.model) && !closed.contains(&model_in_dracula), "{closed:?}");
 
-        // By name, with no picker over the head: the footer's words are the
-        // same and its row is written again in the theme's colour.
+        // By name, with no picker over the head: the footer is drawn in the
+        // theme's colour. (The line that says the theme moves the head's
+        // rows too, so this half does not tell the repaint on its own — the
+        // sample's sentence above does.)
         ui.apply_typed_theme("dracula");
         let _ = ui.paint_rows();
         let after = ui.painter.take_frame();
