@@ -760,19 +760,40 @@ fn query_terminal_palette() -> Option<TerminalPalette> {
     )
 }
 
+/// The colour depth this process's environment names.
+///
+/// A terminal that answered no colour question has no palette, and then every
+/// row the painter writes asks for this depth. The environment does not change
+/// under a running zo, so it is read once.
 pub(crate) fn color_level_from_env() -> ColorLevel {
-    if std::env::var_os("WT_SESSION").is_some() && std::env::var_os("FORCE_COLOR").is_none() {
+    static LEVEL: OnceLock<ColorLevel> = OnceLock::new();
+    *LEVEL.get_or_init(|| {
+        color_level_for(
+            std::env::var_os("WT_SESSION").is_some(),
+            std::env::var_os("FORCE_COLOR").is_some(),
+            &std::env::var("COLORTERM").unwrap_or_default(),
+            std::env::var("TERM").ok().as_deref(),
+        )
+    })
+}
+
+/// The colour depth these environment values name: Windows Terminal draws
+/// truecolour unless `FORCE_COLOR` is set, then `COLORTERM` (`truecolor`,
+/// `24bit`), then a `TERM` with `256color`; anything else is ANSI-16.
+fn color_level_for(
+    wt_session: bool,
+    force_color: bool,
+    colorterm: &str,
+    term: Option<&str>,
+) -> ColorLevel {
+    if wt_session && !force_color {
         return ColorLevel::TrueColor;
     }
-    let colorterm = std::env::var("COLORTERM")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let colorterm = colorterm.to_ascii_lowercase();
     if colorterm.contains("truecolor") || colorterm.contains("24bit") {
         return ColorLevel::TrueColor;
     }
-    if std::env::var("TERM")
-        .is_ok_and(|term| term.to_ascii_lowercase().contains("256color"))
-    {
+    if term.is_some_and(|term| term.to_ascii_lowercase().contains("256color")) {
         return ColorLevel::Ansi256;
     }
     ColorLevel::Ansi16
@@ -1199,4 +1220,21 @@ mod tests {
         assert_eq!(parsed.ansi16[0], None);
     }
 
+    /// The depth the environment names, from the values handed in — the
+    /// process reads its own environment once and asks the same rule.
+    #[test]
+    fn the_colour_depth_follows_the_values_the_environment_names() {
+        use super::color_level_for;
+        assert_eq!(color_level_for(true, false, "", None), ColorLevel::TrueColor, "Windows Terminal");
+        assert_eq!(
+            color_level_for(true, true, "", Some("xterm-256color")),
+            ColorLevel::Ansi256,
+            "FORCE_COLOR hands Windows Terminal back to the other names"
+        );
+        assert_eq!(color_level_for(false, false, "TrueColor", None), ColorLevel::TrueColor);
+        assert_eq!(color_level_for(false, false, "24bit", Some("xterm")), ColorLevel::TrueColor);
+        assert_eq!(color_level_for(false, false, "", Some("XTERM-256COLOR")), ColorLevel::Ansi256);
+        assert_eq!(color_level_for(false, false, "yes", Some("xterm")), ColorLevel::Ansi16);
+        assert_eq!(color_level_for(false, true, "", None), ColorLevel::Ansi16);
+    }
 }
