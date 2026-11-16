@@ -121,6 +121,33 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
     })
 }
 
+/// Whether the person attached tools of their own to a session opened in
+/// `cwd`: an MCP server (in the settings or the launch's `--mcp-config`), a
+/// tool of an enabled plugin, or a skill — read from what the runtime built
+/// for the session loads ([`build_runtime_plugin_state_with_loader`]) and the
+/// skills its prompt lists. A `headless_core` tool set hides none of them: a
+/// run with any keeps the full set. Settings that do not load count as
+/// attached, since what they hold is unknown.
+pub(crate) fn person_attached_tools(cwd: &Path, mcp_config: Option<&Path>) -> bool {
+    let loader = match mcp_config {
+        Some(path) => ConfigLoader::default_for(cwd).with_mcp_config(path),
+        None => ConfigLoader::default_for(cwd),
+    };
+    let Ok(config) = loader.load() else {
+        return true;
+    };
+    if !config.mcp().servers().is_empty() {
+        return true;
+    }
+    let plugin_tools = crate::build_plugin_manager(cwd, &loader, &config)
+        .plugin_registry()
+        .and_then(|registry| registry.aggregated_tools());
+    if !plugin_tools.is_ok_and(|tools| tools.is_empty()) {
+        return true;
+    }
+    !runtime::discover_skills(cwd).is_empty()
+}
+
 fn load_runtime_memory_retriever(
     cwd: &Path,
     active_model: Option<&str>,
@@ -633,5 +660,37 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+}
+
+#[cfg(test)]
+mod attached_tools_tests {
+    use super::person_attached_tools;
+
+    /// A bare zo home and workspace attach nothing; an MCP server in the
+    /// settings, one in a launch's `--mcp-config` or a skill in the zo home
+    /// each count as the person's own tools.
+    #[test]
+    fn a_persons_mcp_server_or_skill_counts_as_attached() {
+        let _lock = crate::test_env_lock();
+        let home = crate::support::IsolatedHome::new();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = workspace.path();
+        assert!(!person_attached_tools(cwd, None), "a bare home and workspace attach nothing");
+
+        let server = r#"{"mcpServers":{"docs":{"command":"no-such-mcp-server","args":[]}}}"#;
+        let launch_config = cwd.join("mcp.json");
+        std::fs::write(&launch_config, server).expect("launch mcp config");
+        assert!(person_attached_tools(cwd, Some(&launch_config)), "a launch's --mcp-config attaches its server");
+
+        let settings = home.zo_home.join("settings.json");
+        std::fs::write(&settings, server).expect("settings");
+        assert!(person_attached_tools(cwd, None), "a server in the settings is attached");
+        std::fs::remove_file(&settings).expect("settings gone");
+
+        let skill = home.zo_home.join("skills").join("hello");
+        std::fs::create_dir_all(&skill).expect("skill folder");
+        std::fs::write(skill.join("SKILL.md"), "---\nname: hello\ndescription: Says hello.\n---\nSay hello.\n").expect("skill");
+        assert!(person_attached_tools(cwd, None), "a skill in the zo home is attached");
     }
 }

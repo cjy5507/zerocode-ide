@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -210,6 +210,23 @@ pub struct TaskRegistry {
     /// from persisted tasks: after restart no old nonterminal record represents
     /// a process owned by this runtime.
     live_background_processes: Arc<LiveBackgroundProcesses>,
+    /// Set by the session when its model reaches a background task by its
+    /// completion only ([`TaskReach::Completion`]); clear — the default — while
+    /// the task tools reach it.
+    completion_only: Arc<AtomicBool>,
+}
+
+/// How the model of the session a registry serves reaches a background task.
+/// The start line, the timeout advice and the completion notice name this road
+/// and no other (`crate::background_log`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TaskReach {
+    /// `TaskOutput` reads the task's output and `TaskStop` stops it.
+    #[default]
+    TaskTools,
+    /// The session was given neither: the output comes back when the task
+    /// exits.
+    Completion,
 }
 
 impl std::fmt::Debug for TaskRegistry {
@@ -374,6 +391,23 @@ impl TaskRegistry {
             persist_disabled: Arc::default(),
             completion_callback: Arc::new(Mutex::new(None)),
             live_background_processes: Arc::default(),
+            completion_only: Arc::default(),
+        }
+    }
+
+    /// Say how the session's model reaches its background tasks. Set once,
+    /// when the session opens, and shared by every clone of this registry.
+    pub fn set_reach(&self, reach: TaskReach) {
+        self.completion_only.store(reach == TaskReach::Completion, Ordering::Relaxed);
+    }
+
+    /// How the session's model reaches its background tasks.
+    #[must_use]
+    pub fn reach(&self) -> TaskReach {
+        if self.completion_only.load(Ordering::Relaxed) {
+            TaskReach::Completion
+        } else {
+            TaskReach::TaskTools
         }
     }
 

@@ -750,14 +750,24 @@ fn normalize_allowed_tools_accepts_aliases_and_mixed_separators() {
 
 /// A core tool set is the list the `--allowed-tools` flag names for the same
 /// edit shape, so a profile and the flag open one session; a full one leaves
-/// the offer to the registry.
+/// the offer to the registry. `headless_core` is that core list for a run
+/// nobody attends and the registry's offer for any other, and it is the only
+/// value that asks which the run is.
 #[test]
 fn a_core_tool_set_is_the_list_the_allowed_tools_flag_names() {
     // Built before the lock is taken: the helper takes `env_lock` itself, and
     // std's mutex does not re-enter.
     let registry = crate::tests::builtin_registry_outside_cwd_windows();
     let flag = |list: &str| registry.normalize_allowed_tools(&[list.to_string()]).expect("the flag's names");
-    let (patcher, editor, plain) = {
+    let asked = std::cell::Cell::new(0_u32);
+    let ask = |answer: bool| {
+        let asked = &asked;
+        move || {
+            asked.set(asked.get() + 1);
+            answer
+        }
+    };
+    let (patcher, editor, plain, unattended, attended) = {
         let _guard = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(api::MODEL_CONTEXT_WINDOWS_ENV);
         std::env::set_var(
@@ -765,12 +775,15 @@ fn a_core_tool_set_is_the_list_the_allowed_tools_flag_names() {
             r#"{"models":[
                 {"ids":["acme-patcher-1"],"harness":{"edit_tool":"apply_patch","tool_set":"core"}},
                 {"ids":["acme-editor-1"],"harness":{"tool_set":"core"}},
-                {"ids":["acme-plain-1"],"harness":{"edit_tool":"apply_patch"}}]}"#,
+                {"ids":["acme-plain-1"],"harness":{"edit_tool":"apply_patch"}},
+                {"ids":["acme-headless-1"],"harness":{"edit_tool":"apply_patch","tool_set":"headless_core"}}]}"#,
         );
         let sets = (
-            crate::harness_tool_set("acme-patcher-1"),
-            crate::harness_tool_set("acme-editor-1"),
-            crate::harness_tool_set("acme-plain-1"),
+            crate::harness_tool_set("acme-patcher-1", ask(false)),
+            crate::harness_tool_set("acme-editor-1", ask(false)),
+            crate::harness_tool_set("acme-plain-1", ask(true)),
+            crate::harness_tool_set("acme-headless-1", ask(true)),
+            crate::harness_tool_set("acme-headless-1", ask(false)),
         );
         match previous {
             Some(value) => std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, value),
@@ -781,6 +794,42 @@ fn a_core_tool_set_is_the_list_the_allowed_tools_flag_names() {
     assert_eq!(patcher, flag("bash,read_file,write_file,apply_patch"));
     assert_eq!(editor, flag("bash,read_file,write_file,edit_file"));
     assert_eq!(plain, None, "a full tool set leaves the offer to the registry");
+    assert_eq!(unattended, flag("bash,read_file,write_file,apply_patch"), "headless_core holds a run nobody attends to the core list");
+    assert_eq!(attended, None, "and leaves any other session to the registry");
+    assert_eq!(asked.get(), 2, "only headless_core asks whether the run is one nobody attends");
+}
+
+/// A session reaches a tool it advertises and a deferred one behind its
+/// `CapabilityInvoke`; under a list, exactly what the list names; a denied
+/// tool, never. A background task is reached through the task tools only
+/// while the session reaches both.
+#[test]
+fn a_session_reaches_what_it_advertises_and_the_deferred_tools_behind_its_door() {
+    use runtime::task_registry::TaskReach;
+
+    let open = crate::ToolOffer::default();
+    assert!(open.reaches("Agent") && open.reaches("AskUserQuestion"), "advertised");
+    assert!(open.reaches("MemoryWrite") && open.reaches("TaskOutput"), "deferred, behind CapabilityInvoke");
+    assert_eq!(open.task_reach(), TaskReach::TaskTools);
+
+    let door: BTreeSet<String> = ["CapabilityInvoke".to_string()].into();
+    let shut = crate::ToolOffer::new(None, Some(&door));
+    assert!(shut.reaches("Agent"), "an advertised tool needs no door");
+    assert!(!shut.reaches("MemoryWrite") && !shut.reaches("TaskOutput"), "no door, no deferred tool");
+    assert_eq!(shut.task_reach(), TaskReach::Completion);
+
+    let core: BTreeSet<String> = ["bash", "read_file", "write_file", "apply_patch"].map(String::from).into();
+    let listed = crate::ToolOffer::new(Some(&core), None);
+    assert!(listed.reaches("bash") && listed.reaches("apply_patch"));
+    for name in ["Agent", "AskUserQuestion", "Skill", "MemoryWrite", "CapabilityInvoke", "ToolSearch", "TaskOutput"] {
+        assert!(!listed.reaches(name), "a list reaches only what it names: {name}");
+    }
+    assert_eq!(listed.task_reach(), TaskReach::Completion);
+
+    let no_spawn: BTreeSet<String> = ["Agent", "SpawnMultiAgent", "Workflow", "Task"].map(String::from).into();
+    let denied = crate::ToolOffer::new(None, Some(&no_spawn));
+    assert!(!denied.reaches("Agent") && !denied.reaches("Workflow"), "denied, never reached");
+    assert!(denied.reaches("AskUserQuestion") && denied.reaches("MemoryWrite"), "the rest as before");
 }
 
 #[test]

@@ -19,6 +19,7 @@ use crate::sandbox::{
     resolve_sandbox_status_for_request_with_macos_seatbelt, sandbox_scratch_dirs,
     wrap_sandbox_command, FilesystemIsolationMode, SandboxConfig, SandboxStatus,
 };
+use crate::task_registry::{TaskReach, TaskRegistry};
 use crate::ConfigLoader;
 use zerocode_core::surface_execution::{ExecutionEnvelope, SurfaceExecution};
 
@@ -417,33 +418,31 @@ pub fn timeout_stderr(effective_timeout_ms: u64) -> String {
 /// name, but the caller can, and the kill is the moment that distinction
 /// becomes actionable.
 ///
-/// `output_is_pollable` decides *which* promise is honest, and it is not a
-/// property of the tool but of the caller's wiring. Only
-/// [`execute_bash_with_tasks`] **with a registry in scope** turns a background
-/// run into a real task whose log `TaskOutput` can read. Without one — plain
-/// [`execute_bash`] — the background branch detaches with both streams on
-/// `Stdio::null()` and hands back a bare OS pid, so promising a pollable task
-/// there would name a route that does not exist. Tool-dispatched Bash and
-/// `PowerShell` calls both provide a registry and may truthfully advertise it.
+/// `background` decides *which* promise is honest, and it is not a property of
+/// the tool but of the caller's wiring. Only [`execute_bash_with_tasks`]
+/// **with a registry in scope** turns a background run into a real task whose
+/// output is kept; without one — plain [`execute_bash`] — the background branch
+/// detaches with both streams on `Stdio::null()` and hands back a bare OS pid,
+/// so promising a kept output there would name a route that does not exist
+/// (`None`). A kept output is read with `TaskOutput` in a session that reaches
+/// it, and comes back when the task exits in one that does not
+/// ([`TaskReach`]). Tool-dispatched Bash and `PowerShell` calls both provide a
+/// registry and may truthfully advertise it.
 #[must_use]
 pub fn timeout_stderr_with_background_advice(
     effective_timeout_ms: u64,
-    output_is_pollable: bool,
+    background: Option<TaskReach>,
 ) -> String {
     let shared = timeout_stderr(effective_timeout_ms);
-    if output_is_pollable {
-        format!(
-            "{shared} If it is not expected to exit on its own, re-run it with \
-             `run_in_background: true` — it then keeps running and its output \
-             stays readable with TaskOutput(task_id)."
-        )
-    } else {
-        format!(
-            "{shared} If it is not expected to exit on its own, re-run it with \
-             `run_in_background: true` — it then keeps running, but its output \
-             is not captured."
-        )
-    }
+    let kept = match background {
+        Some(TaskReach::TaskTools) => "it then keeps running and its output stays readable with TaskOutput(task_id).",
+        Some(TaskReach::Completion) => "it then keeps running and its output comes back to you when it exits.",
+        None => "it then keeps running, but its output is not captured.",
+    };
+    format!(
+        "{shared} If it is not expected to exit on its own, re-run it with \
+         `run_in_background: true` — {kept}"
+    )
 }
 
 /// Polling slice for the background-task watcher: how quickly a `TaskStop`
@@ -879,9 +878,10 @@ pub fn execute_bash_with_tasks(
     refuse_when_disk_critical(&cwd, &input.command)?;
 
     // Captured before the background branch consumes `tasks`: the foreground
-    // timeout reply below may only name `TaskOutput` when a registry is what
-    // a background re-run would land in.
-    let registry_backed = tasks.is_some();
+    // timeout reply below may only promise a kept output when a registry is
+    // what a background re-run would land in, and names the road the session
+    // reaches it by.
+    let background = tasks.map(TaskRegistry::reach);
 
     if input.run_in_background.unwrap_or(false) {
         let mut command = prepare_command(&input.command, &cwd, &sandbox_status, false)?;
@@ -909,10 +909,7 @@ pub fn execute_bash_with_tasks(
             registry.attach_background_process(&task.task_id, child);
 
             return Ok(BashCommandOutput {
-                stdout: format!(
-                    "Started background task {} (pid {pid}). Poll output with TaskOutput(task_id), stop with TaskStop.",
-                    task.task_id
-                ),
+                stdout: crate::background_log::started_line(&task.task_id, pid, registry.reach()),
                 stderr: String::new(),
                 raw_output_path: None,
                 interrupted: false,
@@ -997,7 +994,7 @@ pub fn execute_bash_with_tasks(
                     sandbox_status,
                     cwd,
                     live_writer,
-                    registry_backed,
+                    background,
                     owner_session,
                 ));
                 end_call_runtime(runtime);
@@ -1012,7 +1009,7 @@ pub fn execute_bash_with_tasks(
                     sandbox_status,
                     cwd,
                     live_writer,
-                    registry_backed,
+                    background,
                     owner_session,
                 ))
             })
@@ -1026,7 +1023,7 @@ pub fn execute_bash_with_tasks(
         sandbox_status,
         cwd,
         live_writer,
-        registry_backed,
+        background,
         owner_session,
     ));
     end_call_runtime(runtime);
@@ -1047,17 +1044,17 @@ fn end_call_runtime(runtime: tokio::runtime::Runtime) {
     runtime.shutdown_background();
 }
 
-/// `registry_backed` records whether the caller reached here through
-/// [`execute_bash_with_tasks`] **with** a task registry. It changes no
-/// execution, only what the timeout reply may promise: without a registry a
-/// re-run with `run_in_background` detaches and discards its output, so naming
-/// `TaskOutput` there would be false.
+/// `background` records whether the caller reached here through
+/// [`execute_bash_with_tasks`] **with** a task registry, and how the session
+/// reaches its tasks. It changes no execution, only what the timeout reply may
+/// promise: without a registry a re-run with `run_in_background` detaches and
+/// discards its output, so naming `TaskOutput` there would be false.
 async fn execute_bash_async(
     input: BashCommandInput,
     sandbox_status: SandboxStatus,
     cwd: std::path::PathBuf,
     live_output: crate::live_output::LiveOutputWriter,
-    registry_backed: bool,
+    background: Option<TaskReach>,
     owner_session: Option<String>,
 ) -> io::Result<BashCommandOutput> {
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true)?;
@@ -1157,7 +1154,7 @@ async fn execute_bash_async(
         return Ok(timed_out_output(
             &input,
             effective_timeout_ms,
-            registry_backed,
+            background,
             sandbox_status,
         ));
     };
@@ -1203,11 +1200,11 @@ async fn execute_bash_async(
 fn timed_out_output(
     input: &BashCommandInput,
     effective_timeout_ms: u64,
-    registry_backed: bool,
+    background: Option<TaskReach>,
     sandbox_status: SandboxStatus,
 ) -> BashCommandOutput {
     BashCommandOutput {
-        stderr: timeout_stderr_with_background_advice(effective_timeout_ms, registry_backed),
+        stderr: timeout_stderr_with_background_advice(effective_timeout_ms, background),
         interrupted: true,
         dangerously_disable_sandbox: input.dangerously_disable_sandbox,
         return_code_interpretation: Some(CommandEnding::timed_out_word()),
@@ -1730,7 +1727,7 @@ mod tests {
         DrainGate, DEFAULT_BASH_TIMEOUT_MS, TOOL_CHILD_ENV,
     };
     use crate::sandbox::{FilesystemIsolationMode, SandboxStatus};
-    use crate::task_registry::{TaskRegistry, TaskStatus};
+    use crate::task_registry::{TaskReach, TaskRegistry, TaskStatus};
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -2337,10 +2334,10 @@ mod tests {
             "tool-specific advice must not leak into the shared half: {shared}"
         );
 
-        // Both variants keep the shared verdict and name the one lever the
+        // Every variant keeps the shared verdict and names the one lever the
         // caller actually has.
-        for pollable in [true, false] {
-            let advised = super::timeout_stderr_with_background_advice(1_000, pollable);
+        for background in [Some(TaskReach::TaskTools), Some(TaskReach::Completion), None] {
+            let advised = super::timeout_stderr_with_background_advice(1_000, background);
             assert!(advised.starts_with(&shared), "{advised}");
             assert!(
                 advised.contains("run_in_background: true"),
@@ -2350,16 +2347,21 @@ mod tests {
 
         // Registry in scope: a background re-run becomes a real task, so the
         // pollable promise is honest.
-        let pollable = super::timeout_stderr_with_background_advice(1_000, true);
+        let pollable = super::timeout_stderr_with_background_advice(1_000, Some(TaskReach::TaskTools));
         assert!(
             pollable.contains("TaskOutput(task_id)"),
             "a registry-backed re-run IS pollable: {pollable}"
         );
+        // Kept, in a session given no task tool: the output comes back when
+        // the task exits, and no tool the session lacks is named.
+        let returned = super::timeout_stderr_with_background_advice(1_000, Some(TaskReach::Completion));
+        assert!(returned.contains("comes back to you when it exits"), "{returned}");
+        assert!(!returned.contains("TaskOutput"), "a session without TaskOutput is not sent to it: {returned}");
 
         // No registry: the background branch detaches with `Stdio::null()` and
         // returns a bare pid, so naming `TaskOutput` would send the caller to a
         // route that does not exist.
-        let detached = super::timeout_stderr_with_background_advice(1_000, false);
+        let detached = super::timeout_stderr_with_background_advice(1_000, None);
         assert!(
             !detached.contains("TaskOutput"),
             "must not promise a task lookup that cannot resolve: {detached}"
@@ -2397,6 +2399,33 @@ mod tests {
             "{}",
             output.stderr
         );
+    }
+
+    /// A registry whose session reaches its tasks by their completion only
+    /// starts a background command, and advises on a timeout, without naming
+    /// the task tools the session was not given: it says the output comes back
+    /// when the command exits.
+    #[test]
+    fn a_session_without_task_tools_is_told_only_what_it_reaches() {
+        let registry = TaskRegistry::new_in_memory();
+        registry.set_reach(TaskReach::Completion);
+        let mut request = input("sleep 30", None);
+        request.run_in_background = Some(true);
+        let started = execute_bash_with_tasks(request, Some(&registry), Some("session-a")).expect("background spawn works");
+        let task_id = started.background_task_id.clone().expect("task id present");
+        assert!(started.stdout.starts_with(&format!("Started background task {task_id} (pid ")), "{}", started.stdout);
+        assert!(started.stdout.contains("comes back to you when it exits"), "{}", started.stdout);
+        assert!(!started.stdout.contains("TaskOutput") && !started.stdout.contains("TaskStop"), "{}", started.stdout);
+        registry.stop(&task_id).expect("stop the sleeper");
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ZO_BASH_TIMEOUT_MS", "250");
+        let output = execute_bash_with_tasks(input("sleep 5", None), Some(&registry), Some("s"))
+            .expect("bash command should execute");
+        std::env::remove_var("ZO_BASH_TIMEOUT_MS");
+        assert!(output.interrupted, "the deadline must fire");
+        assert!(output.stderr.contains("comes back to you when it exits"), "{}", output.stderr);
+        assert!(!output.stderr.contains("TaskOutput"), "{}", output.stderr);
     }
 
     /// The registry-backed dispatch — what the bash tool actually uses — may

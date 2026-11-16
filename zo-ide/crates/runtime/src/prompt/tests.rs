@@ -1,7 +1,7 @@
 use super::{
     collapse_blank_lines, display_context_path, normalize_instruction_content,
     render_instruction_files, split_system_with_identity, truncate_git_status_snapshot,
-    ContextFile, ProjectContext, PromptMode, SkillIndexEntry, SystemPromptBuilder,
+    ContextFile, ProjectContext, PromptMode, PromptToolReach, SkillIndexEntry, SystemPromptBuilder,
     CLAUDE_CODE_IDENTITY, MAX_GIT_STATUS_CHARS, MAX_GIT_STATUS_LINES,
     SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
@@ -1671,10 +1671,9 @@ fn runtime_config_is_a_compact_table_without_nested_values() {
 /// cannot call — measured, that flag went from moving the prefix by 2 tokens to
 /// cutting 3,173 (18,184 → 15,011 on an empty workspace).
 ///
-/// The `true` half matters as much as the `false` half: `spawn_family` is a
-/// `bool` on a struct that used to `#[derive(Default)]`, and a derived default
-/// is `false` — which would have silently dropped this section from **every**
-/// prompt. `Default` is written by hand for exactly that reason.
+/// The default half matters as much as the other: a builder told nothing about
+/// the session's tools reaches every tool, so the rubric stays in every prompt
+/// a host does not narrow.
 #[test]
 fn the_delegation_rubric_is_on_by_default_and_off_without_the_spawn_family() {
     let _guard = env_lock();
@@ -1694,7 +1693,7 @@ fn the_delegation_rubric_is_on_by_default_and_off_without_the_spawn_family() {
 
     let off = SystemPromptBuilder::new()
         .with_project_context(context)
-        .with_spawn_family(false)
+        .with_tool_reach(PromptToolReach::from_fn(|tool| !matches!(tool, "Agent" | "SpawnMultiAgent" | "Workflow")))
         .build()
         .join("\n\n");
     assert!(
@@ -1709,6 +1708,51 @@ fn the_delegation_rubric_is_on_by_default_and_off_without_the_spawn_family() {
         off.len() < on.len(),
         "and the prompt must actually get smaller"
     );
+
+    fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
+/// Each section that teaches a tool follows that tool: a session that reaches
+/// none of a section's tools is not sent it, one that reaches any of them is,
+/// and nothing else in the prompt moves. `# Persistent memory` follows
+/// `MemoryWrite` — the tool its text says to write with — not the file tools
+/// every session keeps.
+#[test]
+fn a_section_that_teaches_a_tool_is_sent_only_to_a_session_that_reaches_it() {
+    let _guard = env_lock();
+    ensure_valid_cwd();
+    let root = temp_dir();
+    fs::create_dir_all(&root).expect("root dir");
+    let context = ProjectContext::discover(&root, "2026-03-31").expect("context");
+    let build = |reach: PromptToolReach| {
+        SystemPromptBuilder::new()
+            .with_project_context(context.clone())
+            .with_mode(PromptMode::Autonomous)
+            .with_tool_reach(reach)
+            .build()
+    };
+    let teaching = [
+        ("# Clarifying questions", "AskUserQuestion"),
+        ("# Delegation and workflow routing", "Workflow"),
+        ("# Skills and library documentation", "skill_load"),
+        ("# Persistent memory", "MemoryWrite"),
+    ];
+
+    let every = build(PromptToolReach::default());
+    assert_eq!(build(PromptToolReach::from_fn(|_| true)), every, "reaching every tool is the default prompt");
+    let core = build(PromptToolReach::from_fn(|tool| matches!(tool, "bash" | "read_file" | "write_file" | "apply_patch")));
+    let untaught: Vec<String> = every
+        .iter()
+        .filter(|section| !teaching.iter().any(|(heading, _)| section.lines().next() == Some(*heading)))
+        .cloned()
+        .collect();
+    assert_eq!(every.len(), untaught.len() + teaching.len(), "the full prompt carries all four");
+    assert_eq!(core, untaught, "a session that reaches none of their tools loses the four sections and nothing else");
+    for (heading, tool) in teaching {
+        let one = build(PromptToolReach::from_fn(|name| name == tool));
+        assert!(one.iter().any(|section| section.lines().next() == Some(heading)), "{tool} keeps {heading}");
+        assert_eq!(one.len(), core.len() + 1, "{tool} keeps {heading} alone");
+    }
 
     fs::remove_dir_all(root).expect("cleanup temp dir");
 }

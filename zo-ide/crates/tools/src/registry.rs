@@ -506,11 +506,18 @@ const fn edit_tool_handler(form: api::EditToolForm) -> &'static str {
 /// offer to the registry; under `core`, the shell, `Read`, `Write` and the
 /// model's own edit shape — the set `--allowed-tools
 /// bash,read_file,write_file,<edit shape>` names, so a profile and the flag
-/// open one session.
+/// open one session. Under `headless_core`, that core set when
+/// `unattended_and_bare` says the session is a run nobody attends with nothing
+/// of the person's attached — asked only then — and `None` otherwise.
 #[must_use]
-pub fn harness_tool_set(model: &str) -> Option<BTreeSet<String>> {
+pub fn harness_tool_set(model: &str, unattended_and_bare: impl FnOnce() -> bool) -> Option<BTreeSet<String>> {
     let profile = api::harness_profile_for_model(model);
-    (profile.tool_set == api::ToolSet::Core).then(|| {
+    let core = match profile.tool_set {
+        api::ToolSet::Full => false,
+        api::ToolSet::Core => true,
+        api::ToolSet::HeadlessCore => unattended_and_bare(),
+    };
+    core.then(|| {
         [
             CoreTool::Bash.handler(),
             CoreTool::Read.handler(),
@@ -521,6 +528,55 @@ pub fn harness_tool_set(model: &str) -> Option<BTreeSet<String>> {
         .map(str::to_string)
         .collect()
     })
+}
+
+/// What a session can call, for the text that teaches or names a tool: the
+/// session reaches a tool it advertises, and a deferred one while it
+/// advertises `CapabilityInvoke`, the door every deferred tool is run through.
+///
+/// `allowed` is the session's tool list — a launch `--allowed-tools`, or the
+/// core set a profile holds it to — and `None` for the registry's own
+/// advertisement; `denied` is the launch's deny set (`--disallowedTools`,
+/// `--no-spawn`). Both are fixed for the session, as the text built from them
+/// is. A list is advertised as it is, deferred names included, and a call
+/// through `CapabilityInvoke` meets the same list, so under a list the session
+/// reaches exactly what the list names.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolOffer<'a> {
+    allowed: Option<&'a BTreeSet<String>>,
+    denied: Option<&'a BTreeSet<String>>,
+}
+
+impl<'a> ToolOffer<'a> {
+    #[must_use]
+    pub const fn new(allowed: Option<&'a BTreeSet<String>>, denied: Option<&'a BTreeSet<String>>) -> Self {
+        Self { allowed, denied }
+    }
+
+    /// Whether the session can call `name`, a tool's handler name as tool
+    /// lists hold it.
+    #[must_use]
+    pub fn reaches(&self, name: &str) -> bool {
+        if self.denied.is_some_and(|denied| denied.contains(name)) {
+            return false;
+        }
+        match self.allowed {
+            Some(allowed) => allowed.contains(name),
+            None => !is_deferred_tool(name) || self.reaches(crate::capability::CAPABILITY_INVOKE),
+        }
+    }
+
+    /// How the session's model reaches a background task: through
+    /// `TaskOutput` and `TaskStop` while it can call both, else by the
+    /// completion that brings the output back.
+    #[must_use]
+    pub fn task_reach(&self) -> runtime::task_registry::TaskReach {
+        if self.reaches("TaskOutput") && self.reaches("TaskStop") {
+            runtime::task_registry::TaskReach::TaskTools
+        } else {
+            runtime::task_registry::TaskReach::Completion
+        }
+    }
 }
 
 /// Whether a session whose model edits in `edit_tool` shape is shown — on the

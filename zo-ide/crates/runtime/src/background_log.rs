@@ -25,6 +25,8 @@
 //! whether anything was cut, so the foreground formatter can be handed the
 //! same shape it gets from a foreground `bash` result.
 
+use crate::task_registry::TaskReach;
+
 /// The name a background bash task carries — its registry description and
 /// the `name` of the completion it publishes. The reader that turns that
 /// completion back into a command cell keys on it.
@@ -102,10 +104,31 @@ pub fn completion_summary(task_id: &str, log: &str) -> String {
     format!("{COMPLETION_PREFIX}{task_id} exited ({code}) — last: {last}")
 }
 
-/// Process completions point at retained output, not agent continuation tools.
+/// Process completions point at retained output, not agent continuation tools:
+/// `TaskOutput` where the session reaches it, else the output the notice
+/// carries below this line.
 #[must_use]
-pub fn notification_header(task_id: &str) -> String {
-    format!("{NOTIFICATION_PREFIX}{task_id}; use TaskOutput to read its retained output]")
+pub fn notification_header(task_id: &str, reach: TaskReach) -> String {
+    match reach {
+        TaskReach::TaskTools => format!("{NOTIFICATION_PREFIX}{task_id}; use TaskOutput to read its retained output]"),
+        TaskReach::Completion => format!("{NOTIFICATION_PREFIX}{task_id}; its retained output follows]"),
+    }
+}
+
+/// What a command started in the background answers: its task and pid, and
+/// how the session's model reaches it — the task tools, or, in a session
+/// given neither, the completion that brings its output back. Nothing else is
+/// promised there: a `kill` of the pid can meet the shell's kill guard.
+#[must_use]
+pub fn started_line(task_id: &str, pid: u32, reach: TaskReach) -> String {
+    match reach {
+        TaskReach::TaskTools => format!(
+            "Started background task {task_id} (pid {pid}). Poll output with TaskOutput(task_id), stop with TaskStop."
+        ),
+        TaskReach::Completion => format!(
+            "Started background task {task_id} (pid {pid}). Its output comes back to you when it exits."
+        ),
+    }
 }
 
 #[must_use]
@@ -197,6 +220,27 @@ mod tests {
         }
         log.push_str(closer);
         log
+    }
+
+    /// The start line and the completion notice name the task tools only to a
+    /// session that reaches them; one that does not is told what it does
+    /// reach — the output that comes back when the command exits — and the
+    /// notice keeps the shape the screen finds it by.
+    #[test]
+    fn the_start_and_the_notice_name_only_the_road_the_session_reaches() {
+        assert_eq!(
+            started_line("task-1", 4242, TaskReach::TaskTools),
+            "Started background task task-1 (pid 4242). Poll output with TaskOutput(task_id), stop with TaskStop."
+        );
+        let started = started_line("task-1", 4242, TaskReach::Completion);
+        assert!(started.starts_with("Started background task task-1 (pid 4242). "), "{started}");
+        assert_eq!(started, "Started background task task-1 (pid 4242). Its output comes back to you when it exits.");
+        let notice = notification_header("task-1", TaskReach::Completion);
+        assert!(is_notification_header(&notice), "{notice}");
+        assert!(is_notification_header(&notification_header("task-1", TaskReach::TaskTools)));
+        for text in [started, notice] {
+            assert!(!text.contains("TaskOutput") && !text.contains("TaskStop"), "{text}");
+        }
     }
 
     #[test]

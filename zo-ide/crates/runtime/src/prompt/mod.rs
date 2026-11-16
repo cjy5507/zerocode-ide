@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -417,13 +418,50 @@ fn log_prompt_boot_component(label: &str, started: std::time::Instant) {
     }
 }
 
-/// Builder for the runtime system prompt and dynamic environment sections.
+/// The tools each tool-teaching static section is about. A section is sent only
+/// to a session that reaches one of its tools ([`PromptToolReach`]).
+const DELEGATION_TOOLS: &[&str] = &["Agent", "SpawnMultiAgent", "Workflow"];
+const CLARIFICATION_TOOLS: &[&str] = &["AskUserQuestion"];
+const SKILL_TOOLS: &[&str] = &["Skill", "skill_load", "skill_search"];
+const MEMORY_TOOLS: &[&str] = &["MemoryWrite"];
+
+/// Which of the tools the static prompt teaches the session can call — by
+/// handler name, as the host's tool lists hold them.
 ///
-/// `Default` is written out rather than derived: `Self::spawn_family` must
-/// default to **on**, and a derived `bool` defaults to `false` — which would
-/// silently drop the delegation rubric from every prompt, not just the
-/// `--no-spawn` ones.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A section that teaches only tools the session cannot reach is not sent: it
+/// would teach the model to call what it will be refused, and pay for that on
+/// every request. `# Delegation and workflow routing` follows `Agent` (and the
+/// deferred `SpawnMultiAgent`, `Workflow`), `# Clarifying questions` follows
+/// `AskUserQuestion`, `# Skills and library documentation` follows `Skill`
+/// (and the deferred `skill_load`, `skill_search`), and `# Persistent memory`
+/// follows `MemoryWrite` — the tool its text says to write with, not the file
+/// tools a session keeps. The default reaches every tool: the prompt every
+/// session was sent before sessions differed in their tools.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptToolReach {
+    unreached: BTreeSet<&'static str>,
+}
+
+impl PromptToolReach {
+    /// Ask `reaches` about each tool a section teaches.
+    #[must_use]
+    pub fn from_fn(reaches: impl Fn(&str) -> bool) -> Self {
+        let unreached = [DELEGATION_TOOLS, CLARIFICATION_TOOLS, SKILL_TOOLS, MEMORY_TOOLS]
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&tool| !reaches(tool))
+            .collect();
+        Self { unreached }
+    }
+
+    fn reaches_any(&self, tools: &[&str]) -> bool {
+        tools.iter().any(|tool| !self.unreached.contains(*tool))
+    }
+}
+
+/// Builder for the runtime system prompt and dynamic environment sections.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SystemPromptBuilder {
     output_style_name: Option<String>,
     output_style_prompt: Option<String>,
@@ -438,13 +476,11 @@ pub struct SystemPromptBuilder {
     /// line so the model is told what it actually is. `None` (no bound model
     /// yet) falls back to [`frontier_model_name`].
     model: Option<String>,
-    /// Whether this session can actually delegate. `false` drops
-    /// `# Delegation and workflow routing` — every one of its bullets names
-    /// `Agent`, `SpawnMultiAgent` or `Workflow`, so with the spawn family
-    /// turned off (`--no-spawn`) it is 1,315 tokens teaching the model to use
-    /// tools it will be refused. Defaults to `true`: delegation is on unless a
-    /// launch flag says otherwise.
-    spawn_family: bool,
+    /// What the session reaches of the tools the static sections teach. The
+    /// default reaches all of them; a session given fewer tools — a launch
+    /// list, a profile's core set, `--no-spawn` — is not taught the ones it
+    /// lacks.
+    tool_reach: PromptToolReach,
     /// The knowledge vault this session should consult, when one is configured
     /// and the session is not already running inside it.
     second_brain: Option<crate::second_brain::SecondBrain>,
@@ -457,26 +493,6 @@ pub struct SystemPromptBuilder {
     /// harness costs before a turn exists — and any host whose reminders really
     /// are fixed for the session.
     reminders: Vec<ReminderCandidate>,
-}
-
-impl Default for SystemPromptBuilder {
-    fn default() -> Self {
-        Self {
-            output_style_name: None,
-            output_style_prompt: None,
-            os_name: None,
-            os_version: None,
-            append_sections: Vec::new(),
-            project_context: None,
-            config: None,
-            mode: PromptMode::default(),
-            model: None,
-            // Delegation is on unless a launch flag turns it off.
-            spawn_family: true,
-            second_brain: None,
-            reminders: Vec::new(),
-        }
-    }
 }
 
 impl SystemPromptBuilder {
@@ -511,10 +527,10 @@ impl SystemPromptBuilder {
         self
     }
 
-    /// Turn the delegation rubric off for a session that cannot delegate.
+    /// Say what the session reaches of the tools the static sections teach.
     #[must_use]
-    pub fn with_spawn_family(mut self, spawn_family: bool) -> Self {
-        self.spawn_family = spawn_family;
+    pub fn with_tool_reach(mut self, tool_reach: PromptToolReach) -> Self {
+        self.tool_reach = tool_reach;
         self
     }
 
@@ -569,19 +585,25 @@ impl SystemPromptBuilder {
         }
         sections.push(get_simple_system_section());
         sections.push(get_responding_section());
-        sections.push(get_clarification_section());
+        if self.tool_reach.reaches_any(CLARIFICATION_TOOLS) {
+            sections.push(get_clarification_section());
+        }
         sections.push(get_default_coding_harness_section());
         sections.push(get_grounding_in_code_section());
         sections.push(get_simple_doing_tasks_section(profile.finish_rule));
-        if self.spawn_family {
+        if self.tool_reach.reaches_any(DELEGATION_TOOLS) {
             sections.push(get_delegation_section());
         }
         sections.push(get_actions_section());
         if let Some(discipline) = get_turn_discipline_section(self.mode) {
             sections.push(discipline);
         }
-        sections.push(get_skills_and_docs_section());
-        sections.push(get_memory_protocol_section());
+        if self.tool_reach.reaches_any(SKILL_TOOLS) {
+            sections.push(get_skills_and_docs_section());
+        }
+        if self.tool_reach.reaches_any(MEMORY_TOOLS) {
+            sections.push(get_memory_protocol_section());
+        }
         sections.push(get_context_trust_label_section());
         // Filter once, here, rather than at each push: the arm is a property of
         // the whole static region, and a filter cannot forget a section a
@@ -1859,9 +1881,9 @@ pub fn load_system_prompt(
         model,
         false,
         PromptMode::Subagent,
-        // A sub-agent keeps the rubric: it can still delegate further, and the
-        // host's `--no-spawn` is enforced at the wire, not by this prompt.
-        true,
+        // A sub-agent keeps every section: it can still delegate further, and
+        // the host's `--no-spawn` is enforced at the wire, not by this prompt.
+        PromptToolReach::default(),
     )
 }
 
@@ -1894,28 +1916,28 @@ pub fn load_system_prompt_for_main_with_mode(
     model: Option<&str>,
     mode: PromptMode,
 ) -> Result<Vec<String>, PromptBuildError> {
-    load_system_prompt_for_main_with_mode_and_spawn(
+    load_system_prompt_for_main_with_mode_and_reach(
         cwd,
         current_date,
         os_name,
         os_version,
         model,
         mode,
-        true,
+        PromptToolReach::default(),
     )
 }
 
-/// [`load_system_prompt_for_main_with_mode`] plus the host's answer to "can
-/// this session delegate?". `false` drops the delegation rubric — see
-/// [`SystemPromptBuilder::with_spawn_family`].
-pub fn load_system_prompt_for_main_with_mode_and_spawn(
+/// [`load_system_prompt_for_main_with_mode`] plus the host's answer to "which
+/// of the tools the prompt teaches can this session call?" — see
+/// [`PromptToolReach`].
+pub fn load_system_prompt_for_main_with_mode_and_reach(
     cwd: impl Into<PathBuf>,
     current_date: impl Into<String>,
     os_name: impl Into<String>,
     os_version: impl Into<String>,
     model: Option<&str>,
     mode: PromptMode,
-    spawn_family: bool,
+    tool_reach: PromptToolReach,
 ) -> Result<Vec<String>, PromptBuildError> {
     load_system_prompt_with_options(
         &cwd.into(),
@@ -1925,7 +1947,7 @@ pub fn load_system_prompt_for_main_with_mode_and_spawn(
         model,
         true,
         mode,
-        spawn_family,
+        tool_reach,
     )
 }
 
@@ -1938,7 +1960,7 @@ fn load_system_prompt_with_options(
     model: Option<&str>,
     apply_output_style: bool,
     mode: PromptMode,
-    spawn_family: bool,
+    tool_reach: PromptToolReach,
 ) -> Result<Vec<String>, PromptBuildError> {
     let prompt_started = std::time::Instant::now();
     // A sub-agent's context skips the `git status` subprocess (see
@@ -1978,7 +2000,7 @@ fn load_system_prompt_with_options(
         .with_project_context(project_context)
         .with_runtime_config(config)
         .with_mode(mode)
-        .with_spawn_family(spawn_family);
+        .with_tool_reach(tool_reach);
     if let Some(vault) = second_brain {
         builder = builder.with_second_brain(vault);
     }

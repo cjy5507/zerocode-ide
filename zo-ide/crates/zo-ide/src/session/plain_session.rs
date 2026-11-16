@@ -924,16 +924,19 @@ impl PlainSession {
             model_selection,
             origins: selection_origins,
         } = opening;
-        // The tools the session is given: a list the launch named, else the
-        // one the opening model's harness profile holds a root session to
-        // (`tools::harness_tool_set`) — the list `--allowed-tools` would name,
-        // read once here like the system prompt. A pane child keeps what its
-        // parent resolved.
-        let allowed_tools = options.allowed_tools.clone().or_else(|| {
-            (options.parent_registry.is_none() && options.teammate_harness.is_none())
-                .then(|| tools::harness_tool_set(&model))
-                .flatten()
-        });
+        // The tools the session is given (`opening_tool_list`), read once
+        // here like the system prompt.
+        let allowed_tools = opening_tool_list(
+            options.allowed_tools.as_ref(),
+            options.parent_registry.is_none() && options.teammate_harness.is_none(),
+            options.headless,
+            &model,
+            || super::runtime_builder::person_attached_tools(&cwd, options.mcp_config.as_deref()),
+        );
+        // What the session reaches of what it is given: the text built below
+        // names no other tool (`tools::ToolOffer`).
+        let denied_tools = crate::runtime_support::disallowed_tool_names();
+        let offer = tools::ToolOffer::new(allowed_tools.as_ref(), denied_tools.as_ref());
         let prompt_started = std::time::Instant::now();
         crate::runtime_support::log_boot_stage("open/session-handle", opened);
         // A teammate runs the prompt its parent resolved, as written — never
@@ -953,12 +956,14 @@ impl PlainSession {
                 } else {
                     runtime::PromptMode::Interactive
                 },
+                offer,
             )?,
         };
         crate::runtime_support::log_boot_stage("open/system-prompt", prompt_started);
         let runtime_started = std::time::Instant::now();
         let effort = Some(opening_effort);
         let tasks = Arc::new(runtime::task_registry::TaskRegistry::for_session(&runtime::zo_project_state_dir(registry.origin_cwd()), &handle.id)?);
+        tasks.set_reach(offer.task_reach());
 
         let persisted_goal = session.session_goal.clone();
         let had_goal_reminder = session_has_goal_reminder(&session);
@@ -2995,6 +3000,26 @@ pub fn permission_label(mode: PermissionMode) -> &'static str {
     }
 }
 
+/// The tool list a session opens with: the list the launch named, else, for a
+/// `root` session, the one the opening model's harness profile holds it to
+/// (`tools::harness_tool_set`) — the list `--allowed-tools` would name. A pane
+/// child keeps what its parent resolved. A `headless_core` profile holds only a
+/// run nobody attends (`headless`, the judgment that picks the prompt's
+/// `Operating autonomously`) to that list, and only while `attached` says the
+/// person attached nothing of their own
+/// ([`super::runtime_builder::person_attached_tools`]) — asked only then.
+fn opening_tool_list(
+    launch: Option<&AllowedToolSet>,
+    root: bool,
+    headless: bool,
+    model: &str,
+    attached: impl FnOnce() -> bool,
+) -> Option<AllowedToolSet> {
+    launch
+        .cloned()
+        .or_else(|| root.then(|| tools::harness_tool_set(model, || headless && !attached())).flatten())
+}
+
 /// `<id>.system-prompt.json` — 세션이 만들어질 때의 프롬프트를 보존해 재개 시
 /// 그대로 재사용한다(바이트가 달라지면 제공자 캐시 프리픽스가 전부 무효).
 fn session_system_prompt_path(session_path: &Path) -> PathBuf {
@@ -3030,6 +3055,7 @@ fn session_system_prompt(
     session_path: &Path,
     resumed: bool,
     prompt_mode: runtime::PromptMode,
+    offer: tools::ToolOffer<'_>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     if resumed {
         if let Some(stored) = std::fs::read(session_system_prompt_path(session_path))
@@ -3044,6 +3070,7 @@ fn session_system_prompt(
         cwd,
         prompt_mode,
         model,
+        offer,
     )?;
     if let Ok(payload) = serde_json::to_vec(&built) {
         let _ = core_types::paths::write_private_file(
@@ -3062,9 +3089,10 @@ fn install_headless_task_delivery(runtime: &BuiltRuntime, tasks: &runtime::task_
             if let Some(inner) = runtime.runtime.as_ref() {
                 let inbox = inner.agent_notification_inbox();
                 let owner = session_id.to_string();
+                let reach = tasks.reach();
                 let callback: runtime::task_registry::TaskCompletionCallback = Box::new(move |task_id, status, output, session_id| {
                     if session_id.as_deref() != Some(owner.as_str()) { return; }
-                    if let Some(notification) = super::agent_completion_pump::background_task_notification(task_id, status, output) {
+                    if let Some(notification) = super::agent_completion_pump::background_task_notification(task_id, status, output, reach) {
                         inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(notification);
                     }
                 });
@@ -3593,6 +3621,7 @@ mod prompt_mode_tests {
                 dir.path(),
                 mode,
                 "claude-opus-5",
+                tools::ToolOffer::default(),
             )
             .expect("prompt builds")
             .join("\n")
@@ -3942,5 +3971,40 @@ mod resume_progress_tests {
         })
         .expect("opens");
         assert_eq!(steps, vec![(size, size)]);
+    }
+}
+
+#[cfg(test)]
+mod opening_tool_list_tests {
+    use super::{opening_tool_list, AllowedToolSet};
+
+    /// `headless_core` holds only a root run nobody attends, with nothing of
+    /// the person's attached, to the core list. A session a person attends, a
+    /// run the person attached tools to, a launch list and a pane child keep
+    /// what they had, and only a headless root run without a list looks for
+    /// the person's tools.
+    #[test]
+    fn headless_core_holds_only_a_bare_root_run_nobody_attends() {
+        let _lock = crate::test_env_lock();
+        let _overlay = crate::support::EnvVarGuard::set(
+            api::MODEL_CONTEXT_WINDOWS_ENV,
+            Some(r#"{"models":[{"ids":["acme-coder-1"],"harness":{"edit_tool":"apply_patch","tool_set":"headless_core"}}]}"#),
+        );
+        let core: AllowedToolSet = ["bash", "read_file", "write_file", "apply_patch"].map(String::from).into();
+        let launch: AllowedToolSet = ["bash".to_string()].into();
+        let looked = std::cell::Cell::new(0_u32);
+        let open = |launch: Option<&AllowedToolSet>, root: bool, headless: bool, attached: bool| {
+            opening_tool_list(launch, root, headless, "acme-coder-1", || {
+                looked.set(looked.get() + 1);
+                attached
+            })
+        };
+
+        assert_eq!(open(None, true, true, false), Some(core), "a bare root run nobody attends");
+        assert_eq!(open(None, true, true, true), None, "the person's MCP server, plugin tool or skill keeps every tool");
+        assert_eq!(open(None, true, false, false), None, "a session a person attends keeps every tool");
+        assert_eq!(open(Some(&launch), true, true, false), Some(launch.clone()), "a launch list wins");
+        assert_eq!(open(None, false, true, false), None, "a pane child keeps what its parent resolved");
+        assert_eq!(looked.get(), 2, "only a headless root run without a list looks for the person's tools");
     }
 }

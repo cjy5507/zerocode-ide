@@ -9,7 +9,8 @@ use tools::GlobalToolRegistry;
 
 use crate::default_prompt_date;
 
-/// Build the main-loop system prompt for `model`.
+/// Build the main-loop system prompt for `model`, for a session that reaches
+/// what `offer` says it does.
 ///
 /// `model` must be the session's *settled* model — the one the runtime is
 /// about to be bound to, after preference resolution — because it is what the
@@ -18,23 +19,24 @@ pub(crate) fn build_system_prompt_for_mode(
     cwd: &Path,
     mode: runtime::PromptMode,
     model: &str,
+    offer: tools::ToolOffer<'_>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     // Main-loop prompt: the only surface that carries the configured
     // `outputStyle` (sub-agents and status views stay on the stock prompt).
-    // `# Delegation and workflow routing` is 1,315 tokens of `Agent` /
-    // `SpawnMultiAgent` / `Workflow` rubric. With the spawn family turned off it
-    // teaches the model to reach for tools it will be refused, so it comes out
-    // — read from the same session deny set that decides what is advertised
-    // (`crate::runtime_support::disallowed_tool_names`), so the prompt and the
-    // wire can never disagree about whether this session can delegate.
-    let mut sections = runtime::load_system_prompt_for_main_with_mode_and_spawn(
+    // A section that teaches only tools the session cannot reach comes out —
+    // `# Delegation and workflow routing` alone is 1,315 tokens of `Agent` /
+    // `SpawnMultiAgent` / `Workflow` rubric that would teach the model to reach
+    // for tools it will be refused. Read from the session's own tool list and
+    // deny set, the ones that decide what is advertised, so the prompt and the
+    // wire can never disagree about what this session can call.
+    let mut sections = runtime::load_system_prompt_for_main_with_mode_and_reach(
         cwd,
         default_prompt_date(),
         env::consts::OS,
         "unknown",
         Some(model),
         mode,
-        spawn_family_enabled(),
+        runtime::PromptToolReach::from_fn(|tool| offer.reaches(tool)),
     )?;
     // Deferred-tool manifest: the model cannot ToolSearch for names it has
     // never seen. Session-stable, so it never disturbs the prompt cache — the
@@ -42,14 +44,22 @@ pub(crate) fn build_system_prompt_for_mode(
     // change under a session (`tools::ToolReach`), less the tools the person's
     // rules refuse every call of, read once here (`rules_as_read`). Appended
     // here rather than in the runtime builder because the deferred set is
-    // owned by the tools crate, which depends on runtime — not vice versa.
-    let denied_by = rules_as_read(cwd);
-    sections.push(tools::deferred_tool_manifest_section_for(
-        tools::ToolReach::here(),
-        denied_by.as_ref(),
-    ));
+    // owned by the tools crate, which depends on runtime — not vice versa. A
+    // session given neither of the doors it names (`CapabilityInvoke`,
+    // `ToolSearch`) is not sent it: nothing in it could be called.
+    if offer.reaches(tools::capability::CAPABILITY_INVOKE) || offer.reaches(TOOL_SEARCH) {
+        let denied_by = rules_as_read(cwd);
+        sections.push(tools::deferred_tool_manifest_section_for(
+            tools::ToolReach::here(),
+            denied_by.as_ref(),
+        ));
+    }
     Ok(sections)
 }
+
+/// The tool the deferred-tool manifest sends a model to for MCP and plugin
+/// tools.
+const TOOL_SEARCH: &str = "ToolSearch";
 
 /// The permission rules a session under `cwd` reads, as a policy — what the
 /// prompt asks [`PermissionPolicy::denies_every_call`] of. The same settings
@@ -67,22 +77,6 @@ fn rules_as_read(cwd: &Path) -> Option<PermissionPolicy> {
 /// offers ([`rules_as_read`]).
 fn rules_policy(mode: PermissionMode, feature_config: &runtime::RuntimeFeatureConfig) -> PermissionPolicy {
     PermissionPolicy::new(mode).with_permission_rules(feature_config.permission_rules())
-}
-
-/// Whether this session can delegate at all.
-///
-/// True unless every member of [`crate::session::plain_session::SPAWN_FAMILY_TOOLS`]
-/// is in the session deny set — which is exactly what `--no-spawn` installs.
-/// A partial deny (someone passing `--disallowedTools Agent` alone) keeps the
-/// rubric, because the remaining two tools are still callable and the rubric is
-/// how the model chooses between them.
-fn spawn_family_enabled() -> bool {
-    let Some(disallowed) = crate::runtime_support::disallowed_tool_names() else {
-        return true;
-    };
-    !crate::session::plain_session::SPAWN_FAMILY_TOOLS
-        .iter()
-        .all(|tool| disallowed.contains(*tool))
 }
 
 
@@ -249,7 +243,7 @@ mod system_prompt_tests {
         fs::write(root.join("context.md"), "SUPPLIED_CWD_RULE").expect("write instructions");
 
         let prompt =
-            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-opus-5")
+            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-opus-5", tools::ToolOffer::default())
                 .expect("system prompt should load")
                 .join("\n\n");
 
@@ -277,7 +271,7 @@ mod system_prompt_tests {
         .expect("write settings");
 
         let prompt =
-            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-opus-5")
+            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-opus-5", tools::ToolOffer::default())
                 .expect("system prompt should load")
                 .join("\n\n");
         let line = prompt
@@ -317,14 +311,14 @@ mod system_prompt_tests {
         let root = crate::support::temp_dir("bound-model");
 
         let fable =
-            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-fable-5")
+            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-fable-5", tools::ToolOffer::default())
                 .expect("system prompt should load")
                 .join("\n\n");
         assert!(fable.contains("Model family: Claude Fable 5"), "{fable}");
         assert!(!fable.contains("Opus"), "fable session must not claim Opus");
 
         let opus =
-            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-opus-5")
+            build_system_prompt_for_mode(&root, runtime::PromptMode::Interactive, "claude-opus-5", tools::ToolOffer::default())
                 .expect("system prompt should load")
                 .join("\n\n");
         assert!(opus.contains("Model family: Claude Opus 5"), "{opus}");

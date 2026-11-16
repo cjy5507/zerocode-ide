@@ -62,7 +62,9 @@ const TASK_TOOLS_LINE: &str = "Poll output with TaskOutput(task_id), stop with T
 
 /// A catalog overlay that declares `harness` for the measured model.
 fn overlay(harness: Value) -> String {
-    json!({"models": [{"ids": [MODEL], "harness": harness}]}).to_string()
+    let mut row = json!({"ids": [MODEL]});
+    row["harness"] = harness;
+    json!({"models": [row]}).to_string()
 }
 
 fn report(model: &str) -> PromptInput {
@@ -361,13 +363,13 @@ impl Scene {
     /// allowed every call so the tool runs.
     fn tool_result(&self, server: &ChatServer, env: &[(&str, &str)]) -> String {
         let (bodies, told) = self.bodies(server, env, &["--permission-mode", "danger-full-access"]);
-        bodies
+        let message = bodies
             .iter()
             .filter_map(|body| body["messages"].as_array())
             .flatten()
             .find(|message| message["role"] == "tool")
-            .map(|message| content_text(&message["content"]))
-            .unwrap_or_else(|| panic!("no tool result reached the endpoint:\n{told}"))
+            .unwrap_or_else(|| panic!("no tool result reached the endpoint:\n{told}"));
+        content_text(&message["content"])
     }
 
     /// Write `skills/scene-skill/SKILL.md` under the scene's zo home: a skill
@@ -564,7 +566,10 @@ fn a_background_start_names_only_what_the_run_reaches() {
 /// alias and a crowd of names the catalog does not list, from this build and
 /// from a baseline build (`ZO_BASELINE_BIN`, a `zo` built from the commit
 /// before a harness change). A change whose defaults keep the harness passes
-/// with every digest equal.
+/// with every digest equal. A name whose shipped profile says `headless_core`
+/// is, here, a run nobody attends with nothing attached (a piped
+/// `--prompt-input` in a bare home), so its digest must move — and only those
+/// names' may.
 #[test]
 #[ignore = "needs ZO_BASELINE_BIN: a zo built from the commit before the change"]
 fn every_shipped_row_alias_and_unlisted_name_keeps_the_baseline_digest() {
@@ -579,6 +584,10 @@ fn every_shipped_row_alias_and_unlisted_name_keeps_the_baseline_digest() {
         .collect();
     let crowd = [MODEL, "acme-coder-1", "gpt-9.9-nova", "chatgpt-4o-latest", "local-gpt-helper", "local-codex-helper", "o1", "o3", "o4"];
     names.extend(crowd.map(str::to_string));
+    let headless_core: Vec<bool> = {
+        let _own = fixture::OwnProviders::new();
+        names.iter().map(|name| api::harness_profile_for_model(name).tool_set == api::ToolSet::HeadlessCore).collect()
+    };
     let scene = Scene::new();
     let providers = json!([{"name": "Acme", "base_url": "http://127.0.0.1:9/v1", "requires_auth": false, "models": [MODEL, "acme-coder-1"]}]).to_string();
     let digest = |binary: &Path, name: &str| -> (Option<String>, String) {
@@ -600,18 +609,24 @@ fn every_shipped_row_alias_and_unlisted_name_keeps_the_baseline_digest() {
         let digest = stdout.lines().find_map(|row| row.trim_start().strip_prefix("Digest").map(|value| value.trim().to_string()));
         (digest, format!("{stdout}\n{}", String::from_utf8_lossy(&output.stderr)))
     };
-    let mut compared = 0;
+    let (mut compared, mut moved) = (0, 0);
     let mut lines = Vec::new();
-    for name in &names {
+    for (name, moves) in names.iter().zip(headless_core) {
         let (before, before_told) = digest(&baseline, name);
         let (after, after_told) = digest(Path::new(env!("CARGO_BIN_EXE_zo")), name);
-        assert_eq!(before, after, "{name}: the digest moved\n-- baseline --\n{before_told}\n-- this build --\n{after_told}");
+        if moves && after.is_some() {
+            assert_ne!(before, after, "{name}: headless_core must send the core request\n-- baseline --\n{before_told}\n-- this build --\n{after_told}");
+            moved += 1;
+        } else {
+            assert_eq!(before, after, "{name}: the digest moved\n-- baseline --\n{before_told}\n-- this build --\n{after_told}");
+        }
         if after.is_some() {
             compared += 1;
         }
-        lines.push(format!("{name}\t{}", after.unwrap_or_else(|| "no digest (both builds)".to_string())));
+        let mark = if moves { "\tmoved (headless_core)" } else { "" };
+        lines.push(format!("{name}\t{}{mark}", after.unwrap_or_else(|| "no digest (both builds)".to_string())));
     }
     println!("{}", lines.join("\n"));
-    println!("compared {compared} of {} names", names.len());
+    println!("compared {compared} of {} names, {moved} moved by headless_core", names.len());
     assert!(compared * 4 >= names.len() * 3, "too few names opened to compare: {compared} of {}", names.len());
 }

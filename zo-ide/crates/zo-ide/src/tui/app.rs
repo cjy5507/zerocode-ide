@@ -12766,7 +12766,7 @@ mod tests {
         let peer = runtime::peer_message_frame(Some("reviewer"), "look at src/lib.rs");
         let task = format!(
             "{}\n\n{}two\n{}",
-            notification_header("task-1"),
+            notification_header("task-1", runtime::task_registry::TaskReach::TaskTools),
             head("ls", 42),
             exit_line(Some(0))
         );

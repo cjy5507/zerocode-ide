@@ -233,7 +233,7 @@ pub use misc_tools::push_notification::{
 };
 pub use registry::{
     deferred_tool_manifest_section, deferred_tool_manifest_section_for, harness_tool_set, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition,
-    ToggleableTool, ToggleableToolSource, ToolManifestEntry, ToolReach, ToolRegistry, ToolSource,
+    ToggleableTool, ToggleableToolSource, ToolManifestEntry, ToolOffer, ToolReach, ToolRegistry, ToolSource,
     ToolSpec,
 };
 pub use team_tools::{ensure_team_inbox_store, host_post_team_inbox_update};

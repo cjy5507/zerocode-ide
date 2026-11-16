@@ -729,12 +729,7 @@ fn execute_shell_command(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;
-        return Ok(backgrounded_command_output(
-            child.id().to_string(),
-            Some(child.id()),
-            false,
-            sandbox_status,
-        ));
+        return Ok(backgrounded_command_output(child.id().to_string(), None, sandbox_status));
     }
 
     let mut process = std::process::Command::new(shell);
@@ -757,7 +752,7 @@ fn execute_shell_command(
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 Ok(timed_out_command_output(
                     timeout_ms,
-                    tasks.is_some(),
+                    tasks.map(runtime::task_registry::TaskRegistry::reach),
                     sandbox_status,
                 ))
             }
@@ -788,7 +783,8 @@ fn register_background_command(
         &runtime::background_log::head(command, pid),
     );
     registry.attach_background_process(&task.task_id, child);
-    backgrounded_command_output(task.task_id, Some(pid), true, sandbox_status)
+    let started = runtime::background_log::started_line(&task.task_id, pid, registry.reach());
+    backgrounded_command_output(task.task_id, Some(started), sandbox_status)
 }
 
 fn fail_closed_if_sandbox_unavailable(sandbox_status: &SandboxStatus) -> std::io::Result<()> {
@@ -803,23 +799,17 @@ fn fail_closed_if_sandbox_unavailable(sandbox_status: &SandboxStatus) -> std::io
 }
 
 /// Output shape for a command spawned via `run_in_background`. Registry-backed
-/// calls return a task id whose output can be polled and stopped; legacy callers
-/// without a registry retain the detached PID-only behavior.
+/// calls return a task id whose output is kept, and `started` says how the
+/// session reaches it (`runtime::background_log::started_line`); legacy callers
+/// without a registry retain the detached PID-only behavior (`None`).
 fn backgrounded_command_output(
     task_id: String,
-    pid: Option<u32>,
-    output_captured: bool,
+    started: Option<String>,
     sandbox_status: SandboxStatus,
 ) -> BashCommandOutput {
+    let output_captured = started.is_some();
     BashCommandOutput {
-        stdout: if output_captured {
-            format!(
-                "Started background task {task_id} (pid {}). Poll output with TaskOutput(task_id), stop with TaskStop.",
-                pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string())
-            )
-        } else {
-            String::new()
-        },
+        stdout: started.unwrap_or_default(),
         stderr: String::new(),
         raw_output_path: None,
         interrupted: false,
@@ -868,12 +858,12 @@ fn completed_command_output(output: &Output, sandbox_status: SandboxStatus) -> B
 /// Output shape for a command killed because it exceeded its timeout budget.
 fn timed_out_command_output(
     timeout_ms: u64,
-    output_is_pollable: bool,
+    background: Option<runtime::task_registry::TaskReach>,
     sandbox_status: SandboxStatus,
 ) -> BashCommandOutput {
     BashCommandOutput {
         stdout: String::new(),
-        stderr: runtime::timeout_stderr_with_background_advice(timeout_ms, output_is_pollable),
+        stderr: runtime::timeout_stderr_with_background_advice(timeout_ms, background),
         raw_output_path: None,
         interrupted: true,
         is_image: None,
@@ -1280,7 +1270,7 @@ mod tests {
     fn powershell_timeout_advice_never_promises_a_task_lookup_without_registry() {
         let sandbox_status =
             resolve_sandbox_status(&SandboxConfig::default(), Path::new("."));
-        let output = timed_out_command_output(1_000, false, sandbox_status);
+        let output = timed_out_command_output(1_000, None, sandbox_status);
 
         assert!(output.interrupted);
         assert_eq!(output.return_code_interpretation.as_deref(), Some("timeout"));

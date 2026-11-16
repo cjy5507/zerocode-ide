@@ -309,7 +309,9 @@ fn build_background_notification(
         .or_else(|| non_blank(completion.result.clone()))
         .or_else(|| (completion.status != "completed").then(|| error.clone()).flatten())
         .unwrap_or_else(|| tools::AGENT_NOTIFICATION_EMPTY_RESULT.to_string());
-    Some(completion_notification(completion, &body, error.as_deref()))
+    // An attended session's background commands are read with the task tools
+    // it is given; a launch list without them is the one case this misses.
+    Some(completion_notification(completion, &body, error.as_deref(), runtime::task_registry::TaskReach::TaskTools))
 }
 
 /// Word to the main conversation about a helper that may be stuck
@@ -445,18 +447,30 @@ fn starvation_notification(completion: &AgentCompletion) -> Option<AgentNotifica
 }
 
 /// A headless host has no idle follow-up loop, but a background process that
-/// exits during its turn must still enter the same tool-boundary inbox.
-pub(super) fn background_task_notification(task_id: String, status: runtime::task_registry::TaskStatus, output: String) -> Option<AgentNotification> {
+/// exits during its turn must still enter the same tool-boundary inbox. `reach`
+/// is how the session's model reaches the task (its registry's
+/// [`runtime::task_registry::TaskRegistry::reach`]), which the notice names.
+pub(super) fn background_task_notification(
+    task_id: String,
+    status: runtime::task_registry::TaskStatus,
+    output: String,
+    reach: runtime::task_registry::TaskReach,
+) -> Option<AgentNotification> {
     if !matches!(status, runtime::task_registry::TaskStatus::Completed | runtime::task_registry::TaskStatus::Failed) { return None; }
     let completion = tools::background_task_completion(task_id, &status.to_string(), Some(output));
     let body = completion.result.as_deref().unwrap_or_default();
-    Some(completion_notification(&completion, body, None))
+    Some(completion_notification(&completion, body, None, reach))
 }
 
-fn completion_notification(completion: &AgentCompletion, body: &str, error: Option<&str>) -> AgentNotification {
+fn completion_notification(
+    completion: &AgentCompletion,
+    body: &str,
+    error: Option<&str>,
+    reach: runtime::task_registry::TaskReach,
+) -> AgentNotification {
     let label = helper_label(&completion.name, &completion.agent_id);
     let header = if label == runtime::background_log::BACKGROUND_BASH {
-        runtime::background_log::notification_header(&completion.agent_id)
+        runtime::background_log::notification_header(&completion.agent_id, reach)
     } else { tools::background_agent_notification_header(
         &completion.agent_id,
         label,
