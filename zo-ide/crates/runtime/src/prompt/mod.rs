@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{ConfigError, ConfigLoader, RuntimeConfig};
+use crate::sandbox::{resolve_sandbox_status, FilesystemIsolationMode, SandboxStatus};
 use crate::git_snapshot::read_git_root;
 use zerocode_core::jev::{JevMode, SKILLS, SKILL_TOP_CAP};
 
@@ -670,7 +671,7 @@ impl SystemPromptBuilder {
         );
         let model_family = model_family_line_value(self.model.as_deref());
         let mut lines = vec![ENVIRONMENT_SECTION_HEADING.to_string()];
-        lines.extend(prepend_bullets(vec![
+        let mut bullets = vec![
             format!("{MODEL_FAMILY_LABEL}{model_family}"),
             format!("Working directory: {cwd}"),
             format!("Date: {date}"),
@@ -679,8 +680,76 @@ impl SystemPromptBuilder {
                 self.os_name.as_deref().unwrap_or("unknown"),
                 self.os_version.as_deref().unwrap_or("unknown")
             ),
-        ]));
+        ];
+        bullets.extend(self.sandbox_line());
+        lines.extend(prepend_bullets(bullets));
         lines.join("\n")
+    }
+
+    /// What a shell command meets in this session, in one line — or nothing
+    /// when the builder was handed no settings or no working directory (a
+    /// micro-prompt, a test), which leaves such a prompt byte for byte as it was.
+    ///
+    /// The bash tool's schema carries a `dangerouslyDisableSandbox` switch
+    /// whether or not a sandbox is on, and nothing else in the prompt said which
+    /// it was. With the sandbox off, the model read the switch as a sandbox: in
+    /// seven of ten benchmark transcripts it held back from installing what it
+    /// needed ("sandboxed maybe no network", "apt may fail due to permissions")
+    /// and worked around a missing tool instead — for eleven steps in one, and
+    /// past the time limit in another.
+    ///
+    /// The status is the one the bash tool resolves for a command that passes no
+    /// switch of its own ([`resolve_sandbox_status`]), read from the same
+    /// settings, so the line cannot disagree with what a command meets.
+    fn sandbox_line(&self) -> Option<String> {
+        let config = self.config.as_ref()?;
+        let cwd = &self.project_context.as_ref()?.cwd;
+        Some(render_sandbox_line(&resolve_sandbox_status(
+            config.sandbox(),
+            cwd,
+        )))
+    }
+}
+
+/// Bullet label of the line that says what a shell command runs under.
+const SANDBOX_LABEL: &str = "Sandbox: ";
+
+/// [`SystemPromptBuilder::sandbox_line`] for a resolved status: the limits that
+/// are actually in force, or that there are none. A sandbox the settings ask
+/// for but this machine cannot provide limits nothing, and is not claimed.
+fn render_sandbox_line(status: &SandboxStatus) -> String {
+    let place = if status.in_container {
+        "this machine (a container)"
+    } else {
+        "this machine"
+    };
+    let mut limits: Vec<&str> = Vec::new();
+    if status.filesystem_write_blocking_active {
+        limits.push(match status.filesystem_mode {
+            FilesystemIsolationMode::AllowList => "writes outside the allowed mounts are blocked",
+            FilesystemIsolationMode::WorkspaceOnly | FilesystemIsolationMode::Off => {
+                "writes outside the workspace are blocked"
+            }
+        });
+    }
+    if status.network_active {
+        limits.push("the network is cut off");
+    }
+    if status.namespace_active {
+        limits.push("processes run in a namespace of their own");
+    }
+    if status.home_tmp_redirected {
+        limits.push("HOME and TMPDIR point at scratch folders");
+    }
+    if limits.is_empty() {
+        format!(
+            "{SANDBOX_LABEL}none — shell commands run directly on {place}; zo restricts neither their files nor their network."
+        )
+    } else {
+        format!(
+            "{SANDBOX_LABEL}on — shell commands run on {place} with these limits: {}.",
+            limits.join("; ")
+        )
     }
 }
 

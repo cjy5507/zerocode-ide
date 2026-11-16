@@ -2201,6 +2201,90 @@ fn model_family_line_follows_the_bound_model() {
     assert!(render(Some("ollama/llama-4-70b")).contains("Model family: llama-4-70b"));
 }
 
+/// The sandbox line names the limits in force, and says so when there are none
+/// — a sandbox that is asked for but limits nothing here is not claimed.
+#[test]
+fn the_sandbox_line_says_what_a_shell_command_meets() {
+    use crate::sandbox::{FilesystemIsolationMode, SandboxStatus};
+
+    let none = SandboxStatus::default();
+    assert_eq!(
+        super::render_sandbox_line(&none),
+        "Sandbox: none — shell commands run directly on this machine; zo restricts neither their files nor their network."
+    );
+    let container = SandboxStatus { in_container: true, ..SandboxStatus::default() };
+    assert_eq!(
+        super::render_sandbox_line(&container),
+        "Sandbox: none — shell commands run directly on this machine (a container); zo restricts neither their files nor their network."
+    );
+    // Enabled in the settings, nothing this machine can enforce: still none.
+    let asked_only = SandboxStatus { enabled: true, ..SandboxStatus::default() };
+    assert!(super::render_sandbox_line(&asked_only).starts_with("Sandbox: none — "));
+
+    let walled = SandboxStatus {
+        enabled: true,
+        active: true,
+        filesystem_write_blocking_active: true,
+        filesystem_active: true,
+        network_active: true,
+        home_tmp_redirected: true,
+        ..SandboxStatus::default()
+    };
+    assert_eq!(
+        super::render_sandbox_line(&walled),
+        "Sandbox: on — shell commands run on this machine with these limits: writes outside the workspace are blocked; the network is cut off; HOME and TMPDIR point at scratch folders."
+    );
+    let mounts = SandboxStatus {
+        filesystem_mode: FilesystemIsolationMode::AllowList,
+        ..walled.clone()
+    };
+    assert!(super::render_sandbox_line(&mounts).contains("writes outside the allowed mounts are blocked"));
+    let namespaced = SandboxStatus {
+        enabled: true,
+        active: true,
+        namespace_active: true,
+        in_container: true,
+        ..SandboxStatus::default()
+    };
+    assert_eq!(
+        super::render_sandbox_line(&namespaced),
+        "Sandbox: on — shell commands run on this machine (a container) with these limits: processes run in a namespace of their own."
+    );
+}
+
+/// A prompt built from a workspace carries the line in its environment section,
+/// and one built with no settings in hand does not grow it.
+#[test]
+fn the_environment_section_says_what_the_sandbox_is_when_settings_are_in_hand() {
+    let _guard = env_lock();
+    ensure_valid_cwd();
+    let root = temp_dir();
+    fs::create_dir_all(&root).expect("root dir");
+    let sections = super::load_system_prompt_for_main(&root, "2026-03-31", "linux", "6.8", None)
+        .expect("main prompt should load");
+    let environment = sections
+        .iter()
+        .find(|section| section.starts_with("# Environment context"))
+        .expect("environment section");
+    let line = environment
+        .lines()
+        .find(|line| line.starts_with(" - Sandbox: "))
+        .unwrap_or_else(|| panic!("no sandbox line: {environment}"));
+    assert!(
+        line.starts_with(" - Sandbox: none — ") || line.starts_with(" - Sandbox: on — "),
+        "{line}"
+    );
+    assert_eq!(
+        environment.lines().last(),
+        Some(line),
+        "the line closes the section, after the platform"
+    );
+    fs::remove_dir_all(&root).expect("cleanup temp dir");
+
+    let bare = super::SystemPromptBuilder::new().with_os("linux", "6.8").render();
+    assert!(!bare.contains("Sandbox: "), "no settings, no claim: {bare}");
+}
+
 /// No bound model (diagnostic dump, harness that has not picked one) falls back
 /// to the catalog's Opus family head — resolved live, never a frozen id.
 #[test]
