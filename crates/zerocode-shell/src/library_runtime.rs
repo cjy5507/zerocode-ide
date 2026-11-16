@@ -162,6 +162,12 @@ pub(crate) struct Context {
     config_home: PathBuf,
     present: Vec<&'static LibraryAgent>,
     path: Option<OsString>,
+    /// The window's `zerocode-mirror`, where a Claude pane's local servers
+    /// can be written through it to start on their first call (t-110740):
+    /// beside the window, on a platform whose stand-in ends what it starts
+    /// with the session. `None` on Windows, where a server's `.cmd` start and
+    /// its tree's end were not measured, and in a build with no mirror.
+    stand_in: Option<PathBuf>,
 }
 
 impl Context {
@@ -195,6 +201,11 @@ impl Context {
                     || on_path(agent.binary, path.as_deref())
             })
             .collect();
+        let stand_in = if cfg!(unix) {
+            crate::hooks::mirror_bin().filter(|bin| bin.is_file())
+        } else {
+            None
+        };
         Ok(Self {
             home,
             data,
@@ -203,6 +214,7 @@ impl Context {
             config_home,
             present,
             path,
+            stand_in,
         })
     }
 
@@ -931,6 +943,19 @@ fn agent_envs(ctx: &Context, agent: &LibraryAgent) -> Vec<(&'static str, OsStrin
     }
 }
 
+/// The stand-in the window's Claude list writes its local servers through,
+/// while the person's switch has them start on their first call: the window's
+/// mirror ([`Context::stand_in`]), or `None` — written straight, as before.
+fn first_call_stand_in(ctx: &Context) -> Option<String> {
+    if ctx.claude_home.is_none() || read_ledger(ctx).mcp_start_at_once {
+        return None;
+    }
+    ctx.stand_in
+        .as_ref()
+        .and_then(|bin| bin.to_str())
+        .map(str::to_owned)
+}
+
 fn add_server(
     ctx: &Context,
     agent: &LibraryAgent,
@@ -938,6 +963,17 @@ fn add_server(
     name: &str,
     entry: &McpEntry,
 ) -> Result<(), String> {
+    let through;
+    let entry = match (agent.mcp, first_call_stand_in(ctx)) {
+        (McpPlace::ClaudeWindow, Some(stand_in)) => {
+            through = McpEntry {
+                def: entry.def.started_on_first_call(&stand_in, name),
+                disabled: entry.disabled,
+            };
+            &through
+        }
+        _ => entry,
+    };
     match mcp::add_command(agent.format, name, &entry.def) {
         Write::Command(argv) => {
             let envs = agent_envs(ctx, agent);
@@ -1024,7 +1060,9 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
                 if result.is_ok() {
                     result = add_server(ctx, known, &file, name, entry);
                 }
-                let written = read_list_now(&file, known.format)
+                let after = read_list_now(&file, known.format);
+                let written = after
+                    .as_ref()
                     .and_then(|servers| servers.get(name).map(|held| held.def.fingerprint()));
                 match (result, written) {
                     (Ok(()), Some(fingerprint)) if fingerprint == entry.def.fingerprint() => {
@@ -1036,6 +1074,18 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
                             .insert(agent.clone(), fingerprint);
                     }
                     (outcome, _) => {
+                        // A replace that took the server out and could not
+                        // put it back must not read, next look, as the agent
+                        // removing it — that takes it from the store and from
+                        // every agent. The window forgets it wrote it there,
+                        // and the next look writes it again (t-110740).
+                        if after
+                            .as_ref()
+                            .is_some_and(|servers| !servers.contains_key(name))
+                            && let Some(record) = ledger.mcp.get_mut(name)
+                        {
+                            record.seen.remove(agent);
+                        }
                         failures += 1;
                         let mut said = line("failed", "mcp", name, agent);
                         said.detail =
@@ -1847,6 +1897,7 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
     let store_before = std::fs::read(ctx.store_mcp()).ok();
     run_mcp(ctx, &mcp_plan.steps, &mut ledger, &mut log);
     keep_store_before(ctx, store_before);
+    respell_claude_window(ctx, &mut ledger, &mut log);
 
     let mut skill_steps = false;
     let mut skill_notes = Vec::new();
@@ -2118,6 +2169,11 @@ pub(crate) struct LogRow {
 #[derive(Debug, Serialize)]
 pub(crate) struct Report {
     pub paused: bool,
+    /// 「MCP 서버를 부를 때만 띄우기」 (t-110740).
+    pub mcp_on_first_call: bool,
+    /// Whether this window can write its Claude list that way at all: its own
+    /// Claude home, and a stand-in beside it ([`Context::stand_in`]).
+    pub mcp_on_first_call_ready: bool,
     pub running: bool,
     pub merged_at: Option<i64>,
     pub store_skills: String,
@@ -2307,6 +2363,8 @@ pub(crate) fn report(ctx: &Context) -> Report {
         .collect();
     Report {
         paused: ledger.paused,
+        mcp_on_first_call: !ledger.mcp_start_at_once,
+        mcp_on_first_call_ready: ctx.claude_home.is_some() && ctx.stand_in.is_some(),
         running: RUNNING.load(std::sync::atomic::Ordering::Relaxed),
         merged_at: ledger.merged_at,
         store_skills: ctx.store_skills().to_string_lossy().into_owned(),
@@ -3002,6 +3060,77 @@ pub(crate) fn align_skill(ctx: &Context, name: &str, agent: &str) -> Result<Repo
     })
 }
 
+/// Write again each local server of the window's Claude list that is not
+/// written the way the switch asks (t-110740). Off, every entry is written
+/// straight. On, an entry written straight — before, or by Claude itself — is
+/// written through this window's stand-in when it has one; an entry written
+/// through a stand-in is kept while that stand-in is there, whichever window
+/// wrote it (an installed window and a development build share one Claude
+/// home, and each writing its own would wake the other's look for ever), and
+/// written again — through this window's, or straight — once it is gone. A
+/// window that cannot stand in is not the switch off: it strips nothing. A
+/// list reads every server as itself whichever way it is written, so the plan
+/// sees no change here; the write is the same push, and its check, as any
+/// other.
+fn respell_claude_window(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) -> usize {
+    let Some(agent) = ctx
+        .present
+        .iter()
+        .copied()
+        .find(|agent| agent.mcp == McpPlace::ClaudeWindow)
+    else {
+        return 0;
+    };
+    let Some(file) = ctx.mcp_file(agent) else {
+        return 0;
+    };
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return 0;
+    };
+    let (Some(spelled), Some(servers)) = (
+        mcp::first_call_spelling(&text),
+        mcp::read_text(Format::Claude, &text),
+    ) else {
+        return 0;
+    };
+    let off = read_ledger(ctx).mcp_start_at_once;
+    let own = first_call_stand_in(ctx);
+    let steps: Vec<McpStep> = spelled
+        .into_iter()
+        .filter(|(_, through)| match (off, through) {
+            (true, through) => through.is_some(),
+            (false, None) => own.is_some(),
+            (false, Some(stand_in)) => !Path::new(stand_in).is_file(),
+        })
+        .filter_map(|(name, _)| {
+            let entry = servers.get(&name)?.clone();
+            Some(McpStep::Push {
+                agent: agent.id.to_string(),
+                name,
+                entry,
+            })
+        })
+        .collect();
+    if steps.is_empty() {
+        return 0;
+    }
+    run_mcp(ctx, &steps, ledger, log)
+}
+
+/// Turn 「MCP 서버를 부를 때만 띄우기」 on or off, and write the window's Claude
+/// list that way at once — unless the keeper is paused, which writes no list:
+/// the switch is kept, and the look that runs again writes it.
+pub(crate) fn set_first_call(ctx: &Context, on: bool) -> Result<Report, String> {
+    {
+        let _held = RUN.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut ledger = read_ledger(ctx);
+        ledger.mcp_start_at_once = !on;
+        write_ledger(ctx, &ledger);
+    }
+    look(ctx)?;
+    Ok(report(ctx))
+}
+
 /// Pause the keeper, or let it run again.
 pub(crate) fn set_paused(ctx: &Context, paused: bool) -> Result<Report, String> {
     {
@@ -3138,6 +3267,7 @@ mod tests {
                 .filter(|agent| matches!(agent.id, "kiro" | "cursor"))
                 .collect(),
             path: None,
+            stand_in: None,
         }
     }
 
@@ -4002,6 +4132,82 @@ mod tests {
         );
     }
 
+    /// t-110740: a write that took a server out of the window's Claude list
+    /// (`claude mcp remove`) and could not put it back (`add-json` failed) is
+    /// not read by the next look as Claude removing it — the store and every
+    /// agent keep the server, and the window writes it again.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewrite_that_could_not_put_a_server_back_removes_it_from_nowhere() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        std::fs::create_dir_all(&claude).unwrap();
+        let server = |command: &str| serde_json::json!({ "type": "stdio", "command": command });
+        std::fs::write(
+            claude.join(".claude.json"),
+            serde_json::json!({ "mcpServers": { "a": server("a-mcp"), "b": server("b-mcp") } })
+                .to_string(),
+        )
+        .unwrap();
+        // The first look takes both in, writing nothing: no stand-in yet.
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            ..context_of(home.path(), data.path(), &["claude"])
+        };
+        look(&ctx).unwrap();
+        assert!(
+            read_list(&ctx.store_mcp(), Format::Store)
+                .unwrap()
+                .contains_key("a")
+        );
+
+        // A `claude` whose remove takes `a` out and whose add fails.
+        let only_b = data.path().join("only-b.json");
+        std::fs::write(
+            &only_b,
+            serde_json::json!({ "mcpServers": { "b": server("b-mcp") } }).to_string(),
+        )
+        .unwrap();
+        let bin = data.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("claude");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n[ \"$2\" = remove ] && [ \"$5\" = a ] && /bin/cp '{}' \"$CLAUDE_CONFIG_DIR/.claude.json\"\n[ \"$2\" = add-json ] && exit 1\nexit 0\n",
+                only_b.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stand_in = data.path().join("app/zerocode-mirror");
+        std::fs::create_dir_all(stand_in.parent().unwrap()).unwrap();
+        std::fs::write(&stand_in, "").unwrap();
+        let ctx = Context {
+            path: Some(bin.into_os_string()),
+            stand_in: Some(stand_in),
+            ..ctx
+        };
+        look(&ctx).unwrap();
+        let text = std::fs::read_to_string(claude.join(".claude.json")).unwrap();
+        assert!(
+            !text.contains("a-mcp"),
+            "the failing claude took it out: {text}"
+        );
+
+        look(&ctx).unwrap();
+        let store = read_list(&ctx.store_mcp(), Format::Store).unwrap();
+        assert!(store.contains_key("a"), "the store keeps it: {store:?}");
+        assert!(store.contains_key("b"));
+        assert!(
+            read_log(&ctx).iter().all(|line| line.kind != "removed"),
+            "{:?}",
+            read_log(&ctx)
+        );
+    }
+
     /// The review of the skills store (P3-4): the window's own Claude home
     /// reads the store — on Windows too, through a junction where a link is
     /// not allowed — and a skill that stood in it moves into the store.
@@ -4258,6 +4464,152 @@ mod tests {
             ctx.mcp_file(AGENTS.iter().find(|one| one.id == "opencode").unwrap()),
             Some(config.join("opencode/opencode.json"))
         );
+    }
+
+    /// t-110740: while 「MCP 서버를 부를 때만 띄우기」 is on, a look writes the
+    /// window's Claude list's local servers through the stand-in — the
+    /// server's values where they were, its name in the marker — and the
+    /// store keeps the server itself; a look after that writes nothing; the
+    /// switch turned off writes the entry back as it was.
+    #[cfg(unix)]
+    #[test]
+    fn the_windows_claude_list_starts_its_local_servers_on_their_first_call() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let claude = data.path().join("claude-home");
+        std::fs::create_dir_all(&claude).unwrap();
+        let original = serde_json::json!({
+            "type": "stdio",
+            "command": "a-mcp",
+            "args": ["--x"],
+            "env": { "A_TOKEN": "fixture-value" }
+        });
+        std::fs::write(
+            claude.join(".claude.json"),
+            serde_json::json!({ "mcpServers": { "a": original } }).to_string(),
+        )
+        .unwrap();
+        // A `claude` that keeps a one-server list the way `mcp add-json` and
+        // `mcp remove` are asked to, and counts its calls.
+        let bin = data.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("claude");
+        std::fs::write(
+            &fake,
+            concat!(
+                "#!/bin/sh\n",
+                "echo \"$2 $5\" >> \"$CLAUDE_CONFIG_DIR/calls.log\"\n",
+                "case \"$2\" in\n",
+                "  add-json) printf '{\"mcpServers\":{\"%s\":%s}}\\n' \"$5\" \"$6\" > \"$CLAUDE_CONFIG_DIR/.claude.json\" ;;\n",
+                "  remove) printf '{\"mcpServers\":{}}\\n' > \"$CLAUDE_CONFIG_DIR/.claude.json\" ;;\n",
+                "esac\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stand_in = data.path().join("app/zerocode-mirror");
+        std::fs::create_dir_all(stand_in.parent().unwrap()).unwrap();
+        std::fs::write(&stand_in, "").unwrap();
+        let ctx = Context {
+            claude_home: Some(claude.clone()),
+            path: Some(bin.into_os_string()),
+            stand_in: Some(stand_in.clone()),
+            ..context_of(home.path(), data.path(), &["claude"])
+        };
+        let calls = || {
+            std::fs::read_to_string(claude.join("calls.log"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        let entry = |text: &str| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(text).unwrap()["mcpServers"]["a"].clone()
+        };
+
+        look(&ctx).unwrap();
+        let text = std::fs::read_to_string(claude.join(".claude.json")).unwrap();
+        assert_eq!(
+            mcp::first_call_spelling(&text).unwrap().get("a"),
+            Some(&Some(stand_in.to_string_lossy().into_owned())),
+            "{text}"
+        );
+        let written = entry(&text);
+        assert_eq!(written["args"], serde_json::json!(["a-mcp", "--x"]));
+        assert_eq!(written["env"]["A_TOKEN"], "fixture-value");
+        assert_eq!(written["env"][zerocode_core::mcp_first_call::MARKER], "a");
+        let real = mcp::read_text(
+            Format::Claude,
+            &serde_json::json!({ "mcpServers": { "a": original } }).to_string(),
+        )
+        .unwrap()
+        .remove("a")
+        .unwrap();
+        let store = read_list(&ctx.store_mcp(), Format::Store).unwrap();
+        assert_eq!(
+            store["a"].def, real.def,
+            "the store keeps the server itself"
+        );
+        let on = report(&ctx);
+        assert!(on.mcp_on_first_call && on.mcp_on_first_call_ready);
+
+        let before = calls();
+        look(&ctx).unwrap();
+        assert_eq!(
+            calls(),
+            before,
+            "a list written that way is not written again"
+        );
+
+        // A window with no stand-in of its own (a development build) leaves an
+        // entry another window's stand-in serves as it is: it strips nothing.
+        let bare = Context {
+            stand_in: None,
+            ..ctx.clone()
+        };
+        look(&bare).unwrap();
+        assert_eq!(
+            calls(),
+            before,
+            "a window that cannot stand in writes nothing"
+        );
+        assert!(!report(&bare).mcp_on_first_call_ready);
+
+        // Its stand-in gone, the entry is written again through this window's.
+        let other = data.path().join("other/zerocode-mirror");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, "").unwrap();
+        std::fs::remove_file(&stand_in).unwrap();
+        let moved = Context {
+            stand_in: Some(other.clone()),
+            ..ctx.clone()
+        };
+        look(&moved).unwrap();
+        let text = std::fs::read_to_string(claude.join(".claude.json")).unwrap();
+        assert_eq!(
+            mcp::first_call_spelling(&text).unwrap().get("a"),
+            Some(&Some(other.to_string_lossy().into_owned())),
+            "{text}"
+        );
+        let ctx = moved;
+
+        let off = set_first_call(&ctx, false).unwrap();
+        assert!(!off.mcp_on_first_call);
+        let text = std::fs::read_to_string(claude.join(".claude.json")).unwrap();
+        assert_eq!(entry(&text), original, "the entry is back as it was");
+        assert_eq!(
+            mcp::first_call_spelling(&text).unwrap().get("a"),
+            Some(&None)
+        );
+        assert!(
+            read_log(&ctx)
+                .iter()
+                .all(|line| line.kind != "edited" && line.kind != "failed"),
+            "{:?}",
+            read_log(&ctx)
+        );
+        let store = read_list(&ctx.store_mcp(), Format::Store).unwrap();
+        assert_eq!(store["a"].def, real.def);
     }
 
     /// The review of skills-p2-r2 (P3-4): a link to a sibling skill

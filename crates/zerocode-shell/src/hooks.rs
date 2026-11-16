@@ -722,7 +722,7 @@ pub fn mirror_shims() -> Option<(PathBuf, PathBuf)> {
 /// written at all ([`build_mirror_shims`]) and whether the binary they name is
 /// still there ([`mirror_ready`]) — and a second spelling of this path would
 /// let those two answers drift apart.
-fn mirror_bin() -> Option<PathBuf> {
+pub(crate) fn mirror_bin() -> Option<PathBuf> {
     // With the platform's executable suffix: on Windows the file beside the
     // window is `zerocode-mirror.exe`, and asking for the bare name found
     // nothing — which built no shim directory at all, and with it none of

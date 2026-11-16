@@ -239,6 +239,18 @@ pub(crate) async fn library_undo(state: State<'_, AppState>, id: u64) -> Result<
     off_thread(&state, move |context| library_runtime::undo(&context, id)).await
 }
 
+/// 「MCP 서버를 부를 때만 띄우기」 on or off (t-110740).
+#[tauri::command]
+pub(crate) async fn library_mcp_on_first_call(
+    state: State<'_, AppState>,
+    on: bool,
+) -> Result<Report, String> {
+    off_thread(&state, move |context| {
+        library_runtime::set_first_call(&context, on)
+    })
+    .await
+}
+
 #[tauri::command]
 pub(crate) async fn library_pause(
     state: State<'_, AppState>,

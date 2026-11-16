@@ -170,6 +170,77 @@ impl McpDef {
         let relative = !whole && (command.contains('/') || command.contains('\\'));
         relative || command.contains(".app/Contents/")
     }
+
+    /// The server as a Claude pane the window opens is told it, to start on
+    /// its first call (t-110740): `stand_in` (the window's `zerocode-mirror`)
+    /// in front of the real command, which with its arguments becomes the
+    /// stand-in's arguments, and [`crate::mcp_first_call::MARKER`] naming the
+    /// server added to its environment. Nothing else changes: the values stay
+    /// in the entry they were in. A remote server is written as it is.
+    #[must_use]
+    pub fn started_on_first_call(&self, stand_in: &str, name: &str) -> Self {
+        let Self::Stdio { command, args, env } = self else {
+            return self.clone();
+        };
+        let mut env = env.clone();
+        env.insert(crate::mcp_first_call::MARKER.to_string(), name.to_string());
+        Self::Stdio {
+            command: stand_in.to_string(),
+            args: std::iter::once(command.clone())
+                .chain(args.iter().cloned())
+                .collect(),
+            env,
+        }
+    }
+
+    /// The server an entry written by [`McpDef::started_on_first_call`]
+    /// starts, and any other entry as it is: every list is read through this,
+    /// so the store and every agent compare the server itself, never its
+    /// stand-in (whose `.app/Contents/` path would also read as bound to the
+    /// window's Claude).
+    #[must_use]
+    pub fn as_started(self) -> Self {
+        match self {
+            Self::Stdio {
+                command: _,
+                mut args,
+                mut env,
+            } if !args.is_empty() && env.contains_key(crate::mcp_first_call::MARKER) => {
+                env.remove(crate::mcp_first_call::MARKER);
+                let command = args.remove(0);
+                Self::Stdio { command, args, env }
+            }
+            other => other,
+        }
+    }
+}
+
+/// How each local server of a Claude list is written: `None` started by its
+/// own command, `Some(stand-in)` through the stand-in named, to start on its
+/// first call ([`McpDef::started_on_first_call`]). `None` for a text that is
+/// not a Claude list; a remote server is not named.
+#[must_use]
+pub fn first_call_spelling(text: &str) -> Option<BTreeMap<String, Option<String>>> {
+    let doc: Value = serde_json::from_str(text).ok()?;
+    if !doc.is_object() {
+        return None;
+    }
+    let Some(list) = json_list(Format::Claude, &doc) else {
+        return Some(BTreeMap::new());
+    };
+    Some(
+        list.iter()
+            .filter(|(_, value)| self::text(value, "url").is_none())
+            .filter_map(|(name, value)| {
+                let command = self::text(value, "command")?;
+                let through = value
+                    .get("env")
+                    .and_then(|env| env.get(crate::mcp_first_call::MARKER))
+                    .is_some();
+                Some((name.clone(), through.then(|| command.to_string())))
+            })
+            .collect(),
+    )
 }
 
 fn string_map(value: Option<&Value>) -> BTreeMap<String, String> {
@@ -238,7 +309,10 @@ fn entry_from_json(format: Format, value: &Value) -> Option<McpEntry> {
                 env: string_map(value.get("environment")),
             }
         };
-        return Some(McpEntry { def, disabled });
+        return Some(McpEntry {
+            def: def.as_started(),
+            disabled,
+        });
     }
     let kind = text(value, "type")
         .or_else(|| text(value, "transport"))
@@ -268,7 +342,10 @@ fn entry_from_json(format: Format, value: &Value) -> Option<McpEntry> {
         },
         (None, None) => return None,
     };
-    Some(McpEntry { def, disabled })
+    Some(McpEntry {
+        def: def.as_started(),
+        disabled,
+    })
 }
 
 /// The object a JSON document keeps its servers in, for `format`.
@@ -1214,5 +1291,90 @@ mod tests {
         for bad in ["", "-x", "a b", "a;b", "../x", "x\n", &"a".repeat(129)] {
             assert!(!is_server_name(bad), "{bad}");
         }
+    }
+
+    /// t-110740: a server the window writes for a Claude pane to start on its
+    /// first call reads back, from any list, as the server itself — the same
+    /// fingerprint, not bound to the window's Claude — so the store and the
+    /// other agents never take its stand-in for another server. The values
+    /// stay where they were; a remote server is written as it is.
+    #[test]
+    fn a_server_written_to_start_on_its_first_call_reads_as_itself() {
+        let mirror = "/Applications/ZeroCode.app/Contents/MacOS/zerocode-mirror";
+        let real = stdio(
+            "npx",
+            &["-y", "@upstash/context7-mcp"],
+            &[("CONTEXT7_API_KEY", "fixture-value")],
+        );
+        let written = real.started_on_first_call(mirror, "context7");
+        let McpDef::Stdio { command, args, env } = &written else {
+            panic!("{written:?}");
+        };
+        assert_eq!(command, mirror);
+        assert_eq!(args, &["npx", "-y", "@upstash/context7-mcp"]);
+        assert_eq!(
+            env.get("CONTEXT7_API_KEY").map(String::as_str),
+            Some("fixture-value")
+        );
+        assert_eq!(
+            env.get(crate::mcp_first_call::MARKER).map(String::as_str),
+            Some("context7")
+        );
+
+        let entry = McpEntry {
+            def: written.clone(),
+            disabled: false,
+        };
+        let doc =
+            serde_json::json!({ "mcpServers": { "context7": to_json(Format::Claude, &entry) } });
+        let back = read_json(Format::Claude, &doc).remove("context7").unwrap();
+        assert_eq!(back.def, real);
+        assert_eq!(back.def.fingerprint(), real.fingerprint());
+        assert!(!back.def.bound_to_its_agent());
+        let store = read_json(Format::Store, &doc).remove("context7").unwrap();
+        assert_eq!(store.def, real, "the store reads it as itself too");
+
+        let remote = http(
+            "https://mcp.example.com/mcp",
+            &[("Authorization", "Bearer x")],
+        );
+        assert_eq!(remote.started_on_first_call(mirror, "remote"), remote);
+        assert_eq!(
+            real.clone().as_started(),
+            real,
+            "a server written straight is itself"
+        );
+    }
+
+    /// Which local servers of a Claude list start through a stand-in, and
+    /// which one: what a look compares with how the switch asks them written.
+    #[test]
+    fn a_claude_list_says_which_servers_start_on_their_first_call() {
+        let mirror = "/opt/zc/zerocode-mirror";
+        let through = to_json(
+            Format::Claude,
+            &McpEntry {
+                def: stdio("rea", &["mcp"], &[]).started_on_first_call(mirror, "rea"),
+                disabled: false,
+            },
+        );
+        let text = serde_json::json!({
+            "mcpServers": {
+                "rea": through,
+                "ctx": { "type": "stdio", "command": "npx", "args": ["-y", "x"] },
+                "remote": { "type": "http", "url": "https://mcp.example.com/mcp" },
+            },
+            "projects": {}
+        })
+        .to_string();
+        let spelled = first_call_spelling(&text).unwrap();
+        assert_eq!(spelled.get("rea"), Some(&Some(mirror.to_string())));
+        assert_eq!(spelled.get("ctx"), Some(&None));
+        assert!(
+            !spelled.contains_key("remote"),
+            "a remote server has no stand-in"
+        );
+        assert_eq!(first_call_spelling("{}"), Some(BTreeMap::new()));
+        assert_eq!(first_call_spelling("not json"), None);
     }
 }

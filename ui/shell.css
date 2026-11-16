@@ -57234,6 +57234,25 @@ button.jev-token:hover {
   overflow: auto;
 }
 
+/* 「MCP 서버를 부를 때만 띄우기」 (t-110740): one setting over the server rows,
+ * ruled as they are and padded as they are, so its switch stands in their
+ * switch column. The row itself is not pressed — only its switch is — so it
+ * has no hover of its own. Inside the list, it scrolls with the rows and takes
+ * no height from a short window's fixed head. */
+.lib-first-call {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-3);
+  min-height: var(--library-row-min);
+  padding: var(--space-2) var(--space-5);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.lib-first-call-label {
+  font: var(--type-label-14);
+}
+
 .lib-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -57967,6 +57986,10 @@ button.jev-token:hover {
   .lib-row-open {
     grid-template-columns: minmax(0, 1fr) auto;
     padding-left: var(--space-4);
+  }
+
+  .lib-first-call {
+    padding: var(--space-2) var(--space-4);
   }
 
   .lib-log-row {

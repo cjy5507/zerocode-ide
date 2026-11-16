@@ -67,7 +67,7 @@ const STAND = `(async (library, skills) => {
   window.__ANSWER__.skill_detail = ({ id }) => ({ skill: skills.families.flatMap((f) => f.variants).find((v) => v.id === id), markdown: "# Body\\n\\nThe skill's own text.", evidence: [] });
   window.__ANSWER__.library_report = () => library;
   window.__ANSWER__.library_look = () => library;
-  for (const command of ["library_server_switch", "library_server_agent", "library_server_choose", "library_server_share", "library_server_remove", "library_server_save", "library_paste_add", "library_skill_remove", "library_skill_import", "library_skill_choose", "library_skill_align", "library_undo", "library_pause"]) {
+  for (const command of ["library_server_switch", "library_server_agent", "library_server_choose", "library_server_share", "library_server_remove", "library_server_save", "library_paste_add", "library_skill_remove", "library_skill_import", "library_skill_choose", "library_skill_align", "library_undo", "library_pause", "library_mcp_on_first_call"]) {
     window.__ANSWER__[command] = record(command, library);
   }
   window.__ANSWER__.library_paste_read = record("library_paste_read", [{ name: "github", kind: "stdio", summary: "npx -y @modelcontextprotocol/server-github", secrets: ["GITHUB_TOKEN"] }]);
@@ -460,6 +460,60 @@ export async function testLibraryPage(browser, origin, ok) {
         && JSON.stringify(defaults.servers) === JSON.stringify(["zerocode-tools", "rea", "context7", "node_repl", "kept", "figma"]),
       JSON.stringify(defaults));
     await page.evaluate(`${STAND}(${JSON.stringify(LIBRARY)}, ${JSON.stringify(SKILLS)})`);
+
+    /* ---- 「MCP 서버를 부를 때만 띄우기」: one switch over the server rows (t-110740) ------------ */
+    // On (the default), a Claude pane the window opens starts a local server at the first call to
+    // one of its tools; off, every pane starts every server at once. The MCP tab alone carries it,
+    // its switch in the server rows' own column. A window that cannot do it (Windows, a development
+    // build with no helper) shows it unpressable with the reason instead of hiding it, and so does a
+    // report from before the two fields, which reads as on and not ready.
+    const firstCallFaults = faults.length;
+    const firstCall = async (fields) => {
+      await page.evaluate(`${STAND}(${JSON.stringify({ ...LIBRARY, ...fields })}, ${JSON.stringify(SKILLS)})`);
+      return page.evaluate(`(async () => {
+        const v = ${view()};
+        const drawn = () => [...v.querySelectorAll(".lib-switch")]
+          .find((toggle) => toggle.getAttribute("aria-label") === "MCP 서버를 부를 때만 띄우기" && toggle.getClientRects().length > 0) ?? null;
+        const on = async (tab) => { v.querySelector("#lib-tab-" + tab).click(); await window.__PAINTED__(); return Boolean(drawn()); };
+        const onSkills = await on("skills");
+        const onLog = await on("log");
+        await on("mcp");
+        const toggle = drawn();
+        const rea = v.querySelector('.lib-part[data-part="mcp"] .lib-row[data-key="rea"] .lib-switch');
+        const seen = {
+          onSkills, onLog, shown: Boolean(toggle), checked: toggle?.getAttribute("aria-checked") ?? null, disabled: toggle?.disabled ?? null,
+          words: toggle?.parentElement?.textContent ?? "",
+          offset: toggle && rea ? Math.abs(toggle.getBoundingClientRect().right - rea.getBoundingClientRect().right) : null,
+          overflow: v.scrollWidth > v.clientWidth + 1,
+        };
+        const before = window.__LIB_CALLS__.length;
+        toggle?.click();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return { ...seen, sent: window.__LIB_CALLS__.slice(before) };
+      })()`);
+    };
+    const ready = await firstCall({ mcp_on_first_call: true, mcp_on_first_call_ready: true });
+    const off = await firstCall({ mcp_on_first_call: false, mcp_on_first_call_ready: true });
+    const unready = await firstCall({ mcp_on_first_call: true, mcp_on_first_call_ready: false });
+    const older = await firstCall({});
+    const firstCallWords = await page.evaluate(`["en", "ja", "zh", "es"].every((code) => ["library.mcp.firstCall.label", "library.mcp.firstCall.about", "library.mcp.firstCall.notReady"]
+      .every((key) => typeof CATALOG[code]?.[key] === "string"))`);
+    await page.evaluate(`${STAND}(${JSON.stringify(LIBRARY)}, ${JSON.stringify(SKILLS)})`);
+    ok("「MCP 서버를 부를 때만 띄우기」 stands on the MCP tab pressed as the report says, its switch in the server rows' column, the page no wider",
+      ready.shown && ready.checked === "true" && ready.disabled === false && ready.words.includes("처음 부를 때")
+        && ready.offset !== null && ready.offset <= 1 && !ready.overflow && off.shown && off.checked === "false",
+      JSON.stringify({ ready, off }));
+    ok("pressing it sends library_mcp_on_first_call with the state it turns to, and nothing else",
+      ready.sent.length === 1 && ready.sent[0].command === "library_mcp_on_first_call" && JSON.stringify(ready.sent[0].args) === JSON.stringify({ on: false })
+        && off.sent.length === 1 && JSON.stringify(off.sent[0].args) === JSON.stringify({ on: true }),
+      JSON.stringify({ ready: ready.sent, off: off.sent }));
+    ok("a window that cannot do it shows the switch unpressable with the reason, and a press sends nothing — a report from before the fields reads the same",
+      [unready, older].every((seen) => seen.shown && seen.disabled === true && seen.checked === "true" && seen.words.includes("이 창에서는 쓸 수 없습니다") && seen.sent.length === 0),
+      JSON.stringify({ unready, older }));
+    ok("the skills and log tabs do not carry it",
+      [ready, off, unready, older].every((seen) => !seen.onSkills && !seen.onLog), JSON.stringify([ready, off, unready, older].map((seen) => [seen.onSkills, seen.onLog])));
+    ok("its words are in all four catalogs", firstCallWords, "");
+    ok("the first-call switch raised no errors", faults.length === firstCallFaults, faults.slice(firstCallFaults, firstCallFaults + 3).join(" | "));
 
     const capture = process.env.CAPTURE_LIBRARY;
     if (capture) {

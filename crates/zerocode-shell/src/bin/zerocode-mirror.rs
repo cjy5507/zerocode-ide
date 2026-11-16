@@ -45,6 +45,24 @@ use std::sync::{Arc, Mutex};
 fn main() {
     #[cfg(target_os = "macos")]
     zerocode_pty::serve_ctty_exec();
+    // A Claude pane's MCP server the window wrote through this binary: it
+    // stands in for the server and starts it on its first call
+    // (`zerocode_core::mcp_first_call`). Asked before anything below — an
+    // MCP server is never a tty, never an agent run to tee or announce, and
+    // the orchestration guard would refuse it in a worker's pane.
+    if let Some(name) = std::env::var_os(zerocode_core::mcp_first_call::MARKER) {
+        let mut args = std::env::args_os().skip(1);
+        let Some(real) = args.next() else {
+            eprintln!("zerocode-mirror: MCP server command missing");
+            std::process::exit(127);
+        };
+        let rest: Vec<std::ffi::OsString> = args.collect();
+        std::process::exit(zerocode_core::mcp_first_call::serve(
+            &name.to_string_lossy(),
+            &real,
+            &rest,
+        ));
+    }
     let mut args = std::env::args_os().skip(1);
     let Some(real) = args.next() else {
         eprintln!("zerocode-mirror: real binary path missing");

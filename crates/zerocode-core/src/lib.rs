@@ -89,6 +89,7 @@ pub mod linear;
 pub mod localhost_label;
 pub mod login_renewal;
 pub mod mail_triage;
+pub mod mcp_first_call;
 pub mod mermaid;
 pub mod notify;
 pub mod notify_call;

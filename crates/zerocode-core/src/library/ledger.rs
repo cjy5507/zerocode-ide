@@ -19,6 +19,11 @@ pub struct Ledger {
     /// Off only by the person's own switch; the store is kept in step
     /// otherwise.
     pub paused: bool,
+    /// The person's switch 「MCP 서버를 부를 때만 띄우기」 turned off: a
+    /// Claude pane the window opens starts every local server with the
+    /// session, as before t-110740. Absent — every file written before it,
+    /// and a build that drops it — is the switch on.
+    pub mcp_start_at_once: bool,
     /// When the first look took every agent's lists into the store.
     pub merged_at: Option<i64>,
     pub mcp: BTreeMap<String, McpRecord>,

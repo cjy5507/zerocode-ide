@@ -5955,7 +5955,7 @@ function buildSkillsView() {
     <div class="lib-agents"></div><div class="lib-tabs" role="tablist"></div><div class="lib-attention"></div>
     <div class="skills-required" hidden></div><div class="skills-bundled" hidden></div><p class="skills-error" role="alert" hidden></p><p class="skills-plan-status" role="status" hidden></p><p class="skills-native-status" role="status" hidden></p>
     <div class="lib-tools"><label class="lib-search"><span class="lib-search-glyph" aria-hidden="true"></span><input type="search" class="skills-search" autocomplete="off"/></label><div class="lib-filters" role="group"></div><span class="skills-total" role="status"></span></div></div>
-    <div class="lib-body"><div class="lib-list skills-card-list"><div class="lib-part" data-part="skills" role="list"></div><div class="lib-part" data-part="mcp" role="list" hidden></div><div class="lib-part" data-part="log" role="list" hidden></div><p class="lib-empty skills-empty" hidden></p></div><aside class="lib-detail skills-detail"><p class="skills-detail-empty"></p><div class="skills-detail-content" hidden></div></aside></div>
+    <div class="lib-body"><div class="lib-list skills-card-list"><div class="lib-first-call" hidden></div><div class="lib-part" data-part="skills" role="list"></div><div class="lib-part" data-part="mcp" role="list" hidden></div><div class="lib-part" data-part="log" role="list" hidden></div><p class="lib-empty skills-empty" hidden></p></div><aside class="lib-detail skills-detail"><p class="skills-detail-empty"></p><div class="skills-detail-content" hidden></div></aside></div>
     <div class="lib-scrim" hidden></div><div class="lib-toast" role="status" aria-live="polite"></div>`;
   return view;
 }
@@ -6161,6 +6161,7 @@ function paintSkillsView(view) {
   paintLibraryRequired(view);
   paintLibraryFilters(view, state);
   paintLibraryList(view, state);
+  paintLibraryFirstCall(view, state);
   // A server's detail is cheap and follows every report; a skill's reads its
   // file, so it is read again only when another skill is picked.
   if (state.tab === "mcp" || state.painted !== `${state.tab}:${state.selected[state.tab] ?? ""}`) void paintLibraryDetail(view, state);
@@ -6485,6 +6486,31 @@ function paintLibraryList(view, state) {
     syncLibraryRows(view, state, "skills", librarySkillItems());
   }
   filterLibraryList(view, state);
+}
+
+/* 「MCP 서버를 부를 때만 띄우기」 (t-110740). On, a Claude pane the window opens
+ * starts a local server at the first call to one of its tools; off, every pane
+ * starts every server with its session, as before. One row over the server
+ * rows, on the MCP tab alone. A window that cannot (Windows, a development
+ * build with no helper beside it) keeps the row with its switch unpressable
+ * and says why; a report from before the two fields reads as on and not ready.
+ * Made anew on every paint, so the switch never answers with an old state; a
+ * switch that held the focus hands it to the new one. */
+function paintLibraryFirstCall(view, state) {
+  const host = view.querySelector(".lib-first-call");
+  if (state.tab !== "mcp" || !libraryReport) { host.hidden = true; host.replaceChildren(); return; }
+  const on = libraryReport.mcp_on_first_call !== false;
+  const ready = libraryReport.mcp_on_first_call_ready === true;
+  const label = t("library.mcp.firstCall.label", "MCP 서버를 부를 때만 띄우기");
+  const words = skillElement("span", "lib-row-main");
+  words.append(skillElement("span", "lib-first-call-label", label),
+    skillElement("span", "lib-quiet", t("library.mcp.firstCall.about", "Claude 판이 MCP 서버를 처음 부를 때 띄웁니다. 끄면 판마다 모든 서버를 바로 띄웁니다.")));
+  if (!ready) words.append(skillElement("span", "lib-quiet", t("library.mcp.firstCall.notReady", "이 창에서는 쓸 수 없습니다(Windows · 개발 빌드).")));
+  const focused = host.contains(document.activeElement);
+  const toggle = librarySwitch(on, label, (next) => void libraryAct(view, state, "library_mcp_on_first_call", { on: next }), !ready);
+  host.replaceChildren(words, toggle);
+  host.hidden = false;
+  if (focused) toggle.focus();
 }
 
 /* The search and the filter: rows are shown or hidden, never made. */
