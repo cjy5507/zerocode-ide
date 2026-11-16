@@ -47,6 +47,7 @@ use zerocode_core::jev::{
 use super::jev_gate::{self, JevDoor};
 use super::jev_summary::cost_of;
 use super::probe_exec::task_fingerprint;
+use super::seat_mode::{self, FAIL_SETTINGS_UNAVAILABLE};
 use super::settings::agent_tool_mode_from;
 use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 
@@ -102,8 +103,6 @@ const ITEM_ID_PREFIX: &str = "i";
 
 /// The word a verdict's `routeUse` carries under `off`: the switch's own.
 const ROUTE_USE_OFF: &str = "off";
-
-const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 
 /// What a `score` is told to do with `items[k]`.
 fn score_instructions(at: usize) -> String {
@@ -573,18 +572,7 @@ impl AgentToolRow {
 /// The mode this question is to be judged under, or `None` when it is not
 /// to be judged at all: an ablation, an unreadable setting, or `off`.
 fn asking_mode(cwd: &Path) -> Option<JevMode> {
-    if telemetry::attest_ablated(telemetry::HarnessFeature::AgentTool) {
-        return None;
-    }
-    let Some(mode) = agent_tool_mode_from(&runtime::ConfigLoader::default_for(cwd)) else {
-        telemetry::attest_failed(telemetry::HarnessFeature::AgentTool, FAIL_SETTINGS_UNAVAILABLE);
-        return None;
-    };
-    if !mode.asks() {
-        telemetry::attest_declined(telemetry::HarnessFeature::AgentTool, mode.key());
-        return None;
-    }
-    Some(mode)
+    seat_mode::asking_mode(telemetry::HarnessFeature::AgentTool, cwd, agent_tool_mode_from)
 }
 
 /// Decide `question` for `caller`, on the road the project under `cwd` has

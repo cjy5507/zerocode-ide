@@ -60,6 +60,7 @@ use zerocode_core::jev::{
 
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::task_fingerprint;
+use super::seat_mode::{self, FAIL_SETTINGS_UNAVAILABLE};
 use super::settings::jev_compaction_mode_from;
 use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 use super::turn_reads::read_path;
@@ -87,8 +88,6 @@ const _: () = assert!(
 
 /// The word a label row carries as its kind.
 pub const LABEL_ROW_KIND: &str = "label";
-
-const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 
 /// Where a project's compaction ledger lives.
 #[must_use]
@@ -251,18 +250,7 @@ impl CompactionSeat for CompactionJudge {
 /// to be judged at all: an ablation holding it out, an unreadable setting,
 /// or a mode that asks nothing.
 fn asking_mode(cwd: &Path) -> Option<JevMode> {
-    if telemetry::attest_ablated(telemetry::HarnessFeature::DecisionShadow) {
-        return None;
-    }
-    let Some(mode) = jev_compaction_mode_from(&runtime::ConfigLoader::default_for(cwd)) else {
-        telemetry::attest_failed(telemetry::HarnessFeature::DecisionShadow, FAIL_SETTINGS_UNAVAILABLE);
-        return None;
-    };
-    if !mode.asks() {
-        telemetry::attest_declined(telemetry::HarnessFeature::DecisionShadow, mode.key());
-        return None;
-    }
-    Some(mode)
+    seat_mode::asking_mode(telemetry::HarnessFeature::DecisionShadow, cwd, jev_compaction_mode_from)
 }
 
 /// Ask about one compaction on the road this project's setting names, write

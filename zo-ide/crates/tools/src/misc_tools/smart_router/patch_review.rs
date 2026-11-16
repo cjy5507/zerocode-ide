@@ -65,6 +65,7 @@ use zerocode_core::jev::{
 
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::task_fingerprint;
+use super::seat_mode::{self, FAIL_SETTINGS_UNAVAILABLE};
 use super::settings::jev_patch_review_mode_from;
 use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 
@@ -82,8 +83,6 @@ const _: () = assert!(
     matches!(PATCH_REVIEW.apply_deadline_ms, Some(PATCH_REVIEW_APPLY_DEADLINE_MS)),
     "the seat's row names the wall its stage waits"
 );
-
-const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 
 /// Where a project's patch review ledger lives.
 #[must_use]
@@ -257,18 +256,7 @@ impl PatchReviewSeat for PatchReviewJudge {
 /// are not reviewed at all: an ablation holding it out, an unreadable
 /// setting, or a mode that asks nothing.
 fn asking_mode(cwd: &Path) -> Option<JevMode> {
-    if telemetry::attest_ablated(telemetry::HarnessFeature::PatchReview) {
-        return None;
-    }
-    let Some(mode) = jev_patch_review_mode_from(&runtime::ConfigLoader::default_for(cwd)) else {
-        telemetry::attest_failed(telemetry::HarnessFeature::PatchReview, FAIL_SETTINGS_UNAVAILABLE);
-        return None;
-    };
-    if !mode.asks() {
-        telemetry::attest_declined(telemetry::HarnessFeature::PatchReview, mode.key());
-        return None;
-    }
-    Some(mode)
+    seat_mode::asking_mode(telemetry::HarnessFeature::PatchReview, cwd, jev_patch_review_mode_from)
 }
 
 /// Review one patch on the road this project's setting names: acting, the

@@ -29,6 +29,7 @@ mod plan_usage;
 mod planner;
 mod probe_exec;
 mod probe_gate;
+mod seat_mode;
 mod settings;
 mod shadow_ledger;
 mod rerank_shadow;

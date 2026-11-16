@@ -46,6 +46,7 @@ use zerocode_core::jev::{JevMode, JevUse, ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK,
 
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::{remember_bounded, task_fingerprint};
+use super::seat_mode::{self, FAIL_SETTINGS_UNAVAILABLE};
 use super::settings::{skill_search_mode_from, skill_suggestion_mode_from};
 use super::shadow_ledger::{append_shadow_row, judge_seat_ledger, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 
@@ -77,7 +78,6 @@ const _: () = assert!(
     "the seat's row names the wall its stage waits"
 );
 
-const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 const FAIL_SKILL_SEND: &str = "skill_request_not_sent";
 
 /// The word a caller's answer carries when there was nothing to ask about —
@@ -1012,24 +1012,13 @@ async fn send_stage(
 /// or `None` when it is not to be judged at all: an ablation holding it
 /// out, an unreadable setting, or a mode that asks nothing.
 fn asking_mode(cwd: &Path, seat: &JevUse) -> Option<JevMode> {
-    if telemetry::attest_ablated(telemetry::HarnessFeature::SkillSearch) {
-        return None;
-    }
-    let loader = runtime::ConfigLoader::default_for(cwd);
-    let mode = if seat.id == SKILL_SUGGESTION.id {
-        skill_suggestion_mode_from(&loader)
-    } else {
-        skill_search_mode_from(&loader)
-    };
-    let Some(mode) = mode else {
-        telemetry::attest_failed(telemetry::HarnessFeature::SkillSearch, FAIL_SETTINGS_UNAVAILABLE);
-        return None;
-    };
-    if !mode.asks() {
-        telemetry::attest_declined(telemetry::HarnessFeature::SkillSearch, mode.key());
-        return None;
-    }
-    Some(mode)
+    seat_mode::asking_mode(telemetry::HarnessFeature::SkillSearch, cwd, |loader| {
+        if seat.id == SKILL_SUGGESTION.id {
+            skill_suggestion_mode_from(loader)
+        } else {
+            skill_search_mode_from(loader)
+        }
+    })
 }
 
 /// One search's row and its ranking: recalled from the memo, refused at the

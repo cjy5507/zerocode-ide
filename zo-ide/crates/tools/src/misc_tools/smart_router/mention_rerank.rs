@@ -65,6 +65,7 @@ use zerocode_core::jev::{
 
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::{remember_bounded, task_fingerprint};
+use super::seat_mode;
 use super::settings::jev_mention_rerank_mode_from;
 use super::shadow_ledger::{
     append_shadow_row, judge_seat_ledger, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES,
@@ -114,8 +115,6 @@ const CANDIDATE_KEYS: [&str; 2] = ["name", "head"];
 /// The word a label row carries as its kind, so a reader sweeping the ledger
 /// can tell a comparison from a reading without parsing both.
 pub const LABEL_ROW_KIND: &str = "label";
-
-const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 
 /// Where a project's mention ledger lives.
 #[must_use]
@@ -608,17 +607,7 @@ impl MentionRerank {
 /// an ablation holding it out, an unreadable setting, or a mode that asks
 /// nothing.
 fn arm_at(cwd: &Path) -> Option<Armed> {
-    if telemetry::attest_ablated(telemetry::HarnessFeature::MentionRerank) {
-        return None;
-    }
-    let Some(mode) = jev_mention_rerank_mode_from(&runtime::ConfigLoader::default_for(cwd)) else {
-        telemetry::attest_failed(telemetry::HarnessFeature::MentionRerank, FAIL_SETTINGS_UNAVAILABLE);
-        return None;
-    };
-    if !mode.asks() {
-        telemetry::attest_declined(telemetry::HarnessFeature::MentionRerank, mode.key());
-        return None;
-    }
+    let mode = seat_mode::asking_mode(telemetry::HarnessFeature::MentionRerank, cwd, jev_mention_rerank_mode_from)?;
     // Read only under `auto`: a person's `on` needs no ledger, and `shadow`
     // reads none.
     let raised = mode == JevMode::Auto && runtime::jev_seat_applies(cwd, &MENTION_RERANK);
