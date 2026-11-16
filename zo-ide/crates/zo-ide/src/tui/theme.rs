@@ -245,6 +245,11 @@ pub fn is_valid_slug(slug: &str) -> bool {
 #[must_use]
 pub fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
     let hex = value.strip_prefix('#')?;
+    // Hex digits only: `from_str_radix` also takes a leading `+`, and a
+    // multi-byte character would split a slice below.
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     match hex.len() {
         3 => {
             let red = u8::from_str_radix(&hex[0..1], 16).ok()?;
@@ -262,9 +267,24 @@ pub fn parse_hex_color(value: &str) -> Option<(u8, u8, u8)> {
     }
 }
 
-/// All built-in theme slugs: `terminal` first, followed by the 30 terminal themes.
+/// Every theme slug: `terminal` first, the 30 built-in themes, then the
+/// person's own themes from `<zo home>/themes` by name — the folder is read
+/// again on each call, so a file written since the last call is listed.
 #[must_use]
-pub fn names() -> Vec<&'static str> {
+pub fn names() -> Vec<String> {
+    super::theme_files::names()
+}
+
+/// Looks up a theme by slug: `terminal`, else the person's own theme of that
+/// name, else the built-in one.
+#[must_use]
+pub fn find(slug: &str) -> Option<Theme> {
+    super::theme_files::find(slug)
+}
+
+/// The built-in theme slugs: `terminal` first, followed by the 30 terminal themes.
+#[must_use]
+pub(crate) fn builtin_names() -> Vec<&'static str> {
     let builtins = builtin_themes();
     let mut list = Vec::with_capacity(1 + builtins.len());
     list.push(TERMINAL_THEME_NAME);
@@ -272,9 +292,9 @@ pub fn names() -> Vec<&'static str> {
     list
 }
 
-/// Looks up a built-in theme by slug.
+/// Looks up a built-in theme (`terminal` or one of the 30) by slug.
 #[must_use]
-pub fn find(slug: &str) -> Option<Theme> {
+pub(crate) fn find_builtin(slug: &str) -> Option<Theme> {
     if !is_valid_slug(slug) {
         return None;
     }
@@ -369,6 +389,7 @@ pub fn choose(preferences: &Preferences, env_theme: Option<&str>) -> (Theme, Opt
 /// Initializes the process theme from `ZO_THEME` and `preferences`, queuing any
 /// startup warning.
 pub fn init(preferences: &Preferences) {
+    super::theme_files::read_at_start();
     let env_theme = std::env::var(THEME_ENV).ok();
     let (theme, warning) = choose(preferences, env_theme.as_deref());
     let _ = set(theme);
