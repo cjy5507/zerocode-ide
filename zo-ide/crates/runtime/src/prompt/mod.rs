@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{ConfigError, ConfigLoader, RuntimeConfig};
-use crate::sandbox::{resolve_sandbox_status, FilesystemIsolationMode, SandboxStatus};
+use crate::sandbox::{
+    current_sandbox_unavailability, resolve_sandbox_status, FilesystemIsolationMode, SandboxStatus,
+};
 use crate::git_snapshot::read_git_root;
 use zerocode_core::jev::{JevMode, SKILLS, SKILL_TOP_CAP};
 
@@ -717,7 +719,15 @@ const SANDBOX_LABEL: &str = "Sandbox: ";
 /// [`SystemPromptBuilder::sandbox_line`] for a resolved status: the limits that
 /// are actually in force, or that there are none. A sandbox the settings ask
 /// for but this machine cannot provide limits nothing, and is not claimed.
+/// Where the bash tool refuses a command for it instead, the line says that and
+/// why, read from the verdict the tool refuses by
+/// ([`current_sandbox_unavailability`]), so the two cannot disagree.
 fn render_sandbox_line(status: &SandboxStatus) -> String {
+    if let Some(reason) = current_sandbox_unavailability(status) {
+        return format!(
+            "{SANDBOX_LABEL}requested but unavailable — shell commands are refused: {reason}."
+        );
+    }
     let place = if status.in_container {
         "this machine (a container)"
     } else {

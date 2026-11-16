@@ -2285,6 +2285,58 @@ fn the_environment_section_says_what_the_sandbox_is_when_settings_are_in_hand() 
     assert!(!bare.contains("Sandbox: "), "no settings, no claim: {bare}");
 }
 
+/// A sandbox the settings ask for that this machine cannot give: the bash tool
+/// refuses a shell command for it, and the line says that and why instead of
+/// "none" or "on". Run alone, with a `PATH` that holds neither `sandbox-exec`
+/// nor `unshare`: the person's own settings (a project's `sandbox` is stripped)
+/// ask for Seatbelt (macOS) and for namespaces (Linux), and neither is there.
+/// Windows refuses nothing for a sandbox.
+#[cfg(unix)]
+#[test]
+fn the_sandbox_line_says_when_a_requested_sandbox_refuses_commands() {
+    let root = own_root().unwrap_or_else(temp_dir);
+    let vars = [
+        ("HOME", root.join("home")),
+        ("ZO_CONFIG_HOME", root.join("zo-global")),
+        ("ZO_HOME", root.join("missing-zo-home")),
+        ("PATH", root.join("no-tools")),
+    ];
+    with_root_exported(
+        "the_sandbox_line_says_when_a_requested_sandbox_refuses_commands",
+        &root,
+        &vars,
+        false,
+        |root| {
+            fs::create_dir_all(root.join("zo-global")).expect("global zo dir");
+            fs::write(
+                root.join("zo-global").join("settings.json"),
+                r#"{"sandbox":{"enabled":true,"macosSeatbelt":true}}"#,
+            )
+            .expect("write the person's settings");
+            let config = ConfigLoader::default_for(root).load().expect("settings should load");
+            let status = crate::sandbox::resolve_sandbox_status(config.sandbox(), root);
+            let reason = crate::sandbox::current_sandbox_unavailability(&status)
+                .unwrap_or_else(|| {
+                    panic!("precondition: the bash tool runs commands here: {status:?}")
+                });
+            let context =
+                ProjectContext::discover(root, "2026-03-31").expect("context should load");
+            let line = SystemPromptBuilder::new()
+                .with_project_context(context)
+                .with_runtime_config(config)
+                .sandbox_line();
+            let expected = format!(
+                "Sandbox: requested but unavailable — shell commands are refused: {reason}."
+            );
+            assert_eq!(
+                line.as_deref(),
+                Some(expected.as_str()),
+                "the line where the bash tool refuses commands"
+            );
+        },
+    );
+}
+
 /// No bound model (diagnostic dump, harness that has not picked one) falls back
 /// to the catalog's Opus family head — resolved live, never a frozen id.
 #[test]
