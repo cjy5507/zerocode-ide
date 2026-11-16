@@ -186,71 +186,109 @@ fn compress_wire_view(output: &str, tool_name: &str, rewrite: WireRewrite) -> St
     content
 }
 
-/// Max distinct tool-result views the wire-compression memo retains (bounded
-/// FIFO). Each value is a compressed view (≤ tens of KB), so this bounds memory.
-const WIRE_MEMO_CAPACITY: usize = 256;
+/// Most bytes of views the wire-compression memo keeps.
+///
+/// A request walks its whole history in order, so the memo has to hold every
+/// distinct result of the conversations a process is serving. One smaller
+/// than that set lets go, on each request, of exactly the views the next
+/// request asks for first, and from then on every request compresses every
+/// result again. It used to keep 256 views. Measured on this machine's
+/// sessions (2026-11-16): 11 of the 120 largest hold more distinct results
+/// than that — up to 483, whose views come to 1.3 MB — and building one
+/// request's views cost them as much as with no memo at all (8 to 12 ms in a
+/// test build).
+/// Eight mebibytes is six times the largest of those sets, which leaves room
+/// for the sub-agents of a fan-out. It is a ceiling, not a reservation: what
+/// a process holds is the views of the results it has, about a megabyte for
+/// the longest of those conversations.
+const WIRE_MEMO_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+/// Most views it keeps, whatever their size: the bound on the map itself when
+/// the results are very many and very small.
+const WIRE_MEMO_MAX_VIEWS: usize = 8_192;
+
+/// The views kept, oldest first.
+///
+/// A view is kept as it was first made. A grep or glob view names the
+/// directory the process is in at that moment as the root its paths are
+/// relative to, and a read view shortens its neighbours against it, so a view
+/// made before `EnterWorktree` moved the process keeps that root and those
+/// paths: a result reads the same in every later request, which is what
+/// keeps the prompt-cache prefix stable.
+#[derive(Default)]
 struct WireMemo {
     map: HashMap<(u64, u64), String>,
     order: VecDeque<(u64, u64)>,
+    /// Bytes of the views in `map`.
+    bytes: usize,
+}
+
+impl WireMemo {
+    fn get(&self, key: (u64, u64)) -> Option<String> {
+        self.map.get(&key).cloned()
+    }
+
+    /// Keep `view` under `key`, letting the oldest views go until it fits in
+    /// `max_bytes` and `max_views`. A view larger than the whole budget is
+    /// not kept: it would push everything else out and still not fit.
+    fn put(&mut self, key: (u64, u64), view: &str, max_bytes: usize, max_views: usize) {
+        if self.map.contains_key(&key) || view.len() > max_bytes || max_views == 0 {
+            return;
+        }
+        while self.order.len() >= max_views || self.bytes + view.len() > max_bytes {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = self.map.remove(&oldest) {
+                self.bytes -= gone.len();
+            }
+        }
+        self.bytes += view.len();
+        self.map.insert(key, view.to_string());
+        self.order.push_back(key);
+    }
 }
 
 fn wire_memo() -> &'static Mutex<WireMemo> {
     static MEMO: OnceLock<Mutex<WireMemo>> = OnceLock::new();
-    MEMO.get_or_init(|| {
-        Mutex::new(WireMemo {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-        })
-    })
+    MEMO.get_or_init(Mutex::default)
 }
 
-/// 128-bit content key: two FNV-1a passes over `tool_name` + NUL + `output` with
-/// distinct offset bases, so a hash collision returning a *wrong* cached view is
-/// statistically impossible (the failure mode that would matter for correctness).
+/// The multiplier of 64-bit FNV-1a.
+const WIRE_FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// 128-bit content key: two FNV-1a streams over `tool_name` + NUL + `output`
+/// from distinct offset bases, so a hash collision returning a *wrong* cached
+/// view is statistically impossible (the failure mode that would matter for
+/// correctness).
+///
+/// Both streams are fed in one walk of the bytes: the key is made for every
+/// result of every request, hit or miss, so a hit is one walk and one copy.
 fn wire_memo_key(tool_name: &str, output: &str, rewrite: WireRewrite) -> (u64, u64) {
     // The permitted rewrite depth changes the view, so it seeds the hash rather
     // than being ignored — otherwise the lossless view of the newest result and
     // the elided view of the same bytes in history would share one cache slot.
-    let (a, b) = match rewrite {
+    let (mut first, mut second): (u64, u64) = match rewrite {
         WireRewrite::Lossless => (0xcbf2_9ce4_8422_2325, 0x0102_0304_0506_0708),
         WireRewrite::Full => (0x9e37_79b9_7f4a_7c15, 0x8ebc_6af0_9c88_c6e3),
     };
-    (fnv1a_wire(a, tool_name, output), fnv1a_wire(b, tool_name, output))
-}
-
-fn fnv1a_wire(seed: u64, tool_name: &str, output: &str) -> u64 {
-    let mut hash = seed;
-    for byte in tool_name
-        .as_bytes()
-        .iter()
-        .chain(b"\0".iter())
-        .chain(output.as_bytes().iter())
-    {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    for bytes in [tool_name.as_bytes(), b"\0".as_slice(), output.as_bytes()] {
+        for &byte in bytes {
+            first = (first ^ u64::from(byte)).wrapping_mul(WIRE_FNV_PRIME);
+            second = (second ^ u64::from(byte)).wrapping_mul(WIRE_FNV_PRIME);
+        }
     }
-    hash
+    (first, second)
 }
 
 fn wire_memo_get(key: (u64, u64)) -> Option<String> {
-    wire_memo().lock().ok()?.map.get(&key).cloned()
+    wire_memo().lock().ok()?.get(key)
 }
 
 fn wire_memo_put(key: (u64, u64), value: &str) {
-    let Ok(mut memo) = wire_memo().lock() else {
-        return;
-    };
-    if memo.map.contains_key(&key) {
-        return;
+    if let Ok(mut memo) = wire_memo().lock() {
+        memo.put(key, value, WIRE_MEMO_MAX_BYTES, WIRE_MEMO_MAX_VIEWS);
     }
-    if memo.order.len() >= WIRE_MEMO_CAPACITY {
-        if let Some(evicted) = memo.order.pop_front() {
-            memo.map.remove(&evicted);
-        }
-    }
-    memo.map.insert(key, value.to_string());
-    memo.order.push_back(key);
 }
 
 fn split_recovery_notice(output: &str) -> (Cow<'_, str>, Option<String>) {
@@ -1436,6 +1474,89 @@ mod tests {
             compress_wire_view(&raw, "read_file", WireRewrite::Full),
             "cached view must equal the uncached transform"
         );
+    }
+
+    /// One half of the key as it was made before both halves were fed in one
+    /// walk: a whole FNV-1a pass of its own.
+    fn one_half_in_its_own_walk(seed: u64, tool_name: &str, output: &str) -> u64 {
+        let mut hash = seed;
+        for byte in tool_name.as_bytes().iter().chain(b"\0".iter()).chain(output.as_bytes().iter()) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    #[test]
+    fn the_key_fed_in_one_walk_is_the_key_two_walks_made() {
+        let long = "x".repeat(4096);
+        for (tool_name, output) in [
+            ("read_file", "fn main() {}\n"),
+            ("", ""),
+            ("Bash", "한글 출력\n\0 and a NUL"),
+            ("mcp__files__read", long.as_str()),
+        ] {
+            assert_eq!(
+                wire_memo_key(tool_name, output, WireRewrite::Lossless),
+                (
+                    one_half_in_its_own_walk(0xcbf2_9ce4_8422_2325, tool_name, output),
+                    one_half_in_its_own_walk(0x0102_0304_0506_0708, tool_name, output)
+                ),
+                "{tool_name:?}, lossless"
+            );
+            assert_eq!(
+                wire_memo_key(tool_name, output, WireRewrite::Full),
+                (
+                    one_half_in_its_own_walk(0x9e37_79b9_7f4a_7c15, tool_name, output),
+                    one_half_in_its_own_walk(0x8ebc_6af0_9c88_c6e3, tool_name, output)
+                ),
+                "{tool_name:?}, full"
+            );
+        }
+    }
+
+    /// A request walks its whole history in order, so a memo that keeps fewer
+    /// views than the conversation has results gives the next request
+    /// nothing: what it asks for first is what was let go last. At 256 views
+    /// a conversation of a thousand results missed every time.
+    #[test]
+    fn the_memo_keeps_every_view_of_a_long_conversation() {
+        let mut memo = WireMemo::default();
+        let view = "a view of a tool result, a few hundred bytes long. ".repeat(8);
+        for request in 0..2 {
+            for result in 0..1_000_u64 {
+                if request == 1 {
+                    assert!(
+                        memo.get((result, !result)).is_some(),
+                        "the view of result {result} was let go before the next request asked for it"
+                    );
+                }
+                memo.put((result, !result), &view, WIRE_MEMO_MAX_BYTES, WIRE_MEMO_MAX_VIEWS);
+            }
+        }
+        assert_eq!((memo.map.len(), memo.bytes), (1_000, 1_000 * view.len()));
+    }
+
+    #[test]
+    fn the_memo_stays_inside_its_budget_and_lets_the_oldest_views_go() {
+        // Thirty-five bytes hold three ten-byte views.
+        let mut memo = WireMemo::default();
+        for result in 0..10_u64 {
+            memo.put((result, 0), "0123456789", 35, 100);
+        }
+        assert_eq!((memo.map.len(), memo.bytes), (3, 30));
+        assert!(memo.get((6, 0)).is_none() && memo.get((7, 0)).is_some(), "the oldest views go first");
+        // A view larger than the whole budget is not kept, and pushes nothing out.
+        memo.put((99, 0), &"y".repeat(36), 35, 100);
+        assert_eq!((memo.map.len(), memo.bytes), (3, 30));
+        assert!(memo.get((99, 0)).is_none());
+        // A count of two lets the oldest go, whatever the bytes.
+        let mut few = WireMemo::default();
+        for result in 0..5_u64 {
+            few.put((result, 0), "x", 1_000, 2);
+        }
+        assert_eq!((few.map.len(), few.bytes), (2, 2));
+        assert!(few.get((3, 0)).is_some() && few.get((4, 0)).is_some());
     }
 
     #[test]
