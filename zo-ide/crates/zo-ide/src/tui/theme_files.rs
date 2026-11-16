@@ -817,4 +817,83 @@ mod tests {
         // The process catalog in a test build reads no folder at all.
         assert_eq!(crate::tui::theme::names(), crate::tui::theme::builtin_names());
     }
+
+    #[test]
+    fn a_user_theme_names_its_own_syntax_theme() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_theme(dir.path(), "plain-nord.json", r#"{ "syntax": "nord" }"#);
+        write_theme(
+            dir.path(),
+            "dracula-nord.json",
+            r#"{ "base": "dracula", "syntax": "nord" }"#,
+        );
+        write_theme(
+            dir.path(),
+            "mocha.json",
+            r#"{ "syntax": "catppuccin-mocha" }"#,
+        );
+
+        let (themes, warnings) = load_from(dir.path());
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let syntax: Vec<(&str, EmbeddedThemeName)> = themes
+            .iter()
+            .map(|theme| (theme.name.as_str(), theme.syntax_theme(true)))
+            .collect();
+        assert_eq!(
+            syntax,
+            [
+                ("dracula-nord", EmbeddedThemeName::Nord),
+                ("mocha", EmbeddedThemeName::CatppuccinMocha),
+                ("plain-nord", EmbeddedThemeName::Nord),
+            ],
+            "the file's syntax theme wins over its base's and over the background"
+        );
+        // Its colours are still the base's.
+        let dracula = find_builtin("dracula").expect("dracula");
+        assert_eq!(themes[0].ansi, dracula.ansi);
+    }
+
+    #[test]
+    fn a_colour_that_is_not_hex_digits_is_said_and_the_base_colour_stays() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Each value once panicked (a byte cut through a character) or was
+        // taken for a colour (`from_str_radix` takes a leading `+`).
+        write_theme(
+            dir.path(),
+            "bad-values.json",
+            r##"{
+                "base": "dracula",
+                "ansi": {
+                    "red": "#aéé",
+                    "green": "#ｆｆｆ",
+                    "yellow": "#+f+f+f",
+                    "blue": "",
+                    "magenta": "ff79c6",
+                    "cyan": "#é1",
+                    "white": "#aé"
+                },
+                "colors": { "accent": "#+1+2+3", "code": "#" }
+            }"##,
+        );
+
+        let (themes, warnings) = load_from(dir.path());
+        assert_eq!(themes.len(), 1, "{warnings:?}");
+        let theme = &themes[0];
+        let dracula = find_builtin("dracula").expect("dracula");
+        assert_eq!(theme.ansi, dracula.ansi, "every slot keeps the base's colour");
+        assert_eq!(theme.accent, dracula.accent);
+        assert_eq!(theme.code, dracula.code);
+
+        for value in [
+            "#aéé", "#ｆｆｆ", "#+f+f+f", "\"\"", "ff79c6", "#é1", "#aé", "#+1+2+3", "\"#\"",
+        ] {
+            assert!(
+                warnings
+                    .iter()
+                    .any(|msg| msg.contains(value) && msg.contains("is not a colour")),
+                "missing warning for {value:?} in {warnings:?}"
+            );
+        }
+        assert_eq!(warnings.len(), 9, "one line a value: {warnings:?}");
+    }
 }
