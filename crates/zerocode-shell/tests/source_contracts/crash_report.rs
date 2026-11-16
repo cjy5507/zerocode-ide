@@ -65,6 +65,21 @@ fn crash_report_preserves_the_boot_pin_and_uses_existing_panic_and_resume_roads(
             && beat.contains("seen: screens_awake()"),
         "the watchdog's beat no longer carries its own nap and the screens:\n{beat}"
     );
+    // t-110411: the beat also carries whether the main thread waits where the
+    // person holds it — in a menu's own event loop — and the main run loop is
+    // asked for that only on a beat that finds the ping unanswered. No unit
+    // test passes through `tick()`, so a beat built with `held: false` would
+    // file every menu held open as a hang again and nothing else would say so.
+    assert!(
+        beat.contains("held: main_loop.as_ref().is_some_and(MainLoop::holds)"),
+        "the watchdog's beat no longer carries whether the main thread is held:\n{beat}"
+    );
+    assert!(
+        watchdog.contains(
+            "(self.watch.pending.is_some() && self.answer.peek().is_none()).then(main_loop_now)"
+        ),
+        "the watchdog no longer asks the main run loop only of a ping left unanswered"
+    );
     let crash = std::fs::read_to_string(src.join("crash.rs")).unwrap();
     assert_eq!(crash.matches("pub(crate) struct Limits").count(), 1);
     let environment = super::support::block_after(&crash, "fn environment()");
