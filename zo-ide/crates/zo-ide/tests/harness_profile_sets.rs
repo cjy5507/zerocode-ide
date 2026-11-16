@@ -8,6 +8,12 @@
 //! experiment measures and what a profile ships are one request. The finish
 //! rule closes `# Task work` with the two lines the experiment registered, and
 //! leaves no trace when it is off.
+//!
+//! A tool set of `headless_core` is `core` for a run nobody attends and `full`
+//! for every other session. Whatever the tool set, the system text names only
+//! tools the session can reach: the four sections that teach a tool, the
+//! deferred-tool paragraph and a background command's start line follow the
+//! tools the session was given.
 
 #[expect(dead_code, reason = "the env guard is shared; its HTTP server and model reader are not used here")]
 #[path = "support/custom_models.rs"]
@@ -37,6 +43,27 @@ const MODEL: &str = "deepseek-flash";
 const ARM_TOOLS: &str = "bash,read_file,write_file,apply_patch";
 /// The experiment's prompt switch (`runtime::prompt::ablation`).
 const ABLATION_ENV: &str = "ZO_ABLATE_PROMPT";
+/// What the light-surface arm (⑨) held out with that switch: the four sections
+/// that each teach a tool the arm's list did not offer.
+const TOOL_SECTIONS: &str =
+    "delegation_and_workflow_routing,clarifying_questions,persistent_memory,skills_and_library_documentation";
+/// Those four sections and the deferred-tool paragraph, by the heading each
+/// opens with in the system text. A session that reaches none of their tools
+/// is sent none of them.
+const UNREACHED_TEXT: [&str; 5] = [
+    "# Clarifying questions",
+    "# Delegation and workflow routing",
+    "# Skills and library documentation",
+    "# Persistent memory",
+    "# Deferred tools",
+];
+/// The line a background command starts with while the task tools reach it.
+const TASK_TOOLS_LINE: &str = "Poll output with TaskOutput(task_id), stop with TaskStop.";
+
+/// A catalog overlay that declares `harness` for the measured model.
+fn overlay(harness: Value) -> String {
+    json!({"models": [{"ids": [MODEL], "harness": harness}]}).to_string()
+}
 
 fn report(model: &str) -> PromptInput {
     PromptInput::measure(model, "/w", &["# Zo\nfixed".to_string()], &[], &[])
@@ -101,7 +128,6 @@ fn the_finish_rule_closes_task_work_when_on_and_leaves_no_trace_when_off() {
         assert!(!off.iter().any(|section| section.contains(line)), "off must leave no trace of: {line}");
     }
 
-    let overlay = |harness: Value| json!({"models": [{"ids": [MODEL], "harness": harness}]}).to_string();
     std::env::set_var(api::MODEL_CONTEXT_WINDOWS_ENV, overlay(json!({"finish_rule": "on"})));
     let on = system_prompt(workspace.path());
     let rule = FINISH_RULE.map(|line| format!("\n - {line}")).concat();
@@ -139,6 +165,16 @@ struct ChatServer {
 
 impl ChatServer {
     fn new() -> Self {
+        Self::answering(None)
+    }
+
+    /// The endpoint, but a turn that offers tools and holds no tool result yet
+    /// is answered with one `Bash` call of `arguments`.
+    fn calling_bash(arguments: &Value) -> Self {
+        Self::answering(Some(arguments.to_string()))
+    }
+
+    fn answering(bash_arguments: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
         listener.set_nonblocking(true).expect("nonblocking");
         let base = format!("http://{}/v1", listener.local_addr().expect("address"));
@@ -155,14 +191,14 @@ impl ChatServer {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                 let request = read_request(&mut stream);
                 let response = if request.starts_with("POST ") {
-                    if let Some(body) = request.split_once("\r\n\r\n").and_then(|(_, body)| serde_json::from_str(body).ok()) {
+                    let body: Option<Value> = request.split_once("\r\n\r\n").and_then(|(_, body)| serde_json::from_str(body).ok());
+                    let calls = bash_arguments
+                        .as_deref()
+                        .filter(|_| body.as_ref().is_some_and(|body| body.get("tools").is_some() && !holds_tool_result(body)));
+                    if let Some(body) = body {
                         kept.lock().expect("bodies").push(body);
                     }
-                    let events = [
-                        json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": null}]}),
-                        json!({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                               "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}),
-                    ];
+                    let events = calls.map_or_else(reply_events, bash_call_events);
                     let mut stream_body = String::new();
                     for event in &events {
                         stream_body.push_str("data: ");
@@ -194,6 +230,30 @@ impl Drop for ChatServer {
             let _ = worker.join();
         }
     }
+}
+
+fn holds_tool_result(body: &Value) -> bool {
+    body["messages"].as_array().is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"))
+}
+
+/// One short streamed reply that ends the turn.
+fn reply_events() -> Vec<Value> {
+    vec![
+        json!({"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": null}]}),
+        json!({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}),
+    ]
+}
+
+/// One streamed `Bash` call with `arguments` (JSON text).
+fn bash_call_events(arguments: &str) -> Vec<Value> {
+    vec![
+        json!({"id": "c2", "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+            {"index": 0, "id": "call_bash", "type": "function", "function": {"name": "Bash", "arguments": arguments}}
+        ]}, "finish_reason": null}]}),
+        json!({"id": "c2", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}),
+    ]
 }
 
 fn read_request(stream: &mut std::net::TcpStream) -> String {
@@ -269,16 +329,21 @@ impl Scene {
         command
     }
 
-    /// The system text and the tools of the turn request one headless run sends.
-    fn request(&self, server: &ChatServer, env: &[(&str, &str)], args: &[&str]) -> (Vec<Value>, Value) {
+    /// Every request body one headless run sends, in order, and what it printed.
+    fn bodies(&self, server: &ChatServer, env: &[(&str, &str)], args: &[&str]) -> (Vec<Value>, String) {
         let providers = json!([{"name": "Acme", "base_url": server.base, "requires_auth": false, "models": [MODEL]}]).to_string();
         let mut command = self.command(Path::new(env!("CARGO_BIN_EXE_zo")));
         command.env(api::CUSTOM_PROVIDERS_ENV, providers).envs(env.iter().copied());
-        command.args(["--plain", "--model", &format!("Acme/{MODEL}"), "--permission-mode", "workspace-write"]).args(args).arg("x");
+        command.args(["--plain", "--model", &format!("Acme/{MODEL}")]).args(args).arg("x");
         let output = finish(command);
         let told = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        let turn = server
-            .take()
+        (server.take(), told)
+    }
+
+    /// The system text and the tools of the turn request one headless run sends.
+    fn request(&self, server: &ChatServer, env: &[(&str, &str)], args: &[&str]) -> (Vec<Value>, Value) {
+        let (bodies, told) = self.bodies(server, env, &[&["--permission-mode", "workspace-write"][..], args].concat());
+        let turn = bodies
             .into_iter()
             .find(|body| body.get("tools").is_some())
             .unwrap_or_else(|| panic!("no turn request reached the endpoint:\n{told}"));
@@ -291,6 +356,62 @@ impl Scene {
             .collect();
         (system, turn["tools"].clone())
     }
+
+    /// The text of the first tool result a headless run sends back, the run
+    /// allowed every call so the tool runs.
+    fn tool_result(&self, server: &ChatServer, env: &[(&str, &str)]) -> String {
+        let (bodies, told) = self.bodies(server, env, &["--permission-mode", "danger-full-access"]);
+        bodies
+            .iter()
+            .filter_map(|body| body["messages"].as_array())
+            .flatten()
+            .find(|message| message["role"] == "tool")
+            .map(|message| content_text(&message["content"]))
+            .unwrap_or_else(|| panic!("no tool result reached the endpoint:\n{told}"))
+    }
+
+    /// Write `skills/scene-skill/SKILL.md` under the scene's zo home: a skill
+    /// the person installed.
+    fn install_skill(&self) {
+        let folder = self.home.join("skills").join("scene-skill");
+        std::fs::create_dir_all(&folder).expect("skill folder");
+        std::fs::write(folder.join("SKILL.md"), "---\nname: scene-skill\ndescription: A skill the person installed.\n---\nSay hello.\n")
+            .expect("skill");
+    }
+
+    /// Add an MCP server to the scene's settings: one the person attached.
+    /// Its command does not exist, and discovery runs behind the turn, so the
+    /// run goes on without its tools.
+    fn attach_mcp_server(&self) {
+        let path = self.home.join("settings.json");
+        let mut settings: Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("settings")).expect("settings json");
+        settings["mcpServers"] = json!({"scene-docs": {"command": self.home.join("no-such-mcp-server").display().to_string(), "args": []}});
+        std::fs::write(&path, settings.to_string()).expect("settings");
+    }
+}
+
+/// A message's text, whether its content is a string or a list of parts.
+fn content_text(content: &Value) -> String {
+    content.as_str().map_or_else(
+        || content.as_array().into_iter().flatten().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n\n"),
+        str::to_string,
+    )
+}
+
+/// The system text of a request, its system messages in order.
+fn system_text(system: &[Value]) -> String {
+    system.iter().map(|message| content_text(&message["content"])).collect::<Vec<_>>().join("\n\n")
+}
+
+/// `text` less the section that opens with `heading`: from the blank line
+/// before it to the next blank line, or to the end.
+fn cut_section(text: &str, heading: &str) -> String {
+    let start = text
+        .find(&format!("\n\n{heading}\n"))
+        .unwrap_or_else(|| panic!("no `{heading}` section in:\n{text}"));
+    let body = start + 2;
+    let end = text[body..].find("\n\n").map_or(text.len(), |offset| body + offset);
+    format!("{}{}", &text[..start], &text[end..])
 }
 
 /// Run `command` to its end, or stop it after two minutes: a run that hangs
@@ -326,7 +447,6 @@ fn tool_names(tools: &Value) -> Vec<String> {
 fn a_core_profile_sends_the_request_the_experiment_switches_send() {
     let server = ChatServer::new();
     let scene = Scene::new();
-    let overlay = |harness: Value| json!({"models": [{"ids": [MODEL], "harness": harness}]}).to_string();
     let plain = overlay(json!({}));
     let core = overlay(json!({"prompt_set": "core", "tool_set": "core"}));
 
@@ -351,6 +471,93 @@ fn a_core_profile_sends_the_request_the_experiment_switches_send() {
         serde_json::to_string(&switches.1).expect("tools"),
         "a core tool set must send the tools --allowed-tools {ARM_TOOLS} sends"
     );
+}
+
+/// A run nobody attends, given no tool list, on a model whose profile says
+/// `headless_core`, sends the request the light-surface arm measured: the
+/// shell, `Read`, `Write` and the edit shape, and the full system text less the
+/// four sections that teach a tool it does not reach and the deferred-tool
+/// paragraph whose doors (`CapabilityInvoke`, `ToolSearch`) it does not have —
+/// nothing else moves. The arm's own switches send that request byte for byte
+/// on this build, and a launch list of the same four tools drops the same text.
+#[test]
+fn a_headless_core_run_sends_the_request_the_light_surface_arm_measured() {
+    let server = ChatServer::new();
+    let scene = Scene::new();
+    let headless_core = overlay(json!({"tool_set": "headless_core"}));
+    let full = overlay(json!({"tool_set": "full"}));
+    let overlay_env = api::MODEL_CONTEXT_WINDOWS_ENV;
+
+    let everything = scene.request(&server, &[(overlay_env, &full)], &[]);
+    let unattended = scene.request(&server, &[(overlay_env, &headless_core)], &[]);
+    let arm = scene.request(&server, &[(overlay_env, &full), (ABLATION_ENV, TOOL_SECTIONS)], &["--allowed-tools", ARM_TOOLS]);
+    let listed = scene.request(&server, &[(overlay_env, &full)], &["--allowed-tools", ARM_TOOLS]);
+
+    // A full tool set is every other session's request, as it was.
+    let full_tools = tool_names(&everything.1);
+    for tool in ["Agent", "AskUserQuestion", "Skill", "ToolSearch", "CapabilityInvoke"] {
+        assert!(full_tools.iter().any(|name| name == tool), "a full run offers {tool}: {full_tools:?}");
+    }
+    let full_text = system_text(&everything.0);
+    let expected = UNREACHED_TEXT.iter().fold(full_text, |text, heading| cut_section(&text, heading));
+
+    assert_eq!(tool_names(&unattended.1), ["Bash", "Read", "Write", "apply_patch"], "headless_core offers the core four");
+    assert_eq!(
+        system_text(&unattended.0),
+        expected,
+        "headless_core sends the full text less the four sections and the deferred-tool paragraph"
+    );
+    assert_eq!(
+        (serde_json::to_string(&unattended.0).expect("system"), serde_json::to_string(&unattended.1).expect("tools")),
+        (serde_json::to_string(&arm.0).expect("system"), serde_json::to_string(&arm.1).expect("tools")),
+        "headless_core sends the request the arm's switches send"
+    );
+    assert_eq!(system_text(&listed.0), expected, "a launch list of the four drops the same text and nothing else");
+}
+
+/// What `headless_core` leaves as it was: a launch list wins over it, and a
+/// run the person attached an MCP server or a skill to keeps the full request.
+#[test]
+fn headless_core_leaves_a_launch_list_and_the_persons_attachments_as_they_were() {
+    let server = ChatServer::new();
+    let headless_core = overlay(json!({"tool_set": "headless_core"}));
+    let full = overlay(json!({"tool_set": "full"}));
+    let overlay_env = api::MODEL_CONTEXT_WINDOWS_ENV;
+
+    let flagged = Scene::new().request(&server, &[(overlay_env, &headless_core)], &["--allowed-tools", "bash,read_file"]);
+    assert_eq!(tool_names(&flagged.1), ["Bash", "Read"], "the launch list wins over the profile");
+
+    for (attachment, attach) in [("an MCP server", Scene::attach_mcp_server as fn(&Scene)), ("a skill", Scene::install_skill)] {
+        let scene = Scene::new();
+        attach(&scene);
+        let declared = scene.request(&server, &[(overlay_env, &headless_core)], &[]);
+        let as_it_was = scene.request(&server, &[(overlay_env, &full)], &[]);
+        assert!(tool_names(&declared.1).len() > 4, "with {attachment} attached the run keeps every tool");
+        assert_eq!(
+            (serde_json::to_string(&declared.0).expect("system"), serde_json::to_string(&declared.1).expect("tools")),
+            (serde_json::to_string(&as_it_was.0).expect("system"), serde_json::to_string(&as_it_was.1).expect("tools")),
+            "with {attachment} attached, headless_core sends the full request"
+        );
+    }
+}
+
+/// A background command started in a run that reaches no task tool is told
+/// how its output does come back — when it exits — and how to stop it, and
+/// names no tool the run was not given; a run with the task tools reads as
+/// before.
+#[test]
+fn a_background_start_names_only_what_the_run_reaches() {
+    let server = ChatServer::calling_bash(&json!({"command": "sleep 3", "run_in_background": true, "description": "wait"}));
+    let overlay_env = api::MODEL_CONTEXT_WINDOWS_ENV;
+
+    let core = Scene::new().tool_result(&server, &[(overlay_env, &overlay(json!({"tool_set": "headless_core"})))]);
+    assert!(core.contains("Started background task"), "the command started in the background: {core}");
+    for tool in ["TaskOutput", "TaskStop"] {
+        assert!(!core.contains(tool), "a run without {tool} is not told to use it: {core}");
+    }
+
+    let full = Scene::new().tool_result(&server, &[(overlay_env, &overlay(json!({"tool_set": "full"})))]);
+    assert!(full.contains(TASK_TOOLS_LINE), "a run with the task tools reads as before: {full}");
 }
 
 /// The `--prompt-input` digest of every shipped model row id, every shipped
