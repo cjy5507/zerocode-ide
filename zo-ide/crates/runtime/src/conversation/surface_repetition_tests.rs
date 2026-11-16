@@ -1279,10 +1279,40 @@ fn long_repetition_transcript() -> (ConversationRuntime<ScriptApi, ScriptExecuto
     (runtime, executor)
 }
 
+/// A check reads the transcript only for a call a stop stands for. Three
+/// notes reach the advisory and the batch boundary arms the stop.
+fn stand_a_stop_for(runtime: &mut ConversationRuntime<ScriptApi, ScriptExecutor>, input: &str) {
+    for _ in 0..3 { runtime.note_tool_repetition("Bash", input, false); }
+    runtime.arm_tool_repetition_hard_stops();
+}
+
+/// A call no stop stands for is checked without reading the transcript. Each
+/// of the three checks used to walk every message of the session first — here
+/// 2,000 tool calls, each one resolved — to answer a question only a repeat
+/// asks.
+#[test]
+fn a_call_no_stop_stands_for_is_checked_without_reading_the_transcript() {
+    use crate::permissions::PermissionOutcome;
+    let (mut runtime, executor) = long_repetition_transcript();
+    let resolutions = executor.resolutions.clone().unwrap();
+    let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
+    let read = json!({"path":"src/lib.rs"}).to_string();
+    let before = resolutions.load(Ordering::Relaxed);
+    assert_eq!(runtime.next_tool_repetition_hard_stop_notice("Bash", &input), None);
+    assert!(matches!(
+        runtime.note_tool_repetition("Bash", &input, false),
+        super::ToolRepetition::Ok
+    ));
+    assert!(!runtime.parallel_batch_has_repetition_risk([("read_file", read.as_str(), &PermissionOutcome::Allow)]));
+    let resolved = resolutions.load(Ordering::Relaxed) - before;
+    assert!(resolved <= 3, "three checks of calls no stop stands for resolved {resolved} calls: the transcript's 2,000 were read");
+}
+
 #[test]
 fn a_second_repetition_check_reuses_parsed_tool_use_fingerprints() {
     let (mut runtime, executor) = long_repetition_transcript();
     let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
+    stand_a_stop_for(&mut runtime, &input);
     runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
     runtime.session_mut().name = Some("Fixture metadata rename".into());
     let before = executor.resolutions.as_ref().unwrap().load(Ordering::Relaxed);
@@ -1298,15 +1328,25 @@ fn measure_repetition_check_for_two_thousand_ordinary_tool_calls() {
     let (mut runtime, _) = long_repetition_transcript();
     runtime.tool_executor_mut().resolutions = None;
     let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
-    runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
-    let mut samples = (0..101).map(|_| {
-        let start = std::time::Instant::now();
-        std::hint::black_box(runtime.next_tool_repetition_hard_stop_notice("Bash", &input));
-        start.elapsed().as_nanos()
-    }).collect::<Vec<_>>();
-    samples.sort_unstable();
-    eprintln!("REPETITION_CHECK_METRIC {}", json!({"toolCalls":2000,"samples":samples.len(),
-        "p50Nanoseconds":samples[50],"p95Nanoseconds":samples[95],"debugAssertions":cfg!(debug_assertions)}));
+    let sample = |runtime: &mut ConversationRuntime<ScriptApi, ScriptExecutor>| {
+        runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
+        let mut samples = (0..101).map(|_| {
+            let start = std::time::Instant::now();
+            std::hint::black_box(runtime.next_tool_repetition_hard_stop_notice("Bash", &input));
+            start.elapsed().as_nanos()
+        }).collect::<Vec<_>>();
+        samples.sort_unstable();
+        (samples[50], samples[95])
+    };
+    // The call as it usually is: no stop stands for it.
+    let ordinary = sample(&mut runtime);
+    // The same call once a stop stands for it: the check reads the transcript.
+    stand_a_stop_for(&mut runtime, &input);
+    let stopped = sample(&mut runtime);
+    eprintln!("REPETITION_CHECK_METRIC {}", json!({"toolCalls":2000,"samples":101,
+        "p50Nanoseconds":ordinary.0,"p95Nanoseconds":ordinary.1,
+        "stoppedP50Nanoseconds":stopped.0,"stoppedP95Nanoseconds":stopped.1,
+        "debugAssertions":cfg!(debug_assertions)}));
 }
 
 fn retain_script_result(runtime: &mut ConversationRuntime<ScriptApi, ScriptExecutor>, name: &str, input: &str) {

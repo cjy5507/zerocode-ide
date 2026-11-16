@@ -895,9 +895,6 @@ where
         if !is_mutation && !keeps_surface_limit {
             self.index_read_fingerprint(input, fp);
         }
-        let recovering_microcompacted_result = !is_mutation
-            && !is_error
-            && self.latest_matching_tool_result_was_microcompacted(fp);
         // Cross-turn tally: it counts the number of DISTINCT turns that issued
         // this identical call, so it must advance at most ONCE per turn — on the
         // fingerprint's FIRST occurrence this turn (`count == 1`, because the
@@ -921,11 +918,19 @@ where
         // never hard-stop this recovery call. Once this fresh result is appended, a
         // later identical call will no longer match the cleared-result exemption and
         // the ordinary no-progress guard applies again.
-        if recovering_microcompacted_result
-            && (count >= TOOL_REPETITION_THRESHOLD
-                || cross >= TOOL_REPETITION_CROSS_TURN_ADVISE
-                || self.tool_repetition_hard_stop_fps.contains(&fp)
-                || self.cross_turn_tool_repetition_hard_stop_fps.contains(&fp))
+        //
+        // The transcript is read for that only once a count or a standing stop
+        // says this call repeats. The read walks every message of the session,
+        // and it used to run for every call that was neither a mutation nor an
+        // error — to answer a question only a repeat asks.
+        let repeats = count >= TOOL_REPETITION_THRESHOLD
+            || cross >= TOOL_REPETITION_CROSS_TURN_ADVISE
+            || self.tool_repetition_hard_stop_fps.contains(&fp)
+            || self.cross_turn_tool_repetition_hard_stop_fps.contains(&fp);
+        if repeats
+            && !is_mutation
+            && !is_error
+            && self.latest_matching_tool_result_was_microcompacted(fp)
         {
             self.tool_repetition_pending_hard_stop_fps.insert(fp);
             self.cross_turn_tool_repetition_pending_hard_stop_fps.insert(fp);
@@ -1222,18 +1227,32 @@ where
             .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
         let fp = self.repetition_fingerprint(tool_name, input);
         let is_mutation = is_edit_or_write_tool(tool_name);
-        if !is_mutation && self.latest_matching_tool_result_was_microcompacted(fp) {
-            return None;
-        }
         let next_count = self
             .tool_fingerprint_counts
             .get(&fp)
             .copied()
             .unwrap_or(0)
             .saturating_add(1);
-        if next_count >= TOOL_REPETITION_HARD_STOP
-            && self.tool_repetition_hard_stop_fps.contains(&fp)
-        {
+        let per_turn_stop = next_count >= TOOL_REPETITION_HARD_STOP
+            && self.tool_repetition_hard_stop_fps.contains(&fp);
+        let cross_turn_stop = !is_mutation
+            && next_count == 1
+            && self.cross_turn_tool_fingerprints.get(&fp).copied().unwrap_or(0).saturating_add(1)
+                >= TOOL_REPETITION_CROSS_TURN_HARD_STOP
+            && self.cross_turn_tool_repetition_hard_stop_fps.contains(&fp);
+        // No stop stands for this call: there is nothing a cleared result
+        // could excuse, so the transcript is not read to look for one. That
+        // read walks every message of the session, and it used to come first,
+        // for every call.
+        if !per_turn_stop && !cross_turn_stop {
+            return None;
+        }
+        // A call that would be stopped is excused when the result it repeats
+        // was cleared: it is fetching back what the runtime removed.
+        if !is_mutation && self.latest_matching_tool_result_was_microcompacted(fp) {
+            return None;
+        }
+        if per_turn_stop {
             // Count the skipped round so a successful repeated read gets one
             // chance to recover after seeing the advisory, but cannot request
             // the same cached result forever now that interactive turns have no
@@ -1413,17 +1432,19 @@ where
             }
             let fp = self.repetition_fingerprint(tool_name, input);
             let is_mutation = is_edit_or_write_tool(tool_name);
+            // Asked only of a call a stop stands for: the answer is read off
+            // the whole transcript.
             let recovering_microcompacted_result =
-                !is_mutation && self.latest_matching_tool_result_was_microcompacted(fp);
+                || !is_mutation && self.latest_matching_tool_result_was_microcompacted(fp);
 
             let next_count = projected_counts
                 .get(&fp)
                 .copied()
                 .unwrap_or(0)
                 .saturating_add(1);
-            if !recovering_microcompacted_result
-                && next_count >= TOOL_REPETITION_HARD_STOP
+            if next_count >= TOOL_REPETITION_HARD_STOP
                 && self.tool_repetition_hard_stop_fps.contains(&fp)
+                && !recovering_microcompacted_result()
             {
                 return true;
             }
@@ -1434,9 +1455,9 @@ where
                     .copied()
                     .unwrap_or(0)
                     .saturating_add(1);
-                if !recovering_microcompacted_result
-                    && next_cross >= TOOL_REPETITION_CROSS_TURN_HARD_STOP
+                if next_cross >= TOOL_REPETITION_CROSS_TURN_HARD_STOP
                     && self.cross_turn_tool_repetition_hard_stop_fps.contains(&fp)
+                    && !recovering_microcompacted_result()
                 {
                     return true;
                 }
