@@ -1766,6 +1766,120 @@ fn named_theme_lightness_fit_is_cached_per_revision_and_pair() {
     );
 }
 
+/// On a light ground `terminal` and `catppuccin-latte` both take Catppuccin
+/// Latte as their syntax theme, so the same syntax ink comes in under both —
+/// and `terminal` blends it toward the body ink while a named theme moves only
+/// its lightness. The contrast cache must keep the theme's revision in its
+/// key, or one theme gets the other's answer.
+#[test]
+fn the_same_syntax_ink_fits_by_blend_under_terminal_and_by_lightness_under_catppuccin_latte() {
+    use super::ansi::Color;
+    use super::palette::{code_background_rgb, ensure_text_contrast_cached, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path(
+        "the_same_syntax_ink_fits_by_blend_under_terminal_and_by_lightness_under_catppuccin_latte",
+    )) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+    let terminal = super::theme::Theme::terminal();
+    let latte = super::theme::find("catppuccin-latte").expect("catppuccin-latte");
+    let type_ink = |theme: &super::theme::Theme| {
+        let _ = super::theme::set(theme.clone());
+        super::highlight::foreground_style_for_scopes_with_level(
+            &["entity.name.type"],
+            Some(light),
+            ColorLevel::TrueColor,
+        )
+        .and_then(|style| style.fg)
+    };
+    let ink = match (type_ink(&terminal), type_ink(&latte)) {
+        (Some(Color::Rgb(red, green, blue)), named) => {
+            assert_eq!(named, Some(Color::Rgb(red, green, blue)), "both themes hand in the same Latte ink");
+            (red, green, blue)
+        }
+        other => panic!("a type's ink is RGB under both themes: {other:?}"),
+    };
+    let ground = code_background_rgb(light);
+    let blended = light.ensure_text_contrast(ink, ground);
+    let lightness_fit = super::theme::fit_lightness(ink, light, ground);
+    let values = format!("ink {ink:?} on {ground:?}: blend {blended:?}, lightness {lightness_fit:?}");
+    assert_ne!(blended, lightness_fit, "the two fits must differ for this ink — {values}");
+
+    let _ = super::theme::set(terminal.clone());
+    let first = ensure_text_contrast_cached(light, ink, ground);
+    assert_eq!(first, blended, "terminal blends — {values}");
+    let _ = super::theme::set(latte);
+    assert_eq!(
+        ensure_text_contrast_cached(light, ink, ground),
+        lightness_fit,
+        "catppuccin-latte moves the lightness, not terminal's cached blend — {values}"
+    );
+    let _ = super::theme::set(terminal);
+    assert_eq!(ensure_text_contrast_cached(light, ink, ground), first, "back on terminal — {values}");
+
+    // The values the report quotes: Latte's yellow (#df8e1d) on the code band.
+    assert_eq!(
+        (ink, ground, blended, lightness_fit),
+        ((223, 142, 29), (247, 247, 247), (143, 101, 39), (155, 99, 20)),
+        "{values}"
+    );
+}
+
+/// Switching themes back and forth keeps one revision's worth of cached
+/// colours: the contrast cache, the ANSI-16 ink cache and the syntax scope
+/// cache drop the entries an earlier theme left once a new theme asks.
+#[test]
+fn switching_themes_back_and_forth_keeps_one_revision_of_cached_colours() {
+    use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};
+    use super::palette::{cached_colour_entries, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("switching_themes_back_and_forth_keeps_one_revision_of_cached_colours")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
+    let draw = || {
+        let mut out = String::new();
+        for color in [
+            Color::Role(Role::Code),
+            Color::Role(Role::Link),
+            Color::Role(Role::Heading),
+            Color::Role(Role::Caret),
+            Color::Role(Role::Model),
+            Color::Role(Role::Cwd),
+            Color::Role(Role::Warning),
+            Color::Base(0),
+            Color::Base(7),
+        ] {
+            write_spans_for_palette(&Line::new(vec![Span::new("x", Style::new().fg(color))]), Some(light), &mut out);
+        }
+        for scopes in [&["entity.name.type", "support.type", "variable"][..], &["string", "markup.underline.link"][..]] {
+            let _ = super::highlight::foreground_style_for_scopes_with_level(scopes, Some(light), ColorLevel::TrueColor);
+        }
+        let (contrast, inks) = cached_colour_entries();
+        (contrast, inks, super::highlight::cached_scope_answers())
+    };
+    let dracula = super::theme::find("dracula").expect("dracula");
+    let nord = super::theme::find("nord").expect("nord");
+
+    let _ = super::theme::set(dracula.clone());
+    let one_dracula = draw();
+    let _ = super::theme::set(nord.clone());
+    let one_nord = draw();
+    assert!(
+        one_dracula.0 > 0 && one_dracula.1 > 0 && one_dracula.2 > 0,
+        "each cache is asked: {one_dracula:?}"
+    );
+    for round in 0..3 {
+        let _ = super::theme::set(dracula.clone());
+        assert_eq!(draw(), one_dracula, "dracula again, round {round}: (contrast, ANSI-16 inks, scopes)");
+        let _ = super::theme::set(nord.clone());
+        assert_eq!(draw(), one_nord, "nord again, round {round}: (contrast, ANSI-16 inks, scopes)");
+    }
+}
+
 #[test]
 fn an_empty_named_theme_resolves_roles_like_terminal_on_a_light_ground() {
     use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};

@@ -186,8 +186,8 @@ fn convert_style(
 /// syntax highlighting instead of freezing one theme's RGB values at call sites.
 ///
 /// The footer asks on every paint, and a `Highlighter` is built from the whole
-/// theme, so each scope list's answer is kept; the theme is fixed for the
-/// process, so an answer never goes stale (t-48216).
+/// theme, so each scope list's answer is kept for the theme revision it was
+/// asked under (t-48216); a miss drops the answers an earlier revision left.
 pub(crate) fn foreground_style_for_scopes(scope_names: &[&str]) -> Option<Style> {
     let palette = super::palette::terminal_palette();
     foreground_style_for_scopes_with_level(scope_names, palette, production_color_level(palette))
@@ -224,7 +224,9 @@ pub(crate) fn foreground_style_for_scopes_with_level(
             convert_syntect_color(foreground).map(|color| Style::new().fg(color))
         });
         let scopes = scope_names.iter().map(|scope| (*scope).to_string()).collect();
-        answers.borrow_mut().push((revision, light, named, scopes, style));
+        let mut answers = answers.borrow_mut();
+        answers.retain(|(cached_rev, ..)| *cached_rev == revision);
+        answers.push((revision, light, named, scopes, style));
         style
     })
 }
@@ -235,6 +237,12 @@ type ScopeStyleCacheEntry = (u64, bool, bool, Vec<String>, Option<Style>);
 thread_local! {
     static SCOPE_STYLES: std::cell::RefCell<Vec<ScopeStyleCacheEntry>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many scope answers this thread's cache holds.
+#[cfg(test)]
+pub(crate) fn cached_scope_answers() -> usize {
+    SCOPE_STYLES.with(|answers| answers.borrow().len())
 }
 
 #[cfg(test)]

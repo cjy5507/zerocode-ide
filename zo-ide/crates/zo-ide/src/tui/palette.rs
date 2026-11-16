@@ -489,9 +489,27 @@ pub(crate) fn contrast_computes() -> usize {
     CONTRAST_COMPUTES.with(std::cell::Cell::get)
 }
 
+thread_local! {
+    static ADJUSTED_TEXT_COLORS: std::cell::RefCell<Vec<ContrastCacheEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static ANSI16_INKS: std::cell::RefCell<Vec<Ansi16InkCacheEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many entries this thread's contrast cache and ANSI-16 ink cache hold.
+#[cfg(test)]
+pub(crate) fn cached_colour_entries() -> (usize, usize) {
+    (
+        ADJUSTED_TEXT_COLORS.with(|cache| cache.borrow().len()),
+        ANSI16_INKS.with(|cache| cache.borrow().len()),
+    )
+}
+
 /// Cached contrast adjustment keyed by `(revision, palette, color, background)`.
 /// In `terminal` theme it blends toward `palette.foreground`; in a named theme
-/// it shifts HSL lightness while keeping hue and saturation.
+/// it shifts HSL lightness while keeping hue and saturation. A miss drops the
+/// entries an earlier theme revision left, so switching themes keeps one
+/// revision's worth.
 #[must_use]
 pub(crate) fn ensure_text_contrast_cached(
     palette: TerminalPalette,
@@ -500,10 +518,6 @@ pub(crate) fn ensure_text_contrast_cached(
 ) -> (u8, u8, u8) {
     let revision = super::theme::revision();
     let named_theme = !super::theme::is_terminal();
-    thread_local! {
-        static ADJUSTED_TEXT_COLORS: std::cell::RefCell<Vec<ContrastCacheEntry>> =
-            const { std::cell::RefCell::new(Vec::new()) };
-    }
     ADJUSTED_TEXT_COLORS.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(entry) = cache.iter().find(|entry| {
@@ -521,6 +535,7 @@ pub(crate) fn ensure_text_contrast_cached(
         } else {
             palette.ensure_text_contrast(color, background)
         };
+        cache.retain(|entry| entry.revision == revision);
         cache.push(ContrastCacheEntry {
             revision,
             palette,
@@ -584,7 +599,8 @@ fn compute_ansi16_ink(
 /// Resolves an ANSI-16 slot's foreground RGB when its colour is known and
 /// either `dim` is set or the slot falls below the text contrast floor.
 /// Returns `None` when the slot should keep its original ANSI index bytes.
-/// Caches `(palette, slot, dim)` for the terminal's default background.
+/// Caches `(palette, slot, dim)` for the terminal's default background, for
+/// one theme revision at a time.
 #[must_use]
 pub(crate) fn resolved_ansi16_ink(
     palette: TerminalPalette,
@@ -596,10 +612,6 @@ pub(crate) fn resolved_ansi16_ink(
         return compute_ansi16_ink(palette, slot, dim, background);
     }
     let revision = super::theme::revision();
-    thread_local! {
-        static ANSI16_INKS: std::cell::RefCell<Vec<Ansi16InkCacheEntry>> =
-            const { std::cell::RefCell::new(Vec::new()) };
-    }
     ANSI16_INKS.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(entry) = cache.iter().find(|entry| {
@@ -611,6 +623,7 @@ pub(crate) fn resolved_ansi16_ink(
             return entry.resolved;
         }
         let resolved = compute_ansi16_ink(palette, slot, dim, palette.background());
+        cache.retain(|entry| entry.revision == revision);
         cache.push(Ansi16InkCacheEntry {
             revision,
             palette,
