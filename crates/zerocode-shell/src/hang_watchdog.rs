@@ -817,21 +817,26 @@ impl fmt::Display for MainLoop {
     }
 }
 
-/// The main run loop, asked from this thread. Whether it waits is one flag
-/// read under no lock (`CFRunLoopIsWaiting`, which Apple documents for
-/// reading another thread's run loop). Its mode is read under the run loop's
-/// own lock, which the loop gives up for its wait and around every callout
-/// (CFRunLoop.c) — so the mode is asked only of a loop found waiting, and a
-/// main thread at work is never asked for it.
+/// The main run loop, asked from this thread.
 #[cfg(target_os = "macos")]
 fn main_loop_now() -> MainLoop {
-    let Some(main) = objc2_core_foundation::CFRunLoop::main() else {
-        return MainLoop::Running;
-    };
-    if !main.is_waiting() {
+    objc2_core_foundation::CFRunLoop::main().map_or(MainLoop::Running, |main| loop_now(&main))
+}
+
+/// A run loop, asked from a thread that does not run it. Whether it waits is
+/// one flag read under no lock (`CFRunLoopIsWaiting`, which Apple documents
+/// for reading another thread's run loop). Its mode is read under the run
+/// loop's own lock, which the loop gives up for its wait and around every
+/// callout — as the open-source `CFRunLoop.c` of swift-corelibs-foundation
+/// has it; the library macOS ships is taken to do the same. So the mode is
+/// asked only of a loop found waiting, and a thread at work is never asked
+/// for it.
+#[cfg(target_os = "macos")]
+fn loop_now(run_loop: &objc2_core_foundation::CFRunLoop) -> MainLoop {
+    if !run_loop.is_waiting() {
         return MainLoop::Running;
     }
-    main.current_mode().map_or(MainLoop::Running, |mode| {
+    run_loop.current_mode().map_or(MainLoop::Running, |mode| {
         MainLoop::Waiting(mode.to_string())
     })
 }
@@ -1399,6 +1404,71 @@ mod tests {
     #[test]
     fn a_main_run_loop_nobody_runs_is_not_found_waiting() {
         assert_eq!(main_loop_now(), MainLoop::Running);
+    }
+
+    /// The same question, of a run loop that does sleep. A thread of the
+    /// test's own keeps its run loop asleep in the event-tracking mode — a
+    /// timer a day off is all the mode holds — and this thread reads it as
+    /// the watch reads the main one. The flag, the mode read under the
+    /// loop's lock and the name it is compared with are all the system's
+    /// here; only a menu itself is not. (The thread is the test's: the watch
+    /// starts none, and `crash_report.rs` reads this file for that.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_run_loop_asleep_in_the_event_tracking_mode_is_read_as_held() {
+        use objc2_core_foundation::{
+            CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopTimer, CFString,
+        };
+
+        /// The sleeper's run loop, handed to the thread that reads it.
+        struct Asked(CFRetained<CFRunLoop>);
+        // SAFETY: a CFRunLoop may be used from any thread — Core Foundation
+        // locks it itself, and reading another thread's run loop is what
+        // `CFRunLoopIsWaiting` is for.
+        unsafe impl Send for Asked {}
+
+        unsafe extern "C-unwind" fn never(_: *mut CFRunLoopTimer, _: *mut std::ffi::c_void) {}
+
+        let read = std::thread::scope(|threads| {
+            let (tell, told) = std::sync::mpsc::channel();
+            threads.spawn(move || {
+                let run_loop = CFRunLoop::current().expect("a thread has a run loop");
+                let mode = CFString::from_static_str(EVENT_TRACKING_MODE);
+                // SAFETY: the default allocator, a callout that does nothing
+                // and no context for it to be handed.
+                let far_off = unsafe {
+                    CFRunLoopTimer::new(
+                        None,
+                        CFAbsoluteTimeGetCurrent() + 86_400.0,
+                        0.0,
+                        0,
+                        0,
+                        Some(never),
+                        std::ptr::null_mut(),
+                    )
+                }
+                .expect("a timer");
+                run_loop.add_timer(Some(&far_off), Some(&mode));
+                tell.send(Asked(run_loop))
+                    .expect("the test waits for the run loop");
+                // Ends when the test stops the loop; the minute is for a test
+                // that never does.
+                CFRunLoop::run_in_mode(Some(&mode), 60.0, false);
+            });
+            let Asked(run_loop) = told.recv().expect("the sleeper sends its run loop");
+            let give_up = Instant::now() + Duration::from_secs(30);
+            let read = loop {
+                let read = loop_now(&run_loop);
+                if read != MainLoop::Running || Instant::now() >= give_up {
+                    break read;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            run_loop.stop();
+            read
+        });
+        assert_eq!(read, MainLoop::Waiting(EVENT_TRACKING_MODE.to_string()));
+        assert!(read.holds());
     }
 
     /// Made-up moments for the actor watch alone: `ms` past one origin.
