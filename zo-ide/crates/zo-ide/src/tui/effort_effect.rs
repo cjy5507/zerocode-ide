@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use crate::effort::Effort;
 
-use super::ansi::{char_width, Color, Line, Span, Style};
+use super::ansi::{char_width, Color, Line, Role, Span, Style};
+use super::palette::{self, ColorLevel, TerminalPalette};
 
 const SCROLL_OUT: Duration = Duration::from_millis(620);
 const LABEL_ASSEMBLE: Duration = Duration::from_millis(700);
@@ -169,6 +170,67 @@ fn transition_line_at(
     elapsed: Duration,
     width: usize,
 ) -> Option<Line> {
+    transition_line_with_inks(tier, previous, current, elapsed, width, RoleInks::current())
+}
+
+/// Where the fade finds the ink a colour role is drawn in. The footer's model
+/// and folder are roles under a named theme, and a role is no RGB the fade
+/// could tint — so it asks the theme first.
+#[derive(Clone, Copy, Debug)]
+struct RoleInks {
+    palette: Option<TerminalPalette>,
+    color_level: ColorLevel,
+}
+
+impl RoleInks {
+    /// The terminal this process draws on.
+    fn current() -> Self {
+        let palette = palette::terminal_palette();
+        Self {
+            palette,
+            color_level: palette.map_or_else(palette::color_level_from_env, TerminalPalette::color_level),
+        }
+    }
+
+    /// The RGB the active theme draws `role` in on this terminal, its contrast
+    /// fitted on the terminal's ground as the writer fits it. `None` where the
+    /// writer draws the role as `terminal` does — the `terminal` theme, the
+    /// codex look, a sixteen-colour terminal — or the theme has no colour for
+    /// it; the fade then leaves the role as it was.
+    fn ink(self, role: Role) -> Option<(u8, u8, u8)> {
+        let draws_the_theme = !super::theme::is_terminal()
+            && super::style::current().style == super::style::TuiStyle::Marks
+            && self.color_level != ColorLevel::Ansi16;
+        if !draws_the_theme {
+            return None;
+        }
+        let ink = super::theme::with_active(|theme| theme.role_color(role))?;
+        Some(self.palette.map_or(ink, |palette| {
+            palette::ensure_text_contrast_cached(palette, ink, palette.background())
+        }))
+    }
+
+    /// A role in `style` becomes the RGB the writer would draw it in, so the
+    /// fade below can tint it; any other colour is left as it is.
+    fn resolve(self, style: &mut Style) {
+        let ink = match style.fg {
+            Some(Color::Role(role)) => self.ink(role),
+            _ => None,
+        };
+        if let Some((red, green, blue)) = ink {
+            style.fg = Some(Color::Rgb(red, green, blue));
+        }
+    }
+}
+
+fn transition_line_with_inks(
+    tier: EffortTier,
+    previous: Option<&Line>,
+    current: Option<&Line>,
+    elapsed: Duration,
+    width: usize,
+    inks: RoleInks,
+) -> Option<Line> {
     if width == 0 {
         return None;
     }
@@ -182,7 +244,7 @@ fn transition_line_at(
         let offset = (width_f32 * ease_in_cubic(progress)).round() as usize;
         let mut line = previous.cloned()?;
         let tint = 0.12 + 0.88 * progress;
-        style_line(&mut line, tier, 1.0 - progress * progress, tint);
+        style_line(&mut line, tier, 1.0 - progress * progress, tint, inks);
         line.spans.insert(0, Span::raw(" ".repeat(offset)));
         return Some(clip_line(line, width));
     }
@@ -207,7 +269,7 @@ fn transition_line_at(
     let fade_elapsed = after_scroll.saturating_sub(label_duration);
     let opacity = (fade_elapsed.as_secs_f32() / STATUS_FADE_IN.as_secs_f32()).clamp(0.0, 1.0);
     let mut line = current.cloned()?;
-    style_line(&mut line, tier, opacity, 0.0);
+    style_line(&mut line, tier, opacity, 0.0, inks);
     Some(clip_line(line, width))
 }
 
@@ -265,9 +327,11 @@ fn tier_label_line(tier: EffortTier, width: usize, assemble: f32, opacity: f32) 
     clip_line(Line::new(spans), width)
 }
 
-fn style_line(line: &mut Line, tier: EffortTier, opacity: f32, tint: f32) {
+fn style_line(line: &mut Line, tier: EffortTier, opacity: f32, tint: f32, inks: RoleInks) {
+    inks.resolve(&mut line.style);
     apply_fade(&mut line.style, tier, opacity, tint);
     for span in &mut line.spans {
+        inks.resolve(&mut span.style);
         apply_fade(&mut span.style, tier, opacity, tint);
     }
 }
@@ -383,6 +447,59 @@ mod tests {
                 );
                 assert!(line.is_none_or(|line| line.width() <= width));
             }
+        }
+    }
+
+    /// Under a named theme the footer's model is a colour role. While the old
+    /// footer scrolls out it tints toward the tier like `terminal`'s RGB
+    /// does; `terminal` and a sixteen-colour terminal keep today's colours.
+    #[test]
+    fn a_named_themes_footer_model_tints_toward_the_tier_as_it_scrolls_out() {
+        use crate::tui::{style, theme};
+
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !style::in_fresh_run(&format!(
+            "{module}::a_named_themes_footer_model_tints_toward_the_tier_as_it_scrolls_out"
+        )) {
+            return;
+        }
+        style::init(&crate::preferences::Preferences::default());
+        let footer = Line::new(vec![
+            Span::new("gpt-5.6-sol", Style::new().fg(palette::FOOTER_MODEL)),
+            Span::raw(" · "),
+            Span::new("/tmp", Style::new().fg(palette::FOOTER_CWD)),
+        ]);
+        let model_at = |color_level| {
+            let inks = RoleInks { palette: None, color_level };
+            transition_line_with_inks(EffortTier::Max, Some(&footer), Some(&footer), Duration::ZERO, 40, inks)
+                .expect("the old footer, scrolling out")
+                .spans
+                .into_iter()
+                .find(|span| span.text == "gpt-5.6-sol")
+                .expect("the model")
+                .style
+                .fg
+        };
+
+        let _ = theme::set(theme::Theme::terminal());
+        assert_eq!(model_at(ColorLevel::TrueColor), Some(palette::FOOTER_MODEL), "terminal: as before");
+
+        let _ = theme::set(theme::find("dracula").expect("dracula"));
+        assert_eq!(model_at(ColorLevel::Ansi16), Some(palette::FOOTER_MODEL), "16 colours draw terminal's");
+        let themed = theme::with_active(|active| active.role_color(Role::Model)).expect("dracula's model ink");
+        let tier = EffortTier::Max.accent();
+        let tinted = blend(tier, themed, 0.12);
+        assert_eq!(model_at(ColorLevel::TrueColor), Some(Color::Rgb(tinted.0, tinted.1, tinted.2)));
+        assert!(tinted != themed && tinted != tier, "{tinted:?} is neither end");
+        for (value, theme_end, tier_end) in [
+            (tinted.0, themed.0, tier.0),
+            (tinted.1, themed.1, tier.1),
+            (tinted.2, themed.2, tier.2),
+        ] {
+            assert!(
+                (theme_end.min(tier_end)..=theme_end.max(tier_end)).contains(&value),
+                "{tinted:?} lies between {themed:?} and {tier:?}"
+            );
         }
     }
 
