@@ -256,6 +256,8 @@ impl IdleProfile {
 
     /// The prefix of every returned pause longer than `elapsed`.
     fn returned_beyond(&self, elapsed: Duration) -> u64 {
+        #[cfg(test)]
+        tests::LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
         let longer = self.returned.partition_point(|(pause, _)| *pause > elapsed);
         longer.checked_sub(1).map_or(0, |last| self.returned[last].1)
     }
@@ -286,17 +288,22 @@ fn refresh_every(ttl: CacheTtl) -> Duration {
     ttl.lifetime().saturating_sub(REFRESH_LEAD)
 }
 
+/// What the `refresh`-th refresh of a conversation reads back, summed over
+/// the profile: the prefix of every pause that outlasted it, and of every
+/// conversation that never came back.
+fn refresh_reads(profile: &IdleProfile, every: Duration, refresh: u32) -> u64 {
+    profile.returned_beyond(every * refresh) + profile.ended_prefix_tokens
+}
+
 /// The expected lifetime-dependent input cost of one request under `ttl` with
 /// up to `refreshes` refreshes, in input-token equivalents: its writes at the
 /// lifetime's rate, the refreshes a pause outlasts, and the rewrite past the
-/// last one.
-fn plan_cost(rates: CacheRates, profile: &IdleProfile, ttl: CacheTtl, refreshes: u32) -> f64 {
-    let every = refresh_every(ttl);
-    let mut reads = 0_u64;
-    for refresh in 1..=refreshes {
-        reads += profile.returned_beyond(every * refresh) + profile.ended_prefix_tokens;
-    }
-    let expired = profile.returned_beyond(every * refreshes + ttl.lifetime());
+/// last one. `reads` is what those refreshes read back — the sum of
+/// [`refresh_reads`] over `1..=refreshes` — handed in so a search over
+/// refresh counts carries it forward instead of adding it up from the first
+/// refresh again for every count it tries.
+fn plan_cost(rates: CacheRates, profile: &IdleProfile, ttl: CacheTtl, refreshes: u32, reads: u64) -> f64 {
+    let expired = profile.returned_beyond(refresh_every(ttl) * refreshes + ttl.lifetime());
     let total = rates.write(ttl) * as_f64(profile.written_tokens)
         + rates.read * as_f64(reads)
         + (rates.write(ttl) - rates.read) * as_f64(expired);
@@ -322,9 +329,15 @@ fn cheapest_refreshes_with_cost(rates: CacheRates, profile: &IdleProfile, ttl: C
     let every = refresh_every(ttl);
     let reach = profile.longest_return().saturating_sub(ttl.lifetime());
     let most = u32::try_from(reach.as_nanos().div_ceil(every.as_nanos().max(1))).unwrap_or(u32::MAX);
-    let mut best = (0, plan_cost(rates, profile, ttl, 0));
+    // One pass: each count's reads are the count before it plus one more
+    // refresh. Summed from the first refresh for every count, a pause of some
+    // days (hundreds of refreshes at the short lifetime) cost the square of
+    // that in lookups — on the way into every turn, and at every refresh wake.
+    let mut reads = 0_u64;
+    let mut best = (0, plan_cost(rates, profile, ttl, 0, reads));
     for refreshes in 1..=most {
-        let cost = plan_cost(rates, profile, ttl, refreshes);
+        reads += refresh_reads(profile, every, refreshes);
+        let cost = plan_cost(rates, profile, ttl, refreshes, reads);
         if cost < best.1 {
             best = (refreshes, cost);
         }
@@ -343,7 +356,7 @@ pub fn cheapest_plan(rates: CacheRates, profile: &IdleProfile, ttls: &[CacheTtl]
         let (refreshes, cost) = if refresh {
             cheapest_refreshes_with_cost(rates, profile, ttl)
         } else {
-            (0, plan_cost(rates, profile, ttl, 0))
+            (0, plan_cost(rates, profile, ttl, 0, 0))
         };
         if best.is_none_or(|(_, least)| cost < least) {
             best = Some((CachePlan { ttl, refreshes }, cost));
@@ -638,6 +651,106 @@ mod tests {
 
     fn gap(until_next: Option<Duration>, prefix_tokens: u64, written_tokens: u64) -> IdleGap {
         IdleGap { until_next, prefix_tokens, written_tokens }
+    }
+
+    thread_local! {
+        /// How many times this thread asked a profile for the pauses beyond a
+        /// point (`IdleProfile::returned_beyond`) — the lookup a plan's cost
+        /// is made of, counted so a search's growth is a number.
+        pub(super) static LOOKUPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    fn lookups_of<T>(work: impl FnOnce() -> T) -> (T, u64) {
+        LOOKUPS.with(|lookups| lookups.set(0));
+        let done = work();
+        (done, LOOKUPS.with(std::cell::Cell::get))
+    }
+
+    /// The search as it was first written: every refresh count adds its
+    /// reads up from the first refresh again. The answers of the one-pass
+    /// search are compared against it.
+    fn cheapest_refreshes_count_by_count(rates: CacheRates, profile: &IdleProfile, ttl: CacheTtl) -> (u32, f64) {
+        let every = super::refresh_every(ttl);
+        let cost_of = |refreshes: u32| {
+            let reads: u64 = (1..=refreshes).map(|refresh| super::refresh_reads(profile, every, refresh)).sum();
+            super::plan_cost(rates, profile, ttl, refreshes, reads)
+        };
+        let reach = profile.longest_return().saturating_sub(ttl.lifetime());
+        let most = u32::try_from(reach.as_nanos().div_ceil(every.as_nanos().max(1))).unwrap_or(u32::MAX);
+        let mut best = (0, cost_of(0));
+        for refreshes in 1..=most {
+            let cost = cost_of(refreshes);
+            if cost < best.1 {
+                best = (refreshes, cost);
+            }
+        }
+        best
+    }
+
+    /// A record of `requests` pauses drawn from `seed`: most of them short,
+    /// some of hours, a few of days, and some conversations that ended.
+    fn recorded_rhythm(seed: u64, requests: u64) -> IdleProfile {
+        let mut state = seed;
+        let mut next = move || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            state >> 33
+        };
+        IdleProfile::new((0..requests).map(|_| {
+            let until_next = match next() % 20 {
+                0 => None,
+                1 => Some(Duration::from_secs(next() % (3 * 24 * 60 * 60))),
+                2..=4 => Some(Duration::from_secs(next() % (4 * 60 * 60))),
+                _ => Some(Duration::from_secs(next() % 240)),
+            };
+            gap(until_next, 5_000 + next() % 400_000, next() % 20_000)
+        }))
+    }
+
+    /// Carrying the reads forward changes how the search counts, not what it
+    /// chooses: the same refresh count at the same cost, to the bit, over
+    /// records of every shape and both lifetimes.
+    #[test]
+    fn the_one_pass_search_chooses_what_the_count_by_count_search_chose() {
+        let standard = CacheRates { read: 0.1, ..OPUS_5_5 };
+        let mut records: Vec<IdleProfile> = (1..=12).map(|seed| recorded_rhythm(seed, 40 * seed)).collect();
+        records.push(IdleProfile::default());
+        records.push(IdleProfile::new([gap(None, 80_000, 4_000)]));
+        records.push(IdleProfile::new((0..100).map(|_| gap(Some(minutes(50)), 100_000, 500))));
+        for (at, profile) in records.iter().enumerate() {
+            for rates in [OPUS_5_5, standard] {
+                for ttl in CacheTtl::ALL {
+                    let (refreshes, cost) = super::cheapest_refreshes_with_cost(rates, profile, ttl);
+                    let (expected, expected_cost) = cheapest_refreshes_count_by_count(rates, profile, ttl);
+                    assert_eq!(
+                        (refreshes, cost.to_bits()),
+                        (expected, expected_cost.to_bits()),
+                        "record {at}, {ttl:?}, read {}",
+                        rates.read
+                    );
+                }
+            }
+        }
+    }
+
+    /// One pause of three days is 959 refresh counts to try at the short
+    /// lifetime. The search asks the profile twice per count; adding the
+    /// reads up from the first refresh for each count, it asked 461,280
+    /// times — for every turn, and at every refresh wake.
+    #[test]
+    fn the_search_asks_the_profile_twice_per_refresh_count() {
+        let days = |count: u64| Duration::from_secs(count * 24 * 60 * 60);
+        let profile = IdleProfile::new(
+            (0..500)
+                .map(|_| gap(Some(minutes(2)), 150_000, 3_000))
+                .chain([gap(Some(days(3)), 200_000, 3_000), gap(None, 90_000, 1_000)]),
+        );
+        let ttl = CacheTtl::FiveMinutes;
+        let counts: u64 = 959;
+        let (_, one_pass) = lookups_of(|| super::cheapest_refreshes_with_cost(OPUS_5_5, &profile, ttl));
+        let (_, count_by_count) = lookups_of(|| cheapest_refreshes_count_by_count(OPUS_5_5, &profile, ttl));
+        assert_eq!(one_pass, 2 * counts + 1);
+        assert_eq!(count_by_count, counts * (counts + 1) / 2 + counts + 1);
+        assert_eq!(count_by_count, 461_280);
     }
 
     /// With nothing recorded, the plan is the provider's default and no
