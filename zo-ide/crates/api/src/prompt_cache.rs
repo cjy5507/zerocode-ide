@@ -823,7 +823,6 @@ impl PromptCache {
 
     #[must_use]
     pub fn lookup_completion(&self, request: &MessageRequest) -> Option<MessageResponse> {
-        let request_hash = request_hash_hex(request);
         let (paths, ttl) = {
             let inner = self.lock();
             // A recording-only cache never answers: not a miss (which would
@@ -833,6 +832,9 @@ impl PromptCache {
             }
             (inner.paths.clone(), inner.config.completion_ttl)
         };
+        // Hashed past the switch: the hash serializes the whole request, and
+        // a recording-only cache — every spawned agent's — has no use for it.
+        let request_hash = request_hash_hex(request);
         let entry_path = paths.completion_entry_path(&request_hash);
         let entry = read_json::<CompletionCacheEntry>(&entry_path);
         let Some(entry) = entry else {
@@ -3905,6 +3907,8 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
 }
 
 fn request_hash_hex(request: &MessageRequest) -> String {
+    #[cfg(test)]
+    tests::REQUEST_HASHES.with(|hashes| hashes.set(hashes.get() + 1));
     format!(
         "{REQUEST_FINGERPRINT_PREFIX}-{:016x}",
         hash_serializable(request)
@@ -4285,6 +4289,32 @@ mod tests {
             std::env::remove_var("ZO_CONFIG_HOME");
             let _ = std::fs::remove_dir_all(&self.home);
         }
+    }
+
+    thread_local! {
+        /// How many times this thread hashed a whole request
+        /// (`request_hash_hex`); each one serializes the conversation.
+        pub(super) static REQUEST_HASHES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A spawned agent's cache keeps the books and answers nothing, so the
+    /// key a stored completion is found under is of no use to it. It was
+    /// computed anyway, on the way in: the whole request serialized once
+    /// more for every request of every agent.
+    #[test]
+    fn a_recording_only_cache_hashes_no_request_it_will_not_answer() {
+        let _guard = test_env_lock();
+        let home = CacheHome::new("recording-only-lookup");
+        let request = sample_request("never answered from the store");
+        let hashes_of = |cache: &PromptCache| {
+            REQUEST_HASHES.with(|hashes| hashes.set(0));
+            assert!(cache.lookup_completion(&request).is_none());
+            REQUEST_HASHES.with(std::cell::Cell::get)
+        };
+        let recording = PromptCache::with_config(PromptCacheConfig::recording_only(home.session.clone()));
+        assert_eq!(hashes_of(&recording), 0);
+        let answering = PromptCache::with_config(PromptCacheConfig::new(home.session.clone()));
+        assert_eq!(hashes_of(&answering), 1);
     }
 
     fn plain_usage(cache_creation: u32, cache_read: u32, input: u32) -> Usage {
