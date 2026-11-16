@@ -5957,7 +5957,9 @@ mod tests {
 
         /// The prompt set, tool set and finish rule are defaults wherever they
         /// are not declared: every shipped row id, every shipped alias and the
-        /// unlisted names keep the harness they had before the values existed.
+        /// unlisted names keep the harness they had before the values existed —
+        /// but the deepseek family's tool set, which the catalog declares
+        /// `headless_core` from a measurement, and no other name's.
         #[test]
         fn the_new_values_keep_their_defaults_on_every_shipped_and_unlisted_name() {
             let _lock = crate::test_env_lock();
@@ -5976,12 +5978,20 @@ mod tests {
                 .chain(crowd)
                 .collect();
             assert!(names.len() > catalog.aliases.len() + crowd.len(), "the shipped rows are read");
+            let mut measured = 0;
             for name in names {
                 let profile = harness_profile_for_model(name);
+                let tool_set = if name.to_ascii_lowercase().contains("deepseek") {
+                    measured += 1;
+                    (ToolSet::HeadlessCore, HarnessValueSource::Measured)
+                } else {
+                    (ToolSet::Full, HarnessValueSource::Default)
+                };
                 assert_eq!((profile.prompt_set, profile.prompt_set_source), (PromptSet::Full, HarnessValueSource::Default), "{name}");
-                assert_eq!((profile.tool_set, profile.tool_set_source), (ToolSet::Full, HarnessValueSource::Default), "{name}");
+                assert_eq!((profile.tool_set, profile.tool_set_source), tool_set, "{name}");
                 assert_eq!((profile.finish_rule, profile.finish_rule_source), (FinishRule::Off, HarnessValueSource::Default), "{name}");
             }
+            assert!(measured > 1, "the shipped deepseek rows and the measured model are read");
         }
 
         /// Each new value takes the edit shape's road, field by field: the

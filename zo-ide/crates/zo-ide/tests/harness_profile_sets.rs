@@ -90,7 +90,9 @@ fn prompt_input_shows_each_new_value_with_its_evidence() {
     for model in ["claude-opus-5-5", "gpt-6.1-sol", "gemini-3.6-flash", MODEL, "acme-coder-1"] {
         let rendered = report(model).render();
         profile_sources::assert_sources(&rendered);
-        for (label, value) in [("Prompt set", "full (default)"), ("Tool set", "full (default)"), ("Finish rule", "off (default)")] {
+        // The measured model's family ships `headless_core`, from its measurement.
+        let tool_set = if model == MODEL { "headless_core (measured)" } else { "full (default)" };
+        for (label, value) in [("Prompt set", "full (default)"), ("Tool set", tool_set), ("Finish rule", "off (default)")] {
             assert_eq!(profile_value(&rendered, label).as_deref(), Some(value), "{model}: {label}\n{rendered}");
         }
     }
@@ -454,7 +456,8 @@ fn tool_names(tools: &Value) -> Vec<String> {
 fn a_core_profile_sends_the_request_the_experiment_switches_send() {
     let server = ChatServer::new();
     let scene = Scene::new();
-    let plain = overlay(json!({}));
+    // Full said out loud: the measured model's family ships `headless_core`.
+    let plain = overlay(json!({"tool_set": "full"}));
     let core = overlay(json!({"prompt_set": "core", "tool_set": "core"}));
 
     let full = scene.request(&server, &[(api::MODEL_CONTEXT_WINDOWS_ENV, &plain)], &[]);
