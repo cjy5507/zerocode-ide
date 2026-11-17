@@ -403,11 +403,20 @@ fn shown(value: &Value) -> String {
 
 /// The person's themes as last read, the warnings that read said, and how
 /// many mistakes it counted in each theme's file.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Catalog {
     themes: Option<Vec<Theme>>,
     said: BTreeSet<String>,
     problems: BTreeMap<String, usize>,
+    /// The most theme files a read takes from the folder:
+    /// [`MAX_THEME_FILES`], and less only where a test asks for less.
+    cap: usize,
+}
+
+impl Default for Catalog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Catalog {
@@ -416,6 +425,7 @@ impl Catalog {
             themes: None,
             said: BTreeSet::new(),
             problems: BTreeMap::new(),
+            cap: MAX_THEME_FILES,
         }
     }
 
@@ -423,11 +433,12 @@ impl Catalog {
     /// read before did not say, so a picker opened again and again does not
     /// repeat the same line.
     pub(crate) fn read(&mut self, dir: Option<&Path>) -> Vec<String> {
+        let cap = self.cap;
         let Loaded {
             themes,
             warnings,
             problems,
-        } = dir.map_or_else(Loaded::default, load_folder);
+        } = dir.map_or_else(Loaded::default, |dir| load_folder_capped(dir, cap));
         self.themes = Some(themes);
         self.problems = problems;
         let fresh = warnings
@@ -491,11 +502,20 @@ impl Catalog {
 
 static CATALOG: Mutex<Catalog> = Mutex::new(Catalog::new());
 
+/// The folder a test had the process catalog of its own run read
+/// (`read_folder_in_this_run`). Only a test build asks it, and nothing but
+/// such a test sets it.
+static TEST_THEMES_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 /// `<zo home>/themes` — the one place the person's real home is chosen. A
-/// test build reads no folder, so no test sees the person's themes.
+/// test build reads no folder but the one a test named for its own run, so
+/// no test sees the person's themes.
 fn user_themes_dir() -> Option<PathBuf> {
     if cfg!(test) {
-        return None;
+        return TEST_THEMES_DIR
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
     }
     Some(runtime::default_config_home().join(THEMES_FOLDER))
 }
@@ -539,6 +559,16 @@ pub(crate) fn problems(slug: &str) -> usize {
 /// Reads the person's themes folder at start, saying what is wrong in it.
 pub(crate) fn read_at_start() {
     with_catalog(|catalog, dir| ((), catalog.read(dir)));
+}
+
+/// Has the process catalog of this run read `dir`, at most `cap` theme files
+/// of it, from here on. For a test that runs in a process of its own
+/// (`style::in_fresh_run`) alone: there no other test's catalog is reached,
+/// and in every other run the process catalog reads no folder.
+#[cfg(test)]
+pub(crate) fn read_folder_in_this_run(dir: &Path, cap: usize) {
+    *TEST_THEMES_DIR.lock().unwrap_or_else(PoisonError::into_inner) = Some(dir.to_path_buf());
+    CATALOG.lock().unwrap_or_else(PoisonError::into_inner).cap = cap;
 }
 
 #[cfg(test)]
