@@ -668,7 +668,10 @@ fn a_run_a_launch_list_opened_reopens_on_every_tool() {
 /// with every digest equal. A name whose shipped profile says `headless_core`
 /// is, here, a run nobody attends with nothing attached (a piped
 /// `--prompt-input` in a bare home), so its digest must move — and only those
-/// names' may.
+/// names' may. A change that means to move other names, or none, names them in
+/// `ZO_BASELINE_MOVED`, comma-separated (empty: none moves): a change that
+/// leaves the core request alone keeps those digests against a baseline that
+/// already sends it.
 #[test]
 #[ignore = "needs ZO_BASELINE_BIN: a zo built from the commit before the change"]
 fn every_shipped_row_alias_and_unlisted_name_keeps_the_baseline_digest() {
@@ -708,13 +711,18 @@ fn every_shipped_row_alias_and_unlisted_name_keeps_the_baseline_digest() {
         let digest = stdout.lines().find_map(|row| row.trim_start().strip_prefix("Digest").map(|value| value.trim().to_string()));
         (digest, format!("{stdout}\n{}", String::from_utf8_lossy(&output.stderr)))
     };
+    let expected_to_move: Option<Vec<String>> = std::env::var("ZO_BASELINE_MOVED")
+        .ok()
+        .map(|list| list.split(',').map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).collect());
+    let why = if expected_to_move.is_some() { "named in ZO_BASELINE_MOVED" } else { "headless_core" };
     let (mut compared, mut moved) = (0, 0);
     let mut lines = Vec::new();
-    for (name, moves) in names.iter().zip(headless_core) {
+    for (name, headless_core) in names.iter().zip(headless_core) {
+        let must_move = expected_to_move.as_ref().map_or(headless_core, |listed| listed.contains(name));
         let (before, before_told) = digest(&baseline, name);
         let (after, after_told) = digest(Path::new(env!("CARGO_BIN_EXE_zo")), name);
-        if moves && after.is_some() {
-            assert_ne!(before, after, "{name}: headless_core must send the core request\n-- baseline --\n{before_told}\n-- this build --\n{after_told}");
+        if must_move && after.is_some() {
+            assert_ne!(before, after, "{name}: the change must move this digest ({why})\n-- baseline --\n{before_told}\n-- this build --\n{after_told}");
             moved += 1;
         } else {
             assert_eq!(before, after, "{name}: the digest moved\n-- baseline --\n{before_told}\n-- this build --\n{after_told}");
@@ -722,10 +730,10 @@ fn every_shipped_row_alias_and_unlisted_name_keeps_the_baseline_digest() {
         if after.is_some() {
             compared += 1;
         }
-        let mark = if moves { "\tmoved (headless_core)" } else { "" };
+        let mark = if must_move { format!("\tmoved ({why})") } else { String::new() };
         lines.push(format!("{name}\t{}{mark}", after.unwrap_or_else(|| "no digest (both builds)".to_string())));
     }
     println!("{}", lines.join("\n"));
-    println!("compared {compared} of {} names, {moved} moved by headless_core", names.len());
+    println!("compared {compared} of {} names, {moved} moved ({why})", names.len());
     assert!(compared * 4 >= names.len() * 3, "too few names opened to compare: {compared} of {}", names.len());
 }
