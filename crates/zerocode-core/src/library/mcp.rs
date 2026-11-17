@@ -215,32 +215,247 @@ impl McpDef {
     }
 }
 
-/// How each local server of a Claude list is written: `None` started by its
-/// own command, `Some(stand-in)` through the stand-in named, to start on its
-/// first call ([`McpDef::started_on_first_call`]). `None` for a text that is
-/// not a Claude list; a remote server is not named.
+/// One local server of a Claude list (`.claude.json`) and how it is written.
+///
+/// Claude Code keeps two kinds of list in that one file: the user list
+/// (`mcpServers`, read in every folder) and each project's own
+/// (`projects.<folder>.mcpServers` — what `claude mcp add` writes when no
+/// scope is named, Claude Code's 「local」 scope, and the one it prefers over
+/// a project's `.mcp.json` and the user list for the same name, measured with
+/// 2.1.326 on 2026-11-17). In the window's own Claude home both are the
+/// window's file to write (t-112281).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Spelled {
+    /// The folder whose own list holds the server; `None` for the user list.
+    pub project: Option<String>,
+    pub name: String,
+    /// `None` started by its own command, `Some(stand-in)` through the
+    /// stand-in named, to start on its first call
+    /// ([`McpDef::started_on_first_call`]).
+    pub through: Option<String>,
+}
+
+/// Every local server of a Claude document — the user list's, then each
+/// project's — and how it is written. A remote server is not named.
+#[must_use]
+pub fn claude_spellings(doc: &Value) -> Vec<Spelled> {
+    let mut lists: Vec<(Option<&String>, &Map<String, Value>)> = Vec::new();
+    if let Some(list) = doc.get("mcpServers").and_then(Value::as_object) {
+        lists.push((None, list));
+    }
+    if let Some(projects) = doc.get("projects").and_then(Value::as_object) {
+        lists.extend(projects.iter().filter_map(|(folder, project)| {
+            Some((Some(folder), project.get("mcpServers")?.as_object()?))
+        }));
+    }
+    lists
+        .into_iter()
+        .flat_map(|(project, list)| {
+            list.iter().filter_map(move |(name, value)| {
+                Some(Spelled {
+                    project: project.cloned(),
+                    name: name.clone(),
+                    through: local_spelling(value)?,
+                })
+            })
+        })
+        .collect()
+}
+
+/// How one entry of a Claude list is written, when it is a local server:
+/// `Some(None)` straight, `Some(Some(stand-in))` through a stand-in.
+fn local_spelling(value: &Value) -> Option<Option<String>> {
+    if text(value, "url").is_some() {
+        return None;
+    }
+    let command = text(value, "command")?;
+    let through = value
+        .get("env")
+        .and_then(|env| env.get(crate::mcp_first_call::MARKER))
+        .is_some();
+    Some(through.then(|| command.to_string()))
+}
+
+/// How each local server of a Claude user list is written: `None` started by
+/// its own command, `Some(stand-in)` through the stand-in named, to start on
+/// its first call ([`McpDef::started_on_first_call`]). `None` for a text that
+/// is not a Claude list; a remote server is not named.
 #[must_use]
 pub fn first_call_spelling(text: &str) -> Option<BTreeMap<String, Option<String>>> {
     let doc: Value = serde_json::from_str(text).ok()?;
     if !doc.is_object() {
         return None;
     }
-    let Some(list) = json_list(Format::Claude, &doc) else {
-        return Some(BTreeMap::new());
-    };
     Some(
-        list.iter()
-            .filter(|(_, value)| self::text(value, "url").is_none())
-            .filter_map(|(name, value)| {
-                let command = self::text(value, "command")?;
-                let through = value
-                    .get("env")
-                    .and_then(|env| env.get(crate::mcp_first_call::MARKER))
-                    .is_some();
-                Some((name.clone(), through.then(|| command.to_string())))
-            })
+        claude_spellings(&doc)
+            .into_iter()
+            .filter(|spelled| spelled.project.is_none())
+            .map(|spelled| (spelled.name, spelled.through))
             .collect(),
     )
+}
+
+/// How a local server of the window's Claude list is to be written again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Respell {
+    /// Started by its own command.
+    Straight,
+    /// Through this stand-in, to start on its first call.
+    Through(String),
+}
+
+/// How a local server of the window's Claude list written `through` is to be
+/// written again under 「MCP 서버를 부를 때만 띄우기」 (t-110740), or `None`
+/// while it stands as the switch asks. Off, every server goes straight. On,
+/// a server written straight goes through this window's stand-in `own` when
+/// it has one; a server written through a stand-in stays while that stand-in
+/// is there (`stands`), whichever window wrote it — an installed window and a
+/// development build share one Claude home, and each writing its own would
+/// wake the other's look for ever — and goes through `own`, or straight,
+/// once it is gone. A window that cannot stand in strips nothing.
+#[must_use]
+pub fn respell_to(
+    off: bool,
+    own: Option<&str>,
+    through: Option<&str>,
+    stands: &dyn Fn(&str) -> bool,
+) -> Option<Respell> {
+    let through_own = own.map(|own| Respell::Through(own.to_string()));
+    match (off, through) {
+        (true, Some(_)) => Some(Respell::Straight),
+        (true, None) => None,
+        (false, None) => through_own,
+        (false, Some(stand_in)) if stands(stand_in) => None,
+        (false, Some(_)) => Some(through_own.unwrap_or(Respell::Straight)),
+    }
+}
+
+/// Write every local server of a Claude document — the user list's and each
+/// project's — the way [`respell_to`] asks, on the JSON itself: the stand-in
+/// goes in front of the command, which with its arguments becomes the
+/// stand-in's arguments, and [`crate::mcp_first_call::MARKER`] naming the
+/// server joins its environment — or the other way round. Every other key of
+/// the entry and of the document stays as it was, so an entry taken off a
+/// stand-in is the entry put on it, empty `args` and `env` included. An
+/// entry not shaped the way Claude Code writes one stays as it is. Answers
+/// the servers written again, as they were written before.
+pub fn respell_claude(
+    doc: &mut Value,
+    off: bool,
+    own: Option<&str>,
+    stands: &dyn Fn(&str) -> bool,
+) -> Vec<Spelled> {
+    let mut done = Vec::new();
+    let Some(root) = doc.as_object_mut() else {
+        return done;
+    };
+    let mut respell = |project: Option<&String>, list: &mut Value| {
+        let Some(list) = list.as_object_mut() else {
+            return;
+        };
+        for (name, value) in list.iter_mut() {
+            let Some(through) = local_spelling(value) else {
+                continue;
+            };
+            let Some(to) = respell_to(off, own, through.as_deref(), stands) else {
+                continue;
+            };
+            if let Some(entry) = value.as_object_mut()
+                && write_as(entry, name, &to)
+            {
+                done.push(Spelled {
+                    project: project.cloned(),
+                    name: name.clone(),
+                    through,
+                });
+            }
+        }
+    };
+    for (key, value) in root.iter_mut() {
+        match key.as_str() {
+            "mcpServers" => respell(None, value),
+            "projects" => {
+                if let Some(projects) = value.as_object_mut() {
+                    for (folder, project) in projects.iter_mut() {
+                        if let Some(list) = project.get_mut("mcpServers") {
+                            respell(Some(folder), list);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    done
+}
+
+/// One entry written `to`: taken off any stand-in first, then put through
+/// the one asked. Answers whether it changed.
+fn write_as(entry: &mut Map<String, Value>, name: &str, to: &Respell) -> bool {
+    let marked = entry
+        .get("env")
+        .and_then(|env| env.get(crate::mcp_first_call::MARKER))
+        .is_some();
+    let straightened = marked && straighten(entry);
+    if marked && !straightened {
+        return false;
+    }
+    match to {
+        Respell::Straight => straightened,
+        Respell::Through(stand_in) => put_through(entry, stand_in, name) || straightened,
+    }
+}
+
+/// [`McpDef::as_started`] on the JSON itself.
+fn straighten(entry: &mut Map<String, Value>) -> bool {
+    let command = match entry.get_mut("args") {
+        Some(Value::Array(args)) if args.first().is_some_and(Value::is_string) => args.remove(0),
+        _ => return false,
+    };
+    entry.insert("command".into(), command);
+    if let Some(Value::Object(env)) = entry.get_mut("env") {
+        // Rebuilt rather than removed from: a removal may move the last key
+        // into the marker's place where the keys keep their order.
+        *env = std::mem::take(env)
+            .into_iter()
+            .filter(|(key, _)| key != crate::mcp_first_call::MARKER)
+            .collect();
+    }
+    true
+}
+
+/// [`McpDef::started_on_first_call`] on the JSON itself.
+fn put_through(entry: &mut Map<String, Value>, stand_in: &str, name: &str) -> bool {
+    let Some(command) = entry
+        .get("command")
+        .filter(|command| command.is_string())
+        .cloned()
+    else {
+        return false;
+    };
+    let args_fit = matches!(entry.get("args"), None | Some(Value::Array(_)));
+    let env_fits = matches!(entry.get("env"), None | Some(Value::Object(_)));
+    if !args_fit || !env_fits {
+        return false;
+    }
+    entry.insert("command".into(), stand_in.into());
+    match entry.get_mut("args") {
+        Some(Value::Array(args)) => args.insert(0, command),
+        _ => {
+            entry.insert("args".into(), Value::Array(vec![command]));
+        }
+    }
+    match entry.get_mut("env") {
+        Some(Value::Object(env)) => {
+            env.insert(crate::mcp_first_call::MARKER.into(), name.into());
+        }
+        _ => {
+            let mut env = Map::new();
+            env.insert(crate::mcp_first_call::MARKER.into(), name.into());
+            entry.insert("env".into(), Value::Object(env));
+        }
+    }
+    true
 }
 
 fn string_map(value: Option<&Value>) -> BTreeMap<String, String> {
@@ -1376,5 +1591,170 @@ mod tests {
         );
         assert_eq!(first_call_spelling("{}"), Some(BTreeMap::new()));
         assert_eq!(first_call_spelling("not json"), None);
+    }
+
+    /// t-112281: the servers a project keeps for itself in the window's
+    /// Claude list (`projects.<folder>.mcpServers`, what `claude mcp add`
+    /// writes in a pane when no scope is named) are written through the
+    /// stand-in like the user list's, on the JSON itself: every other key of
+    /// the document, the project and the entry stays, and the entry taken off
+    /// again is the entry put on, empty `args` and `env` as `claude mcp add`
+    /// writes them included.
+    #[test]
+    fn a_projects_own_servers_start_on_their_first_call_like_the_user_lists() {
+        let own = "/opt/zc/zerocode-mirror";
+        let other = "/opt/other/zerocode-mirror";
+        let gone = "/opt/gone/zerocode-mirror";
+        let marker = crate::mcp_first_call::MARKER;
+        let original = serde_json::json!({
+            "numStartups": 3,
+            "mcpServers": {
+                "u": { "type": "stdio", "command": "u-mcp", "args": ["--x"], "env": { "U_TOKEN": "fixture-value" } },
+            },
+            "projects": {
+                "/p/one": {
+                    "allowedTools": [],
+                    "mcpServers": {
+                        "p": { "type": "stdio", "command": "npx", "args": [], "env": {} },
+                        "r": { "type": "http", "url": "https://mcp.example.com/mcp" },
+                    },
+                    "hasTrustDialogAccepted": true,
+                },
+                "/p/two": {
+                    "mcpServers": {
+                        "q": { "type": "stdio", "command": other, "args": ["q-mcp"], "env": { marker: "q" } },
+                        "g": { "type": "stdio", "command": gone, "args": ["g-mcp", "--y"], "env": { marker: "g", "G_TOKEN": "fixture-value" } },
+                    },
+                },
+                "/p/three": { "allowedTools": [] },
+            },
+        });
+        let stands = |path: &str| path == own || path == other;
+        let names = |done: Vec<Spelled>| -> Vec<(Option<String>, String)> {
+            let mut names: Vec<_> = done
+                .into_iter()
+                .map(|spelled| (spelled.project, spelled.name))
+                .collect();
+            names.sort();
+            names
+        };
+        let place =
+            |project: Option<&str>, name: &str| (project.map(str::to_string), name.to_string());
+
+        let mut doc = original.clone();
+        let done = respell_claude(&mut doc, false, Some(own), &stands);
+        assert_eq!(
+            names(done),
+            vec![
+                place(None, "u"),
+                place(Some("/p/one"), "p"),
+                place(Some("/p/two"), "g")
+            ],
+            "a remote server and one another window's stand-in serves stay as they are"
+        );
+        assert_eq!(
+            doc["projects"]["/p/one"]["mcpServers"]["p"],
+            serde_json::json!({ "type": "stdio", "command": own, "args": ["npx"], "env": { marker: "p" } })
+        );
+        assert_eq!(
+            doc["projects"]["/p/two"]["mcpServers"]["g"],
+            serde_json::json!({ "type": "stdio", "command": own, "args": ["g-mcp", "--y"], "env": { marker: "g", "G_TOKEN": "fixture-value" } }),
+            "a stand-in gone, the server goes through this window's"
+        );
+        assert_eq!(
+            doc["projects"]["/p/two"]["mcpServers"]["q"],
+            original["projects"]["/p/two"]["mcpServers"]["q"]
+        );
+        assert_eq!(
+            doc["projects"]["/p/one"]["mcpServers"]["r"],
+            original["projects"]["/p/one"]["mcpServers"]["r"]
+        );
+        assert_eq!(doc["projects"]["/p/one"]["hasTrustDialogAccepted"], true);
+        assert_eq!(doc["numStartups"], 3);
+        let back = read_json(Format::Claude, &doc).remove("u").unwrap();
+        assert_eq!(
+            back.def,
+            stdio("u-mcp", &["--x"], &[("U_TOKEN", "fixture-value")])
+        );
+        let spelled = claude_spellings(&doc);
+        assert!(
+            spelled
+                .iter()
+                .all(|one| one.through.as_deref() == Some(own) || one.name == "q"),
+            "{spelled:?}"
+        );
+        assert!(
+            !spelled.iter().any(|one| one.name == "r"),
+            "a remote server is not named"
+        );
+
+        assert!(
+            respell_claude(&mut doc, false, Some(own), &stands).is_empty(),
+            "a list written the way the switch asks is not written again"
+        );
+        let mut bare = doc.clone();
+        assert!(
+            respell_claude(&mut bare, false, None, &stands).is_empty(),
+            "a window that cannot stand in strips nothing"
+        );
+
+        let done = respell_claude(&mut doc, true, Some(own), &stands);
+        assert_eq!(
+            names(done).len(),
+            4,
+            "off, every server through a stand-in goes straight"
+        );
+        assert_eq!(doc["mcpServers"]["u"], original["mcpServers"]["u"]);
+        assert_eq!(
+            doc["projects"]["/p/one"], original["projects"]["/p/one"],
+            "the entry taken off is the entry put on"
+        );
+        assert_eq!(
+            doc["projects"]["/p/two"]["mcpServers"]["g"],
+            serde_json::json!({ "type": "stdio", "command": "g-mcp", "args": ["--y"], "env": { "G_TOKEN": "fixture-value" } })
+        );
+        assert!(
+            claude_spellings(&doc)
+                .iter()
+                .all(|one| one.through.is_none())
+        );
+    }
+
+    /// An entry not shaped the way Claude Code writes one is left as it is,
+    /// and what to write again follows the switch, this window's stand-in and
+    /// whether a written one is still there.
+    #[test]
+    fn an_entry_claude_would_not_write_is_left_as_it_is() {
+        let own = "/opt/zc/zerocode-mirror";
+        let marker = crate::mcp_first_call::MARKER;
+        let odd = serde_json::json!({
+            "mcpServers": {
+                "env-text": { "command": "a", "env": "x" },
+                "args-text": { "command": "a", "args": "x" },
+                "marked-bare": { "command": own, "env": { marker: "marked-bare" } },
+                "no-command": { "args": ["x"] },
+            },
+            "projects": { "/p": "not a project" },
+        });
+        let mut doc = odd.clone();
+        assert!(respell_claude(&mut doc, false, Some(own), &|_| false).is_empty());
+        assert!(respell_claude(&mut doc, true, Some(own), &|_| true).is_empty());
+        assert_eq!(doc, odd);
+        let mut not_object = serde_json::json!(["x"]);
+        assert!(respell_claude(&mut not_object, false, Some(own), &|_| true).is_empty());
+
+        let stands = |path: &str| path == own;
+        let to =
+            |off, own: Option<&str>, through: Option<&str>| respell_to(off, own, through, &stands);
+        let through_own = Some(Respell::Through(own.to_string()));
+        assert_eq!(to(false, Some(own), None), through_own);
+        assert_eq!(to(false, None, None), None);
+        assert_eq!(to(false, Some(own), Some(own)), None);
+        assert_eq!(to(false, None, Some(own)), None);
+        assert_eq!(to(false, Some(own), Some("/gone")), through_own);
+        assert_eq!(to(false, None, Some("/gone")), Some(Respell::Straight));
+        assert_eq!(to(true, Some(own), Some(own)), Some(Respell::Straight));
+        assert_eq!(to(true, None, Some("/gone")), Some(Respell::Straight));
+        assert_eq!(to(true, Some(own), None), None);
     }
 }

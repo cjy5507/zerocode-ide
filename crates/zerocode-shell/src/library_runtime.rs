@@ -98,6 +98,24 @@ static LAST_ID: Mutex<u64> = Mutex::new(0);
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// What the last watched look started from ([`inputs_stamp`]).
 static LOOKED_AT: Mutex<Option<u64>> = Mutex::new(None);
+/// A write of the window's Claude list found Claude Code's lock taken for the
+/// whole wait and wrote nothing ([`claude_config_lock::BUSY`]): the keeper
+/// looks again on the next burst though its stamp stands — whichever look met
+/// the lock, the keeper's own, the switch's or a page action's. The lock goes
+/// with a write of Claude Code's, which is a burst (t-112281).
+static LOOK_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Note a write the lock kept out ([`LOOK_AGAIN`]).
+fn note_refusal(error: &str) {
+    if error == claude_config_lock::BUSY {
+        LOOK_AGAIN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Whether a write the lock kept out waits for a look ([`LOOK_AGAIN`]).
+fn look_again() -> bool {
+    LOOK_AGAIN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 enum Undo {
     /// A server removed: put it back into the store.
@@ -168,6 +186,9 @@ pub(crate) struct Context {
     /// with the session. `None` on Windows, where a server's `.cmd` start and
     /// its tree's end were not measured, and in a build with no mirror.
     stand_in: Option<PathBuf>,
+    /// How long a write of the window's Claude list waits for Claude Code to
+    /// let its lock go ([`claude_config_lock::LOCK_WAIT`]).
+    claude_lock_wait: std::time::Duration,
 }
 
 impl Context {
@@ -215,6 +236,7 @@ impl Context {
             present,
             path,
             stand_in,
+            claude_lock_wait: claude_config_lock::LOCK_WAIT,
         })
     }
 
@@ -318,7 +340,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// one — a list can hold a server's values). The folders on the way are left
 /// as they are, and a file that is a link has its target replaced, so a
 /// dotfiles link stays a link.
-fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
     let path = match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -453,7 +475,16 @@ fn masked(text: &str) -> String {
 /// thread: a clock that ticks by the second (HFS+, FAT, a network share)
 /// leaves a rewrite of the same size at the same time, which the next burst
 /// reads anew (the review of v1.1.129's skills, t-98860, P3-4).
-type Parsed = (u64, std::time::SystemTime, BTreeMap<String, McpEntry>);
+type Parsed = (u64, std::time::SystemTime, ClaudeList);
+
+/// A Claude list read once: its user list's servers, as every list is read,
+/// and how each local server — the user list's and every project's own — is
+/// written ([`mcp::claude_spellings`]).
+#[derive(Clone, Default)]
+struct ClaudeList {
+    servers: BTreeMap<String, McpEntry>,
+    spelled: Vec<mcp::Spelled>,
+}
 thread_local! {
     static CLAUDE_PARSED: std::cell::RefCell<Option<BTreeMap<PathBuf, Parsed>>> =
         const { std::cell::RefCell::new(None) };
@@ -475,27 +506,53 @@ fn read_list(path: &Path, format: Format) -> Option<BTreeMap<String, McpEntry>> 
     if format != Format::Claude {
         return read_list_now(path, format);
     }
+    read_claude(path).map(|list| list.servers)
+}
+
+/// A Claude list, parsed once a burst ([`CLAUDE_PARSED`]); only a read that
+/// succeeded is kept.
+fn read_claude(path: &Path) -> Option<ClaudeList> {
     let stamp = std::fs::metadata(path)
         .ok()
         .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
     let Some((len, at)) = stamp else {
-        return read_list_now(path, format);
+        return read_claude_now(path);
     };
     let held = CLAUDE_PARSED.with(|parsed| {
         let parsed = parsed.borrow();
-        let (held_len, held_at, servers) = parsed.as_ref()?.get(path)?;
-        ((*held_len, *held_at) == (len, at)).then(|| servers.clone())
+        let (held_len, held_at, list) = parsed.as_ref()?.get(path)?;
+        ((*held_len, *held_at) == (len, at)).then(|| list.clone())
     });
     if held.is_some() {
         return held;
     }
-    let servers = read_list_now(path, format)?;
+    let list = read_claude_now(path)?;
     CLAUDE_PARSED.with(|parsed| {
         if let Some(parsed) = parsed.borrow_mut().as_mut() {
-            parsed.insert(path.to_path_buf(), (len, at, servers.clone()));
+            parsed.insert(path.to_path_buf(), (len, at, list.clone()));
         }
     });
-    Some(servers)
+    Some(list)
+}
+
+/// [`read_list_now`] of a Claude list, with how its local servers are
+/// written: `Some(empty)` for a file that is not there yet.
+fn read_claude_now(path: &Path) -> Option<ClaudeList> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(ClaudeList::default());
+        }
+        Err(_) => return None,
+    };
+    if text.trim().is_empty() {
+        return Some(ClaudeList::default());
+    }
+    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
+    doc.is_object().then(|| ClaudeList {
+        servers: mcp::read_json(Format::Claude, &doc),
+        spelled: mcp::claude_spellings(&doc),
+    })
 }
 
 fn read_list_now(path: &Path, format: Format) -> Option<BTreeMap<String, McpEntry>> {
@@ -956,6 +1013,19 @@ fn first_call_stand_in(ctx: &Context) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The entry as `agent`'s list is to hold it: through the window's stand-in
+/// in the window's Claude list while the switch has its local servers start
+/// on their first call ([`first_call_stand_in`]), as it is anywhere else.
+fn as_written(ctx: &Context, agent: &LibraryAgent, name: &str, entry: &McpEntry) -> McpEntry {
+    match (agent.mcp, first_call_stand_in(ctx)) {
+        (McpPlace::ClaudeWindow, Some(stand_in)) => McpEntry {
+            def: entry.def.started_on_first_call(&stand_in, name),
+            disabled: entry.disabled,
+        },
+        _ => entry.clone(),
+    }
+}
+
 fn add_server(
     ctx: &Context,
     agent: &LibraryAgent,
@@ -963,17 +1033,7 @@ fn add_server(
     name: &str,
     entry: &McpEntry,
 ) -> Result<(), String> {
-    let through;
-    let entry = match (agent.mcp, first_call_stand_in(ctx)) {
-        (McpPlace::ClaudeWindow, Some(stand_in)) => {
-            through = McpEntry {
-                def: entry.def.started_on_first_call(&stand_in, name),
-                disabled: entry.disabled,
-            };
-            &through
-        }
-        _ => entry,
-    };
+    let entry = &as_written(ctx, agent, name, entry);
     match mcp::add_command(agent.format, name, &entry.def) {
         Write::Command(argv) => {
             let envs = agent_envs(ctx, agent);
@@ -994,6 +1054,31 @@ fn add_server(
         Write::File => edit_json(file, agent.format, name, Some(entry)),
         Write::Unsupported(what) => Err(format!("library.unsupported.{what}")),
     }
+}
+
+/// Write `name` again in a list that holds it. The window's Claude list is
+/// changed in place, under Claude Code's own lock ([`claude_config_lock`]):
+/// `claude mcp add-json` refuses a name the list holds, and between `remove`
+/// and `add-json` a pane that starts has no such server for its whole session
+/// (t-112281). Every other list is written out and in as before, and so is
+/// Claude's on Windows, where a rename over the file a running Claude Code
+/// holds was not measured.
+fn replace_server(
+    ctx: &Context,
+    agent: &LibraryAgent,
+    file: &Path,
+    name: &str,
+    entry: &McpEntry,
+) -> Result<(), String> {
+    if agent.mcp == McpPlace::ClaudeWindow && cfg!(unix) {
+        let entry = as_written(ctx, agent, name, entry);
+        return claude_config_lock::rewrite(file, ctx.claude_lock_wait, |doc| {
+            mcp::set_json(doc, Format::Claude, name, Some(&entry))
+        })
+        .map(|_| ());
+    }
+    remove_server(ctx, agent, file, name)?;
+    add_server(ctx, agent, file, name, entry)
 }
 
 fn remove_server(
@@ -1053,13 +1138,11 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
                 };
                 back_up(ctx, agent, &file, &mut backed_up);
                 let held = read_list(&file, known.format).unwrap_or_default();
-                let mut result = Ok(());
-                if held.contains_key(name) {
-                    result = remove_server(ctx, known, &file, name);
-                }
-                if result.is_ok() {
-                    result = add_server(ctx, known, &file, name, entry);
-                }
+                let result = if held.contains_key(name) {
+                    replace_server(ctx, known, &file, name, entry)
+                } else {
+                    add_server(ctx, known, &file, name, entry)
+                };
                 let after = read_list_now(&file, known.format);
                 let written = after
                     .as_ref()
@@ -1087,9 +1170,10 @@ fn run_mcp(ctx: &Context, steps: &[McpStep], ledger: &mut Ledger, log: &mut Vec<
                             record.seen.remove(agent);
                         }
                         failures += 1;
+                        let refused = outcome.err().unwrap_or_else(|| "library.notWritten".into());
+                        note_refusal(&refused);
                         let mut said = line("failed", "mcp", name, agent);
-                        said.detail =
-                            masked(&outcome.err().unwrap_or_else(|| "library.notWritten".into()));
+                        said.detail = masked(&refused);
                         log.push(said);
                     }
                 }
@@ -1851,6 +1935,8 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
     if before.paused {
         return Ok(Looked::default());
     }
+    // This look tries every write again; one the lock keeps out says so anew.
+    LOOK_AGAIN.store(false, std::sync::atomic::Ordering::Relaxed);
     let mut ledger = before.clone();
     let first = ledger.merged_at.is_none();
     let started = now();
@@ -1897,7 +1983,7 @@ fn look_held(ctx: &Context) -> Result<Looked, String> {
     let store_before = std::fs::read(ctx.store_mcp()).ok();
     run_mcp(ctx, &mcp_plan.steps, &mut ledger, &mut log);
     keep_store_before(ctx, store_before);
-    respell_claude_window(ctx, &mut ledger, &mut log);
+    respell_claude_window(ctx, &mut log);
 
     let mut skill_steps = false;
     let mut skill_notes = Vec::new();
@@ -2019,6 +2105,24 @@ fn inputs_stamp(ctx: &Context) -> Option<u64> {
         servers(&list.agent, &list.servers);
     }
     look.unreadable.hash(&mut hasher);
+    // How the window's Claude list is written, and whether each stand-in it
+    // names is there: a project's own server added in a pane, or a stand-in
+    // gone, is a look that writes it again though no server changed
+    // (t-112281; the review of t-110740, problem 2).
+    if let Some((_, file)) = claude_window_list(ctx)
+        && let Some(list) = read_claude(&file)
+    {
+        list.spelled.hash(&mut hasher);
+        let through: BTreeSet<&str> = list
+            .spelled
+            .iter()
+            .filter_map(|spelled| spelled.through.as_deref())
+            .collect();
+        for stand_in in through {
+            stand_in.hash(&mut hasher);
+            Path::new(stand_in).is_file().hash(&mut hasher);
+        }
+    }
     let mut dirs = vec![ctx.store_skills(), ctx.home.join(MAC_CLAUDE_SKILLS)];
     for agent in &ctx.present {
         dirs.extend(ctx.own_skill_dirs(agent));
@@ -2061,8 +2165,9 @@ fn one_round(app: &AppHandle) {
         // Stamped before the look, so a change that lands while it runs makes
         // the next round's stamp differ and is looked at then.
         let stamp = inputs_stamp(&ctx);
-        let seen =
-            stamp.is_some() && *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) == stamp;
+        let seen = !look_again()
+            && stamp.is_some()
+            && *LOOKED_AT.lock().unwrap_or_else(PoisonError::into_inner) == stamp;
         if !seen {
             match look(&ctx) {
                 Ok(looked) => {
@@ -3060,61 +3165,62 @@ pub(crate) fn align_skill(ctx: &Context, name: &str, agent: &str) -> Result<Repo
     })
 }
 
-/// Write again each local server of the window's Claude list that is not
-/// written the way the switch asks (t-110740). Off, every entry is written
-/// straight. On, an entry written straight — before, or by Claude itself — is
-/// written through this window's stand-in when it has one; an entry written
-/// through a stand-in is kept while that stand-in is there, whichever window
-/// wrote it (an installed window and a development build share one Claude
-/// home, and each writing its own would wake the other's look for ever), and
-/// written again — through this window's, or straight — once it is gone. A
-/// window that cannot stand in is not the switch off: it strips nothing. A
-/// list reads every server as itself whichever way it is written, so the plan
-/// sees no change here; the write is the same push, and its check, as any
-/// other.
-fn respell_claude_window(ctx: &Context, ledger: &mut Ledger, log: &mut Vec<LogLine>) -> usize {
-    let Some(agent) = ctx
+/// The window's Claude list as Claude Code reads it, when the window has one:
+/// the agent that lists it and its file.
+fn claude_window_list(ctx: &Context) -> Option<(&'static LibraryAgent, PathBuf)> {
+    let agent = ctx
         .present
         .iter()
         .copied()
-        .find(|agent| agent.mcp == McpPlace::ClaudeWindow)
+        .find(|agent| agent.mcp == McpPlace::ClaudeWindow)?;
+    Some((agent, ctx.mcp_file(agent)?))
+}
+
+/// Write again each local server of the window's Claude list — the user
+/// list's and every project's own (t-112281) — that is not written the way
+/// the switch asks ([`mcp::respell_to`], t-110740), in one write under Claude
+/// Code's lock: never `remove` then `add-json`, between which a pane that
+/// starts has no such server for its whole session. Each list reads every
+/// server as itself whichever way it is written, so the plan sees no change
+/// here, and a project's own servers never reach the store. A write the lock
+/// kept out is noted to be tried again ([`LOOK_AGAIN`]).
+fn respell_claude_window(ctx: &Context, log: &mut Vec<LogLine>) {
+    let Some((agent, file)) = claude_window_list(ctx) else {
+        return;
+    };
+    let Some(doc) = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
     else {
-        return 0;
-    };
-    let Some(file) = ctx.mcp_file(agent) else {
-        return 0;
-    };
-    let Ok(text) = std::fs::read_to_string(&file) else {
-        return 0;
-    };
-    let (Some(spelled), Some(servers)) = (
-        mcp::first_call_spelling(&text),
-        mcp::read_text(Format::Claude, &text),
-    ) else {
-        return 0;
+        return;
     };
     let off = read_ledger(ctx).mcp_start_at_once;
     let own = first_call_stand_in(ctx);
-    let steps: Vec<McpStep> = spelled
+    let stands = |path: &str| Path::new(path).is_file();
+    let due: Vec<mcp::Spelled> = mcp::claude_spellings(&doc)
         .into_iter()
-        .filter(|(_, through)| match (off, through) {
-            (true, through) => through.is_some(),
-            (false, None) => own.is_some(),
-            (false, Some(stand_in)) => !Path::new(stand_in).is_file(),
-        })
-        .filter_map(|(name, _)| {
-            let entry = servers.get(&name)?.clone();
-            Some(McpStep::Push {
-                agent: agent.id.to_string(),
-                name,
-                entry,
-            })
+        .filter(|spelled| {
+            mcp::respell_to(off, own.as_deref(), spelled.through.as_deref(), &stands).is_some()
         })
         .collect();
-    if steps.is_empty() {
-        return 0;
+    if due.is_empty() {
+        return;
     }
-    run_mcp(ctx, &steps, ledger, log)
+    // A copy of the list before the window writes it, as a write through
+    // `run_mcp` keeps one.
+    back_up(ctx, agent.id, &file, &mut BTreeSet::new());
+    let written = claude_config_lock::rewrite(&file, ctx.claude_lock_wait, |doc| {
+        !mcp::respell_claude(doc, off, own.as_deref(), &stands).is_empty()
+    });
+    let Err(error) = written else {
+        return;
+    };
+    note_refusal(&error);
+    for spelled in &due {
+        let mut said = line("failed", "mcp", &spelled.name, agent.id);
+        said.detail = masked(&error);
+        log.push(said);
+    }
 }
 
 /// Turn 「MCP 서버를 부를 때만 띄우기」 on or off, and write the window's Claude
@@ -3268,6 +3374,7 @@ mod tests {
                 .collect(),
             path: None,
             stand_in: None,
+            claude_lock_wait: claude_config_lock::LOCK_WAIT,
         }
     }
 
@@ -4132,38 +4239,34 @@ mod tests {
         );
     }
 
-    /// t-110740: a write that took a server out of the window's Claude list
-    /// (`claude mcp remove`) and could not put it back (`add-json` failed) is
-    /// not read by the next look as Claude removing it — the store and every
-    /// agent keep the server, and the window writes it again.
+    /// t-110740: a write that took a server out of an agent's list and could
+    /// not put it back — the same server, out with `mcp remove` and in again
+    /// with an `add` that failed — is not read by the next look as the agent
+    /// removing it: the store and every agent keep the server, and the window
+    /// writes it again. The window's Claude list is no longer written out and
+    /// in (t-112281), so the write here is a Gemini list's, which still is.
     #[cfg(unix)]
     #[test]
     fn a_rewrite_that_could_not_put_a_server_back_removes_it_from_nowhere() {
         use std::os::unix::fs::PermissionsExt as _;
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
-        let claude = data.path().join("claude-home");
-        std::fs::create_dir_all(&claude).unwrap();
-        let server = |command: &str| serde_json::json!({ "type": "stdio", "command": command });
+        let list = home.path().join(".gemini/settings.json");
+        std::fs::create_dir_all(list.parent().unwrap()).unwrap();
+        let server = |command: &str| serde_json::json!({ "command": command });
         std::fs::write(
-            claude.join(".claude.json"),
+            &list,
             serde_json::json!({ "mcpServers": { "a": server("a-mcp"), "b": server("b-mcp") } })
                 .to_string(),
         )
         .unwrap();
-        // The first look takes both in, writing nothing: no stand-in yet.
-        let ctx = Context {
-            claude_home: Some(claude.clone()),
-            ..context_of(home.path(), data.path(), &["claude"])
-        };
+        // The first look takes both in, writing nothing.
+        let ctx = context_of(home.path(), data.path(), &["gemini"]);
         look(&ctx).unwrap();
-        assert!(
-            read_list(&ctx.store_mcp(), Format::Store)
-                .unwrap()
-                .contains_key("a")
-        );
+        let store = read_list(&ctx.store_mcp(), Format::Store).unwrap();
+        assert!(store.contains_key("a"));
 
-        // A `claude` whose remove takes `a` out and whose add fails.
+        // A `gemini` whose remove takes `a` out and whose add fails.
         let only_b = data.path().join("only-b.json");
         std::fs::write(
             &only_b,
@@ -4172,29 +4275,37 @@ mod tests {
         .unwrap();
         let bin = data.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let fake = bin.join("claude");
+        let fake = bin.join("gemini");
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\n[ \"$2\" = remove ] && [ \"$5\" = a ] && /bin/cp '{}' \"$CLAUDE_CONFIG_DIR/.claude.json\"\n[ \"$2\" = add-json ] && exit 1\nexit 0\n",
-                only_b.display()
+                "#!/bin/sh\n[ \"$2\" = remove ] && [ \"$5\" = a ] && /bin/cp '{}' '{}'\n[ \"$2\" = add ] && exit 1\nexit 0\n",
+                only_b.display(),
+                list.display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let stand_in = data.path().join("app/zerocode-mirror");
-        std::fs::create_dir_all(stand_in.parent().unwrap()).unwrap();
-        std::fs::write(&stand_in, "").unwrap();
         let ctx = Context {
             path: Some(bin.into_os_string()),
-            stand_in: Some(stand_in),
             ..ctx
         };
-        look(&ctx).unwrap();
-        let text = std::fs::read_to_string(claude.join(".claude.json")).unwrap();
+        // The server written again as it stands, the way a stand-in's
+        // respelling of the Claude list was before t-112281.
+        let steps = [McpStep::Push {
+            agent: "gemini".to_string(),
+            name: "a".to_string(),
+            entry: store["a"].clone(),
+        }];
+        let mut ledger = read_ledger(&ctx);
+        let mut log = Vec::new();
+        let failures = in_one_burst(|| run_mcp(&ctx, &steps, &mut ledger, &mut log));
+        assert_eq!(failures, 1, "{log:?}");
+        write_ledger(&ctx, &ledger);
+        let text = std::fs::read_to_string(&list).unwrap();
         assert!(
             !text.contains("a-mcp"),
-            "the failing claude took it out: {text}"
+            "the failing gemini took it out: {text}"
         );
 
         look(&ctx).unwrap();
@@ -4375,7 +4486,9 @@ mod tests {
     /// burst, the read after a write to the window's Claude list is the file
     /// as written — never the parse of before, which a rewrite at the same
     /// size within one tick of a coarse clock would leave standing. The
-    /// fake `claude` here writes the new value and sets the old time back.
+    /// fake `claude` here adds a server the list did not hold — a name it
+    /// holds is written in place, never by the CLI (t-112281) — in a file of
+    /// the same size, and sets the old time back.
     #[cfg(unix)]
     #[test]
     fn a_write_to_the_claude_list_is_checked_against_the_file_as_written() {
@@ -4387,7 +4500,7 @@ mod tests {
         let file = claude.join(".claude.json");
         let next = data.path().join("next.json");
         let stamp = data.path().join("stamp");
-        std::fs::write(&file, r#"{"mcpServers":{"a":{"command":"x-mcp"}}}"#).unwrap();
+        std::fs::write(&file, r#"{"mcpServers":{"b":{"command":"x-mcp"}}}"#).unwrap();
         std::fs::write(&next, r#"{"mcpServers":{"a":{"command":"y-mcp"}}}"#).unwrap();
         std::fs::write(&stamp, "").unwrap();
         let at = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -4466,75 +4579,156 @@ mod tests {
         );
     }
 
+    /// A window whose Claude list starts as `doc`, with a stand-in of its own
+    /// and a `claude` that keeps the list the way the real one does for `mcp
+    /// add-json` and `mcp remove` — `add-json` refusing a name the list
+    /// holds, as 2.1.326 does (「already exists in user config」, exit 1) —
+    /// and logs each call.
+    #[cfg(unix)]
+    struct ClaudeWindow {
+        _home: tempfile::TempDir,
+        data: tempfile::TempDir,
+        claude: PathBuf,
+        stand_in: PathBuf,
+        ctx: Context,
+    }
+
+    #[cfg(unix)]
+    impl ClaudeWindow {
+        fn new(doc: &serde_json::Value) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            let home = tempfile::tempdir().unwrap();
+            let data = tempfile::tempdir().unwrap();
+            let claude = data.path().join("claude-home");
+            std::fs::create_dir_all(&claude).unwrap();
+            std::fs::write(
+                claude.join(".claude.json"),
+                serde_json::to_string_pretty(doc).unwrap(),
+            )
+            .unwrap();
+            let bin = data.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let fake = bin.join("claude");
+            std::fs::write(
+                &fake,
+                concat!(
+                    "#!/bin/sh\n",
+                    "echo \"$2 $5\" >> \"$CLAUDE_CONFIG_DIR/calls.log\"\n",
+                    "list=\"$CLAUDE_CONFIG_DIR/.claude.json\"\n",
+                    "case \"$2\" in\n",
+                    "  add-json)\n",
+                    "    if grep -q \"\\\"$5\\\":\" \"$list\" 2>/dev/null; then\n",
+                    "      echo \"MCP server $5 already exists in user config\" >&2; exit 1\n",
+                    "    fi\n",
+                    "    printf '{\"mcpServers\":{\"%s\":%s}}\\n' \"$5\" \"$6\" > \"$list\" ;;\n",
+                    "  remove) printf '{\"mcpServers\":{}}\\n' > \"$list\" ;;\n",
+                    "esac\n",
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let stand_in = data.path().join("app/zerocode-mirror");
+            std::fs::create_dir_all(stand_in.parent().unwrap()).unwrap();
+            std::fs::write(&stand_in, "").unwrap();
+            let ctx = Context {
+                claude_home: Some(claude.clone()),
+                path: Some(bin.into_os_string()),
+                stand_in: Some(stand_in.clone()),
+                ..context_of(home.path(), data.path(), &["claude"])
+            };
+            Self {
+                _home: home,
+                data,
+                claude,
+                stand_in,
+                ctx,
+            }
+        }
+
+        fn list(&self) -> PathBuf {
+            self.claude.join(".claude.json")
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            std::fs::read(self.list()).unwrap()
+        }
+
+        fn doc(&self) -> serde_json::Value {
+            serde_json::from_slice(&self.bytes()).unwrap()
+        }
+
+        fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.claude.join("calls.log"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+
+        /// The gap t-112281 closes: a server taken out of the list to be put
+        /// back, a pane started in between having none.
+        fn taken_out(&self) -> Vec<String> {
+            self.calls()
+                .into_iter()
+                .filter(|call| call.starts_with("remove "))
+                .collect()
+        }
+
+        fn stand_in_text(&self) -> String {
+            self.stand_in.to_string_lossy().into_owned()
+        }
+
+        /// The copies the window kept of its Claude list before writing it.
+        fn backups(&self) -> Vec<Vec<u8>> {
+            let dir = self.ctx.folder().join(BACKUPS).join("claude");
+            let mut kept: Vec<PathBuf> = std::fs::read_dir(dir)
+                .map(|read| read.flatten().map(|entry| entry.path()).collect())
+                .unwrap_or_default();
+            kept.sort();
+            kept.iter()
+                .map(|path| std::fs::read(path).unwrap())
+                .collect()
+        }
+    }
+
     /// t-110740: while 「MCP 서버를 부를 때만 띄우기」 is on, a look writes the
     /// window's Claude list's local servers through the stand-in — the
     /// server's values where they were, its name in the marker — and the
     /// store keeps the server itself; a look after that writes nothing; the
-    /// switch turned off writes the entry back as it was.
+    /// switch turned off writes the entry back as it was. Each of those is a
+    /// write in place (t-112281): no server is taken out of the list to be
+    /// put back.
     #[cfg(unix)]
     #[test]
     fn the_windows_claude_list_starts_its_local_servers_on_their_first_call() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let home = tempfile::tempdir().unwrap();
-        let data = tempfile::tempdir().unwrap();
-        let claude = data.path().join("claude-home");
-        std::fs::create_dir_all(&claude).unwrap();
         let original = serde_json::json!({
             "type": "stdio",
             "command": "a-mcp",
             "args": ["--x"],
             "env": { "A_TOKEN": "fixture-value" }
         });
-        std::fs::write(
-            claude.join(".claude.json"),
-            serde_json::json!({ "mcpServers": { "a": original } }).to_string(),
-        )
-        .unwrap();
-        // A `claude` that keeps a one-server list the way `mcp add-json` and
-        // `mcp remove` are asked to, and counts its calls.
-        let bin = data.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let fake = bin.join("claude");
-        std::fs::write(
-            &fake,
-            concat!(
-                "#!/bin/sh\n",
-                "echo \"$2 $5\" >> \"$CLAUDE_CONFIG_DIR/calls.log\"\n",
-                "case \"$2\" in\n",
-                "  add-json) printf '{\"mcpServers\":{\"%s\":%s}}\\n' \"$5\" \"$6\" > \"$CLAUDE_CONFIG_DIR/.claude.json\" ;;\n",
-                "  remove) printf '{\"mcpServers\":{}}\\n' > \"$CLAUDE_CONFIG_DIR/.claude.json\" ;;\n",
-                "esac\n",
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let stand_in = data.path().join("app/zerocode-mirror");
-        std::fs::create_dir_all(stand_in.parent().unwrap()).unwrap();
-        std::fs::write(&stand_in, "").unwrap();
-        let ctx = Context {
-            claude_home: Some(claude.clone()),
-            path: Some(bin.into_os_string()),
-            stand_in: Some(stand_in.clone()),
-            ..context_of(home.path(), data.path(), &["claude"])
-        };
-        let calls = || {
-            std::fs::read_to_string(claude.join("calls.log"))
-                .unwrap_or_default()
-                .lines()
-                .count()
-        };
-        let entry = |text: &str| -> serde_json::Value {
-            serde_json::from_str::<serde_json::Value>(text).unwrap()["mcpServers"]["a"].clone()
-        };
+        let window = ClaudeWindow::new(&serde_json::json!({ "mcpServers": { "a": original } }));
+        let ctx = window.ctx.clone();
+        let first = window.bytes();
 
         look(&ctx).unwrap();
-        let text = std::fs::read_to_string(claude.join(".claude.json")).unwrap();
+        assert_eq!(
+            window.taken_out(),
+            Vec::<String>::new(),
+            "a server written again is never out of the list"
+        );
+        assert_eq!(
+            window.backups(),
+            vec![first],
+            "the list as it was is kept before the window writes it"
+        );
+        let text = String::from_utf8(window.bytes()).unwrap();
         assert_eq!(
             mcp::first_call_spelling(&text).unwrap().get("a"),
-            Some(&Some(stand_in.to_string_lossy().into_owned())),
+            Some(&Some(window.stand_in_text())),
             "{text}"
         );
-        let written = entry(&text);
+        let written = window.doc()["mcpServers"]["a"].clone();
         assert_eq!(written["args"], serde_json::json!(["a-mcp", "--x"]));
         assert_eq!(written["env"]["A_TOKEN"], "fixture-value");
         assert_eq!(written["env"][zerocode_core::mcp_first_call::MARKER], "a");
@@ -4553,10 +4747,10 @@ mod tests {
         let on = report(&ctx);
         assert!(on.mcp_on_first_call && on.mcp_on_first_call_ready);
 
-        let before = calls();
+        let before = window.bytes();
         look(&ctx).unwrap();
         assert_eq!(
-            calls(),
+            window.bytes(),
             before,
             "a list written that way is not written again"
         );
@@ -4569,23 +4763,23 @@ mod tests {
         };
         look(&bare).unwrap();
         assert_eq!(
-            calls(),
+            window.bytes(),
             before,
             "a window that cannot stand in writes nothing"
         );
         assert!(!report(&bare).mcp_on_first_call_ready);
 
         // Its stand-in gone, the entry is written again through this window's.
-        let other = data.path().join("other/zerocode-mirror");
+        let other = window.data.path().join("other/zerocode-mirror");
         std::fs::create_dir_all(other.parent().unwrap()).unwrap();
         std::fs::write(&other, "").unwrap();
-        std::fs::remove_file(&stand_in).unwrap();
+        std::fs::remove_file(&window.stand_in).unwrap();
         let moved = Context {
             stand_in: Some(other.clone()),
             ..ctx.clone()
         };
         look(&moved).unwrap();
-        let text = std::fs::read_to_string(claude.join(".claude.json")).unwrap();
+        let text = String::from_utf8(window.bytes()).unwrap();
         assert_eq!(
             mcp::first_call_spelling(&text).unwrap().get("a"),
             Some(&Some(other.to_string_lossy().into_owned())),
@@ -4595,8 +4789,12 @@ mod tests {
 
         let off = set_first_call(&ctx, false).unwrap();
         assert!(!off.mcp_on_first_call);
-        let text = std::fs::read_to_string(claude.join(".claude.json")).unwrap();
-        assert_eq!(entry(&text), original, "the entry is back as it was");
+        let text = String::from_utf8(window.bytes()).unwrap();
+        assert_eq!(
+            window.doc()["mcpServers"]["a"],
+            original,
+            "the entry is back as it was"
+        );
         assert_eq!(
             mcp::first_call_spelling(&text).unwrap().get("a"),
             Some(&None)
@@ -4610,6 +4808,240 @@ mod tests {
         );
         let store = read_list(&ctx.store_mcp(), Format::Store).unwrap();
         assert_eq!(store["a"].def, real.def);
+        assert_eq!(
+            window.calls(),
+            Vec::<String>::new(),
+            "the list is written in place, not through `claude mcp`"
+        );
+    }
+
+    /// t-112281: a server edited in the library is written again in the
+    /// window's Claude list in place, under Claude Code's lock — `claude mcp
+    /// add-json` refuses a name the list holds, and the `remove` before it
+    /// left a pane started between the two without the server for its whole
+    /// session. The rest of the file stays as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_server_edited_in_the_library_is_written_again_in_place() {
+        let window = ClaudeWindow::new(&serde_json::json!({
+            "numStartups": 2,
+            "mcpServers": { "a": { "type": "stdio", "command": "a-mcp", "args": ["--x"] } },
+            "projects": { "/p": { "allowedTools": [] } },
+        }));
+        let ctx = window.ctx.clone();
+        look(&ctx).unwrap();
+        let edited = McpDef::Stdio {
+            command: "a-mcp".into(),
+            args: vec!["--y".into()],
+            env: BTreeMap::new(),
+        };
+        save_server(&ctx, "a", edited.clone(), None, None).unwrap();
+        assert_eq!(
+            window.taken_out(),
+            Vec::<String>::new(),
+            "the server is never out of the list"
+        );
+        let doc = window.doc();
+        assert_eq!(doc["mcpServers"]["a"]["command"], window.stand_in_text());
+        assert_eq!(
+            doc["mcpServers"]["a"]["args"],
+            serde_json::json!(["a-mcp", "--y"])
+        );
+        assert_eq!(doc["numStartups"], 2);
+        assert_eq!(doc["projects"]["/p"]["allowedTools"], serde_json::json!([]));
+        assert!(
+            read_log(&ctx).iter().all(|said| said.kind != "failed"),
+            "{:?}",
+            read_log(&ctx)
+        );
+        let held = read_list(&window.list(), Format::Claude).unwrap();
+        assert_eq!(held["a"].def, edited);
+    }
+
+    /// t-112281: the servers a project keeps for itself in the window's
+    /// Claude list (`projects.<folder>.mcpServers`, what `claude mcp add`
+    /// writes in a pane when no scope is named) start on their first call too:
+    /// written through the stand-in in place, never taken into the store, and
+    /// back as they were with the switch off. One added there, or a stand-in
+    /// gone, changes the keeper's stamp, so it looks though no list's servers
+    /// changed (the review of t-110740, problem 2).
+    #[cfg(unix)]
+    #[test]
+    fn a_projects_own_servers_start_on_their_first_call_too() {
+        let p = serde_json::json!({ "type": "stdio", "command": "p-mcp", "args": [], "env": {} });
+        let remote = serde_json::json!({ "type": "http", "url": "https://mcp.example.com/mcp" });
+        let window = ClaudeWindow::new(&serde_json::json!({
+            "mcpServers": {},
+            "projects": { "/p/one": { "allowedTools": [], "mcpServers": { "p": p, "r": remote } } },
+        }));
+        let ctx = window.ctx.clone();
+        let marker = zerocode_core::mcp_first_call::MARKER;
+        let first = window.bytes();
+
+        look(&ctx).unwrap();
+        assert_eq!(
+            window.backups(),
+            vec![first],
+            "the list as it was is kept before the window writes it"
+        );
+        let doc = window.doc();
+        assert_eq!(
+            doc["projects"]["/p/one"]["mcpServers"]["p"],
+            serde_json::json!({
+                "type": "stdio",
+                "command": window.stand_in_text(),
+                "args": ["p-mcp"],
+                "env": { marker: "p" },
+            })
+        );
+        assert_eq!(doc["projects"]["/p/one"]["mcpServers"]["r"], remote);
+        assert_eq!(
+            doc["projects"]["/p/one"]["allowedTools"],
+            serde_json::json!([])
+        );
+        let store = read_list(&ctx.store_mcp(), Format::Store).unwrap_or_default();
+        assert!(
+            !store.contains_key("p"),
+            "a project's own server is not the store's"
+        );
+        assert!(!read_ledger(&ctx).mcp.contains_key("p"));
+        assert_eq!(window.calls(), Vec::<String>::new());
+
+        let before = window.bytes();
+        look(&ctx).unwrap();
+        assert_eq!(
+            window.bytes(),
+            before,
+            "a list written that way is not written again"
+        );
+
+        // `claude mcp add` in a pane adds one more: the stamp changes, and the
+        // look writes it through the stand-in.
+        let stamp = in_one_burst(|| inputs_stamp(&ctx));
+        let q =
+            serde_json::json!({ "type": "stdio", "command": "q-mcp", "args": ["--z"], "env": {} });
+        let mut doc = window.doc();
+        doc["projects"]["/p/one"]["mcpServers"]["q"] = q.clone();
+        std::fs::write(window.list(), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        assert_ne!(
+            in_one_burst(|| inputs_stamp(&ctx)),
+            stamp,
+            "a project's server added is a look"
+        );
+        look(&ctx).unwrap();
+        assert_eq!(
+            window.doc()["projects"]["/p/one"]["mcpServers"]["q"]["command"],
+            window.stand_in_text()
+        );
+
+        // Its stand-in gone is a look too, which writes it through this
+        // window's.
+        let written = in_one_burst(|| inputs_stamp(&ctx));
+        std::fs::remove_file(&window.stand_in).unwrap();
+        assert_ne!(
+            in_one_burst(|| inputs_stamp(&ctx)),
+            written,
+            "a stand-in gone is a look"
+        );
+        let other = window.data.path().join("other/zerocode-mirror");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, "").unwrap();
+        let moved = Context {
+            stand_in: Some(other.clone()),
+            ..ctx.clone()
+        };
+        look(&moved).unwrap();
+        assert_eq!(
+            window.doc()["projects"]["/p/one"]["mcpServers"]["p"]["command"],
+            other.to_string_lossy().as_ref()
+        );
+
+        set_first_call(&moved, false).unwrap();
+        let doc = window.doc();
+        assert_eq!(
+            doc["projects"]["/p/one"]["mcpServers"]["p"], p,
+            "the entry is back as it was"
+        );
+        assert_eq!(doc["projects"]["/p/one"]["mcpServers"]["q"], q);
+        assert!(
+            read_log(&moved).iter().all(|said| said.kind != "failed"),
+            "{:?}",
+            read_log(&moved)
+        );
+        assert_eq!(window.calls(), Vec::<String>::new());
+    }
+
+    /// t-112281: a write of the window's Claude list waits for Claude Code's
+    /// lock and never takes it. Held past the wait, the list is left as it
+    /// was and the look says so and asks to be tried again — the keeper's
+    /// look, a server edited in the library and the switch turned off alike;
+    /// let go, the next look writes what each asked.
+    #[cfg(unix)]
+    #[test]
+    fn a_list_claude_holds_its_lock_on_is_written_once_it_lets_go() {
+        let window = ClaudeWindow::new(&serde_json::json!({
+            "mcpServers": { "a": { "type": "stdio", "command": "a-mcp" } }
+        }));
+        let ctx = Context {
+            claude_lock_wait: std::time::Duration::from_millis(200),
+            ..window.ctx.clone()
+        };
+        let lock = window.claude.join(".claude.json.lock");
+        let refused = |ctx: &Context| -> Vec<LogLine> {
+            read_log(ctx)
+                .into_iter()
+                .filter(|said| said.kind == "failed" && said.detail == claude_config_lock::BUSY)
+                .collect()
+        };
+        // Asked under the keeper's own lock, so no other look clears the
+        // answer before it is read.
+        let look_alone = |ctx: &Context| -> bool {
+            let _held = RUN.lock().unwrap_or_else(PoisonError::into_inner);
+            look_held(ctx).unwrap();
+            look_again()
+        };
+        std::fs::create_dir(&lock).unwrap();
+        let before = window.bytes();
+
+        assert!(look_alone(&ctx), "a write the lock kept out is tried again");
+        assert_eq!(window.bytes(), before, "nothing is written");
+        assert!(lock.is_dir(), "Claude Code's lock is not taken");
+        let failed = refused(&ctx);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert_eq!(failed[0].name, "a");
+        assert_eq!(window.calls(), Vec::<String>::new());
+
+        std::fs::remove_dir(&lock).unwrap();
+        assert!(!look_alone(&ctx));
+        assert_eq!(
+            window.doc()["mcpServers"]["a"]["command"],
+            window.stand_in_text()
+        );
+
+        // Held again: a server edited in the library, then the switch turned
+        // off, write nothing either.
+        std::fs::create_dir(&lock).unwrap();
+        let before = window.bytes();
+        let edited = McpDef::Stdio {
+            command: "a-mcp".into(),
+            args: vec!["--y".into()],
+            env: BTreeMap::new(),
+        };
+        save_server(&ctx, "a", edited.clone(), None, None).unwrap();
+        set_first_call(&ctx, false).unwrap();
+        assert_eq!(window.bytes(), before, "nothing is written");
+        assert!(refused(&ctx).len() > 1);
+        let store = read_list(&ctx.store_mcp(), Format::Store).unwrap();
+        assert_eq!(store["a"].def, edited, "the store keeps the edit");
+
+        std::fs::remove_dir(&lock).unwrap();
+        assert!(!look_alone(&ctx));
+        assert_eq!(
+            window.doc()["mcpServers"]["a"],
+            serde_json::json!({ "type": "stdio", "command": "a-mcp", "args": ["--y"] }),
+            "the edit lands, written straight as the switch now asks"
+        );
+        assert_eq!(window.calls(), Vec::<String>::new());
     }
 
     /// The review of skills-p2-r2 (P3-4): a link to a sibling skill
