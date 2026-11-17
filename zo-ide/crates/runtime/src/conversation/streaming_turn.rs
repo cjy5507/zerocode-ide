@@ -652,15 +652,13 @@ where
         self.record_turn_started(&user_input);
         let turn_start_output_tokens = self.usage_tracker.cumulative_usage().output_tokens;
         let message_count_before = self.session.messages.len();
-        if images.is_empty() {
-            self.session
-                .push_user_text(user_input)
-                .map_err(|error| StreamingTurnError::runtime(error.to_string()))?;
+        let pushed = if images.is_empty() {
+            self.session.push_user_text(user_input)
         } else {
-            self.session
-                .push_user_with_images(user_input, images)
-                .map_err(|error| StreamingTurnError::runtime(error.to_string()))?;
-        }
+            self.session.push_user_with_images(user_input, images)
+        };
+        self.turn_message_pushed(pushed)
+            .map_err(|error| StreamingTurnError::runtime(error.to_string()))?;
 
         self.tool_fingerprint_counts.clear();
 

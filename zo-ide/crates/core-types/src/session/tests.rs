@@ -4797,6 +4797,32 @@ fn a_read_from_a_later_turn_counts_the_turns_it_leaves_out() {
     assert_eq!(partial.next_turn_ordinal(), 4);
 }
 
+/// The header's count is written only when the file is written whole, and a
+/// turn-end persist after appended turns writes nothing. So a number given to
+/// a turn whose user message never landed (its append was refused) is on no
+/// line of the file until something asks for a full write — which is what the
+/// conversation runtime does at such a turn start, by marking the transcript.
+#[test]
+fn a_number_no_message_stands_for_reaches_the_file_with_the_next_full_write() {
+    let path = temp_session_path("turn-number-without-message");
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
+    assert_eq!(take_numbered_turn(&mut session, "words"), 1);
+    // A turn takes its number and its message never lands.
+    assert_eq!(session.claim_turn_ordinal(), 2);
+    session.mark_transcript_dirty();
+    assert_eq!(take_numbered_turn(&mut session, "the next turn"), 3);
+    session
+        .persist_appended_state_to_path(&path)
+        .expect("turn-end persist");
+    let read_back = Session::load_from_path(&path).expect("session should load");
+    cleanup_session_file(&path);
+    assert_eq!(
+        read_back.next_turn_ordinal(),
+        4,
+        "the third turn's number is not given again"
+    );
+}
+
 /// The property the four ledgers lean on: a number is given once. A fixed
 /// walk over everything that shortens a transcript or reads it back.
 #[test]

@@ -5254,6 +5254,65 @@ fn a_turn_key_is_not_given_again_after_the_transcript_is_shortened() {
     ::api::note_attempt(&session_id, "");
 }
 
+/// A turn that was given its number and whose user message did not reach the
+/// file — the append was refused — leaves a number no message stands for, and
+/// the header that carries such numbers is written only by a full write of
+/// the file. The turn start asks for one. Without it the next turn appends,
+/// its turn-end persist writes nothing, and the session read back gives that
+/// turn's number again — the number its requests were filed under.
+#[test]
+fn a_turn_whose_message_did_not_land_does_not_cost_the_next_turn_its_number() {
+    let dir = temp_workspace("turn-number-lost-message");
+    fs::create_dir_all(&dir).expect("the folder");
+    let path = dir.join("session.jsonl");
+    let session = Session::new().with_persistence_path(path.clone());
+    let session_id = session.session_id.clone();
+    let mut runtime = ConversationRuntime::new(
+        session,
+        PlainAnswerClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["You are a test assistant.".to_string()],
+    );
+    runtime.run_turn("one", None).expect("first turn");
+    assert_eq!(runtime.attempt(), format!("{session_id}@1"));
+
+    // Another writer holds the file's lease for a moment and writes nothing:
+    // the second turn takes its number, and its message is refused.
+    runtime.session().release_writer_lease();
+    let peer = Session::load_from_path(&path).expect("the peer reads the file");
+    peer.persist_appended_state_to_path(&path)
+        .expect("the peer takes the lease and has nothing to write");
+    runtime
+        .run_turn("two", None)
+        .expect_err("the second turn's message is refused");
+    assert_eq!(
+        runtime.attempt(),
+        format!("{session_id}@2"),
+        "the turn took its number before its message was refused"
+    );
+    peer.release_writer_lease();
+    drop(peer);
+
+    runtime.run_turn("three", None).expect("third turn");
+    assert_eq!(runtime.attempt(), format!("{session_id}@3"));
+    // The turn-end persist, as a host makes it.
+    runtime
+        .session()
+        .persist_appended_state_to_path(&path)
+        .expect("turn-end persist");
+    let read_back = Session::load_from_path(&path).expect("the session reads back");
+    assert_eq!(
+        read_back.next_turn_ordinal(),
+        4,
+        "read back, the session would give the third turn's number again"
+    );
+    ::api::note_attempt(&session_id, "");
+    drop(read_back);
+    drop(runtime);
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// A spawned agent's runtime spends on the attempt its PARENT named, under the
 /// agent's own prompt-cache scope — not a turn key of its own, which would
 /// leave its requests joined to nothing.

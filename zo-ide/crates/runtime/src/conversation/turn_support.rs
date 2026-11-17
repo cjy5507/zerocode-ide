@@ -262,14 +262,37 @@ where
         ::api::note_attempt(self.attempt_cache_scope(), &self.attempt);
     }
 
+    /// What the session answered when the user message of the turn that was
+    /// just given its number ([`Self::begin_attempt`]) was pushed.
+    ///
+    /// A message that did not land — its append to the file was refused —
+    /// leaves a number that stays given (a host has already filed the turn's
+    /// plan under it) and that no message stands for. The file keeps such
+    /// numbers in its header (`turn_base`), and the header is written only
+    /// when the file is written whole. Nothing else asks for that: the next
+    /// turn appends its messages, its turn-end persist compares header fields
+    /// the turn number is not among and finds them unchanged, and a session
+    /// read back from that file would give its next turn the number the last
+    /// one was spent under. So the transcript is marked for one full write,
+    /// which the next turn-end persist makes.
+    pub(super) fn turn_message_pushed<E>(&self, pushed: Result<(), E>) -> Result<(), E> {
+        if pushed.is_err() {
+            self.session.mark_transcript_dirty();
+        }
+        pushed
+    }
+
     /// The attempt the NEXT turn will be spent on, without starting it.
     ///
     /// A host that classifies a turn before handing it over — the routing
     /// probe runs before the first request leaves — needs the key that turn
     /// will carry, so the tax it records lands on the attempt that paid it.
-    /// The ordinal the turn start claims, and nothing between the two calls
-    /// moves it: the session gives it out at the turn's start, and the user
-    /// message is pushed after that.
+    /// The ordinal the turn start claims when nothing reshapes the transcript
+    /// between the two calls: the session gives it out at the turn's start,
+    /// and the user message is pushed after that. (A compaction in between
+    /// can move it when user messages pushed inside a turn — a turn-end
+    /// notice, the person's steering — had run the count past the last number
+    /// given; through v1.1.160 a compaction in between always moved it.)
     ///
     /// The session keeps the count (`Session::claim_turn_ordinal`), in its
     /// file as well, so a `/resume` picks the sequence back up where the

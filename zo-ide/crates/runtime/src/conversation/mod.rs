@@ -2478,8 +2478,8 @@ where
         self.begin_attempt();
         self.record_turn_started(&user_input);
         let turn_start_output_tokens = self.usage_tracker.cumulative_usage().output_tokens;
-        self.session
-            .push_user_text(user_input)
+        let pushed = self.session.push_user_text(user_input);
+        self.turn_message_pushed(pushed)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
 
         self.tool_fingerprint_counts.clear();
