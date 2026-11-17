@@ -448,12 +448,65 @@ struct PermissionPicker {
 
 /// 떠 있는 `/theme` 피커. The theme under the cursor is on while it is up —
 /// a move turns it on at once — so the picker keeps what to go back to.
+/// Letters typed narrow the list to the themes they are found in.
 struct ThemePicker {
-    /// The theme of each row, in the rows' order.
+    /// Every theme there was when the picker opened, in the list's order.
+    /// Narrowing asks this list: the themes folder is not read again while
+    /// the picker is up.
+    all: Vec<ThemeEntry>,
+    /// The theme of each row, in the rows' order: every theme, or the ones
+    /// `query` is found in. Empty when it is found in none.
     entries: Vec<ThemeEntry>,
+    /// What was typed to narrow the list; empty when nothing was.
+    query: String,
     view: Picker,
     /// The theme in use when the picker opened: what esc goes back to.
     original: super::theme::Theme,
+}
+
+impl ThemePicker {
+    /// The theme under the cursor — `None` when no theme matches the query.
+    fn under_cursor(&self) -> Option<&ThemeEntry> {
+        self.entries.get(self.view.selected)
+    }
+
+    /// Narrow the list to the themes `query` is found in, in the whole
+    /// list's order, and say the query and the count in the row under the
+    /// title. The cursor stays on the theme that is on — the one under it,
+    /// or the one the picker opened on when there was no row — while that
+    /// theme is still listed, and goes to the first row when it is not.
+    fn narrow(&mut self, query: String) {
+        let on = self
+            .under_cursor()
+            .map_or(self.original.name.as_str(), |entry| entry.slug.as_str())
+            .to_string();
+        self.entries = theme_entries_matching(&self.all, &query);
+        self.query = query;
+        self.view.rows = theme_picker_rows(&self.entries, &self.original.name);
+        self.view.selected = self
+            .entries
+            .iter()
+            .position(|entry| entry.slug == on)
+            .unwrap_or(0);
+        self.view.note =
+            super::strings::theme_picker_note(&self.query, self.entries.len(), self.all.len());
+    }
+
+    /// The rows under the list: the sample in the theme that is on now, and
+    /// above it — when no theme matches the query — the one faded line that
+    /// says so. The line stands where the list would: the frame draws these
+    /// rows under the choices, and there are none.
+    fn sample(&self) -> Vec<Line> {
+        let mut rows = Vec::new();
+        if self.entries.is_empty() {
+            rows.push(Line::new(vec![super::ansi::Span::dim(
+                super::strings::theme_no_match(&self.query),
+            )]));
+            rows.push(Line::empty());
+        }
+        rows.extend(view::theme_preview());
+        rows
+    }
 }
 
 /// One theme as the `/theme` picker lists it: what its row is made of
@@ -3962,17 +4015,19 @@ impl Ui {
             .position(|entry| entry.slug == original.name)
             .unwrap_or(0);
         self.theme_picker = Some(ThemePicker {
-            entries,
+            all: entries.clone(),
+            query: String::new(),
             original,
             view: Picker {
                 title: super::strings::THEME_PICKER_TITLE.to_string(),
                 title_style: Style::new().bold(),
-                note: super::strings::THEME_PICKER_NOTE.to_string(),
+                note: super::strings::theme_picker_note("", entries.len(), entries.len()),
                 rows,
                 selected,
                 footer: PICKER_FOOTER.to_string(),
                 preview: view::theme_preview(),
             },
+            entries,
         });
     }
 
@@ -3980,26 +4035,55 @@ impl Ui {
     /// not open. Its keys are the numbered pickers' own: ↑↓ move, a number
     /// picks its row and confirms, enter confirms, esc (ctrl-c too) leaves.
     /// What is its own: a move turns the theme under the cursor on at once,
-    /// and leaving goes back to the theme the picker opened on.
+    /// and leaving goes back to the theme the picker opened on — in one esc,
+    /// whatever was typed. A letter, `-` or a blank typed narrows the list
+    /// to the themes it is found in (`theme_matches`) and backspace takes
+    /// the last one back; a number still picks its row, of the rows left.
+    /// The home, end and page keys move too. A letter held with ctrl or alt
+    /// is a chord and no part of the query.
     fn theme_picker_key(&mut self, key: KeyEvent) -> bool {
+        /// The rows a page key moves by.
+        const PAGE: usize = 10;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let chord = control || key.modifiers.contains(KeyModifiers::ALT);
         let Some(picker) = self.theme_picker.as_mut() else {
             return false;
         };
-        let before = picker.view.selected;
+        let before = picker.under_cursor().map(|entry| entry.slug.clone());
+        let last = picker.view.rows.len().saturating_sub(1);
         let mut confirm = false;
         match key.code {
             KeyCode::Up => picker.view.up(),
             KeyCode::Down => picker.view.down(),
+            KeyCode::Home => picker.view.selected = 0,
+            KeyCode::End => picker.view.selected = last,
+            KeyCode::PageUp => picker.view.selected = picker.view.selected.saturating_sub(PAGE),
+            KeyCode::PageDown => picker.view.selected = (picker.view.selected + PAGE).min(last),
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
                 let digit = ch.to_digit(10).unwrap_or(0) as usize;
                 confirm = picker.view.select_number(digit);
             }
-            KeyCode::Enter => confirm = true,
+            KeyCode::Char(ch) if !chord && is_theme_query_char(ch) => {
+                let mut query = picker.query.clone();
+                query.push(ch);
+                picker.narrow(query);
+            }
+            KeyCode::Backspace if !picker.query.is_empty() => {
+                let mut query = picker.query.clone();
+                query.pop();
+                picker.narrow(query);
+            }
+            // No theme matches: there is nothing to choose, and the picker
+            // stays up.
+            KeyCode::Enter => confirm = !picker.entries.is_empty(),
             _ => {}
         }
-        if picker.view.selected != before {
+        let after = picker.under_cursor().map(|entry| entry.slug.as_str());
+        if after != before.as_deref() {
             self.show_theme_under_cursor();
+        } else if picker.entries.is_empty() {
+            // Still no theme: the line that says so names what is typed now.
+            picker.view.preview = picker.sample();
         }
         if confirm {
             self.confirm_theme_picker();
@@ -4010,21 +4094,23 @@ impl Ui {
     }
 
     /// Turn the theme under the picker's cursor on, and draw the sample in
-    /// it. The painter writes the screen's rows again by itself: it reads
-    /// the theme's revision ([`super::theme::revision`]).
+    /// it. With no row under the cursor — no theme matches what was typed —
+    /// the theme the picker opened on is on again. The painter writes the
+    /// screen's rows again by itself: it reads the theme's revision
+    /// ([`super::theme::revision`]).
     fn show_theme_under_cursor(&mut self) {
         let Some(picker) = self.theme_picker.as_mut() else {
             return;
         };
-        let Some(theme) = picker
-            .entries
-            .get(picker.view.selected)
-            .and_then(|entry| super::theme::find(&entry.slug))
-        else {
+        let theme = match picker.under_cursor() {
+            Some(entry) => super::theme::find(&entry.slug),
+            None => Some(picker.original.clone()),
+        };
+        let Some(theme) = theme else {
             return;
         };
         let _ = super::theme::set(theme);
-        picker.view.preview = view::theme_preview();
+        picker.view.preview = picker.sample();
     }
 
     /// Enter in the picker: the theme under the cursor is the person's
@@ -4035,8 +4121,7 @@ impl Ui {
             return;
         };
         let chosen = picker
-            .entries
-            .get(picker.view.selected)
+            .under_cursor()
             .and_then(|entry| super::theme::find(&entry.slug));
         if let Some(theme) = chosen {
             self.choose_theme(&theme);
@@ -8359,6 +8444,39 @@ fn theme_picker_rows(entries: &[ThemeEntry], current: &str) -> Vec<PickerRow> {
             }
             PickerRow { label, description, dim: false }
         })
+        .collect()
+}
+
+/// Whether a key's character goes into the `/theme` picker's query: a
+/// letter, `-` or a blank. A digit picks a row, as in every numbered picker.
+fn is_theme_query_char(ch: char) -> bool {
+    ch.is_alphabetic() || ch == '-' || ch == ' '
+}
+
+/// A theme's name or a typed query as the `/theme` picker compares them: in
+/// lower case, with a blank for a hyphen — `Tokyo Night` and `tokyo-night`
+/// are one name.
+fn theme_search_key(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|ch| if ch == ' ' { '-' } else { ch })
+        .collect()
+}
+
+/// Whether `query` finds the theme `entry`: it is in the theme's visible
+/// name or in its slug, compared as `theme_search_key` makes them. An empty
+/// query finds every theme.
+fn theme_matches(entry: &ThemeEntry, query: &str) -> bool {
+    let wanted = theme_search_key(query);
+    theme_search_key(&entry.label).contains(&wanted)
+        || theme_search_key(&entry.slug).contains(&wanted)
+}
+
+/// The themes of `all` that `query` finds, in the order they have there.
+fn theme_entries_matching(all: &[ThemeEntry], query: &str) -> Vec<ThemeEntry> {
+    all.iter()
+        .filter(|entry| theme_matches(entry, query))
+        .cloned()
         .collect()
 }
 
@@ -13313,8 +13431,8 @@ mod theme_tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        test_ui, theme_chosen_note, theme_picker_rows, Event, KeyCode, KeyEvent, KeyModifiers, Line,
-        Painter, SystemLevel, ThemeEntry, Ui,
+        test_ui, theme_chosen_note, theme_entries_matching, theme_picker_rows, Event, KeyCode,
+        KeyEvent, KeyModifiers, Line, Painter, SystemLevel, ThemeEntry, Ui,
     };
     use crate::preferences::Preferences;
     use crate::tui::{slash, strings, style, theme};
@@ -13595,6 +13713,268 @@ mod theme_tests {
         assert_eq!(shown("dracula"), rows, "the mark is there every time the rows are made");
         // The theme in use keeps its mark beside the word that it is in use.
         assert_eq!(shown("mine")[3], row("mine (current)", "mine · ⚠ 2 problems in its file"));
+    }
+
+    /// Types `word` into the open picker, a key a letter.
+    fn type_word(ui: &mut Ui, word: &str) {
+        for ch in word.chars() {
+            let _ = ui.idle_event(&press(KeyCode::Char(ch)));
+        }
+    }
+
+    /// The labels of the open theme picker's rows.
+    fn labels(ui: &Ui) -> Vec<String> {
+        let picker = ui.overlay().expect("the theme picker is open");
+        picker.rows.iter().map(|row| row.label.clone()).collect()
+    }
+
+    /// The rows of the open theme picker, drawn on an 80 by 24 screen, that
+    /// say no theme matches.
+    fn no_match_lines(ui: &Ui) -> Vec<Line> {
+        let picker = ui.overlay().expect("the theme picker is open");
+        let drawn = picker.lines(80, 24);
+        drawn.into_iter().filter(|line| line.plain().contains("no theme matches")).collect()
+    }
+
+    /// Letters typed in the picker narrow its list. `tok` leaves the two
+    /// Tokyo Night themes, with the first one on and the query and the count
+    /// in the row under the title; backspace brings the rows back with the
+    /// cursor on the theme that is on. A word no theme has leaves one faded
+    /// line where the list was and the theme the picker opened on, and then
+    /// enter and a number choose nothing. A number picks its row of the rows
+    /// left and saves it. One esc goes back to the first theme and closes,
+    /// whatever was typed.
+    #[test]
+    fn theme_picker_filters_as_letters_are_typed() {
+        if !style::in_fresh_run(&test_path("theme_picker_filters_as_letters_are_typed")) {
+            return;
+        }
+        style::init(&Preferences::default());
+        let initial = "{\n    \"z\": 1\n}\n";
+        let (folder, settings) = settings_file("theme-filter", initial);
+        let mut ui = ui_saving_to(&settings);
+        assert!(theme::active().is_terminal());
+        let total = theme::names().len();
+
+        ui.open_theme_picker();
+        let picker = ui.overlay().expect("the picker is open");
+        assert_eq!(picker.rows.len(), total);
+        assert_eq!(picker.note, strings::THEME_PICKER_NOTE);
+        assert!(picker.note.ends_with("type to filter"), "{}", picker.note);
+
+        // `tok`: the two Tokyo Night themes, and the first of them on.
+        type_word(&mut ui, "tok");
+        assert_eq!(labels(&ui), ["Tokyo Night", "Tokyo Night Light"]);
+        let picker = ui.overlay().expect("typing keeps the picker open");
+        assert_eq!(picker.selected, 0);
+        assert_eq!(theme::active().name, "tokyo-night", "the first row left is turned on");
+        assert_eq!(picker.note, strings::theme_picker_note("tok", 2, total));
+        let count = format!("2 of {total}");
+        assert!(picker.note.contains("\"tok\"") && picker.note.contains(&count), "{}", picker.note);
+        assert_eq!(read(&settings), initial, "typing saves nothing");
+
+        // The rows back, one letter less at a time: the cursor stays on the
+        // theme that is on.
+        let _ = ui.idle_event(&press(KeyCode::Down));
+        assert_eq!(theme::active().name, "tokyo-night-light");
+        for _ in 0..3 {
+            let _ = ui.idle_event(&press(KeyCode::Backspace));
+        }
+        let picker = ui.overlay().expect("backspace keeps the picker open");
+        assert_eq!(picker.rows.len(), total, "every row is back");
+        assert_eq!(picker.selected, row_of(&ui, "Tokyo Night Light"));
+        assert_eq!(theme::active().name, "tokyo-night-light");
+        assert_eq!(picker.note, strings::THEME_PICKER_NOTE);
+
+        // A word no theme has: one faded line where the list was, and the
+        // theme the picker opened on. Enter and a number choose nothing.
+        type_word(&mut ui, "zzz");
+        let picker = ui.overlay().expect("no match keeps the picker open");
+        assert!(picker.rows.is_empty(), "{:?}", labels(&ui));
+        assert!(theme::active().is_terminal(), "no theme is under the cursor: the first one is on");
+        assert_eq!(picker.note, strings::theme_picker_note("zzz", 0, total));
+        let drawn = no_match_lines(&ui);
+        assert_eq!(drawn.len(), 1, "one line says no theme matches");
+        assert_eq!(drawn[0].plain().trim(), "no theme matches \"zzz\"");
+        let mut words = drawn[0].spans.iter().filter(|span| !span.text.trim().is_empty());
+        assert!(words.all(|span| span.style.dim), "the line is faded: {:?}", drawn[0]);
+        for key in [KeyCode::Enter, KeyCode::Char('1'), KeyCode::Down] {
+            let _ = ui.idle_event(&press(key));
+            assert!(ui.overlay().is_some(), "{key:?} chooses nothing when no theme matches");
+            assert!(theme::active().is_terminal(), "{key:?}");
+        }
+        assert_eq!(read(&settings), initial, "nothing was saved");
+        assert!(!said(&ui).contains("theme →"), "nothing was chosen: {}", said(&ui));
+        // One esc from there: closed, and still the first theme.
+        let _ = ui.idle_event(&press(KeyCode::Esc));
+        assert!(ui.overlay().is_none(), "esc closes the picker from the line that says no theme");
+        assert!(theme::active().is_terminal());
+        assert_eq!(read(&settings), initial);
+
+        // A number picks its row of the rows left, and saves it.
+        ui.open_theme_picker();
+        type_word(&mut ui, "Tokyo N");
+        assert_eq!(labels(&ui), ["Tokyo Night", "Tokyo Night Light"], "case and the blank are no matter");
+        let _ = ui.idle_event(&press(KeyCode::Char('1')));
+        assert!(ui.overlay().is_none(), "a number confirms");
+        assert_eq!(theme::active().name, "tokyo-night");
+        assert_eq!(crate::preferences::load_from_path(&settings).theme.as_deref(), Some("tokyo-night"));
+        assert!(said(&ui).contains("theme → Tokyo Night"), "{}", said(&ui));
+        let saved = read(&settings);
+
+        // One esc, whatever was typed: the first theme, closed, nothing saved.
+        ui.open_theme_picker();
+        type_word(&mut ui, "dra");
+        assert_eq!(labels(&ui), ["Dracula"]);
+        assert_eq!(theme::active().name, "dracula");
+        let _ = ui.idle_event(&press(KeyCode::Esc));
+        assert!(ui.overlay().is_none(), "esc closes the picker with a query typed");
+        assert_eq!(theme::active().name, "tokyo-night", "esc goes back to the theme it opened on");
+        assert_eq!(read(&settings), saved, "esc leaves the file as it was");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// The cursor through a narrowed list, and the keys that are not the
+    /// query. The line that says no theme matches names what is typed now;
+    /// as letters are taken back the theme that is on keeps the cursor — the
+    /// one match a shorter query turned on, or the theme the picker opened
+    /// on when there was no row. Backspace with nothing typed, and a letter
+    /// held with ctrl or alt, are no part of the query. The home, end and
+    /// page keys move, and the theme follows.
+    #[test]
+    fn theme_picker_keeps_the_cursor_on_the_theme_that_is_on() {
+        if !style::in_fresh_run(&test_path("theme_picker_keeps_the_cursor_on_the_theme_that_is_on")) {
+            return;
+        }
+        style::init(&Preferences::default());
+        let (folder, settings) = settings_file("theme-filter-cursor", "{}\n");
+        let mut ui = ui_saving_to(&settings);
+        let names = theme::names();
+        let total = names.len();
+        ui.open_theme_picker();
+
+        type_word(&mut ui, "zzz");
+        assert_eq!(labels(&ui), [""; 0], "no theme has `zzz`");
+        type_word(&mut ui, "q");
+        let drawn = no_match_lines(&ui);
+        assert_eq!(drawn.len(), 1, "one line still, and it names what is typed now");
+        assert_eq!(drawn[0].plain().trim(), "no theme matches \"zzzq\"");
+        // A letter less at a time: `zz` is in Snazzy alone, so it is turned
+        // on, and the cursor stays on it as the list grows.
+        for _ in 0..4 {
+            let _ = ui.idle_event(&press(KeyCode::Backspace));
+        }
+        let picker = ui.overlay().expect("still open");
+        assert_eq!((picker.rows.len(), picker.selected), (total, row_of(&ui, "Snazzy")));
+        assert_eq!(theme::active().name, "snazzy");
+        assert!(no_match_lines(&ui).is_empty(), "the line goes when a theme matches again");
+        // From no theme straight back to every row: the theme that is on
+        // again — the one the picker opened on — is under the cursor.
+        type_word(&mut ui, "q");
+        assert!(ui.overlay().expect("still open").rows.is_empty());
+        assert!(theme::active().is_terminal());
+        let _ = ui.idle_event(&press(KeyCode::Backspace));
+        let picker = ui.overlay().expect("still open");
+        assert_eq!((picker.rows.len(), picker.selected), (total, 0));
+        assert!(theme::active().is_terminal());
+
+        // Backspace with nothing typed, and a letter held with ctrl or alt,
+        // change nothing.
+        let _ = ui.idle_event(&press(KeyCode::Backspace));
+        for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
+            let _ = ui.idle_event(&Event::Key(KeyEvent::new(KeyCode::Char('d'), modifiers)));
+        }
+        let picker = ui.overlay().expect("still open");
+        assert_eq!((picker.rows.len(), picker.selected), (total, 0));
+        assert_eq!(picker.note, strings::THEME_PICKER_NOTE);
+
+        // Home, End and the page keys move, and the theme follows.
+        let _ = ui.idle_event(&press(KeyCode::End));
+        assert_eq!(ui.overlay().expect("still open").selected, total - 1);
+        assert_eq!(theme::active().name, names[total - 1]);
+        let _ = ui.idle_event(&press(KeyCode::PageUp));
+        assert_eq!(ui.overlay().expect("still open").selected, total - 11);
+        assert_eq!(theme::active().name, names[total - 11]);
+        let _ = ui.idle_event(&press(KeyCode::Home));
+        assert_eq!(ui.overlay().expect("still open").selected, 0);
+        assert!(theme::active().is_terminal());
+        let _ = ui.idle_event(&press(KeyCode::PageDown));
+        assert_eq!(ui.overlay().expect("still open").selected, 10);
+        assert_eq!(theme::active().name, names[10]);
+        // The page keys stop at the ends.
+        for _ in 0..total {
+            let _ = ui.idle_event(&press(KeyCode::PageDown));
+        }
+        assert_eq!(ui.overlay().expect("still open").selected, total - 1);
+
+        let _ = ui.idle_event(&press(KeyCode::Esc));
+        assert!(ui.overlay().is_none());
+        assert!(theme::active().is_terminal());
+        assert_eq!(read(&settings), "{}\n", "nothing was saved");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// What a query finds, from the entries alone: a theme whose visible
+    /// name or slug holds it, whatever the case, a blank and a hyphen being
+    /// one — in the whole list's order.
+    #[test]
+    fn filter_matching_ignores_case_and_treats_blanks_as_hyphens() {
+        let entry = |slug: &str, label: &str| ThemeEntry {
+            slug: slug.to_string(),
+            label: label.to_string(),
+            problems: 0,
+            is_terminal: slug == theme::TERMINAL_THEME_NAME,
+        };
+        let all = [
+            entry("terminal", "terminal"),
+            entry("github-light", "GitHub Light"),
+            entry("nord", "Nord"),
+            entry("tokyo-night", "Tokyo Night"),
+            entry("tokyo-night-light", "Tokyo Night Light"),
+            entry("my-nord", "my-nord"),
+        ];
+        let found = |query: &str| -> Vec<String> {
+            theme_entries_matching(&all, query).into_iter().map(|entry| entry.slug).collect()
+        };
+        let every: Vec<String> = all.iter().map(|entry| entry.slug.clone()).collect();
+
+        assert_eq!(found(""), every, "nothing typed finds every theme");
+        for query in ["TOKYO night", "tokyo-night", "Tokyo Night", "tokyo night", "TOKYO-NIGHT", "kyo n"] {
+            assert_eq!(found(query), ["tokyo-night", "tokyo-night-light"], "{query:?}");
+        }
+        assert_eq!(found("night l"), ["tokyo-night-light"]);
+        assert_eq!(found("NORD"), ["nord", "my-nord"], "in the list's order");
+        assert_eq!(found("my nord"), ["my-nord"], "a blank typed finds the slug's hyphen");
+        assert_eq!(found("hub-l"), ["github-light"], "a hyphen typed finds the name's blank");
+        assert_eq!(found("light"), ["github-light", "tokyo-night-light"]);
+        assert_eq!(found("term"), ["terminal"]);
+        assert!(found("tokyonight").is_empty(), "letters run together are another word");
+        assert!(found("zzz").is_empty());
+
+        // The entries found are the ones given, whole.
+        assert_eq!(theme_entries_matching(&all, "nord"), [all[2].clone(), all[5].clone()]);
+    }
+
+    /// The row under the title on an 80-column terminal: its last words —
+    /// that typing narrows the list, and with a query the count — are not
+    /// cut off, however long the query is.
+    #[test]
+    fn the_picker_note_keeps_its_last_words_in_eighty_columns() {
+        // The frame draws the row two cells in.
+        let fits = |note: &str| crate::tui::ansi::str_width(note) + 2 <= 80;
+        assert!(fits(strings::THEME_PICKER_NOTE), "{}", strings::THEME_PICKER_NOTE);
+        assert_eq!(
+            strings::theme_picker_note("tok", 2, 31),
+            "filter: \"tok\" · 2 of 31 — backspace clears"
+        );
+        assert_eq!(strings::theme_no_match("tok"), "no theme matches \"tok\"");
+        for long in ["z".repeat(200), "한".repeat(100)] {
+            let note = strings::theme_picker_note(&long, 0, 231);
+            assert!(fits(&note), "{note}");
+            assert!(note.contains('…') && note.ends_with("· 0 of 231 — backspace clears"), "{note}");
+            let line = strings::theme_no_match(&long);
+            assert!(fits(&line) && line.contains('…'), "{line}");
+        }
     }
 
     /// Criterion 6: a slug or a visible name, in any case, is set and saved

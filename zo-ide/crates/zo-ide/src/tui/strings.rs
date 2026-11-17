@@ -89,10 +89,53 @@ pub const THINKING: &str = "Thinking";
 pub const THINKING_COMMAND_DESCRIPTION: &str = "show or hide the model's thinking";
 /// The `/theme` popup row.
 pub const THEME_COMMAND_DESCRIPTION: &str = "choose zo's color theme";
-/// The `/theme` picker's title and the row under it.
+/// The `/theme` picker's title and the row under it. The row ends in the
+/// one word that tells the list can be narrowed, so it is kept short enough
+/// for an 80-column terminal to show to its end.
 pub const THEME_PICKER_TITLE: &str = "Select Theme";
 pub const THEME_PICKER_NOTE: &str =
-    "A move shows the theme at once — enter saves it, esc keeps the one before.";
+    "A move shows the theme — enter saves it, esc goes back · type to filter";
+/// The widest a typed query is shown in the `/theme` picker, in cells: what
+/// leaves the count after it on an 80-column terminal.
+const THEME_QUERY_CELLS: usize = 30;
+/// The row under the `/theme` picker's title: what the keys do, and once
+/// something is typed, the query and how many of the `total` themes it
+/// leaves (`shown`). A long query is cut so that the count is always seen.
+#[must_use]
+pub fn theme_picker_note(query: &str, shown: usize, total: usize) -> String {
+    if query.is_empty() {
+        return THEME_PICKER_NOTE.to_string();
+    }
+    format!(
+        "filter: \"{}\" · {shown} of {total} — backspace clears",
+        theme_query_shown(query)
+    )
+}
+/// What the `/theme` picker says where its list was when no theme matches
+/// `query`.
+#[must_use]
+pub fn theme_no_match(query: &str) -> String {
+    format!("no theme matches \"{}\"", theme_query_shown(query))
+}
+/// `query` as the `/theme` picker shows it: whole while it is no wider than
+/// `THEME_QUERY_CELLS`, else its head and `…`.
+fn theme_query_shown(query: &str) -> String {
+    if super::ansi::str_width(query) <= THEME_QUERY_CELLS {
+        return query.to_string();
+    }
+    let mut shown = String::new();
+    let mut used = 0;
+    for ch in query.chars() {
+        let cells = super::ansi::char_width(ch);
+        if used + cells >= THEME_QUERY_CELLS {
+            break;
+        }
+        used += cells;
+        shown.push(ch);
+    }
+    shown.push('…');
+    shown
+}
 /// The `/theme` picker's word for the `terminal` row.
 pub const THEME_TERMINAL_ROW: &str = "the terminal's own colors";
 /// The `/theme` picker's mark on the row of a theme whose file held `count`
