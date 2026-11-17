@@ -53,6 +53,7 @@ fn the_ledger_reopens(store: &zerocode_orchestrator::workflow_store::WorkflowSto
         Box::new(super::super::ShellPaneTable),
         Box::new(super::super::LiveCatalog {
             overrides: std::sync::Arc::clone(&overrides),
+            limits_root: super::process_data_root().to_path_buf(),
             ledger_dir: std::env::temp_dir(),
             headroom: super::super::HeadroomSource::Fixed(TEST_HEADROOM_BYTES),
             usage: usage.clone(),

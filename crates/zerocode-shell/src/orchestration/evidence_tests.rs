@@ -272,6 +272,7 @@ fn the_live_catalog_answers_for_the_checkout_the_window_observed() {
 
     let catalog = super::LiveCatalog {
         overrides: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        limits_root: std::path::PathBuf::from("/limits"),
         ledger_dir: std::path::PathBuf::from("/ledger"),
         headroom: super::HeadroomSource::Fixed(1),
         usage: super::UsageSource::fixed(Vec::new()),

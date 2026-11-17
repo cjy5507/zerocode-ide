@@ -2524,6 +2524,20 @@ impl PlainSession {
         Ok(report)
     }
 
+    /// What this session's launch put on it, for a window that reopens it
+    /// (t-112277): the launch's list and spawn bar ([`Self::launch_flags`]),
+    /// with the shell's inspection hold read off the tool context. `None` for
+    /// a launch that put none on.
+    #[must_use]
+    pub fn launch_limits(&self) -> Option<crate::ide::reporter::LaunchLimits> {
+        let inspection_shell = self
+            .runtime
+            .runtime
+            .as_ref()
+            .is_some_and(|inner| inner.tool_executor().tool_registry().context().inspection_shell());
+        crate::ide::reporter::LaunchLimits::of(self.launch_allowed_tools.as_ref(), self.disable_spawn_family, inspection_shell)
+    }
+
     #[must_use]
     /// 이 세션을 연 런치 플래그(`/resume` 세션 교체가 같은 조건으로 다시 연다).
     pub fn launch_flags(&self) -> LaunchFlags {

@@ -40,6 +40,7 @@ fn usage_snapshot(
 fn provider_headroom_reads_the_injected_cache_and_never_the_network() {
     let catalog = super::LiveCatalog {
         overrides: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        limits_root: std::path::PathBuf::from("/limits"),
         ledger_dir: std::path::PathBuf::from("/ledger"),
         headroom: super::HeadroomSource::Fixed(TEST_HEADROOM_BYTES),
         usage: super::UsageSource::fixed(vec![
@@ -424,6 +425,7 @@ impl PrivateWindow {
             Box::new(super::ShellPaneTable),
             Box::new(super::LiveCatalog {
                 overrides: std::sync::Arc::clone(&overrides),
+                limits_root: process_data_root().to_path_buf(),
                 ledger_dir: vault.clone(),
                 headroom: super::HeadroomSource::Fixed(TEST_HEADROOM_BYTES),
                 usage: usage.clone(),
@@ -831,6 +833,7 @@ fn measure_board_ledger_polls() {
                 Box::new(super::ShellPaneTable),
                 Box::new(super::LiveCatalog {
                     overrides: overrides.clone(),
+                    limits_root: root.path().to_path_buf(),
                     ledger_dir: root.path().to_path_buf(),
                     headroom: super::HeadroomSource::Fixed(TEST_HEADROOM_BYTES),
                     usage: super::UsageSource::fixed(Vec::new()),

@@ -1535,11 +1535,19 @@ pub(crate) fn resume_line(
     let launch_override = stored_launch_override(state.settings(), &agent)
         .ok()
         .flatten();
+    // The limits the pane's own resume gives back (t-112277). A record that
+    // cannot be read leaves the line without them: the pane's notice says so
+    // before it (`conversation_limits::UNREADABLE`), and the person types it
+    // knowing it opens on every tool.
+    let limits =
+        crate::conversation_limits::resume_words(state.local_data_root(), &agent, &session)
+            .unwrap_or_default();
     spelled_resume(
         &agent,
         &session,
         folder.as_deref(),
         launch_override.as_ref(),
+        &limits,
     )
 }
 
@@ -1572,12 +1580,16 @@ fn plain_shell_word(word: &str) -> bool {
 /// and a bare `zo --resume …` comes back asking before every tool. Those
 /// words are the window's or the person's own, never the conversation's, so
 /// one a shell would read as syntax is quoted ([`zerocode_core::vault::resume_word`])
-/// rather than dropping the line.
+/// rather than dropping the line. And it carries the tool limits the pane's
+/// resume gives back (`limits`, t-112277): the line stands in for that resume.
+/// They are the conversation's, read back as plain tool names and quoted
+/// where a shell would read a word of them as syntax.
 pub(crate) fn spelled_resume(
     agent: &str,
     session: &zerocode_core::ProviderSession,
     folder: Option<&Path>,
     launch_override: Option<&zerocode_core::LaunchOverride>,
+    limits: &[String],
 ) -> Option<String> {
     let kind = zerocode_core::AgentKind::from_slug(agent)?;
     let argv = zerocode_core::resume_argv(kind, session)?;
@@ -1597,6 +1609,7 @@ pub(crate) fn spelled_resume(
     let line = std::iter::once(program.clone())
         .chain(
             base.iter()
+                .chain(limits)
                 .map(|word| zerocode_core::vault::resume_word(word)),
         )
         .chain(rest.iter().cloned())
@@ -1654,6 +1667,7 @@ pub(crate) fn resume_command(
     session: &zerocode_core::ProviderSession,
     nudge: Option<&str>,
     tuning: &[String],
+    limits: &[String],
     launch_override: Option<&zerocode_core::LaunchOverride>,
 ) -> Result<ResumeCommand, String> {
     let kind = zerocode_core::AgentKind::from_slug(agent)
@@ -1686,8 +1700,12 @@ pub(crate) fn resume_command(
     // the selector (and its optional positional nudge). Both roads hand in
     // the same durable tuning receipt for a worker — the ledger's reseat, and
     // the Tauri caller for a sleeper's conversation (t-7812) — and nothing
-    // for a person's own.
-    argv.splice(1..1, base_args.into_iter().chain(tuning.iter().cloned()));
+    // for a person's own. The tool limits the conversation's launch put on it
+    // ride after them, before the selector (t-112277): a pane reopened after a
+    // restart keeps the list and the spawn bar it was opened under, which the
+    // launch words alone gave back to every tool.
+    let carried = tuning.iter().chain(limits).cloned();
+    argv.splice(1..1, base_args.into_iter().chain(carried));
     let env = conversation_env(kind, session);
     Ok(ResumeCommand {
         kind,
@@ -2148,6 +2166,16 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
         (None, Some(moved)) => (moved.words.clone(), Some(moved.to.clone())),
         (None, None) => (Vec::new(), None),
     };
+    // The tool limits the conversation's launch put on it, given back
+    // (t-112277): a pane opened on a short list or barred from starting
+    // other agents comes back so. A record that cannot be given back refuses
+    // the wake with the person's sentence — the pane's notice says why and
+    // how to reopen by hand — never a resume on every tool.
+    let limits = if fresh {
+        Vec::new()
+    } else {
+        crate::conversation_limits::resume_words(&data_root, agent, &session)?
+    };
     let command = if fresh {
         // Nobody's sleeper (`fresh` is never a worker's): a person's tab
         // coming back as the launch button starts it, phone link included.
@@ -2166,6 +2194,7 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             &session,
             nudge.as_deref(),
             &tuning,
+            &limits,
             launch_override.as_ref(),
         )?
     };
@@ -3291,7 +3320,8 @@ mod tests {
         .expect("fake PATH");
 
         let run = |session: &zerocode_core::ProviderSession, round: &str| {
-            let command = resume_command("codex", session, None, &[], None).expect("codex resumes");
+            let command =
+                resume_command("codex", session, None, &[], &[], None).expect("codex resumes");
             let argv_at = root.path().join(format!("argv-{round}"));
             let home_at = root.path().join(format!("home-{round}"));
             // The order `prepare` lays them in: the launch and the account
@@ -3365,6 +3395,7 @@ mod tests {
                 transcript_path: Some(rollout.to_string_lossy().into_owned()),
             },
             None,
+            &[],
             &[],
             None,
         )

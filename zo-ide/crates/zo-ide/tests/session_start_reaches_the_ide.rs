@@ -66,6 +66,9 @@ fn every_conversation_the_tui_swaps_in_is_announced_to_the_ide() {
         "session.handle.path",
         "session.cwd",
         "session.model",
+        // What the launch put on it (t-112277): the window gives the list and
+        // the spawn bar back when it reopens the pane after a restart.
+        "session.launch_limits()",
     ] {
         assert!(
             announcing.contains(fact),

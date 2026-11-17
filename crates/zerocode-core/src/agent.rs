@@ -618,6 +618,10 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 rewrites_cache: false,
             },
             resume_selectors: ZO_RESUME_SELECTORS,
+            // A pane reopened after a restart takes back the tool list and
+            // the spawn bar its launch put on it (t-112277): zo says them in
+            // its `SessionStart`, and its command line reads these two flags.
+            resume_limits: Some(crate::launch_limits::ZO_LIMIT_FLAGS),
             ..Harness::PLAIN
         },
     },

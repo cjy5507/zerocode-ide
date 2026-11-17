@@ -1625,3 +1625,122 @@ fn a_restart_brings_back_every_conversation_including_the_one_whose_pane_moved()
         "come back as themselves, before and after"
     );
 }
+
+/// The record `conversation_limits` keeps for a zo conversation whose launch
+/// put `names` and the spawn bar on it, in the door's data root.
+fn launched_on(door: &Door, id: &str, names: &[&str]) {
+    let session = zerocode_core::ProviderSession {
+        key: zerocode_core::SessionKey::SessionId,
+        id: id.to_string(),
+        transcript_path: None,
+    };
+    let limits = zerocode_core::launch_limits::LaunchLimits {
+        allowed_tools: Some(names.iter().map(|name| (*name).to_string()).collect()),
+        no_spawn: true,
+    };
+    crate::conversation_limits::keep(
+        &door.data_root(),
+        "zo",
+        &session,
+        &zerocode_core::launch_limits::Reported::Limits(limits),
+    )
+    .expect("the record");
+}
+
+/// t-112277: a zo conversation whose launch put a tool list and the spawn bar
+/// on it comes back with both after a restart — after the launch words, before
+/// the selector — where it came back on every tool. One whose launch put none
+/// on comes back on the very line it always did.
+#[test]
+fn a_conversation_opened_on_a_tool_list_comes_back_on_it() {
+    const LIMITED: u32 = 278_810;
+    const UNLIMITED: u32 = 278_811;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the folder it comes back in");
+    let door = Door::new(checkout.path());
+    launched_on(
+        &door,
+        "session-1794874000000-0",
+        &["read_file", "grep_search"],
+    );
+
+    door.wake(LIMITED, "zo", "session-1794874000000-0")
+        .expect("the wake");
+    door.wake(UNLIMITED, "zo", "session-1794874000000-1")
+        .expect("the wake");
+
+    assert_eq!(
+        door.started(),
+        vec![
+            (
+                LIMITED,
+                "zo --permission-mode danger-full-access --allowed-tools read_file,grep_search \
+                 --no-spawn --resume session-1794874000000-0"
+                    .to_string()
+            ),
+            (
+                UNLIMITED,
+                "zo --permission-mode danger-full-access --resume session-1794874000000-1"
+                    .to_string()
+            ),
+        ]
+    );
+    crate::agent_teams::forget_term(LIMITED);
+    crate::agent_teams::forget_term(UNLIMITED);
+}
+
+/// t-112277: a conversation whose limits cannot be given back — its record
+/// says them in a shape no command line carries, or is cut short — is not
+/// reopened at all: the door answers with the person's sentence, which the
+/// pane's notice shows, and nothing is seated or started. Never a resume on
+/// every tool.
+#[test]
+fn a_conversation_whose_limits_cannot_be_given_back_is_not_reopened_wider() {
+    const UNPLAIN: u32 = 278_812;
+    const CUT: u32 = 278_813;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the folder it comes back in");
+    let door = Door::new(checkout.path());
+    let session = |id: &str| zerocode_core::ProviderSession {
+        key: zerocode_core::SessionKey::SessionId,
+        id: id.to_string(),
+        transcript_path: None,
+    };
+    crate::conversation_limits::keep(
+        &door.data_root(),
+        "zo",
+        &session("session-1794874000000-2"),
+        &zerocode_core::launch_limits::Reported::Unplain,
+    )
+    .expect("the record");
+    launched_on(&door, "session-1794874000000-3", &["read_file"]);
+    std::fs::write(
+        crate::conversation_limits::record_path(
+            &door.data_root(),
+            "zo",
+            &session("session-1794874000000-3"),
+        ),
+        b"{\"limits\":{\"allowed_tools\":[\"read_fi",
+    )
+    .expect("cut short");
+
+    for (term, id) in [
+        (UNPLAIN, "session-1794874000000-2"),
+        (CUT, "session-1794874000000-3"),
+    ] {
+        let record = crate::conversation_limits::record_path(&door.data_root(), "zo", &session(id));
+        let woke = door.wake(term, "zo", id);
+        assert!(
+            woke.as_ref().is_err_and(|said| said
+                .starts_with(crate::conversation_limits::UNREADABLE)
+                && said.contains(&record.display().to_string())),
+            "{id}: {woke:?}"
+        );
+    }
+    assert_eq!(door.started(), Vec::new(), "nothing started");
+    let did = door.did.lock().unwrap().clone();
+    assert!(
+        !did.contains(&Did::Prepared(UNPLAIN)) && !did.contains(&Did::Prepared(CUT)),
+        "nothing was seated: {did:?}"
+    );
+}

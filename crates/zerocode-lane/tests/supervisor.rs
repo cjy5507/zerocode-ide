@@ -536,6 +536,12 @@ fn opening_a_pane_uses_its_private_events_channel() {
                 "--cwd".to_string(),
                 "--model".to_string(),
                 "fast".to_string(),
+                // The tool limits a resume gives a conversation back
+                // (t-112277) are the launch's to say, not the pane's: they
+                // reach zo as given.
+                "--allowed-tools".to_string(),
+                "read_file,grep_search".to_string(),
+                "--no-spawn".to_string(),
             ],
             10,
             80,
@@ -552,7 +558,7 @@ fn opening_a_pane_uses_its_private_events_channel() {
     assert_eq!(
         marker_lines(&marker),
         vec![format!(
-            "--events-bind 127.0.0.1:0 --cwd {} --resume session-42 --permission-mode danger-full-access --model fast|{TOKEN}",
+            "--events-bind 127.0.0.1:0 --cwd {} --resume session-42 --permission-mode danger-full-access --model fast --allowed-tools read_file,grep_search --no-spawn|{TOKEN}",
             worktree.display()
         )]
     );

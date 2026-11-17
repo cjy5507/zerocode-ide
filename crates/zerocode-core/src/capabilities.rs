@@ -466,6 +466,10 @@ pub struct Harness {
     /// Orca's `RESUMABLE_TUI_AGENTS` intersected with the agents the vault
     /// scans (renderer ai-vault-resume-command.ts:163-224).
     pub vault_resume_carries_launch_args: bool,
+    /// How a resume gives a conversation back the tool limits its launch put
+    /// on it (t-112277, [`crate::launch_limits`]); `None` for an agent nobody
+    /// measured a spelling for, whose conversations keep no limits.
+    pub resume_limits: Option<crate::launch_limits::LimitFlags>,
     /// The local witnesses a readiness probe may ask about this agent's
     /// login; empty for an agent whose login this window cannot see.
     pub auth_probes: &'static [AuthProbeKind],
@@ -509,6 +513,7 @@ impl Harness {
         resume_store: None,
         wake_mark: WakeMark::Hook,
         vault_resume_carries_launch_args: false,
+        resume_limits: None,
         auth_probes: &[],
         moves: TurnMoves::NONE,
         start_settle_ms: None,
@@ -656,6 +661,9 @@ pub struct Resume {
     pub store: Option<StoreResume>,
     pub wake_mark: WakeMark,
     pub vault_carries_launch_args: bool,
+    /// The spelling a resume gives a conversation's launch limits back in
+    /// (t-112277); `None` keeps none for this agent.
+    pub limits: Option<crate::launch_limits::LimitFlags>,
 }
 
 impl Resume {
@@ -779,6 +787,7 @@ impl AgentSpec {
                 store: self.harness.resume_store,
                 wake_mark: self.harness.wake_mark,
                 vault_carries_launch_args: self.harness.vault_resume_carries_launch_args,
+                limits: self.harness.resume_limits,
             },
             spawn: self.harness.spawn,
             pointer_route: self.harness.pointer_route,

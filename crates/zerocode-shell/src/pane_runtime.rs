@@ -956,6 +956,31 @@ pub(super) async fn hook_loop(
             };
             codex_queue::bind_session(report.term, &session);
             orchestration::pane_session_reported(report.term, &session, now_epoch_ms());
+            // The tool limits this conversation's launch put on it, said by
+            // its agent's own start and kept for the resume that brings it
+            // back after a restart (t-112277): the newest launch decides, so
+            // a start that says none takes the record away.
+            if let Some(reported) = zerocode_core::launch_limits::reported_by(
+                &report.event,
+                &zerocode_core::payload::HookPayload::of(&envelope.payload),
+            ) {
+                let state = app.state::<AppState>();
+                if let Err(error) = crate::conversation_limits::keep(
+                    state.local_data_root(),
+                    report.agent.slug(),
+                    &session,
+                    &reported,
+                ) {
+                    note_window_event(
+                        state.local_data_root(),
+                        &format!(
+                            "term {} kept no tool limits for its {} conversation: {error}",
+                            report.term,
+                            report.agent.slug()
+                        ),
+                    );
+                }
+            }
             if let Some(word) = word {
                 // A conversation no door named, that a wire of this window
                 // holds (152): a second process on one transcript, opened in a

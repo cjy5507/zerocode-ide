@@ -6726,6 +6726,7 @@ impl App {
                 &session.handle.path.to_string_lossy(),
                 &session.cwd.to_string_lossy(),
                 &session.model,
+                session.launch_limits().as_ref(),
             );
         }
     }

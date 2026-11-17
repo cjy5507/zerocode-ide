@@ -33,6 +33,7 @@ mod jev_pane_decisions;
 mod jev_pane_seats;
 mod keys_tauri_reads;
 mod land_batch;
+mod launch_limits;
 mod peer_room;
 mod plain_words;
 mod pre_handin;

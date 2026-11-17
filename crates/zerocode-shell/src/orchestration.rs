@@ -4271,6 +4271,9 @@ impl PaneTable for ShellPaneTable {
 /// the actor at boot.
 struct LiveCatalog {
     overrides: Arc<Mutex<Vec<(String, LaunchOverride)>>>,
+    /// The window's data root, where each conversation's launch limits are
+    /// kept for its resume (t-112277, `conversation_limits`).
+    limits_root: PathBuf,
     /// Where the ledger's store lives — the volume a `--worktree` summons is
     /// measured against, because that is the volume an `ENOSPC` would take
     /// the ledger down on.
@@ -4480,7 +4483,9 @@ impl Launcher for LiveCatalog {
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .clone();
-        Catalog::new(overrides).command_for_resume(agent, session, nudge, tuning)
+        Catalog::new(overrides)
+            .keeping_limits_in(&self.limits_root)
+            .command_for_resume(agent, session, nudge, tuning)
     }
 
     fn presence(&self) -> Option<Vec<zerocode_core::AgentPresence>> {
@@ -5006,6 +5011,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         Box::new(ShellPaneTable),
         Box::new(LiveCatalog {
             overrides: Arc::clone(&overrides),
+            limits_root: local_data_root.to_path_buf(),
             ledger_dir: vault.clone(),
             headroom,
             usage: usage.clone(),
@@ -11353,11 +11359,27 @@ pub fn speaks_here(argv: &[String]) -> bool {
 /// would give the same agent.
 pub struct Catalog {
     overrides: Vec<(String, LaunchOverride)>,
+    /// Where each conversation's launch limits are kept, when this catalog
+    /// resumes for a window that keeps them (t-112277); `None` resumes with
+    /// none, as before.
+    limits_root: Option<PathBuf>,
 }
 
 impl Catalog {
     pub fn new(overrides: Vec<(String, LaunchOverride)>) -> Self {
-        Self { overrides }
+        Self {
+            overrides,
+            limits_root: None,
+        }
+    }
+
+    /// This catalog, giving a resumed conversation back the tool limits its
+    /// launch put on it, as the window's record under `root` keeps them —
+    /// the ledger's reseat and a door's wake give back the same.
+    #[must_use]
+    pub fn keeping_limits_in(mut self, root: &Path) -> Self {
+        self.limits_root = Some(root.to_path_buf());
+        self
     }
 
     fn override_for(&self, agent: &str) -> Option<&LaunchOverride> {
@@ -11424,11 +11446,16 @@ impl Launcher for Catalog {
         if !spec.runs_on(std::env::consts::OS) {
             return Err(format!("{agent} does not run on {}", std::env::consts::OS));
         }
+        let limits = match &self.limits_root {
+            Some(root) => crate::conversation_limits::resume_words(root, agent, session)?,
+            None => Vec::new(),
+        };
         let command = crate::cmd::board::resume_command(
             agent,
             session,
             (!nudge.is_empty()).then_some(nudge),
             tuning,
+            &limits,
             self.override_for(agent),
         )?;
         Ok(join_command_line(&command.argv))

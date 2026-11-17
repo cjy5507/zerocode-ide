@@ -87,6 +87,54 @@ impl ToolCallFacts<'_> {
     }
 }
 
+/// The `SessionStart` key a session's [`LaunchLimits`] ride under — the one
+/// the window reads (`zerocode_core::launch_limits::PAYLOAD_KEY`).
+pub const LAUNCH_LIMITS_KEY: &str = "launch_limits";
+
+/// What a session's launch put on it that a window reopening the session has
+/// to give back (t-112277): the launch's own tool list, and the bar on the
+/// tools that start other agents.
+///
+/// The window reopens a pane's conversation as `zo --resume <id>` behind its
+/// own launch words, and nothing on that line knew a review opened on four
+/// tools, a helper pane cut from its parent's brief, or a list typed into a
+/// pane's shell: each came back after a restart on every tool. So the session
+/// says them in its start, and the window gives them back on the resume as
+/// `--allowed-tools` and `--no-spawn`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchLimits {
+    /// The launch's list, by the names the session holds — the names
+    /// `--allowed-tools` reads back as the same list.
+    pub allowed_tools: Option<Vec<String>>,
+    pub no_spawn: bool,
+}
+
+impl LaunchLimits {
+    /// The limits of a launch that named `allowed` and `no_spawn`, or `None`
+    /// for one that put none on. A shell held to inspection — a helper pane's
+    /// read-only shell — has no flag to be said again with, so it is not given
+    /// back as a shell at all: without `bash` the list only narrows.
+    #[must_use]
+    pub fn of(allowed: Option<&crate::cli_args::AllowedToolSet>, no_spawn: bool, inspection_shell: bool) -> Option<Self> {
+        let allowed_tools = allowed.map(|tools| {
+            tools.iter().filter(|name| !(inspection_shell && name.as_str() == "bash")).cloned().collect::<Vec<_>>()
+        });
+        (allowed_tools.is_some() || no_spawn).then_some(Self { allowed_tools, no_spawn })
+    }
+
+    /// The object the start carries: only what the launch put on.
+    fn payload(&self) -> serde_json::Value {
+        let mut said = serde_json::Map::new();
+        if let Some(tools) = &self.allowed_tools {
+            said.insert("allowed_tools".to_string(), serde_json::json!(tools));
+        }
+        if self.no_spawn {
+            said.insert("no_spawn".to_string(), serde_json::Value::Bool(true));
+        }
+        serde_json::Value::Object(said)
+    }
+}
+
 /// hookd `HookJson` 과 같은 모양의 봉투. `payload` 는 이벤트별 JSON 객체.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HookEnvelope {
@@ -479,17 +527,21 @@ impl HookReporter {
 
     // ---- 이벤트별 페이로드 (IDE 파서가 읽는 키 이름 그대로) ----
 
-    pub fn session_start(&self, source: &str, session_id: &str, transcript_path: &str, cwd: &str, model: &str) {
-        self.post(
-            "SessionStart",
-            serde_json::json!({
-                "source": source,
-                "session_id": session_id,
-                "transcript_path": transcript_path,
-                "cwd": cwd,
-                "model": model,
-            }),
-        );
+    /// `limits`: what the session's launch put on it, said only when it put
+    /// something on ([`LaunchLimits`], t-112277) — an unlimited session's
+    /// start is the envelope it always was.
+    pub fn session_start(&self, source: &str, session_id: &str, transcript_path: &str, cwd: &str, model: &str, limits: Option<&LaunchLimits>) {
+        let mut payload = serde_json::json!({
+            "source": source,
+            "session_id": session_id,
+            "transcript_path": transcript_path,
+            "cwd": cwd,
+            "model": model,
+        });
+        if let (Some(limits), Some(said)) = (limits, payload.as_object_mut()) {
+            said.insert(LAUNCH_LIMITS_KEY.to_string(), limits.payload());
+        }
+        self.post("SessionStart", payload);
     }
 
     pub fn user_prompt_submit(&self, prompt: &str, session_id: &str) {
@@ -1188,5 +1240,65 @@ mod tests {
             .map(|envelope| envelope.hook_event_name.clone())
             .collect();
         assert_eq!(events, ["Stop", "SessionEnd"]);
+    }
+
+    /// t-112277: a session's start says the limits its launch put on it —
+    /// the list and the spawn bar — and an unlimited session's start carries
+    /// the five keys it always did and nothing more. The list said is one
+    /// `--allowed-tools` reads back as the same list.
+    #[test]
+    fn a_session_start_says_the_limits_its_launch_put_on_it() {
+        let (reporter, captured) = HookReporter::capturing();
+        reporter.session_start("startup", "session-1-0", "/s/session-1-0.jsonl", "/repo", "m", None);
+        let review: crate::cli_args::AllowedToolSet =
+            ["apply_patch", "bash", "read_file", "write_file"].map(String::from).into();
+        let limits = LaunchLimits::of(Some(&review), true, false).expect("limits");
+        reporter.session_start("resume", "session-1-0", "/s/session-1-0.jsonl", "/repo", "m", Some(&limits));
+        let payloads: Vec<serde_json::Value> =
+            captured.lock().expect("capture").iter().map(|envelope| envelope.payload.clone()).collect();
+        assert_eq!(
+            payloads[0],
+            serde_json::json!({
+                "source": "startup",
+                "session_id": "session-1-0",
+                "transcript_path": "/s/session-1-0.jsonl",
+                "cwd": "/repo",
+                "model": "m",
+            }),
+            "an unlimited start is the envelope it always was"
+        );
+        assert_eq!(payloads[1]["source"], "resume");
+        assert_eq!(
+            payloads[1][LAUNCH_LIMITS_KEY],
+            serde_json::json!({"allowed_tools": ["apply_patch", "bash", "read_file", "write_file"], "no_spawn": true})
+        );
+        let joined = limits.allowed_tools.as_ref().expect("a list").join(",");
+        let launch = crate::ide::args::parse(&["--allowed-tools".to_string(), joined]).expect("the list reads back");
+        assert_eq!(launch.open.allowed_tools, Some(review), "the list said is the list `--allowed-tools` reads");
+    }
+
+    /// t-112277: a launch that put nothing on says nothing; a spawn bar alone
+    /// is said alone; and a shell held to inspection is not given back as a
+    /// shell, so the list said only narrows.
+    #[test]
+    fn the_limits_a_launch_put_on_are_the_ones_it_named() {
+        assert_eq!(LaunchLimits::of(None, false, false), None);
+        assert_eq!(
+            LaunchLimits::of(None, true, false),
+            Some(LaunchLimits { allowed_tools: None, no_spawn: true })
+        );
+        let explore: crate::cli_args::AllowedToolSet = ["bash", "grep_search", "read_file"].map(String::from).into();
+        assert_eq!(
+            LaunchLimits::of(Some(&explore), false, false).and_then(|limits| limits.allowed_tools),
+            Some(vec!["bash".to_string(), "grep_search".to_string(), "read_file".to_string()])
+        );
+        assert_eq!(
+            LaunchLimits::of(Some(&explore), true, true),
+            Some(LaunchLimits {
+                allowed_tools: Some(vec!["grep_search".to_string(), "read_file".to_string()]),
+                no_spawn: true,
+            }),
+            "a shell held to inspection is not given back as a shell"
+        );
     }
 }

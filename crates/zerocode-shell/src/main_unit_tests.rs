@@ -15555,7 +15555,7 @@ fn a_stand_in_pane_says_what_it_stands_in_for_and_how_to_go_on() {
         transcript_path: None,
     };
     let spelled = |agent: &str, id: &str, folder: Option<&str>| {
-        cmd::board::spelled_resume(agent, &session(id), folder.map(std::path::Path::new), None)
+        cmd::board::spelled_resume(agent, &session(id), folder.map(std::path::Path::new), None, &[])
     };
     // Unix only: the line is a POSIX one (`cd … && …`) and its folder must be
     // made of plain shell words, which a Windows path (`C:\…`) is not — it is
@@ -15582,9 +15582,20 @@ fn a_stand_in_pane_says_what_it_stands_in_for_and_how_to_go_on() {
         ..zerocode_core::LaunchOverride::default()
     };
     assert_eq!(
-        cmd::board::spelled_resume("zo", &session("session-1790551803628-0"), None, Some(&manual))
+        cmd::board::spelled_resume("zo", &session("session-1790551803628-0"), None, Some(&manual), &[])
             .as_deref(),
         Some("zo --permission-mode workspace-write --name 'my pane' --resume session-1790551803628-0")
+    );
+    // The tool limits the pane's own resume gives back ride the line too
+    // (t-112277), after the launch words and before the selector.
+    let limits = ["--allowed-tools", "read_file,grep_search", "--no-spawn"].map(String::from);
+    assert_eq!(
+        cmd::board::spelled_resume("zo", &session("session-1790551803628-0"), None, None, &limits)
+            .as_deref(),
+        Some(
+            "zo --permission-mode danger-full-access --allowed-tools read_file,grep_search \
+             --no-spawn --resume session-1790551803628-0"
+        )
     );
     // An id is resumed as one argv element, where a space or a `;` is inert;
     // a line a person copies into a shell is parsed, so no such word is ever
