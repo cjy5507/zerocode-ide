@@ -208,8 +208,10 @@ pub fn resolve_sandbox_status_for_request_with_macos_seatbelt(
     )
 }
 
+/// [`resolve_sandbox_status_for_request_with_macos_seatbelt`] for a given
+/// platform and what it offers, so each platform's status is built on any host.
 #[allow(clippy::too_many_arguments)]
-fn resolve_sandbox_status_for_platform(
+pub(crate) fn resolve_sandbox_status_for_platform(
     request: &SandboxRequest,
     cwd: &Path,
     container: ContainerEnvironment,
@@ -687,6 +689,55 @@ pub fn current_sandbox_unavailability(status: &SandboxStatus) -> Option<String> 
         status.macos_seatbelt_opt_in,
         command_exists("sandbox-exec"),
     )
+}
+
+/// Why the `PowerShell` tool refuses a command under `status`, or `None` when it
+/// runs it.
+///
+/// The `PowerShell` tool has no sandbox of its own: it starts
+/// [`powershell_program`] directly — no namespace, no Seatbelt, no scratch
+/// `HOME` — whatever the status says, and refuses every command while a sandbox
+/// is enabled and the status names a fallback. So it refuses where the bash
+/// tool degrades ([`current_sandbox_unavailability`] on macOS and Windows), and
+/// runs unconfined where bash runs confined (Linux with `unshare`). The tool
+/// refuses by this, and the prompt's sandbox line reads it, so the two cannot
+/// disagree.
+#[must_use]
+pub fn powershell_sandbox_refusal(status: &SandboxStatus) -> Option<&str> {
+    if status.enabled {
+        status.fallback_reason.as_deref()
+    } else {
+        None
+    }
+}
+
+/// The program the `PowerShell` tool starts — `pwsh`, else `powershell` — or
+/// `None` when a login `sh` finds neither ([`login_shell_finds`]). The tool
+/// starts this one, and the prompt's sandbox line asks it too, so the line
+/// names `PowerShell` exactly where the tool reaches its sandbox verdict.
+#[must_use]
+pub fn powershell_program() -> Option<&'static str> {
+    ["pwsh", "powershell"]
+        .into_iter()
+        .find(|program| login_shell_finds(program))
+}
+
+/// Whether a login `sh` finds `command` (`command -v`): how the tools that
+/// start a program a person installs — `PowerShell`, a REPL's interpreter — look
+/// it up. Nothing the shell's profile prints reaches the terminal: the prompt
+/// asks this while an interactive session starts.
+#[must_use]
+pub fn login_shell_finds(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v \"$1\" >/dev/null 2>&1")
+        .arg("--")
+        .arg(command)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// Wrap a typed-action argv (program + args, no shell) for isolated execution,

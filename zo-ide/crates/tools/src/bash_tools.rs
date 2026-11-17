@@ -613,18 +613,7 @@ pub(crate) fn detect_first_command(commands: &[&'static str]) -> Option<&'static
     commands
         .iter()
         .copied()
-        .find(|command| command_exists(command))
-}
-
-pub(crate) fn command_exists(command: &str) -> bool {
-    std::process::Command::new("sh")
-        .arg("-lc")
-        .arg("command -v \"$1\" >/dev/null 2>&1")
-        .arg("--")
-        .arg(command)
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .find(|command| runtime::login_shell_finds(command))
 }
 
 fn execute_powershell(
@@ -657,17 +646,15 @@ fn execute_powershell(
     )
 }
 
+/// The `PowerShell` this tool starts: the program the prompt's sandbox line
+/// looks for too ([`runtime::powershell_program`]).
 fn detect_powershell_shell() -> std::io::Result<&'static str> {
-    if command_exists("pwsh") {
-        Ok("pwsh")
-    } else if command_exists("powershell") {
-        Ok("powershell")
-    } else {
-        Err(std::io::Error::new(
+    runtime::powershell_program().ok_or_else(|| {
+        std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "PowerShell executable not found (expected `pwsh` or `powershell` in PATH)",
-        ))
-    }
+        )
+    })
 }
 
 fn execute_shell_command(
@@ -787,15 +774,16 @@ fn register_background_command(
     backgrounded_command_output(task.task_id, Some(started), sandbox_status)
 }
 
+/// Refuse a `PowerShell` command by the tool's own rule
+/// ([`runtime::powershell_sandbox_refusal`]), the one the prompt's sandbox line
+/// reads.
 fn fail_closed_if_sandbox_unavailable(sandbox_status: &SandboxStatus) -> std::io::Result<()> {
-    if sandbox_status.enabled {
-        if let Some(reason) = &sandbox_status.fallback_reason {
-            return Err(std::io::Error::other(format!(
-                "sandbox requested but unavailable: {reason}. Set sandbox.enabled=false to run PowerShell without sandbox."
-            )));
-        }
+    match runtime::powershell_sandbox_refusal(sandbox_status) {
+        Some(reason) => Err(std::io::Error::other(format!(
+            "sandbox requested but unavailable: {reason}. Set sandbox.enabled=false to run PowerShell without sandbox."
+        ))),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Output shape for a command spawned via `run_in_background`. Registry-backed

@@ -454,7 +454,7 @@ fn given_timeout_ms_when_repl_blocks_then_returns_timeout_error() {
 
 /// `PATH` with the stub folder first. Unix keeps only the system folders
 /// behind it. Windows keeps the whole inherited `PATH`, `;`-separated: the
-/// tool asks Git's `sh` whether a shell exists (`command_exists`), and `sh`
+/// tool asks Git's `sh` whether a shell exists (`runtime::login_shell_finds`), and `sh`
 /// must still be found — while a process is started there only from an
 /// `.exe`, so a script stub is seen by `sh` and never run.
 fn stub_first_path(dir: &Path, original: &str) -> String {
@@ -581,6 +581,9 @@ printf 'pwsh:%s' "$1"
     let err = run_tool_isolated("PowerShell", &json!({"command": "Write-Output hello"}))
         .expect_err("PowerShell should fail before spawning when sandbox is unavailable");
     let marker_exists = marker.exists();
+    // The prompt a session builds here: its sandbox line, read from the same
+    // settings and the same `PATH`.
+    let prompt = runtime::load_system_prompt(cwd.clone(), "2026-03-31", "test", "test", None);
 
     std::env::set_current_dir(original_dir).expect("restore cwd");
     std::env::set_var("PATH", original_path);
@@ -593,10 +596,25 @@ printf 'pwsh:%s' "$1"
     let _ = std::fs::remove_dir_all(config_home);
 
     let error = err.to_string();
+    let reason = "filesystem allow-list requested without configured mounts";
     assert!(error.contains("sandbox requested but unavailable"));
-    assert!(error.contains("filesystem allow-list requested without configured mounts"));
+    assert!(error.contains(reason));
     assert!(error.contains("sandbox.enabled=false"));
     assert!(!marker_exists, "PowerShell stub must not be spawned");
+    let sections = prompt.expect("the prompt builds");
+    let line = sections
+        .iter()
+        .flat_map(|section| section.lines())
+        .find(|line| line.starts_with(" - Sandbox: "))
+        .unwrap_or_else(|| panic!("no sandbox line: {sections:?}"));
+    // Linux's bash tool refuses for the same reason, so one fate speaks for
+    // both there; elsewhere bash runs, and the line names PowerShell's own.
+    let says = if cfg!(target_os = "linux") {
+        format!("shell commands are refused: {reason}.")
+    } else {
+        format!("PowerShell commands are refused: {reason}.")
+    };
+    assert!(line.ends_with(&says), "the line says what the PowerShell tool did: {line}");
 }
 
 #[test]

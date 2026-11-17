@@ -7,7 +7,8 @@ use std::process::Command;
 
 use crate::config::{ConfigError, ConfigLoader, RuntimeConfig};
 use crate::sandbox::{
-    current_sandbox_unavailability, resolve_sandbox_status, FilesystemIsolationMode, SandboxStatus,
+    current_sandbox_unavailability, powershell_program, powershell_sandbox_refusal,
+    resolve_sandbox_status, FilesystemIsolationMode, SandboxStatus,
 };
 use crate::git_snapshot::read_git_root;
 use zerocode_core::jev::{JevMode, SKILLS, SKILL_TOP_CAP};
@@ -424,9 +425,13 @@ const DELEGATION_TOOLS: &[&str] = &["Agent", "SpawnMultiAgent", "Workflow"];
 const CLARIFICATION_TOOLS: &[&str] = &["AskUserQuestion"];
 const SKILL_TOOLS: &[&str] = &["Skill", "skill_load", "skill_search"];
 const MEMORY_TOOLS: &[&str] = &["MemoryWrite"];
+/// The shell tool besides bash whose own fate the environment section's
+/// sandbox line names ([`SystemPromptBuilder::sandbox_line`]) — the deferred
+/// `PowerShell`, named only to a session that reaches it.
+const POWERSHELL_TOOLS: &[&str] = &["PowerShell"];
 
-/// Which of the tools the static prompt teaches the session can call — by
-/// handler name, as the host's tool lists hold them.
+/// Which of the tools the prompt teaches or speaks of the session can call —
+/// by handler name, as the host's tool lists hold them.
 ///
 /// A section that teaches only tools the session cannot reach is not sent: it
 /// would teach the model to call what it will be refused, and pay for that on
@@ -443,10 +448,10 @@ pub struct PromptToolReach {
 }
 
 impl PromptToolReach {
-    /// Ask `reaches` about each tool a section teaches.
+    /// Ask `reaches` about each tool the prompt teaches or speaks of.
     #[must_use]
     pub fn from_fn(reaches: impl Fn(&str) -> bool) -> Self {
-        let unreached = [DELEGATION_TOOLS, CLARIFICATION_TOOLS, SKILL_TOOLS, MEMORY_TOOLS]
+        let unreached = [DELEGATION_TOOLS, CLARIFICATION_TOOLS, SKILL_TOOLS, MEMORY_TOOLS, POWERSHELL_TOOLS]
             .into_iter()
             .flatten()
             .copied()
@@ -706,13 +711,33 @@ impl SystemPromptBuilder {
     /// The status is the one the bash tool resolves for a command that passes no
     /// switch of its own ([`resolve_sandbox_status`]), read from the same
     /// settings, so the line cannot disagree with what a command meets.
+    ///
+    /// The `PowerShell` tool meets that status by a rule of its own
+    /// ([`powershell_sandbox_refusal`]): it confines nothing, and refuses every
+    /// command while an enabled sandbox names a fallback — on macOS and Windows
+    /// that is whenever the sandbox is on. Where a `PowerShell` command's fate is
+    /// not a bash command's, and the session runs `PowerShell` here — it reaches
+    /// the tool, and the program the tool starts is found
+    /// ([`powershell_program`]) — the line names each tool's fate. Anywhere else
+    /// it is the line it was, and `PowerShell` is not looked up.
     fn sandbox_line(&self) -> Option<String> {
         let config = self.config.as_ref()?;
         let cwd = &self.project_context.as_ref()?.cwd;
-        Some(render_sandbox_line(&resolve_sandbox_status(
-            config.sandbox(),
-            cwd,
-        )))
+        let status = resolve_sandbox_status(config.sandbox(), cwd);
+        let line = render_sandbox_line(&status);
+        if !self.tool_reach.reaches_any(POWERSHELL_TOOLS) {
+            return Some(line);
+        }
+        let apart = render_sandbox_line_beside_powershell(
+            &status,
+            current_sandbox_unavailability(&status).as_deref(),
+            powershell_sandbox_refusal(&status),
+        );
+        Some(if apart != line && powershell_program().is_some() {
+            apart
+        } else {
+            line
+        })
     }
 }
 
@@ -726,17 +751,94 @@ const SANDBOX_LABEL: &str = "Sandbox: ";
 /// why, read from the verdict the tool refuses by
 /// ([`current_sandbox_unavailability`]), so the two cannot disagree.
 fn render_sandbox_line(status: &SandboxStatus) -> String {
-    if let Some(reason) = current_sandbox_unavailability(status) {
-        return format!(
-            "{SANDBOX_LABEL}requested but unavailable — shell commands are refused: {reason}."
-        );
+    let refusal = current_sandbox_unavailability(status);
+    render_shell_fates(status, &ShellFate::of_bash(status, refusal.as_deref()), None)
+}
+
+/// [`render_sandbox_line`] for a session that runs `PowerShell` commands here,
+/// from each tool's refusal: the bash tool's on this host (`bash_refusal`,
+/// [`current_sandbox_unavailability`]) and the `PowerShell` tool's
+/// (`powershell_refusal`, [`powershell_sandbox_refusal`]).
+///
+/// Where a `PowerShell` command's fate is a bash command's, this is
+/// [`render_sandbox_line`]'s line byte for byte. Where it is not, the line says
+/// bash's fate of `bash commands` and then the `PowerShell` tool's of
+/// `PowerShell commands` — never bash's limits of a `PowerShell` command, which
+/// runs without them. Pure over the two refusals, so every platform's row is
+/// tested on any host.
+fn render_sandbox_line_beside_powershell(
+    status: &SandboxStatus,
+    bash_refusal: Option<&str>,
+    powershell_refusal: Option<&str>,
+) -> String {
+    let bash = ShellFate::of_bash(status, bash_refusal);
+    let powershell = powershell_refusal.map_or(ShellFate::Runs(Vec::new()), ShellFate::Refused);
+    render_shell_fates(status, &bash, (powershell != bash).then_some(&powershell))
+}
+
+/// What one shell tool does with a command a model writes for it.
+#[derive(Debug, PartialEq, Eq)]
+enum ShellFate<'a> {
+    /// Refused, for this reason.
+    Refused(&'a str),
+    /// Run under these limits — directly on the machine when there are none.
+    Runs(Vec<&'static str>),
+}
+
+impl<'a> ShellFate<'a> {
+    /// The bash tool's: its refusal, or the limits `status` puts in force.
+    fn of_bash(status: &SandboxStatus, refusal: Option<&'a str>) -> Self {
+        refusal.map_or_else(|| Self::Runs(sandbox_limits(status)), Self::Refused)
     }
+}
+
+/// The line: bash's fate as what a shell command meets, or — when `PowerShell`'s
+/// fate is apart from it — each tool's fate by name, bash's first.
+fn render_shell_fates(
+    status: &SandboxStatus,
+    bash: &ShellFate<'_>,
+    powershell_apart: Option<&ShellFate<'_>>,
+) -> String {
     let place = if status.in_container {
         "this machine (a container)"
     } else {
         "this machine"
     };
-    let mut limits: Vec<&str> = Vec::new();
+    let state = match bash {
+        ShellFate::Refused(_) => "requested but unavailable",
+        ShellFate::Runs(limits) if limits.is_empty() => "none",
+        ShellFate::Runs(_) => "on",
+    };
+    let commands = if powershell_apart.is_some() {
+        "bash commands"
+    } else {
+        "shell commands"
+    };
+    let mut line = format!("{SANDBOX_LABEL}{state} — {}", fate_sentence(commands, bash, place));
+    if let Some(powershell) = powershell_apart {
+        line.push(' ');
+        line.push_str(&fate_sentence("PowerShell commands", powershell, place));
+    }
+    line
+}
+
+/// One tool's fate, said of `commands` run on `place`.
+fn fate_sentence(commands: &str, fate: &ShellFate<'_>, place: &str) -> String {
+    match fate {
+        ShellFate::Refused(reason) => format!("{commands} are refused: {reason}."),
+        ShellFate::Runs(limits) if limits.is_empty() => format!(
+            "{commands} run directly on {place}; zo restricts neither their files nor their network."
+        ),
+        ShellFate::Runs(limits) => format!(
+            "{commands} run on {place} with these limits: {}.",
+            limits.join("; ")
+        ),
+    }
+}
+
+/// The limits a bash command runs under for `status`, in the line's order.
+fn sandbox_limits(status: &SandboxStatus) -> Vec<&'static str> {
+    let mut limits: Vec<&'static str> = Vec::new();
     if status.filesystem_write_blocking_active {
         limits.push(match status.filesystem_mode {
             FilesystemIsolationMode::AllowList => "writes outside the allowed mounts are blocked",
@@ -754,16 +856,7 @@ fn render_sandbox_line(status: &SandboxStatus) -> String {
     if status.home_tmp_redirected {
         limits.push("HOME and TMPDIR point at scratch folders");
     }
-    if limits.is_empty() {
-        format!(
-            "{SANDBOX_LABEL}none — shell commands run directly on {place}; zo restricts neither their files nor their network."
-        )
-    } else {
-        format!(
-            "{SANDBOX_LABEL}on — shell commands run on {place} with these limits: {}.",
-            limits.join("; ")
-        )
-    }
+    limits
 }
 
 /// The arm a prompt is built on: what `ZO_ABLATE_PROMPT` holds out, or every

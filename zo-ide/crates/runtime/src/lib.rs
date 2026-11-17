@@ -376,7 +376,8 @@ pub use skills::{
 pub use skill_sources::{SkillCandidate, SkillCatalog, SkillSource};
 pub use sandbox::{
     build_linux_sandbox_command, detect_container_environment, detect_container_environment_from,
-    resolve_sandbox_status, resolve_sandbox_status_for_request, ContainerEnvironment,
+    login_shell_finds, powershell_program, powershell_sandbox_refusal, resolve_sandbox_status,
+    resolve_sandbox_status_for_request, ContainerEnvironment,
     FilesystemIsolationMode, LinuxSandboxCommand, SandboxConfig, SandboxDetectionInputs,
     SandboxRequest, SandboxStatus,
 };

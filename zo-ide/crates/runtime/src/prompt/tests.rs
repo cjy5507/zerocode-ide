@@ -2424,6 +2424,244 @@ fn the_sandbox_line_says_when_a_requested_sandbox_refuses_commands() {
     );
 }
 
+/// The sandbox line a session that runs `PowerShell` is shown on `platform`, for
+/// the sandbox `config` asks for, where `unshare` works (`namespace`) or not,
+/// `sandbox-exec` is there (`seatbelt`) or not, inside a container or not:
+/// the status each platform resolves, the bash tool's verdict there and the
+/// `PowerShell` tool's.
+fn line_beside_powershell(
+    platform: &str,
+    config: &crate::sandbox::SandboxConfig,
+    namespace: bool,
+    seatbelt: bool,
+    container: bool,
+) -> String {
+    use crate::sandbox::{
+        powershell_sandbox_refusal, resolve_sandbox_status_for_platform,
+        sandbox_unavailability_reason, ContainerEnvironment, FilesystemIsolationMode,
+    };
+    let request = config.resolve_request(None, None, None, None, None);
+    let status = resolve_sandbox_status_for_platform(
+        &request,
+        Path::new("/work"),
+        ContainerEnvironment { in_container: container, markers: Vec::new() },
+        platform,
+        namespace,
+        config.macos_seatbelt.unwrap_or(false),
+        seatbelt,
+    );
+    let bash = sandbox_unavailability_reason(
+        platform,
+        status.enabled,
+        status.requested.filesystem_mode != FilesystemIsolationMode::Off,
+        status.fallback_reason.as_deref(),
+        status.macos_seatbelt_opt_in,
+        seatbelt,
+    );
+    super::render_sandbox_line_beside_powershell(
+        &status,
+        bash.as_deref(),
+        powershell_sandbox_refusal(&status),
+    )
+}
+
+/// Each platform's row for a session that runs `PowerShell`. The `PowerShell`
+/// tool confines nothing and refuses every command while an enabled sandbox
+/// names a fallback; the bash tool runs a command where it cannot confine it
+/// (macOS without Seatbelt, Windows) and confines it where it can. Where the
+/// two fates differ the line names each, bash's first; where they match it is
+/// the line C7 wrote, byte for byte.
+#[test]
+fn the_sandbox_line_names_powershell_apart_only_where_its_fate_differs() {
+    use crate::sandbox::SandboxConfig;
+    let on = SandboxConfig { enabled: Some(true), ..SandboxConfig::default() };
+    let off = SandboxConfig { enabled: Some(false), ..SandboxConfig::default() };
+    let seatbelt = SandboxConfig { macos_seatbelt: Some(true), ..on.clone() };
+    let seatbelt_alone = SandboxConfig { namespace_restrictions: Some(false), ..seatbelt.clone() };
+    let nothing_to_confine = SandboxConfig {
+        namespace_restrictions: Some(false),
+        filesystem_mode: Some(crate::sandbox::FilesystemIsolationMode::Off),
+        ..on.clone()
+    };
+    let namespace = "namespace isolation unavailable (requires Linux with `unshare`)";
+    let missing_seatbelt = "macOS Seatbelt was requested by sandbox.macosSeatbelt or ZO_MACOS_SEATBELT, but `sandbox-exec` is unavailable";
+
+    // Fates apart: bash runs (or refuses) where PowerShell refuses (or runs).
+    assert_eq!(
+        line_beside_powershell("windows", &on, false, false, false),
+        format!("Sandbox: none — bash commands run directly on this machine; zo restricts neither their files nor their network. PowerShell commands are refused: {namespace}."),
+        "Windows: bash runs as it would without a sandbox, PowerShell refuses"
+    );
+    assert_eq!(
+        line_beside_powershell("macos", &on, false, true, false),
+        format!("Sandbox: on — bash commands run on this machine with these limits: HOME and TMPDIR point at scratch folders. PowerShell commands are refused: {namespace}."),
+        "macOS: bash runs with a scratch HOME, PowerShell refuses"
+    );
+    assert_eq!(
+        line_beside_powershell("macos", &seatbelt, false, true, false),
+        format!("Sandbox: on — bash commands run on this machine with these limits: writes outside the workspace are blocked; HOME and TMPDIR point at scratch folders. PowerShell commands are refused: {namespace}."),
+        "macOS with Seatbelt: bash is walled in, PowerShell refuses"
+    );
+    assert_eq!(
+        line_beside_powershell("macos", &seatbelt, false, false, false),
+        format!("Sandbox: requested but unavailable — bash commands are refused: {missing_seatbelt}. PowerShell commands are refused: {namespace}."),
+        "macOS, Seatbelt asked for and missing: both refuse, each for its own reason"
+    );
+    assert_eq!(
+        line_beside_powershell("macos", &seatbelt_alone, false, false, false),
+        format!("Sandbox: requested but unavailable — bash commands are refused: {missing_seatbelt}. PowerShell commands run directly on this machine; zo restricts neither their files nor their network."),
+        "macOS, Seatbelt alone asked for and missing: bash refuses, PowerShell runs"
+    );
+    assert_eq!(
+        line_beside_powershell("linux", &on, true, false, false),
+        "Sandbox: on — bash commands run on this machine with these limits: processes run in a namespace of their own. PowerShell commands run directly on this machine; zo restricts neither their files nor their network.",
+        "Linux with `unshare`: bash runs in a namespace, PowerShell runs without one"
+    );
+
+    // Fates alike: the line C7 wrote, whatever PowerShell is.
+    assert_eq!(
+        line_beside_powershell("linux", &on, false, false, false),
+        format!("Sandbox: requested but unavailable — shell commands are refused: {namespace}."),
+        "Linux without `unshare`: both refuse for one reason"
+    );
+    assert_eq!(
+        line_beside_powershell("windows", &nothing_to_confine, false, false, false),
+        "Sandbox: none — shell commands run directly on this machine; zo restricts neither their files nor their network.",
+        "Windows, a sandbox that asks for nothing to confine: both run"
+    );
+    for platform in ["linux", "macos", "windows"] {
+        assert_eq!(
+            line_beside_powershell(platform, &off, false, platform == "macos", false),
+            "Sandbox: none — shell commands run directly on this machine; zo restricts neither their files nor their network.",
+            "{platform}, sandbox off"
+        );
+    }
+    assert_eq!(
+        line_beside_powershell("linux", &off, false, false, true),
+        "Sandbox: none — shell commands run directly on this machine (a container); zo restricts neither their files nor their network.",
+        "the benchmark container"
+    );
+}
+
+/// A session that runs `PowerShell` on this Mac with the sandbox on: the bash
+/// tool runs a command with a scratch `HOME` and `TMPDIR`, the `PowerShell` tool
+/// refuses it — no namespace here — and the line says both. Run alone, with a
+/// `pwsh` of its own on `PATH` and the person's settings asking for a sandbox.
+/// A session that does not reach the `PowerShell` tool, and a machine where no
+/// `PowerShell` is found, keep the line bash's fate speaks for.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sandbox_line_names_powershell_where_a_session_runs_it() {
+    let root = own_root().unwrap_or_else(temp_dir);
+    let vars = [
+        ("HOME", root.join("home")),
+        ("ZO_CONFIG_HOME", root.join("zo-global")),
+        ("ZO_HOME", root.join("missing-zo-home")),
+        ("PATH", PathBuf::from(format!("{}:/bin:/usr/bin", root.join("pwsh-bin").display()))),
+    ];
+    with_root_exported(
+        "the_sandbox_line_names_powershell_where_a_session_runs_it",
+        &root,
+        &vars,
+        false,
+        |root| {
+            use std::os::unix::fs::PermissionsExt as _;
+            // An inherited opt-in walls bash in with Seatbelt: not this row.
+            std::env::remove_var("ZO_MACOS_SEATBELT");
+            fs::create_dir_all(root.join("zo-global")).expect("global zo dir");
+            fs::write(
+                root.join("zo-global").join("settings.json"),
+                r#"{"sandbox":{"enabled":true}}"#,
+            )
+            .expect("write the person's settings");
+            let pwsh = root.join("pwsh-bin").join("pwsh");
+            fs::create_dir_all(root.join("pwsh-bin")).expect("pwsh dir");
+            fs::write(&pwsh, "#!/bin/sh\nexit 0\n").expect("write pwsh");
+            fs::set_permissions(&pwsh, fs::Permissions::from_mode(0o755)).expect("pwsh runs");
+            let asked = std::process::Command::new("sh")
+                .args(["-lc", "command -v pwsh"])
+                .output()
+                .expect("ask a login sh");
+            assert!(asked.status.success(), "precondition: a login sh finds a pwsh here: {asked:?}");
+            let config = ConfigLoader::default_for(root).load().expect("settings should load");
+            let line = |reach: PromptToolReach| {
+                SystemPromptBuilder::new()
+                    .with_project_context(
+                        ProjectContext::discover(root, "2026-03-31").expect("context should load"),
+                    )
+                    .with_runtime_config(config.clone())
+                    .with_tool_reach(reach)
+                    .sandbox_line()
+            };
+            let bash_alone = "Sandbox: on — shell commands run on this machine with these limits: HOME and TMPDIR point at scratch folders.";
+            assert_eq!(
+                line(PromptToolReach::default()).as_deref(),
+                Some("Sandbox: on — bash commands run on this machine with these limits: HOME and TMPDIR point at scratch folders. PowerShell commands are refused: namespace isolation unavailable (requires Linux with `unshare`)."),
+                "a session that runs PowerShell here"
+            );
+            assert_eq!(
+                line(PromptToolReach::from_fn(|tool| tool != "PowerShell")).as_deref(),
+                Some(bash_alone),
+                "a session that does not reach the PowerShell tool"
+            );
+            // No `sh` to ask, so no PowerShell is found — whatever this Mac has
+            // installed where a login shell would look.
+            std::env::set_var("PATH", root.join("no-tools"));
+            assert_eq!(
+                line(PromptToolReach::default()).as_deref(),
+                Some(bash_alone),
+                "a machine where no PowerShell is found"
+            );
+        },
+    );
+}
+
+/// Windows with the sandbox on: the bash tool runs a command as it would
+/// without one, the `PowerShell` tool refuses it, and the line says both.
+/// Windows ships `powershell`, so a session there runs `PowerShell`. Run alone,
+/// with the person's settings asking for a sandbox. Compiled by
+/// `just win-check`, run only on Windows.
+#[cfg(windows)]
+#[test]
+fn the_sandbox_line_names_powershell_on_windows_with_the_sandbox_on() {
+    let root = own_root().unwrap_or_else(temp_dir);
+    let vars = [
+        ("HOME", root.join("home")),
+        ("USERPROFILE", root.join("home")),
+        ("ZO_CONFIG_HOME", root.join("zo-global")),
+        ("ZO_HOME", root.join("missing-zo-home")),
+    ];
+    with_root_exported(
+        "the_sandbox_line_names_powershell_on_windows_with_the_sandbox_on",
+        &root,
+        &vars,
+        false,
+        |root| {
+            fs::create_dir_all(root.join("zo-global")).expect("global zo dir");
+            fs::write(
+                root.join("zo-global").join("settings.json"),
+                r#"{"sandbox":{"enabled":true}}"#,
+            )
+            .expect("write the person's settings");
+            assert!(
+                crate::sandbox::powershell_program().is_some(),
+                "precondition: Git's sh finds a PowerShell here"
+            );
+            let config = ConfigLoader::default_for(root).load().expect("settings should load");
+            let line = SystemPromptBuilder::new()
+                .with_project_context(
+                    ProjectContext::discover(root, "2026-03-31").expect("context should load"),
+                )
+                .with_runtime_config(config)
+                .sandbox_line();
+            assert_eq!(
+                line.as_deref(),
+                Some("Sandbox: none — bash commands run directly on this machine; zo restricts neither their files nor their network. PowerShell commands are refused: namespace isolation unavailable (requires Linux with `unshare`)."),
+            );
+        },
+    );
+}
+
 /// No bound model (diagnostic dump, harness that has not picked one) falls back
 /// to the catalog's Opus family head — resolved live, never a frozen id.
 #[test]
