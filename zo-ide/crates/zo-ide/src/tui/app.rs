@@ -449,11 +449,25 @@ struct PermissionPicker {
 /// 떠 있는 `/theme` 피커. The theme under the cursor is on while it is up —
 /// a move turns it on at once — so the picker keeps what to go back to.
 struct ThemePicker {
-    /// The slug of each row, in the rows' order.
-    slugs: Vec<String>,
+    /// The theme of each row, in the rows' order.
+    entries: Vec<ThemeEntry>,
     view: Picker,
     /// The theme in use when the picker opened: what esc goes back to.
     original: super::theme::Theme,
+}
+
+/// One theme as the `/theme` picker lists it: what its row is made of
+/// (`theme_picker_rows`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThemeEntry {
+    slug: String,
+    /// The name the row shows: the theme's visible name, and `terminal` for
+    /// the terminal's own colours.
+    label: String,
+    /// How many mistakes the theme's file held when the themes folder was
+    /// read — none for a file without one and for a built-in theme.
+    problems: usize,
+    is_terminal: bool,
 }
 
 /// 턴 중에 눌렀지만 지금 돌 수 없는 일 — 턴이 끝나면 [`App`] 이 푼다.
@@ -3920,36 +3934,35 @@ impl Ui {
     /// `/theme`: every theme in one list — `terminal` first, then the
     /// built-in ones and the person's own by their visible names, each with
     /// its slug beside it — the theme in use marked and under the cursor,
-    /// and a sample under the list. The frame and the keys are the numbered
-    /// pickers' ([`Picker`]).
+    /// and a sample under the list. A theme whose file held mistakes says so
+    /// on its row (`theme_picker_rows`). The frame and the keys are the
+    /// numbered pickers' ([`Picker`]).
     fn open_theme_picker(&mut self) {
         if self.overlay().is_some() || self.sessions.is_some() {
             return;
         }
         let original = super::theme::active();
-        let mut slugs = Vec::new();
-        let mut rows = Vec::new();
-        let mut selected = 0;
-        for name in &super::theme::names() {
-            let slug: &str = name;
-            let Some(theme) = super::theme::find(slug) else {
-                continue;
-            };
-            let mut label = super::theme::shown_name(&theme).to_string();
-            if theme.name == original.name {
-                label.push_str(" (current)");
-                selected = rows.len();
-            }
-            let description = if theme.is_terminal() {
-                super::strings::THEME_TERMINAL_ROW.to_string()
-            } else {
-                slug.to_string()
-            };
-            rows.push(PickerRow { label, description, dim: false });
-            slugs.push(slug.to_string());
-        }
+        // The themes folder is read once, by `names`: `find` and `problems`
+        // ask what that read found.
+        let entries: Vec<ThemeEntry> = super::theme::names()
+            .into_iter()
+            .filter_map(|slug| {
+                let theme = super::theme::find(&slug)?;
+                Some(ThemeEntry {
+                    label: super::theme::shown_name(&theme).to_string(),
+                    problems: super::theme_files::problems(&slug),
+                    is_terminal: theme.is_terminal(),
+                    slug,
+                })
+            })
+            .collect();
+        let rows = theme_picker_rows(&entries, &original.name);
+        let selected = entries
+            .iter()
+            .position(|entry| entry.slug == original.name)
+            .unwrap_or(0);
         self.theme_picker = Some(ThemePicker {
-            slugs,
+            entries,
             original,
             view: Picker {
                 title: super::strings::THEME_PICKER_TITLE.to_string(),
@@ -4004,9 +4017,9 @@ impl Ui {
             return;
         };
         let Some(theme) = picker
-            .slugs
+            .entries
             .get(picker.view.selected)
-            .and_then(|slug| super::theme::find(slug))
+            .and_then(|entry| super::theme::find(&entry.slug))
         else {
             return;
         };
@@ -4022,9 +4035,9 @@ impl Ui {
             return;
         };
         let chosen = picker
-            .slugs
+            .entries
             .get(picker.view.selected)
-            .and_then(|slug| super::theme::find(slug));
+            .and_then(|entry| super::theme::find(&entry.slug));
         if let Some(theme) = chosen {
             self.choose_theme(&theme);
         } else {
@@ -8319,6 +8332,34 @@ impl TerminationSignals {
             _ => std::future::pending::<()>().await,
         }
     }
+}
+
+/// The `/theme` picker's rows for `entries`, in their order: a theme's
+/// visible name — marked when it is `current`, the slug of the theme in use
+/// — and beside it its slug, or for `terminal` what it is. A theme whose file
+/// held mistakes says how many after its slug, every time the rows are made:
+/// the warning lines are said once, and without the mark such a theme reads
+/// as a sound one. Made of what it is given alone — no folder is read here.
+fn theme_picker_rows(entries: &[ThemeEntry], current: &str) -> Vec<PickerRow> {
+    entries
+        .iter()
+        .map(|entry| {
+            let mut label = entry.label.clone();
+            if entry.slug == current {
+                label.push_str(" (current)");
+            }
+            let mut description = if entry.is_terminal {
+                super::strings::THEME_TERMINAL_ROW.to_string()
+            } else {
+                entry.slug.clone()
+            };
+            if entry.problems > 0 {
+                description.push_str(" · ");
+                description.push_str(&super::strings::theme_file_problems(entry.problems));
+            }
+            PickerRow { label, description, dim: false }
+        })
+        .collect()
 }
 
 /// What a `/word` that is neither zo's nor a prompt command answers.
@@ -13272,11 +13313,11 @@ mod theme_tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        test_ui, theme_chosen_note, Event, KeyCode, KeyEvent, KeyModifiers, Line, Painter,
-        SystemLevel, Ui,
+        test_ui, theme_chosen_note, theme_picker_rows, Event, KeyCode, KeyEvent, KeyModifiers, Line,
+        Painter, SystemLevel, ThemeEntry, Ui,
     };
     use crate::preferences::Preferences;
-    use crate::tui::{slash, style, theme};
+    use crate::tui::{slash, strings, style, theme};
 
     /// The path of one of this module's tests inside the crate — what a
     /// fresh run of it is asked for by.
@@ -13509,6 +13550,51 @@ mod theme_tests {
         let after = ui.painter.take_frame();
         assert!(after.contains(&model_in_dracula), "the footer kept the terminal's colour: {after:?}");
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A theme whose file held mistakes says so on its row, after its slug,
+    /// every time the rows are made — the warning lines are said once. A
+    /// theme whose file held none, a built-in theme and `terminal` have no
+    /// mark. The rows are made of the entries alone: no home is read.
+    #[test]
+    fn a_theme_whose_file_has_mistakes_is_marked_on_its_row_every_time() {
+        let entry = |slug: &str, label: &str, problems: usize| ThemeEntry {
+            slug: slug.to_string(),
+            label: label.to_string(),
+            problems,
+            is_terminal: slug == theme::TERMINAL_THEME_NAME,
+        };
+        let entries = [
+            entry("terminal", "terminal", 0),
+            entry("dracula", "Dracula", 0),
+            entry("clean", "clean", 0),
+            entry("mine", "mine", 2),
+            entry("once", "once", 1),
+        ];
+        let shown = |current: &str| -> Vec<(String, String, bool)> {
+            theme_picker_rows(&entries, current)
+                .into_iter()
+                .map(|row| (row.label, row.description, row.dim))
+                .collect()
+        };
+        let row = |label: &str, description: &str| (label.to_string(), description.to_string(), false);
+
+        let rows = shown("dracula");
+        assert_eq!(
+            rows,
+            [
+                row("terminal", strings::THEME_TERMINAL_ROW),
+                row("Dracula (current)", "dracula"),
+                row("clean", "clean"),
+                row("mine", "mine · ⚠ 2 problems in its file"),
+                row("once", "once · ⚠ 1 problem in its file"),
+            ]
+        );
+        assert_eq!(strings::theme_file_problems(2), "⚠ 2 problems in its file");
+        // The picker opened again: the mark is on the row again.
+        assert_eq!(shown("dracula"), rows, "the mark is there every time the rows are made");
+        // The theme in use keeps its mark beside the word that it is in use.
+        assert_eq!(shown("mine")[3], row("mine (current)", "mine · ⚠ 2 problems in its file"));
     }
 
     /// Criterion 6: a slug or a visible name, in any case, is set and saved

@@ -95,6 +95,14 @@ pub const THEME_PICKER_NOTE: &str =
     "A move shows the theme at once — enter saves it, esc keeps the one before.";
 /// The `/theme` picker's word for the `terminal` row.
 pub const THEME_TERMINAL_ROW: &str = "the terminal's own colors";
+/// The `/theme` picker's mark on the row of a theme whose file held `count`
+/// mistakes, after the theme's slug. What the mistakes are is in the warning
+/// lines, said once (`/warnings`); the mark is on the row every time.
+#[must_use]
+pub fn theme_file_problems(count: usize) -> String {
+    let noun = if count == 1 { "problem" } else { "problems" };
+    format!("⚠ {count} {noun} in its file")
+}
 /// What `/thinking` says it did, one word each way.
 pub const THINKING_SHOWN: &str = "thinking shown · /thinking hides it";
 /// The marks look's three steps of `/thinking`: one row, the whole block, none.
