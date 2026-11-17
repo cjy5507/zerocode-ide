@@ -25,6 +25,11 @@ pub(crate) const REPICKED: &str = "repicked";
 const WAIT_STOPPED_BY_PERSON: &str = "wait_stopped_by_person";
 const WAIT_STOPPED_BY_AGENT: &str = "wait_stopped_by_agent";
 const WAIT_DEADLINE: &str = "wait_deadline";
+/// A call the person's pointer or keys held up, that the tool asked again
+/// once they paused: counted whether or not it then went, so the count beside
+/// `person_pointing` and `person_typing` says how many of those the model
+/// never heard. Also the name the call's own answer says it under.
+pub(crate) const STOOD_BY: &str = "stood_by_for_the_person";
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Default)]

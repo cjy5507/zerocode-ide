@@ -192,6 +192,38 @@ fn the_photo_scene_counts_one_element_not_found_and_one_repick() {
     assert_eq!(tally["refusals"]["repicked"], 1, "photo scene: the click re-picked on the same document is counted by its kind");
 }
 
+/// A press the person's pointer held up (the person's session of 2026-11-17:
+/// three `person_pointing` refusals in 54 calls, each a round trip of the
+/// model). The tool asks again once they pause: the call that then goes is
+/// no refusal, and the tally counts that it stood by. One that never goes is
+/// counted as both.
+#[cfg(unix)]
+#[test]
+fn a_press_that_stood_by_for_the_person_is_counted_by_its_kind() {
+    use zerocode_core::computer_use_protocol::{error_code::PERSON_POINTING, NOT_DELIVERED};
+    let root = Root::new();
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+    let held_up = json!({"ok": false, "error": {"code": PERSON_POINTING, "message": "the person is using the mouse; nothing was done", "delivery": NOT_DELIVERED}}).to_string();
+    let click = json!({"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true, "foreground": true});
+
+    let dir = tempfile::tempdir().unwrap();
+    let (road, _) = crate::computer_tools::tests::fake_shim(dir.path());
+    std::fs::write(dir.path().join("reply-click.1"), &held_up).unwrap();
+    crate::computer_tools::run_computer_execution(&click, &ctx, &road).expect("the press goes at the second asking");
+    let tally = root.read();
+    assert_eq!(tally["refusals"][STOOD_BY], 1, "{tally}");
+    assert!(tally["refusals"].get(PERSON_POINTING).is_none(), "the call that went is no refusal: {tally}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (road, _) = crate::computer_tools::tests::fake_shim(dir.path());
+    std::fs::write(dir.path().join("reply-click"), &held_up).unwrap();
+    let refused = crate::computer_tools::run_computer_execution(&click, &ctx, &road);
+    assert!(matches!(&refused, Err(ToolError::Execution(message)) if message.starts_with(PERSON_POINTING)), "{refused:?}");
+    let tally = root.read();
+    assert_eq!(tally["refusals"][STOOD_BY], 2, "{tally}");
+    assert_eq!(tally["refusals"][PERSON_POINTING], 1, "the person stayed on the pointer: {tally}");
+}
+
 /// A wait the person or an agent stopped (t-66760 b2): the window refuses it
 /// `stopped` and names who stopped it; the tally counts the stop by who
 /// made it, beside its refusal code — alone and as a batch's step.
