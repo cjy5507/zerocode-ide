@@ -4490,3 +4490,353 @@ fn a_cleared_mark_and_an_unknown_origin_name_no_origin() {
     assert_eq!(loaded.messages[0].origin, None);
     cleanup_session_file(&path);
 }
+
+// ── turn ordinals: a number is given once ───────────────────────────────────
+//
+// A main-session turn is named `<session>@<ordinal>` in four ledgers. The
+// ordinal was the user messages left in the transcript plus one, so whatever
+// shortened the transcript — a compaction, a rewind, a failed turn taken back
+// — gave a later turn a number an earlier turn had already been spent under.
+
+/// One turn as the conversation runtime takes it: the session gives it its
+/// ordinal, then its user message and the answer are pushed.
+fn take_numbered_turn(session: &mut Session, words: &str) -> usize {
+    let ordinal = session.claim_turn_ordinal();
+    session.push_user_text(words).expect("user append");
+    session
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: format!("answer to {words}"),
+        }]))
+        .expect("assistant append");
+    ordinal
+}
+
+/// A compaction as the runtime applies one: the continuation it wrote, then
+/// the last `kept` messages of the transcript.
+fn fold_all_but(session: &mut Session, kept: usize) {
+    let total = session.messages.len();
+    let kept = kept.min(total);
+    let mut compacted = vec![ConversationMessage {
+        role: MessageRole::System,
+        ..ConversationMessage::user_text("what the folded messages said")
+    }];
+    compacted.extend(session.messages[total - kept..].iter().cloned());
+    session.apply_compaction_atomic(std::sync::Arc::new(compacted), "summary", total - kept, None);
+}
+
+/// A turn that failed after its user message was pushed, as the turn loop
+/// takes it back: the ordinal was given, and the transcript is cut to what it
+/// held before the turn.
+fn take_a_turn_that_is_rolled_back(session: &mut Session) -> usize {
+    let before = session.messages.len();
+    let ordinal = session.claim_turn_ordinal();
+    session.push_user_text("a turn that will fail").expect("user append");
+    std::sync::Arc::make_mut(&mut session.messages).truncate(before);
+    ordinal
+}
+
+fn user_messages_in(session: &Session) -> usize {
+    session
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .count()
+}
+
+/// The file as a zo from before the header carried the turn base wrote it.
+fn without_the_turn_base(file_text: &str) -> String {
+    let start = file_text
+        .find("\"turn_base\":")
+        .expect("the header carries the turn base");
+    let end = start + file_text[start..].find(',').expect("a field follows it") + 1;
+    format!("{}{}", &file_text[..start], &file_text[end..])
+}
+
+#[test]
+fn a_turn_is_numbered_one_past_the_turns_before_it() {
+    let mut session = Session::new();
+    for expected in 1..=3 {
+        assert_eq!(
+            session.next_turn_ordinal(),
+            expected,
+            "a host prices a turn under the number it will be given"
+        );
+        assert_eq!(take_numbered_turn(&mut session, "words"), expected);
+    }
+    // A transcript nothing was taken from: the number is its user messages
+    // plus one, which is what it was read off through v1.1.160.
+    assert_eq!(session.next_turn_ordinal(), user_messages_in(&session) + 1);
+    assert_eq!(
+        session.fork(None).next_turn_ordinal(),
+        session.next_turn_ordinal(),
+        "a fork carries the count on under its own session id"
+    );
+}
+
+#[test]
+fn a_compaction_does_not_hand_a_later_turn_a_number_already_given() {
+    let mut session = Session::new();
+    for _ in 0..6 {
+        take_numbered_turn(&mut session, "words");
+    }
+    fold_all_but(&mut session, 2);
+    assert_eq!(
+        user_messages_in(&session),
+        1,
+        "the fixture folds five of the six user messages away"
+    );
+    assert_eq!(
+        take_numbered_turn(&mut session, "after the compaction"),
+        7,
+        "counted off what is left it would be 2, the key the second turn was spent under"
+    );
+    fold_all_but(&mut session, 0);
+    assert_eq!(user_messages_in(&session), 0);
+    assert_eq!(
+        session.fork(None).next_turn_ordinal(),
+        8,
+        "a fork carries the count on, though its transcript shows no turn"
+    );
+    assert_eq!(take_numbered_turn(&mut session, "after a compaction that kept nothing"), 8);
+}
+
+#[test]
+fn a_rewind_and_a_rolled_back_turn_do_not_give_their_numbers_again() {
+    let mut session = Session::new();
+    for _ in 0..3 {
+        take_numbered_turn(&mut session, "words");
+    }
+    assert!(session.rewind_turns(1) > 0, "the third turn is taken back");
+    assert_eq!(
+        take_numbered_turn(&mut session, "asked again"),
+        4,
+        "the third turn's rows stay under @3"
+    );
+    assert_eq!(take_a_turn_that_is_rolled_back(&mut session), 5);
+    assert_eq!(
+        take_a_turn_that_is_rolled_back(&mut session),
+        6,
+        "each try is a turn of its own"
+    );
+    assert_eq!(take_numbered_turn(&mut session, "the try that went through"), 7);
+}
+
+#[test]
+fn the_numbering_survives_the_file() {
+    let mut clean = Session::new();
+    for _ in 0..3 {
+        take_numbered_turn(&mut clean, "words");
+    }
+    let mut compacted = Session::new();
+    for _ in 0..6 {
+        take_numbered_turn(&mut compacted, "words");
+    }
+    fold_all_but(&mut compacted, 2);
+    let mut rolled_back = Session::new();
+    take_numbered_turn(&mut rolled_back, "words");
+    take_a_turn_that_is_rolled_back(&mut rolled_back);
+
+    for (name, session, next) in [
+        ("clean", &clean, 4),
+        ("compacted", &compacted, 7),
+        ("rolled back", &rolled_back, 3),
+    ] {
+        assert_eq!(session.next_turn_ordinal(), next, "{name}");
+        let path = temp_session_path("turn-numbering");
+        session.save_to_path(&path).expect("session should save");
+        let from_lines = Session::load_from_path(&path).expect("session should load");
+        cleanup_session_file(&path);
+        assert_eq!(from_lines.next_turn_ordinal(), next, "{name}: the file of one record a line");
+        assert_eq!(&from_lines, session, "{name}: the file gives the session back whole");
+        let from_whole = Session::from_json(&session.to_json().expect("the session renders"))
+            .expect("the session reads back");
+        assert_eq!(from_whole.next_turn_ordinal(), next, "{name}: the whole-file JSON");
+    }
+}
+
+#[test]
+fn turns_appended_after_a_full_write_are_counted_when_the_file_is_read_again() {
+    let path = temp_session_path("turn-numbering-appends");
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
+    for _ in 0..3 {
+        take_numbered_turn(&mut session, "words");
+    }
+    // The compaction writes the whole file, header and all; the two turns
+    // after it are lines appended under that header.
+    fold_all_but(&mut session, 2);
+    for _ in 0..2 {
+        take_numbered_turn(&mut session, "words");
+    }
+    assert_eq!(session.next_turn_ordinal(), 6);
+    let reread = Session::load_from_path(&path).expect("session should load");
+    cleanup_session_file(&path);
+    assert_eq!(
+        reread.next_turn_ordinal(),
+        6,
+        "the header's base and the user messages the file holds"
+    );
+}
+
+#[test]
+fn the_header_says_how_many_turns_the_transcript_no_longer_shows() {
+    fn header_base(session: &Session) -> Option<i64> {
+        let path = temp_session_path("turn-base-header");
+        session.save_to_path(&path).expect("session should save");
+        let text = fs::read_to_string(&path).expect("the file reads");
+        cleanup_session_file(&path);
+        let header = JsonValue::parse(text.lines().next().expect("a header line"))
+            .expect("the header parses");
+        header
+            .as_object()
+            .and_then(|object| object.get("turn_base"))
+            .and_then(JsonValue::as_i64)
+    }
+
+    let mut session = Session::new();
+    assert_eq!(
+        header_base(&session),
+        Some(0),
+        "written even when nothing was taken: its absence is what marks an older file"
+    );
+    for _ in 0..6 {
+        take_numbered_turn(&mut session, "words");
+    }
+    assert_eq!(header_base(&session), Some(0));
+    fold_all_but(&mut session, 2);
+    assert_eq!(
+        header_base(&session),
+        Some(5),
+        "five of the six turns are no longer in the transcript"
+    );
+    take_a_turn_that_is_rolled_back(&mut session);
+    assert_eq!(header_base(&session), Some(6));
+}
+
+/// Through v1.1.160 the header said nothing of turns, and a file's transcript
+/// counts short once it was compacted or a turn was taken back. Such a file
+/// starts past every number it can have given out. (Counted on this machine's
+/// 697 session files that still had a turn key in some ledger: with this
+/// start none meets a number already used; counted off what is left, 54 do.)
+#[test]
+fn a_file_from_before_the_header_carried_the_count_starts_past_every_number_it_gave() {
+    fn read_as_an_older_file(session: &Session) -> Session {
+        let path = temp_session_path("turn-numbering-older-file");
+        session.save_to_path(&path).expect("session should save");
+        let older = without_the_turn_base(&fs::read_to_string(&path).expect("the file reads"));
+        assert!(!older.contains("turn_base"));
+        fs::write(&path, older).expect("the file writes");
+        let read = Session::load_from_path(&path).expect("an older file loads");
+        cleanup_session_file(&path);
+        read
+    }
+
+    // Never compacted: three turns stand in the transcript, and a fourth may
+    // have been taken back after it left rows under @4.
+    let mut plain = Session::new();
+    for _ in 0..3 {
+        take_numbered_turn(&mut plain, "words");
+    }
+    let read = read_as_an_older_file(&plain);
+    assert_eq!(read.messages.len(), plain.messages.len());
+    assert_eq!(
+        read.next_turn_ordinal(),
+        5,
+        "three it shows, one it may have taken back, and the next"
+    );
+
+    // Compacted: twenty-two turns were taken, forty messages evicted, two user
+    // messages left. Counted off what is left the next turn would be @3 again.
+    let mut compacted = Session::new();
+    for _ in 0..22 {
+        take_numbered_turn(&mut compacted, "words");
+    }
+    fold_all_but(&mut compacted, 4);
+    assert_eq!(compacted.first_message_index(), 40);
+    assert_eq!(user_messages_in(&compacted), 2);
+    let read = read_as_an_older_file(&compacted);
+    assert_eq!(read.next_turn_ordinal(), 40 + 1 + 2 + 1);
+    assert!(
+        read.next_turn_ordinal() > 23,
+        "past the twenty-two it gave and one it may have taken back"
+    );
+}
+
+#[test]
+fn a_turn_base_no_count_can_be_read_off_is_read_as_an_older_file() {
+    let mut session = Session::new();
+    for _ in 0..2 {
+        take_numbered_turn(&mut session, "words");
+    }
+    let path = temp_session_path("turn-base-unreadable");
+    session.save_to_path(&path).expect("session should save");
+    let text = fs::read_to_string(&path).expect("the file reads");
+    assert!(text.contains("\"turn_base\":0,"));
+    for unreadable in ["\"turn_base\":-4,", "\"turn_base\":\"many\","] {
+        fs::write(&path, text.replacen("\"turn_base\":0,", unreadable, 1)).expect("the file writes");
+        let read = Session::load_from_path(&path).expect("the session still loads");
+        assert_eq!(
+            read.next_turn_ordinal(),
+            4,
+            "{unreadable}: two it shows, one it may have taken back, and the next"
+        );
+    }
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_read_from_a_later_turn_counts_the_turns_it_leaves_out() {
+    let mut session = Session::new();
+    for _ in 0..3 {
+        take_numbered_turn(&mut session, "words");
+    }
+    let path = temp_session_path("turn-numbering-from-turn");
+    session.save_to_path(&path).expect("session should save");
+    let partial = Session::load_from_path_from_turn(&path, Some(2)).expect("partial load");
+    cleanup_session_file(&path);
+    assert_eq!(partial.messages.len(), 4, "the second and the third turn");
+    assert_eq!(partial.next_turn_ordinal(), 4);
+}
+
+/// The property the four ledgers lean on: a number is given once. A fixed
+/// walk over everything that shortens a transcript or reads it back.
+#[test]
+fn no_turn_number_is_given_twice_whatever_shortens_the_transcript() {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut draw = move |bound: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        usize::try_from(state % bound).expect("a small draw")
+    };
+    let mut session = Session::new();
+    let mut given = Vec::new();
+    for step in 0..600 {
+        match draw(10) {
+            0..=4 => given.push(take_numbered_turn(&mut session, "words")),
+            5 => given.push(take_a_turn_that_is_rolled_back(&mut session)),
+            6 => {
+                let kept = draw(5);
+                fold_all_but(&mut session, kept);
+            }
+            7 => {
+                let steps = 1 + draw(2);
+                let _ = session.rewind_turns(steps);
+            }
+            8 => {
+                session = Session::from_json(&session.to_json().expect("the session renders"))
+                    .expect("the session reads back");
+            }
+            _ => {
+                // The file of one record a line, as the snapshot writer lays
+                // it out — read back from its text, so the session stays
+                // bound to no file the walk would then have to keep.
+                let lines = session.render_jsonl_snapshot().expect("the session renders");
+                session = Session::from_jsonl(&lines, None).expect("the session reads back");
+            }
+        }
+        if let [.., before, last] = given.as_slice() {
+            assert!(before < last, "step {step}: {before} was followed by {last}");
+        }
+    }
+    assert!(given.len() > 250, "the walk took {} turns", given.len());
+}

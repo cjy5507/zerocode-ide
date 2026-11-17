@@ -5190,6 +5190,70 @@ fn the_main_turn_attempt_is_the_session_and_a_rising_turn_ordinal() {
     ::api::note_attempt(&session_id, "");
 }
 
+/// What shortens a transcript — a compaction, a rewind, a failed turn taken
+/// back, a session read back from its file — does not hand a later turn a key
+/// an earlier turn was spent under, and every turn runs under the key a host
+/// peeked for it. The ordinal used to be the user messages left in the
+/// transcript plus one, so the turn after a compaction took the key of the
+/// session's second or third turn, and the ledgers that join on the key
+/// joined the two.
+#[test]
+fn a_turn_key_is_not_given_again_after_the_transcript_is_shortened() {
+    fn take_turn(runtime: &mut ConversationRuntime<PlainAnswerClient, StaticToolExecutor>, words: &str) -> String {
+        let peeked = runtime.next_attempt();
+        runtime.run_turn(words, None).expect("turn");
+        assert_eq!(runtime.attempt(), peeked, "a turn runs under the key a host priced it under");
+        peeked
+    }
+
+    let session = Session::new();
+    let session_id = session.session_id.clone();
+    let mut runtime = ConversationRuntime::new(
+        session,
+        PlainAnswerClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["You are a test assistant.".to_string()],
+    );
+    let mut keys = Vec::new();
+    for words in ["one", "two", "three"] {
+        keys.push(take_turn(&mut runtime, words));
+    }
+
+    // A compaction: the continuation it wrote and the last answer are what is
+    // left, and no user message among them.
+    let session = runtime.session_mut();
+    let last = session.messages.last().cloned().expect("the third answer");
+    let folded = session.messages.len() - 1;
+    let continuation = ConversationMessage {
+        role: MessageRole::System,
+        ..ConversationMessage::user_text("what the folded messages said")
+    };
+    session.apply_compaction_atomic(Arc::new(vec![continuation, last]), "summary", folded, None);
+    keys.push(take_turn(&mut runtime, "four"));
+
+    // A rewind takes the fourth turn back; its rows stay under @4.
+    assert!(runtime.rewind_turns(1) > 0, "the fourth turn is taken back");
+    keys.push(take_turn(&mut runtime, "five"));
+
+    // A turn whose messages are taken back as the streaming loop takes a
+    // failed turn's: the transcript is cut to what it held before the turn.
+    let before = runtime.session().messages.len();
+    keys.push(take_turn(&mut runtime, "six, which is taken back"));
+    Arc::make_mut(&mut runtime.session_mut().messages).truncate(before);
+    keys.push(take_turn(&mut runtime, "seven"));
+
+    // A resume: the session as its file gives it back.
+    let resumed = Session::from_json(&runtime.session().to_json().expect("the session renders"))
+        .expect("the session reads back");
+    runtime.replace_session(resumed);
+    keys.push(take_turn(&mut runtime, "eight"));
+
+    let expected: Vec<String> = (1..=8).map(|ordinal| format!("{session_id}@{ordinal}")).collect();
+    assert_eq!(keys, expected);
+    ::api::note_attempt(&session_id, "");
+}
+
 /// A spawned agent's runtime spends on the attempt its PARENT named, under the
 /// agent's own prompt-cache scope — not a turn key of its own, which would
 /// leave its requests joined to nothing.

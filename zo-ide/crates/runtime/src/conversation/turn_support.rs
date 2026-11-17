@@ -248,12 +248,17 @@ where
     /// Once per turn, never per request: the deposit is one map write, and the
     /// per-request recorder only reads.
     pub(super) fn begin_attempt(&mut self) {
-        // A turn's seat asks afresh: an attempt key can come round again (a
-        // child inherits one for its whole run, and a main session's counts
-        // the user messages a compaction left), and the last turn's reading
-        // must not answer this one's first request.
+        // A turn's seat asks afresh: a child inherits one attempt key for its
+        // whole run, and the last turn's reading must not answer this one's
+        // first request. (A main session's key does not come round again: the
+        // session gives each turn a number it never gives twice.)
         self.turn_settled = Arc::default();
-        self.attempt = self.next_attempt();
+        self.attempt = if let Some(inherited) = &self.inherited_attempt {
+            inherited.clone()
+        } else {
+            let ordinal = self.session.claim_turn_ordinal();
+            crate::turn_attempt_key(&self.session.session_id, ordinal)
+        };
         ::api::note_attempt(self.attempt_cache_scope(), &self.attempt);
     }
 
@@ -262,30 +267,21 @@ where
     /// A host that classifies a turn before handing it over — the routing
     /// probe runs before the first request leaves — needs the key that turn
     /// will carry, so the tax it records lands on the attempt that paid it.
-    /// The same computation the turn start commits, and nothing between the
-    /// two calls moves it: the user message that would advance the ordinal is
-    /// pushed after the mint.
+    /// The ordinal the turn start claims, and nothing between the two calls
+    /// moves it: the session gives it out at the turn's start, and the user
+    /// message is pushed after that.
+    ///
+    /// The session keeps the count (`Session::claim_turn_ordinal`), in its
+    /// file as well, so a `/resume` picks the sequence back up where the
+    /// session left it, and a compaction, a rewind or a rolled-back turn —
+    /// each of which shortens the transcript the ordinal used to be counted
+    /// off — does not hand a later turn a key already on disk.
     #[must_use]
     pub fn next_attempt(&self) -> String {
         match &self.inherited_attempt {
             Some(inherited) => inherited.clone(),
-            None => crate::turn_attempt_key(&self.session.session_id, self.turn_ordinal()),
+            None => crate::turn_attempt_key(&self.session.session_id, self.session.next_turn_ordinal()),
         }
-    }
-
-    /// The 1-based ordinal of the turn about to start: the user turns this
-    /// session has already taken, plus this one.
-    ///
-    /// Counted off the transcript rather than kept in a counter, so a
-    /// `/resume` picks the sequence back up where the session left it instead
-    /// of restarting at 1 and colliding with keys already on disk.
-    fn turn_ordinal(&self) -> usize {
-        self.session
-            .messages
-            .iter()
-            .filter(|message| message.role == MessageRole::User)
-            .count()
-            + 1
     }
 
     pub(super) fn record_turn_started(&self, user_input: &str) {

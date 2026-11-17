@@ -407,6 +407,14 @@ pub struct Session {
     /// unchanged.
     pub session_goal: Option<String>,
     first_message_index: u32,
+    /// The highest turn ordinal this session has given out
+    /// ([`Self::claim_turn_ordinal`]). It only moves forward: a compaction
+    /// that folds user messages away, a rewind and a failed turn's rollback
+    /// all shorten the transcript, and none of them takes a number back — so
+    /// the attempt key a turn was spent under names that turn alone for as
+    /// long as the session lives. The file keeps the part of it the
+    /// transcript no longer shows ([`TURN_BASE_FIELD`]).
+    turn_mark: u32,
     persistence: Option<SessionPersistence>,
     /// Who opens the next turn when it is not the person (t-75726): marked by
     /// the front-end before a turn a window notice opens, and taken by the
@@ -428,6 +436,7 @@ impl PartialEq for Session {
             && self.fork == other.fork
             && self.session_goal == other.session_goal
             && self.first_message_index == other.first_message_index
+            && self.turns_taken() == other.turns_taken()
     }
 }
 
@@ -448,9 +457,57 @@ impl Session {
             fork: None,
             session_goal: None,
             first_message_index: 0,
+            turn_mark: 0,
             persistence: None,
             next_user_origin: None,
         }
+    }
+
+    /// The user messages the transcript holds now.
+    fn user_message_count(&self) -> u32 {
+        user_message_count(&self.messages)
+    }
+
+    /// How many turn ordinals this session has used: never fewer than the
+    /// highest one it gave out, and never fewer than the user messages its
+    /// transcript holds — the count the ordinal was read off through v1.1.160,
+    /// which a transcript nothing was taken from still equals.
+    fn turns_taken(&self) -> u32 {
+        self.turn_mark.max(self.user_message_count())
+    }
+
+    /// The part of [`Self::turns_taken`] no user message in the transcript
+    /// stands for: turns a compaction folded away, a rewind took back or a
+    /// failed turn's rollback removed. The header carries it
+    /// ([`TURN_BASE_FIELD`]), and a read adds the user messages it finds, so
+    /// the appends between two full writes of the file need not touch it.
+    fn turn_base(&self) -> u32 {
+        self.turns_taken().saturating_sub(self.user_message_count())
+    }
+
+    /// The 1-based ordinal the next turn will be given, without giving it.
+    ///
+    /// What [`Self::claim_turn_ordinal`] returns when it is called next and
+    /// nothing was pushed in between — a host that prices a turn before it
+    /// starts names the turn by this.
+    #[must_use]
+    pub fn next_turn_ordinal(&self) -> usize {
+        usize::try_from(self.turns_taken().saturating_add(1)).unwrap_or(usize::MAX)
+    }
+
+    /// Give the next turn its ordinal: one past every ordinal this session
+    /// has used, and never given again.
+    ///
+    /// Called once at a turn's start, before its user message is pushed. The
+    /// ordinal used to be counted off the transcript at that moment, and a
+    /// transcript is shortened by every compaction, rewind and rolled-back
+    /// turn — so one `<session>@<ordinal>` key came to name many turns of a
+    /// long session, and the ledgers that join on it joined turns of
+    /// different days.
+    pub fn claim_turn_ordinal(&mut self) -> usize {
+        let ordinal = self.turns_taken().saturating_add(1);
+        self.turn_mark = ordinal;
+        usize::try_from(ordinal).unwrap_or(usize::MAX)
     }
 
     #[must_use]
@@ -1403,6 +1460,7 @@ impl Session {
             }),
             session_goal: self.session_goal.clone(),
             first_message_index: self.first_message_index,
+            turn_mark: self.turns_taken(),
             persistence: None,
             next_user_origin: None,
         }
@@ -1447,6 +1505,10 @@ impl Session {
         if let Some(goal) = &self.session_goal {
             object.insert("session_goal".to_string(), JsonValue::String(goal.clone()));
         }
+        object.insert(
+            TURN_BASE_FIELD.to_string(),
+            JsonValue::Number(i64::from(self.turn_base())),
+        );
         Ok(JsonValue::Object(object))
     }
 
@@ -1499,6 +1561,7 @@ impl Session {
             .as_ref()
             .and_then(|value| value.first_kept_message_index)
             .unwrap_or(0);
+        let turn_mark = loaded_turn_mark(turn_base_field(object), first_message_index, &messages);
         Ok(Self {
             version,
             session_id,
@@ -1510,6 +1573,7 @@ impl Session {
             fork,
             session_goal,
             first_message_index,
+            turn_mark,
             persistence: None,
             next_user_origin: None,
         })
@@ -1530,6 +1594,9 @@ impl Session {
         let mut fork = None;
         let mut session_goal = None;
         let mut first_message_index = None;
+        let mut turn_base = None;
+        // User messages a `--from-turn` read leaves out: turns all the same.
+        let mut skipped_user_messages = 0u32;
 
         // A crash/OOM/power-loss between an incremental append's write and its
         // newline can leave the final record torn; persistence is append-only,
@@ -1570,6 +1637,7 @@ impl Session {
                     record_updated_at_ms,
                     record_fork,
                     record_session_goal,
+                    record_turn_base,
                 } => {
                     version = record_version;
                     session_id = Some(record_session_id);
@@ -1578,6 +1646,7 @@ impl Session {
                     updated_at_ms = Some(record_updated_at_ms);
                     fork = record_fork;
                     session_goal = record_session_goal;
+                    turn_base = record_turn_base;
                 }
                 SessionJsonlRecord::Message {
                     turn_index,
@@ -1598,6 +1667,9 @@ impl Session {
                             )));
                         };
                         if turn_index < from_turn {
+                            if message.role == MessageRole::User {
+                                skipped_user_messages = skipped_user_messages.saturating_add(1);
+                            }
                             continue;
                         }
                     }
@@ -1638,6 +1710,12 @@ impl Session {
                     .and_then(|value| value.first_kept_message_index)
             })
             .unwrap_or(0);
+        let evicted_messages = compaction
+            .as_ref()
+            .and_then(|value| value.first_kept_message_index)
+            .unwrap_or(0);
+        let turn_mark = loaded_turn_mark(turn_base, evicted_messages, &messages)
+            .saturating_add(skipped_user_messages);
         Ok(Self {
             version,
             session_id: session_id.unwrap_or_else(generate_session_id),
@@ -1649,6 +1727,7 @@ impl Session {
             fork,
             session_goal,
             first_message_index,
+            turn_mark,
             persistence: None,
             next_user_origin: None,
         })
@@ -1840,6 +1919,10 @@ impl Session {
         if let Some(goal) = &self.session_goal {
             object.insert("session_goal".to_string(), JsonValue::String(goal.clone()));
         }
+        object.insert(
+            TURN_BASE_FIELD.to_string(),
+            JsonValue::Number(i64::from(self.turn_base())),
+        );
         Ok(JsonValue::Object(object))
     }
 
@@ -2177,6 +2260,7 @@ pub(super) enum SessionJsonlRecord {
         record_updated_at_ms: u64,
         record_fork: Option<SessionFork>,
         record_session_goal: Option<String>,
+        record_turn_base: Option<u32>,
     },
     Message {
         turn_index: Option<u32>,
@@ -2185,6 +2269,47 @@ pub(super) enum SessionJsonlRecord {
         line_number: usize,
     },
     Compaction(SessionCompaction),
+}
+
+/// The header field that keeps a session's turn numbers from running
+/// backwards: how many of its turns no user message in the transcript stands
+/// for (see `Session::turn_base`). Written by every full write of the file,
+/// in the `session_meta` record and in the whole-file JSON alike. A zo from
+/// before it reads a header by the fields it knows and passes this one over.
+const TURN_BASE_FIELD: &str = "turn_base";
+
+/// The header's turn base, when the file carries one a count can be read off.
+fn turn_base_field(object: &BTreeMap<String, JsonValue>) -> Option<u32> {
+    object
+        .get(TURN_BASE_FIELD)
+        .and_then(JsonValue::as_i64)
+        .and_then(|base| u32::try_from(base).ok())
+}
+
+/// The user messages among `messages` — the turns a transcript shows.
+fn user_message_count(messages: &[ConversationMessage]) -> u32 {
+    let users = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .count();
+    u32::try_from(users).unwrap_or(u32::MAX)
+}
+
+/// Where a session's turn numbers stand when it is read back.
+///
+/// A file this zo wrote says how many of its turns the transcript no longer
+/// shows (`turn_base`), and the user messages it holds stand for the rest. A
+/// file from before the header carried that has only its transcript to go by,
+/// and a transcript that was compacted or rolled back counts short — which is
+/// how one attempt key came to name many turns. Such a file starts past every
+/// number it can have given out: the messages its compactions evicted (no
+/// fewer than the turns among them), and one more for a last turn that was
+/// taken back and left its number in the ledgers.
+fn loaded_turn_mark(turn_base: Option<u32>, evicted_messages: u32, messages: &[ConversationMessage]) -> u32 {
+    let older_file_base = evicted_messages.saturating_add(1);
+    turn_base
+        .unwrap_or(older_file_base)
+        .saturating_add(user_message_count(messages))
 }
 
 /// Index of the last non-blank line in `contents`, or `None` if every line is
@@ -2250,6 +2375,7 @@ pub(super) fn parse_jsonl_record(
                 .get("session_goal")
                 .and_then(JsonValue::as_str)
                 .map(ToOwned::to_owned),
+            record_turn_base: turn_base_field(object),
         },
         "message" => {
             let turn_index = parse_turn_index(object, line_number)?;
