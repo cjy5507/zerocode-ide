@@ -269,6 +269,8 @@ pub(crate) fn in_fresh_run_with(test: &str, env: &[(&str, &str)]) -> bool {
         .env(FRESH_RUN_ENV, "1")
         .env_remove(STYLE_ENV)
         .env_remove(super::theme::THEME_ENV)
+        .env_remove(super::ground::TERMINAL_BACKGROUND_ENV)
+        .env_remove(super::ground::COLORFGBG_ENV)
         .envs(env.iter().copied())
         .output()
         .expect("run the test alone");

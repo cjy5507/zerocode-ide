@@ -364,6 +364,17 @@ pub(crate) fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpe
             path: &["theme"],
             options: None,
         },
+        // Whether the terminal's background is light or dark, for a terminal
+        // that does not answer zo's colour question (every Windows console):
+        // a named theme then keeps its contrast and the syntax theme follows.
+        // `auto` leaves it to the terminal's answer. Read when the
+        // interactive screen starts, like `theme`.
+        "terminalBackground" => ConfigSettingSpec {
+            scope: ConfigScope::Global,
+            kind: ConfigKind::String,
+            path: &["terminalBackground"],
+            options: Some(&["auto", "light", "dark"]),
+        },
         // Free-form (no `options`): custom styles live in
         // `.zo/output-styles/*.md`, so the valid set is open-ended —
         // `/output-style` validates against the resolvable styles instead.
@@ -1118,5 +1129,36 @@ mod tests {
         let error = normalize_config_value(spec, ConfigValue::String("bogus".to_string()))
             .expect_err("unknown effort token is rejected");
         assert!(error.contains("bogus"), "error: {error}");
+    }
+
+    /// `terminalBackground` stands beside `theme`: the person's own setting
+    /// (Global), a string, and one of the three words zo reads — `auto`,
+    /// `light`, `dark` — so the tool never writes a word the screen would
+    /// warn about and read as `auto`.
+    #[test]
+    fn the_terminal_background_setting_sits_beside_theme_and_takes_auto_light_or_dark() {
+        let theme = supported_config_setting("theme").expect("theme");
+        let spec = supported_config_setting("terminalBackground").expect("terminalBackground");
+        assert!(matches!(theme.scope, ConfigScope::Global));
+        assert!(matches!(spec.scope, ConfigScope::Global), "the person's settings, like theme");
+        assert!(matches!(spec.kind, ConfigKind::String));
+        assert_eq!(spec.path, &["terminalBackground"]);
+        assert_eq!(spec.options, Some(&["auto", "light", "dark"][..]));
+        for word in ["auto", "light", "dark"] {
+            assert_eq!(
+                normalize_config_value(spec, ConfigValue::String(word.to_string())),
+                Ok(Value::String(word.to_string())),
+                "{word}"
+            );
+        }
+        for wrong in ["Light", "blue", "", "system"] {
+            let error = normalize_config_value(spec, ConfigValue::String(wrong.to_string()))
+                .expect_err("a word zo does not read is refused");
+            assert!(error.contains("auto, light, dark"), "{wrong:?}: {error}");
+        }
+        assert!(
+            normalize_config_value(spec, ConfigValue::Bool(true)).is_err(),
+            "true is no lightness"
+        );
     }
 }

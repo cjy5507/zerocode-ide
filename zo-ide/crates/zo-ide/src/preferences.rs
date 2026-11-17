@@ -47,6 +47,10 @@ pub const CONVERSATION_VIEW_KEY: &str = "conversationView";
 pub const MAX_PROSE_WIDTH_KEY: &str = "maxProseWidth";
 /// The interactive TUI's colour theme slug (`tui::theme`).
 pub const THEME_KEY: &str = "theme";
+/// Whether the terminal's background is light or dark, for a terminal that
+/// does not answer zo's colour question: `"auto"` (the default), `"light"` or
+/// `"dark"` (`tui::ground`).
+pub const TERMINAL_BACKGROUND_KEY: &str = "terminalBackground";
 
 /// The one recognized `workspaceTrust` value: the interactive trust gate is
 /// retired and every folder opens in full access, no prompt, outranking even
@@ -86,6 +90,9 @@ pub struct Preferences {
     pub max_prose_width: Option<usize>,
     /// Raw `theme` slug; `tui::theme` validates and resolves it.
     pub theme: Option<String>,
+    /// Raw `terminalBackground`; `tui::ground::choose` reads it, and a word
+    /// it does not know is `auto` with a startup warning.
+    pub terminal_background: Option<String>,
 }
 
 impl Preferences {
@@ -168,6 +175,10 @@ pub fn load_from_path(path: &Path) -> Preferences {
             .and_then(Value::as_u64)
             .and_then(|columns| usize::try_from(columns).ok()),
         theme: object.get(THEME_KEY).and_then(Value::as_str).map(str::to_string),
+        terminal_background: object
+            .get(TERMINAL_BACKGROUND_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -624,6 +635,32 @@ mod tests {
         ] {
             fs::write(&settings, document).expect("seed settings");
             assert_eq!(load_from_path(&settings).theme.as_deref(), expected, "{document}");
+        }
+        let _ = fs::remove_dir_all(settings.parent().expect("test parent"));
+    }
+
+    /// `terminalBackground` is read as `theme` is: a string, whatever it
+    /// says (`tui::ground::choose` judges the word), or nothing.
+    #[test]
+    fn terminal_background_setting_is_a_string_or_nothing() {
+        let settings = path("terminal-background-read");
+        for (document, expected) in [
+            (r#"{"terminalBackground":"light"}"#, Some("light")),
+            (r#"{"terminalBackground":" Dark "}"#, Some(" Dark ")),
+            (r#"{"terminalBackground":"blue"}"#, Some("blue")),
+            (r#"{"terminalBackground":""}"#, Some("")),
+            (r#"{"terminalBackground":1}"#, None),
+            (r#"{"terminalBackground":false}"#, None),
+            (r#"{"terminalBackground":{"light":true}}"#, None),
+            (r#"{"theme":"dracula"}"#, None),
+            (r"{}", None),
+        ] {
+            fs::write(&settings, document).expect("seed settings");
+            assert_eq!(
+                load_from_path(&settings).terminal_background.as_deref(),
+                expected,
+                "{document}"
+            );
         }
         let _ = fs::remove_dir_all(settings.parent().expect("test parent"));
     }

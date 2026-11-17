@@ -482,7 +482,21 @@ pub fn fit_lightness(
     palette: TerminalPalette,
     background: (u8, u8, u8),
 ) -> (u8, u8, u8) {
-    let floor = palette.text_contrast_floor(background);
+    fit_lightness_to_floor(color, background, palette.text_contrast_floor(background))
+}
+
+/// Adjusts `color`'s HSL lightness in 1%p steps away from `background` until
+/// its contrast against `background` clears `floor` — the rule
+/// [`fit_lightness`] follows with the floor a measured body ink gives, and
+/// `ground` with the fixed floor it takes when only the ground's lightness is
+/// known. Hue and saturation stay; a colour that clears `floor` already is
+/// returned as it is.
+#[must_use]
+pub(crate) fn fit_lightness_to_floor(
+    color: (u8, u8, u8),
+    background: (u8, u8, u8),
+    floor: f64,
+) -> (u8, u8, u8) {
     if contrast_ratio(color, background) >= floor {
         return color;
     }

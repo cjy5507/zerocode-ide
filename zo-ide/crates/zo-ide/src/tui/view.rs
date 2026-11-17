@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use super::ansi::{Color, Line, Span, Style};
 use super::composer::Composer;
 use super::effort_effect::{EffortEffect, EffortTier};
+use super::ground::Ground;
 use super::palette;
 use super::shimmer::{activity_marker, fmt_elapsed_compact, shimmer_spans};
 use super::{activity::Activity, strings};
@@ -1725,12 +1726,12 @@ fn dreamer_footer(dream: &str, width: usize) -> Line {
 }
 
 fn footer_theme_style(scopes: &[&str], fallback: Color) -> Style {
-    let palette = palette::terminal_palette();
-    let color_level = palette.map_or_else(
+    let ground = super::ground::current();
+    let color_level = ground.palette().map_or_else(
         palette::color_level_from_env,
         palette::TerminalPalette::color_level,
     );
-    footer_theme_style_with_level(scopes, fallback, palette, color_level)
+    footer_theme_style_on(scopes, fallback, ground, color_level)
 }
 
 #[cfg(test)]
@@ -1743,21 +1744,28 @@ pub(crate) fn footer_theme_style_for_palette(
         palette::ColorLevel::TrueColor,
         palette::TerminalPalette::color_level,
     );
-    footer_theme_style_with_level(scopes, fallback, terminal_palette, color_level)
+    footer_theme_style_on(scopes, fallback, Ground::from(terminal_palette), color_level)
 }
 
-pub(crate) fn footer_theme_style_with_level(
+/// The footer's style for the model (or the folder) on `ground` at
+/// `color_level`: its role — `fallback` — under a named theme in the marks
+/// look, and on a ground known only by its lightness, where the `terminal`
+/// theme then draws the role's light-ground pair on a light ground (a syntax
+/// theme's colour is fitted only against a measured body ink); else the
+/// syntax theme's colour for `scopes`, softened as codex softens it.
+pub(crate) fn footer_theme_style_on(
     scopes: &[&str],
     fallback: Color,
-    terminal_palette: Option<palette::TerminalPalette>,
+    ground: Ground,
     color_level: palette::ColorLevel,
 ) -> Style {
-    if !super::theme::is_terminal()
+    let named_theme = !super::theme::is_terminal()
         && super::style::current().style == super::style::TuiStyle::Marks
-        && color_level != palette::ColorLevel::Ansi16
-    {
+        && color_level != palette::ColorLevel::Ansi16;
+    if named_theme || matches!(ground, Ground::Lightness { .. }) {
         return Style::new().fg(fallback);
     }
+    let terminal_palette = ground.palette();
     super::highlight::foreground_style_for_scopes_with_level(scopes, terminal_palette, color_level)
         .map_or_else(
             || Style::new().fg(fallback),
@@ -2322,6 +2330,18 @@ pub fn short_cwd(cwd: &str) -> String {
         }
         _ => cwd.to_string(),
     }
+}
+
+/// [`footer_theme_style_on`] with a palette handed in alone — measured, or
+/// nothing known.
+#[cfg(test)]
+pub(crate) fn footer_theme_style_with_level(
+    scopes: &[&str],
+    fallback: Color,
+    terminal_palette: Option<palette::TerminalPalette>,
+    color_level: palette::ColorLevel,
+) -> Style {
+    footer_theme_style_on(scopes, fallback, Ground::from(terminal_palette), color_level)
 }
 
 #[cfg(test)]

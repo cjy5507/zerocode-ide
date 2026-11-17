@@ -305,17 +305,27 @@ impl TerminalPalette {
     }
 
     fn adapt_for_background(self, color: Color) -> Color {
-        if !self.has_light_background() {
-            return color;
+        if self.has_light_background() {
+            light_ground_color(color)
+        } else {
+            color
         }
-        match color {
-            DARK_COMPOSER_CARET => LIGHT_COMPOSER_CARET,
-            DARK_FOOTER_MODEL => LIGHT_FOOTER_MODEL,
-            DARK_FOOTER_CWD => LIGHT_FOOTER_CWD,
-            DARK_TABLE_HEADER => LIGHT_TABLE_HEADER,
-            DARK_WARNING_NOTICE => LIGHT_WARNING_NOTICE,
-            _ => color,
-        }
+    }
+}
+
+/// `color` as a light ground draws it: each of the five colours the captures
+/// give the `terminal` theme's roles on a dark ground becomes its light-ground
+/// pair; any other colour stays. A measured light palette asks it, and so does
+/// a ground only known to be light (`ground::Ground::Lightness`).
+#[must_use]
+pub(crate) fn light_ground_color(color: Color) -> Color {
+    match color {
+        DARK_COMPOSER_CARET => LIGHT_COMPOSER_CARET,
+        DARK_FOOTER_MODEL => LIGHT_FOOTER_MODEL,
+        DARK_FOOTER_CWD => LIGHT_FOOTER_CWD,
+        DARK_TABLE_HEADER => LIGHT_TABLE_HEADER,
+        DARK_WARNING_NOTICE => LIGHT_WARNING_NOTICE,
+        _ => color,
     }
 }
 
@@ -459,9 +469,18 @@ pub fn contrast_ratio(foreground: (u8, u8, u8), background: (u8, u8, u8)) -> f64
 static TERMINAL_PALETTE: OnceLock<Option<TerminalPalette>> = OnceLock::new();
 static DEFAULT_SECONDARY_INK: OnceLock<(TerminalPalette, (u8, u8, u8))> = OnceLock::new();
 
-/// startup probe가 성공했을 때만 적응 팔레트를 돌려준다.
+/// startup probe가 성공했고 그 팔레트로 그릴 때만 적응 팔레트를 돌려준다 —
+/// 사람이 말한 바탕의 밝기가 잰 바탕과 어긋나면 잰 팔레트는 쓰지 않는다
+/// ([`super::ground`]).
 #[must_use]
 pub(crate) fn terminal_palette() -> Option<TerminalPalette> {
+    super::ground::current().palette()
+}
+
+/// The palette the startup probe measured, whatever the person said of the
+/// ground — what [`super::ground::current`] weighs the person's word against.
+#[must_use]
+pub(crate) fn measured_palette() -> Option<TerminalPalette> {
     TERMINAL_PALETTE.get().copied().flatten()
 }
 

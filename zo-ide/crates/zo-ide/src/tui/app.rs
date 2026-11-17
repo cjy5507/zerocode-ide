@@ -347,6 +347,7 @@ fn thinking_flags(flags: RenderFlags) -> RenderFlags {
     let preferences = crate::preferences::load();
     super::style::init(&preferences);
     super::theme::init(&preferences);
+    super::ground::init(&preferences);
     RenderFlags {
         show_thinking: flags.show_thinking
             || preferences.show_thinking.unwrap_or(thinking::SHOW_BY_DEFAULT),

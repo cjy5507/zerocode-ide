@@ -48,6 +48,7 @@ zo decision-shadow eval --labels labels.jsonl   # probe·typed 판단을 사람�
 
 내장 슬래시: `/model /fast /thinking /theme /permissions /new /resume /fork /rename /export /compact /rewind /goal /loop /status /context /warnings /help /exit /clear`.
 추론 강도는 `/model`에서 고른다.
+색 테마는 `/theme`이나 설정 `theme`으로 고른다. 바탕색 물음에 답하지 않는 터미널(Windows 콘솔 등)에서는 설정 `terminalBackground`(`auto` · `light` · `dark`, 한 번만 덮는 `ZO_TERMINAL_BACKGROUND`)로 바탕이 밝은지 어두운지 알려 준다.
 
 ```sh
 zo --plain 'Explain this repository'            # 한 번 실행하고 종료

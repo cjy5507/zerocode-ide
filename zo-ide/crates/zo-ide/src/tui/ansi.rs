@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use unicode_width::UnicodeWidthStr;
 
+use super::ground::{self, Ground};
 use super::palette::{self, ColorLevel, TerminalPalette};
 
 /// Semantic colour roles carried to `Style::resolved_for` so the active theme
@@ -207,11 +208,7 @@ impl Style {
         self
     }
 
-    fn resolved_for_level(
-        mut self,
-        palette: Option<TerminalPalette>,
-        color_level: ColorLevel,
-    ) -> Self {
+    fn resolved_for_level(mut self, ground: Ground, color_level: ColorLevel) -> Self {
         let keep_sgr_dim = self.sgr_dim;
         self.sgr_dim = false;
         let use_named_theme = !super::theme::is_terminal()
@@ -220,13 +217,26 @@ impl Style {
         if !use_named_theme {
             self.fg = self.fg.map(lower_role_to_terminal);
             self.bg = self.bg.map(lower_role_to_terminal);
-            if let Some(palette) = palette {
-                self.resolve_terminal_palette(palette, keep_sgr_dim);
+            match ground {
+                Ground::Measured(palette) => self.resolve_terminal_palette(palette, keep_sgr_dim),
+                Ground::Lightness { light } => self.resolve_terminal_lightness(light),
+                Ground::Unknown => {}
             }
             return self;
         }
-        self.resolve_named_theme(palette, color_level, keep_sgr_dim);
+        self.resolve_named_theme(ground, color_level, keep_sgr_dim);
         self
+    }
+
+    /// On a ground only known to be light, the `terminal` theme's roles take
+    /// their light-ground colours; on one known to be dark they stay. Nothing
+    /// is measured against the ground and nothing is lowered to the depth —
+    /// that takes the ground's own colours.
+    fn resolve_terminal_lightness(&mut self, light: bool) {
+        if light {
+            self.fg = self.fg.map(palette::light_ground_color);
+            self.bg = self.bg.map(palette::light_ground_color);
+        }
     }
 
     fn resolve_terminal_palette(&mut self, palette: TerminalPalette, keep_sgr_dim: bool) {
@@ -259,13 +269,9 @@ impl Style {
         self.fg = self.fg.and_then(|color| palette.resolve(color));
     }
 
-    fn resolve_named_theme(
-        &mut self,
-        palette: Option<TerminalPalette>,
-        color_level: ColorLevel,
-        keep_sgr_dim: bool,
-    ) {
+    fn resolve_named_theme(&mut self, ground: Ground, color_level: ColorLevel, keep_sgr_dim: bool) {
         let explicit_bg = explicit_rgb(self.bg);
+        let palette = ground.palette();
         match self.fg {
             None => {
                 if let Some(palette) = palette {
@@ -278,8 +284,8 @@ impl Style {
                     other => ansi16_slot(other).and_then(|slot| theme.ansi_slot(slot)),
                 });
                 if let Some(rgb) = theme_rgb {
-                    let resolved_rgb = match palette {
-                        Some(palette) => {
+                    let resolved_rgb = match ground {
+                        Ground::Measured(palette) => {
                             let bg = explicit_bg.unwrap_or_else(|| palette.background());
                             let base = if !keep_sgr_dim && self.dim {
                                 self.dim = false;
@@ -289,7 +295,14 @@ impl Style {
                             };
                             palette::ensure_text_contrast_cached(palette, base, bg)
                         }
-                        None => rgb,
+                        // Only the lightness: the colour keeps the floor on the
+                        // stand-in ground, or on the span's own. A dim span
+                        // stays SGR 2 — no ground to blend it toward.
+                        Ground::Lightness { light } => ground::fit_without_body_ink(
+                            rgb,
+                            explicit_bg.unwrap_or(ground::stand_in(light)),
+                        ),
+                        Ground::Unknown => rgb,
                     };
                     self.fg = Some(if color_level == ColorLevel::Ansi256 {
                         Color::Indexed(palette::nearest_xterm_index(resolved_rgb))
@@ -298,8 +311,14 @@ impl Style {
                     });
                 } else {
                     self.fg = Some(lower_role_to_terminal(fg));
-                    if let Some(palette) = palette {
-                        self.resolve_terminal_fg(palette, keep_sgr_dim);
+                    match ground {
+                        Ground::Measured(palette) => self.resolve_terminal_fg(palette, keep_sgr_dim),
+                        // A role this theme has no colour for is drawn as
+                        // `terminal` draws it.
+                        Ground::Lightness { light: true } => {
+                            self.fg = self.fg.map(palette::light_ground_color);
+                        }
+                        Ground::Lightness { light: false } | Ground::Unknown => {}
                     }
                 }
             }
@@ -674,18 +693,19 @@ pub fn char_width(ch: char) -> usize {
 #[derive(Debug, Clone)]
 pub struct StyleWriter {
     current: Style,
-    palette: Option<TerminalPalette>,
+    ground: Ground,
     color_level: ColorLevel,
 }
 
 impl Default for StyleWriter {
     fn default() -> Self {
-        let palette = palette::terminal_palette();
-        let color_level =
-            palette.map_or_else(palette::color_level_from_env, TerminalPalette::color_level);
+        let ground = ground::current();
+        let color_level = ground
+            .palette()
+            .map_or_else(palette::color_level_from_env, TerminalPalette::color_level);
         Self {
             current: Style::new(),
-            palette,
+            ground,
             color_level,
         }
     }
@@ -702,7 +722,7 @@ impl StyleWriter {
         let color_level = palette.map_or(ColorLevel::TrueColor, TerminalPalette::color_level);
         Self {
             current: Style::new(),
-            palette,
+            ground: Ground::from(palette),
             color_level,
         }
     }
@@ -736,7 +756,7 @@ impl StyleWriter {
     /// 그 공백을 쓰려고 스타일을 바꿀 필요가 없다.
     #[must_use]
     pub fn blank_looks_alike(&self, style: Style) -> bool {
-        let wanted = style.resolved_for_level(self.palette, self.color_level);
+        let wanted = style.resolved_for_level(self.ground, self.color_level);
         self.current.bg == wanted.bg
             && self.current.underline == wanted.underline
             && self.current.strike == wanted.strike
@@ -744,7 +764,7 @@ impl StyleWriter {
 
     /// `style` 로 전이하는 데 필요한 바이트를 `out` 에 붙인다.
     pub fn transition(&mut self, style: Style, out: &mut String) {
-        let style = style.resolved_for_level(self.palette, self.color_level);
+        let style = style.resolved_for_level(self.ground, self.color_level);
         let previous = self.current;
         self.current = style;
         Self::modifier_diff(previous, style, out);
@@ -819,11 +839,11 @@ impl StyleWriter {
         out: &mut String,
     ) {
         let color_level = palette.map_or(ColorLevel::TrueColor, TerminalPalette::color_level);
-        Self::set_colors_for_palette_and_level(palette, color_level, fg, bg, out);
+        Self::set_colors_for_ground_and_level(Ground::from(palette), color_level, fg, bg, out);
     }
 
-    fn set_colors_for_palette_and_level(
-        palette: Option<TerminalPalette>,
+    fn set_colors_for_ground_and_level(
+        ground: Ground,
         color_level: ColorLevel,
         fg: Option<Color>,
         bg: Option<Color>,
@@ -834,7 +854,7 @@ impl StyleWriter {
             bg,
             ..Style::new()
         }
-        .resolved_for_level(palette, color_level);
+        .resolved_for_level(ground, color_level);
         Self::set_colors(resolved.fg, resolved.bg, out);
     }
 
@@ -880,11 +900,12 @@ pub const LINE_TAIL: &str = "\u{1b}[39m\u{1b}[49m\u{1b}[0m";
 #[must_use]
 pub fn line_lead(line: &Line) -> String {
     let mut out = String::new();
-    let palette = palette::terminal_palette();
-    let color_level =
-        palette.map_or_else(palette::color_level_from_env, TerminalPalette::color_level);
-    StyleWriter::set_colors_for_palette_and_level(
-        palette,
+    let ground = ground::current();
+    let color_level = ground
+        .palette()
+        .map_or_else(palette::color_level_from_env, TerminalPalette::color_level);
+    StyleWriter::set_colors_for_ground_and_level(
+        ground,
         color_level,
         line.style.fg,
         line.style.bg,
@@ -929,12 +950,7 @@ pub(crate) fn write_spans_for_palette_and_level(
     color_level: ColorLevel,
     out: &mut String,
 ) {
-    let mut writer = StyleWriter {
-        current: Style::new(),
-        palette,
-        color_level,
-    };
-    write_spans_with_writer(line, &mut writer, out);
+    write_spans_for_ground_and_level(line, Ground::from(palette), color_level, out);
 }
 
 fn write_spans_with_writer(line: &Line, writer: &mut StyleWriter, out: &mut String) {
@@ -980,6 +996,23 @@ pub fn write_plain(line: &Line, out: &mut String) {
     for span in &line.spans {
         out.push_str(&span.text);
     }
+}
+
+/// One line's spans on a ground and at a colour depth handed in — a ground
+/// whose lightness alone is known among them, which no palette stands for.
+#[cfg(test)]
+pub(crate) fn write_spans_for_ground_and_level(
+    line: &Line,
+    ground: Ground,
+    color_level: ColorLevel,
+    out: &mut String,
+) {
+    let mut writer = StyleWriter {
+        current: Style::new(),
+        ground,
+        color_level,
+    };
+    write_spans_with_writer(line, &mut writer, out);
 }
 
 #[cfg(test)]

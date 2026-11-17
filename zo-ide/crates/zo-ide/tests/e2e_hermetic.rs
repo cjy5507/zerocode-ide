@@ -10935,3 +10935,60 @@ async fn e2e_theme_command_draws_dracula_and_saves_to_settings() {
     assert_eq!(saved["smart"]["autoClassifier"], "off", "the other settings are kept: {saved}");
     assert!(service.request_bodies().await.is_empty(), "/theme asked the model");
 }
+
+/// The same `/theme dracula` on a terminal that answers no colour question,
+/// its background said to be light for the run (`ZO_TERMINAL_BACKGROUND`):
+/// the footer's folder and model are Dracula's cyan and accent with their
+/// lightness moved to keep 4.5:1 on the light stand-in ground (#d5d6db) —
+/// never the pastels themselves, which stand at 1.05:1 and 1.66:1 there. The
+/// word is read where the screen starts, the setting's way, and reaches the
+/// writer that draws the footer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_theme_dracula_keeps_its_contrast_on_a_terminal_background_said_to_be_light() {
+    const RAW_CWD: &[u8] = b"\x1b[38;2;139;233;253;49m";
+    const RAW_MODEL: &[u8] = b"\x1b[38;2;189;147;249;49m";
+    const FITTED_CWD: &[u8] = b"\x1b[38;2;2;99;120;49m";
+    const FITTED_MODEL: &[u8] = b"\x1b[38;2;115;26;242;49m";
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("unused")
+        .await
+        .expect("start text script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[
+            (zo_ide::tui::style::STYLE_ENV, "marks"),
+            ("COLORTERM", "truecolor"),
+            (zo_ide::tui::ground::TERMINAL_BACKGROUND_ENV, "light"),
+        ],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("What should we do?", TEST_TIMEOUT);
+
+    let at = run.output_len();
+    run.send(b"/theme dracula\r").expect("send /theme dracula");
+    run.wait_until(at, TEST_TIMEOUT, |bytes| {
+        find_bytes(bytes, FITTED_CWD).is_some()
+            || find_bytes(bytes, RAW_CWD).is_some()
+            || find_bytes(bytes, b"is not in zo").is_some()
+    });
+    let output = run.finish();
+    let after = &output[at..];
+    assert!(
+        find_bytes(after, RAW_CWD).is_none() && find_bytes(after, RAW_MODEL).is_none(),
+        "Dracula's own pastels on a ground said to be light: {:?}",
+        String::from_utf8_lossy(after)
+    );
+    let folder = find_bytes(after, FITTED_CWD).expect("the footer's folder in Dracula's cyan, fitted");
+    assert!(
+        find_bytes(&after[..folder], FITTED_MODEL).is_some(),
+        "the footer's model in Dracula's accent, fitted, before its folder: {:?}",
+        String::from_utf8_lossy(after)
+    );
+    assert!(service.request_bodies().await.is_empty(), "/theme asked the model");
+}

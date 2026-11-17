@@ -42,6 +42,7 @@ use syntect::parsing::{ParseState, Scope, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 use super::ansi::{Color, Line, Span, Style};
+use super::ground::Ground;
 
 /// Syntect work counter used by streaming regression tests.
 #[cfg(test)]
@@ -105,14 +106,11 @@ fn test_seam_color_level(palette: Option<super::palette::TerminalPalette>) -> su
     )
 }
 
-/// Catppuccin Mocha, or Latte on a terminal whose measured background is
-/// light — or the active named theme's syntax theme when running in marks look
-/// at 256-colour or truecolour depth.
-fn theme_for(
-    palette: Option<super::palette::TerminalPalette>,
-    color_level: super::palette::ColorLevel,
-) -> &'static Theme {
-    let light = palette.is_some_and(super::palette::TerminalPalette::has_light_background);
+/// Catppuccin Mocha, or Latte on a terminal whose ground is light — measured,
+/// or only said ([`Ground::Lightness`]) — or the active named theme's syntax
+/// theme when running in marks look at 256-colour or truecolour depth.
+fn theme_for(ground: Ground, color_level: super::palette::ColorLevel) -> &'static Theme {
+    let light = ground.is_light();
     let embedded = if use_named_syntax_theme(color_level) {
         super::theme::with_active(|active| active.syntax_theme(light))
     } else if light {
@@ -124,8 +122,8 @@ fn theme_for(
 }
 
 fn theme() -> &'static Theme {
-    let palette = super::palette::terminal_palette();
-    theme_for(palette, production_color_level(palette))
+    let ground = super::ground::current();
+    theme_for(ground, production_color_level(ground.palette()))
 }
 
 // -- 안전 한계(원본 `Guardrail constants`) --------------------------------
@@ -217,7 +215,7 @@ pub(crate) fn foreground_style_for_scopes_with_level(
         }
         #[cfg(test)]
         HIGHLIGHTERS_BUILT.with(|built| built.set(built.get() + 1));
-        let highlighter = Highlighter::new(theme_for(palette, color_level));
+        let highlighter = Highlighter::new(theme_for(Ground::from(palette), color_level));
         let style = scope_names.iter().find_map(|scope_name| {
             let scope = Scope::new(scope_name).ok()?;
             let foreground = highlighter.style_mod_for_stack(&[scope]).foreground?;
@@ -320,7 +318,7 @@ fn highlighted_line_spans(
 fn highlight_to_line_spans(
     code: &str,
     lang: &str,
-    palette: Option<super::palette::TerminalPalette>,
+    ground: Ground,
     color_level: super::palette::ColorLevel,
 ) -> Option<Vec<Vec<Span>>> {
     // 빈 입력은 강조할 것이 없다. 평문 경로가 빈 줄 하나를 옳게 만든다.
@@ -340,14 +338,14 @@ fn highlight_to_line_spans(
     }
 
     let syntax = find_syntax(lang)?;
-    let mut highlighter = HighlightLines::new(syntax, theme_for(palette, color_level));
+    let mut highlighter = HighlightLines::new(syntax, theme_for(ground, color_level));
     let mut lines: Vec<Vec<Span>> = Vec::new();
 
     for line in LinesWithEndings::from(code) {
         #[cfg(test)]
         probe::highlighted(line.len());
         let ranges = highlighter.highlight_line(line, syntax_set()).ok()?;
-        lines.push(highlighted_line_spans(ranges, palette));
+        lines.push(highlighted_line_spans(ranges, ground.palette()));
     }
 
     Some(lines)
@@ -366,8 +364,8 @@ pub(crate) fn exceeds_highlight_limits(total_bytes: usize, total_lines: usize) -
 /// public fallback so an unavailable language can stay distinguishable from a
 /// successfully highlighted line.
 pub(crate) fn highlight_block_to_lines(code: &str, lang: &str) -> Option<Vec<Line>> {
-    let palette = super::palette::terminal_palette();
-    highlight_to_line_spans(code, lang, palette, production_color_level(palette))
+    let ground = super::ground::current();
+    highlight_to_line_spans(code, lang, ground, production_color_level(ground.palette()))
         .map(|lines| lines.into_iter().map(Line::new).collect())
 }
 
@@ -461,8 +459,8 @@ impl StreamingCodeHighlighter {
 /// — 부르는 쪽은 언제나 결과를 그대로 그리면 된다.
 #[must_use]
 pub fn highlight_code_to_lines(code: &str, lang: &str) -> Vec<Line> {
-    let palette = super::palette::terminal_palette();
-    highlight_code_to_lines_with_level(code, lang, palette, production_color_level(palette))
+    let ground = super::ground::current();
+    highlight_code_lines_on(code, lang, ground, production_color_level(ground.palette()))
 }
 
 #[cfg(test)]
@@ -472,16 +470,19 @@ pub(crate) fn highlight_code_to_lines_for_palette(
     lang: &str,
     palette: Option<super::palette::TerminalPalette>,
 ) -> Vec<Line> {
-    highlight_code_to_lines_with_level(code, lang, palette, test_seam_color_level(palette))
+    highlight_code_lines_on(code, lang, Ground::from(palette), test_seam_color_level(palette))
 }
 
-pub(crate) fn highlight_code_to_lines_with_level(
+/// The lines of `code` on `ground` at `color_level`: the syntax theme follows
+/// the ground's lightness, measured or only said, and a syntax colour is
+/// fitted to a measured ground alone.
+pub(crate) fn highlight_code_lines_on(
     code: &str,
     lang: &str,
-    palette: Option<super::palette::TerminalPalette>,
+    ground: Ground,
     color_level: super::palette::ColorLevel,
 ) -> Vec<Line> {
-    if let Some(lines) = highlight_to_line_spans(code, lang, palette, color_level) {
+    if let Some(lines) = highlight_to_line_spans(code, lang, ground, color_level) {
         lines.into_iter().map(Line::new).collect()
     } else {
         // 폴백: 원문 한 줄에 우리 줄 하나. `split('\n')` 이 아니라 `lines()` 다
@@ -493,6 +494,18 @@ pub(crate) fn highlight_code_to_lines_with_level(
         }
         result
     }
+}
+
+/// [`highlight_code_lines_on`] with a palette handed in alone — measured, or
+/// nothing known.
+#[cfg(test)]
+pub(crate) fn highlight_code_to_lines_with_level(
+    code: &str,
+    lang: &str,
+    palette: Option<super::palette::TerminalPalette>,
+    color_level: super::palette::ColorLevel,
+) -> Vec<Line> {
+    highlight_code_lines_on(code, lang, Ground::from(palette), color_level)
 }
 
 #[cfg(test)]

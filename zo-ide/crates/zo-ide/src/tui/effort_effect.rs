@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::effort::Effort;
 
 use super::ansi::{char_width, Color, Line, Role, Span, Style};
+use super::ground::{self, Ground};
 use super::palette::{self, ColorLevel, TerminalPalette};
 
 const SCROLL_OUT: Duration = Duration::from_millis(620);
@@ -178,17 +179,19 @@ fn transition_line_at(
 /// could tint — so it asks the theme first.
 #[derive(Clone, Copy, Debug)]
 struct RoleInks {
-    palette: Option<TerminalPalette>,
+    ground: Ground,
     color_level: ColorLevel,
 }
 
 impl RoleInks {
     /// The terminal this process draws on.
     fn current() -> Self {
-        let palette = palette::terminal_palette();
+        let ground = ground::current();
         Self {
-            palette,
-            color_level: palette.map_or_else(palette::color_level_from_env, TerminalPalette::color_level),
+            ground,
+            color_level: ground
+                .palette()
+                .map_or_else(palette::color_level_from_env, TerminalPalette::color_level),
         }
     }
 
@@ -205,9 +208,13 @@ impl RoleInks {
             return None;
         }
         let ink = super::theme::with_active(|theme| theme.role_color(role))?;
-        Some(self.palette.map_or(ink, |palette| {
-            palette::ensure_text_contrast_cached(palette, ink, palette.background())
-        }))
+        Some(match self.ground {
+            Ground::Measured(palette) => {
+                palette::ensure_text_contrast_cached(palette, ink, palette.background())
+            }
+            Ground::Lightness { light } => ground::fit_without_body_ink(ink, ground::stand_in(light)),
+            Ground::Unknown => ink,
+        })
     }
 
     /// A role in `style` becomes the RGB the writer would draw it in, so the
@@ -470,7 +477,7 @@ mod tests {
             Span::new("/tmp", Style::new().fg(palette::FOOTER_CWD)),
         ]);
         let model_at = |color_level| {
-            let inks = RoleInks { palette: None, color_level };
+            let inks = RoleInks { ground: Ground::Unknown, color_level };
             transition_line_with_inks(EffortTier::Max, Some(&footer), Some(&footer), Duration::ZERO, 40, inks)
                 .expect("the old footer, scrolling out")
                 .spans
@@ -501,6 +508,42 @@ mod tests {
                 "{tinted:?} lies between {themed:?} and {tier:?}"
             );
         }
+    }
+
+    /// With only the ground's lightness known, a named theme's model ink is
+    /// the one the writer draws — fitted on the stand-in ground — so the fade
+    /// starts from the colour the footer stood in, and the `terminal` theme
+    /// is left to the writer as before.
+    #[test]
+    fn with_only_the_lightness_known_the_themes_fade_starts_from_the_colour_the_writer_draws() {
+        use crate::tui::ansi::write_spans_for_ground_and_level;
+        use crate::tui::{style, theme};
+
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        if !style::in_fresh_run(&format!(
+            "{module}::with_only_the_lightness_known_the_themes_fade_starts_from_the_colour_the_writer_draws"
+        )) {
+            return;
+        }
+        style::init(&crate::preferences::Preferences::default());
+        let _ = theme::set(theme::find("dracula").expect("dracula"));
+        for light in [true, false] {
+            let ground = Ground::Lightness { light };
+            let inks = RoleInks { ground, color_level: ColorLevel::TrueColor };
+            let mut written = String::new();
+            let footer = Line::new(vec![Span::new("m", Style::new().fg(palette::FOOTER_MODEL))]);
+            write_spans_for_ground_and_level(&footer, ground, ColorLevel::TrueColor, &mut written);
+            let ink = inks.ink(Role::Model).expect("Dracula's model ink");
+            assert_eq!(
+                written,
+                format!("\u{1b}[38;2;{};{};{};49mm", ink.0, ink.1, ink.2),
+                "light={light}"
+            );
+            assert!(palette::contrast_ratio(ink, ground::stand_in(light)) >= 4.5, "{ink:?}");
+        }
+        let _ = theme::set(theme::Theme::terminal());
+        let inks = RoleInks { ground: Ground::Lightness { light: true }, color_level: ColorLevel::TrueColor };
+        assert_eq!(inks.ink(Role::Model), None, "terminal: the writer's own light-ground pair");
     }
 
     #[test]

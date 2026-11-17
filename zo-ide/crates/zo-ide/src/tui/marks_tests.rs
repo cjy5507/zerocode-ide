@@ -1920,3 +1920,351 @@ fn an_empty_named_theme_resolves_roles_like_terminal_on_a_light_ground() {
     assert_eq!(actual, expected);
 }
 
+
+/// Only the ground's lightness known — the person said it, or `COLORFGBG`,
+/// and the terminal did not answer: a named theme's roles and colour slots
+/// move their lightness until they keep 4.5:1 on the stand-in ground of that
+/// lightness, hue and saturation kept, and a colour that keeps it already
+/// stays. A dim span stays SGR 2 over the same colour (no ground to blend it
+/// toward), 256 colours take the fitted colour's nearest index as a measured
+/// ground does, and a span on a colour of its own is fitted to that colour.
+#[test]
+fn with_only_the_lightness_known_a_named_theme_clears_four_point_five_on_the_stand_in_ground() {
+    use super::ansi::{write_spans_for_ground_and_level, Color, Role, Span, Style};
+    use super::ground::{stand_in, Ground};
+    use super::palette::{contrast_ratio, nearest_xterm_index, ColorLevel};
+    use super::theme::rgb_to_hsl;
+
+    if !style::in_fresh_run(&path(
+        "with_only_the_lightness_known_a_named_theme_clears_four_point_five_on_the_stand_in_ground",
+    )) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let dracula = super::theme::find("dracula").expect("dracula theme");
+    let _ = super::theme::set(dracula.clone());
+    let draw = |style: Style, ground: Ground, level: ColorLevel| {
+        let mut out = String::new();
+        write_spans_for_ground_and_level(&Line::new(vec![Span::new("x", style)]), ground, level, &mut out);
+        out
+    };
+    let hue_apart = |a: f64, b: f64| {
+        let apart = (a - b).abs() % 360.0;
+        apart.min(360.0 - apart)
+    };
+    let mut colours: Vec<(Color, (u8, u8, u8))> =
+        [Role::Code, Role::Link, Role::Heading, Role::Caret, Role::Model, Role::Cwd, Role::Warning]
+            .into_iter()
+            .map(|role| (Color::Role(role), dracula.role_color(role).expect("Dracula colours every role")))
+            .collect();
+    for (color, slot) in [
+        (Color::RED, 1),
+        (Color::GREEN, 2),
+        (Color::YELLOW, 3),
+        (Color::MAGENTA, 5),
+        (Color::CYAN, 6),
+        (Color::BrightBase(1), 9),
+        (Color::LIGHT_BLUE, 12),
+        (Color::Indexed(13), 13),
+    ] {
+        colours.push((color, dracula.ansi_slot(slot).expect("Dracula colours the slot")));
+    }
+
+    for light in [true, false] {
+        let ground = Ground::Lightness { light };
+        let behind = stand_in(light);
+        let mut moved = 0;
+        for (color, theirs) in &colours {
+            let drawn = draw(Style::new().fg(*color), ground, ColorLevel::TrueColor);
+            let fitted = parse_fg_rgb(&drawn);
+            assert!(
+                contrast_ratio(fitted, behind) >= 4.5,
+                "{color:?} drawn {fitted:?} on {behind:?}: {drawn:?}"
+            );
+            if contrast_ratio(*theirs, behind) >= 4.5 {
+                assert_eq!(fitted, *theirs, "{color:?} keeps 4.5:1 already and stays");
+                continue;
+            }
+            moved += 1;
+            let ((hue, saturation, _), (fitted_hue, fitted_saturation, _)) =
+                (rgb_to_hsl(*theirs), rgb_to_hsl(fitted));
+            assert!(hue_apart(hue, fitted_hue) <= 3.0, "{color:?} hue {hue:.1} -> {fitted_hue:.1}");
+            assert!(
+                (saturation - fitted_saturation).abs() <= 0.05,
+                "{color:?} saturation {saturation:.3} -> {fitted_saturation:.3}"
+            );
+            let dim = draw(Style::new().fg(*color).dim(), ground, ColorLevel::TrueColor);
+            assert!(dim.contains("\u{1b}[2m") && parse_fg_rgb(&dim) == fitted, "{color:?} dim: {dim:?}");
+            let indexed = draw(Style::new().fg(*color), ground, ColorLevel::Ansi256);
+            assert_eq!(indexed, format!("\u{1b}[38;5;{};49mx", nearest_xterm_index(fitted)), "{color:?}");
+        }
+        assert!(moved > 0, "a Dracula colour moves on the stand-in for light={light}");
+    }
+
+    // A span on a colour of its own keeps the floor on that colour, not on
+    // the stand-in: Dracula's red on white, the ground said to be dark.
+    let on_white = draw(
+        Style::new().fg(Color::RED).bg(Color::Rgb(255, 255, 255)),
+        Ground::Lightness { light: false },
+        ColorLevel::TrueColor,
+    );
+    let red = parse_fg_rgb(&on_white);
+    assert!(
+        contrast_ratio(red, (255, 255, 255)) >= 4.5 && on_white.contains(";48;2;255;255;255m"),
+        "{on_white:?}"
+    );
+}
+
+/// Only the ground's lightness known, no palette is made up from it: the
+/// person's words, a code block and the composer stand on no band, a dim
+/// span stays SGR 2, and the `terminal` theme's colours are never lowered to
+/// the depth — at 256 colours its roles are still RGB (today's bytes on a
+/// ground said to be dark, their light-ground pairs on one said to be
+/// light), and its colour slots keep their slot bytes.
+#[test]
+fn with_only_the_lightness_known_no_band_is_drawn_and_no_depth_is_lowered() {
+    use super::ansi::{line_lead, write_spans, write_spans_for_ground_and_level, Color, Role, Span, Style};
+    use super::ground::{self, Ground, Hint, TerminalBackground};
+    use super::palette::{self, ColorLevel};
+
+    if !style::in_fresh_run_with(
+        &path("with_only_the_lightness_known_no_band_is_drawn_and_no_depth_is_lowered"),
+        &[("COLORTERM", "truecolor")],
+    ) {
+        return;
+    }
+    style::init(&Preferences::default());
+    ground::set(Hint { word: TerminalBackground::Light, colorfgbg: None });
+    assert_eq!(ground::current(), Ground::Lightness { light: true });
+    assert_eq!(palette::terminal_palette(), None, "a lightness is never a palette");
+
+    let mut code = Line::from_text("fn main() {}");
+    code.code = true;
+    let mut rows = super::cells::user_cell("fix the parser", WIDTH);
+    rows.extend(prefixed(&[Line::from_text("Run this:"), code], WIDTH, &Prefix::hang(), true));
+    let (composer, _cursor) = super::composer::Composer::new().render(WIDTH, "Ask zo to do anything");
+    rows.extend(composer);
+    for row in &rows {
+        let mut out = line_lead(row);
+        write_spans(row, &mut out);
+        assert!(!out.contains("48;"), "a band under {:?}: {out:?}", row.plain());
+    }
+
+    let draw = |style: Style, ground: Ground, level: ColorLevel| {
+        let mut out = String::new();
+        write_spans_for_ground_and_level(&Line::new(vec![Span::new("x", style)]), ground, level, &mut out);
+        out
+    };
+    for level in [ColorLevel::TrueColor, ColorLevel::Ansi256] {
+        for (role, dark, light) in [
+            (Role::Code, "\u{1b}[36;49mx", "\u{1b}[36;49mx"),
+            (Role::Link, "\u{1b}[36;49mx", "\u{1b}[36;49mx"),
+            (Role::Heading, "\u{1b}[38;2;249;226;175;49mx", "\u{1b}[38;2;108;76;21;49mx"),
+            (Role::Caret, "\u{1b}[38;2;255;178;66;49mx", "\u{1b}[38;2;143;83;0;49mx"),
+            (Role::Model, "\u{1b}[38;2;246;226;183;49mx", "\u{1b}[38;2;106;78;17;49mx"),
+            (Role::Cwd, "\u{1b}[38;2;171;223;167;49mx", "\u{1b}[38;2;40;96;48;49mx"),
+            (Role::Warning, "\u{1b}[38;2;196;167;103;49mx", "\u{1b}[38;2;139;98;20;49mx"),
+        ] {
+            let style = Style::new().fg(Color::Role(role));
+            assert_eq!(draw(style, Ground::Lightness { light: false }, level), dark, "{role:?} {level:?}");
+            assert_eq!(draw(style, Ground::Lightness { light: true }, level), light, "{role:?} {level:?}");
+        }
+        for light in [true, false] {
+            let ground = Ground::Lightness { light };
+            assert_eq!(draw(Style::new().fg(Color::CYAN), ground, level), "\u{1b}[36;49mx");
+            assert_eq!(draw(Style::new().fg(Color::Indexed(200)), ground, level), "\u{1b}[38;5;200;49mx");
+            assert_eq!(draw(Style::new().dim(), ground, level), "\u{1b}[2mx", "{level:?} light={light}");
+        }
+    }
+}
+
+/// `auto` on a terminal that did not answer, with no `COLORFGBG`: what was
+/// drawn before, byte for byte — the `terminal` theme's roles, colour slots
+/// and dim text, a code block in Catppuccin Mocha as codex drew it
+/// (`codex-tui-v0.149.1-codeblock.bin`), the footer's model and folder, and
+/// Dracula's roles and slots in Dracula's own colours.
+#[test]
+fn auto_with_no_answer_writes_todays_bytes() {
+    use super::ansi::{write_spans, Color, Role, Span, Style};
+    use super::ground::{self, Ground, Hint};
+    use super::palette::{self, ColorLevel};
+
+    if !style::in_fresh_run_with(&path("auto_with_no_answer_writes_todays_bytes"), &[("COLORTERM", "truecolor")]) {
+        return;
+    }
+    style::init(&Preferences::default());
+    ground::set(Hint::default());
+    assert_eq!(ground::current(), Ground::Unknown);
+    let draw = |style: Style| {
+        let mut out = String::new();
+        write_spans(&Line::new(vec![Span::new("x", style)]), &mut out);
+        out
+    };
+    let roles = [Role::Code, Role::Link, Role::Heading, Role::Caret, Role::Model, Role::Cwd, Role::Warning];
+    let slots = [Color::RED, Color::GREEN, Color::YELLOW, Color::MAGENTA, Color::CYAN];
+    let every = || -> Vec<String> {
+        roles
+            .iter()
+            .map(|role| draw(Style::new().fg(Color::Role(*role))))
+            .chain(slots.iter().map(|slot| draw(Style::new().fg(*slot))))
+            .chain([draw(Style::new().dim())])
+            .collect()
+    };
+
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    assert_eq!(
+        every(),
+        [
+            "\u{1b}[36;49mx",
+            "\u{1b}[36;49mx",
+            "\u{1b}[38;2;249;226;175;49mx",
+            "\u{1b}[38;2;255;178;66;49mx",
+            "\u{1b}[38;2;246;226;183;49mx",
+            "\u{1b}[38;2;171;223;167;49mx",
+            "\u{1b}[38;2;196;167;103;49mx",
+            "\u{1b}[31;49mx",
+            "\u{1b}[32;49mx",
+            "\u{1b}[33;49mx",
+            "\u{1b}[35;49mx",
+            "\u{1b}[36;49mx",
+            "\u{1b}[2mx",
+        ]
+    );
+    let code: Vec<String> = super::highlight::highlight_code_to_lines("fn main() {\n    let name = \"zo\";\n", "rust")
+        .iter()
+        .map(|line| {
+            let mut out = String::new();
+            write_spans(line, &mut out);
+            out
+        })
+        .collect();
+    assert_eq!(
+        code,
+        [
+            "\u{1b}[38;2;203;166;247;49mfn\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;137;180;250;49mmain\u{1b}[38;2;147;153;178;49m()\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;147;153;178;49m{",
+            "\u{1b}[38;2;205;214;244;49m    \u{1b}[38;2;203;166;247;49mlet\u{1b}[38;2;205;214;244;49m name \u{1b}[38;2;148;226;213;49m=\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;166;227;161;49m\"zo\"\u{1b}[38;2;147;153;178;49m;",
+        ]
+    );
+    let footer = |scopes: &[&str], fallback| {
+        draw(super::view::footer_theme_style_on(scopes, fallback, ground::current(), ColorLevel::TrueColor))
+    };
+    assert_eq!(
+        footer(&["entity.name.type", "support.type", "variable"], palette::FOOTER_MODEL),
+        "\u{1b}[38;2;246;226;183;49mx"
+    );
+    assert_eq!(footer(&["string", "markup.underline.link"], palette::FOOTER_CWD), "\u{1b}[38;2;171;223;167;49mx");
+
+    let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
+    assert_eq!(
+        every(),
+        [
+            "\u{1b}[38;2;80;250;123;49mx",
+            "\u{1b}[38;2;139;233;253;49mx",
+            "\u{1b}[38;2;189;147;249;49mx",
+            "\u{1b}[38;2;255;121;198;49mx",
+            "\u{1b}[38;2;189;147;249;49mx",
+            "\u{1b}[38;2;139;233;253;49mx",
+            "\u{1b}[38;2;241;250;140;49mx",
+            "\u{1b}[38;2;255;85;85;49mx",
+            "\u{1b}[38;2;80;250;123;49mx",
+            "\u{1b}[38;2;241;250;140;49mx",
+            "\u{1b}[38;2;255;121;198;49mx",
+            "\u{1b}[38;2;189;147;249;49mx",
+            "\u{1b}[2mx",
+        ]
+    );
+}
+
+/// The person says the ground is light and the terminal does not answer:
+/// under `terminal`, code is highlighted in Catppuccin Latte — what a
+/// measured light ground picks — and the roles take their light-ground
+/// colours, the footer's model and folder too. Headings and the table head
+/// stay uncoloured, as with no answer. Said dark, each byte is the one
+/// `auto` draws with no answer.
+#[test]
+fn light_turns_on_latte_and_the_light_role_colours_for_terminal() {
+    use super::ansi::{write_spans, write_spans_for_ground_and_level, Color, Role, Span, Style};
+    use super::ground::{self, Ground, Hint, TerminalBackground};
+    use super::palette::{self, ColorLevel, TerminalPalette};
+    use pulldown_cmark::HeadingLevel;
+
+    if !style::in_fresh_run_with(
+        &path("light_turns_on_latte_and_the_light_role_colours_for_terminal"),
+        &[("COLORTERM", "truecolor")],
+    ) {
+        return;
+    }
+    style::init(&Preferences::default());
+    ground::set(Hint { word: TerminalBackground::Light, colorfgbg: None });
+    let light = ground::current();
+    assert_eq!(light, Ground::Lightness { light: true });
+    let _ = super::theme::set(super::theme::Theme::terminal());
+
+    let draw = |style: Style| {
+        let mut out = String::new();
+        write_spans(&Line::new(vec![Span::new("x", style)]), &mut out);
+        out
+    };
+    for (role, expected) in [
+        (Role::Code, "\u{1b}[36;49mx"),
+        (Role::Link, "\u{1b}[36;49mx"),
+        (Role::Heading, "\u{1b}[38;2;108;76;21;49mx"),
+        (Role::Caret, "\u{1b}[38;2;143;83;0;49mx"),
+        (Role::Model, "\u{1b}[38;2;106;78;17;49mx"),
+        (Role::Cwd, "\u{1b}[38;2;40;96;48;49mx"),
+        (Role::Warning, "\u{1b}[38;2;139;98;20;49mx"),
+    ] {
+        assert_eq!(draw(Style::new().fg(Color::Role(role))), expected, "{role:?}");
+    }
+    let model_scopes = ["entity.name.type", "support.type", "variable"];
+    let cwd_scopes = ["string", "markup.underline.link"];
+    let footer = |scopes: &[&str], fallback| {
+        draw(super::view::footer_theme_style_on(scopes, fallback, light, ColorLevel::TrueColor))
+    };
+    assert_eq!(footer(&model_scopes, palette::FOOTER_MODEL), "\u{1b}[38;2;106;78;17;49mx");
+    assert_eq!(footer(&cwd_scopes, palette::FOOTER_CWD), "\u{1b}[38;2;40;96;48;49mx");
+    for level in [HeadingLevel::H1, HeadingLevel::H2] {
+        let heading = super::markdown::heading_style_with_level(level, palette::terminal_palette(), ColorLevel::TrueColor);
+        assert_eq!(heading.fg, None, "{level:?}");
+    }
+    assert_eq!(super::tables::header_style_with_level(palette::terminal_palette(), ColorLevel::TrueColor).fg, None);
+
+    // Latte: a measured light ground at sixteen colours picks it and leaves
+    // its colours unfitted, so the two must match span for span.
+    let code = "fn main() {\n    let name = \"zo\";\n}\n";
+    let latte_by_measure = super::highlight::highlight_code_lines_on(
+        code,
+        "rust",
+        Ground::Measured(TerminalPalette::new((76, 79, 105), (239, 241, 245), ColorLevel::Ansi16)),
+        ColorLevel::Ansi16,
+    );
+    let said_light = super::highlight::highlight_code_to_lines(code, "rust");
+    assert_eq!(said_light, latte_by_measure, "the light word picks Latte");
+    let mocha = super::highlight::highlight_code_lines_on(code, "rust", Ground::Unknown, ColorLevel::TrueColor);
+    assert_ne!(said_light, mocha, "Latte is not Mocha");
+
+    // Said dark: every byte as `auto` with no answer.
+    let dark = Ground::Lightness { light: false };
+    let written = |ground: Ground, lines: &[Line]| -> String {
+        let mut out = String::new();
+        for line in lines {
+            write_spans_for_ground_and_level(line, ground, ColorLevel::TrueColor, &mut out);
+        }
+        out
+    };
+    let screen = |ground: Ground| -> String {
+        let mut lines: Vec<Line> = [Role::Code, Role::Heading, Role::Caret, Role::Model, Role::Cwd, Role::Warning]
+            .into_iter()
+            .map(|role| Line::new(vec![Span::new("x", Style::new().fg(Color::Role(role)))]))
+            .collect();
+        lines.push(Line::new(vec![Span::new("x", Style::new().fg(Color::RED))]));
+        lines.push(Line::new(vec![Span::dim("x")]));
+        for (scopes, fallback) in [(&model_scopes[..], palette::FOOTER_MODEL), (&cwd_scopes[..], palette::FOOTER_CWD)] {
+            let style = super::view::footer_theme_style_on(scopes, fallback, ground, ColorLevel::TrueColor);
+            lines.push(Line::new(vec![Span::new("x", style)]));
+        }
+        lines.extend(super::highlight::highlight_code_lines_on(code, "rust", ground, ColorLevel::TrueColor));
+        written(ground, &lines)
+    };
+    assert_eq!(screen(dark), screen(Ground::Unknown));
+}

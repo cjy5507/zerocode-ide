@@ -19,6 +19,7 @@
 //! | [`ansi`] | `Style`/`Span`/`Line` 과 최소 차분 SGR 방출 |
 //! | [`agents`] | 현재 세션의 하위 에이전트 개요·메시지·중지 피커 재료 |
 //! | [`palette`] | 터미널 기본색 조회·팔레트 상수·지연 OSC 응답 차단 |
+//! | [`ground`] | 그릴 바탕을 얼마나 아는가 — 잰 팔레트·밝기만(`terminalBackground`)·모름 |
 //! | [`shimmer`] | Working 글자를 훑는 밝기 웨이브 |
 //! | [`wrap`] | 히스토리에 넣기 전 미리 접기 |
 //! | [`highlight`] | 코드 담장의 문법 강조(syntect + two-face) |
@@ -63,6 +64,7 @@ pub mod effort_effect;
 pub mod fast;
 pub mod footer_hints;
 pub mod folds;
+pub mod ground;
 pub mod highlight;
 pub mod holdback;
 pub mod input;
