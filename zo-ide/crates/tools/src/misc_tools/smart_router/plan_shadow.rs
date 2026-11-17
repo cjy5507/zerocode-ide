@@ -586,6 +586,66 @@ mod tests {
         assert_eq!(no_cohort.candidates, unread.candidates, "without a cohort a record is nobody's evidence");
     }
 
+    /// A candidate is asked about under the name the resolver gives its model
+    /// — the name the store's rows are read under. A model the settings spell
+    /// another way than the ledger (`4.8` for `4-8`) still meets its verdicts;
+    /// asked about under the spelling it was given, it would meet none, and
+    /// nothing would say so.
+    #[test]
+    fn a_candidate_is_asked_about_under_the_name_the_resolver_gives_its_model() {
+        let spelled = "claude-opus-4.8";
+        let resolved = canonicalize_route_model_id(spelled);
+        assert_ne!(resolved, spelled, "the fixture needs a name the resolver changes");
+        let models = vec![ModelOption { id: spelled.into(), band: ModelBand::Top, efforts: vec!["high".into()] }];
+        let priors = priors();
+        let price = |_: &str| Some(ModelPrice { input: 3.0, cache_read: 0.3, cache_write: 3.75, output: 15.0 });
+        let cohort = plan_cohort_for_turn("implement the change and run the tests", RouteTaskComplexity::Medium, runtime::RouteTaskRisk::Medium)
+            .expect("a coding turn has a cohort");
+        let (kind, target) = cohort.route_key.split_once(':').expect("a route key is kind:target");
+        let store: Vec<RouteOutcomeRecord> = ["one", "two", "three"]
+            .into_iter()
+            .map(|attempt| {
+                RouteOutcomeRecord::new(kind, target, resolved.as_str(), "completed")
+                    .with_attempt_key(attempt)
+                    .with_role(Some(cohort.role.clone()))
+                    .with_complexity(Some(cohort.complexity.clone()))
+                    .with_risk(Some(cohort.risk.clone()))
+                    .with_effort_level(Some("high".into()))
+                    .with_shape(PlanShape::Solo)
+                    .with_signal("verdict")
+                    .with_decision(runtime::DecisionKind::Verify)
+                    .with_verdict_basis(runtime::VerdictBasis::Model)
+            })
+            .collect();
+        let row = |records: &[RouteOutcomeRecord]| {
+            let mut ctx = context(spelled);
+            ctx.cohort = Some(&cohort);
+            build_plan_shadow(PlanShadowInputs {
+                session_id: "session-1",
+                attempt: None,
+                recorded_at: 1,
+                ctx,
+                models: &models,
+                priors: &priors,
+                records,
+                price: &price,
+                cache: &[],
+                actual: actual(spelled),
+                trigger: None,
+                category: None,
+            })
+        };
+        let (unread, read) = (row(&[]), row(&store));
+        assert!(
+            !unread.candidates.is_empty() && unread.candidates.iter().all(|candidate| candidate.model == spelled),
+            "the row names the model as the settings spell it"
+        );
+        assert_ne!(
+            read.candidates, unread.candidates,
+            "verdicts filed under `{resolved}` moved no candidate of the model spelled `{spelled}`"
+        );
+    }
+
     #[test]
     fn the_shadow_ledger_appends_one_line_and_keeps_its_newer_half_past_the_cap() {
         let dir = tempfile::tempdir().unwrap();

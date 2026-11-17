@@ -1294,8 +1294,9 @@ mod tests {
     /// A store with something of everything a candidate's question turns on:
     /// two names of one model, another model, another effort, another shape,
     /// both ways a result is checked, a failed and a stopped run, an attempt
-    /// with two rows, a verdict that names a model its run did not end on, and
-    /// rows that are nobody's evidence.
+    /// with two rows, an attempt whose two rows are of different models and
+    /// efforts, a verdict that names a model its run did not end on, and rows
+    /// that are nobody's evidence.
     fn a_store_of_many_plans() -> Vec<super::super::outcome::RouteOutcomeRecord> {
         use super::super::outcome::{DecisionKind, RouteOutcomeRecord, VerdictBasis, VerdictSubject};
         let run = |attempt: &str, status: &str, duration_ms: u64, output_tokens: u64| {
@@ -1326,6 +1327,10 @@ mod tests {
             // Said of `a`, about an attempt that ended on `b`.
             of_model("b", run("eight", "completed", 15_000, 300)),
             verdict("eight", "completed", VerdictBasis::Objective),
+            // One attempt, two run rows that differ in what a candidate asks
+            // about: it ran on `a` at `high`, then ended on `b` at `max`.
+            run("fourteen", "completed", 40_000, 1_000),
+            of_effort("max", of_model("b", run("fourteen", "completed", 60_000, 1_500))),
             // Nobody's evidence.
             RouteOutcomeRecord { intervened: Some(true), ..run("nine", "completed", 1, 1) },
             RouteOutcomeRecord { run_id: None, ..verdict("ten", "completed", VerdictBasis::Objective) },
@@ -1387,6 +1392,40 @@ mod tests {
             let _ = read_once.evidence(&candidate, "a");
         }
         assert_eq!(named.get(), for_the_store, "a candidate's question named a row of the store again");
+    }
+
+    /// One attempt whose two run rows differ in what a candidate asks about —
+    /// it ran on `a` at `high`, was switched, and ended on `b` at `max` —
+    /// speaks to each plan through the row that is that plan's: the rows are
+    /// narrowed to the candidate's first, and only then does an attempt keep
+    /// its later row. Kept the other way round (one row an attempt when the
+    /// store is read, then the candidate's), the attempt would speak for `b`
+    /// alone, and `a` at `high` would lose a run it did make.
+    #[test]
+    fn an_attempt_that_changed_model_and_effort_speaks_to_each_plan_through_its_own_row() {
+        let cohort = evidence_cohort();
+        let run = |model: &str, effort: &str, duration_ms: u64| super::super::outcome::RouteOutcomeRecord {
+            selected_model: model.into(),
+            effort_level: Some(effort.into()),
+            ..observed_run("switched", "completed").with_duration_ms(Some(duration_ms)).with_output_tokens(1_000)
+        };
+        let rows = [run("a", "high", 40_000), run("b", "max", 60_000)];
+        let read_once = PlanEvidenceRecords::new(&rows, &cohort, str::to_string);
+        for (model, effort, duration_ms) in [("a", "high", 40_000), ("b", "max", 60_000)] {
+            let candidate = solo(model, effort);
+            let evidence = read_once.evidence(&candidate, model);
+            assert_eq!(
+                evidence.and_then(|evidence| evidence.median_duration_ms),
+                Some(duration_ms),
+                "{model} at {effort}"
+            );
+            assert_eq!(
+                evidence,
+                evidence_read_per_candidate(&rows, &candidate, &cohort, str::to_string),
+                "{model} at {effort}"
+            );
+        }
+        assert_eq!(read_once.evidence(&solo("a", "max"), "a"), None, "no row of the attempt is `a` at `max`");
     }
 
     fn observed_run(attempt: &str, status: &str) -> super::super::outcome::RouteOutcomeRecord {
