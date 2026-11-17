@@ -19,6 +19,11 @@ use super::theme::{self, Theme, TERMINAL_THEME_NAME};
 /// The largest theme file read: 256 KiB.
 pub const MAX_THEME_FILE_BYTES: u64 = 256 * 1024;
 
+/// The most theme files read from the themes folder: the first 200 by name.
+/// The folder is read where the screen is drawn, each time `/theme` opens,
+/// so a folder of thousands of files must not hold the screen.
+pub const MAX_THEME_FILES: usize = 200;
+
 /// The folder under the zo home that holds the theme files.
 const THEMES_FOLDER: &str = "themes";
 
@@ -48,9 +53,18 @@ type ColourField = for<'t> fn(&'t mut Theme, &str) -> Option<&'t mut Option<(u8,
 /// Reads every `<slug>.json` directly inside `dir` into a theme, sorted by
 /// name, and says each mistake as one warning line. A name that starts with
 /// `.` is passed over without a word, and a missing folder is no themes and
-/// no warning.
+/// no warning. At most [`MAX_THEME_FILES`] files are read.
 #[must_use]
 pub fn load_from(dir: &Path) -> (Vec<Theme>, Vec<String>) {
+    load_from_capped(dir, MAX_THEME_FILES)
+}
+
+/// [`load_from`], reading at most `cap` theme files: the first `cap` by name
+/// of the folder's theme files — what is left of its entries without those
+/// passed over in silence (a name that starts with `.`, another extension,
+/// a folder). A file past the cap is not opened or measured, and one warning
+/// line says how many theme files the folder holds.
+fn load_from_capped(dir: &Path, cap: usize) -> (Vec<Theme>, Vec<String>) {
     let mut warnings = Vec::new();
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -66,9 +80,18 @@ pub fn load_from(dir: &Path) -> (Vec<Theme>, Vec<String>) {
     let folder = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut paths: Vec<PathBuf> = entries
         .filter_map(Result::ok)
+        .filter(is_theme_file_entry)
         .map(|entry| entry.path())
         .collect();
     paths.sort();
+    if paths.len() > cap {
+        warnings.push(format!(
+            "theme folder {}: holds {} theme files; only the first {cap} by name are read",
+            dir.display(),
+            paths.len()
+        ));
+        paths.truncate(cap);
+    }
     let mut themes = BTreeMap::new();
     for path in &paths {
         if let Some(theme) = read_theme_file(path, &folder, &mut warnings) {
@@ -90,19 +113,37 @@ impl Notes<'_> {
     }
 }
 
-/// The theme in `path`, or `None` — said, unless it is no theme file at all
-/// (another extension, a folder, or a name that starts with `.`).
-fn read_theme_file(path: &Path, folder: &Path, warnings: &mut Vec<String>) -> Option<Theme> {
+/// Whether `path` is named as a theme file is: `<name>.json`, and not a name
+/// that starts with `.`.
+fn has_theme_file_name(path: &Path) -> bool {
     // An editor's lock file beside a theme being edited (`.#mine.json`),
     // macOS's `._mine.json` and any other hidden name: no theme file, and
     // nothing to say each time the names are read.
-    if path
+    let hidden = path
         .file_name()
-        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
-    {
-        return None;
+        .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
+    !hidden && path.extension().and_then(OsStr::to_str) == Some("json")
+}
+
+/// Whether a folder's entry is one of its theme files — the ones counted
+/// against the cap: named as one (`has_theme_file_name`) and no folder. A
+/// link is followed to tell; nothing is opened.
+fn is_theme_file_entry(entry: &fs::DirEntry) -> bool {
+    let path = entry.path();
+    if !has_theme_file_name(&path) {
+        return false;
     }
-    if path.extension().and_then(OsStr::to_str) != Some("json") {
+    match entry.file_type() {
+        Ok(kind) if kind.is_dir() => false,
+        Ok(kind) if kind.is_symlink() => !fs::metadata(&path).is_ok_and(|target| target.is_dir()),
+        _ => true,
+    }
+}
+
+/// The theme in `path`, or `None` — said, unless it is no theme file at all
+/// (another extension, a folder, or a name that starts with `.`).
+fn read_theme_file(path: &Path, folder: &Path, warnings: &mut Vec<String>) -> Option<Theme> {
+    if !has_theme_file_name(path) {
         return None;
     }
     let mut notes = Notes {
@@ -443,7 +484,7 @@ mod tests {
 
     use two_face::theme::EmbeddedThemeName;
 
-    use super::{load_from, Catalog, MAX_THEME_FILE_BYTES};
+    use super::{load_from, load_from_capped, Catalog, MAX_THEME_FILES, MAX_THEME_FILE_BYTES};
     use crate::tui::ansi::Role;
     use crate::tui::theme::find_builtin;
 
@@ -765,6 +806,61 @@ mod tests {
         let names: Vec<&str> = themes.iter().map(|theme| theme.name.as_str()).collect();
         assert_eq!(names, ["mine"]);
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// More theme files than the cap: the first by name are read, the rest
+    /// are not opened, and one line says how many there are. A dot file,
+    /// another extension and a folder are no theme files and are not
+    /// counted.
+    #[test]
+    fn more_theme_files_than_the_cap_reads_the_first_by_name_and_says_so_in_one_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let theme = r##"{"colors":{"accent":"#112233"}}"##;
+        for name in ["delta.json", "alpha.json", "charlie.json", "bravo.json"] {
+            write_theme(dir.path(), name, theme);
+        }
+        // Past a cap of three or four: never opened, so what is wrong in it
+        // is not said.
+        write_theme(dir.path(), "echo.json", "{ not valid json");
+        write_theme(dir.path(), ".hidden.json", theme);
+        write_theme(dir.path(), "notes.txt", "my themes");
+        fs::create_dir_all(dir.path().join("folder.json")).expect("create a folder named .json");
+        let names_of = |themes: &[crate::tui::theme::Theme]| -> Vec<String> {
+            themes.iter().map(|theme| theme.name.clone()).collect()
+        };
+
+        let (themes, warnings) = load_from_capped(dir.path(), 3);
+        assert_eq!(names_of(&themes), ["alpha", "bravo", "charlie"]);
+        assert_eq!(warnings.len(), 1, "the cap's line and no other: {warnings:?}");
+        let line = &warnings[0];
+        assert!(
+            line.contains("holds 5 theme files")
+                && line.contains("only the first 3 by name are read")
+                && line.contains(&dir.path().display().to_string()),
+            "{line}"
+        );
+        assert!(!line.contains('\n'), "a warning is one line: {line:?}");
+
+        let (themes, warnings) = load_from_capped(dir.path(), 4);
+        assert_eq!(names_of(&themes), ["alpha", "bravo", "charlie", "delta"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("only the first 4 by name are read"), "{warnings:?}");
+
+        // At the cap, and under it: every file is read and no such line.
+        for cap in [5, 6, MAX_THEME_FILES] {
+            let (themes, warnings) = load_from_capped(dir.path(), cap);
+            assert_eq!(names_of(&themes), ["alpha", "bravo", "charlie", "delta"], "cap {cap}");
+            assert_eq!(warnings.len(), 1, "cap {cap}: {warnings:?}");
+            assert!(
+                warnings[0].contains("echo.json") && !warnings[0].contains("holds"),
+                "cap {cap}: {warnings:?}"
+            );
+        }
+        assert_eq!(
+            load_from(dir.path()),
+            load_from_capped(dir.path(), MAX_THEME_FILES),
+            "the folder is read with the cap of {MAX_THEME_FILES}"
+        );
     }
 
     #[test]
