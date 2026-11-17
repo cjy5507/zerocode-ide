@@ -101,7 +101,7 @@ impl PlanTurn {
     pub(crate) fn finish(mut self, cwd: &Path, session: &str, result: &Result<runtime::TurnSummary, String>) {
         self.receipt.at_ms = now_ms();
         self.receipt.duration_ms = self.receipt.at_ms.saturating_sub(self.began_ms);
-        let records = runtime::read_route_outcomes(cwd).unwrap_or_default();
+        let records = written_since(runtime::read_route_outcomes(cwd).unwrap_or_default(), self.began_ms);
         let mut checked = false;
         let mut failed = result.is_err();
         for record in records.iter().filter(|record| record.run_id.as_deref() == Some(self.receipt.attempt.as_str())
@@ -160,5 +160,45 @@ impl PlanTurn {
             }
         }
         let _ = tools::record_plan_receipt(cwd, &self.receipt);
+    }
+}
+
+/// The outcome rows written since a turn began — the only ones that can be
+/// about it.
+///
+/// The receipt reads its turn's verdicts and children back by the turn's
+/// attempt key, and a key was not always one turn's: through v1.1.160 the
+/// ordinal in it was counted off a transcript that every compaction, rewind
+/// and rolled-back turn shortens, so the ledger of a long session holds
+/// earlier turns under the key a later turn takes. A verdict or a child of one
+/// of those is not evidence about this plan — and the verdict rows a clean
+/// receipt stamps with its plan are written back into the ledger the router
+/// learns from. The ledger stamps whole seconds, so the bound is the second
+/// the turn began in.
+fn written_since(records: Vec<runtime::RouteOutcomeRecord>, began_ms: u64) -> Vec<runtime::RouteOutcomeRecord> {
+    let first_second = began_ms / 1_000;
+    records.into_iter().filter(|record| record.recorded_at >= first_second).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::written_since;
+
+    /// A row of an earlier turn that was spent under the same key is left out;
+    /// a row written in the second the turn began, or after it, is kept.
+    #[test]
+    fn a_row_written_before_the_turn_began_is_not_the_turns() {
+        let row = |recorded_at: u64| {
+            let mut row = runtime::RouteOutcomeRecord::new("turn", "the work", "a-model", runtime::OUTCOME_COMPLETED)
+                .with_attempt_key("session-1@3");
+            row.recorded_at = recorded_at;
+            row
+        };
+        let began_ms = 1_000_500;
+        let kept: Vec<u64> = written_since(vec![row(400), row(999), row(1_000), row(1_001), row(2_000)], began_ms)
+            .into_iter()
+            .map(|record| record.recorded_at)
+            .collect();
+        assert_eq!(kept, [1_000, 1_001, 2_000], "the turn began in second 1000");
     }
 }
