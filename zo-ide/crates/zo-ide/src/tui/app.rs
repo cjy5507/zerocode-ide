@@ -4148,16 +4148,23 @@ impl Ui {
     /// `/theme <name>`: the theme the word names
     /// ([`super::theme::resolve_name`]) is turned on and saved. A word that
     /// names none — a path-shaped one is never looked up — changes nothing
-    /// and is answered with the names there are.
+    /// and is answered with the names there are. A word that names a theme
+    /// file left unread past the cap changes nothing either, and is answered
+    /// with that: the names there are would not hold it.
     fn apply_typed_theme(&mut self, name: &str) {
-        if let Ok(theme) = super::theme::resolve_name(name) {
-            self.choose_theme(&theme);
-        } else {
-            let text = format!(
-                "no theme is named {name:?} — the themes: {}",
-                super::theme::names_line()
-            );
-            self.note(SystemLevel::Info, &text);
+        use super::theme::ThemeResolveError;
+        match super::theme::resolve_name(name) {
+            Ok(theme) => self.choose_theme(&theme),
+            Err(ThemeResolveError::PastCap { cap }) => {
+                self.note(SystemLevel::Info, &super::strings::theme_past_cap(name, cap));
+            }
+            Err(ThemeResolveError::Invalid | ThemeResolveError::Unknown) => {
+                let text = format!(
+                    "no theme is named {name:?} — the themes: {}",
+                    super::theme::names_line()
+                );
+                self.note(SystemLevel::Info, &text);
+            }
         }
     }
 
@@ -14156,6 +14163,106 @@ mod theme_tests {
         assert_eq!(theme::active().name, "dracula");
         assert_eq!(crate::preferences::load_from_path(&settings).theme.as_deref(), Some("dracula"));
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A theme whose file is in the themes folder past the cap is not an
+    /// unknown name: the start warning and `/theme <name>` say that it was
+    /// not read and why, with the cap the folder was read by, and nothing is
+    /// saved. A name no file has, a file the read took that made no theme, a
+    /// folder and a path-shaped name are said in the words there were; a
+    /// theme inside the cap is taken without a word. The unread file is
+    /// never opened: what is wrong in it is not said.
+    #[test]
+    fn a_theme_past_the_cap_says_why_it_was_not_read() {
+        if !style::in_fresh_run(&test_path("a_theme_past_the_cap_says_why_it_was_not_read")) {
+            return;
+        }
+        style::init(&Preferences::default());
+        let (own, broken) = (r##"{"colors":{"accent":"#112233"}}"##, "{ not valid json");
+        let longest = "z".repeat(64);
+        let longest_file = format!("{longest}.json");
+        // By name the first three are `aa-broken`, `alpha` and `bravo`.
+        let files = [
+            ("aa-broken.json", broken),
+            ("alpha.json", own),
+            ("bravo.json", own),
+            ("charlie.json", own),
+            ("zz-mine.json", broken),
+            (longest_file.as_str(), own),
+        ];
+        let themes = themes_folder("theme-cap-themes", &files, 3);
+        std::fs::create_dir_all(themes.join("zz-folder.json")).expect("a folder named as a theme file is");
+        let initial = "{\n  \"z\": 1\n}\n";
+        let (folder, settings) = settings_file("theme-cap", initial);
+        let mut ui = ui_saving_to(&settings);
+        let named = |name: &str| Preferences { theme: Some(name.to_string()), ..Preferences::default() };
+        let past = |name: &str| format!("theme {name:?} was not read: it is past the first 3 theme files by name");
+        assert_eq!(past("zz-mine"), strings::theme_past_cap("zz-mine", 3));
+
+        // At start, by the setting and by `ZO_THEME`, as the name was written.
+        for typed in ["zz-mine", "ZZ Mine", "charlie", longest.as_str()] {
+            let expected = Some(format!("{}; using terminal", past(typed)));
+            let by_setting = theme::choose(&named(typed), None);
+            let by_env = theme::choose(&Preferences::default(), Some(typed));
+            for (chosen, warning) in [by_setting, by_env] {
+                assert!(chosen.is_terminal(), "{typed:?}");
+                assert_eq!(warning, expected, "{typed:?}");
+            }
+        }
+        // A name no file has, a file the read took that made no theme and a
+        // folder named as a theme file is: unknown, in the words there were.
+        for unknown in ["no-such-theme", "aa-broken", "zz-folder"] {
+            let (chosen, warning) = theme::choose(&named(unknown), None);
+            assert!(chosen.is_terminal(), "{unknown:?}");
+            assert_eq!(warning, Some(format!("unknown theme {unknown:?}; using terminal")), "{unknown:?}");
+        }
+        let (_, warning) = theme::choose(&named("../x"), None);
+        assert_eq!(warning.as_deref(), Some("invalid theme name \"../x\"; using terminal"));
+        // A theme inside the cap is taken, and nothing is said.
+        for inside in ["alpha", "bravo"] {
+            let (chosen, warning) = theme::choose(&named(inside), None);
+            assert_eq!((chosen.name.as_str(), warning), (inside, None), "{inside:?}");
+        }
+        // The unread file was never opened: what is wrong in it is not said.
+        let warnings = crate::runtime_support::drain_startup_warnings();
+        assert!(warnings.iter().any(|line| line.contains("aa-broken.json")), "{warnings:?}");
+        assert!(warnings.iter().any(|line| line.contains("only the first 3 by name are read")), "{warnings:?}");
+        assert!(!warnings.iter().any(|line| line.contains("zz-mine.json")), "{warnings:?}");
+
+        // `/theme <name>`: the same reason on one row, in place of the names.
+        for typed in ["zz-mine", "ZZ Mine"] {
+            ui.pending_history.clear();
+            ui.apply_typed_theme(typed);
+            let answer = said(&ui);
+            assert!(answer.contains(&past(typed)), "{typed:?}: {answer}");
+            assert!(!answer.contains("dracula") && !answer.contains("no theme is named"), "{typed:?}: {answer}");
+            assert_eq!(answer.lines().filter(|row| !row.trim().is_empty()).count(), 1, "{typed:?}: {answer}");
+            assert!(theme::active().is_terminal(), "{typed:?} changed the theme");
+            assert_eq!(read(&settings), initial, "{typed:?} changed the settings");
+        }
+        // A name no file has is answered with the names there are, as it was.
+        for unknown in ["no-such-theme", "aa-broken"] {
+            ui.pending_history.clear();
+            ui.apply_typed_theme(unknown);
+            let answer = said(&ui);
+            let opening = format!("no theme is named {unknown:?} — the themes: terminal,");
+            assert!(answer.contains(&opening) && answer.contains("dracula"), "{unknown:?}: {answer}");
+            assert!(!answer.contains("was not read"), "{unknown:?}: {answer}");
+        }
+        assert_eq!(read(&settings), initial, "nothing was saved");
+
+        // The longest name there can be, with the real cap: two rows of an
+        // 80-column terminal at most, for the warning at start and the answer.
+        let reason = strings::theme_past_cap(&longest, theme_files::MAX_THEME_FILES);
+        assert!(reason.contains(&format!("the first {} theme files", theme_files::MAX_THEME_FILES)), "{reason}");
+        for (level, text) in [(SystemLevel::Warn, format!("{reason}; using terminal")), (SystemLevel::Info, reason)] {
+            // A blank row stands above the words.
+            let rows = crate::tui::cells::system_cell(level, &text, 80);
+            assert!(rows.len() <= 3, "{} rows: {text}", rows.len());
+            assert!(rows.iter().all(|row| crate::tui::ansi::str_width(&row.plain()) <= 80), "{text}");
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_dir_all(&themes);
     }
 
     /// Criterion 7: a key reaches the open picker on both roads — an idle

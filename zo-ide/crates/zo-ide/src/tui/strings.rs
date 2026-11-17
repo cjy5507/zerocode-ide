@@ -146,6 +146,14 @@ pub fn theme_file_problems(count: usize) -> String {
     let noun = if count == 1 { "problem" } else { "problems" };
     format!("⚠ {count} {noun} in its file")
 }
+/// Why the theme `name` has a file in the person's themes folder and is no
+/// theme: the folder holds more theme files than `cap`, the most that are
+/// read, and this one is past the first `cap` by name. Said at start, and by
+/// `/theme <name>` in place of the names there are.
+#[must_use]
+pub fn theme_past_cap(name: &str, cap: usize) -> String {
+    format!("theme {name:?} was not read: it is past the first {cap} theme files by name")
+}
 /// What `/thinking` says it did, one word each way.
 pub const THINKING_SHOWN: &str = "thinking shown · /thinking hides it";
 /// The marks look's three steps of `/thinking`: one row, the whole block, none.

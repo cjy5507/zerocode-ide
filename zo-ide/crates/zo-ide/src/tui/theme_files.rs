@@ -6,7 +6,7 @@
 //! all is no theme. Only the zo home is read — never a project folder.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,10 @@ pub struct Loaded {
     /// held none is not listed, and neither is a file that made no theme —
     /// its one line says why it was skipped.
     pub problems: BTreeMap<String, usize>,
+    /// The file name of the first theme file, by name, that was left unread
+    /// because the folder holds more theme files than the cap. `None` when
+    /// every theme file was read.
+    pub first_unread: Option<OsString>,
 }
 
 /// Reads the themes folder `dir` as [`load_from`] does, and counts the
@@ -86,8 +90,14 @@ pub fn load_folder(dir: &Path) -> Loaded {
 /// [`load_folder`], reading at most `cap` theme files: the first `cap` by
 /// name of the folder's theme files — what is left of its entries without
 /// those passed over in silence (a name that starts with `.`, another
-/// extension, a folder). A file past the cap is not opened or measured, and
-/// one warning line says how many theme files the folder holds.
+/// extension, a folder). A file past the cap is not opened and its size is
+/// not asked, and one warning line says how many theme files the folder
+/// holds. One look is taken at an entry whether or not it is read: an entry
+/// named as a theme file that is a link is followed once (`fs::metadata`, in
+/// `is_theme_file_entry`) to tell whether it points at a folder, which is no
+/// theme file and is not counted — past the cap too, since the count and the
+/// order are of the theme files alone. Of the files left unread one name is
+/// kept, the first ([`Loaded::first_unread`]), and no other.
 fn load_folder_capped(dir: &Path, cap: usize) -> Loaded {
     let mut warnings = Vec::new();
     let entries = match fs::read_dir(dir) {
@@ -111,6 +121,11 @@ fn load_folder_capped(dir: &Path, cap: usize) -> Loaded {
         .map(|entry| entry.path())
         .collect();
     paths.sort();
+    // The one name kept of a folder over its cap: the first file left unread.
+    let first_unread = paths
+        .get(cap)
+        .and_then(|path| path.as_path().file_name())
+        .map(OsStr::to_os_string);
     if paths.len() > cap {
         warnings.push(format!(
             "theme folder {}: holds {} theme files; only the first {cap} by name are read",
@@ -137,6 +152,7 @@ fn load_folder_capped(dir: &Path, cap: usize) -> Loaded {
         themes: themes.into_values().collect(),
         warnings,
         problems,
+        first_unread,
     }
 }
 
@@ -173,10 +189,30 @@ fn is_theme_file_entry(entry: &fs::DirEntry) -> bool {
         return false;
     }
     match entry.file_type() {
-        Ok(kind) if kind.is_dir() => false,
-        Ok(kind) if kind.is_symlink() => !fs::metadata(&path).is_ok_and(|target| target.is_dir()),
-        _ => true,
+        Ok(kind) => is_no_folder(&path, kind),
+        // A kind that cannot be told is counted: reading the file says
+        // what is wrong with it.
+        Err(_) => true,
     }
+}
+
+/// Whether what stands at `path`, an entry of the kind `kind`, is no folder.
+/// A link is followed to tell — one `fs::metadata` — and nothing is opened.
+fn is_no_folder(path: &Path, kind: fs::FileType) -> bool {
+    if kind.is_symlink() {
+        !fs::metadata(path).is_ok_and(|target| target.is_dir())
+    } else {
+        !kind.is_dir()
+    }
+}
+
+/// Whether `path` is one of its folder's theme files, as
+/// `is_theme_file_entry` tells an entry of the folder: there, named as a
+/// theme file is, and no folder. One look at the name and one more through
+/// a link; nothing is opened.
+fn is_theme_file_at(path: &Path) -> bool {
+    has_theme_file_name(path)
+        && fs::symlink_metadata(path).is_ok_and(|found| is_no_folder(path, found.file_type()))
 }
 
 /// The theme in `path`, or `None` — said, unless it is no theme file at all
@@ -411,6 +447,10 @@ pub(crate) struct Catalog {
     /// The most theme files a read takes from the folder:
     /// [`MAX_THEME_FILES`], and less only where a test asks for less.
     cap: usize,
+    /// The first theme file by name that the last read left unread
+    /// ([`Loaded::first_unread`]): the one name kept of a folder over its
+    /// cap, by which `past_cap` tells a file the read never came to.
+    first_unread: Option<OsString>,
 }
 
 impl Default for Catalog {
@@ -426,6 +466,7 @@ impl Catalog {
             said: BTreeSet::new(),
             problems: BTreeMap::new(),
             cap: MAX_THEME_FILES,
+            first_unread: None,
         }
     }
 
@@ -438,9 +479,11 @@ impl Catalog {
             themes,
             warnings,
             problems,
+            first_unread,
         } = dir.map_or_else(Loaded::default, |dir| load_folder_capped(dir, cap));
         self.themes = Some(themes);
         self.problems = problems;
+        self.first_unread = first_unread;
         let fresh = warnings
             .iter()
             .filter(|warning| !self.said.contains(*warning))
@@ -481,6 +524,25 @@ impl Catalog {
     /// file is as it was.
     pub(crate) fn problems(&self, slug: &str) -> usize {
         self.problems.get(slug).copied().unwrap_or(0)
+    }
+
+    /// The cap, when the theme `slug` has a file in `dir` that the last read
+    /// left unread for it: `<slug>.json` is one of the folder's theme files
+    /// (`is_theme_file_at`) and stands at or after the first one left unread,
+    /// in the order the read sorted the folder by. `None` for a name no file
+    /// has, for a file the read took — whether or not it made a theme — and
+    /// whenever every theme file was read. One look at that one name, and
+    /// none unless the folder was over its cap; nothing is opened or read.
+    pub(crate) fn past_cap(&self, dir: Option<&Path>, slug: &str) -> Option<usize> {
+        let first_unread = self.first_unread.as_deref()?;
+        if !theme::is_valid_slug(slug) {
+            return None;
+        }
+        let name = format!("{slug}.json");
+        // The read sorted whole file names, `.json` and all: `a-b.json`
+        // stands before `a.json`.
+        let unread = OsStr::new(&name) >= first_unread && is_theme_file_at(&dir?.join(&name));
+        unread.then_some(self.cap)
     }
 
     /// `terminal`, else the person's theme of that name, else the built-in one.
@@ -556,9 +618,33 @@ pub(crate) fn problems(slug: &str) -> usize {
         .problems(slug)
 }
 
+/// The cap, when the person's theme `slug` has a file in the themes folder
+/// that the last read left unread because the folder holds more theme files
+/// than that (`Catalog::past_cap`). Asked for a name no theme has, and by
+/// nothing on the road of a name that is known. The folder is not read for
+/// this.
+pub(crate) fn past_cap(slug: &str) -> Option<usize> {
+    let dir = user_themes_dir();
+    CATALOG
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .past_cap(dir.as_deref(), slug)
+}
+
 /// Reads the person's themes folder at start, saying what is wrong in it.
 pub(crate) fn read_at_start() {
     with_catalog(|catalog, dir| ((), catalog.read(dir)));
+}
+
+#[cfg(test)]
+impl Catalog {
+    /// A catalog whose reads take at most `cap` theme files.
+    fn capped(cap: usize) -> Self {
+        Self {
+            cap,
+            ..Self::new()
+        }
+    }
 }
 
 /// Has the process catalog of this run read `dir`, at most `cap` theme files
@@ -574,6 +660,7 @@ pub(crate) fn read_folder_in_this_run(dir: &Path, cap: usize) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsStr;
     use std::fs;
     use std::path::Path;
 
@@ -962,6 +1049,67 @@ mod tests {
             load_folder_capped(dir.path(), MAX_THEME_FILES),
             "the folder is read with the cap of {MAX_THEME_FILES}"
         );
+    }
+
+    /// A catalog tells a theme file its read left unread past the cap from a
+    /// name no file has and from a file the read took, by the one name the
+    /// read kept — the first it left — and one look at the name asked. A
+    /// folder and a link to one are no theme files; a link to a file is.
+    #[test]
+    fn the_catalog_tells_a_theme_file_past_the_cap_from_a_missing_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let theme = r##"{"colors":{"accent":"#112233"}}"##;
+        // By file name `a-b.json` stands before `a.json`, and a cap of three
+        // takes them and `aa-broken.json`, which makes no theme.
+        for name in ["a-b.json", "a.json", "bravo.json", "charlie.json", "delta.json"] {
+            write_theme(dir.path(), name, theme);
+        }
+        write_theme(dir.path(), "aa-broken.json", "{ not valid json");
+        fs::create_dir_all(dir.path().join("zz-folder.json")).expect("create a folder named .json");
+        #[cfg(unix)]
+        for (target, link) in [("zz-folder.json", "zz-link-to-folder.json"), ("charlie.json", "zz-link.json")] {
+            std::os::unix::fs::symlink(dir.path().join(target), dir.path().join(link)).expect("link");
+        }
+        let folder = Some(dir.path());
+
+        let loaded = load_folder_capped(dir.path(), 3);
+        assert_eq!(loaded.first_unread.as_deref(), Some(OsStr::new("bravo.json")));
+        assert_eq!(loaded.themes.len(), 2, "{:?}", loaded.warnings);
+        assert_eq!(load_folder(dir.path()).first_unread, None, "every theme file is read");
+
+        let mut catalog = Catalog::capped(3);
+        assert_eq!(catalog.past_cap(folder, "bravo"), None, "nothing is unread before a read");
+        let _ = catalog.names(folder);
+        for unread in ["bravo", "charlie", "delta"] {
+            assert_eq!(catalog.past_cap(folder, unread), Some(3), "{unread}");
+            assert!(catalog.find(unread).is_none(), "{unread} was not read");
+        }
+        #[cfg(unix)]
+        assert_eq!(catalog.past_cap(folder, "zz-link"), Some(3), "a link to a file is a theme file");
+        // Read, a theme or not; no such file; a folder and a link to one;
+        // no theme name at all.
+        let others = ["a-b", "a", "aa-broken", "zebra", "zz-folder", "zz-link-to-folder", "../bravo", "Bravo", ""];
+        for other in others {
+            assert_eq!(catalog.past_cap(folder, other), None, "{other:?}");
+        }
+        assert_eq!(catalog.past_cap(None, "bravo"), None, "no folder holds no file");
+
+        // Every theme file read: no name is past the cap.
+        let mut whole = Catalog::new();
+        assert_eq!(whole.cap, MAX_THEME_FILES, "the process catalog reads by the cap");
+        let _ = whole.names(folder);
+        for name in ["bravo", "delta", "aa-broken", "zebra"] {
+            assert_eq!(whole.past_cap(folder, name), None, "{name}");
+        }
+
+        // The folder back under the cap: the next read forgets the name it
+        // kept, and reads what it had left.
+        for gone in ["a-b.json", "a.json", "aa-broken.json", "zz-link.json"] {
+            let _ = fs::remove_file(dir.path().join(gone));
+        }
+        let _ = catalog.names(folder);
+        assert_eq!(catalog.past_cap(folder, "bravo"), None);
+        assert!(catalog.find("bravo").is_some(), "bravo is read now");
     }
 
     /// A theme file's mistakes are counted for its theme — two for two, none

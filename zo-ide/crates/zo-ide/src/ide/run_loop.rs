@@ -784,9 +784,18 @@ fn handle_theme_slash<W: Write>(
         note(renderer, &format!("themes: {}", theme::names_line()));
         return;
     }
-    let Ok(chosen) = theme::resolve_name(arg) else {
-        note(renderer, &format!("{arg:?} 라는 테마는 없습니다 — themes: {}", theme::names_line()));
-        return;
+    let chosen = match theme::resolve_name(arg) {
+        Ok(chosen) => chosen,
+        // The theme's file is there, unread past the cap: the names there
+        // are would not hold it, so the answer is why.
+        Err(theme::ThemeResolveError::PastCap { cap }) => {
+            note(renderer, &crate::tui::strings::theme_past_cap(arg, cap));
+            return;
+        }
+        Err(theme::ThemeResolveError::Invalid | theme::ThemeResolveError::Unknown) => {
+            note(renderer, &format!("{arg:?} 라는 테마는 없습니다 — themes: {}", theme::names_line()));
+            return;
+        }
     };
     let name = theme::shown_name(&chosen);
     let slug = (!chosen.is_terminal()).then_some(chosen.name.as_str());
@@ -1831,5 +1840,50 @@ mod tests {
         assert!(cleared.contains("theme → terminal"), "{cleared:?}");
         assert_eq!(std::fs::read_to_string(&settings).expect("read"), initial, "terminal takes the key out");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/theme <name>` on the plain screen for a theme whose file is in the
+    /// themes folder past the cap: why it was not read, in place of the
+    /// names there are, and nothing saved. A name no file has is answered
+    /// as it was, and the bare `/theme` says the start's warning.
+    #[test]
+    fn plain_front_theme_says_why_a_theme_past_the_cap_was_not_read() {
+        let module = module_path!().split_once("::").map_or(module_path!(), |(_crate, path)| path);
+        let test = format!("{module}::plain_front_theme_says_why_a_theme_past_the_cap_was_not_read");
+        if !crate::tui::style::in_fresh_run(&test) {
+            return;
+        }
+        let themes = crate::support::temp_dir("plain-front-theme-cap-themes");
+        for name in ["alpha.json", "bravo.json", "zz-mine.json"] {
+            std::fs::write(themes.join(name), "{}").expect("write a theme file");
+        }
+        crate::tui::theme_files::read_folder_in_this_run(&themes, 2);
+        let dir = crate::support::temp_dir("plain-front-theme-cap");
+        let settings = dir.join("settings.json");
+        let initial = "{\n  \"theme\": \"zz-mine\"\n}\n";
+        std::fs::write(&settings, initial).expect("seed settings");
+        let run = |arg: &str| -> String {
+            let mut written = Vec::new();
+            {
+                let mut renderer = super::Renderer::new(&mut written, super::RenderOptions::default());
+                super::handle_theme_slash(arg, &settings, None, &mut renderer);
+            }
+            String::from_utf8_lossy(&written).into_owned()
+        };
+        let reason = "theme \"zz-mine\" was not read: it is past the first 2 theme files by name";
+
+        let unread = run("zz-mine");
+        assert!(unread.contains(reason), "{unread:?}");
+        assert!(!unread.contains("dracula") && !unread.contains("theme →"), "{unread:?}");
+        let unknown = run("no-such-theme");
+        assert!(unknown.contains("라는 테마는 없습니다") && unknown.contains("dracula"), "{unknown:?}");
+        assert!(!unknown.contains("was not read"), "{unknown:?}");
+        // The setting names the unread theme: the listing says so.
+        let listed = run("");
+        assert!(listed.contains("theme terminal"), "{listed:?}");
+        assert!(listed.contains(&format!("{reason}; using terminal")), "{listed:?}");
+        assert_eq!(std::fs::read_to_string(&settings).expect("read"), initial, "nothing was saved");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&themes);
     }
 }
