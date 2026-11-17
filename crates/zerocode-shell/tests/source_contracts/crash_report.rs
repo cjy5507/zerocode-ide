@@ -76,9 +76,39 @@ fn crash_report_preserves_the_boot_pin_and_uses_existing_panic_and_resume_roads(
     );
     assert!(
         watchdog.contains(
-            "(self.watch.pending.is_some() && self.answer.peek().is_none()).then(main_loop_now)"
-        ),
+            "let unanswered = self.watch.pending.is_some() && self.answer.peek().is_none();"
+        ) && watchdog.contains("let main_loop = unanswered.then(main_loop_now).flatten();"),
         "the watchdog no longer asks the main run loop only of a ping left unanswered"
+    );
+    // t-112301: what the watch finds of a hold reaches the log from `tick()`
+    // alone, and no unit test passes through `tick()`. Each of its three
+    // lines is held to the field of the tick it is written from.
+    for (found, line) in [
+        (
+            "if let Some(ms) = tick.held {",
+            "\"main queue held: {ms}ms main_scope={scope}\"",
+        ),
+        (
+            "if let Some(ms) = tick.held_ended {",
+            "\"main queue held ended: {ms}ms\"",
+        ),
+        (
+            "if let Some(Voided { ms, why }) = tick.held_voided {",
+            "\"main queue held withdrawn: {ms}ms {why}\"",
+        ),
+    ] {
+        assert!(
+            super::support::block_after(&watchdog, found).contains(line),
+            "the watchdog no longer writes `{line}` from `{found}`"
+        );
+    }
+    // Where no run loop is asked, a hang says nothing of one. Nothing on a
+    // Mac runs the other platforms' side, so its text is held here.
+    assert!(
+        watchdog.contains(
+            "#[cfg(not(target_os = \"macos\"))]\nfn main_loop_now() -> Option<MainLoop> {\n    None\n}"
+        ),
+        "the watchdog says something of a run loop where it asks none"
     );
     let crash = std::fs::read_to_string(src.join("crash.rs")).unwrap();
     assert_eq!(crash.matches("pub(crate) struct Limits").count(), 1);

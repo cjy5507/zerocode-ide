@@ -71,6 +71,10 @@ struct Tick {
     /// How long a queue said held stood in all, said on the beat its ping
     /// is answered.
     held_ended: Option<u64>,
+    /// A queue said held whose count an absence ended. The observer was not
+    /// there to see the ping answered, so what it can say is that it stopped
+    /// counting, how far it had counted and why.
+    held_voided: Option<Voided>,
 }
 
 /// How often a hang still open is said again (t-75646): the 3 min 40 s of
@@ -206,7 +210,16 @@ impl Watch {
             self.warm_until = now.saturating_add(limits.warmup_ms);
             self.noted = false;
             self.badged = false;
-            self.held = None;
+            if let Some(held) = self.held.take()
+                && held.said
+            {
+                // A hold already on the log is not left open there: its line
+                // would stand with no end, as if the menu were still up.
+                tick.held_voided = Some(Voided {
+                    ms: now.saturating_sub(held.from),
+                    why,
+                });
+            }
             return tick;
         }
         if now < self.warm_until {
@@ -553,9 +566,10 @@ impl Monitor {
             ..Limits::DEFAULT
         };
         // Asked only of a main thread that has not answered its ping, so a
-        // beat that finds the ping answered pays nothing for it (t-110411).
-        let main_loop =
-            (self.watch.pending.is_some() && self.answer.peek().is_none()).then(main_loop_now);
+        // beat that finds the ping answered pays nothing for it (t-110411),
+        // and only where there is a run loop to ask.
+        let unanswered = self.watch.pending.is_some() && self.answer.peek().is_none();
+        let main_loop = unanswered.then(main_loop_now).flatten();
         let beat = Beat {
             now,
             wall: wall_ms(),
@@ -614,6 +628,15 @@ impl Monitor {
             crate::note_window_event(
                 app.state::<crate::AppState>().local_data_root(),
                 &format!("main queue held ended: {ms}ms"),
+            );
+        }
+        if let Some(Voided { ms, why }) = tick.held_voided {
+            // The hold's end as the watch can say it: it was not there for the
+            // ping's answer, so its count is withdrawn, not ended.
+            crate::crumbs::record("main_queue_held_withdrawn", format_args!("ms={ms} {why}"));
+            crate::note_window_event(
+                app.state::<crate::AppState>().local_data_root(),
+                &format!("main queue held withdrawn: {ms}ms {why}"),
             );
         }
         if queue {
@@ -787,7 +810,7 @@ fn wall_ms() -> u64 {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum MainLoop {
-    /// Working — or not asked, where nothing is.
+    /// At work.
     Running,
     /// Waiting for an event, in the run loop mode named.
     Waiting(String),
@@ -803,6 +826,19 @@ impl MainLoop {
     /// answer, which is a hang, and no record has shown a person held there;
     /// a hang's `hang_loop` line names the mode, so one that should be
     /// excused shows itself first.
+    ///
+    /// A main thread that does not sleep but polls its run loop in that mode
+    /// can be read as waiting too: Core Foundation raises the waiting flag
+    /// for every pass through the loop, the ones with no timeout among them.
+    /// Measured 2026-11-17 on macOS 26.3.1, with no menu, two seconds a row
+    /// and twice: asleep in the mode, 99.7 % of readings; polling with
+    /// nothing between passes, 56–62 % (AppKit's own poll, 32 %); with
+    /// 0.1 ms of work between passes, 0.2 %; with 1 ms or more, none. So a
+    /// loop that does any work is filed on time — one reading in five
+    /// hundred starts its threshold again — and a loop that only polls is
+    /// held, which is what it is doing: asking for the next event. Two
+    /// readings 2 ms apart left the bare poll at 33–39 % and moved neither
+    /// case, so the watch reads once.
     fn holds(&self) -> bool {
         matches!(self, Self::Waiting(mode) if mode == EVENT_TRACKING_MODE)
     }
@@ -819,8 +855,8 @@ impl fmt::Display for MainLoop {
 
 /// The main run loop, asked from this thread.
 #[cfg(target_os = "macos")]
-fn main_loop_now() -> MainLoop {
-    objc2_core_foundation::CFRunLoop::main().map_or(MainLoop::Running, |main| loop_now(&main))
+fn main_loop_now() -> Option<MainLoop> {
+    objc2_core_foundation::CFRunLoop::main().map(|main| loop_now(&main))
 }
 
 /// A run loop, asked from a thread that does not run it. Whether it waits is
@@ -841,10 +877,11 @@ fn loop_now(run_loop: &objc2_core_foundation::CFRunLoop) -> MainLoop {
     })
 }
 
-/// Elsewhere nothing is asked: a main thread that does not answer is at work.
+/// Elsewhere there is no run loop to ask, and a hang says nothing of one:
+/// its record carries no `hang loop` line there.
 #[cfg(not(target_os = "macos"))]
-fn main_loop_now() -> MainLoop {
-    MainLoop::Running
+fn main_loop_now() -> Option<MainLoop> {
+    None
 }
 
 /// Whether any screen is awake to show the window. CoreGraphics counts a
@@ -1347,7 +1384,7 @@ mod tests {
 
     /// A wait read while the watch warms up, or on a beat the observer was
     /// not there for, changes nothing: neither judges, with it or without,
-    /// and an absence ends the hold's own count with the episode.
+    /// and an absence ends a hold not yet said with the episode, in silence.
     #[test]
     fn a_wait_read_in_warm_up_or_in_an_absence_changes_nothing() {
         let limits = Limits::DEFAULT;
@@ -1362,11 +1399,11 @@ mod tests {
         assert!(watch.step(beat(sent), None, limits).ping);
         let mut now = sent;
         let mut said = Vec::new();
-        while now < sent + 3_000 {
+        while now < sent + 1_000 {
             now += limits.ping_ms;
             said.extend(watch.step(held(now), None, limits).held);
         }
-        assert_eq!(said, [limits.first_ms]);
+        assert_eq!(said, [0_u64; 0]);
         let late = Beat {
             nap: limits.ping_ms * 3,
             ..held(now + limits.ping_ms)
@@ -1378,6 +1415,46 @@ mod tests {
             Tick::default(),
             "the watch warms up again, as after any absence"
         );
+    }
+
+    /// A hold already said is not left open on the log when the observer
+    /// stops being there — a beat back late, a sleep, a screen gone dark. Its
+    /// count ends with the episode as before; what the watch had said is
+    /// answered with one more line: withdrawn, how far it had counted, and
+    /// why. No end is said later for a ping answered while nobody watched.
+    #[test]
+    fn a_hold_already_said_is_said_withdrawn_when_the_observer_was_not_there() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let mut now = sent;
+        let mut said = Vec::new();
+        while now < sent + 3_000 {
+            now += limits.ping_ms;
+            said.extend(watch.step(held(now), None, limits).held);
+        }
+        assert_eq!(said, [limits.first_ms]);
+        now += limits.ping_ms;
+        let late = Beat {
+            nap: limits.ping_ms * 3,
+            ..held(now)
+        };
+        assert_eq!(
+            watch.step(late, None, limits),
+            Tick {
+                held_voided: Some(Voided {
+                    ms: now - sent,
+                    why: Absence::Late(limits.ping_ms * 2),
+                }),
+                ..Tick::default()
+            }
+        );
+        assert!(watch.held.is_none() && watch.pending.is_none());
+        let back = now + limits.warmup_ms;
+        let tick = watch.step(beat(back), Some(now + 1), limits);
+        assert_eq!((tick.held_ended, tick.held_voided), (None, None));
+        assert!(tick.ping, "the watch pings again once it has warmed up");
     }
 
     /// Only a wait in AppKit's event-tracking mode is taken for the person's
@@ -1403,7 +1480,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_main_run_loop_nobody_runs_is_not_found_waiting() {
-        assert_eq!(main_loop_now(), MainLoop::Running);
+        assert_eq!(main_loop_now(), Some(MainLoop::Running));
+    }
+
+    /// Elsewhere no run loop is asked, so a hang there says nothing of one.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn where_no_run_loop_is_asked_none_is_said_of_one() {
+        assert_eq!(main_loop_now(), None);
     }
 
     /// The same question, of a run loop that does sleep. A thread of the
