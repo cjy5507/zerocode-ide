@@ -1712,11 +1712,23 @@ fn the_delegation_rubric_is_on_by_default_and_off_without_the_spawn_family() {
     fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
+/// The Response Style Contract's bullet that sends the model to `Skill` before
+/// it writes a page, found by the words that say so.
+fn skill_page_bullet(sections: &[String]) -> Option<&str> {
+    sections
+        .iter()
+        .flat_map(|section| section.lines())
+        .find(|line| line.contains("read artifact-design with Skill"))
+}
+
 /// Each section that teaches a tool follows that tool: a session that reaches
 /// none of a section's tools is not sent it, one that reaches any of them is,
 /// and nothing else in the prompt moves. `# Persistent memory` follows
 /// `MemoryWrite` — the tool its text says to write with — not the file tools
-/// every session keeps.
+/// every session keeps. The Response Style Contract's bullet that sends the
+/// model to `Skill` before it writes a page follows the skill tools as
+/// `# Skills and library documentation` does; the rest of the contract goes to
+/// every session.
 #[test]
 fn a_section_that_teaches_a_tool_is_sent_only_to_a_session_that_reaches_it() {
     let _guard = env_lock();
@@ -1741,17 +1753,28 @@ fn a_section_that_teaches_a_tool_is_sent_only_to_a_session_that_reaches_it() {
     let every = build(PromptToolReach::default());
     assert_eq!(build(PromptToolReach::from_fn(|_| true)), every, "reaching every tool is the default prompt");
     let core = build(PromptToolReach::from_fn(|tool| matches!(tool, "bash" | "read_file" | "write_file" | "apply_patch")));
+    let page_bullet = skill_page_bullet(&every).expect("the full prompt sends the model to Skill before a page");
+    let carrying = every.iter().filter(|section| section.contains(page_bullet)).count();
+    assert_eq!(carrying, 1, "the full prompt carries that bullet once");
     let untaught: Vec<String> = every
         .iter()
         .filter(|section| !teaching.iter().any(|(heading, _)| section.lines().next() == Some(*heading)))
-        .cloned()
+        .map(|section| section.replacen(&format!("\n{page_bullet}"), "", 1))
         .collect();
     assert_eq!(every.len(), untaught.len() + teaching.len(), "the full prompt carries all four");
-    assert_eq!(core, untaught, "a session that reaches none of their tools loses the four sections and nothing else");
+    assert_eq!(skill_page_bullet(&core), None, "a session that reaches no skill tool is not sent to Skill");
+    assert_eq!(
+        core, untaught,
+        "a session that reaches none of their tools loses the four sections and the Skill bullet, and nothing else"
+    );
     for (heading, tool) in teaching {
         let one = build(PromptToolReach::from_fn(|name| name == tool));
         assert!(one.iter().any(|section| section.lines().next() == Some(heading)), "{tool} keeps {heading}");
         assert_eq!(one.len(), core.len() + 1, "{tool} keeps {heading} alone");
+    }
+    for tool in ["Skill", "skill_load", "skill_search"] {
+        let one = build(PromptToolReach::from_fn(|name| name == tool));
+        assert_eq!(skill_page_bullet(&one), Some(page_bullet), "{tool} keeps the Skill bullet");
     }
 
     fs::remove_dir_all(root).expect("cleanup temp dir");

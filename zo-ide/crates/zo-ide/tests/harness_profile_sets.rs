@@ -12,13 +12,14 @@
 //! A tool set of `headless_core` is `core` for a run nobody attends and `full`
 //! for every other session. Whatever the tool set, the system text names only
 //! tools the session can reach: the four sections that teach a tool, the
-//! deferred-tool paragraph and a background command's start line follow the
-//! tools the session was given. A reopened session sends the text it stored
-//! when it opened. A run nobody attends that reopens it is given the tools its
-//! profile chose for that text; a session a launch list opened keeps no list
-//! and reopens on every tool, as 1.1.159 did. A person who reopens a session
-//! gets what the run decides then — every run here is one nobody attends, so
-//! `plain_session`'s own table shows that side.
+//! Response Style Contract's line that sends the model to `Skill` before it
+//! writes a page, the deferred-tool paragraph and a background command's start
+//! line follow the tools the session was given. A reopened session sends the
+//! text it stored when it opened. A run nobody attends that reopens it is
+//! given the tools its profile chose for that text; a session a launch list
+//! opened keeps no list and reopens on every tool, as 1.1.159 did. A person
+//! who reopens a session gets what the run decides then — every run here is
+//! one nobody attends, so `plain_session`'s own table shows that side.
 
 #[expect(dead_code, reason = "the env guard is shared; its HTTP server and model reader are not used here")]
 #[path = "support/custom_models.rs"]
@@ -62,6 +63,10 @@ const UNREACHED_TEXT: [&str; 5] = [
     "# Persistent memory",
     "# Deferred tools",
 ];
+/// The words of the Response Style Contract's line that sends the model to
+/// `Skill` before it writes a page. A session that reaches no skill tool is not
+/// sent that line.
+const SKILL_LINE_WORDS: &str = "read artifact-design with Skill";
 /// The line a background command starts with while the task tools reach it.
 const TASK_TOOLS_LINE: &str = "Poll output with TaskOutput(task_id), stop with TaskStop.";
 
@@ -483,10 +488,16 @@ fn a_core_profile_sends_the_request_the_experiment_switches_send() {
     );
 }
 
+/// The one line of `text` that holds `words`, with the line break before it.
+fn line_holding(text: &str, words: &str) -> Option<String> {
+    text.lines().find(|line| line.contains(words)).map(|line| format!("\n{line}"))
+}
+
 /// A run nobody attends, given no tool list, on a model whose profile says
 /// `headless_core`, sends the request the light-surface arm measured: the
 /// shell, `Read`, `Write` and the edit shape, and the full system text less the
-/// four sections that teach a tool it does not reach and the deferred-tool
+/// four sections that teach a tool it does not reach, the Response Style
+/// Contract's line that sends the model to `Skill`, and the deferred-tool
 /// paragraph whose doors (`CapabilityInvoke`, `ToolSearch`) it does not have —
 /// nothing else moves. The arm's own switches send that request byte for byte
 /// on this build, and a launch list of the same four tools drops the same text.
@@ -509,13 +520,21 @@ fn a_headless_core_run_sends_the_request_the_light_surface_arm_measured() {
         assert!(full_tools.iter().any(|name| name == tool), "a full run offers {tool}: {full_tools:?}");
     }
     let full_text = system_text(&everything.0);
-    let expected = UNREACHED_TEXT.iter().fold(full_text, |text, heading| cut_section(&text, heading));
+    let skill_line = line_holding(&full_text, SKILL_LINE_WORDS).expect("a full run is sent to Skill before it writes a page");
+    assert_eq!(full_text.matches(&skill_line).count(), 1, "a full run is sent that line once");
+    let unskilled = full_text.replacen(&skill_line, "", 1);
+    let expected = UNREACHED_TEXT.iter().fold(unskilled, |text, heading| cut_section(&text, heading));
 
     assert_eq!(tool_names(&unattended.1), ["Bash", "Read", "Write", "apply_patch"], "headless_core offers the core four");
     assert_eq!(
+        line_holding(&system_text(&unattended.0), SKILL_LINE_WORDS),
+        None,
+        "a run that reaches no skill tool is not sent to Skill before it writes a page"
+    );
+    assert_eq!(
         system_text(&unattended.0),
         expected,
-        "headless_core sends the full text less the four sections and the deferred-tool paragraph"
+        "headless_core sends the full text less the four sections, the Skill line and the deferred-tool paragraph"
     );
     assert_eq!(
         (serde_json::to_string(&unattended.0).expect("system"), serde_json::to_string(&unattended.1).expect("tools")),
