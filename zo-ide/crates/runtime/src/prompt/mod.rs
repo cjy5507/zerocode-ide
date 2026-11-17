@@ -420,7 +420,9 @@ fn log_prompt_boot_component(label: &str, started: std::time::Instant) {
 }
 
 /// The tools each tool-teaching static section is about. A section is sent only
-/// to a session that reaches one of its tools ([`PromptToolReach`]).
+/// to a session that reaches one of its tools ([`PromptToolReach`]). The skill
+/// tools also decide the Response Style Contract's bullet that sends the model
+/// to `Skill` before it writes a page.
 const DELEGATION_TOOLS: &[&str] = &["Agent", "SpawnMultiAgent", "Workflow"];
 const CLARIFICATION_TOOLS: &[&str] = &["AskUserQuestion"];
 const SKILL_TOOLS: &[&str] = &["Skill", "skill_load", "skill_search"];
@@ -440,8 +442,11 @@ const POWERSHELL_TOOLS: &[&str] = &["PowerShell"];
 /// `AskUserQuestion`, `# Skills and library documentation` follows `Skill`
 /// (and the deferred `skill_load`, `skill_search`), and `# Persistent memory`
 /// follows `MemoryWrite` — the tool its text says to write with, not the file
-/// tools a session keeps. The default reaches every tool: the prompt every
-/// session was sent before sessions differed in their tools.
+/// tools a session keeps. One bullet goes the same way inside a section every
+/// session is sent: the Response Style Contract's line that sends the model to
+/// `Skill` (artifact-design) before it writes a page follows the skill tools.
+/// The default reaches every tool: the prompt every session was sent before
+/// sessions differed in their tools.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PromptToolReach {
     unreached: BTreeSet<&'static str>,
@@ -584,7 +589,9 @@ impl SystemPromptBuilder {
             .unwrap_or_default();
         let arm = prompt_arm(profile.prompt_set);
         sections.push(get_simple_intro_section(self.output_style_name.is_some()));
-        sections.push(get_response_style_contract_section());
+        sections.push(get_response_style_contract_section(
+            self.tool_reach.reaches_any(SKILL_TOOLS),
+        ));
         if let (Some(name), Some(prompt)) = (&self.output_style_name, &self.output_style_prompt) {
             sections.push(format!("# Output Style: {name}\n{prompt}"));
         }

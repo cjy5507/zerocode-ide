@@ -139,8 +139,13 @@ pub(super) fn get_simple_intro_section(has_output_style: bool) -> String {
     format!("{}\n{role}\n\n{INTRO_LINK_RULE}", super::CLAUDE_CODE_IDENTITY)
 }
 
-pub(super) fn get_response_style_contract_section() -> String {
-    let items = prepend_bullets(vec![
+/// How the model writes its answers. The bullet on audience-facing pages sends
+/// the model to `Skill` (artifact-design) before it writes HTML, so it comes
+/// only with `reaches_skill` — a session that reaches a skill tool, the ones
+/// `# Skills and library documentation` follows. The other bullets go to every
+/// session, word for word.
+pub(super) fn get_response_style_contract_section(reaches_skill: bool) -> String {
+    let mut items = vec![
         "Write for a teammate catching up: explain codenames, shorthand, and conclusions without relying on process history.".to_string(),
         "Put every answer, finding, conclusion, and deliverable in the final text message of your turn, with no later tool calls. Between calls, give only brief status; repeat any important interim result in the final.".to_string(),
         // What "the outcome" is, said out: a model that is told only to lead
@@ -149,7 +154,13 @@ pub(super) fn get_response_style_contract_section() -> String {
         // paragraph (seen 2026-11-13 on an "analyse this project" request), or
         // on what it did to find out ("I compared the README with the code.").
         "Lead with the outcome: the first sentence is the answer, the verdict, or what changed — the conclusion, not its topic. For an analysis or a review that is your overall judgment, not what the thing is. Do not open by defining the subject (\"X is a …\") unless that was the question, by repeating the request, or by recounting what you did; supporting detail comes after.".to_string(),
-        "For requested audience-facing reports, plans or decision briefs, read artifact-design with Skill before writing HTML; use dataviz for charts and artifact-diagramming for diagrams. Publish through Artifact and give its returned link. For an unrequested page, offer it in one line.".to_string(),
+    ];
+    if reaches_skill {
+        items.extend([
+            "For requested audience-facing reports, plans or decision briefs, read artifact-design with Skill before writing HTML; use dataviz for charts and artifact-diagramming for diagrams. Publish through Artifact and give its returned link. For an unrequested page, offer it in one line.".to_string(),
+        ]);
+    }
+    items.extend([
         "Keep prose selective, but readable matters more than brevity. Use complete sentences, not fragments, abbreviations, jargon, arrow chains, or references to labels you invented elsewhere.".to_string(),
         "Before your first tool call, state the next action in one sentence. During work, briefly note load-bearing findings or changes of direction.".to_string(),
         "Match the response to the question: answer simple questions directly in prose. Use tables only for short enumerable facts and explain them outside the cells.".to_string(),
@@ -160,7 +171,7 @@ pub(super) fn get_response_style_contract_section() -> String {
     ]);
 
     std::iter::once("# Response Style Contract".to_string())
-        .chain(items)
+        .chain(prepend_bullets(items))
         .collect::<Vec<_>>()
         .join("\n")
 }
