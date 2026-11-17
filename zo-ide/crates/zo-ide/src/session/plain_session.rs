@@ -3105,22 +3105,26 @@ fn load_stored_prompt(session_path: &Path) -> Option<StoredPrompt> {
 /// list, which also takes away a list an earlier prompt of this session left
 /// — only a file that reads as one: beside a transcript reopened by its path
 /// the name may be the person's, and a file that does not read as a list
-/// reads as every tool anyway. The list is written first and the prompt only
-/// once it stands, so a prompt never sits beside a list it was not built for;
-/// without a prompt a reopen builds afresh. Best effort, like the prompt
-/// always was.
+/// reads as every tool anyway. A list is written the same way, over no file
+/// or over a list of this store's alone (t-112277): the person's file of that
+/// name is left as it was, and so is the prompt, as when a list cannot be
+/// written. The list is written first and the prompt only once it stands, so
+/// a prompt never sits beside a list it was not built for; without a prompt a
+/// reopen builds afresh. Best effort, like the prompt always was.
 fn store_system_prompt(session_path: &Path, sections: &[String], tool_list: Option<&AllowedToolSet>) {
     let list = session_tool_list_path(session_path);
-    let listed = match tool_list {
-        Some(tools) => serde_json::to_vec(&SessionToolList { tools: tools.clone() })
+    let held = std::fs::read(&list);
+    let ours = |raw: &[u8]| serde_json::from_slice::<SessionToolList>(raw).is_ok();
+    let listed = match (tool_list, held) {
+        (Some(_), Ok(raw)) if !ours(&raw) => Err(std::io::Error::other("a file of the list's name is no list of this store's")),
+        (Some(_), Err(error)) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        (Some(tools), _) => serde_json::to_vec(&SessionToolList { tools: tools.clone() })
             .map_err(std::io::Error::other)
             .and_then(|payload| {
                 core_types::paths::write_private_file(&list, &payload, &core_types::paths::ParentDirPolicy::LeaveParent)
             }),
-        None => match std::fs::read(&list) {
-            Ok(raw) if serde_json::from_slice::<SessionToolList>(&raw).is_ok() => std::fs::remove_file(&list),
-            _ => Ok(()),
-        },
+        (None, Ok(raw)) if ours(&raw) => std::fs::remove_file(&list),
+        (None, _) => Ok(()),
     };
     if listed.is_err() {
         return;
@@ -4169,8 +4173,50 @@ mod opening_tool_list_tests {
             "a file that is no list of this store's is left as it was"
         );
 
+        std::fs::remove_file(session_tool_list_path(&session)).expect("the file that is no list goes");
         store_system_prompt(&session, &sections, Some(&core));
         std::fs::remove_file(session_system_prompt_path(&session)).expect("the prompt goes");
         assert!(read().is_none(), "a list without a prompt is no stored prompt");
+    }
+
+    /// The person's file of the list's name is not written over (t-112277):
+    /// beside a transcript reopened by its path, `<stem>.tools` may be theirs.
+    /// It keeps its bytes and its mode, and no prompt is stored beside it — a
+    /// list that cannot stand keeps the prompt back, as a failed write does. A
+    /// list of this store's is written over as before.
+    #[test]
+    fn a_tool_list_is_not_written_over_the_persons_file_of_its_name() {
+        let folder = tempfile::tempdir().expect("a session folder");
+        let session = folder.path().join("notes.jsonl");
+        let list = session_tool_list_path(&session);
+        let sections = vec!["# Zo".to_string(), "fixed".to_string()];
+        let core: AllowedToolSet = ["bash", "read_file", "write_file", "apply_patch"].map(String::from).into();
+        std::fs::write(&list, b"the person's notes\n").expect("the person's file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&list, std::fs::Permissions::from_mode(0o644)).expect("the person's mode");
+        }
+
+        store_system_prompt(&session, &sections, Some(&core));
+        assert_eq!(std::fs::read(&list).expect("the person's file stays"), b"the person's notes\n", "the person's file keeps its bytes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&list).expect("its mode").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "the person's file keeps its mode");
+        }
+        assert!(!session_system_prompt_path(&session).exists(), "no prompt is stored beside a list that could not stand");
+        assert!(load_stored_prompt(&session).is_none(), "the session builds its prompt afresh");
+
+        std::fs::remove_file(&list).expect("the person's file goes");
+        store_system_prompt(&session, &sections, Some(&core));
+        let read: AllowedToolSet = ["read_file"].map(String::from).into();
+        store_system_prompt(&session, &sections, Some(&read));
+        assert_eq!(
+            load_stored_prompt(&session).map(|stored| (stored.sections, stored.tools)),
+            Some((sections, Some(read))),
+            "a list of this store's is written over"
+        );
     }
 }
