@@ -5313,6 +5313,73 @@ fn a_turn_whose_message_did_not_land_does_not_cost_the_next_turn_its_number() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// The streaming loop's twin of the test above, and the road a host's turn
+/// comes in by: its turn start, too, asks for the full write when the turn's
+/// user message did not land. (The fix is one helper both turn starts call;
+/// a turn start that pushed without it would pass the sync test.)
+#[test]
+fn a_streaming_turn_whose_message_did_not_land_does_not_cost_the_next_turn_its_number() {
+    let transcript = temp_transcript_path("streaming-turn-number-lost-message");
+    let path = transcript.to_path_buf();
+    let session = Session::new().with_persistence_path(path.clone());
+    let session_id = session.session_id.clone();
+    let mut runtime = ConversationRuntime::new(
+        session,
+        PlainAnswerClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["You are a test assistant.".to_string()],
+    )
+    .with_async_api_client(Arc::new(SilentAsyncClient));
+    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let streamed = |runtime: &mut ConversationRuntime<PlainAnswerClient, StaticToolExecutor>, words: &str| {
+        tokio_runtime.block_on(async {
+            let (render_tx, _render_rx) = tokio::sync::mpsc::channel(256);
+            let prompter: Arc<dyn crate::permission::PermissionPrompter> =
+                Arc::new(AllowAsyncPrompterForOverflow);
+            runtime
+                .run_turn_streaming_with_images(words, Vec::new(), render_tx, prompter)
+                .await
+        })
+    };
+
+    streamed(&mut runtime, "one").expect("first turn");
+    assert_eq!(runtime.attempt(), format!("{session_id}@1"));
+
+    // Another writer holds the file's lease for a moment and writes nothing:
+    // the second turn takes its number, and its message is refused.
+    runtime.session().release_writer_lease();
+    let peer = Session::load_from_path(&path).expect("the peer reads the file");
+    peer.persist_appended_state_to_path(&path)
+        .expect("the peer takes the lease and has nothing to write");
+    streamed(&mut runtime, "two").expect_err("the second turn's message is refused");
+    assert_eq!(
+        runtime.attempt(),
+        format!("{session_id}@2"),
+        "the turn took its number before its message was refused"
+    );
+    peer.release_writer_lease();
+    drop(peer);
+
+    streamed(&mut runtime, "three").expect("third turn");
+    assert_eq!(runtime.attempt(), format!("{session_id}@3"));
+    // The turn-end persist, as a host makes it.
+    runtime
+        .session()
+        .persist_appended_state_to_path(&path)
+        .expect("turn-end persist");
+    let read_back = Session::load_from_path(&path).expect("the session reads back");
+    assert_eq!(
+        read_back.next_turn_ordinal(),
+        4,
+        "read back, the session would give the third turn's number again"
+    );
+    ::api::note_attempt(&session_id, "");
+}
+
 /// A spawned agent's runtime spends on the attempt its PARENT named, under the
 /// agent's own prompt-cache scope — not a turn key of its own, which would
 /// leave its requests joined to nothing.
