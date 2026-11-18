@@ -911,6 +911,8 @@ mod tests {
             .env_remove(core_types::paths::ZO_CONFIG_HOME_ENV)
             .env_remove(core_types::paths::ZO_HOME_ENV)
             .env_remove("HOME")
+            // Windows' fallback home (`core_types::paths::user_home`).
+            .env_remove("USERPROFILE")
             .status()
             .expect("run isolated no-home config test");
         assert!(status.success(), "isolated no-home config test failed");

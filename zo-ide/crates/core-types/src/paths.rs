@@ -1578,9 +1578,13 @@ mod tests {
             (ZO_CONFIG_HOME_ENV, std::env::var_os(ZO_CONFIG_HOME_ENV)),
             (ZO_HOME_ENV, std::env::var_os(ZO_HOME_ENV)),
             ("HOME", std::env::var_os("HOME")),
+            // Windows' fallback home (`user_home`): cleared too, so the
+            // no-home case below is one on Windows as well.
+            ("USERPROFILE", std::env::var_os("USERPROFILE")),
         ];
         std::env::remove_var(ZO_CONFIG_HOME_ENV);
         std::env::remove_var(ZO_HOME_ENV);
+        std::env::remove_var("USERPROFILE");
         let home = std::env::temp_dir().join(format!(
             "zo-global-roots-{}-{}",
             std::process::id(),
@@ -1619,6 +1623,8 @@ mod tests {
             (ZO_CONFIG_HOME_ENV, std::env::var_os(ZO_CONFIG_HOME_ENV)),
             (ZO_HOME_ENV, std::env::var_os(ZO_HOME_ENV)),
             ("HOME", std::env::var_os("HOME")),
+            // Windows' fallback home (`user_home`), or Windows has a home here.
+            ("USERPROFILE", std::env::var_os("USERPROFILE")),
         ];
         for (key, _) in &prior {
             std::env::remove_var(key);
