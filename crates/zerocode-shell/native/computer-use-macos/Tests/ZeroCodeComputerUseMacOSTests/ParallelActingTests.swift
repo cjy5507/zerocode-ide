@@ -266,6 +266,82 @@ final class ActionDeliveryTests: XCTestCase {
         )
     }
 
+    /// A browser answers a control scrolled out of its page with a frame cut to
+    /// a line at the page's edge. With its own scroll on offer it is not waited
+    /// for; without one, or with no side at all, it waits as before.
+    func testAControlScrolledOutOfViewIsNotWaitedForWhenItOffersToScrollBack() {
+        let line = CGRect(x: 309, y: 798, width: 305, height: 0)
+        XCTAssertEqual(Actionability.of(enabled: true, frame: line, previousFrame: nil, needsFrame: true, scrollsIntoView: true), .outOfView)
+        XCTAssertEqual(Actionability.of(enabled: true, frame: line, previousFrame: nil, needsFrame: true, scrollsIntoView: false), .wait("has no size"))
+        XCTAssertEqual(Actionability.of(enabled: true, frame: line, previousFrame: nil, needsFrame: true), .wait("has no size"))
+        // Upright, at a side edge.
+        XCTAssertEqual(
+            Actionability.of(enabled: true, frame: CGRect(x: 0, y: 40, width: 0, height: 22), previousFrame: nil, needsFrame: true, scrollsIntoView: true),
+            .outOfView
+        )
+        // No side at all, or no frame: not laid out yet, or hidden. A scroll is not known to show it.
+        for frame in [CGRect(x: 10, y: 10, width: 0, height: 0), nil] as [CGRect?] {
+            XCTAssertEqual(Actionability.of(enabled: true, frame: frame, previousFrame: nil, needsFrame: true, scrollsIntoView: true), .wait("has no size"))
+        }
+        // A disabled control waits whatever its frame; one that needs no frame is ready.
+        XCTAssertEqual(Actionability.of(enabled: false, frame: line, previousFrame: nil, needsFrame: true, scrollsIntoView: true), .wait("disabled"))
+        XCTAssertEqual(Actionability.of(enabled: true, frame: line, previousFrame: nil, needsFrame: false, scrollsIntoView: true), .ready)
+        // A control with a size is as it was, whatever it offers.
+        XCTAssertEqual(
+            Actionability.of(enabled: true, frame: CGRect(x: 0, y: 0, width: 1, height: 1), previousFrame: nil, needsFrame: true, scrollsIntoView: true),
+            .ready
+        )
+    }
+
+    /// A control scrolled into view is pressed once it has come to rest: two
+    /// reads alike, the second with a size. Part way in, it is still moving.
+    func testAControlScrolledIntoViewIsPressedOnlyOnceItComesToRest() {
+        let partWay = CGRect(x: 309, y: 780, width: 305, height: 18)
+        let atRest = CGRect(x: 309, y: 640, width: 305, height: 36)
+        XCTAssertFalse(Actionability.cameToRest(atRest, after: nil), "one read is not rest")
+        XCTAssertFalse(Actionability.cameToRest(atRest, after: partWay), "still moving")
+        XCTAssertTrue(Actionability.cameToRest(atRest, after: atRest))
+        XCTAssertTrue(Actionability.cameToRest(atRest, after: atRest.offsetBy(dx: 0.4, dy: -0.4)), "half a point is a rounding difference")
+        let line = CGRect(x: 309, y: 798, width: 305, height: 0)
+        XCTAssertFalse(Actionability.cameToRest(line, after: line), "at rest out of view is not in view")
+        XCTAssertFalse(Actionability.cameToRest(nil, after: atRest))
+    }
+
+    func testOnlyAFrameWithBothSidesIsOneAPersonCouldPressIn() {
+        XCTAssertTrue(Actionability.hasSize(CGRect(x: 0, y: 0, width: 1, height: 1)))
+        XCTAssertFalse(Actionability.hasSize(CGRect(x: 0, y: 0, width: 305, height: 0)))
+        XCTAssertFalse(Actionability.hasSize(nil))
+        XCTAssertFalse(Actionability.cutToALine(CGRect(x: 0, y: 0, width: 1, height: 1)))
+        XCTAssertFalse(Actionability.cutToALine(CGRect(x: 0, y: 0, width: 0, height: 0)))
+        XCTAssertFalse(Actionability.cutToALine(nil))
+    }
+
+    /// Every road that presses a control by its number, or writes it, brings it
+    /// into view first; the scroll is an act of its own, so it asks the person
+    /// as one, and it is read again on the hand's clock, where a stop is heard.
+    func testEveryPressByNumberBringsItsControlIntoViewFirst() throws {
+        let here = URL(fileURLWithPath: #filePath)
+        let main = here.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/ZeroCodeComputerUseMacOS/main.swift")
+        let source = try String(contentsOf: main, encoding: .utf8)
+        XCTAssertEqual(source.components(separatedBy: "try inView(").count - 1, 4)
+        let road = try XCTUnwrap(source.range(of: "private func inView(_ record: ElementRecord, in snapshot: Snapshot) throws -> ElementRecord {"))
+        let body = source[road.upperBound...].prefix(2400)
+        XCTAssertTrue(body.contains("guard try performActionChecked(record.element, Self.scrollToVisibleAction) else {"))
+        // One that offered the scroll and did not take it is refused, never pressed where it is.
+        XCTAssertTrue(body.contains("did not scroll into view when asked; nothing was pressed"))
+        XCTAssertTrue(body.contains("try OperatorHandHost.sleep("))
+        XCTAssertFalse(body.contains("usleep("))
+        XCTAssertTrue(body.contains("Actionability.intoViewWaitMs"))
+        XCTAssertTrue(body.contains("if Actionability.cameToRest(frame, after: previous) {"), "a smooth scroll is not pressed part way")
+        // A write that would be refused is refused before anything is scrolled.
+        let write = try XCTUnwrap(source.range(of: "private func setValue(params: [String: JSONValue]) throws -> [String: Any] {"))
+        let writes = source[write.upperBound...].prefix(1800)
+        let settable = try XCTUnwrap(writes.range(of: "guard isSettable(found.element, kAXValueAttribute as String) else {"))
+        let scrolls = try XCTUnwrap(writes.range(of: "let record = try inView(found, in: snapshot)"))
+        XCTAssertLessThan(settable.lowerBound, scrolls.lowerBound)
+    }
+
     func testAMovingControlWaits() {
         XCTAssertEqual(
             Actionability.of(enabled: true, frame: CGRect(x: 9, y: 0, width: 1, height: 1), previousFrame: CGRect(x: 0, y: 0, width: 1, height: 1), needsFrame: true),

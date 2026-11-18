@@ -1394,8 +1394,10 @@ final class Provider {
                 enabled: boolAttribute(record.element, kAXEnabledAttribute as String),
                 frame: frame,
                 previousFrame: record.onSurface ? nil : previous,
-                needsFrame: !record.onSurface
+                needsFrame: !record.onSurface,
+                scrollsIntoView: record.actions.contains(Self.scrollToVisibleAction)
             )
+            // Ready, or scrolled out of view: the press brings that one in itself (`inView`).
             guard case let .wait(why) = verdict else { return }
             guard Date() < giveUp else {
                 throw ProviderError.coded("not_actionable", "element \(index) \(why) after waiting \(waitMs) ms; nothing was pressed")
@@ -2119,8 +2121,9 @@ final class Provider {
             let index = try optionalInteger(params, "elementIndex")
                 ?? (query.isEmpty ? nil : chosenIndex(query, in: snapshot))
             let requestedPoint = try index == nil ? coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot) : nil
-            let record = try index.map { try element(snapshot, $0) }
+            let found = try index.map { try element(snapshot, $0) }
                 ?? requestedPoint.flatMap { backgroundClickRecord(at: $0, in: snapshot) }
+            let record = try found.map { try inView($0, in: snapshot) }
             if let record,
                let action = BackgroundInput.clickAction(
                    actions: record.actions,
@@ -2185,7 +2188,7 @@ final class Provider {
             named = try chosenIndex(query, in: snapshot)
         }
         if let elementIndex = named {
-            let record = try element(snapshot, elementIndex)
+            let record = try inView(try element(snapshot, elementIndex), in: snapshot)
             // A click by a mark's number presses only what a person would hit:
             // the control, on top at its centre, now that its window is in front.
             if try markPin(params) != nil {
@@ -2303,6 +2306,44 @@ final class Provider {
         }
     }
 
+    static let scrollToVisibleAction = "AXScrollToVisible"
+
+    /// A control scrolled out of what its page shows has no size where it is,
+    /// and a person could not press it there. Before it is pressed it is
+    /// scrolled into view by its own action — which asks the person like any
+    /// other act — and it goes on only once it has a size, read again for
+    /// `Actionability.intoViewWaitMs` on the hand's clock, until it comes to
+    /// rest — two reads alike, so a smooth scroll is not pressed part way. One
+    /// that does not is refused, saying the page was scrolled. Any other
+    /// control comes back as it is.
+    private func inView(_ record: ElementRecord, in snapshot: Snapshot) throws -> ElementRecord {
+        // The look this press was dispatched on is fresh: a control it gave a
+        // size is not read again.
+        guard !record.onSurface, !Actionability.hasSize(record.localFrame),
+              record.actions.contains(Self.scrollToVisibleAction),
+              Actionability.cutToALine(absoluteFrame(record.element))
+        else { return record }
+        // It offered to be scrolled back and did not take it: it stays out of
+        // view, and a person could not press it there.
+        guard try performActionChecked(record.element, Self.scrollToVisibleAction) else {
+            throw ProviderError.coded("not_actionable", "element \(record.index) is scrolled out of view and did not scroll into view when asked; nothing was pressed. Look again")
+        }
+        let giveUp = Date().addingTimeInterval(TimeInterval(Actionability.intoViewWaitMs) / 1_000)
+        var previous: CGRect?
+        while true {
+            let frame = reader(frameOf: record.element, windowBounds: snapshot.windowBounds)
+            // Two reads alike, the second with a size: the page stopped moving it.
+            if Actionability.cameToRest(frame, after: previous) {
+                return record.standing(actions: record.actions, frame: frame)
+            }
+            guard Date() < giveUp else {
+                throw ProviderError.coded("not_actionable", "element \(record.index) was scrolled out of view, and had not come to rest in view \(Actionability.intoViewWaitMs) ms after it was asked to scroll into view: the page was scrolled, nothing was pressed. Look again")
+            }
+            previous = frame
+            try OperatorHandHost.sleep(nanoseconds: UInt64(Actionability.pollMs) * 1_000_000)
+        }
+    }
+
     private func reader(frameOf element: AXUIElement, windowBounds: CGRect) -> CGRect? {
         AXSnapshotReader().frame(element, windowBounds: windowBounds)
     }
@@ -2390,7 +2431,7 @@ final class Provider {
     }
 
     private func performSecondaryAction(params: [String: JSONValue], snapshot: Snapshot) throws -> [String: Any] {
-        let record = try element(snapshot, try requiredInteger(params, "elementIndex"))
+        let record = try inView(try element(snapshot, try requiredInteger(params, "elementIndex")), in: snapshot)
         let requested = try requiredString(params, "action")
         let action = record.actions.first { SnapshotRenderHeuristics.prettyAction($0).caseInsensitiveCompare(requested) == .orderedSame || $0.caseInsensitiveCompare(requested) == .orderedSame }
         guard let action else {
@@ -2404,18 +2445,22 @@ final class Provider {
 
     private func setValue(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentSnapshot(params: params)
-        let record = try element(snapshot, try requiredInteger(params, "elementIndex"))
+        let found = try element(snapshot, try requiredInteger(params, "elementIndex"))
         if params["background"]?.bool == true {
             try admitBackgroundTarget(snapshot)
-            try requireReachable(record, in: snapshot)
         }
+        // What refuses the write refuses it before anything is scrolled.
         let expected = try requiredStringAllowingEmpty(params, "value")
         if params["plainInputOnly"]?.bool == true,
-           record.plainInput == nil || record.plainInput != params["expectedPlainValue"]?.string || looksLikeSecret(record.element) {
+           found.plainInput == nil || found.plainInput != params["expectedPlainValue"]?.string || looksLikeSecret(found.element) {
             throw ProviderError.coded("value_not_settable", "the marked control is no longer a readable, non-secret text field")
         }
-        guard isSettable(record.element, kAXValueAttribute as String) else {
-            throw ProviderError.coded("value_not_settable", "element \(record.index) is not settable")
+        guard isSettable(found.element, kAXValueAttribute as String) else {
+            throw ProviderError.coded("value_not_settable", "element \(found.index) is not settable")
+        }
+        let record = try inView(found, in: snapshot)
+        if params["background"]?.bool == true {
+            try requireReachable(record, in: snapshot)
         }
         let current = rawAttributeValue(record.element, kAXValueAttribute as String)
         let coercion = AttributeValueCoercion(existingValue: current, requested: expected)

@@ -63,13 +63,42 @@ public enum Actionability: Equatable, Sendable {
     case ready
     /// Wait and read again: this can change by itself.
     case wait(String)
+    /// Scrolled out of what its page shows, and it offers to be scrolled back:
+    /// waiting changes nothing, and the press brings it into view itself.
+    case outOfView
 
-    public static func of(enabled: Bool?, frame: CGRect?, previousFrame: CGRect?, needsFrame: Bool) -> Actionability {
+    public static func of(enabled: Bool?, frame: CGRect?, previousFrame: CGRect?, needsFrame: Bool, scrollsIntoView: Bool = false) -> Actionability {
         if enabled == false { return .wait("disabled") }
         guard needsFrame else { return .ready }
-        guard let frame, frame.width > 0, frame.height > 0 else { return .wait("has no size") }
+        guard let frame, frame.width > 0, frame.height > 0 else {
+            return scrollsIntoView && cutToALine(frame) ? .outOfView : .wait("has no size")
+        }
         if let previousFrame, !framesAgree(previousFrame, frame) { return .wait("moving") }
         return .ready
+    }
+
+    /// A frame cut to a line: one side has length and the other none. A browser
+    /// answers so for a control scrolled out of its page — its frame clipped to
+    /// the edge of what the page shows (a text field 305 x 0 at the foot of a
+    /// sign-in page, 2026-11-17). A frame with no side at all is a control not
+    /// laid out yet, or hidden: nothing says a scroll would show it.
+    public static func cutToALine(_ frame: CGRect?) -> Bool {
+        guard let frame else { return false }
+        return (frame.width > 0) != (frame.height > 0)
+    }
+
+    /// Whether a frame is one a person could press in.
+    public static func hasSize(_ frame: CGRect?) -> Bool {
+        guard let frame else { return false }
+        return frame.width > 0 && frame.height > 0
+    }
+
+    /// Whether a control scrolled into view has come to rest: a size, and the
+    /// same frame as the read before. A page that scrolls smoothly shows the
+    /// control part way in first; a click there could land beside it.
+    public static func cameToRest(_ frame: CGRect?, after previous: CGRect?) -> Bool {
+        guard let frame, let previous, hasSize(frame) else { return false }
+        return framesAgree(previous, frame)
     }
 
     /// Half a point of drift is a rounding difference between two reads, not a move.
@@ -84,6 +113,11 @@ public enum Actionability: Equatable, Sendable {
     /// requests in line, and must end well before the window gives up on the answer.
     public static var longestWaitMs: Int { 10_000 }
     public static var pollMs: Int { 50 }
+    /// How long a control asked to scroll into view is read again until it
+    /// comes to rest. The scroll is the app's own, smooth on some pages, and
+    /// the frame comes after it; the wait is inside the act's turn. Not
+    /// measured on a real browser.
+    public static var intoViewWaitMs: Int { 1_000 }
 }
 
 /// One lock per app, so a slow or hung app holds up only the requests that name
