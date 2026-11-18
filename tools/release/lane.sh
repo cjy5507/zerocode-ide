@@ -10,9 +10,11 @@
 # coordinator's gate receipt for the sha's tree left owed, when the sha carries
 # one — t-47516), judges known flakes solo, pushes
 # <sha>:main, builds the app and zo in parallel, swaps each beside-then-mv,
-# bundles the signed updater feed (bundle-updater), publishes the GitHub
-# release when asked (publish; docs/design/versioned-auto-update.md §2.6), and
-# sweeps. One trap covers every exit path — red, refused, SIGTERM, missing
+# cross-builds the Windows installer on a publish run (build-win,
+# tools/release/win-installer.sh — t-113717), bundles the signed updater feed
+# (bundle-updater), publishes the GitHub release when asked (publish;
+# docs/design/versioned-auto-update.md §2.6), and sweeps. One trap covers
+# every exit path — red, refused, SIGTERM, missing
 # tool — so the scratch never outlives the lane. Each run is reported as any
 # build reports itself (`zo build report`, through RELEASE_REPORT_ZO): the task
 # board's build card reads that record and knows no lane.
@@ -62,6 +64,7 @@ build-app|앱 빌드|Build the app|アプリのビルド|构建应用|Compilar l
 swap-app|앱 바꿔 넣기|Swap in the app|アプリの入れ替え|替换应用|Cambiar la app
 build-zo|zo 빌드|Build zo|zo のビルド|构建 zo|Compilar zo
 swap-zo|zo 바꿔 넣기|Swap in zo|zo の入れ替え|替换 zo|Cambiar zo
+build-win|Windows 설치 파일 빌드|Build the Windows installer|Windows インストーラーのビルド|构建 Windows 安装程序|Compilar el instalador de Windows
 bundle-updater|업데이트 묶기|Bundle the updater|アップデーターの梱包|打包更新器|Empaquetar el actualizador
 publish|발행|Publish|公開|发布|Publicar
 sweep|정리|Clean up|後片付け|清理|Limpiar'
@@ -80,7 +83,7 @@ QUIET_FLOOR_SECS=600        # never said sooner — a quick recipe waiting on ca
 QUIET_CAP_FLOOR_SECS=1200   # never ended sooner, however quick its usual time
 QUIET_SAMPLES=5             # the green lanes a recipe's usual time is the median of (the board's estimates read five too)
 QUIET_POLL_SECS=10          # how often the lane looks at a running gate's log
-TARGET_LANES="root-gate zo-gate root-release zo-release"
+TARGET_LANES="root-gate zo-gate root-release zo-release win-release"
 # The window harness (ui/tests/window.mjs) split across this many browsers in the lane's gates
 # (ui/tests/window-shards.mjs). 2026-11-12, main 1ebcbba2c on this Mac: 1,723 s in one browser
 # (v1.1.144's gate-root), 451 · 444 · 454 s split four ways — 6312/6312 each time, its four shares
@@ -116,9 +119,21 @@ KILL_GRACE_SECS=2           # TERM to the children, then KILL after this long
 RELEASE_PUBLISH=${RELEASE_PUBLISH:-0}          # 1 publishes the sha's release with gh — flipped per run by the coordinator, never here
 RELEASE_CHANNEL=${RELEASE_CHANNEL:-stable}     # stable | beta (a prerelease; the moving `beta` tag carries the feed)
 RELEASE_LEGACY_MANIFEST=${RELEASE_LEGACY_MANIFEST:-0}   # 1 sends the old zo CLI's manifest.txt·SHA256SUMS·zo-v<v>-<triple>×3·install.sh along — every target or refused (§2.7)
+RELEASE_WINDOWS=${RELEASE_WINDOWS:-1}          # 0 skips build-win aloud: that publish ships macOS alone, with no cold Windows build in front of it (t-113717)
 UPDATER_PLATFORM=darwin-aarch64                # the latest.json platforms key this machine builds
 UPDATER_ARCH=aarch64                           # ZeroCode_<version>_<arch>.app.tar.gz
 UPDATER_FEED=latest.json
+# The Windows installer (t-113717): on a publish run, after both swaps, the sha's own
+# tools/release/win-installer.sh cross-builds zo and the window for WIN_TRIPLE here (cargo-xwin as
+# tauri's runner, Homebrew's makensis — MSI needs WiX, which runs on Windows only) into the WIN_LANE
+# target; bundle-updater signs it with the same updater key and adds its row to the feed.
+WIN_TRIPLE=x86_64-pc-windows-msvc
+WIN_ARCH=x64                                   # tauri's NSIS name for it: ZeroCode_<version>_x64-setup.exe, kept (the app takes only ZeroCode_ assets)
+WIN_LANE=win-release                           # its target under $TARGETS, one of TARGET_LANES
+WIN_UPDATER_PLATFORM=windows-x86_64            # its latest.json platforms key (the updater looks for windows-x86_64-nsis first, then this one)
+WIN_INSTALLER_SH=tools/release/win-installer.sh   # in the sha's tree: a sha from before it builds no installer, said, never red
+WIN_ROOM_GB=6                                  # free above DISK_FLOOR_GB a cold Windows build needs (estimate: root-release 3.9G + zo-release 1.2G, 11-18); less and the phase is skipped aloud, so it never refuses the macOS publish behind it
+WIN_BLOCKS_PUBLISH=${WIN_BLOCKS_PUBLISH:-0}    # 0: a red build-win leaves the release macOS-only (the step stays red; Windows keeps its version); 1: it stops the publish
 ZO_BUILD_TARGETS="aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu"   # the manifest's rows in install.sh's order; the first is the host
 BUILD_APP_CONFIG='{"bundle":{"createUpdaterArtifacts":false}}'   # the local install build makes no updater artifacts (tauri-cli refuses the key without plugins.updater); bundle-updater is the phase that does
 COMPUTER_USE_HELPER='ZeroCode Computer Use.app'   # native UI helper under bundle Resources
@@ -211,8 +226,9 @@ if [ "${1:-}" = "--table" ]; then
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
            RELEASE_ZO_BIN RELEASE_REPORT_ZO RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS PASSED RECEIPT_PY \
            RELEASE_BUILD_LINE RELEASE_COORD_RUN RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
-           RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST UPDATER_KEY \
+           RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST RELEASE_WINDOWS UPDATER_KEY \
            UPDATER_PLATFORM UPDATER_ARCH UPDATER_FEED ZO_BUILD_TARGETS COMPUTER_USE_HELPER APP_SIBLING_BINS APP_BIN APP_ZO \
+           WIN_TRIPLE WIN_ARCH WIN_LANE WIN_UPDATER_PLATFORM WIN_INSTALLER_SH WIN_ROOM_GB WIN_BLOCKS_PUBLISH \
            GOOGLE_OAUTH_SECRET_ENV GOOGLE_OAUTH_SECRET_ITEM SECURITY_BIN; do
     eval "printf \"%s='%s'\\n\" \"$k\" \"\$$k\""
   done
@@ -270,6 +286,8 @@ PHASES_JSON=; DISK_FREE_GB=0; OUTCOME=null; REASON=; SWEPT=1; LOCK_HELD=0
 VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=   # SKIP: why the phase being ended did nothing; WHY: a step's red in words
 ONLY=; RECEIPT=   # a gate's recipes a coordinator's receipt left owed, and what that receipt did (receipt_cover)
 STALLED=null      # status.json's `stalled` while a gate's recipe writes nothing past its say time (watch_gate), else null
+WIN_INSTALLER=    # this run's Windows installer (build-win): the only one bundle-updater signs, never one an earlier run left
+WIN_SHIPPED=0     # 1 once bundle-updater put that installer, its .sig and its feed row under out/ — publish sends the three or none
 
 measure_disk() {
   if is_dry; then
@@ -980,6 +998,48 @@ swap_zo() {
   record_installed zo "$SHA"
 }
 
+# ------------------------------------------------------------- build-win --
+# The Windows installer (t-113717), on a publish run only. It runs after both swaps and never beside
+# build-app: win-installer.sh builds ui/dist and stages its zo where the bundle carries one
+# (crates/zerocode-shell/bin/zo), both in the scratch build-app uses — it puts that zo back after.
+win_asset() { printf 'ZeroCode_%s_%s-setup.exe' "$VERSION" "$WIN_ARCH"; }
+build_win_release() { # TARGET LOG SECRET — the sha's own script; the Google client in its environment alone
+  with_oauth_secret "$3" env ZO_PROFILE="$ZO_PROFILE" bash "$SCRATCH/$WIN_INSTALLER_SH" "$SCRATCH" "$1" > "$2" 2>&1
+}
+# rc 0 built — WIN_INSTALLER names the copy under out/ — or skipped aloud (SKIP) · 1 red (WHY)
+do_build_win() {
+  local target release built log="$OUT/build-win-$SHA8.log" secret rc in_tree=0
+  [ "$RELEASE_PUBLISH" = 1 ] || { SKIP="RELEASE_PUBLISH=0 (only a publish ships the Windows installer)"; return 0; }
+  [ "$RELEASE_WINDOWS" = 1 ] || { SKIP="RELEASE_WINDOWS=0 (this publish ships macOS alone)"; return 0; }
+  if is_dry; then in_tree=$(stub WIN_INSTALLER_IN_TREE 1); else [ -f "$SCRATCH/$WIN_INSTALLER_SH" ] && in_tree=1; fi
+  [ "$in_tree" = 1 ] || { SKIP="$SHA8's tree has no $WIN_INSTALLER_SH (a sha from before the Windows installer)"; return 0; }
+  measure_disk
+  [ "$DISK_FREE_GB" -ge $(( DISK_FLOOR_GB + WIN_ROOM_GB )) ] \
+    || { SKIP="disk: ${DISK_FREE_GB}G free < ${DISK_FLOOR_GB}G floor + ${WIN_ROOM_GB}G for the Windows build — the release goes out without it"; return 0; }
+  target=$(target_dir "$WIN_LANE"); release="$target/$WIN_TRIPLE/release"; built="$release/bundle/nsis/$(win_asset)"
+  # Read here, for this build alone, as build-app reads it.
+  secret=$(oauth_secret)
+  oauth_secret_usable "$secret" || { printf 'build-win: %s\n' "$WHY" > "$log"; return 1; }
+  if is_dry; then
+    stub_log "build-win target=$target"; rc=$(stub BUILD_WIN_RC 0)
+    if [ "$rc" = 0 ]; then
+      mkdir -p "$(dirname "$built")" && printf 'stub installer %s\n' "$SHA" > "$built" || rc=1
+      if [ "$(stub BUILD_WIN_DROPS_SECRET 0)" = 1 ]; then stub_binary "$release/$APP_BIN.exe" "$target/$WIN_TRIPLE/$ZO_PROFILE/zo.exe" || rc=1
+      else with_oauth_secret "$secret" stub_binary "$release/$APP_BIN.exe" "$target/$WIN_TRIPLE/$ZO_PROFILE/zo.exe" || rc=1; fi
+    fi
+  else
+    heavy build_win_release "$target" "$log" "$secret"; rc=$?
+  fi
+  [ "$rc" = 0 ] || { WHY="$WIN_INSTALLER_SH rc=$rc ($log)"; return 1; }
+  # A Windows window or zo without its Google sign-in client is never shipped either.
+  carries_oauth_secret "$secret" "$release/$APP_BIN.exe" "$target/$WIN_TRIPLE/$ZO_PROFILE/zo.exe" \
+    || { printf 'build-win: %s\n' "$WHY" >> "$log"; return 1; }
+  [ -f "$built" ] || { WHY="no $(win_asset) under $(dirname "$built") ($log)"; return 1; }
+  # Out of the target at once: on a tight disk the target goes right after this phase (judge_sha).
+  mkdir -p "$(out_dir)" && cp "$built" "$(out_dir)/$(win_asset)" || { WHY="copy $(win_asset) to $(out_dir)"; return 1; }
+  WIN_INSTALLER="$(out_dir)/$(win_asset)"
+}
+
 # ------------------------------------------------------- bundle-updater --
 # The scratch's own facts; the dry twin answers from stubs.
 scratch_version() { if is_dry; then stub VERSION 0.1.0; else python3 "$FEED_PY" version "$SCRATCH/Cargo.toml" 2>/dev/null; fi; }
@@ -1014,6 +1074,12 @@ build_updater_bundle() { # TARGET PASSWORD LOG
 # cdhash (4929830f to 9cfee161 on 10-13) and the updater would ship an app this
 # machine never installed. With the identity, Tauri's own seal is kept and only verified.
 # Either way the bundle must verify --deep --strict before it is gathered.
+# Every asset the feed names is signed this one way — the macOS archive and the Windows installer.
+sign_updater_asset() { # FILE PASSWORD LOG -> FILE.sig beside it; WHY on failure
+  ( cd "$SCRATCH" && TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$2 npx --no-install tauri signer sign -f "$UPDATER_KEY" "$1" ) >> "$3" 2>&1 \
+    || { WHY="sign $1 with the updater key ($3)"; return 1; }
+  [ -f "$1.sig" ] || { WHY="tauri signer left no $1.sig"; return 1; }
+}
 seal_updater_bundle() { # TARGET PASSWORD LOG -> rc; WHY on failure
   local target=$1 password=$2 log=$3 app archive dmg staging rc
   app="$target/release/bundle/macos/$APP_NAME"
@@ -1024,9 +1090,7 @@ seal_updater_bundle() { # TARGET PASSWORD LOG -> rc; WHY on failure
     # COPYFILE_DISABLE: no AppleDouble `._` entries — the updater unpacks the
     # archive with its own tar and expects the bundle's files alone.
     ( cd "$target/release/bundle/macos" && COPYFILE_DISABLE=1 tar -czf "$APP_NAME.tar.gz" "$APP_NAME" ) >> "$log" 2>&1 || { WHY="pack the sealed app into $archive"; return 1; }
-    ( cd "$SCRATCH" && TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$password npx --no-install tauri signer sign -f "$UPDATER_KEY" "$archive" ) >> "$log" 2>&1 \
-      || { WHY="sign $archive with the updater key ($log)"; return 1; }
-    [ -f "$archive.sig" ] || { WHY="tauri signer left no $archive.sig"; return 1; }
+    sign_updater_asset "$archive" "$password" "$log" || return 1
     mkdir -p "$target/release/bundle/dmg" && rm -f "$target/release/bundle/dmg/"*.dmg
     dmg="$target/release/bundle/dmg/$(asset_base).dmg"
     staging=$(mktemp -d "${TMPDIR:-/tmp}/zerocode-dmg.XXXXXX") || { WHY="no staging folder for the DMG"; return 1; }
@@ -1048,7 +1112,7 @@ app_cdhash() { # INSTALLED|SEALED APP -> its CDHash, or nothing
   if is_dry; then stub "CDHASH_$1" stub-cdhash; else codesign -dvvv "$2" 2>&1 | sed -n 's/^CDHash=//p' | head -1; fi
 }
 do_bundle_updater() {
-  local target pub conf_pub conf_fp out log="$OUT/bundle-updater-$SHA8.log" archive dmg rc password= installed sealed
+  local target pub conf_pub conf_fp out log="$OUT/bundle-updater-$SHA8.log" archive dmg rc password= installed sealed rows
   target=$(target_dir root-release); out=$(out_dir)
   [ -n "$VERSION" ] || { WHY="no [workspace.package] version in the scratch"; return 1; }
   [ -f "$UPDATER_KEY" ] || { SKIP="no updater key at $UPDATER_KEY (tools/release/README.md)"; return 0; }
@@ -1096,10 +1160,17 @@ do_bundle_updater() {
   cp "$archive" "$out/$(asset_base).app.tar.gz" && cp "$archive.sig" "$out/$(asset_base).app.tar.gz.sig" || { WHY="copy to $out"; return 1; }
   dmg=$(ls "$target/release/bundle/dmg/"*.dmg 2>/dev/null | head -1)
   [ -z "$dmg" ] || cp "$dmg" "$out/$(asset_base).dmg" || { WHY="copy dmg to $out"; return 1; }
-  python3 "$FEED_PY" latest --version "$VERSION" --notes-file "$out/notes.md" --pub-date "$(now_iso)" \
-      --platform "$UPDATER_PLATFORM" --sig-file "$out/$(asset_base).app.tar.gz.sig" --url "$(asset_url "$(asset_base).app.tar.gz")" \
+  rows=(--platform "$UPDATER_PLATFORM" --sig-file "$out/$(asset_base).app.tar.gz.sig" --url "$(asset_url "$(asset_base).app.tar.gz")")
+  # The Windows set rides whole or not at all (t-113717): this run's installer, its .sig, its feed row.
+  if [ -n "$WIN_INSTALLER" ]; then
+    if is_dry; then stub_log "bundle-updater sign-win $(win_asset) key=$UPDATER_KEY"; printf 'STUBWINSIG%s\n' "$SHA8" > "$WIN_INSTALLER.sig"
+    else sign_updater_asset "$WIN_INSTALLER" "$password" "$log" || return 1; fi
+    rows+=(--platform "$WIN_UPDATER_PLATFORM" --sig-file "$WIN_INSTALLER.sig" --url "$(asset_url "$(win_asset)")")
+  fi
+  python3 "$FEED_PY" latest --version "$VERSION" --notes-file "$out/notes.md" --pub-date "$(now_iso)" "${rows[@]}" \
       > "$out/$UPDATER_FEED.tmp" && mv -f "$out/$UPDATER_FEED.tmp" "$out/$UPDATER_FEED" || { WHY="$UPDATER_FEED"; return 1; }
-  log "bundle-updater: $(asset_base).app.tar.gz + .sig + $UPDATER_FEED under $out (key $UPDATER_PUBKEY)"
+  [ -z "$WIN_INSTALLER" ] || WIN_SHIPPED=1
+  log "bundle-updater: $(asset_base).app.tar.gz + .sig${WIN_INSTALLER:+ + $(win_asset) + .sig} + $UPDATER_FEED under $out (key $UPDATER_PUBKEY)"
 }
 
 # -------------------------------------------------------------- publish --
@@ -1123,6 +1194,12 @@ beta_release_kind() { # -> none | ours | foreign
   case $names in *"$UPDATER_FEED"*) case $names in *ZeroCode_*) printf ours; return 0;; esac;; esac
   printf foreign
 }
+# The installer has no Authenticode signature yet, so a first install from the browser meets
+# SmartScreen; an update runs the copy the app downloaded and verified itself, which carries no
+# browser's mark of the web (Smart App Control, where a person turned it on, judges either).
+win_note() {
+  printf 'Windows (x64): %s — 코드 서명(Authenticode)이 아직 없어 SmartScreen이 「Windows의 PC 보호」를 띄우면 「추가 정보(More info)」 → 「실행(Run anyway)」을 누릅니다. 설치한 앱은 그 뒤로 스스로 업데이트됩니다.' "$(win_asset)"
+}
 # rc 0 published (or skipped, said in SKIP) · 1 red (WHY) · 3 refused (REASON set)
 do_publish() {
   local out tag notes assets= names= f t bin missing= spec= prerelease=0 kind=none rc flag= log="$OUT/publish-$SHA8.log"
@@ -1136,6 +1213,9 @@ do_publish() {
   for f in "$out/$(asset_base).app.tar.gz" "$out/$(asset_base).app.tar.gz.sig" "$out/$(asset_base).dmg" "$out/$UPDATER_FEED"; do
     [ -f "$f" ] && assets="$assets $f"
   done
+  # The Windows installer and its .sig go up only beside the feed row bundle-updater wrote for them
+  # in this run — never a pair an earlier run of this sha left under out/.
+  [ "$WIN_SHIPPED" = 1 ] && assets="$assets $out/$(win_asset) $out/$(win_asset).sig"
   # The app installer rides beside the feed it reads, so
   # `releases/latest/download/install.sh` always names the installer that
   # matches `latest.json` next to it (the README's one-line install; the
@@ -1163,6 +1243,9 @@ do_publish() {
     for t in $ZO_BUILD_TARGETS; do assets="$assets $out/zo-$tag-$t"; done
   fi
   for f in $assets; do names="${names:+$names,}$(basename "$f")"; done
+  # The release page says how a Windows install starts (README.md says it too); the feed's notes,
+  # written before this, are what an installed app shows and need no such line.
+  [ "$WIN_SHIPPED" = 1 ] && printf '\n\n%s\n' "$(win_note)" >> "$notes"
   # No --target: the release repo does not hold this source (§2.2 — ours are
   # known by their assets, never by the tag's commit), so the build's sha
   # rides in the notes instead.
@@ -1550,6 +1633,20 @@ judge_sha() {
   else reds="$reds build-zo"; fi
   if [ -n "$reds" ]; then red "red:$reds"; return 1; fi
 
+  # The Windows installer (t-113717): a publish run's, after both swaps. A red build leaves the
+  # release macOS-only unless WIN_BLOCKS_PUBLISH=1, as a missing legacy zo triple and a refused
+  # source snapshot leave the release itself alone; the step stays red on the board. Its target's
+  # last use in this run is this phase (the installer is under out/ by now): on a tight disk it goes
+  # before the floor judges the phases still to come.
+  phase_begin build-win
+  do_build_win; rc=$?
+  [ -n "$SKIP" ] || release_gate_target "$WIN_LANE"
+  step_done build-win "$rc" || return $?
+  if [ "$rc" != 0 ]; then
+    [ "$WIN_BLOCKS_PUBLISH" = 1 ] && { red "build-win: $WHY"; return 1; }
+    log "build-win: red — this release goes out without the Windows installer ($WHY)"
+  fi
+
   phase_begin bundle-updater
   do_bundle_updater; rc=$?
   step_done bundle-updater "$rc" || return $?
@@ -1586,7 +1683,7 @@ run_sha() { # SHA [QUEUE_FILE]
   SHA=$1; SHA8=$(printf '%s' "$1" | cut -c1-8); QUEUE_FILE=${2:-}
   SCRATCH=$RELEASE_SCRATCH_ROOT/gate-$SHA8; LOG=$OUT/lane-$SHA8.log
   STARTED_AT=$(now_iso); PHASES_JSON=; OUTCOME=null; REASON=; SWEPT=0
-  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=; STALLED=null
+  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=; STALLED=null; WIN_INSTALLER=; WIN_SHIPPED=0
   rm -rf "$WORK"; mkdir -p "$WORK"
   log "== lane $SHA8 start (dry=$RELEASE_DRY_RUN)"
   report_begin

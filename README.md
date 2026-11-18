@@ -63,7 +63,10 @@ agent's hook script into that agent's own home.
 
 Signed, notarized builds for Apple silicon Macs are published on the
 [release repository](https://github.com/cjy5507/zerocode/releases), and an installed app updates
-itself from the same place. Everything else builds from source.
+itself from the same place. Windows (x64) gets an installer there too,
+`ZeroCode_<version>_x64-setup.exe`, which installs for the current user and updates itself the
+same way. It carries no Authenticode signature yet, so SmartScreen may say "Windows protected your
+PC" on the first install: choose **More info → Run anyway**. Everything else builds from source.
 
 **Requirements:** Rust stable 1.94+, Node 22+, Tauri CLI 2.11.
 
@@ -81,7 +84,9 @@ secret is not in this repository: the release lane builds it into the app and `z
 A build from source has no built-in Google client and says so; give zo your own with
 `ZO_GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID` (and `_SECRET`), or use a published build.
 
-A shipped build is a signed, notarized `.dmg` on macOS and `.msi`/NSIS on Windows. The version
+A shipped build is a signed, notarized `.dmg` on macOS and an NSIS installer on Windows, which the
+release lane cross-builds on its Mac (`tools/release/win-installer.sh`; MSI needs WiX, which runs on
+Windows only). The version
 lives in the root `Cargo.toml` under `[workspace.package]`, and `tools/release/bump.sh` moves it
 everywhere at once — no version numbers are hand-written into docs.
 

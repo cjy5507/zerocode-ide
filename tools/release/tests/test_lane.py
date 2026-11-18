@@ -54,11 +54,11 @@ REPO = Path(__file__).resolve().parents[3]
 RELEASE = REPO / "tools" / "release"
 LANE = RELEASE / "lane.sh"
 SCRIPTS = ["lane.sh", "enqueue.sh", "status.sh", "install-launchd.sh", "rollback.sh", "bump.sh",
-           "verify-every-recipe.sh", "lane-env.sh"]
+           "verify-every-recipe.sh", "lane-env.sh", "win-installer.sh"]
 
 PHASES = [
     "archive", "gate-root", "gate-zo", "flakes", "push",
-    "build-app", "swap-app", "build-zo", "swap-zo", "bundle-updater", "publish", "sweep",
+    "build-app", "swap-app", "build-zo", "swap-zo", "build-win", "bundle-updater", "publish", "sweep",
 ]
 ZO_BUILD_TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # The window's languages (ui/shell-i18n.js LOCALES, past `system`): the lane names its steps in each.
@@ -92,7 +92,7 @@ def minisign_pub(keyid: bytes, comment="minisign public key: TEST"):
     raw = b"Ed" + keyid + bytes(32)
     box = f"untrusted comment: {comment}\n{base64.b64encode(raw).decode()}\n"
     return base64.b64encode(box.encode()).decode()
-TARGET_LANES = ["root-gate", "zo-gate", "root-release", "zo-release"]
+TARGET_LANES = ["root-gate", "zo-gate", "root-release", "zo-release", "win-release"]
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -575,6 +575,20 @@ class Syntax(LaneCase):
         self.assertEqual(table["UPDATER_ARCH"], "aarch64")
         self.assertEqual(table["ZO_BUILD_TARGETS"].split(), ZO_BUILD_TARGETS)
         self.assertIn("python3", table["TOOLS"].split(), "latest.json is rendered by python3")
+        # t-113717: the Windows installer is cross-built here; its tools are its own script's to ask
+        # for, never the lane's, so a Mac without them still publishes macOS.
+        self.assertEqual(table["WIN_TRIPLE"], "x86_64-pc-windows-msvc")
+        self.assertEqual(table["WIN_ARCH"], "x64")
+        self.assertEqual(table["WIN_LANE"], "win-release")
+        self.assertIn(table["WIN_LANE"], TARGET_LANES)
+        self.assertEqual(table["WIN_UPDATER_PLATFORM"], "windows-x86_64")
+        self.assertEqual(table["WIN_INSTALLER_SH"], "tools/release/win-installer.sh")
+        self.assertTrue((REPO / table["WIN_INSTALLER_SH"]).is_file())
+        self.assertGreater(int(table["WIN_ROOM_GB"]), 0)
+        self.assertEqual(table["WIN_BLOCKS_PUBLISH"], "0")
+        self.assertEqual(table["RELEASE_WINDOWS"], "1")
+        for tool in ("makensis", "cargo-xwin", "7z"):
+            self.assertNotIn(tool, table["TOOLS"].split(), f"{tool} missing must not refuse a macOS release")
         # t-9741: a UI check's suite is chosen by the runner's own variable; unlisted results live beside installed.json.
         self.assertEqual(table["UI_SUITE_CHOOSER"], "WINDOW_SUITES")
         self.assertEqual(Path(table["UNLISTED"]).parent, Path(table["INSTALLED"]).parent)
@@ -651,11 +665,17 @@ class Syntax(LaneCase):
         for words in [
             'if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then',
             'COPYFILE_DISABLE=1 tar -czf "$APP_NAME.tar.gz" "$APP_NAME"',
-            'npx --no-install tauri signer sign -f "$UPDATER_KEY" "$archive"',
+            'sign_updater_asset "$archive" "$password" "$log" || return 1',
             'hdiutil create -quiet -volname "${APP_NAME%.app}" -srcfolder "$staging" -ov -format UDZO "$dmg"',
             'codesign --verify --deep --strict "$app"',
         ]:
             self.assertIn(words, seal, f"the seal step lost: {words}")
+        # One signing road for every asset the feed names (t-113717: the Windows installer too):
+        # the key by its path, never its bytes on a command line, the password from the env.
+        signing = lane.split("sign_updater_asset() {")[1].split("\n}\n")[0]
+        self.assertIn('TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$2 npx --no-install tauri signer sign -f "$UPDATER_KEY" "$1"', signing)
+        self.assertIn('[ -f "$1.sig" ]', signing, "a signer that left no .sig is red")
+        self.assertEqual(lane.count("tauri signer sign"), 1, "the archive and the installer are signed the same one way")
         gathering = lane.split("do_bundle_updater() {")[1].split("\n}\n")[0]
         built = gathering.index('heavy build_updater_bundle "$target" "$password" "$log"')
         sealed = gathering.index('seal_updater_bundle "$target" "$password" "$log" || return 1')
@@ -1899,6 +1919,32 @@ class UpdaterFeed(LaneCase):
         self.assertEqual(parsed["platforms"], {"darwin-aarch64": {"signature": "SIG", "url": "https://x/y.app.tar.gz"}})
         self.assertTrue(doc.endswith("\n"))
 
+    def test_latest_takes_one_triple_per_platform_in_the_order_given(self):
+        """t-113717: bundle-updater writes the macOS row and, when this run built the Windows
+        installer, its row after it — each platform's signature read from its own .sig."""
+        tmp = Path(self._tmp)
+        (tmp / "notes.md").write_text("- a note\n")
+        (tmp / "mac.sig").write_text("MACSIG\n")
+        (tmp / "win.sig").write_text("WINSIG\n")
+        base = ["python3", str(RELEASE / "updater_feed.py"), "latest", "--version", "0.1.0",
+                "--notes-file", str(tmp / "notes.md"), "--pub-date", "2026-11-18T00:00:00Z"]
+        mac = ["--platform", "darwin-aarch64", "--sig-file", str(tmp / "mac.sig"), "--url", "https://x/m.app.tar.gz"]
+        win = ["--platform", "windows-x86_64", "--sig-file", str(tmp / "win.sig"), "--url", "https://x/ZeroCode_0.1.0_x64-setup.exe"]
+        r = subprocess.run(base + mac + win, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        feed = json.loads(r.stdout)
+        self.assertEqual(list(feed["platforms"]), ["darwin-aarch64", "windows-x86_64"])
+        self.assertEqual(feed["platforms"]["darwin-aarch64"], {"signature": "MACSIG", "url": "https://x/m.app.tar.gz"})
+        self.assertEqual(feed["platforms"]["windows-x86_64"],
+                         {"signature": "WINSIG", "url": "https://x/ZeroCode_0.1.0_x64-setup.exe"})
+        one = subprocess.run(base + mac, capture_output=True, text=True)
+        self.assertEqual(list(json.loads(one.stdout)["platforms"]), ["darwin-aarch64"], "one triple is the old shape")
+        short = subprocess.run(base + mac + ["--platform", "windows-x86_64", "--sig-file", str(tmp / "win.sig")],
+                               capture_output=True, text=True)
+        self.assertEqual((short.returncode, short.stdout), (2, ""), "a platform without its url writes no feed")
+        twice = subprocess.run(base + mac + mac, capture_output=True, text=True)
+        self.assertEqual((twice.returncode, twice.stdout), (2, ""), "a platform given twice writes no feed")
+
     def test_changelog_section_is_the_body_under_that_version_only(self):
         feed = load_updater_feed()
         text = ("# Changelog\n\n## [0.2.0] — 2026-09-09\n\n_since v0.1.1 (2 commits)_\n\n### fix\n- fix: b\n\n"
@@ -1998,7 +2044,8 @@ class BundleUpdater(LaneCase):
         self.assertEqual(feed["version"], VERSION)
         self.assertRegex(feed["pub_date"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertTrue(feed["notes"].strip(), "notes are the CHANGELOG section")
-        self.assertEqual(list(feed["platforms"]), ["darwin-aarch64"])
+        # The Windows installer's row rides after it on a publish run (t-113717, class WindowsInstaller).
+        self.assertEqual(list(feed["platforms"]), ["darwin-aarch64", "windows-x86_64"])
         darwin = feed["platforms"]["darwin-aarch64"]
         self.assertEqual(darwin["signature"], archive.with_name(archive.name + ".sig").read_text().strip())
         self.assertEqual(darwin["url"],
@@ -2116,6 +2163,8 @@ class Publish(LaneCase):
         self.assertEqual(sorted(assets), sorted([
             f"ZeroCode_{VERSION}_aarch64.app.tar.gz", f"ZeroCode_{VERSION}_aarch64.app.tar.gz.sig",
             f"ZeroCode_{VERSION}_aarch64.dmg", "latest.json", "install.sh",
+            # t-113717: the Windows installer and its .sig (class WindowsInstaller).
+            f"ZeroCode_{VERSION}_x64-setup.exe", f"ZeroCode_{VERSION}_x64-setup.exe.sig",
         ]))
         # The app installer goes up beside the feed it reads, so the README's
         # `latest/download/install.sh` never 404s again (v1.1.0..v1.1.4 did).
@@ -2218,6 +2267,169 @@ class Publish(LaneCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual([l for l in self.lane.stub_lines() if "cross=" in l], [])
         self.assertFalse((self.lane.out(SHA_A) / "manifest.txt").exists())
+
+
+class WindowsInstaller(LaneCase):
+    """t-113717: on a publish run, after both swaps, build-win cross-builds the Windows installer
+    (tools/release/win-installer.sh in the sha's own tree) into the win-release target and copies
+    it under out/; bundle-updater signs it by the same key's path and gives it its feed row; publish
+    sends it with its .sig and a SmartScreen line. A red build leaves the release macOS-only
+    unless WIN_BLOCKS_PUBLISH=1; no room on the disk, or a sha from before the script, skips it aloud."""
+
+    INSTALLER = f"ZeroCode_{VERSION}_x64-setup.exe"
+
+    def setUp(self):
+        super().setUp()
+        self.pub = self.lane.write_key(keyid=bytes.fromhex("0102030405060708"))
+        self.lane.extra_env["RELEASE_PUBLISH"] = "1"
+
+    def events(self):
+        return [line.split(" ", 1)[1] for line in self.lane.stub_lines()]
+
+    def publish_assets(self):
+        lines = [l for l in self.lane.stub_lines() if " publish " in l]
+        self.assertEqual(len(lines), 1, lines)
+        return lines[0].split("assets=")[1].split()[0].split(",")
+
+    def feed(self):
+        return json.loads((self.lane.out(SHA_A) / "latest.json").read_text())
+
+    def lane_log(self):
+        return (self.lane.home / "out" / f"lane-{SHA_A[:8]}.log").read_text()
+
+    def test_an_install_run_builds_no_installer_and_says_so(self):
+        self.lane.extra_env["RELEASE_PUBLISH"] = "0"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ph = self.lane.phase("build-win")
+        self.assertEqual(ph["rc"], 0)
+        self.assertIn("RELEASE_PUBLISH", ph["skipped"])
+        self.assertFalse([e for e in self.events() if e.startswith("build-win")])
+
+    def test_a_publish_builds_it_after_both_swaps_signs_it_and_sends_it_with_its_feed_row(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "green")
+        self.assertEqual(self.phases(st), PHASES)
+        self.assertNotIn("skipped", self.lane.phase("build-win"))
+        events = self.events()
+        def at(prefix):
+            return next(i for i, event in enumerate(events) if event.startswith(prefix))
+        self.assertLess(at("swap-app"), at("build-win target="), "never beside build-app: they share the scratch")
+        self.assertLess(at("swap-zo"), at("build-win target="))
+        self.assertIn(f"target={self.lane.target('win-release')}", events[at("build-win target=")])
+        self.assertLess(at("build-win target="), at("bundle-updater sign-win "))
+        signed = events[at("bundle-updater sign-win ")]
+        self.assertIn(self.INSTALLER, signed)
+        self.assertIn("key=" + str(self.lane.key), signed, "signed by the key's path, as the archive is")
+        out = self.lane.out(SHA_A)
+        sig = out / (self.INSTALLER + ".sig")
+        self.assertTrue((out / self.INSTALLER).exists() and sig.exists(), sorted(p.name for p in out.iterdir()))
+        feed = self.feed()
+        self.assertEqual(list(feed["platforms"]), ["darwin-aarch64", "windows-x86_64"])
+        self.assertEqual(feed["platforms"]["windows-x86_64"], {
+            "signature": sig.read_text().strip(),
+            "url": f"https://github.com/{GITHUB_REPO}/releases/download/v{VERSION}/{self.INSTALLER}",
+        })
+        assets = self.publish_assets()
+        self.assertEqual(sorted(assets), sorted([
+            f"ZeroCode_{VERSION}_aarch64.app.tar.gz", f"ZeroCode_{VERSION}_aarch64.app.tar.gz.sig",
+            f"ZeroCode_{VERSION}_aarch64.dmg", "latest.json", "install.sh",
+            self.INSTALLER, self.INSTALLER + ".sig",
+        ]))
+        notes = (out / "notes.md").read_text()
+        self.assertIn(f"Windows (x64): {self.INSTALLER}", notes)
+        self.assertIn("SmartScreen", notes)
+        self.assertNotIn("SmartScreen", feed["notes"], "an installed app's notes need no first-install line")
+
+    def test_a_red_windows_build_leaves_the_release_macos_only(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, BUILD_WIN_RC=1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "green")
+        self.assertEqual(self.lane.phase("build-win")["rc"], 1, "the step stays red on the board")
+        self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
+        self.assertFalse([a for a in self.publish_assets() if "-setup.exe" in a])
+        self.assertFalse([e for e in self.events() if "sign-win" in e])
+        self.assertIn("without the Windows installer", self.lane_log())
+        self.assertNotIn("SmartScreen", (self.lane.out(SHA_A) / "notes.md").read_text())
+
+    def test_a_red_windows_build_stops_the_publish_when_told_to(self):
+        self.lane.extra_env["WIN_BLOCKS_PUBLISH"] = "1"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, BUILD_WIN_RC=1)
+        self.assertNotEqual(r.returncode, 0)
+        st = self.lane.status()
+        self.assertEqual(st["outcome"], "red")
+        self.assertIn("build-win", st["reason"])
+        self.assertFalse([e for e in self.events() if e.startswith("publish ")])
+        self.assertEqual(self.lane.installed()["app"]["sha"], SHA_A, "the local install already happened")
+
+    def test_a_windows_build_without_the_google_client_is_never_shipped(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, BUILD_WIN_DROPS_SECRET=1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lane.phase("build-win")["rc"], 1)
+        log = (self.lane.home / "out" / f"build-win-{SHA_A[:8]}.log").read_text()
+        self.assertIn("Google sign-in client", log)
+        self.assertNotIn("dry-run-google-oauth-client-secret", log + self.lane_log(), "the value is never written")
+        self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
+        self.assertFalse([a for a in self.publish_assets() if "-setup.exe" in a])
+
+    def test_a_publish_told_to_ship_macos_alone_skips_it_aloud(self):
+        self.lane.extra_env["RELEASE_WINDOWS"] = "0"
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ph = self.lane.phase("build-win")
+        self.assertEqual(ph["rc"], 0)
+        self.assertIn("RELEASE_WINDOWS=0", ph["skipped"])
+        self.assertFalse([e for e in self.events() if e.startswith("build-win")])
+        self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
+        self.assertFalse([a for a in self.publish_assets() if "-setup.exe" in a])
+
+    def test_a_sha_from_before_the_script_is_skipped_aloud(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, WIN_INSTALLER_IN_TREE=0)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        ph = self.lane.phase("build-win")
+        self.assertEqual(ph["rc"], 0)
+        self.assertIn("tools/release/win-installer.sh", ph["skipped"])
+        self.assertFalse([e for e in self.events() if e.startswith("build-win")])
+        self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
+
+    def test_no_room_for_it_skips_it_rather_than_refusing_the_release(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, DISK_FREE_GB_BUILD_WIN=12)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lane.status()["outcome"], "green")
+        ph = self.lane.phase("build-win")
+        self.assertEqual(ph["rc"], 0)
+        self.assertIn("disk: 12G free", ph["skipped"])
+        self.assertFalse([e for e in self.events() if e.startswith("build-win")])
+        self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
+        self.assertTrue(self.publish_assets(), "the macOS release still goes out")
+
+    def test_on_a_tight_disk_its_target_goes_once_the_installer_is_out_of_it(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub, DISK_FREE_GB_BUILD_WIN=17)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        events = self.events()
+        self.assertIn("clean win-release", events)
+        built = next(i for i, event in enumerate(events) if event.startswith("build-win target="))
+        self.assertLess(built, events.index("clean win-release"))
+        self.assertIn("windows-x86_64", self.feed()["platforms"], "the installer was out of the target first")
+        self.assertIn(self.INSTALLER, self.publish_assets())
+
+    def test_on_a_roomy_disk_its_target_stays_warm(self):
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(PLUGIN_PUBKEY=self.pub)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("clean win-release", self.events())
 
 
 class GateOwed(LaneCase):

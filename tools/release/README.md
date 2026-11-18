@@ -443,8 +443,26 @@ build script runs again (`target <lane>: removed N build-script run(s) that ran
 in another target` in the lane log). Copy a target out of the lane, never into
 it.
 
-## The two phases after the swaps
+## The three phases after the swaps
 
+- `build-win` (t-113717) — only under `RELEASE_PUBLISH=1`, after both swaps and
+  never beside build-app (the two share the scratch's staged zo and `ui/dist`).
+  The sha's own `tools/release/win-installer.sh` cross-builds zo and the window
+  for `x86_64-pc-windows-msvc` into the `win-release` target — cargo-xwin as
+  tauri's runner, Homebrew's `makensis` (`brew install makensis`), `7z`
+  (`p7zip`) to read the installer back; MSI needs WiX, which runs on Windows
+  only — and checks that `ZeroCode_<version>_x64-setup.exe` carries the
+  window, every `[[bin]]` helper of the shell crate that needs no feature
+  (`zerocode-mirror.exe`, `zerocode-pick.exe`) and `bin/zo`. Both binaries
+  must carry the Google sign-in client, as build-app's do. The installer is
+  copied to `out/<sha8>/`, and on a disk under `RECLAIM_BELOW_GB` the target
+  goes right after. A red build leaves the release macOS-only (the step stays
+  red; installed Windows apps keep their version) unless `WIN_BLOCKS_PUBLISH=1`;
+  less than `DISK_FLOOR_GB + WIN_ROOM_GB` free, a sha from before the script,
+  or `RELEASE_WINDOWS=0` (a macOS-only publish with no Windows build in front
+  of it) skips the phase aloud. None of its tools is in `TOOLS`: a Mac without
+  them still publishes macOS. There is no Authenticode signature; the release
+  notes and the README say what SmartScreen shows on a first install.
 - `bundle-updater` — with a key and U-B's `plugins.updater` present, and only
   under `RELEASE_PUBLISH=1` (an install run skips the phase aloud), gathers
   `ZeroCode_<version>_<arch>.app.tar.gz`, its `.sig`, the `.dmg`, the CHANGELOG
@@ -469,6 +487,13 @@ it.
   is red: Tauri without an identity ships the linker's adhoc signature over
   unsealed resources, which another Mac's Gatekeeper calls "damaged" under
   quarantine (v1.3.78, 2026-09-15).
+  When build-win built the installer in this run, the phase signs it the same
+  one way (`sign_updater_asset`: `tauri signer sign -f $UPDATER_KEY`, the key by
+  its path) and writes its `windows-x86_64` row after `darwin-aarch64` in
+  `latest.json` — the installer itself is the update (tauri v2's
+  `createUpdaterArtifacts: true` shape, not v1's `.nsis.zip`); the app hands it
+  to the updater plugin at the restart, which runs it `/P /UPDATE` and starts
+  the new version.
 - `publish` — only under `RELEASE_PUBLISH=1`. Creates `v<version>` on
   `RELEASE_GITHUB_REPO` with the assets and the feed (`gh release create`);
   refuses (rc 3, the queue file is not put back) when the tag already exists.
@@ -506,7 +531,8 @@ after the person's go —
 
 ## Out of scope, with a place kept
 
-- Windows/Linux app assets (Actions is billing-blocked; `platforms` carries
-  only what this machine builds).
+- Linux app assets and a Windows MSI or arm64 installer (`platforms` carries
+  only what this machine builds: `darwin-aarch64`, and `windows-x86_64` since
+  t-113717).
 - Developer ID signing and notarisation (`notarize` would sit between
   `bundle-updater` and `publish`).
