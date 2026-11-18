@@ -7862,9 +7862,9 @@ private enum DesktopApps {
     /// it has, not at its first window. How late it comes was not measured.
     private static let comesForwardLateSeconds: TimeInterval = launchProcessTimeoutSeconds
     /// Told to come up behind, an app may still bring itself to the front. What the
-    /// person had goes back in front, unless they moved on since (`FrontWatch`).
+    /// person had goes back in front, unless they chose since (`FrontWatch`).
     /// Beside the launch, which answers without waiting for it.
-    /// `launchedAt` is the system uptime the launch began at: input since then
+    /// `launchedAt` is the system uptime the launch began at: a press since then
     /// is the person's say over the front.
     private static func keepInFront(_ front: NSRunningApplication?, over pid: pid_t, launchedAt: TimeInterval) {
         guard let front, front.processIdentifier != pid else { return }
@@ -7874,8 +7874,8 @@ private enum DesktopApps {
         }
     }
 
-    /// `kCGAnyInputEventType`: the age of the newest input of any type.
-    private static let anyInput = CGEventType(rawValue: ~0)!
+    /// The buttons going down: a press, by the HID system's table.
+    private static let pressEvents: [CGEventType] = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
 
     private static func watchFront(_ watching: inout FrontWatch, of front: NSRunningApplication, launchedAt: TimeInterval, for seconds: TimeInterval) -> Bool {
         let giveUp = Date().addingTimeInterval(seconds)
@@ -7894,13 +7894,14 @@ private enum DesktopApps {
             // `postToPid` into one process's queue and never pass the HID system,
             // so its ages do not count them. Its desktop input is posted at the
             // HID tap and may count; DesktopBorrowHost stamps each such post and
-            // `personActed` takes a matching age for it. Read from the code, not
+            // `personChose` takes a matching age for it. Read from the code, not
             // measured on a person's machine.
-            personActed: {
-                FrontWatch.personActed(
+            personChose: {
+                FrontWatch.personChose(
                     sinceLaunch: ProcessInfo.processInfo.systemUptime - launchedAt,
                     reading: DesktopBorrowHost.reading(),
-                    sinceAnyInput: CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: anyInput)
+                    commandHeld: FrontWatch.choosesAnApp(CGEventSource.flagsState(.hidSystemState)),
+                    sinceClick: pressEvents.map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }.min() ?? .infinity
                 )
             },
             giveBack: {
