@@ -2961,15 +2961,28 @@ fn call_once_the_person_pauses(
 }
 
 /// Whether an act held up by the person's pointer or keys may be asked again
-/// once they pause. Not a press the person is asked to confirm: every asking
-/// would show them the card again. Not an act at a point: the window cannot
-/// tell that what is there changed while the person was on the pointer — a
-/// page they scrolled, a tab they switched — and the model looks again
-/// before it presses again. An act the window finds again on its fresh look
-/// (by an element's number, a mark, or words) may.
+/// once they pause: only a pointer act the window finds its target for again
+/// on its fresh look — a press or a scroll by an element's number, a mark,
+/// or words — and, in a batch, steps that do not act at all.
+///
+/// Not an act at a point: the window cannot tell that what is there changed
+/// while the person was on the pointer — a page they scrolled, a tab they
+/// switched — and the model looks again before it presses again. Not keys or
+/// typed text: they go to the app's own focus, which the window does not
+/// find again, and a refusal for the person's keys may mean they were typing
+/// in that very app — a Return sent once they paused could send what they
+/// had half typed. Not a press the person is asked to confirm: every asking
+/// would show them the card again.
 fn may_ask_again(input: &ComputerInput) -> bool {
-    input.confirming.is_none() && input.coordinate.is_none() && input.start_coordinate.is_none()
+    let action = input.action.trim();
+    let finds_its_target_again = (MARK_CLICKS.contains(&action) || action == SCROLL_ACTION)
+        && input.coordinate.is_none()
+        && input.start_coordinate.is_none();
+    input.confirming.is_none() && (finds_its_target_again || !acts(action))
 }
+
+/// The pointer act that scrolls what the window finds under its target.
+const SCROLL_ACTION: &str = "scroll";
 
 /// Sleep `pause` in slices of [`STOP_LOOK_EVERY`], looking at `stopped`
 /// before each and once more at its end: false, at once, when the turn was
@@ -7023,13 +7036,13 @@ printf '%s
     #[cfg(unix)]
     #[test]
     fn a_batch_held_up_before_its_first_step_is_sent_again_and_one_that_ran_a_step_is_not() {
-        let steps = json!([{"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true, "foreground": true}, {"action": "key", "text": "Return", "foreground": true}]);
+        let steps = json!([{"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true, "foreground": true}, {"action": "left_click", "app": "Fixture", "label": "Done", "ocr": true, "foreground": true}]);
         // As `batch_answer` writes it: the batch's refusal is a code and words,
         // and the step it stopped at carries what the window said of it.
         let held_up = |ran: u64| {
             let refused: Value = serde_json::from_str(&the_person_is_on_the_pointer()).unwrap();
             let mut reports: Vec<Value> = (1..=ran).map(|n| json!({"n": n, "verb": "click", "ok": true, "ms": 1, "result": {}})).collect();
-            reports.push(json!({"n": ran + 1, "verb": if ran == 0 { "click" } else { "key" }, "ok": false, "error": refused["error"]}));
+            reports.push(json!({"n": ran + 1, "verb": "click", "ok": false, "error": refused["error"]}));
             json!({"ok": false,
                 "error": {"code": refused["error"]["code"], "message": format!("step {} of 2: {}", ran + 1, refused["error"]["message"].as_str().unwrap())},
                 "result": {"ran": ran, "of": 2, "refusedAt": ran + 1, "steps": reports}})
@@ -7155,11 +7168,35 @@ printf '%s
     #[test]
     fn only_an_act_the_window_finds_again_is_asked_again() {
         assert!(may_ask_again(&input(json!({"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true}))));
-        assert!(may_ask_again(&input(json!({"action": "key", "text": "Return"}))));
+        assert!(may_ask_again(&input(json!({"action": "scroll", "app": "Fixture", "scroll_direction": "down"}))));
+        // A step that does not act, between two presses of a batch.
+        assert!(may_ask_again(&input(json!({"action": "wait_for", "app": "Fixture", "text": "Saved"}))));
+        // Keys go to the app's focus: a Return once the person paused could send what they half typed.
+        assert!(!may_ask_again(&input(json!({"action": "key", "text": "Return"}))));
+        assert!(!may_ask_again(&input(json!({"action": "type", "app": "Fixture", "text": "hello"}))));
+        assert!(!may_ask_again(&input(json!({"action": "hold_key", "text": "shift", "duration": 1}))));
         assert!(!may_ask_again(&input(json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]}))));
         assert!(!may_ask_again(&input(json!({"action": "left_click", "coordinate": [100, 40]}))));
         assert!(!may_ask_again(&input(json!({"action": "left_click_drag", "start_coordinate": [10, 20], "coordinate": [30, 40]}))));
         assert!(!may_ask_again(&input(json!({"action": "left_click", "app": "Fixture", "label": "Pay", "ocr": true, "confirming": "payment"}))));
+    }
+
+    /// A batch is asked again only when every step finds its target again:
+    /// one that types or sends a key goes back to the model as it was refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_batch_that_sends_keys_is_not_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let refused: Value = serde_json::from_str(&the_person_is_on_the_pointer()).unwrap();
+        std::fs::write(dir.path().join("reply-batch.1"), json!({"ok": false,
+            "error": {"code": refused["error"]["code"], "message": "step 1 of 2: words"},
+            "result": {"ran": 0, "of": 2, "refusedAt": 1, "steps": [{"n": 1, "verb": "click", "ok": false, "error": refused["error"]}]}}).to_string()).unwrap();
+        let steps = json!([{"action": "left_click", "app": "Fixture", "label": "Message", "ocr": true, "foreground": true}, {"action": "key", "text": "Return", "foreground": true}]);
+        let _ = run_computer(&json!({"action": "batch", "steps": steps}), &ctx, &road);
+        let batches = calls(dir.path()).iter().filter(|verb| verb.as_str() == "batch").count();
+        assert_eq!(batches, 1, "{:?}", calls(dir.path()));
     }
 
     /// A press the person is asked to confirm is not asked again: every
