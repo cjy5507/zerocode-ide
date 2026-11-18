@@ -458,5 +458,155 @@ class PiiScan(unittest.TestCase):
             self.assertEqual(pii_scan.machine_accounts(), ("acme", "acme-old"))
 
 
+# --- one corpus over every pattern the gate runs -------------------------------
+#
+# The 2026-11-19 measurement of this gate (t-115074, reports/rust-anything-166)
+# counts thirteen patterns it runs: each row's `find` and `allow` (eight),
+# home-path's `allow` read without case for the account (`account_forgiven`),
+# `TOKEN`, `ACCOUNT_ALLOW`, `account_finder` and `WAIVER`. The corpus gives each
+# one a value it takes and one it passes over, and every alternative of every
+# `find` a value of its own, so a change that leaves a file or a word unread
+# shows here as a finding gone missing, and one that reads too much as a finding
+# too many. Every value is fictional, and the caught ones are assembled where the
+# corpus is written: this file carries none of them whole.
+CORPUS_ACCOUNTS = ("acme", "DEV", "RunnerAdmin", "runner2")  # two looked for; home-path forgives one, ACCOUNT_ALLOW one
+CORPUS_WORDS = ("gizmo", "frobozz")  # a banished word of each length the shipped table hashes
+
+
+def dotted(*octets):
+    """An address written from its parts, so this file never spells it whole."""
+    return ".".join(str(octet) for octet in octets)
+
+
+def corpus():
+    """The corpus's files, and every finding the gate reads off them, in the order it reports them."""
+    home = CAUGHT["home-path"]
+    name = home.rsplit("/", 1)[-1]
+    domain = CAUGHT["email"].split("@", 1)[1]
+    s, b = "/", "\\"
+    body = "Qz7Rk2Wm9Lp4"  # twelve characters that spell no word a row's `allow` forgives
+    keys = (  # one per alternative of the credential row's `find`, in its order
+        "sk-ant-" + "api03-" + body * 2,
+        "sk-proj-" + body * 2,
+        "gh" + "p_" + body * 3,
+        "github_" + "pat_" + body * 5,
+        CAUGHT["credential"],
+        "xox" + "b-" + body * 2,
+        "AI" + "za" + (body * 3)[:35],
+        "GOCSPX" + "-" + body * 2,
+        "ya29" + "." + body * 3,
+    )
+    pem_head = "-----BEGIN " + "RSA PRIVATE KEY-----"
+    pem_body = "\n".join("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC1" for _ in range(3))
+    files = {
+        "account.txt": (
+            "the account was acme and ACME@h and /srv/acme/x acme-kim acme_home\n"
+            "runner2 ran\n"
+            "misses acmes xacme acme7 9acme runner RunnerAdmin dev DEV runner22\n"
+        ),
+        "home.txt": (
+            f"path {home}{s}x\n"
+            f"win C:{b}Users{b}{name}{b}y\n"
+            f'rust "C:{b}{b}Users{b}{b}{name}"\n'
+            f"quoted `Users{s}{name}{s}Desktop`\n"
+            f"slug -Users-{name}-proj\n"
+            f"placeholders {s}Users{s}dev {b}Users{b}pi Users-you {s}Users{s}dev.local\n"
+            f"near {s}Users{s}devops\n"
+            f"misses AllUsers{s}{name} Users:{name} {s}Users{s} the Users table\n"
+        ),
+        "ip.txt": (
+            f"hosts {dotted(10, 99, 44, 7)} and {dotted(172, 20, 9, 9)} and {dotted(192, 168, 77, 5)}\n"
+            "allowed 10.0.0.5 10.1.2.3 172.16.0.1 192.168.1.20\n"
+            f"near {dotted(172, 16, 0, 2)}\n"
+            "misses 172.15.0.1 110.99.44.7 10.1.2 version 10.4 192.169.1.1\n"
+        ),
+        "keys.txt": "".join(f"{key}\n" for key in keys) + f"{pem_head}\n{pem_body}\n" + (
+            "short AKIA" + "Q7RVBNMLKJHGFDS\n"
+            "header -----BEGIN PRIVATE KEY----- and no body\n"
+            "forgiven AKIAIOSFODNN7EXAMPLE gh" + "p_" + "x" * 36 + "\n"
+        ),
+        "mail.txt": (
+            f"write to chief@{domain}\n"
+            "allowed one@example.com ONE@EXAMPLE.ORG git@github.com icon@2x.png\n"
+            "misses user@localhost a@b @mention name@host.c\n"
+        ),
+        # No shape row's literal stands in this file: the banished and account rows still read it.
+        "plain.txt": "a gizmo by acme\n",
+        "ui/vendor/lib.js": f"/* by chief@{domain}, acme, {dotted(10, 99, 44, 8)} */\n",
+        "waived.txt": (
+            f"{home}  # pii-scan: allow home-path — on its own line\n"
+            "# pii-scan:allow  home-path — the line below\n"
+            f"{home}\n"
+            f"{home}  # pii-scan: allow email — another row\n"
+            "# pii-scan: allow home-path — two lines above\n"
+            "unrelated\n"
+            f"{home}\n"
+            f"{home}  # pii-scan allow home-path — no colon\n"
+        ),
+        "words.txt": (
+            "a gizmo here and GIZMO there\n"
+            "frobozz/x and 7gizmo and gizmo_x\n"
+            + "a" * 32 + "gizmo\n"  # TOKEN takes 32 characters at most: the five after them are a word
+            "misses gizmos xgizmo gizmo7 " + "a" * 31 + "gizmo frobozzz\n"
+        ),
+    }
+    expected = [
+        ("home-path", "home.txt", 1, home),
+        ("home-path", "home.txt", 2, f"{b}Users{b}{name}"),
+        ("home-path", "home.txt", 3, f"{b}{b}Users{b}{b}{name}"),
+        ("home-path", "home.txt", 4, f"Users{s}{name}"),
+        ("home-path", "home.txt", 5, f"Users-{name}"),
+        ("home-path", "home.txt", 7, f"{s}Users{s}devops"),
+        ("home-path", "waived.txt", 4, home),
+        ("home-path", "waived.txt", 7, home),
+        ("home-path", "waived.txt", 8, home),
+        ("private-ip", "ip.txt", 1, dotted(10, 99, 44, 7)),
+        ("private-ip", "ip.txt", 1, dotted(172, 20, 9, 9)),
+        ("private-ip", "ip.txt", 1, dotted(192, 168, 77, 5)),
+        ("private-ip", "ip.txt", 3, dotted(172, 16, 0, 2)),
+        ("private-ip", "ui/vendor/lib.js", 1, dotted(10, 99, 44, 8)),
+        ("email", "mail.txt", 1, f"chief@{domain}"),
+        # A finding is shown in at most 60 characters: 57 and an ellipsis past that.
+        *(("credential", "keys.txt", line, key if len(key) <= 60 else key[:57] + "…") for line, key in enumerate(keys, start=1)),
+        ("credential", "keys.txt", len(keys) + 1, f"{pem_head}\\n{pem_body[:25]}…"),
+        (pii_scan.BANISHED_NAME, "plain.txt", 1, "gizmo"),
+        (pii_scan.BANISHED_NAME, "words.txt", 1, "gizmo"),
+        (pii_scan.BANISHED_NAME, "words.txt", 1, "GIZMO"),
+        (pii_scan.BANISHED_NAME, "words.txt", 2, "frobozz"),
+        (pii_scan.BANISHED_NAME, "words.txt", 2, "gizmo"),
+        (pii_scan.BANISHED_NAME, "words.txt", 2, "gizmo"),
+        (pii_scan.BANISHED_NAME, "words.txt", 3, "gizmo"),
+        *((pii_scan.ACCOUNT_NAME, "account.txt", 1, pii_scan.ACCOUNT_SHOWN),) * 5,
+        (pii_scan.ACCOUNT_NAME, "account.txt", 2, pii_scan.ACCOUNT_SHOWN),
+        (pii_scan.ACCOUNT_NAME, "plain.txt", 1, pii_scan.ACCOUNT_SHOWN),
+    ]
+    return files, expected
+
+
+class Corpus(unittest.TestCase):
+    """The corpus above, read by the gate as it stands."""
+
+    def setUp(self):
+        self.files, self.expected = corpus()
+        self.checkout = Checkout()
+        self.addCleanup(self.checkout.close)
+        for path, text in self.files.items():
+            self.checkout.write(path, text)
+
+    def scan(self):
+        """The gate over the corpus, with its fictional accounts and banished words."""
+        table = tuple((len(word), hashlib.sha256(word.encode()).hexdigest()) for word in CORPUS_WORDS)
+        with account(*CORPUS_ACCOUNTS), mock.patch.object(pii_scan, "BANISHED", table):
+            return pii_scan.scan(self.checkout.root)
+
+    def test_every_pattern_takes_its_value_and_passes_over_its_neighbour(self):
+        """Each finding the corpus holds, in the gate's order, and not one more."""
+        found = self.scan()
+        self.assertEqual(
+            [(category, hit["path"], hit["line"], hit["text"]) for category in pii_scan.categories() for hit in found[category]],
+            self.expected,
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
