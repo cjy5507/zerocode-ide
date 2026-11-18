@@ -6357,10 +6357,7 @@ impl App {
                             KeyOutcome::TurnView => self.turn_view(),
                             KeyOutcome::Nothing => {}
                         }
-                        self.drive_autonomy(&mut events).await;
-                        // A theme chosen now, or during the turn that just
-                        // ended, is drawn over the whole conversation.
-                        self.redraw_in_chosen_theme();
+                        self.after_idle_event(&mut events).await;
                         self.ui.draw();
                     }
                     Some(Err(_)) | None => break ExitReason::UserExit,
@@ -6801,7 +6798,9 @@ impl App {
     /// cleared and the session's saved turns are drawn again in the new
     /// theme, as `ctrl+o` draws them in the other view, with the line that
     /// says the theme under them. An empty conversation has drawn nothing in
-    /// the old one.
+    /// the old one. The idle loop asks after every event it handles — and a
+    /// turn runs inside that handling, so a theme chosen during the turn is
+    /// drawn once the turn has ended.
     fn redraw_in_chosen_theme(&mut self) {
         let Some((level, text)) = self.ui.theme_redraw.take() else {
             return;
@@ -7780,6 +7779,14 @@ impl App {
     /// Every due `/goal` and `/loop` turn, through the driver both frontends
     /// share (`autonomy::driver`). There is no idle timer: when nothing is
     /// armed this returns at once and the 10-second idle draw contract stays.
+    /// What the idle loop does once it has handled a person's event: the
+    /// autonomy that may start a turn, then a theme chosen meanwhile drawn
+    /// over the conversation ([`Self::redraw_in_chosen_theme`]).
+    async fn after_idle_event(&mut self, events: &mut TerminalEvents) {
+        self.drive_autonomy(events).await;
+        self.redraw_in_chosen_theme();
+    }
+
     async fn drive_autonomy(&mut self, events: &mut TerminalEvents) {
         if self.opening.is_some() || self.ui.recovery.is_some() { return; }
         let mut front = TuiFrontend { app: self, events };
