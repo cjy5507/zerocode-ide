@@ -1230,7 +1230,9 @@ class Cap(LaneCase):
         self.assertEqual(self.lane.run().returncode, 0)
         used = [l for l in self.lane.stub_lines() if "target=" in l]
         dirs = sorted({l.split("target=")[1].split()[0] for l in used})
-        self.assertEqual(dirs, sorted(str(self.lane.target(l)) for l in TARGET_LANES))
+        # An install run uses every target but the Windows installer's, which only a publish run
+        # builds (t-113717; class WindowsInstaller pins that one).
+        self.assertEqual(dirs, sorted(str(self.lane.target(l)) for l in TARGET_LANES if l != "win-release"))
 
 
 class Flakes(LaneCase):
