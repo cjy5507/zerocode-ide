@@ -150,6 +150,16 @@ pub fn truncate_tool_output(
         }
     }
 
+    // A skill keeps its envelope's shape: its body is shortened inside it,
+    // so the wire still reads it as text (t-115139 Z7).
+    if let Some(content) = digest_skill_envelope(output, limit) {
+        return TruncatedOutput {
+            content,
+            was_truncated: true,
+            original_len,
+        };
+    }
+
     // WebFetch returns a fetched page's readable body (metadata header + text).
     // Head-only truncation would silently drop the tail — a long article's
     // conclusion, a doc page's reference/API list at the bottom. A head+tail
@@ -216,6 +226,121 @@ fn digest_read_file_envelope(output: &str, limit: usize) -> Option<String> {
         None => note,
     });
     serde_json::to_string_pretty(&parsed).ok()
+}
+
+/// Shorten an over-cap skill envelope inside its JSON — `Skill`'s one skill,
+/// or the `skills` a search or a load hands back — so the wire still shows
+/// it as text (t-115139 Z7).
+///
+/// Cut at the cap like any other text, `computer-use` (40 KB) lost its JSON
+/// shape in the middle: the wire could not read it, and the model got the
+/// raw envelope with the procedure's middle gone — about a third of this
+/// machine's `skill_search` answers in a week. Here the longest body goes
+/// first and keeps its first and last lines ([`shortened_skill_body`]).
+/// `None` when the output is no skill envelope or stays over `limit` once
+/// every body is shortened; the caller then cuts it as before.
+fn digest_skill_envelope(output: &str, limit: usize) -> Option<String> {
+    if !(output.starts_with('{') && output.contains("\"prompt\"") && output.contains("\"skill")) {
+        return None;
+    }
+    let mut value: serde_json::Value = serde_json::from_str(output).ok()?;
+    loop {
+        let text = serde_json::to_string_pretty(&value).ok()?;
+        let length = text.chars().count();
+        if length <= limit {
+            return Some(text);
+        }
+        let mut bodies = skill_bodies(&mut value);
+        bodies.sort_by_key(|skill| std::cmp::Reverse(skill_body(skill).chars().count()));
+        let skill = bodies.into_iter().find(|skill| !skill_body(skill).starts_with(SKILL_SHORTENED))?;
+        let body = skill_body(skill).to_string();
+        let keep = body.chars().count().saturating_sub(length - limit + SKILL_NOTE_ALLOWANCE);
+        let path = skill.get("path").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+        skill.insert("prompt".to_string(), serde_json::Value::String(shortened_skill_body(&body, keep, &path)));
+    }
+}
+
+/// How a shortened skill body begins.
+const SKILL_SHORTENED: &str = "[zo] skill shortened to fit the result";
+
+/// Room a shortened body's note and marker take, beyond the lines it keeps.
+const SKILL_NOTE_ALLOWANCE: usize = 400;
+
+/// The skills of an envelope that carry a body: the one `Skill` returns, or
+/// each of the `skills` a search or a load returns — an object naming its
+/// `skill` beside its `prompt`.
+fn skill_bodies(value: &mut serde_json::Value) -> Vec<&mut serde_json::Map<String, serde_json::Value>> {
+    let Some(object) = value.as_object_mut() else {
+        return Vec::new();
+    };
+    if is_skill(object) {
+        return vec![object];
+    }
+    object
+        .get_mut("skills")
+        .and_then(serde_json::Value::as_array_mut)
+        .map(|skills| {
+            skills
+                .iter_mut()
+                .filter_map(serde_json::Value::as_object_mut)
+                .filter(|skill| is_skill(skill))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn is_skill(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    object.get("skill").is_some_and(serde_json::Value::is_string)
+        && object.get("prompt").is_some_and(serde_json::Value::is_string)
+}
+
+fn skill_body(skill: &serde_json::Map<String, serde_json::Value>) -> &str {
+    skill.get("prompt").and_then(serde_json::Value::as_str).unwrap_or_default()
+}
+
+/// A skill body cut to about `keep` chars at whole lines — two thirds from
+/// its start, where the procedure begins, the rest from its end — under one
+/// line that says which lines are missing and names the skill's own file and
+/// the tool that reads them back. A `SKILL.md` is the body line for line, so
+/// the numbers are the file's.
+fn shortened_skill_body(body: &str, keep: usize, path: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut used = 0;
+    let head = lines
+        .iter()
+        .take_while(|line| {
+            used += line.chars().count() + 1;
+            used <= keep * 2 / 3
+        })
+        .count();
+    let mut used = 0;
+    let tail = lines[head..]
+        .iter()
+        .rev()
+        .take_while(|line| {
+            used += line.chars().count() + 1;
+            used <= keep - keep * 2 / 3
+        })
+        .count();
+    let (first, last) = (head + 1, lines.len() - tail);
+    let mut out = String::with_capacity(keep + 256);
+    let _ = writeln!(
+        out,
+        "{SKILL_SHORTENED}: lines {first}-{last} of {} are not shown — the whole skill is {path}; {} it with offset={first} limit={}",
+        lines.len(),
+        core_types::tool_names::CoreTool::Read.wire(),
+        (last + 1).saturating_sub(first),
+    );
+    for line in &lines[..head] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    let _ = writeln!(out, "⟨lines {first}-{last} not shown⟩");
+    for line in &lines[lines.len() - tail..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Build a bounded plain-text view for an oversized bash JSON envelope.
@@ -1284,5 +1409,53 @@ mod tests {
         let result = truncate_tool_output(&s, "read_file", &cfg);
         assert_eq!(result.original_len, 5);
         assert_ne!(result.original_len, s.len()); // must NOT be byte count
+    }
+
+    /// An over-cap skill keeps its envelope's JSON shape (t-115139 Z7). The
+    /// cap cut `computer-use` (40 KB) in the middle of its JSON, the wire
+    /// could not read it, and the model got the raw envelope with the
+    /// procedure's middle gone. Only the body is shortened — its first and
+    /// last lines stay — and one line says what is missing and names the
+    /// skill's own file and the tool that reads it.
+    #[test]
+    fn an_over_cap_skill_keeps_its_json_and_names_its_whole_file() {
+        let body = (1..=1_500).fold(String::new(), |mut body, n| {
+            let _ = writeln!(body, "Step {n}: do what the skill says here, then check it.");
+            body
+        });
+        let path = "/Users/dev/.zo/skills/big-skill/SKILL.md";
+        let search = serde_json::to_string_pretty(&serde_json::json!({
+            "rankedBy": "fallback", "outcome": "off", "installed": 32,
+            "skills": [{
+                "skill": "big-skill", "path": path, "description": "A long procedure.",
+                "origin": "global-zo", "reading": 0.5, "prompt": body,
+            }],
+            "others": ["small-skill"],
+        }))
+        .expect("json");
+        let one = serde_json::to_string_pretty(&serde_json::json!({
+            "skill": "big-skill", "path": path, "args": null, "description": "A long procedure.",
+            "origin": "global-zo", "prompt": body,
+        }))
+        .expect("json");
+        let cfg = TruncationConfig::default();
+        let read = core_types::tool_names::CoreTool::Read.wire();
+        for (raw, tool) in [(&search, "CapabilityInvoke"), (&one, "Skill")] {
+            let capped = truncate_tool_output(raw, tool, &cfg);
+            assert!(capped.was_truncated && capped.content.chars().count() <= cfg.default_max_chars);
+            serde_json::from_str::<serde_json::Value>(&capped.content).expect("the envelope is still JSON");
+            let shown = crate::context_compression::wire_tool_output(
+                &capped.content,
+                tool,
+                false,
+                crate::context_compression::WireRewrite::Lossless,
+            );
+            assert!(shown.contains("\nStep 1: do what") && shown.contains("Step 1500: do what"), "{tool}: head and tail stay");
+            let note = shown
+                .lines()
+                .find(|line| line.contains("shortened") && line.contains(path))
+                .unwrap_or_else(|| panic!("{tool}: one line says what is missing and where the whole is"));
+            assert!(note.contains(read), "{note}");
+        }
     }
 }
