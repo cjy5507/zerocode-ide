@@ -100,6 +100,7 @@ pub mod pane;
 pub mod pane_claim;
 pub mod pane_transcript;
 pub mod payload;
+pub mod person_home;
 pub mod pick;
 pub mod plain_text;
 pub mod private_data;
