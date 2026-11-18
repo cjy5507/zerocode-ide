@@ -12,6 +12,13 @@ use super::ToolError;
 pub(crate) struct SkillInput {
     pub skill: String,
     pub args: Option<String>,
+    /// The first line of the body to hand back, counted from 1 — for a skill
+    /// a result carried shortened (t-115139 Z7 review).
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// How many lines from `offset`; to the body's end when absent.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,9 +190,10 @@ pub(crate) fn execute_skill_at(input: SkillInput, cwd: &Path) -> Result<SkillOut
             if crate::artifact_tools::DESIGN_SKILLS.contains(&name) {
                 if let Some(skill) = zerocode_core::skill_install::bundled_skill(name) {
                     return Ok(SkillOutput {
+                        prompt: lines_asked(skill.content, input.offset, input.limit),
                         skill: input.skill, path: format!("bundled/{}/SKILL.md", skill.name),
                         args: input.args, description: parse_skill_description(skill.content),
-                        origin: "bundled".into(), prompt: skill.content.into(),
+                        origin: "bundled".into(),
                     });
                 }
             }
@@ -203,14 +211,50 @@ pub(crate) fn execute_skill_at(input: SkillInput, cwd: &Path) -> Result<SkillOut
     let description = parse_skill_description(&prompt);
 
     Ok(SkillOutput {
+        prompt: lines_asked(&prompt, input.offset, input.limit),
         skill: input.skill,
         path: resolved.path.display().to_string(),
         args: input.args,
         description,
         origin: resolved.origin,
-        prompt,
     })
 }
+
+/// A skill's body, or — when an `offset` or a `limit` asks — the lines of it
+/// they name under one line that says which (t-115139 Z7 review). A skill too
+/// long for its result comes back shortened, and the line naming the missing
+/// lines names this call: `Skill` reads the skill itself, in any permission
+/// mode, where a `Read` of its file outside the workspace is refused. The
+/// lines stop before they would outgrow that result, and say where the rest
+/// starts.
+fn lines_asked(body: &str, offset: Option<usize>, limit: Option<usize>) -> String {
+    if offset.is_none() && limit.is_none() {
+        return body.to_string();
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    let first = offset.unwrap_or(1).max(1);
+    let asked_end = limit.map_or(lines.len(), |limit| first.saturating_add(limit).saturating_sub(1)).min(lines.len());
+    let room = runtime::SKILL_RESULT_CHARS.saturating_sub(SKILL_ENVELOPE_ROOM);
+    let (mut shown, mut used) = (String::new(), 0);
+    let mut last = first.saturating_sub(1);
+    for line in lines.iter().take(asked_end).skip(first.saturating_sub(1)) {
+        // Measured as the envelope carries it: JSON escapes a quote, a
+        // backslash and the line's end.
+        used += serde_json::to_string(line).map_or(line.len(), |quoted| quoted.chars().count());
+        if used > room {
+            break;
+        }
+        shown.push_str(line);
+        shown.push('\n');
+        last += 1;
+    }
+    let rest = if last < asked_end { format!("; the rest from offset={}", last + 1) } else { String::new() };
+    format!("[zo] lines {first}-{last} of {}{rest}\n{shown}", lines.len())
+}
+
+/// Room an envelope's other fields take beside the lines a `Skill` call with
+/// an `offset` hands back: its name, path, description and origin.
+const SKILL_ENVELOPE_ROOM: usize = 4_000;
 
 /// Rank every installed skill against `task` and hand back the best of them
 /// whole.
@@ -375,6 +419,8 @@ fn load_named_skill(name: &str, cwd: &Path) -> Result<LoadedSkill, ToolError> {
         SkillInput {
             skill: name.to_string(),
             args: None,
+            offset: None,
+            limit: None,
         },
         cwd,
     )?;

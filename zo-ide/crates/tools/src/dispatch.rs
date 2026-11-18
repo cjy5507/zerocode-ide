@@ -409,8 +409,9 @@ pub(crate) fn finish_successful_tool_output(
     // exceeds the global ceiling as "oversized" for artifact purposes, even
     // when the structural rewrite did not happen to save enough to flip
     // `was_compressed`. An envelope kept whole withholds nothing: its view
-    // drops only what the model sent.
-    let oversized = !kept_whole && truncated.original_len > global_truncation_config().default_max_chars;
+    // drops only what the model sent. The ceiling is the tool's own: a skill
+    // chosen by name fits whole under its 50,000 chars (t-115139 Z7).
+    let oversized = !kept_whole && truncated.original_len > global_truncation_config().limit_for(canonical_ref);
     // Phase-4: transformed output keeps its full pre-transform content as a
     // content-addressed artifact (best-effort) so it stays recoverable without
     // rendering raw bytes without bound into the transcript. The `None`

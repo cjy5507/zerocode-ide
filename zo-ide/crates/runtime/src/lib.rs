@@ -383,7 +383,9 @@ pub use sandbox::{
     SandboxRequest, SandboxStatus,
 };
 mod tool_output_truncation;
-pub use tool_output_truncation::{truncate_tool_output, TruncatedOutput, TruncationConfig};
+pub use tool_output_truncation::{
+    truncate_tool_output, TruncatedOutput, TruncationConfig, SKILL_RESULT_CHARS, SKILL_TOOL,
+};
 pub mod commit_ledger;
 pub mod turn_trace;
 pub use turn_trace::{TurnOutcome, TurnRecord};

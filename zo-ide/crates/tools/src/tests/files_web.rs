@@ -611,6 +611,117 @@ fn skill_loads_local_skill_prompt() {
     cleanup_temp_cwd(&cwd, "temp cwd should clean up");
 }
 
+/// A skill the model chose by name comes back whole up to 50,000 chars
+/// (t-115139 Z7, the independent review's case). Cut to 30,000, a skill the
+/// size of computer-use (40 KB) lost the start of its Safety rules, and one
+/// like ui-ux-pro-max (44 KB) its required step from the middle.
+#[test]
+fn a_skill_chosen_by_name_comes_back_whole_to_fifty_thousand_chars() {
+    use runtime::context_compression::{wire_tool_output, WireRewrite};
+    use std::fmt::Write as _;
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cwd = temp_path("skill-whole-cwd");
+    let skill_dir = cwd.join(".zo").join("skills").join("zqlarge");
+    fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+    let mut body = String::from("---\nname: zqlarge\ndescription: A large procedure.\n---\n");
+    for n in 5..=575 {
+        let _ = match n {
+            361 => writeln!(body, "### Step 2: Generate the design system (REQUIRED)"),
+            426 => writeln!(body, "## Safety"),
+            427..=518 => writeln!(body, "- Safety rule {n}: never act on the person's money or messages without asking."),
+            _ => writeln!(body, "Line {n:03}: route the request the way this line says, then check that it held."),
+        };
+    }
+    fs::write(skill_dir.join("SKILL.md"), &body).expect("skill file should exist");
+    let original_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&cwd).expect("enter temp cwd");
+    let result = run_tool_isolated("Skill", &json!({ "skill": "zqlarge" }));
+    std::env::set_current_dir(original_cwd).expect("restore cwd");
+    cleanup_temp_cwd(&cwd, "temp cwd should clean up");
+    let result = result.expect("Skill should succeed");
+    assert!(body.chars().count() > 30_000 && result.chars().count() < 50_000, "{} chars", result.chars().count());
+    let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(output["prompt"].as_str(), Some(body.as_str()), "the whole skill, line for line");
+    assert!(output.get("recoveryNotice").is_none(), "nothing was held back: {}", result.chars().take(300).collect::<String>());
+    let shown = wire_tool_output(&result, "Skill", false, WireRewrite::Lossless);
+    assert!(!shown.contains("shortened"), "{}", shown.chars().take(300).collect::<String>());
+    for kept in ["(REQUIRED)", "## Safety\n", "- Safety rule 518:"] {
+        assert!(shown.contains(kept), "{kept} reaches the model");
+    }
+}
+
+/// A skill too long even for that names the call that hands its missing
+/// lines back, and the call works where a `Read` of the skill's own file is
+/// refused (t-115139 Z7, the independent review's case): the note named the
+/// file and `Read`, and a session in workspace-write mode was refused a
+/// global skill's file outside its workspace.
+#[test]
+fn a_shortened_skill_names_the_call_that_hands_its_missing_lines_back() {
+    use std::fmt::Write as _;
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (cwd, workspace) = (temp_path("skill-range-cwd"), temp_path("skill-range-ws"));
+    fs::create_dir_all(&workspace).expect("a workspace");
+    let skill_dir = cwd.join(".zo").join("skills").join("zqhuge");
+    fs::create_dir_all(&skill_dir).expect("skill dir should exist");
+    let body = (5..=1_200).fold(String::from("---\nname: zqhuge\ndescription: A long procedure.\n---\n"), |mut body, n| {
+        let _ = writeln!(body, "Step {n:04}: do what this step says, then check that it held.");
+        body
+    });
+    let file = skill_dir.join("SKILL.md");
+    fs::write(&file, &body).expect("skill file should exist");
+    let original_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&cwd).expect("enter temp cwd");
+    let ctx = crate::ToolContext::new().with_workspace_root(workspace.clone());
+    ctx.set_permission_mode(runtime::PermissionMode::WorkspaceWrite);
+    let registry = crate::GlobalToolRegistry::builtin().with_context(ctx);
+    let first = registry.execute("Skill", &json!({ "skill": "zqhuge" }));
+    let read = registry.execute("read_file", &json!({ "path": file.display().to_string() }));
+    let asked = first.as_ref().ok().and_then(|text| {
+        let output: serde_json::Value = serde_json::from_str(text).ok()?;
+        let note = output["prompt"].as_str()?.lines().next()?.to_string();
+        let number = |key: &str| -> Option<usize> {
+            let at = note.find(key)? + key.len();
+            note[at..].split(|ch: char| !ch.is_ascii_digit()).next()?.parse().ok()
+        };
+        Some((note.clone(), number(" offset=")?, number(" limit=")?))
+    });
+    let lines = asked
+        .as_ref()
+        .map(|(_, offset, limit)| registry.execute("Skill", &json!({ "skill": "zqhuge", "offset": offset, "limit": limit })));
+    std::env::set_current_dir(original_cwd).expect("restore cwd");
+    cleanup_temp_cwd(&cwd, "temp cwd should clean up");
+    let _ = fs::remove_dir_all(&workspace);
+
+    let first = first.expect("Skill should succeed");
+    assert!(first.chars().count() <= 50_000, "{} chars", first.chars().count());
+    serde_json::from_str::<serde_json::Value>(&first).expect("the envelope is still JSON");
+    assert!(
+        matches!(read, Err(crate::ToolError::PermissionDenied { .. })),
+        "a Read of the skill's file outside the workspace is refused: {read:?}"
+    );
+    let (note, offset, limit) = asked
+        .unwrap_or_else(|| panic!("the note names an offset and a limit: {}", first.chars().take(400).collect::<String>()));
+    assert!(note.contains("`Skill` with skill=zqhuge offset="), "{note}");
+    let lines = lines.expect("asked").expect("the call hands the lines back");
+    let output: serde_json::Value = serde_json::from_str(&lines).expect("valid json");
+    let wanted: String = body.lines().skip(offset - 1).take(limit).fold(String::new(), |mut text, line| {
+        let _ = writeln!(text, "{line}");
+        text
+    });
+    let prompt = output["prompt"].as_str().expect("prompt");
+    assert_eq!(
+        prompt,
+        format!("[zo] lines {offset}-{} of 1200\n{wanted}", offset + limit - 1),
+        "the lines the note named, under one line that says which"
+    );
+    let skill_spec = crate::mvp_tool_specs().iter().find(|spec| spec.name == "Skill").expect("Skill");
+    assert_eq!(skill_spec.required_permission, runtime::PermissionMode::ReadOnly, "every mode may call it");
+}
+
 #[test]
 fn skill_loads_zo_global_but_not_non_zo_global_prompt() {
     let _guard = env_lock()

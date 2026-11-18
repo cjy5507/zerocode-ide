@@ -29,7 +29,17 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "skill": { "type": "string" },
-                    "args": { "type": "string" }
+                    "args": { "type": "string" },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "First line of the skill to return, from 1 — for a skill a result shortened."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "How many lines from offset."
+                    }
                 },
                 "required": ["skill"],
                 "additionalProperties": false

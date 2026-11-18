@@ -44,10 +44,28 @@ impl TruncationConfig {
     }
 }
 
+/// The tools that hand back a skill the model chose by its name.
+pub const SKILL_LOADING_TOOLS: [&str; 2] = [SKILL_TOOL, "skill_load"];
+
+/// The tool that hands back one skill by its name — whole, or the lines of it
+/// an `offset` and a `limit` name.
+pub const SKILL_TOOL: &str = "Skill";
+
+/// The cap a skill the model chose by its name comes back under, above the
+/// 30,000 chars of every other result (t-115139 Z7 review). A skill is a
+/// procedure to follow whole, and cut to 30,000 the largest installed on this
+/// machine lost what it is followed for — computer-use (40,132 B) the start
+/// of its Safety rules, ui-ux-pro-max (44,776 B) its required steps. The
+/// largest installed skill and about a tenth more.
+pub const SKILL_RESULT_CHARS: usize = 50_000;
+
 impl Default for TruncationConfig {
     fn default() -> Self {
         let mut tool_overrides = HashMap::new();
         tool_overrides.insert(core_types::tool_names::CoreTool::Bash.handler().to_string(), 16_384);
+        for tool in SKILL_LOADING_TOOLS {
+            tool_overrides.insert(tool.to_string(), SKILL_RESULT_CHARS);
+        }
         Self {
             default_max_chars: 30_000,
             tool_overrides,
@@ -255,8 +273,8 @@ fn digest_skill_envelope(output: &str, limit: usize) -> Option<String> {
         let skill = bodies.into_iter().find(|skill| !skill_body(skill).starts_with(SKILL_SHORTENED))?;
         let body = skill_body(skill).to_string();
         let keep = body.chars().count().saturating_sub(length - limit + SKILL_NOTE_ALLOWANCE);
-        let path = skill.get("path").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
-        skill.insert("prompt".to_string(), serde_json::Value::String(shortened_skill_body(&body, keep, &path)));
+        let name = skill.get("skill").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+        skill.insert("prompt".to_string(), serde_json::Value::String(shortened_skill_body(&body, keep, &name)));
     }
 }
 
@@ -300,10 +318,12 @@ fn skill_body(skill: &serde_json::Map<String, serde_json::Value>) -> &str {
 
 /// A skill body cut to about `keep` chars at whole lines — two thirds from
 /// its start, where the procedure begins, the rest from its end — under one
-/// line that says which lines are missing and names the skill's own file and
-/// the tool that reads them back. A `SKILL.md` is the body line for line, so
-/// the numbers are the file's.
-fn shortened_skill_body(body: &str, keep: usize, path: &str) -> String {
+/// line that says which lines are missing and the call that hands them back:
+/// `Skill` with an `offset` and a `limit`, which reads the skill as `Skill`
+/// does in any permission mode (t-115139 Z7 review — a `Read` of the skill's
+/// own file is refused outside the workspace). The numbers are the body's
+/// lines, the ones that call counts.
+fn shortened_skill_body(body: &str, keep: usize, name: &str) -> String {
     let lines: Vec<&str> = body.lines().collect();
     let mut used = 0;
     let head = lines
@@ -326,9 +346,8 @@ fn shortened_skill_body(body: &str, keep: usize, path: &str) -> String {
     let mut out = String::with_capacity(keep + 256);
     let _ = writeln!(
         out,
-        "{SKILL_SHORTENED}: lines {first}-{last} of {} are not shown — the whole skill is {path}; {} it with offset={first} limit={}",
+        "{SKILL_SHORTENED}: lines {first}-{last} of {} are not shown — `{SKILL_TOOL}` with skill={name} offset={first} limit={} hands them back",
         lines.len(),
-        core_types::tool_names::CoreTool::Read.wire(),
         (last + 1).saturating_sub(first),
     );
     for line in &lines[..head] {
@@ -1416,9 +1435,12 @@ mod tests {
     /// could not read it, and the model got the raw envelope with the
     /// procedure's middle gone. Only the body is shortened — its first and
     /// last lines stay — and one line says what is missing and names the
-    /// skill's own file and the tool that reads it.
+    /// call that hands it back in any permission mode: `Skill` with an
+    /// `offset` and a `limit`, not a `Read` of a file outside the workspace
+    /// (the independent review). A skill the model chose by name is held to
+    /// 50,000 chars, every other result to 30,000.
     #[test]
-    fn an_over_cap_skill_keeps_its_json_and_names_its_whole_file() {
+    fn an_over_cap_skill_keeps_its_json_and_names_the_call_for_its_missing_lines() {
         let body = (1..=1_500).fold(String::new(), |mut body, n| {
             let _ = writeln!(body, "Step {n}: do what the skill says here, then check it.");
             body
@@ -1439,10 +1461,11 @@ mod tests {
         }))
         .expect("json");
         let cfg = TruncationConfig::default();
-        let read = core_types::tool_names::CoreTool::Read.wire();
+        assert_eq!((cfg.limit_for("Skill"), cfg.limit_for("skill_load")), (50_000, 50_000));
+        assert_eq!(cfg.limit_for("skill_search"), cfg.default_max_chars, "a search is not a skill chosen by name");
         for (raw, tool) in [(&search, "CapabilityInvoke"), (&one, "Skill")] {
             let capped = truncate_tool_output(raw, tool, &cfg);
-            assert!(capped.was_truncated && capped.content.chars().count() <= cfg.default_max_chars);
+            assert!(capped.was_truncated && capped.content.chars().count() <= cfg.limit_for(tool));
             serde_json::from_str::<serde_json::Value>(&capped.content).expect("the envelope is still JSON");
             let shown = crate::context_compression::wire_tool_output(
                 &capped.content,
@@ -1453,9 +1476,10 @@ mod tests {
             assert!(shown.contains("\nStep 1: do what") && shown.contains("Step 1500: do what"), "{tool}: head and tail stay");
             let note = shown
                 .lines()
-                .find(|line| line.contains("shortened") && line.contains(path))
-                .unwrap_or_else(|| panic!("{tool}: one line says what is missing and where the whole is"));
-            assert!(note.contains(read), "{note}");
+                .find(|line| line.contains("shortened"))
+                .unwrap_or_else(|| panic!("{tool}: one line says what is missing"));
+            assert!(note.contains("`Skill` with skill=big-skill offset=") && note.contains(" limit="), "{note}");
+            assert!(!note.contains(path), "the call reads the skill, not its file: {note}");
         }
     }
 }

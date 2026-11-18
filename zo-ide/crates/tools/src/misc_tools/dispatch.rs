@@ -845,6 +845,8 @@ fn kernel_bridge_skill(args: &Value) -> Value {
     match super::skill_tools::execute_skill(super::skill_tools::SkillInput {
         skill: name.to_string(),
         args: None,
+        offset: None,
+        limit: None,
     }) {
         Ok(output) => {
             let dir = std::path::Path::new(&output.path)

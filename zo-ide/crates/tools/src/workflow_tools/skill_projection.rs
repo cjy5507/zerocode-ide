@@ -297,6 +297,8 @@ mod tests {
         let err = execute_skill(SkillInput {
             skill: "saved-flow".to_string(),
             args: None,
+            offset: None,
+            limit: None,
         })
         .expect_err("proposed skill cannot execute");
         std::env::set_current_dir(previous_cwd).expect("restore cwd");
