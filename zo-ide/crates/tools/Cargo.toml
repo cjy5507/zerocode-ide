@@ -38,5 +38,9 @@ session-corpus = { path = "../session-corpus" }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["fs"] }
 
+# The session search's time bound reads the thread's CPU clock (`nix::time`).
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.29", features = ["time"] }
+
 [lints]
 workspace = true

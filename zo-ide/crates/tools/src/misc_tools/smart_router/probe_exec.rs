@@ -2225,25 +2225,49 @@ mod live_path_tests {
             assert!(env.rows().last().is_some_and(|row| row.route_use == DecisionRouteUse::Control));
         }
 
+        /// A round is one funnel per mode, each on fresh tasks. A verdict one
+        /// mode got and the other did not is the probe answering nothing
+        /// inside its own wall (`PROBE_TIMEOUT`), which a busy machine spends:
+        /// on 11-17, at load 30–40, the third task's probe came back empty
+        /// under `shadow` and the case passed alone. Such a round says nothing
+        /// about the shadow and the next one is asked. Two verdicts that
+        /// differ fail at once, and a verdict lost in every round is the
+        /// shadow taking it away.
         #[test]
         fn routing_is_the_same_with_the_shadow_on_or_off() {
+            /// Rounds a verdict lost to the probe's wall may cost.
+            const ROUNDS: usize = 3;
             let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
             let judgment = judging(judgment_answer());
             let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
 
-            env.set_mode(Some("off"));
-            let (off_a, off_b) = (unique("route-off-a"), unique("route-off-b"));
-            let (off, _) = funnel(&[("", off_a.as_str()), ("", ""), ("described", off_b.as_str())], UNHURRIED);
-            assert!(judgment.requests().is_empty());
+            for round in 1..=ROUNDS {
+                let (judged, rows) = (judgment.requests().len(), env.rows().len());
+                env.set_mode(Some("off"));
+                let (off_a, off_b) = (unique("route-off-a"), unique("route-off-b"));
+                let (off, _) = funnel(&[("", off_a.as_str()), ("", ""), ("described", off_b.as_str())], UNHURRIED);
+                assert_eq!(judgment.requests().len(), judged, "off asks no judgment");
 
-            env.set_mode(Some("shadow"));
-            let (on_a, on_b) = (unique("route-on-a"), unique("route-on-b"));
-            let (on, _) = funnel(&[("", on_a.as_str()), ("", ""), ("described", on_b.as_str())], UNHURRIED);
+                env.set_mode(Some("shadow"));
+                let (on_a, on_b) = (unique("route-on-a"), unique("route-on-b"));
+                let (on, _) = funnel(&[("", on_a.as_str()), ("", ""), ("described", on_b.as_str())], UNHURRIED);
 
-            assert_eq!(on, off, "the shadow changes no routing result");
-            assert_eq!(on[1], None, "an empty task is neither probed nor judged");
-            assert_eq!(judgment.requests().len(), 2, "the shadow did run: one judgment per non-empty task");
-            assert_eq!(env.rows().len(), 2);
+                assert_eq!(on[1], None, "an empty task is neither probed nor judged");
+                assert_eq!(judgment.requests().len() - judged, 2, "the shadow did run: one judgment per non-empty task");
+                assert_eq!(env.rows().len() - rows, 2);
+                for (on, off) in on.iter().zip(&off) {
+                    if let (Some(on), Some(off)) = (on, off) {
+                        assert_eq!(on, off, "the shadow changes no routing result");
+                    }
+                }
+                if on == off {
+                    return;
+                }
+                assert!(
+                    round < ROUNDS,
+                    "the shadow changes no routing result, yet each of {ROUNDS} rounds lost a verdict in one mode — the last: {on:?} with the shadow, {off:?} without"
+                );
+            }
         }
 
         #[test]

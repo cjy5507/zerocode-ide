@@ -2543,7 +2543,12 @@ async fn e2e_rewind_command_works_in_the_shipped_tui() {
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"remember the ZEBRA-REWIND prompt\r").expect("send prompt");
     run.wait_for_history_row("rewind fixture answer", timeout);
-    wait_until_quiet(&run, Duration::from_millis(300), timeout);
+    // The actions row under the answer is the turn's end: zo draws it after
+    // the turn's status is gone, when keys reach the idle composer. Quiet
+    // after the answer is not that — on a busy machine the turn went on past
+    // 300 ms of quiet, and `/rewind list` met "'/rewind' is disabled while a
+    // task is in progress." (10-01, 11-18).
+    run.wait_for_screen("/find search", 40, timeout);
 
     run.send(b"/rewind list\r").expect("send /rewind list");
     run.wait_for_history_row("Workspace checkpoints", timeout);

@@ -2230,6 +2230,13 @@ mod tests {
     /// t-2947 — a search over a 2,000-session store answers under the bound
     /// (fastest of N), and its hits are exactly the needle sessions among the
     /// newest `MAX_SEARCH_SESSIONS`.
+    ///
+    /// The bound is held against the CPU time the search spends on this
+    /// thread, not against the wall clock. The search runs on the caller's
+    /// thread, so that clock counts all of its work — the parsing t-2947 took
+    /// out of it included — and none of the time a busy machine keeps the
+    /// thread waiting for a core: on 11-18 the fastest of five read 347 ms of
+    /// wall at load 170 and the case passed alone. The message keeps the wall.
     #[test]
     fn a_search_over_2000_sessions_stays_under_the_bound() {
         use session_corpus::{generate, CorpusSpec, SearchBounds, NEEDLE};
@@ -2240,16 +2247,24 @@ mod tests {
         let ctx = ctx_for(&base);
         let bounds = SearchBounds::T2947;
         let mut out = String::new();
-        let elapsed = bounds.min_of_runs(|| {
-            out = run_session_recall(
-                SessionRecallInput {
-                    query: Some(NEEDLE.into()),
-                    ..Default::default()
-                },
-                &ctx,
-            )
-            .expect("search");
-        });
+        // (CPU, wall) of each run.
+        let runs: Vec<(Duration, Duration)> = (0..bounds.min_of.max(1))
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let cpu = thread_cpu_time_of(|| {
+                    out = run_session_recall(
+                        SessionRecallInput {
+                            query: Some(NEEDLE.into()),
+                            ..Default::default()
+                        },
+                        &ctx,
+                    )
+                    .expect("search");
+                });
+                (cpu, started.elapsed())
+            })
+            .collect();
+        let fastest = runs.iter().map(|(cpu, _)| *cpu).min().unwrap_or_default();
         let expected: Vec<&str> = manifest
             .iter()
             .take(super::MAX_SEARCH_SESSIONS)
@@ -2266,12 +2281,36 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&base);
         assert!(
-            elapsed < bounds.session_recall_search,
-            "session_recall search took {elapsed:?} over {} sessions (bound {:?}, min of {})",
+            fastest < bounds.session_recall_search,
+            "session_recall search took {fastest:?} of CPU over {} sessions (bound {:?}, min of {}; CPU and wall of each run: {runs:?})",
             manifest.len(),
             bounds.session_recall_search,
             bounds.min_of
         );
+    }
+
+    /// What `work` cost this thread in CPU time: however loaded the machine
+    /// is, the time the thread waited for a core is not in it. The wall clock
+    /// where the platform gives no thread clock.
+    fn thread_cpu_time_of(work: impl FnOnce()) -> Duration {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let now = || {
+                nix::time::ClockId::CLOCK_THREAD_CPUTIME_ID
+                    .now()
+                    .map(Duration::from)
+                    .expect("the thread's CPU clock")
+            };
+            let before = now();
+            work();
+            now().saturating_sub(before)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let started = std::time::Instant::now();
+            work();
+            started.elapsed()
+        }
     }
 
     /// t-2947 — the prefilter's verdict on a query: only a query whose every
