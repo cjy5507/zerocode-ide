@@ -475,9 +475,14 @@ fmt-check:
 prototype:
     open ui/prototype/index.html
 
+# 창 패키지의 실행 파일을 모두 먼저 짓는다: 설치판처럼 `zerocode-mirror` ·
+# `zerocode-pick`이 창 옆에 있어야 판 도우미 · 미러 · 파일 선택이 선다.
+# `cargo run`은 고른 실행 파일 하나만 짓고, 실행 파일이 넷이라 `--bin` 없이는
+# 어느 것을 띄울지 몰라 멈춘다(t-113721).
 # 창을 띄운다. 첫 빌드는 웹뷰 스택 때문에 몇 분 걸린다.
 shell:
-    cargo run -p zerocode-shell
+    cargo build -p zerocode-shell --bins
+    cargo run -p zerocode-shell --bin zerocode-shell
 
 # 설치된 Electron 앱을 읽기 전용으로 추출한다(리버스 작업용).
 # 결과는 .re-scratch/ 아래에만 쌓이고 커밋되지 않는다.
