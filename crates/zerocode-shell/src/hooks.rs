@@ -5361,6 +5361,151 @@ mod tests {
         assert_eq!(run("term-25"), "none|none|none", "another pane's grant");
     }
 
+    /// A PowerShell this machine runs the generated `.impl.ps1` files with, or
+    /// `None`: Windows PowerShell (or pwsh) on Windows, pwsh elsewhere.
+    fn powershell_here() -> Option<&'static str> {
+        let names: &[&'static str] = if cfg!(windows) {
+            &["powershell.exe", "pwsh.exe"]
+        } else {
+            &["pwsh"]
+        };
+        names.iter().copied().find(|name| {
+            crate::proc::quiet_command(name)
+                .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+                .output()
+                .is_ok_and(|out| out.status.success())
+        })
+    }
+
+    /// The PowerShell twin of the two tests above (TR-11, t-113721). An agent
+    /// typed into a plain Windows shell reaches its doors and `zerocode-orc`
+    /// through `<door>.cmd` → `<door>.impl.ps1`, whose loader read the
+    /// endpoint and the token files the environment named, but never the
+    /// pane's grant: the browser, Computer Use and the ledger refused it. The
+    /// grant is the window's own writer's, under a folder with a space and
+    /// Hangul in it — a Korean profile folder is where it lives, and Windows
+    /// PowerShell 5.1 reads a file with no byte-order mark in the ANSI code
+    /// page. The conditions are the sh loader's: only a missing token file
+    /// sends it to the grant, and only for the window's own pane-key spelling.
+    #[test]
+    fn a_hand_started_agents_grant_is_read_by_the_powershell_loader_too() {
+        let Some(powershell) = powershell_here() else {
+            eprintln!("skipping: no PowerShell on this machine");
+            return;
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("Application Support").join("사용자 폴더");
+        std::fs::create_dir_all(&root).expect("root");
+        let file = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, body).expect("token file");
+            path.to_string_lossy().into_owned()
+        };
+        let computer = file("computer-token", "secret-1234\n");
+        let browser = file("browser-token", "browser-secret\n");
+        let team = file("team.token", "pane-secret\n");
+        write_pane_grant(
+            &root,
+            7,
+            &[
+                (zerocode_hookd::env_var::COMPUTER_TOKEN_FILE, computer),
+                (zerocode_hookd::env_var::BROWSER_TOKEN_FILE, browser),
+                (
+                    zerocode_core::agent_teams::TEAM_ID_VAR,
+                    "team-abc".to_string(),
+                ),
+                (zerocode_core::agent_teams::TEAM_PANE_VAR, "%1".to_string()),
+                (zerocode_hookd::env_var::TEAM_TOKEN_FILE, team),
+            ],
+        )
+        .expect("grant");
+        let endpoint = root.join("endpoint.env");
+        std::fs::write(&endpoint, "ZEROCODE_HOOK_PORT=1\nZEROCODE_HOOK_TOKEN=h\n")
+            .expect("endpoint");
+        let script = root.join("probe.impl.ps1");
+        let probe = "function v($n) { $x = [Environment]::GetEnvironmentVariable($n); if ($x) { $x } else { 'none' } }\r\n\
+             [Console]::Out.Write((v 'ZEROCODE_COMPUTER_TOKEN') + '|' + (v 'ZEROCODE_BROWSER_TOKEN') + '|' + \
+             (v 'ZEROCODE_AGENT_TEAM_ID') + '|' + (v 'ZEROCODE_AGENT_TEAM_PANE') + '|' + (v 'ZEROCODE_AGENT_TEAM_TOKEN'))\r\n";
+        let body = powershell_shim_script_with_private_tokens(
+            probe.to_string(),
+            &[
+                (
+                    zerocode_hookd::env_var::COMPUTER_TOKEN,
+                    zerocode_hookd::env_var::COMPUTER_TOKEN_FILE,
+                ),
+                (
+                    zerocode_hookd::env_var::BROWSER_TOKEN,
+                    zerocode_hookd::env_var::BROWSER_TOKEN_FILE,
+                ),
+                (
+                    zerocode_core::agent_teams::TEAM_TOKEN_VAR,
+                    zerocode_hookd::env_var::TEAM_TOKEN_FILE,
+                ),
+            ],
+        );
+        std::fs::write(&script, format!("{UTF8_BOM}{body}")).expect("script");
+        let run = |pane_key: &str, named: &[(&str, &Path)]| {
+            let mut command = crate::proc::quiet_command(powershell);
+            // This test may run in a ZeroCode pane, whose own capability
+            // paths must not stand in for the grant under test.
+            for (name, _) in std::env::vars_os() {
+                if name.to_string_lossy().starts_with("ZEROCODE_") {
+                    command.env_remove(name);
+                }
+            }
+            command
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(&script)
+                .env("ZEROCODE_HOOK_ENDPOINT", &endpoint)
+                .env("ZEROCODE_PANE_KEY", pane_key);
+            for (name, path) in named {
+                command.env(name, path);
+            }
+            let out = command.output().expect("powershell");
+            assert!(
+                out.status.success(),
+                "{powershell}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert_eq!(
+            run("term-7", &[]),
+            "secret-1234|browser-secret|team-abc|%1|pane-secret",
+            "a hand-started agent's PowerShell loader did not read its pane's grant"
+        );
+        assert_eq!(
+            run("term-8", &[]),
+            "none|none|none|none|none",
+            "another pane's grant is not this pane's"
+        );
+        assert_eq!(
+            run("../term-7", &[]),
+            "none|none|none|none|none",
+            "a key that is not the window's spelling"
+        );
+        let own = root.join("own-token");
+        std::fs::write(&own, "launched\n").expect("own token");
+        assert_eq!(
+            run(
+                "term-7",
+                &[
+                    (zerocode_hookd::env_var::COMPUTER_TOKEN_FILE, own.as_path()),
+                    (zerocode_hookd::env_var::BROWSER_TOKEN_FILE, own.as_path()),
+                    (zerocode_hookd::env_var::TEAM_TOKEN_FILE, own.as_path()),
+                ]
+            ),
+            "launched|launched|none|none|launched",
+            "a launch that names every file is not sent to the grant"
+        );
+    }
+
     /// The agent mirror shims' Windows companions: for every resolved agent a
     /// `<agent>.impl.ps1` (BOM, endpoint and team-token loading, then the
     /// mirror binary with the real path and `@args`, wearing its exit code)
