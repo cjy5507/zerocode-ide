@@ -7,6 +7,8 @@ use zerocode_core::skill::{
 
 const USAGE_FILE: &str = "skills-usage.json";
 const PLANS_FILE: &str = "skills-plans.json";
+/// Every `SKILL.md` place the first-run install has looked at ([`seed_bundled`]).
+const SEEDED_FILE: &str = "skills-seeded.json";
 
 #[derive(Clone)]
 pub(crate) struct Context {
@@ -405,6 +407,39 @@ pub(crate) fn install_bundled_skill(
     let answer = zerocode_core::skill_install::install_bundled_skill(name, home, launched, agents)?;
     runtime().roots.clear();
     Ok(answer)
+}
+
+/// Put every skill this build carries where an installed agent reads skills
+/// and nothing stands yet, once for each place, without a press
+/// ([`zerocode_core::skill_install::seed_bundled_skills`], t-113689). The
+/// places looked at before are kept in [`SEEDED_FILE`] under the app's data,
+/// so a skill the person took out stays out. Whether any copy was written.
+pub(crate) fn seed_bundled(
+    home: &Path,
+    data: &Path,
+    launched: &[(String, PathBuf)],
+    agents: &[(String, String)],
+) -> bool {
+    let file = data.join(SEEDED_FILE);
+    let mut seeded: BTreeSet<PathBuf> = std::fs::read(&file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let before = seeded.clone();
+    let outcomes =
+        zerocode_core::skill_install::seed_bundled_skills(home, launched, agents, &mut seeded);
+    if seeded != before
+        && let Err(error) = save_json(&file, &seeded)
+    {
+        eprintln!("skills seed: {error}");
+    }
+    let wrote = outcomes
+        .iter()
+        .any(|outcome| outcome.state == zerocode_core::skill_install::InstallState::Written);
+    if wrote {
+        runtime().roots.clear();
+    }
+    wrote
 }
 
 fn read_bounded(path: &Path, limit: usize) -> Result<String, String> {

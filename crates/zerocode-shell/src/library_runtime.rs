@@ -9,8 +9,15 @@
 //! (the `library` lane of the window's file watch), and when the person acts on
 //! the Skills·MCP page. Looks never overlap ([`RUN`]).
 //!
+//! A round also puts the skills this build carries where an installed agent
+//! reads skills and nothing stands yet, once for each place, as the Skills
+//! page's button does ([`seed_bundled_skills`], t-113689) — the one write
+//! into an agent's own skills folder, the person's `~/.claude/skills` among
+//! them, that no press asks for.
+//!
 //! What it never does: write the person's own Claude home (`~/.claude`,
-//! `~/.claude.json` — read only, `accounts`); write a list it could not read;
+//! `~/.claude.json` — read only, `accounts`) but for that seed; write a list
+//! it could not read;
 //! print, log or keep a server's environment or header values anywhere but
 //! the store and the agents' own files, where the agents keep them already.
 //! What the person may want back — a removed server, a trashed skill — is held
@@ -193,13 +200,9 @@ pub(crate) struct Context {
 
 impl Context {
     pub(crate) fn from_state(state: &AppState) -> Result<Self, String> {
-        // `HOME` first, as every agent reads it; Windows has none and keeps
-        // its home in the profile folder.
-        let home = std::env::var_os("HOME")
-            .filter(|home| !home.is_empty())
-            .map(PathBuf::from)
-            .or_else(dirs::home_dir)
-            .ok_or("library.homeUnavailable")?;
+        // The home the agents read (`person_home`): the profile folder on
+        // Windows, which sets no `HOME`, and `HOME` elsewhere.
+        let home = crate::person_home::person_home().ok_or("library.homeUnavailable")?;
         let data = state.local_data_root().to_path_buf();
         let claude_home = match accounts::login_look(state.config_root()) {
             accounts::LoginLook::Managed(home) => Some(home),
@@ -2156,11 +2159,30 @@ fn inputs_stamp(ctx: &Context) -> Option<u64> {
     Some(hasher.finish())
 }
 
+/// Put the skills this build carries where an installed agent reads skills
+/// and nothing stands yet ([`skills_runtime::seed_bundled`], t-113689), so a
+/// fresh install has them without a press, before the look that follows
+/// takes them where it keeps skills. Under the look's own lock, so it never
+/// runs beside a look a page action started, and not while the person has
+/// paused the keeper. Whether it wrote anything.
+fn seed_bundled_skills(ctx: &Context, state: &AppState) -> bool {
+    let launched = skills_runtime::window_agent_homes(state.config_root(), state.local_data_root());
+    let agents = skills_runtime::installed_agents();
+    let _held = RUN.lock().unwrap_or_else(PoisonError::into_inner);
+    if read_ledger(ctx).paused {
+        return false;
+    }
+    skills_runtime::seed_bundled(&ctx.home, &ctx.data, &launched, &agents)
+}
+
 fn one_round(app: &AppHandle) {
     let state = app.state::<AppState>();
     let Ok(ctx) = Context::from_state(&state) else {
         return;
     };
+    if seed_bundled_skills(&ctx, &state) {
+        let _ = app.emit(CHANGED_EVENT, ());
+    }
     in_one_burst(|| {
         // Stamped before the look, so a change that lands while it runs makes
         // the next round's stamp differ and is looked at then.

@@ -364,6 +364,19 @@ pub fn install_bundled_skill(
     launched: &[(String, PathBuf)],
     detected: &[(String, String)],
 ) -> Result<Vec<SkillInstallOutcome>, String> {
+    install_bundled_into(name, home, launched, detected, None)
+}
+
+/// [`install_bundled_skill`], into every root it reads — or, with `only`,
+/// into just the roots whose `SKILL.md` place `only` names. A root left out
+/// is not touched and has no outcome, and neither has an agent with no root.
+fn install_bundled_into(
+    name: &str,
+    home: &Path,
+    launched: &[(String, PathBuf)],
+    detected: &[(String, String)],
+    only: Option<&BTreeSet<PathBuf>>,
+) -> Result<Vec<SkillInstallOutcome>, String> {
     let skill = bundled_skill(name)
         .ok_or_else(|| format!("{name}: 이 빌드가 담고 있는 스킬이 아닙니다"))?;
     let sources = discovery_sources(home, &[]);
@@ -373,7 +386,7 @@ pub fn install_bundled_skill(
     let mut stored: Option<SkillInstallOutcome> = None;
     for (agent, label) in detected {
         let roots = skill_roots(agent, &sources, launched, store.as_deref());
-        if roots.is_empty() {
+        if roots.is_empty() && only.is_none() {
             outcomes.push(SkillInstallOutcome {
                 agent: agent.clone(),
                 label: label.clone(),
@@ -383,6 +396,10 @@ pub fn install_bundled_skill(
             });
         }
         for root in roots {
+            let place = root.dir.join(skill.name).join(SKILL_FILE);
+            if only.is_some_and(|only| !only.contains(&place)) {
+                continue;
+            }
             outcomes.push(match &root.link_to {
                 Some(store) => install_linked(skill, agent, label, &root.dir, store, &mut stored),
                 None => install_one(skill, agent, label, &root.dir),
@@ -393,15 +410,44 @@ pub fn install_bundled_skill(
 }
 
 /// Put every skill this build carries where a detected agent reads skills
-/// and nothing stands yet — without a press, once for each place.
+/// and nothing stands yet — without a press, once for each place: on the
+/// first run, for an agent found later, and for a skill a later release
+/// adds (t-113689: 「윈도우에서 설치 했는데 동봉스킬도 없고 전부 없던데」).
+///
+/// `seeded` holds every `SKILL.md` place a seed has looked at before, kept
+/// by the caller between runs. A place in it is not written here again, so
+/// a skill the person took out stays out, and every place this seed looks
+/// at goes into it. A copy that stands is left for the person: an earlier
+/// release's text waits for their press of 「고쳐 쓰기」 (t-55424), and a
+/// text that is not ours is never written over. Writes follow
+/// [`install_bundled_skill`]'s roads, the store's links included.
 pub fn seed_bundled_skills(
     home: &Path,
     launched: &[(String, PathBuf)],
     detected: &[(String, String)],
     seeded: &mut BTreeSet<PathBuf>,
 ) -> Vec<SkillInstallOutcome> {
-    let _ = (home, launched, detected, seeded);
-    Vec::new()
+    let mut outcomes = Vec::new();
+    for skill in BUNDLED_SKILLS {
+        let Ok(copies) = bundled_copies(skill.name, home, launched, detected) else {
+            continue;
+        };
+        let empty: BTreeSet<PathBuf> = copies
+            .iter()
+            .filter(|copy| copy.state == CopyState::Missing && !seeded.contains(&copy.path))
+            .map(|copy| copy.path.clone())
+            .collect();
+        seeded.extend(copies.into_iter().map(|copy| copy.path));
+        if empty.is_empty() {
+            continue;
+        }
+        if let Ok(written) =
+            install_bundled_into(skill.name, home, launched, detected, Some(&empty))
+        {
+            outcomes.extend(written);
+        }
+    }
+    outcomes
 }
 
 /// Put the store's copy of `skill` where `root` should hold it, as a link.

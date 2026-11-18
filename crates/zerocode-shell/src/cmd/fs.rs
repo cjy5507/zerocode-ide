@@ -780,9 +780,7 @@ pub(crate) fn reveal_vault_session(path: String) -> Result<(), String> {
         return Err("그 경로에 파일이 없습니다".into());
     }
     let real = target.canonicalize().map_err(|error| error.to_string())?;
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or("HOME이 설정되어 있지 않습니다")?;
+    let home = crate::person_home::person_home().ok_or("홈 폴더를 찾을 수 없습니다")?;
     let walked = zerocode_core::vault::AGENT_SOURCES
         .iter()
         .flat_map(|source| {
@@ -869,9 +867,7 @@ pub(crate) async fn vault_sessions(
     // start one, and owned: the walk runs on a thread of its own, and neither
     // the pane roster nor the project catalog crosses one.
     let sources = if vault_walk::may_walk(force) {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .ok_or("HOME이 설정되어 있지 않습니다")?;
+        let home = crate::person_home::person_home().ok_or("홈 폴더를 찾을 수 없습니다")?;
         // The walk reads Claude's store under the app config root — the home
         // that resolves to the isolated runtime — and every other agent's
         // under the ordinary home.

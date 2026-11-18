@@ -160,8 +160,30 @@ pub fn merge(current: Option<&str>, segments: &[String]) -> Option<String> {
 /// `separator` between them: `;` on Windows, `:` elsewhere. At the end, so a
 /// command the person's own PATH finds first is still the one that runs.
 pub fn with_dirs_at_end(path: &str, dirs: &[String], separator: char) -> String {
-    let _ = (dirs, separator);
-    path.to_string()
+    let mut joined = path.to_string();
+    for dir in dirs {
+        if dir.is_empty() || joined.split(separator).any(|held| held == dir) {
+            continue;
+        }
+        if !joined.is_empty() && !joined.ends_with(separator) {
+            joined.push(separator);
+        }
+        joined.push_str(dir);
+    }
+    joined
+}
+
+/// The folders the window puts commands of its own in, which every pane and
+/// the agent list must find whatever PATH the person's shell builds: the one
+/// the zo the window carries is installed into at boot (`zo_companion`,
+/// `~/.local/bin`). Named whether it stands yet or not — the first boot
+/// reads the PATH before it installs zo there.
+fn own_bins() -> Vec<String> {
+    crate::person_home::person_home()
+        .map(|home| crate::zo_companion::zo_path_under(&home))
+        .and_then(|zo| zo.parent().map(|dir| dir.to_string_lossy().into_owned()))
+        .into_iter()
+        .collect()
 }
 
 /// Ask one shell for its PATH, bounded (`spawnShellAndReadPath`, :7793-7860).
@@ -245,6 +267,15 @@ pub fn hydrate(force: bool) -> Option<String> {
         let segments = read_login_shell_path(&shell, SPAWN_TIMEOUT);
         merge(std::env::var("PATH").ok().as_deref(), &segments)
     });
+    // Windows asks no shell: its PATH is the process's own, which a GUI app
+    // there inherits whole. Either way the window's own folders go at its
+    // end, so the zo it installed is found and runs (t-113689).
+    let (merged, separator) = if cfg!(windows) {
+        (std::env::var("PATH").ok(), ';')
+    } else {
+        (merged, ':')
+    };
+    let merged = merged.map(|path| with_dirs_at_end(&path, &own_bins(), separator));
     let mut held = HYDRATED.lock().expect("shell path lock");
     *held = Some(merged.clone());
     merged

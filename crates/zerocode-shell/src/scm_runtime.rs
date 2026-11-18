@@ -189,7 +189,13 @@ pub(super) fn detected_agents(force: bool) -> Vec<zerocode_core::AgentPresence> 
     let path = shell_path::hydrate(force)
         .map(std::ffi::OsString::from)
         .or_else(|| std::env::var_os("PATH"));
-    agent_presence(path.as_deref(), std::env::consts::OS)
+    let found = agent_presence(path.as_deref(), std::env::consts::OS);
+    if force {
+        // An agent installed since the last look is given the skills this
+        // build carries at the keeper's next round (t-113689).
+        library_runtime::poke();
+    }
+    found
 }
 
 /// One re-enterable Claude conversation from the on-disk session store.

@@ -23,8 +23,11 @@ fn person_home_by(
     home_var: Option<OsString>,
     profile: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
-    let _ = (windows, profile);
-    home_var.map(PathBuf::from)
+    let home_var = home_var.filter(|home| !home.is_empty()).map(PathBuf::from);
+    if windows {
+        return profile().or(home_var);
+    }
+    home_var.or_else(profile)
 }
 
 #[cfg(test)]
