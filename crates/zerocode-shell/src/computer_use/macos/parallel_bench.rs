@@ -1232,3 +1232,372 @@ fn parallel_bench_at_once() {
     std::fs::write(&out, &text).expect("the report");
     println!("{text}");
 }
+
+/// The page the front bench presses: a button that counts its presses in the
+/// window's title, and a field. Its words are its own, so a tree line that
+/// reads them is the page's.
+const FRONT_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><title>ZC front</title></head>
+<body style="font: 24px -apple-system; padding: 40px">
+<button id="t" style="font-size: 24px; padding: 12px 24px">ZC-TARGET</button>
+<p><input id="f" aria-label="ZC-FIELD" style="font-size: 24px"></p>
+<script>let n = 0; document.getElementById("t").onclick = () => { n += 1; document.title = "ZC count " + n; };</script>
+</body></html>
+"#;
+
+/// Chrome for Testing on the bench's own page, with an empty profile of the
+/// bench's own: none of the person's sign-ins, tabs or history. It comes to the
+/// front as it opens, which is the place this bench measures, and it is quit
+/// when the bench ends. Nothing is deleted: each run opens in a new folder of
+/// its own, and the folders are left for the person to say what goes.
+struct TestBrowser {
+    pid: i32,
+}
+
+impl TestBrowser {
+    fn open(app: &Path, root: &Path) -> Self {
+        assert!(
+            !root.exists(),
+            "a run opens in a folder of its own: {}",
+            root.display()
+        );
+        let profile = root.join("profile");
+        std::fs::create_dir_all(&profile).expect("a profile folder");
+        let page = root.join("page.html");
+        std::fs::write(&page, FRONT_PAGE).expect("the page");
+        let opened = crate::proc::quiet_command("/usr/bin/open")
+            .arg("-n")
+            .arg("-a")
+            .arg(app)
+            .arg("--args")
+            .arg(format!("--user-data-dir={}", profile.display()))
+            // Playwright's own: no keychain prompt, no first-run or choice screens, nothing fetched in the background.
+            .args([
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--use-mock-keychain",
+                "--disable-search-engine-choice-screen",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--disable-default-apps",
+                "--disable-extensions",
+                "--disable-sync",
+                "--no-service-autorun",
+                "--force-renderer-accessibility",
+                "--new-window",
+            ])
+            .arg(format!("file://{}", page.display()))
+            .status()
+            .expect("open");
+        assert!(opened.success(), "Chrome for Testing did not open");
+        let name = app
+            .file_stem()
+            .expect("the app's name")
+            .to_string_lossy()
+            .to_string();
+        // The browser's own process, not its helpers: the main executable, then this profile.
+        let pattern = format!(
+            "Contents/MacOS/{name} --user-data-dir={}",
+            profile.display()
+        );
+        let started = Instant::now();
+        let pid = loop {
+            let found = crate::proc::quiet_command("/usr/bin/pgrep")
+                .arg("-f")
+                .arg(&pattern)
+                .output()
+                .expect("pgrep");
+            if let Some(pid) = String::from_utf8_lossy(&found.stdout)
+                .lines()
+                .next()
+                .and_then(|line| line.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "Chrome for Testing never came up"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let started = Instant::now();
+        let mut asked_again = false;
+        while front_pid() != Some(pid) {
+            if !asked_again && started.elapsed() > Duration::from_secs(5) {
+                // It came up behind: ask for it once more, by its own app.
+                let _ = crate::proc::quiet_command("/usr/bin/open")
+                    .arg("-a")
+                    .arg(app)
+                    .status();
+                asked_again = true;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "Chrome for Testing did not come to the front"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Self { pid }
+    }
+}
+
+impl Drop for TestBrowser {
+    fn drop(&mut self) {
+        let pid = self.pid.to_string();
+        let _ = crate::proc::quiet_command("/bin/kill").arg(&pid).status();
+        let started = Instant::now();
+        while crate::proc::quiet_command("/bin/kill")
+            .args(["-0", pid.as_str()])
+            .status()
+            .is_ok_and(|alive| alive.success())
+            && started.elapsed() < Duration::from_secs(10)
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// The process of the app in front, by the system's own word.
+fn front_pid() -> Option<i32> {
+    let asn = front_app();
+    let said = crate::proc::quiet_command("/usr/bin/lsappinfo")
+        .args(["info", "-only", "pid", asn.as_str()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&said.stdout)
+        .rsplit('=')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// A look at the app in front once its page has drawn `words` into the tree.
+/// A look reads; it is not asked to stay in the background.
+fn front_look_with(session: &Session, app: &str, words: &str) -> Value {
+    let started = Instant::now();
+    loop {
+        let (_, answer) = call(
+            session,
+            "getAppState",
+            &json!({"app": app, "noScreenshot": true}),
+        );
+        if let Ok(state) = answer
+            && state["snapshot"]["treeText"]
+                .as_str()
+                .is_some_and(|tree| tree.contains(words))
+        {
+            return state;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the page's {words} never showed in the tree"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// How many presses reached the page: the count its title shows, whatever
+/// the window adds after it.
+fn page_count(title: &str) -> u64 {
+    title
+        .split("ZC count ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The window's title once the page has counted `pressed` presses, or as it
+/// stands after three seconds: a title follows its page a moment later.
+fn settled_title(session: &Session, app: &str, pressed: u64) -> String {
+    let started = Instant::now();
+    loop {
+        let title = front_look_with(session, app, "ZC-FIELD")["snapshot"]["window"]["title"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if page_count(&title) >= pressed || started.elapsed() > Duration::from_secs(3) {
+            return title;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// One helper's turn on the page in front: the button pressed `presses`
+/// times, then a written value, then the two acts that stay refused in front
+/// (a field's press, a key). Stops at once when the person comes back or
+/// another app comes to the front.
+fn front_turn(session: &Session, app: &str, pid: i32, presses: usize) -> Value {
+    let state = front_look_with(session, app, "ZC-FIELD");
+    let (target, field) = (
+        number_of(&state, "ZC-TARGET", 0),
+        number_of(&state, "ZC-FIELD", 0),
+    );
+    let mut rows = vec![];
+    let mut person_back = false;
+    for _ in 0..presses {
+        if person_idle_secs() < 2 || front_pid() != Some(pid) {
+            person_back = true;
+            break;
+        }
+        let pointer = pointer_at(session);
+        let (ms, answer) = call(
+            session,
+            "click",
+            &json!({"app": app, "elementIndex": target, "background": true, "noScreenshot": true, "afterAct": "none"}),
+        );
+        let now = pointer_at(session);
+        let moved = (now.0 - pointer.0).abs().max((now.1 - pointer.1).abs());
+        let front_kept = front_pid() == Some(pid);
+        rows.push(match answer {
+            Ok(result) => json!({
+                "ms": ms.round(), "path": result.pointer("/action/path"), "action": result.pointer("/action/actionName"),
+                "delivery": result.pointer("/action/delivery"), "moved": moved, "frontKept": front_kept,
+            }),
+            Err(refused) => json!({"ms": ms.round(), "refused": refused, "moved": moved, "frontKept": front_kept}),
+        });
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let sent = rows
+        .iter()
+        .filter(|row| row.get("refused").is_none())
+        .count();
+    let title = settled_title(session, app, u64::try_from(sent).expect("a count"));
+    let act = |method: &str, extra: Value| {
+        let mut params =
+            json!({"app": app, "background": true, "noScreenshot": true, "afterAct": "none"});
+        for (key, value) in extra.as_object().expect("an object") {
+            params[key] = value.clone();
+        }
+        call(session, method, &params).1.err()
+    };
+    let wrote = act(
+        "setValue",
+        json!({"elementIndex": field, "value": "zc front"}),
+    );
+    let field_press = act("click", json!({"elementIndex": field}));
+    let key = act("pressKey", json!({"key": "a"}));
+    let mut ms: Vec<f64> = rows
+        .iter()
+        .filter(|row| row.get("refused").is_none())
+        .filter_map(|row| row["ms"].as_f64())
+        .collect();
+    ms.sort_by(f64::total_cmp);
+    json!({
+        "pressed": rows.iter().filter(|row| row.get("refused").is_none()).count(),
+        "pressMsP50": ms.get(ms.len() / 2),
+        "maxMoved": rows.iter().filter_map(|row| row["moved"].as_f64()).fold(0.0, f64::max),
+        "frontKept": rows.iter().all(|row| row["frontKept"] == true),
+        "title": title,
+        "writeRefused": wrote,
+        "fieldPressRefused": field_press,
+        "keyRefused": key,
+        "personBack": person_back,
+        "rows": rows,
+    })
+}
+
+/// Helper item 1 of the five the person approved on 2026-11-17 22:3x: the
+/// app's own press, and a written value, in the app the person has in front.
+/// Measured on Chrome for Testing — a browser of its own, an empty profile,
+/// none of the person's sign-ins — in front only while the person is away:
+/// each turn stops the moment they come back. The installed helper (the one
+/// before) and the built one take a turn each on the same button: before, a
+/// press in front is refused `requires_foreground`; after, it goes by the
+/// app's own action, the pointer where it was and the app still in front, and
+/// a field's press and a key stay refused.
+///
+/// ```text
+/// ZEROCODE_FRONT_CHROME=<…>/Google\ Chrome\ for\ Testing.app \
+/// ZEROCODE_PARALLEL_BASELINE=/Applications/ZeroCode.app/Contents/Resources/ZeroCode\ Computer\ Use.app \
+/// ZEROCODE_PARALLEL_BUILT=<worktree>/crates/zerocode-shell/native/computer-use-macos/.build/release/ZeroCode\ Computer\ Use.app \
+/// ZEROCODE_FRONT_OUT=<dir>/front-report.json \
+/// cargo test -p zerocode-shell --bin zerocode-shell front_press_bench -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "brings Chrome for Testing to the front; run by hand while the person is away"]
+fn front_press_bench() {
+    const AWAY_SECS: u64 = 60;
+    const PRESSES: usize = 10;
+    let idle = person_idle_secs();
+    assert!(
+        idle >= AWAY_SECS,
+        "the person acted {idle} s ago: this bench waits for {AWAY_SECS} s away"
+    );
+    let chrome =
+        PathBuf::from(std::env::var_os("ZEROCODE_FRONT_CHROME").expect("Chrome for Testing"));
+    let before =
+        PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BASELINE").expect("the helper before"));
+    let built =
+        PathBuf::from(std::env::var_os("ZEROCODE_PARALLEL_BUILT").expect("the built helper"));
+    let out = PathBuf::from(std::env::var_os("ZEROCODE_FRONT_OUT").expect("report path"));
+    // Both helpers answer before anything comes to the front: one that does
+    // not costs the person's away time nothing.
+    let sessions = [("before", &before), ("after", &built)].map(|(side, helper)| {
+        let session = Session::connect(launch_at(helper).expect("helper"))
+            .unwrap_or_else(|error| panic!("the {side} helper does not answer: {error:?}"));
+        (side, session)
+    });
+    // The run's own folder, beside its report: the page and the browser's profile.
+    let browser = TestBrowser::open(&chrome, &out.with_extension("run"));
+    let app = format!("pid:{}", browser.pid);
+    let mut report = json!({"presses": PRESSES});
+    for (side, session) in &sessions {
+        report[*side] = front_turn(session, &app, browser.pid, PRESSES);
+        if report[*side]["personBack"] == true {
+            break;
+        }
+    }
+    drop(browser);
+    let text = serde_json::to_string_pretty(&report).expect("a report");
+    std::fs::write(&out, &text).expect("the report");
+    println!("{text}");
+    if report["before"]["personBack"] == true || report["after"]["personBack"] == true {
+        // The person came back: the bench stood back, and says so rather than judge.
+        return;
+    }
+    let (was, now) = (&report["before"], &report["after"]);
+    let refused_in_front = |value: &Value| {
+        value
+            .as_str()
+            .is_some_and(|said| said.starts_with("requires_foreground"))
+    };
+    assert_eq!(
+        was["pressed"], 0,
+        "the helper before refuses a press in front"
+    );
+    assert_eq!(now["pressed"], PRESSES, "every press in front went");
+    assert!(
+        now["maxMoved"].as_f64().unwrap_or(f64::MAX) < 1.0,
+        "the pointer stayed where it was"
+    );
+    assert_eq!(now["frontKept"], true, "the app stayed in front");
+    assert_eq!(
+        page_count(now["title"].as_str().unwrap_or_default()),
+        u64::try_from(PRESSES).expect("a count"),
+        "the page counted every press"
+    );
+    assert!(
+        now["writeRefused"].is_null(),
+        "a written value goes in front: {}",
+        now["writeRefused"]
+    );
+    assert!(
+        refused_in_front(&now["fieldPressRefused"]),
+        "a field's press stays refused in front: {}",
+        now["fieldPressRefused"]
+    );
+    assert!(
+        refused_in_front(&now["keyRefused"]),
+        "a key stays refused in front: {}",
+        now["keyRefused"]
+    );
+}
+
+#[test]
+fn the_front_page_counts_in_its_title() {
+    assert_eq!(page_count("ZC count 10"), 10);
+    assert_eq!(page_count("ZC count 7 - Google Chrome for Testing"), 7);
+    assert_eq!(page_count("ZC front"), 0);
+    assert!(FRONT_PAGE.contains("ZC-TARGET") && FRONT_PAGE.contains("ZC-FIELD"));
+}
