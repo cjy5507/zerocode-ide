@@ -709,7 +709,8 @@ pub fn mark_selection_seeded(env: &mut Vec<(String, String)>, prompt: &str) {
 
 /// The shim and mirror directories, built once for this window's lifetime —
 /// or `None` when the mirror binary is not beside this executable, which is
-/// the graceful absence every launch keeps working through.
+/// the graceful absence every launch keeps working through. On Windows the
+/// folder stands without it, for the doors ([`build_shims_in`]).
 pub fn mirror_shims() -> Option<(PathBuf, PathBuf)> {
     use std::sync::OnceLock;
     static HELD: OnceLock<Option<(PathBuf, PathBuf)>> = OnceLock::new();
@@ -809,6 +810,14 @@ fn build_mirror_shims() -> Option<(PathBuf, PathBuf)> {
 }
 
 /// The shim and mirror folders in `temp` for the window numbered `stamp`.
+///
+/// The agent shims need the mirror; the six doors beside them do not. With no
+/// mirror beside the window a macOS one writes no folder, as before, and a
+/// Windows one (`doors_without_mirror`) writes the doors and mirrors no agent.
+/// A source build started with `cargo run --bin zerocode-shell` builds the
+/// window's binary alone, and the person's Windows source build had none of
+/// the six (11-18, t-113721). Its nested runs are not mirrored, which
+/// [`mirror_ready`] still says.
 fn build_shims_in(
     temp: &Path,
     stamp: u32,
@@ -816,11 +825,13 @@ fn build_shims_in(
     doors_without_mirror: bool,
     agents: impl FnOnce() -> Vec<(String, PathBuf)>,
 ) -> Option<(PathBuf, PathBuf)> {
-    let _ = doors_without_mirror;
-    if !mirror_bin.is_file() {
+    let agents = if mirror_bin.is_file() {
+        agents()
+    } else if doors_without_mirror {
+        Vec::new()
+    } else {
         return None;
-    }
-    let agents = agents();
+    };
     sweep_ownerless_shim_dirs(
         temp,
         stamp,

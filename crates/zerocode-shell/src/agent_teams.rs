@@ -708,18 +708,30 @@ pub(crate) fn granted_leader_env(
 }
 
 /// Which road a launched agent's team takes, or `None` for no team.
+///
+/// `Panes` is the program's own road. `InProcess` is no team where a fake
+/// `tmux` can run, and the ledger alone where it cannot (`tmux_cannot_run`,
+/// the platform the settings already turn `Panes` into `InProcess` for:
+/// `SettingsDocument::normalized`, `stored_teams_mode`). There the shim is a
+/// POSIX script with no Windows twin and claude starts `tmux` itself, with no
+/// shell between, so its teammates stay in-process; `zerocode-orc` has its
+/// `.cmd` and `.ps1` there, and without this every agent the window launched
+/// went without it (t-113721).
 fn launch_dialect(mode: TeamsMode, program: &str, tmux_cannot_run: bool) -> Option<Dialect> {
-    let _ = tmux_cannot_run;
-    (mode == TeamsMode::Panes).then(|| Dialect::of(program))
+    match mode {
+        TeamsMode::Panes => Some(Dialect::of(program)),
+        TeamsMode::InProcess if tmux_cannot_run => Some(Dialect::Ledger),
+        TeamsMode::InProcess | TeamsMode::Off => None,
+    }
 }
 
 /// Open a team for a leader about to start, and hand back the environment it
 /// has to carry.
 ///
-/// Empty means "no team": the mode is off, the shim could not be written, or
-/// the bridge is not listening — and in every one of those cases the agent
-/// must start anyway, as the agent it was, rather than being refused a launch
-/// over a feature nobody asked for yet.
+/// Empty means "no team": the mode opens none here (`launch_dialect`), the
+/// shim could not be written, or the bridge is not listening — and in every
+/// one of those cases the agent must start anyway, as the agent it was, rather
+/// than being refused a launch over a feature nobody asked for yet.
 pub fn open_team(
     local_data_root: &Path,
     leader_term: u32,

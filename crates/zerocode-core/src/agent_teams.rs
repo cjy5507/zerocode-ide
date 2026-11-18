@@ -1130,6 +1130,12 @@ pub fn teammate_mode_args(argv: &[String], mode: TeamsMode) -> Vec<String> {
 /// Returned as pairs rather than applied here: the launch assembles one
 /// environment from several contributors in a measured order, and this is one
 /// contributor.
+///
+/// `dialect` is the caller's, decided once with the shim folders it puts on
+/// `shim_dirs`: the program's own ([`Dialect::of`]) where a fake `tmux` can
+/// run, and the ledger alone where it cannot — a Windows window, whose claude
+/// runs its teammates in-process. A claude handed the ledger is told nothing
+/// about a multiplexer, here or in the folders.
 pub fn team_launch_env(
     dialect: Dialect,
     team_id: &str,
@@ -1141,8 +1147,7 @@ pub fn team_launch_env(
 ) -> Vec<(String, String)> {
     let joined = shim_path(shim_dirs, path);
     let mut said: Vec<(String, String)> = Vec::new();
-    let _ = dialect;
-    if Dialect::of(program) == Dialect::Tmux {
+    if dialect == Dialect::Tmux {
         // Claude's Agent Teams is behind an experimental switch, and the
         // switch is CLAUDE's — not the road's. A zo leader reaches the same
         // panes without it, and setting it in a zo pane would arm Agent Teams
