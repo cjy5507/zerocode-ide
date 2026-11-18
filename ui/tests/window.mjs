@@ -59305,12 +59305,16 @@ suite("term-osc8-links", async ({ browser, origin, ok }) => {
       await feed({ full: true, rows: [
         { index: 0, text: "😀\u0000 https:" },
         { index: 1, wrap: 9, text: "//example.test/a ok" },
+        { index: 2, text: "😀\u0000 https://x.test; 😀\u0000 https://y.test." },
       ] });
       return [...view.pre.querySelectorAll(".term-link")].map(span => [span.textContent, span.dataset.href]);
     });
     const wrappedUrl = "https://example.test/a";
     ok("a wrapped URL after an emoji is clickable over exactly its printed characters",
-      JSON.stringify(wrapped) === JSON.stringify([["https:", wrappedUrl], ["//example.test/a", wrappedUrl]]),
+      JSON.stringify(wrapped) === JSON.stringify([
+        ["https:", wrappedUrl], ["//example.test/a", wrappedUrl],
+        ["https://x.test", "https://x.test"], ["https://y.test", "https://y.test"],
+      ]),
       JSON.stringify(wrapped));
     ok("the OSC 8 link checks raised no errors", faults.length === 0, faults.join(" | "));
   } finally {

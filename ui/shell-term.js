@@ -2820,16 +2820,9 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       const upTo = at === last ? line.length : (rows[at + 1]?.wrap ?? line.length);
       for (let col = 0; col < Math.min(upTo, line.length); col += 1) {
         if (line[col].ch === CONTINUATION) continue;
-        const ch = line[col].ch;
-        text += ch;
-        // RegExp indices address UTF-16 units. Both halves of a supplementary
-        // character point back to the same terminal cell.
+        text += line[col].ch;
         rowAt.push(at);
         colAt.push(col);
-        for (let unit = 1; unit < ch.length; unit += 1) {
-          rowAt.push(at);
-          colAt.push(col);
-        }
       }
     }
     // 그 줄의 주소들, 찾은 순서대로. 어느 행에 얼마만큼 떨어지는가는 읽는 쪽이
@@ -2848,6 +2841,24 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
         dev: found[1] !== undefined && !href.startsWith("file:"),
       });
       found = TERM_LINK_PATTERN.exec(text);
+    }
+    // The coordinate tables have one entry per scalar. Regex matches use
+    // UTF-16 offsets. Convert only on lines with a match and a surrogate pair.
+    if (links.length && text.length !== colAt.length) {
+      let offset = 0;
+      let scalar = 0;
+      const scalarAt = (boundary) => {
+        while (offset < boundary) {
+          offset += text.codePointAt(offset) > 0xffff ? 2 : 1;
+          scalar += 1;
+        }
+        return scalar;
+      };
+      // Matches arrive in order, so each character is visited at most once.
+      for (const link of links) {
+        link.head = scalarAt(link.head);
+        link.tail = scalarAt(link.tail + 1) - 1;
+      }
     }
     return { text, rowAt, colAt, lines, links };
   }
