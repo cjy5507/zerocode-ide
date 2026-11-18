@@ -253,7 +253,7 @@ fn external_runtime_home() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(set.trim()));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(CLAUDE_HOME_DIR))
+    crate::person_home::person_home().map(|home| home.join(CLAUDE_HOME_DIR))
 }
 
 #[cfg(test)]

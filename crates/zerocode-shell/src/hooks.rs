@@ -1514,7 +1514,7 @@ pub fn reconcile(
     local_data_root: &Path,
     installed_slugs: &[String],
 ) -> Vec<HookStatus> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::person_home::person_home() else {
         return Vec::new();
     };
     let paths = InstallPaths::from_environment(home.clone())
@@ -1628,7 +1628,7 @@ pub fn agent_launch_env_with_lock(local_data_root: &Path, agent: &str) -> Launch
     if let Some(prepared) = take_prepared_launch(agent) {
         return prepared;
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::person_home::person_home();
     launch_env_for(local_data_root, agent, home.as_deref())
 }
 
@@ -1678,7 +1678,7 @@ impl Drop for PreparedLaunch {
 /// nothing waits on this thread, and the door hands what was prepared to the
 /// split that asks for the same agent on this thread.
 pub(crate) fn prepare_launch(local_data_root: &Path, agent: &str) -> PreparedLaunch {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::person_home::person_home();
     prepare_launch_inner(local_data_root, agent, home.as_deref())
 }
 
@@ -1799,7 +1799,7 @@ pub fn sync_agent_auth(
     local_data_root: &Path,
     agent: &str,
 ) -> std::io::Result<Option<zerocode_hookd::codex_runtime_auth::AuthSync>> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::person_home::person_home();
     sync_agent_auth_inner(local_data_root, agent, home.as_deref())
 }
 
@@ -1887,7 +1887,7 @@ fn claude_account_settings(config_root: &Path) -> Vec<PathBuf> {
 
 /// What the settings screen shows, read without writing anything.
 pub fn statuses(config_root: &Path, local_data_root: &Path) -> Vec<HookStatus> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::person_home::person_home() else {
         return Vec::new();
     };
     let paths = InstallPaths::from_environment(home.clone())

@@ -99,7 +99,7 @@ pub(crate) fn account_home(local_data_root: &Path, id: &str) -> Option<PathBuf> 
 
 /// The person's own Codex home — the one a `codex` with no `CODEX_HOME` uses.
 pub(crate) fn system_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(SYSTEM_HOME_DIR))
+    crate::person_home::person_home().map(|home| home.join(SYSTEM_HOME_DIR))
 }
 
 /// The single shared Codex runtime home every ZeroCode session runs in.
@@ -535,7 +535,7 @@ fn codex_command(program: &str, home: &Path) -> Command {
 /// only waits for the credential file to change. Nothing is carried and no
 /// store is touched — the row that names this login reads it live.
 pub fn relogin_system(program: &str) -> Result<(), String> {
-    let home = system_home().ok_or("HOME이 설정되어 있지 않습니다")?;
+    let home = system_home().ok_or("홈 폴더를 찾을 수 없습니다")?;
     refuse_pinned_provider_in(&home)?;
     run_login(program, &home)
 }
@@ -547,7 +547,7 @@ pub fn relogin_system(program: &str) -> Result<(), String> {
 /// beside it. The mirror homes follow on their next launch: a system home with
 /// no login takes back the copy that was planted there (`codex_runtime_auth`).
 pub fn logout_system(program: &str) -> Result<(), String> {
-    let home = system_home().ok_or("HOME이 설정되어 있지 않습니다")?;
+    let home = system_home().ok_or("홈 폴더를 찾을 수 없습니다")?;
     let output = codex_command(program, &home)
         .arg("logout")
         .output()
