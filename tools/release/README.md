@@ -456,8 +456,10 @@ it.
   (`zerocode-mirror.exe`, `zerocode-pick.exe`) and `bin/zo`. Both binaries
   must carry the Google sign-in client, as build-app's do. The installer is
   copied to `out/<sha8>/`, and on a disk under `RECLAIM_BELOW_GB` the target
-  goes right after. A red build leaves the release macOS-only (the step stays
-  red; installed Windows apps keep their version) unless `WIN_BLOCKS_PUBLISH=1`;
+  goes right after (the lane log names its folder and size first). A red build
+  leaves the release macOS-only — the step stays red, the green run carries
+  `build-win red — …` as its reason (status.json, the end line, the board), and
+  installed Windows apps keep their version — unless `WIN_BLOCKS_PUBLISH=1`;
   less than `DISK_FLOOR_GB + WIN_ROOM_GB` free, a sha from before the script,
   or `RELEASE_WINDOWS=0` (a macOS-only publish with no Windows build in front
   of it) skips the phase aloud. None of its tools is in `TOOLS`: a Mac without

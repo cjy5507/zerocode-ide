@@ -288,6 +288,7 @@ ONLY=; RECEIPT=   # a gate's recipes a coordinator's receipt left owed, and what
 STALLED=null      # status.json's `stalled` while a gate's recipe writes nothing past its say time (watch_gate), else null
 WIN_INSTALLER=    # this run's Windows installer (build-win): the only one bundle-updater signs, never one an earlier run left
 WIN_SHIPPED=0     # 1 once bundle-updater put that installer, its .sig and its feed row under out/ — publish sends the three or none
+WIN_RED=          # a red build-win that left the release macOS-only, in words: a green run's reason (status.json, the end line, the board)
 
 measure_disk() {
   if is_dry; then
@@ -465,9 +466,12 @@ clean_target() { # LANE — empty it, keep the directory
 # in this run (its gate passed, or the solo judgments are done): on a tight disk
 # it goes now, before the floor judges the phases still to come.
 release_gate_target() {
+  local kb
   measure_disk
   [ "$DISK_FREE_GB" -lt "$RECLAIM_BELOW_GB" ] || return 0
-  log "released $1 — ${DISK_FREE_GB}G free < ${RECLAIM_BELOW_GB}G after its last use in this run"
+  # What goes is said, the folder and its size, before it goes.
+  kb=$(target_kb "$1"); kb=${kb:-0}
+  log "released $1 ($(target_dir "$1"), $(( kb / 1024 ))M) — ${DISK_FREE_GB}G free < ${RECLAIM_BELOW_GB}G after its last use in this run"
   clean_target "$1"
 }
 # drop_incremental LANE — the incremental caches earlier runs left in LANE's target
@@ -1644,7 +1648,9 @@ judge_sha() {
   step_done build-win "$rc" || return $?
   if [ "$rc" != 0 ]; then
     [ "$WIN_BLOCKS_PUBLISH" = 1 ] && { red "build-win: $WHY"; return 1; }
-    log "build-win: red — this release goes out without the Windows installer ($WHY)"
+    # Never a quiet macOS-only release: the run ends green with this as its reason.
+    WIN_RED="build-win red — the release goes out without the Windows installer: $WHY"
+    log "$WIN_RED"
   fi
 
   phase_begin bundle-updater
@@ -1656,7 +1662,7 @@ judge_sha() {
   step_done publish "$rc" || return $?
   [ "$rc" = 3 ] && return 3
   [ "$rc" = 0 ] || { red "publish: $WHY"; return 1; }
-  OUTCOME=green; REASON=; return 0
+  OUTCOME=green; REASON=$WIN_RED; return 0
 }
 
 sweep_sha() {
@@ -1683,7 +1689,7 @@ run_sha() { # SHA [QUEUE_FILE]
   SHA=$1; SHA8=$(printf '%s' "$1" | cut -c1-8); QUEUE_FILE=${2:-}
   SCRATCH=$RELEASE_SCRATCH_ROOT/gate-$SHA8; LOG=$OUT/lane-$SHA8.log
   STARTED_AT=$(now_iso); PHASES_JSON=; OUTCOME=null; REASON=; SWEPT=0
-  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=; STALLED=null; WIN_INSTALLER=; WIN_SHIPPED=0
+  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=; STALLED=null; WIN_INSTALLER=; WIN_SHIPPED=0; WIN_RED=
   rm -rf "$WORK"; mkdir -p "$WORK"
   log "== lane $SHA8 start (dry=$RELEASE_DRY_RUN)"
   report_begin

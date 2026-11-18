@@ -2357,7 +2357,14 @@ class WindowsInstaller(LaneCase):
         self.assertEqual(list(self.feed()["platforms"]), ["darwin-aarch64"])
         self.assertFalse([a for a in self.publish_assets() if "-setup.exe" in a])
         self.assertFalse([e for e in self.events() if "sign-win" in e])
-        self.assertIn("without the Windows installer", self.lane_log())
+        # Never a quiet macOS-only release: the green run says so as its reason, in status.json,
+        # on the lane's end line and to the board (the coordinator's ask, m-113917).
+        self.assertIn("build-win red", st["reason"])
+        self.assertIn("without the Windows installer", st["reason"])
+        self.assertIn("win-installer.sh rc=1", st["reason"])
+        end = [l for l in self.lane_log().splitlines() if " == green" in l]
+        self.assertEqual(len(end), 1, self.lane_log())
+        self.assertIn("build-win red", end[0])
         self.assertNotIn("SmartScreen", (self.lane.out(SHA_A) / "notes.md").read_text())
 
     def test_a_red_windows_build_stops_the_publish_when_told_to(self):
@@ -2426,6 +2433,12 @@ class WindowsInstaller(LaneCase):
         self.assertLess(built, events.index("clean win-release"))
         self.assertIn("windows-x86_64", self.feed()["platforms"], "the installer was out of the target first")
         self.assertIn(self.INSTALLER, self.publish_assets())
+        # What goes is said, the folder and its size, before it goes (m-113917).
+        released = [l for l in self.lane_log().splitlines() if "released win-release" in l]
+        self.assertEqual(len(released), 1, self.lane_log())
+        self.assertIn(f"({self.lane.target('win-release')}, ", released[0])
+        self.assertRegex(released[0], r", \d+M\) — 17G free < 20G")
+        self.assertEqual(self.lane.status()["reason"], "", "a green run with the Windows installer has nothing to say")
 
     def test_on_a_roomy_disk_its_target_stays_warm(self):
         self.lane.enqueue(SHA_A)
