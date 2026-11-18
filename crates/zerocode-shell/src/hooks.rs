@@ -799,19 +799,36 @@ const MIRROR_DIR_PREFIX: &str = "zerocode-mirror-";
 
 fn build_mirror_shims() -> Option<(PathBuf, PathBuf)> {
     let mirror_bin = mirror_bin()?;
+    build_shims_in(
+        &std::env::temp_dir(),
+        std::process::id(),
+        &mirror_bin,
+        cfg!(windows),
+        resolvable_agents,
+    )
+}
+
+/// The shim and mirror folders in `temp` for the window numbered `stamp`.
+fn build_shims_in(
+    temp: &Path,
+    stamp: u32,
+    mirror_bin: &Path,
+    doors_without_mirror: bool,
+    agents: impl FnOnce() -> Vec<(String, PathBuf)>,
+) -> Option<(PathBuf, PathBuf)> {
+    let _ = doors_without_mirror;
     if !mirror_bin.is_file() {
         return None;
     }
-    let stamp = std::process::id();
-    let temp = std::env::temp_dir();
+    let agents = agents();
     sweep_ownerless_shim_dirs(
-        &temp,
+        temp,
         stamp,
         zerocode_core::settings_file_lock::process_alive,
     );
     let shims = temp.join(format!("{SHIM_DIR_PREFIX}{stamp}"));
     let mirrors = temp.join(format!("{MIRROR_DIR_PREFIX}{stamp}"));
-    write_shim_dir(&shims, &mirror_bin, resolvable_agents().as_slice()).ok()?;
+    write_shim_dir(&shims, mirror_bin, agents.as_slice()).ok()?;
     std::fs::create_dir_all(&mirrors).ok()?;
     #[cfg(unix)]
     {
@@ -4981,6 +4998,39 @@ mod tests {
             .expect("fallback child");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"unset");
+    }
+
+    /// A Windows window with no mirror beside it — a source build started with
+    /// `cargo run --bin zerocode-shell`, which builds the window alone — still
+    /// lays the six doors and mirrors no agent; a macOS one writes no folder,
+    /// as it always has (t-113721).
+    #[test]
+    fn a_windows_window_without_the_mirror_still_lays_the_doors_and_mirrors_no_agent() {
+        let temp = tempfile::tempdir().unwrap();
+        let absent = temp.path().join("zerocode-mirror-not-built");
+        let (shims, _) = build_shims_in(temp.path(), 7, &absent, true, || {
+            panic!("an agent was resolved for a mirror that is not there")
+        })
+        .expect("no shim folder without the mirror, so no door on the pane's PATH");
+        for door in [
+            zerocode_core::artifact_publish::SHIM,
+            zerocode_core::file_find::SHIM,
+            zerocode_core::agent_browser::BROWSER_CLI,
+            zerocode_core::computer_use::COMPUTER_CLI,
+            "zerocode-emulator",
+            "zerocode-ssh",
+        ] {
+            assert!(shims.join(door).is_file(), "{door} is missing");
+            #[cfg(windows)]
+            assert!(
+                shims.join(format!("{door}.cmd")).is_file(),
+                "{door}.cmd is missing"
+            );
+        }
+        assert!(
+            build_shims_in(temp.path(), 8, &absent, false, Vec::new).is_none(),
+            "a macOS window without the mirror wrote a shim folder"
+        );
     }
 
     /// Every door an agent has out of its pane is laid by this one function,

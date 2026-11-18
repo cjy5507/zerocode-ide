@@ -707,6 +707,12 @@ pub(crate) fn granted_leader_env(
         .collect()
 }
 
+/// Which road a launched agent's team takes, or `None` for no team.
+fn launch_dialect(mode: TeamsMode, program: &str, tmux_cannot_run: bool) -> Option<Dialect> {
+    let _ = tmux_cannot_run;
+    (mode == TeamsMode::Panes).then(|| Dialect::of(program))
+}
+
 /// Open a team for a leader about to start, and hand back the environment it
 /// has to carry.
 ///
@@ -721,19 +727,19 @@ pub fn open_team(
     path: &str,
     program: &str,
 ) -> Vec<(String, String)> {
-    if mode != TeamsMode::Panes {
+    let Some(dialect) = launch_dialect(mode, program, cfg!(not(unix))) else {
         return Vec::new();
-    }
+    };
     let Some(installed) = install_shim(local_data_root) else {
         return Vec::new();
     };
     let Some((id, token)) = mint_team(leader_term) else {
         return Vec::new();
     };
-    let dialect = Dialect::of(program);
     let dirs = dirs_for(dialect, &installed);
     let borrowed: Vec<&str> = dirs.iter().map(String::as_str).collect();
     let mut env = team_launch_env(
+        dialect,
         &id,
         &token,
         &borrowed,
@@ -2515,7 +2521,15 @@ mod tests {
                 .map(|(_, value)| value.clone())
                 .collect::<Vec<_>>()
         };
-        let leader = team_launch_env("team-x", "tok", &["/shim"], "/usr/bin", "", "claude");
+        let leader = team_launch_env(
+            Dialect::Tmux,
+            "team-x",
+            "tok",
+            &["/shim"],
+            "/usr/bin",
+            "",
+            "claude",
+        );
         let teammate = teammate_env("team-x", "%4", "pane-4-secret", &leader);
         assert_eq!(held(&teammate, "TMUX_PANE"), ["%4"]);
         assert_eq!(held(&teammate, TEAM_PANE_VAR), ["%4"]);
@@ -2542,7 +2556,15 @@ mod tests {
         // A worker under a leader that was never given a multiplexer is not
         // given one either. It still knows which pane it is — in the name that
         // does not claim tmux — which is the whole reason that name exists.
-        let ledger = team_launch_env("team-y", "tok", &["/orc"], "/usr/bin", "", "codex");
+        let ledger = team_launch_env(
+            Dialect::Ledger,
+            "team-y",
+            "tok",
+            &["/orc"],
+            "/usr/bin",
+            "",
+            "codex",
+        );
         let worker = teammate_env("team-y", "%7", "pane-7-secret", &ledger);
         assert_eq!(held(&worker, TEAM_PANE_VAR), ["%7"]);
         assert!(held(&worker, TEAM_TOKEN_VAR).is_empty());
@@ -2562,6 +2584,7 @@ mod tests {
     #[test]
     fn a_teammate_does_not_export_its_pane_secret_to_its_children() {
         let leader = team_launch_env(
+            Dialect::Ledger,
             "team-secret-file",
             "leader-secret",
             &[],
@@ -2593,7 +2616,15 @@ mod tests {
     /// handed its own through the launch door (`agent_launch_env_with_lock`).
     #[test]
     fn a_teammate_does_not_inherit_the_leaders_router_keys() {
-        let mut leader = team_launch_env("team-router", "tok", &[], "/usr/bin", "", "zo");
+        let mut leader = team_launch_env(
+            Dialect::Tmux,
+            "team-router",
+            "tok",
+            &[],
+            "/usr/bin",
+            "",
+            "zo",
+        );
         leader.push((
             "ZEROCODE_ROUTER_OPENROUTER_KEY".to_string(),
             "sk-or-dummy".to_string(),
@@ -2734,15 +2765,31 @@ mod tests {
             assert!(
                 open_team(local_data.path(), 600, TeamsMode::Off, "/usr/bin", program).is_empty()
             );
-            assert!(
-                open_team(
-                    local_data.path(),
-                    600,
-                    TeamsMode::InProcess,
-                    "/usr/bin",
-                    program
-                )
-                .is_empty()
+            // In-process opens none either where a fake `tmux` can run. A
+            // Windows window's in-process is the ledger road, pinned below.
+            assert_eq!(launch_dialect(TeamsMode::InProcess, program, false), None);
+        }
+    }
+
+    /// A Windows window seats every agent it launches in the ledger. Its
+    /// settings turn `Panes` into `InProcess`, because claude's teammates
+    /// cannot be panes where the fake `tmux` (a POSIX script) cannot run, and
+    /// that used to open no team at all: no agent the window started had
+    /// `zerocode-orc` (t-113721). Where tmux runs, nothing moves.
+    #[test]
+    fn a_windows_in_process_launch_takes_the_ledger_road_and_nothing_else_moves() {
+        for program in ["claude", "codex", "zo", "gemini"] {
+            assert_eq!(
+                launch_dialect(TeamsMode::InProcess, program, true),
+                Some(Dialect::Ledger),
+                "{program} launched by a Windows window has no zerocode-orc"
+            );
+            assert_eq!(launch_dialect(TeamsMode::InProcess, program, false), None);
+            assert_eq!(launch_dialect(TeamsMode::Off, program, true), None);
+            assert_eq!(launch_dialect(TeamsMode::Off, program, false), None);
+            assert_eq!(
+                launch_dialect(TeamsMode::Panes, program, false),
+                Some(Dialect::of(program))
             );
         }
     }
