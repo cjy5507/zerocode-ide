@@ -551,8 +551,7 @@ pub fn lexical_rank(task: &str, candidates: &[SkillCandidate]) -> Vec<SkillReadi
     let mut ranked: Vec<SkillReading> = candidates
         .iter()
         .filter_map(|candidate| {
-            let mut held = words_of(&candidate.name);
-            held.extend(words_of(&candidate.description));
+            let held = held_words(candidate);
             let mut shared = 0.0;
             let mut total = 0.0;
             for word in &asked {
@@ -584,6 +583,21 @@ pub fn lexical_rank(task: &str, candidates: &[SkillCandidate]) -> Vec<SkillReadi
             .then_with(|| left.name.cmp(&right.name))
     });
     ranked
+}
+
+/// The words of `task` that `candidate`'s name and description carry — the
+/// ones [`lexical_rank`] counts for it.
+#[must_use]
+pub fn task_words_held(task: &str, candidate: &SkillCandidate) -> BTreeSet<String> {
+    let held = held_words(candidate);
+    words_of(task).into_iter().filter(|word| held.contains(word)).collect()
+}
+
+/// The words a skill's name and description carry, as the word match reads them.
+fn held_words(candidate: &SkillCandidate) -> BTreeSet<String> {
+    let mut held = words_of(&candidate.name);
+    held.extend(words_of(&candidate.description));
+    held
 }
 
 /// The words of a text worth matching on: lowercased, split on anything that
