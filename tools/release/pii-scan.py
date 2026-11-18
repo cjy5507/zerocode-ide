@@ -251,7 +251,9 @@ def scan(root: Path):
             nonlocal lines
             number = text.count("\n", 0, hit.start()) + 1
             if lines is None:
-                lines = text.splitlines()
+                # The lines `number` counts. `splitlines()` also breaks at \v, \f,
+                # \x1c-\x1e, \x85 and U+2028/9, and read the waiver off another line.
+                lines = text.split("\n")
             if _waived(lines, number, category):
                 return
             if shown is None:

@@ -52,6 +52,10 @@ CASES = (
 CAUGHT = {category: caught for category, caught, _allowed in CASES}
 ALLOWED = {category: allowed for category, _caught, allowed in CASES}
 
+# The line breaks `str.splitlines()` knows and a count of "\n" does not
+# (a lone "\r" never reaches the gate: reading a file as text turns it into "\n").
+SPLITLINES_ONLY = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
 
 def run(root, *args):
     """The real script against `root`, as the recipe runs it."""
@@ -275,6 +279,34 @@ class PiiScan(unittest.TestCase):
         caught = CAUGHT["home-path"]
         self.checkout.write("waived.txt", f"{caught}  # pii-scan: allow email — wrong row\n")
         self.assertEqual(len(found(self.checkout.root)["home-path"]), 1)
+
+    def test_a_waiver_on_the_findings_line_holds_after_a_break_only_splitlines_knows(self):
+        """A finding's line is counted by `\\n`, and its waiver is read off that same
+        line. `str.splitlines()` also breaks at a form feed, a vertical tab, the
+        file, group and record separators, NEL and the two Unicode separators, so
+        one of those earlier in the file put the waiver a line off (t-115074,
+        reports/rust-anything-166 §8): the gate refused a site that waives itself."""
+        caught = CAUGHT["home-path"]
+        for brk in SPLITLINES_ONLY:
+            with self.subTest(brk=hex(ord(brk))):
+                checkout = Checkout()
+                self.addCleanup(checkout.close)
+                checkout.write("same-line.txt", f"a{brk}b\n{caught}  # pii-scan: allow home-path — why\n")
+                self.assertEqual(pii_scan.scan(checkout.root)["home-path"], [])
+
+    def test_a_waiver_two_lines_above_does_not_hold_after_a_break_only_splitlines_knows(self):
+        """The other half of the same slip, and the one that let a value through: a
+        waiver two lines above the finding was read as the line above it."""
+        caught = CAUGHT["home-path"]
+        for brk in SPLITLINES_ONLY:
+            with self.subTest(brk=hex(ord(brk))):
+                checkout = Checkout()
+                self.addCleanup(checkout.close)
+                checkout.write(
+                    "two-below.txt", f"a{brk}b\n# pii-scan: allow home-path — why\nunrelated\n{caught}\n"
+                )
+                hits = pii_scan.scan(checkout.root)["home-path"]
+                self.assertEqual([(h["path"], h["line"]) for h in hits], [("two-below.txt", 4)], hits)
 
     # --- what the recipe sees ----------------------------------------------
 
