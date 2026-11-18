@@ -6921,13 +6921,22 @@ async function saveKnowledgeExplore(vault, explore) {
   await commitSetting("second_brain_explore", "set_second_brain_explore", { vault, explore: line });
 }
 
+/* 두 볼트 글자가 같은 폴더인가. Windows에서 저장한 볼트는 사람이 적는 꼴(`C:\…`, 설정
+ * 명령의 `dunce::canonicalize`)이고 그래프 답의 볼트는 std `canonicalize`의 꼴(`\\?\C:\…`)
+ * 이다. dunce가 떼는 것은 그 앞머리 네 글자뿐이라 두 쪽에서 떼고 견준다. macOS · Linux의
+ * 경로에는 이 앞머리가 없다. */
+function knowledgeSameVault(left, right) {
+  const plain = (path) => (typeof path === "string" && path.startsWith("\\\\?\\") ? path.slice(4) : path);
+  return plain(left) === plain(right);
+}
+
 /* 문을 연 뒤의 첫 그림에서 한 번: 어느 모드로 서는가(`knowledgeStartMode`), 어디를
  * 중심으로, 어느 깊이로. 「연결 보기」의 열쇠는 그 페이지, 저장된 줄의 중심은 그림에
  * 있을 때만 — 없으면 기본 중심(`knowledgeDefaultCentre`)이다. 답이 아직 없거나 다른
  * 볼트의 옛 답이면 묻지 않은 채 둔다. */
 function applyKnowledgeEntry(view, layout) {
   if (!knowledgeEntryPending || knowledgeReport === null) return;
-  if (knowledgeReport.vault !== (secondBrainVault || knowledgeReport.vault)) return;
+  if (!knowledgeSameVault(knowledgeReport.vault, secondBrainVault || knowledgeReport.vault)) return;
   knowledgeEntryPending = false;
   const model = layout.model;
   const reveal = knowledgeRevealMode === "local" && knowledgeRevealKey !== null
