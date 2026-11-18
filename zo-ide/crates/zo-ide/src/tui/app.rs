@@ -779,6 +779,11 @@ struct Ui {
     permissions: Option<PermissionPicker>,
     /// 떠 있는 `/theme` 피커 — the same place on the screen again.
     theme_picker: Option<ThemePicker>,
+    /// A theme chosen over the one the conversation's rows were drawn in, on
+    /// a screen that draws it, and the line that says so: the rows written
+    /// keep their colours, so [`App`] draws the conversation again in the new
+    /// theme and sets this line under it ([`App::redraw_in_chosen_theme`]).
+    theme_redraw: Option<(SystemLevel, String)>,
     /// Alt+A session-scoped in-process agent overview.
     agents: Option<agents::Overview>,
     /// The `?` card or the F2 viewer, while one is up.
@@ -4136,7 +4141,9 @@ impl Ui {
             .under_cursor()
             .and_then(|entry| super::theme::find(&entry.slug));
         if let Some(theme) = chosen {
-            self.choose_theme(&theme);
+            // The rows under the picker were drawn in the theme it opened on;
+            // the one under its cursor is only previewed.
+            self.choose_theme(&theme, &picker.original);
         } else {
             let _ = super::theme::set(picker.original);
         }
@@ -4159,7 +4166,7 @@ impl Ui {
     fn apply_typed_theme(&mut self, name: &str) {
         use super::theme::ThemeResolveError;
         match super::theme::resolve_name(name) {
-            Ok(theme) => self.choose_theme(&theme),
+            Ok(theme) => self.choose_theme(&theme, &super::theme::active()),
             Err(ThemeResolveError::PastCap { cap }) => {
                 self.note(SystemLevel::Info, &super::strings::theme_past_cap(name, cap));
             }
@@ -4178,16 +4185,24 @@ impl Ui {
     /// — and one line says so, with whatever keeps it from showing here or
     /// from lasting ([`theme_chosen_note`]). A file that could not be
     /// written leaves the theme on for this run.
-    fn choose_theme(&mut self, theme: &super::theme::Theme) {
+    ///
+    /// The rows already written stay in `drawn_in`, the theme they were
+    /// drawn in — the scrollback cannot be rewritten — so a theme that is
+    /// another and shows here asks [`App`] to draw the conversation again in
+    /// it (the person, 2026-11-18: 「theme 색상 글씨가 바꿔도 다똑같음」).
+    fn choose_theme(&mut self, theme: &super::theme::Theme, drawn_in: &super::theme::Theme) {
         let _ = super::theme::set(theme.clone());
         let slug = (!theme.is_terminal()).then_some(theme.name.as_str());
         let not_saved = crate::preferences::save_theme_to(&self.settings_path, slug)
             .err()
             .map(|error| error.to_string());
         let env_theme = std::env::var(super::theme::THEME_ENV).ok();
-        let (level, text) =
-            theme_chosen_note(theme, not_saved.as_deref(), theme_unseen_here(), env_theme.as_deref());
+        let unseen = theme_unseen_here();
+        let (level, text) = theme_chosen_note(theme, not_saved.as_deref(), unseen, env_theme.as_deref());
         self.note(level, &text);
+        if theme != drawn_in && unseen.is_none() {
+            self.theme_redraw = Some((level, text));
+        }
     }
 
     /// enter — 1단계면 effort 단계로 잇고, 2단계면 둘을 함께 확정한다.
@@ -6191,6 +6206,7 @@ impl App {
             session_page: 0,
                 permissions: None,
                 theme_picker: None,
+                theme_redraw: None,
                 agents: None,
                 footer_view: None,
                 warnings: warnings::Retained::default(),
@@ -6342,6 +6358,9 @@ impl App {
                             KeyOutcome::Nothing => {}
                         }
                         self.drive_autonomy(&mut events).await;
+                        // A theme chosen now, or during the turn that just
+                        // ended, is drawn over the whole conversation.
+                        self.redraw_in_chosen_theme();
                         self.ui.draw();
                     }
                     Some(Err(_)) | None => break ExitReason::UserExit,
@@ -6774,6 +6793,28 @@ impl App {
         self.session_card();
         self.replay_history();
         self.ui.note(SystemLevel::Info, word);
+    }
+
+    /// A theme chosen over the one the conversation was drawn in
+    /// ([`Ui::choose_theme`]): the rows written keep the colours they were
+    /// drawn in and the scrollback cannot be rewritten, so the screen is
+    /// cleared and the session's saved turns are drawn again in the new
+    /// theme, as `ctrl+o` draws them in the other view, with the line that
+    /// says the theme under them. An empty conversation has drawn nothing in
+    /// the old one.
+    fn redraw_in_chosen_theme(&mut self) {
+        let Some((level, text)) = self.ui.theme_redraw.take() else {
+            return;
+        };
+        if self.ui.start.is_some() {
+            return;
+        }
+        self.ui.flush_history();
+        self.ui.painter.clear_terminal();
+        self.ui.forget_drawn();
+        self.session_card();
+        self.replay_history();
+        self.ui.note(level, &text);
     }
 
     /// codex 의 세션 정보 셀 — 부팅 카드다. 새로 열 때도, `/resume` 이 세션을
@@ -8614,6 +8655,7 @@ fn test_ui() -> Ui {
             session_page: 0,
         permissions: None,
         theme_picker: None,
+        theme_redraw: None,
         agents: None,
         footer_view: None,
         warnings: warnings::Retained::default(),

@@ -10882,6 +10882,70 @@ async fn e2e_late_osc_colour_replies_never_reach_composer() {
     .await;
 }
 
+/// `/theme` over a conversation (the person, 2026-11-18: 「theme 색상 글씨가
+/// 바꿔도 다똑같음」): the rows already written are drawn again in the theme
+/// chosen — the answer's code in Dracula's green (#50fa7b) — and the line that
+/// says the theme stands under them. Before, only what came after the choice
+/// took its colours: the screen the person was looking at stayed as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_theme_draws_the_conversation_again_in_the_theme_chosen() {
+    // The foreground of an SGR, whatever stands beside it in the sequence.
+    const DRACULA_GREEN: &[u8] = b"38;2;80;250;123";
+    /// Whether `text` is written right after an SGR that sets `colour`.
+    fn written_in(bytes: &[u8], colour: &[u8], text: &[u8]) -> bool {
+        bytes.windows(colour.len()).enumerate().any(|(index, window)| {
+            window == colour && {
+                let rest = &bytes[index + colour.len()..];
+                rest.iter().position(|byte| *byte == b'm').is_some_and(|end| rest[end + 1..].starts_with(text))
+            }
+        })
+    }
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("Run `cargo test` before you push.")
+        .await
+        .expect("start text script");
+    let args = interactive_args();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &args,
+        &[
+            (zo_ide::tui::style::STYLE_ENV, "marks"),
+            ("COLORTERM", "truecolor"),
+        ],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("What should we do?", TEST_TIMEOUT);
+    run.send(b"Which command first?\r").expect("send prompt");
+    run.wait_for_history_row("before you push", TEST_TIMEOUT);
+    assert!(
+        !written_in(&run.snapshot_output(), DRACULA_GREEN, b"cargo test"),
+        "the answer's code was in Dracula's green before the theme was chosen"
+    );
+
+    let at = run.output_len();
+    run.send(b"/theme dracula\r").expect("send /theme dracula");
+    run.wait_until(at, TEST_TIMEOUT, |after| {
+        find_bytes(after, b"before you push")
+            .is_some_and(|answer| find_bytes(&after[answer..], "theme → Dracula".as_bytes()).is_some())
+    });
+    let output = run.finish();
+    let after = &output[at..];
+    assert!(
+        written_in(after, DRACULA_GREEN, b"cargo test"),
+        "the answer was not drawn again in Dracula's green: {:?}",
+        String::from_utf8_lossy(after)
+    );
+    let answer = find_bytes(after, b"before you push").expect("the answer drawn again");
+    assert!(
+        find_bytes(&after[answer..], "theme → Dracula".as_bytes()).is_some(),
+        "the line that says the theme stands under the conversation"
+    );
+}
+
 /// `/theme dracula` in a real terminal (T3): the line is zo's own — no
 /// "is not in zo" — the footer is written again in the theme's colours
 /// though its words did not change, and the choice is one new member of the
