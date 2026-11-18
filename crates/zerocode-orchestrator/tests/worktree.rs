@@ -323,9 +323,9 @@ fn a_repository_can_put_its_task_branches_at_the_top_level() {
         Orchestrator::open(&root)
             .expect("open")
             .with_worktree_root(dir.path().join("worktrees"))
-            .with_branch_prefix("joe")
+            .with_branch_prefix("dev")
             .prefixed_branch("drain-gate"),
-        "joe/drain-gate"
+        "dev/drain-gate"
     );
 
     let made = bare.create(&task("drain gate")).expect("create");

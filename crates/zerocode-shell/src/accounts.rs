@@ -4430,12 +4430,12 @@ JSON
         std::fs::write(
             dir.path().join(CREDENTIALS_FILE),
             r#"{"claudeAiOauth":{"accessToken":"secret-do-not-read",
-                "emailAddress":"joe@example.com","organizationName":"Example"}}"#,
+                "emailAddress":"dev@example.com","organizationName":"Example"}}"#,
         )
         .expect("write");
         assert!(signed_in(dir.path()));
         let identity = identity_in(dir.path());
-        assert_eq!(identity.email.as_deref(), Some("joe@example.com"));
+        assert_eq!(identity.email.as_deref(), Some("dev@example.com"));
         assert_eq!(identity.organization_name.as_deref(), Some("Example"));
         // The token is not part of the identity, and this test exists to keep
         // it that way — a future field that captured it would fail here.

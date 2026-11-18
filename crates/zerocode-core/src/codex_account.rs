@@ -366,7 +366,7 @@ mod tests {
         let auth = serde_json::json!({
             "tokens": {
                 "id_token": token(serde_json::json!({
-                    "email": "joe@example.com",
+                    "email": "dev@example.com",
                     "https://api.openai.com/auth": {
                         "chatgpt_account_id": "acct-1",
                         "workspace_name": "Example Inc",
@@ -380,12 +380,12 @@ mod tests {
         .to_string();
         let (kind, identity) = identity_from_auth(&auth);
         assert_eq!(kind, AuthKind::Oauth);
-        assert_eq!(identity.email.as_deref(), Some("joe@example.com"));
+        assert_eq!(identity.email.as_deref(), Some("dev@example.com"));
         assert_eq!(identity.provider_account_id.as_deref(), Some("acct-1"));
         assert_eq!(identity.workspace_label.as_deref(), Some("Example Inc"));
         assert_eq!(
             identity.label().as_deref(),
-            Some("joe@example.com · Example Inc")
+            Some("dev@example.com · Example Inc")
         );
         // The tokens themselves are not part of an identity, and this test
         // exists to keep it that way.
@@ -454,14 +454,14 @@ mod tests {
     fn one_address_in_two_workspaces_is_two_accounts() {
         let held = vec![CodexAccount {
             id: "a".into(),
-            email: Some("joe@example.com".into()),
+            email: Some("dev@example.com".into()),
             workspace_label: Some("Work".into()),
             provider_account_id: Some("acct-1".into()),
             home_dir: "/state/codex-accounts/a/home".into(),
             added_at: 0,
         }];
         let same = CodexIdentity {
-            email: Some("JOE@example.com".into()),
+            email: Some("DEV@example.com".into()),
             workspace_label: Some("Work".into()),
             provider_account_id: Some("acct-1".into()),
         };
@@ -470,7 +470,7 @@ mod tests {
             "an address is not case-sensitive"
         );
         let other = CodexIdentity {
-            email: Some("joe@example.com".into()),
+            email: Some("dev@example.com".into()),
             workspace_label: Some("Personal".into()),
             provider_account_id: Some("acct-2".into()),
         };
@@ -481,7 +481,7 @@ mod tests {
     fn no_selection_means_the_machines_own_login_rather_than_the_first_row() {
         let held = vec![CodexAccount {
             id: "a".into(),
-            email: Some("joe@example.com".into()),
+            email: Some("dev@example.com".into()),
             workspace_label: None,
             provider_account_id: None,
             home_dir: "/state/codex-accounts/a/home".into(),

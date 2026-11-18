@@ -1217,7 +1217,7 @@ pub(super) fn draft_branch_name(
     )?;
     let slug = ai::sanitize_branch_slug(&raw, ai::MAX_BRANCH_NAME_WORDS);
     // The prefix the branch machinery adds comes back off, so a model that
-    // helpfully included it does not produce `joe/joe-fix-login`.
+    // helpfully included it does not produce `dev/dev-fix-login`.
     let slug = ai::strip_configured_branch_prefix(&slug, prefix);
     if slug.is_empty() {
         return Err("쓸 만한 이름이 나오지 않았습니다".to_string());

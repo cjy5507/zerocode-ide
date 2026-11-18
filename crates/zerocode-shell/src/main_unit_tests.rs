@@ -8878,7 +8878,7 @@ fn a_refused_push_is_classified_by_what_git_refused_it_for() {
 #[test]
 fn a_refusal_never_carries_the_credential_it_was_pushed_with() {
     assert_eq!(
-        strip_credentials("fatal: unable to access 'https://joe:ghp_secret@github.com/a/b.git'"),
+        strip_credentials("fatal: unable to access 'https://dev:ghp_secret@github.com/a/b.git'"),
         "fatal: unable to access 'https://github.com/a/b.git'"
     );
     assert_eq!(
@@ -13273,11 +13273,11 @@ fn the_branch_prefix_degrades_for_a_name_and_refuses_a_word() {
 
     // git-username: 슬러그가 그대로 접두사다.
     assert_eq!(
-        resolve_branch_prefix(&named(BranchPrefixMode::GitUsername, None), Some("joe-kim")),
-        Ok(Some("joe-kim".to_string()))
+        resolve_branch_prefix(&named(BranchPrefixMode::GitUsername, None), Some("dev-kim")),
+        Ok(Some("dev-kim".to_string()))
     );
     // 이름이 없거나 ref로 못 쓰이면 접두사 없이 간다.
-    for name in [None, Some("jo e"), Some("-joe"), Some("joe.lock")] {
+    for name in [None, Some("de v"), Some("-dev"), Some("dev.lock")] {
         assert_eq!(
             resolve_branch_prefix(&named(BranchPrefixMode::GitUsername, None), name),
             Ok(None),
@@ -13286,19 +13286,19 @@ fn the_branch_prefix_degrades_for_a_name_and_refuses_a_word() {
     }
     // none은 언제나 없음이다 — 적어 둔 낱말이 있어도.
     assert_eq!(
-        resolve_branch_prefix(&named(BranchPrefixMode::None, Some("joe")), Some("kim")),
+        resolve_branch_prefix(&named(BranchPrefixMode::None, Some("dev")), Some("kim")),
         Ok(None)
     );
     // custom은 적힌 낱말이고, 가장자리는 다듬되 뜻은 바꾸지 않는다.
     assert_eq!(
         resolve_branch_prefix(
-            &named(BranchPrefixMode::Custom, Some("/feature//joe/")),
+            &named(BranchPrefixMode::Custom, Some("/feature//dev/")),
             None
         ),
-        Ok(Some("feature/joe".to_string()))
+        Ok(Some("feature/dev".to_string()))
     );
     // 그리고 쓸 수 없는 낱말은 거절이다.
-    for bad in [None, Some(""), Some("jo e"), Some("joe~")] {
+    for bad in [None, Some(""), Some("de v"), Some("dev~")] {
         assert!(
             resolve_branch_prefix(&named(BranchPrefixMode::Custom, bad), Some("kim")).is_err(),
             "{bad:?} was accepted as a custom prefix"
@@ -13685,7 +13685,7 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
 
     let params = auth_reload_params(
         zerocode_core::account::Provider::Anthropic,
-        Some("joe@example.com · Acme"),
+        Some("dev@example.com · Acme"),
         Some(ClaudeDirs {
             config: Path::new("/data/runtime/claude"),
             credentials: Path::new("/data/claude-accounts/a-1"),
@@ -13715,7 +13715,7 @@ fn an_account_switch_reaches_each_live_zo_pane_once_and_no_other_pane() {
 fn a_reload_carries_the_new_paths_and_says_so_when_there_are_none() {
     let switched = auth_reload_params(
         zerocode_core::account::Provider::Anthropic,
-        Some("  joe@example.com  "),
+        Some("  dev@example.com  "),
         Some(ClaudeDirs {
             config: Path::new("/data/runtime/claude"),
             credentials: Path::new("/data/claude-accounts/a-1"),
@@ -13723,7 +13723,7 @@ fn a_reload_carries_the_new_paths_and_says_so_when_there_are_none() {
         None,
     );
     assert_eq!(switched["provider"], "anthropic");
-    assert_eq!(switched["label"], "joe@example.com");
+    assert_eq!(switched["label"], "dev@example.com");
     assert_eq!(switched["claude_config_dir"], "/data/runtime/claude");
     assert_eq!(
         switched["claude_secure_storage_dir"],
@@ -21141,7 +21141,7 @@ fn ssh_host_metadata_and_native_password_move_as_one_recoverable_transaction() {
         label: "Build machine".to_string(),
         host: "build.example.com".to_string(),
         port: zerocode_core::host::SSH_DEFAULT_PORT,
-        user: "joe".to_string(),
+        user: "dev".to_string(),
         authentication: zerocode_core::host::SshAuthentication::Password,
         key_algorithm: "ssh-ed25519".to_string(),
         encoded_key: ssh_hosts::TEST_HOST_KEY.to_string(),
@@ -21170,7 +21170,7 @@ fn ssh_host_metadata_and_native_password_move_as_one_recoverable_transaction() {
         label: "Build machine".to_string(),
         host: "build.example.com".to_string(),
         port: zerocode_core::host::SSH_DEFAULT_PORT,
-        user: "joe".to_string(),
+        user: "dev".to_string(),
         authentication: zerocode_core::host::SshAuthentication::Agent,
         key_algorithm: "ssh-ed25519".to_string(),
         encoded_key: ssh_hosts::TEST_HOST_KEY.to_string(),

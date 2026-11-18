@@ -794,7 +794,7 @@ mod tests {
     #[test]
     fn codex_prints_two_labelled_lines_and_they_read() {
         let parsed = parse_codex_status(
-            "  Account: joe@example.com\n  5h limit: 12% used (resets 3h 20m)\n  Weekly limit: 40% used\n",
+            "  Account: dev@example.com\n  5h limit: 12% used (resets 3h 20m)\n  Weekly limit: 40% used\n",
         );
         let (session, session_reset) = parsed.session.expect("no five-hour window");
         assert_eq!(session, 12.0);

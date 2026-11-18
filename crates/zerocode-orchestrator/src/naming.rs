@@ -171,7 +171,7 @@ fn is_reserved_stem(value: &str) -> bool {
 ///
 /// Kept beside [`slugify`] rather than inside it because a **prefix** does not
 /// go through the slug: it is a name somebody typed for their branches
-/// (`joe`, `feature/joe`) and slugifying it would silently rename it. So the
+/// (`dev`, `feature/dev`) and slugifying it would silently rename it. So the
 /// prefix is CHECKED instead, and the caller decides what a refusal means —
 /// which is exactly the difference Orca draws (`computeValidatedBranchName`
 /// drops an unusable git-username prefix and refuses a custom one).
@@ -179,7 +179,7 @@ const REF_FORBIDDEN: [char; 8] = ['~', '^', ':', '?', '*', '[', '\\', ' '];
 
 /// Is this usable as a branch prefix, exactly as typed?
 ///
-/// `/` is legal and meaningful — `feature/joe` is one prefix of two components
+/// `/` is legal and meaningful — `feature/dev` is one prefix of two components
 /// — so it is not on the list above; empty components are what
 /// [`clean_prefix`] removes.
 #[must_use]
@@ -331,28 +331,28 @@ mod tests {
     /// with a message about a name the person never typed.
     #[test]
     fn a_prefix_git_would_refuse_is_named_as_unusable() {
-        for good in ["joe", "feature/joe", " joe ", "joe/", "/joe", "a.b-c"] {
+        for good in ["dev", "feature/dev", " dev ", "dev/", "/dev", "a.b-c"] {
             assert!(prefix_is_usable(good), "{good:?} was refused");
         }
         for bad in [
             "",
             "   ",
             "//",
-            "jo~e",
-            "jo^e",
-            "jo:e",
-            "jo?e",
-            "jo*e",
-            "jo[e",
-            "jo\\e",
-            "jo e",
-            "jo..e",
-            "jo@{e",
-            "-joe",
-            ".joe",
-            "joe.",
-            "joe.lock",
-            "feature/-joe",
+            "de~v",
+            "de^v",
+            "de:v",
+            "de?v",
+            "de*v",
+            "de[v",
+            "de\\v",
+            "de v",
+            "de..v",
+            "de@{v",
+            "-dev",
+            ".dev",
+            "dev.",
+            "dev.lock",
+            "feature/-dev",
         ] {
             assert!(!prefix_is_usable(bad), "{bad:?} was accepted");
         }
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn cleaning_a_prefix_cannot_produce_an_empty_component() {
-        assert_eq!(clean_prefix("/feature//joe/"), "feature/joe");
+        assert_eq!(clean_prefix("/feature//dev/"), "feature/dev");
         assert_eq!(clean_prefix("  "), "");
     }
 
@@ -387,7 +387,7 @@ mod tests {
             ("t-1111-went-quiet-fold", "t-1111"),
             ("wt/t-1111-went-quiet-fold", "t-1111"),
             ("wt/t-1111/went-quiet-fold", "t-1111"),
-            ("feature/joe/t-9-드레인-게이트-2", "t-9"),
+            ("feature/dev/t-9-드레인-게이트-2", "t-9"),
             ("/workspaces/repo/t-42", "t-42"),
         ] {
             assert_eq!(worker_task_id(name), Some(task), "name was {name:?}");

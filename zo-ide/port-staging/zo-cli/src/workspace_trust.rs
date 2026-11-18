@@ -692,7 +692,7 @@ mod tests {
     fn workspace_trust_marks_home_as_high_blast_radius() {
         let _guard = crate::test_env_lock();
         let root = temp_dir("home");
-        let home = root.join("joe");
+        let home = root.join("dev");
         std::fs::create_dir_all(&home).expect("home dir");
         let risk = with_home(&home, || classify_cwd(&home));
         std::fs::remove_dir_all(root).expect("cleanup");
@@ -703,7 +703,7 @@ mod tests {
     fn workspace_trust_marks_home_ancestor_as_high_blast_radius() {
         let _guard = crate::test_env_lock();
         let root = temp_dir("ancestor");
-        let home = root.join("users").join("joe");
+        let home = root.join("users").join("dev");
         std::fs::create_dir_all(&home).expect("home dir");
         let users_dir = home.parent().expect("home parent").to_path_buf();
         let risk = with_home(&home, || classify_cwd(&users_dir));
@@ -715,7 +715,7 @@ mod tests {
     fn workspace_trust_allows_project_below_home() {
         let _guard = crate::test_env_lock();
         let root = temp_dir("project");
-        let home = root.join("joe");
+        let home = root.join("dev");
         let project = home.join("repo");
         std::fs::create_dir_all(&project).expect("project dir");
         let risk = with_home(&home, || classify_cwd(&project));

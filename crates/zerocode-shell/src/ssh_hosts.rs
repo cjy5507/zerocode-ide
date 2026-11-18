@@ -416,7 +416,7 @@ mod tests {
             label: "Build machine".to_string(),
             host: "build.example.com".to_string(),
             port: SSH_DEFAULT_PORT,
-            user: "joe".to_string(),
+            user: "dev".to_string(),
             authentication,
             key_algorithm: "ssh-ed25519".to_string(),
             encoded_key: TEST_HOST_KEY.to_string(),

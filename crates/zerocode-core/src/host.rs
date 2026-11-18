@@ -1372,7 +1372,7 @@ mod tests {
     #[test]
     fn ssh_endpoint_and_pin_deserialization_cannot_bypass_validation() {
         let endpoint =
-            SshEndpoint::new("dev.example.test", SSH_DEFAULT_PORT, "joe").expect("valid endpoint");
+            SshEndpoint::new("dev.example.test", SSH_DEFAULT_PORT, "dev").expect("valid endpoint");
         let pin =
             PinnedHostKey::new("ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAITest").expect("valid key");
 
@@ -1392,7 +1392,7 @@ mod tests {
         );
         assert!(
             serde_json::from_str::<SshEndpoint>(
-                r#"{"host":"dev.example.test\nother","port":22,"user":"joe"}"#
+                r#"{"host":"dev.example.test\nother","port":22,"user":"dev"}"#
             )
             .is_err()
         );
@@ -1407,7 +1407,7 @@ mod tests {
     #[test]
     fn changing_an_endpoint_clears_the_old_host_key_by_construction() {
         let id = ExecutionHostId::generate();
-        let original = SshEndpoint::new("old.example.test", SSH_DEFAULT_PORT, "joe")
+        let original = SshEndpoint::new("old.example.test", SSH_DEFAULT_PORT, "dev")
             .expect("original endpoint");
         let pin = PinnedHostKey::new("ssh-ed25519", "AAAAC3NzaOld").expect("original host key");
         let record = SshHostDraft::new(id, original, SshAuthentication::Agent).confirm(pin.clone());
@@ -1417,7 +1417,7 @@ mod tests {
         assert_eq!(decoded, record);
 
         let changed = record.change_endpoint(
-            SshEndpoint::new("new.example.test", SSH_DEFAULT_PORT, "joe")
+            SshEndpoint::new("new.example.test", SSH_DEFAULT_PORT, "dev")
                 .expect("changed endpoint"),
         );
         let reverified = changed
@@ -1437,7 +1437,7 @@ mod tests {
         let pin = PinnedHostKey::new("ssh-ed25519", "AAAAC3NzaAgent").expect("valid pin");
         let record = SshHostDraft::new(
             id,
-            SshEndpoint::new("agent.example.test", SSH_DEFAULT_PORT, "joe").expect("endpoint"),
+            SshEndpoint::new("agent.example.test", SSH_DEFAULT_PORT, "dev").expect("endpoint"),
             SshAuthentication::Agent,
         )
         .confirm(pin.clone());
@@ -1453,7 +1453,7 @@ mod tests {
     fn passwords_never_enter_the_persisted_host_record() {
         let record = SshHostDraft::new(
             ExecutionHostId::generate(),
-            SshEndpoint::new("dev.example.test", SSH_DEFAULT_PORT, "joe").expect("valid endpoint"),
+            SshEndpoint::new("dev.example.test", SSH_DEFAULT_PORT, "dev").expect("valid endpoint"),
             SshAuthentication::Password,
         )
         .confirm(PinnedHostKey::new("ssh-ed25519", "AAAAC3NzaPinned").expect("valid pin"));

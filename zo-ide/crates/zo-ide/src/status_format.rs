@@ -1047,7 +1047,7 @@ mod card_tests {
         api::managed_account::apply(
             api::ManagedProvider::Anthropic,
             &api::ManagedAccountUpdate {
-                label: Some("joe@example.com · Acme".to_string()),
+                label: Some("dev@example.com · Acme".to_string()),
                 claude_config_dir: Some(managed.clone()),
                 claude_secure_storage_dir: None,
                 codex_home: None,
@@ -1071,7 +1071,7 @@ mod card_tests {
         ));
 
         assert!(text.contains("Anthropic:"), "{text}");
-        assert!(text.contains("joe@example.com · Acme"), "{text}");
+        assert!(text.contains("dev@example.com · Acme"), "{text}");
         assert!(text.contains("(IDE-managed)"), "{text}");
         api::managed_account::clear();
         std::fs::remove_dir_all(managed).ok();

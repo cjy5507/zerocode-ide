@@ -523,9 +523,9 @@ pub fn sanitize_branch_slug(raw: &str, max_words: usize) -> String {
 
 /// Take a configured prefix back off a slug.
 ///
-/// `stripConfiguredBranchPrefix`: a person whose branches are all `joe/…` has
+/// `stripConfiguredBranchPrefix`: a person whose branches are all `dev/…` has
 /// that prefix added by the branch machinery, and a model that helpfully
-/// included it too would produce `joe/joe-fix-login`. A slug that is ONLY the
+/// included it too would produce `dev/dev-fix-login`. A slug that is ONLY the
 /// prefix becomes empty, which the caller reads as "the model said nothing".
 pub fn strip_configured_branch_prefix(slug: &str, prefix: &str) -> String {
     let prefix_slug = sanitize_branch_slug(prefix.trim(), usize::MAX);
@@ -1254,19 +1254,19 @@ mod tests {
         assert_eq!(sanitize_branch_slug("  Add  __LOGIN__  ", 9), "add-login");
         assert_eq!(sanitize_branch_slug("!!!", 4), "");
         // The prefix the branch machinery adds is taken back off, so a model
-        // that helpfully included it does not produce `joe/joe-fix-login`.
+        // that helpfully included it does not produce `dev/dev-fix-login`.
         assert_eq!(
-            strip_configured_branch_prefix("joe-fix-login", "joe/"),
+            strip_configured_branch_prefix("dev-fix-login", "dev/"),
             "fix-login"
         );
         assert_eq!(
-            strip_configured_branch_prefix("fix-login", "joe/"),
+            strip_configured_branch_prefix("fix-login", "dev/"),
             "fix-login"
         );
         assert_eq!(strip_configured_branch_prefix("fix-login", ""), "fix-login");
         // Only the prefix is nothing at all, which the caller reads as "the
         // model said nothing".
-        assert_eq!(strip_configured_branch_prefix("joe", "joe/"), "");
+        assert_eq!(strip_configured_branch_prefix("dev", "dev/"), "");
         assert_eq!(humanize_branch_slug("fix-login-loop"), "Fix login loop");
         assert_eq!(humanize_branch_slug(""), "");
     }

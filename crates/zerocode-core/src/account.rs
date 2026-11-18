@@ -665,10 +665,10 @@ mod tests {
     #[test]
     fn an_identity_is_read_from_the_credentials_the_cli_wrote() {
         let identity = ClaudeIdentity::from_credentials(
-            r#"{"claudeAiOauth":{"accessToken":"x","emailAddress":"joe@example.com",
+            r#"{"claudeAiOauth":{"accessToken":"x","emailAddress":"dev@example.com",
                 "organizationUuid":"org-1","organizationName":"Example Inc"}}"#,
         );
-        assert_eq!(identity.email.as_deref(), Some("joe@example.com"));
+        assert_eq!(identity.email.as_deref(), Some("dev@example.com"));
         assert_eq!(identity.organization_uuid.as_deref(), Some("org-1"));
         assert_eq!(identity.organization_name.as_deref(), Some("Example Inc"));
         assert!(identity.is_namable());
@@ -704,9 +704,9 @@ mod tests {
     fn one_address_in_two_organisations_is_two_accounts() {
         // The case the organisation is part of identity FOR: a personal login
         // and a work login under the same address.
-        let held = vec![account("a", "joe@example.com", Some("org-personal"))];
+        let held = vec![account("a", "dev@example.com", Some("org-personal"))];
         let work = ClaudeIdentity {
-            email: Some("joe@example.com".into()),
+            email: Some("dev@example.com".into()),
             organization_uuid: Some("org-work".into()),
             organization_name: None,
             ..ClaudeIdentity::default()
@@ -714,7 +714,7 @@ mod tests {
         assert!(duplicate_of(&held, &work).is_none());
 
         let same = ClaudeIdentity {
-            email: Some("JOE@Example.com".into()),
+            email: Some("DEV@Example.com".into()),
             organization_uuid: Some("org-personal".into()),
             organization_name: None,
             ..ClaudeIdentity::default()
@@ -814,13 +814,13 @@ mod tests {
 
     #[test]
     fn a_row_says_the_organisation_only_when_there_is_one() {
-        let mut one = account("a", "joe@example.com", Some("org"));
-        assert_eq!(one.label(), "joe@example.com");
+        let mut one = account("a", "dev@example.com", Some("org"));
+        assert_eq!(one.label(), "dev@example.com");
         one.organization_name = Some("Example Inc".into());
-        assert_eq!(one.label(), "joe@example.com · Example Inc");
+        assert_eq!(one.label(), "dev@example.com · Example Inc");
         // An empty name is not a name.
         one.organization_name = Some(String::new());
-        assert_eq!(one.label(), "joe@example.com");
+        assert_eq!(one.label(), "dev@example.com");
     }
 
     /// A managed directory is a whole Claude Code home, not a credential store,

@@ -832,7 +832,7 @@ mod tests {
             .map(|(tool, text)| (*tool, text.as_str()))
             .collect();
         let text = flow_doc(&lines, &flow.spec);
-        let walk_command = command(&["--params", r#"{"name":"joe"}"#]);
+        let walk_command = command(&["--params", r#"{"name":"dev"}"#]);
         let mut arena = Arena::read(dir.path(), 1).expect("a recording");
         assert_eq!(arena.from(), dir.path());
         let report = rehearse(&mut arena, &walk_command, &text);
@@ -899,7 +899,7 @@ mod tests {
         // `--start` aligns the script: the walk from step three asks the
         // browser click first, and gets its line.
         let text = flow_doc(&lines, &flow.spec);
-        let from_three = command(&["--start", "3", "--params", r#"{"name":"joe"}"#]);
+        let from_three = command(&["--start", "3", "--params", r#"{"name":"dev"}"#]);
         let mut arena = Arena::read(dir.path(), 3).unwrap();
         let report = rehearse(&mut arena, &from_three, &text);
         assert_eq!(report["ran"][0]["verb"], json!("click"));

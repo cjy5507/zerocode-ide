@@ -268,12 +268,12 @@ mod tests {
     #[test]
     fn a_credential_never_reaches_the_sentence_a_person_reads() {
         assert_eq!(
-            scrub_credentials("fatal: could not read https://joe:ghp_secret@github.com/o/r.git"),
+            scrub_credentials("fatal: could not read https://dev:ghp_secret@github.com/o/r.git"),
             "fatal: could not read https://***@github.com/o/r.git"
         );
         // 사용자 이름만 있어도 지운다. 사람 이름도 남의 화면에 실릴 것은 아니다.
         assert_eq!(
-            scrub_credentials("https://joe@example.com/x"),
+            scrub_credentials("https://dev@example.com/x"),
             "https://***@example.com/x"
         );
         // 자격 증명이 없으면 한 글자도 바뀌지 않는다.
@@ -303,7 +303,7 @@ mod tests {
     fn the_failure_a_person_sees_is_gits_last_word_with_the_secret_taken_out() {
         let said = "Cloning into 'repo'...\n\
                     error: RPC failed\n\
-                    fatal: could not read Username for 'https://joe:tok@github.com'\n";
+                    fatal: could not read Username for 'https://dev:tok@github.com'\n";
         assert_eq!(
             clone_failure(said).as_deref(),
             Some("fatal: could not read Username for 'https://***@github.com'")

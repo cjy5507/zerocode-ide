@@ -32561,7 +32561,7 @@ const branchPrefix = await page.evaluate(async () => {
   seen.saved = { ...window.__WT_PREFS__ };
   // And a refusal is said where the word was typed.
   window.__FAIL__.add("save_worktree_prefs");
-  word.value = "jo e";
+  word.value = "de v";
   word.dispatchEvent(new Event("change"));
   await new Promise((done) => setTimeout(done, 60));
   window.__FAIL__.delete("save_worktree_prefs");
@@ -50867,14 +50867,14 @@ const sshCred = await page.evaluate(async () => {
   const input = el("ssh-cred-value");
 
   // 질문 하나: 모달이 서고, 종류와 대상이 제목과 상세에 입힌다.
-  request({ requestId: "q1", targetId: "t1", kind: "password", detail: "joe@box:22" });
+  request({ requestId: "q1", targetId: "t1", kind: "password", detail: "dev@box:22" });
   seen.stands = !scrim.hidden;
-  seen.saysWho = el("ssh-cred-detail").textContent === "joe@box:22";
+  seen.saysWho = el("ssh-cred-detail").textContent === "dev@box:22";
   seen.masked = input.type === "password";
 
   // 두 번째 질문은 줄에 선다 — 화면의 질문은 그대로.
   request({ requestId: "q2", targetId: "t2", kind: "passphrase", detail: "root@far:22" });
-  seen.queues = el("ssh-cred-detail").textContent === "joe@box:22";
+  seen.queues = el("ssh-cred-detail").textContent === "dev@box:22";
 
   // Enter가 답을 낸다: 값이 명령으로 나가고, 칸은 비워지고, 다음 질문이 오른다.
   input.value = "hunter2";

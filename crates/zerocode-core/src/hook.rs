@@ -3990,7 +3990,7 @@ mod tests {
         let secret = activity_of(
             "PreToolUse",
             r#"{"tool_name":"Bash",
-                "tool_input":{"command":"git clone https://joe:ghp_secret@github.com/o/r.git"}}"#,
+                "tool_input":{"command":"git clone https://dev:ghp_secret@github.com/o/r.git"}}"#,
         )
         .expect("a clone said nothing");
         let target = secret.target.expect("the command vanished with its token");
@@ -4035,7 +4035,7 @@ mod tests {
 
         // The target walks through the same scrub and the same clamp every
         // other target does — this line reaches a row people screen-share.
-        let secret = activity_said("Bash · git clone https://joe:ghp_secret@github.com/o/r.git")
+        let secret = activity_said("Bash · git clone https://dev:ghp_secret@github.com/o/r.git")
             .expect("a clone said nothing")
             .target
             .expect("the command vanished with its token");

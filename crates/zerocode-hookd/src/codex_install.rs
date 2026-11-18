@@ -1188,7 +1188,7 @@ mod tests {
     /// fixture target for the person's independently owned Codex home.
     #[test]
     fn a_managed_codex_home_inherited_by_a_test_is_not_the_system_home() {
-        let user_home = Path::new("/users/joe");
+        let user_home = Path::new("/users/dev");
         for inherited in [
             Path::new("/app/data/codex-runtime-home/home"),
             Path::new("/APP/DATA/CODEX-RUNTIME-HOME/HOME"),
