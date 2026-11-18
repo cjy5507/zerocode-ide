@@ -1773,10 +1773,10 @@ const TAKES_THE_DESKTOP: &str = "foreground: true";
 /// A command line's phrase and what this tool's model sends for the same
 /// thing. A phrase is rewritten whole before a flag inside it is.
 const COMMAND_LINE_PHRASES: &[(&str, &str)] = &[
-    // An app with no window to look at: opening the app again brings a
-    // minimized window back behind, and takes nothing of the person's.
-    // Not every app stays behind as it opens: some come to the front.
-    ("then retry with --restore-window", "then send launch for that app and look again: most apps open the window behind, some come to the front"),
+    // An app with no window to look at: launching it again brings a
+    // minimized window back. Launch asks the app to open behind; some apps
+    // come to the front all the same, so the advice promises nothing more.
+    ("then retry with --restore-window", "then send launch for that app and look again: launch asks the app to open behind, but some apps come to the front"),
     // Keys for a window that is not focused: the tool has no value writer of
     // its own to offer beside the desktop.
     ("retry with --restore-window or use set-value for editable elements", "retry with foreground: true"),
@@ -2123,7 +2123,7 @@ fn check_batch_len(count: usize) -> Result<(), ToolError> {
 /// One batch: checked whole by the core before any look is paid, one trip
 /// down the shim, one look after — and each step answered under the model's
 /// own action name, in its picture's pixels.
-fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
+fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &ComputerRoad, stop: Option<&runtime::HookAbortSignal>) -> Result<String, ToolError> {
     let mut steps = input
         .steps
         .take()
@@ -2169,8 +2169,8 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
     let frame = ctx.computer_frame().unwrap_or(ShotFrame::UNIT);
     // A batch the person's pointer or keys held up before its first step is
     // the same batch once they pause; one that ran a step is not sent again.
-    let confirms = steps.iter().any(|step| step.confirming.is_some());
-    let (answer, stood_by) = call_once_the_person_pauses(road, &batch_argv(&steps, frame)?, ctx, confirms, PERSON_BUSY_PAUSE)?;
+    let asks_again = steps.iter().all(may_ask_again);
+    let (answer, stood_by) = call_once_the_person_pauses(road, &batch_argv(&steps, frame)?, ctx, stop, asks_again, PERSON_BUSY_PAUSE)?;
     let mut reports = answer
         .pointer("/result/steps")
         .and_then(Value::as_array)
@@ -2698,6 +2698,8 @@ pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &Co
 }
 
 fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<ToolExecutionResult, ToolError> {
+    // The stop of the turn this call began in: read now, before any look or asking.
+    let stop = ctx.turn_stop();
     if input.get("action").and_then(Value::as_str).map(str::trim) == Some(BATCH_ACTION) {
         if let Some(steps) = input.get("steps").and_then(Value::as_array) {
             check_batch_len(steps.len())?;
@@ -2711,7 +2713,7 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
     let action = input.action.trim().to_string();
     if action == BATCH_ACTION {
-        return run_computer_batch(input, ctx, road).map(ToolExecutionResult::from);
+        return run_computer_batch(input, ctx, road, stop.as_ref()).map(ToolExecutionResult::from);
     }
     if input.steps.is_some() {
         return Err(ToolError::InvalidInput(format!("`steps` belongs to `batch`, not `{action}`")));
@@ -2736,7 +2738,7 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
     if LOOKS.contains(&action.as_str()) || argv.iter().any(|word| word == "--mark") {
         argv = as_viewer(argv, ctx);
     }
-    let (mut answer, stood_by) = call_once_the_person_pauses(road, &argv, ctx, input.confirming.is_some(), PERSON_BUSY_PAUSE)?;
+    let (mut answer, stood_by) = call_once_the_person_pauses(road, &argv, ctx, stop.as_ref(), may_ask_again(&input), PERSON_BUSY_PAUSE)?;
     let mut repicked = None;
     if let Some(refused) = refusal(&answer) {
         let (pressed, picked) = repick(&input, refused, ctx, road)?;
@@ -2926,25 +2928,25 @@ fn the_person_is_busy(answer: &Value) -> bool {
 /// who only moved the mouse cost the model a refused call and a round trip
 /// for each second they kept moving it.
 ///
-/// Esc ends it: the turn's stop is looked at before every asking again and
-/// through each pause, and once it is raised nothing more is asked — the
-/// model was told the turn was cancelled, so nothing may land after it. A
-/// press the person is asked to confirm (`asks_to_confirm`) is not asked
-/// again at all: every asking would show them the card again.
+/// Esc ends it: `stop` — the stop of the turn the call began in, read when
+/// it began — is looked at before every asking again and through each
+/// pause, and once it is raised nothing more is asked. An asking already on
+/// its way may still land; none is sent after the stop. A call that
+/// `may_ask_again` says no to is answered as the window answered it.
 fn call_once_the_person_pauses(
     road: &ComputerRoad,
     argv: &[String],
     ctx: &ToolContext,
-    asks_to_confirm: bool,
+    stop: Option<&runtime::HookAbortSignal>,
+    asks_again: bool,
     pause: Duration,
 ) -> Result<(Value, Option<StoodBy>), ToolError> {
     let cwd = ctx.cwd.as_deref();
     let mut answer = call_shim(road, argv, cwd)?;
-    if asks_to_confirm || !the_person_is_busy(&answer) {
+    if !asks_again || !the_person_is_busy(&answer) {
         return Ok((answer, None));
     }
-    let stop = ctx.turn_stop();
-    let stopped = || stop.as_ref().is_some_and(runtime::HookAbortSignal::is_aborted);
+    let stopped = || stop.is_some_and(runtime::HookAbortSignal::is_aborted);
     let refused_at = Instant::now();
     let mut asked_again = 0;
     while the_person_is_busy(&answer) && asked_again < PERSON_BUSY_TRIES && refused_at.elapsed() + pause <= PERSON_BUSY_BUDGET {
@@ -2956,6 +2958,17 @@ fn call_once_the_person_pauses(
     }
     super::computer_tally::note(super::computer_tally::STOOD_BY);
     Ok((answer, Some(StoodBy { waited: refused_at.elapsed(), asked_again })))
+}
+
+/// Whether an act held up by the person's pointer or keys may be asked again
+/// once they pause. Not a press the person is asked to confirm: every asking
+/// would show them the card again. Not an act at a point: the window cannot
+/// tell that what is there changed while the person was on the pointer — a
+/// page they scrolled, a tab they switched — and the model looks again
+/// before it presses again. An act the window finds again on its fresh look
+/// (by an element's number, a mark, or words) may.
+fn may_ask_again(input: &ComputerInput) -> bool {
+    input.confirming.is_none() && input.coordinate.is_none() && input.start_coordinate.is_none()
 }
 
 /// Sleep `pause` in slices of [`STOP_LOOK_EVERY`], looking at `stopped`
@@ -3155,7 +3168,7 @@ pub(crate) mod tests {
             steps: Some(vec![input(json!({"action":"wait", "app":"Other", "window_id":52})); COMPUTER_BATCH_MAX_STEPS + 1]),
             ..ComputerInput::default()
         };
-        let error = run_computer_batch(direct, &ctx, &road).unwrap_err();
+        let error = run_computer_batch(direct, &ctx, &road, None).unwrap_err();
         assert!(error.to_string().contains(&format!("1 to {COMPUTER_BATCH_MAX_STEPS} steps")), "{error}");
         assert!(calls(dir.path()).is_empty());
     }
@@ -4956,6 +4969,7 @@ title=''
 [ -f '@DIR@/window-document' ] && title="$title"',"document":"'"$(cat '@DIR@/window-document')"'"'
 target=''
 [ -n "$window" ] && target=',"window":{"id":'"$window""$title"'},"fixture":"unrelated-window-fixture"'
+[ -f '@DIR@/delay-'"$verb"'.'"$asked" ] && sleep "$(cat '@DIR@/delay-'"$verb"'.'"$asked")"
 [ -f '@DIR@/reply-'"$verb"'.'"$asked" ] && { cat '@DIR@/reply-'"$verb"'.'"$asked"; echo; exit 0; }
 [ -f '@DIR@/reply-'"$verb" ] && { cat '@DIR@/reply-'"$verb"; echo; exit 0; }
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
@@ -7086,6 +7100,68 @@ printf '%s
         assert_eq!(clicks_asked(dir.path()), 2);
     }
 
+    /// Esc ends the turn the call began in; a turn opened right after it puts
+    /// its own stop in place. The call answers to the stop it began under:
+    /// the first asking was still out when the turn ended, and nothing is
+    /// asked again into the next turn.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_opened_right_after_esc_does_not_restart_the_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let first = runtime::HookAbortSignal::new();
+        ctx.set_turn_stop(Some(first.clone()));
+        std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+        // The first asking takes its time, as the window's wait for the person does.
+        std::fs::write(dir.path().join("delay-click.1"), "1").unwrap();
+        let asked = dir.path().join("calls");
+        let next_turn = ctx.clone();
+        let esc = std::thread::spawn(move || {
+            // Once the first asking is out: Esc ends this turn, and the next one puts its stop in place.
+            let began = Instant::now();
+            while !std::fs::read_to_string(&asked).unwrap_or_default().lines().any(|verb| verb == "click") {
+                assert!(began.elapsed() < Duration::from_secs(10), "the first asking never went out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            first.abort();
+            next_turn.set_turn_stop(Some(runtime::HookAbortSignal::new()));
+        });
+        let click = json!({"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true, "foreground": true});
+        let refused = refused_with(run_computer(&click, &ctx, &road));
+        esc.join().unwrap();
+        assert!(refused.starts_with(&format!("{}:", error_code::PERSON_POINTING)), "{refused}");
+        assert_eq!(clicks_asked(dir.path()), 1, "nothing is asked again into the next turn: {:?}", calls(dir.path()));
+    }
+
+    /// A press at a point is not asked again: what is at that point may have
+    /// changed while the person was on the pointer. The model hears the
+    /// refusal and looks again.
+    #[cfg(unix)]
+    #[test]
+    fn a_press_at_a_point_is_not_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        std::fs::write(dir.path().join("reply-mouse-click.1"), the_person_is_on_the_pointer()).unwrap();
+        let refused = refused_with(run_computer(&json!({"action": "left_click", "coordinate": [100, 40]}), &ctx, &road));
+        assert!(refused.starts_with(&format!("{}:", error_code::PERSON_POINTING)), "{refused}");
+        let presses = calls(dir.path()).iter().filter(|verb| verb.as_str() == "mouse-click").count();
+        assert_eq!(presses, 1, "{:?}", calls(dir.path()));
+    }
+
+    /// Which held-up acts are asked again: not one at a point, not one the
+    /// person confirms; one the window finds again by its number or words is.
+    #[test]
+    fn only_an_act_the_window_finds_again_is_asked_again() {
+        assert!(may_ask_again(&input(json!({"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true}))));
+        assert!(may_ask_again(&input(json!({"action": "key", "text": "Return"}))));
+        assert!(!may_ask_again(&input(json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]}))));
+        assert!(!may_ask_again(&input(json!({"action": "left_click", "coordinate": [100, 40]}))));
+        assert!(!may_ask_again(&input(json!({"action": "left_click_drag", "start_coordinate": [10, 20], "coordinate": [30, 40]}))));
+        assert!(!may_ask_again(&input(json!({"action": "left_click", "app": "Fixture", "label": "Pay", "ocr": true, "confirming": "payment"}))));
+    }
+
     /// A press the person is asked to confirm is not asked again: every
     /// asking would show them the card again. The model hears the refusal.
     #[cfg(unix)]
@@ -7174,7 +7250,7 @@ printf '%s
             ("send the key with --foreground", "send the key with foreground: true"),
             (
                 "app 'Fixture' has no accessibility window; make sure the app has a visible window, then retry with --restore-window.",
-                "app 'Fixture' has no accessibility window; make sure the app has a visible window, then send launch for that app and look again: most apps open the window behind, some come to the front.",
+                "app 'Fixture' has no accessibility window; make sure the app has a visible window, then send launch for that app and look again: launch asks the app to open behind, but some apps come to the front.",
             ),
             (
                 "keyboard input requires the target Fixture window to be focused; retry with --restore-window or use set-value for editable elements",
