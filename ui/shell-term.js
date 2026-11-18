@@ -2820,9 +2820,16 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
       const upTo = at === last ? line.length : (rows[at + 1]?.wrap ?? line.length);
       for (let col = 0; col < Math.min(upTo, line.length); col += 1) {
         if (line[col].ch === CONTINUATION) continue;
-        text += line[col].ch;
+        const ch = line[col].ch;
+        text += ch;
+        // RegExp indices address UTF-16 units. Both halves of a supplementary
+        // character point back to the same terminal cell.
         rowAt.push(at);
         colAt.push(col);
+        for (let unit = 1; unit < ch.length; unit += 1) {
+          rowAt.push(at);
+          colAt.push(col);
+        }
       }
     }
     // 그 줄의 주소들, 찾은 순서대로. 어느 행에 얼마만큼 떨어지는가는 읽는 쪽이
