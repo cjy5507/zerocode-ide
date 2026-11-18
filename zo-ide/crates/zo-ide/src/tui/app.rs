@@ -10291,14 +10291,11 @@ mod tests {
                     rows_seen.push(row);
                 }
             }
-            // A row replaced another where neither, its ellipsis aside,
-            // starts the other: the sentence changed.
+            // A row that is not the sentence the one before it said replaced
+            // it: the sentence changed.
             let replaced = rows_seen
                 .windows(2)
-                .filter(|pair| {
-                    let (before, after) = (pair[0].trim_end_matches('…'), pair[1].trim_end_matches('…'));
-                    !before.starts_with(after) && !after.starts_with(before)
-                })
+                .filter(|pair| !crate::tui::thinking::same_sentence(&pair[0], &pair[1]))
                 .count();
             assert_eq!(replaced, 2, "width {width}: the row changes its sentence twice: {rows_seen:#?}");
         }

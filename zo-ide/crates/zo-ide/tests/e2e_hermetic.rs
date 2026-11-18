@@ -2390,6 +2390,7 @@ async fn e2e_a_delegation_cell_shows_its_task_not_its_arguments() {
 /// changed once a sentence and the row jumped as the model wrote (the
 /// person, 2026-11-18: 「working부분이 정신없게 바뀜」).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // one turn read in its order: the row while it thinks, the cell it leaves, then `/thinking` — split, the turn loses its order
 async fn e2e_headerless_thinking_names_the_status_row_and_commits_a_titled_cell() {
     let layout = Layout::new();
     let sentences = [

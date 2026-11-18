@@ -2460,7 +2460,7 @@ mod tests {
         assert_eq!(status.header, "Reading the parser", "a heading over a heading waits its dwell");
         assert_eq!(status.waiting_header(), Some("Comparing the spans"), "the last offer waits");
         let shown_at = Duration::from_millis(400);
-        status.set_elapsed(shown_at + HEADER_DWELL - Duration::from_millis(1));
+        status.set_elapsed(shown_at + HEADER_DWELL.saturating_sub(Duration::from_millis(1)));
         assert_eq!(status.header, "Reading the parser");
         status.set_elapsed(shown_at + HEADER_DWELL);
         assert_eq!(status.header, "Comparing the spans", "the clock past the dwell puts it on the row");

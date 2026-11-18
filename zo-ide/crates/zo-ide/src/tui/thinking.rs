@@ -376,13 +376,25 @@ fn indent_marker(row: Line) -> Line {
     }
 }
 
+/// Whether `after`, the thinking row drawn next, still says the sentence
+/// `before` said: it grew out of it, or it is the one cut that turns its
+/// last word into an ellipsis once the sentence outruns the row. Anything
+/// else is the next sentence — which can begin with the letters the last one
+/// began with (`The` after `Then I will…`), so a shared start alone is not
+/// the same sentence.
+#[cfg(test)]
+pub(crate) fn same_sentence(before: &str, after: &str) -> bool {
+    after.starts_with(before)
+        || (after.ends_with('…') && before.starts_with(after.trim_end_matches('…')))
+}
+
 #[cfg(test)]
 mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::{
         bound_scan, cell, first_bold_heading, leading_bold_heading, live_heading, live_line,
-        live_line_without_headings, LIVE_HEADING_MAX_COLUMNS,
+        live_line_without_headings, same_sentence, LIVE_HEADING_MAX_COLUMNS,
     };
     use crate::tui::ansi::Line;
     use crate::tui::folds::{FoldIds, FoldMode};
@@ -648,14 +660,14 @@ mod tests {
     }
 
     /// Rows that followed one another, split where one replaced the other —
-    /// where neither, its ellipsis aside, starts the other.
+    /// where a row is not [`same_sentence`] as the one before it.
     fn sentence_runs(rows: &[String]) -> Vec<Vec<String>> {
         let mut runs: Vec<Vec<String>> = Vec::new();
         for row in rows {
-            let replaces = runs.last().and_then(|run| run.last()).is_none_or(|before| {
-                let (a, b) = (before.trim_end_matches('…'), row.trim_end_matches('…'));
-                !a.starts_with(b) && !b.starts_with(a)
-            });
+            let replaces = runs
+                .last()
+                .and_then(|run| run.last())
+                .is_none_or(|before| !same_sentence(before, row));
             if replaces {
                 runs.push(Vec::new());
             }
