@@ -24,6 +24,7 @@ set -u
 WIN_TRIPLE=x86_64-pc-windows-msvc
 LLVM_BIN=${WIN_LLVM_BIN:-/opt/homebrew/opt/llvm/bin}   # clang-cl, llvm-lib, llvm-rc; cargo-xwin brings its own lld-link
 ZO_PROFILE=${ZO_PROFILE:-release}
+NSIS_LOCALE=en_US.UTF-8                                # makensis needs a UTF-8 locale (see the tauri build below)
 # tauri's NSIS output is ZeroCode_<version>_x64-setup.exe; the updater artifacts are the lane's (bundle-updater)
 NO_UPDATER_ARTIFACTS='{"bundle":{"createUpdaterArtifacts":false}}'
 
@@ -71,7 +72,10 @@ trap put_back EXIT
 cp "$ZO_EXE" "$STAGED.win" && mv -f "$STAGED.win" "$STAGED" || fail "cannot stage $ZO_EXE at $STAGED"
 
 say "the window's NSIS installer for $WIN_TRIPLE"
-( cd "$SHELL_DIR" && CI=true CARGO_TARGET_DIR=$TARGET "$TAURI" build --runner cargo-xwin --target "$WIN_TRIPLE" \
+# A UTF-8 locale for makensis: Homebrew's makensis 3.13 dies with std::bad_alloc at "Generating
+# language tables" under the C locale, and the lane's launchd environment has no LANG at all
+# (11-18: an empty script, rc 134 with LC_ALL=C or none, 0 with en_US.UTF-8 or C.UTF-8).
+( cd "$SHELL_DIR" && LC_ALL=$NSIS_LOCALE CI=true CARGO_TARGET_DIR=$TARGET "$TAURI" build --runner cargo-xwin --target "$WIN_TRIPLE" \
     --bundles nsis --ci --no-sign --config tauri.release.conf.json --config "$NO_UPDATER_ARTIFACTS" ) \
   || fail "tauri build --bundles nsis failed"
 
