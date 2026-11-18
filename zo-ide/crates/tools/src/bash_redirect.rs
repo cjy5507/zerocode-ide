@@ -85,28 +85,24 @@ impl DedicatedRead {
 }
 
 /// The line put before a redirected result, so the model sees which door its
-/// shell read went through — and that the door exists.
+/// shell read went through — and that the door exists — under the name the
+/// model is shown for it ([`runtime::dedicated_read_note`]).
 #[must_use]
 pub fn redirect_note(read: &DedicatedRead, command: &str) -> String {
-    format!(
-        "[zo] `{}` ran as {} — the shell is for what the dedicated tools cannot do; call {} directly next time.",
-        command.trim(),
-        read.tool_name(),
-        read.tool_name(),
-    )
+    runtime::dedicated_read_note(command, read.tool_name())
 }
 
 /// A shell result the runtime answered with a dedicated read: the read, and
 /// the dedicated tool's own output with the note before it left off — for a
 /// screen, which shows a person the read and not the words meant for the
-/// model. `None` for any other output. The note is matched by writing it
-/// again ([`redirect_note`]), so its wording lives in one place.
+/// model. `None` for any other output. The note is read back by the runtime
+/// that writes it ([`runtime::split_dedicated_read`]), so its wording lives
+/// in one place.
 #[must_use]
 pub fn redirected_read(stdout: &str) -> Option<(DedicatedRead, &str)> {
-    let (note, body) = stdout.split_once('\n')?;
-    let command = note.strip_prefix("[zo] `")?.split_once("` ran as ")?.0;
+    let (command, tool, body) = runtime::split_dedicated_read(stdout)?;
     let read = dedicated_read_for(command)?;
-    (redirect_note(&read, command) == note).then_some((read, body))
+    (core_types::tool_names::CoreTool::of(read.tool_name()) == Some(tool)).then_some((read, body))
 }
 
 /// Characters that make a command more than one program and its arguments.
@@ -706,6 +702,20 @@ mod redirected_read_tests {
         let (found, body) = redirected_read(&stdout).expect("the note is read back");
         assert!(matches!(found, DedicatedRead::Grep { ref pattern, .. } if pattern == "continue"));
         assert_eq!(body, "{\"numLines\": 1}");
+    }
+
+    /// The note names the tool the model is shown (t-115139 Z2); a session
+    /// written before it holds the handler's name, and still reads back.
+    #[test]
+    fn the_note_names_the_shown_tool_and_an_older_note_still_reads_back() {
+        let command = "sed -n 1,2p a.rs";
+        let read = dedicated_read_for(command).expect("a plain sed is a read");
+        assert!(redirect_note(&read, command).contains("ran as Read "), "{}", redirect_note(&read, command));
+        let older = format!(
+            "[zo] `{command}` ran as read_file — the shell is for what the dedicated tools cannot do; call read_file directly next time.\n{{}}"
+        );
+        let (found, body) = redirected_read(&older).expect("the older note is read back");
+        assert_eq!((found, body), (read, "{}"));
     }
 
     #[test]

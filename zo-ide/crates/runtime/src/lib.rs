@@ -101,9 +101,9 @@ pub use core_types::sse;
 pub use core_types::usage;
 
 pub use bash::{
-    execute_bash, execute_bash_with_tasks, interrupt_foreground_bash, replace_bash_transport_output, timeout_stderr,
-    timeout_stderr_with_background_advice, whole_output_pointer, BashCommandInput, BashCommandOutput, CommandEnding,
-    BASH_TRANSPORT_MAX_BYTES,
+    dedicated_read_note, execute_bash, execute_bash_with_tasks, interrupt_foreground_bash, replace_bash_transport_output,
+    split_dedicated_read, timeout_stderr, timeout_stderr_with_background_advice, whole_output_pointer, BashCommandInput,
+    BashCommandOutput, CommandEnding, BASH_TRANSPORT_MAX_BYTES,
 };
 #[cfg(windows)]
 pub use bash::end_process_tree_command;

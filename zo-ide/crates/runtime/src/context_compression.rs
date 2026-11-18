@@ -347,7 +347,7 @@ pub fn compress_tool_output_with(
     // through to `unchanged` and forfeit the compression.
     match CoreTool::of(tool_name) {
         Some(CoreTool::Read) => compress_read_file(raw, rewrite, workspace_root),
-        Some(CoreTool::Bash) => compress_bash(raw),
+        Some(CoreTool::Bash) => compress_bash(raw, rewrite),
         Some(CoreTool::Grep) => compress_grep(raw, workspace_root),
         Some(CoreTool::Glob) => compress_glob(raw, workspace_root),
         // `MultiEdit` returns the same envelope as `edit_file` (`filePath` +
@@ -948,7 +948,7 @@ fn outline_view(file: &crate::file_ops::TextFilePayload) -> Option<String> {
 // bash
 // ---------------------------------------------------------------------------
 
-fn compress_bash(raw: &str) -> CompressionOutcome {
+fn compress_bash(raw: &str, rewrite: WireRewrite) -> CompressionOutcome {
     let Ok(parsed) = serde_json::from_str::<BashCommandOutput>(raw) else {
         return CompressionOutcome::unchanged(raw);
     };
@@ -956,6 +956,9 @@ fn compress_bash(raw: &str) -> CompressionOutcome {
     // represent — leave those envelopes intact.
     if parsed.structured_content.is_some() || parsed.is_image == Some(true) {
         return CompressionOutcome::unchanged(raw);
+    }
+    if let Some(view) = dedicated_read_view(&parsed, rewrite) {
+        return CompressionOutcome::pick_smaller(raw, view);
     }
 
     let mut header_notes: Vec<String> = Vec::new();
@@ -1033,6 +1036,21 @@ fn compress_bash(raw: &str) -> CompressionOutcome {
         view.push_str("(no output)");
     }
     CompressionOutcome::pick_smaller(raw, view)
+}
+
+/// A shell read the runtime answered with a dedicated read (`sed -n 1,80p
+/// x.rs` run as `Read`), shown as that read: the note naming the door, then
+/// the dedicated tool's own view of its result — the text a direct call gets
+/// (t-115139 Z2). Left to the shell's view it came as the read tool's JSON
+/// inside the shell's, every newline two characters on one long line.
+fn dedicated_read_view(parsed: &BashCommandOutput, rewrite: WireRewrite) -> Option<String> {
+    let (command, tool, body) = crate::bash::split_dedicated_read(&parsed.stdout)?;
+    let read = compress_tool_output_with(body, tool.handler(), None, rewrite);
+    Some(format!(
+        "[bash]\n{}\n{}",
+        crate::bash::dedicated_read_note(command, tool.handler()),
+        read.content
+    ))
 }
 
 pub(crate) fn compact_bash_stream(text: &str) -> String {

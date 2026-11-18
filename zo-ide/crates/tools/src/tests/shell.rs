@@ -659,3 +659,39 @@ fn given_no_enforcer_when_bash_then_executes_normally() {
     assert_eq!(output["stdout"], "ok");
     let _ = fs::remove_dir_all(cwd);
 }
+
+/// A shell read the runtime answers with the read tool reaches the model as
+/// that tool's own text, under the name this session shows it (t-115139 Z2).
+/// It came as the read tool's JSON inside the shell's — every newline two
+/// characters on one long line — after a note naming `read_file`, which no
+/// model is shown.
+#[test]
+fn a_redirected_sed_read_reads_as_the_read_tool_itself() {
+    use runtime::context_compression::{wire_tool_output, WireRewrite};
+    use std::fmt::Write as _;
+    let cwd = sandbox_disabled_cwd("bash-redirected-read");
+    let body = (1..=12).fold(String::new(), |mut body, n| {
+        let _ = writeln!(body, "line {n} of the notes");
+        body
+    });
+    fs::write(cwd.join("notes.txt"), body).expect("write notes");
+    let command = "sed -n 2,4p notes.txt";
+    let read = crate::bash_redirect::dedicated_read_for(command).expect("a plain sed is a read");
+    let redirected = run_tool_in_cwd_outside_windows("bash", &json!({ "command": command }), &cwd)
+        .expect("the read runs");
+    let direct = run_tool_in_cwd_outside_windows(read.tool_name(), &read.input(), &cwd)
+        .expect("the read tool reads");
+    let _ = fs::remove_dir_all(&cwd);
+    let shown = wire_tool_output(&redirected, "bash", false, WireRewrite::Lossless);
+    let as_read = wire_tool_output(&direct, read.tool_name(), false, WireRewrite::Lossless);
+    let wire_name = core_types::tool_names::wire_tool_name(read.tool_name());
+    assert!(
+        shown.contains(&format!("ran as {wire_name} ")) && !shown.contains("read_file"),
+        "the note names the tool the model is shown: {shown}"
+    );
+    assert!(
+        shown.ends_with(&as_read),
+        "the body is the read tool's own text:\n{shown}\n--- the read tool's ---\n{as_read}"
+    );
+    assert!(shown.contains("\nline 2 of the notes\nline 3 of the notes\n"), "{shown}");
+}

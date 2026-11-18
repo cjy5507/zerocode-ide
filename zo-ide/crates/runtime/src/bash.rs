@@ -135,6 +135,41 @@ pub struct BashCommandOutput {
     pub safety_warning: Option<String>,
 }
 
+/// The first line of a shell result the runtime answered with a dedicated
+/// read (`tools::bash_redirect`): which door the read went through, in the
+/// name the model is shown for that tool — `Read`, not the handler's
+/// `read_file`, which no model is shown (t-115139 Z2). `tool` may be either
+/// spelling.
+#[must_use]
+pub fn dedicated_read_note(command: &str, tool: &str) -> String {
+    note_naming(command, core_types::tool_names::wire_tool_name(tool))
+}
+
+fn note_naming(command: &str, tool: &str) -> String {
+    format!(
+        "[zo] `{}` ran as {tool} — the shell is for what the dedicated tools cannot do; call {tool} directly next time.",
+        command.trim()
+    )
+}
+
+/// The command, the dedicated tool and that tool's own output of a shell
+/// result [`dedicated_read_note`] opens; `None` for any other output. The
+/// note is matched by writing it again, so its wording lives in one place —
+/// under either name, because a session written before the note used the
+/// shown name still holds the handler's.
+#[must_use]
+pub fn split_dedicated_read(stdout: &str) -> Option<(&str, core_types::tool_names::CoreTool, &str)> {
+    use core_types::tool_names::CoreTool;
+    let (note, body) = stdout.split_once('\n')?;
+    let (command, rest) = note.strip_prefix("[zo] `")?.split_once("` ran as ")?;
+    let tool = CoreTool::of(rest.split_once(' ')?.0)
+        .filter(|tool| matches!(tool, CoreTool::Read | CoreTool::Grep | CoreTool::Glob))?;
+    [tool.wire(), tool.handler()]
+        .into_iter()
+        .any(|name| note_naming(command, name) == note)
+        .then_some((command, tool, body))
+}
+
 #[must_use]
 pub fn replace_bash_transport_output(mut output: BashCommandOutput) -> (BashCommandOutput, Option<SurfaceExecution>) {
     if output.interrupted || output.background_task_id.is_some() {
