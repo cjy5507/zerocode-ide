@@ -83,6 +83,68 @@ public enum DesktopBorrow {
         return nil
     }
 
+    /// How often an act refused for the person's input is run again at most,
+    /// however they come and go within one wait.
+    public static let redoLimit = 3
+
+    /// The one wait a request spends on the person: when it gives up, on the
+    /// borrow's clock, and the app that was in front when it began.
+    public struct Wait: Equatable {
+        public var giveUpAt: Double
+        public var front: Int32?
+
+        public init(giveUpAt: Double, front: Int32?) {
+            self.giveUpAt = giveUpAt
+            self.front = front
+        }
+    }
+
+    /// Whether a refused act may wait for the person and go again: only while
+    /// the app in front is the one it was when the request's wait began.
+    /// Nothing of theirs was taken then, and waiting stands in nobody's way. A
+    /// request that put another app in front is holding their desktop, and one
+    /// that cannot tell is treated the same.
+    public static func waitsAgain(frontWhenAsked: Int32?, frontNow: Int32?) -> Bool {
+        guard let frontWhenAsked, let frontNow, frontWhenAsked > 0 else { return false }
+        return frontWhenAsked == frontNow
+    }
+
+    /// Run `act`. When it is refused for the person's input with nothing sent,
+    /// wait for their pause and run it again from the start — its look at the
+    /// screen and its checks are made anew, so nothing it presses by is older
+    /// than the act. It goes again only while nothing was sent, the app in
+    /// front is the one it was when the wait began (before the pause and after
+    /// it), the wait is not spent, and fewer than `redoLimit` times. Any other
+    /// refusal, and the last one for the person, is thrown as it came. `wait`
+    /// is asked at the first such refusal: a request that began with no wait
+    /// starts its one wait there. `sleep` throwing ends it: a stop does not
+    /// wait for the person.
+    public static func againOncePaused<T>(
+        _ act: () throws -> T,
+        refusedForThePerson: (any Error) -> Bool,
+        sent: () -> Bool,
+        wait: () -> Wait,
+        frontNow: () -> Int32?,
+        read: () -> Reading,
+        now: () -> Double,
+        sleep: (Double) throws -> Void
+    ) throws -> T {
+        var again = 0
+        while true {
+            do {
+                return try act()
+            } catch {
+                guard refusedForThePerson(error), !sent(), again < redoLimit else { throw error }
+                let spending = wait()
+                guard waitsAgain(frontWhenAsked: spending.front, frontNow: frontNow()),
+                      try waitForQuiet(read: read, now: now, giveUpAt: spending.giveUpAt, sleep: sleep) == nil,
+                      waitsAgain(frontWhenAsked: spending.front, frontNow: frontNow())
+                else { throw error }
+                again += 1
+            }
+        }
+    }
+
     /// Wait for the person to pause, until `giveUpAt` on the `now` clock. Nil when
     /// they did; otherwise what they are still doing. `sleep` throwing ends the
     /// wait: a stop does not wait for the person to pause.

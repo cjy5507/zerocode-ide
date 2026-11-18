@@ -105,6 +105,9 @@ final class RequestContext {
         try OperatorHandHost.sleep(nanoseconds: 0)
         try DesktopBorrowHost.refuseIfThePersonIsBusy()
     }
+    /// The one wait this request spends on the person: set by the wait it began
+    /// with, or when it was first refused for them; nil until then.
+    var personWait: DesktopBorrow.Wait?
     /// How long the app itself took to perform the action, in ms.
     var appActionMs: Int?
 
@@ -580,12 +583,12 @@ final class Provider {
             guard shared else {
                 // What repaints from here on may be this act's doing (§7.1 eye).
                 ScreenEye.markAct()
-                return try dispatch(method: method, params: params)
+                return try DesktopBorrowHost.againOnceThePersonPauses { try dispatch(method: method, params: params) }
             }
             try DesktopBorrowHost.waitForThePerson()
             RequestContext.current.asksThePerson = true
             let before = frontPidNow()
-            let pointer = Input.desktopCursorPosition()
+            var pointer = Input.desktopCursorPosition()
             defer {
                 if !RequestContext.current.sent {
                     // Refused with nothing sent: a window raised on the way leaves too.
@@ -597,7 +600,12 @@ final class Provider {
                 }
             }
             ScreenEye.markAct()
-            return try dispatch(method: method, params: params)
+            return try DesktopBorrowHost.againOnceThePersonPauses {
+                // Nothing was sent before a go again: where the pointer is now
+                // is where the person left it, and where it goes back to.
+                pointer = Input.desktopCursorPosition()
+                return try dispatch(method: method, params: params)
+            }
         }
     }
 
@@ -625,7 +633,7 @@ final class Provider {
             RequestContext.current.borrowed = true
             RequestContext.current.asksThePerson = true
             let before = frontPidNow()
-            let pointer = Input.desktopCursorPosition()
+            var pointer = Input.desktopCursorPosition()
             let raising = try query.flatMap { $0.isEmpty ? nil : try resolveApp($0) }
             let raised = raising ?? params["app"]?.string.flatMap { try? resolveApp($0) }
             defer {
@@ -640,7 +648,12 @@ final class Provider {
                 try refuseACoveredPoint(method: method, params: params, target: raising)
             }
             ScreenEye.markAct()
-            return try dispatch(method: method, params: params)
+            return try DesktopBorrowHost.againOnceThePersonPauses {
+                // Nothing was sent before a go again: where the pointer is now
+                // is where the person left it, and where it goes back to.
+                pointer = Input.desktopCursorPosition()
+                return try dispatch(method: method, params: params)
+            }
         }
     }
 
@@ -8542,10 +8555,39 @@ enum DesktopBorrowHost {
     /// and on the hand's own clock, so a stop ends the wait at once. Other agents'
     /// turns on the shared desktop would be waiting for the same person.
     static func waitForThePerson() throws {
+        let giveUpAt = now() + DesktopBorrow.longestWaitSeconds
         try refuse(DesktopBorrow.waitForQuiet(
-            read: reading, now: now, giveUpAt: now() + DesktopBorrow.longestWaitSeconds,
+            read: reading, now: now, giveUpAt: giveUpAt,
             sleep: { try OperatorHandHost.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
         ))
+        // What is left of this wait is all the request may spend going again
+        // (`againOnceThePersonPauses`). The app in front is read once they
+        // paused, before the request raises anything of its own.
+        RequestContext.current.personWait = DesktopBorrow.Wait(giveUpAt: giveUpAt, front: frontPidNow())
+    }
+
+    /// Run an act; when its look just before the first event refused it for
+    /// the person's input, wait for their pause and run it again from a fresh
+    /// look (`DesktopBorrow.againOncePaused`): within the request's one wait,
+    /// only while nothing was sent and nothing of theirs is held. A request
+    /// that began with no wait — an act in an app's own window — starts its
+    /// wait at that first refusal.
+    static func againOnceThePersonPauses<T>(_ act: () throws -> T) throws -> T {
+        let context = RequestContext.current
+        return try DesktopBorrow.againOncePaused(
+            act,
+            refusedForThePerson: { ($0 as? ProviderError).flatMap { DesktopBorrow.Busy(rawValue: $0.code) } != nil },
+            sent: { context.sent },
+            wait: {
+                if let begun = context.personWait { return begun }
+                let begun = DesktopBorrow.Wait(giveUpAt: now() + DesktopBorrow.longestWaitSeconds, front: frontPidNow())
+                context.personWait = begun
+                return begun
+            },
+            frontNow: { frontPidNow() },
+            read: reading, now: now,
+            sleep: { try OperatorHandHost.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
+        )
     }
 
     static func refuseIfThePersonIsBusy() throws {

@@ -133,6 +133,145 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertEqual(clock, 0)
     }
 
+    // MARK: A refused act goes again
+
+    private struct Refused: Error, Equatable { let code: String }
+
+    /// One run of `againOncePaused` on a clock the test owns. `acts` answers
+    /// each run of the act in turn (true: it goes; false: refused for the
+    /// person); past its end the act is refused.
+    private func goAgain(
+        acts: [Bool], pointerAge: @escaping (Double) -> Double, sent: Bool = false,
+        front: Int32? = 73, frontNow: @escaping (Double) -> Int32? = { _ in 73 },
+        giveUpAt: Double = DesktopBorrow.longestWaitSeconds, refusal: String = DesktopBorrow.Busy.pointing.rawValue
+    ) -> (result: Result<Int, Refused>, runs: Int, clock: Double) {
+        var clock = 0.0
+        var runs = 0
+        let result: Result<Int, Refused>
+        do {
+            let went = try DesktopBorrow.againOncePaused(
+                { () -> Int in
+                    runs += 1
+                    guard runs <= acts.count, acts[runs - 1] else { throw Refused(code: refusal) }
+                    return runs
+                },
+                refusedForThePerson: { error in
+                    guard let refused = error as? Refused else { return false }
+                    return DesktopBorrow.Busy(rawValue: refused.code) != nil
+                },
+                sent: { sent },
+                wait: { DesktopBorrow.Wait(giveUpAt: giveUpAt, front: front) },
+                frontNow: { frontNow(clock) },
+                read: { self.reading(pointer: pointerAge(clock)) },
+                now: { clock },
+                sleep: { clock += $0 }
+            )
+            result = .success(went)
+        } catch let refused as Refused {
+            result = .failure(refused)
+        } catch {
+            result = .failure(Refused(code: "other"))
+        }
+        return (result, runs, clock)
+    }
+
+    /// The person nudged the mouse as the act was about to go: it waits for
+    /// their pause and goes from a fresh look.
+    func testAnActRefusedForThePersonGoesAgainOnceTheyPause() {
+        // They last moved at 0.1 s on the wait's clock.
+        let (result, runs, clock) = goAgain(acts: [false, true], pointerAge: { clock in clock < 0.1 ? 0.01 : clock - 0.1 })
+        XCTAssertEqual(result, .success(2))
+        XCTAssertEqual(runs, 2)
+        XCTAssertGreaterThanOrEqual(clock, DesktopBorrow.pointerQuietSeconds)
+        XCTAssertLessThan(clock, 1)
+    }
+
+    /// Anything that was sent stays sent: the act is not run a second time.
+    func testAnActThatSentSomethingIsNotRunAgain() {
+        let (result, runs, clock) = goAgain(acts: [false, true], pointerAge: { _ in self.long }, sent: true)
+        XCTAssertEqual(result, .failure(Refused(code: DesktopBorrow.Busy.pointing.rawValue)))
+        XCTAssertEqual(runs, 1)
+        XCTAssertEqual(clock, 0)
+    }
+
+    /// A request that put another app in front is holding the person's desktop,
+    /// and one whose person moved to another app while it waited has lost it:
+    /// neither waits on, and what cannot be told is not waited on.
+    func testNothingOfThePersonsIsHeldForAWait() {
+        let held: [(Int32?, (Double) -> Int32?)] = [(73, { _ in 42 }), (nil, { _ in 73 }), (73, { _ in nil }), (0, { _ in 0 })]
+        for (front, frontNow) in held {
+            let (result, runs, clock) = goAgain(acts: [false, true], pointerAge: { _ in self.long }, front: front, frontNow: frontNow)
+            XCTAssertEqual(result, .failure(Refused(code: DesktopBorrow.Busy.pointing.rawValue)))
+            XCTAssertEqual(runs, 1)
+            XCTAssertEqual(clock, 0)
+        }
+        // Their desktop held and the person busy: not waited for at all —
+        // the look before the wait refuses it, not the one after.
+        let busy = goAgain(acts: [false, true], pointerAge: { _ in 0.01 }, frontNow: { _ in 42 })
+        XCTAssertEqual(busy.result, .failure(Refused(code: DesktopBorrow.Busy.pointing.rawValue)))
+        XCTAssertEqual(busy.runs, 1)
+        XCTAssertEqual(busy.clock, 0, "nothing of the person's is held for a wait")
+        // In front as the wait begins, gone by the time the person paused.
+        let (result, runs, _) = goAgain(
+            acts: [false, true], pointerAge: { clock in clock < 0.2 ? 0.01 : clock - 0.2 }, frontNow: { clock in clock < 0.3 ? 73 : 42 }
+        )
+        XCTAssertEqual(result, .failure(Refused(code: DesktopBorrow.Busy.pointing.rawValue)))
+        XCTAssertEqual(runs, 1)
+        XCTAssertTrue(DesktopBorrow.waitsAgain(frontWhenAsked: 73, frontNow: 73))
+    }
+
+    /// The wait is the request's one wait: a person who never pauses holds it
+    /// up until that wait gives up, and no longer.
+    func testAPersonWhoNeverPausesIsWaitedForNoLongerThanTheRequestsOneWait() {
+        let (result, runs, clock) = goAgain(acts: [false, true], pointerAge: { _ in 0.01 })
+        XCTAssertEqual(result, .failure(Refused(code: DesktopBorrow.Busy.pointing.rawValue)))
+        XCTAssertEqual(runs, 1)
+        XCTAssertGreaterThanOrEqual(clock, DesktopBorrow.longestWaitSeconds)
+        XCTAssertLessThan(clock, DesktopBorrow.longestWaitSeconds + 2 * DesktopBorrow.pollSeconds)
+        // What the wait it began with already spent is not spent again.
+        let spent = goAgain(acts: [false, true], pointerAge: { _ in 0.01 }, giveUpAt: 0)
+        XCTAssertEqual(spent.runs, 1)
+        XCTAssertEqual(spent.clock, 0)
+    }
+
+    /// A refusal that keeps coming while the person is quiet is not a matter
+    /// of waiting: the act goes again `redoLimit` times and no more.
+    func testAnActRefusedOverAndOverStopsGoingAgain() {
+        let (result, runs, clock) = goAgain(acts: [], pointerAge: { _ in self.long })
+        XCTAssertEqual(result, .failure(Refused(code: DesktopBorrow.Busy.pointing.rawValue)))
+        XCTAssertEqual(runs, DesktopBorrow.redoLimit + 1)
+        XCTAssertEqual(clock, 0)
+    }
+
+    /// Only the person's input is waited for; any other refusal is the answer.
+    func testAnyOtherRefusalIsThrownAsItCame() {
+        let (result, runs, _) = goAgain(acts: [false, true], pointerAge: { _ in self.long }, refusal: "element_not_found")
+        XCTAssertEqual(result, .failure(Refused(code: "element_not_found")))
+        XCTAssertEqual(runs, 1)
+    }
+
+    /// A stop does not wait for the person to pause.
+    func testAStopEndsTheWaitToGoAgain() {
+        struct Stopped: Error {}
+        var runs = 0
+        XCTAssertThrowsError(try DesktopBorrow.againOncePaused(
+            { () -> Int in
+                runs += 1
+                throw Refused(code: DesktopBorrow.Busy.typing.rawValue)
+            },
+            refusedForThePerson: { _ in true },
+            sent: { false },
+            wait: { DesktopBorrow.Wait(giveUpAt: 3, front: 73) },
+            frontNow: { 73 },
+            read: { self.reading(key: 0.01) },
+            now: { 0 },
+            sleep: { _ in throw Stopped() }
+        )) { error in
+            XCTAssertTrue(error is Stopped)
+        }
+        XCTAssertEqual(runs, 1)
+    }
+
     // MARK: What comes back
 
     private func point(_ x: Double, _ y: Double) -> SmoothPointerPath.Point {
@@ -272,6 +411,72 @@ final class DesktopBorrowTests: XCTestCase {
             XCTAssertTrue(lines[at - 1].contains("askThePersonIfFirst()"), "line \(at + 1) of main.swift: \(line)")
         }
         XCTAssertGreaterThanOrEqual(marks, 5)
+    }
+
+    /// Every acting request's act runs where a refusal for the person can send
+    /// it round again: in an app's own window, on the shared desktop, and in a
+    /// borrow. Nothing else of the request is inside — the first wait, a
+    /// window raised and what is given back happen once.
+    func testEveryActingRequestGoesAgainThroughTheSameRoad() throws {
+        let source = try helperSource()
+        let road = "return try DesktopBorrowHost.againOnceThePersonPauses {"
+        XCTAssertEqual(source.components(separatedBy: road).count - 1, 3)
+        for function in [
+            "private func act(method: String, params: [String: JSONValue], scoped: Bool) throws -> Any {",
+            "private func borrowingDesktop(bringingUp query: String? = nil, method: String, params: [String: JSONValue]) throws -> Any {",
+        ] {
+            let body = try self.body(of: function, in: source)
+            let waits = try XCTUnwrap(body.range(of: "try DesktopBorrowHost.waitForThePerson()"))
+            let holds = try XCTUnwrap(body.range(of: "var pointer = Input.desktopCursorPosition()"))
+            let goes = try XCTUnwrap(body.range(of: road, options: .backwards))
+            XCTAssertLessThan(waits.lowerBound, goes.lowerBound, function)
+            XCTAssertLessThan(holds.lowerBound, goes.lowerBound, function)
+            // A go again gives the person back the pointer where they left it
+            // while it waited, not where it was before.
+            let rereads = try XCTUnwrap(body.range(of: "pointer = Input.desktopCursorPosition()\n                return try dispatch(method: method, params: params)"), function)
+            XCTAssertLessThan(goes.lowerBound, rereads.lowerBound, function)
+        }
+    }
+
+    /// The wait a request begins with records itself, and the app in front
+    /// once the person paused: without it the first refusal would start a new
+    /// wait of its own, with whatever the request raised already in front.
+    func testTheWaitARequestBeginsWithRecordsItself() throws {
+        let body = try self.body(of: "static func waitForThePerson() throws {", in: try helperSource())
+        let waits = try XCTUnwrap(body.range(of: "try refuse(DesktopBorrow.waitForQuiet("))
+        let records = try XCTUnwrap(body.range(of: "RequestContext.current.personWait = DesktopBorrow.Wait(giveUpAt: giveUpAt, front: frontPidNow())"))
+        XCTAssertLessThan(waits.lowerBound, records.lowerBound)
+    }
+
+    /// One function's body in the helper's source: from its signature to the
+    /// brace that closes it at its own indentation.
+    private func body(of function: String, in source: String) throws -> Substring {
+        let start = try XCTUnwrap(source.range(of: function), function)
+        let end = try XCTUnwrap(source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex), function)
+        return source[start.upperBound..<end.lowerBound]
+    }
+
+    /// The look just before an act's first event still refuses at once: nothing
+    /// waits between an act's look at the screen and its press.
+    func testTheLookJustBeforeAnActDoesNotWait() throws {
+        let source = try helperSource()
+        let look = try XCTUnwrap(source.range(of: "func askThePersonIfFirst() throws {"))
+        let body = source[look.upperBound...].prefix(220)
+        XCTAssertTrue(body.contains("try DesktopBorrowHost.refuseIfThePersonIsBusy()"))
+        XCTAssertFalse(body.contains("waitFor"))
+    }
+
+    /// Going again has no time of its own for a request that began with a wait:
+    /// it spends what that wait left. Only a request that began with none
+    /// starts one, the same length.
+    func testGoingAgainSpendsTheRequestsOneWait() throws {
+        let source = try helperSource()
+        let again = try XCTUnwrap(source.range(of: "static func againOnceThePersonPauses<T>(_ act: () throws -> T) throws -> T {"))
+        let body = source[again.upperBound...].prefix(900)
+        let begun = try XCTUnwrap(body.range(of: "if let begun = context.personWait { return begun }"))
+        let starts = try XCTUnwrap(body.range(of: "DesktopBorrow.longestWaitSeconds"))
+        XCTAssertLessThan(begun.lowerBound, starts.lowerBound)
+        XCTAssertEqual(body.components(separatedBy: "DesktopBorrow.longestWaitSeconds").count - 1, 1)
     }
 
     /// A select-all is sent as much as a key is: the person's next key replaces the field.
