@@ -592,9 +592,11 @@ pub(crate) async fn second_brain_setup(
     if raw.is_empty() {
         return Err("볼트 폴더를 선택해 주세요".to_string());
     }
-    let target = PathBuf::from(raw)
-        .canonicalize()
-        .map_err(|error| format!("{raw}: {error}"))?;
+    // `dunce`: on Windows std's canonical form is `\\?\C:\…`, which the
+    // guide block, the panes' variable and Obsidian's own vault list would
+    // then carry; the path a person types is `C:\…` (as `worktree_runtime`).
+    let target =
+        dunce::canonicalize(PathBuf::from(raw)).map_err(|error| format!("{raw}: {error}"))?;
     if !target.is_dir() {
         return Err("볼트 경로가 폴더가 아닙니다".to_string());
     }
