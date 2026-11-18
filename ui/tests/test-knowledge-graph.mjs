@@ -3810,6 +3810,102 @@ ok("t-4140 S2: the first visit is the neighbourhood of what the person last used
     && entry.viaWorkbench.word === entry.viaWorkbench.expected,
   JSON.stringify(entry));
 
+/* ---- Windows의 두 꼴: 저장한 볼트와 답의 볼트 (t-114809) ----
+ *
+ * 볼트 설정은 사람이 적는 꼴(`C:\…`, `dunce::canonicalize`)을 저장하고, 그래프의 답은
+ * std `canonicalize`의 꼴(`\\?\C:\…`)을 싣는다. 진입 규칙(S2)은 둘을 같은 볼트로 읽어야
+ * 볼트가 기억한 보기와 「연결 보기」가 선다. 기억한 보기의 열쇠는 답의 꼴(`model.vault`)
+ * 그대로다. 픽스처는 물은 경로를 답의 볼트로 돌려주므로 이 케이스만 앞머리를 붙인다.
+ * 끝에서는 `/vault`의 답으로 돌아가 S2가 남긴 자리에 선다 — 뒤 케이스가 그 위에 선다. */
+const windowsVault = await page.evaluate(async () => {
+  const viewOf = () => document.querySelector(".knowledge-view:not([hidden])");
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  const saved = "C:\\v";
+  const answered = `\\\\?\\${saved}`;
+  /* 연 뒤의 새 답이 그려질 때까지: 물음이 하나 더 나갔고, 답을 받아 그렸고, 그림이 섰고,
+   * 진입이 풀렸다. 진입이 풀리지 않으면(고치기 전) 상한까지 돈다. */
+  const settle = async (vault, asked) => {
+    for (let round = 0; round < 300; round += 1) {
+      await wait(20);
+      const held = viewOf() ? knowledgeLayouts.get(viewOf()) : null;
+      if (held && held.count === 12 && held.left === 0 && (window.__GRAPH_ASKS__ ?? 0) > asked
+        && !knowledgeLoading && knowledgeReport?.vault === vault && !knowledgeEntryPending) break;
+    }
+  };
+  const seen = () => ({
+    pending: knowledgeEntryPending, mode: knowledgeMode, centre: knowledgeSelectedKey, depth: knowledgeFocusDepth,
+    crumb: viewOf()?.querySelector(".knowledge-crumb-here")?.textContent ?? null,
+  });
+  const graph = window.__ANSWER__.second_brain_graph;
+  const history = knowledgeHistory.slice();
+  const depth = knowledgeFocusDepth;
+  const lines = knowledgeExploreLines;
+  let start = null;
+  let asked = null;
+  let remembered = null;
+  let revealed = null;
+  window.__ANSWER__.second_brain_graph = (args) => ({ ...graph(args), vault: `\\\\?\\${args.path}` });
+  try {
+    knowledgeQuery = "";
+    knowledgeTagsPicked.clear();
+    knowledgeSelectedKey = null;
+    knowledgeFocusDepth = 1;
+    window.__VAULT__ = { pages: 12, linksPer: 2, ghosts: 0, tags: ["core", "reading"] };
+    secondBrainVault = saved;
+    /* 이 볼트가 기억한 보기는 주변 탐색 · 개념 4 · 2단계. 시작은 전체 지도 · 중심 없음 · 1단계(S2의 끝). */
+    noteKnowledgeExploreLines({ [answered]: JSON.stringify({ mode: "local", centre: "wiki/Page-0004.md", depth: 2 }) });
+    dropTab("knowledge");
+    start = seen();
+    let asks = window.__GRAPH_ASKS__ ?? 0;
+    el("nav-knowledge").click();
+    await settle(answered, asks);
+    asked = { path: window.__GRAPH_ASKED__?.path ?? null, vault: knowledgeReport?.vault ?? null };
+    remembered = seen();
+    /* 「연결 보기」: 줄이 전체 지도를 말해도 그 페이지의 주변이다. 들어가기 전에 전체 지도로 둔다. */
+    viewOf().querySelector('.knowledge-mode-step[data-knowledge-mode="global"]').click();
+    await wait(KNOWLEDGE_EXPLORE.persistMs + 200);
+    dropTab("knowledge");
+    noteKnowledgeExploreLines({ [answered]: JSON.stringify({ mode: "global" }) });
+    knowledgeSelectedKey = null;
+    asks = window.__GRAPH_ASKS__ ?? 0;
+    revealKnowledgePage("wiki/Page-0006.md", { mode: "local" });
+    await settle(answered, asks);
+    revealed = seen();
+    viewOf().querySelector('.knowledge-mode-step[data-knowledge-mode="global"]').click();
+    await wait(KNOWLEDGE_EXPLORE.persistMs + 200);
+  } finally {
+    window.__ANSWER__.second_brain_graph = graph;
+    window.__ANSWER__.set_second_brain_explore({ vault: answered, explore: "{}" });
+    secondBrainVault = "/vault";
+    knowledgeHistory.splice(0, knowledgeHistory.length, ...history);
+    noteKnowledgeExploreLines(lines);
+  }
+  dropTab("knowledge");
+  const asksBack = window.__GRAPH_ASKS__ ?? 0;
+  el("nav-knowledge").click();
+  await settle("/vault", asksBack);
+  selectKnowledgeNode(viewOf(), null);
+  knowledgeFocusDepth = depth;
+  return { start, asked, remembered, revealed, back: { vault: knowledgeReport?.vault ?? null, ...seen() } };
+});
+ok("t-114809: on Windows the saved vault is C:\\… and the graph answers \\\\?\\C:\\…, and the first picture still takes the vault's remembered view and 「연결 보기」 still enters that page's neighbourhood",
+  () => windowsVault.start.mode === "global"
+    && windowsVault.asked.path === "C:\\v"
+    && windowsVault.asked.vault === "\\\\?\\C:\\v"
+    && windowsVault.remembered.pending === false
+    && windowsVault.remembered.mode === "local"
+    && windowsVault.remembered.centre === "wiki/Page-0004.md"
+    && windowsVault.remembered.depth === 2
+    && windowsVault.remembered.crumb === "개념 4"
+    && windowsVault.revealed.pending === false
+    && windowsVault.revealed.mode === "local"
+    && windowsVault.revealed.centre === "wiki/Page-0006.md"
+    && windowsVault.revealed.crumb === "개념 6"
+    && windowsVault.back.vault === "/vault"
+    && windowsVault.back.pending === false
+    && windowsVault.back.mode === "global",
+  JSON.stringify(windowsVault));
+
 /* ---- t-4140 S3: 검색 후보 목록 ----
  *
  * 입력 중에 제목·폴더·관계 힌트가 있는 후보가 서고(상한은 표), ↑↓가 옮기고 Enter가
