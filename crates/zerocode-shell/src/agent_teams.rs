@@ -2950,6 +2950,64 @@ mod tests {
         );
     }
 
+    /// TR-08 on Windows, the real thing: a bare `zerocode-orc` from the
+    /// installed folder, typed in Windows PowerShell under the policy every
+    /// pane starts with, runs the ledger command's `.ps1` — the shim answers
+    /// in its own words, here its refusal of a shell holding no seat. Under a
+    /// process-scope Restricted, client Windows' default, PowerShell refuses
+    /// that script instead: the pane's variable is what decides. The machine's
+    /// own policy is never touched. Runs on Windows; elsewhere PowerShell
+    /// enforces no policy.
+    #[test]
+    fn the_bare_ledger_command_runs_under_the_policy_a_windows_pane_starts_with() {
+        if !cfg!(windows) {
+            eprintln!("skipping: PowerShell enforces an execution policy on Windows only");
+            return;
+        }
+        let local_data = tempfile::tempdir().expect("local data");
+        install_shim(local_data.path()).expect("install shim");
+        let folder = local_data.path().join(ORC_DIR_NAME);
+        let path = format!(
+            "{};{}",
+            folder.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let (variable, pane_policy) =
+            crate::hooks::pane_powershell_policy(true, None).expect("a Windows pane's policy");
+        let run = |policy: &str| {
+            let mut command = crate::proc::quiet_command_on_path("powershell.exe", Some(&path));
+            // This test may run in a ZeroCode pane, whose own seat must not
+            // answer for the shell under test.
+            for (name, _) in std::env::vars_os() {
+                if name.to_string_lossy().starts_with("ZEROCODE_") || name == "TMUX_PANE" {
+                    command.env_remove(name);
+                }
+            }
+            let out = command
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "zerocode-orc check",
+                ])
+                .env(&variable, policy)
+                .output()
+                .expect("powershell.exe");
+            String::from_utf8_lossy(&out.stderr).into_owned()
+        };
+        let refusal = "orchestration: this shell is not part of an agent team";
+        let said = run(&pane_policy);
+        assert!(
+            said.contains(refusal),
+            "the bare name did not run the shim under {pane_policy}:\n{said}"
+        );
+        let said = run("Restricted");
+        assert!(
+            !said.contains(refusal),
+            "Restricted ran the script, so this test no longer shows what the pane's policy decides:\n{said}"
+        );
+    }
+
     fn granted_team() -> Vec<(&'static str, String)> {
         vec![
             (

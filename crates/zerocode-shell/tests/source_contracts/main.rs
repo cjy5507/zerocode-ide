@@ -33855,6 +33855,15 @@ mod tests {
             "the p10k wizard is seeded over somebody's own setting, or not at \
              all:\n{building}"
         );
+        // And a Windows pane's PowerShell starts under the policy that lets a
+        // bare `zerocode-orc` run the window's own script (TR-08) — wired for
+        // Windows, which no test on this Mac can run.
+        assert!(
+            building.contains("env.extend(pane_powershell_policy(")
+                && building.contains("cfg!(windows),"),
+            "a Windows pane's PowerShell no longer starts under the pane's \
+             policy:\n{building}"
+        );
     }
 
     /// Every `<select>` in this window wears one face, and carries its mark.

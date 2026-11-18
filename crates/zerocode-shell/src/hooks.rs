@@ -347,6 +347,20 @@ pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
 /// set — and a second spelling would seed a variable nobody checks.
 const P10K_WIZARD_OFF: &str = "POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD";
 
+/// PowerShell's process-scope execution policy, which every PowerShell a pane
+/// starts reads. Named here because it is read twice — asked about, then set.
+const POWERSHELL_POLICY: &str = "PSExecutionPolicyPreference";
+
+/// The process-scope execution policy a pane's PowerShell starts with.
+/// Nothing yet: the pane keeps the machine's own (TR-08's red).
+pub(crate) fn pane_powershell_policy(
+    windows: bool,
+    inherited: Option<&std::ffi::OsStr>,
+) -> Option<(String, String)> {
+    let _ = (windows, inherited);
+    None
+}
+
 /// This machine's second-brain vault, as the settings document last said.
 ///
 /// `pty_env` builds a pane's environment from a pane key and a worktree; it
@@ -603,6 +617,12 @@ pub fn pty_env(
     if std::env::var_os(P10K_WIZARD_OFF).is_none() {
         env.push((P10K_WIZARD_OFF.to_string(), "true".to_string()));
     }
+    // A Windows pane's PowerShell may run the scripts this window writes —
+    // the ledger command's above all ([`pane_powershell_policy`]).
+    env.extend(pane_powershell_policy(
+        cfg!(windows),
+        std::env::var_os(POWERSHELL_POLICY).as_deref(),
+    ));
     // Where the second brain is, for every pane and every agent in it. The
     // vault used to be findable only from inside the vault's own project —
     // its `AGENTS.md` was the only thing that named it — so an agent working
@@ -3771,6 +3791,46 @@ mod tests {
                 .map(|(_, value)| value.as_str())
                 .collect();
             assert_eq!(told, [std::process::id().to_string()], "{launch:?}");
+        }
+    }
+
+    /// TR-08: on Windows a pane's PowerShell starts under a process-scope
+    /// RemoteSigned, which client Windows' default (Restricted) yields to, so
+    /// a bare `zerocode-orc` there runs the ledger command's `.ps1` the window
+    /// wrote. A policy the window's own environment already names stands, and
+    /// nothing is said off Windows, where PowerShell enforces no policy. Every
+    /// pane carries it: a plain shell, where an agent may be typed by hand,
+    /// and a launched agent's alike.
+    #[test]
+    fn a_windows_panes_powershell_may_run_the_scripts_the_window_writes() {
+        assert_eq!(
+            pane_powershell_policy(true, None),
+            Some((
+                "PSExecutionPolicyPreference".to_string(),
+                "RemoteSigned".to_string()
+            )),
+            "a Windows pane keeps the machine's default, which refuses the window's own scripts"
+        );
+        assert_eq!(
+            pane_powershell_policy(true, Some(std::ffi::OsStr::new("Bypass"))),
+            None,
+            "a policy the person set was overridden"
+        );
+        assert_eq!(pane_powershell_policy(false, None), None);
+        bridge_for_tests();
+        let expected: Vec<(String, String)> = pane_powershell_policy(
+            cfg!(windows),
+            std::env::var_os(POWERSHELL_POLICY).as_deref(),
+        )
+        .into_iter()
+        .collect();
+        for launch in [None, Some("launch-nonce")] {
+            let env = pty_env("term-7", launch, Path::new("/workspace"), None);
+            let carried: Vec<(String, String)> = env
+                .into_iter()
+                .filter(|(name, _)| name == POWERSHELL_POLICY)
+                .collect();
+            assert_eq!(carried, expected, "{launch:?}");
         }
     }
 
