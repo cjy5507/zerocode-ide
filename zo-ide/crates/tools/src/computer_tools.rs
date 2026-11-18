@@ -24,6 +24,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use runtime::permission_enforcer::PermissionEnforcer;
@@ -34,7 +35,7 @@ use serde_json::{json, Value};
 use zerocode_core::computer_use::{
     computer_deadline_ms, walk_steps, walk_words, ComputerMethod, BATCH_COMMANDS_FLAG, CLICK_NEXT_KEY, COMPUTER_BATCH_MAX_STEPS,
     COMPUTER_BRIDGE_GRACE_MS, COMPUTER_MARKS_ENV, WALK_OVERLAP_FLAG, WALK_REPLAY_FLAG, WALK_RESCUE_FLAG, WALK_STEPS_MAX,
-    WATCH_UNTIL, WINDOW_FRAME_FLAG,
+    WATCH_UNTIL, WINDOW_FRAME_FLAG, WINDOW_FRAME_TOLERANCE_POINTS,
 };
 use zerocode_core::agent_browser::{BROWSER_CLI, WORKSPACE_REVISION_FLAG, WORKSPACE_REVISION_KEY};
 use zerocode_core::jev::{JevMode, GOAL_CHAR_CAP};
@@ -1714,12 +1715,16 @@ fn present_observation(
         discard_screenshot(answer);
         return None;
     }
+    // An app window's picture file stays beside its look: what a press at a
+    // point on it was aimed at, should the person hold that press up.
+    let picture = observation.as_ref().filter(|seen| seen.window_id.is_some() && seen.window.is_some())
+        .and_then(|_| screenshot_path(answer)).and_then(|path| std::fs::read(path).ok()).map(Arc::<[u8]>::from);
     let staged = stage_screenshot(answer, ctx);
     if staged.is_some() {
         if let Some(seen) = observation.as_ref() {
             ctx.set_computer_frame(seen.frame);
         }
-        ctx.set_computer_observation(observation);
+        ctx.set_computer_look(observation, picture);
     } else {
         ctx.set_computer_observation(None);
     }
@@ -2279,7 +2284,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
     let frame = ctx.computer_frame().unwrap_or(ShotFrame::UNIT);
     // A batch the person's pointer or keys held up before its first step is
     // the same batch once they pause; one that ran a step is not sent again.
-    let asks_again = steps.iter().all(may_ask_again);
+    let asks_again = if steps.iter().all(may_ask_again) { AskAgain::AsSent } else { AskAgain::No };
     let (answer, stood_by) = call_once_the_person_pauses(road, &batch_argv(&steps, frame, look)?, ctx, stop, asks_again, PERSON_BUSY_PAUSE)?;
     let mut reports = answer
         .pointer("/result/steps")
@@ -2839,6 +2844,8 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
     } else {
         ctx.computer_frame()
     };
+    // What a press at a point was aimed at, read in the picture pixels it came in.
+    let under = under_the_point(&input, ctx);
     let input = in_points(input, frame.unwrap_or(ShotFrame::UNIT))?;
     let mut argv = with_marked_look(argv_for(&input)?, ctx)?;
     // A process whose looks carry marks numbers its own looks too.
@@ -2848,7 +2855,7 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
     if LOOKS.contains(&action.as_str()) || argv.iter().any(|word| word == "--mark") {
         argv = as_viewer(argv, ctx);
     }
-    let (mut answer, stood_by) = call_once_the_person_pauses(road, &argv, ctx, stop.as_ref(), may_ask_again(&input), PERSON_BUSY_PAUSE)?;
+    let (mut answer, stood_by) = call_once_the_person_pauses(road, &argv, ctx, stop.as_ref(), AskAgain::for_act(&input, under.as_ref()), PERSON_BUSY_PAUSE)?;
     let mut repicked = None;
     if let Some(refused) = refusal(&answer) {
         let (pressed, picked) = repick(&input, refused, ctx, road)?;
@@ -3041,21 +3048,31 @@ fn the_person_is_busy(answer: &Value) -> bool {
 /// Esc ends it: `stop` — the stop of the turn the call began in, read when
 /// it began — is looked at before every asking again and through each
 /// pause, and once it is raised nothing more is asked. An asking already on
-/// its way may still land; none is sent after the stop. A call that
-/// `may_ask_again` says no to is answered as the window answered it.
+/// its way may still land; none is sent after the stop. A call asked again
+/// [`AskAgain::No`] is answered as the window answered it.
+///
+/// A press at a point ([`AskAgain::WhileTheSame`]) is asked again only after
+/// a look shows its window still as the model's last picture of it showed
+/// around the point, and pinned to where that picture saw the window; once
+/// the window shows something else there, the model hears the refusal and
+/// that it must look again.
 fn call_once_the_person_pauses(
     road: &ComputerRoad,
     argv: &[String],
     ctx: &ToolContext,
     stop: Option<&runtime::HookAbortSignal>,
-    asks_again: bool,
+    asks_again: AskAgain<'_>,
     pause: Duration,
 ) -> Result<(Value, Option<StoodBy>), ToolError> {
     let cwd = ctx.cwd.as_deref();
     let mut answer = call_shim(road, argv, cwd)?;
-    if !asks_again || !the_person_is_busy(&answer) {
+    if matches!(asks_again, AskAgain::No) || !the_person_is_busy(&answer) {
         return Ok((answer, None));
     }
+    let again = match asks_again {
+        AskAgain::WhileTheSame(under) => under.pinned(argv),
+        AskAgain::AsSent | AskAgain::No => argv.to_vec(),
+    };
     let stopped = || stop.is_some_and(runtime::HookAbortSignal::is_aborted);
     let refused_at = Instant::now();
     let mut asked_again = 0;
@@ -3063,8 +3080,18 @@ fn call_once_the_person_pauses(
         if !rest_unless_stopped(pause, &stopped) {
             break;
         }
+        if let AskAgain::WhileTheSame(under) = asks_again {
+            if !under.still_the_same(road, ctx) {
+                say_after(&mut answer, UNDER_THE_POINT_CHANGED);
+                break;
+            }
+            // The look took its time: the turn may have been stopped meanwhile.
+            if stopped() {
+                break;
+            }
+        }
         asked_again += 1;
-        answer = call_shim(road, argv, cwd)?;
+        answer = call_shim(road, &again, cwd)?;
     }
     super::computer_tally::note(super::computer_tally::STOOD_BY);
     Ok((answer, Some(StoodBy { waited: refused_at.elapsed(), asked_again })))
@@ -3075,9 +3102,12 @@ fn call_once_the_person_pauses(
 /// on its fresh look — a press or a scroll by an element's number, a mark,
 /// or words — and, in a batch, steps that do not act at all.
 ///
-/// Not an act at a point: the window cannot tell that what is there changed
-/// while the person was on the pointer — a page they scrolled, a tab they
-/// switched — and the model looks again before it presses again. Not keys or
+/// Not an act at a point as it was sent: the window cannot tell that what is
+/// there changed while the person was on the pointer — a page they
+/// scrolled, a tab they switched. A lone press at a point in an app's window
+/// is asked again only while that window still shows there what the model
+/// last saw ([`UnderThePoint`]); any other act at a point is the model's to
+/// look again before it presses again. Not keys or
 /// typed text: they go to the app's own focus, which the window does not
 /// find again, and a refusal for the person's keys may mean they were typing
 /// in that very app — a Return sent once they paused could send what they
@@ -3089,6 +3119,132 @@ fn may_ask_again(input: &ComputerInput) -> bool {
         && input.coordinate.is_none()
         && input.start_coordinate.is_none();
     input.confirming.is_none() && (finds_its_target_again || !acts(action))
+}
+
+/// How an act held up by the person's pointer or keys is asked again once
+/// they pause.
+#[derive(Clone, Copy)]
+enum AskAgain<'a> {
+    /// It is not: the model hears the window's refusal.
+    No,
+    /// As it was sent: the window finds its target again ([`may_ask_again`]).
+    AsSent,
+    /// A press at a point in an app's window: only while the window still
+    /// shows there what the model's last picture of it showed.
+    WhileTheSame(&'a UnderThePoint),
+}
+
+impl<'a> AskAgain<'a> {
+    /// How a lone act is asked again: as sent when the window finds its
+    /// target again, a press at a point while what is under it is the same.
+    fn for_act(input: &ComputerInput, under: Option<&'a UnderThePoint>) -> Self {
+        if may_ask_again(input) {
+            Self::AsSent
+        } else {
+            under.map_or(Self::No, Self::WhileTheSame)
+        }
+    }
+}
+
+/// What a press at a point in an app's window was aimed at: the last picture
+/// the model was shown of that window — the file the window exported, and
+/// whether it was a marked look — the point in its pixels, and where the
+/// window stood in it.
+struct UnderThePoint {
+    target: ComputerTarget,
+    picture: Arc<[u8]>,
+    marked: bool,
+    at: [f64; 2],
+    window_frame: [f64; 4],
+}
+
+/// The pixels around a point that must be as the model last saw them for a
+/// press there to be asked again, width by height in the picture: a
+/// control's neighbours either side and the rows of words above and below.
+const UNDER_THE_POINT_BOX: [u32; 2] = [96, 64];
+
+/// The viewer the look before an asking again is taken as: its own, so the
+/// window's last look for the model — the one its next diff is against —
+/// stays the one the model was shown.
+const UNDER_THE_POINT_VIEWER: &str = "under-the-point";
+
+/// What the model hears when a press at a point was not asked again because
+/// its window no longer showed there what the model's last picture did.
+const UNDER_THE_POINT_CHANGED: &str = "Around that point the window no longer shows what your last picture of it did, or could not be looked at: look at the window again before you press there";
+
+/// A lone press at a point in an app's window — no drag, nothing the person
+/// confirms — and the last picture the model was shown of that window, when
+/// its file was kept and it said where the window stood. `input` is as the
+/// model sent it: its point in the picture's pixels.
+fn under_the_point(input: &ComputerInput, ctx: &ToolContext) -> Option<UnderThePoint> {
+    let presses_once = MARK_CLICKS.contains(&input.action.trim()) && input.start_coordinate.is_none() && input.confirming.is_none();
+    let at = input.coordinate.filter(|_| presses_once)?;
+    let target = target_of(input).filter(|target| target.window_id.is_some())?;
+    let (seen, picture) = ctx.computer_target_picture(&target)?;
+    Some(UnderThePoint { window_frame: seen.window?.frame, marked: seen.marked_look.is_some(), target, picture, at })
+}
+
+impl UnderThePoint {
+    /// The press's command line pinned to where the picture saw the window:
+    /// the window refuses it (`window_stale`) if the window moved since.
+    fn pinned(&self, argv: &[String]) -> Vec<String> {
+        let mut argv = argv.to_vec();
+        let json = argv.iter().rposition(|word| word == "--json").unwrap_or(argv.len());
+        argv.splice(json..json, [format!("--{WINDOW_FRAME_FLAG}"), spelled_region(self.window_frame)]);
+        argv
+    }
+
+    /// Whether the window still shows around the point what the picture
+    /// showed: one look the model is not shown, taken as a viewer of its own;
+    /// the window where the picture saw it, and the same pixels in
+    /// [`UNDER_THE_POINT_BOX`]. A look refused, failed or with no picture is
+    /// not the same.
+    fn still_the_same(&self, road: &ComputerRoad, ctx: &ToolContext) -> bool {
+        let window_id = self.target.window_id.map(|id| id.to_string()).unwrap_or_default();
+        let viewer = format!("{}-{UNDER_THE_POINT_VIEWER}", ctx.computer_viewer());
+        let words = ["observe", "--app", self.target.app.as_str(), "--window-id", window_id.as_str(), "--viewer", viewer.as_str()];
+        let Ok(mut answer) = call_shim(road, &look_argv(&words, self.marked), ctx.cwd.as_deref()) else {
+            return false;
+        };
+        let picture = screenshot_path(&answer).and_then(|path| std::fs::read(path).ok());
+        discard_screenshot(&mut answer);
+        let stood = looked_window(&answer)
+            .is_some_and(|now| now.frame.iter().zip(self.window_frame).all(|(now, then)| (now - then).abs() <= WINDOW_FRAME_TOLERANCE_POINTS));
+        refusal(&answer).is_none() && stood && picture.is_some_and(|now| same_around(&self.picture, &now, self.at))
+    }
+}
+
+/// Whether two pictures show the same pixels in [`UNDER_THE_POINT_BOX`]
+/// around `at`, a pixel of both: decoded, so two encodings of one screen are
+/// the same, and pictures of two sizes are not. A point outside the picture
+/// is not the same.
+// The point is a picture pixel inside the picture, and the box's corner is
+// clamped into it before it is cut to a whole pixel: the cast is that cut.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn same_around(then: &[u8], now: &[u8], at: [f64; 2]) -> bool {
+    let (Ok(then), Ok(now)) = (image::load_from_memory(then), image::load_from_memory(now)) else {
+        return false;
+    };
+    let (then, now) = (then.to_rgba8(), now.to_rgba8());
+    let (width, height) = then.dimensions();
+    let inside = |centre: f64, of: u32| (0.0..f64::from(of)).contains(&centre);
+    if now.dimensions() != (width, height) || !inside(at[0], width) || !inside(at[1], height) {
+        return false;
+    }
+    let span = |centre: f64, side: u32, of: u32| {
+        let low = (centre - f64::from(side) / 2.0).clamp(0.0, f64::from(of)) as u32;
+        low..low.saturating_add(side).min(of)
+    };
+    let (columns, rows) = (span(at[0], UNDER_THE_POINT_BOX[0], width), span(at[1], UNDER_THE_POINT_BOX[1], height));
+    rows.flat_map(|y| columns.clone().map(move |x| (x, y))).all(|(x, y)| then.get_pixel(x, y) == now.get_pixel(x, y))
+}
+
+/// A refusal with one sentence of the tool's own after the window's words.
+fn say_after(answer: &mut Value, words: &str) {
+    if let Some(message) = answer.pointer_mut("/error/message") {
+        let said = message.as_str().unwrap_or_default().trim_end_matches('.').to_string();
+        *message = Value::String(format!("{said}. {words}"));
+    }
 }
 
 /// The pointer act that scrolls what the window finds under its target.
@@ -7595,5 +7751,212 @@ printf '%s
                 assert_eq!(heard, model_hears, "{window_says}");
             }
         }
+    }
+
+    // ── 164: a press at a point, asked again while what is under it is the same ──
+
+    /// A picture of `size`, one grey, with one dark pixel at `dot`.
+    fn picture(size: (u32, u32), dot: Option<(u32, u32)>) -> Vec<u8> {
+        let mut frame = image::RgbaImage::from_pixel(size.0, size.1, image::Rgba([230, 230, 230, 255]));
+        if let Some((x, y)) = dot {
+            frame.put_pixel(x, y, image::Rgba([20, 20, 20, 255]));
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(frame).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    /// The picture every look at the fake window shows from now on.
+    #[cfg(unix)]
+    fn the_window_shows(dir: &Path, png: &[u8]) {
+        std::fs::write(dir.join("shot.png"), png).unwrap();
+    }
+
+    /// The model looked at window 41 of Fixture (at (100, 80), 640 × 480
+    /// points, half a pixel per point) and was shown a plain 400 × 300 picture.
+    #[cfg(unix)]
+    fn looked_at_window_41_showing_a_plain_picture(dir: &Path, ctx: &ToolContext, road: &ComputerRoad) {
+        the_window_shows(dir, &picture((400, 300), None));
+        looked_at_window_41(dir, ctx, road);
+    }
+
+    /// The press the model sends on that picture, at pixel (100, 100).
+    #[cfg(unix)]
+    fn press_at_100_100() -> Value {
+        json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [100, 100], "foreground": true})
+    }
+
+    /// The words a call was sent with, one per line as the fake window wrote them.
+    #[cfg(unix)]
+    fn argv_of(dir: &Path, call: &str) -> Vec<String> {
+        std::fs::read_to_string(dir.join(format!("argv-{call}"))).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    /// 164: a press at a point held up by the person's pointer goes once
+    /// they pause — after one look the model is not shown, taken as a viewer
+    /// of its own, finds the window as the picture showed it around the
+    /// point — pinned to where that picture saw the window.
+    #[cfg(unix)]
+    #[test]
+    fn a_press_at_a_point_goes_once_the_person_pauses_while_its_window_shows_the_same_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        looked_at_window_41_showing_a_plain_picture(dir.path(), &ctx, &road);
+        std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+        let said: Value = serde_json::from_str(&run_computer(&press_at_100_100(), &ctx, &road).expect("the press goes at the second asking")).unwrap();
+        assert_eq!(said["ok"], true, "{said}");
+        assert_eq!(said[STOOD_BY_KEY]["asked_again"], 1, "{said}");
+        assert_eq!(calls(dir.path()), ["observe", "click", "observe", "click", "observe"], "a look before the asking again, and the look after the press");
+        assert!(spelled_after(&argv_of(dir.path(), "click.1"), "--window-frame").is_none(), "the first asking is the press as the model sent it");
+        assert_eq!(spelled_after(&argv_of(dir.path(), "click.2"), "--window-frame").as_deref(), Some("100,80,640,480"), "the asking again is pinned to where the picture saw the window");
+        let viewer = format!("{}-{UNDER_THE_POINT_VIEWER}", ctx.computer_viewer());
+        assert_eq!(spelled_after(&argv_of(dir.path(), "observe.2"), "--viewer").as_deref(), Some(viewer.as_str()), "the look before asking again is not the model's own");
+        assert_eq!(spelled_after(&argv_of(dir.path(), "observe.2"), "--window-id").as_deref(), Some("41"));
+        // The core reads both command lines as the window will: the pinned lone press and the look of its own.
+        for call in ["click.2", "observe.2"] {
+            zerocode_core::computer_use::parse_command(&argv_of(dir.path(), call)).unwrap_or_else(|error| panic!("the core reads {call}: {error}"));
+        }
+    }
+
+    /// 164: once the window shows something else around the point — a
+    /// message came in, the page moved — the press is not asked again: the
+    /// model hears the refusal, and that it must look again.
+    #[cfg(unix)]
+    #[test]
+    fn a_press_at_a_point_is_not_asked_again_once_its_window_shows_something_else_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        looked_at_window_41_showing_a_plain_picture(dir.path(), &ctx, &road);
+        the_window_shows(dir.path(), &picture((400, 300), Some((110, 90))));
+        std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+        let refused = refused_with(run_computer(&press_at_100_100(), &ctx, &road));
+        assert!(refused.starts_with(&format!("{}:", error_code::PERSON_POINTING)), "{refused}");
+        assert!(refused.contains(UNDER_THE_POINT_CHANGED), "the model is told to look again: {refused}");
+        assert_eq!(calls(dir.path()), ["observe", "click", "observe"], "one look, and no asking again");
+    }
+
+    /// 164: what changed away from the point does not hold the press up.
+    #[cfg(unix)]
+    #[test]
+    fn a_change_away_from_the_point_does_not_hold_up_its_press() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        looked_at_window_41_showing_a_plain_picture(dir.path(), &ctx, &road);
+        the_window_shows(dir.path(), &picture((400, 300), Some((390, 290))));
+        std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+        let said: Value = serde_json::from_str(&run_computer(&press_at_100_100(), &ctx, &road).expect("the press goes")).unwrap();
+        assert_eq!(said["ok"], true, "{said}");
+        assert_eq!(clicks_asked(dir.path()), 2, "{:?}", calls(dir.path()));
+    }
+
+    /// 164: a window that moved, or a picture of another size (zo's picture
+    /// budget can shrink a session's pictures), is not the window the model
+    /// saw: the press is not asked again.
+    #[cfg(unix)]
+    #[test]
+    fn a_press_at_a_point_is_not_asked_again_once_its_window_moved_or_its_picture_changed_size() {
+        for (moved, shown) in [(true, picture((400, 300), None)), (false, picture((200, 150), None))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            looked_at_window_41_showing_a_plain_picture(dir.path(), &ctx, &road);
+            if moved {
+                std::fs::write(dir.path().join("window-frame"), r#""x":130,"y":80,"width":640,"height":480"#).unwrap();
+            }
+            the_window_shows(dir.path(), &shown);
+            std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+            let refused = refused_with(run_computer(&press_at_100_100(), &ctx, &road));
+            assert!(refused.contains(UNDER_THE_POINT_CHANGED), "moved {moved}: {refused}");
+            assert_eq!(clicks_asked(dir.path()), 1, "moved {moved}: {:?}", calls(dir.path()));
+        }
+    }
+
+    /// 164: Esc while the press waits for the person — on its first asking,
+    /// or on the look before an asking again — looks at nothing more and
+    /// asks nothing again.
+    #[cfg(unix)]
+    #[test]
+    fn esc_while_a_press_at_a_point_waits_looks_and_asks_nothing_more() {
+        // (the call that is out when Esc comes, how many of that verb have gone, the calls in the end)
+        let cases: [(&str, usize, &[&str]); 2] = [
+            ("click", 1, &["observe", "click"]),
+            ("observe", 2, &["observe", "click", "observe"]),
+        ];
+        for (out, nth, in_the_end) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            looked_at_window_41_showing_a_plain_picture(dir.path(), &ctx, &road);
+            let stop = runtime::HookAbortSignal::new();
+            ctx.set_turn_stop(Some(stop.clone()));
+            std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+            std::fs::write(dir.path().join(format!("delay-{out}.{nth}")), "1").unwrap();
+            let asked = dir.path().join("calls");
+            let esc = std::thread::spawn(move || {
+                let began = Instant::now();
+                while std::fs::read_to_string(&asked).unwrap_or_default().lines().filter(|verb| *verb == out).count() < nth {
+                    assert!(began.elapsed() < Duration::from_secs(10), "{out} {nth} never went out");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                stop.abort();
+            });
+            let refused = refused_with(run_computer(&press_at_100_100(), &ctx, &road));
+            esc.join().unwrap();
+            assert!(refused.starts_with(&format!("{}:", error_code::PERSON_POINTING)), "{out}: {refused}");
+            assert_eq!(calls(dir.path()), in_the_end, "Esc while {out} {nth} was out");
+        }
+    }
+
+    /// 164: which presses are looked under before they are asked again: a
+    /// lone press at a point in the window the model last saw — not a drag,
+    /// not one the person confirms, not one at a point of the desktop, not
+    /// one in a window the last picture was not of.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_lone_press_at_a_point_of_the_window_last_seen_is_looked_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        looked_at_window_41_showing_a_plain_picture(dir.path(), &ctx, &road);
+        let under = |fields: Value| under_the_point(&input(fields), &ctx);
+        let looked = under(press_at_100_100()).expect("a press at a point of the window last seen");
+        assert_eq!((looked.at, looked.window_frame, looked.marked), ([100.0, 100.0], [100.0, 80.0, 640.0, 480.0], false));
+        assert!(under(json!({"action": "double_click", "app": "Fixture", "window_id": 41, "coordinate": [100, 100]})).is_some());
+        assert!(under(json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [100, 100], "confirming": "payment"})).is_none());
+        assert!(under(json!({"action": "left_click_drag", "app": "Fixture", "window_id": 41, "start_coordinate": [10, 10], "coordinate": [100, 100]})).is_none());
+        assert!(under(json!({"action": "left_click", "coordinate": [100, 100]})).is_none(), "a point of the desktop");
+        assert!(under(json!({"action": "left_click", "app": "Fixture", "window_id": 42, "coordinate": [100, 100]})).is_none(), "another window");
+        assert!(under(json!({"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Continue", "ocr": true})).is_none(), "no point");
+        // A desktop picture after it: the window's picture is no longer the last one.
+        ctx.set_computer_frame(ShotFrame::UNIT);
+        assert!(under(press_at_100_100()).is_none(), "the last picture is of the desktop");
+    }
+
+    /// 164 (CU pane, m-113857 ①): the same is the same decoded pixels, not the
+    /// same file — two encodings of one screen are the same — and only in the
+    /// box around the point.
+    #[test]
+    fn the_same_around_a_point_is_the_same_decoded_pixels_in_its_box() {
+        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        use image::ImageEncoder as _;
+        let frame = image::RgbaImage::from_fn(400, 300, |x, y| image::Rgba([u8::try_from(x % 251).unwrap(), u8::try_from(y % 241).unwrap(), 90, 255]));
+        let encode = |compression, filter| {
+            let mut out = Vec::new();
+            PngEncoder::new_with_quality(&mut out, compression, filter).write_image(frame.as_raw(), 400, 300, image::ExtendedColorType::Rgba8).unwrap();
+            out
+        };
+        let (fast, best) = (encode(CompressionType::Fast, FilterType::NoFilter), encode(CompressionType::Best, FilterType::Paeth));
+        assert_ne!(fast, best, "two files");
+        assert!(same_around(&fast, &best, [100.0, 100.0]), "one screen");
+        let plain = picture((400, 300), None);
+        assert!(!same_around(&plain, &picture((400, 300), Some((100, 100))), [100.0, 100.0]), "the point itself changed");
+        assert!(!same_around(&plain, &picture((400, 300), Some((147, 131))), [100.0, 100.0]), "the box's far corner changed");
+        assert!(same_around(&plain, &picture((400, 300), Some((148, 100))), [100.0, 100.0]), "just outside the box");
+        assert!(!same_around(&plain, &picture((200, 150), None), [100.0, 100.0]), "another size");
+        assert!(!same_around(&plain, &plain, [400.0, 100.0]), "a point outside the picture has no box");
+        assert!(!same_around(&plain, b"not a picture", [100.0, 100.0]));
     }
 }

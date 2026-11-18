@@ -290,6 +290,17 @@ pub(crate) struct ComputerTarget {
     pub window_id: Option<u64>,
 }
 
+impl ComputerObservation {
+    /// Whether this look was of `target`: of its window when it names one,
+    /// else of its app with no window named.
+    fn is_of(&self, target: &ComputerTarget) -> bool {
+        match target.window_id {
+            Some(window_id) => self.window_id == Some(window_id),
+            None => self.app.as_deref() == Some(target.app.as_str()) && self.window_id.is_none(),
+        }
+    }
+}
+
 /// One model's desktop frame and observation, shared by context clones. Its
 /// viewer keeps provider diffs separate from every other model's looks.
 struct ComputerSight {
@@ -297,6 +308,10 @@ struct ComputerSight {
     /// A diff can omit a picture only when the last staged picture was of
     /// this target, frame and numbering, not merely a cached provider look.
     observation: Mutex<Option<ComputerObservation>>,
+    /// The file the window exported for the last staged picture, when that
+    /// picture was of an app's window: what a press at a point on it was
+    /// aimed at. Set and cleared with `observation`, under its lock.
+    picture: Mutex<Option<Arc<[u8]>>>,
     /// The last marked look's id: a click by a mark's number names it.
     marked_look: Mutex<Option<String>>,
     /// Whether this session was told once where web pages go, the first
@@ -313,6 +328,7 @@ impl ComputerSight {
         Self {
             frame: Mutex::new(None),
             observation: Mutex::new(None),
+            picture: Mutex::new(None),
             marked_look: Mutex::new(None),
             work_browser_said: std::sync::atomic::AtomicBool::new(false),
             viewer: format!("zo-{}-{n}", std::process::id()),
@@ -715,15 +731,31 @@ impl ToolContext {
     pub(crate) fn computer_target_look(&self, target: &ComputerTarget) -> Option<ComputerObservation> {
         self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .filter(|seen| match target.window_id {
-                Some(window_id) => seen.window_id == Some(window_id),
-                None => seen.app.as_deref() == Some(target.app.as_str()) && seen.window_id.is_none(),
-            })
+            .filter(|seen| seen.is_of(target))
             .cloned()
     }
 
+    /// The last picture staged for this model and the file it was staged
+    /// from, when it was of `target` and its file was kept.
+    pub(crate) fn computer_target_picture(&self, target: &ComputerTarget) -> Option<(ComputerObservation, Arc<[u8]>)> {
+        let observation = self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let seen = observation.as_ref().filter(|seen| seen.is_of(target))?.clone();
+        let picture = self.computer.picture.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()?;
+        Some((seen, picture))
+    }
+
     pub(crate) fn set_computer_observation(&self, observation: Option<ComputerObservation>) {
-        *self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = observation;
+        self.set_computer_look(observation, None);
+    }
+
+    /// Remember the look just staged for this model and, when it was a
+    /// picture of an app's window, the file the window exported for it —
+    /// both under the observation's lock, so no reader pairs one look with
+    /// another's picture.
+    pub(crate) fn set_computer_look(&self, observation: Option<ComputerObservation>, picture: Option<Arc<[u8]>>) {
+        let mut seen = self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *self.computer.picture.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = observation.as_ref().and(picture);
+        *seen = observation;
     }
 
     /// True once per session: the first call that names the person's own

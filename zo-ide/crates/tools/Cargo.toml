@@ -16,6 +16,10 @@ plugins = { path = "../plugins" }
 runtime = { path = "../runtime" }
 telemetry = { package = "zo-telemetry", path = "../telemetry" }
 base64 = "0.22"
+# A press at a point the person held up is asked again only while the pixels
+# around it are the ones the model last saw (`computer_tools::same_around`);
+# the screenshot intake's tests build a heavy photographic frame to stage.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 reqwest.workspace = true
 futures-util.workspace = true
 pulldown-cmark.workspace = true
@@ -31,8 +35,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
-# The screenshot intake's tests build a heavy photographic frame to stage.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 session-corpus = { path = "../session-corpus" }
 
 [target.'cfg(unix)'.dependencies]
