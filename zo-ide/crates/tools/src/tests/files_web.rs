@@ -1877,3 +1877,65 @@ fn glob_and_grep_tools_cover_success_and_errors() {
     std::env::set_current_dir(&original_dir).expect("restore cwd");
     let _ = fs::remove_dir_all(root);
 }
+
+/// A large new file reads back on the wire as one line, as a small one does
+/// (t-115139 Z3). A write's result repeats the file twice — its content and
+/// a patch adding every line — and past the result cap the dispatch cut that
+/// JSON in the middle, so the wire could not read it and sent both copies.
+#[test]
+fn a_large_new_file_reads_back_as_one_line_like_a_small_one() {
+    use runtime::context_compression::{wire_tool_output, WireRewrite};
+    use std::fmt::Write as _;
+    let root = temp_path("write-large-new-file");
+    fs::create_dir_all(&root).expect("create root");
+    let path = root.join("big.txt");
+    let content = (1..=264).fold(String::new(), |mut content, n| {
+        let _ = writeln!(content, "value_{n:03} = compute({n}, scale=0.25, label=\"step-{n:03}\")  # step {n}");
+        content
+    });
+    let small = root.join("small.txt");
+    let results = [
+        run_tool("write_file", &json!({ "path": path.display().to_string(), "content": content }))
+            .expect("the large file is written"),
+        run_tool("write_file", &json!({ "path": small.display().to_string(), "content": "one\ntwo\n" }))
+            .expect("the small file is written"),
+    ];
+    let _ = fs::remove_dir_all(&root);
+    for (result, lines) in results.iter().zip([264, 2]) {
+        let shown = wire_tool_output(result, "write_file", false, WireRewrite::Full);
+        assert!(
+            shown.starts_with("[write] ") && shown.contains(&format!("· {lines} lines")),
+            "{}",
+            &shown[..shown.len().min(400)]
+        );
+        assert!(shown.len() < 1_000, "one line, not the file twice: {} bytes", shown.len());
+    }
+}
+
+/// An overwrite reads back without the content it was just sent (t-115139
+/// Z3): a 17-line file rewritten to 137 lines came back as its whole diff,
+/// about 270 lines, 137 of them the new content. What it took away stays.
+#[test]
+fn an_overwritten_file_reads_back_without_the_content_it_was_sent() {
+    use runtime::context_compression::{wire_tool_output, WireRewrite};
+    use std::fmt::Write as _;
+    let root = temp_path("write-overwrite");
+    fs::create_dir_all(&root).expect("create root");
+    let path = root.join("port.txt");
+    let old = (1..=17).fold(String::new(), |mut text, n| {
+        let _ = writeln!(text, "old line {n}");
+        text
+    });
+    let new = (1..=137).fold(String::new(), |mut text, n| {
+        let _ = writeln!(text, "new line {n} of the port");
+        text
+    });
+    run_tool("write_file", &json!({ "path": path.display().to_string(), "content": old })).expect("created");
+    let result = run_tool("write_file", &json!({ "path": path.display().to_string(), "content": new }))
+        .expect("overwritten");
+    let _ = fs::remove_dir_all(&root);
+    let shown = wire_tool_output(&result, "write_file", false, WireRewrite::Full);
+    assert!(shown.starts_with("[write] ") && shown.contains("· 137 lines"), "{shown}");
+    assert!(!shown.contains("new line 5 of the port"), "the content just sent is not sent back: {shown}");
+    assert!(shown.contains("old line 5"), "what the overwrite took away stays: {shown}");
+}

@@ -604,7 +604,7 @@ fn compress_edit_file(raw: &str) -> CompressionOutcome {
         view.push_str(" · user_modified");
     }
     view.push('\n');
-    render_patch_hunks(&mut view, hunks);
+    render_patch_hunks(&mut view, hunks, AddedLines::Shown);
     append_tool_feedback(&mut view, obj);
     CompressionOutcome::pick_smaller(raw, view)
 }
@@ -616,8 +616,10 @@ fn compress_edit_file(raw: &str) -> CompressionOutcome {
 /// A new file's diff is the echo again: every line of it added. Over 14 days
 /// to 2026-11-05 this machine's conversations carried 588 of those, 2.69M
 /// characters the model had just written itself. A created file keeps only
-/// its header; an overwrite keeps its diff, which says what changed against
-/// an old file the model may not hold.
+/// its header; an overwrite keeps what its diff took away and where, which
+/// the model may not hold, and counts what it added, which is the content
+/// just sent — a 17-line file rewritten to 137 lines came back as the whole
+/// diff, about 270 lines (t-115139 Z3).
 fn compress_write_file(raw: &str) -> CompressionOutcome {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
         return CompressionOutcome::unchanged(raw);
@@ -643,16 +645,26 @@ fn compress_write_file(raw: &str) -> CompressionOutcome {
     view.push('\n');
     if !created {
         if let Some(patch) = obj.get("structuredPatch").and_then(|v| v.as_array()) {
-            render_patch_hunks(&mut view, patch);
+            render_patch_hunks(&mut view, patch, AddedLines::Counted);
         }
     }
     append_tool_feedback(&mut view, obj);
     CompressionOutcome::pick_smaller(raw, view)
 }
 
+/// How a diff's added lines reach the wire.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddedLines {
+    /// Each as it is: an edit's.
+    Shown,
+    /// Each run as one line that counts it: a write's, whose added lines are
+    /// the content the model just sent.
+    Counted,
+}
+
 /// Render `structuredPatch` hunks (whose `lines` already carry the
 /// ` `/`-`/`+` prefixes) as unified-diff text.
-fn render_patch_hunks(out: &mut String, hunks: &[serde_json::Value]) {
+fn render_patch_hunks(out: &mut String, hunks: &[serde_json::Value], added: AddedLines) {
     for hunk in hunks {
         let Some(obj) = hunk.as_object() else {
             continue;
@@ -678,12 +690,28 @@ fn render_patch_hunks(out: &mut String, hunks: &[serde_json::Value]) {
             "@@ -{old_start},{old_lines} +{new_start},{new_lines} @@"
         );
         if let Some(lines) = obj.get("lines").and_then(|v| v.as_array()) {
-            for line in lines {
-                if let Some(text) = line.as_str() {
-                    out.push_str(text);
-                    out.push('\n');
+            let mut run = 0_usize;
+            for text in lines.iter().filter_map(serde_json::Value::as_str) {
+                if added == AddedLines::Counted && text.starts_with('+') {
+                    run += 1;
+                    continue;
                 }
+                push_added_run(out, &mut run);
+                out.push_str(text);
+                out.push('\n');
             }
+            push_added_run(out, &mut run);
+        }
+    }
+}
+
+/// One line for a run of added lines that are the content just sent.
+fn push_added_run(out: &mut String, run: &mut usize) {
+    match std::mem::take(run) {
+        0 => {}
+        1 => out.push_str("+⟨1 line as sent⟩\n"),
+        lines => {
+            let _ = writeln!(out, "+⟨{lines} lines as sent⟩");
         }
     }
 }
@@ -2236,8 +2264,9 @@ mod tests {
         assert!(out.compressed_chars < out.original_chars / 5);
     }
 
-    /// An overwrite's diff says what changed against the old file, which the
-    /// model may not hold, so it stays.
+    /// An overwrite's diff says what it took away from the old file, which the
+    /// model may not hold, so that stays; what it added is the content just
+    /// sent, so that is counted (t-115139 Z3).
     #[test]
     fn write_file_over_an_existing_file_keeps_its_diff() {
         let raw = serde_json::to_string_pretty(&serde_json::json!({
@@ -2257,7 +2286,7 @@ mod tests {
         assert!(out
             .content
             .starts_with("[write] /ws/gen.rs · written · 180 lines"));
-        assert!(out.content.contains("-    42\n+    43"), "{}", out.content);
+        assert!(out.content.contains("@@ -2,1 +2,1 @@\n-    42\n+⟨1 line as sent⟩\n"), "{}", out.content);
     }
 
     // --- read_file outline (large code files) ---

@@ -21,7 +21,7 @@ use std::time::Duration;
 use runtime::{
     context_compression::compress_tool_output,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
-    truncate_tool_output, TruncationConfig,
+    truncate_tool_output, TruncatedOutput, TruncationConfig,
 };
 use runtime::ToolExecutionResult;
 use serde::Deserialize;
@@ -394,15 +394,23 @@ pub(crate) fn finish_successful_tool_output(
         canonical_ref,
         ctx.workspace_root.as_deref().or(ctx.cwd.as_deref()),
     );
-    let truncated = truncate_tool_output(&enriched, canonical_ref, global_truncation_config());
+    let kept_whole = echoes_what_was_sent(canonical_ref)
+        && compressed.was_compressed
+        && compressed.content.chars().count() <= global_truncation_config().limit_for(canonical_ref);
+    let truncated = if kept_whole {
+        TruncatedOutput { content: enriched.clone(), was_truncated: false, original_len: enriched.chars().count() }
+    } else {
+        truncate_tool_output(&enriched, canonical_ref, global_truncation_config())
+    };
     // A JSON-envelope tool (read_file) is exempt from raw-envelope truncation,
     // so `was_truncated` is always false for it even when the output is huge.
     // We must still preserve the full bytes as an artifact in that case so the
     // model can recover them via `retrieve_tool_output`. Treat any output that
     // exceeds the global ceiling as "oversized" for artifact purposes, even
     // when the structural rewrite did not happen to save enough to flip
-    // `was_compressed`.
-    let oversized = truncated.original_len > global_truncation_config().default_max_chars;
+    // `was_compressed`. An envelope kept whole withholds nothing: its view
+    // drops only what the model sent.
+    let oversized = !kept_whole && truncated.original_len > global_truncation_config().default_max_chars;
     // Phase-4: transformed output keeps its full pre-transform content as a
     // content-addressed artifact (best-effort) so it stays recoverable without
     // rendering raw bytes without bound into the transcript. The `None`
@@ -466,6 +474,20 @@ pub(crate) fn finish_successful_tool_output(
         invocation.finish(successful_result(metadata), gateway::epoch_millis_now()),
     );
     content
+}
+
+/// The file tools whose result echoes what the model sent — a write's content
+/// and a patch adding every line of it, an edit's strings and its patch —
+/// and whose view on the wire is a header and the diff.
+///
+/// Such an envelope is kept whole when that view fits the cap (t-115139 Z3).
+/// Cut at the cap like any text, it lost its JSON shape in the middle, the
+/// wire could not read it, and a 264-line file written once came back to the
+/// model twice — 30,187 chars where a smaller write gets one line (12 of 184
+/// writes and 8 of 1,828 edits in a week of this machine's sessions).
+fn echoes_what_was_sent(canonical_ref: &str) -> bool {
+    use core_types::tool_names::CoreTool;
+    matches!(CoreTool::of(canonical_ref), Some(CoreTool::Write | CoreTool::Edit | CoreTool::MultiEdit))
 }
 
 /// The spill file a `bash` run whose streams outgrew the in-memory cap names
