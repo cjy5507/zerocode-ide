@@ -759,6 +759,9 @@ struct Ui {
     /// The newest words of the turn's thinking so far, bounded
     /// ([`thinking::TAIL_KEEP_BYTES`]); empty once the answer or a call began.
     thinking_said: String,
+    /// What the row under the working row shows of them, held for its dwell
+    /// ([`thinking::HeldRow`]).
+    thinking_row: thinking::HeldRow,
     /// An answer's line shows as far as it has come while it is written
     /// ([`MarkdownStream::showing_unfinished`]), with the working row kept
     /// under it — the marks look's.
@@ -1923,7 +1926,21 @@ impl Ui {
             return;
         }
         self.thinking_said.clear();
+        self.thinking_row = thinking::HeldRow::default();
         self.refresh_status_details();
+    }
+
+    /// The turn's clock moved on: the working row's ([`Status::set_elapsed`]),
+    /// and words waiting for the row under it take that row once its
+    /// sentence has stood its dwell ([`thinking::HeldRow`]) — a model that
+    /// pauses mid-thought does not leave them waiting for its next delta.
+    fn tick_status(&mut self, elapsed: Duration) {
+        if let Some(status) = self.status.as_mut() {
+            status.set_elapsed(elapsed);
+        }
+        if self.thinking_row.is_waiting() {
+            self.refresh_status_details();
+        }
     }
 
     /// `/thinking`: show or hide thinking cells from here on. Screen-only,
@@ -2122,12 +2139,15 @@ impl Ui {
         }
         if details.is_empty() && !self.thinking_said.is_empty() {
             // One row, cut to its room: the words never wrap, so the rows
-            // above it do not move as they come.
+            // above it do not move as they come; and held, so a sentence
+            // stands its dwell however fast the lines of a thought come.
             let columns = super::view::status_detail_columns(self.width());
+            let elapsed = self.status.as_ref().map_or(Duration::ZERO, |status| status.elapsed);
             let line = if super::style::current().style == super::style::TuiStyle::Marks {
-                thinking::live_line_without_headings(&self.thinking_said, columns)
+                thinking::without_headings(&self.thinking_said)
+                    .and_then(|said| self.thinking_row.offer(&said, columns, elapsed))
             } else {
-                thinking::live_line(&self.thinking_said, columns)
+                self.thinking_row.offer(&self.thinking_said, columns, elapsed)
             };
             details.extend(line);
         }
@@ -6197,6 +6217,7 @@ impl App {
                 thinking_line: super::style::current().thinking_line,
                 thinking_tail: super::style::current().style == super::style::TuiStyle::Marks,
                 thinking_said: String::new(),
+                thinking_row: thinking::HeldRow::default(),
                 unfinished_lines: super::style::current().style == super::style::TuiStyle::Marks,
                 reasoning_started: None,
                 reasoning_about: None,
@@ -7872,6 +7893,7 @@ impl App {
         }
         ui.status = Some(status);
         ui.thinking_said.clear();
+        ui.thinking_row = thinking::HeldRow::default();
         ui.publish_working_activity(turn_scaffold.ide);
         ui.draw_with_queue(|| block_rx.len());
 
@@ -8052,9 +8074,7 @@ impl App {
                     ui.draw_with_queue(|| block_rx.len());
                 }
                 _ = ticker.tick() => {
-                    if let Some(status) = ui.status.as_mut() {
-                        status.set_elapsed(started.elapsed());
-                    }
+                    ui.tick_status(started.elapsed());
                     ui.publish_working_activity(turn_scaffold.ide);
                     ui.draw_with_queue(|| block_rx.len());
                 }
@@ -8653,6 +8673,7 @@ fn test_ui() -> Ui {
         thinking_line: false,
         thinking_tail: false,
         thinking_said: String::new(),
+        thinking_row: thinking::HeldRow::default(),
         unfinished_lines: false,
         reasoning_started: None,
         reasoning_about: None,
@@ -10256,8 +10277,9 @@ mod tests {
     /// While the model thinks, the row under the working row shows the
     /// sentence it is writing and the row says `Thinking`: fragments join as
     /// they were written, the next block's first sentence takes the row once
-    /// it has a word, and all of it goes when the answer begins. A look that
-    /// does not ask for it shows neither, as before.
+    /// it has a word and the sentence on the row has stood its dwell, and all
+    /// of it goes when the answer begins. A look that does not ask for it
+    /// shows neither, as before.
     #[test]
     fn thinking_shows_under_the_working_row_as_it_comes_and_goes_when_the_answer_begins() {
         use runtime::message_stream::BlockId;
@@ -10290,11 +10312,15 @@ mod tests {
         assert!(shown(&ui).contains("read the parser before I change it"), "between two blocks the row stands: {}", shown(&ui));
         let second = ids.next();
         reason(&mut ui, second, "Then the checker", false);
+        assert!(shown(&ui).contains("read the parser before I change it"), "the row's sentence stands its dwell: {}", shown(&ui));
+        ui.tick_status(Duration::from_secs(3) + crate::tui::thinking::ROW_DWELL);
         assert!(shown(&ui).contains("Then the checker"), "{}", shown(&ui));
         assert!(!shown(&ui).contains("change it"), "the sentence before is not on the row: {}", shown(&ui));
 
         ui.block(RenderBlock::TextDelta { id: ids.next(), text: "Here is what I found\n".to_string(), done: false });
         assert!(shown(&ui).is_empty(), "the answer began: {}", shown(&ui));
+        reason(&mut ui, ids.next(), "Now the emitter", false);
+        assert!(shown(&ui).contains("Now the emitter"), "a thought after the answer has its own row at once: {}", shown(&ui));
 
         let mut as_before = test_ui();
         as_before.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
@@ -10308,8 +10334,9 @@ mod tests {
     /// few characters at a time never takes a second row, and within a
     /// sentence the row only grows until it is full and then holds — the rows
     /// above it never move (the person, 2026-11-18: the work in progress
-    /// jumped as the model typed). The heading above it changes once a few
-    /// seconds, however fast the sentences end.
+    /// jumped as the model typed). Another sentence takes the row once the
+    /// one on it has stood its dwell, and the heading above it changes once a
+    /// few seconds, however fast the sentences end.
     #[test]
     fn the_thinking_row_is_one_row_that_fills_and_holds() {
         use runtime::message_stream::BlockId;
@@ -10328,25 +10355,36 @@ mod tests {
             ui.painter = super::super::painter::Painter::new(std::io::stdout(), width, 24, 1, false);
             ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
             let id = ids.next();
-            let mut rows_seen: Vec<String> = Vec::new();
+            let mut rows_seen: Vec<(Duration, String)> = Vec::new();
+            let mut at = Duration::from_secs(3);
             let chars: Vec<char> = thought.chars().collect();
             for piece in chars.chunks(3) {
+                ui.tick_status(at);
                 reason(&mut ui, id, &piece.iter().collect::<String>(), false);
                 let rows = ui.status.as_ref().expect("status").detail_lines(usize::from(width));
                 assert_eq!(rows.len(), 1, "width {width}: one row, whatever has come: {rows:#?}");
                 let row = rows[0].plain();
                 assert!(unicode_width::UnicodeWidthStr::width(row.as_str()) <= usize::from(width), "width {width}: {row}");
-                if rows_seen.last() != Some(&row) {
-                    rows_seen.push(row);
+                if rows_seen.last().is_none_or(|(_, last)| *last != row) {
+                    rows_seen.push((at, row));
                 }
+                at += Duration::from_millis(30);
             }
             // A row that is not the sentence the one before it said replaced
-            // it: the sentence changed.
-            let replaced = rows_seen
-                .windows(2)
-                .filter(|pair| !crate::tui::thinking::same_sentence(&pair[0], &pair[1]))
-                .count();
-            assert_eq!(replaced, 2, "width {width}: the row changes its sentence twice: {rows_seen:#?}");
+            // it: the sentence changed — once the one on the row had stood
+            // its dwell.
+            let mut stood_from = Duration::from_secs(3);
+            let mut replaced = 0;
+            for pair in rows_seen.windows(2) {
+                if crate::tui::thinking::same_sentence(&pair[0].1, &pair[1].1) {
+                    continue;
+                }
+                let stood = pair[1].0.saturating_sub(stood_from);
+                assert!(stood >= crate::tui::thinking::ROW_DWELL, "width {width}: replaced after {stood:?}: {rows_seen:#?}");
+                stood_from = pair[1].0;
+                replaced += 1;
+            }
+            assert!(replaced >= 1, "width {width}: the row moves on to a later sentence: {rows_seen:#?}");
         }
 
         // The heading: three sentences end within a second; the row keeps the
@@ -10364,6 +10402,37 @@ mod tests {
         assert_eq!(header(&ui), "Reading the lexer first", "a heading stands its dwell");
         ui.status.as_mut().expect("status").set_elapsed(Duration::from_secs(3) + crate::tui::view::HEADER_DWELL);
         assert_eq!(header(&ui), "Then the checker", "then the newest takes the row");
+    }
+
+    /// The turn's clock, not only the model's next delta, puts the words that
+    /// wait for the row under the working row on it once the row's sentence
+    /// has stood its dwell: a model that stops mid-thought for a while leaves
+    /// its newest sentence there, not the one before it.
+    #[test]
+    fn the_turns_clock_puts_the_waiting_words_on_the_thinking_row() {
+        use runtime::message_stream::BlockId;
+
+        fn reason(ui: &mut super::Ui, id: BlockId, text: &str) {
+            ui.block(RenderBlock::Reasoning { id, text: text.to_string(), signature: None, done: false });
+        }
+        fn shown(ui: &super::Ui) -> String {
+            let rows = ui.status.as_ref().map(|status| status.detail_lines(100)).unwrap_or_default();
+            rows.iter().map(Line::plain).collect::<Vec<_>>().join(" ")
+        }
+
+        let ids = BlockIdGen::default();
+        let mut ui = test_ui();
+        ui.thinking_tail = true;
+        let start = Duration::from_secs(3);
+        ui.status = Some(crate::tui::view::Status::working(start));
+        let id = ids.next();
+        reason(&mut ui, id, "I read the lexer and the parser.");
+        reason(&mut ui, id, " Then the che");
+        assert!(shown(&ui).contains("I read the lexer and the parser"), "{}", shown(&ui));
+        ui.tick_status(start + crate::tui::thinking::ROW_DWELL.saturating_sub(Duration::from_millis(1)));
+        assert!(shown(&ui).contains("I read the lexer and the parser"), "not before its dwell: {}", shown(&ui));
+        ui.tick_status(start + crate::tui::thinking::ROW_DWELL);
+        assert!(shown(&ui).contains("Then the che"), "the clock moved on and no delta came: {}", shown(&ui));
     }
 
     /// An answer's line shows in the live rows from its first word, and its

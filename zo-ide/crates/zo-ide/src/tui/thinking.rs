@@ -16,6 +16,8 @@
 //! `… +N lines`, in a `ZeroCode` pane the whole body folded under the title
 //! ([`super::folds`], the same markers a tool cell commits with).
 
+use std::time::Duration;
+
 use unicode_width::UnicodeWidthStr;
 
 use super::ansi::{Line, Span, Style};
@@ -47,6 +49,17 @@ pub const SCAN_KEEP_BYTES: usize = 4096;
 /// sentence being written. The buffer is halved from the front past this, so
 /// a block of any length costs a bounded read per delta.
 pub const TAIL_KEEP_BYTES: usize = 2048;
+
+/// How long a sentence stands on the row under the working row before other
+/// words take it ([`HeldRow`]). The row once took every sentence as it began:
+/// a model that drafts code in its thinking ends one at every line, and at the
+/// pace such a model writes (the person's, 2026-11-18: three hundred
+/// characters a second and more) a line stood a sixth of a second — four rows
+/// a second, and 22 of 23 looks half a second apart met other words, as many
+/// as when the row was the newest words over two rows (zo 1.1.164, a fake
+/// stream at two hundred a second). Two seconds reads a line of code; the row
+/// still moves on while the model writes.
+pub const ROW_DWELL: Duration = Duration::from_secs(2);
 
 /// Body rows a thinking cell keeps in a bare terminal before `… +N lines` —
 /// codex's tool-output preview cap, so the two previews read as one rule.
@@ -225,27 +238,96 @@ fn fit(text: String, max_columns: usize) -> String {
 /// they took — the work in progress jumped as the model typed (the person,
 /// 2026-11-18: 「working부분이 정신없게 바뀜」). The heading on the working row
 /// says what the block is about; this row says what it is saying now, and
-/// changes once a sentence.
+/// changes once a sentence — as drawn, at most once a [`ROW_DWELL`]
+/// ([`HeldRow`]).
 #[must_use]
 pub fn live_line(text: &str, max_columns: usize) -> Option<String> {
     if max_columns < 2 {
         return None;
     }
     let (last_complete, open) = sentences(text);
-    let said = |segment: &str| {
-        let words = clean(segment).split_whitespace().collect::<Vec<_>>().join(" ");
-        (!words.is_empty()).then_some(words)
-    };
     said(open)
         .or_else(|| last_complete.and_then(said))
         .map(|words| fit(words, max_columns))
 }
 
-/// Like [`live_line`], but drops whole-line `**heading**` lines (and an
-/// unclosed `**heading` still being written on the last line) because the
-/// working row above already displays the heading in the marks look.
+/// The newest sentence of `text` that has ended, as [`live_line`] says it.
+fn ended_line(text: &str, max_columns: usize) -> Option<String> {
+    if max_columns < 2 {
+        return None;
+    }
+    sentences(text).0.and_then(said).map(|words| fit(words, max_columns))
+}
+
+/// A sentence's words as the row says them: the markdown taken out, on one
+/// row; `None` when no word is left.
+fn said(segment: &str) -> Option<String> {
+    let words = clean(segment).split_whitespace().collect::<Vec<_>>().join(" ");
+    (!words.is_empty()).then_some(words)
+}
+
+/// Whether `after`, the thinking row drawn next, still says the sentence
+/// `before` said: it grew out of it, or it is the one cut that turns its
+/// last word into an ellipsis once the sentence outruns the row. Anything
+/// else is the next sentence — which can begin with the letters the last one
+/// began with (`The` after `Then I will…`), so a shared start alone is not
+/// the same sentence.
 #[must_use]
-pub fn live_line_without_headings(text: &str, max_columns: usize) -> Option<String> {
+pub fn same_sentence(before: &str, after: &str) -> bool {
+    after.starts_with(before)
+        || (after.ends_with('…') && before.starts_with(after.trim_end_matches('…')))
+}
+
+/// The row under the working row as it is drawn: [`live_line`], held for
+/// [`ROW_DWELL`]. Words that grow out of the row, or are its one cut, take it
+/// at once — its sentence is still being written. Other words take it once
+/// the sentence on it has stood its dwell; until then the row keeps that
+/// sentence, as it ended when it has (a row held at a delta that ended one
+/// sentence and began the next would stop inside a word), and
+/// [`HeldRow::is_waiting`] says the newer words wait. The clock is the
+/// turn's elapsed time, which the turn loop moves and a test sets.
+#[derive(Debug, Default)]
+pub struct HeldRow {
+    /// The words on the row, and the turn's elapsed time when their sentence
+    /// took it.
+    shown: Option<(String, Duration)>,
+    /// Newer words than the row's wait for its dwell to end.
+    waiting: bool,
+}
+
+impl HeldRow {
+    /// The row for `text`, the thinking so far, at `elapsed` on the turn's
+    /// clock; `None` while nothing was said.
+    pub fn offer(&mut self, text: &str, max_columns: usize, elapsed: Duration) -> Option<String> {
+        self.waiting = false;
+        if let Some(now) = live_line(text, max_columns) {
+            self.shown = Some(match self.shown.take() {
+                Some((row, since)) if same_sentence(&row, &now) => (now, since),
+                // A clock behind the row's is a new turn's: its words take the row.
+                Some((row, since)) if elapsed.checked_sub(since).is_some_and(|stood| stood < ROW_DWELL) => {
+                    self.waiting = true;
+                    let ended = ended_line(text, max_columns).filter(|ended| same_sentence(&row, ended));
+                    (ended.unwrap_or(row), since)
+                }
+                _ => (now, elapsed),
+            });
+        }
+        self.shown.as_ref().map(|(row, _)| row.clone())
+    }
+
+    /// Newer words wait for the row: the turn's clock puts them on it once
+    /// the sentence on it has stood its [`ROW_DWELL`].
+    #[must_use]
+    pub fn is_waiting(&self) -> bool {
+        self.waiting
+    }
+}
+
+/// `text` without its whole-line `**heading**` lines (and an unclosed
+/// `**heading` still being written on its last line): the working row above
+/// already says the heading in the marks look. `None` when nothing is left.
+#[must_use]
+pub fn without_headings(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
     let last = lines.len().saturating_sub(1);
     let body: Vec<&str> = lines
@@ -254,10 +336,13 @@ pub fn live_line_without_headings(text: &str, max_columns: usize) -> Option<Stri
         .filter(|&(index, line)| !(is_heading_line(line) || (index == last && is_open_heading_line(line))))
         .map(|(_, line)| line)
         .collect();
-    if body.is_empty() {
-        return None;
-    }
-    live_line(&body.join("\n"), max_columns)
+    (!body.is_empty()).then(|| body.join("\n"))
+}
+
+/// Like [`live_line`], but [`without_headings`].
+#[must_use]
+pub fn live_line_without_headings(text: &str, max_columns: usize) -> Option<String> {
+    without_headings(text).and_then(|body| live_line(&body, max_columns))
 }
 
 fn is_heading_line(line: &str) -> bool {
@@ -376,25 +461,15 @@ fn indent_marker(row: Line) -> Line {
     }
 }
 
-/// Whether `after`, the thinking row drawn next, still says the sentence
-/// `before` said: it grew out of it, or it is the one cut that turns its
-/// last word into an ellipsis once the sentence outruns the row. Anything
-/// else is the next sentence — which can begin with the letters the last one
-/// began with (`The` after `Then I will…`), so a shared start alone is not
-/// the same sentence.
-#[cfg(test)]
-pub(crate) fn same_sentence(before: &str, after: &str) -> bool {
-    after.starts_with(before)
-        || (after.ends_with('…') && before.starts_with(after.trim_end_matches('…')))
-}
-
 #[cfg(test)]
 mod tests {
     use unicode_width::UnicodeWidthStr;
 
+    use std::time::Duration;
+
     use super::{
         bound_scan, cell, first_bold_heading, leading_bold_heading, live_heading, live_line,
-        live_line_without_headings, same_sentence, LIVE_HEADING_MAX_COLUMNS,
+        live_line_without_headings, same_sentence, HeldRow, LIVE_HEADING_MAX_COLUMNS, ROW_DWELL,
     };
     use crate::tui::ansi::Line;
     use crate::tui::folds::{FoldIds, FoldMode};
@@ -405,7 +480,6 @@ mod tests {
     /// flashing half a phrase, and an empty `****` never blanks the shimmer.
     #[test]
     fn a_finished_block_stands_as_one_row() {
-        use std::time::Duration;
         let rows = super::one_line(Some("Reading the parser"), None, Some(Duration::from_millis(2_400)), 80);
         assert_eq!(rows[0].plain(), "", "the gap every cell opens with");
         assert_eq!(rows[1].plain(), "• Thought for 2s · Reading the parser");
@@ -674,6 +748,95 @@ mod tests {
             runs.last_mut().expect("a run").push(row.clone());
         }
         runs
+    }
+
+    /// A thought that drafts code, as a reasoning model writes one: a little
+    /// prose in Korean and English, then lines of Go, unfenced and fenced —
+    /// a sentence ends at every line.
+    const CODE_THOUGHT: &str = "핸들러의 타임아웃 경로부터 고칩니다. The deadline must cover the upstream call and the retry, \
+        so the context is created once at the top. For handler.go the hunk is:\n\n\
+        ctx, cancel := context.WithTimeout(r.Context(), timeout)\n\
+        defer cancel()\n\
+        resp, err := client.Do(req.WithContext(ctx))\n\
+        if err != nil {\n\
+        return fmt.Errorf(\"upstream: %w\", err)\n\
+        }\n\
+        defer resp.Body.Close()\n\n\
+        The retry loop reuses ctx, so no second deadline. 그다음 시험 헬퍼:\n\n\
+        ```go\n\
+        func newTestGateway(t *testing.T) *Gateway {\n\
+        gw, err := NewGateway(Config{FailClosed: true})\n\
+        if err != nil {\n\
+        t.Fatalf(\"gateway: %v\", err)\n\
+        }\n\
+        return gw\n\
+        }\n\
+        ```\n\n\
+        Both hunks keep the existing indentation. 이제 패치를 적용합니다.";
+
+    /// Fed as fast as a reasoning model writes (four characters every thirty
+    /// milliseconds), a thought that drafts code ends a sentence at every
+    /// line, and the row took each as it began — twenty-one rows in under
+    /// five seconds, some standing a seventh of a second (zo 1.1.164). Held,
+    /// the row changes its sentence once its dwell is over, and still moves
+    /// on while the model writes.
+    #[test]
+    fn a_held_row_changes_its_sentence_once_a_dwell_however_fast_the_lines_come() {
+        let mut held = HeldRow::default();
+        let mut said = String::new();
+        let mut rows: Vec<(Duration, String)> = Vec::new();
+        let mut at = Duration::ZERO;
+        let chars: Vec<char> = CODE_THOUGHT.chars().collect();
+        for piece in chars.chunks(4) {
+            said.extend(piece);
+            let row = held.offer(&said, 76, at).expect("a row once a word has come");
+            assert!(row.width() <= 76, "{row}");
+            if rows.last().is_none_or(|(_, last)| *last != row) {
+                rows.push((at, row));
+            }
+            at += Duration::from_millis(30);
+        }
+        let mut stood_from = Duration::ZERO;
+        let mut changes = 0;
+        for pair in rows.windows(2) {
+            let ((_, before), (when, after)) = (&pair[0], &pair[1]);
+            if same_sentence(before, after) {
+                continue;
+            }
+            let stood = when.saturating_sub(stood_from);
+            assert!(stood >= ROW_DWELL, "{before:?} gave way to {after:?} after {stood:?}: {rows:#?}");
+            stood_from = *when;
+            changes += 1;
+        }
+        assert!(changes >= 2, "the row moves on while the model writes: {rows:#?}");
+    }
+
+    /// Words that grow out of the row take it at once; the next sentence
+    /// waits for the dwell, and meanwhile the row says its own sentence as it
+    /// ended — a delta that ends one sentence and begins the next does not
+    /// leave the row inside a word. Once the dwell is over the sentence being
+    /// written takes the row.
+    #[test]
+    fn a_held_row_grows_at_once_and_waits_with_its_sentence_as_it_ended() {
+        let at = Duration::from_secs(1);
+        let mut held = HeldRow::default();
+        assert_eq!(held.offer("", 80, at), None);
+        assert_eq!(held.offer("Patch hunks", 80, at).as_deref(), Some("Patch hunks"));
+        assert_eq!(
+            held.offer("Patch hunks must match exactl", 80, at).as_deref(),
+            Some("Patch hunks must match exactl")
+        );
+        assert!(!held.is_waiting(), "its own words never wait");
+        assert_eq!(
+            held.offer("Patch hunks must match exactly. L", 80, at + ROW_DWELL / 2).as_deref(),
+            Some("Patch hunks must match exactly")
+        );
+        assert!(held.is_waiting(), "the next sentence waits for the dwell");
+        assert_eq!(
+            held.offer("Patch hunks must match exactly. Let me", 80, at + ROW_DWELL).as_deref(),
+            Some("Let me")
+        );
+        assert!(!held.is_waiting());
     }
 
     #[test]
