@@ -128,6 +128,20 @@ the script ever spelling it, and a digest publishes nothing. It matches a
 whole word, which is how a path, a host or a project name carries one; a name
 welded into a longer identifier is past it and is caught by reading the diff.
 
+A sixth cannot be written down even as a digest: the account this machine runs
+as. A short name's digest is undone by hashing every word of its length (a
+three-letter name is one of 17,576), so the script reads the uid's login name
+and its home folder's name from the password database at each run (`USERNAME`
+and `USERPROFILE` on Windows), holds them in memory, and refuses either as a
+whole word in any case — the bare name audit 29-04 found in prose, which the
+home-path row cannot see. Every output says `[this machine's account name]`
+where one stands; the table, `--json` and the refusal never spell it. The CI
+runners' accounts (`runner`, `runneradmin`) and the placeholder vocabulary the
+home-path row forgives (`dev`, `user`, one or two letters) are not looked for:
+this tree writes them on purpose. git's `user.name` and `user.email` are not
+read, because here they are the public repository's owner, which the updater
+feed, the installer and LICENSE name on purpose.
+
 Nothing else in the script names a value, and nothing outside it does either:
 a new exception is a new entry in that row's `allow`, or — for a single site
 that cannot be rewritten, like the throwaway key a signing test needs — a

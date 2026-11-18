@@ -14,10 +14,11 @@ verify: pii-check fmt-check package-runner-test quality-runner-test window-runne
 
 # The re-entry gate for private values (3.9 s over 1,687 tracked files, the
 # median of 3 on an idle machine): a home directory, an office address, a
-# mailbox, a key of a real shape, or a name this tree was cleared of, must
-# not reach the public source snapshot.
+# mailbox, a key of a real shape, a name this tree was cleared of, or this
+# machine's own account name, must not reach the public source snapshot.
 # Everything it knows is the `RULES` table in the script (and `BANISHED`, which
-# carries digests, never a word) — `pii-scan.py --table` prints it, and a site
+# carries digests, never a word, and the account, which it reads at each run
+# and never prints) — `pii-scan.py --table` prints it, and a site
 # that cannot be rewritten waives itself where it stands. First in `verify`
 # because it refuses before anything compiles.
 pii-check:

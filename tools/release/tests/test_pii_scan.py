@@ -9,20 +9,27 @@ row's `skip` holds, a waiver at the site holds, and the exit code is 1 while
 anything is found.
 
 The caught values below are fictional and belong to nobody; each one carries
-its own waiver so this file does not trip the very gate it tests.
+its own waiver so this file does not trip the very gate it tests. The account
+row reads the machine it runs on, so its cases swap that reader for a fictional
+account in-process: none of them reads, writes or prints a real one.
 
 Run: python3 tools/release/tests/test_pii_scan.py   (stdlib only)
 """
 
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 SCAN = REPO / "tools" / "release" / "pii-scan.py"
@@ -60,6 +67,19 @@ def found(root, *args):
     done = run(root, "--json", *args)
     assert done.returncode in (0, 1), done.stderr
     return json.loads(done.stdout)
+
+
+def account(*names):
+    """The account row's reader, swapped for fictional accounts while a case runs."""
+    return mock.patch.object(pii_scan, "machine_accounts", return_value=names)
+
+
+def printed(*argv):
+    """What the script prints and returns, run in-process (so a swapped reader holds)."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = pii_scan.main(list(argv))
+    return code, out.getvalue()
 
 
 class Checkout:
@@ -338,6 +358,104 @@ class PiiScan(unittest.TestCase):
         finally:
             pii_scan.BANISHED = held
         self.assertEqual(hits, [])
+
+    # --- this machine's own account ------------------------------------------
+
+    def test_the_machines_account_is_caught_as_a_whole_word_in_any_case(self):
+        """Audit 29-04 found the account as a bare word in prose (`… and <name>
+        as the uid's own account`), where no shape row looks. The row finds it
+        as a whole word wherever it stands — prose, a quoted value, any case,
+        beside a mailbox's `@`, between path separators, joined by `-` or `_` —
+        and a letter or a digit on either side makes it another word."""
+        self.checkout.write(
+            "caught.txt",
+            "the uid's own account was acme\n"
+            'SshEndpoint::new("h.example.test", 22, "Acme")\n'
+            "ACME@example.com /srv/acme/x acme-kim acme_home\n",
+        )
+        self.checkout.write("edges.txt", "acme opens the file and closes it: acme")
+        self.checkout.write("near.txt", "acmes xacme acme7 9acme acmeCorp\n")
+        with account("acme"):
+            hits = pii_scan.scan(self.checkout.root)
+        self.assertEqual(
+            sorted((h["path"], h["line"]) for h in hits[pii_scan.ACCOUNT_NAME]),
+            [("caught.txt", 1), ("caught.txt", 2)] + [("caught.txt", 3)] * 4 + [("edges.txt", 1)] * 2,
+            hits,
+        )
+        self.assertEqual(sum(len(v) for v in hits.values()), 8, f"no other row reads these lines: {hits}")
+
+    def test_the_account_is_printed_masked_in_every_output(self):
+        """The gate's lines land in gate logs, the release lane's log and a
+        worker's hand-in: a finding of this row says where it stands, never what
+        it is — in the lines, in `--json`, in `--quiet` and in the refusal."""
+        self.checkout.write("a.txt", "one\nthe uid's own account was Acme\n")
+        root = str(self.checkout.root)
+        with account("acme"):
+            said = {mode: printed("--root", root, *mode) for mode in ((), ("--json",), ("--quiet",))}
+        for mode, (code, text) in said.items():
+            self.assertEqual(code, 1, mode)
+            self.assertNotIn("acme", text.lower(), f"{mode} prints the account")
+        self.assertIn(f"a.txt:2: {pii_scan.ACCOUNT_SHOWN}", said[()][1])
+        self.assertIn("refused", said[()][1])
+        self.assertEqual(
+            [(h["path"], h["line"], h["text"]) for h in json.loads(said[("--json",)][1])[pii_scan.ACCOUNT_NAME]],
+            [("a.txt", 2, pii_scan.ACCOUNT_SHOWN)],
+        )
+        self.assertRegex(said[("--quiet",)][1], rf"(?m)^{re.escape(pii_scan.ACCOUNT_NAME)}\s+1\s+1$")
+
+    def test_the_table_describes_the_account_row_without_reading_the_account(self):
+        """`--table` says what the row reads and forgives; it never asks the
+        machine, so it cannot print the account."""
+        with mock.patch.object(pii_scan, "machine_accounts", side_effect=AssertionError("read")) as reader:
+            code, table = printed("--table")
+        self.assertEqual(code, 0)
+        self.assertFalse(reader.called, "the table read the account")
+        self.assertIn(f"{pii_scan.ACCOUNT_NAME}: ", table)
+
+    def test_a_role_account_or_a_placeholder_is_not_looked_for(self):
+        """The CI runners' accounts (`runner` on macOS, `runneradmin` on Windows,
+        as the 2026-11-18 verify logs name their home folders) and the
+        placeholder vocabulary home-path forgives (`dev`, `user`, a name of one
+        or two letters) are words this tree writes on purpose —
+        `package-runner-test`, `/Users/dev` — and no person's name."""
+        self.checkout.write("words.txt", "package-runner-test runneradmin /Users/dev/x the user pi\n")
+        for name in ("runner", "runneradmin", "RUNNER", "dev", "Dev", "user", "pi"):
+            with self.subTest(account=name), account(name):
+                self.assertEqual(pii_scan.scan(self.checkout.root)[pii_scan.ACCOUNT_NAME], [])
+
+    def test_the_account_can_be_waived_at_its_site_and_vendor_text_is_not_read(self):
+        """The row keeps the table's two ways out: a waiver naming it, at the
+        site, and the third-party tree the rows about people leave unread."""
+        self.checkout.write(
+            "waived.txt",
+            "acme  # pii-scan: allow home-path — another row's waiver\n"
+            "\n"
+            f"acme  # pii-scan: allow {pii_scan.ACCOUNT_NAME} — why\n",
+        )
+        self.checkout.write("ui/vendor/lib.js", "/* by acme */\n")
+        with account("acme"):
+            hits = pii_scan.scan(self.checkout.root)[pii_scan.ACCOUNT_NAME]
+        self.assertEqual([(h["path"], h["line"]) for h in hits], [("waived.txt", 1)], hits)
+
+    def test_the_account_comes_from_the_password_database_not_the_environment(self):
+        """A child the window starts has carried `LOGNAME=root` (accounts.rs,
+        MEASURED 2026-09-20), and a gate or a measurement points `HOME` at a
+        folder of its own: on macOS and Linux the row asks the password database
+        for the uid's login name and home folder, each name once. Windows has
+        none; there they are `USERNAME` and `USERPROFILE`."""
+        decoy = {"USER": "root", "LOGNAME": "root", "HOME": "/tmp/gate-home", "USERNAME": "root", "USERPROFILE": "/tmp/gate-home"}
+        # pii-scan: allow home-path — a fictional account the reader is tested with
+        for home, expected in (("/Users/acme", ("acme",)), ("/Users/acme-old", ("acme", "acme-old"))):
+            record = types.SimpleNamespace(pw_name="acme", pw_dir=home)
+            database = types.SimpleNamespace(getpwuid=lambda uid, record=record: record)
+            with self.subTest(home=home), mock.patch.object(pii_scan, "pwd", database), \
+                    mock.patch.object(pii_scan.os, "getuid", return_value=501, create=True), \
+                    mock.patch.dict(os.environ, decoy):
+                self.assertEqual(pii_scan.machine_accounts(), expected)
+        # pii-scan: allow home-path — a fictional account the reader is tested with
+        windows = {"USERNAME": "acme", "USERPROFILE": "C:\\Users\\acme-old", "USER": "root", "HOME": "/tmp/gate-home"}
+        with mock.patch.object(pii_scan, "pwd", None), mock.patch.dict(os.environ, windows):
+            self.assertEqual(pii_scan.machine_accounts(), ("acme", "acme-old"))
 
 
 if __name__ == "__main__":

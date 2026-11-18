@@ -10,9 +10,11 @@ it, and it exits 1 while it holds a finding.
 
 Everything it knows is the table in `pii-rules.json`, beside this file: one row
 per category, each row carrying what it finds, what it forgives and which paths
-it does not read. Nothing else in this file names a value — a new exception is a
-new entry in that row's `allow`, never a branch somewhere further down.
-`--table` prints it.
+it does not read. Two rows are names, not shapes, and only this gate reads them,
+so they stand below the loader: the words this tree was cleared of (`BANISHED`,
+digests) and this machine's own account (read at each run, written nowhere).
+Nothing else in this file names a value — a new exception is a new entry in
+that row's `allow`, never a branch somewhere further down. `--table` prints it.
 
 A single site that cannot be rewritten says so where it stands, by carrying
 `pii-scan: allow <category> — <why>` on its own line or the line above it. A
@@ -27,10 +29,16 @@ Run: python3 tools/release/pii-scan.py   (stdlib only)
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
+
+try:
+    import pwd  # the password database; Windows has none
+except ImportError:
+    pwd = None
 
 # --- the table -------------------------------------------------------------
 #
@@ -92,6 +100,44 @@ BANISHED_SAYS = "a name this tree was cleared of once — a customer, a product,
 BANISHED_NAME = "banished-word"
 TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9]{2,31}")
 
+# --- the account this machine runs as ----------------------------------------
+#
+# The person a home directory names goes by the same name without the path: in
+# prose (`… and <name> as the uid's own account` — audit 29-04, which commit
+# 3e4ce4a97 took out by hand), as a fixture's user, in a branch prefix. No shape
+# row sees a bare name, and the account cannot join `BANISHED` either: a short
+# word's digest is undone by hashing every word of its length (17,576 lowercase
+# words of three letters), so its digest would publish it. So the row reads the
+# account from the machine at each run, holds it in memory only, and every
+# output says `ACCOUNT_SHOWN` where it stands.
+#
+# What it reads: the uid's login name and its home folder's name, from the
+# password database — not `USER`, `LOGNAME` or `HOME`: a child the window starts
+# has carried `LOGNAME=root` (accounts.rs, MEASURED 2026-09-20), and a gate or a
+# measurement points `HOME` at a folder of its own. Windows has no password
+# database; there the two are `USERNAME` and the last part of `USERPROFILE`.
+# git's `user.name` and `user.email` are not read: on the machine this tree is
+# published from they are the public repository's owner, which the updater
+# feed, the installer and LICENSE name on purpose (audit 12-39), and a whole
+# address is the email row's already.
+#
+# It finds the account as a whole word in any case: a letter or a digit on
+# either side makes another word (`<name>s`, `x<name>`, `<name>7`), while `-`,
+# `_`, `.`, `/`, `@`, a quote and a space only separate one.
+#
+# `allow` fully matches an account to forgive it, and a forgiven account is not
+# looked for at all, since every hit would be that same word: the CI runners'
+# accounts (`runner` on macOS, `runneradmin` on Windows, as the 2026-11-18
+# verify logs name their home folders), which this tree writes as a word
+# (`package-runner-test`). So is every name home-path forgives as a home folder
+# (`dev`, `user`, one or two letters): that is the placeholder vocabulary,
+# written on purpose and no person's.
+ACCOUNT_NAME = "account-name"
+ACCOUNT_SAYS = "this machine's own account — its login name, its home folder's name — as a whole word"
+ACCOUNT_ALLOW = re.compile(r"(?i)(?:runner|runneradmin)")
+ACCOUNT_SKIP = (("ui/vendor/", "third-party bundles name their own authors"),)
+ACCOUNT_SHOWN = "[this machine's account name]"
+
 # A site that cannot be rewritten waives itself, on its own line or the one above.
 WAIVER = re.compile(r"pii-scan:\s*allow\s+([a-z-]+)")
 
@@ -100,7 +146,7 @@ MAX_PRINTED = 40  # per category, so a first run stays readable
 
 def categories():
     """Every category the gate reports, in the order it reports them."""
-    return [rule["name"] for rule in RULES] + [BANISHED_NAME]
+    return [rule["name"] for rule in RULES] + [BANISHED_NAME, ACCOUNT_NAME]
 
 
 def rows():
@@ -125,6 +171,41 @@ def banished_words(text):
             continue
         if hashlib.sha256(word.lower().encode()).hexdigest() in digests:
             yield hit
+
+
+def machine_accounts():
+    """This machine's account names, each once, as the system spells them."""
+    if pwd is not None:
+        record = pwd.getpwuid(os.getuid())
+        said = (record.pw_name, PurePath(record.pw_dir).name)
+    else:
+        said = (os.environ.get("USERNAME", ""), PureWindowsPath(os.environ.get("USERPROFILE", "")).name)
+    names = []
+    for name in said:
+        if name and name.lower() not in {held.lower() for held in names}:
+            names.append(name)
+    return tuple(names)
+
+
+def account_forgiven(name):
+    """A CI runner's account, or a name home-path forgives as a home folder."""
+    home = next(rule for rule in RULES if rule["name"] == "home-path")
+    return bool(ACCOUNT_ALLOW.fullmatch(name) or re.fullmatch(home["allow"], f"Users/{name}", re.IGNORECASE))
+
+
+def account_finder(names):
+    """The row's `find` for these accounts, or None when it looks for none.
+
+    Each name opens its own alternative, and the check that no letter or digit
+    stands before it follows it, as a look-behind over the name itself: a
+    pattern that opens on a literal is one the regex engine scans for, which
+    took 0.4 s of CPU over this tree's 3,376 text files against 1.4 s for the
+    same matches with the look-behind first (2026-11-18)."""
+    looked_for = sorted({name for name in names if not account_forgiven(name)}, key=len, reverse=True)
+    if not looked_for:
+        return None
+    either = "|".join(f"{re.escape(name)}(?<![A-Za-z0-9]{re.escape(name)})" for name in looked_for)
+    return re.compile(rf"(?:{either})(?![A-Za-z0-9])", re.IGNORECASE)
 
 
 def tracked(root: Path):
@@ -156,6 +237,7 @@ def scan(root: Path):
     spans lines is one finding reported at the line it opens on.
     """
     table = list(rows())
+    account = account_finder(machine_accounts())
     found = {name: [] for name in categories()}
     for name in tracked(root):
         try:
@@ -164,7 +246,7 @@ def scan(root: Path):
             continue
         lines = None
 
-        def keep(category, hit):
+        def keep(category, hit, shown=None):
             """One finding, unless the site it stands on waives it."""
             nonlocal lines
             number = text.count("\n", 0, hit.start()) + 1
@@ -172,8 +254,9 @@ def scan(root: Path):
                 lines = text.splitlines()
             if _waived(lines, number, category):
                 return
-            said = hit.group(0)
-            shown = said if len(said) <= 60 else said[:57] + "…"
+            if shown is None:
+                said = hit.group(0)
+                shown = said if len(said) <= 60 else said[:57] + "…"
             found[category].append(
                 {"path": name, "line": number, "text": shown.replace("\n", "\\n")}
             )
@@ -187,6 +270,9 @@ def scan(root: Path):
                 keep(category, hit)
         for hit in banished_words(text):
             keep(BANISHED_NAME, hit)
+        if account is not None and not any(name.startswith(prefix) for prefix, _why in ACCOUNT_SKIP):
+            for hit in account.finditer(text):
+                keep(ACCOUNT_NAME, hit, shown=ACCOUNT_SHOWN)
     return found
 
 
@@ -201,6 +287,15 @@ def table_text():
             out.append(f"  skip  {prefix} — {why}")
     out.append(f"{BANISHED_NAME}: {BANISHED_SAYS}")
     out.append(f"  find  {TOKEN.pattern}, hashed and matched against {len(BANISHED)} digest(s)")
+    out.append(f"{ACCOUNT_NAME}: {ACCOUNT_SAYS}")
+    out.append(
+        "  find  the uid's login name and home folder's name from the password database "
+        "(USERNAME and USERPROFILE on Windows), read at each run and printed nowhere, "
+        "as a whole word in any case"
+    )
+    out.append(f"  allow {ACCOUNT_ALLOW.pattern}, and every name home-path forgives as a home folder")
+    for prefix, why in ACCOUNT_SKIP:
+        out.append(f"  skip  {prefix} — {why}")
     out.append(f"waiver: {WAIVER.pattern} on the finding's line or the one above it")
     return "\n".join(out)
 
