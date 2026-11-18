@@ -6,7 +6,9 @@ calls the functions. Nothing here reaches the network or the lane's state —
 every function takes text or paths and returns text.
 
   latest      the Tauri v2 updater feed:
-              {version, notes, pub_date, platforms{<platform>{signature, url}}}
+              {version, notes, pub_date, platforms{<platform>{signature, url}}} —
+              one --platform/--sig-file/--url triple per platform, in the order given
+              (darwin-aarch64, then windows-x86_64 when the lane built the installer)
   section     the CHANGELOG.md body under `## [<version>] — …` (the release notes)
   fingerprint the minisign key id of a public key — the .pub box text, or
               tauri's base64 of it as tauri.conf.json plugins.updater.pubkey carries
@@ -131,9 +133,9 @@ def main(argv):
     p.add_argument("--version", required=True)
     p.add_argument("--notes-file", required=True)
     p.add_argument("--pub-date", required=True)
-    p.add_argument("--platform", required=True)
-    p.add_argument("--sig-file", required=True)
-    p.add_argument("--url", required=True)
+    p.add_argument("--platform", required=True, action="append")
+    p.add_argument("--sig-file", required=True, action="append")
+    p.add_argument("--url", required=True, action="append")
     p = sub.add_parser("section")
     p.add_argument("--changelog", required=True)
     p.add_argument("--version", required=True)
@@ -154,9 +156,16 @@ def main(argv):
     a = ap.parse_args(argv)
 
     if a.cmd == "latest":
+        if not len(a.platform) == len(a.sig_file) == len(a.url):
+            sys.stderr.write("latest: one --sig-file and one --url per --platform\n")
+            return 2
+        if len(set(a.platform)) != len(a.platform):
+            sys.stderr.write(f"latest: a platform given twice: {a.platform}\n")
+            return 2
         notes = Path(a.notes_file).read_text()
-        signature = Path(a.sig_file).read_text().strip()
-        sys.stdout.write(latest_json(a.version, notes, a.pub_date, {a.platform: {"signature": signature, "url": a.url}}))
+        platforms = {platform: {"signature": Path(sig).read_text().strip(), "url": url}
+                     for platform, sig, url in zip(a.platform, a.sig_file, a.url)}
+        sys.stdout.write(latest_json(a.version, notes, a.pub_date, platforms))
         return 0
     if a.cmd == "section":
         path = Path(a.changelog)
