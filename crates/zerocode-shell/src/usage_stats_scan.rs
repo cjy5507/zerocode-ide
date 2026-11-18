@@ -75,7 +75,7 @@ pub fn transcript_roots(config_root: &Path) -> Vec<PathBuf> {
             roots.push(projects);
         }
     };
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::person_home::person_home() {
         consider(home.join(".claude"));
     }
     if let Ok(set) = std::env::var(zerocode_core::account::CONFIG_DIR_VAR) {
@@ -235,7 +235,7 @@ pub fn codex_roots(config_root: &Path) -> Vec<PathBuf> {
             roots.push(sessions);
         }
     };
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::person_home::person_home() {
         consider(home.join(".codex"));
     }
     if let Ok(set) = std::env::var("CODEX_HOME") {

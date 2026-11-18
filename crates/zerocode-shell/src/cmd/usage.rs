@@ -53,7 +53,7 @@ pub(crate) async fn codex_token_usage(
     let projects = known_project_roots(&state);
     let local_data_root = state.local_data_root().to_path_buf();
     tauri::async_runtime::spawn_blocking(move || {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::person_home::person_home();
         let mut places = usage_places::Places::new(workspace_roots(projects));
         // A rollout at rest is read once: what the scan takes of it is kept.
         let digests = token_scan::Digests::under(&local_data_root);

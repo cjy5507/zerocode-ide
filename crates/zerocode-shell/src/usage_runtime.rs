@@ -965,7 +965,7 @@ pub(super) fn scan_claude_usage_now(config_root: &Path, doors: &dyn SelectedDoor
     let road = UsageRoad::Terminal { oauth: Some(oauth) };
     // Spawned in the home directory, deliberately not the checkout: the scan
     // must not trip a project trust prompt it then has to answer.
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::person_home::person_home();
     // And as the SELECTED account. This scan is the number the status bar
     // shows, so a scan that ignores the picker is a picker that visibly does
     // nothing — which is exactly how it was reported ("계정 체인지를 해도
@@ -1138,7 +1138,7 @@ pub(super) fn scan_codex_usage_now(config_root: &Path) -> Scanned {
     // read" and "this could not be read" look identical in a status bar and
     // mean opposite things to the person deciding whether to report a bug.
     let home = codex_accounts::active_home(config_root)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")));
+        .or_else(|| crate::person_home::person_home().map(|home| home.join(".codex")));
     if !home
         .as_deref()
         .is_some_and(|home| home.join(zerocode_core::codex_account::AUTH_FILE).exists())
@@ -1207,7 +1207,7 @@ pub(super) fn scan_codex_usage_now(config_root: &Path) -> Scanned {
     // In the home directory rather than the checkout, for the same reason the
     // Claude scan is: a scan must not trip a project trust prompt it then has
     // to answer.
-    let cwd = std::env::var_os("HOME").map(PathBuf::from);
+    let cwd = crate::person_home::person_home();
     let mut pty = match PtyLane::spawn(
         "codex",
         &[],
