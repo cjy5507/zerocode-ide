@@ -118,8 +118,10 @@ fn the_plugins_are_registered_in_the_backend_and_granted_to_no_webview() {
 /// §2.3, §3: the five commands are registered; the swap of a prepared bundle
 /// happens in `relaunch_window` — the one restart road — right before the
 /// restart and nowhere else; the plugin's own `install` (which deletes the
-/// running app's directory) is never called; and the judgement the commands
-/// act on is `update_runtime`'s pure functions, not a second one at the edge.
+/// running app's directory on macOS) is called only on Windows, on that same
+/// road, where it runs the NSIS installer (t-113717); and the judgement the
+/// commands act on is `update_runtime`'s pure functions, not a second one at
+/// the edge.
 #[test]
 fn the_five_commands_are_registered_and_the_swap_is_the_restart_roads_alone() {
     let main = strip_rust_comments(include_str!("../../src/main.rs"));
@@ -145,6 +147,16 @@ fn the_five_commands_are_registered_and_the_swap_is_the_restart_roads_alone() {
         swap < restart,
         "the swap comes right before the restart:\n{road}"
     );
+    // Windows has no bundle to swap (t-113717): its staged installer is
+    // handed to the plugin on the same road, after the swap site and before
+    // the restart, compiled for Windows alone.
+    let handed = road
+        .find("cmd::update::run_staged_installer(")
+        .expect("relaunch_window hands Windows' staged installer over");
+    assert!(
+        swap < handed && handed < restart && road[swap..handed].contains("#[cfg(windows)]"),
+        "Windows' installer is handed over between the swap and the restart, on Windows alone:\n{road}"
+    );
     assert_eq!(
         backend.matches("update_store::swap_in(").count(),
         1,
@@ -158,9 +170,28 @@ fn the_five_commands_are_registered_and_the_swap_is_the_restart_roads_alone() {
                 before
             }),
     );
+    // The plugin's own `install` deletes the running bundle on macOS, so there
+    // it is never the road; on Windows it is how an NSIS update runs
+    // (t-113717) — in one place, the restart road's `run_staged_installer`,
+    // compiled for Windows alone.
     assert!(
-        !commands.contains(".install(") && !commands.contains("download_and_install("),
-        "the plugin's install is never the road — it deletes the running bundle"
+        !commands.contains("download_and_install("),
+        "the download is the window's road and the install the restart's"
+    );
+    assert_eq!(
+        commands.matches(".install(").count(),
+        1,
+        "the plugin's install is called in one place"
+    );
+    assert!(
+        block_after(&commands, "pub(crate) fn run_staged_installer(")
+            .contains("update.install(bytes)"),
+        "that place is Windows' restart road"
+    );
+    assert!(
+        include_str!("../../src/cmd/update.rs")
+            .contains("#[cfg(windows)]\npub(crate) fn run_staged_installer("),
+        "and it is compiled for Windows alone: macOS never reaches the plugin's install"
     );
     for judgement in [
         "feed::dev_build(",

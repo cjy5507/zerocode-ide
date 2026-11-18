@@ -733,7 +733,18 @@ pub(crate) fn update_dir() -> Option<PathBuf> {
 /// The verified archive's name on disk, beside the cache: the lane's asset
 /// name without the arch (one machine downloads one arch).
 pub(crate) fn archive_file_name(version: &str) -> String {
-    format!("{ASSET_PREFIX}{version}.app.tar.gz")
+    archive_file_name_for(version, cfg!(windows))
+}
+
+/// [`archive_file_name`] for either platform: Windows downloads the NSIS
+/// installer itself (`ZeroCode_<version>_x64-setup.exe` on the release, t-113717),
+/// which the restart hands to the plugin to run.
+pub(crate) fn archive_file_name_for(version: &str, windows: bool) -> String {
+    if windows {
+        format!("{ASSET_PREFIX}{version}-setup.exe")
+    } else {
+        format!("{ASSET_PREFIX}{version}.app.tar.gz")
+    }
 }
 
 // ---- the bundle (design §2.3 내려받기) --------------------------------------
@@ -1335,6 +1346,12 @@ mod tests {
         assert!(asset_is_ours(
             "https://x.test/ZeroCode_1.3.0_x64.app.tar.gz?token=1"
         ));
+        assert!(
+            asset_is_ours(
+                "https://github.com/cjy5507/zerocode/releases/download/v1.3.0/ZeroCode_1.3.0_x64-setup.exe"
+            ),
+            "the Windows installer the lane publishes keeps tauri's name (t-113717)"
+        );
         assert!(!asset_is_ours(
             "https://github.com/cjy5507/zerocode/releases/download/v1.2.7/zo-v1.2.7-aarch64-apple-darwin"
         ));
@@ -1463,7 +1480,19 @@ mod tests {
         };
         assert!(!cache_is_fresh(&torn, 1_000_000_000_000));
         assert!(update_dir_under(Path::new("/h")).ends_with(".local/share/zerocode/update"));
-        assert_eq!(archive_file_name("1.3.0"), "ZeroCode_1.3.0.app.tar.gz");
+        assert_eq!(
+            archive_file_name_for("1.3.0", false),
+            "ZeroCode_1.3.0.app.tar.gz"
+        );
+        assert_eq!(
+            archive_file_name_for("1.3.0", true),
+            "ZeroCode_1.3.0-setup.exe",
+            "Windows keeps the installer it downloaded, to run at the restart"
+        );
+        assert_eq!(
+            archive_file_name("1.3.0"),
+            archive_file_name_for("1.3.0", cfg!(windows))
+        );
     }
 
     /// The bundle beside which the update is staged, and the two names the

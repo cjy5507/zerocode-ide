@@ -1261,6 +1261,13 @@ pub(crate) fn relaunch_window(app: AppHandle, door: Option<String>) {
         let _ = update_store::swap_in(&bundle, &staged);
     }
     let _ = crash::clean_exit(app.state::<AppState>().local_data_root());
+    // Windows hands a staged update to its installer here, which ends this
+    // process and starts the new version itself (t-113717); it comes back
+    // only when nothing was staged or the installer could not start.
+    #[cfg(windows)]
+    if let Some(held) = app.try_state::<cmd::update::UpdateState>() {
+        cmd::update::run_staged_installer(&held, &root);
+    }
     app.restart();
 }
 

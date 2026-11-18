@@ -88,6 +88,49 @@ impl UpdateState {
     pub(crate) fn note_zo(&self, report: zo_companion::Report) {
         self.lock().zo = Some(report);
     }
+
+    /// Windows' staged update (t-113717): the plugin's announced update and
+    /// the verified installer 「준비」 holds — what [`run_staged_installer`]
+    /// hands over at the restart.
+    #[cfg(windows)]
+    fn installer(&self) -> Option<(tauri_plugin_updater::Update, PathBuf)> {
+        let held = self.lock();
+        Some((held.announced.clone()?, held.staged.as_ref()?.1.clone()))
+    }
+}
+
+/// Windows' half of the restart (t-113717): the verified installer 「준비」
+/// holds goes to the plugin, which runs it (passive, `/UPDATE`, the app
+/// started again after it) and ends this process once the app's own cleanup
+/// ran (`on_before_exit`). Returns only when nothing is staged or the
+/// installer could not be read or started: the window then restarts as it
+/// is, as a failed swap does on macOS.
+#[cfg(windows)]
+pub(crate) fn run_staged_installer(held: &UpdateState, root: &std::path::Path) {
+    let Some((update, installer)) = held.installer() else {
+        return;
+    };
+    let bytes = match std::fs::read(&installer) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            crate::note_window_event(
+                root,
+                &format!(
+                    "update: the staged installer {} could not be read: {error}",
+                    installer.display()
+                ),
+            );
+            return;
+        }
+    };
+    // The plugin runs a copy of its own, as macOS keeps no archive past 「준비」.
+    let _ = std::fs::remove_file(&installer);
+    if let Err(error) = update.install(bytes) {
+        crate::note_window_event(
+            root,
+            &format!("update: the installer did not start: {error}"),
+        );
+    }
 }
 
 /// What every update command answers: the phase, what the window does next
@@ -388,6 +431,18 @@ pub(crate) fn update_install(
         .archive
         .clone()
         .ok_or_else(|| "nothing downloaded — download first".to_string())?;
+    // Windows has no bundle to unpack beside (t-113717): the verified
+    // installer itself is what the restart hands to the plugin
+    // (`run_staged_installer`), so 「준비」 only holds it.
+    if cfg!(windows) {
+        {
+            let mut guard = held.lock();
+            guard.archive = None;
+            guard.staged = Some((version.clone(), archive));
+            guard.phase = Phase::Ready { version };
+        }
+        return Ok(report(&state, &held, None));
+    }
     let bundle = std::env::current_exe()
         .ok()
         .and_then(|exe| feed::app_bundle_of(&exe));
