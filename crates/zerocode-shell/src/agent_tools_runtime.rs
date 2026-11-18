@@ -1286,7 +1286,11 @@ impl agent_teams::Host for TeamWindow {
     fn prepare_launch(&self, command: &str) -> Option<hooks::PreparedLaunch> {
         let agent = split_launch_agent(command)?;
         let state = self.app.state::<AppState>();
-        Some(hooks::prepare_launch(state.local_data_root(), agent))
+        Some(hooks::prepare_launch(
+            state.config_root(),
+            state.local_data_root(),
+            agent,
+        ))
     }
 
     /// Who the agent in this terminal is, asked by the ledger road under its
@@ -1740,8 +1744,11 @@ impl agent_teams::Host for TeamWindow {
             if readiness.auth == AuthState::Unauthorized {
                 readiness_runtime::invalidate(agent);
             }
-            let (agent_env, launch_lock) =
-                hooks::agent_launch_env_with_lock(state.local_data_root(), agent);
+            let (agent_env, launch_lock) = hooks::agent_launch_env_with_lock(
+                state.config_root(),
+                state.local_data_root(),
+                agent,
+            );
             env.extend(agent_env);
             _auth_launch_lock = launch_lock;
         }

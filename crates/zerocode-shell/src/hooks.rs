@@ -1639,8 +1639,12 @@ fn grant_codex_trust(
 /// Empty unless the mirror lane is the live one, and the answer comes from
 /// reading the mirror rather than from remembering the install: a home whose
 /// hook was removed by hand must stop being used, not keep being pointed at.
-pub fn agent_launch_env(local_data_root: &Path, agent: &str) -> Vec<(String, String)> {
-    agent_launch_env_with_lock(local_data_root, agent).0
+pub fn agent_launch_env(
+    config_root: &Path,
+    local_data_root: &Path,
+    agent: &str,
+) -> Vec<(String, String)> {
+    agent_launch_env_with_lock(config_root, local_data_root, agent).0
 }
 
 /// Prepare a named agent's environment and, for Codex's mirror lane, return
@@ -1649,7 +1653,11 @@ pub fn agent_launch_env(local_data_root: &Path, agent: &str) -> Vec<(String, Str
 /// Most launch roads only need the environment and keep the old helper above.
 /// A teammate is different: its caller is one of several blocking team tasks,
 /// so it carries this guard until `PtyLane::spawn` has created the child.
-pub fn agent_launch_env_with_lock(local_data_root: &Path, agent: &str) -> LaunchEnv {
+pub fn agent_launch_env_with_lock(
+    config_root: &Path,
+    local_data_root: &Path,
+    agent: &str,
+) -> LaunchEnv {
     // What this thread prepared before it took the team table is handed over
     // as it was prepared (t-51380): its lease was waited for where waiting
     // is safe.
@@ -1657,7 +1665,7 @@ pub fn agent_launch_env_with_lock(local_data_root: &Path, agent: &str) -> Launch
         return prepared;
     }
     let home = crate::person_home::person_home();
-    launch_env_for(local_data_root, agent, home.as_deref())
+    launch_env_for(config_root, local_data_root, agent, home.as_deref())
 }
 
 /// A launch's environment and the Codex mirror lease that must live through
@@ -1669,8 +1677,14 @@ pub type LaunchEnv = (
 
 /// The door's own work: the agent's home with its lease, and a zo launch's
 /// router keys.
-fn launch_env_for(local_data_root: &Path, agent: &str, system_home: Option<&Path>) -> LaunchEnv {
-    let (mut env, lock) = agent_launch_env_with_lock_inner(local_data_root, agent, system_home);
+fn launch_env_for(
+    config_root: &Path,
+    local_data_root: &Path,
+    agent: &str,
+    system_home: Option<&Path>,
+) -> LaunchEnv {
+    let (mut env, lock) =
+        agent_launch_env_with_lock_inner(config_root, local_data_root, agent, system_home);
     env.extend(router_env_for(
         agent,
         crate::api_routers::router_launch_env_from_disk,
@@ -1705,18 +1719,23 @@ impl Drop for PreparedLaunch {
 /// team does. So a caller about to take the table prepares here first, where
 /// nothing waits on this thread, and the door hands what was prepared to the
 /// split that asks for the same agent on this thread.
-pub(crate) fn prepare_launch(local_data_root: &Path, agent: &str) -> PreparedLaunch {
+pub(crate) fn prepare_launch(
+    config_root: &Path,
+    local_data_root: &Path,
+    agent: &str,
+) -> PreparedLaunch {
     let home = crate::person_home::person_home();
-    prepare_launch_inner(local_data_root, agent, home.as_deref())
+    prepare_launch_inner(config_root, local_data_root, agent, home.as_deref())
 }
 
 /// [`prepare_launch`] with the machine's home named rather than read.
 fn prepare_launch_inner(
+    config_root: &Path,
     local_data_root: &Path,
     agent: &str,
     system_home: Option<&Path>,
 ) -> PreparedLaunch {
-    let launch = launch_env_for(local_data_root, agent, system_home);
+    let launch = launch_env_for(config_root, local_data_root, agent, system_home);
     PREPARED_LAUNCH.with(|slot| *slot.borrow_mut() = Some((agent.to_string(), launch)));
     PreparedLaunch(())
 }
@@ -1767,6 +1786,7 @@ fn router_env_for(
 /// [`agent_launch_env_with_lock`] with the machine's home named rather than
 /// read, so a test can hand it one that is not the developer's.
 fn agent_launch_env_with_lock_inner(
+    config_root: &Path,
     local_data_root: &Path,
     agent: &str,
     system_home: Option<&Path>,
@@ -1782,6 +1802,7 @@ fn agent_launch_env_with_lock_inner(
     let Some(home) = system_home else {
         return (Vec::new(), None);
     };
+    let _ = config_root;
     let runtime = crate::codex_accounts::runtime_home(local_data_root);
     let mut record = crate::codex_accounts::read_runtime_record(&runtime);
     if record.account.is_none() {
@@ -1824,14 +1845,16 @@ fn agent_launch_env_with_lock_inner(
 /// Best effort belongs to the caller, matching launch preparation: a failed
 /// auth sync must never keep a terminal from closing.
 pub fn sync_agent_auth(
+    config_root: &Path,
     local_data_root: &Path,
     agent: &str,
 ) -> std::io::Result<Option<zerocode_hookd::codex_runtime_auth::AuthSync>> {
     let home = crate::person_home::person_home();
-    sync_agent_auth_inner(local_data_root, agent, home.as_deref())
+    sync_agent_auth_inner(config_root, local_data_root, agent, home.as_deref())
 }
 
 fn sync_agent_auth_inner(
+    config_root: &Path,
     local_data_root: &Path,
     agent: &str,
     system_home: Option<&Path>,
@@ -1844,6 +1867,7 @@ fn sync_agent_auth_inner(
     let Some(home) = system_home else {
         return Ok(None);
     };
+    let _ = config_root;
     let runtime = crate::codex_accounts::runtime_home(local_data_root);
     let record = crate::codex_accounts::read_runtime_record(&runtime);
     let store = crate::codex_accounts::read_store(local_data_root);
@@ -3060,6 +3084,31 @@ mod tests {
         .expect("account store");
     }
 
+    /// The account store is the config root's, not the data root's. The two
+    /// are one folder on macOS only: on Windows (Roaming and Local app data)
+    /// and on Linux (`~/.config` and `~/.local/share`) a launch that read the
+    /// store off the data root found none, so the Codex account the person
+    /// picked never reached the pane (TR-16, audit 29-01).
+    #[test]
+    fn a_launch_reads_the_codex_account_store_off_the_config_root_when_the_roots_are_apart() {
+        let config = tempfile::tempdir().expect("config root");
+        let data = tempfile::tempdir().expect("local data root");
+        let system_home = tempfile::tempdir().expect("system home");
+        select_a_managed_codex_account(config.path());
+
+        let (env, lock) = agent_launch_env_with_lock_inner(
+            config.path(),
+            data.path(),
+            "codex",
+            Some(system_home.path()),
+        );
+        drop(lock);
+        assert!(
+            env.iter().any(|(key, _)| key == "CODEX_HOME"),
+            "the picked Codex account did not reach the launch: {env:?}"
+        );
+    }
+
     /// A zo pane is an OpenAI consumer, so it gets the same mirror `CODEX_HOME`
     /// (and the same launch lock) a Codex pane gets. Before the provider table
     /// this door answered `agent == "codex"` and handed zo nothing, which is
@@ -3070,8 +3119,12 @@ mod tests {
         let system_home = tempfile::tempdir().expect("system home");
         select_a_managed_codex_account(root.path());
 
-        let (zo, zo_lock) =
-            agent_launch_env_with_lock_inner(root.path(), "zo", Some(system_home.path()));
+        let (zo, zo_lock) = agent_launch_env_with_lock_inner(
+            root.path(),
+            root.path(),
+            "zo",
+            Some(system_home.path()),
+        );
         assert!(
             zo_lock.is_some(),
             "a zo launch took the mirror without its launch lock"
@@ -3080,8 +3133,12 @@ mod tests {
         // holder at a time, and a launch that kept it would sit on the next
         // one forever.
         drop(zo_lock);
-        let (codex, codex_lock) =
-            agent_launch_env_with_lock_inner(root.path(), "codex", Some(system_home.path()));
+        let (codex, codex_lock) = agent_launch_env_with_lock_inner(
+            root.path(),
+            root.path(),
+            "codex",
+            Some(system_home.path()),
+        );
         drop(codex_lock);
 
         let home_of = |env: &[(String, String)]| {
@@ -3121,7 +3178,7 @@ mod tests {
             let (root, home) = (root.path().to_path_buf(), system_home.path().to_path_buf());
             let (lease, ended) = (std::sync::Arc::clone(&lease), ended.clone());
             std::thread::spawn(move || {
-                let (_, taken) = agent_launch_env_with_lock_inner(&root, "zo", Some(&home));
+                let (_, taken) = agent_launch_env_with_lock_inner(&root, &root, "zo", Some(&home));
                 let took = taken.is_some();
                 *lease.lock().unwrap_or_else(|held| held.into_inner()) = taken;
                 let _ = leased.send(took);
@@ -3143,7 +3200,7 @@ mod tests {
                 let table = crate::agent_teams::teams();
                 let _ = tabled.send(());
                 let _ = crate::agent_teams::under_team_table(|| {
-                    agent_launch_env_with_lock_inner(&root, "zo", Some(&home))
+                    agent_launch_env_with_lock_inner(&root, &root, "zo", Some(&home))
                 });
                 drop(table);
                 let _ = ended.send("split");
@@ -3191,9 +3248,10 @@ mod tests {
             .is_ok()
         };
 
-        let prepared = prepare_launch_inner(root.path(), "codex", Some(system_home.path()));
+        let prepared =
+            prepare_launch_inner(root.path(), root.path(), "codex", Some(system_home.path()));
         let (env, lease) = crate::agent_teams::under_team_table(|| {
-            agent_launch_env_with_lock(root.path(), "codex")
+            agent_launch_env_with_lock(root.path(), root.path(), "codex")
         });
         assert!(
             lease.is_some(),
@@ -3208,7 +3266,8 @@ mod tests {
         drop(prepared);
         assert!(free_now(), "the split's lease outlived the split");
 
-        let untaken = prepare_launch_inner(root.path(), "codex", Some(system_home.path()));
+        let untaken =
+            prepare_launch_inner(root.path(), root.path(), "codex", Some(system_home.path()));
         assert!(!free_now(), "a prepared launch did not hold its lease");
         drop(untaken);
         assert!(free_now(), "a prepared launch nobody took kept the lease");
@@ -3223,8 +3282,12 @@ mod tests {
         let system_home = tempfile::tempdir().expect("system home");
 
         for agent in ["claude", "opencode", ""] {
-            let (env, lock) =
-                agent_launch_env_with_lock_inner(root.path(), agent, Some(system_home.path()));
+            let (env, lock) = agent_launch_env_with_lock_inner(
+                root.path(),
+                root.path(),
+                agent,
+                Some(system_home.path()),
+            );
             assert!(env.is_empty(), "{agent} was handed {env:?}");
             assert!(lock.is_none(), "{agent} took the mirror launch lock");
         }
@@ -3237,7 +3300,7 @@ mod tests {
     fn a_launch_without_a_home_is_handed_nothing() {
         let root = tempfile::tempdir().expect("local data root");
 
-        let (env, lock) = agent_launch_env_with_lock_inner(root.path(), "zo", None);
+        let (env, lock) = agent_launch_env_with_lock_inner(root.path(), root.path(), "zo", None);
 
         assert!(env.is_empty(), "{env:?}");
         assert!(lock.is_none());
@@ -3252,8 +3315,9 @@ mod tests {
         let system_home = tempfile::tempdir().expect("system home");
 
         for agent in ["claude", "opencode"] {
-            let synced = sync_agent_auth_inner(root.path(), agent, Some(system_home.path()))
-                .expect("best-effort sync");
+            let synced =
+                sync_agent_auth_inner(root.path(), root.path(), agent, Some(system_home.path()))
+                    .expect("best-effort sync");
             assert!(synced.is_none(), "{agent} reached the codex auth sync");
         }
     }
@@ -3304,7 +3368,7 @@ mod tests {
         std::fs::write(runtime.join(crate::codex_accounts::AUTH_FILE), &older)
             .expect("a stale runtime copy");
 
-        sync_agent_auth_inner(root.path(), "zo", Some(system_home.path()))
+        sync_agent_auth_inner(root.path(), root.path(), "zo", Some(system_home.path()))
             .expect("best-effort sync");
 
         assert_eq!(
@@ -3356,8 +3420,9 @@ mod tests {
         )
         .expect("rotated runtime auth");
 
-        let synced = sync_agent_auth_inner(root.path(), "zo", Some(system_home.path()))
-            .expect("best-effort sync");
+        let synced =
+            sync_agent_auth_inner(root.path(), root.path(), "zo", Some(system_home.path()))
+                .expect("best-effort sync");
 
         assert!(synced.is_some(), "zo was not treated as an OpenAI consumer");
         assert_eq!(

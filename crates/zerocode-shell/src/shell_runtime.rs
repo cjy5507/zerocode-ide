@@ -3082,7 +3082,7 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     // stay best effort just as they do during launch.
     let agent = { state.agent_terms().get(&term).copied() };
     if let Some(agent) = agent {
-        let _ = hooks::sync_agent_auth(state.local_data_root(), agent);
+        let _ = hooks::sync_agent_auth(state.config_root(), state.local_data_root(), agent);
     }
     // A closed terminal is not a native or PTY send target any more. Removing
     // the Codex route drops its generation lease immediately; process cleanup

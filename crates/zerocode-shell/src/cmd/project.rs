@@ -522,7 +522,11 @@ pub(crate) async fn open_lane(
     let worker = supervisor.clone();
     // The launch env every zo road takes — the routers connected in settings
     // ride it — through the one door, not an empty list of its own.
-    let env = crate::hooks::agent_launch_env(state.local_data_root(), AgentKind::Zo.slug());
+    let env = crate::hooks::agent_launch_env(
+        state.config_root(),
+        state.local_data_root(),
+        AgentKind::Zo.slug(),
+    );
     let OpenedZoPane {
         pty,
         addr,

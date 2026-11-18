@@ -788,8 +788,11 @@ pub(super) fn start_automation(
     };
     env.extend(account_env);
     if let Some(driving) = driving {
-        let (agent_env, auth_launch_lock) =
-            hooks::agent_launch_env_with_lock(state.local_data_root(), driving);
+        let (agent_env, auth_launch_lock) = hooks::agent_launch_env_with_lock(
+            state.config_root(),
+            state.local_data_root(),
+            driving,
+        );
         env.extend(agent_env);
         _auth_launch_lock = auth_launch_lock;
     }

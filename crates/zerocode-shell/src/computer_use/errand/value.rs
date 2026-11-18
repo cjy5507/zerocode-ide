@@ -115,6 +115,7 @@ impl Setup {
             Road::CodexCli => {
                 let mut env = crate::usage_runtime::account_env_for(&self.config_root, "codex")?;
                 env.extend(crate::hooks::agent_launch_env(
+                    &self.config_root,
                     &self.local_data_root,
                     "codex",
                 ));

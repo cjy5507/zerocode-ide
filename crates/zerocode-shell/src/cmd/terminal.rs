@@ -1912,7 +1912,7 @@ pub(crate) fn launch_agent_tab(
     // mirror lane reads its hook from a home this window made; without this the
     // hook is written where nothing looks for it.
     let (agent_env, _auth_launch_lock) =
-        hooks::agent_launch_env_with_lock(state.local_data_root(), spec.id);
+        hooks::agent_launch_env_with_lock(state.config_root(), state.local_data_root(), spec.id);
     env.extend(agent_env);
     // And how it REPORTS BACK. The pane key names which tab an event belongs
     // to; the launch token says which occupant of that tab sent it, so a

@@ -1091,6 +1091,7 @@ pub(crate) fn resume_vault_session(
     let mut env = hooks::pty_env(&hooks::pane_key_of(term), Some(&launch_token), &root, None);
     env.extend(account_env_for(state.config_root(), &session.agent)?);
     env.extend(hooks::agent_launch_env(
+        state.config_root(),
         state.local_data_root(),
         &session.agent,
     ));

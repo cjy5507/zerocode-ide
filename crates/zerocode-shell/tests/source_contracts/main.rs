@@ -18801,7 +18801,7 @@ mod tests {
         for contributor in [
             "Some(driving) => account_env_for(state.config_root(), driving)",
             "env.extend(account_env);",
-            "hooks::agent_launch_env_with_lock(state.local_data_root(), driving)",
+            "hooks::agent_launch_env_with_lock(\n            state.config_root(),\n            state.local_data_root(),\n            driving,\n        )",
             "env.extend(agent_env);",
             "_auth_launch_lock = auth_launch_lock;",
             "None => shell_account_env(state.config_root())",
@@ -36094,7 +36094,7 @@ mod tests {
         let backend = shipped_backend();
         let closing = block_after(backend, "fn forget_term_state(");
         let sync_at = closing
-            .find("hooks::sync_agent_auth(state.local_data_root(), agent)")
+            .find("hooks::sync_agent_auth(state.config_root(), state.local_data_root(), agent)")
             .expect("terminal cleanup no longer attempts auth sync");
         let forget_at = closing
             .find("state.agent_terms().remove(&term);")

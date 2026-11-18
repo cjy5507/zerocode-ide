@@ -2519,7 +2519,7 @@ impl WakeWindow for ResumeDoor<'_> {
         ));
         env.extend(account_env_for(state.config_root(), agent)?);
         let (agent_env, _auth_launch_lock) =
-            hooks::agent_launch_env_with_lock(state.local_data_root(), agent);
+            hooks::agent_launch_env_with_lock(state.config_root(), state.local_data_root(), agent);
         env.extend(agent_env);
         // Where the conversation was born outranks the account and the
         // launch both: it is the only home it can be found in (t-94962).

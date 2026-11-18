@@ -538,6 +538,7 @@ fn one_shot_env(state: &AppState, road: OneShotRoad) -> Result<Vec<(String, Stri
         OneShotRoad::CodexExec => {
             let mut env = crate::usage_runtime::account_env_for(state.config_root(), "codex")?;
             env.extend(crate::hooks::agent_launch_env(
+                state.config_root(),
                 state.local_data_root(),
                 "codex",
             ));
