@@ -97,6 +97,10 @@ final class RequestContext {
     /// Whether this request goes through the input the person is using, so that
     /// what it sends first asks them first.
     var asksThePerson = false
+    /// Whether this request is an act of the app's own accessibility in the
+    /// app the person has in front: it takes no device of theirs, and a
+    /// refusal for their input says so.
+    var inTheirApp = false
 
     /// The last moment that can still say nothing was sent: any window the verb
     /// raises on its way here is up by now, and a stop that came meanwhile stands.
@@ -2113,7 +2117,9 @@ final class Provider {
         }
         let modifiers = try KeyMap.parseModifiers(params["modifiers"]?.string)
         if params["background"]?.bool == true {
-            try admitBackgroundTarget(snapshot)
+            // In front of the person only the app's own press goes: decided below, once the control is known.
+            let inFront = try backgroundTargetIsInFront(snapshot)
+            let plainLeftClick = modifiers.isEmpty && count == 1 && button == .left
             if let requested = params["ocrPin"] {
                 try validatePixelTarget(requested, snapshot: snapshot)
             }
@@ -2123,12 +2129,18 @@ final class Provider {
             let requestedPoint = try index == nil ? coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot) : nil
             let found = try index.map { try element(snapshot, $0) }
                 ?? requestedPoint.flatMap { backgroundClickRecord(at: $0, in: snapshot) }
+            if inFront {
+                let textEntry = found.map { MarkPin.textEntryRoles.contains($0.role) } ?? false
+                let own = found.flatMap { BackgroundInput.clickAction(actions: $0.actions, textEntry: textEntry, plainLeftClick: plainLeftClick) }
+                guard BackgroundInput.pressesInFront(action: own, textEntry: textEntry) else { throw backgroundTargetInUse() }
+                try standBackInTheirApp()
+            }
             let record = try found.map { try inView($0, in: snapshot) }
             if let record,
                let action = BackgroundInput.clickAction(
                    actions: record.actions,
                    textEntry: MarkPin.textEntryRoles.contains(record.role),
-                   plainLeftClick: modifiers.isEmpty && count == 1 && button == .left
+                   plainLeftClick: plainLeftClick
                ) {
                 try requireReachable(record, in: snapshot, at: requestedPoint)
                 var shown: PointerArrival?
@@ -2291,7 +2303,14 @@ final class Provider {
         } catch let covered as ProviderError {
             guard requestedPoint == nil, let list = scrollAreaHiding(record, in: snapshot) else { throw covered }
             if record.actions.contains("AXScrollToVisible") {
-                _ = AXUIElementPerformAction(record.element, "AXScrollToVisible" as CFString)
+                if RequestContext.current.inTheirApp {
+                    // In the app the person has in front this scroll moves what
+                    // they are reading: an act of its own, asked about and
+                    // counted as sent, so nothing is said to be undone after it.
+                    guard try performActionChecked(record.element, "AXScrollToVisible") else { throw covered }
+                } else {
+                    _ = AXUIElementPerformAction(record.element, "AXScrollToVisible" as CFString)
+                }
                 if let frame = reader(frameOf: record.element, windowBounds: snapshot.windowBounds),
                    (try? requireOnTop(record.standing(actions: record.actions, frame: frame), in: snapshot, background: true)) != nil {
                     return
@@ -2446,8 +2465,9 @@ final class Provider {
     private func setValue(params: [String: JSONValue]) throws -> [String: Any] {
         let snapshot = try currentSnapshot(params: params)
         let found = try element(snapshot, try requiredInteger(params, "elementIndex"))
-        if params["background"]?.bool == true {
-            try admitBackgroundTarget(snapshot)
+        if params["background"]?.bool == true, try backgroundTargetIsInFront(snapshot) {
+            // A value written is the field's own: no key, no focus, no pointer of the person's.
+            try standBackInTheirApp()
         }
         // What refuses the write refuses it before anything is scrolled.
         let expected = try requiredStringAllowingEmpty(params, "value")
@@ -2769,9 +2789,35 @@ final class Provider {
     }
 
     private func admitBackgroundTarget(_ snapshot: Snapshot) throws {
-        guard BackgroundInput.admitsTarget(snapshot.app.pid, foreground: NSWorkspace.shared.frontmostApplication?.processIdentifier) else {
-            throw ProviderError.coded("requires_foreground", "background input pauses while the person is using the target app or the foreground app is unknown")
+        guard try !backgroundTargetIsInFront(snapshot) else { throw backgroundTargetInUse() }
+    }
+
+    private func backgroundTargetInUse() -> ProviderError {
+        .coded("requires_foreground", "background input pauses while the person is using the target app or the foreground app is unknown")
+    }
+
+    /// Whether a background act's app is the one the person has in front. An
+    /// unknown front app is refused, as it always was.
+    private func backgroundTargetIsInFront(_ snapshot: Snapshot) throws -> Bool {
+        switch BackgroundInput.admission(target: snapshot.app.pid, foreground: NSWorkspace.shared.frontmostApplication?.processIdentifier) {
+        case .behind: return false
+        case .inFront: return true
+        case nil: throw backgroundTargetInUse()
         }
+    }
+
+    /// An act of the app's own accessibility in the app the person has in
+    /// front — a press that is no field's, a value written — takes no pointer,
+    /// no key and no focus of theirs, so it needs no desktop: only that they
+    /// are not in the middle of something. It is refused at once when they
+    /// are, before anything is scrolled or pressed, and is looked at once more
+    /// just before it goes (`askThePersonIfFirst`). It waits for nobody here:
+    /// what it presses by was read for this act, and must not grow old.
+    private func standBackInTheirApp() throws {
+        let context = RequestContext.current
+        context.inTheirApp = true
+        try DesktopBorrowHost.refuseIfThePersonIsBusy()
+        context.asksThePerson = true
     }
 
     private func requireBackgroundWindow(_ snapshot: Snapshot, at point: CGPoint? = nil) throws {
@@ -8641,14 +8687,8 @@ enum DesktopBorrowHost {
     }
 
     private static func refuse(_ busy: DesktopBorrow.Busy?) throws {
-        switch busy {
-        case nil:
-            return
-        case .typing:
-            throw ProviderError.coded(DesktopBorrow.Busy.typing.rawValue, "the person is typing, and this act needs the keyboard or the pointer; nothing was done. Try again shortly")
-        case .pointing:
-            throw ProviderError.coded(DesktopBorrow.Busy.pointing.rawValue, "the person is using the mouse, and this act needs the keyboard or the pointer; nothing was done. Try again shortly")
-        }
+        guard let busy else { return }
+        throw ProviderError.coded(busy.rawValue, DesktopBorrow.refusalWords(busy, inTheirApp: RequestContext.current.inTheirApp))
     }
 
     static func gaveBack(agent: String?) {

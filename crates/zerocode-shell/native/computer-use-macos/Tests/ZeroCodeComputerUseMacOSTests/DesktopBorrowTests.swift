@@ -75,6 +75,25 @@ final class DesktopBorrowTests: XCTestCase {
         XCTAssertEqual(DesktopBorrow.busy(reading(pointer: 0.3, ownPointer: 0.01)), .pointing)
     }
 
+    /// The desktop's refusal says which device the act needs; an act in the
+    /// app the person has in front needs neither, and says where they are.
+    func testARefusalSaysWhatTheActNeedsOrWhereThePersonIs() {
+        XCTAssertEqual(
+            DesktopBorrow.refusalWords(.typing, inTheirApp: false),
+            "the person is typing, and this act needs the keyboard or the pointer; nothing was done. Try again shortly"
+        )
+        XCTAssertEqual(
+            DesktopBorrow.refusalWords(.pointing, inTheirApp: false),
+            "the person is using the mouse, and this act needs the keyboard or the pointer; nothing was done. Try again shortly"
+        )
+        for busy in [DesktopBorrow.Busy.typing, .pointing] {
+            let words = DesktopBorrow.refusalWords(busy, inTheirApp: true)
+            XCTAssertFalse(words.contains("needs the keyboard or the pointer"), words)
+            XCTAssertTrue(words.contains("this act's app in front of them"), words)
+            XCTAssertTrue(words.contains("nothing was done"), words)
+        }
+    }
+
     // MARK: Waiting
 
     private func wait(_ readings: @escaping (Double) -> DesktopBorrow.Reading) -> (DesktopBorrow.Busy?, Double) {

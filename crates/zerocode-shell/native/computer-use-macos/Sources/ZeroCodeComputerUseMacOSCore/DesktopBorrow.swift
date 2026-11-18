@@ -27,6 +27,16 @@ public enum DesktopBorrow {
         case pointing = "person_pointing"
     }
 
+    /// What a refusal for the person's input says. An act in the app they
+    /// have in front takes neither the pointer nor the keys: it stands back
+    /// only because they are in the middle of something there.
+    public static func refusalWords(_ busy: Busy, inTheirApp: Bool) -> String {
+        let doing = busy == .typing ? "typing" : "using the mouse"
+        return inTheirApp
+            ? "the person is \(doing) with this act's app in front of them; nothing was done. Try again shortly"
+            : "the person is \(doing), and this act needs the keyboard or the pointer; nothing was done. Try again shortly"
+    }
+
     /// What the system says about the input devices right now, and when this
     /// helper last posted through them. Ages are seconds; nil is never posted.
     public struct Reading: Equatable {

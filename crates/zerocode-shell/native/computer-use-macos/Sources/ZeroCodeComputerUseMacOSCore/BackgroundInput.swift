@@ -48,8 +48,31 @@ public enum BackgroundInput {
     }
 
     public static func admitsTarget(_ target: Int32, foreground: Int32?) -> Bool {
-        guard target > 0, let foreground, foreground > 0 else { return false }
-        return target != foreground
+        admission(target: target, foreground: foreground) == .behind
+    }
+
+    /// Where a background act's target app stands.
+    public enum Admission: Equatable {
+        /// Behind another app: nothing of the person's is touched.
+        case behind
+        /// The app the person has in front. Only an act that takes nothing of
+        /// theirs goes, and only once they pause (`pressesInFront`).
+        case inFront
+    }
+
+    /// Nil when it cannot be told: an unknown front app is the person's.
+    public static func admission(target: Int32, foreground: Int32?) -> Admission? {
+        guard target > 0, let foreground, foreground > 0 else { return nil }
+        return target == foreground ? .inFront : .behind
+    }
+
+    /// Whether a press may go to the app the person has in front without
+    /// their desktop: only the app's own action (`clickAction`) on a control
+    /// that is no text field. A field's press asks for its keyboard focus,
+    /// and the person's would move; a press with no action of the app's own
+    /// becomes a click in their key window.
+    public static func pressesInFront(action: String?, textEntry: Bool) -> Bool {
+        action != nil && !textEntry
     }
 
     /// The roles whose controls a web view comes to offer a press on.
