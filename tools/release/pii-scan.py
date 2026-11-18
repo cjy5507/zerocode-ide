@@ -85,8 +85,8 @@ RULES = load_rules()
 # regex can know, so this table carries the SHA-256 of each lowercased word
 # instead. The gate refuses the word without this file ever spelling it, and
 # the digest is one-way, so publishing the table publishes nothing. `length`
-# comes first because only a token of that length is ever hashed, which keeps
-# the pass to about two seconds over the whole tree.
+# comes first because only a token of that length is ever hashed, and a scan
+# hashes each distinct word once (`banished_reader`).
 #
 # It matches a whole word — a name bounded by `/`, `@`, a quote or a space,
 # which is how a path, a host or a project name carries one. A name welded
@@ -173,6 +173,156 @@ def banished_words(text):
             yield hit
 
 
+def banished_reader():
+    """For one scan: whether a text holds a word `banished_words` would yield.
+
+    The words recur across the tree — 2,983,966 of the hashed lengths, 13,117 of
+    them distinct (t-115074) — so each distinct word is hashed once a scan, and a
+    file's words are held against those already read as sets. Only a file that
+    holds one is read again by `banished_words`, for the offsets."""
+    lengths = {length for length, _digest in BANISHED}
+    digests = {digest for _length, digest in BANISHED}
+    clean, dirty = set(), set()
+
+    def holds(text):
+        words = set(TOKEN.findall(text))
+        words -= clean
+        for word in words - dirty:
+            if len(word) in lengths and hashlib.sha256(word.lower().encode()).hexdigest() in digests:
+                dirty.add(word)
+            else:
+                clean.add(word)
+        return not words.isdisjoint(dirty)
+
+    return holds
+
+
+# --- what a row cannot match without ------------------------------------------
+#
+# Most tracked files hold no `Users`, no `@` and no key's prefix, and a row's
+# `find` cannot match a text that lacks every string all its matches hold. So the
+# scan reads those strings off each row's own `find` — off the parse the regex
+# engine itself compiles, so `pii-rules.json` stays the one place a shape is
+# written — and does not search a text that holds none of them (t-115140). A
+# part the reading cannot be sure of — a class, a part read without case, an
+# operator it does not know — counts as any text at all, which only ever loosens
+# a set, never makes it wrong; a row it cannot read at all is searched in every
+# file, as before.
+NEEDLES_HELD = 32  # most strings one set may carry: past that its passes over a text cost more than they save
+NEEDLE_SELECTIVE = 3  # characters past which a needle rules out most text, so fewer needles beat longer ones
+_EMPTY = frozenset({""})
+_ANY = (None, _EMPTY, _EMPTY, None)  # what a part that may match any text says: nothing
+
+
+def _joined(heads, tails):
+    """Every head followed by every tail, or None when that is more than a set may carry."""
+    if len(heads) * len(tails) > NEEDLES_HELD:
+        return None
+    return frozenset(head + tail for head in heads for tail in tails)
+
+
+def _tightest(*sets):
+    """Of sets every match holds a member of, the one that rules out the most text
+    for the fewest passes (the first of equals); None when none rules out any."""
+
+    def rank(held):
+        shortest = min(len(needle) for needle in held)
+        return (min(shortest, NEEDLE_SELECTIVE), -len(held), shortest)
+
+    usable = [held for held in sets if held and "" not in held]
+    return max(usable, key=rank) if usable else None
+
+
+def _exactly(strings, *held):
+    """A part that matches these strings and no other."""
+    return (strings, strings, strings, _tightest(strings, *held))
+
+
+def _then(first, second):
+    """One part followed by another."""
+    first_exact, first_starts, first_ends, first_holds = first
+    second_exact, second_starts, second_ends, second_holds = second
+    if first_exact is not None and second_exact is not None:
+        both = _joined(first_exact, second_exact)
+        if both is not None:
+            return _exactly(both, first_holds, second_holds)
+    starts = (_joined(first_exact, second_starts) if first_exact is not None else None) or first_starts
+    ends = (_joined(first_ends, second_exact) if second_exact is not None else None) or second_ends
+    across = _joined(first_ends, second_starts)
+    return (None, starts, ends, _tightest(first_holds, second_holds, across, starts, ends))
+
+
+def _either(shapes):
+    """Alternatives: what every one of them holds."""
+    each = [shape[3] for shape in shapes]
+    holds = None if None in each else frozenset().union(*each)
+    if holds is not None and len(holds) > NEEDLES_HELD:
+        holds = None
+    exacts = [shape[0] for shape in shapes]
+    if None not in exacts:
+        strings = frozenset().union(*exacts)
+        if len(strings) <= NEEDLES_HELD:
+            return _exactly(strings, holds)
+    starts = frozenset().union(*(shape[1] for shape in shapes))
+    ends = frozenset().union(*(shape[2] for shape in shapes))
+    starts = _EMPTY if "" in starts or len(starts) > NEEDLES_HELD else starts
+    ends = _EMPTY if "" in ends or len(ends) > NEEDLES_HELD else ends
+    return (None, starts, ends, _tightest(holds, starts, ends))
+
+
+def _part(parser, op, value):
+    """What one node of a parsed pattern matches, as `_shape` says it."""
+    if op is parser.LITERAL:
+        return _exactly(frozenset({chr(value)}))
+    if op is parser.AT or op is parser.ASSERT or op is parser.ASSERT_NOT:
+        return _exactly(_EMPTY)  # a boundary or a look-around matches no character
+    if op is parser.SUBPATTERN:
+        _group, add_flags, _del_flags, inner = value
+        return _ANY if add_flags & re.IGNORECASE else _shape(parser, inner)
+    if op is parser.BRANCH:
+        return _either([_shape(parser, alternative) for alternative in value[1]])
+    if op is parser.MAX_REPEAT or op is parser.MIN_REPEAT or op is getattr(parser, "POSSESSIVE_REPEAT", None):
+        low, high, inner = value
+        exact, starts, ends, holds = _shape(parser, inner)
+        if low == high == 1:
+            return (exact, starts, ends, holds)
+        if low == 0 and high == 1 and exact is not None:
+            return _exactly(exact | _EMPTY)
+        if low >= 1:
+            return (None, starts, ends, holds)
+    return _ANY
+
+
+def _shape(parser, items):
+    """What every match of a parsed sequence holds, as (exact, starts, ends, holds):
+    `exact` every string it matches when they are few, else None; every match
+    starts with one of `starts` and ends with one of `ends` ({""}: unknown); and
+    holds one of `holds` (None: unknown)."""
+    shape = _exactly(_EMPTY)
+    for op, value in items:
+        shape = _then(shape, _part(parser, op, value))
+    return shape
+
+
+def needles(find):
+    """Strings one of which stands in every match of `find`, a compiled row
+    pattern; None when no such strings are known, and every text is searched."""
+    if find.flags & re.IGNORECASE:
+        return None
+    try:
+        try:
+            from re import _parser as parser  # the engine's own parser, Python 3.11 and later
+        except ImportError:
+            import sre_parse as parser  # the same parser before 3.11
+        holds = _shape(parser, parser.parse(find.pattern, find.flags))[3]
+    except Exception:  # a parser that reads otherwise: no shortcut, every text is searched
+        return None
+    if not holds:
+        return None
+    # A needle that holds another adds nothing: the shorter one is found wherever it is.
+    return tuple(sorted(needle for needle in holds if not any(other != needle and other in needle for other in holds)))
+
+
 def machine_accounts():
     """This machine's account names, each once, as the system spells them."""
     if pwd is not None:
@@ -236,8 +386,9 @@ def scan(root: Path):
     search runs over the whole text, not line by line, so a PEM body that
     spans lines is one finding reported at the line it opens on.
     """
-    table = list(rows())
+    table = [(category, find, allow, skip, needles(find)) for category, _says, find, allow, skip in rows()]
     account = account_finder(machine_accounts())
+    holds_banished = banished_reader()
     found = {name: [] for name in categories()}
     for name in tracked(root):
         try:
@@ -263,15 +414,18 @@ def scan(root: Path):
                 {"path": name, "line": number, "text": shown.replace("\n", "\\n")}
             )
 
-        for category, _says, find, allow, skip in table:
+        for category, find, allow, skip, held in table:
             if any(name.startswith(prefix) for prefix, _why in skip):
                 continue
+            if held is not None and not any(needle in text for needle in held):
+                continue  # every match of `find` holds one of these, and this text holds none
             for hit in find.finditer(text):
                 if allow.fullmatch(hit.group(0)):
                     continue
                 keep(category, hit)
-        for hit in banished_words(text):
-            keep(BANISHED_NAME, hit)
+        if holds_banished(text):
+            for hit in banished_words(text):
+                keep(BANISHED_NAME, hit)
         if account is not None and not any(name.startswith(prefix) for prefix, _why in ACCOUNT_SKIP):
             for hit in account.finditer(text):
                 keep(ACCOUNT_NAME, hit, shown=ACCOUNT_SHOWN)

@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 import os
 import re
@@ -638,6 +639,84 @@ class Corpus(unittest.TestCase):
             [(category, hit["path"], hit["line"], hit["text"]) for category in pii_scan.categories() for hit in found[category]],
             self.expected,
         )
+
+    def test_the_two_shortcuts_find_what_the_plain_loop_finds(self):
+        """`needles` lets a row pass over a text that holds none of them, and
+        `banished_reader` lets a file's words pass the hash once seen. With both
+        off the scan is the loop it was before them — every row over every text,
+        every word hashed — and the corpus reads the same either way, while the
+        banished offsets are looked for only in the two files that hold one."""
+        with mock.patch.object(pii_scan, "banished_words", wraps=pii_scan.banished_words) as read:
+            fast = self.scan()
+        self.assertEqual(read.call_count, 2, "only plain.txt and words.txt hold a banished word")
+        with mock.patch.object(pii_scan, "needles", return_value=None), \
+                mock.patch.object(pii_scan, "banished_reader", return_value=lambda text: True):
+            plain = self.scan()
+        self.assertEqual(fast, plain)
+
+
+# Small patterns over a four-letter alphabet, one for each thing `needles` must
+# read right, with what each exercises. Two of them can be read for nothing.
+NEEDLE_PATTERNS = (
+    (r"ab|ac", "a prefix the parser hoists out of the alternatives"),
+    (r"a(?:bc)?-", "an optional group"),
+    (r"(?:ab){2,3}c", "a bounded repeat"),
+    (r"[ab]c|-[bc]", "a class on either side"),
+    (r"\bab\b", "word boundaries"),
+    (r"a(?=b)|c(?!a)-", "look-aheads"),
+    (r"(?<=a)bc|(?<!a)b-", "look-behinds"),
+    (r"(a|b)\1c", "a back-reference"),
+    (r"(?:ab|)c", "an empty alternative inside a group"),
+    (r"a+?b", "a lazy repeat"),
+    (r"(?:a-|b)+c", "a repeated branch"),
+    (r"-?a{0,2}b", "parts that may match nothing"),
+    (r"a.c", "any character"),
+    (r"(?i:a)b", "a part read without case"),
+    (r"(?:(?:ab|ba)c)+-", "nested groups"),
+    (r"ab|", "an empty alternative: it matches nothing, so nothing is required"),
+    (r"(?i)ab", "a pattern read without case: no needle is safe"),
+)
+NEEDLE_PATTERNS_UNREAD = {r"ab|", r"(?i)ab"}
+
+
+class Needles(unittest.TestCase):
+    """`needles`, held to the regex engine: a wrong needle would leave a value unread."""
+
+    def test_every_match_the_engine_makes_holds_a_needle(self):
+        """Every string over `abc-` up to seven long, every start in it: each match
+        the engine makes holds one of its pattern's needles, or the pattern has none."""
+        texts = ["".join(chars) for length in range(8) for chars in itertools.product("abc-", repeat=length)]
+        for pattern, why in NEEDLE_PATTERNS:
+            find = re.compile(pattern)
+            held = pii_scan.needles(find)
+            with self.subTest(pattern=pattern, why=why):
+                if pattern in NEEDLE_PATTERNS_UNREAD:
+                    self.assertIsNone(held)
+                    continue
+                self.assertTrue(held, "read for nothing: every text would be searched")
+                matched = 0
+                for text in texts:
+                    for start in range(len(text) + 1):
+                        hit = find.match(text, start)
+                        if hit is None:
+                            continue
+                        matched += 1
+                        self.assertTrue(any(needle in hit.group(0) for needle in held), (text, start, hit.group(0), held))
+                self.assertTrue(matched, "the alphabet never matches it, so it proves nothing")
+
+    def test_every_shipped_row_is_read_for_its_needles(self):
+        """Every row of the table gets needles on this interpreter — a row without
+        any is searched in every file, the 12 s of CPU this gate used to take — and
+        every match of a row in the corpus holds one of them."""
+        files, _expected = corpus()
+        for category, _says, find, _allow, _skip in pii_scan.rows():
+            held = pii_scan.needles(find)
+            with self.subTest(category=category):
+                self.assertTrue(held, "read for nothing: every file is searched for this row")
+                matches = [hit.group(0) for text in files.values() for hit in find.finditer(text)]
+                self.assertTrue(matches)
+                for match in matches:
+                    self.assertTrue(any(needle in match for needle in held), (match, held))
 
 
 if __name__ == "__main__":
