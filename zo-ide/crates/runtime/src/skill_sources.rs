@@ -255,9 +255,10 @@ fn zo_scan_roots(cwd: &Path) -> Vec<(SkillSource, PathBuf)> {
         .collect()
 }
 
-/// Resolve a provider home from its test override, else `$HOME/<subdir>`.
-/// Returns `None` when the override is explicitly empty or `HOME` is unset, so
-/// provider discovery contributes nothing rather than guessing.
+/// Resolve a provider home from its test override, else `<home>/<subdir>` under
+/// the person's home ([`core_types::paths::user_home`]). Returns `None` when the
+/// override is explicitly empty or no home resolves, so provider discovery
+/// contributes nothing rather than guessing.
 fn provider_home(override_env: &str, subdir: &str) -> Option<PathBuf> {
     if let Some(value) = std::env::var_os(override_env) {
         if value.is_empty() {
@@ -265,8 +266,7 @@ fn provider_home(override_env: &str, subdir: &str) -> Option<PathBuf> {
         }
         return Some(PathBuf::from(value));
     }
-    let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
-    Some(PathBuf::from(home).join(subdir))
+    Some(core_types::paths::user_home()?.join(subdir))
 }
 
 /// Enabled Claude scan roots: the direct user root plus each enabled plugin's

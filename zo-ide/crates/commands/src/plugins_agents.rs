@@ -476,15 +476,12 @@ pub(crate) fn discover_definition_roots(
         }
     }
 
-    if let Some(home) = env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        if !home.as_os_str().is_empty() {
-            push_unique_root(
-                &mut roots,
-                DefinitionSource::UserZo,
-                home.join(".zo").join(leaf),
-            );
-        }
+    if let Some(home) = core_types::paths::user_home() {
+        push_unique_root(
+            &mut roots,
+            DefinitionSource::UserZo,
+            home.join(".zo").join(leaf),
+        );
     }
 
     roots
@@ -495,7 +492,7 @@ pub(crate) fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
         cwd,
         env::var_os("ZO_CONFIG_HOME").map(PathBuf::from),
         env::var_os("ZO_HOME").map(PathBuf::from),
-        env::var_os("HOME").map(PathBuf::from),
+        core_types::paths::user_home(),
     )
 }
 
