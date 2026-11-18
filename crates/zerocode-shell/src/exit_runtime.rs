@@ -393,6 +393,9 @@ fn lock(cell: &Mutex<Exiting>) -> std::sync::MutexGuard<'_, Exiting> {
 /// tauri's `Exit`: all three reach the goodbye, and the person closed the
 /// window.
 pub(crate) fn begin(road: ExitRoad) -> ExitRoad {
+    // From here the main thread waits on purpose, and the hang watch is told
+    // so before any of it (t-113326).
+    crate::hang_watchdog::on_the_way_out();
     first(&mut exiting().road, road)
 }
 

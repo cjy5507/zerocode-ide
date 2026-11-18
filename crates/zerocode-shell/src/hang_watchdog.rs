@@ -38,11 +38,22 @@ static READY: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static FIRST_MS: AtomicU64 = AtomicU64::new(Limits::DEFAULT.first_ms);
 static SECOND_MS: AtomicU64 = AtomicU64::new(Limits::DEFAULT.second_ms);
+/// Whether the window is on its way out (`on_the_way_out`).
+static LEAVING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn configure(limits: Limits) {
     ENABLED.store(limits.watchdog, Relaxed);
     FIRST_MS.store(limits.first_ms, Relaxed);
     SECOND_MS.store(limits.second_ms, Relaxed);
+}
+
+/// The window is on its way out: a road out was named (`exit_runtime::begin`).
+/// From here the main thread waits on purpose, and within bounds — for the
+/// ledger's goodbye, for the panes' agents to end — and the watch takes those
+/// waits for what they are (t-113326). Atomic, never a lock the main thread
+/// could hold: the watch must not stand behind what it watches.
+pub(crate) fn on_the_way_out() {
+    LEAVING.store(true, Relaxed);
 }
 
 pub(crate) fn ready() {
@@ -98,6 +109,8 @@ struct Beat {
     /// open ([`MainLoop::holds`]). Asked only on a beat that finds the last
     /// ping unanswered.
     held: bool,
+    /// Whether the window is on its way out ([`on_the_way_out`]).
+    leaving: bool,
 }
 
 /// Why the observer cannot testify for the time just past.
@@ -111,6 +124,9 @@ enum Absence {
     Slept(u64),
     /// No screen was awake: a lid-closed DarkWake, or a display asleep.
     Unseen,
+    /// A sleep long enough for the resume watch to take the beat instead of
+    /// the watch (`Monitor::resumed`): the watch starts over after it.
+    Resumed,
 }
 
 impl fmt::Display for Absence {
@@ -119,6 +135,7 @@ impl fmt::Display for Absence {
             Self::Late(ms) => write!(f, "observer_late_ms={ms}"),
             Self::Slept(ms) => write!(f, "slept_ms={ms}"),
             Self::Unseen => f.write_str("no_screen_awake"),
+            Self::Resumed => f.write_str("resumed_after_sleep"),
         }
     }
 }
@@ -188,6 +205,23 @@ impl Watch {
     }
 
     fn step(&mut self, beat: Beat, answered: Option<u64>, limits: Limits) -> Tick {
+        // On the way out the main thread waits on purpose, each wait with a
+        // bound of its own: the ledger's goodbye (`exit_runtime::
+        // LEDGER_PATIENCE`, 1.5 s), the phone link's mapping (`phone_link::
+        // tailscale::EXIT_CLI_TIMEOUT`, 3 s), the panes' note (`pane_leftovers
+        // ::WRITE_PATIENCE`). A close on 2026-11-17 16:23 was filed as a
+        // 2,019 ms hang inside its exit event. Those waits are not a hang, so
+        // the first threshold is the second there. A stall past it is still
+        // one: on 2026-09-25 a quit stood twenty seconds in the embedded
+        // browser's shutdown, and only this watch said where.
+        let limits = if beat.leaving {
+            Limits {
+                first_ms: limits.second_ms,
+                ..limits
+            }
+        } else {
+            limits
+        };
         let mut tick = Tick::default();
         let now = beat.now;
         let absence = self.absence(beat, limits);
@@ -214,9 +248,11 @@ impl Watch {
                 && held.said
             {
                 // A hold already on the log is not left open there: its line
-                // would stand with no end, as if the menu were still up.
+                // would stand with no end, as if the menu were still up. An
+                // answer that came on this beat is where it ended, as for
+                // the hang withdrawn beside it.
                 tick.held_voided = Some(Voided {
-                    ms: now.saturating_sub(held.from),
+                    ms: answered.unwrap_or(now).saturating_sub(held.from),
                     why,
                 });
             }
@@ -531,13 +567,24 @@ impl Monitor {
         limits: Limits,
         look: impl FnOnce() -> Option<Option<Served>>,
     ) -> (Beaten, Vec<ActorLine>) {
+        // A sleep the resume watch took ends a hold already said as an
+        // absence does: one line, and no end said later for a ping answered
+        // while nobody watched (t-113326).
+        let mut resumed = None;
         if !self.armed {
             let count = self.watch.count;
+            resumed = self.watch.held.filter(|held| held.said).map(|held| Voided {
+                ms: beat.now.saturating_sub(held.from),
+                why: Absence::Resumed,
+            });
             self.watch = Watch::new(beat.now);
             self.watch.count = count;
             self.armed = true;
         }
-        let beaten = beat_once(&mut self.watch, &self.answer, beat, limits);
+        let mut beaten = beat_once(&mut self.watch, &self.answer, beat, limits);
+        if let Some(voided) = resumed {
+            beaten.tick.held_voided.get_or_insert(voided);
+        }
         // The actor is judged on its own clock, whatever the watch's warm-up
         // or sleep judgment says; only a watch turned off judges nothing. It
         // forgets the request it said, but not when it last said one, so a
@@ -576,6 +623,7 @@ impl Monitor {
             nap: u64::try_from(nap.as_millis()).unwrap_or(u64::MAX),
             seen: screens_awake(),
             held: main_loop.as_ref().is_some_and(MainLoop::holds),
+            leaving: LEAVING.load(Relaxed),
         };
         let (
             Beaten {
@@ -919,6 +967,7 @@ mod tests {
             nap: Limits::DEFAULT.ping_ms,
             seen: true,
             held: false,
+            leaving: false,
         }
     }
 
@@ -1457,6 +1506,133 @@ mod tests {
         assert!(tick.ping, "the watch pings again once it has warmed up");
     }
 
+    /// A beat on the way out.
+    fn leaving(now: u64) -> Beat {
+        Beat {
+            leaving: true,
+            ..beat(now)
+        }
+    }
+
+    /// 2026-11-17 16:23 (t-113326): a close waited 2.2 s for the panes'
+    /// agents to end, as it is told to, and the watch filed a 2,019 ms hang.
+    /// Before the way out the same unanswered 2.2 s is a hang at the first
+    /// threshold; on the way out it is the close's own wait and nothing is
+    /// filed; a stall past the second threshold there still is.
+    #[test]
+    fn the_way_out_waits_on_purpose_and_only_a_stall_past_the_second_threshold_is_filed() {
+        let limits = Limits::DEFAULT;
+        let sent = limits.warmup_ms;
+        let unanswered_for = |watch: &mut Watch, beat_at: fn(u64) -> Beat, ms: u64| {
+            assert!(watch.step(beat_at(sent), None, limits).ping);
+            let mut now = sent;
+            let mut filed = None;
+            while now < sent + ms {
+                now += limits.ping_ms;
+                filed = filed.or(watch.step(beat_at(now), None, limits).hang);
+            }
+            (now, filed)
+        };
+
+        let mut before = Watch::new(0);
+        assert_eq!(
+            unanswered_for(&mut before, beat, 2_200).1,
+            Some(limits.first_ms)
+        );
+
+        let mut closing = Watch::new(0);
+        let (now, filed) = unanswered_for(&mut closing, leaving, 2_200);
+        assert_eq!(filed, None);
+        let tick = closing.step(leaving(now + limits.ping_ms), Some(sent + 2_200), limits);
+        assert_eq!((tick.hang, tick.badge, tick.ended), (None, None, None));
+        assert_eq!(closing.count, 0, "the close's own wait is not counted");
+
+        let mut stalled = Watch::new(0);
+        let (_, filed) = unanswered_for(&mut stalled, leaving, limits.second_ms);
+        assert_eq!(filed, Some(limits.second_ms));
+        assert_eq!(stalled.count, 1);
+    }
+
+    /// The length a withdrawn hold says is to its ping's answer when the
+    /// answer came on the beat that withdrew it — as the hang withdrawn
+    /// beside it says — not to the beat (t-112585, its second finding).
+    #[test]
+    fn a_hold_withdrawn_on_the_beat_its_answer_came_counts_to_the_answer() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let mut now = sent;
+        while now < sent + 3_000 {
+            now += limits.ping_ms;
+            watch.step(held(now), None, limits);
+        }
+        let answered = now + 10;
+        now += limits.ping_ms * 3;
+        let late = Beat {
+            nap: limits.ping_ms * 3,
+            ..held(now)
+        };
+        assert_eq!(
+            watch.step(late, Some(answered), limits).held_voided,
+            Some(Voided {
+                ms: answered - sent,
+                why: Absence::Late(limits.ping_ms * 2),
+            })
+        );
+    }
+
+    /// A sleep of more than a minute is the resume watch's (`resumed`), and
+    /// the watch starts over after it. A hold it had already said ends there
+    /// with one withdrawn line, how far it had counted, and why — not left
+    /// open on the log (t-112585, its first finding). Nothing more is said
+    /// of it when the ping is answered after.
+    #[test]
+    fn a_hold_already_said_is_said_withdrawn_when_a_long_sleep_starts_the_watch_over() {
+        let limits = Limits::DEFAULT;
+        let mut monitor = Monitor::new();
+        let mut now = 0;
+        let mut sent = None;
+        // Warm up on a main thread that answers at once, then stop answering.
+        while sent.is_none() {
+            now += limits.ping_ms;
+            let (beaten, _) = monitor.judge(beat(now), limits, || Some(None));
+            if beaten.queue {
+                if now > limits.warmup_ms * 2 {
+                    sent = Some(now);
+                } else {
+                    monitor.answer.answer(now);
+                }
+            }
+        }
+        let sent = sent.expect("a ping went out");
+        let mut said = Vec::new();
+        while now < sent + 3_000 {
+            now += limits.ping_ms;
+            let (beaten, _) = monitor.judge(held(now), limits, || Some(None));
+            said.extend(beaten.tick.held);
+        }
+        assert_eq!(said, [limits.first_ms]);
+        monitor.resumed();
+        // Uptime does not run while the machine sleeps.
+        now += limits.ping_ms;
+        let (beaten, _) = monitor.judge(beat(now), limits, || Some(None));
+        assert_eq!(
+            beaten.tick.held_voided,
+            Some(Voided {
+                ms: now - sent,
+                why: Absence::Resumed,
+            })
+        );
+        assert_eq!(Absence::Resumed.to_string(), "resumed_after_sleep");
+        monitor.answer.answer(now);
+        let (beaten, _) = monitor.judge(beat(now + limits.ping_ms), limits, || Some(None));
+        assert_eq!(
+            (beaten.tick.held_ended, beaten.tick.held_voided),
+            (None, None)
+        );
+    }
+
     /// Only a wait in AppKit's event-tracking mode is taken for the person's
     /// hold: a main thread at work, one waiting at the top of its loop and
     /// one in a modal panel's loop are judged as they were.
@@ -1685,6 +1861,7 @@ mod tests {
                 nap,
                 seen: true,
                 held: false,
+                leaving: false,
             };
             let (beaten, lines) = self.monitor.judge(beat, self.limits, || Some(serving));
             if beaten.queue {

@@ -74,6 +74,20 @@ fn crash_report_preserves_the_boot_pin_and_uses_existing_panic_and_resume_roads(
         beat.contains("held: main_loop.as_ref().is_some_and(MainLoop::holds)"),
         "the watchdog's beat no longer carries whether the main thread is held:\n{beat}"
     );
+    // t-113326: the beat says whether the window is on its way out, and the
+    // way out says so at the moment a road out is named — where the main
+    // thread begins to wait on purpose. No unit test passes through `tick()`
+    // or a real exit, so both ends are held here.
+    assert!(
+        beat.contains("leaving: LEAVING.load(Relaxed)"),
+        "the watchdog's beat no longer carries whether the window is on its way out:\n{beat}"
+    );
+    let exit = std::fs::read_to_string(src.join("exit_runtime.rs")).unwrap();
+    assert!(
+        super::support::block_after(&exit, "pub(crate) fn begin(road: ExitRoad) -> ExitRoad {")
+            .contains("crate::hang_watchdog::on_the_way_out();"),
+        "naming a road out no longer tells the hang watch the window is on its way out"
+    );
     assert!(
         watchdog.contains(
             "let unanswered = self.watch.pending.is_some() && self.answer.peek().is_none();"
