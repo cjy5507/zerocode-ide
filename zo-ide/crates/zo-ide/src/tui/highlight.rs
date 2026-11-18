@@ -108,7 +108,10 @@ fn test_seam_color_level(palette: Option<super::palette::TerminalPalette>) -> su
 
 /// Catppuccin Mocha, or Latte on a terminal whose ground is light — measured,
 /// or only said ([`Ground::Lightness`]) — or the active named theme's syntax
-/// theme when running in marks look at 256-colour or truecolour depth.
+/// theme when running in marks look at 256-colour or truecolour depth. The
+/// scope colours the footer and the table head borrow
+/// ([`foreground_style_for_scopes`]) are asked of it; code, of
+/// [`code_theme_for`].
 fn theme_for(ground: Ground, color_level: super::palette::ColorLevel) -> &'static Theme {
     let light = ground.is_light();
     let embedded = if use_named_syntax_theme(color_level) {
@@ -121,9 +124,25 @@ fn theme_for(ground: Ground, color_level: super::palette::ColorLevel) -> &'stati
     EXTRA_THEMES.get_or_init(two_face::theme::extra).get(embedded)
 }
 
+/// The syntax theme code is drawn in. A named theme that shows draws it in
+/// its own ([`theme_for`]). In the marks look everything else — `terminal`,
+/// and a named theme a 16-colour terminal cannot draw — draws it in ANSI,
+/// whose inks are the terminal's own sixteen colour slots: the code follows
+/// the terminal's theme as the rest of the screen does, so changing the
+/// window's theme changes zo's code too (the person, 2026-11-18: 「창 테마를
+/// 기준으로」). The codex look keeps codex's Catppuccin.
+fn code_theme_for(ground: Ground, color_level: super::palette::ColorLevel) -> &'static Theme {
+    if super::style::current().style == super::style::TuiStyle::Marks && !use_named_syntax_theme(color_level) {
+        return EXTRA_THEMES
+            .get_or_init(two_face::theme::extra)
+            .get(two_face::theme::EmbeddedThemeName::Ansi);
+    }
+    theme_for(ground, color_level)
+}
+
 fn theme() -> &'static Theme {
     let ground = super::ground::current();
-    theme_for(ground, production_color_level(ground.palette()))
+    code_theme_for(ground, production_color_level(ground.palette()))
 }
 
 // -- 안전 한계(원본 `Guardrail constants`) --------------------------------
@@ -338,7 +357,7 @@ fn highlight_to_line_spans(
     }
 
     let syntax = find_syntax(lang)?;
-    let mut highlighter = HighlightLines::new(syntax, theme_for(ground, color_level));
+    let mut highlighter = HighlightLines::new(syntax, code_theme_for(ground, color_level));
     let mut lines: Vec<Vec<Span>> = Vec::new();
 
     for line in LinesWithEndings::from(code) {

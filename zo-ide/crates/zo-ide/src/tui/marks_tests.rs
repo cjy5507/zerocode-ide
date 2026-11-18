@@ -1099,12 +1099,21 @@ fn marks_syntax_highlight_keeps_text_contrast_floor_on_light_palette() {
         return;
     }
     style::init(&Preferences::default());
+    // Catppuccin Latte's inks on a light palette: the theme of that name
+    // draws code in them, fitted where they fall short. (`terminal` drew them
+    // too until it drew code in the terminal's own slots, which the writer
+    // fits against the measured ground instead.)
+    let _ = super::theme::set(super::theme::find("catppuccin-latte").expect("catppuccin-latte"));
     let light = TerminalPalette::new((46, 52, 52), (255, 255, 255), ColorLevel::TrueColor);
     let Color::Rgb(bg_r, bg_g, bg_b) = code_background(light) else {
         panic!("code_background must return RGB");
     };
     let code = "fn main() {\n    let x = \"hi\"; // note\n    println!(\"{x}\");\n}\n";
     let lines = super::highlight::highlight_code_to_lines_for_palette(code, "rust", Some(light));
+    assert!(
+        lines.iter().flat_map(|line| &line.spans).any(|span| matches!(span.style.fg, Some(Color::Rgb(..)))),
+        "the check below has RGB inks to check"
+    );
     for line in &lines {
         for span in &line.spans {
             if let Some(Color::Rgb(r, g, b)) = span.style.fg {
@@ -1683,8 +1692,24 @@ fn syntax_theme_follows_the_named_theme() {
             .and_then(|span| span.style.fg)
     };
 
+    // `terminal` draws code in the terminal's own sixteen colours: every ink a
+    // slot, which the terminal paints from its own palette, so changing the
+    // window's theme changes the code too (the person, 2026-11-18: 「창 테마를
+    // 기준으로」). It drew Catppuccin Mocha's, which no theme change reached.
     let _ = super::theme::set(super::theme::Theme::terminal());
-    assert_eq!(keyword_color(), Some(Color::Rgb(203, 166, 247)));
+    let inks: Vec<Color> = super::highlight::highlight_code_to_lines_for_palette(
+        "fn main() { if true {} }\n",
+        "rust",
+        Some(dark),
+    )[0]
+        .spans
+        .iter()
+        .filter_map(|span| span.style.fg)
+        .collect();
+    assert!(
+        !inks.is_empty() && inks.iter().all(|ink| matches!(ink, Color::Base(_) | Color::Indexed(0..=15))),
+        "terminal draws code in the terminal's colour slots: {inks:?}"
+    );
 
     let _ = super::theme::set(super::theme::find("dracula").expect("dracula"));
     assert_eq!(keyword_color(), Some(Color::Rgb(255, 121, 198)));
@@ -2125,9 +2150,11 @@ fn with_only_the_lightness_known_no_band_is_drawn_and_no_depth_is_lowered() {
 
 /// `auto` on a terminal that did not answer, with no `COLORFGBG`: what was
 /// drawn before, byte for byte — the `terminal` theme's roles, colour slots
-/// and dim text, a code block in Catppuccin Mocha as codex drew it
-/// (`codex-tui-v0.149.1-codeblock.bin`), the footer's model and folder, and
-/// Dracula's roles and slots in Dracula's own colours.
+/// and dim text, the footer's model and folder, and Dracula's roles and slots
+/// in Dracula's own colours. A code block is no longer codex's Catppuccin
+/// Mocha (`codex-tui-v0.149.1-codeblock.bin`) here: the marks look draws it
+/// in the terminal's own sixteen colours, so the window's theme reaches it
+/// (the person, 2026-11-18: 「창 테마를 기준으로」).
 #[test]
 fn auto_with_no_answer_writes_todays_bytes() {
     use super::ansi::{write_spans, Color, Role, Span, Style};
@@ -2183,13 +2210,19 @@ fn auto_with_no_answer_writes_todays_bytes() {
             out
         })
         .collect();
-    assert_eq!(
-        code,
-        [
-            "\u{1b}[38;2;203;166;247;49mfn\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;137;180;250;49mmain\u{1b}[38;2;147;153;178;49m()\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;147;153;178;49m{",
-            "\u{1b}[38;2;205;214;244;49m    \u{1b}[38;2;203;166;247;49mlet\u{1b}[38;2;205;214;244;49m name \u{1b}[38;2;148;226;213;49m=\u{1b}[38;2;205;214;244;49m \u{1b}[38;2;166;227;161;49m\"zo\"\u{1b}[38;2;147;153;178;49m;",
-        ]
+    // Every colour the code is written in is one of the terminal's sixteen —
+    // no truecolour ink of zo's own — and there is more than one: it is still
+    // highlighted.
+    let sgrs: Vec<&str> = code
+        .iter()
+        .flat_map(|line| line.split("\u{1b}[").skip(1).filter_map(|rest| rest.split_once('m').map(|(sgr, _)| sgr)))
+        .collect();
+    assert!(sgrs.iter().all(|sgr| !sgr.contains("38;2;")), "a code block in truecolour: {code:?}");
+    assert!(
+        sgrs.iter().collect::<std::collections::BTreeSet<_>>().len() > 1,
+        "a code block in one colour: {code:?}"
     );
+    assert_eq!(code.len(), 2, "two lines of code: {code:?}");
     let footer = |scopes: &[&str], fallback| {
         draw(super::view::footer_theme_style_on(scopes, fallback, ground::current(), ColorLevel::TrueColor))
     };
@@ -2221,20 +2254,21 @@ fn auto_with_no_answer_writes_todays_bytes() {
 }
 
 /// The person says the ground is light and the terminal does not answer:
-/// under `terminal`, code is highlighted in Catppuccin Latte — what a
-/// measured light ground picks — and the roles take their light-ground
-/// colours, the footer's model and folder too. Headings and the table head
-/// stay uncoloured, as with no answer. Said dark, each byte is the one
-/// `auto` draws with no answer.
+/// under `terminal` the roles take their light-ground colours, the footer's
+/// model and folder too, and code is drawn in the terminal's own sixteen
+/// colours — as on a measured light ground and on one nothing is known of:
+/// the terminal paints them from its own palette, light or dark. Headings and
+/// the table head stay uncoloured, as with no answer. Said dark, each byte is
+/// the one `auto` draws with no answer.
 #[test]
-fn light_turns_on_latte_and_the_light_role_colours_for_terminal() {
+fn light_turns_on_the_light_role_colours_and_code_stays_the_terminals_for_terminal() {
     use super::ansi::{write_spans, write_spans_for_ground_and_level, Color, Role, Span, Style};
     use super::ground::{self, Ground, Hint, TerminalBackground};
     use super::palette::{self, ColorLevel, TerminalPalette};
     use pulldown_cmark::HeadingLevel;
 
     if !style::in_fresh_run_with(
-        &path("light_turns_on_latte_and_the_light_role_colours_for_terminal"),
+        &path("light_turns_on_the_light_role_colours_and_code_stays_the_terminals_for_terminal"),
         &[("COLORTERM", "truecolor")],
     ) {
         return;
@@ -2274,19 +2308,26 @@ fn light_turns_on_latte_and_the_light_role_colours_for_terminal() {
     }
     assert_eq!(super::tables::header_style_with_level(palette::terminal_palette(), ColorLevel::TrueColor).fg, None);
 
-    // Latte: a measured light ground at sixteen colours picks it and leaves
-    // its colours unfitted, so the two must match span for span.
+    // Code: the terminal's own colour slots on every ground — said light,
+    // measured light at sixteen colours, and unknown — span for span, and no
+    // ink of zo's own among them. It was Catppuccin Latte here and Mocha with
+    // nothing known, and neither followed the terminal's theme.
     let code = "fn main() {\n    let name = \"zo\";\n}\n";
-    let latte_by_measure = super::highlight::highlight_code_lines_on(
+    let said_light = super::highlight::highlight_code_to_lines(code, "rust");
+    let measured_light = super::highlight::highlight_code_lines_on(
         code,
         "rust",
         Ground::Measured(TerminalPalette::new((76, 79, 105), (239, 241, 245), ColorLevel::Ansi16)),
         ColorLevel::Ansi16,
     );
-    let said_light = super::highlight::highlight_code_to_lines(code, "rust");
-    assert_eq!(said_light, latte_by_measure, "the light word picks Latte");
-    let mocha = super::highlight::highlight_code_lines_on(code, "rust", Ground::Unknown, ColorLevel::TrueColor);
-    assert_ne!(said_light, mocha, "Latte is not Mocha");
+    let unknown = super::highlight::highlight_code_lines_on(code, "rust", Ground::Unknown, ColorLevel::TrueColor);
+    assert_eq!(said_light, measured_light, "said light and measured light draw the same slots");
+    assert_eq!(said_light, unknown, "and so does a ground nothing is known of");
+    let inks: Vec<Color> = said_light.iter().flat_map(|line| line.spans.iter().filter_map(|span| span.style.fg)).collect();
+    assert!(
+        !inks.is_empty() && inks.iter().all(|ink| matches!(ink, Color::Base(_) | Color::Indexed(0..=15))),
+        "code in the terminal's colour slots: {inks:?}"
+    );
 
     // Said dark: every byte as `auto` with no answer.
     let dark = Ground::Lightness { light: false };
