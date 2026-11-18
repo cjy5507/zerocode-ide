@@ -38,8 +38,7 @@ impl ZoBinary {
     /// surfaces away and the rest of the IDE carries on.
     #[must_use]
     pub fn discover() -> Option<Self> {
-        let fallback_dirs =
-            well_known_fallback_dirs(std::env::var_os("HOME").as_deref(), cfg!(windows));
+        let fallback_dirs = well_known_fallback_dirs(home_var().as_deref(), cfg!(windows));
         Self::discover_in_with_fallbacks(std::env::var_os("PATH").as_deref(), &fallback_dirs)
     }
 
@@ -127,10 +126,14 @@ impl ZoBinary {
 /// Where `zo` may stand when `PATH` does not name it, by Windows' rule or by
 /// the others', so both rules are tested wherever tests run.
 fn well_known_fallback_dirs(home: Option<&std::ffi::OsStr>, windows: bool) -> Vec<PathBuf> {
-    if windows {
-        return Vec::new();
-    }
     let home = home.map(PathBuf::from);
+    if windows {
+        // The folder the window installs zo into at boot (`zo_companion`).
+        return home
+            .map(|home| home.join(".local").join("bin"))
+            .into_iter()
+            .collect();
+    }
     let mut dirs = Vec::with_capacity(4);
     if let Some(home) = &home {
         dirs.push(home.join(".local/bin"));
@@ -141,6 +144,19 @@ fn well_known_fallback_dirs(home: Option<&std::ffi::OsStr>, windows: bool) -> Ve
         dirs.push(home.join("bin"));
     }
     dirs
+}
+
+/// The home the window installs zo under: the profile folder on Windows,
+/// which sets no `HOME`, and `HOME` elsewhere — the window's own
+/// `person_home` rule, read here from the environment alone, as this crate
+/// stands below the window's.
+fn home_var() -> Option<std::ffi::OsString> {
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    if cfg!(windows) {
+        var("USERPROFILE").or_else(|| var("HOME"))
+    } else {
+        var("HOME")
+    }
 }
 
 fn is_executable_file(path: &Path) -> bool {
