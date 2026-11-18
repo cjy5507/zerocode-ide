@@ -494,6 +494,13 @@ fn rendered_line(
     out
 }
 
+/// 표시 폭 기준으로 자른다. 한 글자가 남은 칸보다 넓으면 그 **앞에서** 끊어
+/// 항상 전진한다 — CJK 나 탭에서 멈추지 않기 위한 codex 의 규칙이다.
+///
+/// 끊는 자리는 그 줄이 찼는가로 정한다. 스팬이 막 시작하는 글자도 들어갈
+/// 칸이 없으면 다음 줄로 간다 — 조각이 비었다는 것만 보던 때는 문법 토큰이
+/// 접는 자리에서 시작하면 줄이 폭을 넘었고, 그 아래 줄들의 번호 칸이
+/// 밀렸다(TR-54, 감사 04-05). 아무것도 없는 줄은 어떤 글자든 받는다.
 fn wrapped_spans(spans: &[Span], width: usize) -> Vec<Vec<Span>> {
     let mut out = vec![Vec::new()];
     let mut used = 0usize;
@@ -501,8 +508,10 @@ fn wrapped_spans(spans: &[Span], width: usize) -> Vec<Vec<Span>> {
         let mut piece = String::new();
         for ch in span.text.chars() {
             let cols = super::ansi::char_width(ch);
-            if used + cols > width && !piece.is_empty() {
-                out.last_mut().expect("one row").push(Span::new(std::mem::take(&mut piece), span.style));
+            if used + cols > width && used > 0 {
+                if !piece.is_empty() {
+                    out.last_mut().expect("one row").push(Span::new(std::mem::take(&mut piece), span.style));
+                }
                 out.push(Vec::new());
                 used = 0;
             }
@@ -514,8 +523,6 @@ fn wrapped_spans(spans: &[Span], width: usize) -> Vec<Vec<Span>> {
     out
 }
 
-/// 표시 폭 기준으로 자른다. 한 글자가 남은 칸보다 넓으면 그 **앞에서** 끊어
-/// 항상 전진한다 — CJK 나 탭에서 멈추지 않기 위한 codex 의 규칙이다.
 #[cfg(test)]
 mod tests {
     use super::{Color, MAX_RENDERED_LINES, diff_styles, hunk_lines, line_background};
@@ -682,6 +689,41 @@ mod tests {
         );
         let plain: Vec<String> = lines.iter().map(super::Line::plain).collect();
         assert_eq!(plain, vec!["   1 + abcd", "       efgh", "       ij"]);
+    }
+
+    /// A row folds where its content is full even when a span starts there:
+    /// a syntax token that began at the fold ran past the pane's edge, and
+    /// the rows under it lost their number column (TR-54, audit 04-05).
+    #[test]
+    fn a_row_folds_where_it_is_full_when_a_span_starts_there() {
+        use super::{Line, Span, Style};
+        let texts = |rows: Vec<Vec<Span>>| -> Vec<String> {
+            rows.iter().map(|row| row.iter().map(|span| span.text.as_str()).collect::<String>()).collect()
+        };
+        let span = |text: &str| Span::new(text, Style::new());
+        assert_eq!(texts(super::wrapped_spans(&[span("abcd"), span("ef")], 4)), vec!["abcd", "ef"]);
+        // A wide letter that starts a span with one column left goes on too…
+        assert_eq!(texts(super::wrapped_spans(&[span("abc"), span("가나")], 4)), vec!["abc", "가나"]);
+        // …and one wider than the row still has a row of its own: the fold
+        // always advances.
+        assert_eq!(texts(super::wrapped_spans(&[span("가"), span("나")], 1)), vec!["가", "나"]);
+
+        // The row the person sees: the second token starts at the fold.
+        let syntax = Line::new(vec![span("abcd"), span("efgh")]);
+        let rows = super::rendered_line(
+            (None, Some(1)),
+            DiffLineKind::Added,
+            "abcdefgh",
+            Some(&syntax),
+            None,
+            // as above: 7 columns of numbers and sign, 4 of content.
+            11,
+            1,
+            diff_styles(None),
+        );
+        let plain: Vec<String> = rows.iter().map(Line::plain).collect();
+        assert_eq!(plain, vec!["   1 + abcd", "       efgh"]);
+        assert!(rows.iter().all(|row| row.width() <= 11), "a row ran past the pane: {plain:?}");
     }
 
     /// A huge diff is folded, and says how much it folded. Silently dropping
