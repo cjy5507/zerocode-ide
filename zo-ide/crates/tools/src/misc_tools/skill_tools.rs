@@ -90,6 +90,15 @@ pub(crate) struct LoadedSkill {
     pub(crate) prompt: String,
 }
 
+/// A skill a search ranked among the best but did not hand back whole: its
+/// name, its description and its reading. `skill_load` reads it whole.
+#[derive(Debug, Serialize)]
+pub(crate) struct DescribedSkill {
+    pub(crate) skill: String,
+    pub(crate) description: Option<String>,
+    pub(crate) reading: f64,
+}
+
 /// A name nothing answered to, and the names it was probably meant to be.
 #[derive(Debug, Serialize)]
 pub(crate) struct UnknownSkill {
@@ -110,6 +119,11 @@ pub(crate) struct SkillSearchOutput {
     pub(crate) installed: usize,
     /// The best ones, whole, best first.
     pub(crate) skills: Vec<LoadedSkill>,
+    /// The rest of the best, as their names and descriptions (t-115139 Z4):
+    /// read at under half of the best one's reading, or whole they would
+    /// have pushed the answer past the cap a tool result is cut at.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) described: Vec<DescribedSkill>,
     /// The names of every other skill that was ranked above the floor, in
     /// order, so `skill_load` can reach one without a second search.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -239,11 +253,27 @@ pub(crate) fn execute_skill_search_for_session(
         crate::misc_tools::note_search_answer(cwd, judged, &searched.baseline_names, wanted, request);
     }
 
+    let best = searched.ranked.first().map_or(0.0, |reading| reading.normalised);
     let mut skills = Vec::new();
+    let mut described = Vec::new();
     let mut others = Vec::new();
     for reading in &searched.ranked {
-        if skills.len() >= wanted {
+        if skills.len() + described.len() >= wanted {
             others.push(reading.name.clone());
+            continue;
+        }
+        // Far below the best, a skill is a lead and not an answer: its body
+        // is left on disk (t-115139 Z4). With the judgment off, a search
+        // that found its skill at 0.94 carried two at 0.24 and 0.18 whole.
+        if reading.normalised < best * WHOLE_SKILL_SHARE_OF_BEST {
+            described.push(DescribedSkill {
+                skill: reading.name.clone(),
+                description: installed
+                    .iter()
+                    .find(|skill| skill.name == reading.name)
+                    .and_then(|skill| skill.description.clone()),
+                reading: reading.normalised,
+            });
             continue;
         }
         match load_named_skill(&reading.name, cwd) {
@@ -265,14 +295,39 @@ pub(crate) fn execute_skill_search_for_session(
             installed.len()
         )
     });
-    Ok(SkillSearchOutput {
+    let mut output = SkillSearchOutput {
         ranked_by: searched.route_use,
         outcome: searched.outcome,
         installed: installed.len(),
         skills,
+        described,
         others,
         note,
-    })
+    };
+    // Whole skills stop where the answer would be cut (t-115139 Z4): past the
+    // cap the dispatch cut it in the middle of its JSON, so the wire could not
+    // read it and the model got the raw envelope with a skill's middle
+    // missing — 44 of 66 searches in a week of this machine's sessions. The
+    // best one stays whole whatever its size.
+    let cap = runtime::TruncationConfig::default().default_max_chars;
+    while output.skills.len() > 1 && answer_chars(&output) > cap {
+        let Some(last) = output.skills.pop() else { break };
+        output.described.insert(
+            0,
+            DescribedSkill { skill: last.skill, description: last.description, reading: last.reading.unwrap_or_default() },
+        );
+    }
+    Ok(output)
+}
+
+/// A skill is handed back whole only while its reading is at least this
+/// share of the best one's; below it, by name and description.
+const WHOLE_SKILL_SHARE_OF_BEST: f64 = 0.5;
+
+/// How long a search's answer is as the dispatch measures it — the pretty
+/// JSON `run_skill_search` returns, in chars.
+fn answer_chars(output: &SkillSearchOutput) -> usize {
+    serde_json::to_string_pretty(output).map_or(0, |text| text.chars().count())
 }
 
 /// Load skills by name, ignoring case and separators, and answer a name
@@ -998,5 +1053,76 @@ mod tests {
             "a load that asked for nothing"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A skill read at under half of the best one's reading comes back as
+    /// its name and description, not its whole `SKILL.md` (t-115139 Z4). With
+    /// the judgment off, a search that found its skill at 0.94 carried two
+    /// more at 0.24 and 0.18 whole — about 25 KB the turn never read.
+    #[test]
+    fn a_skill_far_below_the_best_comes_back_as_its_description() {
+        let (root, cwd) = project_with_skills(&[
+            ("zqflow", "Runs zqflow over zqrecords with zqgamma and zqdelta"),
+            ("zqside", "Formats zqdelta"),
+        ]);
+        let output = execute_skill_search(
+            &SkillSearchInput {
+                task: "zqflow zqrecords zqgamma zqdelta zqomega".to_string(),
+                max_skills: None,
+            },
+            &cwd,
+        )
+        .expect("a search");
+        let _ = std::fs::remove_dir_all(root);
+        let whole: Vec<&str> = output.skills.iter().map(|skill| skill.skill.as_str()).collect();
+        assert_eq!(whole.first(), Some(&"zqflow"), "{whole:?}");
+        assert!(
+            !whole.contains(&"zqside"),
+            "a skill at a quarter of the best one's reading is not loaded whole: {whole:?}"
+        );
+        let value = serde_json::to_value(&output).expect("json");
+        let described = value["described"].as_array().cloned().unwrap_or_default();
+        let side = described
+            .iter()
+            .find(|skill| skill["skill"] == "zqside")
+            .unwrap_or_else(|| panic!("named with its description so a load can reach it: {value}"));
+        assert_eq!(side["description"], "Formats zqdelta");
+        assert!(side.get("prompt").is_none(), "{side}");
+    }
+
+    /// Skills that all read close to the best come back whole only while the
+    /// answer stays under the cap a tool result is cut at (t-115139 Z4). Past
+    /// it the dispatch cut the answer in the middle of its JSON, the wire
+    /// could not read it, and the model got the raw envelope with a skill's
+    /// middle missing — 44 of 66 searches in a week of this machine's
+    /// sessions.
+    #[test]
+    fn whole_skills_stop_before_the_answer_would_be_cut() {
+        let names = ["zqone", "zqtwo", "zqthree"];
+        let (root, cwd) = project_with_skills(&names.map(|name| (name, "Runs zqflow over zqrecords")));
+        for name in names {
+            let body = format!(
+                "---\nname: {name}\ndescription: Runs zqflow over zqrecords\n---\n\n{}",
+                "A step of the procedure.\n".repeat(500)
+            );
+            std::fs::write(cwd.join(".zo").join("skills").join(name).join("SKILL.md"), body)
+                .expect("write a long skill");
+        }
+        let output = execute_skill_search(
+            &SkillSearchInput { task: "zqflow zqrecords".to_string(), max_skills: None },
+            &cwd,
+        )
+        .expect("a search");
+        let _ = std::fs::remove_dir_all(root);
+        let answer = serde_json::to_string_pretty(&output).expect("json");
+        let cap = runtime::TruncationConfig::default().default_max_chars;
+        assert!(answer.chars().count() <= cap, "{} chars over a {cap} cap", answer.chars().count());
+        assert_eq!(output.skills.len(), 2, "two long skills fit whole, the third does not");
+        let value = serde_json::to_value(&output).expect("json");
+        assert_eq!(
+            value["described"].as_array().map(Vec::len),
+            Some(1),
+            "the third is named with its description: {value}"
+        );
     }
 }

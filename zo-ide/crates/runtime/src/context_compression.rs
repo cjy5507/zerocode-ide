@@ -449,6 +449,21 @@ fn skill_envelope_view(raw: &str) -> Option<String> {
         for skill in skills {
             push_skill(&mut view, skill.as_object()?)?;
         }
+        // A search's lesser matches: a line each, name, reading and what the
+        // skill is for (t-115139 Z4).
+        if let Some(described) = object.get("described").and_then(|v| v.as_array()) {
+            for skill in described {
+                let name = skill.get("skill").and_then(|v| v.as_str())?;
+                let _ = write!(view, "[skill, not loaded] {name}");
+                if let Some(reading) = skill.get("reading").and_then(serde_json::Value::as_f64) {
+                    let _ = write!(view, " · reading {reading:.2}");
+                }
+                if let Some(description) = skill.get("description").and_then(|v| v.as_str()) {
+                    let _ = write!(view, " — {description}");
+                }
+                view.push('\n');
+            }
+        }
         if let Some(others) = object.get("others").and_then(|v| v.as_array()) {
             let names = others.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>();
             if !names.is_empty() {
@@ -482,7 +497,7 @@ fn skill_envelope_view(raw: &str) -> Option<String> {
 
 /// Every key a skill list may carry (`SkillSearchOutput`, `SkillLoadOutput`).
 const SKILL_LIST_KEYS: &[&str] = &[
-    "rankedBy", "outcome", "installed", "skills", "others", "unknown", "note",
+    "rankedBy", "outcome", "installed", "skills", "described", "others", "unknown", "note",
 ];
 /// Every key one skill may carry (`SkillOutput`, `LoadedSkill`).
 const SKILL_KEYS: &[&str] = &[
@@ -2651,6 +2666,40 @@ mod tests {
         assert!(wired.contains("# TUI design\n\nUse box-drawing characters sparingly.\n"));
         assert!(wired.contains("[others, not loaded] frontend-design, ui-ux-pro-max\n"), "{wired}");
         assert!(wired.contains("[note] word match only\n"), "{wired}");
+    }
+
+    /// A search's lesser matches come as a line each — name, reading, what
+    /// the skill is for — between the skills it loaded and the names it only
+    /// ranked (t-115139 Z4); the envelope never falls back to its JSON.
+    #[test]
+    fn a_skill_search_names_its_lesser_matches_with_their_descriptions() {
+        let raw = pretty(&serde_json::json!({
+            "rankedBy": "fallback",
+            "outcome": "off",
+            "installed": 32,
+            "skills": [{
+                "skill": "rust-anything",
+                "path": "/Users/dev/.agents/skills/rust-anything/SKILL.md",
+                "description": "Port code to Rust.",
+                "origin": "global-zo",
+                "reading": 0.941_176,
+                "prompt": "---\nname: rust-anything\ndescription: Port code to Rust.\n---\n\nProfile first.\n",
+            }],
+            "described": [
+                { "skill": "context-md-builder", "description": "Build CONTEXT.md.", "reading": 0.235_294 },
+                { "skill": "mobile-device", "description": null, "reading": 0.176_470 },
+            ],
+            "others": ["computer-use"],
+        }));
+        let wired = wire_tool_output(&raw, "CapabilityInvoke", false, WireRewrite::Lossless);
+        assert!(wired.starts_with("[skills] ranked by fallback · judgment off · 32 installed · 1 loaded\n"), "{wired}");
+        assert!(
+            wired.contains(
+                "Profile first.\n[skill, not loaded] context-md-builder · reading 0.24 — Build CONTEXT.md.\n\
+                 [skill, not loaded] mobile-device · reading 0.18\n[others, not loaded] computer-use\n"
+            ),
+            "{wired}"
+        );
     }
 
     /// The `Skill` tool's own envelope is one skill, with the arguments the
