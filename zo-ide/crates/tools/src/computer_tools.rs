@@ -1775,7 +1775,8 @@ const TAKES_THE_DESKTOP: &str = "foreground: true";
 const COMMAND_LINE_PHRASES: &[(&str, &str)] = &[
     // An app with no window to look at: opening the app again brings a
     // minimized window back behind, and takes nothing of the person's.
-    ("then retry with --restore-window", "then send launch {app}, which opens its window behind, and look again"),
+    // Not every app stays behind as it opens: some come to the front.
+    ("then retry with --restore-window", "then send launch for that app and look again: most apps open the window behind, some come to the front"),
     // Keys for a window that is not focused: the tool has no value writer of
     // its own to offer beside the desktop.
     ("retry with --restore-window or use set-value for editable elements", "retry with foreground: true"),
@@ -2168,7 +2169,8 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
     let frame = ctx.computer_frame().unwrap_or(ShotFrame::UNIT);
     // A batch the person's pointer or keys held up before its first step is
     // the same batch once they pause; one that ran a step is not sent again.
-    let (answer, _) = call_once_the_person_pauses(road, &batch_argv(&steps, frame)?, ctx.cwd.as_deref(), PERSON_BUSY_PAUSE)?;
+    let confirms = steps.iter().any(|step| step.confirming.is_some());
+    let (answer, stood_by) = call_once_the_person_pauses(road, &batch_argv(&steps, frame)?, ctx, confirms, PERSON_BUSY_PAUSE)?;
     let mut reports = answer
         .pointer("/result/steps")
         .and_then(Value::as_array)
@@ -2210,7 +2212,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
     let ran_steps: Vec<&ComputerInput> = steps.iter().take(ran).collect();
     let acted = ran_steps.iter().any(|step| acts(step.action.trim()));
     let looked_after = (LOOK_AFTER_ACT && acted).then(|| look_after(road, ctx, settle, acted_in(&ran_steps, ctx).as_ref()));
-    to_pretty_json(json!({
+    to_pretty_json(with_stood_by(json!({
         "ok": refused.is_none(),
         "action": BATCH_ACTION,
         "ran": ran,
@@ -2219,7 +2221,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
         "steps": reports,
         "first_look": first_look,
         "looked_after": looked_after,
-    }))
+    }), stood_by))
 }
 
 /// What a walk came to, for the model to act on (docs/design/
@@ -2734,7 +2736,7 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
     if LOOKS.contains(&action.as_str()) || argv.iter().any(|word| word == "--mark") {
         argv = as_viewer(argv, ctx);
     }
-    let (mut answer, stood_by) = call_once_the_person_pauses(road, &argv, ctx.cwd.as_deref(), PERSON_BUSY_PAUSE)?;
+    let (mut answer, stood_by) = call_once_the_person_pauses(road, &argv, ctx, input.confirming.is_some(), PERSON_BUSY_PAUSE)?;
     let mut repicked = None;
     if let Some(refused) = refusal(&answer) {
         let (pressed, picked) = repick(&input, refused, ctx, road)?;
@@ -2876,9 +2878,13 @@ const PERSON_BUSY_TRIES: u32 = 3;
 /// The pause between two askings.
 const PERSON_BUSY_PAUSE: Duration = Duration::from_millis(300);
 /// No asking starts later than this after the first refusal: with the
-/// window's own waits, a call stands by for the person for about fifteen
-/// seconds at the very most, and then says what the window said.
+/// window's own waits (three seconds each, in the helper), a call stands by
+/// for the person for about fifteen seconds at the most, and then says what
+/// the window said. An asking keeps its own deadline: one the window holds
+/// for a card it shows the person can run longer.
 const PERSON_BUSY_BUDGET: Duration = Duration::from_secs(12);
+/// How often a pause between two askings looks at the turn's stop.
+const STOP_LOOK_EVERY: Duration = Duration::from_millis(25);
 /// Where an answer says it stood by for the person.
 const STOOD_BY_KEY: &str = super::computer_tally::STOOD_BY;
 
@@ -2919,25 +2925,62 @@ fn the_person_is_busy(answer: &Value) -> bool {
 /// refusal back as it stands, for the model to say. Without this a person
 /// who only moved the mouse cost the model a refused call and a round trip
 /// for each second they kept moving it.
+///
+/// Esc ends it: the turn's stop is looked at before every asking again and
+/// through each pause, and once it is raised nothing more is asked — the
+/// model was told the turn was cancelled, so nothing may land after it. A
+/// press the person is asked to confirm (`asks_to_confirm`) is not asked
+/// again at all: every asking would show them the card again.
 fn call_once_the_person_pauses(
     road: &ComputerRoad,
     argv: &[String],
-    cwd: Option<&Path>,
+    ctx: &ToolContext,
+    asks_to_confirm: bool,
     pause: Duration,
 ) -> Result<(Value, Option<StoodBy>), ToolError> {
+    let cwd = ctx.cwd.as_deref();
     let mut answer = call_shim(road, argv, cwd)?;
-    if !the_person_is_busy(&answer) {
+    if asks_to_confirm || !the_person_is_busy(&answer) {
         return Ok((answer, None));
     }
+    let stop = ctx.turn_stop();
+    let stopped = || stop.as_ref().is_some_and(runtime::HookAbortSignal::is_aborted);
     let refused_at = Instant::now();
     let mut asked_again = 0;
     while the_person_is_busy(&answer) && asked_again < PERSON_BUSY_TRIES && refused_at.elapsed() + pause <= PERSON_BUSY_BUDGET {
-        std::thread::sleep(pause);
+        if !rest_unless_stopped(pause, &stopped) {
+            break;
+        }
         asked_again += 1;
         answer = call_shim(road, argv, cwd)?;
     }
     super::computer_tally::note(super::computer_tally::STOOD_BY);
     Ok((answer, Some(StoodBy { waited: refused_at.elapsed(), asked_again })))
+}
+
+/// Sleep `pause` in slices of [`STOP_LOOK_EVERY`], looking at `stopped`
+/// before each and once more at its end: false, at once, when the turn was
+/// stopped.
+fn rest_unless_stopped(pause: Duration, stopped: &impl Fn() -> bool) -> bool {
+    let until = Instant::now() + pause;
+    loop {
+        if stopped() {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= until {
+            return true;
+        }
+        std::thread::sleep((until - now).min(STOP_LOOK_EVERY));
+    }
+}
+
+/// An answer with how long its call stood by for the person, when it did.
+fn with_stood_by(mut said: Value, stood_by: Option<StoodBy>) -> Value {
+    if let Some(stood_by) = stood_by {
+        said[STOOD_BY_KEY] = stood_by.said();
+    }
+    said
 }
 
 /// A lone click by reading that the window refused `element_not_found` —
@@ -6984,7 +7027,8 @@ printf '%s
         let (road, _) = fake_shim(dir.path());
         let ctx = crate::tests::tool_context_outside_cwd_windows();
         std::fs::write(dir.path().join("reply-batch.1"), held_up(0)).unwrap();
-        run_computer(&json!({"action": "batch", "steps": steps}), &ctx, &road).expect("the batch goes at the second asking");
+        let said: Value = serde_json::from_str(&run_computer(&json!({"action": "batch", "steps": steps}), &ctx, &road).expect("the batch goes at the second asking")).unwrap();
+        assert_eq!(said[STOOD_BY_KEY]["asked_again"], 1, "a batch's answer says it stood by, as a lone act's does: {said}");
         assert_eq!(batches_asked(dir.path()), 2, "{:?}", calls(dir.path()));
 
         let dir = tempfile::tempdir().unwrap();
@@ -6994,6 +7038,83 @@ printf '%s
         let said = run_computer(&json!({"action": "batch", "steps": steps}), &ctx, &road).expect("what ran is answered");
         assert_eq!(batches_asked(dir.path()), 1, "a step ran, so the batch is not sent again: {:?}", calls(dir.path()));
         assert!(said.contains(error_code::PERSON_POINTING), "{said}");
+    }
+
+    /// Esc stops the turn, and with it the asking again: a press the person's
+    /// pointer held up is not sent once the turn is stopped — before an asking
+    /// or during the pause before it — so nothing lands after the model was
+    /// told the turn was cancelled.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_turn_asks_nothing_again() {
+        let click = json!({"action": "left_click", "app": "Fixture", "label": "Continue", "ocr": true, "foreground": true});
+        // Stopped before the first refusal came back, and stopped during the pause after it.
+        for stop_after in [None, Some(Duration::from_millis(40))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            let stop = runtime::HookAbortSignal::new();
+            ctx.set_turn_stop(Some(stop.clone()));
+            std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+            let stopping = match stop_after {
+                None => {
+                    stop.abort();
+                    None
+                }
+                Some(after) => {
+                    let stop = stop.clone();
+                    Some(std::thread::spawn(move || {
+                        std::thread::sleep(after);
+                        stop.abort();
+                    }))
+                }
+            };
+            let refused = refused_with(run_computer(&click, &ctx, &road));
+            if let Some(stopping) = stopping {
+                stopping.join().unwrap();
+            }
+            assert!(refused.starts_with(&format!("{}:", error_code::PERSON_POINTING)), "{stop_after:?}: {refused}");
+            assert_eq!(clicks_asked(dir.path()), 1, "{stop_after:?}: the stopped turn's press is not sent again: {:?}", calls(dir.path()));
+        }
+        // A turn nobody stopped asks again as before.
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        ctx.set_turn_stop(Some(runtime::HookAbortSignal::new()));
+        std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+        run_computer(&click, &ctx, &road).expect("the press goes at the second asking");
+        assert_eq!(clicks_asked(dir.path()), 2);
+    }
+
+    /// A press the person is asked to confirm is not asked again: every
+    /// asking would show them the card again. The model hears the refusal.
+    #[cfg(unix)]
+    #[test]
+    fn a_press_the_person_confirms_is_not_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        std::fs::write(dir.path().join("reply-click.1"), the_person_is_on_the_pointer()).unwrap();
+        let pay = json!({"action": "left_click", "app": "Fixture", "label": "Pay", "ocr": true, "foreground": true, "confirming": "payment"});
+        let refused = refused_with(run_computer(&pay, &ctx, &road));
+        assert!(refused.starts_with(&format!("{}:", error_code::PERSON_POINTING)), "{refused}");
+        assert_eq!(clicks_asked(dir.path()), 1, "{:?}", calls(dir.path()));
+    }
+
+    /// The pause between two askings looks at the turn's stop as it goes.
+    #[test]
+    fn a_pause_ends_as_soon_as_the_turn_is_stopped() {
+        assert!(rest_unless_stopped(Duration::from_millis(30), &|| false), "a pause nobody stopped runs out");
+        let began = Instant::now();
+        assert!(!rest_unless_stopped(Duration::from_secs(60), &|| true), "a stopped turn rests no more");
+        assert!(began.elapsed() < Duration::from_secs(1));
+        let looks = std::cell::Cell::new(0);
+        let stopped_on_the_third_look = || {
+            looks.set(looks.get() + 1);
+            looks.get() >= 3
+        };
+        assert!(!rest_unless_stopped(Duration::from_secs(60), &stopped_on_the_third_look));
+        assert_eq!(looks.get(), 3);
     }
 
     /// A handoff that says which window it means is the person's turn all
@@ -7053,7 +7174,7 @@ printf '%s
             ("send the key with --foreground", "send the key with foreground: true"),
             (
                 "app 'Fixture' has no accessibility window; make sure the app has a visible window, then retry with --restore-window.",
-                "app 'Fixture' has no accessibility window; make sure the app has a visible window, then send launch {app}, which opens its window behind, and look again.",
+                "app 'Fixture' has no accessibility window; make sure the app has a visible window, then send launch for that app and look again: most apps open the window behind, some come to the front.",
             ),
             (
                 "keyboard input requires the target Fixture window to be focused; retry with --restore-window or use set-value for editable elements",
