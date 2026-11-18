@@ -139,6 +139,37 @@ if ($endpoint -and (Test-Path -LiteralPath $endpoint -PathType Leaf)) {{
 }}
 "#
     );
+    // The pane's grant, on the sh loader's conditions: an agent typed into a
+    // plain shell inherits no token file, and the window writes the paths to
+    // `<endpoint dir>/panes/<pane key>.env` instead (TR-11, t-113721). Read as
+    // data: only `ZEROCODE_*` names, only the `'…'` quoting the window writes.
+    // `ReadAllLines` reads UTF-8, where Windows PowerShell 5.1's `Get-Content`
+    // would read a file with no byte-order mark in the ANSI code page — and
+    // these paths sit under a profile folder that may be named in Korean.
+    let missing = private_tokens
+        .iter()
+        .map(|(_, file_var)| format!("(-not $env:{file_var})"))
+        .collect::<Vec<_>>()
+        .join(" -or ");
+    if !missing.is_empty() {
+        let pane_key = crate::hook::PANE_KEY_ENV;
+        loader.push_str(&format!(
+            r#"$paneKey = $env:{pane_key}
+if (({missing}) -and $endpoint -and $paneKey -and ($paneKey -cmatch '^term-[0-9]+$')) {{
+  $grant = Join-Path (Join-Path (Split-Path -Parent $endpoint) '{PANE_GRANTS_DIR_NAME}') ($paneKey + '.env')
+  if (Test-Path -LiteralPath $grant -PathType Leaf) {{
+    try {{
+      foreach ($line in [System.IO.File]::ReadAllLines($grant)) {{
+        if ($line -cmatch '^(ZEROCODE_[A-Z0-9_]+)=''(.*)''$') {{
+          [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2].Replace("'\''", "'"), 'Process')
+        }}
+      }}
+    }} catch {{}}
+  }}
+}}
+"#
+        ));
+    }
     for (token_var, file_var) in private_tokens {
         loader.push_str(&format!(
             r#"$tokenFile = $env:{file_var}
