@@ -673,6 +673,18 @@ pub const MARK_INK_RGBA: [u8; 4] = [0, 0, 0, 255];
 /// number is refused: the two units `windowFramesMatch` already trusts.
 /// A list shifted by one row moves by a whole row, far past it.
 pub const MARK_PIN_TOLERANCE_POINTS: f64 = 2.0;
+/// The flag an app's press at a point names the window its point was read
+/// on with — that window's frame in the look, `x,y,width,height` in screen
+/// points — and the parameter the window reads it under. The window refuses
+/// the press before the helper is asked when the window no longer stands
+/// there: moved, resized or gone, `window_stale`, nothing sent. zo pins each
+/// point step of a batch to the picture its points came from, so a batch
+/// stops at the step whose window left that picture (CU speed 163, A1).
+pub const WINDOW_FRAME_FLAG: &str = "window-frame";
+pub const WINDOW_FRAME_PARAM: &str = "windowFrame";
+/// How far each edge of a pinned window may stand from its look: the look
+/// and the window list both round to whole points.
+pub const WINDOW_FRAME_TOLERANCE_POINTS: f64 = 1.0;
 /// The helper namespace desktop marked looks and mark clicks are filed in, so
 /// a marked look never replaces the snapshot another agent's
 /// `--element-index` is checked against.
@@ -4461,6 +4473,20 @@ fn parse_flags(
     if let Some(region) = optional_string(&flags, "region")? {
         params.insert("region".into(), parse_region(&region)?);
     }
+    if let Some(frame) = optional_string(&flags, WINDOW_FRAME_FLAG)? {
+        let frame = parse_rect(&frame, WINDOW_FRAME_FLAG)?;
+        // A pin the window could never match pins nothing.
+        if frame.as_object().is_some_and(|sides| {
+            sides
+                .values()
+                .any(|side| !side.as_f64().is_some_and(f64::is_finite))
+        }) {
+            return Err(format!(
+                "--{WINDOW_FRAME_FLAG} must be x,y,w,h in screen points"
+            ));
+        }
+        params.insert(WINDOW_FRAME_PARAM.into(), frame);
+    }
     // A zoom is a screenshot of one region at the screen's own resolution.
     if method == ComputerMethod::Zoom {
         params.insert("fullRes".into(), Value::Bool(true));
@@ -4688,6 +4714,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "after-text",
             "dx",
             "dy",
+            WINDOW_FRAME_FLAG,
         ],
         ComputerMethod::PerformSecondaryAction => &[
             "json",
@@ -4717,6 +4744,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "y",
             "direction",
             "pages",
+            WINDOW_FRAME_FLAG,
         ],
         ComputerMethod::Drag => &[
             "json",
@@ -4733,6 +4761,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "from-y",
             "to-x",
             "to-y",
+            WINDOW_FRAME_FLAG,
         ],
         ComputerMethod::TypeText | ComputerMethod::PasteText => &[
             "background",
@@ -4933,16 +4962,21 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
 
 /// `x,y,w,h` — four numbers in screen points — as the helper's region object.
 fn parse_region(raw: &str) -> Result<Value, String> {
+    parse_rect(raw, "region")
+}
+
+/// A rectangle a flag spells `x,y,w,h` in screen points, with a positive size.
+fn parse_rect(raw: &str, flag: &str) -> Result<Value, String> {
     let parts: Vec<f64> = raw
         .split(',')
         .map(|part| part.trim().parse::<f64>())
         .collect::<Result<_, _>>()
-        .map_err(|_| "--region must be x,y,w,h in screen points".to_string())?;
+        .map_err(|_| format!("--{flag} must be x,y,w,h in screen points"))?;
     let [x, y, width, height] = parts.as_slice() else {
-        return Err("--region must be x,y,w,h in screen points".into());
+        return Err(format!("--{flag} must be x,y,w,h in screen points"));
     };
     if *width <= 0.0 || *height <= 0.0 {
-        return Err("--region needs a positive width and height".into());
+        return Err(format!("--{flag} needs a positive width and height"));
     }
     Ok(json!({ "x": x, "y": y, "width": width, "height": height }))
 }
@@ -5009,6 +5043,21 @@ fn validate(
         && !by_device
     {
         return Err("missing required --app".into());
+    }
+    // A window frame pins a press at a point, in one app window, to the look
+    // the point was read on: nothing else has a point that frame holds.
+    if has(WINDOW_FRAME_PARAM) {
+        let at_a_point = match method {
+            ComputerMethod::Drag => ["fromX", "fromY", "toX", "toY"].iter().all(|key| has(key)),
+            _ => {
+                has("x") && has("y") && !has("elementIndex") && !by_mark && !by_query && !has("ocr")
+            }
+        };
+        if !(at_a_point && has("app") && has("windowId")) {
+            return Err(format!(
+                "--{WINDOW_FRAME_FLAG} pins an app's press at a point to the window its look saw: it needs --app, --window-id and the point"
+            ));
+        }
     }
     match method {
         ComputerMethod::Permissions => {
@@ -5885,17 +5934,19 @@ pub fn usage() -> String {
         "  every act in an app answers delivery (not_delivered|delivered_unverified|delivered_verified|uncertain), retry (safe|unsafe) and what it changed; repeat only when retry is safe",
         "    --timeout-ms N how long to wait for its control (0: not at all); --full-state answers the whole tree; --no-state answers no look",
         "    it stays in the background; --foreground takes the shared pointer and keyboard, only when the person asked",
-        "  zerocode-computer click --app <app> (--element-index N|--x X --y Y|--text <t>|--role <r> [--label <l>]) [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--json]",
+        "  zerocode-computer click --app <app> (--element-index N|--x X --y Y [--window-frame x,y,w,h]|--text <t>|--role <r> [--label <l>]) [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--json]",
         "    --text/--label/--role name the control by what it reads (find's matcher), read off a fresh tree right before the press —",
         "    the target a batch step may name after earlier steps; one match presses, none or several answers which",
+        "    --window-frame x,y,w,h (click, scroll, drag at a point): the window's frame in the look the point was read on;",
+        "    refused before anything is sent once that window moved, resized or went — a batch stops at that step",
         "  zerocode-computer click --app <app> --ocr --text <words> [--after-text <words>] [--dx N] [--dy N] [--mouse-button left|right|middle] [--click-count N] [--json]",
         "    a window with no tree (a mirrored phone, a remote desktop): presses the line OCR reads as <words> at the press, nudged",
         "    by --dx/--dy points; words that recur are told apart by the line they come after; one line presses, none or several answers which",
         "  zerocode-computer click --mark N --look <lookId> [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--viewer <id>] [--json]",
         "    presses the control numbered N on the marked look <lookId> (observe --marks) through the element path; refused if it moved or changed since",
         "  zerocode-computer perform-secondary-action --app <app> --element-index N --action <name> [--json]",
-        "  zerocode-computer scroll --app <app> (--element-index N|--x X --y Y) --direction <up|down|left|right> [--json]",
-        "  zerocode-computer drag --app <app> (--from-element-index N --to-element-index N|--from-x X --from-y Y --to-x X --to-y Y) [--json]",
+        "  zerocode-computer scroll --app <app> (--element-index N|--x X --y Y [--window-frame x,y,w,h]) --direction <up|down|left|right> [--json]",
+        "  zerocode-computer drag --app <app> (--from-element-index N --to-element-index N|--from-x X --from-y Y --to-x X --to-y Y [--window-frame x,y,w,h]) [--json]",
         "  zerocode-computer type-text --app <app> (--text text|--text-stdin) [--json]",
         "  zerocode-computer press-key --app <app> --key <key|modifier+key> [--json] (combinations run as hotkey)",
         "  zerocode-computer hotkey --app <app> --key <modifier+key> [--json]",
@@ -12064,5 +12115,95 @@ mod tests {
                 "a phone's secret field is the person's"
             );
         }
+    }
+
+    /// CU speed 163 A1: a press at a point names the frame its window had in
+    /// the look the point was read on, and the flag holds nothing else — not
+    /// a press by number, mark or words, not one with no window, not the
+    /// desktop's hand. A batch carries it on each pinned step.
+    #[test]
+    fn a_window_frame_pins_only_a_press_at_a_point_in_one_app_window() {
+        let parse = |line: &str| {
+            parse_command(
+                &line
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let pinned = parse(
+            "click --app Fixture --window-id 41 --x 10 --y 20 --window-frame 100,80,640,480 --json",
+        )
+        .expect("a pinned point click");
+        assert_eq!(
+            pinned.params[WINDOW_FRAME_PARAM],
+            json!({ "x": 100.0, "y": 80.0, "width": 640.0, "height": 480.0 })
+        );
+        for line in [
+            "scroll --app Fixture --window-id 41 --x 10 --y 20 --direction down --window-frame 100,80,640,480",
+            "drag --app Fixture --window-id 41 --from-x 1 --from-y 2 --to-x 3 --to-y 4 --window-frame 100,80,640,480",
+        ] {
+            assert!(parse(line).is_ok(), "{line}: {:?}", parse(line));
+        }
+        for (line, says) in [
+            (
+                "click --app Fixture --x 10 --y 20 --window-frame 100,80,640,480",
+                "--window-id",
+            ),
+            (
+                "click --app Fixture --window-id 41 --element-index 3 --window-frame 100,80,640,480",
+                "the point",
+            ),
+            (
+                "click --app Fixture --window-id 41 --label Save --window-frame 100,80,640,480",
+                "the point",
+            ),
+            (
+                "click --app Fixture --window-id 41 --x 10 --y 20 --window-frame 100,80,0,480",
+                "positive",
+            ),
+            (
+                "click --app Fixture --window-id 41 --x 10 --y 20 --window-frame 100,80,640",
+                "x,y,w,h",
+            ),
+            (
+                "click --app Fixture --window-id 41 --x 10 --y 20 --window-frame NaN,80,640,480",
+                "x,y,w,h",
+            ),
+            (
+                "mouse-click --x 10 --y 20 --window-frame 100,80,640,480",
+                "unknown flag",
+            ),
+            (
+                "type-text --app Fixture --text a --window-frame 100,80,640,480",
+                "unknown flag",
+            ),
+        ] {
+            let error = parse(line).expect_err("refused");
+            assert!(error.contains(says), "{line}: {error}");
+        }
+        let point = |x: &str| {
+            json!([
+                "click",
+                "--app",
+                "Fixture",
+                "--window-id",
+                "41",
+                "--x",
+                x,
+                "--y",
+                "20",
+                "--window-frame",
+                "100,80,640,480"
+            ])
+        };
+        let steps = batch_commands(&json!([point("10"), point("30")]).to_string())
+            .expect("a batch of pinned points");
+        assert!(
+            steps
+                .iter()
+                .all(|step| step.iter().any(|word| word == "--window-frame")),
+            "{steps:?}"
+        );
     }
 }

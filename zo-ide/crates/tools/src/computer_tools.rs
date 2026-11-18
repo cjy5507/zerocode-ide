@@ -34,7 +34,7 @@ use serde_json::{json, Value};
 use zerocode_core::computer_use::{
     computer_deadline_ms, walk_steps, walk_words, ComputerMethod, BATCH_COMMANDS_FLAG, CLICK_NEXT_KEY, COMPUTER_BATCH_MAX_STEPS,
     COMPUTER_BRIDGE_GRACE_MS, COMPUTER_MARKS_ENV, WALK_OVERLAP_FLAG, WALK_REPLAY_FLAG, WALK_RESCUE_FLAG, WALK_STEPS_MAX,
-    WATCH_UNTIL,
+    WATCH_UNTIL, WINDOW_FRAME_FLAG,
 };
 use zerocode_core::agent_browser::{BROWSER_CLI, WORKSPACE_REVISION_FLAG, WORKSPACE_REVISION_KEY};
 use zerocode_core::jev::{JevMode, GOAL_CHAR_CAP};
@@ -49,7 +49,7 @@ use zerocode_core::computer_use_protocol::marks::{legend_line, ITEMS_KEY, LEGEND
 use super::{
     from_value, maybe_enforce_permission_check, to_pretty_json, ToolContext, ToolError, ToolSpec,
 };
-use crate::context::{ComputerObservation, ComputerTarget};
+use crate::context::{ComputerObservation, ComputerTarget, LookedWindow};
 
 /// The pane's shim — the one road to the window, named as the core names it.
 pub const COMPUTER_SHIM: &str = zerocode_core::computer_use::COMPUTER_CLI;
@@ -713,7 +713,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
                     "additionalProperties": false
                 },
                 "description": "batch: ordered actions, same parameters/pixel frame as single actions. App steps \
-                    use labels, not coordinates. Default app+window_id or scope each step; overrides must agree. \
+                    use labels, or points from the last look. Default app+window_id or scope each step; overrides must agree. \
                     wait sends duration only; scoped wait_for requires a matching window receipt. sound_wait/watch \
                     stay unscoped, without background flags. wait_for/sound_wait take timeout_ms. Stop on refusal; \
                     one final look."
@@ -993,6 +993,20 @@ fn window_pointers(field: &'static str) -> impl Iterator<Item = String> {
 /// The title of the window an answer is of: the document it shows.
 fn window_title(answer: &Value) -> Option<String> {
     window_pointers("title").find_map(|pointer| answer.pointer(&pointer)?.as_str().map(str::to_string))
+}
+
+/// Where the window an answer is of stood, when the answer says its whole
+/// frame: x, y, width and height in screen points, and its layer
+/// (`platform.layer`, 0 when the answer gives none). An app's look carries
+/// its window beside its tree.
+fn looked_window(answer: &Value) -> Option<LookedWindow> {
+    ANSWER_ROOTS.iter().flat_map(|root| WINDOW_OBJECTS.iter().map(move |object| format!("{root}{object}"))).find_map(|pointer| {
+        let window = answer.pointer(&pointer)?;
+        let side = |key: &str| window.get(key).and_then(Value::as_f64).filter(|side| side.is_finite());
+        let frame = [side("x")?, side("y")?, side("width")?, side("height")?];
+        let layer = window.pointer("/platform/layer").and_then(Value::as_i64).unwrap_or(0);
+        (frame[2] > 0.0 && frame[3] > 0.0).then_some(LookedWindow { frame, layer })
+    })
 }
 
 /// The identity of the document the window an answer is of shows, when the
@@ -1693,6 +1707,7 @@ fn present_observation(
         marked_look: answer.pointer(&format!("/result/marks/{LOOK_ID_KEY}")).and_then(Value::as_str).map(str::to_string),
         title: window_title(answer),
         document: window_document(answer),
+        window: looked_window(answer),
     });
     let unchanged = diff && answer.pointer("/result/changed").and_then(Value::as_array).is_some_and(Vec::is_empty);
     if unchanged && observation.as_ref().is_some_and(|seen| ctx.has_computer_observation(seen)) {
@@ -2076,10 +2091,98 @@ fn acted_in(acts: &[&ComputerInput], ctx: &ToolContext) -> Option<ComputerTarget
         .or_else(|| ctx.computer_observed_target())
 }
 
+/// The look a batch's points in an app were read on (CU speed 163, A1): the
+/// last picture this model was shown of their one window — its frame, and
+/// where the window stood in it.
+#[derive(Clone, Copy, Debug)]
+struct PointLook {
+    frame: ShotFrame,
+    window_frame: [f64; 4],
+}
+
+/// Whether a step presses at a point inside an app's window: a click, a
+/// scroll or a drag there, its point counted inside the window.
+fn presses_at_an_app_point(step: &ComputerInput) -> bool {
+    let action = step.action.trim();
+    step.app.is_some()
+        && (step.coordinate.is_some() || step.start_coordinate.is_some())
+        && (MARK_CLICKS.contains(&action) || matches!(action, SCROLL_ACTION | DRAG_ACTION))
+}
+
+/// The one look a batch's app points were read on, or why they cannot ride
+/// in it. The points name one window; the last picture this model was shown
+/// is of that window, said where the window stood, and the window is a
+/// document window (the window lists only those); no scroll, typed text or
+/// key before a point changed what that picture shows. `None` when no step
+/// presses at an app's point. The window holds each point step to that
+/// look's frame of the window, and stops the batch where the window left it.
+fn point_look(steps: &[ComputerInput], ctx: &ToolContext) -> Result<Option<PointLook>, ToolError> {
+    let mut window: Option<ComputerTarget> = None;
+    // Why the points after a step no longer hold: a scroll moved what the
+    // picture shows; typed text or a key may open the app's own list over it
+    // (an autofill, a suggestion), which the helper does not count as
+    // covering the point.
+    let mut stale_after: Option<String> = None;
+    for (at, step) in steps.iter().enumerate() {
+        if presses_at_an_app_point(step) {
+            if let Some(why) = &stale_after {
+                return Err(ToolError::InvalidInput(format!(
+                    "step {}: {why}; end the batch there, look again, and send the points read on the new picture",
+                    at + 1
+                )));
+            }
+            let Some(named) = target_of(step).filter(|named| named.window_id.is_some()) else {
+                return Err(ToolError::InvalidInput("app coordinates require the window_id from an observation of that window".into()));
+            };
+            match window.as_ref().map(|one| one.window_id) {
+                Some(first) if first != named.window_id => {
+                    return Err(ToolError::InvalidInput(format!(
+                        "step {}: a batch's points are read on one picture of one window; windows {} and {} go in separate batches, each after a look at its window",
+                        at + 1,
+                        first.unwrap_or_default(),
+                        named.window_id.unwrap_or_default()
+                    )));
+                }
+                Some(_) => {}
+                None => window = Some(named),
+            }
+        }
+        if stale_after.is_none() {
+            let action = step.action.trim();
+            stale_after = if action == SCROLL_ACTION {
+                Some(format!("the scroll at step {} moved what the picture its points were read on shows", at + 1))
+            } else if KEY_ACTIONS.contains(&action) {
+                Some(format!("the typed text or key at step {} may open a list over the points read before it", at + 1))
+            } else {
+                None
+            };
+        }
+    }
+    let Some(window) = window else {
+        return Ok(None);
+    };
+    let window_id = window.window_id.unwrap_or_default();
+    let look = ctx.computer_target_look(&window);
+    match look.and_then(|look| look.window.map(|seen| (look.frame, seen))) {
+        Some((_, seen)) if seen.layer != 0 => Err(ToolError::InvalidInput(format!(
+            "window {window_id} floats above others (layer {}): send its points one call at a time",
+            seen.layer
+        ))),
+        Some((frame, seen)) => Ok(Some(PointLook { frame, window_frame: seen.frame })),
+        None => {
+            let observe = json!({ "action": "observe", "app": window.app, "window_id": window.window_id });
+            Err(ToolError::InvalidInput(format!(
+                "a batch's points are read on the last picture of their window, and the window holds each one to where that picture saw it: observe {observe} first, then send the batch with points read on that picture"
+            )))
+        }
+    }
+}
+
 /// A batch's command line: each step spelled exactly as the same action
 /// alone, in the same frame — the core's batch verb and flag, the window's
-/// checks.
-fn batch_argv(steps: &[ComputerInput], frame: ShotFrame) -> Result<Vec<String>, ToolError> {
+/// checks — and its points in an app in the frame of the look they were read
+/// on, pinned to where that look saw their window.
+fn batch_argv(steps: &[ComputerInput], frame: ShotFrame, look: Option<PointLook>) -> Result<Vec<String>, ToolError> {
     check_batch_len(steps.len())?;
     let commands = steps
         .iter()
@@ -2098,8 +2201,16 @@ fn batch_argv(steps: &[ComputerInput], frame: ShotFrame) -> Result<Vec<String>, 
                     at + 1
                 )));
             }
-            in_points(step.clone(), frame)
+            let pinned = look.filter(|_| presses_at_an_app_point(step));
+            in_points(step.clone(), pinned.map_or(frame, |look| look.frame))
                 .and_then(|step| argv_for(&step))
+                .map(|mut argv| {
+                    if let Some(look) = pinned {
+                        let json = argv.iter().rposition(|word| word == "--json").unwrap_or(argv.len());
+                        argv.splice(json..json, [format!("--{WINDOW_FRAME_FLAG}"), spelled_region(look.window_frame)]);
+                    }
+                    argv
+                })
                 .map_err(|error| ToolError::InvalidInput(format!("step {} ({action}): {error}", at + 1)))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2160,17 +2271,16 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
                 step.background = Some(true);
             }
         }
-        if step.app.is_some() && (step.coordinate.is_some() || step.start_coordinate.is_some()) {
-            return Err(ToolError::InvalidInput("an app-coordinate action needs its own observed window frame; run it separately or use label-based batch steps (windows without trees: left_click {label, ocr: true, foreground: true}, only when the person told you to do that step on their own screen)".into()));
-        }
     }
-    zerocode_core::computer_use::parse_command(&batch_argv(&steps, ShotFrame::UNIT)?).map_err(ToolError::InvalidInput)?;
+    // Points in an app ride on the last look at their window (CU speed 163, A1).
+    let look = point_look(&steps, ctx)?;
+    zerocode_core::computer_use::parse_command(&batch_argv(&steps, ShotFrame::UNIT, look)?).map_err(ToolError::InvalidInput)?;
     let first_look = first_look(&steps.iter().collect::<Vec<_>>(), ctx, road)?;
     let frame = ctx.computer_frame().unwrap_or(ShotFrame::UNIT);
     // A batch the person's pointer or keys held up before its first step is
     // the same batch once they pause; one that ran a step is not sent again.
     let asks_again = steps.iter().all(may_ask_again);
-    let (answer, stood_by) = call_once_the_person_pauses(road, &batch_argv(&steps, frame)?, ctx, stop, asks_again, PERSON_BUSY_PAUSE)?;
+    let (answer, stood_by) = call_once_the_person_pauses(road, &batch_argv(&steps, frame, look)?, ctx, stop, asks_again, PERSON_BUSY_PAUSE)?;
     let mut reports = answer
         .pointer("/result/steps")
         .and_then(Value::as_array)
@@ -2983,6 +3093,11 @@ fn may_ask_again(input: &ComputerInput) -> bool {
 
 /// The pointer act that scrolls what the window finds under its target.
 const SCROLL_ACTION: &str = "scroll";
+/// The pointer act that drags from one point to another.
+const DRAG_ACTION: &str = "left_click_drag";
+/// The acts that send keys to an app's focus, where a list of the app's own
+/// (an autofill, a suggestion) may open.
+const KEY_ACTIONS: [&str; 2] = ["type", "key"];
 
 /// Sleep `pause` in slices of [`STOP_LOOK_EVERY`], looking at `stopped`
 /// before each and once more at its end: false, at once, when the turn was
@@ -3189,15 +3304,15 @@ pub(crate) mod tests {
     #[test]
     fn batch_serialization_rejects_the_shared_limit_before_per_step_validation() {
         let invalid = input(json!({"action":"batch", "steps":[]}));
-        let error = batch_argv(&vec![invalid; COMPUTER_BATCH_MAX_STEPS + 1], ShotFrame::UNIT).unwrap_err();
+        let error = batch_argv(&vec![invalid; COMPUTER_BATCH_MAX_STEPS + 1], ShotFrame::UNIT, None).unwrap_err();
         assert!(error.to_string().contains(&format!("1 to {COMPUTER_BATCH_MAX_STEPS} steps")), "{error}");
-        assert!(batch_argv(&[], ShotFrame::UNIT).is_err());
+        assert!(batch_argv(&[], ShotFrame::UNIT, None).is_err());
     }
 
     #[test]
     fn batch_serialization_accepts_exactly_the_existing_shared_step_limit() {
         let steps = vec![input(json!({"action":"wait", "duration":0.001})); COMPUTER_BATCH_MAX_STEPS];
-        let argv = batch_argv(&steps, ShotFrame::UNIT).unwrap();
+        let argv = batch_argv(&steps, ShotFrame::UNIT, None).unwrap();
         let parsed = zerocode_core::computer_use::parse_command(&argv).unwrap();
         assert_eq!(zerocode_core::computer_use::batch_steps(&parsed).len(), COMPUTER_BATCH_MAX_STEPS);
     }
@@ -3217,6 +3332,7 @@ pub(crate) mod tests {
                 marked_look: None,
                 title: None,
                 document: None,
+                window: None,
             }));
             std::fs::write(dir.path().join("wait-for"), json!({"ok":true,"result":case["result"]}).to_string()).unwrap();
             let response = run_computer(&case["input"], &ctx, &road).unwrap();
@@ -3247,6 +3363,7 @@ pub(crate) mod tests {
                 marked_look: None,
                 title: None,
                 document: None,
+                window: None,
             }));
             let mut wait = case["input"].clone();
             for key in ["app", "window_id", "background"] { wait.as_object_mut().unwrap().remove(key); }
@@ -4405,7 +4522,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_app_coordinate_batch_step_is_pointed_to_read_words() {
+    fn an_app_coordinate_batch_step_with_no_look_at_its_window_is_pointed_to_one() {
         let dir = tempfile::tempdir().unwrap();
         let (road, _) = fake_shim(dir.path());
         let ctx = crate::tests::tool_context_outside_cwd_windows();
@@ -4413,9 +4530,169 @@ pub(crate) mod tests {
             {"action": "left_click", "coordinate": [20, 40]},
             {"action": "type", "text": "fixture"},
         ]});
-        let error = run_computer(&fields, &ctx, &road).expect_err("an app coordinate cannot ride in a batch").to_string();
-        assert!(error.contains("left_click {label, ocr: true, foreground: true}"), "{error}");
+        let error = run_computer(&fields, &ctx, &road).expect_err("no picture of the window holds the point").to_string();
+        assert!(error.contains(r#"observe {"action":"observe","app":"Fixture","window_id":41} first"#), "{error}");
         assert!(calls(dir.path()).is_empty());
+    }
+
+    /// The look a coordinate batch reads its points on: window 41 of
+    /// Fixture, at (100, 80) and 640 × 480 points, in a picture of half a
+    /// pixel per point.
+    #[cfg(unix)]
+    fn looked_at_window_41(dir: &Path, ctx: &ToolContext, road: &ComputerRoad) {
+        std::fs::write(dir.join("window-frame"), r#""x":100,"y":80,"width":640,"height":480"#).unwrap();
+        run_computer(&json!({"action": "observe", "app": "Fixture", "window_id": 41}), ctx, road).unwrap();
+    }
+
+    /// The value a batch step spells after `flag`, if it spells it.
+    #[cfg(unix)]
+    fn spelled_after(step: &[String], flag: &str) -> Option<String> {
+        step.iter().position(|word| word == flag).and_then(|at| step.get(at + 1)).cloned()
+    }
+
+    /// CU speed 163 A1: points read on the last look at a window ride in one
+    /// batch — one trip, no look bought before it — each converted in that
+    /// look's frame and pinned to the frame the window had in it, so the
+    /// window stops the batch at the step whose window moved.
+    #[cfg(unix)]
+    #[test]
+    fn points_read_on_the_last_look_at_their_window_go_as_one_batch_pinned_to_that_look() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        looked_at_window_41(dir.path(), &ctx, &road);
+        let reports = json!([
+            {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 2, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 3, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 4, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+        ]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 4, "steps": reports}}).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "app": "Fixture", "window_id": 41, "steps": [
+            {"action": "left_click", "coordinate": [20, 40]},
+            {"action": "double_click", "coordinate": [60, 100]},
+            {"action": "left_click_drag", "start_coordinate": [10, 10], "coordinate": [30, 50]},
+            {"action": "type", "text": "fixture"},
+        ]}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(answer["ran"], 4);
+        assert!(answer["first_look"].is_null(), "the look the points came from is the frame: {answer}");
+        assert_eq!(calls(dir.path()), ["observe", "batch", "observe"], "one trip, then the look after it");
+        let commands: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+        assert_eq!(commands.len(), 4);
+        // Half a pixel per point: [20, 40] is (40, 80) points inside the window.
+        assert_eq!(spelled_after(&commands[0], "--x").as_deref(), Some("40"), "{commands:?}");
+        assert_eq!(spelled_after(&commands[0], "--y").as_deref(), Some("80"), "{commands:?}");
+        assert_eq!(spelled_after(&commands[2], "--from-x").as_deref(), Some("20"), "{commands:?}");
+        for at in [0, 1, 2] {
+            assert_eq!(spelled_after(&commands[at], "--window-frame").as_deref(), Some("100,80,640,480"), "step {}: {commands:?}", at + 1);
+            assert_eq!(spelled_after(&commands[at], "--window-id").as_deref(), Some("41"), "{commands:?}");
+        }
+        assert!(spelled_after(&commands[3], "--window-frame").is_none(), "typed text has no point to pin: {commands:?}");
+    }
+
+    /// A batch's points are taken only from the last look at their one
+    /// window, as it stood: no look at it, a look at another window, points
+    /// in two windows, a look that did not say where its window stood, a
+    /// window that floats (the window lists only document windows), or a
+    /// point after a scroll, typed text or a key that may have changed what
+    /// the look showed — each refused before anything is sent, and no look is
+    /// bought for it.
+    #[cfg(unix)]
+    #[test]
+    fn batch_points_need_the_last_look_at_their_one_window_and_nothing_moved_since() {
+        let point = |window_id: u64, at: [u64; 2]| json!({"action": "left_click", "app": "Fixture", "window_id": window_id, "coordinate": at});
+        let scroll = json!({"action": "scroll", "app": "Fixture", "window_id": 41, "coordinate": [20, 40], "scroll_direction": "down", "scroll_pages": 1});
+        let typed = json!({"action": "type", "app": "Fixture", "window_id": 41, "text": "fixture"});
+        let key = json!({"action": "key", "app": "Fixture", "window_id": 41, "text": "Tab"});
+        for (looked, steps, says) in [
+            (false, json!([point(41, [20, 40])]), "observe"),
+            (true, json!([point(52, [20, 40])]), "observe"),
+            (true, json!([point(41, [20, 40]), point(52, [30, 40])]), "one window"),
+            (true, json!([scroll.clone(), point(41, [30, 40])]), "scroll"),
+            (true, json!([point(41, [20, 40]), typed.clone(), point(41, [30, 40])]), "may open a list"),
+            (true, json!([point(41, [20, 40]), key.clone(), point(41, [30, 40])]), "may open a list"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            if looked {
+                looked_at_window_41(dir.path(), &ctx, &road);
+            }
+            let error = run_computer(&json!({"action": "batch", "steps": steps}), &ctx, &road).expect_err("refused").to_string();
+            assert!(error.contains(says), "{steps}: {error}");
+            assert!(!calls(dir.path()).iter().any(|call| call == "batch"), "nothing was sent: {steps}");
+            assert_eq!(calls(dir.path()).len(), usize::from(looked), "no look was bought for it: {steps}");
+        }
+        // A look that did not say where its window stood pins nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        run_computer(&json!({"action": "observe", "app": "Fixture", "window_id": 41}), &ctx, &road).unwrap();
+        let error = run_computer(&json!({"action": "batch", "steps": [point(41, [20, 40])]}), &ctx, &road).expect_err("refused").to_string();
+        assert!(error.contains("observe"), "{error}");
+        assert_eq!(calls(dir.path()), ["observe"]);
+        // A window that floats is one the window's list leaves out: its
+        // points go one call at a time, and no look would change that.
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        std::fs::write(dir.path().join("window-frame"), r#""x":100,"y":80,"width":640,"height":480,"platform":{"layer":3}"#).unwrap();
+        run_computer(&json!({"action": "observe", "app": "Fixture", "window_id": 41}), &ctx, &road).unwrap();
+        let error = run_computer(&json!({"action": "batch", "steps": [point(41, [20, 40])]}), &ctx, &road).expect_err("refused").to_string();
+        assert!(error.contains("window 41 floats above others (layer 3): send its points one call at a time"), "{error}");
+        assert_eq!(calls(dir.path()), ["observe"]);
+    }
+
+    /// A pinned point step keeps every guard of a press sent alone: its
+    /// declared confirmation rides on it, a refusal at a step — the window's
+    /// moved-window refusal among them — stops the batch there and says so,
+    /// and a batch of points the person's hand held up is not sent again.
+    #[cfg(unix)]
+    #[test]
+    fn a_point_batch_keeps_the_press_guards_and_stops_where_the_window_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        looked_at_window_41(dir.path(), &ctx, &road);
+        std::fs::write(dir.path().join("batch"), json!({
+            "ok": false, "error": {"code": "window_stale", "message": "window 41 moved or resized since the look its point was read on"},
+            "result": {"ran": 1, "of": 3, "refusedAt": 2, "steps": [
+                {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+                {"n": 2, "ok": false, "error": {"code": "window_stale", "message": "moved", "delivery": "not_delivered"}},
+            ]},
+        }).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "app": "Fixture", "window_id": 41, "steps": [
+            {"action": "left_click", "coordinate": [20, 40]},
+            {"action": "left_click", "coordinate": [60, 100], "confirming": "payment"},
+            {"action": "left_click", "coordinate": [80, 100]},
+        ]}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["ran"], 1);
+        assert_eq!(answer["refused"]["step"], 2);
+        assert_eq!(answer["refused"]["code"], "window_stale");
+        assert!(answer["looked_after"].is_object(), "the press that ran is looked at: {answer}");
+        let commands: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+        assert_eq!(spelled_after(&commands[1], "--confirming").as_deref(), Some("payment"), "{commands:?}");
+        assert!(spelled_after(&commands[1], "--window-frame").is_some(), "{commands:?}");
+
+        // The person's pointer held the batch up before its first step: a
+        // batch of points is answered as the window answered it, once.
+        std::fs::write(dir.path().join("batch"), json!({
+            "ok": false, "error": {"code": "person_pointing", "message": "the person is using the pointer", "delivery": "not_delivered"},
+            "result": {"ran": 0, "of": 1, "refusedAt": 1, "steps": [
+                {"n": 1, "ok": false, "error": {"code": "person_pointing", "message": "busy", "delivery": "not_delivered"}},
+            ]},
+        }).to_string()).unwrap();
+        let before = calls(dir.path()).iter().filter(|call| call.as_str() == "batch").count();
+        let error = run_computer(&json!({"action": "batch", "steps": [
+            {"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]},
+        ]}), &ctx, &road).expect_err("held up").to_string();
+        assert!(error.contains("person_pointing"), "{error}");
+        let after = calls(dir.path()).iter().filter(|call| call.as_str() == "batch").count();
+        assert_eq!(after - before, 1, "a press at a point is not asked again: {:?}", calls(dir.path()));
     }
 
     #[cfg(unix)]
@@ -4647,9 +4924,9 @@ pub(crate) mod tests {
         assert!(spelled(json!({ "action": "left_click", "app": "Mail", "element_index": 1, "mark": 2 })).is_err());
         assert!(spelled(json!({ "action": "double_click", "app": "Mail", "element_index": 1 })).is_err(), "its press has no count");
         assert!(spelled(json!({ "action": "key", "text": "a", "mark": 1 })).is_err());
-        assert!(batch_argv(&[input(json!({ "action": "left_click", "mark": 1 }))], ShotFrame::UNIT).is_err());
+        assert!(batch_argv(&[input(json!({ "action": "left_click", "mark": 1 }))], ShotFrame::UNIT, None).is_err());
         assert!(
-            batch_argv(&[input(json!({ "action": "left_click", "app": "Mail", "element_index": 1 }))], ShotFrame::UNIT).is_err(),
+            batch_argv(&[input(json!({ "action": "left_click", "app": "Mail", "element_index": 1 }))], ShotFrame::UNIT, None).is_err(),
             "an element click goes alone too"
         );
         let ctx = crate::tests::tool_context_outside_cwd_windows();
@@ -4980,6 +5257,7 @@ done
 title=''
 [ -f '@DIR@/window-title' ] && title=',"title":"'"$(cat '@DIR@/window-title')"'"'
 [ -f '@DIR@/window-document' ] && title="$title"',"document":"'"$(cat '@DIR@/window-document')"'"'
+[ -f '@DIR@/window-frame' ] && title="$title"','"$(cat '@DIR@/window-frame')"
 target=''
 [ -n "$window" ] && target=',"window":{"id":'"$window""$title"'},"fixture":"unrelated-window-fixture"'
 [ -f '@DIR@/delay-'"$verb"'.'"$asked" ] && sleep "$(cat '@DIR@/delay-'"$verb"'.'"$asked")"
@@ -5258,7 +5536,7 @@ printf '%s
         assert_eq!(answer["refused"]["code"], "stopped");
         assert_eq!(calls(dir.path()), ["batch", "observe"]);
         assert!(!answer["looked_after"]["screen"]["said"].as_str().unwrap().contains("--settle"));
-        assert!(batch_argv(&[input(json!({ "action": "key", "text": "a", "settle": false }))], ShotFrame::UNIT).is_err());
+        assert!(batch_argv(&[input(json!({ "action": "key", "text": "a", "settle": false }))], ShotFrame::UNIT, None).is_err());
     }
 
     /// The road end to end: a look is staged and teaches the frame, an act is
@@ -5403,7 +5681,7 @@ printf '%s
             input(json!({ "action": "type", "text": "hi" })),
             input(json!({ "action": "key", "text": "Return", "confirming": "payment" })),
         ];
-        let argv = batch_argv(&steps, frame).expect("a batch");
+        let argv = batch_argv(&steps, frame, None).expect("a batch");
         assert_eq!(argv[0], ComputerMethod::Batch.verb_name());
         assert_eq!(argv[1], format!("--{BATCH_COMMANDS_FLAG}"));
         let commands: Vec<Vec<String>> = serde_json::from_str(&argv[2]).unwrap();
@@ -5412,7 +5690,7 @@ printf '%s
         }
         assert_eq!(commands[0][..5], ["mouse-click", "--x", "100", "--y", "80"]);
         assert!(zerocode_core::computer_use::parse_command(&argv).is_ok());
-        assert!(batch_argv(&[input(json!({ "action": "batch", "steps": [] }))], frame).is_err(), "no nesting");
+        assert!(batch_argv(&[input(json!({ "action": "batch", "steps": [] }))], frame, None).is_err(), "no nesting");
     }
 
     /// Five hand steps: singly, ten trips down the shim and five pictures;
@@ -6888,7 +7166,7 @@ printf '%s
                 {"action":action,"app":"Notes","window_id":41,"label":"Save"},
                 {"action":"scroll","coordinate":[790,450],field:"down","scroll_amount":3}
             ]})).unwrap();
-            batch_argv(call.steps.as_deref().unwrap(), ShotFrame::UNIT).map_err(|error| error.to_string())
+            batch_argv(call.steps.as_deref().unwrap(), ShotFrame::UNIT, None).map_err(|error| error.to_string())
         };
         assert_eq!(batch("click", "direction"), batch("left_click", "scroll_direction"));
         assert!(batch("click", "direction").is_ok());
@@ -6935,7 +7213,8 @@ printf '%s
     /// told it to do (foreground in the tool and a step, its sentences, a phone's
     /// borrowing; t-90094) ~206, and a phone's borrowing said only for its mirroring
     /// window, three sentences shortened to pay for it (t-78118) ~+3, and the
-    /// person's own browser pausing input while they use it (t-106321) ~+10.
+    /// person's own browser pausing input while they use it (t-106321) ~+10,
+    /// and a batch's points from the last look (CU speed 163, t-113495) ~+3.
     #[test]
     fn the_computer_schema_is_measured() {
         const CEILING_TOKENS: usize = 2_280;

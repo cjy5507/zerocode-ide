@@ -49,6 +49,7 @@ pub mod listen;
 pub mod marks;
 pub mod observe;
 mod own_window;
+mod pinned_window;
 pub(crate) mod pressed_reading;
 pub mod recipe_run;
 pub mod recipes;
@@ -202,6 +203,9 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     // A request admitted to a window the person since took back goes no
     // further (t-73906).
     share::ensure_current()?;
+    // A press at a point pinned to the window its look saw goes only while
+    // that window stands there, on every road below (CU speed 163, A1).
+    let params = pinned_window::stands_first(method, params, listed_windows)?;
     // ZeroCode's own app is the page's to answer, before any helper road
     // (t-73906): no OS event is made in the window the person works in.
     if let Some(answer) = self_surface::route(method, &params) {
@@ -271,6 +275,24 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
             acts.then_some(zerocode_core::computer_use_protocol::DELIVERY_UNCERTAIN),
         )),
     }
+}
+
+/// An app's windows as the helper lists them (`listWindows`), for a pinned
+/// press to be held to. A road that broke while listing is the request's own
+/// break: the session goes as it would for the request itself.
+fn listed_windows(app: &str) -> Result<Value, ComputerUseError> {
+    let asked = serde_json::json!({ "app": app });
+    #[cfg(test)]
+    if let Some(answer) = test_helper::answer("listWindows", &asked) {
+        return answer;
+    }
+    let session = standing_session()?;
+    session
+        .request("listWindows", asked)
+        .map_err(|failure| match failure {
+            SessionFailure::Provider(error) => error,
+            SessionFailure::Transport(error) => discard(&session, error),
+        })
 }
 
 /// Whether a helper method changes something, so that its answer must say

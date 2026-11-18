@@ -26495,6 +26495,90 @@ pub(crate) mod computer_desktop_wait {
             "the batch answered {after:?} after the stop"
         );
     }
+
+    /// CU speed 163 A1: a batch of presses at points in one app window, each
+    /// pinned to the frame the window had in the look its points were read
+    /// on, goes press by press while the window stands there — the helper
+    /// never sees the pin — and stops at the step whose window moved: that
+    /// step is refused before the helper is asked, nothing sent, and the
+    /// steps after it are not sent.
+    #[test]
+    fn a_pinned_point_batch_stops_at_the_step_whose_window_left_its_look() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zerocode_core::computer_use::WINDOW_FRAME_PARAM;
+        use zerocode_core::computer_use_protocol::{NOT_DELIVERED, error_code};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
+        let presses = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
+        let pressed = Rc::clone(&presses);
+        // After this many presses the person drags the window aside.
+        let moves_after = Rc::new(Cell::new(usize::MAX));
+        let moving = Rc::clone(&moves_after);
+        let _helper = crate::computer_use::test_helper::stand(move |method, params| {
+            Ok(match method {
+                "listWindows" => {
+                    let x = if pressed.borrow().len() >= moving.get() { 160 } else { 100 };
+                    serde_json::json!({ "windows": [
+                        { "id": 52, "x": 0, "y": 0, "width": 300, "height": 200 },
+                        { "id": 41, "x": x, "y": 80, "width": 640, "height": 480 },
+                    ] })
+                }
+                "click" => {
+                    pressed.borrow_mut().push(params.clone());
+                    serde_json::json!({
+                        "action": { "path": "window", "targetWindowId": 41 },
+                        "snapshot": {
+                            "app": { "name": "Fixture", "pid": 4242 },
+                            "window": { "id": 41, "x": 100, "y": 80, "width": 640, "height": 480 },
+                        },
+                    })
+                }
+                _ => serde_json::json!({ "stopped": false }),
+            })
+        });
+        let step = |x: &str| {
+            serde_json::json!([
+                "click", "--app", "Fixture", "--window-id", "41", "--x", x, "--y", "20",
+                "--window-frame", "100,80,640,480", "--no-screenshot",
+            ])
+        };
+        let command = batch_of(&serde_json::json!([step("10"), step("30"), step("50")]));
+
+        let stood = envelope(&run_batch(&command, answer_computer_command, || true));
+        assert_eq!(stood["ok"], true, "a window that stood takes every press: {stood}");
+        assert_eq!(stood["result"]["ran"], 3, "{stood}");
+        assert_eq!(presses.borrow().len(), 3);
+        assert!(
+            presses
+                .borrow()
+                .iter()
+                .all(|press| press.get(WINDOW_FRAME_PARAM).is_none()),
+            "the pin is the window's, never the helper's: {:?}",
+            presses.borrow()
+        );
+
+        presses.borrow_mut().clear();
+        moves_after.set(1);
+        let moved = envelope(&run_batch(&command, answer_computer_command, || true));
+        assert_eq!(moved["ok"], false, "{moved}");
+        assert_eq!(moved["result"]["refusedAt"], 2, "the batch stops at the step after the move: {moved}");
+        assert_eq!(moved["result"]["ran"], 1, "{moved}");
+        assert_eq!(moved["error"]["code"], error_code::WINDOW_STALE, "{moved}");
+        assert_eq!(
+            moved["result"]["steps"][1]["error"]["delivery"], NOT_DELIVERED,
+            "the refused step sent nothing: {moved}"
+        );
+        assert_eq!(
+            presses.borrow().len(),
+            1,
+            "neither the refused step nor the one after it reached the helper: {:?}",
+            presses.borrow()
+        );
+    }
 }
 
 /// What a walk's answer says in words to a caller that did not ask for JSON.

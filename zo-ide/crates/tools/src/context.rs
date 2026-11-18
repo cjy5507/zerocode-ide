@@ -270,6 +270,18 @@ pub(crate) struct ComputerObservation {
     pub marked_look: Option<String>,
     pub title: Option<String>,
     pub document: Option<String>,
+    /// Where the window stood in the picture, when the look said: the frame
+    /// a batch's points read on this picture are pinned to (CU speed 163, A1).
+    pub window: Option<LookedWindow>,
+}
+
+/// Where a look saw its window: its frame in screen points — x, y, width,
+/// height — and its layer, 0 for a document window and above it for one
+/// that floats.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LookedWindow {
+    pub frame: [f64; 4],
+    pub layer: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -696,13 +708,18 @@ impl ToolContext {
     }
 
     pub(crate) fn computer_target_frame(&self, target: &ComputerTarget) -> Option<ShotFrame> {
+        self.computer_target_look(target).map(|seen| seen.frame)
+    }
+
+    /// The last picture staged for this model, when it was of `target`.
+    pub(crate) fn computer_target_look(&self, target: &ComputerTarget) -> Option<ComputerObservation> {
         self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .filter(|seen| match target.window_id {
                 Some(window_id) => seen.window_id == Some(window_id),
                 None => seen.app.as_deref() == Some(target.app.as_str()) && seen.window_id.is_none(),
             })
-            .map(|seen| seen.frame)
+            .cloned()
     }
 
     pub(crate) fn set_computer_observation(&self, observation: Option<ComputerObservation>) {
