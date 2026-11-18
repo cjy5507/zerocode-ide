@@ -2378,13 +2378,17 @@ async fn e2e_a_delegation_cell_shows_its_task_not_its_arguments() {
 
 /// Anthropic thinking has no bold heading, so the status row said `Working`
 /// for the whole block and the body never reached the screen (2026-09-22,
-/// "thinking 중에 뭘 하는지 확인이 안 됨"). Now the row says the newest
-/// complete sentence and the block commits as a titled thinking cell; a
-/// `/thinking` keeps the row's word and drops the cell (t-5872).
+/// "thinking 중에 뭘 하는지 확인이 안 됨"). Now the row says a complete
+/// sentence and the block commits as a titled thinking cell; a `/thinking`
+/// keeps the row's word and drops the cell (t-5872).
 ///
-/// The delta-to-screen latency is measured, not assumed: the script writes
-/// one SSE event per sentence with its instant, and the screen is polled
-/// until the sentence's word stands on the row.
+/// The first sentence takes the row at once — its delta-to-screen latency is
+/// measured, not assumed: the script writes one SSE event per sentence with
+/// its instant, and the screen is polled until the word stands on the row.
+/// The two after it end within its dwell
+/// ([`zo_ide::tui::view::HEADER_DWELL`]), so the row keeps it: the word
+/// changed once a sentence and the row jumped as the model wrote (the
+/// person, 2026-11-18: 「working부분이 정신없게 바뀜」).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_headerless_thinking_names_the_status_row_and_commits_a_titled_cell() {
     let layout = Layout::new();
@@ -2408,11 +2412,11 @@ async fn e2e_headerless_thinking_names_the_status_row_and_commits_a_titled_cell(
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"Summarise the fixture\r").expect("send prompt");
 
-    // Each sentence's word on the status row, and how long after its delta
-    // left the server. The shimmer styles every glyph, so the row is read
-    // through the screen, never as raw bytes.
+    // The first sentence's word on the status row, and how long after its
+    // delta left the server. The shimmer styles every glyph, so the row is
+    // read through the screen, never as raw bytes.
     let mut latencies_ms = Vec::new();
-    for (index, word) in words.iter().enumerate() {
+    for (index, word) in words.iter().enumerate().take(1) {
         let deadline = Instant::now() + timeout;
         let seen_at = loop {
             let mut screen = Screen::new(40);
@@ -2449,6 +2453,24 @@ async fn e2e_headerless_thinking_names_the_status_row_and_commits_a_titled_cell(
         latencies_ms.iter().all(|ms| *ms < 1_000.0),
         "the status word lagged its delta: {latencies_ms:?}"
     );
+    // Until the answer is in: the sentences that ended within the first
+    // word's dwell never take the row (the block's end comes first, and
+    // waits too).
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut screen = Screen::new(40);
+        screen.feed(&run.snapshot_output());
+        for row in screen.visible().iter().filter(|row| row.contains("esc to interrupt")) {
+            for later in &words[1..] {
+                assert!(!row.contains(later), "a sentence took the row inside the first one's dwell: {row}");
+            }
+        }
+        if screen.transcript().iter().any(|row| row.contains("three lines")) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the answer never came");
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     // The block ends: a titled thinking cell with the sentences under it,
     // then the answer.

@@ -55,6 +55,15 @@ pub fn status_detail_columns(width: usize) -> usize {
     width.saturating_sub(details_prefix().chars().count()).max(1)
 }
 
+/// How long a word the model's thinking put on the working row stands before
+/// the next one takes its place ([`Status::offer_header`]). A model that
+/// writes no bold headings gives the row a new sentence every second or less,
+/// and the row — its words, and the clock and the interrupt hint after them —
+/// moved with every one (the person, 2026-11-18: 「working부분이 정신없게
+/// 바뀜」). A heading of the row's forty-eight columns is some eight words,
+/// read in about as many seconds as this.
+pub const HEADER_DWELL: Duration = Duration::from_secs(3);
+
 /// How long after a request leaves the marks look names the wait
 /// ([`Status::name_the_wait_after`]): long enough that a model which answers
 /// at once never shows the phrase, short enough that a turn waiting on one
@@ -72,6 +81,12 @@ pub enum StatusDetailsCapitalization {
 pub struct Status {
     pub header: String,
     pub elapsed: Duration,
+    /// The turn-elapsed at which `header` last changed.
+    header_since: Duration,
+    /// The word offered for the row while the one on it has not stood its
+    /// [`HEADER_DWELL`]: it takes the row once it has ([`Status::set_elapsed`]),
+    /// and a later offer takes its place.
+    header_waiting: Option<String>,
     pub details: Vec<String>,
     pub details_max_lines: usize,
     inline_message: Option<String>,
@@ -236,6 +251,8 @@ impl Status {
         Self {
             header: Self::DEFAULT_HEADER.to_string(),
             elapsed,
+            header_since: Duration::ZERO,
+            header_waiting: None,
             details: Vec::new(),
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
             inline_message: None,
@@ -525,11 +542,71 @@ impl Status {
     /// restore_reasoning_status_header`): while the model reasons, the animated
     /// word is the first bold heading of that reasoning, so a long unattended
     /// run says what it is thinking about instead of only that it is alive.
+    /// It takes the row now; a word offered and still waiting is dropped.
     pub fn set_header(&mut self, header: Option<&str>) {
-        self.header = header
+        let header = Self::header_word(header);
+        self.show_header(header);
+    }
+
+    /// Offer a word for the row as the model's thinking moves on. A word that
+    /// says more than the row does takes it now: anything over `Working`, a
+    /// heading over `Thinking`. Any other — a heading over a heading, a step
+    /// back to `Thinking` or `Working` — takes the row once the word on it has
+    /// stood its [`HEADER_DWELL`]: now if it has, else at the first
+    /// [`Status::set_elapsed`] after, unless a later offer takes its place
+    /// first. Offering the word the row already says drops the one waiting,
+    /// so a block that ends and the next that begins a moment later leave the
+    /// row as it was.
+    pub fn offer_header(&mut self, header: Option<&str>) {
+        let header = Self::header_word(header);
+        if header == self.header {
+            self.header_waiting = None;
+            return;
+        }
+        let says_more = header != Self::DEFAULT_HEADER
+            && (self.header == Self::DEFAULT_HEADER || self.header == strings::THINKING);
+        if self.compaction.is_none() && (says_more || self.header_stood_its_dwell()) {
+            self.show_header(header);
+        } else {
+            self.header_waiting = Some(header);
+        }
+    }
+
+    /// The word offered and waiting for the row ([`Status::offer_header`]).
+    #[must_use]
+    pub fn waiting_header(&self) -> Option<&str> {
+        self.header_waiting.as_deref()
+    }
+
+    /// The turn's clock moved on: a word waiting for the row takes it once the
+    /// word on it has stood its [`HEADER_DWELL`] (not while a compaction has
+    /// the row).
+    pub fn set_elapsed(&mut self, elapsed: Duration) {
+        self.elapsed = elapsed;
+        if self.compaction.is_none() && self.header_waiting.is_some() && self.header_stood_its_dwell() {
+            if let Some(header) = self.header_waiting.take() {
+                self.show_header(header);
+            }
+        }
+    }
+
+    fn header_stood_its_dwell(&self) -> bool {
+        self.elapsed.saturating_sub(self.header_since) >= HEADER_DWELL
+    }
+
+    fn header_word(header: Option<&str>) -> String {
+        header
             .map(str::trim)
             .filter(|header| !header.is_empty())
-            .map_or_else(|| Self::DEFAULT_HEADER.to_string(), str::to_string);
+            .map_or_else(|| Self::DEFAULT_HEADER.to_string(), str::to_string)
+    }
+
+    fn show_header(&mut self, header: String) {
+        if header != self.header {
+            self.header = header;
+            self.header_since = self.elapsed;
+        }
+        self.header_waiting = None;
     }
 
     /// 상태 줄 한 줄 — `<•> <Working> (0s • esc to interrupt)`.
@@ -2355,6 +2432,84 @@ mod tests {
     use crate::tui::ansi::{Line, Style};
     use crate::tui::composer::Composer;
     use crate::tui::effort_effect::EffortTier;
+
+    /// A word the model's thinking puts on the working row stands its dwell
+    /// before the next takes the row: a word offered sooner waits, the last
+    /// one offered wins, and it takes the row at the first clock tick after
+    /// the dwell. A word that says more than the row — anything over
+    /// `Working`, a heading over `Thinking` — takes it at once; a step back to
+    /// `Working` waits, and a block's `Thinking` offered while that waits
+    /// leaves the row as it was. `set_header` is at once and drops what
+    /// waits; a compaction keeps the row.
+    #[test]
+    fn a_heading_stands_its_dwell_before_the_next_takes_the_row() {
+        use super::HEADER_DWELL;
+        use crate::tui::strings::THINKING;
+        let at = |status: &mut Status, millis: u64| status.set_elapsed(Duration::from_millis(millis));
+
+        let mut status = Status::working(Duration::ZERO);
+        status.offer_header(Some(THINKING));
+        assert_eq!(status.header, THINKING, "over Working, at once");
+        at(&mut status, 400);
+        status.offer_header(Some("Reading the parser"));
+        assert_eq!(status.header, "Reading the parser", "a heading over Thinking, at once");
+
+        at(&mut status, 1_000);
+        status.offer_header(Some("Checking the lexer"));
+        status.offer_header(Some("Comparing the spans"));
+        assert_eq!(status.header, "Reading the parser", "a heading over a heading waits its dwell");
+        assert_eq!(status.waiting_header(), Some("Comparing the spans"), "the last offer waits");
+        let shown_at = Duration::from_millis(400);
+        status.set_elapsed(shown_at + HEADER_DWELL - Duration::from_millis(1));
+        assert_eq!(status.header, "Reading the parser");
+        status.set_elapsed(shown_at + HEADER_DWELL);
+        assert_eq!(status.header, "Comparing the spans", "the clock past the dwell puts it on the row");
+        assert_eq!(status.waiting_header(), None);
+
+        // A block ends (Working is offered) and the next begins a moment
+        // later (Thinking): the row keeps its heading, then the next one.
+        at(&mut status, 3_500);
+        status.offer_header(None);
+        assert_eq!(status.header, "Comparing the spans");
+        status.offer_header(Some(THINKING));
+        assert_eq!(status.waiting_header(), Some(THINKING));
+        status.offer_header(Some("Writing the fix"));
+        status.set_elapsed(shown_at + HEADER_DWELL + HEADER_DWELL);
+        assert_eq!(status.header, "Writing the fix");
+
+        // A block with no heading: Thinking, its end, the next block — no flash.
+        let mut quiet = Status::working(Duration::ZERO);
+        quiet.offer_header(Some(THINKING));
+        at(&mut quiet, 500);
+        quiet.offer_header(None);
+        assert_eq!(quiet.header, THINKING, "a step back to Working waits");
+        quiet.offer_header(Some(THINKING));
+        assert_eq!(quiet.waiting_header(), None, "the next block's Thinking leaves the row as it was");
+        at(&mut quiet, 10_000);
+        assert_eq!(quiet.header, THINKING);
+        // Nothing follows: Working takes the row once the dwell is over.
+        quiet.offer_header(None);
+        assert_eq!(quiet.header, crate::tui::view::Status::DEFAULT_HEADER);
+
+        // set_header is at once and drops what waits.
+        let mut direct = Status::working(Duration::ZERO);
+        direct.offer_header(Some("Reading the parser"));
+        direct.offer_header(Some("Checking the lexer"));
+        direct.set_header(Some("Compacting"));
+        assert_eq!((direct.header.as_str(), direct.waiting_header()), ("Compacting", None));
+
+        // A compaction keeps the row; what waits takes it after.
+        let mut compacting = Status::working(Duration::from_secs(10));
+        compacting.offer_header(Some("Reading the parser"));
+        compacting.note_stream_phase(runtime::message_stream::types::StreamPhase::Compacting);
+        let compacting_word = compacting.header.clone();
+        compacting.offer_header(Some("Checking the lexer"));
+        at(&mut compacting, 60_000);
+        assert_eq!(compacting.header, compacting_word, "the compaction's word stays");
+        compacting.note_stream_phase(runtime::message_stream::types::StreamPhase::CompactionEnded);
+        at(&mut compacting, 61_000);
+        assert_eq!(compacting.header, "Checking the lexer");
+    }
 
     fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         Frame {

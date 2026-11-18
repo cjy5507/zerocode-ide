@@ -43,13 +43,10 @@ pub const LIVE_HEADING_MAX_COLUMNS: usize = 48;
 /// length costs a bounded scan per delta.
 pub const SCAN_KEEP_BYTES: usize = 4096;
 
-/// The thinking text kept for [`live_tail`]: its newest words. Two rows of
-/// the widest pane hold fewer, and the buffer is halved from the front past
-/// this, so a block of any length costs a bounded read per delta.
+/// The thinking text kept for [`live_line`]: its newest words, which hold the
+/// sentence being written. The buffer is halved from the front past this, so
+/// a block of any length costs a bounded read per delta.
 pub const TAIL_KEEP_BYTES: usize = 2048;
-
-/// The rows under the working row a thinking block's newest words may take.
-pub const TAIL_ROWS: usize = 2;
 
 /// Body rows a thinking cell keeps in a bare terminal before `… +N lines` —
 /// codex's tool-output preview cap, so the two previews read as one rule.
@@ -119,14 +116,30 @@ pub fn live_heading(text: &str, max_columns: usize) -> Option<String> {
     if let Some(bold) = leading_bold_heading(text) {
         return Some(fit(clean(bold), max_columns));
     }
+    let (last_complete, open) = sentences(text);
+    if let Some(sentence) = last_complete {
+        let cleaned = clean(sentence);
+        if !cleaned.is_empty() {
+            return Some(fit(cleaned, max_columns));
+        }
+    }
+    let open = clean(open.trim());
+    (open.width() > max_columns).then(|| fit(open, max_columns))
+}
+
+/// The newest complete sentence of `text` and what follows it — the
+/// sentence still being written. A sentence ends at a newline, at `.`/`!`/`?`
+/// followed by whitespace or by the end of the text (so `src/app.rs` and
+/// `v1.2` do not end one, and a run that is a bare number — `1. Inspect` —
+/// is a list marker, not a sentence), or at a CJK full stop. Neither part
+/// holds its terminator.
+fn sentences(text: &str) -> (Option<&str>, &str) {
     let mut last_complete: Option<&str> = None;
     let mut start = 0usize;
     let mut chars = text.char_indices().peekable();
     while let Some((index, ch)) = chars.next() {
         let ends_sentence = match ch {
             '\n' | '。' | '！' | '？' => true,
-            // A stop followed by whitespace, unless the run before it is a
-            // bare number: `1. Inspect` is a list marker, not a sentence.
             '.' | '!' | '?' => {
                 let run = text[start..index].trim_start();
                 chars
@@ -146,14 +159,7 @@ pub fn live_heading(text: &str, max_columns: usize) -> Option<String> {
         }
         start = index + ch.len_utf8();
     }
-    if let Some(sentence) = last_complete {
-        let cleaned = clean(sentence);
-        if !cleaned.is_empty() {
-            return Some(fit(cleaned, max_columns));
-        }
-    }
-    let open = clean(text[start..].trim());
-    (open.width() > max_columns).then(|| fit(open, max_columns))
+    (last_complete, &text[start..])
 }
 
 /// Strip the markdown a reasoning line opens with — `- `, `* `, `1. `, `# `,
@@ -206,50 +212,40 @@ fn fit(text: String, max_columns: usize) -> String {
     out
 }
 
-/// The newest words of a thinking block that is still being written, as the
-/// rows under the working row show them: prose on one line with the emphasis
-/// marks taken out, no wider than `max_columns` display columns, led by an
-/// ellipsis when earlier words were left out. `None` while nothing was said.
+/// The sentence a thinking block is writing now, as the row under the working
+/// row shows it: from its first word, prose on one row with the markdown
+/// taken out, no wider than `max_columns` display columns — cut at its end,
+/// at a word, with an ellipsis. So the row fills as the sentence is written
+/// and then holds still until the next sentence begins; until that one has a
+/// word, the sentence just finished stands, and the row never empties
+/// between two. `None` while nothing was said.
 ///
-/// The heading on the working row says what the block is about; these are
-/// its words as they come, so a model that reasons for half a minute before
-/// its first word shows that it is doing so.
+/// The row once showed the block's newest words over two rows (zo 1.1.143),
+/// and every delta moved each of them a word along and changed how many rows
+/// they took — the work in progress jumped as the model typed (the person,
+/// 2026-11-18: 「working부분이 정신없게 바뀜」). The heading on the working row
+/// says what the block is about; this row says what it is saying now, and
+/// changes once a sentence.
 #[must_use]
-pub fn live_tail(text: &str, max_columns: usize) -> Option<String> {
-    let said = text.split_whitespace().collect::<Vec<_>>().join(" ").replace("**", "").replace('`', "");
-    let said = said.trim();
-    if said.is_empty() || max_columns < 2 {
+pub fn live_line(text: &str, max_columns: usize) -> Option<String> {
+    if max_columns < 2 {
         return None;
     }
-    if said.width() <= max_columns {
-        return Some(said.to_string());
-    }
-    // The newest columns that fit beside the ellipsis, from the end back.
-    let room = max_columns - 1;
-    let mut used = 0usize;
-    let mut cut = said.len();
-    for (index, ch) in said.char_indices().rev() {
-        let width = UnicodeWidthStr::width(ch.encode_utf8(&mut [0u8; 4]) as &str);
-        if used + width > room {
-            break;
-        }
-        used += width;
-        cut = index;
-    }
-    let newest = &said[cut..];
-    // From a word's start, when that keeps at least half of what fits.
-    let from_a_word = newest
-        .find(char::is_whitespace)
-        .filter(|boundary| *boundary * 2 <= newest.len())
-        .map_or(newest, |boundary| newest[boundary..].trim_start());
-    Some(format!("…{from_a_word}"))
+    let (last_complete, open) = sentences(text);
+    let said = |segment: &str| {
+        let words = clean(segment).split_whitespace().collect::<Vec<_>>().join(" ");
+        (!words.is_empty()).then_some(words)
+    };
+    said(open)
+        .or_else(|| last_complete.and_then(said))
+        .map(|words| fit(words, max_columns))
 }
 
-/// Like [`live_tail`], but drops whole-line `**heading**` lines (and an
+/// Like [`live_line`], but drops whole-line `**heading**` lines (and an
 /// unclosed `**heading` still being written on the last line) because the
 /// working row above already displays the heading in the marks look.
 #[must_use]
-pub fn live_tail_without_headings(text: &str, max_columns: usize) -> Option<String> {
+pub fn live_line_without_headings(text: &str, max_columns: usize) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
     let last = lines.len().saturating_sub(1);
     let body: Vec<&str> = lines
@@ -261,7 +257,7 @@ pub fn live_tail_without_headings(text: &str, max_columns: usize) -> Option<Stri
     if body.is_empty() {
         return None;
     }
-    live_tail(&body.join(" "), max_columns)
+    live_line(&body.join("\n"), max_columns)
 }
 
 fn is_heading_line(line: &str) -> bool {
@@ -385,8 +381,8 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::{
-        bound_scan, cell, first_bold_heading, leading_bold_heading, live_heading, live_tail,
-        live_tail_without_headings, LIVE_HEADING_MAX_COLUMNS,
+        bound_scan, cell, first_bold_heading, leading_bold_heading, live_heading, live_line,
+        live_line_without_headings, LIVE_HEADING_MAX_COLUMNS,
     };
     use crate::tui::ansi::Line;
     use crate::tui::folds::{FoldIds, FoldMode};
@@ -570,72 +566,134 @@ mod tests {
         assert!(cell(Vec::new(), FoldMode::Markers, &mut ids).is_empty());
     }
 
-    /// The newest words of a block still being written: all of them while
-    /// they fit, and past that the newest, from a word's start, behind an
-    /// ellipsis — never wider than the room, a Korean letter's two columns
-    /// counted. Line breaks and emphasis marks are not words.
+    /// The sentence a block is writing, from its first word: all of it while
+    /// it fits, and past that its start, cut at a word behind an ellipsis —
+    /// never wider than the room, a Korean letter's two columns counted. A
+    /// sentence's end starts the next one; until that has a word the one just
+    /// finished stands. Line breaks end a sentence; emphasis and code marks
+    /// are not words.
     #[test]
-    fn the_live_tail_is_the_newest_words_that_fit() {
-        assert_eq!(live_tail("", 40), None);
-        assert_eq!(live_tail(" \n ", 40), None);
+    fn the_live_line_is_the_sentence_being_written_from_its_start() {
+        assert_eq!(live_line("", 40), None);
+        assert_eq!(live_line(" \n ", 40), None);
         assert_eq!(
-            live_tail("I should read the parser first", 40).as_deref(),
+            live_line("I should read the parser first", 40).as_deref(),
             Some("I should read the parser first")
         );
+        // The sentence being written, not the ones before it.
         assert_eq!(
-            live_tail("**Reading the parser**\n\nI should read `lex.rs`\nfirst", 60).as_deref(),
-            Some("Reading the parser I should read lex.rs first")
+            live_line("I read the lexer. Then the par", 40).as_deref(),
+            Some("Then the par")
         );
+        assert_eq!(
+            live_line("**Reading the parser**\n\nI should read `lex.rs`\nfirst", 60).as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            live_line("I should read `lex.rs` and  then\tthe   parser", 60).as_deref(),
+            Some("I should read lex.rs and then the parser")
+        );
+        // A sentence just ended and the next has no word yet: it stands.
+        assert_eq!(live_line("I read the lexer. ", 40).as_deref(), Some("I read the lexer"));
+        assert_eq!(live_line("I read the lexer.", 40).as_deref(), Some("I read the lexer"));
+        assert_eq!(live_line("I read the lexer.\n\n", 40).as_deref(), Some("I read the lexer"));
 
+        // Past the room: the sentence's start, cut at a word, and the words
+        // that come after do not move it.
         let long = "first the lexer then the parser then the checker and at last the emitter";
-        let tail = live_tail(long, 30).expect("words");
-        assert!(tail.starts_with('…') && tail.ends_with("at last the emitter"), "{tail}");
-        assert!(tail.width() <= 30, "{tail}");
-        let newest = tail.trim_start_matches('…');
-        assert!(long.contains(&format!(" {newest}")), "it starts at a word: {tail}");
+        let line = live_line(long, 30).expect("words");
+        assert!(line.starts_with("first the lexer") && line.ends_with('…'), "{line}");
+        assert!(line.width() <= 30, "{line}");
+        let shown = line.trim_end_matches('…');
+        assert!(long.starts_with(shown) && long[shown.len()..].starts_with(' '), "it ends at a word: {line}");
+        for more in [" and then", " and then the tests", " and then the tests again"] {
+            assert_eq!(live_line(&format!("{long}{more}"), 30).as_deref(), Some(line.as_str()), "{more}");
+        }
 
         let korean = "먼저 파서를 읽고 그다음 검사기를 본 뒤에 마지막으로 출력기를 고친다";
-        let tail = live_tail(korean, 24).expect("words");
-        assert!(tail.width() <= 24, "{tail} is {} columns", tail.width());
-        assert!(tail.starts_with('…') && tail.ends_with("출력기를 고친다"), "{tail}");
+        let line = live_line(korean, 24).expect("words");
+        assert!(line.width() <= 24, "{line} is {} columns", line.width());
+        assert!(line.starts_with("먼저 파서를") && line.ends_with('…'), "{line}");
+        assert_eq!(live_line("파서를 읽었다。그다음 검사기", 40).as_deref(), Some("그다음 검사기"));
+    }
+
+    /// While the words come the row grows — a word at its end — until the
+    /// sentence outruns it; then, once, its last word gives way to the
+    /// ellipsis, and the row holds until the next sentence replaces it. Fed a
+    /// character at a time, two sentences replace the row once.
+    #[test]
+    fn the_live_line_grows_and_holds_and_changes_once_a_sentence() {
+        let text = "I read the lexer and saw that the tokens carry their spans all the way through. \
+                    Then I will check the parser for the same thing before I change it.";
+        let mut said = String::new();
+        let mut rows: Vec<String> = Vec::new();
+        for ch in text.chars() {
+            said.push(ch);
+            if let Some(row) = live_line(&said, 40) {
+                if rows.last() != Some(&row) {
+                    rows.push(row);
+                }
+            }
+        }
+        assert!(rows.iter().all(|row| row.width() <= 40), "{rows:#?}");
+        let sentences = sentence_runs(&rows);
+        assert_eq!(sentences.len(), 2, "the row is replaced once, when the second sentence begins: {rows:#?}");
+        for run in sentences {
+            let cut = run.iter().position(|row| row.ends_with('…')).expect("each sentence outruns 40 columns");
+            assert_eq!(cut, run.len() - 1, "once cut the row holds: {run:#?}");
+            for pair in run[..cut].windows(2) {
+                assert!(pair[1].starts_with(pair[0].as_str()), "the row only grows: {:?} → {:?}", pair[0], pair[1]);
+            }
+        }
+    }
+
+    /// Rows that followed one another, split where one replaced the other —
+    /// where neither, its ellipsis aside, starts the other.
+    fn sentence_runs(rows: &[String]) -> Vec<Vec<String>> {
+        let mut runs: Vec<Vec<String>> = Vec::new();
+        for row in rows {
+            let replaces = runs.last().and_then(|run| run.last()).is_none_or(|before| {
+                let (a, b) = (before.trim_end_matches('…'), row.trim_end_matches('…'));
+                !a.starts_with(b) && !b.starts_with(a)
+            });
+            if replaces {
+                runs.push(Vec::new());
+            }
+            runs.last_mut().expect("a run").push(row.clone());
+        }
+        runs
     }
 
     #[test]
-    fn live_tail_without_headings_drops_heading_lines_and_keeps_inline_bold() {
+    fn live_line_without_headings_drops_heading_lines_and_keeps_inline_bold() {
         assert_eq!(
-            live_tail_without_headings(
+            live_line_without_headings(
                 "**Reading the parser**\n\nThe person says settings are not read.",
                 80,
             )
             .as_deref(),
-            Some("The person says settings are not read.")
+            Some("The person says settings are not read")
         );
+        assert_eq!(live_line_without_headings("**Reading the parser**", 80), None);
         assert_eq!(
-            live_tail_without_headings("**Reading the parser**", 80),
-            None
-        );
-        assert_eq!(
-            live_tail_without_headings(
-                "**Reading the parser**\n\nFirst part.\n\n**Checking the lexer**\n\nSecond part.",
+            live_line_without_headings(
+                "**Reading the parser**\n\nFirst part.\n\n**Checking the lexer**\n\nSecond part",
                 80,
             )
             .as_deref(),
-            Some("First part. Second part.")
+            Some("Second part")
         );
         assert_eq!(
-            live_tail_without_headings("문장 안의 **강조**는 남는다.", 80).as_deref(),
-            Some("문장 안의 강조는 남는다.")
+            live_line_without_headings("문장 안의 **강조**는 남는다", 80).as_deref(),
+            Some("문장 안의 강조는 남는다")
+        );
+        assert_eq!(live_line_without_headings("**Reading the par", 80), None);
+        assert_eq!(
+            live_line_without_headings("앞 문장.\n\n**Checking the le", 80).as_deref(),
+            Some("앞 문장")
         );
         assert_eq!(
-            live_tail_without_headings("**Reading the par", 80),
-            None
-        );
-        assert_eq!(
-            live_tail_without_headings("앞 문장.\n\n**Checking the le", 80).as_deref(),
-            Some("앞 문장.")
-        );
-        assert_eq!(
-            live_tail_without_headings("**Note** 이어지는 글", 80).as_deref(),
+            live_line_without_headings("**Note** 이어지는 글", 80).as_deref(),
             Some("Note 이어지는 글")
         );
     }
