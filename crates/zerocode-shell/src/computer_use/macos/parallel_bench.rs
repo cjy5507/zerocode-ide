@@ -1428,11 +1428,6 @@ fn settled_title(session: &Session, app: &str, pressed: u64) -> String {
 /// (a field's press, a key). Stops at once when the person comes back or
 /// another app comes to the front.
 fn front_turn(session: &Session, app: &str, pid: i32, presses: usize) -> Value {
-    let state = front_look_with(session, app, "ZC-FIELD");
-    let (target, field) = (
-        number_of(&state, "ZC-TARGET", 0),
-        number_of(&state, "ZC-FIELD", 0),
-    );
     let mut rows = vec![];
     let mut person_back = false;
     for _ in 0..presses {
@@ -1440,6 +1435,10 @@ fn front_turn(session: &Session, app: &str, pid: i32, presses: usize) -> Value {
             person_back = true;
             break;
         }
+        // Each press goes on a fresh look, as the tool's own presses do after
+        // every act: a press changes the page's title, and a number read on
+        // an older look is refused once the tree around it moved.
+        let target = number_of(&front_look_with(session, app, "ZC-FIELD"), "ZC-TARGET", 0);
         let pointer = pointer_at(session);
         let (ms, answer) = call(
             session,
@@ -1463,6 +1462,7 @@ fn front_turn(session: &Session, app: &str, pid: i32, presses: usize) -> Value {
         .filter(|row| row.get("refused").is_none())
         .count();
     let title = settled_title(session, app, u64::try_from(sent).expect("a count"));
+    let field = number_of(&front_look_with(session, app, "ZC-FIELD"), "ZC-FIELD", 0);
     let act = |method: &str, extra: Value| {
         let mut params =
             json!({"app": app, "background": true, "noScreenshot": true, "afterAct": "none"});
