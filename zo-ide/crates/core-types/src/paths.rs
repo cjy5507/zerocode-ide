@@ -598,6 +598,34 @@ pub const ZO_DIR_NAME: &str = ".zo";
 
 const LEGACY_FORGE_DIR_NAME: &str = ".forge";
 
+/// The person's home folder as zo reads it: `HOME`, and on Windows, which sets
+/// no `HOME` unless a person does, the profile folder (`USERPROFILE`) — where
+/// the window installs zo, zo's skills (`.zo/skills`) and the common skill
+/// store (`.agents`) there (t-113689). With `HOME` alone zo found no home on
+/// Windows, read none of those, and kept its sessions, logins and settings
+/// in a new temporary folder each run.
+#[must_use]
+pub fn user_home() -> Option<PathBuf> {
+    user_home_by(
+        cfg!(windows),
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+/// [`user_home`] by Windows' rule or by the others', with both variables
+/// handed in, so both rules are tested wherever tests run. An empty variable
+/// names no home.
+#[must_use]
+pub fn user_home_by(
+    windows: bool,
+    home: Option<std::ffi::OsString>,
+    profile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let _ = (windows, profile);
+    home.filter(|home| !home.is_empty()).map(PathBuf::from)
+}
+
 /// All per-user global config homes, highest priority first: the canonical
 /// `ZO_CONFIG_HOME` → `ZO_HOME` → `~/.zo` chain, de-duplicated. When `HOME` is
 /// set and non-empty, the read-only legacy `~/.forge` fallback is appended
@@ -1279,6 +1307,34 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Windows sets no `HOME`, and the window puts zo, its skills and the
+    /// common store under the profile folder there: zo's home is that folder,
+    /// not a new temporary one each run (t-113689). A `HOME` a person set
+    /// still comes first, as zo has always read it, and nothing changes
+    /// elsewhere.
+    #[test]
+    fn a_windows_user_home_without_home_is_the_profile_folder() {
+        use std::ffi::OsString;
+        let profile = || Some(OsString::from(r"C:\Users\person"));
+        assert_eq!(
+            user_home_by(true, None, profile()),
+            Some(PathBuf::from(r"C:\Users\person"))
+        );
+        assert_eq!(
+            user_home_by(true, Some(OsString::new()), profile()),
+            Some(PathBuf::from(r"C:\Users\person"))
+        );
+        assert_eq!(
+            user_home_by(true, Some(OsString::from(r"D:\home")), profile()),
+            Some(PathBuf::from(r"D:\home"))
+        );
+        assert_eq!(user_home_by(false, None, profile()), None);
+        assert_eq!(
+            user_home_by(false, Some(OsString::from("/Users/person")), None),
+            Some(PathBuf::from("/Users/person"))
+        );
+    }
 
     /// A verbatim drive path is read without its prefix — what git and the
     /// person read — and the same text comes back where nothing changes.
