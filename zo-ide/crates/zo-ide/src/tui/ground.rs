@@ -14,8 +14,9 @@
 //! - a named theme's colours — its roles and its colour slots — keep 4.5:1
 //!   against a stand-in ground: the hardest ground of that lightness among the
 //!   window's thirty terminal themes, so they keep it on any of them;
-//! - the syntax theme is Catppuccin Latte on a light ground and Mocha on a
-//!   dark one, unless the named theme brings its own;
+//! - the `terminal` theme's syntax theme is Catppuccin Latte on a light
+//!   ground and Mocha on a dark one (a named theme draws code in its own, or
+//!   in its own colour slots, which keep the floor above);
 //! - the `terminal` theme's roles take their light-ground colours on a light
 //!   ground.
 //!

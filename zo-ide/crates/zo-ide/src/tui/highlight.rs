@@ -112,7 +112,7 @@ fn test_seam_color_level(palette: Option<super::palette::TerminalPalette>) -> su
 fn theme_for(ground: Ground, color_level: super::palette::ColorLevel) -> &'static Theme {
     let light = ground.is_light();
     let embedded = if use_named_syntax_theme(color_level) {
-        super::theme::with_active(|active| active.syntax_theme(light))
+        super::theme::with_active(super::theme::Theme::syntax_theme)
     } else if light {
         two_face::theme::EmbeddedThemeName::CatppuccinLatte
     } else {

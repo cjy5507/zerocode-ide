@@ -707,8 +707,7 @@ mod tests {
         assert_eq!(custom.role_color(Role::Heading), Some((0xff, 0x79, 0xc6)));
         assert_eq!(custom.role_color(Role::Caret), dracula.role_color(Role::Caret));
         // … and so is its syntax theme, whatever the file is called.
-        assert_eq!(custom.syntax_theme(false), EmbeddedThemeName::Dracula);
-        assert_eq!(custom.syntax_theme(true), EmbeddedThemeName::Dracula);
+        assert_eq!(custom.syntax_theme(), EmbeddedThemeName::Dracula);
 
         let mut catalog = Catalog::new();
         let (list, catalog_warnings) = catalog.names(Some(dir.path()));
@@ -1280,7 +1279,7 @@ mod tests {
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         let syntax: Vec<(&str, EmbeddedThemeName)> = themes
             .iter()
-            .map(|theme| (theme.name.as_str(), theme.syntax_theme(true)))
+            .map(|theme| (theme.name.as_str(), theme.syntax_theme()))
             .collect();
         assert_eq!(
             syntax,
@@ -1289,7 +1288,7 @@ mod tests {
                 ("mocha", EmbeddedThemeName::CatppuccinMocha),
                 ("plain-nord", EmbeddedThemeName::Nord),
             ],
-            "the file's syntax theme wins over its base's and over the background"
+            "the file's syntax theme wins over its base's"
         );
         // Its colours are still the base's.
         let dracula = find_builtin("dracula").expect("dracula");

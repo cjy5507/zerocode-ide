@@ -1690,6 +1690,51 @@ fn syntax_theme_follows_the_named_theme() {
     assert_eq!(keyword_color(), Some(Color::Rgb(255, 121, 198)));
 }
 
+/// A named theme with no syntax theme of its own — seventeen of the thirty,
+/// Ayu Dark among them — draws code in its own sixteen colours: every ink of
+/// a highlighted line is a colour slot, which the writer draws in the theme's
+/// colour for it, so two such themes no longer draw code alike. They drew it
+/// all in Catppuccin's (the person, 2026-11-18: 「theme 색상 글씨가 바꿔도
+/// 다똑같음」).
+#[test]
+fn a_theme_without_a_syntax_theme_of_its_own_draws_code_in_its_own_colours() {
+    use super::ansi::Color;
+    use super::palette::{ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("a_theme_without_a_syntax_theme_of_its_own_draws_code_in_its_own_colours")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let inks = || -> Vec<Color> {
+        super::highlight::highlight_code_to_lines_for_palette(
+            "fn main() { let name = \"zo\"; if name.len() > 1 { println!(\"{name}\"); } }\n",
+            "rust",
+            Some(dark),
+        )[0]
+            .spans
+            .iter()
+            .filter_map(|span| span.style.fg)
+            .collect()
+    };
+    let ayu = super::theme::find("ayu-dark").expect("ayu-dark");
+    let tokyo = super::theme::find("tokyo-night").expect("tokyo-night");
+    let _ = super::theme::set(ayu.clone());
+    let slots: Vec<u8> = inks()
+        .into_iter()
+        .map(|ink| match ink {
+            Color::Base(slot) | Color::Indexed(slot @ 0..=15) => slot,
+            other => panic!("ayu-dark draws code in its colour slots, not {other:?}"),
+        })
+        .collect();
+    let coloured: Vec<u8> = slots.iter().copied().filter(|slot| ayu.ansi_slot(*slot).is_some()).collect();
+    assert!(!coloured.is_empty(), "some of the code is in slots the theme colours: {slots:?}");
+    assert!(
+        coloured.iter().any(|slot| ayu.ansi_slot(*slot) != tokyo.ansi_slot(*slot)),
+        "ayu-dark and tokyo-night draw that code apart: {coloured:?}"
+    );
+}
+
 #[test]
 fn the_composer_placeholder_keeps_sgr_dim_under_a_named_theme() {
     use super::ansi::write_spans_for_palette;

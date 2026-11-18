@@ -105,15 +105,16 @@ impl Theme {
         }
     }
 
-    /// `two_face` syntax theme for this theme.
+    /// `two_face` syntax theme for this theme: its own — the one its file
+    /// names, or the one named like it — else ANSI, whose colours are slots
+    /// of the sixteen, so the code is drawn in this theme's colours as its
+    /// roles are. Seventeen of the thirty had no syntax theme of their own
+    /// and all drew code in one palette, Catppuccin's (the person,
+    /// 2026-11-18: 「theme 색상 글씨가 바꿔도 다똑같음」).
     #[must_use]
-    pub fn syntax_theme(&self, light_background: bool) -> EmbeddedThemeName {
+    pub fn syntax_theme(&self) -> EmbeddedThemeName {
         let key = self.syntax.as_deref().unwrap_or(&self.name);
-        syntax_theme_for_name(key).unwrap_or(if light_background {
-            EmbeddedThemeName::CatppuccinLatte
-        } else {
-            EmbeddedThemeName::CatppuccinMocha
-        })
+        syntax_theme_for_name(key).unwrap_or(EmbeddedThemeName::Ansi)
     }
 }
 
