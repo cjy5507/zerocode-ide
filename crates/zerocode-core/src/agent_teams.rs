@@ -1620,10 +1620,13 @@ pub fn shim_script_powershell(port_var: &str, token_var: &str, voice: &str) -> S
 # agents (Git Bash and every unix; NOT WSL2, whose 127.0.0.1 is not the
 # Windows loopback — that door fails closed until the hook work opens it);
 # this one exists because PowerShell runs a .ps1 it finds on PATH and cannot
-# read a shebang. It runs only where ExecutionPolicy allows a script at all —
-# the default on client Windows does not, and PowerShell's command search
-# prefers .ps1 over PATHEXT, so a bare `zerocode-orc` cannot fall through to
-# the .cmd door either; spelling `zerocode-orc.cmd` always works.
+# read a shebang. PowerShell's command search prefers this file to the .cmd
+# for a bare `zerocode-orc`, so it runs only where the execution policy allows
+# a script written on this machine: the window starts its Windows panes with
+# a process-scope RemoteSigned (PSExecutionPolicyPreference), which client
+# Windows' default (Restricted) yields to. Outside such a pane, spelling
+# `zerocode-orc.cmd` runs this file under the .cmd's own process-scope Bypass.
+# A Group Policy outranks both.
 try {{ [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 }} catch {{}}
 $port = $env:{port_var}
 $token = $env:{token_var}

@@ -351,14 +351,27 @@ const P10K_WIZARD_OFF: &str = "POWERLEVEL9K_DISABLE_CONFIGURATION_WIZARD";
 /// starts reads. Named here because it is read twice — asked about, then set.
 const POWERSHELL_POLICY: &str = "PSExecutionPolicyPreference";
 
-/// The process-scope execution policy a pane's PowerShell starts with.
-/// Nothing yet: the pane keeps the machine's own (TR-08's red).
+/// The process-scope execution policy a pane's PowerShell starts with:
+/// RemoteSigned on Windows, unless the window's own environment already
+/// names one, which then stands.
+///
+/// A bare `zerocode-orc` typed in PowerShell finds the ledger command's
+/// `.ps1` before its `.cmd`, and client Windows' default policy (Restricted)
+/// refuses that script, so a PowerShell-hosted agent could not reach the
+/// ledger (TR-08). The Process scope outranks the user's and the machine's
+/// own settings and a Group Policy outranks it in turn, which is left alone
+/// (`about_Execution_Policies`, "Execution policy scope and precedence").
+/// RemoteSigned runs a script written on this machine, as the window writes
+/// its own, and still asks a downloaded one for a signature. Going through
+/// the `.cmd` instead would hand every inline text to cmd, which expands
+/// `%NAME%` in it and cannot carry a line break. Nothing off Windows, where
+/// PowerShell enforces no policy.
 pub(crate) fn pane_powershell_policy(
     windows: bool,
     inherited: Option<&std::ffi::OsStr>,
 ) -> Option<(String, String)> {
-    let _ = (windows, inherited);
-    None
+    (windows && inherited.is_none())
+        .then(|| (POWERSHELL_POLICY.to_string(), "RemoteSigned".to_string()))
 }
 
 /// This machine's second-brain vault, as the settings document last said.
