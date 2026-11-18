@@ -600,10 +600,31 @@ fn maybe_enrich_file_tool_result(
         _ => return raw_output,
     };
     let mut enrichments = Vec::new();
+    let mut reformatted = false;
     for path in &paths {
-        enrich_written_file(ctx, &path.to_string_lossy(), &mut enrichments);
+        reformatted |= enrich_written_file(ctx, &path.to_string_lossy(), &mut enrichments);
     }
-    fold_enrichment_into_output(raw_output, &enrichments)
+    let output = fold_enrichment_into_output(raw_output, &enrichments);
+    if reformatted {
+        mark_reformatted(output)
+    } else {
+        output
+    }
+}
+
+/// Mark a write's JSON envelope whose file the formatter changed after it was
+/// written (`reformatted`), so its view does not say the file holds what was
+/// sent (t-115139 Z3 review): `fn   new( ){let x=1;}` written to a `.rs` came
+/// back `as sent` and `Formatted with rustfmt`, like the same function written
+/// already formatted, and an `Edit` made against the sent text failed.
+fn mark_reformatted(output: String) -> String {
+    match serde_json::from_str::<serde_json::Value>(&output) {
+        Ok(serde_json::Value::Object(mut map)) => {
+            map.insert("reformatted".to_string(), serde_json::Value::Bool(true));
+            serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or(output)
+        }
+        _ => output,
+    }
 }
 
 /// The files a successful `apply_patch` left on disk (`files[].filePath`,
@@ -624,7 +645,10 @@ fn patched_file_paths(raw_output: &str) -> Vec<std::path::PathBuf> {
 }
 
 /// Auto-format and LSP diagnostics for one file a write tool just wrote.
-fn enrich_written_file(ctx: &ToolContext, path: &str, enrichments: &mut Vec<String>) {
+/// True when the formatter changed the file's bytes: what is on disk is then
+/// not the text the tool was sent.
+fn enrich_written_file(ctx: &ToolContext, path: &str, enrichments: &mut Vec<String>) -> bool {
+    let mut reformatted = false;
     // Auto-format rewrites the file in place. While an instrumentation probe is
     // staged (debugger debug-mode), skip it: a reformat (e.g. rustfmt re-indenting
     // or line-splitting a column-0 `/*ZO_PROBE*/` line) would shift the probe's
@@ -634,11 +658,21 @@ fn enrich_written_file(ctx: &ToolContext, path: &str, enrichments: &mut Vec<Stri
     // debugger sub-agent can stage probes, so the main session is unaffected. LSP
     // diagnostics below only READ the file, so they still run.
     if !file_has_staged_probe(ctx) {
+        let written = runtime::auto_format::formatter_for_path(Path::new(path)).and_then(|_| std::fs::read(path).ok());
         if let Some(fmt_result) = runtime::auto_format::format_file_with_timeout(
             path,
             Duration::from_millis(AUTO_FORMAT_BUDGET_MS),
         ) {
-            enrichments.push(format!("[auto-format] {fmt_result}"));
+            reformatted = written.is_some() && std::fs::read(path).ok() != written;
+            if reformatted {
+                enrichments.push(format!(
+                    "[auto-format] {fmt_result}: it changed the file, so the text on disk is not the text sent — {} it before you {} it",
+                    core_types::tool_names::CoreTool::Read.wire(),
+                    core_types::tool_names::CoreTool::Edit.wire(),
+                ));
+            } else {
+                enrichments.push(format!("[auto-format] {fmt_result}"));
+            }
             // 포맷터가 방금 파일을 재작성했다 — write/edit 성공 시점에 기록된
             // read-registry 스냅샷이 즉시 stale해지므로 여기서 재기록한다.
             // 이 재기록이 없으면 다음 edit_file마다 거짓 "외부 변경" 거부 →
@@ -676,6 +710,7 @@ fn enrich_written_file(ctx: &ToolContext, path: &str, enrichments: &mut Vec<Stri
             ));
         }
     }
+    reformatted
 }
 
 /// Attach `enrichments` (auto-format / LSP feedback) to a tool's `raw_output`

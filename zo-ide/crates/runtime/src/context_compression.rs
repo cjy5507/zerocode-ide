@@ -660,7 +660,15 @@ fn compress_write_file(raw: &str) -> CompressionOutcome {
     view.push('\n');
     if !created {
         if let Some(patch) = obj.get("structuredPatch").and_then(|v| v.as_array()) {
-            render_patch_hunks(&mut view, patch, AddedLines::Counted);
+            // A formatter that changed the file after it was written leaves
+            // the patch's added lines as they were sent, not as they are on
+            // disk (t-115139 Z3 review).
+            let added = if obj.get("reformatted").and_then(serde_json::Value::as_bool) == Some(true) {
+                AddedLines::CountedBeforeTheFormatter
+            } else {
+                AddedLines::Counted
+            };
+            render_patch_hunks(&mut view, patch, added);
         }
     }
     append_tool_feedback(&mut view, obj);
@@ -675,6 +683,9 @@ enum AddedLines {
     /// Each run as one line that counts it: a write's, whose added lines are
     /// the content the model just sent.
     Counted,
+    /// [`Self::Counted`], for a write the formatter then changed on disk:
+    /// the line says the lines are the sent ones, before the formatter.
+    CountedBeforeTheFormatter,
 }
 
 /// Render `structuredPatch` hunks (whose `lines` already carry the
@@ -707,28 +718,33 @@ fn render_patch_hunks(out: &mut String, hunks: &[serde_json::Value], added: Adde
         if let Some(lines) = obj.get("lines").and_then(|v| v.as_array()) {
             let mut run = 0_usize;
             for text in lines.iter().filter_map(serde_json::Value::as_str) {
-                if added == AddedLines::Counted && text.starts_with('+') {
+                if added != AddedLines::Shown && text.starts_with('+') {
                     run += 1;
                     continue;
                 }
-                push_added_run(out, &mut run);
+                push_added_run(out, &mut run, added);
                 out.push_str(text);
                 out.push('\n');
             }
-            push_added_run(out, &mut run);
+            push_added_run(out, &mut run, added);
         }
     }
 }
 
-/// One line for a run of added lines that are the content just sent.
-fn push_added_run(out: &mut String, run: &mut usize) {
-    match std::mem::take(run) {
-        0 => {}
-        1 => out.push_str("+⟨1 line as sent⟩\n"),
-        lines => {
-            let _ = writeln!(out, "+⟨{lines} lines as sent⟩");
-        }
+/// One line for a run of added lines that are the content just sent — and,
+/// when the formatter changed the file after, that they are the lines before
+/// it, so a later edit is not made against them unread (t-115139 Z3 review).
+fn push_added_run(out: &mut String, run: &mut usize, added: AddedLines) {
+    let lines = std::mem::take(run);
+    if lines == 0 {
+        return;
     }
+    let noun = if lines == 1 { "line" } else { "lines" };
+    let _ = if added == AddedLines::CountedBeforeTheFormatter {
+        writeln!(out, "+⟨{lines} {noun} as sent, before the formatter changed the file⟩")
+    } else {
+        writeln!(out, "+⟨{lines} {noun} as sent⟩")
+    };
 }
 
 /// Preserve the enrichment feedback (`toolFeedback`: auto-format + LSP
