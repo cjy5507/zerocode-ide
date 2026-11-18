@@ -22816,3 +22816,54 @@ fn a_refusal_of_a_call_through_the_wrapper_is_bannered_under_the_calls_own_name(
     let nothing = super::tool::ToldCall::of(core_types::tool_names::CAPABILITY_INVOKE, "{}");
     assert_eq!(nothing.name.as_ref(), core_types::tool_names::CAPABILITY_INVOKE);
 }
+
+/// A worker's first turn recalls with the task it was handed, not with the
+/// window's briefing in front of it (t-115139 Z5). The briefing is the same
+/// words in every worker's prompt — 7,363 of a sample's 7,558 characters —
+/// and its words (a phone, an emulator, a signed-in tab) recalled four pages
+/// of another project's sign-up flow for a task about a release script.
+#[test]
+fn recall_query_for_a_worker_briefing_is_the_task_it_hands_over() {
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        NoopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["base prompt".to_string()],
+    );
+    let briefing = format!(
+        "You are a worker in this window's orchestration, carrying task t-1. Mobile devices go \
+         through zerocode-emulator: a phone, iPhone, iPad or Android device.\n\n{}\n\n이 과업의 \
+         지시문을 읽고 그대로 하십시오: reports/rust-anything-166/brief-zo-pii-scan.txt",
+        zerocode_core::orchestration::BRIEFING_HANDS_OVER
+    );
+    runtime.session.push_user_text(briefing).expect("first user message");
+
+    let query = runtime
+        .recall_query_text()
+        .map(std::borrow::Cow::into_owned)
+        .expect("a query");
+    assert!(!query.contains("emulator") && !query.contains("iPhone"), "{query}");
+    assert!(query.contains("brief-zo-pii-scan.txt"), "{query}");
+}
+
+/// The same with the briefing the window really writes: its every word but
+/// the task's stays out of the query.
+#[test]
+fn recall_query_for_the_windows_own_briefing_is_the_task_alone() {
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        NoopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+        vec!["base prompt".to_string()],
+    );
+    let task = "이 과업의 지시문을 읽고 그대로 하십시오: reports/rust-anything-166/brief-zo-pii-scan.txt";
+    // The window writes the briefing up to its last words and the task after
+    // them, as a summoned worker's first prompt.
+    let briefing = zerocode_core::orchestration::worker_briefing("t-1", "pii scan", task);
+    assert!(briefing.len() > task.len() * 10, "the briefing is most of the prompt");
+    runtime.session.push_user_text(format!("{briefing}{task}")).expect("first user message");
+
+    assert_eq!(runtime.recall_query_text().as_deref(), Some(task));
+}

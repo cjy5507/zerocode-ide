@@ -549,10 +549,10 @@ where
             if is_short_follow_up(text.as_ref()) {
                 continue;
             }
-            return Some(Cow::Owned(format!("{}\n{}", text.trim(), latest.trim())));
+            return Some(Cow::Owned(format!("{}\n{}", asked_words(&text).trim(), asked_words(&latest).trim())));
         }
 
-        Some(latest)
+        Some(zerocode_core::second_brain_related::recall_words(&latest).map_or(latest, Cow::Owned))
     }
 
     pub(super) fn build_request(
@@ -962,6 +962,15 @@ fn log_build_segment(label: &str, started_at: std::time::Instant) {
     if ms >= 10 {
         eprintln!("[TURN-SEG]   build_request/{label} = {ms}ms (synchronous; starves render_tick)");
     }
+}
+
+/// What a user message asks recall with: the window's own reading of a
+/// prompt ([`zerocode_core::second_brain_related::recall_words`]) — above all
+/// the task after a worker's briefing, whose words are the same in every
+/// worker's prompt and recalled another project's pages (t-115139 Z5) — or
+/// the message as it stands when that reading finds nothing.
+fn asked_words(text: &str) -> Cow<'_, str> {
+    zerocode_core::second_brain_related::recall_words(text).map_or(Cow::Borrowed(text), Cow::Owned)
 }
 
 fn message_text(message: &ConversationMessage) -> Option<Cow<'_, str>> {
