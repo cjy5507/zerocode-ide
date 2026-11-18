@@ -167,8 +167,9 @@ pub fn replace_bash_transport_output(mut output: BashCommandOutput) -> (BashComm
         raw.record(SpillStream::Stderr, stderr.as_bytes());
     }
     output.raw_output_path = spill_path(spill);
-    output.stdout = cap_transport_stream(&envelope.stdout);
-    output.stderr = cap_transport_stream(&stderr);
+    let whole = output.raw_output_path.as_deref();
+    output.stdout = cap_transport_stream(&envelope.stdout, whole);
+    output.stderr = cap_transport_stream(&stderr, whole);
     if output.return_code_interpretation.is_none() && envelope.exit_code != 0 {
         output.return_code_interpretation = Some(CommandEnding::exit_word(envelope.exit_code));
     }
@@ -176,10 +177,10 @@ pub fn replace_bash_transport_output(mut output: BashCommandOutput) -> (BashComm
     (output, surface)
 }
 
-fn cap_transport_stream(text: &str) -> String {
+fn cap_transport_stream(text: &str, whole: Option<&str>) -> String {
     let bytes = text.as_bytes();
     render_capped(&bytes[..bytes.len().min(MAX_OUTPUT_BYTES)],
-        &bytes[bytes.len().saturating_sub(TAIL_OUTPUT_BYTES)..], bytes.len())
+        &bytes[bytes.len().saturating_sub(TAIL_OUTPUT_BYTES)..], bytes.len(), whole)
 }
 
 fn bash_transport_contents(output: &BashCommandOutput) -> Option<String> {
@@ -1162,9 +1163,9 @@ async fn execute_bash_async(
     let (stdout_cap, stderr_cap, status, interrupted) = output_result;
     let (stdout_head, stdout_tail, stdout_total) = stdout_cap;
     let (stderr_head, stderr_tail, stderr_total) = stderr_cap;
-    let stdout = render_capped(&stdout_head, &stdout_tail, stdout_total);
-    let stderr = render_capped(&stderr_head, &stderr_tail, stderr_total);
     let raw_output_path = spill_path(spill);
+    let stdout = render_capped(&stdout_head, &stdout_tail, stdout_total, raw_output_path.as_deref());
+    let stderr = render_capped(&stderr_head, &stderr_tail, stderr_total, raw_output_path.as_deref());
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
     let return_code_interpretation = match status.code() {
         Some(0) => None,
@@ -3252,8 +3253,10 @@ fn retain_tail(tail: &mut Vec<u8>, chunk: &[u8], tail_cap: usize) {
 /// and the tail (where errors live) with an explicit middle-elision marker.
 /// `head` holds up to `MAX_OUTPUT_BYTES` bytes; `tail` holds the last
 /// `TAIL_OUTPUT_BYTES`; `total` is the full byte count seen. When the whole
-/// output fit in `head` it is returned verbatim (lossless).
-fn render_capped(head: &[u8], tail: &[u8], total: usize) -> String {
+/// output fit in `head` it is returned verbatim (lossless). `whole` is the
+/// spill that holds every byte, named at the cut so the middle can be read
+/// where it went missing ([`whole_output_pointer`]).
+fn render_capped(head: &[u8], tail: &[u8], total: usize, whole: Option<&str>) -> String {
     if total <= head.len() {
         // Everything fit in the head buffer — lossless.
         return String::from_utf8_lossy(head).into_owned();
@@ -3263,8 +3266,9 @@ fn render_capped(head: &[u8], tail: &[u8], total: usize) -> String {
     let elided = total
         .saturating_sub(head_slice.len())
         .saturating_sub(tail.len());
+    let pointer = whole.map_or_else(String::new, |path| format!("; {}", whole_output_pointer(path)));
     format!(
-        "{}\n\n[output truncated — kept first {} B and last {} B of {} B total; {} B elided in the middle. A command's error usually appears at the end.]\n\n{}",
+        "{}\n\n[output truncated — kept first {} B and last {} B of {} B total; {} B elided in the middle{pointer}. A command's error usually appears at the end.]\n\n{}",
         String::from_utf8_lossy(head_slice),
         head_slice.len(),
         tail.len(),
@@ -3272,6 +3276,27 @@ fn render_capped(head: &[u8], tail: &[u8], total: usize) -> String {
         elided,
         String::from_utf8_lossy(tail),
     )
+}
+
+/// Where the whole output of a cut run is, and the tool that reads it, in the
+/// name the model is shown: said at the cut (`render_capped`), on the first
+/// line of the result (`cut_output_note`), and above a fold of it
+/// (`tools::dispatch`).
+#[must_use]
+pub fn whole_output_pointer(path: &str) -> String {
+    format!(
+        "whole output: {path} — {} it with offset/limit",
+        core_types::tool_names::CoreTool::Read.wire()
+    )
+}
+
+/// The header note of a result whose run was cut in the middle (t-115139
+/// Z1). A spill path is only ever set on such a run, so the note says the
+/// middle is missing on the first line the model reads, rather than only in
+/// the marker twelve kilobytes down where a skim passes it. The wire view
+/// and the dispatch digest both open with it.
+pub(crate) fn cut_output_note(path: &str) -> String {
+    format!("output cut in the middle — {}", whole_output_pointer(path))
 }
 
 #[cfg(test)]
@@ -3312,13 +3337,13 @@ mod truncation_tests {
     #[test]
     fn short_output_unchanged() {
         let head = b"hello world".to_vec();
-        assert_eq!(render_capped(&head, &[], head.len()), "hello world");
+        assert_eq!(render_capped(&head, &[], head.len(), None), "hello world");
     }
 
     #[test]
     fn within_cap_is_lossless() {
         let head = b"a".repeat(MAX_OUTPUT_BYTES);
-        assert_eq!(render_capped(&head, &[], head.len()).len(), MAX_OUTPUT_BYTES);
+        assert_eq!(render_capped(&head, &[], head.len(), None).len(), MAX_OUTPUT_BYTES);
     }
 
     #[test]
@@ -3328,7 +3353,7 @@ mod truncation_tests {
         let head = b"H".repeat(MAX_OUTPUT_BYTES);
         let tail = b"TAIL_ERROR".repeat(TAIL_OUTPUT_BYTES / 10);
         let total = 1_000_000;
-        let out = render_capped(&head, &tail, total);
+        let out = render_capped(&head, &tail, total, None);
         assert!(out.contains("[output truncated"), "marker present");
         assert!(out.contains("1000000 B total"), "reports the true total");
         // The tail (where the error lives) survives.
@@ -3346,5 +3371,48 @@ mod truncation_tests {
         // A small follow-up chunk drains the front to stay within tail_cap.
         retain_tail(&mut tail, b"AB", 8);
         assert_eq!(tail, b"456789AB");
+    }
+
+    /// A run cut in the middle says so on the first line the model reads, and
+    /// the cut itself names the file that holds the whole output and the tool
+    /// that reads it (t-115139 Z1). The marker alone sat twelve kilobytes
+    /// down: a reader who skimmed past it lost the middle without knowing.
+    /// Both first lines count — the wire view of a run that fits the result
+    /// cap, and the dispatch digest of one that does not.
+    #[test]
+    fn a_cut_run_says_so_first_and_names_the_whole_output() {
+        let output = execute_bash(BashCommandInput {
+            command: String::from("seq 1 5000"),
+            timeout: Some(20_000),
+            description: None,
+            run_in_background: Some(false),
+            dangerously_disable_sandbox: Some(false),
+            namespace_restrictions: Some(false),
+            isolate_network: Some(false),
+            filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
+            allowed_mounts: None,
+            cwd: None,
+        })
+        .expect("bash runs");
+        let path = output.raw_output_path.clone().expect("a spill path");
+        let _ = std::fs::remove_file(&path);
+        let read = core_types::tool_names::CoreTool::Read.wire();
+        let envelope = serde_json::to_string_pretty(&output).expect("json");
+        let wire = crate::context_compression::compress_tool_output(&envelope, "bash", None).content;
+        let capped =
+            crate::truncate_tool_output(&envelope, "bash", &crate::TruncationConfig::default()).content;
+        for view in [&wire, &capped] {
+            let first = view.lines().next().unwrap_or_default();
+            assert!(
+                first.contains("cut in the middle") && first.contains(&path) && first.contains(read),
+                "the first line says the middle is missing and how to read it: {first}"
+            );
+        }
+        let marker = output
+            .stdout
+            .lines()
+            .find(|line| line.starts_with("[output truncated"))
+            .expect("the cut is marked where it is");
+        assert!(marker.contains(&path) && marker.contains(read), "{marker}");
     }
 }

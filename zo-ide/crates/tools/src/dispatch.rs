@@ -383,7 +383,8 @@ pub(crate) fn finish_successful_tool_output(
     // byte; that — not the capped envelope — is what the artifact keeps and
     // what the fold reads, so the middle the cap dropped is neither lost to
     // `retrieve_tool_output` nor invisible to the digester.
-    let raw_spill = raw_bash_output(canonical_ref, &enriched);
+    let spill = bash_spill_path(canonical_ref, &enriched);
+    let raw_spill = spill.as_deref().and_then(read_spill);
 
     // Compute the model-facing compressed/outline view first: it is what
     // bounds the wire size for JSON-envelope tools (read_file) whose raw
@@ -427,7 +428,8 @@ pub(crate) fn finish_successful_tool_output(
                 global_truncation_config().limit_for(canonical_ref),
             )
         })
-        .flatten();
+        .flatten()
+        .map(|folded| naming_the_whole_output(folded, spill.as_deref()));
     let mut content = digest.unwrap_or(truncated.content);
     // CCR retrieve half: tell the model how to get the cut bytes back. Only
     // when the artifact actually persisted — a store failure must not
@@ -466,18 +468,34 @@ pub(crate) fn finish_successful_tool_output(
     content
 }
 
-/// The whole output of a `bash` run whose streams outgrew the in-memory cap,
-/// read from the spill file its envelope names (`rawOutputPath`). `None` for
-/// every other tool, for a run that fit, and for a spill that is already gone.
-fn raw_bash_output(canonical_ref: &str, enriched: &str) -> Option<String> {
+/// The spill file a `bash` run whose streams outgrew the in-memory cap names
+/// (`rawOutputPath`), holding every byte of it. `None` for every other tool
+/// and for a run that fit.
+fn bash_spill_path(canonical_ref: &str, enriched: &str) -> Option<String> {
     if canonical_ref != "bash" {
         return None;
     }
-    let parsed: runtime::BashCommandOutput = serde_json::from_str(enriched).ok()?;
-    let path = parsed.raw_output_path?;
+    serde_json::from_str::<runtime::BashCommandOutput>(enriched).ok()?.raw_output_path
+}
+
+/// The whole output a spill holds; `None` for one that is already gone.
+fn read_spill(path: &str) -> Option<String> {
     std::fs::read(path)
         .ok()
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A fold of a run past the in-memory cap, under a line naming the file
+/// that holds every byte of it and the tool that reads it (t-115139 Z1). The
+/// fold says how many lines it kept and not where the rest are, so a `cat`
+/// of seven files folded to one file's twelve lines left the model guessing
+/// what was missing; the cut it stands in for names the file on its first
+/// line.
+fn naming_the_whole_output(folded: String, spill: Option<&str>) -> String {
+    match spill {
+        Some(path) => format!("[bash] {}\n{folded}", runtime::whole_output_pointer(path)),
+        None => folded,
+    }
 }
 
 fn recovery_notice(sha256: &str) -> String {
@@ -1620,5 +1638,30 @@ mod auto_format_guard_tests {
             }
         }
         let _ = std::fs::remove_dir_all(&artifact_dir);
+    }
+}
+
+#[cfg(test)]
+mod whole_output_tests {
+    use super::{bash_spill_path, naming_the_whole_output};
+
+    /// A fold of a cut run opens on the file holding all of it and the tool
+    /// that reads it (t-115139 Z1); a fold of anything else is left as it is.
+    #[test]
+    fn a_fold_of_a_cut_run_names_the_whole_output_first() {
+        let envelope = serde_json::json!({ "stdout": "head", "stderr": "", "rawOutputPath": "/tmp/zo-bash-raw/1-2-3.log", "interrupted": false })
+            .to_string();
+        let folded = "[digest] fast-model read 468 lines (16716 chars) of bash output and kept 12 verbatim; ⋯ marks omitted runs.\n# README";
+        let spill = bash_spill_path("bash", &envelope);
+        let named = naming_the_whole_output(folded.to_string(), spill.as_deref());
+        assert_eq!(
+            named.lines().next(),
+            Some("[bash] whole output: /tmp/zo-bash-raw/1-2-3.log — Read it with offset/limit"),
+            "{named}"
+        );
+        assert!(named.ends_with(folded), "{named}");
+        assert_eq!(bash_spill_path("grep_search", &envelope), None);
+        let fit = serde_json::json!({ "stdout": "short", "stderr": "", "rawOutputPath": null, "interrupted": false }).to_string();
+        assert_eq!(naming_the_whole_output(folded.to_string(), bash_spill_path("bash", &fit).as_deref()), folded);
     }
 }

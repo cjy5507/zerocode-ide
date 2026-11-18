@@ -410,7 +410,7 @@ fn bash_digest_header(parsed: &BashCommandOutput) -> String {
         header_notes.push(format!("full output: {path}{size}"));
     }
     if let Some(path) = &parsed.raw_output_path {
-        header_notes.push(format!("raw output: {path}"));
+        header_notes.push(crate::bash::cut_output_note(path));
     }
     if let Some(warning) = &parsed.safety_warning {
         header_notes.push(format!("safety: {warning}"));
