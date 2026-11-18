@@ -657,7 +657,7 @@ pub fn named_places(command: &str) -> Vec<String> {
 /// another variable, another person's home.
 #[must_use]
 pub fn resolve_place(place: &str, cwd: &Path) -> Option<PathBuf> {
-    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::person_home::person_home;
     let path = if place == "~" {
         home()?
     } else if let Some(rest) = ["~/", "$HOME/", "${HOME}/"]

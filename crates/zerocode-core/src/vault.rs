@@ -1478,7 +1478,7 @@ pub fn env_home(source: &AgentSource) -> Option<PathBuf> {
     named_home(
         source,
         |name| std::env::var(name).ok(),
-        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        crate::person_home::person_home().as_deref(),
     )
 }
 

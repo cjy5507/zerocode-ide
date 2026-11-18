@@ -29,8 +29,15 @@ pub fn person_home_by(
     home: Option<OsString>,
     profile: Option<OsString>,
 ) -> Option<PathBuf> {
-    let _ = (windows, profile);
-    home.filter(|home| !home.is_empty()).map(PathBuf::from)
+    let home = home.filter(|home| !home.is_empty()).map(PathBuf::from);
+    let profile = profile
+        .filter(|profile| !profile.is_empty())
+        .map(PathBuf::from);
+    if windows {
+        profile.or(home)
+    } else {
+        home.or(profile)
+    }
 }
 
 #[cfg(test)]
