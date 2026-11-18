@@ -2906,8 +2906,54 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
         "looked_after": looked_after.map(|look| look.value),
     });
     Beside { repicked, handoff_named_a_window, stood_by, shot_window }.said_in(&mut said);
-    let text = to_pretty_json(said)?;
+    let text = act_answer_text(&action, &said)?;
     Ok(ToolExecutionResult { text, surface })
+}
+
+/// A lone act's answer as text — ending, when a batch could have held the
+/// act, with how the next known steps go in one call (CU speed 163, A2):
+/// every call is one more model request.
+fn act_answer_text(action: &str, said: &Value) -> Result<String, ToolError> {
+    if let Some(hint) = ONE_CALL_HINT.filter(|_| a_batch_holds(action)) {
+        to_pretty_json(SaidLast { said, key: ONE_CALL_HINT_KEY, last: hint })
+    } else {
+        to_pretty_json(said)
+    }
+}
+
+/// The line a lone act that went through ends with, when a batch could have
+/// held it (CU speed 163, A2): the model's next known steps in this window
+/// cost one request together, not one each. `None` turns it off.
+const ONE_CALL_HINT: Option<&str> = Some(
+    "Known next steps here go in one batch (by label/role, or points read on this window's last picture); a goal whose success shows in words goes as one walk.",
+);
+/// Where an answer says [`ONE_CALL_HINT`].
+const ONE_CALL_HINT_KEY: &str = "next_steps";
+
+/// Whether `action` acts and a batch can hold it as a step.
+fn a_batch_holds(action: &str) -> bool {
+    methods(action).any(|method| method.acts() && method.batches())
+}
+
+/// An answer with one more field said after all of its own: this tool's
+/// answers are objects whose keys print in order, so a field put in last
+/// would not print last.
+struct SaidLast<'a> {
+    said: &'a Value,
+    key: &'static str,
+    last: &'static str,
+}
+
+impl serde::Serialize for SaidLast<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(None)?;
+        for (key, value) in self.said.as_object().into_iter().flatten() {
+            map.serialize_entry(key, value)?;
+        }
+        map.serialize_entry(self.key, self.last)?;
+        map.end()
+    }
 }
 
 /// What one act's answer says beside the window's own result.
@@ -4693,6 +4739,41 @@ pub(crate) mod tests {
         assert!(error.contains("person_pointing"), "{error}");
         let after = calls(dir.path()).iter().filter(|call| call.as_str() == "batch").count();
         assert_eq!(after - before, 1, "a press at a point is not asked again: {:?}", calls(dir.path()));
+    }
+
+    /// CU speed 163 A2: a lone act that went through, of a kind a batch can
+    /// hold, ends its answer with one line on sending the next known steps in
+    /// one call. Nothing else says it: not a look, a wait, a batch, an act
+    /// that cannot be a batch step, or a refused act.
+    #[cfg(unix)]
+    #[test]
+    fn a_lone_act_that_went_through_says_how_its_next_steps_go_in_one_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let hint = |response: &str| serde_json::from_str::<Value>(response).unwrap().get("next_steps").cloned();
+        let pressed = run_computer(&json!({"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"}), &ctx, &road).unwrap();
+        let said = hint(&pressed).unwrap_or_default();
+        let said = said.as_str().unwrap_or_default();
+        assert!(said.contains("batch") && said.contains("walk"), "a press that went through says it: {pressed}");
+        let typed = run_computer(&json!({"action": "type", "text": "fixture"}), &ctx, &road).unwrap();
+        assert!(hint(&typed).is_some(), "typed text that went through says it too: {typed}");
+        let looked = run_computer(&json!({"action": "observe", "app": "Fixture", "window_id": 41}), &ctx, &road).unwrap();
+        assert!(hint(&looked).is_none(), "{looked}");
+        let waited = run_computer(&json!({"action": "wait", "duration": 0.01}), &ctx, &road).unwrap();
+        assert!(hint(&waited).is_none(), "{waited}");
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 1, "steps": [
+            {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+        ]}}).to_string()).unwrap();
+        let batch = run_computer(&json!({"action": "batch", "steps": [{"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Save"}]}), &ctx, &road).unwrap();
+        assert!(hint(&batch).is_none(), "{batch}");
+        let launched = run_computer(&json!({"action": "launch", "app": "Fixture"}), &ctx, &road).unwrap();
+        assert!(hint(&launched).is_none(), "{launched}");
+        std::fs::write(dir.path().join("reply-click"), json!({"ok": false, "error": {"code": "element_not_found", "message": "no control reads Gone"}}).to_string()).unwrap();
+        let refused = run_computer(&json!({"action": "left_click", "app": "Fixture", "window_id": 41, "label": "Gone"}), &ctx, &road)
+            .expect_err("refused")
+            .to_string();
+        assert!(!refused.contains("one call"), "{refused}");
     }
 
     #[cfg(unix)]
