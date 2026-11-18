@@ -1802,14 +1802,13 @@ fn agent_launch_env_with_lock_inner(
     let Some(home) = system_home else {
         return (Vec::new(), None);
     };
-    let _ = config_root;
     let runtime = crate::codex_accounts::runtime_home(local_data_root);
     let mut record = crate::codex_accounts::read_runtime_record(&runtime);
     if record.account.is_none() {
-        let store = crate::codex_accounts::read_store(local_data_root);
+        let store = crate::codex_accounts::read_store(config_root);
         if zerocode_core::codex_account::active_account(&store.accounts, &store.selection).is_some()
         {
-            let _ = crate::codex_accounts::materialize(local_data_root, local_data_root);
+            let _ = crate::codex_accounts::materialize(config_root, local_data_root);
             record = crate::codex_accounts::read_runtime_record(&runtime);
         }
     }
@@ -1867,10 +1866,9 @@ fn sync_agent_auth_inner(
     let Some(home) = system_home else {
         return Ok(None);
     };
-    let _ = config_root;
     let runtime = crate::codex_accounts::runtime_home(local_data_root);
     let record = crate::codex_accounts::read_runtime_record(&runtime);
-    let store = crate::codex_accounts::read_store(local_data_root);
+    let store = crate::codex_accounts::read_store(config_root);
     let active_id = record.account.as_deref().or_else(|| {
         zerocode_core::codex_account::active_account(&store.accounts, &store.selection)
             .map(|a| a.id.as_str())
