@@ -168,6 +168,7 @@ mod pane_layout;
 mod pane_leftovers;
 mod pane_runtime;
 mod pane_transcript;
+mod person_home;
 mod phone_link;
 mod pick_runtime;
 mod plain_read;

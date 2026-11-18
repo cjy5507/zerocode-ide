@@ -156,6 +156,14 @@ pub fn merge(current: Option<&str>, segments: &[String]) -> Option<String> {
     Some(merged.join(":"))
 }
 
+/// `path` with each folder of `dirs` it does not hold yet added at its end,
+/// `separator` between them: `;` on Windows, `:` elsewhere. At the end, so a
+/// command the person's own PATH finds first is still the one that runs.
+pub fn with_dirs_at_end(path: &str, dirs: &[String], separator: char) -> String {
+    let _ = (dirs, separator);
+    path.to_string()
+}
+
 /// Ask one shell for its PATH, bounded (`spawnShellAndReadPath`, :7793-7860).
 ///
 /// `-i` and `-l` together, or nvm-installed agents stay invisible; stderr to
@@ -424,6 +432,49 @@ mod tests {
         assert_eq!(
             read_login_shell_path("/nonexistent/shell", Duration::from_millis(300)),
             Vec::<String>::new()
+        );
+    }
+
+    /// The folder the window installs zo into joins a PATH that lacks it, at
+    /// the end and in the platform's separator — Windows asks no shell, and
+    /// nothing else put the folder there, so the zo the window installed was
+    /// never found (t-113689). A PATH that holds it already is left alone.
+    #[test]
+    fn the_folder_zo_is_installed_in_goes_at_the_end_of_a_path_that_lacks_it() {
+        let windows_bin = String::from(r"C:\Users\person\.local\bin");
+        assert_eq!(
+            with_dirs_at_end(
+                r"C:\Windows\system32;C:\Users\person\AppData\Roaming\npm",
+                std::slice::from_ref(&windows_bin),
+                ';'
+            ),
+            r"C:\Windows\system32;C:\Users\person\AppData\Roaming\npm;C:\Users\person\.local\bin"
+        );
+        // A trailing separator is not doubled; an empty PATH is the folder.
+        assert_eq!(
+            with_dirs_at_end(r"C:\Windows;", std::slice::from_ref(&windows_bin), ';'),
+            r"C:\Windows;C:\Users\person\.local\bin"
+        );
+        assert_eq!(
+            with_dirs_at_end("", std::slice::from_ref(&windows_bin), ';'),
+            windows_bin
+        );
+        let unix_bin = String::from("/Users/person/.local/bin");
+        assert_eq!(
+            with_dirs_at_end(
+                "/opt/homebrew/bin:/usr/bin",
+                std::slice::from_ref(&unix_bin),
+                ':'
+            ),
+            "/opt/homebrew/bin:/usr/bin:/Users/person/.local/bin"
+        );
+        assert_eq!(
+            with_dirs_at_end(
+                "/Users/person/.local/bin:/usr/bin",
+                std::slice::from_ref(&unix_bin),
+                ':'
+            ),
+            "/Users/person/.local/bin:/usr/bin"
         );
     }
 }

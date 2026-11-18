@@ -19,9 +19,7 @@ pub(crate) struct Context {
 }
 impl Context {
     pub(crate) fn from_state(state: &AppState) -> Result<Self, String> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or("skills.homeUnavailable")?;
+        let home = crate::person_home::person_home().ok_or("skills.homeUnavailable")?;
         let policy = Policy::overlay(&load_settings(state.settings())?.document.skills);
         let mut repos = vec![state.active_root()];
         for repo in stored_projects(state.config_root())
