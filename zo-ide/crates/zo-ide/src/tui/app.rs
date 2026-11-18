@@ -2143,11 +2143,19 @@ impl Ui {
             // stands its dwell however fast the lines of a thought come.
             let columns = super::view::status_detail_columns(self.width());
             let elapsed = self.status.as_ref().map_or(Duration::ZERO, |status| status.elapsed);
+            // The working row's word, where it says more than that the model
+            // is at work: a sentence it says is not held under it.
+            let above = self
+                .status
+                .as_ref()
+                .map(|status| status.header.as_str())
+                .filter(|word| *word != Status::DEFAULT_HEADER && *word != super::strings::THINKING)
+                .unwrap_or_default();
             let line = if super::style::current().style == super::style::TuiStyle::Marks {
                 thinking::without_headings(&self.thinking_said)
-                    .and_then(|said| self.thinking_row.offer(&said, columns, elapsed))
+                    .and_then(|said| self.thinking_row.offer(&said, columns, elapsed, above))
             } else {
-                self.thinking_row.offer(&self.thinking_said, columns, elapsed)
+                self.thinking_row.offer(&self.thinking_said, columns, elapsed, above)
             };
             details.extend(line);
         }
@@ -10355,7 +10363,7 @@ mod tests {
             ui.painter = super::super::painter::Painter::new(std::io::stdout(), width, 24, 1, false);
             ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(3)));
             let id = ids.next();
-            let mut rows_seen: Vec<(Duration, String)> = Vec::new();
+            let mut rows_seen: Vec<(Duration, String, String)> = Vec::new();
             let mut at = Duration::from_secs(3);
             let chars: Vec<char> = thought.chars().collect();
             for piece in chars.chunks(3) {
@@ -10365,23 +10373,31 @@ mod tests {
                 assert_eq!(rows.len(), 1, "width {width}: one row, whatever has come: {rows:#?}");
                 let row = rows[0].plain();
                 assert!(unicode_width::UnicodeWidthStr::width(row.as_str()) <= usize::from(width), "width {width}: {row}");
-                if rows_seen.last().is_none_or(|(_, last)| *last != row) {
-                    rows_seen.push((at, row));
+                if rows_seen.last().is_none_or(|(_, last, _)| *last != row) {
+                    let header = ui.status.as_ref().map(|status| status.header.clone()).unwrap_or_default();
+                    rows_seen.push((at, row, header));
                 }
                 at += Duration::from_millis(30);
             }
             // A row that is not the sentence the one before it said replaced
             // it: the sentence changed — once the one on the row had stood
-            // its dwell.
+            // its dwell, or as the next began where the working row said it.
             let mut stood_from = Duration::from_secs(3);
             let mut replaced = 0;
             for pair in rows_seen.windows(2) {
-                if crate::tui::thinking::same_sentence(&pair[0].1, &pair[1].1) {
+                let ((_, before, _), (when, after, header)) = (&pair[0], &pair[1]);
+                if crate::tui::thinking::same_sentence(before, after) {
                     continue;
                 }
-                let stood = pair[1].0.saturating_sub(stood_from);
-                assert!(stood >= crate::tui::thinking::ROW_DWELL, "width {width}: replaced after {stood:?}: {rows_seen:#?}");
-                stood_from = pair[1].0;
+                let words = before.trim_start().split_once(' ').map_or(before.as_str(), |(_, words)| words);
+                let (said, word) = (words.trim_end_matches('…'), header.trim_end_matches('…'));
+                let said_above = said.starts_with(word) || word.starts_with(said);
+                let stood = when.saturating_sub(stood_from);
+                assert!(
+                    said_above || stood >= crate::tui::thinking::ROW_DWELL,
+                    "width {width}: replaced after {stood:?}: {rows_seen:#?}"
+                );
+                stood_from = *when;
                 replaced += 1;
             }
             assert!(replaced >= 1, "width {width}: the row moves on to a later sentence: {rows_seen:#?}");
@@ -10426,7 +10442,7 @@ mod tests {
         let start = Duration::from_secs(3);
         ui.status = Some(crate::tui::view::Status::working(start));
         let id = ids.next();
-        reason(&mut ui, id, "I read the lexer and the parser.");
+        reason(&mut ui, id, "**Reading the lexer**\n\nI read the lexer and the parser.");
         reason(&mut ui, id, " Then the che");
         assert!(shown(&ui).contains("I read the lexer and the parser"), "{}", shown(&ui));
         ui.tick_status(start + crate::tui::thinking::ROW_DWELL.saturating_sub(Duration::from_millis(1)));

@@ -284,8 +284,11 @@ pub fn same_sentence(before: &str, after: &str) -> bool {
 /// the sentence on it has stood its dwell; until then the row keeps that
 /// sentence, as it ended when it has (a row held at a delta that ended one
 /// sentence and began the next would stop inside a word), and
-/// [`HeldRow::is_waiting`] says the newer words wait. The clock is the
-/// turn's elapsed time, which the turn loop moves and a test sets.
+/// [`HeldRow::is_waiting`] says the newer words wait. A sentence the
+/// working row says already is not held: a block with no heading of its own
+/// is named by its newest finished sentence, and the two rows said one
+/// sentence for two seconds at every block's start. The clock is the turn's
+/// elapsed time, which the turn loop moves and a test sets.
 #[derive(Debug, Default)]
 pub struct HeldRow {
     /// The words on the row, and the turn's elapsed time when their sentence
@@ -297,14 +300,18 @@ pub struct HeldRow {
 
 impl HeldRow {
     /// The row for `text`, the thinking so far, at `elapsed` on the turn's
-    /// clock; `None` while nothing was said.
-    pub fn offer(&mut self, text: &str, max_columns: usize, elapsed: Duration) -> Option<String> {
+    /// clock, under a working row whose word is `above` (empty when it says
+    /// only that the model is at work); `None` while nothing was said.
+    pub fn offer(&mut self, text: &str, max_columns: usize, elapsed: Duration, above: &str) -> Option<String> {
         self.waiting = false;
         if let Some(now) = live_line(text, max_columns) {
             self.shown = Some(match self.shown.take() {
                 Some((row, since)) if same_sentence(&row, &now) => (now, since),
-                // A clock behind the row's is a new turn's: its words take the row.
-                Some((row, since)) if elapsed.checked_sub(since).is_some_and(|stood| stood < ROW_DWELL) => {
+                // A sentence the working row says is not held under it, and a
+                // clock behind the row's is a new turn's: their next words take it.
+                Some((row, since))
+                    if !says(above, &row) && elapsed.checked_sub(since).is_some_and(|stood| stood < ROW_DWELL) =>
+                {
                     self.waiting = true;
                     let ended = ended_line(text, max_columns).filter(|ended| same_sentence(&row, ended));
                     (ended.unwrap_or(row), since)
@@ -321,6 +328,14 @@ impl HeldRow {
     pub fn is_waiting(&self) -> bool {
         self.waiting
     }
+}
+
+/// Whether the working row's word `above` says the sentence on the row under
+/// it: one opens with the other, their ellipses taken off — the word is cut
+/// to its forty-eight columns, the row to the pane's.
+fn says(above: &str, row: &str) -> bool {
+    let (word, row) = (above.trim_end_matches('…'), row.trim_end_matches('…'));
+    !word.is_empty() && !row.is_empty() && (row.starts_with(word) || word.starts_with(row))
 }
 
 /// `text` without its whole-line `**heading**` lines (and an unclosed
@@ -789,7 +804,7 @@ mod tests {
         let chars: Vec<char> = CODE_THOUGHT.chars().collect();
         for piece in chars.chunks(4) {
             said.extend(piece);
-            let row = held.offer(&said, 76, at).expect("a row once a word has come");
+            let row = held.offer(&said, 76, at, "").expect("a row once a word has come");
             assert!(row.width() <= 76, "{row}");
             if rows.last().is_none_or(|(_, last)| *last != row) {
                 rows.push((at, row));
@@ -820,23 +835,56 @@ mod tests {
     fn a_held_row_grows_at_once_and_waits_with_its_sentence_as_it_ended() {
         let at = Duration::from_secs(1);
         let mut held = HeldRow::default();
-        assert_eq!(held.offer("", 80, at), None);
-        assert_eq!(held.offer("Patch hunks", 80, at).as_deref(), Some("Patch hunks"));
+        assert_eq!(held.offer("", 80, at, ""), None);
+        assert_eq!(held.offer("Patch hunks", 80, at, "").as_deref(), Some("Patch hunks"));
         assert_eq!(
-            held.offer("Patch hunks must match exactl", 80, at).as_deref(),
+            held.offer("Patch hunks must match exactl", 80, at, "").as_deref(),
             Some("Patch hunks must match exactl")
         );
         assert!(!held.is_waiting(), "its own words never wait");
         assert_eq!(
-            held.offer("Patch hunks must match exactly. L", 80, at + ROW_DWELL / 2).as_deref(),
+            held.offer("Patch hunks must match exactly. L", 80, at + ROW_DWELL / 2, "").as_deref(),
             Some("Patch hunks must match exactly")
         );
         assert!(held.is_waiting(), "the next sentence waits for the dwell");
         assert_eq!(
-            held.offer("Patch hunks must match exactly. Let me", 80, at + ROW_DWELL).as_deref(),
+            held.offer("Patch hunks must match exactly. Let me", 80, at + ROW_DWELL, "").as_deref(),
             Some("Let me")
         );
         assert!(!held.is_waiting());
+    }
+
+    /// A sentence the working row says already — a block with no heading of
+    /// its own is named by its newest finished sentence — is not held under
+    /// it: the next sentence takes the row as it begins, and only a sentence
+    /// the working row does not say stands its dwell. A word cut to its
+    /// columns still says its sentence (zo 8579c781b: both rows said one
+    /// sentence for 1.8 s at every block's start).
+    #[test]
+    fn a_sentence_the_working_row_says_is_not_held_under_it() {
+        let at = Duration::from_secs(1);
+        let mut held = HeldRow::default();
+        assert_eq!(held.offer("I read the lexer.", 80, at, "").as_deref(), Some("I read the lexer"));
+        assert_eq!(
+            held.offer("I read the lexer. Then the par", 80, at, "I read the lexer").as_deref(),
+            Some("Then the par"),
+            "the working row says it already"
+        );
+        assert!(!held.is_waiting());
+        assert_eq!(
+            held.offer("I read the lexer. Then the parser. And", 80, at, "I read the lexer").as_deref(),
+            Some("Then the parser"),
+            "a sentence the working row does not say stands its dwell"
+        );
+        assert!(held.is_waiting());
+        let long = "The person wants the vulnerabilities scored by how often they happen.";
+        let mut cut = HeldRow::default();
+        assert!(cut.offer(long, 80, at, "").is_some());
+        assert_eq!(
+            cut.offer(&format!("{long} Next"), 80, at, "The person wants the vulnerabilities scored by…").as_deref(),
+            Some("Next"),
+            "a word cut to its columns still says its sentence"
+        );
     }
 
     #[test]
