@@ -19,7 +19,7 @@ zo [<prompt>…] [--prompt-file <file|->] [--model <alias>] [--permission-mode <
        [--teammate <dir> [--resume-transcript <path>]] [--launch-contract <version>]
        [--classifier-fallback off|ask|auto]
        [--events-bind <addr>] [-p|--plain] [--json] [--last-message <file>]
-       [--loop-every <duration>|--loop-until <command>] [--loop-max <runs>]
+       [--loop-every <duration>|--loop-until <command>] [--loop-max <runs>] [--allow-writes]
        [--output-schema <file> --last-message <file>] [--max-turns <iterations>] [--max-output-tokens <tokens>]
        [--add-dir <dir>]… [--worktree <path>]
        [--status] [--prompt-input] [--orchestration-accuracy] [--version] [--help]
@@ -106,6 +106,8 @@ zo decision-shadow check [--json]
   --loop-every       repeat the first piped prompt at this interval
   --loop-until       repeat it until this read-only command succeeds
   --loop-max         bound the run count (defaults to autonomy.maxLoopRuns)
+  --allow-writes     let the loop's turns use the session's permission mode;
+                     without it they run read-only unless it has full access
   --verbose-stderr   keep stderr on the terminal. By default an interactive run
                      sends it to ~/.zo/logs/zo-ide.log so credential notes,
                      retention sweeps and panics stay out of the pane
@@ -235,6 +237,10 @@ pub struct Launch {
 pub struct HeadlessLoop {
     pub trigger: HeadlessLoopTrigger,
     pub max_runs: Option<u32>,
+    /// `--allow-writes`: the loop's turns use the session's own permission
+    /// mode, as `/loop --allow-writes` does; without it they run read-only
+    /// unless the session has Full Access (t-117004).
+    pub allow_writes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +267,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
     let mut teammate: Option<PathBuf> = None;
     let mut loop_trigger: Option<HeadlessLoopTrigger> = None;
     let mut loop_max: Option<u32> = None;
+    let mut loop_allow_writes = false;
     let mut launch_contract: Option<String> = None;
     let mut classifier_fallback: Option<runtime::ClassifierFallback> = None;
     let mut invocation = crate::automation::Invocation::default();
@@ -487,6 +494,10 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
                 );
                 index += 2;
             }
+            "--allow-writes" => {
+                loop_allow_writes = true;
+                index += 1;
+            }
             "--launch-contract" => {
                 launch_contract = Some(value("--launch-contract")?);
                 index += 2;
@@ -571,6 +582,9 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
     if loop_max.is_some() && loop_trigger.is_none() {
         return Err("--loop-max requires --loop-every or --loop-until".to_string());
     }
+    if loop_allow_writes && loop_trigger.is_none() {
+        return Err("--allow-writes requires --loop-every or --loop-until".to_string());
+    }
     if loop_trigger.is_some() && action != Action::Repl {
         return Err("headless loop flags only apply to a prompt run".to_string());
     }
@@ -580,6 +594,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
     let headless_loop = loop_trigger.map(|trigger| HeadlessLoop {
         trigger,
         max_runs: loop_max,
+        allow_writes: loop_allow_writes,
     });
     Ok(Launch {
         requested,
@@ -796,6 +811,18 @@ mod tests {
             "true",
         ]))
         .is_err());
+    }
+
+    /// `--allow-writes` is a headless loop's opt-in into the session's own
+    /// mode — the same flag a held run's refusal tells the person to restart
+    /// with — and it means nothing without a loop (t-117004).
+    #[test]
+    fn a_headless_loop_takes_allow_writes_and_nothing_else_does() {
+        let launch = parse(&args(&["-p", "--loop-every", "1s", "--allow-writes"])).expect("parse");
+        assert!(launch.headless_loop.expect("headless loop").allow_writes);
+        let launch = parse(&args(&["-p", "--loop-until", "true"])).expect("parse");
+        assert!(!launch.headless_loop.expect("headless loop").allow_writes);
+        assert!(parse(&args(&["-p", "--allow-writes"])).is_err());
     }
 
     #[test]

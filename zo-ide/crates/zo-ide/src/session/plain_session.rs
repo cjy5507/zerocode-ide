@@ -2201,10 +2201,11 @@ impl PlainSession {
         trigger: crate::autonomy::scheduler::Trigger,
         prompt: String,
         max_runs: Option<u32>,
+        allow_writes: bool,
     ) -> Result<String, String> {
         self.autonomy
             .loops
-            .start_headless(trigger, prompt, max_runs, now_unix_ms())
+            .start_headless(trigger, prompt, max_runs, allow_writes, now_unix_ms())
     }
 
     #[must_use]

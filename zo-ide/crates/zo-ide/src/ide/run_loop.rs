@@ -344,6 +344,7 @@ async fn run_frontend(
                             trigger,
                             trimmed.to_string(),
                             spec.config.max_runs,
+                            spec.config.allow_writes,
                         )?);
                     } else if headless_loop.is_some() {
                         note(&mut renderer, "headless loop ignores stdin after its first prompt");

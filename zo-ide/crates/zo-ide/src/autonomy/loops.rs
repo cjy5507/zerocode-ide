@@ -352,12 +352,15 @@ impl LoopRegistry {
 
     /// Seed the same persistent [`LoopSpec`] used by `/loop`, but from the
     /// bounded headless CLI. The caller supplies the first stdin prompt; all
-    /// later dispatch, receipt, permission and budget paths remain shared.
+    /// later dispatch, receipt, permission and budget paths remain shared —
+    /// `allow_writes` is the CLI's `--allow-writes`, the same opt-in as
+    /// `/loop --allow-writes` (t-117004).
     pub fn start_headless(
         &mut self,
         trigger: Trigger,
         prompt: String,
         max_runs: Option<u32>,
+        allow_writes: bool,
         now_unix_ms: u64,
     ) -> Result<String, String> {
         let max_runs = max_runs.unwrap_or(self.limits.max_loop_runs);
@@ -384,7 +387,7 @@ impl LoopRegistry {
                 check: None,
                 max_runs,
                 token_budget: self.limits.max_output_tokens,
-                allow_writes: false,
+                allow_writes,
             },
             Some(now_unix_ms),
             LoopSource::Command,

@@ -1540,6 +1540,78 @@ async fn e2e_plain_workspace_write_loop_without_allow_writes_names_the_flag() {
     );
 }
 
+/// The headless loop has the opt-in a held run's refusal names (t-117004):
+/// in a workspace-write session `--loop-every … --allow-writes` writes, and
+/// without the flag the loop is held read-only and told to restart with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_headless_loop_takes_allow_writes_the_refusal_names() {
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start headless loop mock service");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &[
+            "--plain",
+            "--loop-every",
+            "1s",
+            "--loop-max",
+            "1",
+            "--permission-mode",
+            "workspace-write",
+            "--allow-writes",
+        ],
+        b"PARITY_SCENARIO:write_file_allowed make the file\n",
+    )
+    .expect("run a headless loop with --allow-writes");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    show_permission_lines("workspace-write · headless --allow-writes", &stdout);
+    assert!(
+        layout.cwd.join("generated/output.txt").exists(),
+        "a headless loop with --allow-writes could not write: {:?}\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.status.success(), "headless loop exited with {:?}:\n{stdout}", output.status);
+
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start headless loop mock service");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &[
+            "--plain",
+            "--loop-every",
+            "1s",
+            "--loop-max",
+            "1",
+            "--permission-mode",
+            "workspace-write",
+        ],
+        b"PARITY_SCENARIO:write_file_denied try the file\n",
+    )
+    .expect("run a headless loop without the flag");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    show_permission_lines("workspace-write · headless without the flag", &stdout);
+    assert!(
+        !layout.cwd.join("generated/denied.txt").exists(),
+        "a headless loop without --allow-writes wrote in a workspace-write session"
+    );
+    assert!(
+        stdout.contains("restart it with --allow-writes"),
+        "the held headless loop was not told the flag it can restart with:\n{stdout}"
+    );
+}
+
 /// With `--allow-writes` in a session that is not Full Access, the goal's
 /// plan turn still only plans but keeps its own `TodoWrite`, and a gate
 /// command is judged by the session's own rules: one needing approval stops
