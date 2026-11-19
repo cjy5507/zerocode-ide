@@ -16,12 +16,12 @@
 //! 11), written here once so every project has it: each owner's jobs run in the
 //! order they were put in and never two at a time; among owners, the one whose
 //! last job ended longest ago goes first; a `first` job goes before a plain one
-//! — two firsts, then one plain, so plain work is not starved — and a `last` job
-//! only fills a slot nothing else wants. A `solo` job (a whole suite, an e2e
-//! run) takes the first slot only; a `quiet` job (a measurement) runs alone,
-//! and while it waits for the machine nothing new starts beside it. Nothing
-//! starts while the line is paused or the disk is below its floor. The window
-//! reads the records and never writes them: its buttons run `zo line`.
+//! — two firsts, then one plain, a quiet one too, so plain work is not starved —
+//! and a `last` job only fills a slot nothing else wants. A `solo` job (a whole
+//! suite, an e2e run) takes the first slot only; a `quiet` job (a measurement)
+//! runs alone: from its turn until the machine is empty nothing new starts.
+//! Nothing starts while the line is paused or the disk is below its floor. The
+//! window reads the records and never writes them: its buttons run `zo line`.
 
 use std::collections::HashMap;
 use std::io::{self, Read as _};
@@ -470,7 +470,8 @@ pub fn next_up<'jobs>(
 /// The oldest waiting job of a class that fits the slot being decided, by the owners' turns.
 type Pick<'jobs, 'f> = dyn Fn(Class, &dyn Fn(&Job) -> bool) -> Option<&'jobs Job> + 'f;
 
-/// Two first jobs, then a plain one when both wait; a last job only when no other.
+/// Two first jobs, then a plain one when both wait, quiet or not; a last job
+/// only when no other.
 fn pick_ordered<'jobs>(
     pick: &Pick<'jobs, '_>,
     fits: &dyn Fn(&Job) -> bool,
@@ -479,11 +480,7 @@ fn pick_ordered<'jobs>(
     let first = pick(Class::First, fits);
     let plain = pick(Class::Plain, fits);
     match (first, plain) {
-        (Some(first), Some(plain)) => Some(if turn % 3 == 2 && !plain.quiet {
-            plain
-        } else {
-            first
-        }),
+        (Some(first), Some(plain)) => Some(if turn % 3 == 2 { plain } else { first }),
         (first, plain) => first.or(plain).or_else(|| pick(Class::Last, fits)),
     }
 }
@@ -861,5 +858,280 @@ mod tests {
         assert_eq!(line.pause(), None);
         line.lift_pause().expect("lifting nothing is no error");
         assert!(is_job_id(&new_id(1_794_000_000_000, 0xbeef)));
+    }
+
+    /// A start the simulated line made: the job, the slot and the turn it
+    /// took, and the jobs that ran beside it.
+    #[derive(Debug)]
+    struct Start {
+        id: String,
+        slot: u32,
+        turn: u64,
+        beside: Vec<String>,
+    }
+
+    /// When a simulated job ends: it runs its whole cap.
+    fn ends_ms(job: &Job) -> Option<i64> {
+        job.started_ms
+            .map(|from| from + i64::from(job.cap_secs) * 1000)
+    }
+
+    /// The line on a machine of `slots` slots, as the waiting jobs' own looks
+    /// run it (`zo line`'s `take_turn`): whenever a slot is free, the lowest
+    /// first, the job [`next_up`] names for it starts there and the turn moves
+    /// on; when a job ends, its owner's turn moves on. A running quiet job's
+    /// other slots look free here, and `next_up` holds them. It stops after
+    /// `most` starts, or once nothing runs and nothing starts.
+    fn run_line(jobs: &mut [Job], slots: u32, turn: u64, most: usize) -> Vec<Start> {
+        let machine = machine(slots);
+        let mut turn = turn;
+        let mut now = 0_i64;
+        let mut last: HashMap<String, i64> = HashMap::new();
+        let mut starts = Vec::new();
+        loop {
+            while starts.len() < most {
+                let view: &[Job] = jobs;
+                let ended = |owner: &str| last.get(owner).copied().unwrap_or(0);
+                let running: Vec<&Job> = view
+                    .iter()
+                    .filter(|job| job.state == JobState::Running)
+                    .collect();
+                let next = (0..slots)
+                    .filter(|slot| running.iter().all(|job| job.slot != Some(*slot)))
+                    .find_map(|slot| {
+                        let next = next_up(view, slot, &machine, &ended, turn).ok().flatten()?;
+                        Some((slot, next.id.clone()))
+                    });
+                let Some((slot, id)) = next else {
+                    break;
+                };
+                let beside = running.iter().map(|job| job.id.clone()).collect();
+                let job = jobs
+                    .iter_mut()
+                    .find(|job| job.id == id)
+                    .expect("the job it named");
+                job.state = JobState::Running;
+                job.slot = Some(slot);
+                job.started_ms = Some(now);
+                starts.push(Start {
+                    id,
+                    slot,
+                    turn,
+                    beside,
+                });
+                turn += 1;
+            }
+            if starts.len() >= most {
+                return starts;
+            }
+            let Some(at) = jobs
+                .iter()
+                .filter(|job| job.state == JobState::Running)
+                .filter_map(ends_ms)
+                .min()
+            else {
+                return starts;
+            };
+            now = at;
+            for job in jobs
+                .iter_mut()
+                .filter(|job| job.state == JobState::Running && ends_ms(job) == Some(at))
+            {
+                job.state = JobState::Passed;
+                job.ended_ms = Some(at);
+                last.insert(job.owner.clone(), at);
+            }
+        }
+    }
+
+    /// `each` first jobs of every owner in `owners` (its name, and how long its
+    /// jobs run in seconds), put in one owner after another.
+    fn firsts(owners: &[(&str, u32)], each: usize) -> Vec<Job> {
+        (0..each)
+            .flat_map(|n| owners.iter().map(move |&(owner, secs)| (n, owner, secs)))
+            .enumerate()
+            .map(|(order, (n, owner, secs))| Job {
+                class: Class::First,
+                cap_secs: secs,
+                ..job(&format!("{owner}-{n}"), owner, 100 + order as i64)
+            })
+            .collect()
+    }
+
+    fn plain(id: &str, owner: &str, queued_ms: i64, secs: u32, quiet: bool) -> Job {
+        Job {
+            cap_secs: secs,
+            quiet,
+            ..job(id, owner, queued_ms)
+        }
+    }
+
+    /// 2026-11-19: a quiet plain job at the head of plain work waited two
+    /// hours while first jobs kept coming, and the plain jobs behind it with
+    /// it — its turn went to a first job every time.
+    #[test]
+    fn a_quiet_plain_job_gets_plain_turns_while_firsts_keep_coming_and_the_plain_behind_follows() {
+        let quiet_id = "j-q".to_owned();
+        for turn in 0..3 {
+            let mut jobs = vec![
+                plain("q", "w-measure", 1, 600, true),
+                plain("p", "w-check", 2, 600, false),
+            ];
+            jobs.extend(firsts(&[("f-0", 600), ("f-1", 900), ("f-2", 1200)], 10));
+            let starts = run_line(&mut jobs, 2, turn, 6);
+            let order: Vec<&str> = starts.iter().map(|start| start.id.as_str()).collect();
+            let count = |id: &str| order.iter().filter(|started| **started == id).count();
+            assert_eq!(
+                (count("j-q"), count("j-p")),
+                (1, 1),
+                "the quiet plain job, then the plain one behind it, in six starts from turn {turn}: {order:?}"
+            );
+            let place = |id: &str| {
+                order
+                    .iter()
+                    .position(|started| *started == id)
+                    .expect("it started")
+            };
+            let (quiet, behind) = (place("j-q"), place("j-p"));
+            assert!(
+                quiet < 3 && starts[quiet].turn % 3 == 2,
+                "it takes the first plain turn: {order:?}"
+            );
+            assert!(
+                behind > quiet && behind - quiet <= 3,
+                "the plain job behind it takes the next one: {order:?}"
+            );
+            assert!(
+                starts[quiet].beside.is_empty()
+                    && starts.iter().all(|start| !start.beside.contains(&quiet_id)),
+                "the quiet job runs alone: {starts:?}"
+            );
+            assert!(
+                jobs.iter()
+                    .any(|job| job.class == Class::First && job.state == JobState::Waiting),
+                "first jobs were still coming"
+            );
+        }
+    }
+
+    #[test]
+    fn with_quiet_plain_jobs_the_turns_stay_two_to_one_and_quiet_solo_and_last_keep_their_rules() {
+        let mut jobs = vec![Job {
+            class: Class::Last,
+            ..job("l", "w-last", 0)
+        }];
+        for n in 0..10 {
+            jobs.push(plain(&format!("m-{n}"), "w-measure", 1 + 2 * n, 300, true));
+            jobs.push(plain(&format!("c-{n}"), "w-check", 2 + 2 * n, 900, false));
+        }
+        let mut stream = firsts(&[("f-solo", 600), ("f-1", 900), ("f-2", 1200)], 16);
+        for first in stream.iter_mut().filter(|job| job.owner == "f-solo") {
+            first.solo = true;
+        }
+        jobs.extend(stream);
+        let starts = run_line(&mut jobs, 2, 0, 30);
+        let of = |start: &Start| {
+            jobs.iter()
+                .find(|job| job.id == start.id)
+                .expect("a job of the line")
+        };
+        let classes: Vec<Class> = starts.iter().map(|start| of(start).class).collect();
+        assert_eq!(
+            classes,
+            [Class::First, Class::First, Class::Plain].repeat(10),
+            "two firsts, then one plain, quiet or not"
+        );
+        let quiet = |id: &String| jobs.iter().any(|job| job.id == *id && job.quiet);
+        assert!(
+            starts.iter().any(|start| quiet(&start.id)),
+            "quiet jobs took turns"
+        );
+        assert!(
+            starts.iter().all(|start| !start.beside.iter().any(quiet)
+                && (!quiet(&start.id) || start.beside.is_empty())),
+            "a quiet job runs alone: {starts:?}"
+        );
+        let solo: Vec<&Start> = starts.iter().filter(|start| of(start).solo).collect();
+        assert!(
+            !solo.is_empty() && solo.iter().all(|start| start.slot == FIRST_SLOT),
+            "solo jobs take the first slot only: {solo:?}"
+        );
+        assert!(
+            starts.iter().all(|start| start.id != "j-l"),
+            "a last job waits while other work comes"
+        );
+    }
+
+    /// What quiet plain jobs taking plain work's turn cost the first jobs:
+    /// twelve first jobs of three owners on two slots (each owner's run 1, 1.5
+    /// and 2 times the length named), beside one quiet plain job and one plain
+    /// one of another owner, or beside six quiet plain jobs; run to the end.
+    /// A line says, in minutes, when the last first job ended, when the first
+    /// jobs ended on average, when the last quiet one ended and when the other
+    /// plain one did.
+    #[test]
+    #[ignore = "a measurement: cargo test -p zerocode-core --lib line::tests::what_quiet_plain_turns_cost_the_first_jobs -- --ignored --exact --nocapture"]
+    fn what_quiet_plain_turns_cost_the_first_jobs() {
+        let minutes = |ms: i64| ms as f64 / 60_000.0;
+        println!(
+            "case\tfirst jobs (min, x1 x1.5 x2)\tquiet job (min)\tlast first ends\tfirst jobs end, mean\tlast quiet ends\tother plain ends"
+        );
+        for (case, quiet_firsts, quiet_plains) in [
+            ("one quiet plain job", false, 1),
+            ("every plain job quiet", false, 6),
+            ("the first jobs quiet too", true, 1),
+        ] {
+            for first_min in [5_u32, 15, 30] {
+                for quiet_min in [5_u32, 30] {
+                    let mut jobs: Vec<Job> = (0..quiet_plains)
+                        .map(|n| {
+                            let owner = format!("w-measure-{}", n % 2);
+                            plain(&format!("q-{n}"), &owner, 1 + n, quiet_min * 60, true)
+                        })
+                        .collect();
+                    if quiet_plains == 1 {
+                        jobs.push(plain("c", "w-check", 10, first_min * 60, false));
+                    }
+                    let mut stream = firsts(
+                        &[
+                            ("f-0", first_min * 60),
+                            ("f-1", first_min * 90),
+                            ("f-2", first_min * 120),
+                        ],
+                        4,
+                    );
+                    for first in &mut stream {
+                        first.quiet = quiet_firsts;
+                    }
+                    jobs.extend(stream);
+                    run_line(&mut jobs, 2, 0, usize::MAX);
+                    assert!(
+                        jobs.iter().all(|job| job.state == JobState::Passed),
+                        "every job ran"
+                    );
+                    let ends = |keep: &dyn Fn(&Job) -> bool| -> Vec<f64> {
+                        jobs.iter()
+                            .filter(|&job| keep(job))
+                            .filter_map(|job| job.ended_ms)
+                            .map(minutes)
+                            .collect()
+                    };
+                    let latest = |all: &[f64]| all.iter().copied().fold(f64::NAN, f64::max);
+                    let first_ends = ends(&|job| job.class == Class::First);
+                    let mean = first_ends.iter().sum::<f64>() / first_ends.len() as f64;
+                    let last_first = latest(&first_ends);
+                    let last_quiet = latest(&ends(&|job| job.quiet && job.class == Class::Plain));
+                    let other = ends(&|job| job.owner == "w-check");
+                    let other = if other.is_empty() {
+                        "-".to_owned()
+                    } else {
+                        format!("{:.1}", latest(&other))
+                    };
+                    println!(
+                        "{case}\t{first_min}\t{quiet_min}\t{last_first:.1}\t{mean:.1}\t{last_quiet:.1}\t{other}"
+                    );
+                }
+            }
+        }
     }
 }
