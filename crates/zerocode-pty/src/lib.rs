@@ -26,6 +26,7 @@ pub mod readers;
 pub mod ready;
 pub mod recording;
 mod screen_row;
+pub mod screens;
 pub mod serialize;
 pub mod zo;
 
@@ -59,6 +60,10 @@ pub use readers::{
 pub use ready::{
     EnterAgain, Observed, Outcome as DeliveryOutcome, PromptDelivery, Readiness, ReadySignal,
     State as ReadyState, Step as DeliveryStep,
+};
+pub use screens::{
+    DirtyNotices, PulledScreen, PulledScreens, TermId, TerminalPool, WatchedTerms, readers_by_term,
+    tell_dirty,
 };
 pub use serialize::{
     POST_REPLAY_MODE_RESET, SCROLLBACK_BUFFER_BYTE_LIMIT, replay_payload, serialize_tail,
