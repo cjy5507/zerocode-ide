@@ -720,6 +720,28 @@ mod tests {
         assert_eq!(catalog.find("my-dracula").as_ref(), Some(custom));
     }
 
+    /// A theme file's own inline-code colour wins over its base's, the colour
+    /// the built-in table gives that base — and over a built-in of the same
+    /// name, which the file stands in for.
+    #[test]
+    fn a_user_themes_code_colour_wins_over_its_bases_own() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_theme(dir.path(), "my-nord.json", r##"{ "base": "nord", "colors": { "code": "#123456" } }"##);
+        write_theme(dir.path(), "dracula.json", r##"{ "base": "dracula", "colors": { "code": "#abcdef" } }"##);
+
+        let (themes, warnings) = load_from(dir.path());
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        let nord = find_builtin("nord").expect("nord builtin");
+        assert_eq!(nord.role_color(Role::Code), Some((0x8f, 0xbc, 0xbb)), "the table's colour for nord");
+        let mine = themes.iter().find(|theme| theme.name == "my-nord").expect("my-nord");
+        assert_eq!(mine.role_color(Role::Code), Some((0x12, 0x34, 0x56)));
+
+        let mut catalog = Catalog::new();
+        let _ = catalog.names(Some(dir.path()));
+        let dracula = catalog.find("dracula").expect("the person's dracula");
+        assert_eq!(dracula.role_color(Role::Code), Some((0xab, 0xcd, 0xef)));
+    }
+
     #[test]
     fn a_user_theme_without_a_base_leaves_unset_colours_to_the_terminal() {
         let dir = tempfile::tempdir().expect("tempdir");

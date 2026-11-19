@@ -48,7 +48,7 @@ zo decision-shadow eval --labels labels.jsonl   # probe·typed 판단을 사람�
 
 내장 슬래시: `/model /fast /thinking /theme /permissions /new /resume /fork /rename /export /compact /rewind /goal /loop /status /context /warnings /help /exit /clear`.
 추론 강도는 `/model`에서 고른다.
-색 테마는 `/theme`이나 설정 `theme`으로 고른다. 기본 `terminal`은 터미널(창)의 테마를 따르고, 이름 있는 테마는 고정이라 터미널의 테마를 바꿔도 그대로다(`/theme`이 `pinned`로 알려 준다). 문장 속 코드는 그 테마가 정한 색, 정한 것이 없으면 그 테마의 파랑으로 그린다. zo가 바탕색을 알 수 없는 터미널(Windows Terminal 등)에서는 설정 `terminalBackground`(`auto` · `light` · `dark`, 한 번만 덮는 `ZO_TERMINAL_BACKGROUND`)로 바탕이 밝은지 어두운지 알려 준다. 16색 터미널(옛 Windows 콘솔 창 등)에서는 바뀌는 것이 없다. 터미널이 답하지 않고 이 설정도 없으면 zo는 `COLORFGBG`로 어림하는데, 그 값이 실제 바탕과 다르게 남아 있으면(tmux · ssh 너머 등) 이 설정으로 정한다.
+색 테마는 `/theme`이나 설정 `theme`으로 고른다. 기본 `terminal`은 터미널(창)의 테마를 따르고, 이름 있는 테마는 고정이라 터미널의 테마를 바꿔도 그대로다(`/theme`이 `pinned`로 알려 준다). 창 밖 터미널에서는 바탕과 대비가 모자란 색만 zo를 시작할 때의 팔레트로 올려 그리므로, 그 색은 zo를 다시 시작해야 새 테마를 따른다. 문장 속 코드는 그 테마가 정한 색, 정한 것이 없으면 그 테마의 파랑으로 그린다. zo가 바탕색을 알 수 없는 터미널(Windows Terminal 등)에서는 설정 `terminalBackground`(`auto` · `light` · `dark`, 한 번만 덮는 `ZO_TERMINAL_BACKGROUND`)로 바탕이 밝은지 어두운지 알려 준다. 16색 터미널(옛 Windows 콘솔 창 등)에서는 바뀌는 것이 없다. 터미널이 답하지 않고 이 설정도 없으면 zo는 `COLORFGBG`로 어림하는데, 그 값이 실제 바탕과 다르게 남아 있으면(tmux · ssh 너머 등) 이 설정으로 정한다.
 
 ```sh
 zo --plain 'Explain this repository'            # 한 번 실행하고 종료

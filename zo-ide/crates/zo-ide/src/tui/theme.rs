@@ -970,7 +970,7 @@ mod tests {
         let table: std::collections::BTreeMap<String, String> =
             serde_json::from_str(super::THEME_INLINE_CODE_JSON).expect("the table is JSON");
         let builtins = super::builtin_names();
-        assert_eq!(table.len(), 26, "{table:?}");
+        assert_eq!(table.len(), 25, "{table:?}");
         for (slug, value) in &table {
             assert!(builtins.contains(&slug.as_str()), "{slug} is no built-in theme");
             assert!(parse_hex_color(value).is_some(), "{slug}: {value} is no colour");
@@ -992,8 +992,9 @@ mod tests {
         assert_eq!(code("nord"), Some((0x8f, 0xbc, 0xbb)));
         assert_eq!(code("gruvbox-dark"), Some((0x8e, 0xc0, 0x7c)));
         assert_eq!(code("tokyo-night"), Some((0x89, 0xdd, 0xff)));
-        assert_eq!(code("homebrew"), Some((0x00, 0xa6, 0xb2)));
-        // No colour of their own: the blue slot.
+        // No colour of their own: the blue slot. Homebrew's is 1.64:1 on its
+        // black, and the drawing lifts it like every theme colour (the floor test).
+        assert_eq!(code("homebrew"), Some((0x00, 0x00, 0xb2)));
         assert_eq!(code("ghostty-default-style-dark"), Some((0x81, 0xa2, 0xbe)));
         assert_eq!(code("github-light"), Some((0x03, 0x66, 0xd6)));
         assert_eq!(code("snazzy"), Some((0x57, 0xc7, 0xff)));

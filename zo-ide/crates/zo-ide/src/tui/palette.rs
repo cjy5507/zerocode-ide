@@ -605,18 +605,47 @@ struct Ansi16InkCacheEntry {
     resolved: Option<(u8, u8, u8)>,
 }
 
+/// Whether this process draws in the ZeroCode window. Its renderer lifts an
+/// indexed colour that falls under its contrast bar and lifts it again when
+/// the person changes the terminal's theme (`ui/shell-term.js`, Orca's
+/// `minimumContrastRatio`), so there a slot zo would lift stays a slot:
+/// lifted to RGB it would keep the palette zo measured at start, and a change
+/// of the window's theme would leave it behind. Read once; a unit-test build
+/// answers `false` wherever it runs.
+#[cfg(not(test))]
+fn window_lifts_slot_colours() -> bool {
+    /// The value the window gives `TERM_PROGRAM` in every pane
+    /// (`TERMINAL_NAME`, `crates/zerocode-pty/src/grid.rs`).
+    const WINDOW_TERM_PROGRAM: &str = "ZeroCode";
+    static IN_WINDOW: OnceLock<bool> = OnceLock::new();
+    *IN_WINDOW.get_or_init(|| {
+        std::env::var("TERM_PROGRAM").is_ok_and(|name| name == WINDOW_TERM_PROGRAM)
+    })
+}
+
+#[cfg(test)]
+const fn window_lifts_slot_colours() -> bool {
+    false
+}
+
+/// An ANSI-16 slot's ink on `background`: `None` keeps the slot's own index
+/// bytes — when it clears the text floor, or when `window_lifts` (the terminal
+/// lifts it, and keeps lifting it through a change of theme) — else the
+/// measured slot lifted toward the body ink. A dim slot is always the
+/// measured dim ink.
 fn compute_ansi16_ink(
     palette: TerminalPalette,
     slot: u8,
     dim: bool,
     background: (u8, u8, u8),
+    window_lifts: bool,
 ) -> Option<(u8, u8, u8)> {
     let ink = palette.ansi_color(slot)?;
     if dim {
         return Some(palette.dim_foreground(ink, background));
     }
     let floor = palette.text_contrast_floor(background);
-    if contrast_ratio(ink, background) >= floor {
+    if window_lifts || contrast_ratio(ink, background) >= floor {
         None
     } else {
         Some(palette.ensure_text_contrast(ink, background))
@@ -624,7 +653,8 @@ fn compute_ansi16_ink(
 }
 
 /// Resolves an ANSI-16 slot's foreground RGB when its colour is known and
-/// either `dim` is set or the slot falls below the text contrast floor.
+/// either `dim` is set or the slot falls below the text contrast floor —
+/// outside the ZeroCode window, which lifts such a slot itself.
 /// Returns `None` when the slot should keep its original ANSI index bytes.
 /// Caches `(palette, slot, dim)` for the terminal's default background, for
 /// one theme revision at a time.
@@ -636,7 +666,7 @@ pub(crate) fn resolved_ansi16_ink(
     explicit_background: Option<(u8, u8, u8)>,
 ) -> Option<(u8, u8, u8)> {
     if let Some(background) = explicit_background {
-        return compute_ansi16_ink(palette, slot, dim, background);
+        return compute_ansi16_ink(palette, slot, dim, background, window_lifts_slot_colours());
     }
     let revision = super::theme::revision();
     ANSI16_INKS.with(|cache| {
@@ -649,7 +679,8 @@ pub(crate) fn resolved_ansi16_ink(
         }) {
             return entry.resolved;
         }
-        let resolved = compute_ansi16_ink(palette, slot, dim, palette.background());
+        let resolved =
+            compute_ansi16_ink(palette, slot, dim, palette.background(), window_lifts_slot_colours());
         cache.retain(|entry| entry.revision == revision);
         cache.push(Ansi16InkCacheEntry {
             revision,
@@ -1263,5 +1294,30 @@ mod tests {
         assert_eq!(color_level_for(false, false, "", Some("XTERM-256COLOR")), ColorLevel::Ansi256);
         assert_eq!(color_level_for(false, false, "yes", Some("xterm")), ColorLevel::Ansi16);
         assert_eq!(color_level_for(false, true, "", None), ColorLevel::Ansi16);
+    }
+
+    /// A slot under the text floor is lifted to measured RGB — except in the
+    /// ZeroCode window, which lifts it itself and keeps lifting it through a
+    /// change of the terminal's theme: there the slot keeps its index, so the
+    /// window's next palette draws it. A slot over the floor keeps its index
+    /// everywhere, and a dim slot is the measured dim ink everywhere.
+    /// (Catppuccin Latte's blue, 4.34:1 on its ground.)
+    #[test]
+    fn a_slot_under_the_floor_keeps_its_index_where_the_window_lifts_it() {
+        use super::{compute_ansi16_ink, contrast_ratio};
+        let ground = (0xef, 0xf1, 0xf5);
+        let mut slots = [None; 16];
+        slots[4] = Some((0x1e, 0x66, 0xf5));
+        slots[0] = Some((0x5c, 0x5f, 0x77));
+        let latte = TerminalPalette::new((0x4c, 0x4f, 0x69), ground, ColorLevel::TrueColor).with_ansi16(slots);
+
+        let lifted = compute_ansi16_ink(latte, 4, false, ground, false).expect("lifted outside the window");
+        assert!(contrast_ratio(lifted, ground) >= latte.text_contrast_floor(ground), "{lifted:?}");
+        assert_eq!(compute_ansi16_ink(latte, 4, false, ground, true), None);
+        for window in [false, true] {
+            assert_eq!(compute_ansi16_ink(latte, 0, false, ground, window), None, "over the floor");
+            assert!(compute_ansi16_ink(latte, 4, true, ground, window).is_some(), "dim");
+            assert_eq!(compute_ansi16_ink(latte, 6, false, ground, window), None, "an unknown slot");
+        }
     }
 }
