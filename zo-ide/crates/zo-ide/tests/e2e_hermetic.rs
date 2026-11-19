@@ -1315,7 +1315,9 @@ fn show_permission_lines(label: &str, stdout: &str) {
 
 /// The goal the `goal_turns` model runs: its plan turn calls `TodoWrite`, its
 /// action turn writes a file, and its gate is a command no read-only mode
-/// lets run.
+/// lets run. Every run of it is [`Layout::model_led`]: the script owns each
+/// turn's call, and a host decomposition helper that asked first would take
+/// the plan's `TodoWrite` and refuse it as a helper (11-19, j-…fe49).
 const GOAL_TURNS_START: &str =
     "/goal start PARITY_SCENARIO:goal_turns ship it --check \"touch gate-ran\"";
 
@@ -1329,6 +1331,7 @@ const GOAL_TURNS_START: &str =
 async fn e2e_full_access_goal_without_allow_writes_plans_writes_and_runs_its_gate() {
     for mode in ["danger-full-access", "allow"] {
         let layout = Layout::new();
+        layout.model_led();
         let service = MockAnthropicService::spawn()
             .await
             .expect("start goal mock service");
@@ -1397,6 +1400,7 @@ async fn e2e_full_access_loop_without_allow_writes_writes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_plain_full_access_goal_and_headless_loop_keep_full_access() {
     let layout = Layout::new();
+    layout.model_led();
     let service = MockAnthropicService::spawn()
         .await
         .expect("start plain goal mock service");
@@ -1416,7 +1420,8 @@ async fn e2e_plain_full_access_goal_and_headless_loop_keep_full_access() {
     assert_eq!(
         tool_result_sent(&requests, "toolu_goal_plan").map(|(_, is_error)| is_error),
         Some(false),
-        "the plan turn's TodoWrite was refused:\n{stdout}"
+        "the plan turn's TodoWrite was refused: {:?}\n{stdout}",
+        tool_result_sent(&requests, "toolu_goal_plan"),
     );
     assert!(
         layout.cwd.join(mock_anthropic_service::GOAL_TURNS_ACTION_FILE).exists(),
@@ -1619,6 +1624,7 @@ async fn e2e_headless_loop_takes_allow_writes_the_refusal_names() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_allow_writes_goal_plans_and_stops_its_gate_for_a_person() {
     let layout = Layout::new();
+    layout.model_led();
     let service = MockAnthropicService::spawn()
         .await
         .expect("start goal mock service");
