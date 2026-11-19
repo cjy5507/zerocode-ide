@@ -743,6 +743,11 @@ fn main() {
 
     let mut event_loop = EventLoop::new();
     event_loop.set_activation_policy(ActivationPolicy::Accessory);
+    // Never the active app. Unless told otherwise, tao asks AppKit on launch
+    // to activate the app, ignoring every other one — and an active ipc-road
+    // holds the person's keyboard away from the app in front for as long as
+    // it runs (t-115889).
+    event_loop.set_activate_ignoring_other_apps(false);
     let own_window = birth.is_some() || thumb_spec.is_some();
     BIRTH_MODE.store(own_window, Ordering::Relaxed);
     let window = WindowBuilder::new()
@@ -750,6 +755,9 @@ fn main() {
         // The birth mode needs a window AppKit treats as shown, so it stands
         // outside every screen instead of staying hidden.
         .with_visible(own_window)
+        // A shown window is ordered in without becoming key: it never takes
+        // the keyboard either.
+        .with_focused(false)
         .with_position(LogicalPosition::new(PARENT_AT, 100.0))
         .with_inner_size(LogicalSize::new(400.0, 300.0))
         .build(&event_loop)
