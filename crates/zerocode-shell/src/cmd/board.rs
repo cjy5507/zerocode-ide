@@ -3349,3 +3349,640 @@ mod tests {
         assert!(claude.env.is_empty(), "{:?}", claude.env);
     }
 }
+
+/// `term_pull` answers the bytes it answered before the read path became the
+/// engine's (`zerocode_pty::screens`, t-115950) — on the public phase-0
+/// recordings, through this file's own [`pulled_bytes`], against the commands
+/// as they stood at `0a2a4eb65`.
+///
+/// The recordings (`tests/fixtures/phase0/`) are copies of
+/// `reports/native-terminal-166/phase0/recordings-20261119-093328-a`, written
+/// by that folder's recorder (`phase0-record`, zerocode-pty 1.1.165 — this
+/// branch's base) and checked against its `.sha256` list. Five of its eight
+/// cases ride here; the other three (`dense-color` at 4.8 MB, `sparse-log`,
+/// `scroll`) join the same comparison when `ZC_PHASE0_RECORDINGS` names a
+/// recordings folder.
+#[cfg(test)]
+mod pull_before_and_after {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    use zerocode_lane::{PtyHandle, PtyTransport, PtyTransportError};
+    use zerocode_pty::{Look, Pumped, Terminal};
+
+    use super::pulled_bytes;
+    use crate::terminal_registry::{TerminalRegistry, lock_pty};
+
+    /// The commands' bodies at `0a2a4eb65`, line for line, with only Tauri's
+    /// accessors made plain: `webview.label()` is `label`,
+    /// `state.watched_terms()` is `watched.lock()`, `state.terminals()` is
+    /// `terminals`, the answer's `tauri::ipc::Response` body is returned as
+    /// it was built, and the pump's notices are collected where it emitted
+    /// them. Nothing in here calls what this branch moved or made — its
+    /// answer type is its own, spelled as it was — so a change to the
+    /// engine's wire cannot move both sides at once.
+    ///
+    /// `git show 0a2a4eb65:crates/zerocode-shell/src/cmd/board.rs` holds the
+    /// first two; `…/pane_runtime.rs` there holds `readers_by_term` and the
+    /// fold at the end of `pump_loop`; `…/window_runtime.rs` the close.
+    mod before {
+        use std::collections::{HashMap, HashSet};
+        use std::sync::{Arc, Mutex};
+
+        use serde::Serialize;
+        use zerocode_lane::PtyTransport;
+
+        use crate::terminal_registry::{TerminalRegistry, lock_pty};
+
+        type TermId = u32;
+
+        pub(super) type Watched = Mutex<HashMap<String, HashSet<TermId>>>;
+
+        #[derive(Serialize, Default)]
+        struct PulledScreens {
+            screens: Vec<PulledScreen>,
+            missing: Vec<TermId>,
+        }
+
+        #[derive(Serialize)]
+        struct PulledScreen {
+            term: TermId,
+            frames: Vec<zerocode_pty::GridDelta>,
+        }
+
+        pub(super) fn set_watched_terms(
+            watched: &Watched,
+            terminals: &TerminalRegistry,
+            label: &str,
+            terms: Vec<TermId>,
+        ) {
+            let label = label.to_string();
+            let next: HashSet<TermId> = terms.into_iter().collect();
+            let mut watched = watched.lock().expect("the declaration");
+            let previous = watched.get(&label).cloned().unwrap_or_default();
+            for term in next.difference(&previous) {
+                if let Some(held) = terminals.handle(*term) {
+                    let mut pty = lock_pty(&held);
+                    pty.terminal_mut().readers_mut().0.declare(&label);
+                }
+            }
+            for term in previous.difference(&next) {
+                if let Some(held) = terminals.handle(*term) {
+                    let mut pty = lock_pty(&held);
+                    pty.terminal_mut().readers_mut().0.leave(&label);
+                }
+            }
+            watched.insert(label, next);
+        }
+
+        pub(super) fn term_pull(
+            watched: &Watched,
+            terminals: &TerminalRegistry,
+            label: &str,
+            resync: Option<bool>,
+        ) -> Vec<u8> {
+            let resync = resync.unwrap_or(false);
+            let mut terms: Vec<TermId> = watched
+                .lock()
+                .expect("the declaration")
+                .get(label)
+                .map(|terms| terms.iter().copied().collect())
+                .unwrap_or_default();
+            terms.sort_unstable();
+            let now = std::time::Instant::now();
+            let mut answer = PulledScreens::default();
+            for term in terms {
+                let Some(held) = terminals.handle(term) else {
+                    answer.missing.push(term);
+                    continue;
+                };
+                let frames = {
+                    let mut pty = lock_pty(&held);
+                    let (readers, grid) = pty.terminal_mut().readers_mut();
+                    if resync {
+                        readers.declare(label);
+                    }
+                    readers.pull(label, grid, now)
+                };
+                if !frames.is_empty() {
+                    answer.screens.push(PulledScreen { term, frames });
+                }
+            }
+            serde_json::to_vec(&answer).unwrap_or_default()
+        }
+
+        /// `forget_watched_when_closed`'s line for the watch.
+        pub(super) fn forget(watched: &Watched, label: &str) {
+            watched.lock().expect("the declaration").remove(label);
+        }
+
+        pub(super) fn readers_by_term(
+            windows: &HashMap<String, HashSet<TermId>>,
+        ) -> HashMap<TermId, Vec<String>> {
+            let mut readers: HashMap<TermId, Vec<String>> = HashMap::new();
+            for (label, terms) in windows {
+                for term in terms {
+                    readers.entry(*term).or_default().push(label.clone());
+                }
+            }
+            for labels in readers.values_mut() {
+                labels.sort();
+            }
+            readers
+        }
+
+        /// The end of a pump round: one notice a window.
+        pub(super) fn told(told: Vec<Arc<str>>) -> Vec<String> {
+            let mut told = told;
+            told.sort_unstable();
+            told.dedup();
+            told.iter().map(ToString::to_string).collect()
+        }
+    }
+
+    /// A shell with no process behind it: the parsed terminal, as the pool
+    /// holds one.
+    struct Parsed(Terminal);
+
+    impl PtyTransport for Parsed {
+        fn pump(&mut self) -> Pumped {
+            Pumped {
+                bytes: 0,
+                ended: false,
+                answered: false,
+                unanswered_since: None,
+            }
+        }
+
+        fn terminal(&self) -> &Terminal {
+            &self.0
+        }
+
+        fn terminal_mut(&mut self) -> &mut Terminal {
+            &mut self.0
+        }
+
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn resize(&mut self, rows: u16, cols: u16) -> Result<(), PtyTransportError> {
+            self.0
+                .grid_mut()
+                .resize(usize::from(rows), usize::from(cols));
+            Ok(())
+        }
+
+        fn try_wait(&mut self) -> Result<Option<u32>, PtyTransportError> {
+            Ok(None)
+        }
+
+        fn kill(&mut self) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+    }
+
+    const ROWS: usize = 50;
+    const COLS: usize = 170;
+
+    const RESYNC_RESIZE: &[u8] = include_bytes!("../../tests/fixtures/phase0/resync-resize.ansi");
+    /// What the recorder wrote down for `resync-resize`: one frame a line,
+    /// the `serde_json` of each `GridDelta` its pulls answered.
+    const RESYNC_RESIZE_FRAMES: &str =
+        include_str!("../../tests/fixtures/phase0/resync-resize.deltas.jsonl");
+    const CASES: [(&str, &[u8]); 5] = [
+        ("resync-resize", RESYNC_RESIZE),
+        (
+            "hangul",
+            include_bytes!("../../tests/fixtures/phase0/hangul.ansi"),
+        ),
+        (
+            "emoji",
+            include_bytes!("../../tests/fixtures/phase0/emoji.ansi"),
+        ),
+        (
+            "cursor",
+            include_bytes!("../../tests/fixtures/phase0/cursor.ansi"),
+        ),
+        (
+            "wrap",
+            include_bytes!("../../tests/fixtures/phase0/wrap.ansi"),
+        ),
+    ];
+
+    const MAIN: &str = "main";
+    const POPOUT: &str = "board-popout";
+
+    fn open(terminals: &TerminalRegistry, term: u32) {
+        terminals.insert(term, PtyHandle::new(Parsed(Terminal::new(ROWS, COLS))));
+    }
+
+    fn feed(terminals: &TerminalRegistry, term: u32, bytes: &[u8]) {
+        if let Some(held) = terminals.handle(term) {
+            lock_pty(&held).terminal_mut().feed(bytes);
+        }
+    }
+
+    fn resize(terminals: &TerminalRegistry, term: u32, rows: u16, cols: u16) {
+        if let Some(held) = terminals.handle(term) {
+            lock_pty(&held)
+                .resize(rows, cols)
+                .expect("a parsed shell resizes");
+        }
+    }
+
+    /// One pump round's look on one pool: the window pump's own two lines for
+    /// every shell, on the clock it is given.
+    fn look(
+        terminals: &TerminalRegistry,
+        readers: &HashMap<u32, Vec<String>>,
+        at: Instant,
+    ) -> Vec<Arc<str>> {
+        let mut told = Vec::new();
+        let mut terms = terminals.terms();
+        terms.sort_unstable();
+        for term in terms {
+            let Some(held) = terminals.handle(term) else {
+                continue;
+            };
+            let mut pty = lock_pty(&held);
+            let labels = readers.get(&term).map(Vec::as_slice).unwrap_or_default();
+            let (frame_readers, grid) = pty.terminal_mut().readers_mut();
+            frame_readers.reconcile(labels);
+            frame_readers.look(grid, at, Look::Beat, &mut told);
+        }
+        told
+    }
+
+    /// What the engine's channel heard.
+    #[derive(Default)]
+    struct Heard(Mutex<Vec<String>>);
+
+    impl zerocode_pty::DirtyNotices for Heard {
+        fn dirty(&self, label: &str) {
+            self.0.lock().expect("the notices").push(label.to_string());
+        }
+    }
+
+    /// Pieces of uneven size, cut anywhere a pty read could cut — except
+    /// inside a synchronized frame (`CSI ?2026h` … `l`): the grid gives an
+    /// unclosed one up on a wall clock, and a byte comparison must not hang on
+    /// how fast the machine is.
+    fn pieces(bytes: &[u8], salt: usize) -> Vec<&[u8]> {
+        const OPEN: &[u8] = b"\x1b[?2026h";
+        const CLOSE: &[u8] = b"\x1b[?2026l";
+        let opened_at = |end: usize| -> Option<usize> {
+            let head = &bytes[..end];
+            let open = head.windows(OPEN.len()).rposition(|at| at == OPEN)?;
+            let closed = head
+                .windows(CLOSE.len())
+                .rposition(|at| at == CLOSE)
+                .is_some_and(|close| close > open);
+            (!closed).then_some(open)
+        };
+        let mut out = Vec::new();
+        let mut at = 0;
+        let mut size = salt % 97 + 1;
+        while at < bytes.len() {
+            let mut end = (at + size).min(bytes.len());
+            if let Some(open) = opened_at(end) {
+                end = bytes[open..]
+                    .windows(CLOSE.len())
+                    .position(|at| at == CLOSE)
+                    .map_or(bytes.len(), |close| open + close + CLOSE.len());
+            }
+            out.push(&bytes[at..end]);
+            at = end;
+            size = size * 13 % 701 + 1;
+        }
+        out
+    }
+
+    /// What one comparison saw, so it cannot pass on a schedule that never
+    /// reached the cases it is about.
+    #[derive(Default, Debug)]
+    struct Seen {
+        answers: usize,
+        empty: usize,
+        missing: usize,
+        whole_after_the_first: usize,
+        scrolled: usize,
+        linked: usize,
+        several_shells: usize,
+        notices: usize,
+    }
+
+    impl Seen {
+        fn note(&mut self, round: usize, answer: &[u8]) {
+            let wire: serde_json::Value =
+                serde_json::from_slice(answer).expect("an answer is JSON");
+            let screens = wire["screens"].as_array().expect("screens");
+            self.answers += 1;
+            self.empty += usize::from(screens.is_empty());
+            self.missing += usize::from(!wire["missing"].as_array().expect("missing").is_empty());
+            self.several_shells += usize::from(screens.len() > 1);
+            let terms: Vec<u64> = screens
+                .iter()
+                .map(|screen| screen["term"].as_u64().expect("a term"))
+                .collect();
+            assert!(
+                terms.windows(2).all(|pair| pair[0] < pair[1]),
+                "round {round}: the shells are not in order: {terms:?}"
+            );
+            for frame in screens
+                .iter()
+                .flat_map(|screen| screen["frames"].as_array().expect("frames").iter())
+            {
+                self.whole_after_the_first +=
+                    usize::from(round > 0 && frame["full"].as_bool() == Some(true));
+                self.scrolled += usize::from(frame["scrolled_lines"].as_u64() > Some(0));
+                self.linked += usize::from(frame.get("links").is_some());
+            }
+        }
+    }
+
+    /// Feed the same pieces to two pools, run one window schedule on both —
+    /// two windows, shells opened and closed, sets changed, a window closed
+    /// and back, pulls lost and resynced, a resize, the alternate screen —
+    /// and hold every answer and every round's notices side by side.
+    fn compare(cases: &[(&str, &[u8])]) -> Seen {
+        // The cases' shells, numbered out of order on purpose; 9 is declared
+        // and never opened, 14 is opened, closed, and opened again.
+        let numbers: Vec<u32> = [3, 7, 12, 5, 20, 31, 33, 35]
+            .into_iter()
+            .take(cases.len())
+            .collect();
+        let fed: Vec<(u32, Vec<&[u8]>)> = numbers
+            .iter()
+            .zip(cases)
+            .enumerate()
+            .map(|(salt, (term, (_, bytes)))| (*term, pieces(bytes, salt * 31 + 5)))
+            .collect();
+        let old_terminals = TerminalRegistry::default();
+        let new_terminals = TerminalRegistry::default();
+        for term in numbers.iter().copied().chain([14]) {
+            open(&old_terminals, term);
+            open(&new_terminals, term);
+        }
+        // Main reads the first, second and fourth case, the shell that is
+        // never opened and the one that is; the pop-out the third, first and
+        // fifth; any case past the fifth is main's too.
+        let n = |at: usize| numbers[at];
+        let more = &numbers[numbers.len().min(5)..];
+        let main_first: Vec<u32> = [n(1), n(0), 9, n(3), 14]
+            .iter()
+            .chain(more)
+            .copied()
+            .collect();
+        let main_narrowed: Vec<u32> = [n(0), n(2), 9].iter().chain(more).copied().collect();
+        let main_widened: Vec<u32> = [n(1), n(0), 9, n(3), n(4), 14]
+            .iter()
+            .chain(more)
+            .copied()
+            .collect();
+        let popout_first = [n(2), n(0), n(4)];
+        let popout_back = [n(4), n(2), n(0)];
+        let old_watched = before::Watched::default();
+        let new_watched = zerocode_pty::WatchedTerms::default();
+        let declare = |label: &str, terms: &[u32]| {
+            before::set_watched_terms(&old_watched, &old_terminals, label, terms.to_vec());
+            new_watched.declare(&new_terminals, label, terms.iter().copied());
+        };
+        // The looks run on one frozen instant: no reader is ever silent long
+        // enough on it to be told again, so the renotify clock decides
+        // nothing here and both pools live the same history at any load.
+        let frozen = Instant::now();
+        let heard = Heard::default();
+        let mut seen = Seen::default();
+        let rounds = fed
+            .iter()
+            .map(|(_, pieces)| pieces.len())
+            .max()
+            .unwrap_or(0)
+            + 8;
+        let mut popout_open = true;
+        for round in 0..rounds {
+            for (term, pieces) in &fed {
+                if let Some(piece) = pieces.get(round) {
+                    feed(&old_terminals, *term, piece);
+                    feed(&new_terminals, *term, piece);
+                }
+            }
+            match round {
+                0 => {
+                    declare(MAIN, &main_first);
+                    declare(POPOUT, &popout_first);
+                }
+                15 => {
+                    resize(&old_terminals, n(0), 40, 150);
+                    resize(&new_terminals, n(0), 40, 150);
+                }
+                20 => declare(MAIN, &main_narrowed),
+                28 => {
+                    feed(&old_terminals, n(3), b"\x1b[?1049h\x1b[2Jalternate\r\n");
+                    feed(&new_terminals, n(3), b"\x1b[?1049h\x1b[2Jalternate\r\n");
+                }
+                30 => {
+                    before::forget(&old_watched, POPOUT);
+                    new_watched.remove(POPOUT);
+                    popout_open = false;
+                }
+                33 => {
+                    old_terminals.remove(&14);
+                    new_terminals.remove(&14);
+                }
+                38 => {
+                    declare(POPOUT, &popout_back);
+                    popout_open = true;
+                }
+                41 => {
+                    feed(&old_terminals, n(3), b"\x1b[?1049l");
+                    feed(&new_terminals, n(3), b"\x1b[?1049l");
+                }
+                45 => declare(MAIN, &main_widened),
+                50 => {
+                    resize(&old_terminals, n(0), 50, 170);
+                    resize(&new_terminals, n(0), 50, 170);
+                }
+                60 => {
+                    open(&old_terminals, 14);
+                    open(&new_terminals, 14);
+                    feed(&old_terminals, 14, b"opened again\r\n");
+                    feed(&new_terminals, 14, b"opened again\r\n");
+                }
+                _ => {}
+            }
+
+            let old_readers =
+                before::readers_by_term(&old_watched.lock().expect("the declaration"));
+            let new_readers = new_watched.readers_by_term();
+            assert_eq!(
+                old_readers, new_readers,
+                "round {round}: the pump reads another set of readers"
+            );
+            let told = before::told(look(&old_terminals, &old_readers, frozen));
+            zerocode_pty::tell_dirty(look(&new_terminals, &new_readers, frozen), &heard);
+            let heard_now = std::mem::take(&mut *heard.0.lock().expect("the notices"));
+            assert_eq!(told, heard_now, "round {round}: the notices went elsewhere");
+            seen.notices += told.len();
+
+            let mut pulls = vec![(MAIN, (round % 17 == 16 || round == 11).then_some(true))];
+            if popout_open && round.is_multiple_of(3) {
+                pulls.push((POPOUT, Some(round == 26)));
+            }
+            for (label, resync) in pulls {
+                let was = before::term_pull(&old_watched, &old_terminals, label, resync);
+                let is = pulled_bytes(&new_watched, &new_terminals, label, resync);
+                assert!(
+                    was == is,
+                    "round {round}: {label}'s pull answered other bytes\n before: {}\n after:  {}",
+                    String::from_utf8_lossy(&was),
+                    String::from_utf8_lossy(&is),
+                );
+                seen.note(round, &is);
+            }
+        }
+        seen
+    }
+
+    /// The bytes are the bytes: every pull of a two-window schedule over the
+    /// carried recordings answers what the commands at `0a2a4eb65` answered,
+    /// and every round tells the windows they told.
+    #[test]
+    fn a_pull_answers_the_bytes_it_answered_before_the_engine() {
+        let seen = compare(&CASES);
+        assert!(
+            seen.answers > 100
+                && seen.empty > 0
+                && seen.missing > 0
+                && seen.whole_after_the_first > 0
+                && seen.scrolled > 0
+                && seen.linked > 0
+                && seen.several_shells > 0
+                && seen.notices > 0,
+            "the schedule did not reach every case it is about: {seen:?}"
+        );
+    }
+
+    /// The answer's outer letters, spelled out once: the order of the shells,
+    /// the declared shell that is not there, a quiet pull.
+    #[test]
+    fn a_pull_spells_its_answer_as_the_window_reads_it() {
+        let terminals = TerminalRegistry::default();
+        for term in [3, 5] {
+            open(&terminals, term);
+        }
+        feed(&terminals, 3, b"three");
+        feed(&terminals, 5, b"five");
+        let watched = zerocode_pty::WatchedTerms::default();
+        watched.declare(&terminals, MAIN, [5, 9, 3]);
+        let first = String::from_utf8(pulled_bytes(&watched, &terminals, MAIN, None))
+            .expect("an answer is text");
+        let at = |term: u32| {
+            first
+                .find(&format!(r#"{{"term":{term},"frames":[{{"rows":["#))
+                .unwrap_or_else(|| panic!("shell {term} is not in the answer: {first}"))
+        };
+        assert!(
+            first.starts_with(r#"{"screens":[{"term":3,"frames":[{"rows":["#)
+                && at(3) < at(5)
+                && first.ends_with(r#"}]}],"missing":[9]}"#),
+            "the first pull is not spelled as the window reads it: {first}"
+        );
+        assert_eq!(
+            pulled_bytes(&watched, &terminals, MAIN, Some(false)),
+            br#"{"screens":[],"missing":[9]}"#,
+            "a quiet pull is not spelled as the window reads it"
+        );
+    }
+
+    /// The pull answers, frame for frame, what the phase-0 recorder wrote
+    /// down at this branch's base for `resync-resize` — its steps rebuilt
+    /// from the recorder's own case (`resync_resize` in
+    /// `tools/native-terminal-probe/recorder/src/main.rs` on
+    /// `wt/t-115196/gpui-terminal-phase-zero-replay`): clear the screen,
+    /// twenty lines, a resync, ten lines, a shrink to 40×150, ten lines, a
+    /// grow back, ten lines — one pull after each.
+    #[test]
+    fn a_pull_answers_the_frames_the_phase0_recorder_wrote_down() {
+        enum Step<'a> {
+            Feed(&'a [u8]),
+            Resync,
+            Resize(u16, u16),
+        }
+        let (clear, lines) = RESYNC_RESIZE.split_at(b"\x1b[H\x1b[2J".len());
+        let lines: Vec<&[u8]> = lines.split_inclusive(|byte| *byte == b'\n').collect();
+        assert_eq!((clear, lines.len()), (&b"\x1b[H\x1b[2J"[..], 50));
+        let mut steps = vec![Step::Feed(clear)];
+        steps.extend(lines[..20].iter().copied().map(Step::Feed));
+        steps.push(Step::Resync);
+        steps.extend(lines[20..30].iter().copied().map(Step::Feed));
+        steps.push(Step::Resize(40, 150));
+        steps.extend(lines[30..40].iter().copied().map(Step::Feed));
+        steps.push(Step::Resize(50, 170));
+        steps.extend(lines[40..].iter().copied().map(Step::Feed));
+        let recorded: Vec<&str> = RESYNC_RESIZE_FRAMES.lines().collect();
+        assert_eq!(recorded.len(), steps.len(), "one frame a step");
+
+        let terminals = TerminalRegistry::default();
+        open(&terminals, 1);
+        let watched = zerocode_pty::WatchedTerms::default();
+        watched.declare(&terminals, "phase0", [1]);
+        for (step, (what, frame)) in steps.iter().zip(recorded).enumerate() {
+            let resync = match what {
+                Step::Feed(bytes) => {
+                    feed(&terminals, 1, bytes);
+                    None
+                }
+                Step::Resync => Some(true),
+                Step::Resize(rows, cols) => {
+                    resize(&terminals, 1, *rows, *cols);
+                    None
+                }
+            };
+            let answer = pulled_bytes(&watched, &terminals, "phase0", resync);
+            let recorded =
+                format!(r#"{{"screens":[{{"term":1,"frames":[{frame}]}}],"missing":[]}}"#);
+            assert!(
+                answer == recorded.as_bytes(),
+                "step {step} answered other bytes than the recorder wrote down\n recorded: {recorded}\n answered: {}",
+                String::from_utf8_lossy(&answer)
+            );
+        }
+    }
+
+    /// Every case in a recordings folder through the same comparison — the
+    /// three too large to carry among them — when `ZC_PHASE0_RECORDINGS`
+    /// names one (`…/phase0/recordings-20261119-093328-a`).
+    #[test]
+    fn a_pull_answers_the_bytes_it_answered_over_every_public_recording() {
+        let Some(folder) = std::env::var_os("ZC_PHASE0_RECORDINGS") else {
+            println!("ZC_PHASE0_RECORDINGS is not set: the carried cases ran above");
+            return;
+        };
+        let mut found: Vec<(String, Vec<u8>)> = std::fs::read_dir(folder)
+            .expect("a recordings folder")
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                if path.extension()? != "ansi" {
+                    return None;
+                }
+                let name = path.file_stem()?.to_string_lossy().into_owned();
+                Some((name, std::fs::read(&path).ok()?))
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found.len(),
+            8,
+            "the folder does not hold the eight phase-0 cases"
+        );
+        let cases: Vec<(&str, &[u8])> = found
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+            .collect();
+        let seen = compare(&cases);
+        println!("every public recording: {seen:?}");
+    }
+}

@@ -1,0 +1,3 @@
+# The public phase-0 recordings, byte for byte: a program's own CR/LF and
+# escapes are the input, and the recorder's frames are pinned against them.
+* binary
