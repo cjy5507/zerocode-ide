@@ -215,10 +215,7 @@ fn a_job_the_line_ends_tells_its_address_too() {
     let Some(fixture) = Fixture::new() else { return };
     let running = fixture.add("worker:w-7", HOLD, "running", false);
     fixture.until(&running, JobState::Running, "its turn came");
-    let paused = fixture.zo(PANE, "pause").args(["line", "pause"]).output().expect("zo line pause");
-    assert!(paused.status.success(), "zo line pause: {}", String::from_utf8_lossy(&paused.stderr));
-    let waiting = fixture.add("worker:w-7", "exit 0", "waiting", false);
-
+    // The only job on the line: once its runner is gone, this wait's look is the one that ends it.
     fixture.kill_named(&running);
     let mut looks = fixture.watch(&running, "lost-running");
     let words = fixture.told(&running, "lost-running");
@@ -228,6 +225,11 @@ fn a_job_the_line_ends_tells_its_address_too() {
     assert!(words.contains(&format!("pane={LOOKER}")), "told from the pane that looked: {words:?}");
     let _ = looks.wait();
 
+    // Put in only now, on a paused line: before, its waiter's own looks could end the running job first
+    // and tell it in its stead (t-119176).
+    let paused = fixture.zo(PANE, "pause").args(["line", "pause"]).output().expect("zo line pause");
+    assert!(paused.status.success(), "zo line pause: {}", String::from_utf8_lossy(&paused.stderr));
+    let waiting = fixture.add("worker:w-7", "exit 0", "waiting", false);
     fixture.kill_named(&waiting);
     let mut looks = fixture.watch(&waiting, "lost-waiting");
     fixture.until(&waiting, JobState::Lost, "its waiter was gone before its turn");
