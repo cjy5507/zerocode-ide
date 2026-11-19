@@ -108,16 +108,8 @@ impl Fixture {
         self.line.job(id).expect("the job's record")
     }
 
-    fn until(&self, what: &str, mut done: impl FnMut() -> bool) {
-        let until = Instant::now() + PATIENCE;
-        while !done() {
-            assert!(Instant::now() < until, "{what}: not in {} s", PATIENCE.as_secs());
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
     fn runs(&self, id: &str) {
-        self.until(&format!("{id} runs"), || self.job(id).state == JobState::Running);
+        until(&format!("{id} runs"), || self.job(id).state == JobState::Running);
     }
 
     /// A file that ends a `HOLD` job, made when the test ends at the latest.
@@ -139,25 +131,6 @@ impl Fixture {
                 words.try_into().unwrap_or_else(|words| panic!("three numbers, not {words:?} in {text:?}"))
             })
             .collect()
-    }
-
-    /// The process `zo line add` started for job `id`: the one `zo line wait <id>`
-    /// of this binary standing before a test starts its own.
-    fn waiter_of(&self, id: &str) -> u32 {
-        let mut found = Vec::new();
-        self.until(&format!("the waiter of {id} stands"), || {
-            found = waits_on(id);
-            !found.is_empty()
-        });
-        assert_eq!(found.len(), 1, "one waiter for {id}: {found:?}");
-        found[0]
-    }
-
-    /// Kills a waiter of this line: only a `zo line wait <id>` of this binary.
-    fn kill_waiter(&self, pid: u32, id: &str) {
-        assert!(waits_on(id).contains(&pid), "{pid} is no waiter of {id}");
-        kill(Pid::from_raw(i32::try_from(pid).expect("a pid")), Signal::SIGKILL).expect("killed");
-        self.until(&format!("waiter {pid} is gone"), || !alive(pid));
     }
 }
 
@@ -181,6 +154,34 @@ impl Drop for Fixture {
         }
         // A waiter looks every 500 ms: one more look sees its job ended.
         std::thread::sleep(Duration::from_millis(700));
+    }
+}
+
+/// The process `zo line add` started for job `id`: the one `zo line wait <id>`
+/// of this binary standing before a test starts its own.
+fn waiter_of(id: &str) -> u32 {
+    let mut found = Vec::new();
+    until(&format!("the waiter of {id} stands"), || {
+        found = waits_on(id);
+        !found.is_empty()
+    });
+    assert_eq!(found.len(), 1, "one waiter for {id}: {found:?}");
+    found[0]
+}
+
+/// Kills a waiter of this line: only a `zo line wait <id>` of this binary.
+fn kill_waiter(pid: u32, id: &str) {
+    assert!(waits_on(id).contains(&pid), "{pid} is no waiter of {id}");
+    kill(Pid::from_raw(i32::try_from(pid).expect("a pid")), Signal::SIGKILL).expect("killed");
+    until(&format!("waiter {pid} is gone"), || !alive(pid));
+}
+
+/// Waits until `done`, at most `PATIENCE`, and says `what` did not happen when it does not.
+fn until(what: &str, mut done: impl FnMut() -> bool) {
+    let until = Instant::now() + PATIENCE;
+    while !done() {
+        assert!(Instant::now() < until, "{what}: not in {} s", PATIENCE.as_secs());
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -232,7 +233,7 @@ fn a_wait_beside_the_waiter_add_started_never_runs_the_job() {
         fixture.act(&["pause"]);
         let ran = format!("ran-{round}");
         let job = fixture.add(&format!("o-{round}"), WHO_RAN, &ran);
-        let waiter = fixture.waiter_of(&job);
+        let waiter = waiter_of(&job);
         std::thread::sleep(LOOK * round / ROUNDS);
         let mut observer = fixture.wait(&job);
         std::thread::sleep(SETTLE);
@@ -258,8 +259,8 @@ fn a_wait_on_a_job_whose_waiter_is_gone_starts_a_new_one_and_only_watches() {
     let first = fixture.add("p", HOLD, &gate);
     fixture.runs(&first);
     let job = fixture.add("p", WHO_RAN, "ran");
-    let waiter = fixture.waiter_of(&job);
-    fixture.kill_waiter(waiter, &job);
+    let waiter = waiter_of(&job);
+    kill_waiter(waiter, &job);
     let mut observer = fixture.wait(&job);
     let group = ps(std::process::id(), "pgid").expect("this test's group");
     std::thread::sleep(SETTLE);
@@ -289,11 +290,11 @@ fn a_waiting_job_whose_waiter_is_gone_does_not_hold_the_line() {
     let first = fixture.add("q", HOLD, &gate);
     fixture.runs(&first);
     let orphan = fixture.add("q", r#"echo orphan >> "$0""#, "ran");
-    fixture.kill_waiter(fixture.waiter_of(&orphan), &orphan);
+    kill_waiter(waiter_of(&orphan), &orphan);
     fixture.open(&gate);
-    fixture.until("the first job ends", || fixture.job(&first).state.ended());
+    until("the first job ends", || fixture.job(&first).state.ended());
     let behind = fixture.add("q", r#"echo behind >> "$0""#, "ran");
-    fixture.until(&format!("{orphan} has no waiter and stays waiting; {behind} behind it never starts"), || {
+    until(&format!("{orphan} has no waiter and stays waiting; {behind} behind it never starts"), || {
         fixture.job(&behind).state.ended()
     });
     let ran = fs::read_to_string(fixture.cwd().join("ran")).expect("what ran");
@@ -318,7 +319,7 @@ fn a_wait_exits_with_the_jobs_code_however_the_job_ended() {
     let mut watched = vec![("stopped", stopped.clone(), 1, fixture.wait(&stopped)), ("lost", lost.clone(), 1, fixture.wait(&lost))];
     std::thread::sleep(SETTLE);
     fixture.act(&["stop", &stopped]);
-    fixture.kill_waiter(runner, &lost);
+    kill_waiter(runner, &lost);
     // Three that wait behind their owner's first job: two their command ends, one taken out before it ran.
     let gate = fixture.gate("go");
     let first = fixture.add("c", HOLD, &gate);
@@ -350,7 +351,7 @@ fn a_wait_exits_with_the_jobs_code_however_the_job_ended() {
 #[test]
 fn zo_line_run_still_runs_its_job_in_its_own_terminal() {
     let Some(fixture) = Fixture::new() else { return };
-    let mut alone = fixture
+    let alone = fixture
         .zo(&["line", "run", "--owner", "g", "--cap", CAP, "--", "sh", "-c", "echo out; exit 4"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
