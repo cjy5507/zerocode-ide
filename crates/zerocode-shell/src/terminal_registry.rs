@@ -210,6 +210,21 @@ impl TerminalRegistry {
     }
 }
 
+/// The pool as the terminal read path asks it (`zerocode_pty::screens`): the
+/// map lock for the `Arc` clone and nothing else, then the work under the
+/// shell's own lock — the two tiers above, unchanged.
+impl zerocode_pty::TerminalPool for TerminalRegistry {
+    fn with_terminal<R>(
+        &self,
+        term: TermId,
+        work: impl FnOnce(&mut zerocode_pty::Terminal) -> R,
+    ) -> Option<R> {
+        let held = self.handle(term)?;
+        let mut pty = lock_pty(&held);
+        Some(work(pty.terminal_mut()))
+    }
+}
+
 /// The colours the renderer last said it paints terminals with, and the one
 /// door that dresses shells with them (t-73869, t-74931).
 ///

@@ -787,8 +787,8 @@ impl Cadence {
 
 /// A shell this window hosts. Not a [`LaneId`]: a lane is an agent session the
 /// daemon owns, and these are plain terminals that live and die with the
-/// window.
-type TermId = u32;
+/// window. The number the terminal read path speaks (`zerocode_pty::screens`).
+type TermId = zerocode_pty::TermId;
 
 /// The floating panel's shell, which existed before terminals could be tabs
 /// and keeps its id so nothing about it had to change.
@@ -999,15 +999,12 @@ struct ShellRuntime {
     /// background shell's scrollback has to be right the moment somebody looks
     /// at it.
     ///
-    /// **Declarative, per window**: a window sends its CURRENT whole set on
-    /// every visibility change, so the entry is replaced rather than adjusted.
-    /// A count that goes up and down would drift the first time a window
-    /// missed a decrement — and the symptom of that drift is a terminal that
-    /// silently stops painting, which is the worst bug this door can have.
-    /// Keyed by label because there are two windows (the main one and the
-    /// board pop-out, which borrows a live screen into its preview) and either
-    /// may read a shell; a window's entry goes when its window does.
-    watched_terms: Mutex<HashMap<String, HashSet<TermId>>>,
+    /// Declared whole by each window, never counted
+    /// ([`zerocode_pty::WatchedTerms`]). Keyed by label because there are two
+    /// windows (the main one and the board pop-out, which borrows a live
+    /// screen into its preview) and either may read a shell; a window's entry
+    /// goes when its window does.
+    watched_terms: zerocode_pty::WatchedTerms,
     /// Which repository owns each checkout the last `project_catalog` listed,
     /// by the path the sidebar row carries. A workspace click resolves its
     /// path here first and asks git only for a path this answer does not name.
@@ -1027,7 +1024,7 @@ struct ShellRuntime {
     /// doing", and it could not be built out of a set that never holds more
     /// than one.
     ///
-    /// Same shape and same contract as [`AppState::watched_terms`]: declared
+    /// The same contract as [`AppState::watched_terms`]: declared
     /// whole, keyed by the window's own label, gone when that window is. A
     /// term in BOTH is watched — the full tier wins, or one screen would take
     /// a delta and a snapshot by turns and tear between them.
@@ -1506,10 +1503,8 @@ impl ShellRuntime {
         &self.remote_servers
     }
 
-    fn watched_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>> {
-        self.watched_terms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn watched_terms(&self) -> &zerocode_pty::WatchedTerms {
+        &self.watched_terms
     }
 
     fn catalog_owners(&self) -> MutexGuard<'_, HashMap<String, (Orchestrator, Worktree)>> {
@@ -1938,7 +1933,7 @@ trait ShellStateExt {
     fn float_seat(&self) -> MutexGuard<'_, Option<String>>;
     fn ssh_hosts(&self) -> &ssh_hosts::SshHostService;
     fn remote_servers(&self) -> &remote_servers::RemoteServerService;
-    fn watched_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
+    fn watched_terms(&self) -> &zerocode_pty::WatchedTerms;
     fn catalog_owners(&self) -> MutexGuard<'_, HashMap<String, (Orchestrator, Worktree)>>;
     fn previewed_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
     fn terminal_palette(&self) -> &TerminalPalette;
@@ -2065,7 +2060,7 @@ impl ShellStateExt for AppState {
         self.shell_runtime().remote_servers()
     }
 
-    fn watched_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>> {
+    fn watched_terms(&self) -> &zerocode_pty::WatchedTerms {
         self.shell_runtime().watched_terms()
     }
 
@@ -2559,7 +2554,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         inference_sends: Mutex::new(HashMap::new()),
         float_seat: Mutex::new(None),
         next_term: Mutex::new(FLOAT_TERM + 1),
-        watched_terms: Mutex::new(HashMap::new()),
+        watched_terms: zerocode_pty::WatchedTerms::default(),
         catalog_owners: Mutex::new(HashMap::new()),
         terminal_palette: TerminalPalette::default(),
         previewed_terms: Mutex::new(HashMap::new()),

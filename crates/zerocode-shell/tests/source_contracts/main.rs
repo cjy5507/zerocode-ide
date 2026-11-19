@@ -4456,8 +4456,8 @@ mod tests {
         // person — and a tier reachable only through a shell that has frames
         // would leave exactly those cards blank, which is the complaint itself.
         let notices_at = looping
-            .find("for label in told {")
-            .expect("the notice loop is gone");
+            .find("zerocode_pty::tell_dirty(told, &WebviewNotices(app));")
+            .expect("the notices are gone");
         let preview_at = looping
             .find("let previewing = previewed_anywhere(")
             .expect("the preview tier lost its declaration");
@@ -4613,6 +4613,10 @@ mod tests {
     #[test]
     fn the_screen_pulls_its_frames_and_the_pump_only_looks() {
         let backend = shipped_backend();
+        // The read path itself — declaring, pulling, telling — is the
+        // engine's (`zerocode_pty::screens`, no window toolkit in it); the
+        // shell's commands and its pump are the adapter around it.
+        let engine = include_str!("../../../zerocode-pty/src/screens.rs");
         let looping = block_after(backend, "fn pump_loop(app: &AppHandle) {");
 
         // Rule 1: the pump never takes a delta on its own clock. It brings each
@@ -4629,10 +4633,15 @@ mod tests {
             .find("frame_readers.look(grid, looked_at, look, &mut told);")
             .expect("the pump no longer looks at a shell's readers");
         assert!(
-            looping.contains("let readers = readers_by_term(&state.watched_terms());")
+            looping.contains("let readers = state.watched_terms().readers_by_term();")
                 && reconcile_at < look_at,
             "the readers a shell is looked at for are not the ones its \
              declaration names:\n{looping}"
+        );
+        let inverting = block_after(engine, "pub fn readers_by_term(&self)");
+        assert!(
+            inverting.contains("readers_by_term(&self.declared())"),
+            "the pump's readers are not the declaration's:\n{inverting}"
         );
         // Rule 8: the bell and the title are announced off EVERY shell, on the
         // round they happened, never in a branch a read shell skips — a hidden
@@ -4666,12 +4675,24 @@ mod tests {
             "the news lost its own payloads, so it is riding somebody else's"
         );
         // Rule 4: one notice a window, carrying nothing, under a name the
-        // window's label is part of.
-        let telling = &looping[looping
-            .find("told.dedup();")
-            .expect("the notices are not folded to one a window")..];
+        // window's label is part of. The engine folds the round's notices to
+        // one a window and hands each to the channel; the channel's Tauri
+        // side is the only place a webview is told, by that name.
         assert!(
-            telling.contains("let _ = app.emit(&dirty_event_for(&label), ());"),
+            looping.contains("zerocode_pty::tell_dirty(told, &WebviewNotices(app));"),
+            "the round's notices do not go out through the read path's channel:\n{looping}"
+        );
+        let folding = block_after(engine, "pub fn tell_dirty(");
+        assert!(
+            folding.contains("told.dedup();") && folding.contains("notices.dirty(&label);"),
+            "the notices are not folded to one a window:\n{folding}"
+        );
+        let telling = block_after(
+            backend,
+            "impl zerocode_pty::DirtyNotices for WebviewNotices<'_> {",
+        );
+        assert!(
+            telling.contains("let _ = app.emit(&dirty_event_for(label), ());"),
             "a reader owed frames is never told to come:\n{telling}"
         );
         let stem = block_after(backend, "fn dirty_event_for(label: &str) -> String {");
@@ -4698,16 +4719,22 @@ mod tests {
         // Rule 5: the pull. Bytes, the whole of what this window is owed, and a
         // name for a declared shell that is not there.
         let pulling = block_after(backend, "fn term_pull(");
+        let answering = block_after(backend, "fn pulled_bytes(");
         assert!(
             pulling.contains("webview.label()")
-                && pulling.contains("readers.pull(label, grid, now)")
-                && pulling.contains("answer.missing.push(term);")
-                && pulling.contains("tauri::ipc::Response::new(serde_json::to_vec(&answer)"),
-            "the pull does not answer this window's own share as bytes:\n{pulling}"
+                && pulling.contains("tauri::ipc::Response::new(pulled_bytes(")
+                && answering.contains("serde_json::to_vec(&answer)"),
+            "the pull does not answer this window's own share as bytes:\n{pulling}\n{answering}"
+        );
+        let paying = block_after(engine, "pub fn pull(");
+        assert!(
+            paying.contains("readers.pull(label, grid, now)")
+                && paying.contains("answer.missing.push(term);"),
+            "the pull does not answer this window's own share:\n{paying}"
         );
         assert!(
-            pulling.contains("if resync {") && pulling.contains("readers.declare(label);"),
-            "a window whose pull failed cannot ask for its screens whole:\n{pulling}"
+            paying.contains("if resync {") && paying.contains("readers.declare(label);"),
+            "a window whose pull failed cannot ask for its screens whole:\n{paying}"
         );
 
         // The declaration is the subscription: one window, its whole current
@@ -4717,13 +4744,18 @@ mod tests {
         let declaring = block_after(backend, "fn set_watched_terms(");
         assert!(
             declaring.contains("webview: tauri::Webview")
-                && declaring.contains("webview.label().to_string()")
-                && declaring.contains(".insert(")
-                && declaring.contains("readers_mut().0.declare(&label)")
-                && declaring.contains("readers_mut().0.leave(&label)")
-                && !declaring.contains("+= 1"),
+                && declaring.contains(".declare(state.terminals(), webview.label(), terms)"),
+            "the declaration is not this window's own, by the label Tauri \
+             knows:\n{declaring}"
+        );
+        let replacing = block_after(engine, "pub fn declare(");
+        assert!(
+            replacing.contains(".insert(")
+                && replacing.contains("readers_mut().0.declare(label)")
+                && replacing.contains("readers_mut().0.leave(label)")
+                && !replacing.contains("+= 1"),
             "the declaration no longer replaces one set and the readers it \
-             implies:\n{declaring}"
+             implies:\n{replacing}"
         );
         assert!(
             !declaring.contains("JavaScriptChannelId") && !declaring.contains("channel_on"),
@@ -4754,6 +4786,11 @@ mod tests {
             closing.contains("tauri::WindowEvent::Destroyed")
                 && closing.contains("state.watched_terms().remove(&label);"),
             "a closed window keeps its shells' shares:\n{closing}"
+        );
+        let removing = block_after(engine, "pub fn remove(");
+        assert!(
+            removing.contains(".remove(label);"),
+            "a closed window keeps its declaration:\n{removing}"
         );
         assert!(
             backend.contains("forget_watched_when_closed(&app, &window);"),

@@ -1796,7 +1796,7 @@ fn a_wake_is_chased_for_one_frame_instead_of_waiting_out_a_tick() {
 #[test]
 fn only_the_shells_a_window_is_reading_are_watched() {
     let read = |windows: &HashMap<String, HashSet<TermId>>| {
-        readers_by_term(windows)
+        zerocode_pty::readers_by_term(windows)
             .into_keys()
             .collect::<HashSet<TermId>>()
     };
@@ -1854,13 +1854,13 @@ fn only_the_shells_a_window_is_reading_are_watched() {
 fn a_frame_is_addressed_to_each_window_that_declared_the_shell() {
     let mut windows: HashMap<String, HashSet<TermId>> = HashMap::new();
     assert!(
-        readers_by_term(&windows).is_empty(),
+        zerocode_pty::readers_by_term(&windows).is_empty(),
         "a table nobody has written to hands out addresses anyway"
     );
 
     windows.insert("main".to_string(), HashSet::from([0, 4]));
     windows.insert("board-popout".to_string(), HashSet::from([4, 9]));
-    let readers = readers_by_term(&windows);
+    let readers = zerocode_pty::readers_by_term(&windows);
 
     // The shell both windows declared goes to both, in a settled order: two
     // rounds over one declaration must deliver the same way round, or a
@@ -1898,7 +1898,7 @@ fn a_frame_is_addressed_to_each_window_that_declared_the_shell() {
     // every frame of the shell it was reading is still serialised for a
     // webview that is not there.
     windows.remove("board-popout");
-    let readers = readers_by_term(&windows);
+    let readers = zerocode_pty::readers_by_term(&windows);
     assert_eq!(
         readers.get(&4).map(Vec::as_slice),
         Some(["main".to_string()].as_slice()),
@@ -9107,12 +9107,29 @@ fn a_watched_shell_is_paced_by_its_screen_not_by_the_pump() {
          flowing screen:\n{looping}"
     );
     // A reader that has to be told is told at once, by name, one notice a
-    // window however many of its shells have frames.
-    let telling = &looping[looping
-        .find("told.dedup();")
-        .expect("the notices are not folded to one a window")..];
+    // window however many of its shells have frames. The round's notices go
+    // through the read path's channel, the engine folds them
+    // (`zerocode_pty::tell_dirty`), and the channel's webview side is the one
+    // place a window is told.
     assert!(
-        telling.contains("let _ = app.emit(&dirty_event_for(&label), ());"),
+        looping.contains("zerocode_pty::tell_dirty(told, &WebviewNotices(app));"),
+        "the round's notices do not go out through the read path's \
+         channel:\n{looping}"
+    );
+    let folding = block_after(
+        include_str!("../../zerocode-pty/src/screens.rs"),
+        "pub fn tell_dirty(",
+    );
+    assert!(
+        folding.contains("told.dedup();"),
+        "the notices are not folded to one a window:\n{folding}"
+    );
+    let telling = block_after(
+        backend,
+        "impl zerocode_pty::DirtyNotices for WebviewNotices<'_> {",
+    );
+    assert!(
+        telling.contains("let _ = app.emit(&dirty_event_for(label), ());"),
         "a reader owed frames is never told to come:\n{telling}"
     );
 }

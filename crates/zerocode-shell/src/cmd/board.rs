@@ -1186,12 +1186,11 @@ pub(crate) fn reveal_board_agent(app: AppHandle, pane: String) -> Result<(), Str
 /// 지어내면 두 철자가 생기고, 팝아웃이 자기를 `popout`이라 부르는 동안 창의
 /// 라벨은 `board-popout`인 것 같은 어긋남이 바로 그것이다.
 ///
-/// Declaring is the whole of subscribing. A shell this window starts reading
-/// gets this window as a reader that is owed a snapshot, and one it stops
-/// reading loses it — both under that shell's own lock and before the new set
-/// is visible, so the window's first pull after this reply is paid its floor
-/// (`zerocode_pty::readers`) and a shell it just hid holds no share for it.
-/// Notices then come under a name this window's label is part of
+/// Declaring is the whole of subscribing, and the engine does it
+/// ([`zerocode_pty::WatchedTerms::declare`]): a shell this window starts
+/// reading gets this window as a reader owed a snapshot, one it stops reading
+/// loses it, both before the new set is visible. Notices then come under a
+/// name this window's label is part of
 /// ([`crate::pane_runtime::dirty_event_for`]).
 #[tauri::command(async)]
 pub(crate) fn set_watched_terms(
@@ -1208,27 +1207,9 @@ pub(crate) fn set_watched_terms(
         state.local_data_root(),
         &watch_line(webview.label(), &terms, road.as_deref()),
     );
-    let label = webview.label().to_string();
-    let next: HashSet<TermId> = terms.into_iter().collect();
-    // Held until the replacement is visible, so a pull or a pump round that
-    // reads the declaration reads it together with the readers it implies.
-    // Lock order: the declaration, then (one at a time) a terminal's lock —
-    // nothing takes the declaration while holding a terminal.
-    let mut watched = state.watched_terms();
-    let previous = watched.get(&label).cloned().unwrap_or_default();
-    for term in next.difference(&previous) {
-        if let Some(held) = state.terminals().handle(*term) {
-            let mut pty = lock_pty(&held);
-            pty.terminal_mut().readers_mut().0.declare(&label);
-        }
-    }
-    for term in previous.difference(&next) {
-        if let Some(held) = state.terminals().handle(*term) {
-            let mut pty = lock_pty(&held);
-            pty.terminal_mut().readers_mut().0.leave(&label);
-        }
-    }
-    watched.insert(label, next);
+    state
+        .watched_terms()
+        .declare(state.terminals(), webview.label(), terms);
 }
 
 /// The longest reason a declaration's line carries — the window's own words
@@ -1264,75 +1245,40 @@ pub(crate) fn watch_line(label: &str, terms: &[TermId], road: Option<&str>) -> S
     }
 }
 
-/// What one pull answers: the frames each shell owes this window, in order,
-/// and the declared shells that are not there at all.
-#[derive(Serialize, Default)]
-pub(crate) struct PulledScreens {
-    screens: Vec<PulledScreen>,
-    missing: Vec<TermId>,
-}
-
-#[derive(Serialize)]
-struct PulledScreen {
-    term: TermId,
-    frames: Vec<zerocode_pty::GridDelta>,
-}
-
-/// Everything this window's terminals owe it, in one answer (design rule 5).
-///
-/// The screen asks when it is ready — on a notice while it was quiet, then on
-/// each display frame while frames keep coming — so a webview that paints
-/// slower than the pump reads is handed one frame per paint, folded by the
-/// grid, and never a queue of screens that are already stale.
+/// Everything this window's terminals owe it, in one answer (design rule 5):
+/// the engine's pull ([`zerocode_pty::WatchedTerms::pull`]) for the label
+/// Tauri knows this webview by.
 ///
 /// **Bytes, not an event.** The answer is a `tauri::ipc::Response` body: JSON
 /// the webview decodes as data, where an event's payload is spliced into
 /// JavaScript SOURCE and evaluated. And it is an answer to a question, so
 /// nothing is pushed at a page that did not ask.
-///
-/// Each shell is locked on its own, one at a time: the pull that pays a debt
-/// takes the delta for the other readers first and the snapshot after, in one
-/// lock (`zerocode_pty::FrameReaders::pull`). A declared shell that is not in
-/// the pool is named in `missing` — for a board card, that is "no live
-/// terminal".
-///
-/// `resync` is the window saying its last pull failed. The frames that pull
-/// took are gone with it, and a model with a hole in it is wrong from then on;
-/// so every screen it reads is owed whole again, and this pull pays.
 #[tauri::command(async)]
 pub(crate) fn term_pull(
     webview: tauri::Webview,
     state: State<'_, AppState>,
     resync: Option<bool>,
 ) -> tauri::ipc::Response {
-    let label = webview.label();
-    let resync = resync.unwrap_or(false);
-    let mut terms: Vec<TermId> = state
-        .watched_terms()
-        .get(label)
-        .map(|terms| terms.iter().copied().collect())
-        .unwrap_or_default();
-    terms.sort_unstable();
-    let now = std::time::Instant::now();
-    let mut answer = PulledScreens::default();
-    for term in terms {
-        let Some(held) = state.terminals().handle(term) else {
-            answer.missing.push(term);
-            continue;
-        };
-        let frames = {
-            let mut pty = lock_pty(&held);
-            let (readers, grid) = pty.terminal_mut().readers_mut();
-            if resync {
-                readers.declare(label);
-            }
-            readers.pull(label, grid, now)
-        };
-        if !frames.is_empty() {
-            answer.screens.push(PulledScreen { term, frames });
-        }
-    }
-    tauri::ipc::Response::new(serde_json::to_vec(&answer).unwrap_or_default())
+    tauri::ipc::Response::new(pulled_bytes(
+        state.watched_terms(),
+        state.terminals(),
+        webview.label(),
+        resync,
+    ))
+}
+
+/// The bytes of one pull's answer for `label`: the whole of [`term_pull`] but
+/// the label, which only the webview knows. A declared shell that is not in
+/// the pool is named in `missing` — for a board card, that is "no live
+/// terminal".
+fn pulled_bytes(
+    watched: &zerocode_pty::WatchedTerms,
+    terminals: &TerminalRegistry,
+    label: &str,
+    resync: Option<bool>,
+) -> Vec<u8> {
+    let answer = watched.pull(terminals, label, resync.unwrap_or(false));
+    serde_json::to_vec(&answer).unwrap_or_default()
 }
 
 /// 이 창이 지금 **미리보고** 있는 셸들 — 전부, 매번.

@@ -3326,13 +3326,7 @@ fn watching(app: &AppHandle) -> (String, bool, Stage) {
         .get_webview_window("main")
         .and_then(|window| window.is_focused().ok())
         .unwrap_or(false);
-    let stage = Stage(
-        state
-            .watched_terms()
-            .get("main")
-            .cloned()
-            .unwrap_or_default(),
-    );
+    let stage = Stage(state.watched_terms().terms_of("main"));
     (active, focused, stage)
 }
 
@@ -3406,7 +3400,7 @@ pub(super) fn announce_term_news(app: &AppHandle, term: TermId, news: zerocode_p
 /// preview. An empty map means nobody has declared anything yet — a window
 /// that has not booted far enough to say — and answers "preview nothing". The
 /// reading tier is a different question with a different answer
-/// ([`readers_by_term`]: WHO reads each shell), and a caller that unioned the
+/// ([`zerocode_pty::readers_by_term`]: WHO reads each shell), and a caller that unioned the
 /// two would have no way left to ask which tier a term belongs to.
 pub(super) fn previewed_anywhere(windows: &HashMap<String, HashSet<TermId>>) -> HashSet<TermId> {
     windows.values().flatten().copied().collect()
@@ -3444,30 +3438,17 @@ pub(super) fn dirty_event_for(label: &str) -> String {
 /// The stem every notice's name is built on.
 pub(super) const TERM_DIRTY_EVENT: &str = "term:dirty";
 
-/// Which windows asked for each shell, inverted from the per-window sets.
-///
-/// Delivery needs the addresses: every window that declared a shell is one of
-/// its readers (`zerocode_pty::readers`), and no other window is. A shell with
-/// no entry is read by nobody — frames stay in its grid, and a screen that
-/// starts reading it later is owed a snapshot on its first pull. An empty map
-/// means nobody has declared anything yet and reads as "nobody reads
-/// anything", which is right: the first thing every surface does on the way to
-/// visible is declare itself. Sorted so two rounds over the same declaration
-/// keep the same readers in the same order — a board pop-out and the main
-/// window must not swap places between rounds for reasons nobody can name.
-pub(super) fn readers_by_term(
-    windows: &HashMap<String, HashSet<TermId>>,
-) -> HashMap<TermId, Vec<String>> {
-    let mut readers: HashMap<TermId, Vec<String>> = HashMap::new();
-    for (label, terms) in windows {
-        for term in terms {
-            readers.entry(*term).or_default().push(label.clone());
-        }
+/// The read path's notices ([`zerocode_pty::DirtyNotices`]) as webviews hear
+/// them: the event [`dirty_event_for`] names, carrying nothing. The engine
+/// says which window is owed frames; this is the only place that says how a
+/// webview is told.
+struct WebviewNotices<'a>(&'a AppHandle);
+
+impl zerocode_pty::DirtyNotices for WebviewNotices<'_> {
+    fn dirty(&self, label: &str) {
+        let Self(app) = self;
+        let _ = app.emit(&dirty_event_for(label), ());
     }
-    for labels in readers.values_mut() {
-        labels.sort();
-    }
-    readers
 }
 
 /// Whether a shell that just handed over `moved` bytes still owes this round
@@ -3658,7 +3639,7 @@ pub(super) fn pump_loop(app: &AppHandle) {
         // mid-round is read on the next round, and in between the readers a
         // terminal holds are the ones `set_watched_terms` already declared or
         // forgot under that terminal's own lock.
-        let readers = readers_by_term(&state.watched_terms());
+        let readers = state.watched_terms().readers_by_term();
         // One clock for every reader's look this round, and what the round
         // learns about the chase shell by shell (`ChaseRound`).
         let looked_at = Instant::now();
@@ -4135,13 +4116,8 @@ pub(super) fn pump_loop(app: &AppHandle) {
             announce_term_news(app, term, said);
         }
         // One notice a window, however many of its shells have frames: its
-        // pull answers for all of them at once.
-        let mut told = told;
-        told.sort_unstable();
-        told.dedup();
-        for label in told {
-            let _ = app.emit(&dirty_event_for(&label), ());
-        }
+        // pull answers for all of them at once. No lock is held here.
+        zerocode_pty::tell_dirty(told, &WebviewNotices(app));
 
         // The second tier: the tail of every shell the board is showing.
         //
