@@ -545,8 +545,10 @@ impl Line {
 }
 
 /// Where a waiting job stands: 1 for the next to start, by the same rule read
-/// over and over as if each one before it had started. Ended and running
-/// jobs have no place.
+/// over and over as if each one before it had started. When nothing more
+/// starts beside what runs — a quiet job's turn, or an owner it keeps busy —
+/// what runs is counted ended and the reading goes on. Ended and running jobs
+/// have no place.
 #[must_use]
 pub fn places(jobs: &[Job], last_end: &dyn Fn(&str) -> i64, turn: u64) -> HashMap<String, usize> {
     let mut left: Vec<Job> = jobs.to_vec();
@@ -558,7 +560,7 @@ pub fn places(jobs: &[Job], last_end: &dyn Fn(&str) -> i64, turn: u64) -> HashMa
     let mut turn = turn;
     let mut started: HashMap<String, i64> = HashMap::new();
     let mut tick = 0_i64;
-    while let Ok(Some(next)) = {
+    loop {
         // A job counted started has run and ended: its owner's turn moves on.
         let ended = |owner: &str| {
             started
@@ -566,15 +568,26 @@ pub fn places(jobs: &[Job], last_end: &dyn Fn(&str) -> i64, turn: u64) -> HashMa
                 .copied()
                 .unwrap_or_else(|| last_end(owner))
         };
-        next_up(&left, FIRST_SLOT, &machine, &ended, turn).map(|job| job.cloned())
-    } {
-        places.insert(next.id.clone(), places.len() + 1);
+        let next = next_up(&left, FIRST_SLOT, &machine, &ended, turn).map(|job| job.cloned());
         tick += 1;
-        started.insert(next.owner.clone(), i64::MAX / 2 + tick);
-        left.retain(|job| job.id != next.id);
-        turn += 1;
+        match next {
+            Ok(Some(next)) => {
+                places.insert(next.id.clone(), places.len() + 1);
+                started.insert(next.owner.clone(), i64::MAX / 2 + tick);
+                left.retain(|job| job.id != next.id);
+                turn += 1;
+            }
+            Ok(None) | Err(Hold::QuietWanted)
+                if left.iter().any(|job| job.state == JobState::Running) =>
+            {
+                for job in left.iter().filter(|job| job.state == JobState::Running) {
+                    started.insert(job.owner.clone(), i64::MAX / 2 + tick);
+                }
+                left.retain(|job| job.state != JobState::Running);
+            }
+            _ => return places,
+        }
     }
-    places
 }
 
 #[cfg(test)]
@@ -817,6 +830,53 @@ mod tests {
         assert!(
             places["j-a1"] < places["j-a2"],
             "an owner's order holds: {places:?}"
+        );
+    }
+
+    /// 2026-11-19 10:26: a quiet job ran and none of the twelve waiting jobs
+    /// had a place.
+    #[test]
+    fn places_go_on_past_what_runs_once_nothing_more_can_start_beside_it() {
+        let mut running = job("r", "w-a", 0);
+        running.state = JobState::Running;
+        let mut next_of_its_owner = job("a2", "w-a", 1);
+        next_of_its_owner.class = Class::First;
+        let beside = places(
+            &[running.clone(), next_of_its_owner, job("b1", "w-b", 2)],
+            &never,
+            0,
+        );
+        assert_eq!(
+            (beside.get("j-b1"), beside.get("j-a2")),
+            (Some(&1), Some(&2)),
+            "what can start beside it keeps its place, and the busy owner's next comes after: {beside:?}"
+        );
+
+        let mut quiet = job("q", "w-q", 0);
+        quiet.quiet = true;
+        quiet.state = JobState::Running;
+        let mut first = job("f", "w-f", 1);
+        first.class = Class::First;
+        let after_quiet = places(&[quiet, first, job("p", "w-p", 2)], &never, 0);
+        assert_eq!(
+            (after_quiet.get("j-f"), after_quiet.get("j-p")),
+            (Some(&1), Some(&2)),
+            "a quiet job that runs hides no place: {after_quiet:?}"
+        );
+
+        let mut waiting_quiet = job("m", "w-m", 1);
+        waiting_quiet.quiet = true;
+        let mut jobs = vec![running, waiting_quiet];
+        for (n, owner) in ["w-f", "w-g", "w-h"].into_iter().enumerate() {
+            let mut first = job(&format!("f{n}"), owner, 2 + n as i64);
+            first.class = Class::First;
+            jobs.push(first);
+        }
+        let around_quiet = places(&jobs, &never, 0);
+        assert_eq!(
+            around_quiet.len(),
+            4,
+            "a quiet job's turn while another runs hides no place: {around_quiet:?}"
         );
     }
 
