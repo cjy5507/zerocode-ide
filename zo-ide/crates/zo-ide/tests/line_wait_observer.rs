@@ -249,40 +249,43 @@ fn a_wait_beside_the_waiter_add_started_never_runs_the_job() {
     }
 }
 
-/// Red → green 3 (t-118403): when the waiter `add` started is gone before the
-/// job's turn, a pane's wait starts a new waiter on its own and goes on
-/// watching; the job runs once, and not in the wait nor in a child of it.
+/// Red → green 3 (t-118403, as the coordinator decided on 11-20): when the
+/// waiter `add` started is gone before the job's turn, a pane's wait does not
+/// run the job, and no waiter is started in its place — one would run it with
+/// the environment of whichever process looked. The look ends the job as lost,
+/// the wait exits with its code, and the job's log says how the pane that put
+/// it in puts it in again. Before t-118403 the wait ran it as its own child; at
+/// 69c371b78 the wait started a new waiter that ran it.
 #[test]
-fn a_wait_on_a_job_whose_waiter_is_gone_starts_a_new_one_and_only_watches() {
+fn a_wait_on_a_job_whose_waiter_is_gone_ends_it_and_runs_nothing() {
     let Some(fixture) = Fixture::new() else { return };
     let gate = fixture.gate("go");
     let first = fixture.add("p", HOLD, &gate);
     fixture.runs(&first);
     let job = fixture.add("p", WHO_RAN, "ran");
-    let waiter = waiter_of(&job);
-    kill_waiter(waiter, &job);
+    kill_waiter(waiter_of(&job), &job);
     let mut observer = fixture.wait(&job);
-    let group = ps(std::process::id(), "pgid").expect("this test's group");
     std::thread::sleep(SETTLE);
     fixture.open(&gate);
     let code = exit_of(&mut observer);
+    until("the first job ends", || fixture.job(&first).state.ended());
+    // Long enough for a runner, had the line kept one, to have run the job.
+    std::thread::sleep(SETTLE);
     let runs = fixture.who_ran("ran");
-    assert_eq!(runs.len(), 1, "the job ran once: {runs:?}");
-    let [runner, parent, its_group] = runs[0];
-    assert_ne!(runner, observer.id(), "관찰자가 러너가 됨 — the pane's `zo line wait` ran the job");
-    assert_ne!(runner, waiter, "a new waiter ran the job, not the one killed");
-    assert_ne!(parent, observer.id(), "the runner is no child of the wait");
     assert!(
-        parent == 1 || its_group.to_string() != group,
-        "the runner stands apart from the wait: its parent {parent}, its group {its_group}, the wait's {group}"
+        runs.iter().all(|[runner, ..]| *runner != observer.id()),
+        "관찰자가 러너가 됨 — the pane's `zo line wait` ran the job: {runs:?}"
     );
-    assert_eq!(fixture.job(&job).pid, Some(runner), "the record names its runner");
-    assert_eq!(code, 0, "the wait exits with the job's code");
+    assert!(runs.is_empty(), "the job ran after its waiter was gone, in a waiter some look started for it: {runs:?}");
+    assert_eq!((fixture.job(&job).state, code), (JobState::Lost, 1), "the job ended lost, and the wait with its code");
+    let log = fs::read_to_string(fixture.line.log_path(&job)).expect("its log");
+    assert!(log.contains(&format!("`zo line retry {job}` from the pane that put it in")), "{log}");
 }
 
-/// Decision 2 of t-118403: a job whose waiter is gone before its turn, with no
-/// wait watching it, stays waiting no more — before, it held its owner's later
-/// jobs, and the line's slots that chose it, for good.
+/// Decision 2 of t-118403, as decided on 11-20: a job whose waiter is gone
+/// before its turn, with no wait watching it, stays waiting no more — the next
+/// look ends it as lost and its owner's later job runs. Before, it held its
+/// owner's later jobs, and the line's slots that chose it, for good.
 #[test]
 fn a_waiting_job_whose_waiter_is_gone_does_not_hold_the_line() {
     let Some(fixture) = Fixture::new() else { return };
@@ -298,8 +301,8 @@ fn a_waiting_job_whose_waiter_is_gone_does_not_hold_the_line() {
         fixture.job(&behind).state.ended()
     });
     let ran = fs::read_to_string(fixture.cwd().join("ran")).expect("what ran");
-    assert_eq!(ran, "orphan\nbehind\n", "both ran once, in their order");
-    assert_eq!(fixture.job(&orphan).state, JobState::Passed);
+    assert_eq!(ran, "behind\n", "the job whose waiter was gone did not run; the one behind it did");
+    assert_eq!(fixture.job(&orphan).state, JobState::Lost);
 }
 
 /// Red → green 2 (t-118403): a pane's wait exits with the job's code however
