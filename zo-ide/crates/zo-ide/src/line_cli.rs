@@ -36,24 +36,23 @@ zo line forget <job> · zo line restore <job>
 
   One line for the whole machine: each owner's jobs run in the order they
   were put in and never two at a time; the owner whose last job ended longest
-  ago goes first; --first jobs go before plain ones (two to one, --quiet
-  ones too) and --last ones only fill a slot nothing else wants. --solo
-  takes the first slot only (a whole suite); --quiet runs alone (a
-  measurement): from its turn nothing new starts until the machine is
-  empty. Nothing starts while the line is paused or the disk is below its
-  floor; near it, the folders of idle slots go first. Cargo builds in the
-  slot's own folder (zo's home, build-slots/targets/<slot>), the job's
-  workspace crates removed from it before and after, so only registry
-  crates carry over; a job that names its CARGO_TARGET_DIR builds there,
-  untouched. `run` exits as its command did; `add` prints the job and its
-  cap and returns, and the job's end is told to --notify through the
-  ledger; `wait` waits for an added job's end and exits as its command did.
-  A put whose command outran that cap last time is warned; a job the line
-  ends (its cap, a stop) says so as its log's last line. `list` shows this
-  project's waiting and running jobs and the ten that ended last, and counts
-  the older ones; --history lists every job of this project, --all every job
-  of every project. `wait <job>` on a job that has ended exits with its code
-  too. Records live under zo's home (line/).
+  ago goes first; --first jobs go before plain ones (two to one, --quiet ones
+  too) and --last ones only fill a slot nothing else wants. --solo takes the
+  first slot only (a whole suite); --quiet runs alone (a measurement): from
+  its turn nothing new starts until the machine is empty. Nothing starts while
+  the line is paused or the disk is below its floor; near it, the folders of
+  idle slots go first. Cargo builds in the slot's own folder (zo's home,
+  build-slots/targets/<slot>), the job's workspace crates removed from it
+  before and after, so only registry crates carry over; a job that names its
+  CARGO_TARGET_DIR builds there, untouched. `run` exits as its
+  command did; `add` prints the job and its cap and returns, and the job's
+  end is told to --notify through the ledger; `wait` waits for an added job's
+  end and exits as its command did. A put whose command outran that cap last
+  time is warned; a job the line ends (its cap, a stop) says so as its log's
+  last line. `list` shows this project's waiting and running jobs and the ten
+  that ended last, and counts the older ones; --history lists every job of
+  this project, --all every job of every project. `wait <job>` on a job that
+  has ended exits with its code too. Records live under zo's home (line/).
 ";
 
 /// How often a waiting job looks for its turn, and a running one for a stop.
