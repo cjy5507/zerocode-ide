@@ -73,6 +73,8 @@ const WAITER_START: Duration = Duration::from_secs(2);
 const WAITER_LOOK: Duration = Duration::from_millis(10);
 /// The lines of a log `zo line log` prints.
 const LOG_TAIL_LINES: usize = 200;
+/// How much of what a failed `zerocode-orc send` said the job's log keeps.
+const SAID_CHARS: usize = 400;
 /// The machine's slot folder under zo's home — `zo build`'s.
 const SLOTS_FOLDER: &str = "build-slots";
 const TRASH: &str = "trash";
@@ -946,7 +948,7 @@ fn execute(line: &Line, machine: &MachineRules, mut job: Job, foreground: bool) 
     }
     line.prune();
     purge_trash(line, now_ms());
-    notify(&job, started.elapsed());
+    notify(line, &job, started.elapsed());
     if let Some(ready) = ready {
         ready.done();
     }
@@ -1048,8 +1050,12 @@ fn tee(output: Option<impl io::Read + Send + 'static>, log: &File, to_err: bool)
 }
 
 /// Tells the ledger how the job ended, when it named where: through
-/// `zerocode-orc send` on this machine's PATH. A send that cannot go is left.
-fn notify(job: &Job, took: Duration) {
+/// `zerocode-orc send` on this machine's PATH, with the environment of the
+/// process that put the job in. `send` changes the ledger, so it goes under a
+/// name the window can take again unchanged, the job's: without one the window
+/// refused every end the line told (t-118403). A send that does not go is left,
+/// and the job's log says so as its last line.
+fn notify(line: &Line, job: &Job, took: Duration) {
     let Some(to) = job.notify.as_deref() else {
         return;
     };
@@ -1062,16 +1068,33 @@ fn notify(job: &Job, took: Duration) {
         took.as_secs()
     );
     let mut send = Command::new("zerocode-orc");
-    send.args(["send", "--to", to, "--type", "status", "--body", &body]);
+    let name = format!("zo-line-{}", job.id);
+    send.args(["send", "--to", to, "--type", "status", "--body", &body, "--retry-request", &name]);
     if let Some(run) = to.strip_prefix("run:") {
         send.args(["--run", run]);
     }
-    let _ = send
+    let said = send
         .current_dir(&job.checkout)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .stderr(Stdio::piped())
+        .output();
+    let why = match said {
+        Ok(said) if said.status.success() => return,
+        Ok(said) => format!("exit {} — {}", crate::build_runner::rc_of(said.status), first_line(&said.stderr)),
+        Err(error) => format!("zerocode-orc did not start — {error}"),
+    };
+    let path = line.log_path(&job.id);
+    if let Ok(log) = OpenOptions::new().create(true).append(true).open(&path) {
+        close_log(&log, &path, &format!("zo line: telling {to} how the job ended did not go: {why}"));
+    }
+}
+
+/// The first line a command said on stderr, at most `SAID_CHARS` characters.
+fn first_line(said: &[u8]) -> String {
+    let text = String::from_utf8_lossy(said);
+    let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("it said nothing");
+    first.chars().take(SAID_CHARS).collect()
 }
 
 const fn state_word(state: JobState) -> &'static str {
@@ -1455,6 +1478,15 @@ mod tests {
         let fails = rules(&home.path().join(SLOTS_FOLDER));
         assert!(put_with_waiter(&line, &fails, job_of(&put, cwd.path())).is_err());
         assert_eq!(line.jobs().len(), 1, "nothing else was put in");
+    }
+
+    /// What a failed `zerocode-orc send` said, as the job's log keeps it: its
+    /// first line that says anything, cut short.
+    #[test]
+    fn a_failed_sends_words_are_its_first_line_cut_short() {
+        assert_eq!(first_line(b"\n  orchestration: refused\nmore\n"), "orchestration: refused");
+        assert_eq!(first_line(b""), "it said nothing");
+        assert_eq!(first_line("가".repeat(SAID_CHARS + 5).as_bytes()).chars().count(), SAID_CHARS);
     }
 
     /// `zo line list` shows a waiting job's pid as its waiter's, beside the job;
