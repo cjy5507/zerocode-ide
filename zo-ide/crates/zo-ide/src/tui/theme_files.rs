@@ -703,7 +703,10 @@ mod tests {
         expected.accent = Some((0xff, 0x79, 0xc6));
         expected.syntax.clone_from(&custom.syntax);
         assert_eq!(custom, &expected);
-        assert_eq!(custom.role_color(Role::Code), Some((0x69, 0xff, 0x94)));
+        // Inline code is the base's own colour: a green slot written over it
+        // does not move it — `colors.code` does.
+        assert_eq!(custom.role_color(Role::Code), dracula.role_color(Role::Code));
+        assert_eq!(custom.role_color(Role::Code), Some((0x50, 0xfa, 0x7b)));
         assert_eq!(custom.role_color(Role::Heading), Some((0xff, 0x79, 0xc6)));
         assert_eq!(custom.role_color(Role::Caret), dracula.role_color(Role::Caret));
         // … and so is its syntax theme, whatever the file is called.

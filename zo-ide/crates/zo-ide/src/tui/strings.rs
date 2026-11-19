@@ -136,8 +136,15 @@ fn theme_query_shown(query: &str) -> String {
     shown.push('…');
     shown
 }
-/// The `/theme` picker's word for the `terminal` row.
-pub const THEME_TERMINAL_ROW: &str = "the terminal's own colors";
+/// The `/theme` picker's word for the `terminal` row, and what `/theme
+/// terminal` says it did: it draws in the terminal's own theme, the window's.
+pub const THEME_TERMINAL_ROW: &str = "follows the terminal's theme";
+/// The mark on the `/theme` picker's row of the named theme in use: a
+/// change of the terminal's theme leaves it as it is.
+pub const THEME_PINNED_ROW: &str = "pinned";
+/// What choosing a named theme says beside its name: it stays when the
+/// terminal's theme changes, and the word that follows it.
+pub const THEME_PINNED: &str = "pinned — /theme terminal follows the terminal's theme";
 /// The `/theme` picker's mark on the row of a theme whose file held `count`
 /// mistakes, after the theme's slug. What the mistakes are is in the warning
 /// lines, said once (`/warnings`); the mark is on the row every time.

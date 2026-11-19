@@ -464,6 +464,9 @@ struct ThemePicker {
     view: Picker,
     /// The theme in use when the picker opened: what esc goes back to.
     original: super::theme::Theme,
+    /// Whether `original` is a named theme this screen draws, which a change
+    /// of the terminal's theme leaves as it is: its row says so.
+    pinned: bool,
 }
 
 impl ThemePicker {
@@ -484,7 +487,7 @@ impl ThemePicker {
             .to_string();
         self.entries = theme_entries_matching(&self.all, &query);
         self.query = query;
-        self.view.rows = theme_picker_rows(&self.entries, &self.original.name);
+        self.view.rows = theme_picker_rows(&self.entries, &self.original.name, self.pinned);
         self.view.selected = self
             .entries
             .iter()
@@ -4053,7 +4056,11 @@ impl Ui {
                 })
             })
             .collect();
-        let rows = theme_picker_rows(&entries, &original.name);
+        // A named theme this screen draws stays when the terminal's theme
+        // changes; where the look or the colour depth keeps it off the
+        // screen, the terminal's colours show and there is nothing to say.
+        let pinned = !original.is_terminal() && theme_unseen_here().is_none();
+        let rows = theme_picker_rows(&entries, &original.name, pinned);
         let selected = entries
             .iter()
             .position(|entry| entry.slug == original.name)
@@ -4062,6 +4069,7 @@ impl Ui {
             all: entries.clone(),
             query: String::new(),
             original,
+            pinned,
             view: Picker {
                 title: super::strings::THEME_PICKER_TITLE.to_string(),
                 title_style: Style::new().bold(),
@@ -8521,11 +8529,14 @@ impl TerminationSignals {
 
 /// The `/theme` picker's rows for `entries`, in their order: a theme's
 /// visible name — marked when it is `current`, the slug of the theme in use
-/// — and beside it its slug, or for `terminal` what it is. A theme whose file
-/// held mistakes says how many after its slug, every time the rows are made:
-/// the warning lines are said once, and without the mark such a theme reads
-/// as a sound one. Made of what it is given alone — no folder is read here.
-fn theme_picker_rows(entries: &[ThemeEntry], current: &str) -> Vec<PickerRow> {
+/// — and beside it its slug, or for `terminal` what it does: follow the
+/// terminal's theme. The named theme in use says it is pinned when `pinned`
+/// (it shows here, and a change of the terminal's theme leaves it as it is).
+/// A theme whose file held mistakes says how many after its slug, every time
+/// the rows are made: the warning lines are said once, and without the mark
+/// such a theme reads as a sound one. Made of what it is given alone — no
+/// folder is read here.
+fn theme_picker_rows(entries: &[ThemeEntry], current: &str, pinned: bool) -> Vec<PickerRow> {
     entries
         .iter()
         .map(|entry| {
@@ -8538,6 +8549,10 @@ fn theme_picker_rows(entries: &[ThemeEntry], current: &str) -> Vec<PickerRow> {
             } else {
                 entry.slug.clone()
             };
+            if pinned && entry.slug == current && !entry.is_terminal {
+                description.push_str(" · ");
+                description.push_str(super::strings::THEME_PINNED_ROW);
+            }
             if entry.problems > 0 {
                 description.push_str(" · ");
                 description.push_str(&super::strings::theme_file_problems(entry.problems));
@@ -8611,6 +8626,15 @@ fn theme_chosen_note(
             text.push_str(" — saved; this terminal draws 16 colors, so zo keeps the terminal's own");
         }
         None => {}
+    }
+    // Where it shows, whether a change of the terminal's theme reaches it.
+    if unseen.is_none() {
+        text.push_str(" · ");
+        text.push_str(if chosen.is_terminal() {
+            super::strings::THEME_TERMINAL_ROW
+        } else {
+            super::strings::THEME_PINNED
+        });
     }
     if env_theme.is_some_and(|value| !value.trim().is_empty()) {
         text.push_str(" · ZO_THEME is set and decides the next start");
@@ -13927,20 +13951,21 @@ mod theme_tests {
             entry("mine", "mine", 2),
             entry("once", "once", 1),
         ];
-        let shown = |current: &str| -> Vec<(String, String, bool)> {
-            theme_picker_rows(&entries, current)
+        let shown_pinned = |current: &str, pinned: bool| -> Vec<(String, String, bool)> {
+            theme_picker_rows(&entries, current, pinned)
                 .into_iter()
                 .map(|row| (row.label, row.description, row.dim))
                 .collect()
         };
+        let shown = |current: &str| shown_pinned(current, true);
         let row = |label: &str, description: &str| (label.to_string(), description.to_string(), false);
 
         let rows = shown("dracula");
         assert_eq!(
             rows,
             [
-                row("terminal", strings::THEME_TERMINAL_ROW),
-                row("Dracula (current)", "dracula"),
+                row("terminal", "follows the terminal's theme"),
+                row("Dracula (current)", "dracula · pinned"),
                 row("clean", "clean"),
                 row("mine", "mine · ⚠ 2 problems in its file"),
                 row("once", "once · ⚠ 1 problem in its file"),
@@ -13950,7 +13975,12 @@ mod theme_tests {
         // The picker opened again: the mark is on the row again.
         assert_eq!(shown("dracula"), rows, "the mark is there every time the rows are made");
         // The theme in use keeps its mark beside the word that it is in use.
-        assert_eq!(shown("mine")[3], row("mine (current)", "mine · ⚠ 2 problems in its file"));
+        assert_eq!(shown("mine")[3], row("mine (current)", "mine · pinned · ⚠ 2 problems in its file"));
+        // A named theme the look or the colour depth keeps off the screen is
+        // not pinned there — the terminal's colours show — and `terminal` never is.
+        assert_eq!(shown_pinned("dracula", false)[1], row("Dracula (current)", "dracula"));
+        assert_eq!(shown("terminal")[0], row("terminal (current)", "follows the terminal's theme"));
+        assert!(shown("terminal").iter().all(|(_, description, _)| !description.contains("pinned")));
     }
 
     /// Types `word` into the open picker, a key a letter.
@@ -14495,8 +14525,15 @@ mod theme_tests {
         let dracula = theme::find("dracula").expect("the dracula theme");
         let terminal = theme::Theme::terminal();
 
-        assert_eq!(theme_chosen_note(&dracula, None, None, None), (SystemLevel::Info, "theme → Dracula".to_string()));
-        assert_eq!(theme_chosen_note(&terminal, None, None, None), (SystemLevel::Info, "theme → terminal".to_string()));
+        // Where it shows, it says whether a change of the terminal's theme reaches it.
+        assert_eq!(
+            theme_chosen_note(&dracula, None, None, None),
+            (SystemLevel::Info, "theme → Dracula · pinned — /theme terminal follows the terminal's theme".to_string())
+        );
+        assert_eq!(
+            theme_chosen_note(&terminal, None, None, None),
+            (SystemLevel::Info, "theme → terminal · follows the terminal's theme".to_string())
+        );
 
         let (level, codex) = theme_chosen_note(&dracula, None, Some(theme::Unseen::CodexLook), None);
         assert_eq!(level, SystemLevel::Info);

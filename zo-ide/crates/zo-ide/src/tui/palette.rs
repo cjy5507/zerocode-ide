@@ -275,7 +275,7 @@ impl TerminalPalette {
     #[must_use]
     pub fn resolve(self, color: Color) -> Option<Color> {
         let color = match color {
-            Color::Role(role) => role.terminal_color(),
+            Color::Role(role) => role.terminal_ink(),
             other => other,
         };
         let color = self.adapt_for_background(color);
@@ -287,7 +287,7 @@ impl TerminalPalette {
     #[must_use]
     pub(crate) fn resolve_depth(self, color: Color) -> Option<Color> {
         let color = match color {
-            Color::Role(role) => role.terminal_color(),
+            Color::Role(role) => role.terminal_ink(),
             other => other,
         };
         match (self.color_level, color) {

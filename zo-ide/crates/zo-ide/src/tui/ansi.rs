@@ -39,7 +39,8 @@ pub enum Role {
 }
 
 impl Role {
-    /// Today's concrete colour for this role in the default `terminal` theme.
+    /// This role's concrete colour in the default `terminal` theme, as the
+    /// codex look writes it. The marks look writes [`Self::terminal_ink`].
     #[must_use]
     pub const fn terminal_color(self) -> Color {
         match self {
@@ -49,6 +50,21 @@ impl Role {
             Self::Model => Color::Rgb(246, 226, 183),
             Self::Cwd => Color::Rgb(171, 223, 167),
             Self::Warning => Color::Rgb(196, 167, 103),
+        }
+    }
+
+    /// This role's colour in the default `terminal` theme in the look this
+    /// process draws — every road from a role to a terminal colour takes it.
+    /// Inline code is the blue slot in the marks look: a theme's own
+    /// inline-code colour, else its blue, which is also where the window puts
+    /// Claude Code's inline code. A slot, so a change of the terminal's theme
+    /// recolours it in place; and not the cyan of links. The codex look keeps
+    /// codex's cyan, whose bytes it writes.
+    #[must_use]
+    pub fn terminal_ink(self) -> Color {
+        match self {
+            Self::Code if super::style::current().style == super::style::TuiStyle::Marks => Color::BLUE,
+            other => other.terminal_color(),
         }
     }
 }
@@ -73,6 +89,7 @@ impl Color {
     pub const RED: Self = Self::Base(1);
     pub const GREEN: Self = Self::Base(2);
     pub const YELLOW: Self = Self::Base(3);
+    pub const BLUE: Self = Self::Base(4);
     pub const MAGENTA: Self = Self::Base(5);
     pub const CYAN: Self = Self::Base(6);
     pub const LIGHT_BLUE: Self = Self::BrightBase(4);
@@ -95,7 +112,7 @@ impl Color {
             Self::Rgb(r, g, b) => {
                 let _ = write!(out, "38;2;{r};{g};{b}");
             }
-            Self::Role(role) => role.terminal_color().params(out),
+            Self::Role(role) => role.terminal_ink().params(out),
         }
     }
 
@@ -115,7 +132,7 @@ impl Color {
             Self::Rgb(r, g, b) => {
                 let _ = write!(out, "48;2;{r};{g};{b}");
             }
-            Self::Role(role) => role.terminal_color().background_params(out),
+            Self::Role(role) => role.terminal_ink().background_params(out),
         }
     }
 }
@@ -325,7 +342,7 @@ impl Style {
         }
         if let Some(Color::Role(role)) = self.bg {
             let bg_color = super::theme::with_active(|theme| theme.role_color(role))
-                .map_or_else(|| role.terminal_color(), |(r, g, b)| Color::Rgb(r, g, b));
+                .map_or_else(|| role.terminal_ink(), |(r, g, b)| Color::Rgb(r, g, b));
             self.bg = Some(bg_color);
         }
         if let Some(palette) = palette {
@@ -370,9 +387,9 @@ impl Style {
 
 }
 
-const fn lower_role_to_terminal(color: Color) -> Color {
+fn lower_role_to_terminal(color: Color) -> Color {
     match color {
-        Color::Role(role) => role.terminal_color(),
+        Color::Role(role) => role.terminal_ink(),
         other => other,
     }
 }
@@ -1018,6 +1035,23 @@ pub(crate) fn write_spans_for_ground_and_level(
 #[cfg(test)]
 mod tests {
     use super::{write_spans, Color, Line, Span, Style};
+
+    /// The codex look writes codex's bytes: inline code in cyan, as codex
+    /// writes it, under every theme. The blue slot is the marks look's
+    /// ([`super::Role::terminal_ink`]). A test process draws the codex look.
+    #[test]
+    fn inline_code_keeps_codex_cyan_in_the_codex_look() {
+        use super::super::style::{current, TuiStyle};
+        assert_eq!(current().style, TuiStyle::Codex);
+        let mut out = String::new();
+        write_spans(
+            &Line::new(vec![Span::new("x", Style::new().fg(Color::Role(super::Role::Code)))]),
+            &mut out,
+        );
+        assert_eq!(out, "\u{1b}[36;49mx");
+        assert_eq!(super::Role::Code.terminal_ink(), Color::CYAN);
+        assert_eq!(super::Role::Link.terminal_ink(), Color::CYAN);
+    }
 
     #[test]
     fn plain_spans_emit_no_escapes() {

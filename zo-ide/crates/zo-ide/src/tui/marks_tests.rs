@@ -1273,7 +1273,7 @@ fn terminal_theme_resolves_every_role_to_todays_colour() {
     };
 
     let cases = [
-        (Role::Code, "\u{1b}[36;49mx", "\u{1b}[36;49mx", "\u{1b}[36;49mx"),
+        (Role::Code, "\u{1b}[34;49mx", "\u{1b}[34;49mx", "\u{1b}[34;49mx"),
         (Role::Link, "\u{1b}[36;49mx", "\u{1b}[36;49mx", "\u{1b}[36;49mx"),
         (
             Role::Heading,
@@ -1642,7 +1642,7 @@ fn switching_themes_twice_leaves_no_stale_colour() {
     assert_eq!(
         nord_writer,
         expected_writer(
-            [(129, 161, 193), (195, 108, 116), (163, 190, 140), (129, 161, 193), (235, 203, 139)],
+            [(129, 161, 193), (195, 108, 116), (143, 188, 187), (129, 161, 193), (235, 203, 139)],
             (129, 161, 193),
         ),
         "nord writer bytes"
@@ -2127,7 +2127,7 @@ fn with_only_the_lightness_known_no_band_is_drawn_and_no_depth_is_lowered() {
     };
     for level in [ColorLevel::TrueColor, ColorLevel::Ansi256] {
         for (role, dark, light) in [
-            (Role::Code, "\u{1b}[36;49mx", "\u{1b}[36;49mx"),
+            (Role::Code, "\u{1b}[34;49mx", "\u{1b}[34;49mx"),
             (Role::Link, "\u{1b}[36;49mx", "\u{1b}[36;49mx"),
             (Role::Heading, "\u{1b}[38;2;249;226;175;49mx", "\u{1b}[38;2;108;76;21;49mx"),
             (Role::Caret, "\u{1b}[38;2;255;178;66;49mx", "\u{1b}[38;2;143;83;0;49mx"),
@@ -2187,7 +2187,7 @@ fn auto_with_no_answer_writes_todays_bytes() {
     assert_eq!(
         every(),
         [
-            "\u{1b}[36;49mx",
+            "\u{1b}[34;49mx",
             "\u{1b}[36;49mx",
             "\u{1b}[38;2;249;226;175;49mx",
             "\u{1b}[38;2;255;178;66;49mx",
@@ -2285,7 +2285,7 @@ fn light_turns_on_the_light_role_colours_and_code_stays_the_terminals_for_termin
         out
     };
     for (role, expected) in [
-        (Role::Code, "\u{1b}[36;49mx"),
+        (Role::Code, "\u{1b}[34;49mx"),
         (Role::Link, "\u{1b}[36;49mx"),
         (Role::Heading, "\u{1b}[38;2;108;76;21;49mx"),
         (Role::Caret, "\u{1b}[38;2;143;83;0;49mx"),
@@ -2353,4 +2353,48 @@ fn light_turns_on_the_light_role_colours_and_code_stays_the_terminals_for_termin
         written(ground, &lines)
     };
     assert_eq!(screen(dark), screen(Ground::Unknown));
+}
+
+/// Every built-in theme's inline code, drawn on that theme's own ground,
+/// clears the text floor there and keeps its hue: the colour the theme's
+/// sources give a code span, or its blue slot, lifted by lightness alone
+/// where it falls short.
+#[test]
+fn every_builtin_themes_inline_code_clears_the_floor_on_its_own_ground() {
+    use super::ansi::{write_spans_for_palette, Color, Role, Span, Style};
+    use super::palette::{contrast_ratio, ColorLevel, TerminalPalette};
+    use super::theme::rgb_to_hsl;
+
+    if !style::in_fresh_run(&path("every_builtin_themes_inline_code_clears_the_floor_on_its_own_ground")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let hue_diff = |a: f64, b: f64| {
+        let d = (a - b).abs() % 360.0;
+        d.min(360.0 - d)
+    };
+    for slug in super::theme::builtin_names() {
+        let theme = super::theme::find_builtin(slug).expect("a built-in theme");
+        if theme.is_terminal() {
+            continue;
+        }
+        let (fg, bg) = (theme.foreground.expect("its ink"), theme.background.expect("its ground"));
+        let palette = TerminalPalette::new(fg, bg, ColorLevel::TrueColor);
+        let floor = palette.text_contrast_floor(bg);
+        let given = theme.role_color(Role::Code).expect("every built-in theme colours inline code");
+        let _ = super::theme::set(theme);
+        let mut out = String::new();
+        write_spans_for_palette(
+            &Line::new(vec![Span::new("x", Style::new().fg(Color::Role(Role::Code)))]),
+            Some(palette),
+            &mut out,
+        );
+        let drawn = parse_fg_rgb(&out);
+        assert!(contrast_ratio(drawn, bg) >= floor, "{slug}: {drawn:?} under {floor:.2} on {bg:?}");
+        let (hue_given, sat_given, _) = rgb_to_hsl(given);
+        let (hue_drawn, sat_drawn, _) = rgb_to_hsl(drawn);
+        assert!(hue_diff(hue_given, hue_drawn) <= 3.0, "{slug}: hue {hue_given:.1} -> {hue_drawn:.1}");
+        assert!((sat_given - sat_drawn).abs() <= 0.05, "{slug}: saturation {sat_given:.3} -> {sat_drawn:.3}");
+    }
+    let _ = super::theme::set(super::theme::Theme::terminal());
 }

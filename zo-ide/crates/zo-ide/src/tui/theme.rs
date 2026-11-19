@@ -23,6 +23,10 @@ const TERMINAL_ALIASES: [&str; 5] = ["dark", "light", "system", "auto", "default
 
 const TERMINAL_THEMES_JSON: &str =
     include_str!("../../../../../crates/zerocode-shell/src/terminal_themes.json");
+/// Each built-in theme's inline-code colour, by slug: the colour the theme's
+/// own sources give a markdown code span, where they give one. A theme not
+/// named here draws inline code in its blue slot ([`Theme::role_color`]).
+const THEME_INLINE_CODE_JSON: &str = include_str!("theme_inline_code.json");
 
 /// A TUI colour theme: 16 ANSI slots, seven semantic role overrides, and an
 /// optional syntax theme name.
@@ -79,11 +83,14 @@ impl Theme {
     }
 
     /// Theme RGB colour for `role`, falling back through the theme's 16-colour
-    /// table when no explicit role override is set.
+    /// table when no explicit role override is set. Inline code falls back to
+    /// the blue slot, as `terminal` draws it ([`Role::terminal_ink`]): the
+    /// green one made it one green in nearly every theme (the person,
+    /// 2026-11-19: 「녹색으로 전부 똑같아서 theme를 바꿔도」).
     #[must_use]
     pub fn role_color(&self, role: Role) -> Option<(u8, u8, u8)> {
         match role {
-            Role::Code => self.code.or(self.ansi[2]),
+            Role::Code => self.code.or(self.ansi[4]),
             Role::Link => self.link.or(self.ansi[6]),
             Role::Heading => self.heading.or(self.accent).or(self.ansi[4]),
             Role::Caret => self.caret.or(self.ansi[5]),
@@ -170,13 +177,17 @@ fn builtin_themes() -> &'static [Theme] {
     BUILTIN.get_or_init(|| {
         let parsed: OrderedThemes =
             serde_json::from_str(TERMINAL_THEMES_JSON).expect("valid terminal_themes.json");
+        let inline_code: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(THEME_INLINE_CODE_JSON).expect("valid theme_inline_code.json");
         parsed
             .0
             .into_iter()
             .map(|(label, raw)| {
                 let slug = label.to_ascii_lowercase().replace(' ', "-");
+                let code = inline_code.get(&slug).map(String::as_str).and_then(parse_hex_color);
                 let mut theme = Theme::empty(slug, label);
                 let hex = |opt: Option<String>| opt.as_deref().and_then(parse_hex_color);
+                theme.code = code;
                 theme.foreground = hex(raw.foreground);
                 theme.background = hex(raw.background);
                 theme.ansi = [
@@ -949,5 +960,65 @@ mod tests {
             assert_eq!(*listed, slug);
         }
         assert!(line.starts_with("terminal, "), "{line}");
+    }
+
+    /// Every name in the inline-code table is a built-in theme's and every
+    /// value is a colour: a misspelt name would leave its theme on the blue
+    /// slot without a word.
+    #[test]
+    fn every_inline_code_colour_names_a_builtin_theme_and_is_a_colour() {
+        let table: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(super::THEME_INLINE_CODE_JSON).expect("the table is JSON");
+        let builtins = super::builtin_names();
+        assert_eq!(table.len(), 26, "{table:?}");
+        for (slug, value) in &table {
+            assert!(builtins.contains(&slug.as_str()), "{slug} is no built-in theme");
+            assert!(parse_hex_color(value).is_some(), "{slug}: {value} is no colour");
+            let theme = super::find_builtin(slug).expect("built-in");
+            assert_eq!(theme.code, parse_hex_color(value), "{slug}");
+        }
+    }
+
+    /// A built-in theme draws inline code in the colour its own sources give
+    /// a code span, and a theme without one in its blue slot — no longer in
+    /// its green slot, the one green nearly every theme drew it in. The nine
+    /// that are still green are green by their own sources.
+    #[test]
+    fn a_builtin_theme_draws_inline_code_in_its_own_colour_else_its_blue() {
+        use crate::tui::ansi::Role;
+        let code = |slug: &str| super::find_builtin(slug).expect(slug).role_color(Role::Code);
+        assert_eq!(code("dracula"), Some((0x50, 0xfa, 0x7b)));
+        assert_eq!(code("ayu-dark"), Some((0xf2, 0x96, 0x68)));
+        assert_eq!(code("nord"), Some((0x8f, 0xbc, 0xbb)));
+        assert_eq!(code("gruvbox-dark"), Some((0x8e, 0xc0, 0x7c)));
+        assert_eq!(code("tokyo-night"), Some((0x89, 0xdd, 0xff)));
+        assert_eq!(code("homebrew"), Some((0x00, 0xa6, 0xb2)));
+        // No colour of their own: the blue slot.
+        assert_eq!(code("ghostty-default-style-dark"), Some((0x81, 0xa2, 0xbe)));
+        assert_eq!(code("github-light"), Some((0x03, 0x66, 0xd6)));
+        assert_eq!(code("snazzy"), Some((0x57, 0xc7, 0xff)));
+        assert_eq!(code("tokyo-night-light"), Some((0x34, 0x54, 0x8a)));
+        // `terminal` has no colour of its own: the role is drawn in a slot.
+        assert_eq!(super::Theme::terminal().role_color(Role::Code), None);
+
+        let green: Vec<String> = super::builtin_themes()
+            .iter()
+            .filter(|theme| theme.role_color(Role::Code) == theme.ansi[2])
+            .map(|theme| theme.name.clone())
+            .collect();
+        assert_eq!(
+            green,
+            [
+                "catppuccin-latte",
+                "catppuccin-mocha",
+                "dracula",
+                "everforest-dark",
+                "everforest-light",
+                "material-dark",
+                "one-dark",
+                "one-light",
+                "palenight",
+            ]
+        );
     }
 }
