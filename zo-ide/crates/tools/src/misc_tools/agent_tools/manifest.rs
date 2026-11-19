@@ -1255,6 +1255,9 @@ fn loaded_skill_name(input_json: &str) -> Option<String> {
         .get("skill")?
         .as_str()
         .map(str::trim)
+        // A call for a range of a skill (`computer-use#L476-L1070`) reads the
+        // skill it names (t-116290).
+        .map(|skill| runtime::SkillRange::split(skill).map_or(skill, |(name, _)| name.trim()))
         .filter(|skill| !skill.is_empty())
         .map(str::to_string)
 }
@@ -1427,6 +1430,9 @@ mod activity_tests {
         record_tool_finished(path);
         record_current_tool(path, "Skill", r#"{"skill":"karpathy"}"#);
         record_tool_finished(path);
+        // A range of the skill read is the skill read (t-116290).
+        record_current_tool(path, "Skill", r#"{"skill":"karpathy#L476-L1070"}"#);
+        record_tool_finished(path);
 
         let current: AgentOutput = serde_json::from_str(
             &std::fs::read_to_string(&manifest.manifest_file).expect("read manifest"),
@@ -1434,7 +1440,7 @@ mod activity_tests {
         .expect("parse manifest");
         assert_eq!(current.activity.loaded_skills, vec!["karpathy"]);
         assert!(current.current_tool.is_none(), "finished tools never remain stale");
-        assert_eq!(current.tool_calls, 3);
+        assert_eq!(current.tool_calls, 4);
         assert!(current.activity.first_task_action_at.is_some());
         assert!(current.activity.last_task_progress_at.is_some());
         let snapshot = read_activity_snapshot(path).expect("read activity snapshot");

@@ -702,7 +702,9 @@ fn skill_call_loaded(name: &str, input: &str, loaded: &str) -> bool {
     }
     serde_json::from_str::<serde_json::Value>(input).ok().is_some_and(|value| {
         value.get("skill").or_else(|| value.get("name"))
-            .and_then(serde_json::Value::as_str) == Some(loaded)
+            .and_then(serde_json::Value::as_str)
+            // A range of a skill (`computer-use#L476-L1070`) loads it too (t-116290).
+            .map(|skill| runtime::SkillRange::split(skill).map_or(skill, |(name, _)| name)) == Some(loaded)
     })
 }
 

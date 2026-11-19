@@ -227,6 +227,12 @@ fn a_loaded_skill_with_no_following_tool_or_body_quote_is_an_unused_proxy() {
     ];
     assert_eq!(skill_used_after_load(&only_more_loading, "docx"), Some(false));
     assert_eq!(skill_used_after_load(&[], "docx"), None);
+    // A range of the skill (`docx#L476-L1070`, t-116290) loads it too.
+    let ranged = [ConversationMessage::assistant(vec![
+        ContentBlock::ToolUse { id: "load-3".into(), name: "Skill".into(), input: json!({"skill":"docx#L476-L1070"}).to_string() },
+        ContentBlock::ToolUse { id: "read-2".into(), name: "read_file".into(), input: "{}".into() },
+    ])];
+    assert_eq!(skill_used_after_load(&ranged, "docx"), Some(true));
 
     let request = SkillRequestName { task: 1, catalog: 2, at: 3 };
     let label = label_turn(PendingSuggestion {

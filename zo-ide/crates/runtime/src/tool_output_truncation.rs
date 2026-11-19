@@ -47,8 +47,8 @@ impl TruncationConfig {
 /// The tools that hand back a skill the model chose by its name.
 pub const SKILL_LOADING_TOOLS: [&str; 2] = [SKILL_TOOL, "skill_load"];
 
-/// The tool that hands back one skill by its name — whole, or the lines of it
-/// an `offset` and a `limit` name.
+/// The tool that hands back one skill by its name — whole, or the range of it
+/// the name asks: `computer-use#L476-L1070` ([`crate::SkillRange`]).
 pub const SKILL_TOOL: &str = "Skill";
 
 /// The cap a skill the model chose by its name comes back under, above the
@@ -319,17 +319,18 @@ fn skill_body(skill: &serde_json::Map<String, serde_json::Value>) -> &str {
 /// A skill body cut to about `keep` chars at whole lines — two thirds from
 /// its start, where the procedure begins, the rest from its end — under one
 /// line that says which lines are missing and the call that hands them back:
-/// `Skill` with an `offset` and a `limit`, which reads the skill as `Skill`
-/// does in any permission mode (t-115139 Z7 review — a `Read` of the skill's
-/// own file is refused outside the workspace). The numbers are the body's
-/// lines, the ones that call counts.
+/// `Skill`, which reads the skill in any permission mode (t-115139 Z7 review
+/// — a `Read` of the skill's own file is refused outside the workspace),
+/// with the lines in the name, `computer-use#L476-L1070`, the one form its
+/// wire schema takes (t-116290). The numbers are the body's lines, the ones
+/// that call counts, and the lines kept are the body's to the char.
 fn shortened_skill_body(body: &str, keep: usize, name: &str) -> String {
-    let lines: Vec<&str> = body.lines().collect();
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
     let mut used = 0;
     let head = lines
         .iter()
         .take_while(|line| {
-            used += line.chars().count() + 1;
+            used += line.chars().count();
             used <= keep * 2 / 3
         })
         .count();
@@ -338,7 +339,7 @@ fn shortened_skill_body(body: &str, keep: usize, name: &str) -> String {
         .iter()
         .rev()
         .take_while(|line| {
-            used += line.chars().count() + 1;
+            used += line.chars().count();
             used <= keep - keep * 2 / 3
         })
         .count();
@@ -346,18 +347,16 @@ fn shortened_skill_body(body: &str, keep: usize, name: &str) -> String {
     let mut out = String::with_capacity(keep + 256);
     let _ = writeln!(
         out,
-        "{SKILL_SHORTENED}: lines {first}-{last} of {} are not shown — `{SKILL_TOOL}` with skill={name} offset={first} limit={} hands them back",
+        "{SKILL_SHORTENED}: lines {first}-{last} of {} are not shown — {} hands them back",
         lines.len(),
-        (last + 1).saturating_sub(first),
+        crate::SkillRange::lines(first, last).call(name),
     );
     for line in &lines[..head] {
         out.push_str(line);
-        out.push('\n');
     }
     let _ = writeln!(out, "⟨lines {first}-{last} not shown⟩");
     for line in &lines[lines.len() - tail..] {
         out.push_str(line);
-        out.push('\n');
     }
     out
 }
@@ -1435,10 +1434,12 @@ mod tests {
     /// could not read it, and the model got the raw envelope with the
     /// procedure's middle gone. Only the body is shortened — its first and
     /// last lines stay — and one line says what is missing and names the
-    /// call that hands it back in any permission mode: `Skill` with an
-    /// `offset` and a `limit`, not a `Read` of a file outside the workspace
-    /// (the independent review). A skill the model chose by name is held to
-    /// 50,000 chars, every other result to 30,000.
+    /// call that hands it back in any permission mode: `Skill`, not a `Read`
+    /// of a file outside the workspace (the independent review), with the
+    /// lines in the skill's name — `big-skill#L476-L1070` — since the wire
+    /// schema takes `skill` and `args` and nothing else (t-116290). A skill
+    /// the model chose by name is held to 50,000 chars, every other result
+    /// to 30,000.
     #[test]
     fn an_over_cap_skill_keeps_its_json_and_names_the_call_for_its_missing_lines() {
         let body = (1..=1_500).fold(String::new(), |mut body, n| {
@@ -1478,8 +1479,30 @@ mod tests {
                 .lines()
                 .find(|line| line.contains("shortened"))
                 .unwrap_or_else(|| panic!("{tool}: one line says what is missing"));
-            assert!(note.contains("`Skill` with skill=big-skill offset=") && note.contains(" limit="), "{note}");
+            let (first, last) = note
+                .split_once("lines ")
+                .and_then(|(_, rest)| rest.split_once(" of "))
+                .and_then(|(lines, _)| lines.split_once('-'))
+                .unwrap_or_else(|| panic!("{tool}: the note says which lines are missing: {note}"));
+            assert!(
+                note.contains(&format!("`Skill` with skill=big-skill#L{first}-L{last} hands them back")),
+                "{tool}: the call names those lines in the skill's name: {note}"
+            );
+            assert!(!note.contains("offset=") && !note.contains("limit="), "{tool}: only what the wire schema takes: {note}");
             assert!(!note.contains(path), "the call reads the skill, not its file: {note}");
         }
+    }
+
+    /// The lines a shortened skill keeps are the body's own, to the char: a
+    /// `\r` stays, and a last line with no end gets none (t-116290). Put back
+    /// together with what the call it names hands back, they are the skill.
+    #[test]
+    fn a_shortened_skill_keeps_its_lines_as_they_are_written() {
+        let shortened = shortened_skill_body("one\r\ntwo\r\nthree\r\nfour", 12, "x");
+        assert_eq!(
+            shortened,
+            "[zo] skill shortened to fit the result: lines 2-3 of 4 are not shown — \
+             `Skill` with skill=x#L2-L3 hands them back\none\r\n⟨lines 2-3 not shown⟩\nfour"
+        );
     }
 }

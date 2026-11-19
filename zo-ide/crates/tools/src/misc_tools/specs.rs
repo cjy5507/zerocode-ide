@@ -25,8 +25,10 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "Skill",
             description: "Load and follow a discovered Zo skill when the user names it or the task clearly requires it.",
-            // `SkillInput` also takes `offset` and `limit`, named only by the note on a skill
-            // shortened past 50,000 chars: declaring them here broke the r49 tool budget (+54 tokens).
+            // A range of a skill rides in `skill` itself — `computer-use#L476-L1070`, the call the
+            // note on a skill shortened past 50,000 chars names (`runtime::SkillRange`, t-116290) —
+            // since declaring `offset` and `limit` here broke the r49 tool budget (+54 tokens).
+            // `SkillInput` still reads those two, for the calls v1.1.166's note named.
             input_schema: json!({
                 "type": "object",
                 "properties": {

@@ -652,74 +652,213 @@ fn a_skill_chosen_by_name_comes_back_whole_to_fifty_thousand_chars() {
     }
 }
 
-/// A skill too long even for that names the call that hands its missing
-/// lines back, and the call works where a `Read` of the skill's own file is
-/// refused (t-115139 Z7, the independent review's case): the note named the
-/// file and `Read`, and a session in workspace-write mode was refused a
-/// global skill's file outside its workspace.
+/// A skill too long even for that comes back shortened under one line that
+/// names the call handing its missing lines back — and that call, and every
+/// call an answer names after it, is one the `Skill` wire schema takes:
+/// `skill` and `args`, both strings, nothing else (t-116290, I-t115139-7).
+/// v1.1.166's note named `offset` and `limit`, which the schema does not
+/// declare and refuses (`additionalProperties: false`): a provider that holds
+/// a model to the schema could never make the call, and the middle of the
+/// skill was out of reach. Followed to the end, the calls hand back every
+/// missing line once, in either permission mode, where a `Read` of the
+/// skill's own file outside the workspace is refused (t-115139 Z7).
 #[test]
-fn a_shortened_skill_names_the_call_that_hands_its_missing_lines_back() {
+fn a_shortened_skill_hands_its_missing_lines_back_through_calls_its_wire_schema_takes() {
     use std::fmt::Write as _;
+    let schema = crate::mvp_tool_specs()
+        .iter()
+        .find(|spec| spec.name == "Skill")
+        .expect("Skill")
+        .wire_definition()
+        .input_schema;
+    let declared: std::collections::BTreeSet<&str> =
+        schema["properties"].as_object().expect("properties").keys().map(String::as_str).collect();
+    assert_eq!(declared, std::collections::BTreeSet::from(["args", "skill"]), "the wire schema stays as it is: {schema}");
+    assert_eq!(schema["additionalProperties"], json!(false), "{schema}");
+    // The independent review's skill — 1,305 lines, its middle one answer
+    // long — and one whose middle takes several answers.
+    for (name, steps) in [("zqhuge", 1_300), ("zqvast", 4_000)] {
+        let body = (1..=steps).fold(
+            format!("---\nname: {name}\ndescription: A long procedure.\n---\n\n"),
+            |mut body, n| {
+                let _ = writeln!(body, "STEP {n:04}: {}", "detail ".repeat(8));
+                body
+            },
+        );
+        for mode in [runtime::PermissionMode::WorkspaceWrite, runtime::PermissionMode::ReadOnly] {
+            let (followed, read) = with_a_project_skill(name, &body, mode, |registry, file| {
+                (
+                    follow_a_shortened_skill(registry, name),
+                    registry.execute("read_file", &json!({ "path": file.display().to_string() })),
+                )
+            });
+            let followed = followed.unwrap_or_else(|why| panic!("{name} in {mode:?}: {why}"));
+            let refused: Vec<String> = followed
+                .calls
+                .iter()
+                .flat_map(|call| call.as_object().into_iter().flatten())
+                .filter(|(field, value)| {
+                    !(declared.contains(field.as_str()) && schema["properties"][field.as_str()]["type"] == "string" && value.is_string())
+                })
+                .map(|(field, value)| format!("{field}={value}"))
+                .collect();
+            assert!(
+                refused.is_empty(),
+                "{name} in {mode:?}: the calls the answers name carry what the `Skill` wire schema refuses: {refused:?} (calls {:?})",
+                followed.calls
+            );
+            assert!(
+                followed.text == body,
+                "{name} in {mode:?}: the skill put back together is not the skill ({} chars of {}; calls {:?})",
+                followed.text.chars().count(),
+                body.chars().count(),
+                followed.calls
+            );
+            assert!(followed.sizes.iter().all(|&size| size <= 50_000), "{name} in {mode:?}: {:?}", followed.sizes);
+            if mode == runtime::PermissionMode::WorkspaceWrite {
+                assert!(
+                    matches!(read, Err(crate::ToolError::PermissionDenied { .. })),
+                    "a Read of the skill's file outside the workspace is refused: {read:?}"
+                );
+            }
+        }
+    }
+    let skill_spec = crate::mvp_tool_specs().iter().find(|spec| spec.name == "Skill").expect("Skill");
+    assert_eq!(skill_spec.required_permission, runtime::PermissionMode::ReadOnly, "every mode may call it");
+}
+
+/// A line longer than a whole answer comes back in pieces, each answer naming
+/// the call for the next, and no call is named twice (t-116290, I-t116093-1).
+/// v1.1.166 answered such a line with none of it and named the same line
+/// again, so following the answers never ended. The pieces are measured as
+/// the result's JSON carries them — a quote takes two chars there — so every
+/// answer stays under the cap its result is held to, and put back together
+/// they are the skill to the char.
+#[test]
+fn a_line_longer_than_an_answer_comes_back_in_pieces_that_never_repeat() {
+    for (name, line) in [
+        ("zqgiant", "G".repeat(52_000)),
+        ("zqhangul", "가".repeat(52_000)),
+        ("zqquotes", "\"".repeat(30_000)),
+    ] {
+        // The independent review's skill: the long line is the seventh.
+        let body = format!("---\nname: {name}\ndescription: review pagination\n---\n\nHEAD\n{line}\nTAIL\n");
+        for mode in [runtime::PermissionMode::WorkspaceWrite, runtime::PermissionMode::ReadOnly] {
+            let followed = with_a_project_skill(name, &body, mode, |registry, _| follow_a_shortened_skill(registry, name))
+                .unwrap_or_else(|why| panic!("{name} in {mode:?}: {why}"));
+            assert!(
+                followed.text == body,
+                "{name} in {mode:?}: the skill put back together is not the skill ({} chars of {}; calls {:?})",
+                followed.text.chars().count(),
+                body.chars().count(),
+                followed.calls
+            );
+            assert!(followed.calls.len() >= 2, "{name}: the long line came in pieces: {:?}", followed.calls);
+            assert!(followed.sizes.iter().all(|&size| size <= 50_000), "{name} in {mode:?}: {:?}", followed.sizes);
+            assert!(
+                followed.calls.iter().all(|call| call.as_object().is_some_and(|fields| fields.keys().all(|field| field == "skill"))),
+                "{name}: only the name carries the range: {:?}",
+                followed.calls
+            );
+        }
+    }
+}
+
+/// What a model that does only what a shortened skill's answers say gets.
+struct Followed {
+    /// The skill put back together: the shortened answer's own lines, with
+    /// what the calls handed back in place of the lines it left out.
+    text: String,
+    /// Each call made after the first, as the input a model sends.
+    calls: Vec<serde_json::Value>,
+    /// How long each answer was, in chars, the first one's included.
+    sizes: Vec<usize>,
+}
+
+/// Load `name`, then make the call its shortened answer names and the call
+/// each answer names after that — and nothing else — until an answer names
+/// none (t-116290). An answer that hands back nothing, a call named twice and
+/// a fiftieth call are each the end of a reading that would never finish.
+fn follow_a_shortened_skill(registry: &crate::GlobalToolRegistry, name: &str) -> Result<Followed, String> {
+    let prompt_of = |answer: &str| -> Result<String, String> {
+        let value: serde_json::Value = serde_json::from_str(answer)
+            .map_err(|error| format!("not JSON ({error}): {}", answer.chars().take(400).collect::<String>()))?;
+        value["prompt"].as_str().map(str::to_string).ok_or_else(|| format!("no prompt: {value}"))
+    };
+    let first = registry.execute("Skill", &json!({ "skill": name })).map_err(|error| format!("{error:?}"))?;
+    let mut sizes = vec![first.chars().count()];
+    let shortened = prompt_of(&first)?;
+    let (note, shown) = shortened.split_once('\n').ok_or("an answer of one line")?;
+    let (head, rest) = shown.split_once("⟨lines ").ok_or_else(|| format!("nothing marks the lines left out: {note}"))?;
+    let tail = rest.split_once('\n').map_or("", |(_, tail)| tail);
+    let mut call = named_call(note).ok_or_else(|| format!("the note names no call: {note}"))?;
+    let (mut text, mut calls) = (head.to_string(), Vec::new());
+    loop {
+        if calls.contains(&call) {
+            return Err(format!("{call} was named twice; calls {calls:?}"));
+        }
+        if calls.len() == 50 {
+            return Err(format!("fifty calls, and the answers still name another: {call}"));
+        }
+        let answer = registry.execute("Skill", &call).map_err(|error| format!("{call}: {error:?}"))?;
+        sizes.push(answer.chars().count());
+        let prompt = prompt_of(&answer)?;
+        let (header, piece) = prompt.split_once('\n').unwrap_or((prompt.as_str(), ""));
+        if piece.is_empty() {
+            return Err(format!("the answer to {call} carried nothing of what it asked for — {header}"));
+        }
+        text.push_str(piece);
+        let next = named_call(header);
+        calls.push(call);
+        let Some(next) = next else { break };
+        call = next;
+    }
+    text.push_str(tail);
+    Ok(Followed { text, calls, sizes })
+}
+
+/// The call a line names after "`Skill` with ", as the input a model sends:
+/// each `field=value` that follows, a value of digits as a number.
+fn named_call(line: &str) -> Option<serde_json::Value> {
+    let (_, call) = line.split_once("`Skill` with ")?;
+    let fields: serde_json::Map<String, serde_json::Value> = call
+        .split_whitespace()
+        .map_while(|field| field.split_once('='))
+        .map(|(field, value)| (field.to_string(), value.parse::<u64>().map_or_else(|_| json!(value), |number| json!(number))))
+        .collect();
+    (!fields.is_empty()).then_some(serde_json::Value::Object(fields))
+}
+
+/// Run `body` against a registry in `mode` whose process sits in a project
+/// with one skill, `name`, whose text is `skill`; the workspace the registry
+/// may read and write is somewhere else. `body` is handed the skill's file.
+fn with_a_project_skill<T>(
+    name: &str,
+    skill: &str,
+    mode: runtime::PermissionMode,
+    body: impl FnOnce(&crate::GlobalToolRegistry, &std::path::Path) -> T,
+) -> T {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (cwd, workspace) = (temp_path("skill-range-cwd"), temp_path("skill-range-ws"));
     fs::create_dir_all(&workspace).expect("a workspace");
-    let skill_dir = cwd.join(".zo").join("skills").join("zqhuge");
+    let skill_dir = cwd.join(".zo").join("skills").join(name);
     fs::create_dir_all(&skill_dir).expect("skill dir should exist");
-    let body = (5..=1_200).fold(String::from("---\nname: zqhuge\ndescription: A long procedure.\n---\n"), |mut body, n| {
-        let _ = writeln!(body, "Step {n:04}: do what this step says, then check that it held.");
-        body
-    });
     let file = skill_dir.join("SKILL.md");
-    fs::write(&file, &body).expect("skill file should exist");
+    fs::write(&file, skill).expect("skill file should exist");
     let original_cwd = std::env::current_dir().expect("cwd");
     std::env::set_current_dir(&cwd).expect("enter temp cwd");
     let ctx = crate::ToolContext::new().with_workspace_root(workspace.clone());
-    ctx.set_permission_mode(runtime::PermissionMode::WorkspaceWrite);
+    ctx.set_permission_mode(mode);
     let registry = crate::GlobalToolRegistry::builtin().with_context(ctx);
-    let first = registry.execute("Skill", &json!({ "skill": "zqhuge" }));
-    let read = registry.execute("read_file", &json!({ "path": file.display().to_string() }));
-    let asked = first.as_ref().ok().and_then(|text| {
-        let output: serde_json::Value = serde_json::from_str(text).ok()?;
-        let note = output["prompt"].as_str()?.lines().next()?.to_string();
-        let number = |key: &str| -> Option<usize> {
-            let at = note.find(key)? + key.len();
-            note[at..].split(|ch: char| !ch.is_ascii_digit()).next()?.parse().ok()
-        };
-        Some((note.clone(), number(" offset=")?, number(" limit=")?))
-    });
-    let lines = asked
-        .as_ref()
-        .map(|(_, offset, limit)| registry.execute("Skill", &json!({ "skill": "zqhuge", "offset": offset, "limit": limit })));
+    // Nothing in `body` may panic with the process standing in the project:
+    // it returns what it saw, and the caller asserts once the cwd is back.
+    let seen = body(&registry, &file);
     std::env::set_current_dir(original_cwd).expect("restore cwd");
     cleanup_temp_cwd(&cwd, "temp cwd should clean up");
     let _ = fs::remove_dir_all(&workspace);
-
-    let first = first.expect("Skill should succeed");
-    assert!(first.chars().count() <= 50_000, "{} chars", first.chars().count());
-    serde_json::from_str::<serde_json::Value>(&first).expect("the envelope is still JSON");
-    assert!(
-        matches!(read, Err(crate::ToolError::PermissionDenied { .. })),
-        "a Read of the skill's file outside the workspace is refused: {read:?}"
-    );
-    let (note, offset, limit) = asked
-        .unwrap_or_else(|| panic!("the note names an offset and a limit: {}", first.chars().take(400).collect::<String>()));
-    assert!(note.contains("`Skill` with skill=zqhuge offset="), "{note}");
-    let lines = lines.expect("asked").expect("the call hands the lines back");
-    let output: serde_json::Value = serde_json::from_str(&lines).expect("valid json");
-    let wanted: String = body.lines().skip(offset - 1).take(limit).fold(String::new(), |mut text, line| {
-        let _ = writeln!(text, "{line}");
-        text
-    });
-    let prompt = output["prompt"].as_str().expect("prompt");
-    assert_eq!(
-        prompt,
-        format!("[zo] lines {offset}-{} of 1200\n{wanted}", offset + limit - 1),
-        "the lines the note named, under one line that says which"
-    );
-    let skill_spec = crate::mvp_tool_specs().iter().find(|spec| spec.name == "Skill").expect("Skill");
-    assert_eq!(skill_spec.required_permission, runtime::PermissionMode::ReadOnly, "every mode may call it");
+    seen
 }
 
 #[test]

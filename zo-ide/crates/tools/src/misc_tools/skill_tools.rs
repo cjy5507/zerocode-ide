@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -12,10 +13,14 @@ use super::ToolError;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SkillInput {
+    /// The skill's name, or the name and a range of it after a `#` —
+    /// `computer-use#L476-L1070` — for a skill a result carried shortened
+    /// (t-116290): the one form the wire schema takes.
     pub skill: String,
     pub args: Option<String>,
-    /// The first line of the body to hand back, counted from 1 — for a skill
-    /// a result carried shortened (t-115139 Z7 review).
+    /// The first line of the body to hand back, counted from 1 — the call
+    /// v1.1.166's note named (t-115139 Z7 review). Read as the range in the
+    /// name is read, by the same code; the wire schema declares neither.
     #[serde(default)]
     pub offset: Option<usize>,
     /// How many lines from `offset`; to the body's end when absent.
@@ -183,19 +188,59 @@ pub(crate) fn execute_skill(input: SkillInput) -> Result<SkillOutput, ToolError>
 /// from the tool context's. Resolving against the process's instead would
 /// rank a skill found in one project and load one found in another.
 pub(crate) fn execute_skill_at(input: SkillInput, cwd: &Path) -> Result<SkillOutput, ToolError> {
-    let resolved = match resolve_skill_path(&input.skill, cwd) {
+    // A range rides in the name — `computer-use#L476-L1070` (t-116290) — and
+    // is read off it only when no skill answers to the whole name, so a skill
+    // whose own name ended that way would still load by it.
+    let (name, found, range) = match find_skill(&input.skill, cwd) {
+        Err(ToolError::NotFound(unknown)) => {
+            let Some((name, range)) = runtime::SkillRange::split(input.skill.trim()) else {
+                return Err(ToolError::NotFound(unknown));
+            };
+            (name, find_skill(name, cwd)?, Some(range))
+        }
+        found => (input.skill.trim(), found?, None),
+    };
+    // `offset` and `limit`, the call v1.1.166's note named, ask a range the
+    // same code reads.
+    let range = range.or_else(|| offset_range(input.offset, input.limit));
+    let description = parse_skill_description(&found.body);
+    let prompt = match range {
+        Some(range) => range_text(&found.body, name, range)?,
+        None => found.body,
+    };
+    Ok(SkillOutput {
+        prompt,
+        skill: input.skill,
+        path: found.path,
+        args: input.args,
+        description,
+        origin: found.origin,
+    })
+}
+
+/// A skill found by its name: its `SKILL.md`, where it was found and the
+/// trusted source that holds it.
+struct FoundSkill {
+    path: String,
+    origin: String,
+    body: String,
+}
+
+/// The skill `skill` names in the catalog — refused while it is proposed —
+/// or, with none there, one of the window's publication skills.
+fn find_skill(skill: &str, cwd: &Path) -> Result<FoundSkill, ToolError> {
+    let resolved = match resolve_skill_path(skill, cwd) {
         Ok(resolved) => resolved,
         Err(ToolError::NotFound(_)) => {
             // Headless zo has no window installer. Its three publication skills
             // are still readable, from the very same bytes the window installs.
-            let name = input.skill.trim().trim_start_matches(['/', '$']);
+            let name = skill.trim().trim_start_matches(['/', '$']);
             if crate::artifact_tools::DESIGN_SKILLS.contains(&name) {
-                if let Some(skill) = zerocode_core::skill_install::bundled_skill(name) {
-                    return Ok(SkillOutput {
-                        prompt: lines_asked(skill.content, input.offset, input.limit),
-                        skill: input.skill, path: format!("bundled/{}/SKILL.md", skill.name),
-                        args: input.args, description: parse_skill_description(skill.content),
+                if let Some(bundled) = zerocode_core::skill_install::bundled_skill(name) {
+                    return Ok(FoundSkill {
+                        path: format!("bundled/{}/SKILL.md", bundled.name),
                         origin: "bundled".into(),
+                        body: bundled.content.to_string(),
                     });
                 }
             }
@@ -203,59 +248,114 @@ pub(crate) fn execute_skill_at(input: SkillInput, cwd: &Path) -> Result<SkillOut
         }
         Err(error) => return Err(error),
     };
-    let prompt = std::fs::read_to_string(&resolved.path)?;
-    if is_proposed_skill(&prompt) {
+    let body = std::fs::read_to_string(&resolved.path)?;
+    if is_proposed_skill(&body) {
         return Err(ToolError::InvalidInput(format!(
-            "skill `{}` is proposed and must be approved before use",
-            input.skill
+            "skill `{skill}` is proposed and must be approved before use"
         )));
     }
-    let description = parse_skill_description(&prompt);
-
-    Ok(SkillOutput {
-        prompt: lines_asked(&prompt, input.offset, input.limit),
-        skill: input.skill,
-        path: resolved.path.display().to_string(),
-        args: input.args,
-        description,
-        origin: resolved.origin,
-    })
+    Ok(FoundSkill { path: resolved.path.display().to_string(), origin: resolved.origin, body })
 }
 
-/// A skill's body, or — when an `offset` or a `limit` asks — the lines of it
-/// they name under one line that says which (t-115139 Z7 review). A skill too
-/// long for its result comes back shortened, and the line naming the missing
-/// lines names this call: `Skill` reads the skill itself, in any permission
-/// mode, where a `Read` of its file outside the workspace is refused. The
-/// lines stop before they would outgrow that result, and say where the rest
-/// starts.
-fn lines_asked(body: &str, offset: Option<usize>, limit: Option<usize>) -> String {
+/// The range `offset` and `limit` ask, `None` when neither is given.
+fn offset_range(offset: Option<usize>, limit: Option<usize>) -> Option<runtime::SkillRange> {
     if offset.is_none() && limit.is_none() {
-        return body.to_string();
+        return None;
     }
-    let lines: Vec<&str> = body.lines().collect();
     let first = offset.unwrap_or(1).max(1);
-    let asked_end = limit.map_or(lines.len(), |limit| first.saturating_add(limit).saturating_sub(1)).min(lines.len());
+    let last = limit.map_or(usize::MAX, |limit| first.saturating_add(limit).saturating_sub(1));
+    Some(runtime::SkillRange::lines(first, last))
+}
+
+/// `range` of a skill's body under one line that says what it is and — when
+/// the answer ran out of room first — names the call that hands the rest back
+/// (t-115139 Z7 review, t-116290). A skill too long for its result comes back
+/// shortened, and the line naming its missing lines names this call: `Skill`
+/// reads the skill itself, in any permission mode, where a `Read` of its file
+/// outside the workspace is refused.
+///
+/// Whole lines come while they fit the answer; a line that does not fit what
+/// is left starts the next answer, and a line longer than a whole answer
+/// comes in pieces of it. So every call hands something back, never one
+/// position twice, and the calls the answers name one after another hand
+/// back every char of the range once: the body's own bytes, line ends
+/// included. v1.1.166 answered a line too long for its room with none of it
+/// and named the same line again (I-t116093-1).
+fn range_text(body: &str, name: &str, range: runtime::SkillRange) -> Result<String, ToolError> {
+    let lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let total = lines.len();
+    let (first, column) = (range.line.max(1), range.column.max(1));
+    let Some(&start) = lines.get(first - 1) else {
+        return Err(ToolError::InvalidInput(format!("`{name}` has {total} lines; line {first} is past its end")));
+    };
+    let Some((skip, _)) = start.char_indices().nth(column - 1) else {
+        return Err(ToolError::InvalidInput(format!(
+            "line {first} of `{name}` has {} chars; char {column} is past its end",
+            line_chars(start)
+        )));
+    };
+    let last = range.last_line.clamp(first, total);
     let room = runtime::SKILL_RESULT_CHARS.saturating_sub(SKILL_ENVELOPE_ROOM);
     let (mut shown, mut used) = (String::new(), 0);
-    let mut last = first.saturating_sub(1);
-    for line in lines.iter().take(asked_end).skip(first.saturating_sub(1)) {
-        // Measured as the envelope carries it: JSON escapes a quote, a
-        // backslash and the line's end.
-        used += serde_json::to_string(line).map_or(line.len(), |quoted| quoted.chars().count());
-        if used > room {
-            break;
+    // The first char not yet shown: its line, and its byte in that line.
+    let (mut line, mut from) = (first, skip);
+    while line <= last {
+        let rest = &lines[line - 1][from..];
+        let cost = json_chars(rest);
+        if used + cost <= room {
+            shown.push_str(rest);
+            used += cost;
+            (line, from) = (line + 1, 0);
+            continue;
         }
-        shown.push_str(line);
-        shown.push('\n');
-        last += 1;
+        if shown.is_empty() {
+            // A line longer than a whole answer: as many of its chars as fit.
+            let mut fits = 0;
+            for (at, ch) in rest.char_indices() {
+                let cost = json_chars(ch.encode_utf8(&mut [0; 4]));
+                if used + cost > room {
+                    break;
+                }
+                used += cost;
+                fits = at + ch.len_utf8();
+            }
+            shown.push_str(&rest[..fits]);
+            from += fits;
+        }
+        break;
     }
-    let rest = if last < asked_end { format!("; the rest from offset={}", last + 1) } else { String::new() };
-    format!("[zo] lines {first}-{last} of {}{rest}\n{shown}", lines.len())
+    // `line` and `from` now point at the first char not shown — past `last`
+    // when the whole range is here. A `from` inside a line is a cut there.
+    let cut = (from > 0).then(|| lines[line - 1][..from].chars().count());
+    let shown_to = if cut.is_some() { line } else { line - 1 };
+    let mut header = format!("[zo] lines {first}-{shown_to} of {total}");
+    if column > 1 {
+        let _ = write!(header, ", line {first} from char {column}");
+    }
+    if let Some(cut) = cut {
+        let _ = write!(header, ", line {line} cut after char {cut} of {}", line_chars(lines[line - 1]));
+    }
+    if line <= last {
+        let rest = runtime::SkillRange { line, column: cut.map_or(1, |cut| cut + 1), last_line: last };
+        let _ = write!(header, " — the rest: {}", rest.call(name));
+    }
+    Ok(format!("{header}\n{shown}"))
 }
 
-/// Room an envelope's other fields take beside the lines a `Skill` call with
-/// an `offset` hands back: its name, path, description and origin.
+/// How many chars a line holds, its end of line left out.
+fn line_chars(line: &str) -> usize {
+    line.strip_suffix('\n').unwrap_or(line).chars().count()
+}
+
+/// How many chars `text` takes inside a result's JSON, where a quote, a
+/// backslash and a control char are escaped: what the cap counts.
+fn json_chars(text: &str) -> usize {
+    serde_json::to_string(text).map_or(text.len(), |quoted| quoted.chars().count() - 2)
+}
+
+/// Room an envelope's other fields — the skill's name, path, description,
+/// origin and arguments — and an answer's first line take beside a range of
+/// the skill.
 const SKILL_ENVELOPE_ROOM: usize = 4_000;
 
 /// Rank every installed skill against `task` and hand back the best of them
@@ -1260,5 +1360,83 @@ mod tests {
         assert_eq!(named, vec!["zqhuge"]);
         let note = output.note.as_deref().expect("a note");
         assert!(note.contains("`Skill`") && note.contains("whole"), "{note}");
+    }
+
+    // ---- a range of a skill, asked in its name (t-116290) ------------------
+
+    use super::{execute_skill_at, range_text, SkillInput};
+
+    /// `offset` and `limit` — the call v1.1.166's note named — still read,
+    /// through the code the range in the name is read by: the same answer to
+    /// the char. A position past the skill's end is refused, and a skill whose
+    /// folder's whole name ends like a range loads by that name.
+    #[test]
+    fn the_call_v1_1_166_named_reads_what_the_range_in_the_name_reads() {
+        use std::fmt::Write as _;
+        let (root, cwd) = project_with_skills(&[
+            ("zqpaged", "A long procedure"),
+            ("zqodd", "A procedure"),
+            ("zqodd#L2", "Another procedure"),
+        ]);
+        let body = (1..=40).fold(String::from("---\nname: zqpaged\ndescription: A long procedure\n---\n"), |mut body, n| {
+            let _ = writeln!(body, "Step {n}");
+            body
+        });
+        std::fs::write(cwd.join(".zo").join("skills").join("zqpaged").join("SKILL.md"), &body).expect("write the skill");
+        let ask = |skill: &str, offset: Option<usize>, limit: Option<usize>| {
+            execute_skill_at(SkillInput { skill: skill.to_string(), args: None, offset, limit }, &cwd).map(|output| output.prompt)
+        };
+        let named = ask("zqpaged#L10-L19", None, None);
+        let numbered = ask("zqpaged", Some(10), Some(10));
+        let to_the_end = (ask("zqpaged#L40-L44", None, None), ask("zqpaged", Some(40), None));
+        let whole = ask("zqpaged", None, None);
+        let past = [ask("zqpaged#L45", None, None), ask("zqpaged#L14C9", None, None)];
+        let newline = ask("zqpaged#L14C8", None, None);
+        let odd = (ask("zqodd#L2", None, None), ask("zqodd#L6", None, None));
+        let _ = std::fs::remove_dir_all(root);
+
+        let named = named.expect("a range in the name");
+        let wanted: String = body.split_inclusive('\n').skip(9).take(10).collect();
+        assert_eq!(named, format!("[zo] lines 10-19 of 44\n{wanted}"));
+        assert_eq!(numbered.expect("offset and limit"), named);
+        let (by_range, by_offset) = (to_the_end.0.expect("a range"), to_the_end.1.expect("an offset"));
+        assert_eq!(by_range, "[zo] lines 40-44 of 44\nStep 36\nStep 37\nStep 38\nStep 39\nStep 40\n");
+        assert_eq!(by_offset, by_range);
+        assert_eq!(whole.expect("the name alone"), body);
+        for refused in past {
+            assert!(matches!(refused, Err(ToolError::InvalidInput(_))), "{refused:?}");
+        }
+        assert_eq!(newline.expect("a line's end"), "[zo] lines 14-14 of 44, line 14 from char 8\n\n");
+        let (whole_name, range) = (odd.0.expect("a folder named so"), odd.1.expect("a range of zqodd"));
+        assert!(whole_name.contains("The whole body of zqodd#L2,"), "{whole_name}");
+        assert_eq!(range, "[zo] lines 6-6 of 6\nThe whole body of zqodd, which only a load ever reads.\n");
+    }
+
+    /// A range comes back as the body's own bytes — a `\r` and a last line
+    /// with no end kept — and a line longer than a whole answer comes in
+    /// pieces whose first line says where each one starts and stops and
+    /// names the call for the next (t-116290, I-t116093-1).
+    #[test]
+    fn a_range_is_the_bodys_own_text_and_a_long_line_comes_in_named_pieces() {
+        let range = runtime::SkillRange::lines;
+        assert_eq!(range_text("a\r\nb\r\nc", "x", range(2, 3)).expect("a range"), "[zo] lines 2-3 of 3\nb\r\nc");
+        let long = format!("head\n{}\ntail", "G".repeat(50_000));
+        let first = range_text(&long, "x", range(2, 3)).expect("the first piece");
+        let (header, piece) = first.split_once('\n').expect("a first line");
+        assert_eq!(
+            header,
+            "[zo] lines 2-2 of 3, line 2 cut after char 46000 of 50000 — the rest: `Skill` with skill=x#L2C46001-L3"
+        );
+        assert_eq!(piece, "G".repeat(46_000));
+        let rest = runtime::SkillRange { line: 2, column: 46_001, last_line: 3 };
+        assert_eq!(
+            range_text(&long, "x", rest).expect("the rest"),
+            format!("[zo] lines 2-3 of 3, line 2 from char 46001\n{}\ntail", "G".repeat(4_000))
+        );
+        // Lines that fit come whole, and one that does not fit what is left
+        // starts the next answer whole rather than in pieces.
+        let lines = format!("{}\n{}\n", "a".repeat(30_000), "b".repeat(30_000));
+        let first = range_text(&lines, "x", range(1, 2)).expect("the first answer");
+        assert_eq!(first, format!("[zo] lines 1-1 of 2 — the rest: `Skill` with skill=x#L2-L2\n{}\n", "a".repeat(30_000)));
     }
 }
