@@ -345,8 +345,8 @@ impl Slash {
             Self::Copy => "copy the last answer as markdown",
             Self::Compact => "compact the conversation to free context",
             Self::Rewind => crate::tui::strings::REWIND_COMMAND_DESCRIPTION,
-            Self::Goal => "persist a goal and run bounded autonomous checks",
-            Self::Loop => "repeat a prompt on a bounded session schedule",
+            Self::Goal => "persist a goal and run bounded autonomous checks · read-only without --allow-writes unless Full Access",
+            Self::Loop => "repeat a prompt on a bounded session schedule · read-only without --allow-writes unless Full Access",
             Self::Status => "model, account, limits, session and context",
             Self::Context => "what fills the context window and when it compacts",
             // codex `slash_command.rs:117`.

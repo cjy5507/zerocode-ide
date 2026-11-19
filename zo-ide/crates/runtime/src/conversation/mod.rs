@@ -566,7 +566,9 @@ fn denial_banner(tool_name: &str, reason: &str) -> String {
 /// Classify a denied call for the transcript without changing the full,
 /// model-visible tool result. A permission-mode mismatch is an expected policy
 /// skip: show one quiet hint per turn, then suppress repeats. Hook blocks,
-/// explicit user denials, and other exceptional reasons remain warnings.
+/// explicit user denials, and other exceptional reasons remain warnings. A
+/// skip an unattended run's hold made names the hold and the way past it,
+/// not `/permissions`, which cannot lift it (t-117004).
 fn permission_denial_notice(
     tool_name: &str,
     reason: &str,
@@ -587,8 +589,9 @@ fn permission_denial_notice(
         {
             return None;
         }
-        Some(format!(
-            "{active} mode skipped '{tool_name}' (needs {required}) \u{00b7} /permissions"
+        Some(crate::permissions::ReadOnlyHold::named_in(reason).map_or_else(
+            || format!("{active} mode skipped '{tool_name}' (needs {required}) \u{00b7} /permissions"),
+            |hold| hold.skipped_line(tool_name, required),
         ))
     })();
 

@@ -352,7 +352,7 @@ async fn run_frontend(
                             SlashOutcome::Continue => {}
                             SlashOutcome::Exit => break ExitReason::UserExit,
                             SlashOutcome::Turn(prompt) => {
-                                if run_one_turn(&mut session, &prompt, &mut renderer, &mut input_rx, reporter.as_ref(), false, false).await.exit
+                                if run_one_turn(&mut session, &prompt, &mut renderer, &mut input_rx, reporter.as_ref(), None).await.exit
                                     == TurnExit::ExitAfter
                                 {
                                     break ExitReason::UserExit;
@@ -362,7 +362,7 @@ async fn run_frontend(
                                 run_compaction(&mut session, focus, &mut renderer).await;
                             }
                         }
-                    } else if run_one_turn(&mut session, trimmed, &mut renderer, &mut input_rx, reporter.as_ref(), false, false).await.exit
+                    } else if run_one_turn(&mut session, trimmed, &mut renderer, &mut input_rx, reporter.as_ref(), None).await.exit
                         == TurnExit::ExitAfter
                     {
                         break ExitReason::UserExit;
@@ -425,7 +425,7 @@ async fn run_frontend(
                 // The window's mail notice opens the next turn (t-75726).
                 Command::Notice { text } => {
                     session.mark_notice_turn();
-                    if run_one_turn(&mut session, &text, &mut renderer, &mut input_rx, reporter.as_ref(), false, false).await.exit
+                    if run_one_turn(&mut session, &text, &mut renderer, &mut input_rx, reporter.as_ref(), None).await.exit
                         == TurnExit::ExitAfter
                     {
                         break ExitReason::UserExit;
@@ -862,10 +862,9 @@ async fn run_one_turn<W: Write>(
     renderer: &mut Renderer<W>,
     input_rx: &mut mpsc::Receiver<InputEvent>,
     reporter: Option<&HookReporter>,
-    autonomous: bool,
-    allow_writes: bool,
+    autonomous: Option<crate::autonomy::TurnWrites>,
 ) -> TurnCompletion {
-    let saved_permission = autonomous.then(|| session.begin_autonomous_turn(allow_writes));
+    let saved_permission = autonomous.map(|writes| session.begin_autonomous_turn(writes));
     let session_id = session.handle.id.clone();
     let registry = session.registry();
     let transcript_path = session.handle.path.to_string_lossy().into_owned();
@@ -936,7 +935,7 @@ async fn run_one_turn<W: Write>(
         );
                 let published = turn_scaffold.publish(&block);
                 if let Some(prompt) = renderer.push(block) {
-                    if autonomous && (is_permission || is_question) {
+                    if autonomous.is_some() && (is_permission || is_question) {
                         permission_blocked |= is_permission;
                         question_blocked |= is_question;
                         prompt.dismiss();
@@ -1022,7 +1021,7 @@ async fn run_one_turn<W: Write>(
                 Some(InputEvent::Eof) | None => {
                     // stdin 이 끝났다고 답을 버리지 않는다 — 턴은 끝까지, 그 뒤 종료.
                     input_open = false;
-                    if !autonomous {
+                    if autonomous.is_none() {
                         exit_after = true;
                     }
                     // A prompt already parked can no longer be answered by a
@@ -1136,15 +1135,18 @@ impl<W: Write> driver::AutonomyFrontend for HeadlessFrontend<'_, W> {
         self.reporter
     }
 
-    async fn run_turn(&mut self, prompt: &str, allow_writes: bool) -> Option<TurnOutcome> {
+    async fn run_turn(
+        &mut self,
+        prompt: &str,
+        writes: crate::autonomy::TurnWrites,
+    ) -> Option<TurnOutcome> {
         let completion = run_one_turn(
             self.session,
             prompt,
             self.renderer,
             self.input_rx,
             self.reporter,
-            true,
-            allow_writes,
+            Some(writes),
         )
         .await;
         (completion.exit == TurnExit::Continue).then_some(completion.outcome)

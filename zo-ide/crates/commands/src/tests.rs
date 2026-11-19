@@ -1864,8 +1864,8 @@ fn loop_recipe_presets_expand_to_recurring_loops() {
         "the overnight protocol footer is appended"
     );
     assert!(
-        prompt.contains("read-only by default"),
-        "presets are read-only + propose by default"
+        prompt.contains("These loops only propose: do not edit files"),
+        "presets ask for proposals in every mode, Full Access included"
     );
 
     // Intervals per preset.

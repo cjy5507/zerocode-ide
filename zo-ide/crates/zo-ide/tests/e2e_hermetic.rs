@@ -1276,6 +1276,312 @@ async fn e2e_goal_resumes_after_provider_retry_after_and_reaches_its_condition()
     );
 }
 
+/// The text and error flag of the result the model was sent for
+/// `tool_use_id`, from the first request that carries it.
+fn tool_result_sent(requests: &[CapturedRequest], tool_use_id: &str) -> Option<(String, bool)> {
+    requests.iter().find_map(|request| {
+        let body: serde_json::Value = serde_json::from_str(&request.raw_body).ok()?;
+        body["messages"].as_array()?.iter().find_map(|message| {
+            message["content"].as_array()?.iter().find_map(|block| {
+                (block["type"] == "tool_result" && block["tool_use_id"] == tool_use_id).then(|| {
+                    let text = match &block["content"] {
+                        serde_json::Value::String(text) => text.clone(),
+                        serde_json::Value::Array(parts) => parts
+                            .iter()
+                            .filter_map(|part| part["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    (text, block["is_error"].as_bool().unwrap_or(false))
+                })
+            })
+        })
+    })
+}
+
+/// Print the lines of a plain run a person reads about an unattended run's
+/// permission — the start, a skipped call, a stop — so a passing run's log
+/// shows the words too (`--nocapture`), beside a failing one's assertion.
+fn show_permission_lines(label: &str, stdout: &str) {
+    for line in stdout.lines().filter(|line| {
+        ["read-only", "skipped '", "autonomous turn stopped", "loop: loop-", "goal: "]
+            .iter()
+            .any(|marker| line.contains(marker))
+    }) {
+        eprintln!("{label} | {}", line.trim());
+    }
+}
+
+/// The goal the `goal_turns` model runs: its plan turn calls `TodoWrite`, its
+/// action turn writes a file, and its gate is a command no read-only mode
+/// lets run.
+const GOAL_TURNS_START: &str =
+    "/goal start PARITY_SCENARIO:goal_turns ship it --check \"touch gate-ran\"";
+
+/// The person's report (t-117004, 11-19): in a session the screen calls Full
+/// Access, a `/goal` started without `--allow-writes` ran every turn
+/// read-only — the plan's `TodoWrite`, the action's write and the gate's
+/// command were all refused — and the model asked the person to change a
+/// permission they had already given. Every unattended turn keeps Full
+/// Access, in both modes the screen gives that name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_full_access_goal_without_allow_writes_plans_writes_and_runs_its_gate() {
+    for mode in ["danger-full-access", "allow"] {
+        let layout = Layout::new();
+        let service = MockAnthropicService::spawn()
+            .await
+            .expect("start goal mock service");
+        let mut run = pty(&layout, &service.base_url(), &["--permission-mode", mode]);
+        run.wait_for("directory:", TEST_TIMEOUT);
+        run.send(format!("{GOAL_TURNS_START}\r").as_bytes())
+            .expect("start goal");
+        run.wait_until(0, TEST_TIMEOUT, |bytes| {
+            let text = String::from_utf8_lossy(bytes);
+            text.contains("(completed)") || text.contains("(paused)")
+        });
+        let capture = String::from_utf8_lossy(&run.finish()).to_string();
+        let requests = service.captured_requests().await;
+
+        assert_eq!(
+            tool_result_sent(&requests, "toolu_goal_plan").map(|(_, is_error)| is_error),
+            Some(false),
+            "{mode}: the plan turn's TodoWrite was refused: {:?}\n{capture}",
+            tool_result_sent(&requests, "toolu_goal_plan"),
+        );
+        assert!(
+            layout.cwd.join(mock_anthropic_service::GOAL_TURNS_ACTION_FILE).exists(),
+            "{mode}: the action turn's write was refused: {:?}\n{capture}",
+            tool_result_sent(&requests, "toolu_goal_write"),
+        );
+        assert!(
+            layout.cwd.join("gate-ran").exists(),
+            "{mode}: the gate command was refused: {:?}\n{capture}",
+            tool_result_sent(&requests, "toolu_goal_gate"),
+        );
+        assert!(capture.contains("(completed)"), "{mode}: the goal did not complete:\n{capture}");
+        assert!(!capture.contains("skipped '"), "{mode}: a Full Access goal had a call skipped:\n{capture}");
+        assert!(
+            !capture.contains("read-only run"),
+            "{mode}: a Full Access start was told it runs read-only:\n{capture}"
+        );
+    }
+}
+
+/// The same report for `/loop`: a Full Access session's loop started without
+/// `--allow-writes` writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_full_access_loop_without_allow_writes_writes() {
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start loop mock service");
+    let mut run = pty(&layout, &service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"/loop 1 PARITY_SCENARIO:write_file_allowed make the file\r")
+        .expect("start loop");
+    run.wait_for("runs 1/", TEST_TIMEOUT);
+    let capture = String::from_utf8_lossy(&run.finish()).to_string();
+    let requests = service.captured_requests().await;
+
+    assert!(
+        layout.cwd.join("generated/output.txt").exists(),
+        "the loop's write was refused: {:?}\n{capture}",
+        tool_result_sent(&requests, "toolu_write_allowed"),
+    );
+    assert!(!capture.contains("skipped '"), "a Full Access loop had a call skipped:\n{capture}");
+}
+
+/// The append-only frontend runs the same driver: a piped `/goal` and a
+/// headless `--loop-every` loop in a Full Access session keep it too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_plain_full_access_goal_and_headless_loop_keep_full_access() {
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start plain goal mock service");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"],
+        format!("{GOAL_TURNS_START}\n").as_bytes(),
+    )
+    .expect("run a piped goal");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    show_permission_lines("full access · piped /goal", &stdout);
+    let requests = service.captured_requests().await;
+    assert_eq!(
+        tool_result_sent(&requests, "toolu_goal_plan").map(|(_, is_error)| is_error),
+        Some(false),
+        "the plan turn's TodoWrite was refused:\n{stdout}"
+    );
+    assert!(
+        layout.cwd.join(mock_anthropic_service::GOAL_TURNS_ACTION_FILE).exists(),
+        "the action turn's write was refused:\n{stdout}"
+    );
+    assert!(layout.cwd.join("gate-ran").exists(), "the gate command was refused:\n{stdout}");
+    assert!(stdout.contains("(completed)"), "the piped goal did not complete:\n{stdout}");
+
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start headless loop mock service");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &[
+            "--plain",
+            "--loop-every",
+            "1s",
+            "--loop-max",
+            "1",
+            "--permission-mode",
+            "danger-full-access",
+        ],
+        b"PARITY_SCENARIO:write_file_allowed make the file\n",
+    )
+    .expect("run a headless loop");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(output.status.success(), "headless loop exited with {:?}:\n{stdout}", output.status);
+    assert!(
+        layout.cwd.join("generated/output.txt").exists(),
+        "the headless loop's write was refused:\n{stdout}"
+    );
+    assert!(!stdout.contains("skipped '"), "a Full Access headless loop had a call skipped:\n{stdout}");
+}
+
+/// A session that is not Full Access still holds a loop started without
+/// `--allow-writes` read-only (t-117004) — and now says so truthfully: the
+/// start says the run is read-only and names the flag, the skipped call's
+/// line names the run and the flag, and the model is told the same instead
+/// of being sent to ask for `/permissions`, which would not lift the hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_workspace_write_loop_without_allow_writes_names_the_flag_not_permissions() {
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start loop mock service");
+    let mut run = pty(&layout, &service.base_url(), &["--permission-mode", "workspace-write"]);
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"/loop 1 PARITY_SCENARIO:write_file_denied try the file\r")
+        .expect("start loop");
+    run.wait_for("runs 1/", TEST_TIMEOUT);
+    let capture = String::from_utf8_lossy(&run.finish()).to_string();
+    let requests = service.captured_requests().await;
+    let (sent, is_error) =
+        tool_result_sent(&requests, "toolu_write_denied").expect("the refused write's result");
+
+    assert!(
+        !layout.cwd.join("generated/denied.txt").exists(),
+        "a loop without --allow-writes wrote in a workspace-write session"
+    );
+    assert!(is_error, "the refused write was sent as a success: {sent}");
+    assert!(
+        sent.contains("--allow-writes") && !sent.contains("/permissions"),
+        "the model was not told the run's flag: {sent}"
+    );
+    assert!(
+        capture.contains("read-only run (add --allow-writes to let it write)"),
+        "the start did not say the run is read-only:\n{capture}"
+    );
+    assert!(
+        capture.contains("run skipped 'Write' (needs workspace-write)")
+            && capture.contains("restart it with --allow-writes"),
+        "the skipped write's line did not name the run and the flag:\n{capture}"
+    );
+    assert!(
+        !capture.contains("(needs workspace-write) · /permissions"),
+        "the skipped write's line still sends the person to /permissions:\n{capture}"
+    );
+}
+
+/// The plain frontend's words for the same hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_plain_workspace_write_loop_without_allow_writes_names_the_flag() {
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start plain loop mock service");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &["--plain", "--permission-mode", "workspace-write"],
+        b"/loop 1 PARITY_SCENARIO:write_file_denied try the file\n",
+    )
+    .expect("run a piped loop");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    show_permission_lines("workspace-write · piped /loop", &stdout);
+    let requests = service.captured_requests().await;
+    let (sent, _) =
+        tool_result_sent(&requests, "toolu_write_denied").expect("the refused write's result");
+    eprintln!("workspace-write · piped /loop | the model was sent: {sent}");
+
+    assert!(
+        sent.contains("--allow-writes") && !sent.contains("/permissions"),
+        "the model was not told the run's flag: {sent}"
+    );
+    assert!(
+        stdout.contains("read-only run (add --allow-writes to let it write)"),
+        "the start did not say the run is read-only:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("restart it with --allow-writes")
+            && !stdout.contains("(needs workspace-write) · /permissions"),
+        "the skipped write's line did not name the flag:\n{stdout}"
+    );
+}
+
+/// With `--allow-writes` in a session that is not Full Access, the goal's
+/// plan turn still only plans but keeps its own `TodoWrite`, and a gate
+/// command is judged by the session's own rules: one needing approval stops
+/// the run for a person, in words that say so (t-117004).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_allow_writes_goal_plans_and_stops_its_gate_for_a_person() {
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start goal mock service");
+    let mut run = pty(&layout, &service.base_url(), &["--permission-mode", "workspace-write"]);
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(format!("{GOAL_TURNS_START} --allow-writes\r").as_bytes())
+        .expect("start goal");
+    run.wait_until(0, TEST_TIMEOUT, |bytes| {
+        let text = String::from_utf8_lossy(bytes);
+        text.contains("(completed)") || text.contains("(paused)")
+    });
+    let capture = String::from_utf8_lossy(&run.finish()).to_string();
+    let requests = service.captured_requests().await;
+
+    assert_eq!(
+        tool_result_sent(&requests, "toolu_goal_plan").map(|(_, is_error)| is_error),
+        Some(false),
+        "the plan turn's TodoWrite was refused: {:?}\n{capture}",
+        tool_result_sent(&requests, "toolu_goal_plan"),
+    );
+    assert!(
+        layout.cwd.join(mock_anthropic_service::GOAL_TURNS_ACTION_FILE).exists(),
+        "the action turn's write was refused under --allow-writes:\n{capture}"
+    );
+    assert!(
+        capture.contains("autonomous turn stopped: approval requires a person"),
+        "the gate command needing approval did not stop the run for a person:\n{capture}"
+    );
+    assert!(!layout.cwd.join("gate-ran").exists(), "the gate ran without anyone's approval");
+    assert!(
+        !capture.contains("read-only run"),
+        "a start with --allow-writes was told it runs read-only:\n{capture}"
+    );
+}
+
 /// A teammate pane is one turn under somebody else's brief, and then a file.
 ///
 /// The parent's whole protocol is these two documents: it writes `brief.json`

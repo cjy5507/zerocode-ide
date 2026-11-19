@@ -19,6 +19,7 @@ use super::loops::LoopTurn;
 use super::runner::{elapsed_millis, TurnReceipt};
 use super::scheduler::now_unix_ms;
 use super::wakeup;
+use super::TurnWrites;
 use crate::ide::reporter::HookReporter;
 use crate::session::plain_session::PlainSession;
 
@@ -63,8 +64,9 @@ pub(crate) trait AutonomyFrontend {
     fn leaving(&self) -> bool;
     fn note(&mut self, level: SystemLevel, text: &str);
     fn reporter(&self) -> Option<&HookReporter>;
-    /// Run `prompt` as one autonomous turn; `None` when the frontend is leaving.
-    async fn run_turn(&mut self, prompt: &str, allow_writes: bool) -> Option<TurnOutcome>;
+    /// Run `prompt` as one autonomous turn that may write what `writes` says;
+    /// `None` when the frontend is leaving.
+    async fn run_turn(&mut self, prompt: &str, writes: TurnWrites) -> Option<TurnOutcome>;
     /// The goal/loop status changed — a turn was dispatched or recorded.
     fn status_changed(&mut self);
     /// A loop turn is about to run; `dynamic_iteration` is a self-paced
@@ -152,7 +154,7 @@ async fn drive_goal<F: AutonomyFrontend>(front: &mut F) -> Drive {
         let started = TurnStart::capture(session);
         front.status_changed();
         front.note(SystemLevel::Info, &format!("autonomous → {}", turn.kind.label()));
-        let Some(outcome) = front.run_turn(&turn.prompt, turn.allow_writes).await else {
+        let Some(outcome) = front.run_turn(&turn.prompt, turn.writes()).await else {
             return Drive::Leaving;
         };
         let Some(session) = front.session() else {
@@ -224,7 +226,7 @@ async fn drive_loops<F: AutonomyFrontend>(front: &mut F) -> Drive {
             SystemLevel::Info,
             &format!("autonomous → {} · {}", turn.id, turn.kind.label()),
         );
-        let Some(outcome) = front.run_turn(&turn.prompt, turn.allow_writes).await else {
+        let Some(outcome) = front.run_turn(&turn.prompt, turn.writes()).await else {
             front.loop_turn_ended(&turn, dynamic_iteration, LoopTurnEnd::Dropped);
             return Drive::Leaving;
         };
@@ -290,7 +292,7 @@ async fn drive_crons<F: AutonomyFrontend>(front: &mut F) -> CronPass {
             SystemLevel::Info,
             &format!("autonomous → {} {}", crons::TURN_LABEL, turn.id),
         );
-        let Some(outcome) = front.run_turn(&turn.prompt, true).await else {
+        let Some(outcome) = front.run_turn(&turn.prompt, TurnWrites::Session).await else {
             return CronPass::Leaving;
         };
         let Some(session) = front.session() else {

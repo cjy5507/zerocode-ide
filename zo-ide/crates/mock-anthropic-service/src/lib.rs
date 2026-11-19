@@ -102,6 +102,7 @@ enum Scenario {
     TokenCostReporting,
     GoalRateLimitResume,
     GoalGateExact,
+    GoalTurns,
     DenseStream(DenseStream),
 }
 
@@ -124,6 +125,7 @@ impl Scenario {
             "token_cost_reporting" => Some(Self::TokenCostReporting),
             "goal_rate_limit_resume" => Some(Self::GoalRateLimitResume),
             "goal_gate_exact" => Some(Self::GoalGateExact),
+            "goal_turns" => Some(Self::GoalTurns),
             "dense_stream" => DenseStream::parse(words).map(Self::DenseStream),
             _ => None,
         }
@@ -145,6 +147,7 @@ impl Scenario {
             Self::TokenCostReporting => "token_cost_reporting",
             Self::GoalRateLimitResume => "goal_rate_limit_resume",
             Self::GoalGateExact => "goal_gate_exact",
+            Self::GoalTurns => "goal_turns",
             Self::DenseStream(_) => "dense_stream",
         }
     }
@@ -394,6 +397,69 @@ fn goal_step(request: &MessageRequest) -> GoalStep {
         Some(_) => GoalStep::Say("gate ran once, as asked"),
         None => GoalStep::Say("done what the turn asked; nothing edited"),
     }
+}
+
+/// The file a `goal_turns` action turn writes, beside the cwd.
+pub const GOAL_TURNS_ACTION_FILE: &str = "generated/goal-action.txt";
+
+/// What a `/goal` model does turn by turn (`goal_turns`, t-117004): the plan
+/// turn writes its plan with `TodoWrite`, the action turn writes
+/// [`GOAL_TURNS_ACTION_FILE`], a gate turn runs its exact command — each once,
+/// then it answers in words. A repair or condition turn only answers. What
+/// each call was let do is then the permission the turn ran under.
+enum GoalTurnStep {
+    Plan,
+    Write,
+    Run(String),
+    Say(&'static str),
+}
+
+fn goal_turn_step(request: &MessageRequest) -> GoalTurnStep {
+    let mut turn: Option<(&'static str, Option<String>)> = None;
+    let mut called = false;
+    for message in &request.messages {
+        for block in &message.content {
+            match block {
+                InputContentBlock::Text { text, .. } if text.contains("[zo:goal-") => {
+                    let kind = ["plan", "action", "gate"]
+                        .into_iter()
+                        .find(|kind| text.contains(&format!("[zo:goal-{kind}]")))
+                        .unwrap_or("other");
+                    // The gate prompt's third paragraph is the command.
+                    let command = if kind == "gate" {
+                        text.split("\n\n").nth(2).map(|command| command.trim().to_string())
+                    } else {
+                        None
+                    };
+                    turn = Some((kind, command));
+                    called = false;
+                }
+                InputContentBlock::ToolResult { .. } if turn.is_some() => called = true,
+                _ => {}
+            }
+        }
+    }
+    match turn {
+        _ if called => GoalTurnStep::Say("goal turn done"),
+        Some(("plan", _)) => GoalTurnStep::Plan,
+        Some(("action", _)) => GoalTurnStep::Write,
+        Some(("gate", Some(command))) => GoalTurnStep::Run(command),
+        _ => GoalTurnStep::Say("nothing to do in this turn"),
+    }
+}
+
+/// The plan a `goal_turns` plan turn writes.
+fn goal_turns_plan() -> Value {
+    json!({"todos": [{
+        "content": "write the goal file",
+        "activeForm": "Writing the goal file",
+        "status": "pending"
+    }]})
+}
+
+/// The file a `goal_turns` action turn writes.
+fn goal_turns_write() -> Value {
+    json!({"path": GOAL_TURNS_ACTION_FILE, "content": "written by the goal's action turn\n"})
 }
 
 async fn handle_connection(
@@ -785,6 +851,20 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             ),
             GoalStep::Say(text) => final_text_sse(text),
         },
+        Scenario::GoalTurns => match goal_turn_step(request) {
+            GoalTurnStep::Plan => {
+                tool_use_sse("toolu_goal_plan", "TodoWrite", &[&goal_turns_plan().to_string()])
+            }
+            GoalTurnStep::Write => {
+                tool_use_sse("toolu_goal_write", "write_file", &[&goal_turns_write().to_string()])
+            }
+            GoalTurnStep::Run(command) => tool_use_sse(
+                "toolu_goal_gate",
+                "bash",
+                &[&json!({ "command": command }).to_string()],
+            ),
+            GoalTurnStep::Say(text) => final_text_sse(text),
+        },
         Scenario::GoalRateLimitResume => {
             let serialized = serde_json::to_string(request).unwrap_or_default();
             if serialized.contains("[zo:goal-condition]") {
@@ -983,6 +1063,27 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             ),
             GoalStep::Say(text) => text_message_response("msg_goal_gate_text", text),
         },
+        Scenario::GoalTurns => match goal_turn_step(request) {
+            GoalTurnStep::Plan => tool_message_response(
+                "msg_goal_turns_plan",
+                "toolu_goal_plan",
+                "TodoWrite",
+                goal_turns_plan(),
+            ),
+            GoalTurnStep::Write => tool_message_response(
+                "msg_goal_turns_write",
+                "toolu_goal_write",
+                "write_file",
+                goal_turns_write(),
+            ),
+            GoalTurnStep::Run(command) => tool_message_response(
+                "msg_goal_turns_gate",
+                "toolu_goal_gate",
+                "bash",
+                json!({ "command": command }),
+            ),
+            GoalTurnStep::Say(text) => text_message_response("msg_goal_turns_text", text),
+        },
         Scenario::DenseStream(shape) => text_message_response("msg_dense_stream", &shape.answer()),
     }
 }
@@ -1003,6 +1104,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::TokenCostReporting => "req_token_cost_reporting",
         Scenario::GoalRateLimitResume => "req_goal_rate_limit_resume",
         Scenario::GoalGateExact => "req_goal_gate_exact",
+        Scenario::GoalTurns => "req_goal_turns",
         Scenario::DenseStream(_) => "req_dense_stream",
     }
 }

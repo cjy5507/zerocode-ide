@@ -81,6 +81,20 @@ pub struct LoopTurn {
     pub dynamic: bool,
 }
 
+impl LoopTurn {
+    /// What this turn may write (t-117004): the session's mode with
+    /// `--allow-writes` (a wakeup loop always has it), else read-only because
+    /// the loop was started without it.
+    #[must_use]
+    pub fn writes(&self) -> super::TurnWrites {
+        if self.allow_writes {
+            super::TurnWrites::Session
+        } else {
+            super::TurnWrites::ReadOnly(runtime::ReadOnlyHold::RunWithoutAllowWrites)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopBudget {
     pub max_runs: u32,
@@ -548,6 +562,13 @@ impl LoopRegistry {
             .iter()
             .find(|spec| spec.id == id)
             .map(|spec| spec.phase)
+    }
+
+    /// Whether the loop started last was started with `--allow-writes` —
+    /// `None` when there is none.
+    #[must_use]
+    pub fn newest_allows_writes(&self) -> Option<bool> {
+        self.ledger.loops.last().map(|spec| spec.allow_writes)
     }
 
     #[must_use]
@@ -1292,6 +1313,38 @@ mod tests {
         }
     }
 
+    /// t-117004: a loop's turn carries what it may write — the session's mode
+    /// with `--allow-writes` before the prompt, else read-only because the
+    /// loop was started without it — and the registry says which the newest
+    /// loop has, for the start's one-line note.
+    #[test]
+    fn a_loop_turn_carries_what_it_may_write() {
+        use crate::autonomy::TurnWrites;
+        use runtime::ReadOnlyHold;
+
+        for (input, allows, writes) in [
+            (
+                "/loop 1 tidy up",
+                false,
+                TurnWrites::ReadOnly(ReadOnlyHold::RunWithoutAllowWrites),
+            ),
+            ("/loop 1 --allow-writes tidy up", true, TurnWrites::Session),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let transcript = temp.path().join("s.jsonl");
+            let mut loops = LoopRegistry::load(&transcript, false, AutonomyLimits::default());
+            assert_eq!(loops.newest_allows_writes(), None);
+            loops.apply(command(input), 1_000, temp.path()).expect("start");
+            assert_eq!(loops.newest_allows_writes(), Some(allows), "{input}");
+            let turn = loops
+                .dispatch_due(1_000, temp.path())
+                .expect("dispatch")
+                .expect("due");
+            assert!(!turn.prompt.contains("--allow-writes"), "{input}");
+            assert_eq!(turn.writes(), writes, "{input}");
+        }
+    }
+
     #[test]
     fn fixed_count_runs_exactly_the_requested_number_of_iterations() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1502,6 +1555,7 @@ mod tests {
         assert!(turn.prompt.contains("second prompt"));
         assert!(turn.dynamic);
         assert!(turn.allow_writes, "a wakeup turn inherits the session's permission mode");
+        assert_eq!(turn.writes(), crate::autonomy::TurnWrites::Session);
         assert!(loops.status_report(Some("loop-1")).contains("· wakeup ·"));
     }
 

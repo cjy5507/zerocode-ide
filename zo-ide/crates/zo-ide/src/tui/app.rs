@@ -1087,7 +1087,11 @@ impl driver::AutonomyFrontend for TuiFrontend<'_> {
         self.app.ui.reporter.as_ref()
     }
 
-    async fn run_turn(&mut self, prompt: &str, allow_writes: bool) -> Option<TurnOutcome> {
+    async fn run_turn(
+        &mut self,
+        prompt: &str,
+        writes: crate::autonomy::TurnWrites,
+    ) -> Option<TurnOutcome> {
         let input = Submission {
             text: prompt.to_string(),
             image_paths: Vec::new(),
@@ -1097,7 +1101,7 @@ impl driver::AutonomyFrontend for TuiFrontend<'_> {
         // `drive_autonomy`, which the event loop builds after every key.
         let outcome = Box::pin(
             self.app
-                .turn(&input, self.events, Some(allow_writes), None),
+                .turn(&input, self.events, Some(writes), None),
         )
         .await;
         self.app.session.is_some().then_some(outcome)
@@ -7829,7 +7833,7 @@ impl App {
         &mut self,
         input: &Submission,
         events: &mut TerminalEvents,
-        autonomous_allow_writes: Option<bool>,
+        autonomous_writes: Option<crate::autonomy::TurnWrites>,
         agent_followup: Option<&AgentFollowup>,
     ) -> TurnOutcome {
         let images = match load_submission_images(&input.image_paths) {
@@ -7849,8 +7853,8 @@ impl App {
             .session
             .take()
             .expect("the session is only away while a turn runs");
-        let saved_permission = autonomous_allow_writes
-            .map(|allow_writes| session.begin_autonomous_turn(allow_writes));
+        let saved_permission =
+            autonomous_writes.map(|writes| session.begin_autonomous_turn(writes));
         let ui = &mut self.ui;
         // 턴이 시작되는 순간의 크기로 접는다 — 유휴 폴 사이에 판이 바뀌었을 수 있다.
         ui.reconcile_size();
@@ -7962,7 +7966,7 @@ impl App {
                     ui.block(block);
                     ui.tag_parked(published);
                     ui.publish_working_activity(turn_scaffold.ide);
-                    if autonomous_allow_writes.is_some() && (is_permission || is_question) {
+                    if autonomous_writes.is_some() && (is_permission || is_question) {
                         permission_blocked |= is_permission;
                         question_blocked |= is_question;
                         if let Some(parked) = ui.parked.take() {

@@ -332,10 +332,11 @@ pub struct GoalOptions {
     pub checks: Vec<String>,
     pub max_turns: Option<u32>,
     pub token_budget: Option<u64>,
-    /// `--allow-writes` opt-in: when set, the goal's unattended action/repair
-    /// turns inherit the session's write permission instead of being forced
-    /// read-only + propose-only. Defaults to `false` (the safe unattended
-    /// default), so an omitted flag keeps a goal read-only.
+    /// `--allow-writes` opt-in: when set, the goal's unattended turns but the
+    /// plan inherit the session's permission mode and rules instead of being
+    /// held read-only + propose-only. Defaults to `false` (the safe unattended
+    /// default), so an omitted flag keeps a goal read-only — except in a
+    /// session with Full Access, whose mode every unattended turn keeps.
     pub allow_writes: bool,
     pub no_plan: bool,
     pub until: Option<String>,
@@ -844,7 +845,7 @@ fn parse_goal_command(remainder: Option<&str>) -> Result<GoalCommand, SlashComma
     }
 }
 
-const GOAL_USAGE: &str = "[status|verify|pause|resume|clear|history|edit <goal>|<goal> [--check <validator>|--until <command>] [--every <duration>] [--no-plan] [--max-turns <n>] [--token-budget <n>] [--allow-writes]]";
+const GOAL_USAGE: &str = "[status|verify|pause|resume|clear|history|edit <goal>|<goal> [--check <validator>|--until <command>] [--every <duration>] [--no-plan] [--max-turns <n>] [--token-budget <n>] [--allow-writes]] (a goal runs read-only without --allow-writes unless the session has Full Access)";
 
 /// Reject a malformed `--check` value at parse time (`GoalCheck`): a typo in
 /// a known prefix like `cargo:tests` would otherwise be demoted to a command
@@ -944,13 +945,15 @@ fn parse_goal_start(words: &[String]) -> Result<GoalCommand, SlashCommandParseEr
 /// team inbox `digest` channel (the morning digest) and push any must-read
 /// finding to the user. Kept as a shared constant so the three presets stay in
 /// lockstep.
-const PRESET_OVERNIGHT_PROTOCOL: &str = "Overnight protocol: at the end of each iteration, record (a) what you did and (b) what is awaiting the user's decision via TeamInboxPost (channel: \"digest\", source: \"zo-loop\"). Push any finding the user must see verbatim to the user with send_to_user. These loops run read-only by default: do not edit files — leave changes as proposals.";
+const PRESET_OVERNIGHT_PROTOCOL: &str = "Overnight protocol: at the end of each iteration, record (a) what you did and (b) what is awaiting the user's decision via TeamInboxPost (channel: \"digest\", source: \"zo-loop\"). Push any finding the user must see verbatim to the user with send_to_user. These loops only propose: do not edit files — leave changes as proposals.";
 
 /// A `/loop` recipe preset: a curated recurring loop the user starts with a
 /// single alias (`/loop ci`, `/loop pr`, `/loop audit`). Each carries a default
 /// interval and a prompt template ending in [`PRESET_OVERNIGHT_PROTOCOL`]. The
-/// presets are read-only by default (the host's unattended permission gate forces
-/// read-only + propose-only); the user still opts into writes with `--allow-writes`.
+/// presets only propose: the host holds them read-only unless the user opts
+/// into writes with `--allow-writes` or the session has Full Access, whose
+/// mode every unattended turn keeps — so the prompt, not the hold, is what
+/// asks for proposals in every mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopPreset {
     Ci,
@@ -1156,7 +1159,7 @@ fn unquote(value: &str) -> &str {
     s
 }
 
-const LOOP_USAGE: &str = "[list|status [id]|ci|pr|audit [modifiers]|<count> <prompt>|<prompt>|every <duration> <prompt>|watch <glob> <prompt>|until <command> <prompt>|run [id]|pause [id]|resume [id]|stop [id|--all]|clear] (presets ci/pr/audit run read-only + propose; add --allow-writes to inherit session permission)";
+const LOOP_USAGE: &str = "[list|status [id]|ci|pr|audit [modifiers]|<count> <prompt>|<prompt>|every <duration> <prompt>|watch <glob> <prompt>|until <command> <prompt>|run [id]|pause [id]|resume [id]|stop [id|--all]|clear] (a loop runs read-only unless its prompt starts with --allow-writes or the session has Full Access; presets ci/pr/audit only propose)";
 
 fn parse_positive_u32(
     command: &str,

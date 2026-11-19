@@ -311,13 +311,30 @@ impl GoalState {
 }
 
 /// 실행 직전에 원장에서 꺼내는 한 턴. `allow_writes=false` 면 host가 런타임의
-/// 활성 권한을 그 턴 동안 read-only로 낮춘다.
+/// 활성 권한을 그 턴 동안 read-only로 낮춘다 — 세션이 Full Access면 낮추지
+/// 않는다([`crate::autonomy::TurnWrites::hold_in`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalTurn {
     pub kind: GoalTurnKind,
     pub prompt: String,
     pub allow_writes: bool,
     objective: String,
+}
+
+impl GoalTurn {
+    /// What this turn may write, and why not when it may not (t-117004): a
+    /// plan turn only plans, whatever the run's flags; any other turn of a
+    /// run started without `--allow-writes` is read-only for that reason.
+    #[must_use]
+    pub fn writes(&self) -> crate::autonomy::TurnWrites {
+        use crate::autonomy::TurnWrites;
+        use runtime::ReadOnlyHold;
+        match (self.allow_writes, &self.kind) {
+            (true, _) => TurnWrites::Session,
+            (false, GoalTurnKind::Plan) => TurnWrites::ReadOnly(ReadOnlyHold::GoalPlanTurn),
+            (false, _) => TurnWrites::ReadOnly(ReadOnlyHold::RunWithoutAllowWrites),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +455,12 @@ impl GoalController {
         self.state
             .as_ref()
             .is_some_and(|state| state.phase == GoalPhase::Running && state.pending.is_some())
+    }
+
+    /// Whether the goal was started with `--allow-writes`.
+    #[must_use]
+    pub fn allows_writes(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| state.allow_writes)
     }
 
     /// `/goal`의 raw remainder를 읽는다. `start`만 자율 실행을 켠다; bare goal은
@@ -666,8 +689,11 @@ impl GoalController {
         state.dispatched_turns = state.dispatched_turns.saturating_add(1);
         let prompt = prompt_for(state, &kind);
         state.objective_edited = false;
-        let allow_writes = state.allow_writes
-            && matches!(kind, GoalTurnKind::Action | GoalTurnKind::Repair { .. });
+        // `--allow-writes` hands the session's own rules to every turn but
+        // the plan, which only plans: a gate or condition command is judged
+        // as the session would judge it, and one needing approval stops the
+        // run for a person (t-117004).
+        let allow_writes = state.allow_writes && kind != GoalTurnKind::Plan;
         let objective = state.objective.clone();
         self.persist().map_err(|error| error.to_string())?;
         Ok(Some(GoalTurn {
@@ -1458,6 +1484,61 @@ mod tests {
         assert!(controller.is_running());
         let turn = controller.dispatch_next().expect("dispatch").expect("turn");
         assert_eq!(turn.kind, GoalTurnKind::Action);
+    }
+
+    /// t-117004: with `--allow-writes` every goal turn but the plan keeps the
+    /// session's own rules — a gate's command included, so one needing
+    /// approval stops for a person — and the plan, which only plans, keeps
+    /// just its `TodoWrite`; without the flag the action and gate turns are
+    /// held read-only for that reason.
+    #[test]
+    fn goal_turns_carry_what_they_may_write() {
+        use crate::autonomy::TurnWrites;
+        use runtime::ReadOnlyHold;
+
+        let held = TurnWrites::ReadOnly(ReadOnlyHold::RunWithoutAllowWrites);
+        let plan = TurnWrites::ReadOnly(ReadOnlyHold::GoalPlanTurn);
+        for (flag, action, gate) in [
+            (" --allow-writes", TurnWrites::Session, TurnWrites::Session),
+            ("", held, held),
+        ] {
+            let (_temp, mut controller) = controller();
+            controller
+                .apply(&format!("start ship --check 'true'{flag}"), None)
+                .expect("start");
+            assert_eq!(controller.allows_writes(), !flag.is_empty());
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                let turn = controller.dispatch_next().expect("dispatch").expect("turn");
+                seen.push((turn.kind.clone(), turn.writes()));
+                controller
+                    .record_turn(
+                        &turn,
+                        GoalTurnReport {
+                            output_tokens: 1,
+                            active_millis: 1,
+                            workspace_before: "a".to_string(),
+                            workspace_fingerprint: "b".to_string(),
+                            gate: None,
+                            permission_blocked: false,
+                            question_blocked: false,
+                            cancelled: false,
+                            error: None,
+                            todo_completed_delta: 0,
+                        },
+                    )
+                    .expect("record");
+            }
+            assert_eq!(
+                seen,
+                vec![
+                    (GoalTurnKind::Plan, plan),
+                    (GoalTurnKind::Action, action),
+                    (GoalTurnKind::Gate { index: 0 }, gate),
+                ],
+                "flag {flag:?}"
+            );
+        }
     }
 
     #[test]

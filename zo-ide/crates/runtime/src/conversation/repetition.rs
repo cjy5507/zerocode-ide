@@ -1334,6 +1334,16 @@ where
             .or_insert(1);
         if *count <= 1 {
             body
+        } else if let Some(hold) = crate::permissions::ReadOnlyHold::named_in(&body) {
+            // An unattended run's hold, which a mode change would not lift
+            // (t-117004): the repeat keeps naming it.
+            format!(
+                "denied — same permission class as an earlier `{shown}` denial this turn \
+                 (occurrence #{count}; {class}). This denial is deterministic: do not retry \
+                 the class. {}",
+                hold.on_repeat(),
+                shown = core_types::tool_names::wire_tool_name(tool_name),
+            )
         } else {
             format!(
                 "denied — same permission class as an earlier `{shown}` denial this turn \

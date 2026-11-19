@@ -228,9 +228,9 @@ pub(super) const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "goal",
         aliases: &[],
-        summary: "Run a bounded goal loop with typed validation and repair",
+        summary: "Run a bounded goal loop with typed validation and repair; read-only without --allow-writes unless the session has Full Access",
         argument_hint: Some(
-            "[status|verify|pause|resume|clear|history|<goal> (--check <validator>|--until <command>) [--every <duration>] [--no-plan] [--max-turns <n>] [--token-budget <n>]]",
+            "[status|verify|pause|resume|clear|history|<goal> (--check <validator>|--until <command>) [--every <duration>] [--no-plan] [--max-turns <n>] [--token-budget <n>] [--allow-writes]]",
         ),
         resume_supported: false,
         category: CommandCategory::Session,
@@ -238,7 +238,7 @@ pub(super) const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "loop",
         aliases: &[],
-        summary: "Create or manage session-local recurring prompt loops",
+        summary: "Create or manage session-local recurring prompt loops; read-only unless the prompt starts with --allow-writes or the session has Full Access",
         argument_hint: Some(
             "[list|status|<count> <prompt>|<prompt>|every <duration> <prompt>|watch <glob> <prompt>|until <command> <prompt>|run|pause|resume|stop]",
         ),

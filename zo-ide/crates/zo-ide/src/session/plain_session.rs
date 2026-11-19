@@ -2098,7 +2098,14 @@ impl PlainSession {
         let fingerprint = matches!(first, "verify" | "check")
             .then(|| crate::goal::workspace_fingerprint(&self.cwd).ok())
             .flatten();
-        let result = self.autonomy.goal.apply(raw, fingerprint.as_deref())?;
+        let mut result = self.autonomy.goal.apply(raw, fingerprint.as_deref())?;
+        if first == "start"
+            && self.autonomy.goal.is_running()
+            && !self.autonomy.goal.allows_writes()
+            && crate::autonomy::run_is_held_below(self.permission_mode)
+        {
+            result.notice = format!("{} · {}", result.notice, crate::autonomy::READ_ONLY_RUN_NOTE);
+        }
         if let Some(inner) = self.runtime.try_runtime_mut() {
             inner.set_session_goal(self.autonomy.goal.objective().map(str::to_string));
         }
@@ -2168,9 +2175,25 @@ impl PlainSession {
         let Some(commands::SlashCommand::Loop { command }) = parsed else {
             return Err("loop command did not parse as /loop".to_string());
         };
-        self.autonomy
-            .loops
-            .apply(command, now_unix_ms(), &self.cwd)
+        let starts = matches!(
+            command,
+            commands::LoopCommand::StartFixedCount { .. }
+                | commands::LoopCommand::StartDynamic { .. }
+                | commands::LoopCommand::StartInterval { .. }
+                | commands::LoopCommand::StartWatch { .. }
+                | commands::LoopCommand::StartUntil { .. }
+        );
+        let notice = self.autonomy.loops.apply(command, now_unix_ms(), &self.cwd)?;
+        Ok(
+            if starts
+                && self.autonomy.loops.newest_allows_writes() == Some(false)
+                && crate::autonomy::run_is_held_below(self.permission_mode)
+            {
+                format!("{notice} · {}", crate::autonomy::READ_ONLY_RUN_NOTE)
+            } else {
+                notice
+            },
+        )
     }
 
     pub fn start_headless_loop(
@@ -2402,16 +2425,22 @@ impl PlainSession {
     }
 
     /// Unattended turns use the same live permission policy as human turns.
-    /// Without `--allow-writes` it is temporarily clamped to read-only; with
-    /// the opt-in it inherits the session mode/rules. No prompter shortcut is
-    /// installed — a real approval request is denied by the frontend and pauses
-    /// the controller.
-    pub fn begin_autonomous_turn(&mut self, allow_writes: bool) -> PermissionMode {
+    /// A turn `writes` holds read-only is held there for its reason — which a
+    /// refused call then names instead of `/permissions` — unless the session
+    /// has Full Access, which every unattended turn keeps (t-117004); the rest
+    /// inherit the session mode/rules. No prompter shortcut is installed — a
+    /// real approval request is denied by the frontend and pauses the
+    /// controller.
+    pub fn begin_autonomous_turn(
+        &mut self,
+        writes: crate::autonomy::TurnWrites,
+    ) -> PermissionMode {
         let mut saved = self.permission_mode;
+        let hold = writes.hold_in(self.permission_mode);
         if let Some(inner) = self.runtime.try_runtime_mut() {
             inner.set_autonomous_surface(true);
-            if !allow_writes {
-                saved = inner.set_active_permission_mode(PermissionMode::ReadOnly);
+            if let Some(hold) = hold {
+                saved = inner.begin_read_only_hold(hold);
             }
         }
         saved
@@ -2419,7 +2448,7 @@ impl PlainSession {
 
     pub fn finish_autonomous_turn(&mut self, saved_permission: PermissionMode) {
         if let Some(inner) = self.runtime.try_runtime_mut() {
-            inner.set_active_permission_mode(saved_permission);
+            inner.end_read_only_hold(saved_permission);
             inner.set_autonomous_surface(false);
         }
     }

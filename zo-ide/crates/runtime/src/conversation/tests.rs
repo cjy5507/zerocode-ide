@@ -17151,6 +17151,64 @@ fn expected_mode_denial_notice_is_quiet_and_once_per_turn() {
     );
 }
 
+/// t-117004: the one line a person sees for a call an unattended run's hold
+/// refused names the run and the way past it — `--allow-writes` — never
+/// `/permissions`, which would not lift the hold; a plan turn's line says the
+/// turn only plans. The model's words come from the policy itself.
+#[test]
+fn a_held_runs_denial_notice_names_the_run_not_permissions() {
+    let mut policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+        .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+    let saved = policy.begin_read_only_hold(crate::permissions::ReadOnlyHold::RunWithoutAllowWrites);
+    let PermissionOutcome::Deny { reason } = policy.authorize("write_file", "{}", None) else {
+        panic!("a held run's write is refused");
+    };
+    policy.end_read_only_hold(saved);
+    let (level, notice) = super::permission_denial_notice("write_file", &reason, false)
+        .expect("the first held skip is shown");
+    assert_eq!(level, crate::message_stream::SystemLevel::Info);
+    assert_eq!(
+        notice,
+        format!(
+            "read-only /goal \u{00b7} /loop run skipped '{}' (needs workspace-write) \u{00b7} restart it with --allow-writes",
+            CoreTool::Write.wire()
+        )
+    );
+    assert!(notice.chars().count() <= 100, "the line must not wrap a 120-column pane: {notice}");
+    assert!(super::permission_denial_notice("write_file", &reason, true).is_none());
+
+    let saved = policy.begin_read_only_hold(crate::permissions::ReadOnlyHold::GoalPlanTurn);
+    let PermissionOutcome::Deny { reason } = policy.authorize("write_file", "{}", None) else {
+        panic!("a plan turn's write is refused");
+    };
+    policy.end_read_only_hold(saved);
+    let (_, notice) = super::permission_denial_notice("write_file", &reason, false)
+        .expect("the first held skip is shown");
+    assert!(notice.starts_with("read-only goal plan turn skipped"), "{notice}");
+    assert!(!notice.contains("/permissions"), "{notice}");
+}
+
+/// The repeat of a held run's refusal keeps naming the hold instead of
+/// sending the model to ask the user for a mode change (t-117004).
+#[test]
+fn a_repeated_held_denial_keeps_naming_the_hold() {
+    let mut policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+        .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+    let saved = policy.begin_read_only_hold(crate::permissions::ReadOnlyHold::RunWithoutAllowWrites);
+    let PermissionOutcome::Deny { reason } = policy.authorize("write_file", "{}", None) else {
+        panic!("a held run's write is refused");
+    };
+    policy.end_read_only_hold(saved);
+
+    let mut runtime = runtime_with_threshold_percent("claude-opus-4-1", 200_000, 80);
+    let first = runtime.fold_repeated_mode_denial("write_file", super::denial_result_body(&reason));
+    assert!(first.contains("started without --allow-writes"), "{first}");
+    let repeat = runtime.fold_repeated_mode_denial("write_file", super::denial_result_body(&reason));
+    assert!(repeat.contains("occurrence #2"), "{repeat}");
+    assert!(repeat.contains("started without --allow-writes"), "{repeat}");
+    assert!(!repeat.contains("ask the user to change it"), "{repeat}");
+}
+
 #[test]
 fn exceptional_denial_notice_remains_a_warning() {
     let (level, notice) = super::permission_denial_notice(

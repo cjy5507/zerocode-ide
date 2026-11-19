@@ -90,6 +90,110 @@ pub enum PermissionOutcome {
     Deny { reason: String },
 }
 
+/// Why a host holds a turn read-only below the session's own mode: an
+/// unattended `/goal` or `/loop` turn (t-117004). A call the hold refuses
+/// names the hold and the way past it, never the session's permission mode —
+/// the person chose that mode already, and `/permissions` does not lift a
+/// hold the next unattended turn puts back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOnlyHold {
+    /// A `/goal` or `/loop` run started without `--allow-writes`.
+    RunWithoutAllowWrites,
+    /// A goal's plan turn, which only plans: read-only with any flags, but for
+    /// the `TodoWrite` the plan is written with, which keeps the session's mode.
+    GoalPlanTurn,
+}
+
+impl ReadOnlyHold {
+    const ALL: [Self; 2] = [Self::RunWithoutAllowWrites, Self::GoalPlanTurn];
+
+    /// The refusal's words that name this hold, by which [`Self::named_in`]
+    /// tells it again from the refusal alone.
+    const fn cause(self) -> &'static str {
+        match self {
+            Self::RunWithoutAllowWrites => {
+                "This block comes from this unattended /goal or /loop run, which was started \
+                 without --allow-writes and so runs read-only"
+            }
+            Self::GoalPlanTurn => {
+                "This block comes from this unattended goal's plan turn, which only plans and \
+                 so runs read-only with any flags, TodoWrite apart"
+            }
+        }
+    }
+
+    /// The hold a refusal's words name, if any.
+    #[must_use]
+    pub fn named_in(reason: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|hold| reason.contains(hold.cause()))
+    }
+
+    /// Whether the held turn still calls `tool_name` under the session's own
+    /// mode: a plan turn's `TodoWrite`, which is what the turn is for.
+    fn lets_through(self, tool_name: &str) -> bool {
+        self == Self::GoalPlanTurn
+            && crate::todo_progress::PLAN_WRITING_TOOLS.contains(&tool_name)
+    }
+
+    /// What the model reads after the audit sentence: the hold, that the
+    /// session's `base` mode is not the cause, and what to do instead.
+    fn for_the_model(self, base: PermissionMode) -> String {
+        let instead = match self {
+            Self::RunWithoutAllowWrites => {
+                "Starting the run again with --allow-writes lets its turns use the session's own \
+                 mode. Do not retry this call in this run: continue with read-only tools, or end \
+                 the turn saying the run needs --allow-writes."
+            }
+            Self::GoalPlanTurn => {
+                "Do not retry this call in this turn: write the plan with TodoWrite and leave the \
+                 work to the goal's next turns."
+            }
+        };
+        format!(
+            " {} — not from the session's {} permission mode, so do not ask the user to change \
+             permissions. {instead}",
+            self.cause(),
+            base.as_str()
+        )
+    }
+
+    /// The one line the person sees for the first call the hold refuses.
+    #[must_use]
+    pub fn skipped_line(self, tool_name: &str, required: &str) -> String {
+        match self {
+            Self::RunWithoutAllowWrites => format!(
+                "read-only /goal \u{00b7} /loop run skipped '{tool_name}' (needs {required}) \
+                 \u{00b7} restart it with --allow-writes"
+            ),
+            Self::GoalPlanTurn => format!(
+                "read-only goal plan turn skipped '{tool_name}' (needs {required}) \u{00b7} a \
+                 plan turn only plans"
+            ),
+        }
+    }
+
+    /// The sentence a repeated refusal of the same class ends with.
+    #[must_use]
+    pub const fn on_repeat(self) -> &'static str {
+        match self {
+            Self::RunWithoutAllowWrites => {
+                "This /goal or /loop run is read-only because it was started without \
+                 --allow-writes: do not ask the user to change permissions."
+            }
+            Self::GoalPlanTurn => {
+                "A goal's plan turn is read-only: do not ask the user to change permissions."
+            }
+        }
+    }
+}
+
+/// A [`ReadOnlyHold`] in force, with the session mode it holds below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeldMode {
+    base: PermissionMode,
+    hold: ReadOnlyHold,
+}
+
 /// Evaluates permission mode requirements plus allow/deny/ask rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionPolicy {
@@ -99,6 +203,9 @@ pub struct PermissionPolicy {
     /// Lets mode-based denial text name the phase clamp instead of
     /// misattributing the restriction to the user's permission mode.
     phase_clamp_base: Option<PermissionMode>,
+    /// The hold an unattended turn runs under and the session mode it holds
+    /// below (see [`Self::begin_read_only_hold`]); `None` outside one.
+    read_only_hold: Option<HeldMode>,
     /// Tools the active sub-turn phase forbids outright, regardless of mode or
     /// rules (see [`Self::begin_phase_tool_block`]).
     phase_blocked_tools: Vec<String>,
@@ -123,6 +230,7 @@ impl PermissionPolicy {
         Self {
             active_mode,
             phase_clamp_base: None,
+            read_only_hold: None,
             phase_blocked_tools: Vec::new(),
             tool_requirements: BTreeMap::new(),
             allow_rules: Vec::new(),
@@ -309,6 +417,33 @@ impl PermissionPolicy {
         self.phase_clamp_base = None;
     }
 
+    /// Hold the active mode at read-only for `hold`'s reason (an unattended
+    /// `/goal` or `/loop` turn), returning the mode
+    /// [`Self::end_read_only_hold`] gives back. A session already read-only
+    /// is not held: its refusals stay the session's own.
+    pub fn begin_read_only_hold(&mut self, hold: ReadOnlyHold) -> PermissionMode {
+        let saved = std::mem::replace(&mut self.active_mode, PermissionMode::ReadOnly);
+        self.read_only_hold =
+            (saved != PermissionMode::ReadOnly).then_some(HeldMode { base: saved, hold });
+        saved
+    }
+
+    /// Give back the mode [`Self::begin_read_only_hold`] held below.
+    pub fn end_read_only_hold(&mut self, saved: PermissionMode) {
+        self.active_mode = saved;
+        self.read_only_hold = None;
+    }
+
+    /// The mode a call to `tool_name` is judged under: the active mode, but
+    /// the session's own for the tool a held turn keeps
+    /// ([`ReadOnlyHold::lets_through`]).
+    fn mode_for(&self, tool_name: &str) -> PermissionMode {
+        match self.read_only_hold {
+            Some(held) if held.hold.lets_through(tool_name) => held.base,
+            _ => self.active_mode,
+        }
+    }
+
     /// Forbid `tools` outright for the duration of a sub-turn phase, returning
     /// the prior list for [`Self::end_phase_tool_block`] (so nested phases
     /// restore rather than clear).
@@ -405,6 +540,7 @@ impl PermissionPolicy {
                     current_mode: self.active_mode(),
                     required_mode: self.required_mode_for(tool_name),
                     phase_clamp_base: self.phase_clamp_base,
+                    read_only_hold: None,
                 },
             )
         })
@@ -622,6 +758,7 @@ impl PermissionPolicy {
                 current_mode: self.active_mode(),
                 required_mode: self.required_mode_for_input(tool_name, input),
                 phase_clamp_base: self.phase_clamp_base,
+                read_only_hold: None,
             },
             Some(says),
             Some(unanswered),
@@ -647,12 +784,17 @@ impl PermissionPolicy {
             return PermissionOutcome::Deny { reason };
         }
         let signals = self.rule_signals(tool_name, input);
-        let current_mode = self.active_mode();
+        let current_mode = self.mode_for(tool_name);
         let required_mode = self.required_mode_for_input(tool_name, input);
         let mode_audit = ModeAudit {
             current_mode,
             required_mode,
             phase_clamp_base: self.phase_clamp_base,
+            // A tool the hold lets through is judged under the session's own
+            // mode, so a refusal of it is the session's, not the hold's.
+            read_only_hold: self
+                .read_only_hold
+                .filter(|held| !held.hold.lets_through(tool_name)),
         };
 
         if let Some(reason) = signals.deny {
@@ -924,13 +1066,15 @@ impl PermissionPrompter for WouldAsk {
 }
 
 /// The mode facts a denial's audit trailer is built from: the live (possibly
-/// phase-clamped) mode, the mode the call needs, and the stronger session
-/// mode saved by an active PLAN/VERIFY clamp (`None` outside one).
+/// phase-clamped) mode, the mode the call needs, the stronger session mode
+/// saved by an active PLAN/VERIFY clamp (`None` outside one), and the hold an
+/// unattended turn runs under (`None` outside one).
 #[derive(Clone, Copy)]
 struct ModeAudit {
     current_mode: PermissionMode,
     required_mode: PermissionMode,
     phase_clamp_base: Option<PermissionMode>,
+    read_only_hold: Option<HeldMode>,
 }
 
 fn permission_audit_reason(reason: String, mode_audit: ModeAudit) -> String {
@@ -938,6 +1082,7 @@ fn permission_audit_reason(reason: String, mode_audit: ModeAudit) -> String {
         current_mode,
         required_mode,
         phase_clamp_base,
+        read_only_hold,
     } = mode_audit;
     if reason.contains("Permission audit:") {
         return reason;
@@ -963,6 +1108,13 @@ fn permission_audit_reason(reason: String, mode_audit: ModeAudit) -> String {
              phase's plan/analysis output; do not retry this call in this phase and do not \
              ask the user to change permissions.",
         );
+    } else if let Some(held) =
+        read_only_hold.filter(|_| !current_mode.satisfies(required_mode))
+    {
+        // The hold of an unattended run, not the user's mode (t-117004):
+        // `/permissions` would not lift it, so the model is told the hold and
+        // the way past it instead of being sent to ask for a mode change.
+        audit.push_str(&held.hold.for_the_model(held.base));
     } else {
         let _ = write!(
             audit,
@@ -1559,7 +1711,7 @@ mod tests {
     use super::{
         narrowed_allow_rule, narrowed_ordered_allow_rule, AllowRuleNarrowing, PermissionContext,
         PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
-        PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+        PermissionPromptDecision, PermissionPrompter, PermissionRequest, ReadOnlyHold,
     };
     use crate::config::RuntimePermissionRuleConfig;
 
@@ -1932,6 +2084,102 @@ mod tests {
             }
             PermissionOutcome::Allow => panic!("bash should be denied under read-only"),
         }
+    }
+
+    /// t-117004: a `/goal` or `/loop` run started without `--allow-writes`
+    /// is held read-only, and a write it is refused names the run and the
+    /// flag — never `/permissions`, which would not lift a hold the next
+    /// unattended turn puts back, nor a mode change the person already made.
+    #[test]
+    fn a_held_run_names_the_flag_not_the_permission_mode() {
+        let mut policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess);
+
+        let saved = policy.begin_read_only_hold(ReadOnlyHold::RunWithoutAllowWrites);
+        assert_eq!(saved, PermissionMode::WorkspaceWrite);
+        for tool in ["write_file", "bash"] {
+            let PermissionOutcome::Deny { reason } = policy.authorize(tool, "{}", None) else {
+                panic!("{tool} should be refused while the run is held");
+            };
+            assert_eq!(ReadOnlyHold::named_in(&reason), Some(ReadOnlyHold::RunWithoutAllowWrites));
+            assert!(reason.contains("started without --allow-writes"), "{reason}");
+            assert!(reason.contains("not from the session's workspace-write permission mode"), "{reason}");
+            assert!(reason.contains("do not ask the user to change permissions"), "{reason}");
+            assert!(!reason.contains("/permissions"), "{reason}");
+            assert!(!reason.contains("--permission-mode"), "{reason}");
+            // The audit sentence the screen's one-line notice is read from.
+            assert!(reason.contains("Permission audit: active mode is read-only;"), "{reason}");
+        }
+
+        policy.end_read_only_hold(saved);
+        assert_eq!(policy.active_mode(), PermissionMode::WorkspaceWrite);
+        assert_eq!(policy.authorize("write_file", "{}", None), PermissionOutcome::Allow);
+        // Back in the session's own mode, a refusal is the mode's again.
+        let PermissionOutcome::Deny { reason } = policy.authorize("bash", "{}", None) else {
+            panic!("bash needs approval in workspace-write");
+        };
+        assert_eq!(ReadOnlyHold::named_in(&reason), None, "{reason}");
+    }
+
+    /// t-117004: a goal's plan turn only plans, so it is held read-only with
+    /// any flags — but the `TodoWrite` it is asked to write the plan with is
+    /// judged under the session's own mode, rules included.
+    #[test]
+    fn a_held_plan_turn_keeps_its_todo_write_under_the_session_mode() {
+        let mut policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("TodoWrite", PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+
+        let saved = policy.begin_read_only_hold(ReadOnlyHold::GoalPlanTurn);
+        assert_eq!(policy.authorize("TodoWrite", "{}", None), PermissionOutcome::Allow);
+        let PermissionOutcome::Deny { reason } = policy.authorize("write_file", "{}", None) else {
+            panic!("a plan turn's write should be refused");
+        };
+        assert_eq!(ReadOnlyHold::named_in(&reason), Some(ReadOnlyHold::GoalPlanTurn));
+        assert!(reason.contains("goal's plan turn"), "{reason}");
+        assert!(!reason.contains("/permissions"), "{reason}");
+        policy.end_read_only_hold(saved);
+
+        // The session's rules still judge the plan's TodoWrite: a deny rule
+        // refuses it in the plan turn too.
+        let mut denied = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("TodoWrite", PermissionMode::WorkspaceWrite)
+            .with_permission_rules(&RuntimePermissionRuleConfig::new(
+                Vec::new(),
+                vec!["TodoWrite".to_string()],
+                Vec::new(),
+            ));
+        let saved = denied.begin_read_only_hold(ReadOnlyHold::GoalPlanTurn);
+        assert!(matches!(
+            denied.authorize("TodoWrite", "{}", None),
+            PermissionOutcome::Deny { .. }
+        ));
+        denied.end_read_only_hold(saved);
+
+        // A run without the flag keeps no tool: its TodoWrite is held too.
+        let saved = policy.begin_read_only_hold(ReadOnlyHold::RunWithoutAllowWrites);
+        assert!(matches!(
+            policy.authorize("TodoWrite", "{}", None),
+            PermissionOutcome::Deny { .. }
+        ));
+        policy.end_read_only_hold(saved);
+    }
+
+    /// A session the person made read-only holds nothing back: its refusals
+    /// stay the session mode's own, `/permissions` advice included.
+    #[test]
+    fn a_read_only_session_is_not_held() {
+        let mut policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+        let saved = policy.begin_read_only_hold(ReadOnlyHold::RunWithoutAllowWrites);
+        let PermissionOutcome::Deny { reason } = policy.authorize("write_file", "{}", None) else {
+            panic!("a read-only session refuses writes");
+        };
+        assert_eq!(ReadOnlyHold::named_in(&reason), None, "{reason}");
+        assert!(reason.contains("/permissions workspace-write"), "{reason}");
+        policy.end_read_only_hold(saved);
+        assert_eq!(policy.active_mode(), PermissionMode::ReadOnly);
     }
 
     #[test]

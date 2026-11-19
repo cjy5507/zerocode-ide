@@ -353,7 +353,7 @@ pub use oauth::{
 pub use permissions::{
     normalize_tool_name, rule_tool_names, PermissionContext, PermissionMode, PermissionOutcome,
     PermissionOverride, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
-    PermissionRequest, RuleToolName, TemporaryAllowGrant,
+    PermissionRequest, ReadOnlyHold, RuleToolName, TemporaryAllowGrant,
 };
 pub use prompt::{
     discover_all_skills, discover_skills, load_system_prompt, load_system_prompt_for_main,

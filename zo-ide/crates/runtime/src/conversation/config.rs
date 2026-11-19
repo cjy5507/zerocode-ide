@@ -1081,12 +1081,24 @@ where
 
     /// Swap the active permission mode in place, returning the previous one, so a
     /// host can install a one-turn override and restore it after. Mirrors the
-    /// internal `DeepSubturnPermissionGuard` PLAN/VERIFY downgrade, exposed for
-    /// the session-host turn scaffold that forces unattended automation turns
-    /// read-only. `authorize_with_context` reads the active mode live on every
-    /// tool call, so the override takes effect immediately.
+    /// internal `DeepSubturnPermissionGuard` PLAN/VERIFY downgrade.
+    /// `authorize_with_context` reads the active mode live on every tool call,
+    /// so the override takes effect immediately.
     pub fn set_active_permission_mode(&mut self, mode: PermissionMode) -> PermissionMode {
         self.permission_policy.set_active_mode(mode)
+    }
+
+    /// Hold an unattended `/goal` or `/loop` turn read-only for `hold`'s
+    /// reason, returning the mode [`Self::end_read_only_hold`] gives back. A
+    /// call the hold refuses names the hold and the way past it, not the
+    /// session's mode (t-117004).
+    pub fn begin_read_only_hold(&mut self, hold: crate::permissions::ReadOnlyHold) -> PermissionMode {
+        self.permission_policy.begin_read_only_hold(hold)
+    }
+
+    /// Give back the mode [`Self::begin_read_only_hold`] held below.
+    pub fn end_read_only_hold(&mut self, saved: PermissionMode) {
+        self.permission_policy.end_read_only_hold(saved);
     }
 
     /// Add ephemeral allow rules for the duration of a scoped phase, returning an
