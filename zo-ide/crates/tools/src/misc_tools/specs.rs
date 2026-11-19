@@ -25,21 +25,13 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "Skill",
             description: "Load and follow a discovered Zo skill when the user names it or the task clearly requires it.",
+            // `SkillInput` also takes `offset` and `limit`, named only by the note on a skill
+            // shortened past 50,000 chars: declaring them here broke the r49 tool budget (+54 tokens).
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "skill": { "type": "string" },
-                    "args": { "type": "string" },
-                    "offset": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "First line of the skill to return, from 1 — for a skill a result shortened."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "How many lines from offset."
-                    }
+                    "args": { "type": "string" }
                 },
                 "required": ["skill"],
                 "additionalProperties": false
