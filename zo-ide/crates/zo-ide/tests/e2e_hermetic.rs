@@ -1326,49 +1326,51 @@ const GOAL_TURNS_START: &str =
 /// read-only — the plan's `TodoWrite`, the action's write and the gate's
 /// command were all refused — and the model asked the person to change a
 /// permission they had already given. Every unattended turn keeps Full
-/// Access, in both modes the screen gives that name.
+/// Access. The other mode the screen gives that name, `allow`, cannot be
+/// named on the command line (only a trust-store entry carries it), so the
+/// unit test `full_access_is_kept_by_every_unattended_turn` holds it to the
+/// same rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_full_access_goal_without_allow_writes_plans_writes_and_runs_its_gate() {
-    for mode in ["danger-full-access", "allow"] {
-        let layout = Layout::new();
-        layout.model_led();
-        let service = MockAnthropicService::spawn()
-            .await
-            .expect("start goal mock service");
-        let mut run = pty(&layout, &service.base_url(), &["--permission-mode", mode]);
-        run.wait_for("directory:", TEST_TIMEOUT);
-        run.send(format!("{GOAL_TURNS_START}\r").as_bytes())
-            .expect("start goal");
-        run.wait_until(0, TEST_TIMEOUT, |bytes| {
-            let text = String::from_utf8_lossy(bytes);
-            text.contains("(completed)") || text.contains("(paused)")
-        });
-        let capture = String::from_utf8_lossy(&run.finish()).to_string();
-        let requests = service.captured_requests().await;
+    let mode = "danger-full-access";
+    let layout = Layout::new();
+    layout.model_led();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start goal mock service");
+    let mut run = pty(&layout, &service.base_url(), &["--permission-mode", mode]);
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(format!("{GOAL_TURNS_START}\r").as_bytes())
+        .expect("start goal");
+    run.wait_until(0, TEST_TIMEOUT, |bytes| {
+        let text = String::from_utf8_lossy(bytes);
+        text.contains("(completed)") || text.contains("(paused)")
+    });
+    let capture = String::from_utf8_lossy(&run.finish()).to_string();
+    let requests = service.captured_requests().await;
 
-        assert_eq!(
-            tool_result_sent(&requests, "toolu_goal_plan").map(|(_, is_error)| is_error),
-            Some(false),
-            "{mode}: the plan turn's TodoWrite was refused: {:?}\n{capture}",
-            tool_result_sent(&requests, "toolu_goal_plan"),
-        );
-        assert!(
-            layout.cwd.join(mock_anthropic_service::GOAL_TURNS_ACTION_FILE).exists(),
-            "{mode}: the action turn's write was refused: {:?}\n{capture}",
-            tool_result_sent(&requests, "toolu_goal_write"),
-        );
-        assert!(
-            layout.cwd.join("gate-ran").exists(),
-            "{mode}: the gate command was refused: {:?}\n{capture}",
-            tool_result_sent(&requests, "toolu_goal_gate"),
-        );
-        assert!(capture.contains("(completed)"), "{mode}: the goal did not complete:\n{capture}");
-        assert!(!capture.contains("skipped '"), "{mode}: a Full Access goal had a call skipped:\n{capture}");
-        assert!(
-            !capture.contains("read-only run"),
-            "{mode}: a Full Access start was told it runs read-only:\n{capture}"
-        );
-    }
+    assert_eq!(
+        tool_result_sent(&requests, "toolu_goal_plan").map(|(_, is_error)| is_error),
+        Some(false),
+        "{mode}: the plan turn's TodoWrite was refused: {:?}\n{capture}",
+        tool_result_sent(&requests, "toolu_goal_plan"),
+    );
+    assert!(
+        layout.cwd.join(mock_anthropic_service::GOAL_TURNS_ACTION_FILE).exists(),
+        "{mode}: the action turn's write was refused: {:?}\n{capture}",
+        tool_result_sent(&requests, "toolu_goal_write"),
+    );
+    assert!(
+        layout.cwd.join("gate-ran").exists(),
+        "{mode}: the gate command was refused: {:?}\n{capture}",
+        tool_result_sent(&requests, "toolu_goal_gate"),
+    );
+    assert!(capture.contains("(completed)"), "{mode}: the goal did not complete:\n{capture}");
+    assert!(!capture.contains("skipped '"), "{mode}: a Full Access goal had a call skipped:\n{capture}");
+    assert!(
+        !capture.contains("read-only run"),
+        "{mode}: a Full Access start was told it runs read-only:\n{capture}"
+    );
 }
 
 /// The same report for `/loop`: a Full Access session's loop started without
