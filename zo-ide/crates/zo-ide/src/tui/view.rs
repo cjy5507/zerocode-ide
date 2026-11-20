@@ -1826,10 +1826,12 @@ pub(crate) fn footer_theme_style_for_palette(
 
 /// The footer's style for the model (or the folder) on `ground` at
 /// `color_level`: its role — `fallback` — under a named theme in the marks
-/// look, and on a ground known only by its lightness, where the `terminal`
-/// theme then draws the role's light-ground pair on a light ground (a syntax
-/// theme's colour is fitted only against a measured body ink); else the
-/// syntax theme's colour for `scopes`, softened as codex softens it.
+/// look, under the `terminal` theme in the ZeroCode window (where the role
+/// is the window's own ink, `footer_theme_style_in`), and on a ground known
+/// only by its lightness, where the `terminal` theme then draws the role's
+/// light-ground pair on a light ground (a syntax theme's colour is fitted
+/// only against a measured body ink); else the syntax theme's colour for
+/// `scopes`, softened as codex softens it.
 pub(crate) fn footer_theme_style_on(
     scopes: &[&str],
     fallback: Color,

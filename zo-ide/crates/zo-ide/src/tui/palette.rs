@@ -87,7 +87,9 @@ pub const CARD_EFFORT: Color = Color::Indexed(5);
 /// 경고 셀 `⚠`.
 pub const NOTICE_WARN: Color = Color::Indexed(3);
 /// The footer badge's `N warnings` — codex `style.rs::warning_notice_style`
-/// amber on a dark background (the light one is `LIGHT_WARNING_NOTICE`).
+/// amber on a dark background (the light one is `LIGHT_WARNING_NOTICE`); in
+/// the ZeroCode window the `terminal` theme draws it in the slot of `⚠` and
+/// `Full Access` (`NOTICE_WARN`, `Role::terminal_ink_in`).
 pub const WARNING_NOTICE: Color = Color::Role(Role::Warning);
 /// 끝난 도구 셀의 성공 불릿.
 pub const TOOL_OK: Color = Color::Indexed(2);
