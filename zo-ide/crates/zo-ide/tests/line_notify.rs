@@ -1,6 +1,7 @@
 //! `zo line add --notify <address>`: when the job ends, the line tells the
 //! ledger through `zerocode-orc send`, run with the environment of the process
-//! that put the job in. `send` changes the ledger, so the window takes it only
+//! that put the job in, in the run that process's pane stood in (`--run`,
+//! t-119309). `send` changes the ledger, so the window takes it only
 //! with `--retry-request` — before t-118403 the line named none, the window
 //! refused every end it was told, and the line threw the refusal away: workers
 //! waited for letters that never came (t-116447, 2026-11-19). A fake
@@ -27,17 +28,29 @@ const FLOOR_ENV: &str = "ZO_LINE_DISK_FLOOR_GIB";
 const PATIENCE: Duration = Duration::from_secs(60);
 /// The pane the fake sees in the environment of the process that put the job in.
 const PANE: &str = "term-77";
+/// The run `PANE` stands in, as the fake's `run-current` answers it there.
+const PUT_RUN: &str = "run-put";
 /// The pane of a process that only looks at the line (`zo line wait`).
 const LOOKER: &str = "term-88";
+/// The run `LOOKER` stands in: another run than the one the job was put in from.
+const LOOK_RUN: &str = "run-other";
+/// The window's board, whose buttons run `zo line` from no pane and in no run.
+const BOARD: &str = "";
 /// A job's command that holds its runner until the file `free` is there, a
 /// minute and a half at most: a job whose runner is killed is left running it.
 const HOLD: &str = "i=0; while [ ! -e free ] && [ $i -lt 900 ]; do sleep 0.1; i=$((i+1)); done";
 /// What the window says to a `send` that names no retry (`orchestration::needs_a_retry_name`), word
 /// for word as the real `zerocode-orc` printed it to the line's call on 2026-11-20.
 const REFUSAL: &str = "orchestration: send changes the ledger, so it needs --retry-request <id> — a name you can repeat, unchanged, if you never hear how it went. Reads do not need one.";
-/// A fake `zerocode-orc`: it writes its arguments, one a line, and the pane it was
-/// called from to `$ORC_SEEN`; it refuses as the window does when `$ORC_REFUSE` says so.
+/// A fake `zerocode-orc`. Asked `run-current`, it answers the run `$ORC_RUN` names, or that the pane
+/// stands in none, as the window does, and writes nothing. Any other verb it writes, its arguments one a
+/// line and the pane it was called from, to `$ORC_SEEN`; it refuses as the window does when `$ORC_REFUSE`
+/// says so.
 const FAKE_ORC: &str = r#"#!/bin/sh
+if [ "${1:-}" = run-current ]; then
+  if [ -n "${ORC_RUN:-}" ]; then printf '{"runId":"%s","name":"fake"}\n' "$ORC_RUN"; exit 0; fi
+  printf 'orchestration: no run in use — run-create or run-use first\n' >&2; exit 1
+fi
 { for arg in "$@"; do printf '%s\n' "$arg"; done; printf 'pane=%s\n' "${ZEROCODE_PANE_KEY:-}"; } > "$ORC_SEEN.part"
 mv "$ORC_SEEN.part" "$ORC_SEEN"
 if [ -n "${ORC_REFUSE:-}" ]; then printf '%s\n' "$ORC_REFUSE" >&2; exit 1; fi
@@ -63,8 +76,8 @@ impl Fixture {
         Self { root, line }
     }
 
-    /// `zo` from the pane `pane`, on this line with no disk floor, with the fake first on PATH writing
-    /// to `seen`.
+    /// `zo` from the pane `pane` (the board's: none), standing in that pane's run, on this line with no
+    /// disk floor, with the fake first on PATH writing to `seen`.
     fn zo(&self, pane: &str, seen: &str) -> Command {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = vec![self.root.path().join("bin")];
@@ -76,11 +89,33 @@ impl Fixture {
             .env("HOME", self.root.path().join("user"))
             .env("ZO_HOME", self.root.path().join("zo"))
             .env(FLOOR_ENV, "0")
-            .env("ZEROCODE_PANE_KEY", pane)
             .env("ORC_SEEN", self.seen(seen))
             .current_dir(self.root.path().join("work"))
             .stdin(Stdio::null());
+        if !pane.is_empty() {
+            command.env("ZEROCODE_PANE_KEY", pane);
+        }
+        let run = match pane {
+            PANE => Some(PUT_RUN),
+            LOOKER => Some(LOOK_RUN),
+            _ => None,
+        };
+        if let Some(run) = run {
+            command.env("ORC_RUN", run);
+        }
         command
+    }
+
+    /// `zo line pause` from the pane that puts jobs in: what is put in after it waits.
+    fn pause(&self) {
+        let paused = self.zo(PANE, "pause").args(["line", "pause"]).output().expect("zo line pause");
+        assert!(paused.status.success(), "zo line pause: {}", String::from_utf8_lossy(&paused.stderr));
+    }
+
+    /// Job `id`'s record as zo wrote it: the fields a newer zo writes too.
+    fn record(&self, id: &str) -> serde_json::Value {
+        let text = fs::read_to_string(self.line.job_path(id)).expect("its record");
+        serde_json::from_str(&text).expect("a record")
     }
 
     /// `zo line add --notify <address> -- sh -c <script>` from a pane: the job's id.
@@ -226,8 +261,7 @@ fn a_job_the_line_ends_tells_its_address_too() {
 
     // Put in only now, on a paused line: before, its waiter's own looks could end the running job first
     // and tell it in its stead (t-119176).
-    let paused = fixture.zo(PANE, "pause").args(["line", "pause"]).output().expect("zo line pause");
-    assert!(paused.status.success(), "zo line pause: {}", String::from_utf8_lossy(&paused.stderr));
+    fixture.pause();
     let waiting = fixture.add("worker:w-7", "exit 0", "waiting", false);
     fixture.kill_named(&waiting);
     let mut looks = fixture.watch(&waiting, "lost-waiting");
@@ -237,4 +271,50 @@ fn a_job_the_line_ends_tells_its_address_too() {
     assert!(body.starts_with(&format!("zo line {waiting}: ")) && body.contains("— lost"), "{body}");
     let _ = looks.wait();
     fs::write(fixture.root.path().join("work/free"), "").expect("the running job's command let go");
+}
+
+/// Red → green (t-119309, I-t118403-8): a job the line ends is told in the run
+/// the pane that put it in stood in, whoever looked. `zerocode-orc send` finds
+/// a `worker:` or `pane:` address in the run its caller stands in, so the look
+/// of a pane of another run told a worker it could not find — the ledger said
+/// 「unknown worker」 and the job's log kept it. The pane that puts a job in is
+/// asked its run once (`run-current`), the record keeps it (`notify_run`), and
+/// every tell names it with `--run`. The looking pane signs as itself.
+#[test]
+fn a_job_a_look_from_another_run_ended_is_told_in_the_run_it_was_put_in_from() {
+    let fixture = Fixture::new();
+    fixture.pause();
+    let job = fixture.add("worker:w-7", "exit 0", "put", false);
+    fixture.kill_named(&job);
+    let mut looks = fixture.watch(&job, "looked");
+    fixture.until(&job, JobState::Lost, "its waiter was gone before its turn");
+    let words = fixture.told(&job, "looked");
+    assert!(words.contains(&format!("pane={LOOKER}")), "told from the pane that looked: {words:?}");
+    assert_eq!(
+        value(&words, "--run"),
+        Some(PUT_RUN),
+        "told in the run of the pane that put the job in, not in the looker's {LOOK_RUN}: {words:?}"
+    );
+    assert_eq!(value(&words, "--to"), Some("worker:w-7"), "{words:?}");
+    assert_eq!(fixture.record(&job)["notify_run"], PUT_RUN, "the record keeps the run: {}", fixture.record(&job));
+    let _ = looks.wait();
+}
+
+/// t-119309: the board's `retry` button runs `zo line retry` from the window,
+/// which stands in no run; the job it puts in again keeps the run the first
+/// was put in from, and its end is told there — the address is that run's.
+#[test]
+fn a_retry_from_the_board_keeps_the_run_its_job_was_put_in_from() {
+    let fixture = Fixture::new();
+    let first = fixture.add("worker:w-7", "exit 3", "first", false);
+    let words = fixture.told(&first, "first");
+    assert_eq!(value(&words, "--run"), Some(PUT_RUN), "the waiter tells in the run the job was put in from: {words:?}");
+    let output = fixture.zo(BOARD, "again").args(["line", "retry", &first]).output().expect("zo line retry");
+    assert!(output.status.success(), "zo line retry: {}", String::from_utf8_lossy(&output.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).expect("the receipt");
+    let again = receipt["job"].as_str().expect("the job's id").to_owned();
+    assert_eq!(fixture.record(&again)["notify_run"], PUT_RUN, "the retry kept its run: {}", fixture.record(&again));
+    let words = fixture.told(&again, "again");
+    assert_eq!(value(&words, "--run"), Some(PUT_RUN), "the retry's end is told in that run too: {words:?}");
+    assert!(words.contains(&"pane=".to_owned()), "told by the retry's waiter, from the board's environment: {words:?}");
 }

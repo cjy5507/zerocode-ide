@@ -1207,3 +1207,86 @@ fn a_letter_answered_in_the_run_it_was_written_from_is_copied_nowhere() {
         "a letter answered where it was written from was copied to {later}"
     );
 }
+
+/// t-119309 (I-t118403-8): the build line tells how a job ended in the run the
+/// pane that put the job in stood in, whoever looked at the line when it ended
+/// the job — `zo line` names that run with `--run`. A status to a worker of
+/// another run, sent with `--run` naming the worker's run from a pane of another
+/// run or of none, is filed there and signed as the sending pane is known in it
+/// — no identity is borrowed — and the worker reads it. Without `--run` the
+/// same letter is refused in the sender's own run as an unknown worker.
+#[test]
+fn a_status_to_a_worker_of_another_run_named_with_its_run_is_filed_there_signed_by_its_sender() {
+    let mut bench = Bench::new();
+    let home = bench.json("run-create --name home")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let (worker, worker_pane) = bench.seat("worker-start --agent codex");
+    let to = format!("worker:{worker}");
+    let mut looker = Team::new("team-looker", "looker", 60);
+    run_of(&mut bench, &mut looker, "away");
+    let mut loose = Team::new("team-loose", "loose", 70);
+
+    let refused = answered_as_leader_of(
+        &mut bench,
+        &mut looker,
+        &[
+            "send",
+            "--to",
+            &to,
+            "--type",
+            "status",
+            "--body",
+            "lost-here",
+        ],
+    );
+    assert_ne!(refused.exit_code, 0, "{refused:?}");
+    assert!(
+        refused
+            .stderr
+            .contains(&format!("unknown worker: {worker}")),
+        "{}",
+        refused.stderr
+    );
+
+    for (team, body) in [
+        (&mut looker, "told-from-another-run"),
+        (&mut loose, "told-from-no-run"),
+    ] {
+        let sent = as_leader_of(
+            &mut bench,
+            team,
+            &[
+                "send", "--run", &home, "--to", &to, "--type", "status", "--body", body,
+            ],
+        );
+        assert!(sent["messageId"].is_string(), "{sent}");
+    }
+    let read = bench.json_at(&worker_pane, "check");
+    let mut told: Vec<(String, String)> = read["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .filter(|message| {
+            message["body"]
+                .as_str()
+                .is_some_and(|body| body.starts_with("told-"))
+        })
+        .map(|message| {
+            (
+                message["body"].as_str().unwrap_or_default().to_string(),
+                message["from"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    told.sort();
+    assert_eq!(
+        told,
+        [
+            ("told-from-another-run".to_string(), pane_of(&looker)),
+            ("told-from-no-run".to_string(), pane_of(&loose)),
+        ],
+        "{read}"
+    );
+}
