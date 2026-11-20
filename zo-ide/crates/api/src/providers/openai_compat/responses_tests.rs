@@ -467,6 +467,33 @@ fn the_reasoning_on_a_message_goes_back_on_its_own_road_only() {
         sent(build_responses_request_for_session(&request, "instructions", true, "session-sub")),
         vec!["SUBSCRIPTION-CALL", "SUBSCRIPTION-FINAL"]
     );
+    // The mark stays on the message; no request carries it.
+    for body in [
+        api_responses_body(&request, OpenAiCompatConfig::openai(), OFFICIAL, true),
+        build_responses_request_for_session(&request, "instructions", true, "session-sub"),
+    ] {
+        let wire = body.to_string();
+        assert!(!wire.contains("openai-api-key") && !wire.contains("\"road\""), "{wire}");
+    }
+}
+
+/// A road names its endpoint without what may hold a key — a user and
+/// password, a query, a fragment — and the same endpoint however it is
+/// written.
+#[test]
+fn a_road_names_its_endpoint_without_what_may_hold_a_key() {
+    let road = responses_wire::api_road;
+    for written in [
+        "https://api.openai.com/v1",
+        "https://api.openai.com/v1/",
+        "https://api.openai.com/v1/chat/completions",
+        "HTTPS://API.OpenAI.com/v1",
+        "https://user:secret@api.openai.com/v1?api-key=K-SECRET#part",
+    ] {
+        assert_eq!(road(written), "openai-api-key https://api.openai.com/v1", "{written}");
+    }
+    assert_eq!(road("http://127.0.0.1:8080/v1"), "openai-api-key http://127.0.0.1:8080/v1");
+    assert!(!road("https://k:K-SECRET@gateway.example.com/v1?key=K-SECRET").contains("K-SECRET"));
 }
 
 /// However many calls a session holds — past the 256 this process keeps per

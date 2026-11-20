@@ -47,7 +47,24 @@ use crate::types::{EffortLevel, MessageRequest, MessageResponse, StreamEvent, Sy
 /// session's messages, and names what this process keeps of it (the
 /// subscription keeps its own under each client's session).
 pub(super) fn api_road(base_url: &str) -> String {
-    format!("openai-api-key {}", endpoint_base(base_url))
+    format!("openai-api-key {}", endpoint_for_road(base_url))
+}
+
+/// The endpoint as a road names it on the session's messages, which are kept
+/// on disk: scheme, host, port and path — never a user, a password, a query
+/// or a fragment, which may hold a key.
+fn endpoint_for_road(base_url: &str) -> String {
+    let without_query = base_url.split(['?', '#']).next().unwrap_or(base_url);
+    let base = endpoint_base(without_query);
+    let (scheme, rest) = base.split_once("://").unwrap_or(("", base));
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let mut road = format!("{}://{}", scheme.to_ascii_lowercase(), host.to_ascii_lowercase());
+    if !path.is_empty() {
+        road.push('/');
+        road.push_str(path);
+    }
+    road
 }
 
 /// Mark every reasoning-replay entry of an answer with `road`.
