@@ -2166,16 +2166,29 @@ impl PlainSession {
         report: GoalTurnReport,
     ) -> Result<String, String> {
         let usage = (report.output_tokens, report.active_millis);
-        let result = self.autonomy.goal.record_turn(turn, report)?;
+        let mut result = self.autonomy.goal.record_turn(turn, report)?;
         self.autonomy
             .record_usage(usage.0, usage.1)
             .map_err(|error| error.to_string())?;
         if let Some(reason) = self.autonomy.exhaustion() {
+            // A run still going stops here on the session's budget: its line
+            // says so, not the status from a moment before (t-122771).
+            let was_running = self.autonomy.goal.is_running();
             self.autonomy.goal.pause_for_session_limit(&reason)?;
             self.autonomy.loops.pause_for_session_limit(&reason)?;
+            if let Some(line) = was_running.then(|| self.autonomy.goal.stop_line()).flatten() {
+                result = line;
+            }
         }
         self.sync_goal_reminder();
         Ok(result)
+    }
+
+    /// Why a paused goal stopped, for a dispatch that paused it without a
+    /// turn ([`crate::goal::GoalController::stop_line`]).
+    #[must_use]
+    pub fn goal_stop_line(&self) -> Option<String> {
+        self.autonomy.goal.stop_line()
     }
 
     pub fn loop_command(&mut self, raw: &str) -> Result<String, String> {

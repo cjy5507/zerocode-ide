@@ -1030,6 +1030,23 @@ impl GoalController {
         format!("goal: {goal} · autonomous: {autonomous}")
     }
 
+    /// The line a paused run ends with when a limit stopped it outside a
+    /// turn's own report — at its dispatch, or by the session's budget after
+    /// a turn: what stopped it, and that `/goal done` records a goal that is
+    /// met (t-122771). Nothing else would say why the run went quiet.
+    #[must_use]
+    pub fn stop_line(&self) -> Option<String> {
+        let state = self
+            .state
+            .as_ref()
+            .filter(|state| state.phase == GoalPhase::Paused)?;
+        let reason = state.pause_reason.as_deref()?;
+        Some(format!(
+            "goal: {} (paused) · stopped: {reason} · /goal done if the goal is met",
+            one_line(&state.objective, 72)
+        ))
+    }
+
     pub fn pause_for_session_limit(&mut self, reason: &str) -> Result<(), String> {
         if let Some(state) = self
             .state
@@ -1698,6 +1715,34 @@ mod tests {
             footer_status_from_snapshot(&goal, &autonomous),
             Some(GoalFooterStatus::Stalled)
         );
+    }
+
+    /// A run a limit stops outside a turn's own report — by the session's
+    /// budget, or at its dispatch — gets a line that says what stopped it;
+    /// a running or completed goal has none.
+    #[test]
+    fn a_limit_stop_says_what_stopped_the_run() {
+        let (_temp, mut controller) = controller();
+        controller.apply("ship it --no-plan", None).expect("start");
+        assert_eq!(controller.stop_line(), None);
+        controller
+            .pause_for_session_limit("session continuation limit reached (8/8)")
+            .expect("pause");
+        assert_eq!(
+            controller.stop_line().as_deref(),
+            Some("goal: ship it (paused) · stopped: session continuation limit reached (8/8) · /goal done if the goal is met")
+        );
+
+        let (_bounded_temp, mut bounded) = self::controller();
+        bounded.apply("ship it --no-plan", None).expect("start");
+        let state = bounded.state.as_mut().expect("state");
+        state.dispatched_turns = 1;
+        state.continuations = state.max_continuations;
+        assert!(bounded.dispatch_next().expect("dispatch").is_none());
+        let line = bounded.stop_line().expect("the dispatch's pause has a line");
+        assert!(line.contains("· stopped: continuation limit reached"), "{line}");
+        bounded.apply("done", None).expect("done");
+        assert_eq!(bounded.stop_line(), None);
     }
 
     /// `--every` spaces an ungated goal's actions: after one, the next waits.

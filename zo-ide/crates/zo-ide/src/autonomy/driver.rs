@@ -140,9 +140,21 @@ async fn drive_goal<F: AutonomyFrontend>(front: &mut F) -> Drive {
         let Some(session) = front.session() else {
             return Drive::Leaving;
         };
+        let was_running = session.goal_running();
         let turn = match session.dispatch_goal_turn() {
             Ok(Some(turn)) => turn,
             Ok(None) => {
+                // A spent limit pauses the run at its dispatch, with no turn
+                // to report it: say once what stopped it (t-122771).
+                let stopped = (was_running && !session.goal_running())
+                    .then(|| session.goal_stop_line().map(|line| (line, session.handle.id.clone())))
+                    .flatten();
+                if let Some((line, session_id)) = stopped {
+                    front.note(SystemLevel::Info, &line);
+                    if let Some(reporter) = front.reporter() {
+                        reporter.autonomy_goal("GoalPaused", &session_id, &line);
+                    }
+                }
                 front.status_changed();
                 return Drive::Idle;
             }

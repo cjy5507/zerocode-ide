@@ -1456,6 +1456,43 @@ async fn e2e_piped_bare_goal_runs_before_the_pipe_ends() {
     assert!(!stdout.contains("(completed)"), "a goal with no gate said it was achieved:\n{stdout}");
 }
 
+/// A run a spent budget stops says why on the screen (t-122771). The
+/// session's budget paused it after a turn — or a later goal at its first
+/// dispatch — and nothing said so: a goal typed after the budget was spent
+/// answered "running" and then did nothing. One continuation is the limit
+/// here, so the first goal spends the session's budget in two turns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_goal_the_session_budget_stops_says_why() {
+    let layout = Layout::new();
+    layout.model_led();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start goal mock service");
+    let output = run_pipe_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &["--plain", "--permission-mode", "danger-full-access"],
+        b"/goal start PARITY_SCENARIO:goal_turns go --check \"touch gate-ran\"\n/goal start PARITY_SCENARIO:goal_turns again --check \"touch gate-ran\"\n",
+        &[("ZO_AUTONOMY_MAX_CONTINUATIONS", "1")],
+    )
+    .expect("run two piped goals");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    show_permission_lines("full access · two piped goals on one continuation", &stdout);
+
+    assert!(output.status.success(), "the piped goals exited with {:?}:\n{stdout}", output.status);
+    for objective in ["PARITY_SCENARIO:goal_turns go", "PARITY_SCENARIO:goal_turns again"] {
+        assert!(
+            stdout.contains(&format!(
+                "goal: {objective} (paused) · stopped: session continuation limit reached (1/1) · /goal done if the goal is met"
+            )),
+            "the goal {objective:?} stopped on the session's budget without saying so:\n{stdout}"
+        );
+    }
+}
+
 /// A prompt named on the command line is the person's words, never a
 /// command: one that starts with `/goal` reaches the model as text and
 /// starts no goal — a worker or headless run whose brief opens with it does
