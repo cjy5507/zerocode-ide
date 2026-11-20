@@ -1128,6 +1128,11 @@ pub(crate) struct PaneWall {
     /// The reset the record names and the grace after it, or the longest a
     /// wall with no reset stands — `QUOTA_WAIT_POLICY`, the one table.
     pub(crate) stands_until_ms: i64,
+    /// When the record was written, and the provider's reset it names when
+    /// it names one (`quotaLimits.resetsAt`): what a wall that came down
+    /// before its own window ran out is judged by (t-123972).
+    pub(crate) at_ms: i64,
+    pub(crate) resets_at_ms: Option<i64>,
 }
 
 impl PaneWall {
@@ -1185,6 +1190,8 @@ pub(crate) fn pane_wall_in(agent: &str, lines: &[String]) -> Option<PaneWall> {
                     StallCause::ClassifierDecline => at_ms.saturating_add(DECLINE_POINTER_HOLD_MS),
                     _ => zerocode_core::orchestration::wall_stands_until(at_ms, found.resets_at_ms),
                 },
+                at_ms,
+                resets_at_ms: found.resets_at_ms,
             })
         })
 }

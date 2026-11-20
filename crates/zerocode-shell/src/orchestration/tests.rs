@@ -14867,10 +14867,14 @@ impl Host for AtItsWall {
             _ => "You've hit your session limit · resets 6:30pm (Asia/Seoul)",
         };
         (term == self.term && self.walled.load(std::sync::atomic::Ordering::SeqCst)).then(|| {
+            let at_ms = clock();
             crate::quota_wall::PaneWall {
                 cause: self.cause,
                 line: zerocode_core::orchestration::Text::from(said.to_string()),
-                stands_until_ms: clock() + Self::STANDS_FOR_MS,
+                stands_until_ms: at_ms + Self::STANDS_FOR_MS,
+                at_ms,
+                // These sentences name no reset a record would carry.
+                resets_at_ms: None,
             }
         })
     }
@@ -15348,6 +15352,648 @@ fn mail_for_a_pane_already_at_its_login_wall_waits_for_its_next_answer() {
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/* ---- a wall that came down before its own window ran out (t-123972) ---- */
+
+/// The sentence the five walled workers' records ended at on 2026-11-20.
+const WEEKLY_WALL: &str = "You've hit your weekly limit · resets Nov 24 at 8am (Asia/Seoul)";
+
+/// From the wall to the window coming back that night: 20:50 to 23:58, and
+/// three hours and ten minutes of mail nobody was told about.
+const WALL_TO_RESTART_MS: i64 = (3 * 60 + 10) * 60_000;
+
+/// The login the five met their week on, and the one the window started
+/// them on again — at 15% of its week.
+const WALLED_ACCOUNT: &str = "a-walled-week";
+const FRESH_ACCOUNT: &str = "b-fresh-week";
+
+/// A Claude worker's pane as the window found it again at 23:58 (t-123972):
+/// a resumed conversation answers nothing until it is given a turn, so its
+/// own record still ends at the weekly wall it met hours ago, and the login
+/// it runs as is whatever the test says. Every line the pointer types at it
+/// is counted, and lands at once.
+struct BehindAWeeklyWall {
+    term: u32,
+    typed: Mutex<usize>,
+    /// The record the pane's conversation ends at, as `pane_wall` reads it —
+    /// `None` once the conversation went on past it.
+    wall: Mutex<Option<crate::quota_wall::PaneWall>>,
+    /// The managed login the pane was launched as, as its launch recorded it.
+    login: Mutex<Option<crate::agent_teams::PaneLogin>>,
+}
+
+impl BehindAWeeklyWall {
+    fn typed(&self) -> usize {
+        *self.typed.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
+    /// The pane runs as `account` — or as a login nobody recorded.
+    fn runs_as(&self, account: Option<&str>) {
+        *self.login.lock().unwrap_or_else(|held| held.into_inner()) =
+            account.map(|account| crate::agent_teams::PaneLogin {
+                account: account.to_string(),
+                login: format!("login-of-{account}"),
+            });
+    }
+
+    /// The pane's conversation ends at a quota wall its CLI wrote at `at_ms`,
+    /// naming the provider's reset `resets_at_ms` — or none, as a model's own
+    /// cap names none.
+    fn ends_at_a_wall(&self, at_ms: i64, resets_at_ms: Option<i64>) {
+        *self.wall.lock().unwrap_or_else(|held| held.into_inner()) =
+            Some(crate::quota_wall::PaneWall {
+                cause: crate::quota_wall::StallCause::QuotaWall,
+                line: zerocode_core::orchestration::Text::from(WEEKLY_WALL),
+                stands_until_ms: zerocode_core::orchestration::wall_stands_until(
+                    at_ms,
+                    resets_at_ms,
+                ),
+                at_ms,
+                resets_at_ms,
+            });
+    }
+
+    /// Somebody typed at the pane and it answered: its conversation went on.
+    fn went_on(&self) {
+        *self.wall.lock().unwrap_or_else(|held| held.into_inner()) = None;
+    }
+}
+
+impl Host for BehindAWeeklyWall {
+    fn split(
+        &self,
+        _team: &str,
+        _leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        _command: &str,
+        _token: &str,
+    ) -> Option<u32> {
+        Some(self.term)
+    }
+    fn send(&self, _term: u32, _text: &str) -> bool {
+        true
+    }
+    fn point(
+        &self,
+        term: u32,
+        _line: &str,
+        _submit: bool,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        if term == self.term {
+            *self.typed.lock().unwrap_or_else(|held| held.into_inner()) += 1;
+        }
+        let (settled, receipt) = std::sync::mpsc::sync_channel(1);
+        let _ = settled.send(zerocode_pty::DeliveryOutcome::Delivered);
+        Some(receipt)
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        None
+    }
+    fn focus(&self, _term: u32) -> bool {
+        false
+    }
+    fn close(&self, _term: u32) {}
+    fn actor_for(&self, term: u32) -> Option<String> {
+        Some(test_actor(term))
+    }
+    fn agent_of(&self, _term: u32) -> Option<String> {
+        Some(zerocode_core::AgentKind::Claude.slug().to_string())
+    }
+    fn quiet_since(&self, term: u32, _worker_started_ms: i64, now_ms: i64) -> Option<i64> {
+        (term == self.term).then(|| now_ms - zerocode_core::orchestration::QUIET_GRACE_MS)
+    }
+    fn quota_wall_marker(
+        &self,
+        term: u32,
+        _agent: &str,
+    ) -> Option<zerocode_core::orchestration::QuotaWallMarker> {
+        let wall = self.wall.lock().unwrap_or_else(|held| held.into_inner());
+        wall.as_ref().filter(|_| term == self.term).map(|wall| {
+            zerocode_core::orchestration::QuotaWallMarker {
+                source: "transcript".to_string(),
+                line: wall.line.clone(),
+            }
+        })
+    }
+    fn pane_wall(&self, term: u32, agent: &str) -> Option<crate::quota_wall::PaneWall> {
+        assert_eq!(agent, zerocode_core::AgentKind::Claude.slug());
+        (term == self.term)
+            .then(|| {
+                self.wall
+                    .lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .clone()
+            })
+            .flatten()
+    }
+    fn pane_login(&self, term: u32) -> Option<crate::agent_teams::PaneLogin> {
+        (term == self.term)
+            .then(|| {
+                self.login
+                    .lock()
+                    .unwrap_or_else(|held| held.into_inner())
+                    .clone()
+            })
+            .flatten()
+    }
+}
+
+/// One Claude login's reading as the window's poll lands it: `used` percent
+/// of its week, read at `read_at`.
+fn a_weeks_reading(
+    account: &str,
+    used: u8,
+    resets_at: i64,
+    read_at: i64,
+) -> (&'static str, crate::usage::ProviderUsage) {
+    let mut snapshot = usage_snapshot("claude", None, Some((used, Some(resets_at))), read_at);
+    snapshot.account = Some(account.to_string());
+    ("claude", snapshot)
+}
+
+/// Where every scene of t-123972 starts: a private window, a Claude worker
+/// whose last turn ended at its weekly wall, the stall sweep's `quota_walled`
+/// row written against its login's gauge at 100% — and then the window
+/// coming back three hours and ten minutes on, with the pointer remembering
+/// nothing and the pane running as another login.
+///
+/// The ledger's ids start at `id_floor`: the pointer's delivered marks live
+/// in the process's data root, keyed by the run, the address and the
+/// message, and every private window would otherwise mint the same ones.
+struct AfterTheRestart {
+    window: PrivateWindow,
+    _store: zerocode_orchestrator::workflow_store::WorkflowStore,
+    _beat: std::sync::MutexGuard<'static, ()>,
+    host: BehindAWeeklyWall,
+    leader_term: u32,
+    team: String,
+    run: String,
+    worker: String,
+    dispatch: String,
+    /// When the wall's record was written, and the reset it names.
+    wall_at: i64,
+    resets_at: i64,
+    /// When the window came back.
+    back_at: i64,
+}
+
+impl AfterTheRestart {
+    fn stand(leader_term: u32, id_floor: u64) -> Self {
+        let began = clock();
+        let mut seed = super::Ledger::new().export();
+        seed.next_id = id_floor;
+        let (window, store) = PrivateWindow::boot_seeded(seed);
+        let beat = one_beat_at_a_time();
+        let team = format!("team-weekly-wall-{leader_term}");
+        seat_a_team(&team, leader_term);
+        let host = BehindAWeeklyWall {
+            term: leader_term + 1,
+            typed: Mutex::new(0),
+            wall: Mutex::new(None),
+            login: Mutex::new(None),
+        };
+        let verb = |line: &str, at: i64| {
+            let said = run(
+                &host,
+                Vec::new(),
+                &team,
+                zerocode_core::agent_teams::LEADER_PANE,
+                TEST_CAPABILITY,
+                &words(line),
+                at,
+            );
+            assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+            serde_json::from_str::<serde_json::Value>(&said.stdout).expect("json")
+        };
+        let run_id = verb("run-create --name weekly-wall", began)["runId"]
+            .as_str()
+            .expect("a run")
+            .to_string();
+        let task = verb("task-create --spec keep-going", began + 1)["taskId"]
+            .as_str()
+            .expect("a task")
+            .to_string();
+        let started = verb(
+            &format!("worker-start --agent claude --task {task}"),
+            began + 2,
+        );
+        let worker = started["workerId"].as_str().expect("a worker").to_string();
+        let dispatch = started["dispatchId"]
+            .as_str()
+            .expect("a dispatch")
+            .to_string();
+        // It worked, and its last turn ended at its week's wall, days from
+        // its reset — past the six hours a wall with a far reset stands.
+        let wall_at = began + 10_000;
+        let resets_at = wall_at + 3 * 24 * 60 * 60_000;
+        super::pane_turn_began(host.term, began + 3);
+        host.ends_at_a_wall(wall_at, Some(resets_at));
+        super::pane_turn_ended(host.term, wall_at, false, wall_at);
+        // Both witnesses meet: the record's words, and the gauge of the
+        // login the pane runs as, read a moment before, at the wall.
+        host.runs_as(Some(WALLED_ACCOUNT));
+        window.set_usage(vec![a_weeks_reading(
+            WALLED_ACCOUNT,
+            100,
+            resets_at,
+            wall_at - 14_000,
+        )]);
+        notify_stalled_workers(&host, wall_at + 60_000);
+        assert_eq!(
+            verb("check --peek --types quota_walled", wall_at + 60_001)["count"],
+            1,
+            "the ledger did not write the wall's row"
+        );
+        // The window comes back: every pane on the default login again.
+        let back_at = wall_at + WALL_TO_RESTART_MS;
+        host.runs_as(Some(FRESH_ACCOUNT));
+        Self {
+            window,
+            _store: store,
+            _beat: beat,
+            host,
+            leader_term,
+            team,
+            run: run_id,
+            worker,
+            dispatch,
+            wall_at,
+            resets_at,
+            back_at,
+        }
+    }
+
+    /// The coordinator writes to the worker.
+    fn letter(&self, body: &str, at: i64) {
+        let said = run(
+            &self.host,
+            Vec::new(),
+            &self.team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&format!(
+                "send --to worker:{} --type status --body {body}",
+                self.worker
+            )),
+            at,
+        );
+        assert_eq!(said.exit_code, 0, "{}", said.stderr);
+    }
+
+    /// One pass of the mail pointer, and every line typed at the worker so far.
+    fn beat(&self, at: i64) -> usize {
+        super::point_at_waiting_mail(&self.host, at);
+        self.host.typed()
+    }
+
+    /// The window's poll lands these readings.
+    fn reads(&self, rows: Vec<(&'static str, crate::usage::ProviderUsage)>) {
+        self.window.set_usage(rows);
+    }
+
+    /// The lines in the window's own log that carry `needle`.
+    fn told(&self, needle: &str) -> usize {
+        let blackbox = super::BLACKBOX
+            .get()
+            .expect("the bench window's black box")
+            .join("window-errors.log");
+        std::fs::read_to_string(&blackbox)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
+    }
+
+    fn held_line(&self) -> String {
+        format!(
+            "mail waiting for worker:{} in {} is held at terminal {}: its last answer was its \
+             quota wall",
+            self.worker, self.run, self.host.term
+        )
+    }
+
+    /// Whether the ledger's own row for the wall still stands at `at`.
+    fn row_stands(&self, at: i64) -> bool {
+        let held = super::runtime().expect("this window's runtime");
+        let image = held.actor.view().expect("the image");
+        let rows = super::cached_ledger(&held, &image);
+        let run = rows.run(&self.run).expect("the run");
+        zerocode_core::orchestration::newest_wall(run, &self.dispatch)
+            .is_some_and(|wall| wall.stands(at))
+    }
+}
+
+impl Drop for AfterTheRestart {
+    fn drop(&mut self) {
+        super::pane_turn_began(self.host.term, clock());
+        crate::agent_teams::forget_term(self.leader_term);
+        crate::agent_teams::forget_term(self.host.term);
+        crate::orchestration_pointer_mailbox::forget_term(self.host.term);
+    }
+}
+
+/// Step zero of t-123972: what held the five workers' mail after the window
+/// came back. The pointer's own marks were gone with the restart, the
+/// ledger still held each wall's `quota_walled` row, and each pane's record
+/// still ended at the wall. The window's log of that night answers for the
+/// pointer — 23:58:51, five times, "is held at terminal …: its last answer
+/// was its quota wall" — and this pins it: with the row standing all the
+/// while, a record at the wall holds the letter and a record past it does
+/// not. The ledger's row holds no pointer; the pane's own record does.
+#[test]
+fn after_a_restart_the_record_at_the_wall_holds_a_workers_mail_and_the_ledgers_row_does_not() {
+    let scene = AfterTheRestart::stand(123_960, 1_239_600_000);
+    // The restart left the pointer nothing to remember.
+    assert!(
+        !super::pointed()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .contains_key(&(scene.run.clone(), format!("worker:{}", scene.worker))),
+        "the scene began with a pointer's mark"
+    );
+    // The login the window started the pane on has no reading yet: no
+    // number says anything about this wall.
+    scene.letter("after-the-restart", scene.back_at);
+    assert_eq!(
+        scene.beat(scene.back_at + 1_000),
+        0,
+        "a letter was typed at a pane whose record ends at its wall"
+    );
+    assert_eq!(
+        scene.told(&scene.held_line()),
+        1,
+        "the window's log did not say the pane's own record held the letter"
+    );
+    assert!(
+        scene.row_stands(scene.back_at + 1_000),
+        "the ledger's row had stopped standing — the scene is not the night's"
+    );
+
+    // The conversation goes on past the wall; the ledger's row still stands.
+    scene.host.went_on();
+    scene.letter("past-the-wall", scene.back_at + 10_000);
+    assert!(scene.row_stands(scene.back_at + 11_000));
+    assert_eq!(
+        scene.beat(scene.back_at + 11_000),
+        1,
+        "a standing `quota_walled` row held the pointer at a pane past its wall"
+    );
+}
+
+/// ① A letter for a worker whose weekly wall came down while the window was
+/// away — the login it runs as now read at 15% of its week, after the wall
+/// was written — is pointed at once, three hours and ten minutes after the
+/// wall, and not six (t-123972). Before, it waited the wall's whole six
+/// hours, and the five workers of 2026-11-20 were handed over by hand.
+#[test]
+fn a_letter_for_a_worker_whose_weekly_wall_came_down_is_pointed_at_once_without_waiting_six_hours()
+{
+    let scene = AfterTheRestart::stand(123_970, 1_239_700_000);
+    // The window's poll read the login the pane runs as now, after the wall.
+    scene.reads(vec![
+        a_weeks_reading(WALLED_ACCOUNT, 100, scene.resets_at, scene.wall_at - 14_000),
+        a_weeks_reading(
+            FRESH_ACCOUNT,
+            15,
+            scene.back_at + 4 * 24 * 60 * 60_000,
+            scene.back_at - 5 * 60_000,
+        ),
+    ]);
+    scene.letter("after-the-restart", scene.back_at);
+    assert_eq!(
+        scene.beat(scene.back_at + 1_000),
+        1,
+        "the letter waited at a wall the login the pane runs as read under"
+    );
+    assert_eq!(
+        scene.told(&format!(
+            "terminal {}'s quota wall came down before its own window ran out",
+            scene.host.term
+        )),
+        1,
+        "the early lift was not written down once"
+    );
+    assert_eq!(
+        scene.told(&scene.held_line()),
+        0,
+        "the letter was said to be held"
+    );
+    for at in 2..5 {
+        assert_eq!(
+            scene.beat(scene.back_at + at * 1_000),
+            1,
+            "the same letter was pointed at twice"
+        );
+    }
+}
+
+/// ② No number under the wall that speaks for this pane, read after its
+/// record: the letter is held as it always was (t-123972) — whatever else
+/// the window has read.
+#[test]
+fn a_letter_waits_at_the_wall_unless_the_panes_own_login_read_under_it_after_the_wall() {
+    let scene = AfterTheRestart::stand(123_980, 1_239_800_000);
+    let week_on = scene.back_at + 4 * 24 * 60 * 60_000;
+    let mut letters = 0;
+    let mut letter = |scene: &AfterTheRestart, at: i64| {
+        letters += 1;
+        scene.letter(&format!("held-{letters}"), at);
+    };
+
+    // The pane still runs as the walled login, read again after the wall:
+    // still at its week's wall.
+    scene.host.runs_as(Some(WALLED_ACCOUNT));
+    scene.reads(vec![a_weeks_reading(
+        WALLED_ACCOUNT,
+        100,
+        scene.resets_at,
+        scene.back_at - 60_000,
+    )]);
+    letter(&scene, scene.back_at);
+    assert_eq!(
+        scene.beat(scene.back_at + 1_000),
+        0,
+        "a login still at its wall lifted it"
+    );
+
+    // A login nobody recorded: the only reading is the selected account's,
+    // under its wall — a number about some login, not this pane's.
+    scene.host.runs_as(None);
+    scene.reads(vec![a_weeks_reading(
+        FRESH_ACCOUNT,
+        15,
+        week_on,
+        scene.back_at + 5_000,
+    )]);
+    letter(&scene, scene.back_at + 10_000);
+    assert_eq!(
+        scene.beat(scene.back_at + 11_000),
+        0,
+        "the selected account's number lifted a pane whose login nobody recorded"
+    );
+
+    // A failed read keeps its last figure: no observation of room.
+    scene.host.runs_as(Some(FRESH_ACCOUNT));
+    let mut failed = a_weeks_reading(FRESH_ACCOUNT, 15, week_on, scene.back_at + 15_000);
+    failed.1.status = "error".to_string();
+    scene.reads(vec![failed]);
+    letter(&scene, scene.back_at + 20_000);
+    assert_eq!(
+        scene.beat(scene.back_at + 21_000),
+        0,
+        "a failed read's retained figure lifted the wall"
+    );
+
+    // A cap the gauge does not read: the record names no reset (a model's
+    // own cap, a monthly spend), and its login's week says nothing about it.
+    scene.host.ends_at_a_wall(scene.wall_at, None);
+    scene.reads(vec![a_weeks_reading(
+        FRESH_ACCOUNT,
+        15,
+        week_on,
+        scene.back_at + 25_000,
+    )]);
+    letter(&scene, scene.back_at + 30_000);
+    assert_eq!(
+        scene.beat(scene.back_at + 31_000),
+        0,
+        "a number lifted a wall whose record names no window of the gauge's"
+    );
+
+    // Read under the wall, but before the record was written: the pane met
+    // its wall again since, on whatever it runs as.
+    let again = scene.back_at + 40_000;
+    scene.host.ends_at_a_wall(again, Some(scene.resets_at));
+    scene.reads(vec![a_weeks_reading(
+        FRESH_ACCOUNT,
+        15,
+        week_on,
+        again - 30_000,
+    )]);
+    letter(&scene, again + 10_000);
+    assert_eq!(
+        scene.beat(again + 11_000),
+        0,
+        "a reading older than the wall's record lifted it"
+    );
+
+    // A reset already passed: the grace after it is the CLI's own, which
+    // continues by itself there, and a line typed in it cancels that.
+    let reset = again + 60_000;
+    scene.host.ends_at_a_wall(again + 20_000, Some(reset));
+    scene.reads(vec![a_weeks_reading(
+        FRESH_ACCOUNT,
+        15,
+        week_on,
+        reset + 10_000,
+    )]);
+    letter(&scene, reset + 20_000);
+    assert_eq!(
+        scene.beat(reset + 21_000),
+        0,
+        "a number lifted a wall inside the grace after its own reset"
+    );
+    assert_eq!(
+        scene.told(&scene.held_line()),
+        6,
+        "each held letter was not written down once"
+    );
+}
+
+/// ③ A pane pointed at early that meets the same wall again is held again,
+/// and no number lifts that wall early a second time — not the one that
+/// lifted it, and not a newer one (t-123972). The 1,391 lines the
+/// coordinator's pane took in four days (t-6560) were a loop of exactly
+/// this shape: a line, a turn that met the wall, and the same line again.
+#[test]
+fn a_pane_that_meets_the_same_wall_after_its_early_line_is_held_again_and_never_lifted_early_twice()
+{
+    let scene = AfterTheRestart::stand(123_990, 1_239_900_000);
+    let week_on = scene.back_at + 4 * 24 * 60 * 60_000;
+    scene.reads(vec![a_weeks_reading(
+        FRESH_ACCOUNT,
+        15,
+        week_on,
+        scene.back_at - 5 * 60_000,
+    )]);
+    scene.letter("after-the-restart", scene.back_at);
+    assert_eq!(
+        scene.beat(scene.back_at + 1_000),
+        1,
+        "the early line did not go in"
+    );
+
+    // The line opens a turn, and the turn meets the same wall: whatever the
+    // number said, this pane's provider still refuses it.
+    super::pane_turn_began(scene.host.term, scene.back_at + 2_000);
+    let met_again = scene.back_at + 3_000;
+    scene.host.ends_at_a_wall(met_again, Some(scene.resets_at));
+    super::pane_turn_ended(scene.host.term, met_again, false, met_again);
+
+    // A newer reading under the wall, and a new letter.
+    for minutes in [1, 6, 11] {
+        let read_at = met_again + minutes * 60_000;
+        scene.reads(vec![a_weeks_reading(FRESH_ACCOUNT, 15, week_on, read_at)]);
+        scene.letter(&format!("met-again-{minutes}"), read_at + 1_000);
+        for beat in 2..6 {
+            assert_eq!(
+                scene.beat(read_at + beat * 1_000),
+                1,
+                "a wall the pane met again after its early line was lifted early again"
+            );
+        }
+    }
+    assert_eq!(
+        scene.told(&format!(
+            "terminal {}'s quota wall came down before its own window ran out",
+            scene.host.term
+        )),
+        1,
+        "the early lift was written down more than once"
+    );
+    assert_eq!(
+        scene.told(&scene.held_line()),
+        3,
+        "the letters behind the wall met again were not each written down as held"
+    );
+}
+
+/// The letters a wall already holds are pointed at the moment the number
+/// lands, once — not only the next letter (t-123972): the window's poll of
+/// the login the pane runs as may come minutes after the window does, and a
+/// held letter is not looked at again for the wall's six hours.
+#[test]
+fn a_held_letter_is_pointed_at_once_when_a_reading_under_the_wall_lands_later() {
+    let scene = AfterTheRestart::stand(124_000, 1_240_000_000);
+    scene.letter("after-the-restart", scene.back_at);
+    assert_eq!(
+        scene.beat(scene.back_at + 1_000),
+        0,
+        "the letter was typed before any number said the wall came down"
+    );
+    // Five minutes on, the poll reads the login the pane runs as.
+    let read_at = scene.back_at + 5 * 60_000;
+    scene.reads(vec![a_weeks_reading(
+        FRESH_ACCOUNT,
+        15,
+        scene.back_at + 4 * 24 * 60 * 60_000,
+        read_at,
+    )]);
+    assert_eq!(
+        scene.beat(read_at + 1_000),
+        1,
+        "the held letter waited for the wall's six hours after the number landed"
+    );
+    for at in 2..5 {
+        assert_eq!(
+            scene.beat(read_at + at * 1_000),
+            1,
+            "the held letter was pointed at twice"
+        );
+    }
 }
 
 /// A pane a person interrupted is theirs, and stays theirs until they
