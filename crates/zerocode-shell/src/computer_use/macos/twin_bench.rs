@@ -24,9 +24,10 @@
 //! Input rules (CU pane m-122438): the fixture scenes and the late-press scene
 //! are background presses and moves only — no pointer, no keys, no window
 //! brought forward — and run with the person at the machine. The Chrome and
-//! the key scenes bring a window forward: they start only after the person
-//! has left the mouse and the keyboard alone for two minutes, and stop at once
-//! when they touch either.
+//! the key scenes bring a window forward (the key scenes' last cell raises the
+//! twin behind with a window focus, then presses it): they start only after
+//! the person has left the mouse and the keyboard alone for two minutes, and
+//! stop at once when they touch either.
 //!
 //! ```text
 //! swiftc -O tools/computer-bench/TwinWindowsFixture.swift -o <dir>/twin-fixture -framework AppKit
@@ -819,10 +820,58 @@ fn twin_bench_keys() {
                 "key_other": keys.iter().filter(|&&number| number != target).count(),
             });
         }
+        report[label]["raise"] = raise_and_press(&session, &program, &root, label);
     }
     let text = serde_json::to_string_pretty(&report).expect("a report");
     std::fs::write(&out, &text).expect("the report");
     println!("{text}");
+}
+
+/// The twin behind, raised with a window focus — which brings the app forward,
+/// so only with the person away — then pressed by its words in the
+/// background (CU pane m-122932 (다)). Ends with the fixture, whose windows
+/// go with it, so the app that was in front is in front again.
+fn raise_and_press(session: &Session, program: &Path, root: &Path, label: &str) -> Value {
+    let idle = person_idle();
+    if idle < PERSON_AWAY {
+        return json!({"skipped": format!("the person was at the machine {}s ago", idle.as_secs())});
+    }
+    let fixture = Fixture::start(program, root, "twins", &format!("{label}-raise"));
+    let (app, target) = (fixture.app(), fixture.target());
+    let mut road = Road::default();
+    let stopped = person_idle() < PERSON_AWAY.min(idle);
+    if !stopped {
+        let raise = json!({"action": "focus", "windowId": target});
+        if road
+            .step(
+                session,
+                "bring the target window forward",
+                "windowAction",
+                &raise,
+            )
+            .is_some()
+        {
+            let look =
+                json!({"app": app, "windowId": target, "noScreenshot": true, "background": true});
+            let press = json!({
+                "app": app, "windowId": target, "label": "Authorize", "role": "AXButton",
+                "background": true, "noScreenshot": true,
+            });
+            if road
+                .step(session, "look at the target window", "getAppState", &look)
+                .is_some()
+            {
+                let _ = road.step(session, "press Authorize in it", "click", &press);
+            }
+        }
+    }
+    // A press's effect reaches the window's record a moment after its answer.
+    std::thread::sleep(Duration::from_millis(300));
+    let mut report = road.report(&fixture, target);
+    if stopped {
+        report["stopped_by_the_person"] = json!(true);
+    }
+    report
 }
 
 /// A's scene 2 (t-121372): `LatePressFixture.swift`, a web-like window whose
