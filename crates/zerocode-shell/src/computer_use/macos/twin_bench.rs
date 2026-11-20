@@ -17,8 +17,12 @@
 //! (their codes) and milliseconds, and judged by the windows' own record of who
 //! was pressed: the target once, any other never.
 //!
-//! Input rules: a road starts only after the person has left the mouse and the
-//! keyboard alone for two minutes, and stops at once when they touch either.
+//! Input rules (CU pane m-122438): the fixture scenes and the late-press scene
+//! are background presses only — no pointer, no keys, no window brought
+//! forward — and run with the person at the machine. The Chrome and the key
+//! scenes bring a window forward: they start only after the person has left
+//! the mouse and the keyboard alone for two minutes, and stop at once when
+//! they touch either.
 //!
 //! ```text
 //! swiftc -O tools/computer-bench/TwinWindowsFixture.swift -o <dir>/twin-fixture -framework AppKit
@@ -154,8 +158,6 @@ struct Road {
     steps: Vec<Value>,
     refusals: Vec<String>,
     last_refusal: Option<String>,
-    touched: bool,
-    idle_at_start: Duration,
 }
 
 impl Road {
@@ -166,11 +168,6 @@ impl Road {
         method: &str,
         params: &Value,
     ) -> Option<Value> {
-        // The person touched the mouse or keys since the road began: nothing more is sent.
-        if self.touched || person_idle() < self.idle_at_start.min(PERSON_AWAY) {
-            self.touched = true;
-            return None;
-        }
         let (ms, answer) = call(session, method, params);
         let refused = answer.as_ref().err().cloned();
         self.steps
@@ -197,7 +194,6 @@ impl Road {
             "ms": ms.round(),
             "pressed_target": presses.iter().filter(|&&number| number == target).count(),
             "pressed_other": presses.iter().filter(|&&number| number != target).count(),
-            "stopped_by_the_person": self.touched,
             "trail": self.steps,
         })
     }
@@ -250,7 +246,7 @@ fn window_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u6
             return;
         }
         let advice = road.last_refusal.clone().unwrap_or_default();
-        if attempt == 1 || road.touched || !advice.contains("move or resize one of them") {
+        if attempt == 1 || !advice.contains("move or resize one of them") {
             return;
         }
         // The refusal's own advice: move one of them a little, then look again.
@@ -301,9 +297,7 @@ fn app_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) 
         }
         return;
     }
-    if !road.touched {
-        window_road(road, session, fixture, target);
-    }
+    window_road(road, session, fixture, target);
 }
 
 /// The scenes and roads, each on a fresh fixture, under one helper.
@@ -323,17 +317,9 @@ fn under(session: &Session, program: &Path, root: &Path, helper: &str) -> Value 
                 // whether a road that names the window ever presses another.
                 continue;
             }
-            let idle = person_idle();
-            if idle < PERSON_AWAY {
-                scenes[mode][name] = json!({"skipped": format!("the person was at the machine {}s ago", idle.as_secs())});
-                continue;
-            }
             let fixture = Fixture::start(program, root, mode, &format!("{helper}-{mode}-{name}"));
             let target = fixture.target();
-            let mut road = Road {
-                idle_at_start: idle,
-                ..Road::default()
-            };
+            let mut road = Road::default();
             let started = Instant::now();
             road_of(&mut road, session, &fixture, target);
             // A press's effect reaches the window's record a moment after its answer.
@@ -348,7 +334,7 @@ fn under(session: &Session, program: &Path, root: &Path, helper: &str) -> Value 
 
 /// The person's 11-20 scene under the installed helper and this build's.
 #[test]
-#[ignore = "drives the installed and the built helper against owned fixtures while the person is away; run by reports/cu-slow-chrome-1515/jobs/repro-twin-web.sh"]
+#[ignore = "drives the installed and the built helper against owned fixtures, background presses only; run by reports/cu-slow-chrome-1515/jobs/repro-twin-web.sh"]
 fn twin_bench() {
     let program = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_FIXTURE").expect("fixture"));
     let baseline = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_BASELINE").expect("baseline"));
@@ -745,7 +731,7 @@ fn settled_presses(
 /// and a refusal that never names a control by text holding the person's
 /// confirmation word (P10). Background presses only.
 #[test]
-#[ignore = "drives the installed and the built helper against an owned late-press fixture while the person is away; run by reports/cu-slow-chrome-1515/jobs/repro-twin-web.sh"]
+#[ignore = "drives the installed and the built helper against an owned late-press fixture, background presses only; run by reports/cu-slow-chrome-1515/jobs/repro-twin-web.sh"]
 fn twin_bench_late() {
     let program =
         PathBuf::from(std::env::var_os("ZEROCODE_TWIN_LATE_FIXTURE").expect("late fixture"));
@@ -755,11 +741,6 @@ fn twin_bench_late() {
     let root = out.parent().expect("report folder").join("late-fixtures");
     let mut report = json!({});
     for (label, helper) in [("installed", &baseline), ("built", &built)] {
-        let idle = person_idle();
-        if idle < PERSON_AWAY {
-            report[label] = json!({"skipped": format!("the person was at the machine {}s ago", idle.as_secs())});
-            continue;
-        }
         let session = Session::connect(launch_at(helper).expect("helper")).expect("answers");
         let at = |name: &str| format!("{label}-{name}");
         report[label] = json!({
