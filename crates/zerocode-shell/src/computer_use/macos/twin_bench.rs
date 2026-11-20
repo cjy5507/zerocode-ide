@@ -572,8 +572,10 @@ fn twin_bench_keys() {
                 json!({"app": app, "windowId": target, "noScreenshot": true, "background": true});
             let (_, looked) = call(&session, "getAppState", &look);
             let (ms, answer) = if looked.is_ok() && person_idle() >= PERSON_AWAY.min(idle) {
-                let key =
-                    json!({"app": app, "windowId": target, "key": "Return", "restoreWindow": true});
+                // The borrowed desktop's road: the key goes to the fixture's own process
+                // and never through the HID stream, which the person's idle time reads
+                // and the front app at that instant takes (t-122428).
+                let key = json!({"app": app, "windowId": target, "key": "Return", "restoreWindow": true, "mayBorrowDesktop": true});
                 call(&session, "pressKey", &key)
             } else {
                 (
