@@ -1371,6 +1371,10 @@ final class Provider {
     /// still moving. Waiting holds no turn on the hand, and the control is read
     /// again once the turn is held.
     private func waitUntilActionable(method: String, params: [String: JSONValue]) throws {
+        if method == "click", try optionalInteger(params, "elementIndex") == nil {
+            waitForWebPressByReading(params)
+            return
+        }
         guard ["click", "performSecondaryAction", "setValue"].contains(method),
               let index = try optionalInteger(params, "elementIndex"),
               let cached = try cachedSnapshot(params: params),
@@ -1412,16 +1416,46 @@ final class Provider {
     }
 
     /// A web view offers a control's press only once its tree has settled, some seconds
-    /// after it was switched on. Holds up this app's lane alone.
-    private func waitForWebPress(_ record: ElementRecord, pid: pid_t) {
+    /// after it was switched on. Holds up this app's lane alone. Answers the control's
+    /// actions as last read while it waited, or nil when it read none.
+    @discardableResult
+    private func waitForWebPress(_ record: ElementRecord, pid: pid_t) -> [String]? {
         cacheLock.lock()
         let on = webAccessibilityOnAt[pid]
         cacheLock.unlock()
-        guard let on, BackgroundInput.pressableRoles.contains(record.role) else { return }
+        guard let on, BackgroundInput.pressableRoles.contains(record.role) else { return nil }
         let giveUp = on.addingTimeInterval(WebAccessibility.settlesSeconds)
-        while Date() < giveUp, !OperatorGuardHost.isStopped(), !actions(record.element).contains("AXPress") {
+        var offered: [String]?
+        while Date() < giveUp, !OperatorGuardHost.isStopped() {
+            let now = actions(record.element)
+            offered = now
+            if now.contains("AXPress") { break }
             usleep(UInt32(Actionability.pollMs * 1_000))
         }
+        return offered
+    }
+
+    /// The control with the press a web view offers it by now: one chosen by its
+    /// words or its point waits for that offer here, as one named by its number
+    /// waited before the turn (`waitUntilActionable`).
+    private func offeringItsPress(_ record: ElementRecord, pid: pid_t) -> ElementRecord {
+        waitForWebPress(record, pid: pid).map { record.standing(actions: $0, frame: nil) } ?? record
+    }
+
+    /// A click by words waits for its web control's press before the turn, as a
+    /// click by number does: the press may borrow the person's desktop, and a
+    /// wait inside it would hold their pointer and front app. The control is the
+    /// one the last look shows for the words; the press chooses again on its own
+    /// fresh tree.
+    private func waitForWebPressByReading(_ params: [String: JSONValue]) {
+        let query = readingQuery(params)
+        guard !query.isEmpty,
+              let cached = try? cachedSnapshot(params: params),
+              !cached.app.app.isTerminated,
+              case let .one(index) = query.choose(among: readingFaces(cached)),
+              let record = cached.elements[index]
+        else { return }
+        waitForWebPress(record, pid: cached.app.pid)
     }
 
     private func cachedSnapshot(params: [String: JSONValue]) throws -> Snapshot? {
@@ -2127,8 +2161,12 @@ final class Provider {
             let index = try optionalInteger(params, "elementIndex")
                 ?? (query.isEmpty ? nil : chosenIndex(query, in: snapshot))
             let requestedPoint = try index == nil ? coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot) : nil
-            let found = try index.map { try element(snapshot, $0) }
-                ?? requestedPoint.flatMap { backgroundClickRecord(at: $0, in: snapshot) }
+            // A web view offers a press some seconds after its tree is switched on,
+            // and ignores a window event while it is not key: before that offer the
+            // press would answer success and do nothing.
+            let found = try (index.map { try element(snapshot, $0) }
+                ?? requestedPoint.flatMap { backgroundClickRecord(at: $0, in: snapshot) })
+                .map { offeringItsPress($0, pid: snapshot.app.pid) }
             if inFront {
                 let textEntry = found.map { MarkPin.textEntryRoles.contains($0.role) } ?? false
                 let own = found.flatMap { BackgroundInput.clickAction(actions: $0.actions, textEntry: textEntry, plainLeftClick: plainLeftClick) }
@@ -2269,11 +2307,7 @@ final class Provider {
     /// the caller narrows with --role/--label or presses by index — the press
     /// never guesses between two controls.
     private func chosenIndex(_ query: ElementQuery, in snapshot: Snapshot) throws -> Int {
-        let faces = snapshot.order.compactMap { index -> ElementFace? in
-            guard let record = snapshot.elements[index] else { return nil }
-            return ElementFace(index: index, role: record.role, label: record.title, value: record.value, description: record.label)
-        }
-        switch query.choose(among: faces) {
+        switch query.choose(among: readingFaces(snapshot)) {
         case .one(let index):
             return index
         case .none:
@@ -2297,6 +2331,14 @@ final class Provider {
                 "ambiguous_target",
                 "\(some.count) controls read \(query.words): \(named) — add --role or --label, or press one by --element-index"
             )
+        }
+    }
+
+    /// What each element of a look reads, as a click by reading chooses among them.
+    private func readingFaces(_ snapshot: Snapshot) -> [ElementFace] {
+        snapshot.order.compactMap { index -> ElementFace? in
+            guard let record = snapshot.elements[index] else { return nil }
+            return ElementFace(index: index, role: record.role, label: record.title, value: record.value, description: record.label)
         }
     }
 
@@ -8957,7 +8999,8 @@ extension Provider {
     func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot) throws -> String? {
         func label(_ record: ElementRecord?, in snapshot: Snapshot, at point: CGPoint? = nil) throws -> String? {
             if params["background"]?.bool == true {
-                guard let record,
+                // The check reads the press a web view offers by now, as the press does.
+                guard let record = record.map({ offeringItsPress($0, pid: snapshot.app.pid) }),
                       let text = ConfirmationTarget.backgroundLabel(role: record.role, actions: record.actions,
                                                                     label: faceLabel(record.element)) else {
                     // Refused all the same; the words say where to look next.
