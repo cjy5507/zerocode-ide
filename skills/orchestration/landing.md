@@ -112,8 +112,9 @@ and nothing is written.
 lists the completed and
 closed tasks no review stands on whose result names a commit (`mergeHead`, `merged`,
 `landed.mergeHead`, `commits[]` …), with what git proves for each: `merged` when the base
-holds the commit, `deployed` when a release tag holds it and the release remote holds that
-tag (the tag is named — see `--release-remote` below), `verified`
+holds the commit, `deployed` when a release tag holds it, `origin/<base>` holds the tag and
+the release remote holds it as the landing proof below reads one (the tag is named — see
+`--release-remote` below), `verified`
 only when the result names a review task whose own review passed — otherwise
 `"verified":"unknown"`, never a pass nobody recorded — and, for every task it cannot
 write, why (no commit named, not in the base, git does not know it, an attempt handed
@@ -133,9 +134,13 @@ never writes `verified` there; each landing is bound to the coordinator review t
   nothing, nor does one of commits that change nothing alone (those are left out of any
   other range).
 - `deployed` (with `release`) only when a release tag holds that landing, `origin/<base>`
-  holds the tag, and the remote `--release-remote` names holds a tag of that name
-  (`git ls-remote`) — the same object, or, on a remote with a history of its own (a
-  published snapshot), a tag of that name whose object this repository does not have.
+  holds the tag, and the remote `--release-remote` names holds that tag at the same
+  commit (`git ls-remote`, each tag peeled to its commit). Only a remote that shares none
+  of this repository's history — a published snapshot keeps its own — is read by a tag's
+  name alone. Origin, a remote at origin's place, every remote of a shallow clone, and any
+  remote naming a commit this repository has are taken to share it; there a tag of that
+  name at another commit — an annotated tag made elsewhere, one moved onto a commit not
+  fetched here — is no release, and the row says to fetch and ask again.
 - Neither where the base reverted the landing (`This reverts commit <id>`).
 
 **`--release-remote` has no default** — on both roads. Name the remote a release is
@@ -143,7 +148,9 @@ published to (a remote's name or its URL — where a project publishes to a repo
 its own, that one). A remote a release's tag reaches before the release ends — a
 project's own origin often does — says nothing about a release that ended green.
 Without `--release-remote` no release is written for any task: `merged` only, and each
-such row says why under `unreleased`.
+such row says why — under `unreleased`, or, for a task already merged whose release alone
+was asked, under `why`. A URL's user name, password or token is never written: every
+reason names the remote by its host and path.
 
 A row it cannot prove says why, and nothing is written for it. The coordinator in charge
 of a release calls it once the release is published, naming the release remote. Nothing

@@ -140,9 +140,22 @@ const ORIGIN: &str = "origin";
 /// Release tags by name, each with the object it names (a tag object, or a commit for a light one).
 type Tags = std::collections::BTreeMap<String, String>;
 
-/// `remote` as a reason names it.
+/// `remote` as a reason names it: its host and path, never the user name, password or token a URL
+/// may carry before an `@` (t-119569) — the reasons reach the verb's answer, and with it the
+/// ledger every pane reads. Everything up to a URL's last `@` goes, and so does an scp-like
+/// remote's user (`user@host:path`); a remote's name and a path are as given.
 fn shown_remote(remote: &str) -> String {
-    remote.to_string()
+    match remote.split_once("://") {
+        Some((scheme, rest)) => {
+            let place = rest.rsplit_once('@').map_or(rest, |(_, place)| place);
+            format!("{scheme}://{place}")
+        }
+        None if !remote.starts_with(['/', '.']) => remote
+            .rsplit_once('@')
+            .map_or(remote, |(_, place)| place)
+            .to_string(),
+        None => remote.to_string(),
+    }
 }
 
 /// Where a release is read from (t-119569), for both of the backfill's roads: the release tags
@@ -242,7 +255,7 @@ impl<'a> Releases<'a> {
         };
         let shared = *self
             .shared
-            .get_or_insert_with(|| shares_history(vcs, repo, &there.commits));
+            .get_or_insert_with(|| shares_history(vcs, repo, asked, &there.commits));
         // A tag there at another commit than here's, on a remote that shares this history.
         let mut elsewhere = None;
         let released = held
@@ -306,7 +319,7 @@ fn held_tags(
 }
 
 /// One remote's refs, as `ls-remote` lists them: each tag by name with the commit it names (an
-/// annotated tag peeled to its commit), and the commits its branches and tags name.
+/// annotated tag peeled to its commit), and the commits its tags and branches name — tags first.
 struct RemoteRefs {
     tags: Tags,
     commits: Vec<String>,
@@ -319,7 +332,7 @@ fn refs_on(vcs: &dyn Vcs, repo: &Path, remote: &str) -> Option<RemoteRefs> {
     let said = said(vcs, repo, &["ls-remote", "--", remote], None)?;
     let mut tags = Tags::new();
     let mut peeled = Tags::new();
-    let mut commits = Vec::new();
+    let mut heads = Vec::new();
     for line in said.lines() {
         let Some((id, name)) = line.split_once('\t') else {
             continue;
@@ -334,12 +347,13 @@ fn refs_on(vcs: &dyn Vcs, repo: &Path, remote: &str) -> Option<RemoteRefs> {
                     tags.insert(tag.to_string(), id);
                 }
             },
-            None if name == "HEAD" || name.starts_with("refs/heads/") => commits.push(id),
+            None if name == "HEAD" || name.starts_with("refs/heads/") => heads.push(id),
             None => {}
         }
     }
     tags.extend(peeled);
-    commits.extend(tags.values().cloned());
+    let mut commits: Vec<String> = tags.values().cloned().collect();
+    commits.extend(heads);
     Some(RemoteRefs { tags, commits })
 }
 
@@ -367,19 +381,47 @@ fn tags_here(vcs: &dyn Vcs, repo: &Path) -> Option<Tags> {
     )
 }
 
-/// How many of a remote's commits are asked whether this repository has them, to tell a remote
-/// that shares this history from one with a history of its own: its branches first.
-const SHARED_ASKED: usize = 64;
+/// How many of a remote's commits one question asks whether this repository has them.
+const SHARED_ASKED: usize = 256;
 
-/// Whether this repository has any of `commits` — a remote that names one shares this history. No
-/// answer from git counts as yes: then only the same commit is read as the release.
-fn shares_history(vcs: &dyn Vcs, repo: &Path, commits: &[String]) -> bool {
-    if commits.is_empty() {
-        return false;
+/// Whether `remote` shares this repository's history (t-119569) — then only the same commit is
+/// its release. Origin does, and so does a remote at origin's place; a shallow clone takes every
+/// remote to, since it lacks the commits outside its depth whatever a remote holds. Any other
+/// remote does where this repository has any of the commits its tags and branches name, asked of
+/// every one of them, tags first. No answer from git counts as yes. Only a remote that shares
+/// none of it — a published snapshot keeps a history of its own — is read by a tag's name.
+fn shares_history(vcs: &dyn Vcs, repo: &Path, remote: &str, commits: &[String]) -> bool {
+    if remote == ORIGIN || is_shallow(vcs, repo) || same_place(vcs, repo, remote, ORIGIN) {
+        return true;
     }
-    let mut asked = vec!["rev-list", "--no-walk", "--ignore-missing"];
-    asked.extend(commits.iter().take(SHARED_ASKED).map(String::as_str));
-    said(vcs, repo, &asked, None).is_none_or(|known| !known.trim().is_empty())
+    for asking in commits.chunks(SHARED_ASKED) {
+        let mut asked = vec!["rev-list", "--no-walk", "--ignore-missing"];
+        asked.extend(asking.iter().map(String::as_str));
+        match said(vcs, repo, &asked, None) {
+            Some(known) if known.trim().is_empty() => {}
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// Whether this repository is a shallow clone; no answer from git counts as yes.
+fn is_shallow(vcs: &dyn Vcs, repo: &Path) -> bool {
+    said(vcs, repo, &["rev-parse", "--is-shallow-repository"], None)
+        .is_none_or(|said| said.trim() != "false")
+}
+
+/// Whether `remote` and the configured remote `name` are one place: each read as its configured
+/// URL where it names a remote, and as given where it is a URL; a trailing `/` or `.git` aside.
+fn same_place(vcs: &dyn Vcs, repo: &Path, remote: &str, name: &str) -> bool {
+    let place = |of: &str| {
+        let url = said(vcs, repo, &["remote", "get-url", "--", of], None)
+            .map_or_else(|| of.to_string(), |url| url.trim().to_string());
+        url.trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_string()
+    };
+    place(remote) == place(name)
 }
 
 /// One head's range against `base_head`, its release aside. A head the base holds is its own range

@@ -20924,8 +20924,8 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          and the remote --release-remote names holds it; neither where --base reverted it — never \
          a verification — or why not. --release-remote has no default: name the remote releases \
          are published to (a private origin may hold a release's tag before it is published); \
-         without it no release is written, and each row says why (unreleased). --apply writes \
-         them bound to the standing review",
+         without it no release is written, and each row says why (unreleased; for a task already \
+         merged, why). --apply writes them bound to the standing review",
         Doing::Policy,
     ),
     (

@@ -1284,7 +1284,8 @@ fn backfilled_result(original: &str, proven: &Proven, base: &BaseSeen, now_ms: i
     serde_json::Value::Object(map).to_string()
 }
 
-/// `task-backfill [--base <ref>] [--tags <glob>] [--checkout <path>] [--apply]`.
+/// `task-backfill [--base <ref>] [--tags <glob>] [--release-remote <remote or URL>]
+/// [--checkout <path>] [--apply]` — a release is read only from the remote `--release-remote` names.
 ///
 /// Lists every finished task no review stands on, and for each one either what it would write —
 /// a coordinator attempt, a hand-in of the commit git proved, and a review of that commit — or
