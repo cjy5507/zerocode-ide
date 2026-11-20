@@ -1022,7 +1022,9 @@ fn prove_landing(
 /// One proven landing written (t-119569) the way `task-update --members` writes one: bound to the
 /// attempt and source the standing verified review names ([`land_record::member`]), through the
 /// seat check every review takes, with the backfill's note beside it — the moment it marks is the
-/// backfill's, not the merge's (review t-79586 P3-4).
+/// backfill's, not the merge's (review t-79586 P3-4), so the task's cost leaves its landing time
+/// out ([`backfilled`]). A note an earlier backfill left keeps everything it held — what it
+/// replaced, the original it kept — and takes the landing beside it.
 fn land_one(
     ledger: &mut Ledger,
     (team, pane): (&Team, &str),
@@ -1037,16 +1039,25 @@ fn land_one(
         Ok(serde_json::Value::Object(map)) => map,
         _ => return Err("its review is not a JSON object to add the landing to".to_string()),
     };
-    map.insert(
-        BACKFILL_KEY.to_string(),
-        serde_json::json!({
+    let landing = serde_json::json!({
+        "atMs": now_ms,
+        "base": base.name,
+        "baseHead": base.head,
+        "facts": facts,
+    });
+    if let Some(serde_json::Value::Object(note)) = map.get_mut(BACKFILL_KEY) {
+        note.insert("landing".to_string(), landing);
+    } else {
+        let mut note = serde_json::json!({
             "by": BACKFILL_VERB,
             "atMs": now_ms,
-            "base": base.name,
-            "baseHead": base.head,
-            "landing": facts,
-        }),
-    );
+            "landing": landing,
+        });
+        if let Some(earlier) = map.remove(BACKFILL_KEY) {
+            note["earlier"] = earlier;
+        }
+        map.insert(BACKFILL_KEY.to_string(), note);
+    }
     let result = serde_json::Value::Object(map).to_string();
     let author = correction_author(
         ledger,

@@ -8,7 +8,7 @@
 //! to it as `task-update --members` binds one.
 
 use super::*;
-use crate::orchestration::coordinator_take::{BaseSeen, CommitsSeen, RangeSeen};
+use crate::orchestration::coordinator_take::{self, BaseSeen, CommitsSeen, RangeSeen};
 use crate::orchestration::evidence::ReceiptFiles;
 
 const MAIN: &str = "e5f60718293a4b5c6d7e8f901234567890123456";
@@ -132,7 +132,43 @@ fn a_range_picked_onto_main_lands_and_ships_on_the_review_that_stands() {
         serde_json::from_str(run.task(&task).expect("the task").result.as_str()).expect("JSON");
     assert_eq!(result["release"], "v1.2.0", "{result}");
     assert_eq!(result["backfill"]["by"], "task-backfill", "{result}");
-    assert_eq!(result["backfill"]["landing"]["mergeHead"], LANDED_AS, "{result}");
+    assert_eq!(
+        result["backfill"]["landing"]["facts"]["mergeHead"], LANDED_AS,
+        "{result}"
+    );
+}
+
+/// A note an earlier backfill left — what it replaced, the original it kept — survives the
+/// landing written beside it, and the landing time stays the backfill's, out of the task's cost.
+#[test]
+fn a_landing_keeps_what_an_earlier_backfill_kept() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name landing-kept");
+    let task = task_of(&mut bench, "kept");
+    let (_worker, pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+    bench.json_at(
+        &pane,
+        &format!("send --type worker_done --body {{\"ok\":true,\"head\":\"{HEAD}\"}}"),
+    );
+    let attempt = bench.ledger.runs()[0]
+        .newest_attempt(&task)
+        .expect("the attempt")
+        .id
+        .clone();
+    bench.json(&format!(
+        "task-update --task {task} --attempt {attempt} --source {HEAD} --result \
+         {{\"verified\":true,\"backfill\":{{\"by\":\"task-backfill\",\"original\":\"was\"}}}}"
+    ));
+    backfill(&mut bench, "task-backfill --apply", git_says(landed_and_released()));
+    let run = &bench.ledger.runs()[0];
+    let result: serde_json::Value =
+        serde_json::from_str(run.task(&task).expect("the task").result.as_str()).expect("JSON");
+    assert_eq!(result["backfill"]["original"], "was", "{result}");
+    assert_eq!(
+        result["backfill"]["landing"]["facts"]["release"], "v1.2.0",
+        "{result}"
+    );
+    assert!(coordinator_take::backfilled(run.task(&task).expect("the task")));
 }
 
 /// One commit of the range missing from `main` is no landing: the row says which, and nothing is
