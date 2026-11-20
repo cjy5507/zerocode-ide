@@ -286,14 +286,13 @@ fn app_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) 
             "look at the window the refusal names",
             "getAppState",
             &look,
-        ) {
-            if let Some(number) = number_of(&state, "Authorize") {
-                let press = json!({
-                    "app": app, "windowId": named, "elementIndex": number,
-                    "background": true, "noScreenshot": true,
-                });
-                let _ = road.step(session, "press the number that look read", "click", &press);
-            }
+        ) && let Some(number) = number_of(&state, "Authorize")
+        {
+            let press = json!({
+                "app": app, "windowId": named, "elementIndex": number,
+                "background": true, "noScreenshot": true,
+            });
+            let _ = road.step(session, "press the number that look read", "click", &press);
         }
         return;
     }
@@ -351,6 +350,19 @@ fn twin_bench() {
     println!("{text}");
 }
 
+/// The Chrome for Testing processes a run started: ended and waited on when
+/// the run ends, however it ends, as a fixture's process is.
+struct Launched(Vec<Child>);
+
+impl Drop for Launched {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// The flags Playwright starts Chrome for Testing with: no keychain prompt, no
 /// first-run or choice screens, nothing fetched in the background.
 const QUIET_CHROME: [&str; 11] = [
@@ -394,6 +406,7 @@ fn chrome_window(
     page: &Path,
     frame: [u64; 4],
     app: Option<&str>,
+    launched: &mut Launched,
 ) -> (String, u64) {
     let before = app.map(|app| listed(session, app)).unwrap_or_default();
     let name = chrome
@@ -401,8 +414,9 @@ fn chrome_window(
         .expect("the app's name")
         .to_string_lossy()
         .to_string();
-    // The first opens the browser; a later one hands its window to it and ends.
-    let _launched = crate::proc::quiet_command(chrome.join("Contents/MacOS").join(&name))
+    // The first opens the browser and lives until the run ends it; a later one
+    // hands its window to it and ends. The run ends and waits on both.
+    let child = crate::proc::quiet_command(chrome.join("Contents/MacOS").join(&name))
         .arg(format!("--user-data-dir={}", profile.display()))
         .args(QUIET_CHROME)
         .arg("--new-window")
@@ -411,6 +425,7 @@ fn chrome_window(
         .stderr(Stdio::null())
         .spawn()
         .expect("Chrome for Testing");
+    launched.0.push(child);
     let pattern = format!(
         "Contents/MacOS/{name} --user-data-dir={}",
         profile.display()
@@ -502,11 +517,29 @@ fn twin_bench_chrome() {
     let touched = || person_idle() < PERSON_AWAY.min(idle);
     let frame = [120, 120, 1000, 700];
     let setup = Session::connect(launch_at(&built).expect("helper")).expect("answers");
-    let (app, back) = chrome_window(&setup, &chrome, &profile, &back_page, frame, None);
+    // Chrome for Testing ends with the run, however the run ends.
+    let mut launched = Launched(Vec::new());
+    let (app, back) = chrome_window(
+        &setup,
+        &chrome,
+        &profile,
+        &back_page,
+        frame,
+        None,
+        &mut launched,
+    );
     let mut report = json!({"back": back});
     let mut stopped = touched();
     if !stopped {
-        let (_, front) = chrome_window(&setup, &chrome, &profile, &front_page, frame, Some(&app));
+        let (_, front) = chrome_window(
+            &setup,
+            &chrome,
+            &profile,
+            &front_page,
+            frame,
+            Some(&app),
+            &mut launched,
+        );
         report["front"] = json!(front);
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -536,8 +569,7 @@ fn twin_bench_chrome() {
         }
     }
     report["stopped_by_the_person"] = json!(stopped);
-    let pid = app.trim_start_matches("pid:");
-    let _ = crate::proc::quiet_command("/bin/kill").arg(pid).status();
+    drop(launched);
     let text = serde_json::to_string_pretty(&report).expect("a report");
     std::fs::write(&out, &text).expect("the report");
     println!("{text}");
