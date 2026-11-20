@@ -85,6 +85,102 @@ final class DesktopWindowPickTests: XCTestCase {
         XCTAssertEqual(pick(frame, called: "Docs", [(77, CGRect(x: 0, y: 0, width: 1, height: 1), "Other")]), .found(0))
     }
 
+    /// CU slowness 11-20 (t-121376): two Chrome windows at one frame with one
+    /// title. The window publishes no number, but the accessibility library
+    /// links each window to its window-server number, and that tells them apart.
+    func testTwinsAtOneFrameWithOneNameAreToldApartByTheLibrarysLink() {
+        let frame = CGRect(x: 0, y: 33, width: 1512, height: 949)
+        let twins: [Named] = [(nil, frame, "Home | Cloudflare"), (nil, frame, "Home | Cloudflare")]
+        let links: [UInt32] = [78, 77]
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, targetTitle: "Home | Cloudflare", windows: twins, linked: { links[$0] }),
+            .found(1))
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, targetTitle: nil, windows: twins, linked: { links[$0] }),
+            .found(1), "a list that names nothing still has the link")
+        XCTAssertEqual(pick(frame, called: "Home | Cloudflare", twins), .ambiguous, "without the link they stay refused")
+    }
+
+    /// The link and a name that point at different windows contradict each
+    /// other: refused, never one taken over the other. A link and a name that
+    /// agree find the window.
+    func testALinkANameContradictsIsRefusedNotGuessed() {
+        let frame = CGRect(x: 50, y: 50, width: 400, height: 300)
+        let rows: [Named] = [(nil, frame, "Docs"), (nil, frame, "Other")]
+        let links: [UInt32] = [78, 77]
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, targetTitle: "Docs", windows: rows, linked: { links[$0] }),
+            .ambiguous, "the name says the first, the link the second")
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, targetTitle: "Other", windows: rows, linked: { links[$0] }),
+            .found(1), "both say the second")
+    }
+
+    /// A link that names none of them, or two of them, decides nothing: the
+    /// name decides as it did, or the pick is refused as it was.
+    func testALinkThatDoesNotTellLeavesThePickAsItWas() {
+        let frame = CGRect(x: 50, y: 50, width: 400, height: 300)
+        let rows: [Named] = [(nil, frame, "Inbox"), (nil, frame, "Docs")]
+        for links in [[UInt32?](arrayLiteral: nil, nil), [5, 6], [77, 77]] {
+            let linked: (Int) -> UInt32? = { links[$0] }
+            XCTAssertEqual(
+                DesktopWindowPick.pick(target: target, targetBounds: frame, targetTitle: "Docs", windows: rows, linked: linked),
+                .found(1), "\(links)")
+            XCTAssertEqual(
+                DesktopWindowPick.pick(target: target, targetBounds: frame, targetTitle: "Elsewhere", windows: rows, linked: linked),
+                .ambiguous, "\(links)")
+        }
+    }
+
+    /// The link is asked only where windows share the target's frame: a pick
+    /// found by a published number, by the one frame that fits, or by none
+    /// is what it was before the link, and never asks it.
+    func testTheLinkIsAskedOnlyWhereTheFrameIsShared() {
+        let frame = CGRect(x: 50, y: 50, width: 400, height: 300)
+        var asked: [Int] = []
+        let linked: (Int) -> UInt32? = { at in
+            asked.append(at)
+            return 77
+        }
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, windows: [(77, nil, nil), (nil, frame, nil)], linked: linked),
+            .found(0), "the published number")
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, windows: [(nil, frame, nil), (nil, frame.offsetBy(dx: 9, dy: 0), nil)], linked: linked),
+            .found(0), "the one frame that fits")
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, windows: [(nil, frame.offsetBy(dx: 9, dy: 0), nil)], linked: linked),
+            .none, "no frame fits")
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: nil, windows: [(nil, frame, nil), (nil, frame, nil)], linked: linked),
+            .none, "no bounds were read")
+        XCTAssertEqual(asked, [], "none of these asks the link")
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, windows: [(nil, frame, nil), (5, frame, nil), (nil, frame, nil)], linked: linked),
+            .ambiguous, "two that fit are both linked to the target")
+        XCTAssertEqual(asked, [0, 2], "only the numberless windows at the shared frame are asked")
+    }
+
+    /// A focus proof reads frames, so a twin at the target's very frame would
+    /// pass it for the target and take its keys. A twin known to be another
+    /// window is not the target; a window whose number is not known, or that
+    /// stands elsewhere — a popover inside the target — is left to the frames.
+    func testATwinKnownToBeAnotherWindowIsNotTheTarget() {
+        let bounds = CGRect(x: 0, y: 33, width: 1512, height: 949)
+        XCTAssertTrue(DesktopWindowPick.isAnotherAtTheSameFrame(frame: bounds, number: 78, target: target, targetBounds: bounds))
+        XCTAssertTrue(
+            DesktopWindowPick.isAnotherAtTheSameFrame(frame: bounds.offsetBy(dx: 2, dy: -2), number: 78, target: target, targetBounds: bounds),
+            "within the two points the window list and the tree may round apart")
+        XCTAssertFalse(DesktopWindowPick.isAnotherAtTheSameFrame(frame: bounds, number: target, target: target, targetBounds: bounds), "the target itself")
+        XCTAssertFalse(DesktopWindowPick.isAnotherAtTheSameFrame(frame: bounds, number: nil, target: target, targetBounds: bounds), "a number not known")
+        XCTAssertFalse(
+            DesktopWindowPick.isAnotherAtTheSameFrame(frame: CGRect(x: 600, y: 300, width: 320, height: 200), number: 78, target: target, targetBounds: bounds),
+            "a popover inside the target stands elsewhere")
+        XCTAssertFalse(
+            DesktopWindowPick.isAnotherAtTheSameFrame(frame: bounds.offsetBy(dx: 3, dy: 0), number: 78, target: target, targetBounds: bounds),
+            "three points off is another frame")
+    }
+
     func testTheRefusalSaysWhatStandsThereAndWhatToDo() {
         let said = DesktopWindowPick.ambiguousSaid(77)
         XCTAssertTrue(said.contains("window 77"))

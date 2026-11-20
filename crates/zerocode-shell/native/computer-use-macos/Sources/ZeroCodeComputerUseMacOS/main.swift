@@ -3542,8 +3542,21 @@ private func isTargetWindowFocused(_ snapshot: Snapshot) -> Bool {
     guard let frame = absoluteFrame(focusedWindow) else {
         return false
     }
+    // A twin at the target's very frame is another window, and keys sent
+    // now would reach it (CU slowness 11-20, t-121376).
+    if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {
+        return false
+    }
     let intersection = frame.intersection(snapshot.windowBounds)
     return !intersection.isNull && intersection.area >= min(frame.area, snapshot.windowBounds.area) * 0.75
+}
+
+/// Whether `window`, standing at `frame`, is a twin of window `target` at
+/// `targetBounds` and not `target`: its own number, else the accessibility
+/// library's link, names another window at the very same frame.
+private func isTwinOfTarget(_ window: AXUIElement, frame: CGRect, target: CGWindowID, targetBounds: CGRect) -> Bool {
+    DesktopWindowPick.isAnotherAtTheSameFrame(
+        frame: frame, number: windowNumber(window) ?? WindowServerNumber.of(window), target: target, targetBounds: targetBounds)
 }
 
 private enum AXElementProbe {
@@ -3736,7 +3749,7 @@ private func matchingWindow(appElement: AXUIElement, capture: WindowCapture, foc
         let frame: CGRect? = usableWindow(window) ? absoluteFrame(window) : nil
         return (number: windowNumber(window), frame: frame, title: stringAttribute(window, kAXTitleAttribute as String))
     }
-    let picked = DesktopWindowPick.pick(target: capture.windowId, targetBounds: capture.bounds, targetTitle: capture.title, windows: rows)
+    let picked = DesktopWindowPick.pick(target: capture.windowId, targetBounds: capture.bounds, targetTitle: capture.title, windows: rows, linked: { WindowServerNumber.of(windows[$0]) })
     switch picked {
     case let .found(at): return windows[at]
     case .ambiguous:
@@ -3822,8 +3835,10 @@ private func recoverWindow(
        )) {
         targetWindow = focusedWindow
     } else {
+        // The window the target is, by its own number, else by the
+        // accessibility library's link: a twin at its frame is not it.
         let exactWindow = windowId.flatMap { targetId in
-            windows().first { windowNumber($0) == targetId }
+            windows().first { windowNumber($0) == targetId } ?? windows().first { WindowServerNumber.of($0) == targetId }
         }
         targetWindow = exactWindow ?? windowBounds.flatMap { targetBounds in
             windows().first { window in
@@ -3870,6 +3885,7 @@ private func windowMatchesCapture(
 ) -> Bool {
     if let windowId, windowNumber(window) == windowId { return true }
     guard let windowBounds, let frame = absoluteFrame(window) else { return false }
+    if let windowId, isTwinOfTarget(window, frame: frame, target: windowId, targetBounds: windowBounds) { return false }
     return windowFramesMatch(frame, windowBounds)
 }
 
@@ -4029,6 +4045,32 @@ private func windowNumber(_ element: AXUIElement) -> CGWindowID? {
         return nil
     }
     return CGWindowID(number.uint32Value)
+}
+
+/// The window-server number the accessibility library links an
+/// accessibility window to (`_AXUIElementGetWindow`). Asked only to tell
+/// apart windows that stand at one frame (`DesktopWindowPick.pick`'s
+/// `linked`): Chrome publishes no `AXWindowNumber`, so two of its windows
+/// at one frame with one title were refused for every act that named either
+/// (CU slowness 11-20, t-121376). Found at run time: a system without the
+/// function answers nil, and the pick is what it was; nothing is linked
+/// against it.
+private enum WindowServerNumber {
+    private typealias Lookup = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+
+    /// The function's address, 0 where the system has none — a plain
+    /// number, so the one lookup is shared without a lock. `bitPattern: -2`
+    /// is `RTLD_DEFAULT`: every image already loaded, ApplicationServices
+    /// among them.
+    private static let address = UInt(bitPattern: dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow"))
+
+    static func of(_ window: AXUIElement) -> CGWindowID? {
+        guard let symbol = UnsafeRawPointer(bitPattern: address) else { return nil }
+        let lookup = unsafeBitCast(symbol, to: Lookup.self)
+        var number: CGWindowID = 0
+        guard lookup(window, &number) == .success, number != 0 else { return nil }
+        return number
+    }
 }
 
 private func absoluteFrame(_ element: AXUIElement) -> CGRect? {
@@ -8108,7 +8150,7 @@ private enum DesktopWindows {
         let rows: [(number: UInt32?, frame: CGRect?, title: String?)] = windows.map { window in
             (number: windowNumber(window), frame: absoluteFrame(window), title: stringAttribute(window, kAXTitleAttribute as String))
         }
-        let picked = DesktopWindowPick.pick(target: windowId, targetBounds: targetBounds, targetTitle: targetTitle, windows: rows)
+        let picked = DesktopWindowPick.pick(target: windowId, targetBounds: targetBounds, targetTitle: targetTitle, windows: rows, linked: { WindowServerNumber.of(windows[$0]) })
         switch picked {
         case let .found(at): return (windows[at], ownerPid)
         case .ambiguous: throw ProviderError.coded("window_not_found", DesktopWindowPick.ambiguousSaid(windowId))

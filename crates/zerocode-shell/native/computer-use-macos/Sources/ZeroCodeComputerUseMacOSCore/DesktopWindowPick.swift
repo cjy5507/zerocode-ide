@@ -6,7 +6,8 @@ import CoreGraphics
 /// element"; where the number is missing the window is told by where it
 /// stands and how large it is, and only when that tells exactly one. Two
 /// that stand at one frame — two full-size windows of a browser, stacked —
-/// are told apart by what they are called, when exactly one of them is
+/// are told apart by the window-server number the accessibility library
+/// links each to, then by what they are called, when exactly one of them is
 /// called what the window list calls the target; never by which comes first.
 public enum DesktopWindowPick {
     /// The most two frames may differ by, edge for edge and in size, and still
@@ -33,13 +34,19 @@ public enum DesktopWindowPick {
     /// A window that carries a number is found by it or is another window;
     /// only one that carries none is told by its frame against `targetBounds`
     /// (the window list's bounds of `target`, nil when not read). When more
-    /// than one fits, `targetTitle` — the window list's name for `target` —
-    /// decides, if exactly one of them carries it; a name is asked for
-    /// nothing else, so a window that was renamed since is still found alone
-    /// at its frame.
+    /// than one fits, `linked` — the window-server number the accessibility
+    /// library links the window at an index to — decides, if exactly one of
+    /// them is linked to `target` and no name points at another; else
+    /// `targetTitle` — the window list's name for `target` — if exactly one
+    /// of them carries it. Neither is asked for anything else, so a window
+    /// that was renamed since is still found alone at its frame, and a pick
+    /// with no shared frame is what it was before the link was asked
+    /// (CU slowness 11-20, t-121376: two Chrome windows at one frame with
+    /// one title were refused for every act that named either).
     public static func pick(
         target: UInt32, targetBounds: CGRect?, targetTitle: String? = nil,
-        windows: [(number: UInt32?, frame: CGRect?, title: String?)]
+        windows: [(number: UInt32?, frame: CGRect?, title: String?)],
+        linked: (Int) -> UInt32? = { _ in nil }
     ) -> Pick {
         if let numbered = windows.firstIndex(where: { $0.number == target }) { return .found(numbered) }
         guard let targetBounds else { return .none }
@@ -50,10 +57,27 @@ public enum DesktopWindowPick {
         case 0: return .none
         case 1: return .found(fitting[0])
         default:
-            guard let targetTitle, !targetTitle.isEmpty else { return .ambiguous }
-            let named = fitting.filter { windows[$0].title == targetTitle }
+            let named = targetTitle?.isEmpty == false ? fitting.filter { windows[$0].title == targetTitle } : []
+            let byLink = fitting.filter { linked($0) == target }
+            if byLink.count == 1 {
+                // The link is the window server's own; a name that points at
+                // another of them contradicts it, and nothing is guessed.
+                return named.count == 1 && named[0] != byLink[0] ? .ambiguous : .found(byLink[0])
+            }
             return named.count == 1 ? .found(named[0]) : .ambiguous
         }
+    }
+
+    /// Whether a window standing at `frame`, whose window-server number is
+    /// `number` (its own, else the one the accessibility library links it
+    /// to; nil when neither says), is a twin of `target` and not `target`:
+    /// at the target's very frame, and known to be another window. A proof
+    /// that reads frames cannot tell such a twin from the target, so it asks
+    /// this first; a number that is not known leaves the frames to decide as
+    /// they did (CU slowness 11-20, t-121376).
+    public static func isAnotherAtTheSameFrame(frame: CGRect, number: UInt32?, target: UInt32, targetBounds: CGRect) -> Bool {
+        guard let number, framesMatch(frame, targetBounds) else { return false }
+        return number != target
     }
 
     /// How much of the smaller of two frames must lie inside the other for a
