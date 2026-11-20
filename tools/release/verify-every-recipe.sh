@@ -103,8 +103,13 @@ for recipe in $recipes; do
     just "$recipe"; status=$?
   fi
   # Which recipe the gate's time went to (t-4004: 674 → 1208 s, and no log
-  # said where). The lane's parser keys on `==>` alone; this line is inert to it.
-  echo "<== verify recipe $recipe rc=$status $(( SECONDS - started ))s"
+  # said where), and how it ended. The lane's parser reads this line
+  # (failed_tests): a red recipe whose own output named nothing, or one a
+  # signal ended (rc 128 or more), is red for real by it (t-121630, t-123004).
+  # The parser reads it only at the start of a line, and a recipe's output may
+  # stop mid-line (just killed while a test said `test x ... `): a newline
+  # comes first, as flake_entries in lane.sh writes it.
+  printf '\n<== verify recipe %s rc=%s %ss\n' "$recipe" "$status" "$(( SECONDS - started ))"
   if [ "$stopped" = "$recipe" ]; then
     # just's own words for a recipe ended by a signal, so the lane's parser reads
     # it as the red recipe it is (`recipe:<name>`, red for real beside any test it

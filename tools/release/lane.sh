@@ -682,6 +682,8 @@ failed_tests() { # LOG -> sorted unique failure names, one a line, each read aga
                  # recipe <name> rc=<n>` says it ended red, and whose own output named nothing — not even
                  # just's words for it (just killed, its log cut short by a full disk) — is `recipe:<name>`
                  # too: another recipe's names, judged solo, never clear it (t-121630, the review's P-1).
+                 # So is one whose closing line says a signal ended it (rc 128 or more), names or not, as
+                 # for `was terminated` above: just died before it could say so (t-123004, the review's R2).
                  # A failures block never runs on into the next recipe's output.
   awk '
     /^==> verify recipe / {
@@ -690,7 +692,7 @@ failed_tests() { # LOG -> sorted unique failure names, one a line, each read aga
       next
     }
     /^<== verify recipe / {
-      if ($5 ~ /^rc=/ && $5 != "rc=0" && !said) { print "recipe:" $4; said = 1 }
+      if ($5 ~ /^rc=/ && $5 != "rc=0" && (!said || substr($5, 4) + 0 >= 128)) { print "recipe:" $4; said = 1 }
       next
     }
     /^failures:$/ { inblock = 1; next }
