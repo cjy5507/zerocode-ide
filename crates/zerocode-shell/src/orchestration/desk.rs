@@ -4264,6 +4264,60 @@ mod tests {
         );
     }
 
+    /// MEASUREMENT (ignored, t-119569): the board's counts over one copy of the person's ledger,
+    /// as the window drew them before this change and as it draws them now — the top sentence's
+    /// 「답할 일 N」 (mail, decisions and, before, the reports to verify), the coordinator's line
+    /// 「코디가 검증할 보고 N건」, and each run's card 「검증 N」. Counts and run ids only.
+    ///
+    /// ```sh
+    /// ZEROCODE_DESK_REPLAY_STORE=<a copy of authority.sqlite> \
+    ///   cargo test -p zerocode-shell --bin zerocode-shell -- --ignored --nocapture \
+    ///   the_board_counts_over_a_copy_of_the_ledger
+    /// ```
+    #[test]
+    #[ignore = "a measurement over a copy of the person's own ledger; not a check"]
+    fn the_board_counts_over_a_copy_of_the_ledger() {
+        let Ok(store) = std::env::var("ZEROCODE_DESK_REPLAY_STORE") else {
+            return;
+        };
+        let ledger = Ledger::rebuild(projection_at_rest(&store)).expect("the ledger as it stood");
+        let desk = desk_json(&ledger);
+        let standing = |name: &str| {
+            desk["stages"]
+                .as_array()
+                .and_then(|stages| stages.iter().find(|one| one["stage"] == name))
+                .map_or(0, |one| {
+                    one["count"].as_i64().unwrap_or(0) - one["left"].as_i64().unwrap_or(0)
+                })
+        };
+        let mail = desk["counts"]["mail"].as_i64().unwrap_or(0);
+        let (gates, reports) = (standing("gate"), standing("reported"));
+        let cards: Vec<String> = desk["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|run| run["reviews"].as_u64().unwrap_or(0) > 0)
+            .map(|run| {
+                format!(
+                    "{} 검증 {}",
+                    run["run"].as_str().unwrap_or("?"),
+                    run["reviews"]
+                )
+            })
+            .collect();
+        println!(
+            "board: your turn {} → {} (mail {mail} · decisions {gates} · reports {reports}) · \
+             the coordinator's line {reports} · cards: {}",
+            mail + gates + reports,
+            mail + gates,
+            if cards.is_empty() {
+                "none".to_string()
+            } else {
+                cards.join(" · ")
+            }
+        );
+    }
+
     /// The schedule's worker tasks over the ledger that already happened
     /// (t-71840): a copy of the person's store read into a snapshot, the desk
     /// this build draws from it, and what git at this checkout's repository
