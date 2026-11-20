@@ -86,6 +86,16 @@ final class ReadingRefusalTests: XCTestCase {
         XCTAssertEqual(ReadingRefusal.covered(index: 3, by: "", otherWindow: nil), "element 3 is covered at its centre; look again with --marks")
     }
 
+    /// t-122948: a window that publishes no number of its own — Chrome's, the
+    /// twin fixture's — is still named, by the number the library links it to.
+    func testAWindowThatPublishesNoNumberIsStillNamedByItsLink() {
+        XCTAssertEqual(ReadingRefusal.windowID(published: nil, linked: { 243600 }), 243600)
+        var asked = false
+        XCTAssertEqual(ReadingRefusal.windowID(published: 7, linked: { asked = true; return 9 }), 7)
+        XCTAssertFalse(asked, "a published number is read first and the link is not asked")
+        XCTAssertNil(ReadingRefusal.windowID(published: nil, linked: { nil }))
+    }
+
     func testALongTitleOrTextIsClippedToEightyCharacters() {
         let long = String(repeating: "a", count: 300)
         let window = ReadingRefusal.otherWindowsWords(app: "Notes", others: [.init(windowId: 7, title: long)]) ?? ""
@@ -209,6 +219,11 @@ final class ReadingRefusalSourceTests: XCTestCase {
         let owner = try body(of: "private func coveringWindow(_ hit: AXUIElement, in snapshot: Snapshot) -> ReadingRefusal.OtherWindow? {", in: source)
         XCTAssertTrue(owner.contains("owner == snapshot.app.pid"), String(owner))
         XCTAssertTrue(owner.contains("number != snapshot.windowId"), String(owner))
+        // Both refusals that name another window read its linked number when it publishes none (t-122948).
+        let linked = "ReadingRefusal.windowID(published: windowNumber(window), linked: { WindowServerNumber.of(window) })"
+        XCTAssertTrue(owner.contains(linked), String(owner))
+        let point = try body(of: "private func unreadablePoint(_ point: CGPoint?, in snapshot: Snapshot) -> ReadingRefusal.Unreadable {", in: source)
+        XCTAssertTrue(point.contains(linked), String(point))
     }
 
     func testTheElementsThatShowTheWordsOnlyInTheirTextAreTheCoresChoice() throws {

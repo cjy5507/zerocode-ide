@@ -154,6 +154,16 @@ public enum ReadingRefusal {
             .joined(separator: "; ")
     }
 
+    /// The number a refusal names one of the app's windows by: the one the
+    /// window publishes (`AXWindowNumber`), else the window-server number the
+    /// accessibility library links it to. Chrome's windows and the twin
+    /// fixture publish none, so a refusal that read the published number
+    /// alone never named their windows (t-122948). The link is asked only
+    /// when nothing is published, and only for the refusal's words.
+    public static func windowID(published: CGWindowID?, linked: () -> CGWindowID?) -> CGWindowID? {
+        published ?? linked()
+    }
+
     /// A press whose control is under something at its centre (`requireOnTop`).
     /// Under another window of the same app — the twin windows of one app the
     /// person's scene had — the refusal says which window, and that moving it

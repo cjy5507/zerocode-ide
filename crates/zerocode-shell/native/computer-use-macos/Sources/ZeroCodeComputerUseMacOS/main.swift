@@ -2507,7 +2507,8 @@ final class Provider {
 
     /// The window of the app's own that stands over a control, when what is on
     /// top there belongs to another window of the same app; nil for another
-    /// app's window, the control's own window, or a window with no number.
+    /// app's window, the control's own window, or a window with no number,
+    /// published or linked (Chrome's windows publish none).
     /// Read for the refusal's words alone, after the refusal is decided.
     private func coveringWindow(_ hit: AXUIElement, in snapshot: Snapshot) -> ReadingRefusal.OtherWindow? {
         var owner: pid_t = 0
@@ -2515,7 +2516,9 @@ final class Provider {
         let window = stringAttribute(hit, kAXRoleAttribute as String) == (kAXWindowRole as String)
             ? hit
             : copyElement(hit, kAXWindowAttribute as String)
-        guard let window, let number = windowNumber(window), number != snapshot.windowId else { return nil }
+        guard let window,
+              let number = ReadingRefusal.windowID(published: windowNumber(window), linked: { WindowServerNumber.of(window) }),
+              number != snapshot.windowId else { return nil }
         return ReadingRefusal.OtherWindow(windowId: number, title: stringAttribute(window, kAXTitleAttribute as String))
     }
 
@@ -2554,7 +2557,7 @@ final class Provider {
             if AXUIElementCopyElementAtPosition(application, Float(point.x), Float(point.y), &hit) == .success,
                let hit,
                let window = copyElement(hit, kAXWindowAttribute as String),
-               let number = windowNumber(window),
+               let number = ReadingRefusal.windowID(published: windowNumber(window), linked: { WindowServerNumber.of(window) }),
                number != snapshot.windowId {
                 return .anotherWindow(ReadingRefusal.OtherWindow(windowId: number, title: stringAttribute(window, kAXTitleAttribute as String)))
             }

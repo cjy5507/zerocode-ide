@@ -28,8 +28,8 @@ final class WindowNumberSourceTests: XCTestCase {
             own.contains("WindowServerNumber"),
             "the click recipients and every other reader of a window's number read the published one as before")
         XCTAssertEqual(
-            source.components(separatedBy: "WindowServerNumber.of(").count - 1, 4,
-            "asked by the two picks, the twin check and the recovery alone")
+            source.components(separatedBy: "WindowServerNumber.of(").count - 1, 6,
+            "asked by the two picks, the twin check, the recovery, and the two refusals' naming of another window of the app (over a control, or at a background point) alone")
     }
 
     /// Once two windows at one frame are told apart, a look or a press can
