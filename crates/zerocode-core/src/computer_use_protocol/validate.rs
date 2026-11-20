@@ -240,6 +240,17 @@ pub fn secure_input_sentence(message: &str) -> Option<String> {
 
 /// What a refusal for the person's pointer tells the model to do.
 const PERSON_POINTING_SENTENCE: &str = "the person is using the pointer, and this act needs it; nothing was done. Try again shortly, and work elsewhere meanwhile";
+/// The helper's words for an act refused in the app the person has in front
+/// (`DesktopBorrow.refusalWords`): that act needed no pointer of theirs.
+const IN_THEIR_APP: &str = "with this act's app in front of them";
+/// What the same refusal adds for an act that would have borrowed the shared
+/// pointer: a press on a control the app's tree shows goes, in the app's
+/// background, to that app's own process and needs no pointer while the app
+/// stands behind the person's. A window with no tree (a mirrored phone) has no
+/// such press, and the sentence does not offer one. On 11-20 a
+/// model refused in the background turned to the pointer, which the person
+/// was using in another window, and was refused again (t-121372).
+const BACKGROUND_NEEDS_NO_POINTER: &str = ". A press on a control the app's own tree shows, sent to its background (--app with --window-id and --background), needs no pointer while that app is not the one in front of them: send it that way, or hand the step to them";
 
 /// A helper's terse refusal as the model reads it: a password field's
 /// (`secure_input`), the person's pointer (`person_pointing`) and a line break
@@ -251,7 +262,12 @@ pub fn refusal_sentence(code: &str, message: &str) -> Option<String> {
         return secure_input_sentence(message);
     }
     if code == error_code::PERSON_POINTING {
-        return Some(PERSON_POINTING_SENTENCE.to_string());
+        if message.contains(IN_THEIR_APP) {
+            return Some(PERSON_POINTING_SENTENCE.to_string());
+        }
+        return Some(format!(
+            "{PERSON_POINTING_SENTENCE}{BACKGROUND_NEEDS_NO_POINTER}"
+        ));
     }
     let line_break = TextEntryRefusal::LineBreak;
     (code == error_code::INVALID_ARGUMENT
@@ -378,6 +394,46 @@ mod tests {
         assert_eq!(
             delivery_of_refusal(error_code::PERSON_POINTING),
             NOT_DELIVERED
+        );
+    }
+
+    /// t-121372: an act that would have borrowed the shared pointer is told
+    /// that a press in the app's background needs none; an act refused in the
+    /// app the person has in front is not, since it needed no pointer anyway.
+    #[test]
+    fn a_refused_borrow_names_the_background_road_and_a_refusal_in_their_app_does_not() {
+        let borrow = refusal_sentence(
+            error_code::PERSON_POINTING,
+            "the person is using the mouse, and this act needs the keyboard or the pointer; nothing was done. Try again shortly",
+        )
+        .expect("a sentence");
+        assert!(borrow.starts_with(PERSON_POINTING_SENTENCE), "{borrow}");
+        assert!(
+            borrow.contains(
+                "a control the app's own tree shows, sent to its background (--app with --window-id and --background), needs no pointer"
+            ),
+            "{borrow}"
+        );
+        assert!(!borrow.contains("--foreground"), "{borrow}");
+        let in_their_app = refusal_sentence(
+            error_code::PERSON_POINTING,
+            "the person is using the mouse with this act's app in front of them; nothing was done. Try again shortly",
+        )
+        .expect("a sentence");
+        assert_eq!(in_their_app, PERSON_POINTING_SENTENCE);
+    }
+
+    /// The words that tell the two apart are the helper's own.
+    #[test]
+    fn the_in_their_app_words_are_the_helpers() {
+        let helper = include_str!(
+            "../../../zerocode-shell/native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/DesktopBorrow.swift"
+        );
+        assert!(
+            helper.contains(&format!(
+                "\"the person is \\(doing) {IN_THEIR_APP}; nothing was done."
+            )),
+            "DesktopBorrow.refusalWords no longer says {IN_THEIR_APP:?}"
         );
     }
 
