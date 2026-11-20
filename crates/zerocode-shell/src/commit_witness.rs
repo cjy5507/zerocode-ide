@@ -144,7 +144,7 @@ fn range_of(vcs: &dyn Vcs, repo: &Path, head: &str, base_head: &str) -> Option<R
         return Some(RangeSeen {
             commits: vec![(head.to_string(), true)],
             landed_as: Some(landed),
-            tag: None,
+            ..RangeSeen::default()
         });
     }
     let listed = |range: String, oldest_first: bool| {
@@ -187,7 +187,7 @@ fn range_of(vcs: &dyn Vcs, repo: &Path, head: &str, base_head: &str) -> Option<R
         landed_as: newest_copy
             .filter(|_| landed)
             .map(|at| keyed[at].1.to_string()),
-        tag: None,
+        ..RangeSeen::default()
     })
 }
 
@@ -805,8 +805,8 @@ mod tests {
     /// The range a verified review read, as the landing proof asks git (t-119569): a range picked
     /// onto `main` beside a line `main` changed (where git's own patch identity calls the copy
     /// another change) lands once every commit of it is there, as the newest copy; one commit
-    /// still missing is no landing; a tag counts only once it holds the landing and the published
-    /// `main` holds it; and a head merged as it is landed as its merge.
+    /// still missing is no landing; a tag cut before it holds none of it; and a head merged as it
+    /// is landed as its merge.
     #[test]
     fn a_reviewed_range_lands_once_every_change_is_in_main_and_ships_in_a_published_tag() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -843,8 +843,6 @@ mod tests {
 
         git(repo, &["cherry-pick", &head]);
         let copy = git(repo, &["rev-parse", "HEAD"]);
-        git(repo, &["update-ref", "refs/remotes/origin/main", "main~1"]);
-        git(repo, &["tag", "v1.0.1"]);
         let landed = range(repo);
         assert!(
             landed.commits.iter().all(|(_, landed)| *landed),
@@ -857,10 +855,8 @@ mod tests {
         );
         assert_eq!(
             landed.tag, None,
-            "v1.0.0 holds none of it, and v1.0.1 is not on the published main yet"
+            "v1.0.0 was cut before it, and holds none of it"
         );
-        git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
-        assert_eq!(range(repo).tag.as_deref(), Some("v1.0.1"), "published");
 
         // A head merged as it is: its own range of one, landed as the merge that took it.
         git(repo, &["checkout", "-q", "-b", "side"]);
@@ -873,6 +869,250 @@ mod tests {
         let merged = seen.range(&side).expect("git answered for the merged head");
         assert_eq!(merged.commits, vec![(side.clone(), true)]);
         assert_eq!(merged.landed_as.as_deref(), Some(merge.as_str()));
+    }
+
+    /// What git says of the range `head` reviewed, against `main` (t-119569).
+    fn reviewed_range(repo: &Path, head: &str) -> RangeSeen {
+        let mut seen = CommitsSeen::default();
+        see_ranges(&mut seen, repo, &[head.to_string()], "main", "v*");
+        seen.range(head)
+            .cloned()
+            .unwrap_or_else(|| panic!("git answered for the range {head}"))
+    }
+
+    /// A throwaway repository on `main` with one commit, and `work` forked from it.
+    fn forked(dir: &Path) -> &Path {
+        git(dir, &["init", "-q", "-b", "main"]);
+        commit(dir, "base");
+        git(dir, &["checkout", "-q", "-b", "work"]);
+        dir
+    }
+
+    /// The same lines another commit put in another place of the same file (check B · C) are
+    /// another change: the copy a cherry-pick or a rebase makes keeps its author, its moment and its
+    /// subject, and a commit that only happens to add the same line elsewhere keeps none of them.
+    #[test]
+    fn the_same_lines_another_commit_put_elsewhere_in_the_file_are_another_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("file"), "fn a() {\n}\n\nfn b() {\n}\n").expect("write");
+        git(repo, &["add", "file"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        git(repo, &["checkout", "-q", "-b", "work"]);
+        std::fs::write(
+            repo.join("file"),
+            "fn a() {\n    return;\n}\n\nfn b() {\n}\n",
+        )
+        .expect("write");
+        git(repo, &["commit", "-q", "-am", "a returns"]);
+        let head = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(
+            repo.join("file"),
+            "fn a() {\n}\n\nfn b() {\n    return;\n}\n",
+        )
+        .expect("write");
+        git(repo, &["commit", "-q", "-am", "b returns"]);
+        let range = reviewed_range(repo, &head);
+        assert_eq!(
+            range.commits,
+            vec![(head.clone(), false)],
+            "main added the same line to another function: {range:?}"
+        );
+        assert_eq!(range.landed_as, None);
+    }
+
+    /// Commits that change nothing (check B · D) are nothing to land: said apart from the range's
+    /// commits, never matched — not even to another commit that changes nothing — and beside a
+    /// change that landed they hold nothing back.
+    #[test]
+    fn commits_that_change_nothing_are_said_apart_and_hold_nothing_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        git(repo, &["commit", "-q", "--allow-empty", "-m", "a note"]);
+        let note = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(
+            repo,
+            &["commit", "-q", "--allow-empty", "-m", "another note"],
+        );
+        let only = reviewed_range(repo, &note);
+        assert!(only.commits.is_empty(), "{only:?}");
+        assert_eq!(only.empty, vec![note.clone()], "{only:?}");
+        assert_eq!(only.landed_as, None);
+
+        git(repo, &["checkout", "-q", "work"]);
+        let change = commit(repo, "change");
+        git(
+            repo,
+            &["commit", "-q", "--allow-empty", "-m", "a last note"],
+        );
+        let last = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["cherry-pick", &change]);
+        let copy = git(repo, &["rev-parse", "HEAD"]);
+        let beside = reviewed_range(repo, &last);
+        assert_eq!(beside.commits, vec![(change.clone(), true)], "{beside:?}");
+        assert_eq!(beside.empty, vec![note.clone(), last.clone()], "{beside:?}");
+        assert_eq!(beside.landed_as.as_deref(), Some(copy.as_str()));
+    }
+
+    /// A merge inside the range (check B · E) is said apart: what it changes itself matches no
+    /// commit of `main`, so the ledger proves no landing by copies of the rest.
+    #[test]
+    fn a_merge_inside_a_range_is_said_apart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        commit(repo, "elsewhere");
+        git(repo, &["checkout", "-q", "work"]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "take main", "main"]);
+        let merge = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["cherry-pick", &change]);
+        let range = reviewed_range(repo, &merge);
+        assert_eq!(range.merges, vec![merge.clone()], "{range:?}");
+        assert_eq!(range.commits, vec![(change.clone(), true)], "{range:?}");
+    }
+
+    /// A landing `main` reverted (check B · F) is said with its revert — a copy picked onto `main`
+    /// and reverted, and a head merged as it is and reverted by a revert of its merge.
+    #[test]
+    fn a_landing_main_reverted_is_said_with_its_revert() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["cherry-pick", &change]);
+        let copy = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["revert", "--no-edit", &copy]);
+        let revert = git(repo, &["rev-parse", "HEAD"]);
+        let picked = reviewed_range(repo, &change);
+        assert_eq!(
+            picked.landed_as.as_deref(),
+            Some(copy.as_str()),
+            "{picked:?}"
+        );
+        assert_eq!(
+            picked.reverted,
+            vec![(revert.clone(), copy.clone())],
+            "{picked:?}"
+        );
+
+        git(repo, &["checkout", "-q", "-b", "side"]);
+        let side = commit(repo, "side");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "take side", "side"]);
+        let merge = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["revert", "--no-edit", "-m", "1", &merge]);
+        let undone = git(repo, &["rev-parse", "HEAD"]);
+        let merged = reviewed_range(repo, &side);
+        assert_eq!(
+            merged.landed_as.as_deref(),
+            Some(merge.as_str()),
+            "{merged:?}"
+        );
+        assert_eq!(
+            merged.reverted,
+            vec![(undone.clone(), merge.clone())],
+            "{merged:?}"
+        );
+
+        // Fast-forwarded onto main: git cannot tell where the work began on main's line, so a
+        // revert of a commit under the head counts as one of the landing.
+        git(repo, &["checkout", "-q", "-b", "ahead"]);
+        let first = commit(repo, "first");
+        let last = commit(repo, "last");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--ff-only", "ahead"]);
+        git(repo, &["revert", "--no-edit", &first]);
+        let first_undone = git(repo, &["rev-parse", "HEAD"]);
+        let forwarded = reviewed_range(repo, &last);
+        assert_eq!(
+            forwarded.landed_as.as_deref(),
+            Some(last.as_str()),
+            "{forwarded:?}"
+        );
+        assert_eq!(
+            forwarded.reverted,
+            vec![(first_undone.clone(), first.clone())],
+            "{forwarded:?}"
+        );
+    }
+
+    /// Only `main`'s first-parent line proves a copy (check B · B, ruling §4): a copy a side branch
+    /// holds, tied on by `merge -s ours` — which kept `main`'s tree as it was — is no landing.
+    #[test]
+    fn a_copy_only_a_side_branch_of_main_holds_proves_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["checkout", "-q", "-b", "side"]);
+        git(repo, &["cherry-pick", &change]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "-s",
+                "ours",
+                "-m",
+                "keep main as it was",
+                "side",
+            ],
+        );
+        let range = reviewed_range(repo, &change);
+        assert_eq!(range.commits, vec![(change.clone(), false)], "{range:?}");
+        assert_eq!(range.landed_as, None);
+    }
+
+    /// A release counts once origin holds its tag (check B · A): with no origin there is none to
+    /// read and the range says so; a tag only local — a release still running, or one that failed
+    /// — is none; pushed, it is the release.
+    #[test]
+    fn a_release_tag_counts_once_origin_holds_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["cherry-pick", &change]);
+        let copy = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["tag", "v1.0.1"]);
+
+        let alone = reviewed_range(repo, &change);
+        assert_eq!(alone.landed_as.as_deref(), Some(copy.as_str()));
+        assert_eq!(alone.tag, None, "no origin, no release: {alone:?}");
+        assert!(
+            alone
+                .unpublished
+                .as_deref()
+                .is_some_and(|why| why.contains("origin/main")),
+            "{alone:?}"
+        );
+
+        let origin = tempfile::tempdir().expect("tempdir");
+        git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let url = origin.path().to_str().expect("a UTF-8 path");
+        git(repo, &["remote", "add", "origin", url]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let local = reviewed_range(repo, &change);
+        assert_eq!(local.tag, None, "origin holds main, not the tag: {local:?}");
+        assert!(
+            local
+                .unpublished
+                .as_deref()
+                .is_some_and(|why| why.contains("v1.0.1")),
+            "{local:?}"
+        );
+
+        git(repo, &["push", "-q", "origin", "v1.0.1"]);
+        let released = reviewed_range(repo, &change);
+        assert_eq!(released.tag.as_deref(), Some("v1.0.1"), "{released:?}");
+        assert_eq!(released.unpublished, None, "{released:?}");
     }
 
     /// MEASUREMENT (ignored, t-119569): the 「쌓인 일」 count of a real repository's checkouts as the

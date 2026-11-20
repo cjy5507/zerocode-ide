@@ -80,18 +80,33 @@ pub struct CommitsSeen {
 
 /// One reviewed range as git answered for it (t-119569): the commits the head holds that the base
 /// did not when the work forked from it — a head landed as it is, merged or fast-forwarded, is
-/// its own range of one, held by the base — each with whether the base holds its change now,
-/// itself or a copy picked onto the base with the same change (git's own patch identity); the
-/// commit of the base the last of them landed as; and the first release tag that holds that
-/// landing and that the published base holds — a tag cut while a release still runs is none.
+/// its own range of one, held by the base — each with whether the base's first-parent line holds
+/// its change now, itself or a copy picked onto the base: the same change by the same author at the
+/// same moment under the same subject, as a cherry-pick and a rebase keep it (a squash keeps none
+/// of that, and proves nothing); the commits that change nothing and the merges inside the range,
+/// apart; the commit of the base the last of them landed as; the commits of the base that revert
+/// that landing; and the first release tag that holds that landing and that origin holds — a tag
+/// cut while a release still runs is only local, and none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RangeSeen {
-    /// The range's commits, and whether the base holds each one's change.
+    /// The range's commits that change something, oldest first, and whether the base holds each
+    /// one's change.
     pub commits: Vec<(String, bool)>,
+    /// The range's commits that change nothing (`--allow-empty`): nothing to land, so left out of
+    /// `commits` — and a range of nothing else proves no landing.
+    pub empty: Vec<String>,
+    /// The merge commits inside the range: what a merge changes itself (a conflict resolved, a line
+    /// added in it) matches no commit of the base, so a range holding one proves no landing.
+    pub merges: Vec<String>,
     /// The commit of the base the range's last change landed as, when every one landed.
     pub landed_as: Option<String>,
-    /// The first release tag, in version order, that holds `landed_as` and is published.
+    /// The commits of the base that revert the landing, each with the commit it reverts.
+    pub reverted: Vec<(String, String)>,
+    /// The first release tag, in version order, that holds `landed_as` and that origin holds.
     pub tag: Option<String>,
+    /// Why no tag is read as released where one may hold the landing: the tag is only local,
+    /// origin could not be asked, or there is no origin to read a release from.
+    pub unpublished: Option<String>,
 }
 
 /// One head's change — its own commits, the base they stand on left out — file by file: line
