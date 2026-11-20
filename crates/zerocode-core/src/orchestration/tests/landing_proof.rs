@@ -472,3 +472,25 @@ fn the_backfill_takes_the_remote_releases_are_published_to() {
     assert_eq!(row["write"]["deployed"], true, "{row}");
     assert_eq!(row["write"]["release"], "v1.2.0", "{row}");
 }
+
+/// The release remote's credentials are kept nowhere (t-119569): a URL carrying a token, given to
+/// the verb that writes, leaves no trace of it in the verb's answer or in the ledger — the answer
+/// a retry would serve again included.
+#[test]
+fn a_release_remotes_credentials_are_kept_nowhere() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name landing-secret");
+    verified(&mut bench, "secret", HEAD);
+    let listed = backfill(
+        &mut bench,
+        "task-backfill --apply --release-remote https://user:SECRET-TOKEN@example.invalid/z.git \
+         --retry-request backfill-secret",
+        git_says(landed_and_released()),
+    );
+    assert!(!listed.to_string().contains("SECRET"), "{listed}");
+    let kept = serde_json::to_string(&bench.ledger.export()).expect("the ledger serializes");
+    assert!(
+        !kept.contains("SECRET"),
+        "the ledger keeps the URL's credentials"
+    );
+}

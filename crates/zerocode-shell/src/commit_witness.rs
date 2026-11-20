@@ -140,6 +140,11 @@ const ORIGIN: &str = "origin";
 /// Release tags by name, each with the object it names (a tag object, or a commit for a light one).
 type Tags = std::collections::BTreeMap<String, String>;
 
+/// `remote` as a reason names it.
+fn shown_remote(remote: &str) -> String {
+    remote.to_string()
+}
+
 /// Where a release is read from (t-119569), for both of the backfill's roads: the release tags
 /// `tags` names, the base as origin holds it (`published`, none where this repository has no
 /// `origin/<base>`), and the remote releases are published to — named by the caller
@@ -211,7 +216,7 @@ impl<'a> Releases<'a> {
         let Some(first) = held.first() else {
             return (None, None);
         };
-        let Some(remote) = self.remote else {
+        let Some(asked) = self.remote else {
             return (
                 None,
                 Some(format!(
@@ -220,9 +225,10 @@ impl<'a> Releases<'a> {
                 )),
             );
         };
+        let remote = shown_remote(asked);
         let Some(there) = self
             .on_remote
-            .get_or_insert_with(|| refs_on(vcs, repo, remote))
+            .get_or_insert_with(|| refs_on(vcs, repo, asked))
         else {
             return (
                 None,
@@ -1621,6 +1627,149 @@ mod tests {
         assert_eq!(
             released_range(repo, &change, Some("origin")).tag.as_deref(),
             Some("v1.0.1")
+        );
+    }
+
+    /// Whether a remote shares this history is asked of every commit its tags and branches name,
+    /// its tags first (t-119569, the second delta check's 1): a mirror of this history whose main
+    /// moved on, with more branches than are asked at once ahead of everything else, still shares
+    /// it by the old release it holds — so its v1.0.1 over a commit not fetched here is no release.
+    #[test]
+    fn a_mirror_of_this_history_shares_it_however_many_branches_come_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["tag", "v1.0.0"]);
+        git(repo, &["cherry-pick", &change]);
+        git(repo, &["tag", "v1.0.1"]);
+        let origin = tempfile::tempdir().expect("tempdir");
+        let origin_url = bare(&origin);
+        git(repo, &["remote", "add", "origin", origin_url.as_str()]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let mirror = tempfile::tempdir().expect("tempdir");
+        let mirror_url = bare(&mirror);
+        git(repo, &["push", "-q", mirror_url.as_str(), "main", "v1.0.0"]);
+        let other = tempfile::tempdir().expect("tempdir");
+        git(other.path(), &["clone", "-q", mirror_url.as_str(), "."]);
+        let moved = commit(other.path(), "moved");
+        for at in 0..70 {
+            git(other.path(), &["branch", &format!("b{at:02}"), &moved]);
+        }
+        git(other.path(), &["tag", "v1.0.1"]);
+        git(other.path(), &["push", "-q", "origin", "--all"]);
+        git(other.path(), &["push", "-q", "origin", "v1.0.1"]);
+        let mirrored = released_range(repo, &change, Some(mirror_url.as_str()));
+        assert_eq!(
+            mirrored.tag, None,
+            "the mirror's v1.0.1 is another commit: {mirrored:?}"
+        );
+        assert!(
+            mirrored
+                .unpublished
+                .as_deref()
+                .is_some_and(|why| why.contains("another commit")),
+            "{mirrored:?}"
+        );
+    }
+
+    /// A shallow clone takes every remote to share its history (t-119569, the second delta check's
+    /// 1): the commits outside its depth are ones it lacks whatever the remote holds, so a remote
+    /// naming only those is no remote of another history — its v1.0.1 over an old commit is no
+    /// release.
+    #[test]
+    fn a_shallow_clone_takes_every_remote_to_share_its_history() {
+        let full = tempfile::tempdir().expect("tempdir");
+        git(full.path(), &["init", "-q", "-b", "main"]);
+        let old = commit(full.path(), "old");
+        commit(full.path(), "recent");
+        let source = tempfile::tempdir().expect("tempdir");
+        let source_url = bare(&source);
+        git(full.path(), &["push", "-q", source_url.as_str(), "main"]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        let shallow_from = format!("file://{source_url}");
+        git(
+            repo,
+            &["clone", "-q", "--depth", "1", shallow_from.as_str(), "."],
+        );
+        git(repo, &["checkout", "-q", "-b", "work"]);
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["cherry-pick", &change]);
+        git(repo, &["tag", "v1.0.1"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        // Another place holding the same history's old commit, tagged v1.0.1 there.
+        let mirror = tempfile::tempdir().expect("tempdir");
+        let mirror_url = bare(&mirror);
+        git(full.path(), &["tag", "v1.0.1", &old]);
+        let main_at_old = format!("{old}:refs/heads/main");
+        git(
+            full.path(),
+            &[
+                "push",
+                "-q",
+                mirror_url.as_str(),
+                main_at_old.as_str(),
+                "v1.0.1",
+            ],
+        );
+        let cut = released_range(repo, &change, Some(mirror_url.as_str()));
+        assert_eq!(
+            cut.tag, None,
+            "the mirror's v1.0.1 is an old commit: {cut:?}"
+        );
+        assert!(
+            cut.unpublished
+                .as_deref()
+                .is_some_and(|why| why.contains("another commit")),
+            "{cut:?}"
+        );
+    }
+
+    /// A release remote's URL is never written with the credentials it carries (t-119569): every
+    /// reason names it by its host and path alone.
+    #[test]
+    fn a_release_remote_is_named_without_the_credentials_its_url_carries() {
+        for (given, shown) in [
+            (
+                "https://user:SECRET@example.com/org/repo.git",
+                "https://example.com/org/repo.git",
+            ),
+            (
+                "https://SECRET@example.com/repo",
+                "https://example.com/repo",
+            ),
+            (
+                "ssh://git@example.com:22/repo.git",
+                "ssh://example.com:22/repo.git",
+            ),
+            ("git@example.com:org/repo.git", "example.com:org/repo.git"),
+            ("origin", "origin"),
+            ("/srv/git/repo.git", "/srv/git/repo.git"),
+        ] {
+            assert_eq!(shown_remote(given), shown, "{given}");
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["cherry-pick", &change]);
+        git(repo, &["tag", "v1.0.1"]);
+        let origin = tempfile::tempdir().expect("tempdir");
+        let origin_url = bare(&origin);
+        git(repo, &["remote", "add", "origin", origin_url.as_str()]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        // Nothing listens there: git cannot ask it, and the reason says so — host and path only.
+        let range = released_range(
+            repo,
+            &change,
+            Some("https://user:SECRET-TOKEN@127.0.0.1:9/zerocode.git"),
+        );
+        let why = range.unpublished.expect("why no release is read");
+        assert!(
+            why.contains("127.0.0.1:9/zerocode.git") && !why.contains("SECRET"),
+            "{why}"
         );
     }
 
