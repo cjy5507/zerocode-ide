@@ -3,7 +3,8 @@
 //! beside it, to learn how the job ended, never does: a runner that a pane's
 //! restart takes with it leaves its job lost (2026-11-19: j-…6b95 at the
 //! window's restart at 21:24). The real binary, each test on a line of its own
-//! in a temporary zo home (`ZO_HOME`) — never the machine's line.
+//! in a temporary zo home (`ZO_HOME`) — never the machine's line — and with no
+//! disk floor (`FLOOR_ENV`), so the tests run whatever this disk holds.
 
 #![cfg(unix)]
 
@@ -16,8 +17,14 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use zerocode_core::line::{Job, JobState, Line, DISK_FLOOR_DEFAULT_GIB};
+use zerocode_core::line::{Job, JobState, Line};
 
+/// The variable that names the line's disk floor in GiB, `0` for none. Before
+/// t-119309 these tests passed in no time below 17 GiB free: they saw the
+/// floor, said `skipped:` and ended green (j-…e21a, 2026-11-20 05:10).
+const FLOOR_ENV: &str = "ZO_LINE_DISK_FLOOR_GIB";
+/// A floor no disk these tests run on reaches: a million GiB.
+const UNREACHED_FLOOR: &str = "1000000";
 /// How long a step waits for the line before the test says what did not happen.
 const PATIENCE: Duration = Duration::from_secs(60);
 /// The cap of every job here: a job a failed test leaves behind ends by it.
@@ -43,28 +50,23 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// A line of its own — or none, said on stderr, when this disk is below the
-    /// line's floor: nothing starts there, by the line's own rule.
-    fn new() -> Option<Self> {
+    /// A line of its own.
+    fn new() -> Self {
         let root = tempfile::tempdir().expect("a folder");
         for folder in ["zo", "work", "user"] {
             fs::create_dir_all(root.path().join(folder)).expect("folders");
         }
-        let stat = nix::sys::statvfs::statvfs(root.path()).expect("the disk's free space");
-        let free = u128::from(stat.blocks_available()).saturating_mul(u128::from(stat.fragment_size()));
-        if free < u128::from(DISK_FLOOR_DEFAULT_GIB + 1) << 30 {
-            eprintln!("skipped: {free} bytes free, below the line's floor of {DISK_FLOOR_DEFAULT_GIB} GiB — nothing would start");
-            return None;
-        }
         let line = Line::at(&root.path().join("zo"));
-        Some(Self { root, line, gates: RefCell::new(Vec::new()) })
+        Self { root, line, gates: RefCell::new(Vec::new()) }
     }
 
     fn cwd(&self) -> PathBuf {
         self.root.path().join("work")
     }
 
-    /// `zo` on this line only: zo's home, the person's home and nothing else of this process's environment.
+    /// `zo` on this line only, with no disk floor: zo's home, the person's home
+    /// and nothing else of this process's environment. A waiter it starts has
+    /// its environment, the floor too.
     fn zo(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_zo"));
         command.env_clear();
@@ -76,14 +78,21 @@ impl Fixture {
             .current_dir(self.cwd())
             .env("HOME", self.root.path().join("user"))
             .env("ZO_HOME", self.root.path().join("zo"))
+            .env(FLOOR_ENV, "0")
             .stdin(Stdio::null());
         command
     }
 
     /// `zo line add --owner <owner> -- sh -c <script> <arg>`: the job's id.
     fn add(&self, owner: &str, script: &str, arg: &str) -> String {
+        self.add_under("0", owner, script, arg)
+    }
+
+    /// The same, from a `zo` whose disk floor is `floor` GiB.
+    fn add_under(&self, floor: &str, owner: &str, script: &str, arg: &str) -> String {
         let output = self
             .zo(&["line", "add", "--owner", owner, "--cap", CAP, "--", "sh", "-c", script, arg])
+            .env(FLOOR_ENV, floor)
             .output()
             .expect("zo line add");
         assert!(output.status.success(), "zo line add: {}", String::from_utf8_lossy(&output.stderr));
@@ -228,7 +237,7 @@ fn exit_of(child: &mut Child) -> i32 {
 /// and the turn comes when the paused line is let go.
 #[test]
 fn a_wait_beside_the_waiter_add_started_never_runs_the_job() {
-    let Some(fixture) = Fixture::new() else { return };
+    let fixture = Fixture::new();
     for round in 0..ROUNDS {
         fixture.act(&["pause"]);
         let ran = format!("ran-{round}");
@@ -258,7 +267,7 @@ fn a_wait_beside_the_waiter_add_started_never_runs_the_job() {
 /// 69c371b78 the wait started a new waiter that ran it.
 #[test]
 fn a_wait_on_a_job_whose_waiter_is_gone_ends_it_and_runs_nothing() {
-    let Some(fixture) = Fixture::new() else { return };
+    let fixture = Fixture::new();
     let gate = fixture.gate("go");
     let first = fixture.add("p", HOLD, &gate);
     fixture.runs(&first);
@@ -288,7 +297,7 @@ fn a_wait_on_a_job_whose_waiter_is_gone_ends_it_and_runs_nothing() {
 /// owner's later jobs, and the line's slots that chose it, for good.
 #[test]
 fn a_waiting_job_whose_waiter_is_gone_does_not_hold_the_line() {
-    let Some(fixture) = Fixture::new() else { return };
+    let fixture = Fixture::new();
     let gate = fixture.gate("go");
     let first = fixture.add("q", HOLD, &gate);
     fixture.runs(&first);
@@ -310,7 +319,7 @@ fn a_waiting_job_whose_waiter_is_gone_does_not_hold_the_line() {
 /// receipt (`<job>.rc`) says when it ran.
 #[test]
 fn a_wait_exits_with_the_jobs_code_however_the_job_ended() {
-    let Some(fixture) = Fixture::new() else { return };
+    let fixture = Fixture::new();
     // Two jobs that run, one in each of the line's two slots: a stop ends one — its command leaves with
     // 0, yet the job did not pass — and the other's runner is killed.
     let stopped = fixture.add("e", "trap 'exit 0' TERM; while :; do sleep 0.05; done", "-");
@@ -353,7 +362,7 @@ fn a_wait_exits_with_the_jobs_code_however_the_job_ended() {
 /// from it when the paused line is let go.
 #[test]
 fn zo_line_run_still_runs_its_job_in_its_own_terminal() {
-    let Some(fixture) = Fixture::new() else { return };
+    let fixture = Fixture::new();
     let alone = fixture
         .zo(&["line", "run", "--owner", "g", "--cap", CAP, "--", "sh", "-c", "echo out; exit 4"])
         .stdout(Stdio::piped())
@@ -392,6 +401,29 @@ fn zo_line_run_still_runs_its_job_in_its_own_terminal() {
         assert_eq!(runs[0][0], run.id(), "round {round}: `zo line run` ran its own job");
         assert_eq!((code, watched), (0, 0), "round {round}: both exit with the job's code");
     }
+}
+
+/// Red → green (t-119309, I-t118403-5): the line holds a job to the disk floor
+/// its `zo` was given (`ZO_LINE_DISK_FLOOR_GIB`), whatever this disk holds — so
+/// these tests run on any disk, where below 17 GiB free they said `skipped:`
+/// and passed in no time. No floor runs a job; a floor no disk reaches holds
+/// one, its waiter standing, after the line ran the other. Before, zo read no
+/// floor but its own 16 GiB: above it both jobs ran, below it neither did.
+#[test]
+fn a_job_waits_or_runs_by_the_floor_its_zo_was_given_whatever_the_disk_holds() {
+    let fixture = Fixture::new();
+    let free = fixture.add("u", r#"echo free >> "$0""#, "ran");
+    until(&format!("{free}, under no floor, ends"), || fixture.job(&free).state.ended());
+    assert_eq!(fixture.job(&free).state, JobState::Passed);
+    // Put in only now: a job at the head of the line that its waiter holds back holds every job behind it.
+    let held = fixture.add_under(UNREACHED_FLOOR, "v", r#"echo held >> "$0""#, "ran");
+    // `add` returns once the waiter holds its lock, and the waiter looks every 500 ms: by now it has looked
+    // more than once, and found the disk below its floor.
+    std::thread::sleep(SETTLE);
+    assert_eq!(fixture.job(&held).state, JobState::Waiting, "a floor no disk reaches holds the job");
+    waiter_of(&held);
+    let ran = fs::read_to_string(fixture.cwd().join("ran")).expect("what ran");
+    assert_eq!(ran, "free\n", "the job under no floor ran; the one under a floor no disk reaches did not");
 }
 
 /// The job `zo line run` names on its first line of stderr: `zo line: <job> · cap … · <log>`.

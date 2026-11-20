@@ -5,7 +5,8 @@
 //! refused every end it was told, and the line threw the refusal away: workers
 //! waited for letters that never came (t-116447, 2026-11-19). A fake
 //! `zerocode-orc` first on PATH writes how it was called; nothing reaches the
-//! real ledger. The real binary, on a line of its own in a temporary zo home.
+//! real ledger. The real binary, on a line of its own in a temporary zo home,
+//! with no disk floor (`FLOOR_ENV`): the tests run whatever this disk holds.
 
 #![cfg(unix)]
 
@@ -17,8 +18,11 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use zerocode_core::line::{JobState, Line, DISK_FLOOR_DEFAULT_GIB};
+use zerocode_core::line::{JobState, Line};
 
+/// The variable that names the line's disk floor in GiB, `0` for none: below
+/// 17 GiB free these tests said `skipped:` and passed in no time (t-119309).
+const FLOOR_ENV: &str = "ZO_LINE_DISK_FLOOR_GIB";
 /// How long a test waits for the line before it says what did not happen.
 const PATIENCE: Duration = Duration::from_secs(60);
 /// The pane the fake sees in the environment of the process that put the job in.
@@ -46,27 +50,21 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// A line of its own with the fake first on PATH — or none, said on stderr,
-    /// when this disk is below the line's floor, where nothing starts.
-    fn new() -> Option<Self> {
+    /// A line of its own with the fake first on PATH.
+    fn new() -> Self {
         let root = tempfile::tempdir().expect("a folder");
         for folder in ["zo", "work", "user", "bin"] {
             fs::create_dir_all(root.path().join(folder)).expect("folders");
-        }
-        let stat = nix::sys::statvfs::statvfs(root.path()).expect("the disk's free space");
-        let free = u128::from(stat.blocks_available()).saturating_mul(u128::from(stat.fragment_size()));
-        if free < u128::from(DISK_FLOOR_DEFAULT_GIB + 1) << 30 {
-            eprintln!("skipped: {free} bytes free, below the line's floor of {DISK_FLOOR_DEFAULT_GIB} GiB — nothing would start");
-            return None;
         }
         let fake = root.path().join("bin/zerocode-orc");
         fs::write(&fake, FAKE_ORC).expect("the fake");
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("runnable");
         let line = Line::at(&root.path().join("zo"));
-        Some(Self { root, line })
+        Self { root, line }
     }
 
-    /// `zo` from the pane `pane`, on this line, with the fake first on PATH writing to `seen`.
+    /// `zo` from the pane `pane`, on this line with no disk floor, with the fake first on PATH writing
+    /// to `seen`.
     fn zo(&self, pane: &str, seen: &str) -> Command {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut paths = vec![self.root.path().join("bin")];
@@ -77,6 +75,7 @@ impl Fixture {
             .env("PATH", std::env::join_paths(paths).expect("a PATH"))
             .env("HOME", self.root.path().join("user"))
             .env("ZO_HOME", self.root.path().join("zo"))
+            .env(FLOOR_ENV, "0")
             .env("ZEROCODE_PANE_KEY", pane)
             .env("ORC_SEEN", self.seen(seen))
             .current_dir(self.root.path().join("work"))
@@ -162,7 +161,7 @@ fn value<'a>(words: &'a [String], flag: &str) -> Option<&'a str> {
 /// told in that run. The send has the pane of the process that put the job in.
 #[test]
 fn the_line_tells_how_a_job_ended_under_the_name_a_ledger_change_needs() {
-    let Some(fixture) = Fixture::new() else { return };
+    let fixture = Fixture::new();
     let job = fixture.add("worker:w-7", "exit 3", "worker", false);
     let words = fixture.told(&job, "worker");
     assert_eq!(words.first().map(String::as_str), Some("send"), "{words:?}");
@@ -187,7 +186,7 @@ fn the_line_tells_how_a_job_ended_under_the_name_a_ledger_change_needs() {
 /// line, whom the line could not tell and what was said.
 #[test]
 fn a_send_that_does_not_go_says_so_in_the_jobs_log() {
-    let Some(fixture) = Fixture::new() else { return };
+    let fixture = Fixture::new();
     let job = fixture.add("worker:w-7", "echo built", "refused", true);
     fixture.told(&job, "refused");
     let log = fixture.line.log_path(&job);
@@ -212,7 +211,7 @@ fn a_send_that_does_not_go_says_so_in_the_jobs_log() {
 /// from that look's pane. Before, a job the line ended told no one.
 #[test]
 fn a_job_the_line_ends_tells_its_address_too() {
-    let Some(fixture) = Fixture::new() else { return };
+    let fixture = Fixture::new();
     let running = fixture.add("worker:w-7", HOLD, "running", false);
     fixture.until(&running, JobState::Running, "its turn came");
     // The only job on the line: once its runner is gone, this wait's look is the one that ends it.
