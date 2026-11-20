@@ -31,12 +31,13 @@ def line_of(root):
     return Path(root) / "line"
 
 
-def write_gate(root, label, jobs, head=HEAD, tree=TREE, run=RUN, who=None, rc=None, cwd=None, state=None):
+def write_gate(root, label, jobs, head=HEAD, tree=TREE, run=RUN, who=None, rc=None, cwd=None, state=None, said=None):
     """JOBS: {name: [(key, command, rc), ...]} -> the records' paths, in order. RC: {name: the rc the
     line recorded} (by default the count of red entries). STATE: {name: how the line says it ended}
     (by default passed when that rc is 0, else failed). WHO: one owner for every job, or {name:
     owner} (a gate run as two jobs). CWD: the checkout the jobs ran in — by default the top of the
-    gate's checkout, which holds its .git."""
+    gate's checkout, which holds its .git. SAID: {key: what that entry printed}, by default a green
+    test run's two lines."""
     root = Path(root)
     line, logs, top = line_of(root), root / "gates" / label, root / "coord-gate"
     for folder in (line / "jobs", line / "logs", logs, top / ".git"):
@@ -56,7 +57,7 @@ def write_gate(root, label, jobs, head=HEAD, tree=TREE, run=RUN, who=None, rc=No
         log = [f"zo line: cargo builds in {root / 'slots' / '0'} — the workspace crates of {cwd / 'Cargo.toml'} removed from it first",
                f"# who: {who}", f"# run: {run}", f"# cwd: {cwd}", f"# logs: {logs}", f"head {head} tree {tree}"]
         for key, command, entry_rc in entries:
-            (logs / f"{key}.log").write_text(f"{key} ran\ntest result: ok. 120 passed; 0 failed\n")
+            (logs / f"{key}.log").write_text((said or {}).get(key, f"{key} ran\ntest result: ok. 120 passed; 0 failed\n"))
             log += [f"entry {key} {command}", f"RC {key}={entry_rc} (3s)"]
         log.append(f"verdict: bad={bad} ({name} {label} on {head[:9]})")
         record = {"id": ident, "project": str(top / ".git"), "checkout": str(cwd), "owner": who,
@@ -71,6 +72,48 @@ def write_gate(root, label, jobs, head=HEAD, tree=TREE, run=RUN, who=None, rc=No
         (line / "logs" / f"{ident}.rc").write_text(f"{0 if ended == 'passed' else (code or 1)}\n")
         paths.append(path)
     return paths
+
+
+def cargo_failures(names, recipe="test"):
+    """What `just <recipe>` prints when cargo's tests NAMES failed: their stdout, cargo's failures block
+    with each name four spaces in — what the lane's failed_tests reads — and just's own last word."""
+    lines = [f"running {len(names) + 2} tests"] + [f"test {name} ... FAILED" for name in names] + ["", "failures:", ""]
+    for name in names:
+        lines += [f"---- {name} stdout ----", f"thread '{name}' panicked at tests/x.rs:1:1:", "the child never said it ran", ""]
+    lines += ["", "failures:"] + [f"    {name}" for name in names]
+    lines += ["", f"test result: FAILED. 2 passed; {len(names)} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s",
+              "", "error: test failed, to rerun pass `-p x --test y`", f"error: recipe `{recipe}` failed on line 32 with exit code 101"]
+    return "\n".join(lines) + "\n"
+
+
+def unnamed_failure(recipe):
+    """What `just <recipe>` prints when the recipe failed before any test spoke (a compile error)."""
+    return f"error[E0425]: cannot find value `x` in this scope\nerror: recipe `{recipe}` failed on line 41 with exit code 101\n"
+
+
+def judged(path, runs, bad=0, rc=0):
+    """Say in the log of the job at PATH that the lane's flakes judgment ran RUNS — (lane, unit, run, of, rc)
+    each — as solo_judge says them (lane.sh --judge-flakes), just before its verdict, each run's output where
+    run_solo puts it (<logs>/solo.<lane>.<at>.<run>.log, AT the unit's place among its gate's units); the
+    verdict then counts BAD and the line's record and rc file say RC — by default the green job coord-gate.sh
+    leaves when the judgment cleared every red entry."""
+    log = log_of(path)
+    lines = log.read_text().splitlines()
+    logs = next(line[len("# logs: "):] for line in lines if line.startswith("# logs: "))
+    at = next(n for n, line in enumerate(lines) if line.startswith("verdict: "))
+    places, said = {}, []
+    for lane, unit, run, of, code in runs:
+        units = places.setdefault(lane, [])
+        if unit not in units:
+            units.append(unit)
+        said.append(f"17:0{run % 10}:00 solo {lane} {unit} {run}/{of} rc={code}")
+        Path(logs, f"solo.{lane}.{units.index(unit) + 1}.{run}.log").write_text(
+            f"test {unit} ... {'ok' if code == '0' else 'FAILED'}\n")
+    verdict = lines[at].split(" ", 2)
+    lines[at:at + 1] = said + [f"verdict: bad={bad} {verdict[2]}"]
+    log.write_text("\n".join(lines) + "\n")
+    rewrite(path, state="passed" if rc == 0 else "failed", rc=rc)
+    rc_of(path).write_text(f"{rc}\n")
 
 
 def rewrite(path, **fields):

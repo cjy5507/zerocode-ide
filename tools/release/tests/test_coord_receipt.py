@@ -17,6 +17,8 @@ Run: python3 tools/release/tests/test_coord_receipt.py   (stdlib only)
 
 import importlib.util
 import json
+import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -575,6 +577,159 @@ class SplitGate(ReceiptCase):
         self.assertIn("the jobs say run run-2002, not run-1001", said.stdout)
 
 
+FLAKE = "an_absent_server_is_spawned_with_the_serve_arguments_and_the_token"   # 11-20's: red in the gate, green alone
+SOLO_RUNS = 3   # the lane's (lane.sh --table); pinned against it in FlakeJudgment.test_the_count_is_the_lanes
+
+
+def solo(lane, unit, runs=SOLO_RUNS, of=SOLO_RUNS, red_at=None):
+    """The runs the flakes judgment says for one unit: RUNS of them out of OF, the one at RED_AT red."""
+    return [(lane, unit, run, of, "101" if run == red_at else "0") for run in range(1, runs + 1)]
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "the flakes plan is the lane's, read through lane.sh")
+class FlakeJudgment(ReceiptCase):
+    """t-121630: a red entry stands only as the release lane's flakes phase clears a red gate — the lane's
+    own plan (lane.sh --flake-plan) read from the sealed entry logs says what may be judged solo and how
+    many times, and the job's own solo lines must say that every unit passed every run. A failure the lane
+    calls real, a run short, a red run, a run of anything else, a judgment nobody ran — none stands, and
+    nothing the receipt itself says counts for it."""
+
+    RED = {"g1": [("pii-check", "just pii-check", 0), ("test", "just test", 101), ("doc", "just doc", 0)]}
+
+    def setUp(self):
+        super().setUp()
+        nothing_listed = self.tmp / "no-flakes.txt"   # whatever the repository's flakes.txt lists, these names are not in it
+        nothing_listed.write_text("")
+        listing = mock.patch.dict("os.environ", {"RELEASE_FLAKES_FILE": str(nothing_listed)})
+        listing.start()
+        self.addCleanup(listing.stop)
+
+    def flaky(self, names=(FLAKE,), runs=None, gate=None, **kw):
+        """A gate whose `test` entry failed by NAMES and whose job then judged RUNS (by default the lane's: every name green)."""
+        jobs = self.gate(gate or self.RED, rc={name: 0 for name in (gate or self.RED)},
+                         said={"test": receipt_fixture.cargo_failures(list(names))}, **kw)
+        receipt_fixture.judged(jobs[0], [run for name in sorted(set(names)) for run in solo("root", name)] if runs is None else runs)
+        return jobs
+
+    def test_a_red_test_the_lanes_judgment_cleared_stands_and_counts_its_recipe(self):
+        receipt = self.made(self.flaky())
+        facts = self.facts(receipt, ".")
+        self.assertIn(f"judged root\tunlisted\t{FLAKE}\t{FLAKE}", facts)
+        self.assertEqual([line for line in facts if line.split()[0] in ("recipe", "cleared")],
+                         ["recipe doc", "recipe pii-check", "recipe test", "cleared test"])
+        said = self.read_cli(receipt, "--dir", ".")
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+        self.assertIn("cleared test", said.stdout.splitlines())
+
+    def test_a_red_entry_no_solo_run_judged_is_refused(self):
+        jobs = self.gate(self.RED, rc={"g1": 0}, said={"test": receipt_fixture.cargo_failures([FLAKE])})
+        receipt_fixture.judged(jobs[0], [])
+        self.assertIn("entry test rc=101, and no solo run judged it", self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_a_solo_run_that_was_red_is_red_for_real_even_under_a_green_record(self):
+        jobs = self.flaky(runs=solo("root", FLAKE, red_at=2))
+        self.assertIn(f"solo run 2/3 of {FLAKE} was red (rc=101) — red for real", self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_fewer_solo_runs_than_the_lane_runs_are_refused(self):
+        jobs = self.flaky(runs=solo("root", FLAKE, runs=2))
+        self.assertIn(f"runs {FLAKE} solo 3 times, and the root gate's job says 2", self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_more_solo_runs_or_runs_of_another_unit_are_not_the_lanes(self):
+        cases = (("a run past the count", solo("root", FLAKE, runs=4, of=3), "no run past the 3 the lane's plan has"),
+                 ("another unit", solo("root", "some_other_test"), f"where the release lane's flakes judgment runs run 1/3 of {FLAKE}"),
+                 ("a count of its own", solo("root", FLAKE, runs=2, of=2), "says run 1/2 of"))
+        for case, runs, said in cases:
+            with self.subTest(case=case):
+                self.assertIn(said, self.refused(lambda: coord_receipt.make(self.flaky(runs=runs))))
+                shutil.rmtree(self.tmp / "line")
+
+    def test_the_count_is_the_lanes(self):
+        table = subprocess.run(["bash", str(coord_receipt.LANE), "--table"], capture_output=True, text=True, check=True).stdout
+        self.assertIn(f"SOLO_RUNS='{SOLO_RUNS}'", table.splitlines())
+
+    def test_a_red_recipe_that_named_no_test_is_red_for_real_whatever_its_job_says(self):
+        # 1.3.37's shape: a recipe that died before its tests spoke is real beside any name (the lane's recipe:<name>).
+        gate = {"g1": [("test", "just test", 101), ("shell-test", "just shell-test", 101)]}
+        jobs = self.gate(gate, rc={"g1": 0}, said={"test": receipt_fixture.cargo_failures([FLAKE]),
+                                                   "shell-test": receipt_fixture.unnamed_failure("shell-test")})
+        receipt_fixture.judged(jobs[0], solo("root", FLAKE))
+        self.assertIn("is red for real as the release lane's flakes phase reads it: root:recipe:shell-test",
+                      self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_a_red_gate_that_named_nothing_is_red_for_real(self):
+        jobs = self.gate(self.RED, rc={"g1": 0}, said={"test": "it died with no word of any test\n"})
+        receipt_fixture.judged(jobs[0], solo("root", FLAKE))
+        self.assertIn("red for real as the release lane's flakes phase reads it: root:?", self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_more_unlisted_names_than_the_lane_judges_solo_are_red_for_real_over_both_jobs(self):
+        # The lane bounds the unlisted names it judges solo over both gates together (MAX_SOLO_JUDGED, 4): a
+        # gate run as two jobs judged three and two, each under the bound alone, and the lane would not.
+        def split(root_names, zo_names):
+            gate = {"root": [("test", "just test", 101)], "zo": [("zo-test", "bash -c 'cd zo-ide && just test'", 101)]}
+            jobs = self.gate(gate, rc={"root": 0, "zo": 0}, who={"root": "coord-l9-root", "zo": "coord-l9-zo"},
+                             said={"test": receipt_fixture.cargo_failures(root_names),
+                                   "zo-test": receipt_fixture.cargo_failures(zo_names)})
+            receipt_fixture.judged(jobs[0], [run for name in sorted(root_names) for run in solo("root", name)])
+            receipt_fixture.judged(jobs[1], [run for name in sorted(zo_names) for run in solo("zo", name)])
+            return jobs
+        five = split([f"root_flake_{n}" for n in range(3)], [f"zo_flake_{n}" for n in range(2)])
+        self.assertIn("red for real as the release lane's flakes phase reads it: root:root_flake_0",
+                      self.refused(lambda: coord_receipt.make(five)))
+        shutil.rmtree(self.tmp / "line")
+        four = split([f"root_flake_{n}" for n in range(2)], [f"zo_flake_{n}" for n in range(2)])
+        self.assertTrue(self.facts(self.made(four)), "four, the lane's bound, are judged solo")
+
+    def test_listed_names_never_count_toward_the_bound(self):
+        names = [f"root_flake_{n}" for n in range(5)]
+        listed = self.tmp / "flakes.txt"
+        listed.write_text("".join(f"root:{name}\n" for name in names))
+        with mock.patch.dict("os.environ", {"RELEASE_FLAKES_FILE": str(listed)}):
+            self.assertTrue(self.facts(self.made(self.flaky(names))), "a listed cluster is judged solo however many fail")
+        shutil.rmtree(self.tmp / "line")
+        self.assertIn("red for real", self.refused(lambda: coord_receipt.make(self.flaky(names))), "unlisted, five are a regression")
+
+    def test_a_solo_runs_log_that_is_not_there_is_refused(self):
+        jobs = self.flaky()
+        (self.tmp / "gates" / "l9" / "solo.root.1.2.log").unlink()
+        self.assertIn("solo.root.1.2.log is missing", self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_solo_runs_where_nothing_was_red_are_refused(self):
+        jobs = self.gate({"g1": [("test", "just test", 0)]})
+        receipt_fixture.judged(jobs[0], solo("root", FLAKE))
+        self.assertIn("ran solo runs, but no entry of it was red", self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_solo_runs_said_by_a_job_that_ran_none_of_that_gates_recipes_are_refused(self):
+        gate = {"g1": [("test", "just test", 101)], "g2": [("zo-test", "bash -c 'cd zo-ide && just test'", 101)]}
+        jobs = self.gate(gate, rc={"g1": 0, "g2": 0}, said={"test": receipt_fixture.cargo_failures([FLAKE]),
+                                                             "zo-test": receipt_fixture.cargo_failures(["zo_flake"])})
+        receipt_fixture.judged(jobs[0], solo("zo", "zo_flake"))   # each job says the other gate's runs
+        receipt_fixture.judged(jobs[1], solo("root", FLAKE))
+        self.assertIn("says solo runs of the root gate, none of whose recipes it ran", self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_a_red_entry_that_ran_no_recipe_is_refused(self):
+        gate = {"g1": [("cargo-test", "cargo test --workspace", 101)]}
+        jobs = self.gate(gate, rc={"g1": 0}, said={"cargo-test": receipt_fixture.cargo_failures([FLAKE])})
+        receipt_fixture.judged(jobs[0], solo("root", FLAKE))
+        self.assertIn("entry cargo-test rc=101 ran no recipe of either gate", self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_a_receipt_that_says_a_red_was_cleared_stands_for_nothing_the_logs_do_not_say(self):
+        # By hand: a red job's record and rc file made green, its verdict bad=0, a word in the receipt
+        # that the test was a flake — and no solo run in its log. The log is what is read, not the receipt.
+        jobs = self.gate(self.RED, rc={"g1": 0}, said={"test": receipt_fixture.cargo_failures([FLAKE])})
+        receipt_fixture.judged(jobs[0], [])
+        claimed = self.careless(jobs, judged=[f"root\tunlisted\t{FLAKE}\t{FLAKE}"], cleared=["test"])
+        self.assertIn("entry test rc=101, and no solo run judged it", self.refused(lambda: self.facts(claimed)))
+        said = self.read_cli(claimed)
+        self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
+
+    def test_solo_runs_written_into_a_log_after_the_receipt_was_made_are_refused(self):
+        jobs = self.flaky()
+        receipt = self.made(jobs)
+        self.edit_log(jobs[0], lambda text: text.replace(f"solo root {FLAKE} 3/3 rc=0", f"solo root {FLAKE} 3/3 rc=0\n"
+                                                         f"17:09:00 solo root {FLAKE} 3/3 rc=0"))
+        self.assertIn("is not what the receipt sealed", self.refused(lambda: self.facts(receipt)))
+
+
 class OnTheLine(ReceiptCase):
     """ZO's review of t-47516, P2-1: the receipt's evidence is only words the jobs wrote, so
     the reader holds every job to the build line that ran it and to the coordinator's run.
@@ -631,12 +786,26 @@ class OnTheLine(ReceiptCase):
 RELEASE = SCRIPT.parent
 GATE_TOOLS = ("coord-gate.sh", "lane-env.sh", "lane.sh", "verify-every-recipe.sh")
 FAKE_JUST = """#!/bin/sh
-# just, as the gate script calls it: each call said, red for a recipe red.txt names.
+# just, as the gate script calls it: each call said, red for a recipe red.txt names — after printing
+# said-<recipe>.txt, when there is one (a cargo failures block), and then just's own last word.
 echo "$(pwd -P) $*" >> "$HOME/just-calls.txt"
 echo "recipe $1 ran"
 if grep -qx "$1" "$HOME/stray.txt" 2>/dev/null; then echo stray > stray-file; fi
 if grep -qx "$1" "$HOME/edit.txt" 2>/dev/null; then echo edited >> notes.txt; fi
-if grep -qx "$1" "$HOME/red.txt" 2>/dev/null; then exit 1; fi
+if grep -qx "$1" "$HOME/red.txt" 2>/dev/null; then
+  if [ -f "$HOME/said-$1.txt" ]; then cat "$HOME/said-$1.txt"; fi
+  exit 1
+fi
+exit 0
+"""
+# cargo, as a solo run calls it (lane.sh solo_road): each call said with where it ran and where it built,
+# and red for the Nth call when solo-red.txt holds N.
+FAKE_CARGO = """#!/bin/sh
+echo "$(pwd -P) target=${CARGO_TARGET_DIR-unset} $*" >> "$HOME/cargo-calls.txt"
+n=$(wc -l < "$HOME/cargo-calls.txt" | tr -d ' ')
+echo "running 1 test"
+if grep -qx "$n" "$HOME/solo-red.txt" 2>/dev/null; then echo "test $3 ... FAILED"; exit 101; fi
+echo "test $3 ... ok"
 exit 0
 """
 
@@ -667,6 +836,13 @@ class GateScript(ReceiptCase):
         bin_.mkdir(parents=True)
         (bin_ / "just").write_text(FAKE_JUST)
         (bin_ / "just").chmod(0o755)
+        (bin_ / "cargo").write_text(FAKE_CARGO)
+        (bin_ / "cargo").chmod(0o755)
+        nothing_listed = self.tmp / "no-flakes.txt"   # the reader's plan, as the gate's: the stack holds no flakes.txt
+        nothing_listed.write_text("")
+        listing = mock.patch.dict("os.environ", {"RELEASE_FLAKES_FILE": str(nothing_listed)})
+        listing.start()
+        self.addCleanup(listing.stop)
         self.pane = self.tmp / "pane-bin"
         self.pane.mkdir()
         orc = self.pane / "zerocode-orc"
@@ -677,8 +853,10 @@ class GateScript(ReceiptCase):
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.stack), *args], capture_output=True, text=True, check=True).stdout
 
-    def gate(self, *args, cwd=None, pane=True):
+    def gate(self, *args, cwd=None, pane=True, target=None):
         env = {"HOME": str(self.tmp), "PATH": (f"{self.pane}:" if pane else "") + "/usr/bin:/bin:/usr/sbin:/sbin"}
+        if target is not None:   # where the line's slot builds (zo line sets it for each job)
+            env["CARGO_TARGET_DIR"] = str(target)
         return subprocess.run(["bash", "tools/release/coord-gate.sh", *args] if cwd is None
                               else ["bash", str(self.stack / "tools/release/coord-gate.sh"), *args],
                               cwd=cwd or self.stack, env=env, capture_output=True, text=True, timeout=60)
@@ -746,6 +924,58 @@ class GateScript(ReceiptCase):
         self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
         self.assertTrue((self.stack / "stray-file").exists())
         self.assertTrue(ran.stdout.splitlines()[-1].startswith("verdict: bad=0 (root on "))
+
+    def flaky(self, *red_runs, said=None):
+        """The root gate of the stack with its `beta` recipe red — by cargo's FLAKE, or by what SAID prints — each
+        solo run red whose call RED_RUNS counts (1 the first), cargo building where the line's slot builds."""
+        (self.tmp / "red.txt").write_text("beta\n")
+        (self.tmp / "said-beta.txt").write_text(said or receipt_fixture.cargo_failures([FLAKE], recipe="beta"))
+        (self.tmp / "solo-red.txt").write_text("".join(f"{n}\n" for n in red_runs))
+        return self.gate("--who", "coord-l9-root", "--logs", str(self.logs), "--calm-wait", "0", "root",
+                         target=self.tmp / "slot-target")
+
+    def solo_lines(self, ran):
+        return [line.split(" ", 1)[1] for line in ran.stdout.splitlines() if re.fullmatch(r"\d\d:\d\d:\d\d solo .*", line)]
+
+    def test_a_red_test_is_judged_solo_as_the_lane_judges_it_and_a_flake_leaves_the_job_green(self):
+        # t-121630: v1.1.169's stacked gate went red on one supervisor test that passed alone, and made no receipt.
+        ran = self.flaky()
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        top, head = self.stack.resolve(), self.git("rev-parse", "HEAD").strip()
+        self.assertIn("RC beta=1", [line.split(" (")[0] for line in ran.stdout.splitlines() if line.startswith("RC ")])
+        self.assertEqual(self.solo_lines(ran), [f"solo root {FLAKE} {run}/3 rc=0" for run in (1, 2, 3)],
+                         "the lane's count, said as the lane says it")
+        self.assertEqual((self.tmp / "cargo-calls.txt").read_text().splitlines(),
+                         [f"{top} target={self.tmp / 'slot-target'} test --workspace {FLAKE}"] * 3,
+                         "the lane's own solo road, in the gated checkout, building where the gate built")
+        for run in (1, 2, 3):
+            self.assertIn(f"test {FLAKE} ... ok", (self.logs.resolve() / f"solo.root.1.{run}.log").read_text())
+        self.assertEqual(ran.stdout.splitlines()[-1], f"verdict: bad=0 (root on {head[:9]}, 1 red entry cleared solo)")
+        self.assertFalse((self.tmp / ".local").exists(), "nothing of the lane's own home is written")
+        receipt = self.made([self.on_the_line(ran.stdout, "coord-l9-root")])
+        facts = self.facts(receipt, ".")
+        self.assertIn(f"judged root\tunlisted\t{FLAKE}\t{FLAKE}", facts)
+        self.assertEqual([line for line in facts if line.startswith(("recipe ", "cleared "))],
+                         ["recipe alpha", "recipe beta", "recipe win-check", "cleared beta"])
+        said = self.read_cli(receipt, "--dir", ".")
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+
+    def test_a_test_that_fails_alone_too_is_red_and_its_job_red(self):
+        ran = self.flaky(2)   # its second solo run red
+        self.assertEqual(ran.returncode, 1, ran.stdout + ran.stderr)
+        self.assertEqual(self.solo_lines(ran), [f"solo root {FLAKE} 1/3 rc=0", f"solo root {FLAKE} 2/3 rc=101"],
+                         "the first red run ends the judgment, as it ends the lane's")
+        self.assertIn(f"flakes: red — solo root {FLAKE} run 2 rc=101", ran.stdout.splitlines())
+        self.assertTrue(ran.stdout.splitlines()[-1].startswith("verdict: bad=1 (root on "), ran.stdout)
+        self.assertIn("ended failed", self.refused(lambda: coord_receipt.make([self.on_the_line(ran.stdout, "coord-l9-root", 1)])))
+
+    def test_a_recipe_that_failed_without_naming_a_test_is_red_for_real_and_nothing_runs_solo(self):
+        ran = self.flaky(said=receipt_fixture.unnamed_failure("beta"))
+        self.assertEqual(ran.returncode, 1, ran.stdout + ran.stderr)
+        self.assertIn("real root:recipe:beta", ran.stdout.splitlines())
+        self.assertEqual(self.solo_lines(ran), [])
+        self.assertFalse((self.tmp / "cargo-calls.txt").exists(), "no solo run")
+        self.assertTrue(ran.stdout.splitlines()[-1].startswith("verdict: bad=1 (root on "), ran.stdout)
 
     def test_it_will_not_start_where_its_receipt_could_not_stand(self):
         cases = (("an owner that is no coordinator's", ("--who", "t-119757", "--logs", str(self.logs), "root"), {},

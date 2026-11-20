@@ -1562,6 +1562,106 @@ class UiFlakes(LaneCase):
                 self.assertEqual(len((work / "ran.txt").read_text().splitlines()), 2, "both scripts ran after the first was red")
 
 
+class FlakePlan(LaneCase):
+    """t-121630: lane.sh --flake-plan and --judge-flakes are the flakes phase's own judgment, handed a
+    coordinator's gate entries (coord-gate.sh, coord_receipt.py): the same plan of what may be judged solo,
+    the same count and order of solo runs, the same stop at the first red — and nothing of the lane's home."""
+
+    def setUp(self):
+        super().setUp()
+        self.bin = self.lane.tmp / "fake-bin"
+        self.bin.mkdir()
+        cargo = self.bin / "cargo"
+        cargo.write_text('#!/bin/sh\necho "$(pwd -P) target=${CARGO_TARGET_DIR-unset} $*" >> "$(dirname "$0")/calls"\n'
+                         'n=$(wc -l < "$(dirname "$0")/calls" | tr -d " ")\n'
+                         'if grep -qx "$n" "$(dirname "$0")/red" 2>/dev/null; then echo "test $3 ... FAILED"; exit 101; fi\n'
+                         'echo "test $3 ... ok"\n')
+        cargo.chmod(0o755)
+        self.logs = self.lane.tmp / "gate-logs"
+        self.logs.mkdir()
+
+    def entry(self, key, text):
+        log = self.logs / f"{key}.log"
+        log.write_text(text)
+        return str(log)
+
+    def plan(self, *entries, mode="--flake-plan", calm=None, env=None):
+        args = [BASH, posix(LANE), mode]
+        if mode == "--judge-flakes":
+            args += [str(REPO), "", str(self.logs), "0" if calm is None else calm]
+        return subprocess.run([*args, *map(str, entries)], capture_output=True, text=True, timeout=60,
+                              env={**self.lane.env(), "PATH": f"{self.bin}:{os.environ.get('PATH', '/usr/bin:/bin')}", **(env or {})})
+
+    def said(self, out, word):
+        return [line.split(" ", 1)[1] for line in out.stdout.splitlines() if line.split(" ", 1)[0] == word]
+
+    def test_the_plan_names_what_the_flakes_phase_names_listed_or_not(self):
+        log = self.entry("test", receipt_fixture.cargo_failures([FLAKE_ROOT, "shell::tests::not_listed_yet"]))
+        out = self.plan("root", "test", 101, log, "root", "doc", 0, self.entry("doc", "doc ran\n"))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(self.said(out, "runs"), ["3"])
+        self.assertEqual(self.said(out, "plan"), [f"root\tlisted\t{FLAKE_ROOT}\t{FLAKE_ROOT}",
+                                                  "root\tunlisted\tshell::tests::not_listed_yet\tshell::tests::not_listed_yet"])
+        self.assertEqual(self.said(out, "unit"), [f"root {FLAKE_ROOT}", "root shell::tests::not_listed_yet"])
+        self.assertEqual(self.said(out, "real"), [])
+
+    def test_what_the_flakes_phase_calls_real_the_plan_calls_real(self):
+        # The same three rules the dry lane pins in Flakes, through the very function (flake_reals).
+        names = [f"shell::tests::red_{i}" for i in range(5)]
+        cases = (("five unlisted names", [("root", "test", 101, receipt_fixture.cargo_failures(names))],
+                  " ".join(f"root:{name}" for name in names)),
+                 ("a recipe that named no test", [("root", "test", 101, receipt_fixture.cargo_failures([FLAKE_ROOT])),
+                                                  ("root", "shell-test", 101, receipt_fixture.unnamed_failure("shell-test"))],
+                  "root:recipe:shell-test"),
+                 ("a red gate that named nothing", [("zo", "test", 1, "it died\n")], "zo:?"))
+        for case, entries, real in cases:
+            with self.subTest(case=case):
+                words = [word for lane, recipe, rc, text in entries
+                         for word in (lane, recipe, rc, self.entry(f"{lane}-{recipe}", text))]
+                out = self.plan(*words)
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertEqual(self.said(out, "real"), [real])
+                judged = self.plan(*words, mode="--judge-flakes")
+                self.assertEqual(judged.returncode, 1, judged.stdout + judged.stderr)
+                self.assertFalse((self.bin / "calls").exists(), "nothing is judged solo when a red is real")
+        self.lane.enqueue(SHA_A)   # and the lane's own flakes phase, on the same five names
+        lane = self.lane.run(GATE_ROOT_RC=101, GATE_ROOT_FAILS=" ".join(names))
+        self.assertIn(" ".join(f"root:{name}" for name in names), self.lane.status()["reason"], lane.stdout)
+
+    def test_the_judgment_runs_each_unit_the_lanes_count_in_its_order_and_stops_at_the_first_red(self):
+        log = self.entry("test", receipt_fixture.cargo_failures(["b_test", "a_test"]))
+        out = self.plan("root", "test", 101, log, mode="--judge-flakes")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        runs = [line.split(" ", 1)[1] for line in out.stdout.splitlines() if re.match(r"\d\d:\d\d:\d\d solo ", line)]
+        self.assertEqual(runs, [f"solo root {name} {run}/3 rc=0" for name in ("a_test", "b_test") for run in (1, 2, 3)])
+        self.assertEqual((self.bin / "calls").read_text().splitlines(),
+                         [f"{REPO.resolve()} target=unset test --workspace {name}" for name in ("a_test", "b_test") for _ in range(3)])
+        self.assertEqual(sorted(path.name for path in self.logs.glob("solo.*")),
+                         [f"solo.root.{at}.{run}.log" for at in (1, 2) for run in (1, 2, 3)])
+        self.assertIn("flakes: every unit passed 3 solo runs", out.stdout.splitlines())
+        (self.bin / "calls").unlink()
+        (self.bin / "red").write_text("2\n")
+        red = self.plan("root", "test", 101, log, mode="--judge-flakes")
+        self.assertEqual(red.returncode, 1, red.stdout + red.stderr)
+        self.assertEqual(len((self.bin / "calls").read_text().splitlines()), 2, "the first red run ends the judgment")
+        self.assertIn("flakes: red — solo root a_test run 2 rc=101", red.stdout.splitlines())
+
+    def test_the_judgment_writes_nothing_of_the_lanes_home(self):
+        log = self.entry("test", receipt_fixture.cargo_failures(["shell::tests::not_listed_yet"]))
+        out = self.plan("root", "test", 101, log, mode="--judge-flakes")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("unlisted red root:shell::tests::not_listed_yet — judged solo 3/3 green",
+                      " ".join(out.stdout.splitlines()), "said in the job's own log")
+        self.assertFalse(self.lane.home.joinpath("unlisted.txt").exists())
+        self.assertFalse(self.lane.home.joinpath("out").exists())
+
+    def test_a_judgment_asked_wrong_says_so(self):
+        for args in ((), ("root", "test", 101), ("web", "test", 1, self.entry("x", "x\n")),
+                     ("root", "test", 1, str(self.logs / "missing.log"))):
+            with self.subTest(args=args):
+                self.assertEqual(self.plan(*args).returncode, 2)
+
+
 class Queue(LaneCase):
     def test_two_queue_files_drain_by_mtime_one_at_a_time(self):
         now = time.time()
@@ -3120,6 +3220,81 @@ class Receipt(LaneCase):
         self.assertEqual(ran, {"root": "all", "zo": "all"})
         self.assertIn(f"refused: {receipt_fixture.HEAD[:8]} does not hold the tree its jobs printed "
                       f"({receipt_fixture.TREE[:8]})", self.lane.phase("gate-root").get("receipt", ""))
+
+    # t-121630: the coordinator's gate judges a red entry as the flakes phase judges a red gate.
+    FLAKY_TEST = "an_absent_server_is_spawned_with_the_serve_arguments_and_the_token"
+
+    def judged_jobs(self, names, gate=None, said=None, runs=None):
+        """GATE's jobs with `test` (in g2-tests) red by cargo's NAMES — or by SAID — and judged: RUNS, by default
+        every name passed the lane's three solo runs, as coord-gate.sh leaves a job the judgment cleared."""
+        gate = gate or {**self.GATE, "g2-tests": [("test", "just test", 101)]}
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", gate, rc={name: 0 for name in gate},
+                                          said={"test": said or receipt_fixture.cargo_failures(list(names))})
+        ran = [("root", name, run, 3, "0") for name in sorted(names) for run in (1, 2, 3)] if runs is None else runs
+        receipt_fixture.judged(jobs[list(gate).index("g2-tests")], ran)
+        return jobs
+
+    def made_of(self, jobs):
+        made = subprocess.run([sys.executable, str(RELEASE / "coord_receipt.py"), "make", *map(str, jobs)],
+                              capture_output=True, text=True)
+        path = Path(self._tmp) / "receipt.json"
+        path.write_text(made.stdout)
+        return made, path
+
+    def test_a_red_test_the_flakes_judgment_cleared_skips_both_gates_aloud(self):
+        made, receipt = self.made_of(self.judged_jobs([self.FLAKY_TEST]))
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        self.assertEqual(self.cut(receipt), {}, "neither gate ran: the red test was cleared as the lane clears one")
+        skipped = self.lane.phase("gate-root")["skipped"]
+        self.assertIn("3/3 root recipes green (red, cleared solo as the flakes phase clears a red gate: test)", skipped)
+        self.assertTrue(self.lane.phase("gate-zo")["skipped"].startswith("receipt coord-l9"), self.lane.phase("gate-zo"))
+        self.assertEqual(self.lane.status()["outcome"], "green")
+        self.assertFalse([line for line in self.lane.stub_lines() if " solo " in line], "the lane judged nothing again")
+
+    def test_a_receipt_whose_red_is_real_stands_nowhere_and_the_gates_run_whole(self):
+        jobs = self.judged_jobs([self.FLAKY_TEST], said=receipt_fixture.unnamed_failure("test"))
+        made, _ = self.made_of(jobs)
+        self.assertEqual(made.returncode, 1, made.stdout + made.stderr)
+        self.assertIn("is red for real as the release lane's flakes phase reads it: root:recipe:test", made.stdout)
+        careless = Path(self._tmp) / "careless.json"
+        careless.write_text(receipt_fixture.sealed(jobs))
+        door = self.enqueue("--receipt", str(careless))
+        self.assertEqual(door.returncode, 1, door.stdout + door.stderr)
+        self.assertFalse(self.kept().exists(), "the door keeps nothing")
+        self.beside(careless)
+        self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
+        self.assertIn("red for real as the release lane's flakes phase reads it: root:recipe:test",
+                      self.lane.phase("gate-root").get("receipt", ""))
+
+    def test_a_receipt_whose_judgment_fell_short_of_the_lanes_is_refused_and_the_gates_run_whole(self):
+        jobs = self.judged_jobs([self.FLAKY_TEST], runs=[("root", self.FLAKY_TEST, run, 3, "0") for run in (1, 2)])
+        careless = Path(self._tmp) / "careless.json"
+        careless.write_text(receipt_fixture.sealed(jobs))
+        self.beside(careless)
+        self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
+        self.assertIn(f"runs {self.FLAKY_TEST} solo 3 times, and the root gate's job says 2",
+                      self.lane.phase("gate-root").get("receipt", ""))
+
+    def test_the_names_a_receipt_cleared_count_toward_the_lanes_own_bound(self):
+        # MAX_SOLO_JUDGED (4) bounds the unlisted names judged solo over both gates: a receipt of the root
+        # gate that cleared three leaves a zo gate the lane runs itself one more, not four more.
+        root_only = {name: entries for name, entries in self.GATE.items() if name != "g3-zo"}
+        names = [f"flaky_{n}" for n in range(3)]
+        for zo_fails, outcome in (("zo::tests::red_a", "green"), ("zo::tests::red_a zo::tests::red_b", "red")):
+            with self.subTest(zo_fails=zo_fails):
+                made, receipt = self.made_of(self.judged_jobs(names, gate={**root_only, "g2-tests": [("test", "just test", 101)]}))
+                self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+                self.assertEqual(self.cut(receipt, GATE_ZO_RC=101, GATE_ZO_FAILS=zo_fails), {"zo": ["test", "win-check"]})
+                st = self.lane.status()
+                self.assertEqual(st["outcome"], outcome, st["reason"])
+                if outcome == "red":
+                    self.assertIn("gate red for real", st["reason"])
+                    self.assertIn("zo:zo::tests::red_b", st["reason"])
+                shutil.rmtree(self.lane.home)
+                shutil.rmtree(receipt_fixture.line_of(self._tmp))
+                for folder in (self.lane.home / "queue", self.lane.scratch_root):
+                    folder.mkdir(parents=True, exist_ok=True)
+                self.lane.stub_log.unlink(missing_ok=True)
 
 
 # lane.sh's receipt_cover and what it calls, read out of lane.sh and run for real in a checkout:
