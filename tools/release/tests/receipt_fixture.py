@@ -12,6 +12,7 @@ verdict — so the reader is pinned to the lines the line and the script write.
 import hashlib
 import json
 import os
+import re
 import shlex
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ HEAD = "1" * 40
 TREE = "2" * 40
 RUN = "run-1001"
 FIRST_JOB = 1792610090   # a job's id carries the moment it was put in; here a second, one more a job
+SOLO = re.compile(r"(?:\d\d:\d\d:\d\d )?solo (root|zo) (.+) (\d+)/(\d+) rc=(\S+)")   # a solo run's line, as lane.sh says it
 
 
 def job_id(label, name, n=0):
@@ -161,13 +163,21 @@ def sealed(paths, made=None, **facts):
         for one in (path, log_of(path), rc_of(path)):
             seen[str(one)] = hashlib.sha256(one.read_bytes()).hexdigest()
         cwd = json.loads(path.read_text()).get("checkout", cwd)
+        places = {}
         for line in log_of(path).read_text().splitlines():
+            run = SOLO.fullmatch(line)
             if line.startswith("# logs: "):
                 logs = line[len("# logs: "):]
             elif line.startswith("entry "):
                 key = shlex.split(line)[1]
                 entry = os.path.join(logs, f"{key}.log")   # as the reader names it, on every system
                 seen[entry] = hashlib.sha256(Path(entry).read_bytes()).hexdigest()
+            elif run:   # a solo run's own log, where run_solo puts it and the reader looks for it
+                units = places.setdefault(run[1], [])
+                if run[2] not in units:
+                    units.append(run[2])
+                solo = os.path.join(logs, f"solo.{run[1]}.{units.index(run[2]) + 1}.{run[3]}.log")
+                seen[solo] = hashlib.sha256(Path(solo).read_bytes()).hexdigest()
     receipt = {"receipt": 2, "who": "coord-l9", "run": RUN, "tree": TREE, "logs": logs, "cwd": cwd,
                "made": int(made if made is not None else time.time()),
                "jobs": [str(path) for path in paths], "sealed": seen}
