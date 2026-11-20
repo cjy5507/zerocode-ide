@@ -76,7 +76,27 @@ pub(crate) fn build_responses_request_for_session(
     stream: bool,
     session_id: &str,
 ) -> Value {
-    let supports_vision = super::model_supports_vision(&request.model);
+    build_responses_body(
+        request,
+        instructions,
+        stream,
+        session_id,
+        super::model_supports_vision(&request.model),
+    )
+}
+
+/// The Responses body [`build_responses_request_for_session`] sends, with
+/// whether pictures go out as pictures said by the caller: the subscription
+/// asks the model's catalog row, while an API key's endpoint answers for
+/// itself (`openai_compat::responses_wire`, which also says what else differs
+/// on the public `/v1/responses`).
+pub(crate) fn build_responses_body(
+    request: &MessageRequest,
+    instructions: &str,
+    stream: bool,
+    session_id: &str,
+    supports_vision: bool,
+) -> Value {
     let mut input = Vec::new();
     for message in &request.messages {
         append_input_items(&mut input, message, session_id, supports_vision);
@@ -3785,7 +3805,7 @@ fn reasoning_replay_from_output(output: &[Value], session_id: &str) -> Option<Va
 }
 
 /// Parse a non-streaming Responses payload into a zo [`MessageResponse`].
-fn parse_responses_response(value: &Value, model: &str, session_id: &str) -> MessageResponse {
+pub(crate) fn parse_responses_response(value: &Value, model: &str, session_id: &str) -> MessageResponse {
     let mut content = Vec::new();
     if let Some(output) = value.get("output").and_then(Value::as_array) {
         for item in output {
