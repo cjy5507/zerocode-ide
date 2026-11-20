@@ -1420,11 +1420,7 @@ final class Provider {
     /// actions as last read while it waited, or nil when it read none.
     @discardableResult
     private func waitForWebPress(_ record: ElementRecord, pid: pid_t) -> [String]? {
-        cacheLock.lock()
-        let on = webAccessibilityOnAt[pid]
-        cacheLock.unlock()
-        guard let on, BackgroundInput.pressableRoles.contains(record.role) else { return nil }
-        let giveUp = on.addingTimeInterval(WebAccessibility.settlesSeconds)
+        guard BackgroundInput.pressableRoles.contains(record.role), let giveUp = webPressDeadline(pid: pid) else { return nil }
         var offered: [String]?
         while Date() < giveUp, !OperatorGuardHost.isStopped() {
             let now = actions(record.element)
@@ -1449,13 +1445,27 @@ final class Provider {
     /// fresh tree.
     private func waitForWebPressByReading(_ params: [String: JSONValue]) {
         let query = readingQuery(params)
+        // Outside a web view's settle window nothing waits, so nothing is read
+        // or matched either: a native app's click costs what it did.
         guard !query.isEmpty,
               let cached = try? cachedSnapshot(params: params),
               !cached.app.app.isTerminated,
+              webPressDeadline(pid: cached.app.pid) != nil,
               case let .one(index) = query.choose(among: readingFaces(cached)),
               let record = cached.elements[index]
         else { return }
         waitForWebPress(record, pid: cached.app.pid)
+    }
+
+    /// The end of the settle window of an app whose web tree this helper switched
+    /// on: 8 s after it did. Nil once that has passed, and for an app it never
+    /// switched on, such as a native one.
+    private func webPressDeadline(pid: pid_t) -> Date? {
+        cacheLock.lock()
+        let on = webAccessibilityOnAt[pid]
+        cacheLock.unlock()
+        guard let deadline = on?.addingTimeInterval(WebAccessibility.settlesSeconds), Date() < deadline else { return nil }
+        return deadline
     }
 
     private func cachedSnapshot(params: [String: JSONValue]) throws -> Snapshot? {

@@ -45,10 +45,24 @@ final class WebPressOfferSourceTests: XCTestCase {
         let byReading = try body(of: "private func waitForWebPressByReading(_ params: [String: JSONValue]) {", in: source)
         XCTAssertTrue(byReading.contains("query.choose(among: readingFaces(cached))"), String(byReading))
         XCTAssertTrue(byReading.contains("waitForWebPress(record, pid: cached.app.pid)"), String(byReading))
-        // The desktop press itself does not wait: it may hold a borrowed desktop.
+        // The desktop press itself does not wait, up to its press: it may hold a borrowed desktop.
         let desk = try XCTUnwrap(source.range(of: "// A control named by what it reads is chosen on this dispatch's fresh"))
-        let press = source[desk.upperBound...].prefix(1_200)
-        XCTAssertFalse(press.contains("offeringItsPress"), String(press))
+        let pressed = try XCTUnwrap(source.range(of: "performClickAction(record: record, mouseButton: button)", range: desk.upperBound..<source.endIndex))
+        XCTAssertFalse(source[desk.upperBound..<pressed.lowerBound].contains("offeringItsPress"))
+    }
+
+    /// t-121539 고칠 것 1: outside a web view's settle window a click by words
+    /// matches nothing before its turn, and every wait reads one deadline.
+    func testOutsideTheSettleWindowNothingIsMatchedOrWaitedFor() throws {
+        let source = try helperSource()
+        let byReading = try body(of: "private func waitForWebPressByReading(_ params: [String: JSONValue]) {", in: source)
+        let deadline = try XCTUnwrap(byReading.range(of: "webPressDeadline(pid: cached.app.pid) != nil"), String(byReading))
+        let matching = try XCTUnwrap(byReading.range(of: "query.choose(among: readingFaces(cached))"), String(byReading))
+        XCTAssertLessThan(deadline.lowerBound, matching.lowerBound, "the window is read before the look is matched")
+        let wait = try body(of: "private func waitForWebPress(_ record: ElementRecord, pid: pid_t) -> [String]? {", in: source)
+        XCTAssertTrue(wait.contains("let giveUp = webPressDeadline(pid: pid)"), String(wait))
+        let window = try body(of: "private func webPressDeadline(pid: pid_t) -> Date? {", in: source)
+        XCTAssertTrue(window.contains("on?.addingTimeInterval(WebAccessibility.settlesSeconds), Date() < deadline"), String(window))
     }
 
     func testTheBackgroundConfirmationReadsThePressOfferedByNowAndStillRefusesWithoutOne() throws {
