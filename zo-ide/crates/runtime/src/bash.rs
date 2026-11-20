@@ -2232,7 +2232,7 @@ mod tests {
         let held_by = nix::unistd::Pid::from_raw(i32::try_from(pids.next().expect("background pid")).expect("pid fits"));
 
         assert!(took < Duration::from_secs(10), "the run waited out its timeout: {took:?}");
-        assert!(took >= BACKGROUND_DRAIN_GRACE, "output may trail its shell by the grace: {took:?}");
+        assert!(took >= super::BACKGROUND_DRAIN_GRACE, "output may trail its shell by the grace: {took:?}");
         assert!(output.interrupted, "nothing finished, as at the timeout");
         assert!(output.stdout.is_empty(), "no stream comes back, as at the timeout: {:?}", output.stdout);
         assert!(
