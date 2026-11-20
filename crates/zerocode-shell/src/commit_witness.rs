@@ -1510,6 +1510,65 @@ mod tests {
         );
     }
 
+    /// A remote that shares this repository's history counts a release only at the same commit
+    /// (t-119569): a tag of that name there whose object this repository lacks — an annotated tag
+    /// another clone made, or one moved onto a commit not fetched here — is no proof the release
+    /// holds the landing, so it is said, and not read as published. Only a remote with a history
+    /// of its own, as a published snapshot is, is read by the tag's name.
+    #[test]
+    fn a_remote_sharing_this_history_counts_a_release_only_at_the_same_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        let before = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["cherry-pick", &change]);
+        git(repo, &["tag", "v1.0.1"]);
+        let origin = tempfile::tempdir().expect("tempdir");
+        let origin_url = bare(&origin);
+        git(repo, &["remote", "add", "origin", origin_url.as_str()]);
+        git(repo, &["push", "-q", "origin", "main"]);
+
+        // Another clone tags the commit before the landing — annotated, so its tag object is one
+        // this repository never fetched.
+        let other = tempfile::tempdir().expect("tempdir");
+        git(other.path(), &["clone", "-q", origin_url.as_str(), "."]);
+        git(
+            other.path(),
+            &["tag", "-a", "-m", "elsewhere", "v1.0.1", &before],
+        );
+        git(other.path(), &["push", "-q", "origin", "v1.0.1"]);
+        let annotated = released_range(repo, &change, Some("origin"));
+        assert_eq!(
+            annotated.tag, None,
+            "origin's v1.0.1 is not this release: {annotated:?}"
+        );
+        assert!(
+            annotated
+                .unpublished
+                .as_deref()
+                .is_some_and(|why| why.contains("v1.0.1") && why.contains("another commit")),
+            "{annotated:?}"
+        );
+
+        // Moved onto a commit this repository has not fetched.
+        commit(other.path(), "unfetched");
+        git(other.path(), &["tag", "-f", "v1.0.1"]);
+        git(other.path(), &["push", "-q", "-f", "origin", "v1.0.1"]);
+        let unfetched = released_range(repo, &change, Some("origin"));
+        assert_eq!(
+            unfetched.tag, None,
+            "origin's v1.0.1 names another commit: {unfetched:?}"
+        );
+
+        // Put back at this release's commit, it is the release.
+        git(repo, &["push", "-q", "-f", "origin", "v1.0.1"]);
+        assert_eq!(
+            released_range(repo, &change, Some("origin")).tag.as_deref(),
+            Some("v1.0.1")
+        );
+    }
+
     /// The backfill's old road — commits a result names, with no review — reads a release by the
     /// same rule (t-119569, the delta check's 1): a tag only local, or one only a remote nobody
     /// named holds, is no release; the remote named holding it is.
