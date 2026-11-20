@@ -2277,9 +2277,19 @@ final class Provider {
         case .one(let index):
             return index
         case .none:
+            // None is not always absent: the control may show the words only in
+            // its text, the look may have stopped before it, or it may stand in
+            // another of the app's windows.
             throw ProviderError.coded(
                 "element_not_found",
-                "no control in \(snapshot.app.name)'s window «\(snapshot.windowTitle)» reads \(query.words); look with --marks, or find"
+                ReadingRefusal.noControl(
+                    app: snapshot.app.name,
+                    windowTitle: snapshot.windowTitle,
+                    words: query.words,
+                    shown: ReadingRefusal.shownWords(shownFaces(query, in: snapshot)),
+                    cut: lookCut(snapshot),
+                    others: otherWindowsWords(snapshot)
+                )
             )
         case .many(let some):
             let named = some.prefix(5).map(\.said).joined(separator: "; ")
@@ -2288,6 +2298,40 @@ final class Provider {
                 "\(some.count) controls read \(query.words): \(named) — add --role or --label, or press one by --element-index"
             )
         }
+    }
+
+    /// The elements this look shows with the asked words in their shown name
+    /// (`SnapshotRenderHeuristics.displayName`: a link's text, a row's cells),
+    /// of the asked role, which a click by reading did not match.
+    private func shownFaces(_ query: ElementQuery, in snapshot: Snapshot) -> [ElementFace] {
+        guard let words = query.label ?? query.text else { return [] }
+        let byName = ElementQuery(text: nil, role: query.role, label: words)
+        return snapshot.order.compactMap { index -> ElementFace? in
+            guard let record = snapshot.elements[index], let name = record.name,
+                  byName.matches(role: record.role, label: name, value: nil, description: nil) else { return nil }
+            return ElementFace(index: index, role: record.role, label: name, value: nil, description: nil)
+        }
+    }
+
+    /// Why this look did not read the whole window, in a refusal's words; nil
+    /// when it read all of it.
+    private func lookCut(_ snapshot: Snapshot) -> String? {
+        ReadingRefusal.cutWords(
+            truncated: snapshot.truncated,
+            cutShort: snapshot.cutShort,
+            maxDepthReached: snapshot.maxDepthReached,
+            read: snapshot.order.count,
+            maxNodes: TreeRenderer.maxNodes
+        )
+    }
+
+    /// The app's other windows on screen, in a refusal's words; nil when the
+    /// look's window is its only one.
+    private func otherWindowsWords(_ snapshot: Snapshot) -> String? {
+        let others = WindowCapture.candidates(pid: snapshot.app.pid)
+            .filter { $0.windowId != snapshot.windowId && $0.layer == snapshot.windowLayer && $0.isOnScreen }
+            .map { ReadingRefusal.OtherWindow(windowId: $0.windowId, title: $0.title) }
+        return ReadingRefusal.otherWindowsWords(app: snapshot.app.name, others: others)
     }
 
     /// The control can be pressed by its accessibility action: it is on top where
@@ -2435,6 +2479,25 @@ final class Provider {
             hit = copyElement(current, kAXParentAttribute as String)
         }
         return fallback
+    }
+
+    /// Why nothing this look read stands at a background press's point: the
+    /// point is in another of the app's windows (two of them can stand at the
+    /// same place), or the look stopped before what stands there. Read for the
+    /// refusal's words alone; nothing is pressed either way.
+    private func unreadablePoint(_ point: CGPoint?, in snapshot: Snapshot) -> ReadingRefusal.Unreadable {
+        if let point {
+            var hit: AXUIElement?
+            let application = AXUIElementCreateApplication(snapshot.app.pid)
+            if AXUIElementCopyElementAtPosition(application, Float(point.x), Float(point.y), &hit) == .success,
+               let hit,
+               let window = copyElement(hit, kAXWindowAttribute as String),
+               let number = windowNumber(window),
+               number != snapshot.windowId {
+                return .anotherWindow(ReadingRefusal.OtherWindow(windowId: number, title: stringAttribute(window, kAXTitleAttribute as String)))
+            }
+        }
+        return lookCut(snapshot).map(ReadingRefusal.Unreadable.notReached) ?? .notAControl
     }
 
     private func performClickAction(record: ElementRecord, mouseButton: MouseButtonSelection) throws -> String? {
@@ -8892,12 +8955,14 @@ extension Provider {
     /// The label a press is about to land on, by method — nil when the press
     /// has no readable target (a bare key, a point over nothing).
     func confirmTarget(method: String, params: [String: JSONValue], snapshot loadSnapshot: () throws -> Snapshot) throws -> String? {
-        func label(_ record: ElementRecord?) throws -> String? {
+        func label(_ record: ElementRecord?, in snapshot: Snapshot, at point: CGPoint? = nil) throws -> String? {
             if params["background"]?.bool == true {
                 guard let record,
                       let text = ConfirmationTarget.backgroundLabel(role: record.role, actions: record.actions,
                                                                     label: faceLabel(record.element)) else {
-                    throw ProviderError.coded("element_not_found", "the background confirmation target is not a readable control; observe again before retrying; no input was sent")
+                    // Refused all the same; the words say where to look next.
+                    let why = record == nil ? unreadablePoint(point, in: snapshot) : .notAControl
+                    throw ProviderError.coded("element_not_found", ReadingRefusal.backgroundTarget(why))
                 }
                 return text
             }
@@ -8907,14 +8972,14 @@ extension Provider {
         case "click", "performSecondaryAction":
             let snapshot = try loadSnapshot()
             if let index = try optionalInteger(params, "elementIndex") {
-                return try label(element(snapshot, index))
+                return try label(element(snapshot, index), in: snapshot)
             }
             // A click by reading is held for what it would press; one that
             // cannot choose is refused by the press itself, not asked about.
             let query = readingQuery(params)
             if method == "click", !query.isEmpty {
                 guard let index = try? chosenIndex(query, in: snapshot) else { return nil }
-                return try label(element(snapshot, index))
+                return try label(element(snapshot, index), in: snapshot)
             }
             // A click at a window's point presses whatever is under it — read
             // it there, as a desktop click is read: a saved coordinate click
@@ -8922,7 +8987,7 @@ extension Provider {
             guard method == "click" else { return nil }
             let point = try coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot)
             if params["background"]?.bool == true {
-                return try label(backgroundClickRecord(at: point, in: snapshot))
+                return try label(backgroundClickRecord(at: point, in: snapshot), in: snapshot, at: point)
             }
             return faceLabelAtPoint(point, in: snapshot.app.pid)
         case "mouseClick":
