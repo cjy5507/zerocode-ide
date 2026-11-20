@@ -12,7 +12,8 @@
 //! refusal names — a window move for «move or resize one of them» — once, then
 //! try again once. `app`: the road the model took first that day — press
 //! «Authorize» by its words in the app's front window; when the refusal names
-//! another window (`window_id N`), look at it and press the number its look
+//! another window (`window_id N` in zo's tool, `--window-id N` from the helper
+//! itself), look at it and press the number its look
 //! reads; else take the `window` road. Each road is counted in steps, refusals
 //! (their codes) and milliseconds, and judged by the windows' own record of who
 //! was pressed: the target once, any other never.
@@ -210,12 +211,13 @@ fn number_of(state: &Value, words: &str) -> Option<u64> {
         .and_then(|number| number.parse().ok())
 }
 
-/// The window a refusal names as the app's other window (`window_id N`), if
-/// it names exactly one that is not `seen`.
+/// The window a refusal names as the app's other window, if it names exactly
+/// one that is not `seen`: `window_id N` in zo's tool, `--window-id N` from
+/// the helper itself, which this bench asks directly.
 fn named_window(refused: &str, seen: Option<u64>) -> Option<u64> {
-    let named: Vec<u64> = refused
-        .split("window_id ")
-        .skip(1)
+    let named: Vec<u64> = ["window_id ", "--window-id "]
+        .into_iter()
+        .flat_map(|marker| refused.split(marker).skip(1))
         .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
         .filter_map(|number| number.parse().ok())
         .filter(|number| Some(*number) != seen)
@@ -813,5 +815,19 @@ fn a_refusal_names_the_one_other_window_it_points_to() {
         ),
         None,
         "two named: the road does not guess"
+    );
+}
+
+/// The helper's own refusal, word for word, from the run that found the bench
+/// reading only zo's wording (j-1795173248666-0335, `twin-report.json`,
+/// built · twins · app): the app road fell to the window road before.
+#[test]
+fn the_helpers_own_refusal_names_its_window_by_the_flag() {
+    let refused = "element_not_found: no control in twin-fixture's window «Home | Fixture» reads --role AXButton --label «Authorize»; look with --marks, or find; twin-fixture has other windows on screen: --window-id 243623 «Home | Fixture»; the control may be in one of them — look at it by its --window-id";
+    assert_eq!(named_window(refused, Some(243622)), Some(243623));
+    assert_eq!(
+        named_window(refused, Some(243623)),
+        None,
+        "the window the press was in is not another"
     );
 }
