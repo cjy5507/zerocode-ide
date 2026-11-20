@@ -206,7 +206,7 @@ fn a_notice_sent_again_under_its_retry_name_is_one_letter_handed_over_once() {
     );
 
     let read = bench.json_at(&pane, "check");
-    assert_eq!(ids(&read), [notice.clone()], "{read}");
+    assert_eq!(ids(&read), std::slice::from_ref(&notice), "{read}");
     let batch = read["deliveryId"].as_str().expect("a batch").to_string();
     let replayed = bench.json_at(&pane, "check");
     assert_eq!(replayed["deliveryId"], batch.as_str(), "{replayed}");
