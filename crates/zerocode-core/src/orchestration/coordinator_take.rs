@@ -918,6 +918,155 @@ pub fn backfill_commits(run: &Run) -> Vec<String> {
     commits
 }
 
+/// The verified work whose landing nobody wrote, and the landed work whose release nobody wrote
+/// (t-119569): a coordinator's review stands verified on its hand-in and nothing says it merged,
+/// or it merged and nothing says it shipped. What a backfill proves a landing for from git alone
+/// — writing the merge and the release, and never the verification, which is the coordinator's.
+fn landing_unrecorded(run: &Run) -> impl Iterator<Item = (&Task, WorkProgress)> + '_ {
+    run.tasks.iter().filter_map(move |task| {
+        let progress = run.progress_of(task);
+        matches!(progress.stage, WorkStage::Verified | WorkStage::Merged)
+            .then_some((task, progress))
+    })
+}
+
+/// The commit a landing proof asks git the range of, for one task: the one its verified review
+/// read, or the one its merge names once it merged. `None` for a review of a report, which lands
+/// nothing.
+fn landing_head(progress: &WorkProgress) -> Option<String> {
+    match progress.stage {
+        WorkStage::Verified => progress.source.as_deref().and_then(commit_named),
+        WorkStage::Merged => progress.merge_head.as_deref().and_then(commit_named),
+        _ => None,
+    }
+}
+
+/// Every head a backfill of `run` asks git the range of (t-119569) — what the window reads before
+/// the plan, beside [`backfill_commits`].
+#[must_use]
+pub fn backfill_heads(run: &Run) -> Vec<String> {
+    let mut heads: Vec<String> = Vec::new();
+    for (_, progress) in landing_unrecorded(run) {
+        if let Some(head) = landing_head(&progress)
+            && !heads.iter().any(|held| held.eq_ignore_ascii_case(&head))
+        {
+            heads.push(head);
+        }
+    }
+    heads
+}
+
+/// The landing git proves for one task of [`landing_unrecorded`] (t-119569), as the keys to write
+/// — or why none, and then nothing is written. Merged only when every commit of the range its
+/// review read is in the base as the same change, with the commit of the base the last of them
+/// landed as; a commit the subject of a merge names is never enough alone. Deployed only when a
+/// published release tag holds that landing — a tag cut before the merge holds none of it.
+fn prove_landing(
+    progress: &WorkProgress,
+    seen: Option<&CommitsSeen>,
+    base: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let head = landing_head(progress)
+        .ok_or("its review names no commit, and a report lands nothing")?;
+    let seen = seen
+        .filter(|seen| seen.base.as_ref().is_some_and(|asked| asked.name == base))
+        .ok_or_else(|| format!("git was not asked about this range against {base}"))?;
+    if seen.base.as_ref().is_some_and(|asked| asked.head.is_none()) {
+        return Err(format!("git does not know {base} in {}", seen.repo));
+    }
+    let range = seen
+        .range(&head)
+        .ok_or_else(|| format!("git was not asked about the range {head} reviewed"))?;
+    let mut facts = serde_json::Map::new();
+    if progress.stage == WorkStage::Verified {
+        if range.commits.is_empty() {
+            return Err(format!("git found no commit in the range {head} reviewed"));
+        }
+        let missing: Vec<&str> = range
+            .commits
+            .iter()
+            .filter(|(_, landed)| !landed)
+            .map(|(commit, _)| commit.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{} of {} commits of the range {head} reviewed are not in {base} as the same \
+                 change: {}",
+                missing.len(),
+                range.commits.len(),
+                missing.join(", ")
+            ));
+        }
+        let landed = range.landed_as.as_deref().ok_or_else(|| {
+            format!("git could not say which commit of {base} the range {head} landed as")
+        })?;
+        facts.insert(REVIEW_KEY_GROUPS[1][0].to_string(), true.into());
+        facts.insert(land_record::MERGE_HEAD_KEY.to_string(), landed.into());
+    }
+    match &range.tag {
+        Some(tag) => {
+            facts.insert(DEPLOYED_KEY.to_string(), true.into());
+            facts.insert(land_record::RELEASE_KEY.to_string(), tag.clone().into());
+        }
+        None if facts.is_empty() => {
+            return Err(format!(
+                "no published release tag holds {} yet",
+                range.landed_as.as_deref().unwrap_or(&head)
+            ));
+        }
+        None => {}
+    }
+    Ok(facts)
+}
+
+/// One proven landing written (t-119569) the way `task-update --members` writes one: bound to the
+/// attempt and source the standing verified review names ([`land_record::member`]), through the
+/// seat check every review takes, with the backfill's note beside it — the moment it marks is the
+/// backfill's, not the merge's (review t-79586 P3-4).
+fn land_one(
+    ledger: &mut Ledger,
+    (team, pane): (&Team, &str),
+    run_id: &str,
+    task_id: &str,
+    (facts, base): (&serde_json::Map<String, serde_json::Value>, &BaseSeen),
+    now_ms: i64,
+) -> Result<(), String> {
+    let run = ledger.run(run_id).ok_or_else(|| unknown_run(run_id))?;
+    let (attempt, source, result) = land_record::member(run, task_id, facts)?;
+    let mut map = match serde_json::from_str::<serde_json::Value>(&result) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return Err("its review is not a JSON object to add the landing to".to_string()),
+    };
+    map.insert(
+        BACKFILL_KEY.to_string(),
+        serde_json::json!({
+            "by": BACKFILL_VERB,
+            "atMs": now_ms,
+            "base": base.name,
+            "baseHead": base.head,
+            "landing": facts,
+        }),
+    );
+    let result = serde_json::Value::Object(map).to_string();
+    let author = correction_author(
+        ledger,
+        &team.leader_pane,
+        run_id,
+        task_id,
+        (&team.id, pane),
+        Observed {
+            attempt: Some(attempt.as_deref().unwrap_or(NO_ATTEMPT)),
+            source: Some(&source),
+            review: true,
+            bare_verification: verifies_on_nothing_new(&result),
+            tested_head: None,
+            git: None,
+        },
+    )?;
+    ledger.update_task(run_id, task_id, None, Some(result), author, now_ms)?;
+    Ok(())
+}
+
 /// What git proves for one finished task.
 struct Proven {
     /// The checkout git was asked in.
@@ -1069,8 +1218,11 @@ fn backfilled_result(original: &str, proven: &Proven, base: &BaseSeen, now_ms: i
 ///
 /// Lists every finished task no review stands on, and for each one either what it would write —
 /// a coordinator attempt, a hand-in of the commit git proved, and a review of that commit — or
-/// why it cannot. `--apply` writes the listed rows from the coordinator seat; one task that
-/// cannot be written never stops the others.
+/// why it cannot. Then every verified task whose landing nobody wrote, and every landed one whose
+/// release nobody wrote (t-119569, `"landing": true`): the merge and the release git proves for
+/// the range its review read ([`prove_landing`]), or why it cannot — never a verification.
+/// `--apply` writes the listed rows from the coordinator seat; one task that cannot be written
+/// never stops the others.
 #[allow(clippy::too_many_arguments)] // Each argument is one fact the backfill rests on.
 pub(super) fn backfill(
     ledger: &mut Ledger,
@@ -1122,6 +1274,22 @@ pub(super) fn backfill(
         }
         rows.push(row);
     }
+    let mut landings = Vec::new();
+    for (task, progress) in landing_unrecorded(run) {
+        let proven = prove_landing(&progress, seen, &base);
+        rows.push(serde_json::json!({
+            "taskId": task.id,
+            "status": task.status.as_str(),
+            "stage": progress.stage.word(),
+            "landing": true,
+            "head": landing_head(&progress),
+            "write": proven.as_ref().ok(),
+            "why": proven.as_ref().err(),
+        }));
+        if let Ok(facts) = proven {
+            landings.push((task.id.clone(), facts, rows.len() - 1));
+        }
+    }
     let base_seen = seen
         .and_then(|seen| seen.base.clone())
         .filter(|asked| asked.name == base);
@@ -1144,6 +1312,19 @@ pub(super) fn backfill(
                 Err(why) => rows[*at]["why"] = why.into(),
             }
         }
+        for (task_id, facts, at) in &landings {
+            match land_one(
+                ledger,
+                (team, pane),
+                run_id,
+                task_id,
+                (facts, base_seen),
+                now_ms,
+            ) {
+                Ok(()) => applied.push(task_id.clone()),
+                Err(why) => rows[*at]["why"] = why.into(),
+            }
+        }
     }
     Ok(said(serde_json::json!({
         "run": run_id,
@@ -1154,6 +1335,8 @@ pub(super) fn backfill(
         "repo": seen.map(|seen| seen.repo.clone()),
         "listed": rows.len(),
         "ready": ready.len(),
+        // The verified work whose landing git proved, beside the unreviewed work above (t-119569).
+        "landings": landings.len(),
         "applied": applied,
         "rows": rows,
     })))

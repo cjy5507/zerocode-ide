@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use zerocode_core::host::{LocalVcs, Vcs, Within};
 use zerocode_core::orchestration::coordinator_take::{
-    BaseSeen, CommitSeen, CommitsSeen, PatchSeen,
+    BaseSeen, CommitSeen, CommitsSeen, PatchSeen, RangeSeen,
 };
 
 /// How long one git question may take before it counts as no answer. Every question here reads
@@ -75,10 +75,120 @@ fn see_with(
     seen
 }
 
-/// What git says in `repo` about the range each of `heads` reviewed (t-119569) — not read yet.
+/// What git says in `repo` about the range each of `heads` reviewed (t-119569), against `base`,
+/// written into `seen` ([`CommitsSeen::insert_range`]): the head's own commits — the ones `base`
+/// did not hold when the work forked — each with whether `base` holds that change now, by git's
+/// own patch identity, so the same change picked onto `base` is the same; the commit of `base`
+/// the last of them landed as; and the first release tag matching `tags` that holds that landing
+/// and that the published `base` holds (`origin/<base>`, where there is one) — so a tag a release
+/// cut while it still runs is none. A head git gave no answer for is left out, and the ledger says
+/// git was not asked.
 pub(crate) fn see_ranges(seen: &mut CommitsSeen, repo: &Path, heads: &[String], base: &str, tags: &str) {
-    let _ = (seen, repo, heads, base, tags);
+    see_ranges_with(&LocalVcs, seen, repo, heads, base, tags);
 }
+
+fn see_ranges_with(
+    vcs: &dyn Vcs,
+    seen: &mut CommitsSeen,
+    repo: &Path,
+    heads: &[String],
+    base: &str,
+    tags: &str,
+) {
+    let Some(Some(base_head)) = resolve(vcs, repo, base) else {
+        return;
+    };
+    let remote = format!("origin/{base}");
+    let published = match resolve(vcs, repo, &remote) {
+        Some(Some(_)) if !base.contains('/') => remote,
+        _ => base.to_string(),
+    };
+    for named in heads {
+        let Some(Some(head)) = resolve(vcs, repo, named) else {
+            continue;
+        };
+        let Some(mut range) = range_of(vcs, repo, &head, &base_head) else {
+            continue;
+        };
+        range.tag = range
+            .landed_as
+            .as_deref()
+            .and_then(|landed| published_tag(vcs, repo, landed, tags, &published));
+        seen.insert_range(named, range);
+    }
+}
+
+/// One head's range against `base_head`, its tag aside. A head the base holds is its own range of
+/// one, landed as the first commit of the base's first-parent line that holds it. Any other head's
+/// range is its commits the base does not hold by ancestry, each landed or not by its change key
+/// ([`change_key`]: line numbers and the lines around the change aside — git's own patch identity
+/// counts the lines around it, and a change picked onto a base that moved a line beside it is
+/// another change to git), and landed as the newest copy of them on the base: the last change to
+/// arrive. `None` where git gave no answer, or the base moved more than [`RANGE_BASE_MAX`] commits
+/// since the fork — too long to read on a verb's way.
+fn range_of(vcs: &dyn Vcs, repo: &Path, head: &str, base_head: &str) -> Option<RangeSeen> {
+    if holds(vcs, repo, base_head, head)? {
+        let asked = crate::worktree_landing::trunk_log(head, base_head);
+        let said = said(vcs, repo, &asked.each_ref().map(String::as_str), None)?;
+        let landed = match crate::worktree_landing::trunk_entry(&said, head)? {
+            crate::worktree_landing::TrunkEntry::Head => head.to_string(),
+            crate::worktree_landing::TrunkEntry::Commit { sha, .. } => sha.to_string(),
+            crate::worktree_landing::TrunkEntry::Target => base_head.to_string(),
+        };
+        return Some(RangeSeen {
+            commits: vec![(head.to_string(), true)],
+            landed_as: Some(landed),
+            tag: None,
+        });
+    }
+    let listed = |range: String, oldest_first: bool| {
+        let mut asked = vec!["rev-list", "--no-merges"];
+        if oldest_first {
+            asked.push("--reverse");
+        }
+        asked.push(&range);
+        said(vcs, repo, &asked, None).map(|said| {
+            said.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+    };
+    let ours = listed(format!("{base_head}..{head}"), true)?;
+    // Newest first: the first copy found is the last change to have landed.
+    let theirs = listed(format!("{head}..{base_head}"), false)?;
+    if theirs.len() > RANGE_BASE_MAX {
+        return None;
+    }
+    let mut keyed = Vec::with_capacity(theirs.len());
+    for commit in &theirs {
+        keyed.push((change_key_kept(vcs, repo, commit)?, commit.as_str()));
+    }
+    let mut commits = Vec::with_capacity(ours.len());
+    let mut newest_copy: Option<usize> = None;
+    for commit in &ours {
+        let key = change_key_kept(vcs, repo, commit)?;
+        let copy = keyed.iter().position(|(held, _)| *held == key);
+        if let Some(at) = copy {
+            newest_copy = Some(newest_copy.map_or(at, |was| was.min(at)));
+        }
+        commits.push((commit.clone(), copy.is_some()));
+    }
+    let landed = !commits.is_empty() && commits.iter().all(|(_, landed)| *landed);
+    Some(RangeSeen {
+        commits,
+        landed_as: newest_copy
+            .filter(|_| landed)
+            .map(|at| keyed[at].1.to_string()),
+        tag: None,
+    })
+}
+
+/// How many commits the base may have moved since a reviewed range forked before a landing proof
+/// stops reading it: every one is a diff read once and kept by its id ([`change_key_kept`]), and a
+/// range that old is the coordinator's to write by hand.
+const RANGE_BASE_MAX: usize = 1_000;
 
 /// [`change_key`] kept by commit id for as long as the window runs (t-119569): a commit never
 /// changes, so its key is asked of git once — by the 「쌓인 일」 tab's rows and a landing proof alike.
@@ -107,6 +217,36 @@ pub(crate) fn change_key_kept(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Optio
 /// How many change keys a window keeps before it starts again: every unlanded commit of every
 /// checkout it lists and every range it proves, many times over (178 unlanded on 11-20).
 const CHANGE_KEYS_KEPT: usize = 8_192;
+
+/// The first tag matching `tags`, in version order, that holds `commit` and that `published`
+/// holds — a tag on a branch the base has not taken yet is none.
+fn published_tag(
+    vcs: &dyn Vcs,
+    repo: &Path,
+    commit: &str,
+    tags: &str,
+    published: &str,
+) -> Option<String> {
+    said(
+        vcs,
+        repo,
+        &[
+            "tag",
+            "--list",
+            tags,
+            "--contains",
+            commit,
+            "--merged",
+            published,
+            "--sort=v:refname",
+        ],
+        None,
+    )?
+    .lines()
+    .map(str::trim)
+    .find(|tag| !tag.is_empty())
+    .map(str::to_string)
+}
 
 /// The commit `name` names in `repo`, in full: `Some(None)` when git knows no such commit, and
 /// `None` when git gave no answer at all.

@@ -20916,7 +20916,10 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          --base, default main, holds it; deployed when a release tag, default v*, holds it, \
          named; verified only when a review task the result names passed) or why not; --apply, \
          from the coordinator seat, writes the attempt, hand-in and review, keeping the original \
-         result beside them",
+         result beside them; and the verified tasks whose landing nobody wrote (landing: true): \
+         merged only when every commit of the range the review read is in --base as the same \
+         change, deployed only when a published release tag holds that landing — never a \
+         verification — or why not; --apply writes them bound to the standing review",
         Doing::Policy,
     ),
     (

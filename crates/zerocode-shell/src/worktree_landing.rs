@@ -1164,46 +1164,63 @@ fn merge_changes_nothing(host: &Host, path: &Path, target: &str, probe: &MergePr
 /// 이 작업을 처음 담은 비교 ref의 first-parent 커밋. `head`가 그 줄기 위에
 /// 있으면(빨리감기) `head` 자신이다.
 fn landed_commit(host: &Host, path: &Path, head: &str, target: &str) -> Option<LandedIn> {
-    let range = format!("{head}..{target}");
-    let said = landing_git(
-        host,
-        path,
-        &[
-            "log",
-            "--first-parent",
-            "--ancestry-path",
-            "--format=%H %ct %P",
-            &range,
-        ],
-    )
-    .ok()?;
-    let oldest = said.lines().map(str::trim).rfind(|line| !line.is_empty());
-    let (sha, seconds) = match oldest {
-        Some(line) => {
-            let mut fields = line.split_whitespace();
-            let sha = fields.next()?;
-            let seconds = fields.next()?;
-            // 첫 부모가 `head`이면 `head`가 줄기 위에 있다 — 담은 커밋은 head다.
-            if fields.next() == Some(head) {
-                return commit_time(host, path, head).map(|time_ms| LandedIn {
-                    sha: head.to_string(),
-                    time_ms,
-                });
-            }
-            (sha.to_string(), seconds.parse::<i64>().ok()?)
-        }
-        None => {
+    let asked = trunk_log(head, target);
+    let said = landing_git(host, path, &asked.each_ref().map(String::as_str)).ok()?;
+    match trunk_entry(&said, head)? {
+        TrunkEntry::Head => commit_time(host, path, head).map(|time_ms| LandedIn {
+            sha: head.to_string(),
+            time_ms,
+        }),
+        TrunkEntry::Commit { sha, seconds } => Some(LandedIn {
+            sha: sha.to_string(),
+            time_ms: seconds.parse::<i64>().ok()?.saturating_mul(1000),
+        }),
+        TrunkEntry::Target => {
             let time_ms = commit_time(host, path, target)?;
-            return Some(LandedIn {
+            Some(LandedIn {
                 sha: target.to_string(),
                 time_ms,
-            });
+            })
         }
+    }
+}
+
+/// The git question [`trunk_entry`] reads (t-119569 shares it with the ledger's landing proof,
+/// `commit_witness::ranges`): the first-parent commits of `target` that hold `head`, newest first,
+/// each with its commit time and parents.
+pub(crate) fn trunk_log(head: &str, target: &str) -> [String; 5] {
+    [
+        "log".to_string(),
+        "--first-parent".to_string(),
+        "--ancestry-path".to_string(),
+        "--format=%H %ct %P".to_string(),
+        format!("{head}..{target}"),
+    ]
+}
+
+/// Where `head`'s work entered `target`'s first-parent line, read off [`trunk_log`]'s answer.
+pub(crate) enum TrunkEntry<'a> {
+    /// `head` stands on the line itself: the oldest commit after it has it as first parent.
+    Head,
+    /// The commit of the line that first holds `head` — the merge it landed in — and its time.
+    Commit { sha: &'a str, seconds: &'a str },
+    /// No commit of the line comes after `head`: `head` is `target`.
+    Target,
+}
+
+/// [`TrunkEntry`] out of `said`, `None` where a line is not the asked format.
+pub(crate) fn trunk_entry<'a>(said: &'a str, head: &str) -> Option<TrunkEntry<'a>> {
+    let Some(oldest) = said.lines().map(str::trim).rfind(|line| !line.is_empty()) else {
+        return Some(TrunkEntry::Target);
     };
-    Some(LandedIn {
-        sha,
-        time_ms: seconds.saturating_mul(1000),
-    })
+    let mut fields = oldest.split_whitespace();
+    let sha = fields.next()?;
+    let seconds = fields.next()?;
+    // 첫 부모가 `head`이면 `head`가 줄기 위에 있다 — 담은 커밋은 head다.
+    if fields.next() == Some(head) {
+        return Some(TrunkEntry::Head);
+    }
+    Some(TrunkEntry::Commit { sha, seconds })
 }
 
 fn commit_time(host: &Host, path: &Path, commit: &str) -> Option<i64> {

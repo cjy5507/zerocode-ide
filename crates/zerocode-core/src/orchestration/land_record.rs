@@ -24,7 +24,7 @@ pub const RELEASE_KEY: &str = "release";
 
 /// The key the commit that landed is written under beside `merged` — the middle of
 /// [`REVIEW_KEY_GROUPS`]' merge keys, and the one `land-batch` writes.
-const MERGE_HEAD_KEY: &str = REVIEW_KEY_GROUPS[1][1];
+pub(super) const MERGE_HEAD_KEY: &str = REVIEW_KEY_GROUPS[1][1];
 
 /// Why a member is refused when this run holds no task of that id.
 const UNKNOWN_TASK: &str =
@@ -102,8 +102,9 @@ fn landing_of(result: &str) -> Result<serde_json::Map<String, serde_json::Value>
 }
 
 /// One member as its standing review names it: the attempt, the source and the result the
-/// landing is added to — or why it cannot take one.
-fn member(
+/// landing is added to — or why it cannot take one. A backfill's landing proof (t-119569) writes
+/// through it too, so a landing git proved is bound exactly as one the coordinator wrote.
+pub(super) fn member(
     run: &Run,
     id: &str,
     landing: &serde_json::Map<String, serde_json::Value>,
