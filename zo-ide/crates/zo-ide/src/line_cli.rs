@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use zerocode_core::agent_shims;
 use zerocode_core::line::{self, Class, Hold, Job, JobState, Line, Machine, Pause, Until};
 
 use crate::build_cli::now_ms;
@@ -1163,9 +1164,16 @@ fn ledger_command() -> Command {
     ledger_command_on(std::env::var_os("PATH").as_deref(), endpoint.as_deref().map(Path::new), cfg!(windows))
 }
 
-/// The ledger's command on a machine whose `PATH` and window endpoint are these.
-fn ledger_command_on(_path: Option<&OsStr>, _endpoint: Option<&Path>, _windows: bool) -> Command {
-    Command::new("zerocode-orc")
+/// The ledger's command on a machine whose `PATH` and window endpoint are these:
+/// the one zo's Agent tool runs (`zerocode_core::agent_shims`). On Windows that
+/// is the window's `.ps1` through Windows `PowerShell` — a bare `zerocode-orc`
+/// finds only an `.exe` there, and the window installs none (I-t118403-W1).
+/// Found nowhere, the bare name, whose failure to start the job's log says.
+fn ledger_command_on(path: Option<&OsStr>, endpoint: Option<&Path>, windows: bool) -> Command {
+    match agent_shims::find_orchestration_program(path, endpoint, windows) {
+        Some(program) => agent_shims::orchestration_command(&program, windows),
+        None => Command::new(agent_shims::ORCHESTRATION_COMMAND),
+    }
 }
 
 /// The run this process's pane stands in, as `zerocode-orc run-current` says:
