@@ -3,7 +3,8 @@
 // the errand was for. Never activates, sits behind everything, records every
 // press as `pressed <window number>` and every key a window takes as
 // `key <window number> <key code>`, so a run is judged by the windows' own
-// record, names its windows in `ready` (JSON, written once they stand), and
+// record, names its windows in `ready` (JSON, written once they stand) with
+// their frames and their button's centre where a window move reads them, and
 // quits by itself after two minutes.
 //
 //   swiftc -O tools/computer-bench/TwinWindowsFixture.swift -o <dir>/twin-fixture -framework AppKit
@@ -27,8 +28,17 @@ final class KeyView: NSView {
 final class Fixture: NSObject, NSApplicationDelegate {
     let mode: String, dir: URL
     var windows: [NSWindow] = []
+    /// Each window's button, in the order of `windows`.
+    var buttons: [NSButton] = []
 
     init(mode: String, dir: URL) { self.mode = mode; self.dir = dir }
+
+    /// A frame in the coordinates a window move takes: from the main screen's
+    /// top-left corner, y down (AppKit's run up from its bottom-left).
+    func topLeft(_ rect: NSRect) -> [CGFloat] {
+        let height = NSScreen.screens.first?.frame.height ?? rect.maxY
+        return [rect.minX, height - rect.maxY, rect.width, rect.height]
+    }
 
     func log(_ line: String) {
         let url = dir.appendingPathComponent("events.log")
@@ -51,6 +61,7 @@ final class Fixture: NSObject, NSApplicationDelegate {
         let press = NSButton(title: button, target: self, action: #selector(pressed(_:)))
         press.frame = NSRect(x: 16, y: frame.height - 96, width: 140, height: 28)
         content.addSubview(label); content.addSubview(press)
+        buttons.append(press)
         window.contentView = content
         window.initialFirstResponder = content
         window.makeFirstResponder(content)
@@ -82,10 +93,15 @@ final class Fixture: NSObject, NSApplicationDelegate {
         let front = windows[windows.count - 1]
         front.orderBack(nil)
         for window in windows.dropLast() { window.order(.below, relativeTo: front.windowNumber) }
-        let named: [[String: Any]] = windows.map { window in
-            ["number": window.windowNumber, "frame": [window.frame.minX, window.frame.minY, window.frame.width, window.frame.height]]
+        let named: [[String: Any]] = zip(windows, buttons).map { window, button in
+            let pressed = topLeft(window.convertToScreen(button.convert(button.bounds, to: nil)))
+            return ["number": window.windowNumber,
+                    "frame": [window.frame.minX, window.frame.minY, window.frame.width, window.frame.height],
+                    "top_left": topLeft(window.frame),
+                    "button": [pressed[0] + pressed[2] / 2, pressed[1] + pressed[3] / 2]]
         }
-        var ready: [String: Any] = ["pid": Int(getpid()), "mode": mode, "front": front.windowNumber, "windows": named]
+        var ready: [String: Any] = ["pid": Int(getpid()), "mode": mode, "front": front.windowNumber, "windows": named,
+                                    "screen": topLeft(screen)]
         if windows.count > 1 { ready["back"] = windows[0].windowNumber }
         if let data = try? JSONSerialization.data(withJSONObject: ready) {
             try? data.write(to: dir.appendingPathComponent("ready"), options: .atomic)

@@ -8,22 +8,25 @@
 //!
 //! A scripted road per scene stands in for the model, the same for both
 //! helpers. `window`: look at the target window by its number, press its
-//! «Authorize» by its words there, and when that is refused take the step the
-//! refusal names — a window move for «move or resize one of them» — once, then
-//! try again once. `app`: the road the model took first that day — press
+//! «Authorize» by its words there, and when that is refused take one step
+//! once, then try again once: a window move for «move or resize one of them»,
+//! and for «is covered at its centre» a background move of the target until
+//! its «Authorize» stands clear of the app's window in front (Q1, m-122930).
+//! `front`, where both windows carry the button: the `window` road naming
+//! the twin in front. `app`: the road the model took first that day — press
 //! «Authorize» by its words in the app's front window; when the refusal names
-//! another window (`window_id N` in zo's tool, `--window-id N` from the helper
-//! itself), look at it and press the number its look
-//! reads; else take the `window` road. Each road is counted in steps, refusals
-//! (their codes) and milliseconds, and judged by the windows' own record of who
-//! was pressed: the target once, any other never.
+//! another window (`window_id N` in zo's tool, `--window-id N` from the
+//! helper itself), look at it and press the number its look reads; else take
+//! the `window` road. Each road is counted in steps, refusals (their codes)
+//! and milliseconds, and judged by the windows' own record of who was
+//! pressed: the target once, any other never.
 //!
 //! Input rules (CU pane m-122438): the fixture scenes and the late-press scene
-//! are background presses only — no pointer, no keys, no window brought
-//! forward — and run with the person at the machine. The Chrome and the key
-//! scenes bring a window forward: they start only after the person has left
-//! the mouse and the keyboard alone for two minutes, and stop at once when
-//! they touch either.
+//! are background presses and moves only — no pointer, no keys, no window
+//! brought forward — and run with the person at the machine. The Chrome and
+//! the key scenes bring a window forward: they start only after the person
+//! has left the mouse and the keyboard alone for two minutes, and stop at once
+//! when they touch either.
 //!
 //! ```text
 //! swiftc -O tools/computer-bench/TwinWindowsFixture.swift -o <dir>/twin-fixture -framework AppKit
@@ -92,8 +95,13 @@ impl Fixture {
     fn target(&self) -> u64 {
         self.ready["back"]
             .as_u64()
-            .or_else(|| self.ready["front"].as_u64())
+            .or_else(|| self.front())
             .expect("the fixture names its windows")
+    }
+
+    /// The window in front of the app's others.
+    fn front(&self) -> Option<u64> {
+        self.ready["front"].as_u64()
     }
 
     /// The windows pressed so far, by their numbers, in order.
@@ -228,9 +236,130 @@ fn named_window(refused: &str, seen: Option<u64>) -> Option<u64> {
     }
 }
 
+/// How far outside the window over it a moved target's «Authorize» stands.
+const CLEAR: f64 = 24.0;
+
+/// A fixture window's record in its `ready`, by its number.
+fn window_of(ready: &Value, number: u64) -> Option<&Value> {
+    ready["windows"]
+        .as_array()?
+        .iter()
+        .find(|window| window["number"].as_u64() == Some(number))
+}
+
+/// A frame's four numbers: x, y, width, height.
+fn four(value: &Value) -> Option<[f64; 4]> {
+    let numbers = value.as_array()?;
+    Some([
+        numbers.first()?.as_f64()?,
+        numbers.get(1)?.as_f64()?,
+        numbers.get(2)?.as_f64()?,
+        numbers.get(3)?.as_f64()?,
+    ])
+}
+
+/// A fixture window's «Authorize» centre.
+fn button_of(window: &Value) -> Option<(f64, f64)> {
+    Some((window["button"][0].as_f64()?, window["button"][1].as_f64()?))
+}
+
+/// The first of `places` where a window `width` × `height` stands wholly on
+/// the screen the fixture stands on.
+fn on_screen(
+    ready: &Value,
+    places: [(f64, f64); 4],
+    width: f64,
+    height: f64,
+) -> Option<(f64, f64)> {
+    let [screen_x, screen_y, screen_width, screen_height] = four(&ready["screen"])?;
+    places.into_iter().find(|&(left, top)| {
+        left >= screen_x
+            && top >= screen_y
+            && left + width <= screen_x + screen_width
+            && top + height <= screen_y + screen_height
+    })
+}
+
+/// Where window `target` can stand, moved in the background, with its
+/// «Authorize» clear of window `over` (Q1, m-122930): left, else right, else
+/// up, else down, each by as little as puts the button's centre `CLEAR`
+/// points outside `over`'s frame, and only where the whole window stays on
+/// the screen. The frames and the button's centre are the fixture's own
+/// (`ready`), in the coordinates a window move takes — from the top-left of
+/// the main screen, y down. None when the fixture does not say, or no side
+/// has room.
+fn clear_of(ready: &Value, target: u64, over: u64) -> Option<(f64, f64)> {
+    let (moved, front) = (window_of(ready, target)?, window_of(ready, over)?);
+    let [x, y, width, height] = four(&moved["top_left"])?;
+    let [over_x, over_y, over_width, over_height] = four(&front["top_left"])?;
+    let (centre_x, centre_y) = button_of(moved)?;
+    let places = [
+        (x + over_x - CLEAR - centre_x, y),
+        (x + over_x + over_width + CLEAR - centre_x, y),
+        (x, y + over_y - CLEAR - centre_y),
+        (x, y + over_y + over_height + CLEAR - centre_y),
+    ];
+    on_screen(ready, places, width, height)
+}
+
+/// Where window `over` can stand, moved in the background, so that it no
+/// longer covers window `target`'s «Authorize» (Q1b, m-122957): its right
+/// edge `CLEAR` points left of the button's centre, else its left edge as far
+/// right of it, else its bottom above it, else its top below it, and only
+/// where the whole window stays on the screen. None as for `clear_of`.
+fn aside_of(ready: &Value, over: u64, target: u64) -> Option<(f64, f64)> {
+    let (moved, under) = (window_of(ready, over)?, window_of(ready, target)?);
+    let [x, y, width, height] = four(&moved["top_left"])?;
+    let (centre_x, centre_y) = button_of(under)?;
+    let places = [
+        (centre_x - CLEAR - width, y),
+        (centre_x + CLEAR, y),
+        (x, centre_y - CLEAR - height),
+        (x, centre_y + CLEAR),
+    ];
+    on_screen(ready, places, width, height)
+}
+
+/// A road's window move: which window, to where, and what the step is called.
+type Move = (u64, f64, f64, &'static str);
+
+/// Q1 (m-122930): after «is covered at its centre», the app's window in front
+/// covers the button, so the road moves `target` itself, in the background,
+/// until its button stands clear of it — the same step on every road refused
+/// so, under either helper.
+fn clear_step(advice: &str, ready: &Value, target: u64) -> Option<Move> {
+    if !advice.contains("is covered at its centre") {
+        return None;
+    }
+    let front = ready["front"].as_u64().filter(|&front| front != target)?;
+    clear_of(ready, target, front)
+        .map(|(x, y)| (target, x, y, "move it clear of the window over it"))
+}
+
+/// Q1b (m-122957): after «is covered at its centre», the road moves the window
+/// the refusal names by its `--window-id` — the one over the button — aside
+/// in the background, as the refusal says, until the button is clear. A
+/// refusal that names no window moves nothing.
+fn aside_step(advice: &str, ready: &Value, target: u64) -> Option<Move> {
+    if !advice.contains("is covered at its centre") {
+        return None;
+    }
+    let over = named_window(advice, Some(target))?;
+    aside_of(ready, over, target)
+        .map(|(x, y)| (over, x, y, "move the window the refusal names aside"))
+}
+
 /// Look at window `target` and press its «Authorize» by its words there,
-/// taking the step a refusal names once and trying once more.
-fn window_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) {
+/// taking the step a refusal calls for once and trying once more: a small
+/// move of the target for «move or resize one of them», `covered`'s move for
+/// a press under another window.
+fn road_to(
+    road: &mut Road,
+    session: &Session,
+    fixture: &Fixture,
+    target: u64,
+    covered: fn(&str, &Value, u64) -> Option<Move>,
+) {
     let app = fixture.app();
     let look = json!({"app": app, "windowId": target, "noScreenshot": true, "background": true});
     let press = json!({
@@ -247,25 +376,46 @@ fn window_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u6
         {
             return;
         }
-        let advice = road.last_refusal.clone().unwrap_or_default();
-        if attempt == 1 || !advice.contains("move or resize one of them") {
+        if attempt == 1 {
             return;
         }
-        // The refusal's own advice: move one of them a little, then look again.
-        let frame = &fixture.ready["windows"][0]["frame"];
-        let x = frame[0].as_f64().unwrap_or(100.0) + 40.0;
-        let y = frame[1].as_f64().unwrap_or(100.0) + 40.0;
+        let advice = road.last_refusal.clone().unwrap_or_default();
+        let to = if advice.contains("move or resize one of them") {
+            // The refusal's own advice: move one of them a little, then look again.
+            let frame = &fixture.ready["windows"][0]["frame"];
+            let x = frame[0].as_f64().unwrap_or(100.0) + 40.0;
+            let y = frame[1].as_f64().unwrap_or(100.0) + 40.0;
+            Some((target, x, y, "move it (the refusal's advice)"))
+        } else {
+            covered(&advice, &fixture.ready, target)
+        };
+        let Some((window, x, y, what)) = to else {
+            return;
+        };
         let _ = road.step(
             session,
-            "move it (the refusal's advice)",
+            what,
             "windowAction",
-            &json!({"action": "move", "windowId": target, "x": x, "y": y}),
+            &json!({"action": "move", "windowId": window, "x": x, "y": y}),
         );
     }
 }
 
+/// The `window` road: a covered target is moved clear itself (Q1).
+fn window_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) {
+    road_to(road, session, fixture, target, clear_step);
+}
+
+/// The `aside` road: the window a covered press's refusal names is moved
+/// aside (Q1b).
+fn aside_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) {
+    road_to(road, session, fixture, target, aside_step);
+}
+
 /// The model's road that day: the app's front window by words first, then
-/// the window a refusal names, else the window road.
+/// the window a refusal names — looked at, pressed by the number its look
+/// reads, and moved clear once when that press is covered (Q1) — else the
+/// window road.
 fn app_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) {
     let app = fixture.app();
     let first = json!({"app": app, "label": "Authorize", "role": "AXButton", "background": true, "noScreenshot": true});
@@ -281,24 +431,45 @@ fn app_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) 
         return;
     }
     let refused = road.last_refusal.clone().unwrap_or_default();
-    if let Some(named) = named_window(&refused, fixture.ready["front"].as_u64()) {
-        let look = json!({"app": app, "windowId": named, "noScreenshot": true, "background": true});
-        if let Some(state) = road.step(
-            session,
-            "look at the window the refusal names",
-            "getAppState",
-            &look,
-        ) && let Some(number) = number_of(&state, "Authorize")
-        {
-            let press = json!({
-                "app": app, "windowId": named, "elementIndex": number,
-                "background": true, "noScreenshot": true,
-            });
-            let _ = road.step(session, "press the number that look read", "click", &press);
-        }
+    let Some(named) = named_window(&refused, fixture.front()) else {
+        window_road(road, session, fixture, target);
         return;
+    };
+    let look = json!({"app": app, "windowId": named, "noScreenshot": true, "background": true});
+    for attempt in 0..2 {
+        let Some(number) = road
+            .step(
+                session,
+                "look at the window the refusal names",
+                "getAppState",
+                &look,
+            )
+            .and_then(|state| number_of(&state, "Authorize"))
+        else {
+            return;
+        };
+        let press = json!({
+            "app": app, "windowId": named, "elementIndex": number,
+            "background": true, "noScreenshot": true,
+        });
+        if road
+            .step(session, "press the number that look read", "click", &press)
+            .is_some()
+            || attempt == 1
+        {
+            return;
+        }
+        let advice = road.last_refusal.clone().unwrap_or_default();
+        let Some((window, x, y, what)) = clear_step(&advice, &fixture.ready, named) else {
+            return;
+        };
+        let _ = road.step(
+            session,
+            what,
+            "windowAction",
+            &json!({"action": "move", "windowId": window, "x": x, "y": y}),
+        );
     }
-    window_road(road, session, fixture, target);
 }
 
 /// The scenes and roads, each on a fresh fixture, under one helper.
@@ -310,7 +481,15 @@ fn under(session: &Session, program: &Path, root: &Path, helper: &str) -> Value 
                 "window",
                 window_road as fn(&mut Road, &Session, &Fixture, u64),
             ),
+            (
+                "aside",
+                aside_road as fn(&mut Road, &Session, &Fixture, u64),
+            ),
             ("app", app_road as fn(&mut Road, &Session, &Fixture, u64)),
+            (
+                "front",
+                window_road as fn(&mut Road, &Session, &Fixture, u64),
+            ),
         ] {
             if mode == "twins-same" && name == "app" {
                 // Both windows carry the words: a press that names no window
@@ -318,8 +497,20 @@ fn under(session: &Session, program: &Path, root: &Path, helper: &str) -> Value 
                 // whether a road that names the window ever presses another.
                 continue;
             }
+            if name == "front" && mode != "twins-same" {
+                // Only there does the twin in front carry the button too.
+                continue;
+            }
+            if name == "aside" && !mode.starts_with("twins") {
+                // Q1b is asked of the twins.
+                continue;
+            }
             let fixture = Fixture::start(program, root, mode, &format!("{helper}-{mode}-{name}"));
-            let target = fixture.target();
+            let target = if name == "front" {
+                fixture.front().expect("the fixture names its front window")
+            } else {
+                fixture.target()
+            };
             let mut road = Road::default();
             let started = Instant::now();
             road_of(&mut road, session, &fixture, target);
@@ -830,4 +1021,90 @@ fn the_helpers_own_refusal_names_its_window_by_the_flag() {
         None,
         "the window the press was in is not another"
     );
+}
+
+/// The fixture's twins at the main screen's bottom right, as it stands them:
+/// 720 × 480 at 40 points over the bottom edge, the button's centre 86 points
+/// in and 110 down.
+fn twins_ready(screen: [f64; 4]) -> Value {
+    let x = screen[0] + screen[2] - 760.0;
+    let y = screen[1] + screen[3] - 40.0 - 480.0;
+    let window = |number: u64| json!({"number": number, "top_left": [x, y, 720.0, 480.0], "button": [x + 86.0, y + 110.0]});
+    json!({"front": 2, "back": 1, "windows": [window(1), window(2)], "screen": screen})
+}
+
+#[test]
+fn a_covered_target_moves_until_its_button_stands_clear_of_the_window_over_it() {
+    let ready = twins_ready([0.0, 25.0, 1512.0, 920.0]);
+    let (x, y) = clear_of(&ready, 1, 2).expect("room on the left");
+    assert_eq!(
+        (x, y),
+        (752.0 - 24.0 - 86.0, 425.0),
+        "left, by as little as puts the button's centre 24 points outside"
+    );
+    assert!(
+        x + 86.0 < 752.0,
+        "the button's centre is outside the window over it"
+    );
+    assert!(x >= 0.0, "the window stays on the screen");
+}
+
+#[test]
+fn a_covered_target_is_never_moved_off_the_screen() {
+    // A screen only as large as the windows: every side takes the window off
+    // it, so nothing moves.
+    let ready = twins_ready([0.0, 25.0, 760.0, 520.0]);
+    assert_eq!(clear_of(&ready, 1, 2), None);
+    // Room above only: the window goes up, not left off the screen.
+    let tall = twins_ready([0.0, 25.0, 760.0, 1200.0]);
+    let (x, y) = clear_of(&tall, 1, 2).expect("room above");
+    assert_eq!(x, 0.0);
+    assert!(
+        y + 110.0 < 25.0 + 1200.0 - 40.0 - 480.0,
+        "the button's centre is above the window over it"
+    );
+    assert!(y >= 25.0, "the window stays on the screen");
+    // A fixture that does not say where its button is moves nothing, even with room.
+    let mut silent = twins_ready([0.0, 25.0, 1512.0, 920.0]);
+    silent["windows"][0]["button"] = Value::Null;
+    assert_eq!(clear_of(&silent, 1, 2), None);
+}
+
+/// A's covered refusal (t-122111 Q2, 366edc5a6) word for word, naming the
+/// window in front: the Q1b road reads that window and moves it aside.
+const COVERED_NAMING_THE_FRONT: &str = "element_not_found: element 2 is covered at its centre by AXButton Overview, which stands in another window of this app (--window-id 2 «Home | Fixture»): move that window aside in the background — a window move of its --window-id takes no pointer and raises nothing — then look again and press; if it will not move, ask the person";
+
+/// The words a covered press had before (j-…0335, built · twins · window).
+const COVERED_BEFORE: &str = "element_not_found: element 2 is covered at its centre by AXButton Overview; look again with --marks";
+
+#[test]
+fn the_q1b_road_moves_the_window_the_refusal_names_until_it_no_longer_covers_the_button() {
+    let ready = twins_ready([0.0, 25.0, 1512.0, 920.0]);
+    let (window, x, y, _) =
+        aside_step(COVERED_NAMING_THE_FRONT, &ready, 1).expect("the window in front is named");
+    assert_eq!(window, 2, "the window over the button, not the target");
+    assert_eq!(
+        (x, y),
+        (838.0 - 24.0 - 720.0, 425.0),
+        "its right edge 24 points left of the button's centre"
+    );
+    assert_eq!(
+        aside_step(COVERED_BEFORE, &ready, 1),
+        None,
+        "a refusal that names no window moves nothing"
+    );
+    let (window, x, _, _) =
+        clear_step(COVERED_BEFORE, &ready, 1).expect("Q1 moves the target itself");
+    assert_eq!((window, x), (1, 642.0));
+    assert_eq!(
+        clear_step("element_not_found: no control reads «Authorize»", &ready, 1),
+        None,
+        "only a covered press is moved for"
+    );
+}
+
+#[test]
+fn the_window_over_the_button_is_never_moved_off_the_screen() {
+    let ready = twins_ready([0.0, 25.0, 760.0, 520.0]);
+    assert_eq!(aside_of(&ready, 2, 1), None);
 }
