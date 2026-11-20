@@ -34,7 +34,9 @@
 //! the key scenes bring a window forward (the key scenes' last cell raises the
 //! twin behind with a window focus, then presses it): they start only after
 //! the person has left the mouse and the keyboard alone for two minutes, and
-//! stop at once when they touch either.
+//! stop at once when they touch either. The machine's idle clock counts the
+//! key scenes' own real input too, so past it only an input later than the
+//! bench's last is the person's (CU pane m-123497).
 //!
 //! ```text
 //! swiftc -O tools/computer-bench/TwinWindowsFixture.swift -o <dir>/twin-fixture -framework AppKit
@@ -167,6 +169,50 @@ fn person_idle() -> Duration {
         .and_then(|nanos| nanos.trim().parse::<u64>().ok())
         .unwrap_or(0);
     Duration::from_nanos(nanos)
+}
+
+/// How much later than the bench's own last real input an input must come
+/// to be the person's (CU pane m-123497): the helper's input goes inside the
+/// call that asked for it, and the bench marks that call's return.
+const OWN_INPUT_SLACK: Duration = Duration::from_millis(250);
+
+/// Whether the person has been at the machine: `idle` is the machine's idle
+/// clock (HIDIdleTime), `ours` how long ago the bench's last call that may
+/// send real input returned, if one did. Before any, the person must have
+/// left the mouse and the keys alone for two minutes. After one, the clock
+/// counts the helper's input as anyone's — a foreground key set it to nought
+/// (run 012734) — so only an input more than `OWN_INPUT_SLACK` after the
+/// bench's last is the person's: when that input went they had rested two
+/// minutes, or had not come back since the bench's input before it.
+fn person_was_here(idle: Duration, ours: Option<Duration>) -> bool {
+    match ours {
+        None => idle < PERSON_AWAY,
+        Some(ours) => idle + OWN_INPUT_SLACK < ours,
+    }
+}
+
+/// The person's rest across a bench that sends real input: the idle clock,
+/// read past the bench's own input (`sent`).
+#[derive(Default)]
+struct Rest {
+    /// When the bench's last call that may send real input returned.
+    ours: Option<Instant>,
+}
+
+impl Rest {
+    /// The idle clock, when the person has been at the machine since the
+    /// bench began (`person_was_here`); None while they rest.
+    fn person_back(&self) -> Option<Duration> {
+        // Read before the clock, so that the clock's own read only widens the slack.
+        let ours = self.ours.map(|ours| ours.elapsed());
+        let idle = person_idle();
+        person_was_here(idle, ours).then_some(idle)
+    }
+
+    /// A call that may send real input has returned.
+    fn sent(&mut self) {
+        self.ours = Some(Instant::now());
+    }
 }
 
 /// One road's steps as they went.
@@ -870,11 +916,11 @@ fn twin_bench_keys() {
     let out = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_KEYS_OUT").expect("report path"));
     let root = out.parent().expect("report folder").join("key-fixtures");
     let mut report = json!({});
+    let mut rest = Rest::default();
     for (label, helper) in [("installed", &baseline), ("built", &built)] {
         let session = Session::connect(launch_at(helper).expect("helper")).expect("answers");
         for mode in ["single", "twins", "offset", "small-over"] {
-            let idle = person_idle();
-            if idle < PERSON_AWAY {
+            if let Some(idle) = rest.person_back() {
                 report[label][mode] = json!({"skipped": format!("the person was at the machine {}s ago", idle.as_secs())});
                 continue;
             }
@@ -883,12 +929,14 @@ fn twin_bench_keys() {
             let look =
                 json!({"app": app, "windowId": target, "noScreenshot": true, "background": true});
             let (_, looked) = call(&session, "getAppState", &look);
-            let (ms, answer) = if looked.is_ok() && person_idle() >= PERSON_AWAY.min(idle) {
-                // The borrowed desktop's road: the key goes to the fixture's own process
-                // and never through the HID stream, which the person's idle time reads
-                // and the front app at that instant takes (t-122428).
+            let (ms, answer) = if looked.is_ok() && rest.person_back().is_none() {
+                // The borrowed desktop's road (t-122428). Under the installed helper
+                // the machine's idle clock read nought right after this call (run
+                // 012734, CU pane m-123497): the bench marks it as its own input.
                 let key = json!({"app": app, "windowId": target, "key": "Return", "restoreWindow": true, "mayBorrowDesktop": true});
-                call(&session, "pressKey", &key)
+                let sent = call(&session, "pressKey", &key);
+                rest.sent();
+                sent
             } else {
                 (
                     0.0,
@@ -906,7 +954,7 @@ fn twin_bench_keys() {
                 "key_other": keys.iter().filter(|&&number| number != target).count(),
             });
         }
-        report[label]["raise"] = raise_and_press(&session, &program, &root, label);
+        report[label]["raise"] = raise_and_press(&session, &program, &root, label, &mut rest);
     }
     let text = serde_json::to_string_pretty(&report).expect("a report");
     std::fs::write(&out, &text).expect("the report");
@@ -917,26 +965,33 @@ fn twin_bench_keys() {
 /// so only with the person away — then pressed by its words in the
 /// background (CU pane m-122932 (다)). Ends with the fixture, whose windows
 /// go with it, so the app that was in front is in front again.
-fn raise_and_press(session: &Session, program: &Path, root: &Path, label: &str) -> Value {
-    let idle = person_idle();
-    if idle < PERSON_AWAY {
+fn raise_and_press(
+    session: &Session,
+    program: &Path,
+    root: &Path,
+    label: &str,
+    rest: &mut Rest,
+) -> Value {
+    if let Some(idle) = rest.person_back() {
         return json!({"skipped": format!("the person was at the machine {}s ago", idle.as_secs())});
     }
     let fixture = Fixture::start(program, root, "twins", &format!("{label}-raise"));
     let (app, target) = (fixture.app(), fixture.target());
     let mut road = Road::default();
-    let stopped = person_idle() < PERSON_AWAY.min(idle);
+    let stopped = rest.person_back().is_some();
     if !stopped {
         let raise = json!({"action": "focus", "windowId": target});
-        if road
+        let raised = road
             .step(
                 session,
                 "bring the target window forward",
                 "windowAction",
                 &raise,
             )
-            .is_some()
-        {
+            .is_some();
+        // Bringing an app forward is the bench's own doing, whatever the clock makes of it.
+        rest.sent();
+        if raised {
             let look =
                 json!({"app": app, "windowId": target, "noScreenshot": true, "background": true});
             let press = json!({
@@ -1265,4 +1320,20 @@ fn a_look_says_whose_tree_it_read_and_where_the_window_list_stood_its_window() {
         &json!({"frame": {"x": 642, "y": 425, "width": 720, "height": 480}}),
     );
     assert_eq!(moved["frame"], json!([642, 425, 720, 480]));
+}
+
+#[test]
+fn the_benchs_own_input_is_no_ones_but_any_input_after_it_is_the_persons() {
+    let (secs, millis) = (Duration::from_secs, Duration::from_millis);
+    // Before the bench sent anything: two minutes' rest, as before.
+    assert!(person_was_here(secs(119), None));
+    assert!(!person_was_here(secs(120), None));
+    // The bench's own key, which returned 2 s ago and set the clock to nought.
+    assert!(!person_was_here(secs(2), Some(secs(2))));
+    assert!(!person_was_here(millis(1_800), Some(secs(2))));
+    // An input after it is the person's, and the bench stops at once.
+    assert!(person_was_here(millis(1_700), Some(secs(2))));
+    assert!(person_was_here(Duration::ZERO, Some(secs(2))));
+    // A key the clock did not count leaves the person's rest as it stood.
+    assert!(!person_was_here(secs(300), Some(secs(2))));
 }
