@@ -1209,24 +1209,10 @@ async fn execute_bash_async(
         Ok(Err(error)) => return Err(error),
         // The run is cut: its deadline passed (`Err`), or its leader exited
         // while a process it left running still held its output (`Ok(None)`).
-        // Either way: end the group of this run while its leader is still
-        // registered, so backgrounded grandchildren are reaped too, then
-        // return. Dropping `child` triggers `kill_on_drop` as the leader
-        // backstop (WI-G).
+        // Either way its group is ended (`end_cut_run`), then the run returns.
         cut => {
-            let stderr = if cut.is_ok() {
-                held_output_stderr(background)
-            } else {
-                timeout_stderr_with_background_advice(effective_timeout_ms, background)
-            };
-            #[cfg(unix)]
-            end_registered_group(child_pid).await;
-            #[cfg(windows)]
-            end_process_tree(child_pid).await;
-            spill
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .give_up();
+            end_cut_run(child_pid, &spill).await;
+            let stderr = cut_stderr(cut.is_ok(), effective_timeout_ms, background);
             return Ok(cut_output(&input, stderr, sandbox_status));
         }
     };
@@ -1265,6 +1251,28 @@ async fn execute_bash_async(
         sandbox_status: Some(sandbox_status),
         safety_warning: None,
     })
+}
+
+/// Ends the group of a cut run while its leader is still registered, so the
+/// grandchildren it backgrounded are reaped too, and gives up its spill.
+/// Dropping the run's `child` afterwards triggers `kill_on_drop` as the leader
+/// backstop (WI-G).
+async fn end_cut_run(child_pid: Option<u32>, spill: &Mutex<RawSpill>) {
+    #[cfg(unix)]
+    end_registered_group(child_pid).await;
+    #[cfg(windows)]
+    end_process_tree(child_pid).await;
+    spill.lock().unwrap_or_else(PoisonError::into_inner).give_up();
+}
+
+/// Why a cut run was cut and what to do instead: its exited leader left a
+/// process holding its output (`held`), or its deadline passed.
+fn cut_stderr(held: bool, effective_timeout_ms: u64, background: Option<TaskReach>) -> String {
+    if held {
+        held_output_stderr(background)
+    } else {
+        timeout_stderr_with_background_advice(effective_timeout_ms, background)
+    }
 }
 
 /// The result of a run that was cut — by its deadline, or because a process
