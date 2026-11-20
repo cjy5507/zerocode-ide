@@ -4874,6 +4874,16 @@ function applyDocSearch(tab, host) {
     paintDocFindCount(tab, host, mergeDocHits(tab, merge).length);
     return;
   }
+  if (tab.kind === "csv") {
+    const query = boundedQuery(tab.docFindQuery, DOC_SEARCH_QUERY_MAX_BYTES);
+    const sheet = csvSheetOf(tab);
+    tab.csvFindHits = query ? csvFindHits(sheet, query) : [];
+    tab.csvFindSheet = sheet;
+    tab.docFindIndex = -1;
+    paintCsvFind(tab, host);
+    paintDocFindCount(tab, host, csvFindCount(tab.csvFindHits));
+    return;
+  }
   const query = boundedQuery(tab.docFindQuery, DOC_SEARCH_QUERY_MAX_BYTES);
   const root = host.querySelector(DOC_FIND_ROOTS[tab.kind] ?? ".mdview-page");
   const ranges = query && root ? docMatchRanges(root, query) : [];
@@ -4900,7 +4910,11 @@ function paintDocSearch() {
     }
     all.push(...ranges);
     const at = tab.docFindIndex ?? -1;
-    if (at >= 0 && at < ranges.length) active.push(ranges[at]);
+    // A sheet's ranges are its drawn cells only, so the match the step stands
+    // on is held apart (`paintCsvFind`).
+    if (tab.kind === "csv") {
+      if (tab.csvFindActive) active.push(tab.csvFindActive);
+    } else if (at >= 0 && at < ranges.length) active.push(ranges[at]);
   }
   if (all.length === 0) api.registry.delete(DOC_SEARCH_HIGHLIGHT);
   else api.registry.set(DOC_SEARCH_HIGHLIGHT, api.make(all));
@@ -4937,6 +4951,10 @@ function moveDocMatch(tab, host, direction) {
     // 한 트랜잭션에 선택과 스크롤 — file runFind가 캐럿을 옮기는 그 식.
     merge.dispatch({ selection: { anchor: at.from, head: at.to }, scrollIntoView: true });
     paintDocFindCount(tab, host, hits.length);
+    return;
+  }
+  if (tab.kind === "csv") {
+    moveCsvMatch(tab, host, direction);
     return;
   }
   const ranges = docSearchRanges.get(tab.id) ?? [];
@@ -4985,6 +5003,9 @@ function closeDocSearch(tab, host) {
   tab.docFindQuery = "";
   tab.docFindIndex = -1;
   docSearchRanges.delete(tab.id);
+  // A sheet repaints its cells on every scroll; with no matches held, it paints none.
+  tab.csvFindHits = [];
+  tab.csvFindActive = null;
   host.querySelector(".doc-find-input").value = "";
   host.querySelector(".doc-findbar").hidden = true;
   paintDocSearch();
@@ -5794,6 +5815,96 @@ function paintCsvSlice(tab, host) {
     held.appendChild(row);
   }
   slice.replaceChildren(held);
+  // The cells just drawn take the find's wash, if a search stands (`paintCsvFind`).
+  if (tab.csvFindHits?.length) paintCsvFind(tab, host);
+}
+
+/* ---- 표에서 찾기 (t-116954) ----
+ *
+ * 표 탭은 보이는 줄만 그린다(`paintCsvSlice`). DOM을 훑는 문서 찾기는 그려진
+ * 조각만 보았고, 그래서 화면 밖 줄의 값을 말없이 「일치 없음」이라고 했다 —
+ * 1 MiB 표의 19,162번째 줄 값을 두 엔진 모두 0개로 셌다(t-116954 측정).
+ * 표는 그래서 시트에서 찾는다: 모든 칸의 글자에서 일치를 세고, 걸음은 그
+ * 줄로 스크롤해 조각을 그린 뒤, 그려진 칸에만 Range를 건다. 줄 번호 칸은 표의
+ * 내용이 아니라서 찾지 않는다. 대소문자를 가리지 않는 것과 세는 한도(넘으면
+ * 「5000+」)는 다른 찾기와 같다. */
+function csvFindHits(sheet, query) {
+  const needle = query.toLowerCase();
+  const hits = [];
+  for (let row = 0; row < sheet.rows.length; row += 1) {
+    const cells = sheet.rows[row];
+    for (let column = 0; column < cells.length; column += 1) {
+      const said = String(cells[column] ?? "").toLowerCase();
+      for (let at = said.indexOf(needle); at !== -1; at = said.indexOf(needle, at + needle.length)) {
+        hits.push({ row, column, from: at, to: at + needle.length });
+        if (hits.length >= FIND_MAX) return hits;
+      }
+    }
+  }
+  return hits;
+}
+
+function csvFindCount(hits) {
+  return hits.length >= FIND_MAX ? `${FIND_MAX}+` : hits.length;
+}
+
+/* The wash on the cells drawn now: the head row is always drawn, the rest only
+ * while its row is in the slice. A sheet re-read under a standing search (the
+ * file changed on disk) is searched again first, so no match points into a
+ * cell's old text. */
+function paintCsvFind(tab, host) {
+  const sheet = csvSheetOf(tab);
+  if (tab.csvFindSheet !== sheet) {
+    const query = boundedQuery(tab.docFindQuery, DOC_SEARCH_QUERY_MAX_BYTES);
+    tab.csvFindHits = query ? csvFindHits(sheet, query) : [];
+    tab.csvFindSheet = sheet;
+    tab.docFindIndex = -1;
+  }
+  const head = host.querySelector(".csv-head");
+  const slice = host.querySelector(".csv-slice");
+  const first = Number((slice._frame ?? "0:0").split(":")[0]);
+  const ranges = [];
+  let active = null;
+  (tab.csvFindHits ?? []).forEach((hit, at) => {
+    // A row's cells follow its number cell, and the head's follow its corner.
+    const cell = hit.row === 0
+      ? head.children[hit.column + 1]
+      : slice.children[hit.row - 1 - first]?.children[hit.column + 1];
+    const text = cell?.firstChild;
+    if (!text || text.nodeType !== Node.TEXT_NODE || text.length < hit.to) return;
+    const range = document.createRange();
+    range.setStart(text, hit.from);
+    range.setEnd(text, hit.to);
+    ranges.push(range);
+    if (at === tab.docFindIndex) active = range;
+  });
+  tab.csvFindActive = active;
+  if (ranges.length > 0) docSearchRanges.set(tab.id, ranges);
+  else docSearchRanges.delete(tab.id);
+  paintDocSearch();
+}
+
+/* One step: to the match's row, below the head that stays on top, and then to
+ * its cell across. The slice is drawn at once rather than on the scroll's own
+ * event, so the cell the step lands on is washed in the same task. */
+function moveCsvMatch(tab, host, direction) {
+  const hits = tab.csvFindHits ?? [];
+  if (hits.length === 0) return;
+  const cur = tab.docFindIndex ?? -1;
+  tab.docFindIndex = ((cur >= 0 ? cur : direction === 1 ? -1 : 0) + direction + hits.length) % hits.length;
+  const hit = hits[tab.docFindIndex];
+  const body = host.querySelector(".csv-body");
+  if (hit.row > 0) {
+    const top = (hit.row - 1) * CSV_ROW_HEIGHT;
+    const room = body.clientHeight - CSV_ROW_HEIGHT;
+    if (top < body.scrollTop || top + CSV_ROW_HEIGHT > body.scrollTop + room) {
+      body.scrollTop = Math.max(0, top - Math.floor((room - CSV_ROW_HEIGHT) / 2));
+    }
+  }
+  paintCsvSlice(tab, host);
+  paintCsvFind(tab, host);
+  paintDocFindCount(tab, host, csvFindCount(hits));
+  tab.csvFindActive?.startContainer.parentElement?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 /* 표의 문. 이미 선 판이 있으면 그 판으로 갈 뿐이고, 없으면 먼저 읽고 나서 탭을

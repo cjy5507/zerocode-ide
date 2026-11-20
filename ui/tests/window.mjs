@@ -72,6 +72,7 @@ import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
 import { testTabstripOverflow } from "./tabstrip-overflow.mjs";
+import { testCsvFind } from "./csv-find.mjs";
 import { testNarrowWindow } from "./narrow-window.mjs";
 import { testChromeGeist } from "./chrome-geist.mjs";
 import { testSidebarAria } from "./sidebar-aria.mjs";
@@ -442,6 +443,7 @@ suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));
 // The title bar's tab strip under sixty tabs at four widths (t-17078).
 suite("tabstrip-overflow", ({ browser, origin, ok }) => testTabstripOverflow(browser, origin, ok));
+suite("csv-find", ({ browser, origin, ok }) => testCsvFind(browser, origin, ok));
 suite("narrow-window", async ({ browser, origin, ok }) => { await testNarrowWindow(browser, origin, ok); });
 suite("chrome-geist", async ({ browser, origin, ok }) => { await testChromeGeist(browser, origin, ok); });
 // The right column's and the sidebar's rails, the passed draft's item 17 (t-84803).
