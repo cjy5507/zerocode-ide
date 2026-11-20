@@ -3,7 +3,8 @@
 // the errand was for. Never activates, sits behind everything, records every
 // press as `pressed <window number>` and every key a window takes as
 // `key <window number> <key code>`, so a run is judged by the windows' own
-// record, and names its windows in `ready` (JSON, written once they stand).
+// record, names its windows in `ready` (JSON, written once they stand), and
+// quits by itself after two minutes.
 //
 //   swiftc -O tools/computer-bench/TwinWindowsFixture.swift -o <dir>/twin-fixture -framework AppKit
 //   <dir>/twin-fixture <mode> <folder>
@@ -89,8 +90,17 @@ final class Fixture: NSObject, NSApplicationDelegate {
         if let data = try? JSONSerialization.data(withJSONObject: ready) {
             try? data.write(to: dir.appendingPathComponent("ready"), options: .atomic)
         }
+        // A bench that dies first leaves no window behind the person's screen (t-122111 K-6).
+        DispatchQueue.main.asyncAfter(deadline: .now() + lifetime) { [weak self] in
+            self?.log("quit")
+            NSApp.terminate(nil)
+        }
     }
 }
+
+/// How long the fixture stands before it ends itself: past every scene a bench
+/// runs on it (a scene takes under 15 s).
+let lifetime: TimeInterval = 120
 
 let arguments = CommandLine.arguments
 let app = NSApplication.shared
