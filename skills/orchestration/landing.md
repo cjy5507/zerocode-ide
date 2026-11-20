@@ -77,6 +77,22 @@ coordinator seat (a worker's pane is refused):
 - Then review it exactly as any other: `task-update --task <id> --attempt <the take's
   dispatchId> --source <the hand-in's source> --result '{"verified":true,…}'`.
 
+Work with no commit to hand in — a measurement, a design, a report, a fix done
+by hand that is already on main — is settled in one call, from the live
+coordinator seat:
+
+```
+task-settle --task <id> --why '<one line: why the work is done>' --report <the report's absolute path> --retry-request settle-<id>
+```
+
+It walks the same three steps — the seat's own attempt, a hand-in of the why and
+the report on it, and the review of that hand-in — and writes the task 완료 —
+착지할 것 없음 (`verified` and `nothingToLand`), keeping the result it had under
+`settled`. It is refused for a task an attempt handed something in on (review that
+hand-in with `task-update` instead), for one a coordinator review already stands
+on, and for one carried, held by a decision, waiting on its dependencies, failed or
+closed. Do not close finished work `outdated`: nothing reads that as done.
+
 Once a stack is on main, write its landing on every member in the same turn:
 `task-update --members t-1,t-2 --result '{"merged":true,"mergeHead":"<sha>"}'
 --retry-request landed-<sha>`, and after the release

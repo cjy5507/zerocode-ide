@@ -138,7 +138,9 @@ the table: flags, arguments and every verb not named here are in `help`.
   error or a classifier decline.
 - Tasks: `task-create` writes a slice down. `task-list` shows what is written
   down. `task-update` corrects the record, from the coordinator seat.
-  `task-settle` lists old open work and closes it `outdated` with `--apply`.
+  `task-settle` lists old open work and closes it `outdated` with `--apply`;
+  `task-settle --task <id> --why --report` settles one task nothing was handed
+  in on as done with nothing to land.
   `task-take` opens a coordinator attempt on work done by hand. `hand-in`
   hands a commit in on that attempt. `task-backfill` writes the records of
   work that landed without one.

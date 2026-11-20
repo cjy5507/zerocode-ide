@@ -7772,8 +7772,9 @@ fn changes_the_ledger(verb: &str, words: &Words) -> bool {
         // Reading the policy changes nothing; choosing one, or asking for a
         // sweep, changes what the ledger holds.
         "retention" => words.value("--days").is_some() || words.has("--sweep"),
-        // Listing what would be settled changes nothing; applying it does.
-        "task-settle" => words.has("--apply"),
+        // Listing what would be settled changes nothing; applying it does, and so
+        // does settling one task (t-119569).
+        "task-settle" => words.has("--apply") || words.value("--task").is_some(),
         // Listing what git proves changes nothing; writing it does.
         coordinator_take::BACKFILL_VERB => words.has("--apply"),
         // Reading the batches changes nothing; every press hands the window work whose
@@ -20869,7 +20870,10 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
         "[--days <n>] [--apply] · the open tasks whose every attempt ended handing nothing in and \
          that nobody has touched for --days (default one week), and apart the completed ones that \
          can take no review: listed; only the open ones are closed `outdated`, and only with \
-         --apply, from the coordinator seat",
+         --apply, from the coordinator seat | --task <id> --why <line> --report <path> · work \
+         nothing was handed in on (a measurement, a design, work done by hand) settled as done \
+         with nothing to land, from the coordinator seat: the seat's own attempt, a hand-in of \
+         the why and the report, and its review, in one call",
         Doing::Policy,
     ),
     (
@@ -24291,6 +24295,13 @@ fn plan_inner(
          * applies only by saying so. Like `retention`, LISTING is anybody's and
          * APPLYING is the coordinator seat's, and like `reset` the record it
          * writes is a closing, never a failure. */
+        /* One task nothing was handed in on, settled by the coordinator with why and the report
+         * it rests on (t-119569): the seat's own attempt, the hand-in and its review, in one call.
+         * An arm of its own so its answer takes the receipt and the write every mutation takes. */
+        "task-settle" if words.value("--task").is_some() => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            coordinator_take::settle_one(ledger, team, pane, &words, &run_id, now_ms)?
+        }
         "task-settle" => {
             let run_id = bound(ledger, &words, &caller, &seat)?;
             let apply = words.has("--apply");

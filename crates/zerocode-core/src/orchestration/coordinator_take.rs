@@ -1190,3 +1190,206 @@ fn apply_one(
     ledger.update_task(run_id, task_id, None, Some(result), author, now_ms)?;
     Ok(taken.dispatch)
 }
+
+/// The verb whose `--task` form settles one task nothing was handed in on (t-119569). Its bare form
+/// is the settle pass's listing, in `orchestration.rs`.
+pub const SETTLE_VERB: &str = "task-settle";
+
+const SETTLE_ONE_FLAGS: &[&str] = &["--task", "--why", "--report", "--run", RETRY_REQUEST];
+
+/// The key the one-call settle writes what it did under, beside the original result.
+const SETTLE_KEY: &str = "settled";
+
+/// `task-settle --task <id> --why <line> --report <path>` (t-119569): work nothing was ever handed in
+/// on — a measurement, a design, a fix the coordinator made by hand — settled by the coordinator in
+/// one call, with why and the writing it rests on, as 완료 — 착지할 것 없음.
+///
+/// Before it, such a task could take no review at all — `task-update` refuses a review of an attempt
+/// that handed nothing in, and `hand-in` takes a commit — so the coordinator closed finished work
+/// `outdated` (t-112868, 11-20), where nothing reads it as done. No review is written over nothing
+/// here either: the three steps of a coordinator's review of its own work are walked as
+/// [`BACKFILL_VERB`] walks them — the seat's own attempt, a hand-in of the why and the report on it,
+/// and the review of that hand-in by the road every review takes ([`correction_author`]) — so the
+/// review is bound to an attempt and a source like any other, and a later attempt or hand-in moves
+/// it the same way ([`Run::review_of`]).
+///
+/// Refused before anything moves: from anywhere but the live coordinator seat; for a task an attempt
+/// handed something in on (that hand-in is what to review, with `task-update`); for one a coordinator
+/// review already stands on; and for one carried, held by a decision, waiting on its dependencies,
+/// failed or closed.
+pub(super) fn settle_one(
+    ledger: &mut Ledger,
+    team: &Team,
+    pane: &str,
+    words: &Words,
+    run_id: &str,
+    now_ms: i64,
+) -> Result<Decided, String> {
+    only_these(SETTLE_VERB, words, SETTLE_ONE_FLAGS)?;
+    let task_id = words
+        .value("--task")
+        .filter(|task| !task.trim().is_empty())
+        .ok_or_else(|| format!("{SETTLE_VERB} --task names the task to settle"))?;
+    let why = words
+        .value("--why")
+        .map(str::trim)
+        .filter(|why| !why.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{SETTLE_VERB} --task says in a line why the work is done: --why <line>, or \
+                 --why-file <that file's absolute path>"
+            )
+        })?;
+    let report = words
+        .value("--report")
+        .map(str::trim)
+        .filter(|report| !report.is_empty() && !report.contains('\n'))
+        .ok_or_else(|| {
+            format!(
+                "{SETTLE_VERB} --task names the writing the settle rests on, in one line: \
+                 --report <the report's absolute path>"
+            )
+        })?;
+    let (seat, generation) = the_seat(ledger, team, pane, run_id, SETTLE_VERB)?;
+    let run = ledger.run(run_id).ok_or_else(|| unknown_run(run_id))?;
+    let task = run
+        .task(task_id)
+        .ok_or_else(|| format!("unknown task: {task_id}"))?;
+    match task.status {
+        TaskStatus::Completed | TaskStatus::Ready | TaskStatus::Blocked => {}
+        TaskStatus::Pending => {
+            return Err(format!(
+                "task {task_id} is waiting on its dependencies — settle it once they are met"
+            ));
+        }
+        TaskStatus::Dispatched => {
+            return Err(format!(
+                "task {task_id} is carried by an attempt — let it hand in, or stop it, before \
+                 settling it"
+            ));
+        }
+        TaskStatus::Failed => {
+            return Err(format!(
+                "task {task_id} failed — put it back with `task-update --task {task_id} --status \
+                 ready` first if the work is done after all"
+            ));
+        }
+        TaskStatus::Closed => {
+            return Err(format!(
+                "task {task_id} is closed — put it back with `task-update --task {task_id} \
+                 --status ready` first if the work is done after all"
+            ));
+        }
+    }
+    if let Some(gate) = run.pending_gate_on(task_id) {
+        return Err(format!(
+            "task {task_id} is blocked by gate {} — resolve it before settling the work",
+            gate.id
+        ));
+    }
+    if ReviewFacts::written_by(task.result.as_str(), task.result_author.as_ref()).written {
+        return Err(format!(
+            "a coordinator's review already stands on task {task_id} — correct it with \
+             `task-update`"
+        ));
+    }
+    if let Some((attempt, source)) = run
+        .dispatches
+        .iter()
+        .filter(|one| one.task == task_id)
+        .find_map(|one| Some((one.id.as_str(), one.source.as_deref()?)))
+    {
+        return Err(format!(
+            "attempt {attempt} handed {source} in on task {task_id} — review that hand-in with \
+             `task-update --task {task_id} --attempt {attempt} --source {source}`; {SETTLE_VERB} \
+             --task settles work nothing was handed in on"
+        ));
+    }
+    let original = task.result.to_string();
+    let taken = ledger.take_task(
+        run_id,
+        task_id,
+        (&seat, generation),
+        None,
+        Some(why),
+        SETTLE_VERB,
+        now_ms,
+    )?;
+    let body = serde_json::json!({
+        "ok": true,
+        HANDED_IN_SUMMARY: why,
+        REVIEW_REPORT_KEY: report,
+        "by": SETTLE_VERB,
+    });
+    let handed = ledger.hand_in_attempt(
+        run_id,
+        (task_id, &taken.dispatch),
+        body.to_string(),
+        true,
+        &seat,
+        now_ms,
+    )?;
+    let result = settled_result(&original, why, report, now_ms);
+    let author = correction_author(
+        ledger,
+        &team.leader_pane,
+        run_id,
+        task_id,
+        (&team.id, pane),
+        Observed {
+            attempt: Some(&taken.dispatch),
+            source: Some(&handed),
+            review: true,
+            bare_verification: verifies_on_nothing_new(&result),
+            tested_head: None,
+            git: None,
+        },
+    )?;
+    ledger.update_task(run_id, task_id, None, Some(result), author, now_ms)?;
+    Ok(said(serde_json::json!({
+        "taskId": task_id,
+        "dispatchId": taken.dispatch,
+        "handIn": handed,
+        "stage": WorkStage::NothingToLand.word(),
+        "why": why,
+        "report": report,
+    })))
+}
+
+/// The task's result with the one-call settle written over it (t-119569): every original key kept as
+/// it was, except a review key the original held — and a withdrawal's words — which moves under
+/// `settled.replaced`; a result that is not a JSON object is kept whole under `settled.original`, as
+/// a backfill keeps it ([`backfilled_result`]). The review is the coordinator's word that the work is
+/// done with nothing to land, and the report it rests on — the key that names a new review.
+fn settled_result(original: &str, why: &str, report: &str, now_ms: i64) -> String {
+    let (mut map, text) = match serde_json::from_str::<serde_json::Value>(original) {
+        Ok(serde_json::Value::Object(map)) => (map, None),
+        _ => (
+            serde_json::Map::new(),
+            (!original.trim().is_empty()).then(|| original.to_string()),
+        ),
+    };
+    let mut replaced = serde_json::Map::new();
+    for key in review_keys().chain([SETTLE_KEY, VERIFICATION_WITHDRAWN_KEY, REVIEW_REPORT_KEY]) {
+        if let Some(value) = map.remove(key) {
+            replaced.insert(key.to_string(), value);
+        }
+    }
+    map.insert(VERIFIED_KEY.to_string(), true.into());
+    map.insert(NOTHING_TO_LAND_KEY.to_string(), true.into());
+    map.insert(REVIEW_REPORT_KEY.to_string(), report.into());
+    let mut note = serde_json::json!({
+        "by": SETTLE_VERB,
+        "atMs": now_ms,
+        "why": why,
+        "report": report,
+    });
+    if !replaced.is_empty() {
+        note["replaced"] = serde_json::Value::Object(replaced);
+    }
+    if let Some(text) = text {
+        note["original"] = text.into();
+    }
+    map.insert(SETTLE_KEY.to_string(), note);
+    serde_json::Value::Object(map).to_string()
+}
