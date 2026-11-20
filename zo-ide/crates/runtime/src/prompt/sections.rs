@@ -253,11 +253,15 @@ pub(super) fn get_clarification_section() -> String {
         "Use `send_to_user` for important verbatim findings, diffs, URLs, or config mid-run, never routine status. Headless runs return it inline.".to_string(),
     ]);
 
-    std::iter::once("# Clarifying questions".to_string())
+    std::iter::once(CLARIFICATION_HEADING.to_string())
         .chain(items)
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// The heading of the section that teaches `AskUserQuestion`, which a stored
+/// prompt is read for ([`super::teaches_clarifying_questions`]).
+pub(super) const CLARIFICATION_HEADING: &str = "# Clarifying questions";
 
 pub(super) fn get_default_coding_harness_section() -> String {
     let items = prepend_bullets(vec![
@@ -352,11 +356,18 @@ pub(super) fn get_simple_doing_tasks_section(finish_rule: api::FinishRule) -> St
 /// orchestration posture is taught: there is no per-turn mode reminder on top
 /// (the old ultracode reminder is retired), so the model applies these
 /// criteria dynamically per ask, the same way an interactive CC session does.
+/// The delegation rubric's bar for working alone — kept by both the full
+/// section and the solo one.
+const DELEGATION_SOLO_FIRST: &str = "Classify the task. Work SOLO for common renames, typos, focused commands, named-file lookups, and one-file/module implementations; delegate only genuinely larger work.";
+/// What one `Agent` is for — kept by both the full section and the solo one.
+const DELEGATION_ONE_AGENT: &str = "Use `Agent` for one bounded specialist investigation or edit, or a broad search whose conclusion should preserve your context. Set `subagent_type` when a specialist fits.";
+const DELEGATION_HEADING: &str = "# Delegation and workflow routing";
+
 pub(super) fn get_delegation_section() -> String {
     let items = prepend_bullets(vec![
-        "Classify the task. Work SOLO for common renames, typos, focused commands, named-file lookups, and one-file/module implementations; delegate only genuinely larger work.".to_string(),
+        DELEGATION_SOLO_FIRST.to_string(),
         "Inside ZeroCode, this pane's team grant and installed zerocode-orc command let Agent, SpawnMultiAgent and Workflow launch ledger workers in their own tabs. Use agent for an exact catalog id (zo, claude, codex, or another installed agent), model and effort for exact launch choices, and worktree (default true) for the ledger checkout. Check `zerocode-orc agent-list` before choosing; `zo agent-list` is not a command. If the ledger reports a missing grant or command, report that cause before trying more launches. No provider substitution or native teammate fallback is permitted after a ledger launch fails. Outside ZeroCode these tools keep their native helpers; agent, effort and worktree are ledger launch options.".to_string(),
-        "Use `Agent` for one bounded specialist investigation or edit, or a broad search whose conclusion should preserve your context. Set `subagent_type` when a specialist fits.".to_string(),
+        DELEGATION_ONE_AGENT.to_string(),
         "Use `SpawnMultiAgent` only for independent, non-overlapping slices needing separate context or perspectives. Use the minimum agents; shared quota makes dependent fan-out slower than solo work or one `Agent`.".to_string(),
         "Use `Workflow` only for multi-file/subsystem work needing a resumable plan→implement→verify pipeline. For one lane, fold file inspection and local planning into the implement agent; add analysis only when multiple implementers consume it. Omit `synthesize` for a single implement→verify chain. A code request answered with analysis only is a failure.".to_string(),
         "Suggest `/goal` for durable work needing a finite autonomous loop: it stops at 8 continuations, 12 assistant turns, 32k output tokens, or 1,800 seconds; ReadOnly clamps to planning/inspection, and any approval or question stops it.".to_string(),
@@ -368,8 +379,22 @@ pub(super) fn get_delegation_section() -> String {
         "After delegation, adversarially verify once, sized to what actually changed. A Workflow verifier should run the requested comprehensive suite once, repeating only after a fix or an inconclusive/unstable result; its concrete evidence counts as that one verification, so do not reread every changed file and rerun the identical suite. Verification panels are never for a simple question or a routine lookup.".to_string(),
     ]);
 
-    std::iter::once("# Delegation and workflow routing".to_string())
+    std::iter::once(DELEGATION_HEADING.to_string())
         .chain(items)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The delegation rubric for a run nobody attends that reaches no ZeroCode
+/// ledger: the rest of the full section speaks of the ledger's workers, of
+/// `/goal` and of requirements a person adds mid-run, none of which that run
+/// has, while its `Agent` still needs the bar for working alone.
+pub(super) fn get_solo_delegation_section() -> String {
+    std::iter::once(DELEGATION_HEADING.to_string())
+        .chain(prepend_bullets(vec![
+            DELEGATION_SOLO_FIRST.to_string(),
+            DELEGATION_ONE_AGENT.to_string(),
+        ]))
         .collect::<Vec<_>>()
         .join("\n")
 }

@@ -541,16 +541,41 @@ pub fn harness_tool_set(model: &str, unattended_and_bare: impl FnOnce() -> bool)
 /// is. A list is advertised as it is, deferred names included, and a call
 /// through `CapabilityInvoke` meets the same list, so under a list the session
 /// reaches exactly what the list names.
+/// Whether this process reaches the ZeroCode ledger — a pane's team grant
+/// and its `zerocode-orc` command, the road `Agent` takes for ledger workers.
+/// Read once where a session opens; a crate test never reaches it.
+#[must_use]
+pub fn ledger_reachable() -> bool {
+    crate::misc_tools::agent_tools::ledger::available()
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ToolOffer<'a> {
     allowed: Option<&'a BTreeSet<String>>,
     denied: Option<&'a BTreeSet<String>>,
+    /// The session reaches no ZeroCode ledger ([`ledger_reachable`]); the
+    /// default reaches it, as every offer did before this was read.
+    ledger_unreached: bool,
 }
 
 impl<'a> ToolOffer<'a> {
     #[must_use]
     pub const fn new(allowed: Option<&'a BTreeSet<String>>, denied: Option<&'a BTreeSet<String>>) -> Self {
-        Self { allowed, denied }
+        Self { allowed, denied, ledger_unreached: false }
+    }
+
+    /// Say whether the session reaches the ZeroCode ledger, which the
+    /// prompt's delegation rubric speaks of.
+    #[must_use]
+    pub const fn with_ledger(mut self, reached: bool) -> Self {
+        self.ledger_unreached = !reached;
+        self
+    }
+
+    /// Whether the session reaches the ZeroCode ledger.
+    #[must_use]
+    pub const fn reaches_ledger(&self) -> bool {
+        !self.ledger_unreached
     }
 
     /// Whether the session can call `name`, a tool's handler name as tool

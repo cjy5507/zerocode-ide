@@ -22,9 +22,21 @@ use sections::{
     get_default_coding_harness_section, get_delegation_section, get_grounding_in_code_section,
     get_memory_protocol_section, get_responding_section, get_response_style_contract_section,
     get_finish_rule_section, get_simple_doing_tasks_section, get_simple_intro_section,
-    get_simple_system_section, get_skills_and_docs_section, get_turn_discipline_section,
-    render_config_section, render_memory_index, render_second_brain_section, TASK_WORK_HEADING,
+    get_simple_system_section, get_skills_and_docs_section, get_solo_delegation_section,
+    get_turn_discipline_section,
+    render_config_section, render_memory_index, render_second_brain_section, CLARIFICATION_HEADING,
+    TASK_WORK_HEADING,
 };
+
+/// Whether a built prompt teaches `AskUserQuestion` — the section that follows
+/// that tool ([`PromptToolReach`]). A reopened session sends the prompt it
+/// stored, so the tools it is given follow what that prompt was built to teach.
+#[must_use]
+pub fn teaches_clarifying_questions(sections: &[String]) -> bool {
+    sections
+        .iter()
+        .any(|section| section.starts_with(CLARIFICATION_HEADING))
+}
 
 /// Which interaction surface the prompt is built for. The behavioral contract
 /// is identical across models; only the turn-ending discipline varies —
@@ -450,6 +462,13 @@ const POWERSHELL_TOOLS: &[&str] = &["PowerShell"];
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PromptToolReach {
     unreached: BTreeSet<&'static str>,
+    /// The session reaches no ZeroCode ledger (a pane's team grant and its
+    /// `zerocode-orc`). Read only by a run nobody attends, whose delegation
+    /// rubric then keeps the two lines its `Agent` still needs
+    /// (`sections::get_solo_delegation_section`); a session a person attends
+    /// is sent the full rubric either way. The default reaches it: the prompt
+    /// every session was sent before this was read.
+    ledger_unreached: bool,
 }
 
 impl PromptToolReach {
@@ -462,7 +481,14 @@ impl PromptToolReach {
             .copied()
             .filter(|&tool| !reaches(tool))
             .collect();
-        Self { unreached }
+        Self { unreached, ledger_unreached: false }
+    }
+
+    /// Say whether the session reaches the ZeroCode ledger.
+    #[must_use]
+    pub fn with_ledger(mut self, reached: bool) -> Self {
+        self.ledger_unreached = !reached;
+        self
     }
 
     fn reaches_any(&self, tools: &[&str]) -> bool {
@@ -604,7 +630,13 @@ impl SystemPromptBuilder {
         sections.push(get_grounding_in_code_section());
         sections.push(get_simple_doing_tasks_section(profile.finish_rule));
         if self.tool_reach.reaches_any(DELEGATION_TOOLS) {
-            sections.push(get_delegation_section());
+            sections.push(
+                if self.mode == PromptMode::Autonomous && self.tool_reach.ledger_unreached {
+                    get_solo_delegation_section()
+                } else {
+                    get_delegation_section()
+                },
+            );
         }
         sections.push(get_actions_section());
         if let Some(discipline) = get_turn_discipline_section(self.mode) {

@@ -528,6 +528,36 @@ fn build_includes_delegation_section_before_boundary() {
     );
 }
 
+/// A run nobody attends that reaches no ZeroCode ledger keeps only the two
+/// lines of the delegation rubric its `Agent` still needs — the bar for working
+/// alone and what one `Agent` is for. The rest speaks of ledger workers, of
+/// `/goal` and of requirements a person adds mid-run, none of which that run
+/// has. Every other session is sent the full rubric, word for word (t-120813).
+#[test]
+fn a_run_nobody_attends_without_the_ledger_keeps_only_the_solo_delegation_lines() {
+    let rubric = |mode, ledger| {
+        SystemPromptBuilder::new()
+            .with_mode(mode)
+            .with_tool_reach(PromptToolReach::default().with_ledger(ledger))
+            .build()
+            .into_iter()
+            .find(|section| section.starts_with("# Delegation and workflow routing"))
+            .expect("Agent is reached, so the rubric is sent")
+    };
+    let full = rubric(PromptMode::Interactive, true);
+    let solo = rubric(PromptMode::Autonomous, false);
+
+    assert_eq!(rubric(PromptMode::Interactive, false), full, "a session a person attends keeps the full rubric without the ledger");
+    assert_eq!(rubric(PromptMode::Autonomous, true), full, "a run nobody attends keeps the full rubric when it reaches the ledger");
+    assert!(solo.len() * 4 < full.len(), "the solo rubric is a fraction of the full one:\n{solo}");
+    for kept in ["Work SOLO for common renames", "Use `Agent` for one bounded specialist investigation"] {
+        assert!(solo.contains(kept) && full.contains(kept), "both keep {kept:?}:\n{solo}");
+    }
+    for gone in ["zerocode-orc", "`/goal`", "adds a requirement while work is already in flight"] {
+        assert!(full.contains(gone) && !solo.contains(gone), "only the full rubric speaks of {gone:?}:\n{solo}");
+    }
+}
+
 #[test]
 fn delegation_section_exposes_the_bounded_goal_loop() {
     let sections = SystemPromptBuilder::new().build();

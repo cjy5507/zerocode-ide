@@ -63,6 +63,9 @@ const UNREACHED_TEXT: [&str; 5] = [
     "# Persistent memory",
     "# Deferred tools",
 ];
+/// The section that teaches the tool only a person answers (`AskUserQuestion`).
+/// A run nobody attends is given neither, whatever its tool set (t-120813).
+const PERSON_ONLY_TEXT: &str = "# Clarifying questions";
 /// The words of the Response Style Contract's line that sends the model to
 /// `Skill` before it writes a page. A session that reaches no skill tool is not
 /// sent that line.
@@ -514,16 +517,22 @@ fn a_headless_core_run_sends_the_request_the_light_surface_arm_measured() {
     let arm = scene.request(&server, &[(overlay_env, &full), (ABLATION_ENV, TOOL_SECTIONS)], &["--allowed-tools", ARM_TOOLS]);
     let listed = scene.request(&server, &[(overlay_env, &full)], &["--allowed-tools", ARM_TOOLS]);
 
-    // A full tool set is every other session's request, as it was.
+    // A full tool set is every other session's request, as it was — less the
+    // tool only a person answers, which no run nobody attends is given.
     let full_tools = tool_names(&everything.1);
-    for tool in ["Agent", "AskUserQuestion", "Skill", "ToolSearch", "CapabilityInvoke"] {
+    for tool in ["Agent", "Skill", "ToolSearch", "CapabilityInvoke"] {
         assert!(full_tools.iter().any(|name| name == tool), "a full run offers {tool}: {full_tools:?}");
     }
+    assert!(!full_tools.iter().any(|name| name == "AskUserQuestion"), "nobody attends this run: {full_tools:?}");
     let full_text = system_text(&everything.0);
+    assert!(!full_text.contains(PERSON_ONLY_TEXT), "nor is it taught to ask:\n{full_text}");
     let skill_line = line_holding(&full_text, SKILL_LINE_WORDS).expect("a full run is sent to Skill before it writes a page");
     assert_eq!(full_text.matches(&skill_line).count(), 1, "a full run is sent that line once");
     let unskilled = full_text.replacen(&skill_line, "", 1);
-    let expected = UNREACHED_TEXT.iter().fold(unskilled, |text, heading| cut_section(&text, heading));
+    let expected = UNREACHED_TEXT
+        .iter()
+        .filter(|heading| **heading != PERSON_ONLY_TEXT)
+        .fold(unskilled, |text, heading| cut_section(&text, heading));
 
     assert_eq!(tool_names(&unattended.1), ["Bash", "Read", "Write", "apply_patch"], "headless_core offers the core four");
     assert_eq!(
@@ -542,6 +551,35 @@ fn a_headless_core_run_sends_the_request_the_light_surface_arm_measured() {
         "headless_core sends the request the arm's switches send"
     );
     assert_eq!(system_text(&listed.0), expected, "a launch list of the four drops the same text and nothing else");
+}
+
+/// A run nobody attends, on every tool, is sent only what it can use: not the
+/// tool only a person answers (its question would come back dismissed) nor
+/// the section that teaches it, and — reaching no ZeroCode ledger — the two
+/// lines of the delegation rubric its `Agent` still needs instead of the
+/// rubric's ledger workers, `/goal` and mid-run requirements. `Agent`, the
+/// skill tool and the deferred doors stay (t-120813).
+#[test]
+fn a_run_nobody_attends_is_sent_only_what_it_can_use() {
+    let server = ChatServer::new();
+    let full = overlay(json!({"tool_set": "full"}));
+    let (system, tools) = Scene::new().request(&server, &[(api::MODEL_CONTEXT_WINDOWS_ENV, &full)], &[]);
+
+    let names = tool_names(&tools);
+    assert!(!names.iter().any(|name| name == "AskUserQuestion"), "no person answers this run: {names:?}");
+    for kept in ["Agent", "Skill", "ToolSearch", "CapabilityInvoke"] {
+        assert!(names.iter().any(|name| name == kept), "{kept} stays: {names:?}");
+    }
+    let text = system_text(&system);
+    assert!(!text.contains(PERSON_ONLY_TEXT), "nor is it taught to ask:\n{text}");
+    let rubric = text
+        .split("\n\n")
+        .find(|section| section.starts_with("# Delegation and workflow routing"))
+        .unwrap_or_else(|| panic!("Agent is reached, so a rubric is sent:\n{text}"));
+    assert!(rubric.contains("Work SOLO for common renames"), "the bar for working alone stays:\n{rubric}");
+    for gone in ["zerocode-orc", "`/goal`", "adds a requirement while work is already in flight"] {
+        assert!(!rubric.contains(gone), "a run without the ledger or a person is not told of {gone:?}:\n{rubric}");
+    }
 }
 
 /// What `headless_core` leaves as it was: a launch list wins over it, and a
@@ -613,7 +651,9 @@ fn a_run_opened_on_every_tool_reopens_on_every_tool() {
     let text = system_text(&reopened.0);
     assert!(text.starts_with(&system_text(&opened.0)), "a reopened run sends the text it stored:\n{text}");
     for heading in UNREACHED_TEXT {
-        assert!(text.contains(heading), "the stored text teaches `{heading}`");
+        // Every tool but the one only a person answers, which no run nobody
+        // attends is given (t-120813).
+        assert_eq!(text.contains(heading), heading != PERSON_ONLY_TEXT, "the stored text and `{heading}`");
     }
     assert_eq!(tool_names(&reopened.1), tool_names(&opened.1), "a run opened on every tool reopens on every tool");
 }

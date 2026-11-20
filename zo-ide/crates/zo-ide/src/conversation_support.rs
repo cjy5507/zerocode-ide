@@ -36,7 +36,7 @@ pub(crate) fn build_system_prompt_for_mode(
         "unknown",
         Some(model),
         mode,
-        runtime::PromptToolReach::from_fn(|tool| offer.reaches(tool)),
+        runtime::PromptToolReach::from_fn(|tool| offer.reaches(tool)).with_ledger(offer.reaches_ledger()),
     )?;
     // Deferred-tool manifest: the model cannot ToolSearch for names it has
     // never seen. Session-stable, so it never disturbs the prompt cache — the

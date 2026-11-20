@@ -315,6 +315,19 @@ pub(crate) fn disallowed_tool_names() -> Option<DisallowedToolSet> {
     cli_runtime_overrides().disallowed_tools
 }
 
+/// Add `names` to this process's deny set — the road `--no-spawn` takes — so
+/// the session neither advertises them, nor runs them, nor is taught them by
+/// its prompt ([`disallowed_tool_names`] feeds all three). Added to what the
+/// launch already turned off, never in its place.
+pub(crate) fn withhold_tools(names: &[&str]) {
+    let mut overrides = cli_runtime_overrides();
+    overrides
+        .disallowed_tools
+        .get_or_insert_with(DisallowedToolSet::new)
+        .extend(names.iter().map(|name| (*name).to_string()));
+    install_cli_runtime_overrides(overrides);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_runtime_with_thinking(
     cwd: &Path,

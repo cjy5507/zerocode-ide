@@ -581,4 +581,38 @@ mod advertisement_tests {
             "exactly the denied one leaves, nothing else"
         );
     }
+
+    /// A tool a run withholds (a person-only tool in a run nobody attends)
+    /// joins what the launch turned off instead of replacing it, and leaves
+    /// the advertisement the way a denied tool does (t-120813).
+    #[test]
+    fn a_withheld_tool_joins_the_launch_deny_set_and_leaves_the_advertised_set() {
+        // The override is process-global: the crate's one lock for that.
+        let _env = crate::test_env_lock();
+        let registry = tools::GlobalToolRegistry::builtin();
+        let advertised = || -> Vec<String> {
+            filter_tool_specs(&registry, None)
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect()
+        };
+        let restore = CliRuntimeOverrides::default();
+        install_cli_runtime_overrides(restore.clone());
+        let before = advertised();
+        assert!(before.iter().any(|name| name == "AskUserQuestion"), "the person's question tool is on the wire: {before:?}");
+
+        install_cli_runtime_overrides(CliRuntimeOverrides {
+            disallowed_tools: Some(["TodoWrite".to_string()].into_iter().collect()),
+            ..CliRuntimeOverrides::default()
+        });
+        crate::runtime_support::withhold_tools(&["AskUserQuestion"]);
+        let denied = crate::runtime_support::disallowed_tool_names().unwrap_or_default();
+        let after = advertised();
+        install_cli_runtime_overrides(restore);
+
+        assert!(denied.contains("TodoWrite"), "what the launch turned off stays off: {denied:?}");
+        assert!(denied.contains("AskUserQuestion"), "the withheld tool joins it: {denied:?}");
+        assert!(!after.iter().any(|name| name == "AskUserQuestion" || name == "TodoWrite"), "{after:?}");
+        assert_eq!(after.len() + 2, before.len(), "exactly those two leave, nothing else");
+    }
 }
