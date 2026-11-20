@@ -648,6 +648,13 @@ fn the_orchestration_guide_teaches_the_classifier_decline_order() {
 /// a held pane costs no read a beat, and the window it holds for is the one
 /// wall table's. The real host reads the transcript's bounded tail, and the
 /// table is asked before the file is opened.
+///
+/// A held wall's deadline gives way early to one thing (t-123972): the
+/// number of the login the pane runs as, under the wall after its record —
+/// asked of the gauge's cache, never of the transcript, and judged by the
+/// one core reading. A pane pointed past its wall early that meets the same
+/// wall again is held for its window; that memory sits beside the marks a
+/// turn's start strikes out, and goes with the terminal.
 #[test]
 fn the_pointer_reads_a_panes_wall_once_where_it_would_type_a_fresh_line() {
     let orchestration = shell_source("orchestration.rs");
@@ -657,7 +664,7 @@ fn the_pointer_reads_a_panes_wall_once_where_it_would_type_a_fresh_line() {
             .unwrap_or_else(|| panic!("the pointer pass lost `{needle}`:\n{pass}"))
     };
     let running = at("matches!(heard, Some(PaneTurn::Running { .. }))");
-    let deadline = at("Some(Standing::Walled { until_ms, .. }) if now_ms < until_ms => continue");
+    let deadline = at("Some(Standing::Walled { until_ms, seen, .. })\n");
     let asked = at(".pane_wall(term, &agent)");
     assert!(
         running < deadline && deadline < asked,
@@ -671,6 +678,40 @@ fn the_pointer_reads_a_panes_wall_once_where_it_would_type_a_fresh_line() {
     assert!(
         pass.contains(".filter(|wall| wall.stands(now_ms))"),
         "the hold stopped asking whether the wall still stands"
+    );
+    // The held arm gives way to the gauge's number and to nothing else.
+    let held = &pass[deadline..asked];
+    let held = &held[..held.find("=>").expect("the held arm")];
+    assert!(
+        held.contains("if now_ms < until_ms")
+            && held.contains("wall_lowered_by(host, &held.usage, term, seen, now_ms).is_none()"),
+        "the held wall's deadline gives way to something other than the pane's own number:\n{held}"
+    );
+    assert!(
+        pass.contains("let seen = early_lift_watch(term, &wall);")
+            && pass.contains("walls_lowered_early()"),
+        "the early lift is not remembered for the wall it lifted"
+    );
+    let lowered = super::support::block_after(&orchestration, "fn wall_lowered_by(");
+    for needed in [
+        "host.pane_login(term)?",
+        "usage_headroom_of_account(usage, &agent, None, Some(&login))?",
+        "zerocode_core::orchestration::wall_came_down(",
+    ] {
+        assert!(
+            lowered.contains(needed),
+            "the early lift lost `{needed}`:\n{lowered}"
+        );
+    }
+    assert!(
+        !lowered.contains("pane_wall(") && !lowered.contains("tail_lines("),
+        "the gauge's question reads the pane's transcript:\n{lowered}"
+    );
+    let gone =
+        super::support::block_after(&orchestration, "pub(crate) fn terminal_gone_with_archive(");
+    assert!(
+        gone.contains("walls_lowered_early()"),
+        "a closed terminal leaves its early lift behind for the next pane of its number"
     );
 
     let tools = shell_source("agent_tools_runtime.rs");

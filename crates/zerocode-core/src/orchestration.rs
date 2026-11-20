@@ -18133,6 +18133,53 @@ pub fn read_lift(
     })
 }
 
+/// Whether a wall a pane's own conversation met at `observed_at_ms` came
+/// down before its own window ran out (t-123972): the provider's number for
+/// the login the pane runs as now, read after the wall's record was written,
+/// is under the wall.
+///
+/// On 2026-11-20 five Claude workers met their weekly wall at 20:50, and the
+/// window came back at 23:58 with every pane on another login, at 15% of its
+/// week. Each record still ended at the wall, so the mail pointer held their
+/// letters for the wall's six hours ([`QUOTA_WAIT_POLICY`]`.max_wait_ms`)
+/// until a coordinator handed all five over by hand.
+///
+/// Only a wall whose record names the provider's reset, still ahead: that
+/// record answers one of the provider's windows, which is what the gauge
+/// reads. A cap the gauge does not read names none — a model's own cap or a
+/// monthly spend cap, 727 of the 1,665 wall records on this machine
+/// (2026-11-21) — and no number says anything about it. From the reset on
+/// the wall's own window rules: the CLI continues by itself in the grace
+/// after it ([`QUOTA_WAIT_POLICY`]`.slack_ms`), and a line typed there
+/// cancels that.
+///
+/// The number is taken as a refusal takes one (`read_gauge`: under the wall
+/// percentage, and neither older than a refusal may act on nor about a
+/// window that has reset since), from an `ok` read with no failure on it — a
+/// failed refresh's retained figure is no new observation, as in
+/// [`read_lift`].
+#[must_use]
+pub fn wall_came_down(
+    observed_at_ms: i64,
+    resets_at_ms: Option<i64>,
+    headroom: Option<&Headroom>,
+    now_ms: i64,
+) -> bool {
+    if !resets_at_ms.is_some_and(|at| at > observed_at_ms && at > now_ms) {
+        return false;
+    }
+    let Some(held) = headroom.filter(|held| {
+        held.status == "ok"
+            && held.failure_kind.is_none()
+            && held.updated_at_ms > observed_at_ms
+            && held.updated_at_ms <= now_ms
+    }) else {
+        return false;
+    };
+    let reading = read_gauge(held, now_ms);
+    !reading.at_wall && !reading.stale
+}
+
 /* ---- the transient-error continuation (t-4537) ------------------------ */
 
 /// The numbers a transient-error continuation is typed under — one table,

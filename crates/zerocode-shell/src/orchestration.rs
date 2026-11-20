@@ -3800,6 +3800,34 @@ fn note_pointer_wall_lifted(
     );
 }
 
+/// A held pointer's wall came down before its own window ran out
+/// (t-123972): the login the pane runs as read under it after the wall was
+/// written. The pane is pointed at once; the same wall met again after this
+/// line is held for its own window.
+fn note_pointer_wall_came_down(
+    run: &str,
+    address: &str,
+    term: u32,
+    wall: &crate::quota_wall::PaneWall,
+    reading: &zerocode_core::orchestration::Headroom,
+) {
+    let Some(root) = BLACKBOX.get() else { return };
+    let after =
+        zerocode_core::orchestration::minutes_up(reading.updated_at_ms.saturating_sub(wall.at_ms));
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: terminal {term}'s {} wall came down before its own window ran \
+             out — the login it runs as read {}% of its {} window {after} min after the \
+             wall was written — and mail waiting for {address} in {run} is pointed at \
+             once; the same wall met again after this line is held for its own window",
+            wall.cause.word(),
+            reading.used_percent,
+            reading.window.as_str(),
+        ),
+    );
+}
+
 /// Mail is waiting for a pane held mid-turn inside its own question
 /// ([`Standing::Asking`], t-8938). Said when the hold begins — for this mail,
 /// at this pane — so a reader looking for why nothing was parked finds the
@@ -5589,9 +5617,16 @@ enum Standing {
     /// through `wall_stands_until`), and looked at again only then: a pane
     /// that answers again or new mail strikes the mark out and is looked at
     /// afresh, and a wall still standing at its deadline is held anew.
+    ///
+    /// Or sooner, once (t-123972): a wall `seen` names — a quota wall whose
+    /// record names the provider's window — came down when the login the
+    /// pane runs as reads under it after the record was written. The window
+    /// asks the gauge's cache for that each beat, and the transcript only
+    /// when the number says so.
     Walled {
         until_ms: i64,
         cause: crate::quota_wall::StallCause,
+        seen: Option<WallSeen>,
     },
     /// The pane is mid-turn inside its own `ask` — a wait this window runs
     /// for it, on a question it asked ([`question_waiters`]) — and the window
@@ -5631,6 +5666,85 @@ fn pointed() -> &'static Mutex<std::collections::HashMap<(String, String), Point
     static POINTED: OnceLock<Mutex<std::collections::HashMap<(String, String), Pointed>>> =
         OnceLock::new();
     POINTED.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// One wall a pane's record ended at, by the two facts its early lift is
+/// judged by (t-123972): when the record was written, and the provider's
+/// reset it names — the window the wall belongs to. A pane meets the same
+/// window's wall with the same reset: of 875 walls met again in one
+/// transcript on this machine, 836 named the same second as the wall before
+/// them and the other 39 a reset an hour or more away (2026-11-21).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WallSeen {
+    at_ms: i64,
+    resets_at_ms: i64,
+}
+
+/// The wall each pane was pointed past early, by terminal (t-123972).
+///
+/// Beside [`pointed`] and not inside it: the line the early lift types opens
+/// a turn, and the turn's own start strikes that pane's marks out
+/// ([`pane_turn_began`]) — the very shape of the 1,391 lines of t-6560. A
+/// pane that meets the same wall again after its early line is held for the
+/// wall's own window, whatever a number says next: that number was wrong
+/// about this pane once. In memory, like the marks: a restart may cost one
+/// more early line per wall, and the terminal's going takes its entry.
+fn walls_lowered_early() -> &'static Mutex<std::collections::HashMap<u32, WallSeen>> {
+    static LOWERED: OnceLock<Mutex<std::collections::HashMap<u32, WallSeen>>> = OnceLock::new();
+    LOWERED.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The wall `term`'s record ends at, as an early lift would judge it — or
+/// `None` for one no number may lift early (t-123972): not a quota wall, a
+/// record that names no reset of the provider's (a model's own cap, a
+/// monthly spend cap), or the same wall met again after an early line here.
+fn early_lift_watch(term: u32, wall: &crate::quota_wall::PaneWall) -> Option<WallSeen> {
+    if wall.cause != crate::quota_wall::StallCause::QuotaWall {
+        return None;
+    }
+    let seen = WallSeen {
+        at_ms: wall.at_ms,
+        resets_at_ms: wall.resets_at_ms?,
+    };
+    let lowered = walls_lowered_early()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .get(&term)
+        .copied();
+    let met_again = lowered.is_some_and(|lowered| {
+        lowered.resets_at_ms == seen.resets_at_ms && lowered.at_ms < seen.at_ms
+    });
+    (!met_again).then_some(seen)
+}
+
+/// The provider's number for the login `term`'s pane runs as, under the
+/// wall `seen` names and read after its record — the reading that brought
+/// it down (t-123972) — or `None`.
+///
+/// Only the login the window recorded at the pane's launch (t-7538), read
+/// off the one map that keeps each login's number: a pane whose login
+/// nobody recorded has no number of its own, and the selected account's is
+/// another login's. Claude's gauge is the only one kept per login.
+fn wall_lowered_by(
+    host: &dyn Host,
+    usage: &UsageSource,
+    term: u32,
+    seen: WallSeen,
+    now_ms: i64,
+) -> Option<zerocode_core::orchestration::Headroom> {
+    let agent = host.agent_of(term)?;
+    if zerocode_core::orchestration::quota_gauge_for(&agent, None) != Some("claude") {
+        return None;
+    }
+    let login = host.pane_login(term)?;
+    let reading = usage_headroom_of_account(usage, &agent, None, Some(&login))?;
+    zerocode_core::orchestration::wall_came_down(
+        seen.at_ms,
+        Some(seen.resets_at_ms),
+        Some(&reading),
+        now_ms,
+    )
+    .then_some(reading)
 }
 
 /// The receipt of each advice line the pump is carrying, by the mail it is
@@ -7339,6 +7453,10 @@ pub(crate) fn terminal_gone_with_archive(term: u32, screen: Option<String>, now_
         .lock()
         .unwrap_or_else(|held| held.into_inner())
         .retain(|_, held| held.term != Some(term));
+    walls_lowered_early()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(&term);
     superseded::forget(term);
     let dissolving: Vec<String> = {
         let tables = crate::agent_teams::teams();
@@ -10077,8 +10195,18 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                             }
                         }
                     }
-                    // Held at a wall whose own window has not run out.
-                    Some(Standing::Walled { until_ms, .. }) if now_ms < until_ms => continue,
+                    /* Held at a wall whose own window has not run out —
+                     * unless the login the pane runs as read under it since
+                     * (t-123972). That is asked of the gauge's cache, never of
+                     * the transcript, and the arm below looks again, once. */
+                    Some(Standing::Walled { until_ms, seen, .. })
+                        if now_ms < until_ms
+                            && seen.is_none_or(|seen| {
+                                wall_lowered_by(host, &held.usage, term, seen, now_ms).is_none()
+                            }) =>
+                    {
+                        continue;
+                    }
                     /* Held behind a person's draft while it stands (t-14585):
                      * the guard would refuse the same line on the same fact,
                      * and every refusal is a toast. Once the draft is sent or
@@ -10144,23 +10272,40 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                                 .and_then(|agent| host.pane_wall(term, &agent))
                                 .filter(|wall| wall.stands(now_ms))
                         {
-                            if was_walled.is_none() {
-                                note_pointer_walled(&run.id, &address, term, &wall, now_ms);
-                            }
-                            marks.insert(
-                                key,
-                                Pointed {
-                                    newest,
-                                    term: Some(term),
-                                    standing: Standing::Walled {
-                                        until_ms: wall.stands_until_ms,
-                                        cause: wall.cause,
+                            /* Unless the wall came down before its own window
+                             * ran out (t-123972): the login the pane runs as
+                             * read under it after the record was written. The
+                             * pane is pointed at once, and the same wall met
+                             * again after that line is held for its window. */
+                            let seen = early_lift_watch(term, &wall);
+                            let lowered = seen.and_then(|seen| {
+                                wall_lowered_by(host, &held.usage, term, seen, now_ms)
+                                    .map(|reading| (seen, reading))
+                            });
+                            let Some((seen, reading)) = lowered else {
+                                if was_walled.is_none() {
+                                    note_pointer_walled(&run.id, &address, term, &wall, now_ms);
+                                }
+                                marks.insert(
+                                    key,
+                                    Pointed {
+                                        newest,
+                                        term: Some(term),
+                                        standing: Standing::Walled {
+                                            until_ms: wall.stands_until_ms,
+                                            cause: wall.cause,
+                                            seen,
+                                        },
                                     },
-                                },
-                            );
-                            continue;
-                        }
-                        if let Some(cause) = was_walled {
+                                );
+                                continue;
+                            };
+                            walls_lowered_early()
+                                .lock()
+                                .unwrap_or_else(|held| held.into_inner())
+                                .insert(term, seen);
+                            note_pointer_wall_came_down(&run.id, &address, term, &wall, &reading);
+                        } else if let Some(cause) = was_walled {
                             note_pointer_wall_lifted(&run.id, &address, term, cause);
                         }
                         let notice = crate::orchestration_notify::has_route(term)

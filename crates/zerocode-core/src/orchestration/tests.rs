@@ -13915,6 +13915,80 @@ fn a_quota_wall_with_no_reset_to_wait_for_stands_for_the_longest_wait() {
     }
 }
 
+/// A wall comes down before its own window runs out only on a number that
+/// speaks for it (t-123972): an `ok` reading, read after the wall's record
+/// and young enough to act on, under the wall — and only for a wall whose
+/// record names the provider's reset, still ahead.
+#[test]
+fn a_wall_comes_down_early_only_on_a_fresh_number_under_it_read_after_its_record() {
+    const WALL: i64 = 5_000_000;
+    const DAY: i64 = 24 * 60 * 60_000;
+    let reset = Some(WALL + 3 * DAY);
+    // The window came back three hours and ten minutes after the wall.
+    let now = WALL + (3 * 60 + 10) * 60_000;
+    let read = |used: u8, at: i64| gauge("claude", used, at, Some(now + 4 * DAY));
+    let fresh = read(15, now - 5 * 60_000);
+    assert!(
+        wall_came_down(WALL, reset, Some(&fresh), now),
+        "the login the pane runs as read 15% of its week after the wall"
+    );
+    assert!(wall_came_down(
+        WALL,
+        reset,
+        Some(&read(QUOTA_POLICY.wall_percent - 1, now - 60_000)),
+        now
+    ));
+    for (why, held) in [
+        (
+            "at the wall",
+            Some(read(QUOTA_POLICY.wall_percent, now - 60_000)),
+        ),
+        ("nothing read", None),
+        // Read at the very moment of the record, or before it.
+        ("read with the record", Some(read(15, WALL))),
+        (
+            "too old to act on",
+            Some(read(15, now - QUOTA_POLICY.snapshot_max_age_ms - 1)),
+        ),
+        ("read ahead of now", Some(read(15, now + 1))),
+        ("a failed read's figure", {
+            let mut failed = fresh.clone();
+            failed.status = "error".to_string();
+            Some(failed)
+        }),
+        ("a failure on the read", {
+            let mut failing = fresh.clone();
+            failing.failure_kind = Some(crate::usage_limit::FailureKind::StaleToken);
+            Some(failing)
+        }),
+        (
+            "its own window reset since",
+            Some(gauge("claude", 15, now - 60_000, Some(now - 1))),
+        ),
+    ] {
+        assert!(
+            !wall_came_down(WALL, reset, held.as_ref(), now),
+            "a number {why} brought the wall down"
+        );
+    }
+    let before = read(15, WALL - 60_000);
+    assert!(
+        !wall_came_down(WALL, reset, Some(&before), WALL + 60_000),
+        "a fresh number read before the wall brought it down"
+    );
+    for (why, named) in [
+        ("names no reset — a cap the gauge does not read", None),
+        ("names a reset already passed", Some(now - 1)),
+        ("names a reset that is now", Some(now)),
+        ("names a reset that is not after it", Some(WALL)),
+    ] {
+        assert!(
+            !wall_came_down(WALL, named, Some(&fresh), now),
+            "a wall whose record {why} came down early"
+        );
+    }
+}
+
 /// The handover standing order is DECLARED, on the run, by name — the
 /// same alternative word a summons takes — and read back from
 /// `run-show`. Nothing is walked without one (§2.3), a refusal moves
