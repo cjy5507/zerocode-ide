@@ -499,11 +499,6 @@ pub(crate) struct DeskRun {
     /// so the board no longer stands it in the person's turn.
     pub(crate) reviews: usize,
     pub(crate) reviews_since_ms: Option<i64>,
-    /// Its decisions standing in front of a task — the stage the desk calls
-    /// `gate` — counted beside its questions (`mail`): what the board's
-    /// person's turn leaves out for a run nobody sits in, since nobody there
-    /// can carry an answer (t-119569).
-    pub(crate) gates: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1104,10 +1099,6 @@ pub(crate) fn desk_snapshot_of(
                 .filter(|(_, _, row)| awaiting_coordinator(row))
                 .map(|(_, _, row)| row.touched_ms)
                 .min(),
-            gates: staged_tasks[tasks_before..]
-                .iter()
-                .filter(|(_, _, row)| row.stage == "gate" && row.left.is_none())
-                .count(),
         });
     }
     let mut stages = Vec::with_capacity(STAGES.len());
@@ -2919,12 +2910,13 @@ mod tests {
     }
 
     /// The coordinator card counts the work handed in that waits on its review,
-    /// with when the longest-waiting of it came in, and the decisions in front
-    /// of its tasks (t-119569): a review is the coordinator's to write, so the
-    /// board's person's turn no longer stands it, and the card says it instead.
-    /// Work nobody is coming back to is no card's — the board's piles hold it.
+    /// with when the longest-waiting of it came in (t-119569): a review is the
+    /// coordinator's to write, so the board's person's turn no longer stands
+    /// it, and the card says it instead. A decision is not a report: it stays
+    /// the person's turn. Work nobody is coming back to is no card's — the
+    /// board's piles hold it.
     #[test]
-    fn a_runs_card_counts_its_reports_to_verify_and_its_decisions() {
+    fn a_runs_card_counts_its_reports_to_verify_and_not_its_decisions() {
         let now = crate::now_epoch_ms();
         let minute = 60_000;
         let mut ledger = Ledger::new();
@@ -2981,13 +2973,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("the run has no card"))
         };
         let card = card_of(&ledger);
-        assert_eq!(card["reviews"], 2, "{card}");
+        assert_eq!(card["reviews"], 2, "two reports, and the decision is not one: {card}");
         assert_eq!(
             card["reviews_since_ms"],
             now - 40 * minute + 2,
             "the oldest report's hand-in: {card}"
         );
-        assert_eq!(card["gates"], 1, "{card}");
 
         // A run nobody sits in: its reports are left behind (the board's pile), so no card counts them.
         ledger.team_dissolved("team-lead", now);
@@ -2995,7 +2986,6 @@ mod tests {
         assert_eq!(card["held"], false, "{card}");
         assert_eq!(card["reviews"], 0, "{card}");
         assert_eq!(card["reviews_since_ms"], serde_json::Value::Null, "{card}");
-        assert_eq!(card["gates"], 1, "the decision still stands: {card}");
     }
 
     /// Free words answer a decision somebody opened, never a hold the ledger

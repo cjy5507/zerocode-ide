@@ -259,11 +259,7 @@ function deskOwed(ledger) {
   // 아무도 돌아오지 않는 일(남은 일, t-71220)은 누구의 차례도 아니다 — 백엔드가 단계마다 따로 센
   // 그 수(`left`)를 뺀다.
   const stages = new Map((ledger.stages ?? []).map((one) => [one.stage, (Number(one.count) || 0) - (Number(one.left) || 0)]));
-  // 코디 자리가 빈 런의 질문과 결정은 이 판에서 아무도 답할 수 없다(t-119569) — 그 런이 센 수만큼 뺀다.
-  // 자리가 빈 런만 `held: false`를 싣는다(`DeskRun::held`).
-  const seatless = (ledger.runs ?? []).filter((run) => run.held === false)
-    .reduce((sum, run) => sum + (Number(run.mail) || 0) + (Number(run.gates) || 0), 0);
-  return Math.max(0, (Number(ledger.counts?.mail) || 0) + (stages.get("gate") ?? 0) - seatless);
+  return (Number(ledger.counts?.mail) || 0) + (stages.get("gate") ?? 0);
 }
 
 /* ---- 기계 띠 ---------------------------------------------------------------

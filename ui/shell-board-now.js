@@ -2,7 +2,7 @@
  *
  * 사람이 통과시킨 시안 B(Vercel Geist 언어, 아티팩트 p-90883818b247d08e v2)의
  * 정보 구조. 상황판은 네 탭이다: 「지금」은 맨 위 한 문장(답할 일 N개 · 다음에
- * 끝나는 일), 「당신 차례」 카드(질문·결정·검토, 행 안에 첫 행동), 「빌드」
+ * 끝나는 일), 「당신 차례」 카드(질문·결정, 행 안에 첫 행동 — 검토는 그 밑의 「코디가 검증할 보고」 줄), 「빌드」
  * 카드(이 프로젝트의 빌드 기록), 「지금 도는 일」 표(목표별로 접힘). 「일정」은 빌드 줄·결합
  * 게이트·발행 레인·워커 과업의 시간축이다(shell-board-schedule.js, t-67482).
  * 「워커」는 모델·판·비용·호출·바뀐 파일을 여기서만 보이고, 「기록」은 소식·과업
@@ -280,7 +280,7 @@ const BOARD_RUN_STATES = Object.freeze({
 
 /* 원장의 단계 → 표의 상태. 표에 없는 단계(닫힘·검토 자료 없음 같은 끝난 뒤의 것)는
  * 표에 서지 않는다 — 기록 탭의 과업 흐름이 센다. 보고가 와서 검토를 기다리는 과업도 표에
- * 없다: 그것은 당신 차례의 행이다(시안의 표에는 그 과업이 없다). */
+ * 없다: 그것은 「코디가 검증할 보고」 줄의 행이다(t-119569, 시안의 표에는 그 과업이 없다). */
 const BOARD_RUN_OF_STAGE = Object.freeze({
   dispatched: "run",
   ready: "queue",
@@ -450,8 +450,9 @@ function boardRunRaw(row) {
  * 사람만 풀 수 있는 것만(t-119569): 워커의 질문(그 자리에서 답하기 — 답할 우편의 편지
  * 그대로, `paintDeskLetter`), 원장이 세운 결정(거두기·다시 띄우기·열기), 사람을 기다리는
  * 대화. 넘김의 검수는 코디의 몫이라 여기 서지 않는다 — 「코디가 검증할 보고」 줄이 든다
- * (`paintDeskReviews`). 코디 자리가 빈 런의 질문과 결정도 서지 않는다: 이 판에서 그 답을 실어
- * 갈 자리가 없다. 셋 다 원장이 이미 고른 목록에서 오고, 이 화면은 고르지도 세지도 않는다. */
+ * (`paintDeskReviews`). 코디 자리가 빈 런의 질문과 결정은 남는다: 거기에 답할 이는 사람뿐이고,
+ * 「지금 도는 일」도 그 결정을 「당신 차례에 있습니다」라고 말한다. 셋 다 원장이 이미 고른
+ * 목록에서 오고, 이 화면은 고르지도 세지도 않는다. */
 const BOARD_ASK_ORDER = Object.freeze(["question", "talk", "hold"]);
 
 /* 그 런에 코디가 앉아 있는가(어느 창에서든) — 자리가 빈 런만 `held: false`를 싣는다(`DeskRun::held`). */
@@ -465,12 +466,11 @@ function boardAsks(ledger, talks = []) {
   // 답을 받을 때까지 멈춰 있다.
   for (const group of talks) asks.push({ kind: "talk", key: `talk:${group.key}`, group, at: boardTalkSince(group) });
   for (const letter of Array.isArray(ledger?.mail) ? ledger.mail : []) {
-    if (!boardRunHeld(ledger, letter.run)) continue;
     asks.push({ kind: "question", key: `question:${deskLetterKey(letter)}`, letter, at: Number(letter.created_ms) || 0 });
   }
   for (const task of Array.isArray(ledger?.tasks) ? ledger.tasks : []) {
     // 아무도 돌아오지 않는 일은 누구의 차례도 아니다 — 남은 일의 무더기에 선다(`paintDeskLeft`).
-    if (task.left || !boardRunHeld(ledger, task.run)) continue;
+    if (task.left) continue;
     if (task.stage === "gate" && task.gate) {
       asks.push({ kind: "hold", key: `hold:${task.run}/${task.gate.id}`, task, at: Number(task.created_ms) || 0 });
     }
