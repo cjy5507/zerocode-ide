@@ -2501,8 +2501,22 @@ final class Provider {
             .joined(separator: " ")
         throw ProviderError.coded(
             "element_not_found",
-            "element \(record.index) is covered at its centre\(covering.isEmpty ? "" : " by \(covering)"); look again with --marks"
+            ReadingRefusal.covered(index: record.index, by: covering, otherWindow: coveringWindow(hit, in: snapshot))
         )
+    }
+
+    /// The window of the app's own that stands over a control, when what is on
+    /// top there belongs to another window of the same app; nil for another
+    /// app's window, the control's own window, or a window with no number.
+    /// Read for the refusal's words alone, after the refusal is decided.
+    private func coveringWindow(_ hit: AXUIElement, in snapshot: Snapshot) -> ReadingRefusal.OtherWindow? {
+        var owner: pid_t = 0
+        guard AXUIElementGetPid(hit, &owner) == .success, owner == snapshot.app.pid else { return nil }
+        let window = stringAttribute(hit, kAXRoleAttribute as String) == (kAXWindowRole as String)
+            ? hit
+            : copyElement(hit, kAXWindowAttribute as String)
+        guard let window, let number = windowNumber(window), number != snapshot.windowId else { return nil }
+        return ReadingRefusal.OtherWindow(windowId: number, title: stringAttribute(window, kAXTitleAttribute as String))
     }
 
     /// Whether walking up from `from` meets `to` within `MarkPin.hitDepth` parents.

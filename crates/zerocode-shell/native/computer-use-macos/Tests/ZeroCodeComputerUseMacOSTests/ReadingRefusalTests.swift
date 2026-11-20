@@ -67,6 +67,25 @@ final class ReadingRefusalTests: XCTestCase {
         XCTAssertEqual(ReadingRefusal.shownOnly(authorize, among: [plain], guardWords: guardWords).map(\.index), [12])
     }
 
+    /// t-122111 Q2: a control under another window of the same app is
+    /// refused with that window named and a way out that takes no pointer;
+    /// under anything else the refusal keeps the words it always had.
+    func testAControlUnderAnotherWindowOfItsAppNamesThatWindowAndAMoveNotAFocus() {
+        let front = ReadingRefusal.OtherWindow(windowId: 243600, title: "Home | Fixture")
+        let said = ReadingRefusal.covered(index: 9, by: "AXButton Overview", otherWindow: front)
+        XCTAssertTrue(said.hasPrefix("element 9 is covered at its centre by AXButton Overview, which stands in another window of this app (--window-id 243600 «Home | Fixture»)"), said)
+        XCTAssertTrue(said.contains("move that window aside in the background"), said)
+        XCTAssertTrue(said.contains("a window move of its --window-id takes no pointer and raises nothing"), said)
+        XCTAssertTrue(said.hasSuffix("if it will not move, ask the person"), said)
+        XCTAssertFalse(said.lowercased().contains("focus"), "a move comes first, never bringing a window to the front: \(said)")
+        XCTAssertFalse(said.contains("--marks"), "looking again does not clear another window: \(said)")
+        XCTAssertEqual(
+            ReadingRefusal.covered(index: 2, by: "AXButton Overview", otherWindow: nil),
+            "element 2 is covered at its centre by AXButton Overview; look again with --marks"
+        )
+        XCTAssertEqual(ReadingRefusal.covered(index: 3, by: "", otherWindow: nil), "element 3 is covered at its centre; look again with --marks")
+    }
+
     func testALongTitleOrTextIsClippedToEightyCharacters() {
         let long = String(repeating: "a", count: 300)
         let window = ReadingRefusal.otherWindowsWords(app: "Notes", others: [.init(windowId: 7, title: long)]) ?? ""
@@ -176,6 +195,20 @@ final class ReadingRefusalSourceTests: XCTestCase {
         XCTAssertTrue(label.contains("let why = record == nil ? unreadablePoint(point, in: snapshot) : .notAControl"), String(label))
         XCTAssertTrue(label.contains("throw ProviderError.coded(\"element_not_found\", ReadingRefusal.backgroundTarget(why))"), String(label))
         XCTAssertTrue(source.contains("return try label(backgroundClickRecord(at: point, in: snapshot), in: snapshot, at: point)"))
+    }
+
+    /// t-122111 Q2: only the refusal's words change — the decision before it,
+    /// that the control is on top at its centre, is the one it always was.
+    func testACoveredControlIsDecidedAsBeforeAndOnlyItsWordsNameTheWindow() throws {
+        let source = try helperSource()
+        let onTop = try body(of: "private func requireOnTop(_ record: ElementRecord, in snapshot: Snapshot, background: Bool = false, at requestedPoint: CGPoint? = nil, reach: MarkPin.Reach = .press) throws {", in: source)
+        XCTAssertTrue(onTop.contains("if MarkPin.onTop(hit: hit, target: record.element, reach: reach, parent: { copyElement($0, kAXParentAttribute as String) }, same: { CFEqual($0, $1) }) {\n            return\n        }"), String(onTop))
+        let decided = try XCTUnwrap(onTop.range(of: "if MarkPin.onTop(hit: hit"))
+        let worded = try XCTUnwrap(onTop.range(of: "ReadingRefusal.covered(index: record.index, by: covering, otherWindow: coveringWindow(hit, in: snapshot))"))
+        XCTAssertLessThan(decided.lowerBound, worded.lowerBound)
+        let owner = try body(of: "private func coveringWindow(_ hit: AXUIElement, in snapshot: Snapshot) -> ReadingRefusal.OtherWindow? {", in: source)
+        XCTAssertTrue(owner.contains("owner == snapshot.app.pid"), String(owner))
+        XCTAssertTrue(owner.contains("number != snapshot.windowId"), String(owner))
     }
 
     func testTheElementsThatShowTheWordsOnlyInTheirTextAreTheCoresChoice() throws {

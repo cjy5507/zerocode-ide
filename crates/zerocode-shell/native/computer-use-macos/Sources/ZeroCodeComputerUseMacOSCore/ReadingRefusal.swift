@@ -154,6 +154,19 @@ public enum ReadingRefusal {
             .joined(separator: "; ")
     }
 
+    /// A press whose control is under something at its centre (`requireOnTop`).
+    /// Under another window of the same app — the twin windows of one app the
+    /// person's scene had — the refusal says which window, and that moving it
+    /// aside clears the control: a window move takes no pointer, key or front
+    /// app (`ComputerMethod::takes_the_desk`), and the helper's move only sets
+    /// the window's position. Bringing a window to the front is not offered
+    /// first. Anything else keeps the words it always had (t-122111 Q2).
+    public static func covered(index: Int, by covering: String, otherWindow: OtherWindow?) -> String {
+        let shown = "element \(index) is covered at its centre\(covering.isEmpty ? "" : " by \(covering)")"
+        guard let otherWindow else { return "\(shown); look again with --marks" }
+        return "\(shown), which stands in another window of this app (\(otherWindow.said)): move that window aside in the background — a window move of its --window-id takes no pointer and raises nothing — then look again and press; if it will not move, ask the person"
+    }
+
     /// Why a background press's target could not be read for its confirmation.
     public enum Unreadable: Equatable, Sendable {
         /// The point stands in another of the app's windows than the look read.
