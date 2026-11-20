@@ -26739,6 +26739,10 @@ mod landing_watch;
 /// t-59383: a root letter from the asked seat that names the question closes
 /// it for every count (`tests/letter_answers.rs`).
 mod letter_answers;
+/// t-121651: the build line's end notice reaches the worker that put the job
+/// in — a seat is handed the note it wrote itself at an address only it reads
+/// (`tests/note_to_self.rs`).
+mod note_to_self;
 /// t-68069: one conversation is one worker's, whatever seat a report comes by
 /// (`tests/one_conversation.rs`).
 mod one_conversation;
