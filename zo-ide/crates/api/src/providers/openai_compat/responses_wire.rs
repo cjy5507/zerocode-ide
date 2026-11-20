@@ -11,14 +11,22 @@
 //! model's catalog row had come from the ChatGPT subscription's model list,
 //! which offers rungs the API does not take.
 //!
-//! This module is that road: which request goes on which wire, the body for
-//! `/responses` (the subscription backend's own builder, with what the public
-//! API does differently taken out), its stream, and what an endpoint's two
-//! refusals above teach this process about one model. Each refusal is answered
-//! once per request, and only when it says what one of the two above says —
-//! the effort field and the values it takes, or function tools sent to
-//! `/v1/responses`; what it taught is kept for the rest of the process, never
+//! This module is that road: what an endpoint's two refusals above teach this
+//! process about one model, the body for `/responses` (the subscription
+//! backend's own builder, with what the public API does differently taken
+//! out), and its stream. A request goes to `/responses` only after its
+//! endpoint refused function tools on Chat in OpenAI's words, so every request
+//! that worked on Chat before goes there as it did. Each refusal is answered
+//! once per request; what it taught is kept for the rest of the process, never
 //! written to disk.
+//!
+//! The reasoning a model sends on this road goes back to it from this
+//! process's own store ([`API_SCOPE`]) and never rides on the session's
+//! messages: a ChatGPT login and an API key are different OpenAI accounts, and
+//! the API removes or refuses reasoning made under another organization
+//! (OpenAI's reasoning guide, "Reasoning item removal across requests"). The
+//! subscription's reasoning on a message is not read here, and nothing this
+//! road makes is put on a message for the subscription to read.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -31,6 +39,10 @@ use crate::providers::chatgpt_backend::{
     ResponsesSseParser, ResponsesStreamState, build_responses_body,
 };
 use crate::types::{EffortLevel, MessageRequest, MessageResponse, StreamEvent, SystemBlock, Usage};
+
+/// The name this road's reasoning is kept under in this process (the
+/// subscription backend keeps its own under each client's session).
+pub(super) const API_SCOPE: &str = "openai-api-key-responses";
 
 /// The wire one request goes out on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,22 +110,14 @@ pub(super) fn responses_endpoint(base_url: &str) -> String {
     format!("{}/responses", endpoint_base(base_url))
 }
 
-/// The wire `request` goes out on.
-///
-/// `/responses` for a request with function tools when the endpoint already
-/// said the model's tools go there, or, before it said anything, when the
-/// endpoint is OpenAI's own API and the model is a reasoning model: the pair
-/// OpenAI's `/chat/completions` refuses on its newer models, and the API
-/// OpenAI documents for reasoning models with tools. Everything else stays on
-/// Chat as it was — a gateway, `DeepSeek`, a local server, a model that does
-/// not reason (`gpt-4o`), and any request without tools.
-pub(super) fn wire_for(request: &MessageRequest, base_url: &str, learned: &Learned) -> Wire {
+/// The wire `request` goes out on: `/responses` for a request with function
+/// tools once its endpoint said, refusing them on Chat, that the model's tools
+/// go there ([`sends_tools_to_responses`]); Chat for everything else, as
+/// before — OpenAI's own API included, where the reasoning models that take
+/// tools on Chat go on taking them there.
+pub(super) fn wire_for(request: &MessageRequest, learned: &Learned) -> Wire {
     let has_tools = request.tools.as_ref().is_some_and(|tools| !tools.is_empty());
-    if has_tools
-        && (learned.responses
-            || (super::is_official_openai_base_url(base_url)
-                && super::is_reasoning_model(&request.model)))
-    {
+    if has_tools && learned.responses {
         Wire::Responses
     } else {
         Wire::Chat
@@ -136,46 +140,91 @@ fn refusal_texts(error: &ApiError) -> Vec<&str> {
     }
 }
 
-/// The rungs a refusal of the effort says the model takes, read from OpenAI's
-/// own words: `Unsupported value: 'reasoning_effort' does not support 'max'
-/// with this model. Supported values are: 'low', 'medium', 'high', and
-/// 'xhigh'.` The refusal has to name the effort field — `reasoning_effort` on
-/// Chat, `reasoning.effort` on Responses, whose words were not seen yet, so
-/// the sentence around the field is not required — and list the values after
-/// `Supported values are:`. `None` for every other refusal.
-pub(super) fn efforts_the_refusal_names(error: &ApiError) -> Option<Vec<EffortLevel>> {
-    refusal_texts(error).into_iter().find_map(efforts_named_in)
+const SUPPORTED_VALUES: &str = "Supported values are:";
+const EFFORT_FIELDS: [&str; 2] = ["reasoning_effort", "reasoning.effort"];
+
+/// Whether a refusal lists the values a field takes — the shape an effort
+/// refusal comes in, checked before the request it answers is built again.
+pub(super) fn lists_supported_values(error: &ApiError) -> bool {
+    refusal_texts(error)
+        .into_iter()
+        .any(|text| text.contains(SUPPORTED_VALUES))
 }
 
-fn efforts_named_in(text: &str) -> Option<Vec<EffortLevel>> {
-    const LIST: &str = "Supported values are:";
-    let names_the_field = ["'reasoning_effort'", "'reasoning.effort'"]
-        .iter()
-        .any(|field| text.contains(field));
-    if !names_the_field {
+/// The rungs to send the request again within, when `error` refuses the
+/// effort the body `sent` carried; `None` for any other refusal, and when the
+/// rung that went out is one the refusal lists (the same request twice would
+/// be refused twice).
+///
+/// OpenAI's words on Chat (2026-11-20): `Unsupported value: 'reasoning_effort'
+/// does not support 'max' with this model. Supported values are: 'low',
+/// 'medium', 'high', and 'xhigh'.` Its words on `/v1/responses` were not seen,
+/// and a gateway's page quotes the same refusal without the field:
+/// `Unsupported value: 'minimal' is not supported with the 'gpt-5.6-terra'
+/// model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and
+/// 'max'.` So a refusal is the effort's when it names the effort field — in
+/// its words or as its `param` — or quotes the value that went out, before a
+/// list whose values are all efforts.
+pub(super) fn efforts_to_send_again(error: &ApiError, sent: &Value) -> Option<Vec<EffortLevel>> {
+    let sent_text = effort_text_in(sent)?;
+    let sent_level = crate::providers::parse_effort_level(sent_text)?;
+    let param_is_the_effort =
+        refusal_param(error).is_some_and(|param| EFFORT_FIELDS.contains(&param.as_str()));
+    let accepted = refusal_texts(error)
+        .into_iter()
+        .find_map(|text| efforts_listed_in(text, sent_text, param_is_the_effort))?;
+    (!accepted.contains(&sent_level)).then_some(accepted)
+}
+
+/// The `param` of a refusal's `{"error": {...}}` body.
+fn refusal_param(error: &ApiError) -> Option<String> {
+    let ApiError::Api { body, .. } = error else {
+        return None;
+    };
+    serde_json::from_str::<Value>(body)
+        .ok()?
+        .pointer("/error/param")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The efforts `text` lists after `Supported values are:` when it is a
+/// refusal of the effort `sent`.
+pub(super) fn efforts_listed_in(
+    text: &str,
+    sent: &str,
+    param_is_the_effort: bool,
+) -> Option<Vec<EffortLevel>> {
+    let at = text.find(SUPPORTED_VALUES)?;
+    let (before, after) = (&text[..at], &text[at + SUPPORTED_VALUES.len()..]);
+    let names_the_effort = param_is_the_effort
+        || EFFORT_FIELDS
+            .iter()
+            .any(|field| text.contains(&format!("'{field}'")))
+        || before.contains(&format!("'{sent}'"));
+    if !names_the_effort {
         return None;
     }
-    let list = &text[text.find(LIST)? + LIST.len()..];
     // The list ends at the sentence's full stop; no rung's name holds one.
-    let list = list.split_once('.').map_or(list, |(named, _)| named);
+    let list = after.split_once('.').map_or(after, |(named, _)| named);
     let mut accepted = Vec::new();
     for named in list.split('\'').skip(1).step_by(2) {
-        if let Some(level) = crate::providers::parse_effort_level(named) {
-            if !accepted.contains(&level) {
-                accepted.push(level);
-            }
+        // A value that is not an effort makes it another field's list.
+        let level = crate::providers::parse_effort_level(named)?;
+        if !accepted.contains(&level) {
+            accepted.push(level);
         }
     }
     (!accepted.is_empty()).then_some(accepted)
 }
 
-/// The rung a built body carries, on either wire.
-pub(super) fn effort_in(body: &Value) -> Option<EffortLevel> {
+/// The effort a built body carries, as it went out — `reasoning_effort` on
+/// Chat, `reasoning.effort` on Responses.
+fn effort_text_in(body: &Value) -> Option<&str> {
     ["/reasoning_effort", "/reasoning/effort"]
         .iter()
         .find_map(|pointer| body.pointer(pointer))
         .and_then(Value::as_str)
-        .and_then(crate::providers::parse_effort_level)
 }
 
 /// Whether a refusal says the model's function tools go to `/v1/responses`,
@@ -275,18 +324,32 @@ pub(super) fn supports_vision(request: &MessageRequest, config: OpenAiCompatConf
 ///   addendum), and absent when there is none;
 /// * no `reasoning.summary`: OpenAI asks some organizations to verify before a
 ///   reasoning model sends summaries, and a request that asks for one is then
-///   refused; the Chat body never asked for reasoning text either.
+///   refused; the Chat body never asked for reasoning text either;
+/// * the reasoning sent back is this road's own, from this process
+///   ([`API_SCOPE`]): what the subscription left on the messages stays off
+///   (the module's note says why).
 pub(super) fn api_responses_body(
     request: &MessageRequest,
     config: OpenAiCompatConfig,
     stream: bool,
 ) -> Value {
     let instructions = instructions(request, config);
+    let without_attached;
+    let request = if request.messages.iter().any(|message| message.reasoning_replay.is_some()) {
+        let mut copy = request.clone();
+        for message in &mut copy.messages {
+            message.reasoning_replay = None;
+        }
+        without_attached = copy;
+        &without_attached
+    } else {
+        request
+    };
     let mut body = build_responses_body(
         request,
         &instructions,
         stream,
-        "",
+        API_SCOPE,
         supports_vision(request, config),
     );
     if let Some(fields) = body.as_object_mut() {
@@ -330,7 +393,11 @@ pub(super) fn api_response(
     config: OpenAiCompatConfig,
 ) -> MessageResponse {
     note_the_answer(value);
-    let mut response = crate::providers::chatgpt_backend::parse_responses_response(value, model, "");
+    let mut response =
+        crate::providers::chatgpt_backend::parse_responses_response(value, model, API_SCOPE);
+    // Kept in this process under `API_SCOPE` by the parse; never on the
+    // session's messages.
+    response.reasoning_replay = None;
     count_as_chat(&mut response.usage, config);
     response
 }
@@ -362,7 +429,7 @@ impl ResponsesDecoder {
     pub(super) fn new(model: String, config: OpenAiCompatConfig) -> Self {
         Self {
             parser: ResponsesSseParser::new(),
-            state: ResponsesStreamState::new(model),
+            state: ResponsesStreamState::new(model).with_session_id(API_SCOPE),
             config,
         }
     }
@@ -387,6 +454,9 @@ impl ResponsesDecoder {
         for event in &mut events {
             if let StreamEvent::MessageDelta(delta) = event {
                 count_as_chat(&mut delta.usage, self.config);
+                // Kept in this process under `API_SCOPE` by the state; never
+                // on the session's messages.
+                delta.delta.reasoning_replay = None;
             }
         }
         Ok((events, self.state.take_failure()))

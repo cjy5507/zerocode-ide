@@ -100,7 +100,7 @@ pub(super) fn user(text: &str) -> InputMessage {
     InputMessage::user_text(text)
 }
 
-fn assistant_call(call_id: &str, command: &str, replay: Option<Value>) -> InputMessage {
+pub(super) fn assistant_call(call_id: &str, command: &str, replay: Option<Value>) -> InputMessage {
     InputMessage {
         role: "assistant".to_string(),
         content: vec![InputContentBlock::ToolUse {
@@ -114,7 +114,7 @@ fn assistant_call(call_id: &str, command: &str, replay: Option<Value>) -> InputM
     }
 }
 
-fn tool_result(call_id: &str, text: &str) -> InputMessage {
+pub(super) fn tool_result(call_id: &str, text: &str) -> InputMessage {
     InputMessage {
         role: "user".to_string(),
         content: vec![InputContentBlock::ToolResult {
@@ -270,9 +270,11 @@ fn answer_stream() -> String {
 
 /// What OpenAI answered on 2026-11-20, for a fake that takes function tools
 /// on `/v1/responses` only: an effort the model does not take is refused on
-/// either wire, and Chat refuses tools with an effort.
+/// either wire, and Chat refuses tools with an effort. Its `/v1/responses`
+/// refusal of the effort is in the form a gateway's page quotes, with no
+/// field named (OpenAI's own words there were not seen).
 pub(super) fn like_openai(call_id: &'static str) -> Answer {
-    Box::new(move |path, body, seen| match path {
+    Box::new(move |path, body, _| match path {
         "/v1/chat/completions" => {
             if body["reasoning_effort"] == "max" {
                 openai_error(EFFORT_REFUSAL, "reasoning_effort")
@@ -286,12 +288,16 @@ pub(super) fn like_openai(call_id: &'static str) -> Answer {
             let effort = body.pointer("/reasoning/effort").and_then(Value::as_str);
             if !matches!(effort, None | Some("low" | "medium" | "high" | "xhigh")) {
                 return openai_error(
-                    "Unsupported value: 'reasoning.effort' does not support 'max' with this model. Supported values are: 'low', 'medium', 'high', and 'xhigh'.",
-                    "reasoning.effort",
+                    "Unsupported value: 'max' is not supported with the 'gpt-6.2-astra' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.",
+                    "",
                 );
             }
-            let answered = seen.iter().filter(|earlier| earlier.path == "/v1/responses").count();
-            let stream = if answered == 0 { tool_call_stream(call_id) } else { answer_stream() };
+            // A step that carries a tool's output is answered in words; any
+            // other calls the tool.
+            let answered = body["input"].as_array().is_some_and(|items| {
+                items.iter().any(|item| item["type"] == "function_call_output")
+            });
+            let stream = if answered { answer_stream() } else { tool_call_stream(call_id) };
             (200, "text/event-stream", stream)
         }
         _ => openai_error("unknown path", ""),
@@ -426,8 +432,10 @@ async fn the_person_s_two_refusals_end_in_a_tool_call_and_then_an_answer() {
         assert!(body.pointer("/reasoning/summary").is_none(), "{body}");
     }
 
+    // The reasoning stays in this process for the next step; nothing rides on
+    // the session's messages for another account's road to read.
     let replay = replay_of(&first);
-    assert!(replay.is_some(), "the reasoning before the call comes back to be sent again");
+    assert!(replay.is_none(), "{replay:?}");
     let second = drain(
         client
             .stream_message(&turn(vec![

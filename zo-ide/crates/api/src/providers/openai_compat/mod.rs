@@ -810,12 +810,12 @@ impl OpenAiCompatClient {
         request: &MessageRequest,
     ) -> Result<(reqwest::Response, Wire), ApiError> {
         let mut attempts = 0;
-        // Two refusals in OpenAI's own words are each answered once per
-        // request, and what they say is kept for the rest of the process
-        // (`responses_wire`): an effort the model does not take goes again at
-        // the highest rung the refusal names, and function tools the model
-        // takes only on `/responses` go again there. A refusal in any other
-        // words comes back as it came.
+        // Two refusals are each answered once per request, and what they say
+        // is kept for the rest of the process (`responses_wire`): an effort
+        // the model does not take goes again at the highest rung the refusal
+        // lists, and function tools the model takes only on `/responses` (in
+        // OpenAI's words) go again there. Any other refusal comes back as it
+        // came.
         let mut effort_sent_again = false;
         let mut wire_changed = false;
         // What this endpoint answered about `reasoning_content` before, kept
@@ -837,7 +837,7 @@ impl OpenAiCompatClient {
             attempts += 1;
             let answer = candidate.or(known);
             let learned = responses_wire::learned(&self.base_url, &request.model);
-            let wire = responses_wire::wire_for(request, &self.base_url, &learned);
+            let wire = responses_wire::wire_for(request, &learned);
             let sent = self
                 .send_raw_request(request, answer, wire, learned.efforts.as_deref())
                 .await;
@@ -857,21 +857,16 @@ impl OpenAiCompatClient {
                     Err(error) => {
                         // Neither is a transient failure: no backoff, and the
                         // attempt is not spent.
-                        if !effort_sent_again {
-                            if let Some(accepted) = responses_wire::efforts_the_refusal_names(&error) {
-                                // Sent again only when the rung that went out is
-                                // not one the refusal names: the same request
-                                // twice would be refused twice.
-                                let (_, sent) =
-                                    self.request_body(request, answer, wire, learned.efforts.as_deref());
-                                if responses_wire::effort_in(&sent)
-                                    .is_some_and(|level| !accepted.contains(&level))
-                                {
-                                    responses_wire::learn_efforts(&self.base_url, &request.model, accepted);
-                                    effort_sent_again = true;
-                                    attempts -= 1;
-                                    continue;
-                                }
+                        if !effort_sent_again && responses_wire::lists_supported_values(&error) {
+                            // Read against the body that went out: the rung it
+                            // carried is the one refused.
+                            let (_, sent) =
+                                self.request_body(request, answer, wire, learned.efforts.as_deref());
+                            if let Some(accepted) = responses_wire::efforts_to_send_again(&error, &sent) {
+                                responses_wire::learn_efforts(&self.base_url, &request.model, accepted);
+                                effort_sent_again = true;
+                                attempts -= 1;
+                                continue;
                             }
                         }
                         if !wire_changed

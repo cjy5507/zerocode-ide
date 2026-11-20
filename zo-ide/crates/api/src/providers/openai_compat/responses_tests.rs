@@ -2,26 +2,29 @@
 //! is put on, the body, the two refusals read, and what one endpoint said.
 
 use super::person_turn_tests::{
-    EFFORT_REFUSAL, MODEL, TOOLS_REFUSAL, bash_tool, client_at, drain, effort_on, fake_endpoint,
-    like_openai, sse, tool_calls_of, turn, usage, user, with_subscription_row,
+    EFFORT_REFUSAL, MODEL, TOOLS_REFUSAL, assistant_call, bash_tool, client_at, drain, effort_on,
+    fake_endpoint, like_openai, sse, tool_calls_of, tool_result, turn, usage, user,
+    with_subscription_row,
 };
+use crate::providers::chatgpt_backend::build_responses_request_for_session;
 use super::responses_wire::{
-    self, Learned, ResponsesDecoder, Wire, api_responses_body, clamp_effort, effort_in,
-    efforts_the_refusal_names, responses_endpoint, sends_tools_to_responses, wire_for,
+    self, API_SCOPE, Learned, ResponsesDecoder, Wire, api_responses_body, clamp_effort,
+    efforts_listed_in, efforts_to_send_again, lists_supported_values, responses_endpoint,
+    sends_tools_to_responses, wire_for,
 };
 use super::{OpenAiCompatConfig, build_chat_completion_request};
 use crate::error::ApiError;
-use crate::types::{EffortLevel, StreamEvent};
-use serde_json::json;
+use crate::types::{EffortLevel, InputContentBlock, InputMessage, StreamEvent};
+use serde_json::{Value, json};
 
-/// Before anything was said: OpenAI's own API puts a reasoning model with
-/// function tools on `/responses` from the first request, and every other
-/// request stays on Chat.
+/// A request goes to `/responses` only once its endpoint refused its function
+/// tools on Chat; OpenAI's own API included, every request goes on Chat
+/// before that, as it did.
 #[test]
 fn the_wire_a_request_goes_on() {
     let _env = with_subscription_row();
     let nothing = Learned::default();
-    let official = "https://api.openai.com/v1";
+    let said = Learned { efforts: None, responses: true };
     let with_tools = turn(vec![user("hi")]);
     let mut without_tools = turn(vec![user("hi")]);
     without_tools.tools = None;
@@ -30,22 +33,13 @@ fn the_wire_a_request_goes_on() {
     let mut not_reasoning = turn(vec![user("hi")]);
     not_reasoning.model = "gpt-4o".to_string();
 
-    assert_eq!(wire_for(&with_tools, official, &nothing), Wire::Responses);
-    assert_eq!(wire_for(&with_tools, "https://api.openai.com/v1/", &nothing), Wire::Responses);
-    assert_eq!(
-        wire_for(&with_tools, "https://api.openai.com/v1/chat/completions", &nothing),
-        Wire::Responses
-    );
-    assert_eq!(wire_for(&without_tools, official, &nothing), Wire::Chat);
-    assert_eq!(wire_for(&empty_tools, official, &nothing), Wire::Chat);
-    assert_eq!(wire_for(&not_reasoning, official, &nothing), Wire::Chat);
-    for gateway in ["https://gateway.example.com/v1", "https://api.deepseek.com", "http://localhost:11434/v1"] {
-        assert_eq!(wire_for(&with_tools, gateway, &nothing), Wire::Chat, "{gateway}");
+    for request in [&with_tools, &without_tools, &empty_tools, &not_reasoning] {
+        assert_eq!(wire_for(request, &nothing), Wire::Chat, "{}", request.model);
     }
-    // Once an endpoint said so, its tools go to `/responses` there too.
-    let said = Learned { efforts: None, responses: true };
-    assert_eq!(wire_for(&with_tools, "https://gateway.example.com/v1", &said), Wire::Responses);
-    assert_eq!(wire_for(&without_tools, "https://gateway.example.com/v1", &said), Wire::Chat);
+    assert_eq!(wire_for(&with_tools, &said), Wire::Responses);
+    assert_eq!(wire_for(&not_reasoning, &said), Wire::Responses);
+    assert_eq!(wire_for(&without_tools, &said), Wire::Chat);
+    assert_eq!(wire_for(&empty_tools, &said), Wire::Chat);
 }
 
 #[test]
@@ -59,9 +53,8 @@ fn the_responses_address_sits_beside_chat() {
     }
 }
 
-/// The first request of the person's turn on OpenAI's own API: `/responses`
-/// with the API's fields, and the effort the catalog row allows (a refusal
-/// then lowers it once).
+/// A `/responses` body on OpenAI's own config: the API's fields, and the
+/// effort the catalog row allows (a refusal lowers it once).
 #[test]
 fn the_api_responses_body() {
     let _env = with_subscription_row();
@@ -107,34 +100,69 @@ fn the_api_responses_body() {
     assert!(api_responses_body(&bare, row, false).get("instructions").is_none());
 }
 
-#[test]
-fn an_effort_refusal_names_the_rungs_the_model_takes() {
-    let refusal = |message: &str| ApiError::Api {
+fn refusal(message: &str, param: &str) -> ApiError {
+    ApiError::Api {
         status: reqwest::StatusCode::BAD_REQUEST,
         error_type: Some("invalid_request_error".to_string()),
         message: Some(message.to_string()),
-        body: json!({"error": {"message": message}}).to_string(),
+        body: json!({"error": {"message": message, "type": "invalid_request_error", "param": param, "code": null}})
+            .to_string(),
         retryable: false,
         retry_after: None,
-    };
+    }
+}
+
+#[test]
+fn an_effort_refusal_names_the_rungs_the_model_takes() {
     let takes = vec![EffortLevel::Low, EffortLevel::Medium, EffortLevel::High, EffortLevel::Xhigh];
-    assert_eq!(efforts_the_refusal_names(&refusal(EFFORT_REFUSAL)), Some(takes.clone()));
-    // Responses names its field `reasoning.effort`; the words around it were
-    // not seen yet, so only the field and the list are read.
-    assert_eq!(
-        efforts_the_refusal_names(&refusal(&EFFORT_REFUSAL.replace("'reasoning_effort'", "'reasoning.effort'"))),
-        Some(takes.clone())
+    let chat_max = json!({"reasoning_effort": "max"});
+    let responses_max = json!({"reasoning": {"effort": "max"}});
+
+    // The person's Chat refusal, word for word.
+    let person = refusal(EFFORT_REFUSAL, "reasoning_effort");
+    assert!(lists_supported_values(&person));
+    assert_eq!(efforts_to_send_again(&person, &chat_max), Some(takes.clone()));
+    // The value that went out, quoted, with no field named — a gateway's
+    // page's form — on either wire.
+    let unnamed = refusal(
+        "Unsupported value: 'max' is not supported with the 'gpt-6.2-astra' model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'.",
+        "",
     );
-    assert_eq!(
-        efforts_the_refusal_names(&refusal("Invalid value: 'max' for 'reasoning.effort'. Supported values are: 'low', 'medium', 'high', and 'xhigh'.")),
-        Some(takes)
+    assert_eq!(efforts_to_send_again(&unnamed, &responses_max), Some(takes.clone()));
+    assert_eq!(efforts_to_send_again(&unnamed, &chat_max), Some(takes.clone()));
+    // The field only as the body's `param`.
+    let by_param = refusal(
+        "This model does not take that value. Supported values are: 'low', 'medium', 'high', and 'xhigh'.",
+        "reasoning.effort",
     );
-    // Another field's unsupported value, another refusal, another status.
+    assert_eq!(efforts_to_send_again(&by_param, &responses_max), Some(takes.clone()));
+    // The gateway's page's words exactly, about the value `minimal`.
     assert_eq!(
-        efforts_the_refusal_names(&refusal("Unsupported value: 'temperature' does not support 0.2 with this model. Supported values are: '1'.")),
-        None
+        efforts_listed_in(
+            "Unsupported value: 'minimal' is not supported with the 'gpt-5.6-terra' model. Supported values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'.",
+            "minimal",
+            false,
+        ),
+        Some(vec![EffortLevel::Low, EffortLevel::Medium, EffortLevel::High, EffortLevel::Xhigh, EffortLevel::Max])
     );
-    assert_eq!(efforts_the_refusal_names(&refusal(TOOLS_REFUSAL)), None);
+
+    // Not sent again: a rung the refusal lists went out; another value was
+    // refused; another field's list; a list that holds a value no effort is;
+    // no effort in the body; another status.
+    assert_eq!(efforts_to_send_again(&person, &json!({"reasoning_effort": "xhigh"})), None);
+    assert_eq!(efforts_to_send_again(&unnamed, &json!({"reasoning": {"effort": "high"}})), None);
+    let temperature = refusal(
+        "Unsupported value: 'temperature' does not support 0.2 with this model. Supported values are: '1'.",
+        "temperature",
+    );
+    assert!(lists_supported_values(&temperature));
+    assert_eq!(efforts_to_send_again(&temperature, &chat_max), None);
+    let mixed = refusal(
+        "Unsupported value: 'max' is not supported with the 'gpt-6.2-astra' model. Supported values are: 'low', 'auto', and 'xhigh'.",
+        "",
+    );
+    assert_eq!(efforts_to_send_again(&mixed, &chat_max), None);
+    assert_eq!(efforts_to_send_again(&person, &json!({"model": MODEL})), None);
     let unauthorized = ApiError::Api {
         status: reqwest::StatusCode::UNAUTHORIZED,
         error_type: None,
@@ -143,15 +171,12 @@ fn an_effort_refusal_names_the_rungs_the_model_takes() {
         retryable: false,
         retry_after: None,
     };
-    assert_eq!(efforts_the_refusal_names(&unauthorized), None);
+    assert!(!lists_supported_values(&unauthorized));
+    assert_eq!(efforts_to_send_again(&unauthorized, &chat_max), None);
+    assert!(!lists_supported_values(&refusal(TOOLS_REFUSAL, "reasoning_effort")));
 
-    // The rung a body carries, on either wire.
-    assert_eq!(effort_in(&json!({"reasoning_effort": "max"})), Some(EffortLevel::Max));
-    assert_eq!(effort_in(&json!({"reasoning": {"effort": "xhigh"}})), Some(EffortLevel::Xhigh));
-    assert_eq!(effort_in(&json!({"model": MODEL})), None);
-
-    assert!(sends_tools_to_responses(&refusal(TOOLS_REFUSAL)));
-    assert!(!sends_tools_to_responses(&refusal(EFFORT_REFUSAL)));
+    assert!(sends_tools_to_responses(&refusal(TOOLS_REFUSAL, "reasoning_effort")));
+    assert!(!sends_tools_to_responses(&person));
     assert!(!sends_tools_to_responses(&unauthorized));
 }
 
@@ -289,4 +314,110 @@ async fn a_refused_effort_on_responses_goes_again_at_the_rung_it_names() {
     let route: Vec<(&str, Option<&str>)> =
         seen.iter().map(|request| (request.path.as_str(), effort_on(request))).collect();
     assert_eq!(route, vec![("/v1/responses", Some("max")), ("/v1/responses", Some("xhigh"))]);
+}
+
+/// A session that used the ChatGPT login before the key: the reasoning the
+/// subscription left on its messages — before a call and before the turn's
+/// last words — does not go to the API, while the subscription's own request
+/// still carries it.
+#[test]
+fn the_subscription_s_reasoning_on_a_message_stays_off_the_api_key_s_request() {
+    let _env = with_subscription_row();
+    let call_id = "call_from_the_subscription";
+    let attached = json!([
+        {"call_id": call_id, "items": [{"type": "reasoning", "id": "rs_sub", "summary": [], "encrypted_content": "SUBSCRIPTION-ITEM"}]},
+        {"turn_final": true, "items": [{"type": "reasoning", "id": "rs_sub_final", "summary": [], "encrypted_content": "SUBSCRIPTION-FINAL"}]},
+    ]);
+    let answered = InputMessage {
+        role: "assistant".to_string(),
+        content: vec![
+            InputContentBlock::ToolUse {
+                id: call_id.to_string(),
+                name: "bash".to_string(),
+                input: json!({"command": "pwd"}),
+                cache_control: None,
+            },
+            InputContentBlock::Text { text: "Here it is.".to_string(), cache_control: None },
+        ],
+        thought_signature: None,
+        reasoning_replay: Some(attached),
+    };
+    let request = turn(vec![user("hi"), answered, tool_result(call_id, "/w"), user("and now?")]);
+
+    let subscription = build_responses_request_for_session(&request, "instructions", true, "session-sub").to_string();
+    assert!(subscription.contains("SUBSCRIPTION-ITEM") && subscription.contains("SUBSCRIPTION-FINAL"));
+
+    let api = api_responses_body(&request, OpenAiCompatConfig::openai(), true);
+    let kinds: Vec<&str> = api["input"]
+        .as_array()
+        .expect("input items")
+        .iter()
+        .map(|item| item["type"].as_str().unwrap_or("message"))
+        .collect();
+    assert!(!kinds.contains(&"reasoning"), "{kinds:?}");
+    assert!(kinds.contains(&"function_call") && kinds.contains(&"function_call_output"), "{kinds:?}");
+    assert!(!api.to_string().contains("SUBSCRIPTION"), "{api}");
+}
+
+/// A session that used the key, then the ChatGPT login: nothing the key's road
+/// made reaches the subscription's request, which is byte for byte what it was
+/// before the key answered; the key's own next request carries it from this
+/// process.
+#[test]
+fn the_api_key_s_reasoning_never_reaches_a_subscription_request() {
+    let _env = with_subscription_row();
+    let call_id = "call_from_the_api_key";
+    let request = turn(vec![user("hi"), assistant_call(call_id, "pwd", None), tool_result(call_id, "/w")]);
+    let before = build_responses_request_for_session(&request, "instructions", true, "session-sub").to_string();
+
+    let reasoning = json!({"id": "rs_api", "type": "reasoning", "summary": [], "encrypted_content": "API-KEY-ITEM"});
+    let call = json!({"id": "fc_api", "type": "function_call", "status": "completed", "call_id": call_id, "name": "bash", "arguments": "{\"command\":\"pwd\"}"});
+    let mut decoder = ResponsesDecoder::new(MODEL.to_string(), OpenAiCompatConfig::openai());
+    let (events, failure) = decoder
+        .push(
+            sse(&[
+                json!({"type": "response.created", "response": {"id": "resp_api", "status": "in_progress", "output": []}}),
+                json!({"type": "response.output_item.done", "output_index": 0, "item": reasoning}),
+                json!({"type": "response.output_item.added", "output_index": 1, "item": call}),
+                json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+                json!({"type": "response.completed", "response": {"id": "resp_api", "status": "completed", "output": [reasoning, call], "usage": usage()}}),
+            ])
+            .as_bytes(),
+        )
+        .expect("read");
+    assert!(failure.is_none());
+    let replays: Vec<&Option<Value>> = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::MessageDelta(delta) => Some(&delta.delta.reasoning_replay),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replays, vec![&None], "nothing for the session's messages");
+
+    let after = build_responses_request_for_session(&request, "instructions", true, "session-sub").to_string();
+    assert_eq!(before, after);
+    assert!(!after.contains("API-KEY-ITEM"));
+    assert!(api_responses_body(&request, OpenAiCompatConfig::openai(), true).to_string().contains("API-KEY-ITEM"));
+    assert_eq!(API_SCOPE, "openai-api-key-responses");
+}
+
+/// A session resumed in a new process: the key's road holds no reasoning for
+/// its earlier calls, so a call goes back the way OpenAI's function-calling
+/// guide sends one — `call_id`, `name`, `arguments`, no output `id` — with its
+/// output, and no reasoning item.
+#[test]
+fn a_call_this_process_holds_no_reasoning_for_goes_back_without_it() {
+    let _env = with_subscription_row();
+    let call_id = "call_from_an_earlier_process";
+    let request = turn(vec![user("hi"), assistant_call(call_id, "pwd", None), tool_result(call_id, "/w")]);
+    let body = api_responses_body(&request, OpenAiCompatConfig::openai(), true);
+    assert_eq!(
+        body["input"],
+        json!([
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "function_call", "call_id": call_id, "name": "bash", "arguments": "{\"command\":\"pwd\"}"},
+            {"type": "function_call_output", "call_id": call_id, "output": "/w"},
+        ])
+    );
 }
