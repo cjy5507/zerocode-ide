@@ -1999,6 +1999,39 @@ impl Message {
             && self.created_ms >= question.created_ms
             && names_message(self.body.as_str(), &question.id)
     }
+
+    /// Whether a look by `seat` at the inbox `address` holds this letter back
+    /// as that seat's own words. `Ledger::deliver` cuts a batch by it and
+    /// [`Run::pointer_wanted`] counts by it, so a `check` and the pointer
+    /// never disagree about what is waiting.
+    ///
+    /// A seat's own words to the address it reads are held back from it:
+    /// `run:<id>` is read by every leader pane bound to the run, so a
+    /// handover written there is news to the coordinator beside its author
+    /// and only an echo to the author.
+    ///
+    /// Except a note to itself (t-121651): a letter the seat signed as a
+    /// `worker:` or `pane:` address and sent to that same address, opening no
+    /// thread. Only that seat reads such an address, so holding the note back
+    /// handed it to nobody — the build line tells a job's end as the pane
+    /// that put the job in, and a worker's notice to itself was filed and
+    /// never read (I-t119309-7). A word in a thread is no note, so a reply to
+    /// the note does not come back to be answered again; nor is a line the
+    /// ledger writes with the seat's name on it (`question-close` signs the
+    /// closer's seat).
+    fn held_back_from(&self, seat: &str, address: &str) -> bool {
+        self.author_seat.as_deref() == Some(seat)
+            && self.to == address
+            && !(self.from == address && self.thread.is_none() && one_reader(address))
+    }
+}
+
+/// Whether one seat alone reads the inbox at `address`: a worker's, read from
+/// the pane the worker sits in, or a pane's own. `run:<id>` is read by every
+/// leader pane bound to the run; an address of any other shape is not
+/// counted as one reader's.
+fn one_reader(address: &str) -> bool {
+    address.starts_with(WORKER_ADDRESS_PREFIX) || address.starts_with(PANE_ADDRESS_PREFIX)
 }
 
 /// Whether `text` names the message `id` as a word of its own. An ASCII
@@ -4766,8 +4799,10 @@ impl Run {
             return None;
         }
         /* Mail this SEAT wrote is not news to it, and it is the same rule
-         * `Ledger::deliver` cuts a batch by — asked here so the pointer and
-         * the check can never disagree about what is waiting.
+         * `Ledger::deliver` cuts a batch by ([`Message::held_back_from`]) —
+         * asked here so the pointer and the check can never disagree about
+         * what is waiting. A note the seat wrote to itself at an address only
+         * it reads is news to it: nobody else will ever read it.
          *
          * `run:<id>` is one inbox with more than one reader: every leader
          * pane bound to the run signs and reads it. So a coordinator's
@@ -4786,9 +4821,7 @@ impl Run {
                     self.messages
                         .iter()
                         .find(|message| &&message.id == id)
-                        .is_none_or(|message| {
-                            message.author_seat.as_deref() != Some(seat) || message.to != address
-                        })
+                        .is_none_or(|message| !message.held_back_from(seat, address))
                 })
             })
             .count();
@@ -9189,7 +9222,10 @@ impl Ledger {
                     let row = messages.iter().find(|one| &&one.id == id);
                     let wanted_kind =
                         kinds.is_empty() || row.is_some_and(|one| kinds.contains(&one.kind));
-                    /* A seat is never handed back its own words.
+                    /* A seat is not handed back its own words
+                     * (`Message::held_back_from`, which also says the one
+                     * letter that is: a note the seat wrote to itself at an
+                     * address only it reads).
                      *
                      * The policy is old; what is new is that it is asked of
                      * the SEAT rather than of the address. `run:<id>` has
@@ -9209,9 +9245,7 @@ impl Ledger {
                      * the two cases stay apart.
                      */
                     let mine = asking_seat.is_some_and(|seat| {
-                        row.is_some_and(|one| {
-                            one.author_seat.as_deref() == Some(seat) && one.to == address
-                        })
+                        row.is_some_and(|one| one.held_back_from(seat, address))
                     });
                     wanted_kind && !mine
                 })
