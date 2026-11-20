@@ -2112,12 +2112,12 @@ impl PlainSession {
             .then(|| crate::goal::workspace_fingerprint(&self.cwd).ok())
             .flatten();
         let mut result = self.autonomy.goal.apply(raw, fingerprint.as_deref())?;
-        if first == "start"
-            && self.autonomy.goal.is_running()
-            && !self.autonomy.goal.allows_writes()
-            && crate::autonomy::run_is_held_below(self.permission_mode)
-        {
-            result.notice = format!("{} · {}", result.notice, crate::autonomy::READ_ONLY_RUN_NOTE);
+        if result.started {
+            let writes = crate::autonomy::run_writes_note(
+                self.autonomy.goal.allows_writes(),
+                self.permission_mode,
+            );
+            result.notice = format!("{} · {writes}", result.notice);
         }
         if let Some(inner) = self.runtime.try_runtime_mut() {
             inner.set_session_goal(self.autonomy.goal.objective().map(str::to_string));

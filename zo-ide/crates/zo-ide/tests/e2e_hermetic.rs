@@ -1276,6 +1276,216 @@ async fn e2e_goal_resumes_after_provider_retry_after_and_reaches_its_condition()
     );
 }
 
+/// A goal written with no gate, the way a person first types it: its plan
+/// turn calls `TodoWrite` and each action turn writes the same file, so the
+/// first action changes the workspace and the ones after it do not.
+const BARE_GOAL: &str = "/goal PARITY_SCENARIO:goal_turns go";
+
+/// How many captured requests carry `tag` (a goal turn's prompt marker).
+fn requests_carrying(requests: &[CapturedRequest], tag: &str) -> usize {
+    requests.iter().filter(|request| request.raw_body.contains(tag)).count()
+}
+
+/// The person's report (t-122771, 11-20): `/goal <objective>` only saved the
+/// goal — 「목표 쓰면 시작 해야하는데 시작을 안해」. Typed alone, with no
+/// gate, it pursues the goal at once: the plan and the actions run with
+/// nobody typing after the goal, and the run ends when its turns change
+/// nothing — never by saying the goal is achieved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_bare_goal_starts_at_once_and_stops_when_nothing_changes() {
+    let layout = Layout::new();
+    layout.model_led();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start goal mock service");
+    let mut run = pty(&layout, &service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(format!("{BARE_GOAL}\r").as_bytes()).expect("type the goal");
+    let started = run.wait_for("goal: running · no gate", TEST_TIMEOUT);
+    run.wait_for_after("(paused)", started, TEST_TIMEOUT);
+    let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
+    let requests = service.captured_requests().await;
+
+    assert!(
+        requests_carrying(&requests, "[zo:goal-plan]") >= 1
+            && requests_carrying(&requests, "[zo:goal-action]") >= 1,
+        "the goal's plan and action turns did not run by themselves: {requests:#?}"
+    );
+    assert_eq!(requests_carrying(&requests, "[zo:goal-gate]"), 0, "a goal with no gate ran a gate");
+    assert!(
+        layout.cwd.join(mock_anthropic_service::GOAL_TURNS_ACTION_FILE).exists(),
+        "the action turn did not act:\n{capture}"
+    );
+    assert!(
+        capture.contains("turns made no workspace"),
+        "the run did not end by its turns changing nothing:\n{capture}"
+    );
+    assert!(!capture.contains("(completed)"), "a goal with no gate said it was achieved:\n{capture}");
+}
+
+/// In a session that could write, a goal with no gate runs read-only (the
+/// start says so) and does not spin: its refused actions change nothing,
+/// so two of them end the run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_bare_goal_in_a_writing_session_runs_read_only_and_stalls() {
+    let layout = Layout::new();
+    layout.model_led();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start goal mock service");
+    let mut run = pty(&layout, &service.base_url(), &["--permission-mode", "workspace-write"]);
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(format!("{BARE_GOAL}\r").as_bytes()).expect("type the goal");
+    let started = run.wait_for("goal: running · no gate", TEST_TIMEOUT);
+    run.wait_for_after("(paused)", started, TEST_TIMEOUT);
+    let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
+    let requests = service.captured_requests().await;
+
+    assert!(capture.contains("read-only run"), "the start did not say the run is read-only:\n{capture}");
+    assert!(
+        !layout.cwd.join(mock_anthropic_service::GOAL_TURNS_ACTION_FILE).exists(),
+        "a goal started without --allow-writes wrote in a workspace-write session"
+    );
+    assert!(
+        requests_carrying(&requests, "[zo:goal-action]") >= 1,
+        "the action turns did not run: {requests:#?}"
+    );
+    assert!(
+        capture.contains("turns made no workspace"),
+        "the read-only run did not stop by the stall rule:\n{capture}"
+    );
+    assert!(!capture.contains("(completed)"), "a goal with no gate said it was achieved:\n{capture}");
+}
+
+/// `/goal start <objective>` with no gate answered "autonomous start needs a
+/// --check gate or --until condition" and started nothing. It starts the
+/// same run as the bare form, with nobody typing after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_goal_start_without_a_gate_starts_too() {
+    let layout = Layout::new();
+    layout.model_led();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start goal mock service");
+    let mut run = pty(&layout, &service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"/goal start PARITY_SCENARIO:goal_turns go --max-turns 2\r")
+        .expect("type the goal");
+    let started = run.wait_for("goal: running · no gate", TEST_TIMEOUT);
+    run.wait_for_after("assistant-turn limit reached (2/2)", started, TEST_TIMEOUT);
+    let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
+    let requests = service.captured_requests().await;
+
+    assert!(
+        requests_carrying(&requests, "[zo:goal-plan]") >= 1
+            && requests_carrying(&requests, "[zo:goal-action]") >= 1,
+        "the started goal's plan and action did not run by themselves: {requests:#?}"
+    );
+    assert!(!capture.contains("needs a --check gate"), "the start still asked for a gate:\n{capture}");
+}
+
+/// A goal with no gate stops at its limits like any other: two assistant
+/// turns, the plan and one action, and the run pauses on the limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_bare_goal_stops_at_its_turn_limit() {
+    let layout = Layout::new();
+    layout.model_led();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start goal mock service");
+    let mut run = pty(&layout, &service.base_url(), &interactive_args());
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(format!("{BARE_GOAL} --max-turns 2\r").as_bytes())
+        .expect("type the goal");
+    let started = run.wait_for("goal: running · no gate", TEST_TIMEOUT);
+    run.wait_for_after("assistant-turn limit reached (2/2)", started, TEST_TIMEOUT);
+    let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
+
+    assert!(!capture.contains("(completed)"), "a goal with no gate said it was achieved:\n{capture}");
+}
+
+/// The append-only frontend runs the same driver: a piped goal line starts
+/// at once, says what it armed and that the run is read-only, and ends by
+/// the stall rule before the pipe's end closes zo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_piped_bare_goal_runs_before_the_pipe_ends() {
+    let layout = Layout::new();
+    layout.model_led();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start plain goal mock service");
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &["--plain", "--permission-mode", "workspace-write"],
+        format!("{BARE_GOAL}\n").as_bytes(),
+    )
+    .expect("run a piped goal");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    show_permission_lines("workspace-write · piped bare /goal", &stdout);
+    let requests = service.captured_requests().await;
+
+    assert!(output.status.success(), "the piped goal exited with {:?}:\n{stdout}", output.status);
+    assert!(
+        stdout.contains(
+            "goal: running · no gate: ends after 2 turns with no change, at a limit, or on /goal done · four limits armed (turns "
+        ),
+        "the start did not say how the run ends and what bounds it:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(" · read-only run (add --allow-writes to let it write)"),
+        "the start did not say the run is read-only:\n{stdout}"
+    );
+    assert!(
+        requests_carrying(&requests, "[zo:goal-action]") >= 1,
+        "the piped goal's actions did not run: {requests:#?}"
+    );
+    assert!(
+        stdout.contains("(paused)") && stdout.contains("turns made no workspace"),
+        "the piped goal did not end by the stall rule:\n{stdout}"
+    );
+    assert!(!stdout.contains("(completed)"), "a goal with no gate said it was achieved:\n{stdout}");
+}
+
+/// A prompt named on the command line is the person's words, never a
+/// command: one that starts with `/goal` reaches the model as text and
+/// starts no goal — a worker or headless run whose brief opens with it does
+/// not arm an unattended run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_named_prompt_that_starts_with_goal_is_sent_as_text() {
+    let layout = Layout::new();
+    let service = MockAnthropicService::spawn()
+        .await
+        .expect("start named prompt mock service");
+    let prompt = "/goal PARITY_SCENARIO:streaming_text ship it";
+    let output = run_pipe(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        &service.base_url(),
+        &["--plain", prompt],
+        b"",
+    )
+    .expect("run a named prompt");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let requests = service.captured_requests().await;
+
+    assert!(output.status.success(), "the named prompt exited with {:?}:\n{stdout}", output.status);
+    assert!(
+        requests_carrying(&requests, prompt) >= 1,
+        "the model was not sent the prompt as text: {requests:#?}"
+    );
+    assert_eq!(requests_carrying(&requests, "[zo:goal-"), 0, "a named prompt started a goal");
+    assert!(
+        !stdout.contains("goal: running") && !stdout.contains("goal: saved"),
+        "a named prompt was read as a /goal command:\n{stdout}"
+    );
+}
+
 /// The text and error flag of the result the model was sent for
 /// `tool_use_id`, from the first request that carries it.
 fn tool_result_sent(requests: &[CapturedRequest], tool_use_id: &str) -> Option<(String, bool)> {

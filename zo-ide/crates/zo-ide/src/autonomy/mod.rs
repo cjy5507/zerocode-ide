@@ -66,6 +66,21 @@ pub fn run_is_held_below(mode: PermissionMode) -> bool {
     !is_full_access(mode) && mode != PermissionMode::ReadOnly
 }
 
+/// What a `/goal` start says about writing (t-122771): whether its turns may
+/// write, and — when they may not — the one step that would let them.
+#[must_use]
+pub fn run_writes_note(allow_writes: bool, mode: PermissionMode) -> &'static str {
+    if is_full_access(mode) {
+        "may write (Full Access)"
+    } else if mode == PermissionMode::ReadOnly {
+        "read-only session (/permissions to let it write)"
+    } else if allow_writes {
+        "may write as this session allows (--allow-writes)"
+    } else {
+        READ_ONLY_RUN_NOTE
+    }
+}
+
 pub struct Autonomy {
     pub runner: AutonomyRunner,
     pub scheduler: Scheduler,
@@ -323,5 +338,66 @@ mod tests {
         assert!(!run_is_held_below(PermissionMode::ReadOnly));
         assert!(!run_is_held_below(PermissionMode::DangerFullAccess));
         assert!(!run_is_held_below(PermissionMode::Allow));
+    }
+
+    /// t-122771: a `/goal` start says whether its turns may write, and when
+    /// they may not, the one step that lets them — the run's flag where the
+    /// run is held, `/permissions` where the session itself is read-only.
+    #[test]
+    fn a_start_says_whether_its_run_may_write() {
+        use super::{run_writes_note, READ_ONLY_RUN_NOTE};
+        use runtime::PermissionMode;
+
+        for allow_writes in [false, true] {
+            for mode in [PermissionMode::DangerFullAccess, PermissionMode::Allow] {
+                assert_eq!(run_writes_note(allow_writes, mode), "may write (Full Access)");
+            }
+            assert_eq!(
+                run_writes_note(allow_writes, PermissionMode::ReadOnly),
+                "read-only session (/permissions to let it write)"
+            );
+        }
+        for mode in [PermissionMode::WorkspaceWrite, PermissionMode::Prompt] {
+            assert_eq!(run_writes_note(false, mode), READ_ONLY_RUN_NOTE, "{mode:?}");
+            assert_eq!(
+                run_writes_note(true, mode),
+                "may write as this session allows (--allow-writes)",
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// t-122771: a goal now starts the moment it is written, beside a loop
+    /// that may already run — and one session budget counts both, so when
+    /// it is spent, both stop.
+    #[test]
+    fn a_bare_goal_and_a_loop_share_one_session_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transcript = temp.path().join("s.jsonl");
+        let mut autonomy = Autonomy::load(&transcript, None, false);
+        autonomy
+            .loops
+            .apply(
+                commands::LoopCommand::StartDynamic {
+                    prompt: "poll CI".to_string(),
+                },
+                1_000,
+                temp.path(),
+            )
+            .expect("a loop");
+        autonomy.goal.apply("ship it", None).expect("a goal");
+        assert!(autonomy.goal.is_running());
+        assert_eq!(autonomy.status().loops[0].phase, "running");
+
+        autonomy.limits.max_assistant_turns = 2;
+        autonomy.record_usage(1, 1).expect("a goal turn");
+        autonomy.record_usage(1, 1).expect("a loop turn");
+        let reason = autonomy.exhaustion().expect("the shared budget is spent");
+        autonomy.goal.pause_for_session_limit(&reason).expect("goal");
+        autonomy.loops.pause_for_session_limit(&reason).expect("loops");
+
+        assert!(!autonomy.goal.is_running());
+        assert!(autonomy.goal.dispatch_next().expect("dispatch").is_none());
+        assert_eq!(autonomy.status().loops[0].phase, "paused");
     }
 }

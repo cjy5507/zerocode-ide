@@ -65,11 +65,18 @@ pub fn footer_status_from_snapshot(goal: &str, autonomous: &str) -> Option<GoalF
     match phase {
         "running" => Some(GoalFooterStatus::Pursuing),
         "completed" => Some(GoalFooterStatus::Achieved),
-        // A saved objective is intentionally not advertised as paused: bare
-        // `/goal <objective>` has not armed autonomous execution yet.
+        // A saved objective is intentionally not advertised as paused:
+        // `/goal edit <objective>` saves one without arming autonomous
+        // execution.
         "saved" => Some(GoalFooterStatus::Unmet),
         "paused" => {
-            if autonomous.contains("workspace unchanged after repair") {
+            // Both stall rules (t-122771): a repair that changed nothing, and
+            // turns that changed nothing — the end an ungated run reaches.
+            // The status line cuts a reason at 60 characters, so the second
+            // is matched on its head.
+            if autonomous.contains("workspace unchanged after repair")
+                || autonomous.contains("turns made no workspace")
+            {
                 Some(GoalFooterStatus::Stalled)
             } else if autonomous.contains("limit reached") {
                 Some(GoalFooterStatus::HitAutonomousLimits)
@@ -188,16 +195,15 @@ impl GoalState {
             .map(|check| gate_command(check))
             .collect::<Vec<_>>();
         let until = options.until.as_deref().map(gate_command);
-        let can_run = autonomous && (!checks.is_empty() || until.is_some());
-        let pause_reason = (autonomous && checks.is_empty() && until.is_none())
-            .then(|| "autonomous start needs a --check gate or --until condition".to_string());
+        // A goal with no gate and no condition runs too (t-122771): it acts
+        // until its turns change nothing, a limit, or the person's
+        // `/goal done` — it never completes itself.
+        let can_run = autonomous;
         let plan_enabled = !options.no_plan;
         Self {
             objective,
             phase: if can_run {
                 GoalPhase::Running
-            } else if pause_reason.is_some() {
-                GoalPhase::Paused
             } else {
                 GoalPhase::Saved
             },
@@ -244,8 +250,14 @@ impl GoalState {
                 GoalTurnKind::Action
             }),
             last_failed_gate: None,
-            pause_reason,
+            pause_reason: None,
         }
+    }
+
+    /// No `--check` gate and no `--until` condition: nothing the controller
+    /// can observe says the goal is met, so the run never completes itself.
+    fn ungated(&self) -> bool {
+        self.checks.is_empty() && self.until.is_none()
     }
 
     fn elapsed_millis(&self, now: u64) -> u64 {
@@ -340,6 +352,9 @@ impl GoalTurn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalCommandResult {
     pub notice: String,
+    /// This command started an autonomous run: a `/goal <objective>`, `start`
+    /// or `set`. The session adds whether its turns may write.
+    pub started: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -463,8 +478,9 @@ impl GoalController {
         self.state.as_ref().is_some_and(|state| state.allow_writes)
     }
 
-    /// `/goal`의 raw remainder를 읽는다. `start`만 자율 실행을 켠다; bare goal은
-    /// 지속 목표를 저장하기만 하므로 기본값은 언제나 off다.
+    /// `/goal`의 raw remainder를 읽는다. 목표를 쓰면 곧바로 좇는다(t-122771):
+    /// `/goal <objective>`·`start`·`set` 모두 한도 안의 자율 실행을 켠다.
+    /// 저장만 하는 길은 `edit` 하나다.
     pub fn apply(
         &mut self,
         raw: &str,
@@ -476,12 +492,14 @@ impl GoalController {
             let Some(state) = self.state.as_mut() else {
                 return Ok(GoalCommandResult {
                     notice: "goal: none".to_string(),
+                    started: false,
                 });
             };
             state.complete();
             self.persist().map_err(|error| error.to_string())?;
             return Ok(GoalCommandResult {
                 notice: "goal: completed explicitly".to_string(),
+                started: false,
             });
         }
         // commands' broad compatibility parser treats `stop` as clear. zo's
@@ -499,47 +517,48 @@ impl GoalController {
                 _ => return Err("goal command did not parse as /goal".to_string()),
             }
         };
-        let explicitly_autonomous = first == "start";
-        self.apply_parsed(parsed, explicitly_autonomous, workspace_fingerprint)
+        self.apply_parsed(parsed, workspace_fingerprint)
     }
 
     #[allow(clippy::too_many_lines)] // `/goal`의 여덟 명령이 각 한 arm인 정본 dispatch.
     fn apply_parsed(
         &mut self,
         command: GoalCommand,
-        explicitly_autonomous: bool,
         workspace_fingerprint: Option<&str>,
     ) -> Result<GoalCommandResult, String> {
+        let mut started = false;
         let notice = match command {
             GoalCommand::Status | GoalCommand::History => self.status_report(),
             GoalCommand::Start { goal, options } => {
-                self.state = Some(GoalState::new(
-                    goal,
-                    &options,
-                    explicitly_autonomous,
-                    &self.limits,
-                ));
-                let state = self.state.as_ref().expect("goal was just installed");
-                if state.phase == GoalPhase::Running {
-                    let completion = state.until.as_ref().map_or_else(
-                        || format!("{} gate(s)", state.checks.len()),
-                        |_| "until condition".to_string(),
-                    );
-                    format!("goal: running · {completion} · four limits armed")
-                } else if state.phase == GoalPhase::Paused {
+                let state = GoalState::new(goal, &options, true, &self.limits);
+                // The one line says what was armed: how the run ends and the
+                // four limits; the session adds whether its turns may write.
+                let ends = if state.until.is_some() {
+                    "until condition".to_string()
+                } else if state.checks.is_empty() {
                     format!(
-                        "goal: saved · autonomous off ({})",
-                        state.pause_reason.as_deref().unwrap_or("paused")
+                        "no gate: ends after {} turns with no change, at a limit, or on /goal done",
+                        self.limits.max_stalled_turns
                     )
                 } else {
-                    "goal: saved · autonomous off (use /goal start <goal> --check <command>)"
-                        .to_string()
-                }
+                    format!("{} gate(s)", state.checks.len())
+                };
+                let notice = format!(
+                    "goal: running · {ends} · four limits armed (turns {} · continuations {} · output tokens {} · {}s)",
+                    state.max_assistant_turns,
+                    state.max_continuations,
+                    state.max_output_tokens,
+                    state.max_wall_clock_secs
+                );
+                self.state = Some(state);
+                started = true;
+                notice
             }
             GoalCommand::Verify => {
                 let Some(state) = self.state.as_mut() else {
                     return Ok(GoalCommandResult {
                         notice: "goal: none".to_string(),
+                        started: false,
                     });
                 };
                 if state.checks.is_empty() && state.until.is_none() {
@@ -572,6 +591,7 @@ impl GoalController {
                 let Some(state) = self.state.as_mut() else {
                     return Ok(GoalCommandResult {
                         notice: "goal: none".to_string(),
+                        started: false,
                     });
                 };
                 state.pause("stopped explicitly");
@@ -581,13 +601,13 @@ impl GoalController {
                 let Some(state) = self.state.as_mut() else {
                     return Ok(GoalCommandResult {
                         notice: "goal: none".to_string(),
+                        started: false,
                     });
                 };
+                // An ungated goal resumes too (t-122771): its run ends by the
+                // same stall rule, limits and `/goal done` as when it started.
                 if state.phase == GoalPhase::Completed {
                     "goal: already completed; edit or clear it before another run".to_string()
-                } else if state.checks.is_empty() && state.until.is_none() {
-                    state.pause("resume needs a --check gate or --until condition");
-                    "goal: autonomous off — no completion policy is configured".to_string()
                 } else if let Some(exhausted) = state.exhaustion() {
                     state.pause(exhausted.clone());
                     format!("goal: cannot resume — {exhausted}")
@@ -610,6 +630,7 @@ impl GoalController {
                 }
                 return Ok(GoalCommandResult {
                     notice: "goal: cleared".to_string(),
+                    started: false,
                 });
             }
             GoalCommand::Edit { goal } => {
@@ -622,7 +643,8 @@ impl GoalController {
                     ));
                     self.persist().map_err(|error| error.to_string())?;
                     return Ok(GoalCommandResult {
-                        notice: "goal: saved · autonomous off".to_string(),
+                        notice: "goal: saved · autonomous off (/goal resume starts it)".to_string(),
+                        started: false,
                     });
                 };
                 let was_running = state.phase == GoalPhase::Running;
@@ -646,7 +668,7 @@ impl GoalController {
             }
         };
         self.persist().map_err(|error| error.to_string())?;
-        Ok(GoalCommandResult { notice })
+        Ok(GoalCommandResult { notice, started })
     }
 
     /// 다음 자동 턴을 디스패치한다. 첫 action 뒤의 모든 턴은 continuation으로
@@ -809,11 +831,26 @@ impl GoalController {
                 }
                 GoalTurnKind::Action => {
                     state.action_turns = state.action_turns.saturating_add(1);
-                    state.pending = Some(if state.until.is_some() {
-                        GoalTurnKind::Condition
+                    if state.ungated() {
+                        // Nothing to check (t-122771): act again — after
+                        // `--every`, when it was given. Only the stall rule
+                        // above, a limit or the person ends this run.
+                        state.pending = Some(GoalTurnKind::Action);
+                        if let Some(seconds) = state.every_secs {
+                            let next_at = now.saturating_add(seconds.saturating_mul(1_000));
+                            state.next_at_unix_ms = Some(next_at);
+                            state.scheduled_trigger = Some(Trigger::Every { seconds });
+                            state.stop_clock();
+                        } else {
+                            state.scheduled_trigger = Some(Trigger::Immediate);
+                        }
                     } else {
-                        GoalTurnKind::Gate { index: 0 }
-                    });
+                        state.pending = Some(if state.until.is_some() {
+                            GoalTurnKind::Condition
+                        } else {
+                            GoalTurnKind::Gate { index: 0 }
+                        });
+                    }
                 }
                 GoalTurnKind::Gate { index } => {
                     let observation = gate.unwrap_or_else(|| GateObservation {
@@ -938,11 +975,14 @@ impl GoalController {
                 .next_at_unix_ms
                 .map(|at| format!(" · next {at}"))
                 .unwrap_or_default();
+            let gates = if state.ungated() {
+                "no gate".to_string()
+            } else {
+                format!("gates {}/{gates_total}", state.gates_passed)
+            };
             format!(
-                "on · action {} · gates {}/{} · stalled {} · todo {} · continuations {}/{} · turns {}/{} · tokens {}/{} · time {}s/{}s{}",
+                "on · action {} · {gates} · stalled {} · todo {} · continuations {}/{} · turns {}/{} · tokens {}/{} · time {}s/{}s{}",
                 state.action_turns,
-                state.gates_passed,
-                gates_total,
                 state.stalled_turns,
                 state.todo_completed,
                 state.continuations,
@@ -1130,10 +1170,19 @@ fn prompt_for(state: &GoalState, kind: &GoalTurnKind) -> String {
             } else {
                 ""
             };
-            format!(
-                "[zo:goal-action]\nPersistent goal: {}{changed}\n\nTake the next concrete actions toward this goal in this bounded turn. Preserve prior progress, do not ask the absent user a question, and do not declare the goal complete: the controller decides only from its explicit completion policy.",
-                state.objective
-            )
+            if state.ungated() {
+                // No gate will say the goal is met, so the model is told how
+                // the run ends: by turns that change nothing, or the person.
+                format!(
+                    "[zo:goal-action]\nPersistent goal: {}{changed}\n\nTake the next concrete actions toward this goal in this bounded turn. Preserve prior progress and do not ask the absent user a question. No gate checks this goal: when nothing is left to do toward it, say so and change nothing — the run stops after turns that change nothing, and only the person marks it done.",
+                    state.objective
+                )
+            } else {
+                format!(
+                    "[zo:goal-action]\nPersistent goal: {}{changed}\n\nTake the next concrete actions toward this goal in this bounded turn. Preserve prior progress, do not ask the absent user a question, and do not declare the goal complete: the controller decides only from its explicit completion policy.",
+                    state.objective
+                )
+            }
         }
         GoalTurnKind::Gate { index } => {
             let check = &state.checks[index];
@@ -1346,6 +1395,14 @@ mod tests {
             ),
             Some(GoalFooterStatus::Stalled)
         );
+        // The stall an ungated run ends with, as the status line cuts it.
+        assert_eq!(
+            footer_status_from_snapshot(
+                "ship (paused)",
+                "off · two unattended turns made no workspace, gate, or todo progr…",
+            ),
+            Some(GoalFooterStatus::Stalled)
+        );
         assert_eq!(
             footer_status_from_snapshot("ship (paused)", "off · output-token limit reached (8/8)"),
             Some(GoalFooterStatus::HitAutonomousLimits)
@@ -1470,20 +1527,219 @@ mod tests {
         (temp, GoalController::load(&transcript, None, false))
     }
 
+    /// What one turn of a goal left behind: the workspace before and after,
+    /// and nothing else — no gate, no block, no error.
+    fn turn_report(before: &str, after: &str) -> GoalTurnReport {
+        GoalTurnReport {
+            output_tokens: 1,
+            active_millis: 1,
+            workspace_before: before.to_string(),
+            workspace_fingerprint: after.to_string(),
+            gate: None,
+            permission_blocked: false,
+            question_blocked: false,
+            cancelled: false,
+            error: None,
+            todo_completed_delta: 0,
+        }
+    }
+
+    /// The person's report (t-122771, 11-20): `/goal <objective>` only saved
+    /// the goal and nothing started. Writing a goal starts it — with no gate,
+    /// its plan turn is the next one — and the one line says how the run
+    /// ends and what bounds it.
     #[test]
-    fn bare_goal_is_saved_but_only_start_enables_autonomy() {
+    fn a_bare_goal_starts_at_once_and_says_what_it_armed() {
         let (_temp, mut controller) = controller();
-        controller
-            .apply("ship it --check \"just verify\"", None)
-            .expect("save");
-        assert!(!controller.is_running());
+        let result = controller.apply("ship it", None).expect("start");
+        assert!(result.started);
+        assert!(controller.is_running());
         assert_eq!(controller.objective(), Some("ship it"));
-        controller
+        let limits = &controller.limits;
+        assert_eq!(
+            result.notice,
+            format!(
+                "goal: running · no gate: ends after {} turns with no change, at a limit, or on /goal done · four limits armed (turns {} · continuations {} · output tokens {} · {}s)",
+                limits.max_stalled_turns,
+                limits.max_assistant_turns,
+                limits.max_continuations,
+                limits.max_output_tokens,
+                limits.max_wall_clock_secs
+            )
+        );
+        assert!(controller.status_report().contains("(running) · autonomous: on · action 0 · no gate"));
+        let turn = controller.dispatch_next().expect("dispatch").expect("turn");
+        assert_eq!(turn.kind, GoalTurnKind::Plan);
+
+        // A gated start keeps its words, and its limits are named the same way.
+        let (_gated_temp, mut gated) = self::controller();
+        let result = gated
             .apply("start ship it --check \"just verify\" --max-turns 3 --no-plan", None)
             .expect("start");
-        assert!(controller.is_running());
+        assert!(result.started);
+        assert!(
+            result.notice.starts_with("goal: running · 1 gate(s) · four limits armed (turns 3 · "),
+            "{}",
+            result.notice
+        );
+        let turn = gated.dispatch_next().expect("dispatch").expect("turn");
+        assert_eq!(turn.kind, GoalTurnKind::Action);
+    }
+
+    /// `start` and its alias `set` start a goal with no gate as well: the
+    /// old refusal ("needs a --check gate") is gone with the save-only bare
+    /// form.
+    #[test]
+    fn start_and_set_start_a_goal_without_a_gate_too() {
+        for line in ["start ship it", "set ship it", "ship it --no-plan"] {
+            let (_temp, mut controller) = controller();
+            let result = controller.apply(line, None).expect(line);
+            assert!(result.started, "{line}: {}", result.notice);
+            assert!(controller.is_running(), "{line}: {}", result.notice);
+            assert_eq!(controller.objective(), Some("ship it"), "{line}");
+        }
+    }
+
+    /// The save-only road stays: `/goal edit <objective>` keeps a goal
+    /// without starting it, says how to start it, and `/goal resume` does.
+    #[test]
+    fn edit_saves_a_goal_without_starting_it() {
+        let (_temp, mut controller) = controller();
+        let result = controller.apply("edit ship it", None).expect("edit");
+        assert!(!result.started);
+        assert!(!controller.is_running());
+        assert_eq!(controller.objective(), Some("ship it"));
+        assert_eq!(result.notice, "goal: saved · autonomous off (/goal resume starts it)");
+        assert!(controller.dispatch_next().expect("dispatch").is_none());
+
+        let resumed = controller.apply("resume", None).expect("resume");
+        assert!(!resumed.started);
+        assert!(controller.is_running(), "{}", resumed.notice);
         let turn = controller.dispatch_next().expect("dispatch").expect("turn");
         assert_eq!(turn.kind, GoalTurnKind::Action);
+    }
+
+    /// With no gate the controller has nothing to observe the goal met by:
+    /// every turn after the plan is another action, the model is told how
+    /// the run ends, and the goal never completes itself — however many
+    /// turns change the workspace.
+    #[test]
+    fn an_ungated_goal_acts_again_and_never_completes_itself() {
+        let (_temp, mut controller) = controller();
+        controller.apply("ship it", None).expect("start");
+        let mut kinds = Vec::new();
+        for step in 0..4 {
+            let turn = controller.dispatch_next().expect("dispatch").expect("turn");
+            assert_eq!(controller.expected_gate(&turn), None);
+            if turn.kind == GoalTurnKind::Action {
+                assert!(turn.prompt.contains("No gate checks this goal"), "{}", turn.prompt);
+                assert!(!turn.prompt.contains("do not declare the goal complete"), "{}", turn.prompt);
+            }
+            kinds.push(turn.kind.clone());
+            controller
+                .record_turn(&turn, turn_report(&format!("w{step}"), &format!("w{}", step + 1)))
+                .expect("record");
+        }
+        assert_eq!(
+            kinds,
+            [GoalTurnKind::Plan, GoalTurnKind::Action, GoalTurnKind::Action, GoalTurnKind::Action]
+        );
+        assert!(controller.is_running());
+        assert!(!controller.status_report().contains("completed"));
+
+        // A gated action prompt keeps its words.
+        let (_gated_temp, mut gated) = self::controller();
+        gated.apply("start ship --check 'true' --no-plan", None).expect("start");
+        let turn = gated.dispatch_next().expect("dispatch").expect("turn");
+        assert!(turn.prompt.contains("do not declare the goal complete"), "{}", turn.prompt);
+    }
+
+    /// The run a read-only session cannot move ends by the stall rule: two
+    /// turns that change nothing pause it, and the footer says it stalled.
+    #[test]
+    fn an_ungated_goal_stops_after_two_turns_without_progress() {
+        use super::{footer_status_from_snapshot, GoalFooterStatus};
+
+        let (_temp, mut controller) = controller();
+        controller.limits.max_stalled_turns = 2;
+        controller.apply("ship it --no-plan", None).expect("start");
+        let first = controller.dispatch_next().expect("dispatch").expect("turn");
+        controller.record_turn(&first, turn_report("w", "w")).expect("record");
+        assert!(controller.is_running(), "one turn without change is not a stall yet");
+        let second = controller.dispatch_next().expect("dispatch").expect("turn");
+        controller.record_turn(&second, turn_report("w", "w")).expect("record");
+        assert!(!controller.is_running());
+        assert!(controller.dispatch_next().expect("dispatch").is_none());
+        let (goal, autonomous) = controller.status_fields();
+        assert!(autonomous.contains("turns made no workspace"), "{autonomous}");
+        assert_eq!(
+            footer_status_from_snapshot(&goal, &autonomous),
+            Some(GoalFooterStatus::Stalled)
+        );
+    }
+
+    /// `--every` spaces an ungated goal's actions: after one, the next waits.
+    #[test]
+    fn an_ungated_goal_waits_every_between_its_actions() {
+        let (_temp, mut controller) = controller();
+        controller
+            .apply("watch the deploy --every 30s --no-plan", None)
+            .expect("start");
+        let turn = controller.dispatch_next().expect("dispatch").expect("turn");
+        controller.record_turn(&turn, turn_report("a", "b")).expect("record");
+        assert!(controller.next_wakeup().is_some());
+        assert!(controller.dispatch_next().expect("dispatch").is_none(), "the next action waits 30s");
+        assert!(controller.status_report().contains("(running)"));
+    }
+
+    /// `/goal stop` pauses a goal started bare, `/goal resume` goes on with
+    /// it, and only `/goal done` records it achieved.
+    #[test]
+    fn stop_and_done_end_a_bare_goal() {
+        let (_temp, mut controller) = controller();
+        controller.apply("ship it", None).expect("start");
+        let stopped = controller.apply("stop", None).expect("stop");
+        assert_eq!(stopped.notice, "goal: stopped · objective preserved");
+        assert!(!controller.is_running());
+        assert!(controller.dispatch_next().expect("dispatch").is_none());
+        controller.apply("resume", None).expect("resume");
+        assert!(controller.is_running());
+        let done = controller.apply("done", None).expect("done");
+        assert_eq!(done.notice, "goal: completed explicitly");
+        assert!(!controller.is_running());
+        assert!(controller.status_report().contains("(completed)"));
+    }
+
+    /// Reopening a session starts nothing by itself: a goal an older zo left
+    /// saved (its bare `/goal <objective>` only saved) stays saved, and a
+    /// running one comes back paused until `/goal resume`.
+    #[test]
+    fn a_reopened_session_starts_no_goal_by_itself() {
+        use super::GoalState;
+        use commands::GoalOptions;
+
+        let (temp, mut controller) = controller();
+        let transcript = temp.path().join("session.jsonl");
+        let options = GoalOptions {
+            checks: vec!["just verify".to_string()],
+            ..GoalOptions::default()
+        };
+        controller.state = Some(GoalState::new("ship it".to_string(), &options, false, &controller.limits));
+        controller.persist().expect("persist the saved goal");
+        for resumed in [true, false] {
+            let mut loaded = GoalController::load(&transcript, Some("ship it"), resumed);
+            assert!(!loaded.is_running(), "resumed {resumed}");
+            assert!(loaded.status_report().contains("(saved)"), "resumed {resumed}");
+            assert!(loaded.dispatch_next().expect("dispatch").is_none(), "resumed {resumed}");
+        }
+
+        controller.apply("ship it", None).expect("start");
+        assert!(controller.is_running());
+        let mut loaded = GoalController::load(&transcript, Some("ship it"), true);
+        assert!(!loaded.is_running());
+        assert!(loaded.status_report().contains("(paused)"), "{}", loaded.status_report());
+        assert!(loaded.status_report().contains("session resumed"), "{}", loaded.status_report());
+        assert!(loaded.dispatch_next().expect("dispatch").is_none());
     }
 
     /// t-117004: with `--allow-writes` every goal turn but the plan keeps the
@@ -1838,12 +2094,18 @@ mod tests {
         assert!(!controller.is_running());
     }
 
+    /// Every axis stops a gated start and, since t-122771, a bare
+    /// `/goal <objective>` with no gate as well.
     #[test]
     fn every_autonomous_axis_has_a_finite_hard_stop() {
+        for start in ["start fix --check \"just verify\" --no-plan", "fix --no-plan"] {
+            every_axis_stops(start);
+        }
+    }
+
+    fn every_axis_stops(start: &str) {
         let (_temp, mut limits) = controller();
-        limits
-            .apply("start fix --check \"just verify\" --no-plan", None)
-            .expect("start");
+        limits.apply(start, None).expect("start");
         let state = limits.state.as_ref().expect("state");
         assert!(state.max_continuations > 0);
         assert!(state.max_assistant_turns > 0);
@@ -1852,9 +2114,7 @@ mod tests {
 
         for axis in ["continuations", "assistant turns", "tokens", "wall clock"] {
             let (_temp, mut bounded) = controller();
-            bounded
-                .apply("start fix --check \"just verify\" --no-plan", None)
-                .expect("start");
+            bounded.apply(start, None).expect("start");
             let state = bounded.state.as_mut().expect("state");
             match axis {
                 "continuations" => {
@@ -1869,8 +2129,8 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert!(bounded.dispatch_next().expect("dispatch").is_none(), "{axis}");
-            assert!(!bounded.is_running(), "{axis}");
+            assert!(bounded.dispatch_next().expect("dispatch").is_none(), "{start}: {axis}");
+            assert!(!bounded.is_running(), "{start}: {axis}");
         }
     }
 

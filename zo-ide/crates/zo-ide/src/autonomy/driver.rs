@@ -128,9 +128,10 @@ pub fn goal_event(notice: &str) -> Option<&'static str> {
     }
 }
 
-/// Explicitly armed `/goal start` turns until a gate succeeds or one of the
-/// limits / permission / no-change guards pauses it. There is no idle timer:
-/// when the goal is off this is never entered.
+/// The turns a `/goal <objective>` armed, until a gate succeeds (a goal with
+/// none never completes itself) or one of the limits / permission / no-change
+/// guards pauses it. There is no idle timer: when the goal is off this is
+/// never entered.
 async fn drive_goal<F: AutonomyFrontend>(front: &mut F) -> Drive {
     loop {
         if front.leaving() {
