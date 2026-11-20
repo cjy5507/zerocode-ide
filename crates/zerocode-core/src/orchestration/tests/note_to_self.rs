@@ -315,6 +315,60 @@ fn a_coordinators_own_notice_to_its_run_is_held_back_from_it_as_before() {
     );
 }
 
+/// Nor does `--notify pane:<its own pane>` reach a coordinator (I-t121651-1).
+/// The chair signs as its run, so in its own run its pane address has never
+/// spoken, and the line's letter there is refused rather than filed — the
+/// chair reads `run:<id>`, where its own words are held back. Test 4's pane
+/// is nobody's worker and sits in no chair.
+#[test]
+fn a_coordinators_notice_to_its_own_pane_address_is_refused_in_its_run() {
+    let mut bench = Bench::new();
+    let run_id = opened(&mut bench, "chair-pane-notice");
+    let address = format!(
+        "{PANE_ADDRESS_PREFIX}{}",
+        seat_of(&bench, agent_teams::LEADER_PANE)
+    );
+    let written = bench.ledger.run(&run_id).expect("the run").messages().len();
+
+    let planned = bench.at_argv(
+        agent_teams::LEADER_PANE,
+        [
+            "send",
+            "--to",
+            address.as_str(),
+            "--type",
+            "status",
+            "--body",
+            "zo line j-6: gate — passed (rc 0, 9s)",
+            "--retry-request",
+            "zo-line-j-6",
+            "--run",
+            run_id.as_str(),
+        ]
+        .map(str::to_string)
+        .to_vec(),
+    );
+    assert_ne!(
+        planned.reply.exit_code, 0,
+        "the chair's pane notice was filed: {}",
+        planned.reply.stdout
+    );
+    assert!(
+        planned
+            .reply
+            .stderr
+            .contains("a seat is answerable once it has spoken"),
+        "{}",
+        planned.reply.stderr
+    );
+    assert_eq!(
+        bench.ledger.run(&run_id).expect("the run").messages().len(),
+        written,
+        "the refused notice wrote a row"
+    );
+    assert_eq!(bench.json("check")["count"], 0);
+}
+
 /// A word in a thread is no note. A worker that answers its own notice files
 /// the answer at its own address, and the answer is not handed back to it: a
 /// note does not start a round of a worker answering itself.
