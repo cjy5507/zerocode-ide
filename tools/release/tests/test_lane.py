@@ -330,8 +330,25 @@ class Syntax(LaneCase):
         named = subprocess.run([BASH, "-c", parse, posix(LANE), posix(log)], capture_output=True, text=True,
                                check=True).stdout.split()
         # A red recipe that named a test keeps its name (the lane's normal day); one that named nothing
-        # is red for real; a green one names nothing; a failures block cut short stops at its recipe.
-        self.assertEqual(named, ["a::tests::named_before_the_cut", "pane::tests::a_flake", "recipe:shell-test"])
+        # is red for real; a green one names nothing; a failures block cut short stops at its recipe. One a
+        # signal ended (rc 137) is red for real beside the name it gave: the tests after the stop never
+        # ran, so no solo pass of that name clears it (t-123004, the review's R2).
+        self.assertEqual(named, ["a::tests::named_before_the_cut", "pane::tests::a_flake", "recipe:cut-short",
+                                 "recipe:shell-test"])
+
+    def test_a_named_red_recipe_below_a_signals_rc_keeps_only_its_names(self):
+        # t-123004: the lane's normal day stays a flake to judge solo. A red recipe that named its test and
+        # ended under 128 gives that name alone, at rc 2 as at 101 (a number, not text: "2" sorts after
+        # "128"); from 128 up, as verify-every-recipe.sh stops at a signal's end, it is red for real.
+        log = Path(self._tmp) / "gate.log"
+        log.write_text("".join(f"==> verify recipe r{rc}\nfailures:\n    t::named_at_{rc}\n\ntest result: FAILED.\n"
+                               f"error: recipe `r{rc}` failed on line 1 with exit code {rc}\n"
+                               f"<== verify recipe r{rc} rc={rc} 1s\n" for rc in (1, 2, 101, 127, 128)))
+        parse = ('eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"')
+        named = subprocess.run([BASH, "-c", parse, posix(LANE), posix(log)], capture_output=True, text=True,
+                               check=True).stdout.split()
+        self.assertEqual(sorted(named), ["recipe:r128", "t::named_at_1", "t::named_at_101", "t::named_at_127",
+                                         "t::named_at_128", "t::named_at_2"])
 
     def test_the_lane_parser_reads_the_closing_lines_as_nothing(self):
         # The `<==` line sits between one recipe's failure and the next `==>`
@@ -3823,6 +3840,63 @@ class Quiet(LaneCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.lane.status()["outcome"], "green")
         self.assertEqual(len([line for line in self.lane.stub_lines() if " solo zo " in line]), 3)
+
+    def named_flake_then(self, end):
+        """The lane's own gate over `unit`, which names a listed flake (it passes solo) and then ENDs, and
+        `after`: the run, its status and the justfile's folder."""
+        work = self.justdir([("unit", f"printf 'failures:\\n    pane::tests::{FLAKE_ZO}\\n\\ntest result: FAILED.\\n'; {end}"),
+                             ("after", "echo after > after.txt")])
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(GATE_ZO_JUSTDIR=posix(work), SOLO_RCS="0")
+        return r, self.lane.status(), work
+
+    def test_a_recipe_a_signal_ended_after_naming_its_flake_is_red_for_real_on_the_lanes_own_gate(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        # t-123004, the review's R2: just dies of SIGKILL after `unit` named its flake, so the gate stops
+        # there (rc 137) and `after` never runs. Before, the flake's three green solo runs cleared the gate;
+        # a signal's end is red for real whatever the recipe named (t-83513), by its own closing line.
+        r, st, work = self.named_flake_then("kill -KILL $PPID")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(st["outcome"], "red", st)
+        self.assertIn("zo:recipe:unit", st["reason"])
+        self.assertFalse([line for line in self.lane.stub_lines() if " solo " in line], "nothing is judged solo when a red is real")
+        self.assertFalse((work / "after.txt").exists(), "the gate stopped at the signal")
+
+    def test_the_same_recipe_ended_red_by_its_tests_is_still_judged_solo_on_the_lanes_own_gate(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        # The control of the test above, the lane's normal day: the same name, the recipe red by its tests
+        # (rc 101) and the gate going on to `after` -- judged solo three times, and green.
+        r, st, work = self.named_flake_then("exit 101")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(st["outcome"], "green", st)
+        self.assertEqual(len([line for line in self.lane.stub_lines() if " solo zo " in line]), 3)
+        self.assertTrue((work / "after.txt").exists())
+
+    def test_a_closing_line_after_an_unfinished_line_is_read_on_the_lanes_own_gate(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        # t-123004, the review's R1: `shell-test` names nothing and ends mid-line (a test said `test x ... `)
+        # with no word after it. A just killed by a signal is mostly followed by a line of the shell's
+        # (`Killed: 9`) or its own (`was terminated`, `interrupted by SIGINT`); `[no-exit-message]` and rc 137
+        # stand in for a death nobody announced. Its closing line used to follow on that line, where the
+        # parser never reads it, and `unit`'s flake, judged solo, cleared the gate; it now starts a line.
+        work = self.lane.tmp / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            "verify: unit shell-test\n\n"
+            f"unit:\n    printf 'failures:\\n    pane::tests::{FLAKE_ZO}\\n\\ntest result: FAILED.\\n'; exit 101\n\n"
+            "[no-exit-message]\nshell-test:\n    printf 'test shell::tests::a_resize ... '; exit 137\n")
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(GATE_ZO_JUSTDIR=posix(work), SOLO_RCS="0")
+        st = self.lane.status()
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(st["outcome"], "red", st)
+        self.assertIn("zo:recipe:shell-test", st["reason"])
+        self.assertFalse([line for line in self.lane.stub_lines() if " solo " in line], "nothing is judged solo when a red is real")
+        gate_log = (self.lane.home / "out" / f"gate-zo-{SHA_A[:8]}.log").read_text()
+        self.assertIn("test shell::tests::a_resize ... \n<== verify recipe shell-test rc=137 ", gate_log)
 
     def test_a_recipe_ended_at_its_cap_stays_red_though_the_tests_it_named_pass_solo(self):
         if shutil.which("just") is None:

@@ -667,6 +667,17 @@ class FlakeJudgment(ReceiptCase):
         self.assertIn("is red for real as the release lane's flakes phase reads it: root:recipe:shell-test",
                       self.refused(lambda: coord_receipt.make(jobs)))
 
+    def test_an_entry_a_signal_ended_is_red_for_real_though_it_named_a_flake(self):
+        # t-123004, the review's R2: `test` named a flake, and then a signal ended it -- the recipe's shell
+        # gave 128 + 9 and just said so. The tests after the stop never ran, so the flake's three green solo
+        # runs clear nothing: red for real by the entry's own closing line, as the lane reads its own gate.
+        gate = {"g1": [("pii-check", "just pii-check", 0), ("test", "just test", 137), ("doc", "just doc", 0)]}
+        jobs = self.gate(gate, rc={"g1": 0},
+                         said={"test": receipt_fixture.cargo_failures([FLAKE]).replace("exit code 101", "exit code 137")})
+        receipt_fixture.judged(jobs[0], solo("root", FLAKE))
+        self.assertIn("red for real as the release lane's flakes phase reads it: root:recipe:test",
+                      self.refused(lambda: coord_receipt.make(jobs)))
+
     def test_two_red_entries_that_each_name_their_flake_are_each_judged(self):
         # The lane's normal day after P-1: every red entry that names its own tests is judged solo.
         gate = {"g1": [("test", "just test", 101), ("shell-test", "just shell-test", 101)]}
@@ -810,9 +821,14 @@ RELEASE = SCRIPT.parent
 GATE_TOOLS = ("coord-gate.sh", "lane-env.sh", "lane.sh", "verify-every-recipe.sh")
 FAKE_JUST = """#!/bin/sh
 # just, as the gate script calls it: each call said, red for a recipe red.txt names — after printing
-# said-<recipe>.txt, when there is one (a cargo failures block), and then just's own last word.
+# said-<recipe>.txt, when there is one (a cargo failures block), and then just's own last word — and
+# dead of SIGKILL after that print for a recipe killed.txt names (just killed: no last word).
 echo "$(pwd -P) $*" >> "$HOME/just-calls.txt"
 echo "recipe $1 ran"
+if grep -qx "$1" "$HOME/killed.txt" 2>/dev/null; then
+  if [ -f "$HOME/said-$1.txt" ]; then cat "$HOME/said-$1.txt"; fi
+  kill -KILL $$
+fi
 if grep -qx "$1" "$HOME/stray.txt" 2>/dev/null; then echo stray > stray-file; fi
 if grep -qx "$1" "$HOME/edit.txt" 2>/dev/null; then echo edited >> notes.txt; fi
 if grep -qx "$1" "$HOME/red.txt" 2>/dev/null; then
@@ -1003,6 +1019,21 @@ class GateScript(ReceiptCase):
         self.assertIn("real root:recipe:alpha", ran.stdout.splitlines())
         self.assertEqual(self.solo_lines(ran), [], "nothing is judged solo when a red is real")
         self.assertTrue(ran.stdout.splitlines()[-1].startswith("verdict: bad=2 (root on "), ran.stdout)
+
+    def test_an_entry_a_signal_ended_after_naming_a_flake_keeps_the_job_red(self):
+        # t-123004, the review's R2 on the gate script: `beta` names a flake that passes alone, and then just
+        # itself dies of SIGKILL (RC beta=137). What would have run after the stop never spoke: red for real,
+        # and nothing is judged solo.
+        (self.tmp / "killed.txt").write_text("beta\n")
+        (self.tmp / "said-beta.txt").write_text(receipt_fixture.cargo_failures([FLAKE], recipe="beta").split("error: recipe")[0])
+        ran = self.gate("--who", "coord-l9-root", "--logs", str(self.logs), "--calm-wait", "0", "root",
+                        target=self.tmp / "slot-target")
+        self.assertEqual(ran.returncode, 1, ran.stdout + ran.stderr)
+        self.assertIn("RC beta=137", [line.split(" (")[0] for line in ran.stdout.splitlines() if line.startswith("RC ")])
+        self.assertIn("real root:recipe:beta", ran.stdout.splitlines())
+        self.assertEqual(self.solo_lines(ran), [], "nothing is judged solo when a red is real")
+        self.assertFalse((self.tmp / "cargo-calls.txt").exists(), "no solo run")
+        self.assertTrue(ran.stdout.splitlines()[-1].startswith("verdict: bad=1 (root on "), ran.stdout)
 
     def test_a_recipe_that_failed_without_naming_a_test_is_red_for_real_and_nothing_runs_solo(self):
         ran = self.flaky(said=receipt_fixture.unnamed_failure("beta"))
