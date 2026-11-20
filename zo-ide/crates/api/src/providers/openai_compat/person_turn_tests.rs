@@ -132,16 +132,16 @@ fn tool_result(call_id: &str, text: &str) -> InputMessage {
 
 /// One request the fake saw: where it went and what it carried.
 #[derive(Debug, Clone)]
-struct Seen {
-    path: String,
-    body: Value,
+pub(super) struct Seen {
+    pub(super) path: String,
+    pub(super) body: Value,
 }
 
-type Answer = Box<dyn Fn(&str, &Value, &[Seen]) -> (u16, &'static str, String) + Send + Sync>;
+pub(super) type Answer = Box<dyn Fn(&str, &Value, &[Seen]) -> (u16, &'static str, String) + Send + Sync>;
 
 /// A fake HTTP endpoint on loopback: every request is kept, and `answer`
 /// gives its status, content type and body.
-async fn fake_endpoint(answer: Answer) -> (String, Arc<Mutex<Vec<Seen>>>) {
+pub(super) async fn fake_endpoint(answer: Answer) -> (String, Arc<Mutex<Vec<Seen>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -271,7 +271,7 @@ fn answer_stream() -> String {
 /// What OpenAI answered on 2026-11-20, for a fake that takes function tools
 /// on `/v1/responses` only: an effort the model does not take is refused on
 /// either wire, and Chat refuses tools with an effort.
-fn like_openai(call_id: &'static str) -> Answer {
+pub(super) fn like_openai(call_id: &'static str) -> Answer {
     Box::new(move |path, body, seen| match path {
         "/v1/chat/completions" => {
             if body["reasoning_effort"] == "max" {
@@ -300,7 +300,7 @@ fn like_openai(call_id: &'static str) -> Answer {
 
 /// A client for a person's provider row at `base_url`, the way the window
 /// writes one for an OpenAI API key.
-fn client_at(base_url: &str) -> OpenAiCompatClient {
+pub(super) fn client_at(base_url: &str) -> OpenAiCompatClient {
     OpenAiCompatClient::new(
         "test-key",
         OpenAiCompatConfig::from_user("OpenAI", base_url, Some("ZO_TEST_OPENAI_KEY"), true),
@@ -313,7 +313,7 @@ fn client_at(base_url: &str) -> OpenAiCompatClient {
     )
 }
 
-async fn drain(mut stream: MessageStream) -> Result<Vec<StreamEvent>, ApiError> {
+pub(super) async fn drain(mut stream: MessageStream) -> Result<Vec<StreamEvent>, ApiError> {
     let mut events = Vec::new();
     while let Some(event) = stream.next_event().await? {
         events.push(event);
@@ -334,7 +334,7 @@ fn text_of(events: &[StreamEvent]) -> String {
         .collect()
 }
 
-fn tool_calls_of(events: &[StreamEvent]) -> Vec<(String, String)> {
+pub(super) fn tool_calls_of(events: &[StreamEvent]) -> Vec<(String, String)> {
     events
         .iter()
         .filter_map(|event| match event {
@@ -367,7 +367,7 @@ fn replay_of(events: &[StreamEvent]) -> Option<Value> {
     })
 }
 
-fn effort_on(seen: &Seen) -> Option<&str> {
+pub(super) fn effort_on(seen: &Seen) -> Option<&str> {
     seen.body
         .get("reasoning_effort")
         .or_else(|| seen.body.pointer("/reasoning/effort"))

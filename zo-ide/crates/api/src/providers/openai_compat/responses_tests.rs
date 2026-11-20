@@ -2,7 +2,8 @@
 //! is put on, the body, the two refusals read, and what one endpoint said.
 
 use super::person_turn_tests::{
-    EFFORT_REFUSAL, MODEL, TOOLS_REFUSAL, bash_tool, sse, turn, usage, user, with_subscription_row,
+    EFFORT_REFUSAL, MODEL, TOOLS_REFUSAL, bash_tool, client_at, drain, effort_on, fake_endpoint,
+    like_openai, sse, tool_calls_of, turn, usage, user, with_subscription_row,
 };
 use super::responses_wire::{
     self, Learned, ResponsesDecoder, Wire, api_responses_body, clamp_effort, effort_in,
@@ -262,4 +263,30 @@ fn pictures_on_responses_follow_the_endpoint_as_on_chat() {
     blind.supports_vision = false;
     let placeholder = api_responses_body(&request, blind, true);
     assert_eq!(placeholder["input"][0]["content"][0]["type"], json!("input_text"));
+}
+
+/// OpenAI's own API puts the person's first request on `/responses` at the
+/// catalog row's `max`; a refusal of `reasoning.effort` sends it again once at
+/// the highest rung it names. The official address is the one wire decision a
+/// loopback fake cannot take, so the endpoint's having said that its tools go
+/// to `/responses` stands in for it here.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_refused_effort_on_responses_goes_again_at_the_rung_it_names() {
+    let _env = with_subscription_row();
+    let (base_url, seen) = fake_endpoint(like_openai("call_t121998_b")).await;
+    responses_wire::learn_responses(&base_url, MODEL);
+    let events = drain(
+        client_at(&base_url)
+            .stream_message(&turn(vec![user("hi")]))
+            .await
+            .expect("the step is answered"),
+    )
+    .await
+    .expect("the step streams to its end");
+    assert_eq!(tool_calls_of(&events), vec![("call_t121998_b".to_string(), "bash".to_string())]);
+    let seen = seen.lock().expect("seen");
+    let route: Vec<(&str, Option<&str>)> =
+        seen.iter().map(|request| (request.path.as_str(), effort_on(request))).collect();
+    assert_eq!(route, vec![("/v1/responses", Some("max")), ("/v1/responses", Some("xhigh"))]);
 }
