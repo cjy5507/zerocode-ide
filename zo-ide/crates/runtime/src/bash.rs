@@ -470,14 +470,37 @@ pub fn timeout_stderr_with_background_advice(
     background: Option<TaskReach>,
 ) -> String {
     let shared = timeout_stderr(effective_timeout_ms);
-    let kept = match background {
-        Some(TaskReach::TaskTools) => "it then keeps running and its output stays readable with TaskOutput(task_id).",
-        Some(TaskReach::Completion) => "it then keeps running and its output comes back to you when it exits.",
-        None => "it then keeps running, but its output is not captured.",
-    };
+    let kept = kept_in_background(background);
     format!(
         "{shared} If it is not expected to exit on its own, re-run it with \
          `run_in_background: true` — {kept}"
+    )
+}
+
+/// What a re-run with `run_in_background` keeps on the calling path — the
+/// promise [`timeout_stderr_with_background_advice`] explains.
+fn kept_in_background(background: Option<TaskReach>) -> &'static str {
+    match background {
+        Some(TaskReach::TaskTools) => "it then keeps running and its output stays readable with TaskOutput(task_id).",
+        Some(TaskReach::Completion) => "it then keeps running and its output comes back to you when it exits.",
+        None => "it then keeps running, but its output is not captured.",
+    }
+}
+
+/// What a run says when its shell exited while a process it left running in
+/// the background (`&`, `nohup`) still held its output: the run ended it the
+/// way a timeout does, [`BACKGROUND_DRAIN_GRACE`] after the shell, instead of
+/// waiting out the timeout. A process started with `run_in_background` writes
+/// its output to the session, which stops reading it when it ends, so one that
+/// must outlive the session writes to a file.
+fn held_output_stderr(background: Option<TaskReach>) -> String {
+    format!(
+        "The command's shell finished, but a process it left running in the background still \
+         held the command's output, so that process was ended after {} s. Start what must keep \
+         running (a server, a watcher) with `run_in_background: true` — {} If it must keep \
+         running after this session ends, send its output to a file (`> log 2>&1`).",
+        BACKGROUND_DRAIN_GRACE.as_secs(),
+        kept_in_background(background),
     )
 }
 
@@ -1138,28 +1161,39 @@ async fn execute_bash_async(
     // once a stream outgrows the in-memory cap (see `RawSpill`).
     let spill = RawSpill::shared();
     let collect_all = Box::pin(async {
-        let (out, err) = tokio::join!(
-            read_capped(
-                stdout_reader,
-                MAX_OUTPUT_BYTES,
-                TAIL_OUTPUT_BYTES,
-                live_output.clone(),
-                crate::live_output::LiveOutputWriter::append_stdout,
-                &spill,
-                SpillStream::Stdout,
-            ),
-            read_capped(
-                stderr_reader,
-                MAX_OUTPUT_BYTES,
-                TAIL_OUTPUT_BYTES,
-                live_output,
-                crate::live_output::LiveOutputWriter::append_stderr,
-                &spill,
-                SpillStream::Stderr,
-            ),
-        );
+        let streams = async {
+            tokio::join!(
+                read_capped(
+                    stdout_reader,
+                    MAX_OUTPUT_BYTES,
+                    TAIL_OUTPUT_BYTES,
+                    live_output.clone(),
+                    crate::live_output::LiveOutputWriter::append_stdout,
+                    &spill,
+                    SpillStream::Stdout,
+                ),
+                read_capped(
+                    stderr_reader,
+                    MAX_OUTPUT_BYTES,
+                    TAIL_OUTPUT_BYTES,
+                    live_output,
+                    crate::live_output::LiveOutputWriter::append_stderr,
+                    &spill,
+                    SpillStream::Stderr,
+                ),
+            )
+        };
+        // Both streams to their end — unless the leader has exited and a
+        // process it left running still holds them past the grace
+        // (`held_after_its_leader`): `None`, and the run is cut below the way
+        // its deadline cuts it, with the leader still unreaped.
+        let (out, err) = tokio::select! {
+            biased;
+            streams = streams => streams,
+            () = held_after_its_leader(child_pid) => return Ok::<_, io::Error>(None),
+        };
         let status = reap_run_leader(&mut child, child_pid).await;
-        Ok::<_, io::Error>((out?, err?, status?))
+        Ok::<_, io::Error>(Some((out?, err?, status?)))
     });
 
     // The deadline is unconditional: a model-supplied `timeout` (ms) stays
@@ -1170,29 +1204,31 @@ async fn execute_bash_async(
     // can wedge the run. `run_in_background` commands early-return above and
     // stay exempt.
     let effective_timeout_ms = resolve_bash_timeout_ms(input.timeout);
-    let output_result = if let Ok(result) =
-        timeout(Duration::from_millis(effective_timeout_ms), collect_all).await
-    {
-        let (stdout_cap, stderr_cap, status) = result?;
-        (stdout_cap, stderr_cap, status, false)
-    } else {
-        // Timeout: end the group of this run while its leader is still
-        // registered, so backgrounded grandchildren are reaped too, then return.
-        // Dropping `child` triggers `kill_on_drop` as the leader backstop (WI-G).
-        #[cfg(unix)]
-        end_registered_group(child_pid).await;
-        #[cfg(windows)]
-        end_process_tree(child_pid).await;
-        spill
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .give_up();
-        return Ok(timed_out_output(
-            &input,
-            effective_timeout_ms,
-            background,
-            sandbox_status,
-        ));
+    let output_result = match timeout(Duration::from_millis(effective_timeout_ms), collect_all).await {
+        Ok(Ok(Some((stdout_cap, stderr_cap, status)))) => (stdout_cap, stderr_cap, status, false),
+        Ok(Err(error)) => return Err(error),
+        // The run is cut: its deadline passed (`Err`), or its leader exited
+        // while a process it left running still held its output (`Ok(None)`).
+        // Either way: end the group of this run while its leader is still
+        // registered, so backgrounded grandchildren are reaped too, then
+        // return. Dropping `child` triggers `kill_on_drop` as the leader
+        // backstop (WI-G).
+        cut => {
+            let stderr = if cut.is_ok() {
+                held_output_stderr(background)
+            } else {
+                timeout_stderr_with_background_advice(effective_timeout_ms, background)
+            };
+            #[cfg(unix)]
+            end_registered_group(child_pid).await;
+            #[cfg(windows)]
+            end_process_tree(child_pid).await;
+            spill
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .give_up();
+            return Ok(cut_output(&input, stderr, sandbox_status));
+        }
     };
 
     let (stdout_cap, stderr_cap, status, interrupted) = output_result;
@@ -1231,16 +1267,17 @@ async fn execute_bash_async(
     })
 }
 
-/// The result of a run the deadline reaped: no streams, the timeout advice on
-/// stderr, and `interrupted` so the caller knows nothing finished.
-fn timed_out_output(
+/// The result of a run that was cut — by its deadline, or because a process
+/// its exited leader left running still held its output: no streams, `stderr`
+/// saying why and what to do instead, and `interrupted` so the caller knows
+/// nothing finished.
+fn cut_output(
     input: &BashCommandInput,
-    effective_timeout_ms: u64,
-    background: Option<TaskReach>,
+    stderr: String,
     sandbox_status: SandboxStatus,
 ) -> BashCommandOutput {
     BashCommandOutput {
-        stderr: timeout_stderr_with_background_advice(effective_timeout_ms, background),
+        stderr,
         interrupted: true,
         dangerously_disable_sandbox: input.dangerously_disable_sandbox,
         return_code_interpretation: Some(CommandEnding::timed_out_word()),
@@ -1576,12 +1613,123 @@ pub fn interrupt_foreground_bash(_session_id: Option<&str>) -> usize {
     0
 }
 
+/// How often a run's leader is looked at for having exited while its output is
+/// still open — asked without reaping it ([`LeaderWatch`]).
+#[cfg(unix)]
+const BASH_LEADER_LOOK_EVERY: Duration = Duration::from_millis(100);
+
+/// Resolves once the run's leader has exited and its output pipes are still
+/// open [`BACKGROUND_DRAIN_GRACE`] later: a process the command left running
+/// in the background (`&`, `nohup`) holds them, and waiting longer only waits
+/// out the timeout. Output that trails its leader by less than the grace is
+/// still read in full. Never resolves where the host cannot tell an exited
+/// leader without reaping it, and there the run waits as it always did.
+async fn held_after_its_leader(pid: Option<u32>) {
+    #[cfg(unix)]
+    {
+        if let Some(watch) = pid.and_then(LeaderWatch::new) {
+            while !watch.exited() {
+                tokio::time::sleep(BASH_LEADER_LOOK_EVERY).await;
+            }
+            tokio::time::sleep(BACKGROUND_DRAIN_GRACE).await;
+            return;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+    std::future::pending::<()>().await;
+}
+
+/// Whether a run's leader has exited, asked WITHOUT reaping it: the leader
+/// stays unreaped until its group is ended, so its pid still names that group
+/// (t-19897). Linux asks `waitid` with `WNOWAIT`; macOS, where `waitpid`
+/// refuses `WNOWAIT`, has the kernel queue tell it of the exit.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+struct LeaderWatch {
+    pid: nix::unistd::Pid,
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+impl LeaderWatch {
+    fn new(pid: u32) -> Option<Self> {
+        Some(Self { pid: nix::unistd::Pid::from_raw(i32::try_from(pid).ok()?) })
+    }
+
+    fn exited(&self) -> bool {
+        use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
+        matches!(
+            waitid(
+                Id::Pid(self.pid),
+                WaitPidFlag::WEXITED | WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT,
+            ),
+            Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct LeaderWatch {
+    /// `None` once the exit is known: a leader that had already exited when
+    /// it was watched, which the kernel refuses to watch.
+    queue: Option<nix::sys::event::Kqueue>,
+}
+
+#[cfg(target_os = "macos")]
+impl LeaderWatch {
+    /// A poll that does not wait.
+    const NOW: nix::libc::timespec = nix::libc::timespec { tv_sec: 0, tv_nsec: 0 };
+
+    fn new(pid: u32) -> Option<Self> {
+        use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent, Kqueue};
+        let queue = Kqueue::new().ok()?;
+        let exit = KEvent::new(
+            usize::try_from(pid).ok()?,
+            EventFilter::EVFILT_PROC,
+            EventFlag::EV_ADD | EventFlag::EV_ONESHOT,
+            FilterFlag::NOTE_EXIT,
+            0,
+            0,
+        );
+        match queue.kevent(&[exit], &mut [], Some(Self::NOW)) {
+            Ok(_) => Some(Self { queue: Some(queue) }),
+            // The leader this run holds unreaped has already exited.
+            Err(nix::errno::Errno::ESRCH) => Some(Self { queue: None }),
+            Err(_) => None,
+        }
+    }
+
+    fn exited(&self) -> bool {
+        use nix::sys::event::{EventFilter, EventFlag, FilterFlag, KEvent};
+        let Some(queue) = &self.queue else {
+            return true;
+        };
+        let mut told = [KEvent::new(0, EventFilter::EVFILT_PROC, EventFlag::empty(), FilterFlag::empty(), 0, 0)];
+        queue.kevent(&[], &mut told, Some(Self::NOW)).is_ok_and(|events| events > 0)
+    }
+}
+
+/// No way to ask without reaping here: the run waits as it always did.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
+struct LeaderWatch;
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
+impl LeaderWatch {
+    fn new(_pid: u32) -> Option<Self> {
+        None
+    }
+
+    fn exited(&self) -> bool {
+        false
+    }
+}
+
 /// Reaps a run's leader once its output pipes have closed (t-19897). On Unix the
 /// registry lock is held while the leader is tried, and the run's registration is
 /// taken out in the same breath as the reap, so a cancel can only ever name a pid
 /// that is still unreaped. The leader is not reaped while its pipes are open: a
 /// backgrounded job's output stays in the result, and its group is ended only by
-/// a timeout or a cancel.
+/// a timeout, a cancel, or its output still held past the grace after the leader
+/// exited ([`held_after_its_leader`]).
 async fn reap_run_leader(
     child: &mut tokio::process::Child,
     pid: Option<u32>,
@@ -2055,6 +2203,50 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_group_empty(leader);
+    }
+
+    /// A process the command left running in the background that still holds
+    /// its output once the shell has exited — `cd dir && server … &` keeps the
+    /// pipes in the subshell bash forks for the list — ends the run
+    /// `BACKGROUND_DRAIN_GRACE` after the shell instead of at the timeout. It is
+    /// the timeout's own ending, reached early: interrupted, no streams, the
+    /// group ended before its leader is reaped (t-19897), with words that say
+    /// what held the run and what to start instead (t-120813).
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn a_background_process_holding_the_output_ends_the_run_after_the_grace_not_the_timeout() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let pidfile = std::env::temp_dir().join(format!("zo-held-output-{}-{unique}.pid", std::process::id()));
+        let command = format!("cd / && sleep 30 & echo $$ $! > {}; exit 0", pidfile.display());
+
+        let mark = plugins::bounded_child::trace::mark();
+        let started = Instant::now();
+        let output = execute_bash(unsandboxed(&command, 15_000)).expect("bash command should execute");
+        let took = started.elapsed();
+        let text = std::fs::read_to_string(&pidfile).expect("pidfile written");
+        let _ = std::fs::remove_file(&pidfile);
+        let mut pids = text.split_whitespace().map(|word| word.parse::<u32>().expect("valid pid"));
+        let leader = pids.next().expect("leader pid");
+        let held_by = nix::unistd::Pid::from_raw(i32::try_from(pids.next().expect("background pid")).expect("pid fits"));
+
+        assert!(took < Duration::from_secs(10), "the run waited out its timeout: {took:?}");
+        assert!(took >= BACKGROUND_DRAIN_GRACE, "output may trail its shell by the grace: {took:?}");
+        assert!(output.interrupted, "nothing finished, as at the timeout");
+        assert!(output.stdout.is_empty(), "no stream comes back, as at the timeout: {:?}", output.stdout);
+        assert!(
+            output.stderr.contains("still held the command's output") && output.stderr.contains("`run_in_background: true`"),
+            "the run says what held it and what to start instead: {}",
+            output.stderr
+        );
+        plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
+        let until = Instant::now() + Duration::from_secs(5);
+        while nix::sys::signal::kill(held_by, None).is_ok() {
+            assert!(Instant::now() < until, "the process that held the output outlived its group");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_group_empty(i32::try_from(leader).expect("leader pid fits"));
     }
 
     /// A run whose leader exits first while a grandchild still holds the output
