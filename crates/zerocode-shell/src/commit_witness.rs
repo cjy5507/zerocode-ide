@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use zerocode_core::host::{LocalVcs, Vcs, Within};
 use zerocode_core::orchestration::coordinator_take::{
-    BaseSeen, CommitSeen, CommitsSeen, PatchSeen, RangeSeen,
+    BaseSeen, CommitSeen, CommitsSeen, PatchSeen, RELEASE_REMOTE_FLAG, RangeSeen,
 };
 
 /// How long one git question may take before it counts as no answer. Every question here reads
@@ -20,9 +20,10 @@ use zerocode_core::orchestration::coordinator_take::{
 /// as loose objects nothing points to, which `git gc` takes away (t-98182 r4, review t-99233 P3-C).
 const GIT_BUDGET: Duration = Duration::from_secs(10);
 
-/// What git says in `repo` about each of `commits`: the full hash, whether `base` holds it, and
-/// the first release tag matching `tags` that does — the last two asked only of a commit git
-/// knows, and the tag only of one the base holds when a base is named.
+/// What git says in `repo` about each of `commits`: the full hash, whether `base` holds it, and the
+/// first release tag matching `tags` that holds it and that the remote `release` names holds
+/// ([`Releases`]) — the last two asked only of a commit git knows, and the tag only of one the base
+/// holds. With no `release` named no release is read, and the commit says why (t-119569).
 pub(crate) fn see(
     repo: &Path,
     commits: &[String],
@@ -41,7 +42,7 @@ fn see_with(
     commits: &[String],
     base: Option<&str>,
     tags: Option<&str>,
-    _release: Option<&str>,
+    release: Option<&str>,
 ) -> CommitsSeen {
     let mut seen = CommitsSeen {
         repo: repo.display().to_string(),
@@ -55,6 +56,7 @@ fn see_with(
         ..CommitsSeen::default()
     };
     let base_head = seen.base.as_ref().and_then(|base| base.head.clone());
+    let mut releases = Releases::new(vcs, repo, tags, base, release);
     for named in commits {
         let Some(full) = resolve(vcs, repo, named) else {
             continue;
@@ -68,9 +70,9 @@ fn see_with(
             (Some(full), Some(head)) => holds(vcs, repo, head, full),
             _ => None,
         };
-        let tag = match (&full, tags) {
-            (Some(full), Some(tags)) if in_base != Some(false) => first_tag(vcs, repo, full, tags),
-            _ => None,
+        let (tag, unpublished) = match &full {
+            Some(full) if in_base == Some(true) => releases.release_of(full),
+            _ => (None, None),
         };
         seen.insert(
             named,
@@ -78,7 +80,7 @@ fn see_with(
                 full,
                 in_base,
                 tag,
-                unpublished: None,
+                unpublished,
             },
         );
     }
@@ -91,11 +93,9 @@ fn see_with(
 /// change now ([`change_of`]: the same change by the same author at the same moment under the same
 /// subject, as a cherry-pick or a rebase keeps it); the merges inside the range and its commits
 /// that change nothing, apart; the commit of `base` the last of them landed as; the commits of
-/// `base` that revert that landing; and the first release tag matching `tags` that holds the
-/// landing, that `origin/<base>` holds, and that origin itself holds — the release lane pushes its
-/// tag only once it ends green, so a tag only local is a release still running or one that failed
-/// ([`Releases`]). A head git gave no answer for is left out, and the ledger says git was not
-/// asked.
+/// `base` that revert that landing; and the release of that landing as [`see`] reads one
+/// ([`Releases`]: only from the remote `release` names). A head git gave no answer for is left
+/// out, and the ledger says git was not asked.
 pub(crate) fn see_ranges(
     seen: &mut CommitsSeen,
     repo: &Path,
@@ -114,21 +114,12 @@ fn see_ranges_with(
     heads: &[String],
     base: &str,
     tags: &str,
-    _release: Option<&str>,
+    release: Option<&str>,
 ) {
     let Some(Some(base_head)) = resolve(vcs, repo, base) else {
         return;
     };
-    let remote = format!("{ORIGIN}/{base}");
-    let mut releases = Releases {
-        vcs,
-        repo,
-        tags,
-        base,
-        published: matches!(resolve(vcs, repo, &remote), Some(Some(_))).then_some(remote),
-        on_origin: None,
-        here: None,
-    };
+    let mut releases = Releases::new(vcs, repo, Some(tags), Some(base), release);
     for named in heads {
         let Some(Some(head)) = resolve(vcs, repo, named) else {
             continue;
@@ -136,76 +127,125 @@ fn see_ranges_with(
         let Some(mut range) = range_of(vcs, repo, &head, &base_head) else {
             continue;
         };
-        releases.read(&mut range);
+        if let Some(landed) = range.landed_as.clone() {
+            (range.tag, range.unpublished) = releases.release_of(&landed);
+        }
         seen.insert_range(named, range);
     }
 }
 
-/// The remote a release is published to, and whose copy of the base a release tag must sit on.
+/// The remote whose copy of the base a release tag must sit on: where the base is pushed.
 const ORIGIN: &str = "origin";
 
 /// Release tags by name, each with the object it names (a tag object, or a commit for a light one).
 type Tags = std::collections::BTreeMap<String, String>;
 
-/// Where a landing's release is read from (t-119569): the release tags `tags` names, the base as
-/// origin holds it (`published`, none where this repository has no `origin/<base>`), and the tags
-/// origin and this repository hold — each asked once, and only where a tag may count.
+/// Where a release is read from (t-119569), for both of the backfill's roads: the release tags
+/// `tags` names, the base as origin holds it (`published`, none where this repository has no
+/// `origin/<base>`), and the remote releases are published to — named by the caller
+/// ([`zerocode_core::orchestration::coordinator_take::RELEASE_REMOTE_FLAG`]), with no default: this
+/// project's private origin may hold a release's tag before the lane publishes it (the public
+/// snapshot needs it there first), so a tag there proves nothing unless origin is the remote
+/// named. What that remote and this repository hold of the tags is asked once, and only where a tag
+/// may count.
 struct Releases<'a> {
     vcs: &'a dyn Vcs,
     repo: &'a Path,
-    tags: &'a str,
-    base: &'a str,
+    tags: Option<&'a str>,
+    base: Option<&'a str>,
+    remote: Option<&'a str>,
     published: Option<String>,
-    on_origin: Option<Option<Tags>>,
+    on_remote: Option<Option<Tags>>,
     here: Option<Option<Tags>>,
 }
 
-impl Releases<'_> {
-    /// The release of `range`'s landing, into it: the first tag in version order that holds the
-    /// landing, that the published base holds, and that origin holds as this repository does — or,
-    /// where one may hold it and none is read as released, why ([`RangeSeen::unpublished`]).
-    fn read(&mut self, range: &mut RangeSeen) {
-        let Some(landed) = range.landed_as.as_deref() else {
-            return;
+impl<'a> Releases<'a> {
+    fn new(
+        vcs: &'a dyn Vcs,
+        repo: &'a Path,
+        tags: Option<&'a str>,
+        base: Option<&'a str>,
+        remote: Option<&'a str>,
+    ) -> Self {
+        let published = base
+            .filter(|_| tags.is_some())
+            .map(|base| format!("{ORIGIN}/{base}"))
+            .filter(|branch| matches!(resolve(vcs, repo, branch), Some(Some(_))));
+        Releases {
+            vcs,
+            repo,
+            tags,
+            base,
+            remote,
+            published,
+            on_remote: None,
+            here: None,
+        }
+    }
+
+    /// The release of `landed` and, where a tag may hold it and none is read as its release, why:
+    /// the first tag in version order that holds it, that the published base holds, and that the
+    /// remote named holds — the same object as here, or, where that remote keeps its own history
+    /// (the public snapshot repository does), a tag of that name whose object this repository does
+    /// not have. `(None, None)` where nothing was asked or no tag holds it.
+    fn release_of(&mut self, landed: &str) -> (Option<String>, Option<String>) {
+        let (Some(tags), Some(base)) = (self.tags, self.base) else {
+            return (None, None);
         };
         let Some(published) = self.published.as_deref() else {
-            range.unpublished = Some(format!(
-                "there is no {ORIGIN}/{} to read a published release from",
-                self.base
-            ));
-            return;
+            return (
+                None,
+                Some(format!(
+                    "there is no {ORIGIN}/{base} to read a published release from"
+                )),
+            );
         };
         let (vcs, repo) = (self.vcs, self.repo);
-        let Some(held) = held_tags(vcs, repo, landed, self.tags, published) else {
-            return;
+        let Some(held) = held_tags(vcs, repo, landed, tags, published) else {
+            return (None, None);
         };
         let Some(first) = held.first() else {
-            return;
+            return (None, None);
         };
-        let Some(on_origin) = self
-            .on_origin
-            .get_or_insert_with(|| tags_on_origin(vcs, repo))
+        let Some(remote) = self.remote else {
+            return (
+                None,
+                Some(format!(
+                    "{first} holds it, but no release remote was named ({RELEASE_REMOTE_FLAG} \
+                     <remote or URL>) — a release is read only where the caller names it published"
+                )),
+            );
+        };
+        let Some(there) = self
+            .on_remote
+            .get_or_insert_with(|| tags_on(vcs, repo, remote))
         else {
-            range.unpublished = Some(format!(
-                "{ORIGIN} could not be asked whether {first} is published"
-            ));
-            return;
+            return (
+                None,
+                Some(format!(
+                    "{remote} could not be asked whether {first} is published there"
+                )),
+            );
         };
         let Some(here) = self.here.get_or_insert_with(|| tags_here(vcs, repo)) else {
-            return;
+            return (None, None);
         };
-        range.tag = held
+        let released = held
             .iter()
-            .find(|tag| {
-                here.get(*tag)
-                    .is_some_and(|id| on_origin.get(*tag) == Some(id))
+            .find(|tag| match there.get(*tag) {
+                None => false,
+                Some(id) => here.get(*tag) == Some(id) || !knows(vcs, repo, id),
             })
             .cloned();
-        if range.tag.is_none() {
-            range.unpublished = Some(format!(
-                "{first} holds the landing, but {ORIGIN} has no such tag yet — the release has not \
-                 published it"
-            ));
+        match released {
+            Some(tag) => (Some(tag), None),
+            None => (
+                None,
+                Some(format!(
+                    "{first} holds it, but {remote} has no such tag yet — the release has not been \
+                     published there"
+                )),
+            ),
         }
     }
 }
@@ -238,10 +278,11 @@ fn held_tags(
     )
 }
 
-/// The tags origin holds, asked of origin itself (`ls-remote`): a tag pushed and one only cut here
-/// look alike in this repository. `None` where origin gave no answer within the budget.
-fn tags_on_origin(vcs: &dyn Vcs, repo: &Path) -> Option<Tags> {
-    let said = said(vcs, repo, &["ls-remote", "--tags", ORIGIN], None)?;
+/// The tags `remote` holds — a remote's name or a URL — asked of that remote itself (`ls-remote`):
+/// a tag pushed and one only cut here look alike in this repository. `None` where the remote gave
+/// no answer within the budget.
+fn tags_on(vcs: &dyn Vcs, repo: &Path, remote: &str) -> Option<Tags> {
+    let said = said(vcs, repo, &["ls-remote", "--tags", "--", remote], None)?;
     Some(
         said.lines()
             .filter_map(|line| {
@@ -268,6 +309,15 @@ fn tags_here(vcs: &dyn Vcs, repo: &Path) -> Option<Tags> {
                 Some((name.trim().to_string(), id.trim().to_string()))
             })
             .collect(),
+    )
+}
+
+/// Whether this repository has `object` — any answer but git's own refusal counts as yes, so a
+/// remote's tag is read as another history's only where git said it has no such object.
+fn knows(vcs: &dyn Vcs, repo: &Path, object: &str) -> bool {
+    !matches!(
+        vcs.try_within(repo, &["cat-file", "-e", object], GIT_BUDGET),
+        Within::Refused(_)
     )
 }
 
@@ -564,29 +614,6 @@ fn holds(vcs: &dyn Vcs, repo: &Path, head: &str, commit: &str) -> Option<bool> {
     ) {
         Within::Said(_) => Some(true),
         Within::Refused(said) if said.trim().is_empty() => Some(false),
-        Within::Refused(_) | Within::Silent => None,
-    }
-}
-
-/// The first tag matching `tags`, in version order, that holds `commit`.
-fn first_tag(vcs: &dyn Vcs, repo: &Path, commit: &str, tags: &str) -> Option<String> {
-    match vcs.try_within(
-        repo,
-        &[
-            "tag",
-            "--list",
-            tags,
-            "--contains",
-            commit,
-            "--sort=v:refname",
-        ],
-        GIT_BUDGET,
-    ) {
-        Within::Said(listed) => listed
-            .lines()
-            .map(str::trim)
-            .find(|tag| !tag.is_empty())
-            .map(str::to_string),
         Within::Refused(_) | Within::Silent => None,
     }
 }

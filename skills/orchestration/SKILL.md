@@ -144,7 +144,7 @@ the table: flags, arguments and every verb not named here are in `help`.
   `task-take` opens a coordinator attempt on work done by hand. `hand-in`
   hands a commit in on that attempt. `task-backfill` writes the records of
   work that landed without one, and the landing and release git proves for
-  verified work.
+  verified work — a release only from the remote `--release-remote` names.
 - Gates: `gate-create` holds a task on a decision. `gate-resolve` answers it.
   `gate-list` shows what stands and what was decided.
 - Workers: `agent-list` says which agents this machine has and their

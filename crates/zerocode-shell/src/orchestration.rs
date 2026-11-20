@@ -11611,7 +11611,7 @@ fn read_commits(
     else {
         return Ok(None);
     };
-    for flag in ["--head", "--base", "--tags"] {
+    for flag in ["--head", "--base", "--tags", RELEASE_REMOTE_FLAG] {
         if let Some(value) = arg(flag).filter(|value| value.trim_start().starts_with('-')) {
             return Err(format!(
                 "{flag} {value:?} starts with '-', which git would read as an option — name a ref"

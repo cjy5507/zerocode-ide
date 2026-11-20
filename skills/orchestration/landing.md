@@ -108,10 +108,12 @@ to the attempt and source its verified review names; a member with no verified
 review, or whose attempt handed nothing in, refuses the whole call (a line each)
 and nothing is written.
 
-`task-backfill [--base main] [--tags 'v*'] [--checkout <path>]` lists the completed and
+`task-backfill [--base main] [--tags 'v*'] [--release-remote <remote or URL>] [--checkout <path>]`
+lists the completed and
 closed tasks no review stands on whose result names a commit (`mergeHead`, `merged`,
 `landed.mergeHead`, `commits[]` …), with what git proves for each: `merged` when the base
-holds the commit, `deployed` when a release tag holds it (the tag is named), `verified`
+holds the commit, `deployed` when a release tag holds it and the release remote holds that
+tag (the tag is named — see `--release-remote` below), `verified`
 only when the result names a review task whose own review passed — otherwise
 `"verified":"unknown"`, never a pass nobody recorded — and, for every task it cannot
 write, why (no commit named, not in the base, git does not know it, an attempt handed
@@ -121,8 +123,8 @@ never stopping the others. The original result is kept: its keys stay, a review 
 held moves under `backfill.replaced`, and `backfill.by` reads `task-backfill`.
 
 The same list holds the verified tasks whose landing nobody wrote (`"landing": true`),
-with what git proves of each against `--base` and `origin` — and the ledger never
-writes `verified` there; each landing is bound to the coordinator review that stands:
+with what git proves of each against `--base` and the release remote — and the ledger
+never writes `verified` there; each landing is bound to the coordinator review that stands:
 
 - `merged` (with `mergeHead`, the newest copy on the base) only when every commit of the
   range the review read is on the base's first-parent line as the same change: the same
@@ -131,13 +133,21 @@ writes `verified` there; each landing is bound to the coordinator review that st
   nothing, nor does one of commits that change nothing alone (those are left out of any
   other range).
 - `deployed` (with `release`) only when a release tag holds that landing, `origin/<base>`
-  holds the tag, and origin itself holds the same tag (`git ls-remote`): the release lane
-  pushes its tag once it ends green, so a tag only local is a release still running or
-  one that failed. With no `origin/<base>`, no release is read.
+  holds the tag, and the remote `--release-remote` names holds a tag of that name
+  (`git ls-remote`) — the same object, or, on a remote with a history of its own (a
+  published snapshot), a tag of that name whose object this repository does not have.
 - Neither where the base reverted the landing (`This reverts commit <id>`).
 
-A row it cannot prove says why, and nothing is written for it. The release's after-step
-and the coordinator call it; nothing calls it on a timer.
+**`--release-remote` has no default** — on both roads. Name the remote a release is
+published to (a remote's name or its URL — where a project publishes to a repository of
+its own, that one). A remote a release's tag reaches before the release ends — a
+project's own origin often does — says nothing about a release that ended green.
+Without `--release-remote` no release is written for any task: `merged` only, and each
+such row says why under `unreleased`.
+
+A row it cannot prove says why, and nothing is written for it. The coordinator in charge
+of a release calls it once the release is published, naming the release remote. Nothing
+calls it on a timer, and no release script calls it yet.
 
 ## Decision gates
 

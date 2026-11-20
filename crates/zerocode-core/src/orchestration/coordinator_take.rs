@@ -348,6 +348,7 @@ const HAND_IN_FLAGS: &[&str] = &[
 const BACKFILL_FLAGS: &[&str] = &[
     "--base",
     "--tags",
+    RELEASE_REMOTE_FLAG,
     "--checkout",
     "--apply",
     "--run",
@@ -1140,6 +1141,8 @@ struct Proven {
     commit: String,
     under: String,
     tag: Option<String>,
+    /// Why no release is written where a tag may hold the commit ([`CommitSeen::unpublished`]).
+    unreleased: Option<String>,
     /// The review tasks the result names, and whether each one's own review passed.
     reviews: Vec<(String, bool)>,
 }
@@ -1206,7 +1209,7 @@ fn prove(
                 full: Some(full),
                 in_base: Some(true),
                 tag,
-                ..
+                unpublished,
             }) => {
                 let reviews = reviews_named(&task.result, &task.id)
                     .into_iter()
@@ -1222,6 +1225,7 @@ fn prove(
                     commit: full.clone(),
                     under: one.under.clone(),
                     tag: tag.clone(),
+                    unreleased: unpublished.clone(),
                     reviews,
                 });
             }
@@ -1322,6 +1326,7 @@ pub(super) fn backfill(
                 "foundUnder": proven.under,
                 "tag": proven.tag,
                 "write": proven.facts(),
+                "unreleased": proven.unreleased,
                 "verified": proven.verified_word(),
                 "reviews": proven.reviews_json(),
                 "why": null,
@@ -1343,6 +1348,14 @@ pub(super) fn backfill(
     let mut landings = Vec::new();
     for (task, progress) in landing_unrecorded(run) {
         let proven = prove_landing(&progress, seen, &base);
+        // A landing written without its release says why the release is not (t-119569).
+        let unreleased = proven
+            .as_ref()
+            .ok()
+            .filter(|facts| !facts.contains_key(DEPLOYED_KEY))
+            .and_then(|_| seen.zip(landing_head(&progress)))
+            .and_then(|(seen, head)| seen.range(&head))
+            .and_then(|range| range.unpublished.clone());
         rows.push(serde_json::json!({
             "taskId": task.id,
             "status": task.status.as_str(),
@@ -1350,6 +1363,7 @@ pub(super) fn backfill(
             "landing": true,
             "head": landing_head(&progress),
             "write": proven.as_ref().ok(),
+            "unreleased": unreleased,
             "why": proven.as_ref().err(),
         }));
         if let Ok(facts) = proven {

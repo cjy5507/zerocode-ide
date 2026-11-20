@@ -20911,17 +20911,21 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         coordinator_take::BACKFILL_VERB,
-        "[--base <ref>] [--tags <glob>] [--checkout <path>] [--apply] · the finished tasks no \
-         review stands on whose result names a commit: listed with what git proves (merged when \
-         --base, default main, holds it; deployed when a release tag, default v*, holds it, \
+        "[--base <ref>] [--tags <glob>] [--release-remote <remote or URL>] [--checkout <path>] \
+         [--apply] · the finished tasks no review stands on whose result names a commit: listed \
+         with what git proves (merged when --base, default main, holds it; deployed when a \
+         release tag, default v*, holds it and the remote --release-remote names holds that tag, \
          named; verified only when a review task the result names passed) or why not; --apply, \
          from the coordinator seat, writes the attempt, hand-in and review, keeping the original \
          result beside them; and the verified tasks whose landing nobody wrote (landing: true): \
          merged only when every commit of the range the review read is on --base's first-parent \
          line as the same change by the same author, moment and subject, and the range holds no \
-         merge and not only empty commits; deployed only when a release tag origin holds holds \
-         that landing; neither where --base reverted it — never a verification — or why not; \
-         --apply writes them bound to the standing review",
+         merge and not only empty commits; deployed only when a release tag holds that landing \
+         and the remote --release-remote names holds it; neither where --base reverted it — never \
+         a verification — or why not. --release-remote has no default: name the remote releases \
+         are published to (a private origin may hold a release's tag before it is published); \
+         without it no release is written, and each row says why (unreleased). --apply writes \
+         them bound to the standing review",
         Doing::Policy,
     ),
     (
