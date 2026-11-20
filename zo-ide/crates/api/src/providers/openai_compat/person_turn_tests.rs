@@ -220,15 +220,16 @@ fn openai_error(message: &str, param: &str) -> (u16, &'static str, String) {
 }
 
 pub(super) fn sse(events: &[Value]) -> String {
-    events
-        .iter()
-        .map(|event| {
-            format!(
-                "event: {}\ndata: {event}\n\n",
-                event["type"].as_str().unwrap_or_default()
-            )
-        })
-        .collect()
+    use std::fmt::Write as _;
+    events.iter().fold(String::new(), |mut frames, event| {
+        // Writing to a `String` cannot fail.
+        let _ = write!(
+            frames,
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap_or_default()
+        );
+        frames
+    })
 }
 
 pub(super) fn usage() -> Value {
