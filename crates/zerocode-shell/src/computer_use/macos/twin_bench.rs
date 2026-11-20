@@ -534,6 +534,171 @@ fn twin_bench_chrome() {
     println!("{text}");
 }
 
+/// A's scene 2 (t-121372): `LatePressFixture.swift`, a web-like window whose
+/// «Authorize» offers its press only `delay` seconds after the app's tree was
+/// switched on, beside a link that reads «Go» and shows «Delete project».
+struct LateFixture {
+    process: Child,
+    directory: PathBuf,
+}
+
+impl LateFixture {
+    fn start(program: &Path, root: &Path, mode: &str, delay: &str, name: &str) -> Self {
+        let directory = root.join(name);
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        let process = crate::proc::quiet_command(program)
+            .arg(mode)
+            .arg(&directory)
+            .arg(delay)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("fixture");
+        let started = Instant::now();
+        while !directory.join("ready").exists() {
+            assert!(started.elapsed() < Duration::from_secs(10), "fixture ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+        Self { process, directory }
+    }
+
+    fn app(&self) -> String {
+        format!("pid:{}", self.process.id())
+    }
+
+    /// How many lines of the fixture's record begin with `what`.
+    fn count(&self, what: &str) -> usize {
+        std::fs::read_to_string(self.directory.join("events.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with(what))
+            .count()
+    }
+}
+
+impl Drop for LateFixture {
+    fn drop(&mut self) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
+
+/// The words the window hands the helper for the person's last step.
+fn delete_guard() -> Value {
+    json!({"delete": ["delete"]})
+}
+
+/// One background press by words on a fresh fixture, right after its first
+/// look: its answer, its milliseconds and the fixture's record of presses.
+fn late_press(
+    session: &Session,
+    program: &Path,
+    root: &Path,
+    name: &str,
+    delay: &str,
+    label: &str,
+    guard: Option<Value>,
+) -> Value {
+    let fixture = LateFixture::start(program, root, "web", delay, name);
+    let app = fixture.app();
+    let _ = call(
+        session,
+        "getAppState",
+        &json!({"app": app, "noScreenshot": true, "background": true}),
+    );
+    let mut press = json!({"app": app, "label": label, "background": true, "noScreenshot": true});
+    if let Some(guard) = guard {
+        press["confirmGuard"] = guard;
+    }
+    let (ms, answer) = call(session, "click", &press);
+    std::thread::sleep(Duration::from_millis(300));
+    json!({
+        "ms": ms.round(),
+        "refused": answer.err(),
+        "pressed_button": fixture.count("pressed button"),
+        "pressed_link": fixture.count("pressed link"),
+        "ignored": fixture.count("ignored-press") + fixture.count("ignored-mouse"),
+    })
+}
+
+/// Five presses by words and five by number, after the tree has long stood:
+/// the helper's milliseconds for each, where nothing should wait.
+fn settled_presses(
+    session: &Session,
+    program: &Path,
+    root: &Path,
+    mode: &str,
+    name: &str,
+) -> Value {
+    let fixture = LateFixture::start(program, root, mode, "0", name);
+    let app = fixture.app();
+    let look = json!({"app": app, "noScreenshot": true, "background": true});
+    let (_, first) = call(session, "getAppState", &look);
+    // Past the settle window a press waits for nothing (t-121372).
+    std::thread::sleep(Duration::from_secs(9));
+    let number = first
+        .ok()
+        .as_ref()
+        .and_then(|state| number_of(state, "Authorize"));
+    let (mut by_words, mut by_number) = (vec![], vec![]);
+    for _ in 0..5 {
+        let (ms, _) = call(
+            session,
+            "click",
+            &json!({"app": app, "label": "Authorize", "background": true, "noScreenshot": true}),
+        );
+        by_words.push(ms.round());
+        if let Some(number) = number {
+            let (ms, _) = call(
+                session,
+                "click",
+                &json!({"app": app, "elementIndex": number, "background": true, "noScreenshot": true}),
+            );
+            by_number.push(ms.round());
+        }
+    }
+    json!({"by_words_ms": by_words, "by_number_ms": by_number, "pressed": fixture.count("pressed")})
+}
+
+/// A's scene 2 under the installed helper and this build's: a press offered
+/// late (P7), never offered (P8), the milliseconds where nothing waits (P9),
+/// and a refusal that never names a control by text holding the person's
+/// confirmation word (P10). Background presses only.
+#[test]
+#[ignore = "drives the installed and the built helper against an owned late-press fixture while the person is away; run by reports/cu-slow-chrome-1515/jobs/repro-twin-web.sh"]
+fn twin_bench_late() {
+    let program =
+        PathBuf::from(std::env::var_os("ZEROCODE_TWIN_LATE_FIXTURE").expect("late fixture"));
+    let baseline = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_BASELINE").expect("baseline"));
+    let built = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_BUILT").expect("built helper"));
+    let out = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_LATE_OUT").expect("report path"));
+    let root = out.parent().expect("report folder").join("late-fixtures");
+    let mut report = json!({});
+    for (label, helper) in [("installed", &baseline), ("built", &built)] {
+        let idle = person_idle();
+        if idle < PERSON_AWAY {
+            report[label] = json!({"skipped": format!("the person was at the machine {}s ago", idle.as_secs())});
+            continue;
+        }
+        let session = Session::connect(launch_at(helper).expect("helper")).expect("answers");
+        let at = |name: &str| format!("{label}-{name}");
+        report[label] = json!({
+            "late_guarded": late_press(&session, &program, &root, &at("late-guarded"), "3", "Authorize", Some(delete_guard())),
+            "late_plain": late_press(&session, &program, &root, &at("late-plain"), "3", "Authorize", None),
+            "never": late_press(&session, &program, &root, &at("never"), "never", "Authorize", Some(delete_guard())),
+            "settled_web": settled_presses(&session, &program, &root, "web", &at("settled-web")),
+            "settled_native": settled_presses(&session, &program, &root, "native", &at("settled-native")),
+            "words_guarded": late_press(&session, &program, &root, &at("words-guarded"), "0", "project", Some(delete_guard())),
+            "words_plain": late_press(&session, &program, &root, &at("words-plain"), "0", "project", Some(json!({"payment": ["pay"]}))),
+        });
+    }
+    let text = serde_json::to_string_pretty(&report).expect("a report");
+    std::fs::write(&out, &text).expect("the report");
+    println!("{text}");
+}
+
 #[test]
 fn a_refusal_names_the_one_other_window_it_points_to() {
     let refused = "element_not_found: no control in Fixture's window «Home | Fixture» reads label «Authorize»; \
