@@ -53,12 +53,12 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "bash",
-            description: "Run a shell command in the workspace. Prefer file tools; batch independent calls. Use run_in_background for long commands or waits and keep working. If denied, change approach instead of retrying verbatim.",
+            description: "Run a shell command in the workspace. Prefer file tools; batch independent calls. Use run_in_background for long commands, waits and servers; a `&` process holding the output is stopped. If denied, change approach.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds; default 120000, and values below 1000 use that default." },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Milliseconds; default 120000; values below 1000 use it." },
                     "description": { "type": "string" },
                     "run_in_background": { "type": "boolean" },
                     "dangerouslyDisableSandbox": { "type": "boolean" }
@@ -990,6 +990,22 @@ mod tests {
     /// joins its modules with `::`, which a Windows file name cannot hold.
     fn thread_tag() -> String {
         std::thread::current().name().unwrap_or("test").replace("::", "-")
+    }
+
+    /// The shell's description tells a model, before its first try, what the
+    /// run does with a server started with `&`: a process that still holds
+    /// the command's output is stopped, so servers start with
+    /// `run_in_background`. Without it the model learned that only from the
+    /// end of a cut run (t-120813).
+    #[test]
+    fn the_shell_says_a_background_process_holding_its_output_is_stopped_and_servers_run_in_the_background() {
+        let bash = tool_specs().into_iter().find(|spec| spec.name == "bash").expect("the bash spec");
+        assert!(
+            bash.description.contains("`&` process holding the output is stopped"),
+            "{}",
+            bash.description
+        );
+        assert!(bash.description.contains("run_in_background for long commands, waits and servers"), "{}", bash.description);
     }
 
     #[test]
