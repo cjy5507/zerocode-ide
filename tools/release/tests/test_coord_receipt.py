@@ -677,9 +677,12 @@ class FlakeJudgment(ReceiptCase):
         self.assertEqual([line for line in facts if line.startswith("cleared ")], ["cleared shell-test", "cleared test"])
 
     def test_a_red_gate_that_named_nothing_is_red_for_real(self):
+        # Its one red entry named nothing, so its own closing line names it (the review's P-1): red for
+        # real by the entry's name, where a lane gate log without closing lines says `root:?`.
         jobs = self.gate(self.RED, rc={"g1": 0}, said={"test": "it died with no word of any test\n"})
         receipt_fixture.judged(jobs[0], solo("root", FLAKE))
-        self.assertIn("red for real as the release lane's flakes phase reads it: root:?", self.refused(lambda: coord_receipt.make(jobs)))
+        self.assertIn("red for real as the release lane's flakes phase reads it: root:recipe:test",
+                      self.refused(lambda: coord_receipt.make(jobs)))
 
     def test_more_unlisted_names_than_the_lane_judges_solo_are_red_for_real_over_both_jobs(self):
         # The lane bounds the unlisted names it judges solo over both gates together (MAX_SOLO_JUDGED, 4): a

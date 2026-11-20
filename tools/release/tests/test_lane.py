@@ -1638,7 +1638,7 @@ class FlakePlan(LaneCase):
                  ("a recipe that named no test", [("root", "test", 101, receipt_fixture.cargo_failures([FLAKE_ROOT])),
                                                   ("root", "shell-test", 101, receipt_fixture.unnamed_failure("shell-test"))],
                   "root:recipe:shell-test"),
-                 ("a red gate that named nothing", [("zo", "test", 1, "it died\n")], "zo:?"))
+                 ("a red gate that named nothing", [("zo", "test", 1, "it died\n")], "zo:recipe:test"))
         for case, entries, real in cases:
             with self.subTest(case=case):
                 words = [word for lane, recipe, rc, text in entries

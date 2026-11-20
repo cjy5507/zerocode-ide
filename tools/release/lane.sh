@@ -678,16 +678,24 @@ failed_tests() { # LOG -> sorted unique failure names, one a line, each read aga
                  # judge it (1.3.37: shell-test died compiling beside a named harness red) — and for
                  # every recipe ended by a signal (`was terminated`: the lane's cap, or just's words for
                  # any signal), names or not: what would have run after the stop never spoke, so a solo
-                 # pass of the names it gave clears nothing (t-83513)
+                 # pass of the names it gave clears nothing (t-83513). A recipe whose own `<== verify
+                 # recipe <name> rc=<n>` says it ended red, and whose own output named nothing — not even
+                 # just's words for it (just killed, its log cut short by a full disk) — is `recipe:<name>`
+                 # too: another recipe's names, judged solo, never clear it (t-121630, the review's P-1).
+                 # A failures block never runs on into the next recipe's output.
   awk '
     /^==> verify recipe / {
-      named = 0; harness = ""; suite = ""; checks = ""
+      named = 0; said = 0; inblock = 0; harness = ""; suite = ""; checks = ""
       if ($4 ~ /^[a-z]+-browser-test$/) { harness = $4; sub(/-browser-test$/, "", harness) }
+      next
+    }
+    /^<== verify recipe / {
+      if ($5 ~ /^rc=/ && $5 != "rc=0" && !said) { print "recipe:" $4; said = 1 }
       next
     }
     /^failures:$/ { inblock = 1; next }
     inblock && /^test result/ { inblock = 0; next }
-    inblock && /^    [A-Za-z0-9_:]+$/ { sub(/^    /, ""); print; named = 1; next }
+    inblock && /^    [A-Za-z0-9_:]+$/ { sub(/^    /, ""); print; named = 1; said = 1; next }
     harness != "" && /^SUITE  / { suite = substr($0, 8); next }
     harness != "" && /^FAIL  / {
       check = substr($0, 7); cut = index(check, "  — "); if (cut) check = substr(check, 1, cut - 1)
@@ -697,6 +705,7 @@ failed_tests() { # LOG -> sorted unique failure names, one a line, each read aga
     }
     /recipe `[^`]+` (failed|was terminated)/ {
       match($0, /recipe `[^`]+`/); r = substr($0, RSTART + 8, RLENGTH - 9)
+      said = 1
       if ($0 ~ /was terminated/) { printf "%s", checks; checks = ""; print "recipe:" r }
       else if (r ~ /^[a-z]+-browser-test$/) {
         if (checks != "") printf "%s", checks
@@ -1756,7 +1765,8 @@ run_sha() { # SHA [QUEUE_FILE]
 #
 # An ENTRY is four words, <root|zo> <recipe> <rc> <log>: one recipe of that gate, how it ended and its
 # output. Each gate's entries are read, in their order, as that gate's log — `==> verify recipe <recipe>`
-# over each one's output, as verify-every-recipe.sh writes the lane's — red when one of them was red, and
+# over each one's output and `<== verify recipe <recipe> rc=<rc>` under it, as verify-every-recipe.sh
+# writes the lane's — red when one of them was red, and
 # the plan is the flakes phase's own (solo_plan, flake_reals, solo_units, SOLO_RUNS). --flake-plan prints
 # it, one a line, and changes nothing:
 #   runs <SOLO_RUNS>
@@ -1781,8 +1791,10 @@ flake_entries() { # FOLDER ENTRY... — FOLDER/root.log and FOLDER/zo.log as abo
     lane=$1 recipe=$2 rc=$3 log=$4; shift 4
     case $lane in root|zo) ;; *) return 2 ;; esac
     [ -n "$rc" ] && [ -f "$log" ] || return 2
-    # The output's last line may lack its newline: the next mark starts a line of its own.
-    { echo "==> verify recipe $recipe"; cat "$log"; echo; } >> "$folder/$lane.log" || return 2
+    # The output's last line may lack its newline: the next mark starts a line of its own. The closing
+    # mark carries the entry's rc as verify-every-recipe.sh's does, so a red entry that named nothing in
+    # its own log is red for real here as in the lane (failed_tests).
+    { echo "==> verify recipe $recipe"; cat "$log"; echo; echo "<== verify recipe $recipe rc=$rc 0s"; } >> "$folder/$lane.log" || return 2
     if [ "$rc" != 0 ]; then
       if [ "$lane" = root ]; then FLAKE_RC_ROOT=1; else FLAKE_RC_ZO=1; fi
     fi
