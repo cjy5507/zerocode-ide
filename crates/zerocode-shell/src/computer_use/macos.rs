@@ -43,6 +43,8 @@ mod background_tests;
 mod parallel_bench;
 #[cfg(test)]
 pub(crate) mod stand_in;
+#[cfg(test)]
+mod twin_bench;
 
 const HELPER_APP_NAME: &str = "ZeroCode Computer Use.app";
 const HELPER_EXECUTABLE: &str = "zerocode-computer-use-macos";
