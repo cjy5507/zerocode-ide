@@ -433,10 +433,16 @@ async fn the_person_s_two_refusals_end_in_a_tool_call_and_then_an_answer() {
         assert!(body.pointer("/reasoning/summary").is_none(), "{body}");
     }
 
-    // The reasoning stays in this process for the next step; nothing rides on
-    // the session's messages for another account's road to read.
+    // The reasoning before the call rides on the session's messages marked
+    // with this road and endpoint, for this road alone to send back.
     let replay = replay_of(&first);
-    assert!(replay.is_none(), "{replay:?}");
+    let road = json!(format!("openai-api-key {base_url}"));
+    assert!(
+        replay.as_ref().and_then(Value::as_array).is_some_and(|entries| {
+            !entries.is_empty() && entries.iter().all(|entry| entry["road"] == road)
+        }),
+        "{replay:?}"
+    );
     let second = drain(
         client
             .stream_message(&turn(vec![

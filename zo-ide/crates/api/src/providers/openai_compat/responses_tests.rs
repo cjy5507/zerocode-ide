@@ -8,7 +8,7 @@ use super::person_turn_tests::{
 };
 use crate::providers::chatgpt_backend::build_responses_request_for_session;
 use super::responses_wire::{
-    self, API_SCOPE, Learned, ResponsesDecoder, Wire, api_responses_body, clamp_effort,
+    self, Learned, ResponsesDecoder, Wire, api_response, api_responses_body, clamp_effort,
     efforts_listed_in, efforts_to_send_again, lists_supported_values, responses_endpoint,
     sends_tools_to_responses, wire_for,
 };
@@ -16,6 +16,9 @@ use super::{OpenAiCompatConfig, build_chat_completion_request};
 use crate::error::ApiError;
 use crate::types::{EffortLevel, InputContentBlock, InputMessage, StreamEvent};
 use serde_json::{Value, json};
+
+/// OpenAI's own endpoint, for the bodies built here.
+const OFFICIAL: &str = "https://api.openai.com/v1";
 
 /// A request goes to `/responses` only once its endpoint refused its function
 /// tools on Chat; OpenAI's own API included, every request goes on Chat
@@ -60,7 +63,7 @@ fn the_api_responses_body() {
     let _env = with_subscription_row();
     let request = turn(vec![user("hi")]);
 
-    let body = api_responses_body(&request, OpenAiCompatConfig::openai(), true);
+    let body = api_responses_body(&request, OpenAiCompatConfig::openai(), OFFICIAL, true);
     assert_eq!(body["model"], json!(MODEL));
     assert_eq!(body["stream"], json!(true));
     assert_eq!(body["store"], json!(false));
@@ -89,7 +92,7 @@ fn the_api_responses_body() {
 
     // A person's row asks for no prompt-cache control, on Chat or here.
     let row = OpenAiCompatConfig::from_user("OpenAI", "https://api.openai.com/v1", Some("ZO_TEST_OPENAI_KEY"), true);
-    let body = api_responses_body(&request, row, true);
+    let body = api_responses_body(&request, row, OFFICIAL, true);
     assert!(body.get("prompt_cache_key").is_none(), "{body}");
     assert!(body.get("prompt_cache_retention").is_none(), "{body}");
     assert!(build_chat_completion_request(&request, row).get("prompt_cache_key").is_none());
@@ -97,7 +100,7 @@ fn the_api_responses_body() {
     // No system text, no `instructions`.
     let mut bare = request.clone();
     bare.system = None;
-    assert!(api_responses_body(&bare, row, false).get("instructions").is_none());
+    assert!(api_responses_body(&bare, row, OFFICIAL, false).get("instructions").is_none());
 }
 
 fn refusal(message: &str, param: &str) -> ApiError {
@@ -201,7 +204,7 @@ fn a_named_ceiling_lowers_the_effort_on_either_wire() {
 fn the_stream_counts_cache_reads_as_chat_does() {
     let completed = sse(&[json!({"type": "response.completed", "response": {"id": "resp_4", "status": "completed", "output": [], "usage": usage()}})]);
     let usage_after = |config| {
-        let mut decoder = ResponsesDecoder::new(MODEL.to_string(), config);
+        let mut decoder = ResponsesDecoder::new(MODEL.to_string(), config, OFFICIAL);
         let (events, failure) = decoder.push(completed.as_bytes()).expect("read");
         assert!(failure.is_none());
         events
@@ -247,7 +250,7 @@ fn parallel_calls_on_responses_stay_apart() {
     events.extend(call(0, "call_parallel_a"));
     events.extend(call(1, "call_parallel_b"));
     events.push(json!({"type": "response.completed", "response": {"id": "resp_5", "status": "completed", "output": [], "usage": usage()}}));
-    let mut decoder = ResponsesDecoder::new(MODEL.to_string(), OpenAiCompatConfig::openai());
+    let mut decoder = ResponsesDecoder::new(MODEL.to_string(), OpenAiCompatConfig::openai(), OFFICIAL);
     let (out, failure) = decoder.push(sse(&events).as_bytes()).expect("read");
     assert!(failure.is_none());
     let ids: Vec<String> = out
@@ -282,11 +285,11 @@ fn pictures_on_responses_follow_the_endpoint_as_on_chat() {
         thought_signature: None,
         reasoning_replay: None,
     }];
-    let official = api_responses_body(&request, OpenAiCompatConfig::openai(), true);
+    let official = api_responses_body(&request, OpenAiCompatConfig::openai(), OFFICIAL, true);
     assert_eq!(official["input"][0]["content"][0]["type"], json!("input_image"));
     let mut blind = OpenAiCompatConfig::openai();
     blind.supports_vision = false;
-    let placeholder = api_responses_body(&request, blind, true);
+    let placeholder = api_responses_body(&request, blind, OFFICIAL, true);
     assert_eq!(placeholder["input"][0]["content"][0]["type"], json!("input_text"));
 }
 
@@ -347,7 +350,7 @@ fn the_subscription_s_reasoning_on_a_message_stays_off_the_api_key_s_request() {
     let subscription = build_responses_request_for_session(&request, "instructions", true, "session-sub").to_string();
     assert!(subscription.contains("SUBSCRIPTION-ITEM") && subscription.contains("SUBSCRIPTION-FINAL"));
 
-    let api = api_responses_body(&request, OpenAiCompatConfig::openai(), true);
+    let api = api_responses_body(&request, OpenAiCompatConfig::openai(), OFFICIAL, true);
     let kinds: Vec<&str> = api["input"]
         .as_array()
         .expect("input items")
@@ -359,20 +362,18 @@ fn the_subscription_s_reasoning_on_a_message_stays_off_the_api_key_s_request() {
     assert!(!api.to_string().contains("SUBSCRIPTION"), "{api}");
 }
 
-/// A session that used the key, then the ChatGPT login: nothing the key's road
-/// made reaches the subscription's request, which is byte for byte what it was
-/// before the key answered; the key's own next request carries it from this
-/// process.
+/// A session that used the key, then the ChatGPT login: the reasoning the
+/// key's road put on the session's messages carries its road, and the
+/// subscription's request leaves it out — byte for byte the request it builds
+/// for the same history without it — while the key's own next request sends
+/// it back.
 #[test]
 fn the_api_key_s_reasoning_never_reaches_a_subscription_request() {
     let _env = with_subscription_row();
     let call_id = "call_from_the_api_key";
-    let request = turn(vec![user("hi"), assistant_call(call_id, "pwd", None), tool_result(call_id, "/w")]);
-    let before = build_responses_request_for_session(&request, "instructions", true, "session-sub").to_string();
-
     let reasoning = json!({"id": "rs_api", "type": "reasoning", "summary": [], "encrypted_content": "API-KEY-ITEM"});
     let call = json!({"id": "fc_api", "type": "function_call", "status": "completed", "call_id": call_id, "name": "bash", "arguments": "{\"command\":\"pwd\"}"});
-    let mut decoder = ResponsesDecoder::new(MODEL.to_string(), OpenAiCompatConfig::openai());
+    let mut decoder = ResponsesDecoder::new(MODEL.to_string(), OpenAiCompatConfig::openai(), OFFICIAL);
     let (events, failure) = decoder
         .push(
             sse(&[
@@ -386,20 +387,132 @@ fn the_api_key_s_reasoning_never_reaches_a_subscription_request() {
         )
         .expect("read");
     assert!(failure.is_none());
-    let replays: Vec<&Option<Value>> = events
+    let replay = events
         .iter()
-        .filter_map(|event| match event {
-            StreamEvent::MessageDelta(delta) => Some(&delta.delta.reasoning_replay),
+        .find_map(|event| match event {
+            StreamEvent::MessageDelta(delta) => delta.delta.reasoning_replay.clone(),
             _ => None,
         })
-        .collect();
-    assert_eq!(replays, vec![&None], "nothing for the session's messages");
+        .expect("the reasoning before the call rides on the message");
+    let road = json!(format!("openai-api-key {OFFICIAL}"));
+    assert!(
+        replay.as_array().is_some_and(|entries| entries.iter().all(|entry| entry["road"] == road)),
+        "{replay}"
+    );
 
-    let after = build_responses_request_for_session(&request, "instructions", true, "session-sub").to_string();
-    assert_eq!(before, after);
-    assert!(!after.contains("API-KEY-ITEM"));
-    assert!(api_responses_body(&request, OpenAiCompatConfig::openai(), true).to_string().contains("API-KEY-ITEM"));
-    assert_eq!(API_SCOPE, "openai-api-key-responses");
+    let history = |attached: Option<Value>| {
+        turn(vec![user("hi"), assistant_call(call_id, "pwd", attached), tool_result(call_id, "/w")])
+    };
+    let with_the_key_s = history(Some(replay));
+    let subscription =
+        build_responses_request_for_session(&with_the_key_s, "instructions", true, "session-sub").to_string();
+    assert_eq!(
+        subscription,
+        build_responses_request_for_session(&history(None), "instructions", true, "session-sub").to_string()
+    );
+    assert!(!subscription.contains("API-KEY-ITEM"));
+    assert!(api_responses_body(&with_the_key_s, OpenAiCompatConfig::openai(), OFFICIAL, true)
+        .to_string()
+        .contains("API-KEY-ITEM"));
+}
+
+/// The reasoning on a session's messages goes back only on the road that made
+/// it — before a call and before the turn's last words: this endpoint's marked
+/// entries here, another endpoint's there (another key may be another
+/// organization), and the subscription's unmarked ones to the subscription.
+#[test]
+fn the_reasoning_on_a_message_goes_back_on_its_own_road_only() {
+    let _env = with_subscription_row();
+    let call_id = "call_on_three_roads";
+    let here = format!("openai-api-key {OFFICIAL}");
+    let gateway = "https://gateway.example.com/v1";
+    let there = format!("openai-api-key {gateway}");
+    let item = |words: &str| json!([{"type": "reasoning", "id": format!("rs_{words}"), "summary": [], "encrypted_content": words}]);
+    let attached = json!([
+        {"call_id": call_id, "road": here, "items": item("HERE-CALL")},
+        {"call_id": call_id, "road": there, "items": item("THERE-CALL")},
+        {"call_id": call_id, "items": item("SUBSCRIPTION-CALL")},
+        {"turn_final": true, "road": here, "items": item("HERE-FINAL")},
+        {"turn_final": true, "items": item("SUBSCRIPTION-FINAL")},
+    ]);
+    let answered = InputMessage {
+        role: "assistant".to_string(),
+        content: vec![
+            InputContentBlock::ToolUse {
+                id: call_id.to_string(),
+                name: "bash".to_string(),
+                input: json!({"command": "pwd"}),
+                cache_control: None,
+            },
+            InputContentBlock::Text { text: "Here it is.".to_string(), cache_control: None },
+        ],
+        thought_signature: None,
+        reasoning_replay: Some(attached),
+    };
+    let request = turn(vec![user("hi"), answered, tool_result(call_id, "/w"), user("and now?")]);
+    let sent = |body: Value| -> Vec<String> {
+        body["input"]
+            .as_array()
+            .expect("input items")
+            .iter()
+            .filter_map(|entry| entry["encrypted_content"].as_str().map(str::to_string))
+            .collect()
+    };
+    assert_eq!(
+        sent(api_responses_body(&request, OpenAiCompatConfig::openai(), OFFICIAL, true)),
+        vec!["HERE-CALL", "HERE-FINAL"]
+    );
+    assert_eq!(sent(api_responses_body(&request, OpenAiCompatConfig::openai(), gateway, true)), vec!["THERE-CALL"]);
+    assert_eq!(
+        sent(build_responses_request_for_session(&request, "instructions", true, "session-sub")),
+        vec!["SUBSCRIPTION-CALL", "SUBSCRIPTION-FINAL"]
+    );
+}
+
+/// However many calls a session holds — past the 256 this process keeps per
+/// road — each call's marked reasoning goes back from its message, the first
+/// call's too.
+#[test]
+fn every_call_s_reasoning_goes_back_however_long_the_session() {
+    let _env = with_subscription_row();
+    let road = format!("openai-api-key {OFFICIAL}");
+    let mut messages = vec![user("hi")];
+    for n in 0..300 {
+        let call_id = format!("call_long_{n}");
+        let attached = json!([{"call_id": call_id, "road": road, "items": [
+            {"type": "reasoning", "id": format!("rs_long_{n}"), "summary": [], "encrypted_content": format!("LONG-{n}")}
+        ]}]);
+        messages.push(assistant_call(&call_id, "pwd", Some(attached)));
+        messages.push(tool_result(&call_id, "/w"));
+    }
+    let body = api_responses_body(&turn(messages), OpenAiCompatConfig::openai(), OFFICIAL, true);
+    let sent: Vec<&str> = body["input"]
+        .as_array()
+        .expect("input items")
+        .iter()
+        .filter_map(|entry| entry["encrypted_content"].as_str())
+        .collect();
+    assert_eq!(sent.len(), 300);
+    assert_eq!(sent.first(), Some(&"LONG-0"));
+    assert_eq!(sent.last(), Some(&"LONG-299"));
+}
+
+/// A one-shot answer's reasoning rides on the session marked with its road,
+/// as a streamed one's does.
+#[test]
+fn a_one_shot_answer_s_reasoning_rides_on_the_session_with_its_road() {
+    let reasoning = json!({"id": "rs_once", "type": "reasoning", "summary": [], "encrypted_content": "ONCE"});
+    let call = json!({"id": "fc_once", "type": "function_call", "status": "completed", "call_id": "call_once", "name": "bash", "arguments": "{}"});
+    let response = api_response(
+        &json!({"id": "resp_once", "status": "completed", "output": [reasoning.clone(), call], "usage": usage()}),
+        MODEL,
+        OpenAiCompatConfig::openai(),
+        OFFICIAL,
+    );
+    assert_eq!(
+        response.reasoning_replay,
+        Some(json!([{"call_id": "call_once", "items": [reasoning], "road": format!("openai-api-key {OFFICIAL}")}]))
+    );
 }
 
 /// A session resumed in a new process: the key's road holds no reasoning for
@@ -411,7 +524,7 @@ fn a_call_this_process_holds_no_reasoning_for_goes_back_without_it() {
     let _env = with_subscription_row();
     let call_id = "call_from_an_earlier_process";
     let request = turn(vec![user("hi"), assistant_call(call_id, "pwd", None), tool_result(call_id, "/w")]);
-    let body = api_responses_body(&request, OpenAiCompatConfig::openai(), true);
+    let body = api_responses_body(&request, OpenAiCompatConfig::openai(), OFFICIAL, true);
     assert_eq!(
         body["input"],
         json!([

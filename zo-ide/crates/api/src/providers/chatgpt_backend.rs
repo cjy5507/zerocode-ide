@@ -82,21 +82,58 @@ pub(crate) fn build_responses_request_for_session(
         stream,
         session_id,
         super::model_supports_vision(&request.model),
+        None,
     )
 }
 
+/// The key a reasoning-replay entry on a message names the road that made it
+/// under. Only an API key's road (`openai_compat::responses_wire`) sets it;
+/// the subscription's own entries carry none, as they always have.
+pub(crate) const REPLAY_ROAD_KEY: &str = "road";
+
+/// Whether a reasoning-replay entry was made on `road` — `None` being the
+/// subscription, whose entries carry no road.
+fn replay_entry_is_of(entry: &Value, road: Option<&str>) -> bool {
+    entry.get(REPLAY_ROAD_KEY).and_then(Value::as_str) == road
+}
+
 /// The Responses body [`build_responses_request_for_session`] sends, with
-/// whether pictures go out as pictures said by the caller: the subscription
+/// whether pictures go out as pictures said by the caller (the subscription
 /// asks the model's catalog row, while an API key's endpoint answers for
-/// itself (`openai_compat::responses_wire`, which also says what else differs
-/// on the public `/v1/responses`).
+/// itself), and the road whose reasoning goes back (`None`: the
+/// subscription's). A ChatGPT login and an API key are different OpenAI
+/// accounts, and the API removes or refuses reasoning made under another
+/// organization, so the reasoning a session's messages carry goes back only
+/// on the road that made it (`openai_compat::responses_wire` says what else
+/// differs on the public `/v1/responses`).
 pub(crate) fn build_responses_body(
     request: &MessageRequest,
     instructions: &str,
     stream: bool,
     session_id: &str,
     supports_vision: bool,
+    road: Option<&str>,
 ) -> Value {
+    let carries_another_road = |message: &InputMessage| {
+        message
+            .reasoning_replay
+            .as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|entries| entries.iter().any(|entry| !replay_entry_is_of(entry, road)))
+    };
+    let this_road_only;
+    let request = if request.messages.iter().any(carries_another_road) {
+        let mut copy = request.clone();
+        for message in &mut copy.messages {
+            if let Some(Value::Array(entries)) = message.reasoning_replay.as_mut() {
+                entries.retain(|entry| replay_entry_is_of(entry, road));
+            }
+        }
+        this_road_only = copy;
+        &this_road_only
+    } else {
+        request
+    };
     let mut input = Vec::new();
     for message in &request.messages {
         append_input_items(&mut input, message, session_id, supports_vision);

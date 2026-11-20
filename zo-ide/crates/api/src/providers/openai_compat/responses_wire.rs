@@ -20,13 +20,15 @@
 //! once per request; what it taught is kept for the rest of the process, never
 //! written to disk.
 //!
-//! The reasoning a model sends on this road goes back to it from this
-//! process's own store ([`API_SCOPE`]) and never rides on the session's
-//! messages: a ChatGPT login and an API key are different OpenAI accounts, and
-//! the API removes or refuses reasoning made under another organization
-//! (OpenAI's reasoning guide, "Reasoning item removal across requests"). The
-//! subscription's reasoning on a message is not read here, and nothing this
-//! road makes is put on a message for the subscription to read.
+//! The reasoning a model sends on this road rides on the session's messages
+//! marked with the road that made it ([`api_road`]: this road and its
+//! endpoint), and goes back only on that road: a ChatGPT login and an API key
+//! are different OpenAI accounts, and so may two endpoints be, and the API
+//! removes or refuses reasoning made under another organization (OpenAI's
+//! reasoning guide, "Reasoning item removal across requests"). The
+//! subscription's reasoning, which carries no mark, is not sent here, and
+//! what this road marks is not sent to the subscription
+//! (`chatgpt_backend::build_responses_body`).
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -36,13 +38,28 @@ use serde_json::{Value, json};
 use super::OpenAiCompatConfig;
 use crate::error::ApiError;
 use crate::providers::chatgpt_backend::{
-    ResponsesSseParser, ResponsesStreamState, build_responses_body,
+    REPLAY_ROAD_KEY, ResponsesSseParser, ResponsesStreamState, build_responses_body,
 };
 use crate::types::{EffortLevel, MessageRequest, MessageResponse, StreamEvent, SystemBlock, Usage};
 
-/// The name this road's reasoning is kept under in this process (the
-/// subscription backend keeps its own under each client's session).
-pub(super) const API_SCOPE: &str = "openai-api-key-responses";
+/// The road an API key's `/responses` answers come back on: this road and the
+/// endpoint they came from. It marks the reasoning this road puts on the
+/// session's messages, and names what this process keeps of it (the
+/// subscription keeps its own under each client's session).
+pub(super) fn api_road(base_url: &str) -> String {
+    format!("openai-api-key {}", endpoint_base(base_url))
+}
+
+/// Mark every reasoning-replay entry of an answer with `road`.
+fn mark_road(replay: &mut Option<Value>, road: &str) {
+    if let Some(Value::Array(entries)) = replay.as_mut() {
+        for entry in entries {
+            if let Some(fields) = entry.as_object_mut() {
+                fields.insert(REPLAY_ROAD_KEY.to_string(), json!(road));
+            }
+        }
+    }
+}
 
 /// The wire one request goes out on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,32 +342,23 @@ pub(super) fn supports_vision(request: &MessageRequest, config: OpenAiCompatConf
 /// * no `reasoning.summary`: OpenAI asks some organizations to verify before a
 ///   reasoning model sends summaries, and a request that asks for one is then
 ///   refused; the Chat body never asked for reasoning text either;
-/// * the reasoning sent back is this road's own, from this process
-///   ([`API_SCOPE`]): what the subscription left on the messages stays off
-///   (the module's note says why).
+/// * the reasoning sent back is only what this road, at this endpoint, marked
+///   ([`api_road`]; the module's note says why).
 pub(super) fn api_responses_body(
     request: &MessageRequest,
     config: OpenAiCompatConfig,
+    base_url: &str,
     stream: bool,
 ) -> Value {
     let instructions = instructions(request, config);
-    let without_attached;
-    let request = if request.messages.iter().any(|message| message.reasoning_replay.is_some()) {
-        let mut copy = request.clone();
-        for message in &mut copy.messages {
-            message.reasoning_replay = None;
-        }
-        without_attached = copy;
-        &without_attached
-    } else {
-        request
-    };
+    let road = api_road(base_url);
     let mut body = build_responses_body(
         request,
         &instructions,
         stream,
-        API_SCOPE,
+        &road,
         supports_vision(request, config),
+        Some(&road),
     );
     if let Some(fields) = body.as_object_mut() {
         fields.insert(
@@ -391,13 +399,13 @@ pub(super) fn api_response(
     value: &Value,
     model: &str,
     config: OpenAiCompatConfig,
+    base_url: &str,
 ) -> MessageResponse {
     note_the_answer(value);
+    let road = api_road(base_url);
     let mut response =
-        crate::providers::chatgpt_backend::parse_responses_response(value, model, API_SCOPE);
-    // Kept in this process under `API_SCOPE` by the parse; never on the
-    // session's messages.
-    response.reasoning_replay = None;
+        crate::providers::chatgpt_backend::parse_responses_response(value, model, &road);
+    mark_road(&mut response.reasoning_replay, &road);
     count_as_chat(&mut response.usage, config);
     response
 }
@@ -423,14 +431,17 @@ pub(super) struct ResponsesDecoder {
     parser: ResponsesSseParser,
     state: ResponsesStreamState,
     config: OpenAiCompatConfig,
+    road: String,
 }
 
 impl ResponsesDecoder {
-    pub(super) fn new(model: String, config: OpenAiCompatConfig) -> Self {
+    pub(super) fn new(model: String, config: OpenAiCompatConfig, base_url: &str) -> Self {
+        let road = api_road(base_url);
         Self {
             parser: ResponsesSseParser::new(),
-            state: ResponsesStreamState::new(model).with_session_id(API_SCOPE),
+            state: ResponsesStreamState::new(model).with_session_id(road.clone()),
             config,
+            road,
         }
     }
 
@@ -454,9 +465,7 @@ impl ResponsesDecoder {
         for event in &mut events {
             if let StreamEvent::MessageDelta(delta) = event {
                 count_as_chat(&mut delta.usage, self.config);
-                // Kept in this process under `API_SCOPE` by the state; never
-                // on the session's messages.
-                delta.delta.reasoning_replay = None;
+                mark_road(&mut delta.delta.reasoning_replay, &self.road);
             }
         }
         Ok((events, self.state.take_failure()))

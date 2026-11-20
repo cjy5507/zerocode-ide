@@ -767,7 +767,7 @@ impl OpenAiCompatClient {
             }
             Wire::Responses => {
                 let payload = response.json::<Value>().await?;
-                responses_wire::api_response(&payload, &request.model, config)
+                responses_wire::api_response(&payload, &request.model, config, &self.base_url)
             }
         };
         if normalized.request_id.is_none() {
@@ -790,6 +790,7 @@ impl OpenAiCompatClient {
                 wire,
                 request.model.clone(),
                 request_config_for_base_url(self.config(), &self.base_url),
+                &self.base_url,
             ),
             pending: VecDeque::new(),
             failure: None,
@@ -953,7 +954,7 @@ impl OpenAiCompatClient {
             ),
             Wire::Responses => (
                 responses_wire::responses_endpoint(&self.base_url),
-                responses_wire::api_responses_body(request, config, request.stream),
+                responses_wire::api_responses_body(request, config, &self.base_url, request.stream),
             ),
         };
         if let Some(accepted) = efforts {
@@ -1245,6 +1246,7 @@ impl MessageStream {
             wire,
             self.request.model.clone(),
             request_config_for_base_url(self.client.config(), &self.client.base_url),
+            &self.client.base_url,
         );
         Ok(())
     }
@@ -1265,15 +1267,15 @@ struct ChatDecoder {
 }
 
 impl StreamDecoder {
-    fn new(wire: Wire, model: String, config: OpenAiCompatConfig) -> Self {
+    fn new(wire: Wire, model: String, config: OpenAiCompatConfig, base_url: &str) -> Self {
         match wire {
             Wire::Chat => Self::Chat(Box::new(ChatDecoder {
                 parser: OpenAiSseParser::new(),
                 state: StreamState::new(model, config),
             })),
-            Wire::Responses => {
-                Self::Responses(Box::new(responses_wire::ResponsesDecoder::new(model, config)))
-            }
+            Wire::Responses => Self::Responses(Box::new(responses_wire::ResponsesDecoder::new(
+                model, config, base_url,
+            ))),
         }
     }
 
