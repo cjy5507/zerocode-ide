@@ -1243,7 +1243,14 @@ mod tests {
         git(repo, &["cherry-pick", &first]);
         let range = |repo: &Path| {
             let mut seen = CommitsSeen::default();
-            see_ranges(&mut seen, repo, &[head.clone()], "main", "v*", None);
+            see_ranges(
+                &mut seen,
+                repo,
+                std::slice::from_ref(&head),
+                "main",
+                "v*",
+                None,
+            );
             seen.range(&head)
                 .cloned()
                 .expect("git answered for the range")
@@ -1281,7 +1288,14 @@ mod tests {
         git(repo, &["merge", "-q", "--no-ff", "-m", "take side", "side"]);
         let merge = git(repo, &["rev-parse", "HEAD"]);
         let mut seen = CommitsSeen::default();
-        see_ranges(&mut seen, repo, &[side.clone()], "main", "v*", None);
+        see_ranges(
+            &mut seen,
+            repo,
+            std::slice::from_ref(&side),
+            "main",
+            "v*",
+            None,
+        );
         let merged = seen.range(&side).expect("git answered for the merged head");
         assert_eq!(merged.commits, vec![(side.clone(), true)]);
         assert_eq!(merged.landed_as.as_deref(), Some(merge.as_str()));
