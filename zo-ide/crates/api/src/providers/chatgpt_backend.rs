@@ -255,24 +255,7 @@ pub(crate) fn build_responses_body(
     // Attested rather than silent: a retry that works leaves no other trace, so
     // without this the only way to learn whether the ladder ever ran was to
     // reconstruct it from months of transcripts.
-    let effort = if empty_response_pressure(request) {
-        let stepped = empty_retry_effort(effort, explicit_top_effort);
-        if stepped == effort {
-            telemetry::attest_declined(
-                telemetry::HarnessFeature::EmptyRetryDeescalation,
-                if explicit_top_effort {
-                    "explicit_top_effort"
-                } else {
-                    "already_lowest"
-                },
-            );
-        } else {
-            telemetry::attest_fired(telemetry::HarnessFeature::EmptyRetryDeescalation);
-        }
-        stepped
-    } else {
-        effort
-    };
+    let effort = empty_retry_deescalation(request, effort, explicit_top_effort);
     // gpt-5.6-luna effort contract (user-set, 2026-07-13): luna runs at
     // `xhigh` or above. Applied LAST — after band resolution, dynamic effort,
     // and the empty-retry de-escalation — so nothing steps a luna request
@@ -304,6 +287,35 @@ pub(crate) fn build_responses_body(
     }
 
     payload
+}
+
+/// The empty-response de-escalation [`build_responses_body`] applies (its call
+/// site says why): when `request` retries a turn that came back empty,
+/// `effort` goes out as [`empty_retry_effort`] steps it and whether it stepped
+/// is attested; any other request keeps `effort`.
+fn empty_retry_deescalation(
+    request: &MessageRequest,
+    effort: Option<&'static str>,
+    explicit_top_effort: bool,
+) -> Option<&'static str> {
+    if empty_response_pressure(request) {
+        let stepped = empty_retry_effort(effort, explicit_top_effort);
+        if stepped == effort {
+            telemetry::attest_declined(
+                telemetry::HarnessFeature::EmptyRetryDeescalation,
+                if explicit_top_effort {
+                    "explicit_top_effort"
+                } else {
+                    "already_lowest"
+                },
+            );
+        } else {
+            telemetry::attest_fired(telemetry::HarnessFeature::EmptyRetryDeescalation);
+        }
+        stepped
+    } else {
+        effort
+    }
 }
 
 fn build_image_generation_request(
