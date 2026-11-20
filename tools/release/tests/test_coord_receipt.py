@@ -8,7 +8,9 @@ owner, run, logs folder and checkout, its bytes as sealed, made after the last j
 and, as the lane and the door read it, every job one the build line ran (its record in the
 line's jobs/) whose own word on owner and run is the coordinator's. A recipe counts only
 where an entry ran exactly `just <recipe>` in that gate's folder from the top of the
-checkout. A receipt of the old build queue (version 1) is refused with its reason.
+checkout, the one place the gate script runs (a log without its head and tree is refused):
+the checkout itself is never read, so one removed before the receipt was made or after
+changes nothing. A receipt of the old build queue (version 1) is refused with its reason.
 
 Run: python3 tools/release/tests/test_coord_receipt.py   (stdlib only)
 """
@@ -119,20 +121,21 @@ class Reading(ReceiptCase):
         self.assertEqual(coord_receipt.recipe_of(["bash", "-c", "cd zo-ide && just e2e"], "zo-ide"), "e2e")
         self.assertIsNone(coord_receipt.recipe_of(["bash", "-c", "cd zo-ide && just e2e"], "."))
 
-    def test_a_just_counts_only_from_the_top_of_the_checkout(self):
-        # ZO's review of t-47516, P1-1: jobs that ran in zo-ide ran zo's `just test` and
-        # `just doc`, never the root's — and a `cd` from there names no folder of the
-        # checkout either. The same entries from the top cover the root's and zo's.
+    def test_a_job_run_below_its_checkouts_top_is_refused_and_from_the_top_a_bare_just_is_the_roots(self):
+        # ZO's review of t-47516, P1-1: jobs that ran in zo-ide ran zo's `just test` and `just doc`,
+        # never the root's. The gate script runs only at the top: anywhere else it stops before its
+        # head and tree, so such a job's log is refused even with its record made green by hand — the
+        # reader never looks at the checkout (the review of t-119757's fix, R1).
         gate = {"g1": [("test", "just test", 0), ("doc", "just doc", 0)],
                 "g2": [("zo-fmt-check", "zsh -c 'cd zo-ide && just fmt-check'", 0)]}
-        below = self.made(self.gate(gate, cwd=self.tmp / "coord-gate" / "zo-ide"))
-        recipes = lambda receipt, folder: [line.split()[1] for line in self.facts(receipt, folder)
-                                           if line.startswith("recipe ")]
-        self.assertEqual(recipes(below, "."), [], "a bare just in zo-ide is not the root's recipe")
-        self.assertEqual(recipes(below, "zo-ide"), [])
+        below = self.gate(gate, cwd=self.tmp / "coord-gate" / "zo-ide")
+        for path in below:
+            receipt_fixture.stopped_below_the_top(path)
+        self.assertIn("does not open with its head and tree", self.refused(lambda: coord_receipt.make(below)))
         top = self.made(self.gate(gate))
-        self.assertEqual(recipes(top, "."), ["doc", "test"])
-        self.assertEqual(recipes(top, "zo-ide"), ["fmt-check"])
+        recipes = lambda folder: [line.split()[1] for line in self.facts(top, folder) if line.startswith("recipe ")]
+        self.assertEqual(recipes("."), ["doc", "test"])
+        self.assertEqual(recipes("zo-ide"), ["fmt-check"])
 
     def test_each_head_is_said_with_the_first_end_of_its_jobs(self):
         one = self.gate({"g1": [("pii-check", "just pii-check", 0)]}, head="3" * 40)
@@ -290,26 +293,35 @@ class Refusing(ReceiptCase):
         recipes = lambda: [line.split()[1] for line in self.facts(receipt, ".") if line.startswith("recipe ")]
         self.assertEqual(recipes(), ["pii-check", "test", "tools-test", "win-check-if-available"])
         shutil.rmtree(self.tmp / "coord-gate")
-        self.assertEqual(recipes(), ["pii-check", "test", "tools-test", "win-check-if-available"], "what make found at the top")
+        self.assertEqual(recipes(), ["pii-check", "test", "tools-test", "win-check-if-available"], "the jobs' logs say they ran at the top")
         said = self.read_cli(receipt, "--dir", ".")
         self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
         self.assertIn("recipe pii-check", said.stdout.splitlines())
 
-    def test_a_receipt_made_below_the_top_counts_nothing_after_its_checkout_is_removed(self):
-        gate = {"g1": [("test", "just test", 0)]}
-        receipt = self.made(self.gate(gate, cwd=self.tmp / "coord-gate" / "zo-ide"))
-        self.assertFalse(json.loads(receipt.read_text())["top"])
+    def test_a_receipt_made_after_its_checkout_was_removed_still_counts_its_recipes(self):
+        # The review of t-119757's fix, R1: the stack is cleaned as soon as it lands — before the release
+        # commit, so before make. Its jobs ran at the top by their own logs; the checkout is not read again.
+        jobs = self.gate()
         shutil.rmtree(self.tmp / "coord-gate")
-        self.assertFalse([line for line in self.facts(receipt, ".") if line.startswith("recipe ")])
+        receipt = self.made(jobs)
+        self.assertNotIn("top", json.loads(receipt.read_text()), "the receipt says nothing of the checkout")
+        self.assertEqual([line.split()[1] for line in self.facts(receipt, ".") if line.startswith("recipe ")],
+                         ["pii-check", "test", "tools-test", "win-check-if-available"])
+        said = self.read_cli(receipt, "--dir", "zo-ide")
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+        self.assertEqual([line for line in said.stdout.splitlines() if line.startswith("recipe ")], ["recipe clippy", "recipe fmt-check"])
 
-    def test_a_receipt_whose_top_is_not_its_checkouts_is_refused(self):
-        jobs = self.gate({"g1": [("test", "just test", 0)]}, cwd=self.tmp / "coord-gate" / "zo-ide")
-        self.assertIn("the receipt's top is not its checkout's", self.refused(lambda: self.facts(self.careless(jobs, top=True))))
-        receipt = json.loads(self.careless(jobs, top=False).read_text())
-        del receipt["top"]
-        bare = self.tmp / "no-top.json"
-        bare.write_text(json.dumps(receipt))
-        self.assertIn("does not say whether its jobs ran at the top", self.refused(lambda: self.facts(bare)))
+    def test_neither_the_checkout_nor_a_top_written_into_the_receipt_is_read(self):
+        # The review of t-119757's fix, I-A: a receipt's own word on where its jobs ran is no evidence, nor is
+        # what stands at the checkout's path now — the jobs' logs say where they ran.
+        jobs = self.gate()
+        every = ["pii-check", "test", "tools-test", "win-check-if-available"]
+        recipes = lambda receipt: [line.split()[1] for line in self.facts(receipt, ".") if line.startswith("recipe ")]
+        for top in (False, True, None, "yes"):
+            with self.subTest(top=top):
+                self.assertEqual(recipes(self.careless(jobs, top=top)), every)
+        (self.tmp / "coord-gate" / ".git").rmdir()   # the path holds no checkout's top any more
+        self.assertEqual(recipes(self.made(jobs)), every)
 
     def test_a_folder_named_through_a_link_is_the_same_folder(self):
         jobs = self.gate({"g1": [("pii-check", "just pii-check", 0)]})
@@ -751,6 +763,8 @@ class GateScript(ReceiptCase):
                 self.assertIn(f"STOP ", ran.stdout)
                 self.assertIn(said, ran.stdout)
                 self.assertFalse((self.tmp / "just-calls.txt").exists(), "no recipe ran")
+                # Its head and tree only past every check: the reader takes a log that has them as run at the top.
+                self.assertFalse([line for line in ran.stdout.splitlines() if line.startswith("head ")], ran.stdout)
         (self.stack / "justfile").write_text("verify: alpha beta gamma\n")   # a change nobody committed
         dirty = self.gate("--who", "coord-l9", "--logs", str(self.logs), "root")
         self.assertEqual(dirty.returncode, 2, dirty.stdout + dirty.stderr)

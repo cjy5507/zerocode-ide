@@ -85,6 +85,18 @@ def ended(path, at):
     rewrite(path, started_ms=int((at - 194) * 1000), ended_ms=int(at * 1000))
 
 
+def stopped_below_the_top(path):
+    """Make the log of the job at PATH what coord-gate.sh writes when put in below its checkout's top:
+    its `#` lines, then its STOP line, with no head and tree and nothing after. The record is left as
+    it was (green), so what refuses the job is the log alone."""
+    log = log_of(path)
+    lines = log.read_text().splitlines()
+    at = next(n for n, line in enumerate(lines) if line.startswith("head "))
+    cwd = next(line[len("# cwd: "):] for line in lines if line.startswith("# cwd: "))
+    lines[at:] = [f"STOP the job runs in {cwd}, not the top of its checkout ({Path(path).parents[2] / 'coord-gate'})"]
+    log.write_text("\n".join(lines) + "\n")
+
+
 def log_of(path):
     """The log the line keeps for the job whose record is at PATH."""
     path = Path(path)
@@ -113,7 +125,7 @@ def sealed(paths, made=None, **facts):
                 key = shlex.split(line)[1]
                 entry = os.path.join(logs, f"{key}.log")   # as the reader names it, on every system
                 seen[entry] = hashlib.sha256(Path(entry).read_bytes()).hexdigest()
-    receipt = {"receipt": 2, "who": "coord-l9", "run": RUN, "tree": TREE, "logs": logs, "cwd": cwd, "top": True,
+    receipt = {"receipt": 2, "who": "coord-l9", "run": RUN, "tree": TREE, "logs": logs, "cwd": cwd,
                "made": int(made if made is not None else time.time()),
                "jobs": [str(path) for path in paths], "sealed": seen}
     receipt.update(facts)

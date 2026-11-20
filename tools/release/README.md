@@ -228,9 +228,10 @@ off `zo line` jobs (t-119757). The coordinator gates the stacked tree with
 
 `<label>` is letters and digits; `<folder>` is an absolute folder outside the
 checkout; the third line runs after both jobs passed and the release commit is
-cut on top of the gated head. `make` writes down whether the jobs ran at the top
-of their checkout, so the stack may be removed before the lane reads the receipt:
-a checkout no longer there is taken at what `make` found. `--in-lane-env` is the
+cut on top of the gated head. The stack may be removed as soon as both jobs
+ended, before `make` too: the jobs' own logs say they ran at its top, and nothing
+reads it again. `<folder>` stays until the lane has read the receipt, which reads
+every entry's log there again. `--in-lane-env` is the
 script's own second step (past `lane-env.sh` and `run-current`): a job whose
 command names it is refused. `--quiet` runs a job alone, so the two gates run
 one after another, as the lane's do (a gate starts only once the load is at or
@@ -247,8 +248,9 @@ just <recipe>'` under the key `zo-<recipe>` — in the environment the lane's ga
 get (`lane-env.sh`), each entry's output in `<folder>/<key>.log`, after waiting
 for the calm the lane waits for (at most the table's `CALM_WAIT_SECS`). It runs
 only in the checkout the line ran it in, at its top and clean (a `node_modules`
-link aside), and stops (rc 2) before any recipe when it cannot make a receipt: an
-owner that is no coordinator's, a logs folder inside the checkout, no run. Its
+link aside), and stops (rc 2) before its head and tree, so before any recipe, when
+it cannot make a receipt: below the top, a checkout not clean, an owner that is no
+coordinator's, a logs folder inside the checkout, no run. Its
 log opens, under the line's own `zo line: …` lines, with `# who:`, `# run:` (its
 pane's `zerocode-orc run-current`), `# cwd:` and `# logs:`, then `head <sha> tree
 <tree>`; it says `entry <key> <command>` and `RC <key>=<rc> (<n>s)` for every
@@ -275,8 +277,7 @@ it again and:
   than 0, or its rc file does), ran anything but the checkout's own
   `coord-gate.sh` — its inner `--in-lane-env` step included, or with a `--who`
   other than its owner or a `--logs` other than its log's folder — its log names
-  another owner or folder than its record, the receipt's word on running at the
-  top differs from a checkout still there, the
+  another owner or folder than its record or stops before its head and tree, the
   jobs name two trees, owners, runs, logs folders or checkouts, two jobs ran one
   entry, a sealed byte changed, the receipt is older than its last job, a job is
   not one the build line ran (its record outside `RELEASE_BUILD_LINE`'s `jobs/`),
@@ -291,9 +292,10 @@ it again and:
   the coordinator's launch names its own, the person's launchd agent none;
 - counts a recipe as gated only where an entry ran exactly `just <recipe>` in the
   gate's folder from the top of the checkout — a bare `just <recipe>` for the
-  root, `bash -c 'cd zo-ide && just <recipe>'` (or `zsh`, `sh`) for zo, and nothing
-  at all when the jobs ran anywhere but the top (their checkout holds no `.git`):
-  from zo-ide a bare `just test` is zo's — weighed against the gate's own list
+  root, `bash -c 'cd zo-ide && just <recipe>'` (or `zsh`, `sh`) for zo; the top is
+  where every job ran by its own log (the gate script runs nowhere else — from
+  zo-ide a bare `just test` would be zo's), so neither the checkout nor any word
+  of the receipt on it is read — weighed against the gate's own list
   (`verify-every-recipe.sh --list`): the lane's strict `win-check` is never
   covered by `win-check-if-available`, which says SKIPPED on a cold target, and
   zo's tests run by package are no `just test`;

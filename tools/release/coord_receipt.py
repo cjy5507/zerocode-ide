@@ -36,11 +36,12 @@ for a gate run as two jobs, both `coord-<label>-root` and `coord-<label>-zo` of 
     head <sha> <the earliest end, epoch seconds, of a job on that head>
     recipe <name>    with --dir: a recipe of that folder an entry ran exactly as `just <name>`
 
-and exits 1 with one line saying why when the receipt does not stand. An entry's `just` is
-placed only when the jobs ran at the top of their checkout (it holds its .git; `make` writes down
-what it found, and a checkout removed since is taken at that): a bare
-`just <name>` is then the top's recipe, and `<shell> -c 'cd <folder> && just <name>'` that
-folder's — from zo-ide a bare `just test` is zo's, never the root's. How the tree relates
+and exits 1 with one line saying why when the receipt does not stand. Every job ran at the
+top of its checkout by its own log: anywhere else the gate script stops before its head and
+tree, and a log without them is refused. So a bare `just <name>` is the top's recipe and
+`<shell> -c 'cd <folder> && just <name>'` that folder's (from zo-ide a bare `just test` would be
+zo's, never the root's, and the script never runs there), and nothing reads the checkout
+again: it may be removed once its jobs ended, before `make` too. How the tree relates
 to the sha being cut, and which recipes a gate runs, are the lane's to judge (git and
 verify-every-recipe.sh --list); so is anything an entry ran other than a recipe. A receipt
 of the old build queue's jobs (version 1, 2026-10-22 to 11-09) is refused: that queue's
@@ -274,11 +275,6 @@ def held_to(facts, run):
         raise Refused(f"the jobs say {facts['who']}, not a coordinator's coord-<label>")
 
 
-def at_top(folder):
-    """FOLDER is the top of a checkout: it holds the checkout's .git (a worktree's file, a clone's folder)."""
-    return os.path.lexists(os.path.join(folder, ".git"))
-
-
 def recipe_of(command, folder):
     """The recipe an entry run from the checkout's top ran in FOLDER when it ran exactly `just <recipe>` there, else None."""
     folder = os.path.normpath(folder)
@@ -297,8 +293,7 @@ def make(paths):
     seen = {}
     for one in jobs:
         seen.update(one["seen"])
-    return {"receipt": VERSION, **facts, "top": at_top(facts["cwd"]), "made": int(time.time()),
-            "jobs": [one["path"] for one in jobs], "sealed": seen}
+    return {"receipt": VERSION, **facts, "made": int(time.time()), "jobs": [one["path"] for one in jobs], "sealed": seen}
 
 
 def read(path, folder=None, line=None, run=None):
@@ -331,13 +326,9 @@ def read(path, folder=None, line=None, run=None):
         raise Refused(f"{changed[0]} is not what the receipt sealed")
     if made < int(max(one["ended"] for one in jobs)):
         raise Refused("the receipt was made before its last job ended")
-    # Whether the jobs ran at the top of their checkout is read where it still stands; a checkout
-    # removed since (the stack, cleaned after landing) is taken at what make found (ZO's review, F1).
-    top = receipt.get("top")
-    if not isinstance(top, bool):
-        raise Refused("the receipt does not say whether its jobs ran at the top of their checkout")
-    if os.path.isdir(facts["cwd"]) and at_top(facts["cwd"]) != top:
-        raise Refused("the receipt's top is not its checkout's")
+    # The jobs ran at the top of their checkout by their own logs (job: no head and tree, no job), so the
+    # checkout is not read, nor any word of the receipt on it: the stack is cleaned as soon as it lands,
+    # before make as often as after (the review of t-119757's fix, R1).
     if line is not None:
         on_the_line(jobs, line)
     if run is not None:
@@ -347,8 +338,8 @@ def read(path, folder=None, line=None, run=None):
         heads[one["head"]] = min(heads.get(one["head"], one["ended"]), one["ended"])
     said = [f"{key} {value}" for key, value in facts.items()]
     said += [f"head {head} {int(ended)}" for head, ended in sorted(heads.items())]
-    if folder is not None and top:
-        recipes = {recipe_of(command, folder) for one in jobs for command in one["entries"].values()}
+    if folder is not None:
+        recipes ={recipe_of(command, folder) for one in jobs for command in one["entries"].values()}
         said += [f"recipe {name}" for name in sorted(recipes - {None})]
     return said
 

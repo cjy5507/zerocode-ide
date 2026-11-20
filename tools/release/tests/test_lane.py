@@ -2797,8 +2797,10 @@ class Receipt(LaneCase):
         self.kept().parent.mkdir(parents=True, exist_ok=True)
         self.kept().write_text(Path(receipt).read_text())
 
-    def receipt(self, gate=None, **kw):
+    def receipt(self, gate=None, *, stack_removed=False, **kw):
         jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", gate or self.GATE, **kw)
+        if stack_removed:   # cleaned as soon as it landed: before the release commit, so before make
+            shutil.rmtree(Path(self._tmp) / "coord-gate")
         made = subprocess.run([sys.executable, str(RELEASE / "coord_receipt.py"), "make", *map(str, jobs)],
                               capture_output=True, text=True)
         self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
@@ -2855,9 +2857,17 @@ class Receipt(LaneCase):
 
     def test_a_receipt_still_skips_both_gates_after_the_stack_checkout_is_removed(self):
         # ZO's review of t-119757, F1: the coordinator cleans the stack after landing, maybe before the lane
-        # reads the receipt — make wrote down that the jobs ran at the top, so their recipes still count.
+        # reads the receipt — the jobs' own logs say they ran at the top, so their recipes still count.
         receipt = self.receipt()
         shutil.rmtree(Path(self._tmp) / "coord-gate")
+        self.assertEqual(self.cut(receipt), {}, "neither gate ran")
+        self.assertTrue(self.lane.phase("gate-zo")["skipped"].startswith("receipt coord-l9"), self.lane.phase("gate-zo"))
+        self.assertEqual(self.lane.status()["outcome"], "green")
+
+    def test_a_receipt_made_after_the_stack_checkout_was_removed_still_skips_both_gates(self):
+        # The review of t-119757's fix, R1: the stack is cleaned as soon as it lands — before the release
+        # commit, so before make. The jobs' own logs say they ran at the top; nothing reads the checkout.
+        receipt = self.receipt(stack_removed=True)
         self.assertEqual(self.cut(receipt), {}, "neither gate ran")
         self.assertTrue(self.lane.phase("gate-zo")["skipped"].startswith("receipt coord-l9"), self.lane.phase("gate-zo"))
         self.assertEqual(self.lane.status()["outcome"], "green")
@@ -2973,13 +2983,19 @@ class Receipt(LaneCase):
         self.assertEqual(self.lane.queue(), [SHA_A])
         self.assertLessEqual(self.kept().stat().st_mtime_ns, (self.lane.home / "queue" / SHA_A).stat().st_mtime_ns)
 
-    def test_bare_recipes_run_below_the_checkouts_top_cover_nothing(self):
-        # ZO's review, P1-1: jobs that ran in zo-ide ran zo's `just test`, never the
-        # root's — both gates run every recipe, as if no receipt had covered one.
+    def test_a_gate_run_below_the_checkouts_top_is_no_receipt_and_both_gates_run_whole(self):
+        # ZO's review, P1-1: jobs that ran in zo-ide ran zo's `just test`, never the root's. The gate
+        # script runs only at the top — anywhere else it stops before its head and tree — and a job
+        # without them is refused, however green its record (the review of t-119757's fix, R1).
         gate = {"g1": [("pii-check", "just pii-check", 0), ("test", "just test", 0), ("win-check", "just win-check", 0)]}
-        below = self.receipt(gate, cwd=Path(self._tmp) / "coord-gate" / "zo-ide")
-        self.assertEqual(self.cut(below), {"root": self.ROOT.split(), "zo": self.ZO.split()})
-        self.assertIn("0/3 root recipes green, owes pii-check test win-check", self.lane.phase("gate-root").get("receipt", ""))
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", gate, cwd=Path(self._tmp) / "coord-gate" / "zo-ide")
+        for path in jobs:
+            receipt_fixture.stopped_below_the_top(path)
+        careless = Path(self._tmp) / "careless.json"
+        careless.write_text(receipt_fixture.sealed(jobs))
+        self.beside(careless)
+        self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
+        self.assertIn("does not open with its head and tree", self.lane.phase("gate-root").get("receipt", ""))
 
     def test_jobs_outside_the_build_lines_folder_are_refused_and_the_gates_run_whole(self):
         # ZO's review, P2-1: jobs copied out of the line's folder by hand are no jobs the line ran.
