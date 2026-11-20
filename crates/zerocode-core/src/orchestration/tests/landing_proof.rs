@@ -427,6 +427,10 @@ fn a_release_tag_origin_does_not_hold_ships_nothing_and_says_why() {
     );
     assert_eq!(row["write"]["merged"], true, "{row}");
     assert_eq!(row["write"].get("deployed"), None, "{row}");
+    assert_eq!(
+        row["unreleased"], UNPUBLISHED,
+        "the row says why the release is not written: {row}"
+    );
     assert!(after.merged && !after.deployed, "{after:?}");
 
     let mut seen = git_says(RangeSeen::default());
@@ -450,4 +454,21 @@ fn a_release_tag_origin_does_not_hold_ships_nothing_and_says_why() {
         "{row}"
     );
     assert!(!review(&bench, &task).deployed);
+}
+
+/// Where releases are published is the caller's to name (t-119569, the delta check's 2): the verb
+/// takes `--release-remote`, a remote's name or URL, and reads the release of what git said there.
+#[test]
+fn the_backfill_takes_the_remote_releases_are_published_to() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name landing-remote");
+    let task = verified(&mut bench, "published", HEAD);
+    let listed = backfill(
+        &mut bench,
+        "task-backfill --release-remote https://example.invalid/zerocode.git",
+        git_says(landed_and_released()),
+    );
+    let row = landing_row(&listed, &task);
+    assert_eq!(row["write"]["deployed"], true, "{row}");
+    assert_eq!(row["write"]["release"], "v1.2.0", "{row}");
 }

@@ -11597,7 +11597,8 @@ fn read_commits(
 ) -> Result<Option<zerocode_core::orchestration::coordinator_take::CommitsSeen>, String> {
     use zerocode_core::orchestration::commit_named;
     use zerocode_core::orchestration::coordinator_take::{
-        BACKFILL_VERB, DEFAULT_BASE, HAND_IN_VERB, RELEASE_TAGS, backfill_commits, backfill_heads,
+        BACKFILL_VERB, DEFAULT_BASE, HAND_IN_VERB, RELEASE_REMOTE_FLAG, RELEASE_TAGS,
+        backfill_commits, backfill_heads,
     };
     let arg = |flag| crate::agent_tools_runtime::orchestration_arg(argv, flag);
     if argv.first().map(String::as_str) == Some(TASK_UPDATE_VERB) {
@@ -11638,6 +11639,7 @@ fn read_commits(
             &[head],
             arg("--base"),
             None,
+            None,
         )));
     }
     let named = || {
@@ -11653,9 +11655,11 @@ fn read_commits(
     Ok(named().map(|(commits, heads)| {
         let base = arg("--base").unwrap_or(DEFAULT_BASE);
         let tags = arg("--tags").unwrap_or(RELEASE_TAGS);
-        let mut seen = crate::commit_witness::see(&repo, &commits, Some(base), Some(tags));
+        // Where releases are published, as the caller names it — no default (t-119569).
+        let release = arg(RELEASE_REMOTE_FLAG);
+        let mut seen = crate::commit_witness::see(&repo, &commits, Some(base), Some(tags), release);
         // And the range each verified review read (t-119569): what its landing is proven by.
-        crate::commit_witness::see_ranges(&mut seen, &repo, &heads, base, tags);
+        crate::commit_witness::see_ranges(&mut seen, &repo, &heads, base, tags, release);
         seen
     }))
 }

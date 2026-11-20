@@ -21,6 +21,11 @@ const ASIDE: &str = "b2c3d4e5f60718293a4b5c6d7e8f901234567890";
 const UNRELEASED: &str = "c3d4e5f60718293a4b5c6d7e8f90123456789012";
 /// A commit git does not know.
 const UNKNOWN: &str = "d4e5f60718293a4b5c6d7e8f9012345678901234";
+/// A commit on `main` a release tag holds that the release remote named does not hold yet.
+const UNPUBLISHED: &str = "f60718293a4b5c6d7e8f9012345678901234abcd";
+/// Why git read no release for [`UNPUBLISHED`], as the window says it.
+const UNPUBLISHED_WHY: &str =
+    "v1.0.2 holds it, but public has no such tag yet — the release has not been published there";
 /// Where `main` stands.
 const MAIN: &str = "e5f60718293a4b5c6d7e8f901234567890123456";
 const REPO: &str = "/Users/dev/repo";
@@ -37,12 +42,19 @@ fn git_says() -> CommitsSeen {
         tags: Some("v*".to_string()),
         ..CommitsSeen::default()
     };
-    for (named, full, in_base, tag) in [
-        (LANDED, Some(LANDED), Some(true), Some("v1.0.1")),
-        (&LANDED[..9], Some(LANDED), Some(true), Some("v1.0.1")),
-        (ASIDE, Some(ASIDE), Some(false), None),
-        (UNRELEASED, Some(UNRELEASED), Some(true), None),
-        (UNKNOWN, None, None, None),
+    for (named, full, in_base, tag, unpublished) in [
+        (LANDED, Some(LANDED), Some(true), Some("v1.0.1"), None),
+        (&LANDED[..9], Some(LANDED), Some(true), Some("v1.0.1"), None),
+        (ASIDE, Some(ASIDE), Some(false), None, None),
+        (UNRELEASED, Some(UNRELEASED), Some(true), None, None),
+        (UNKNOWN, None, None, None, None),
+        (
+            UNPUBLISHED,
+            Some(UNPUBLISHED),
+            Some(true),
+            None,
+            Some(UNPUBLISHED_WHY),
+        ),
     ] {
         seen.insert(
             named,
@@ -50,6 +62,7 @@ fn git_says() -> CommitsSeen {
                 full: full.map(str::to_string),
                 in_base,
                 tag: tag.map(str::to_string),
+                unpublished: unpublished.map(str::to_string),
             },
         );
     }
@@ -553,6 +566,33 @@ fn a_workers_pane_can_neither_take_nor_hand_in() {
     std::mem::swap(&mut bench.team, &mut stranger);
     assert_eq!(bench.ledger.runs()[0].dispatches.len(), attempts);
     assert!(newest(&bench, &mine).is_open() && newest(&bench, &mine).source.is_none());
+}
+
+/// The old road writes no release the remote the caller named does not hold (t-119569, the delta
+/// check's 1 · 2): a commit `main` holds lands, its release unwritten, and the row says why in the
+/// window's words — and the verb takes the remote it is named.
+#[test]
+fn a_backfill_writes_no_release_the_named_remote_does_not_hold_and_says_why() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name backfill-unpublished");
+    let task = finished_by_hand(
+        &mut bench,
+        "unpublished",
+        &format!("{{\"mergeHead\":\"{UNPUBLISHED}\"}}"),
+    );
+    let listed = json_seeing(
+        &mut bench,
+        "task-backfill --release-remote public",
+        git_says(),
+    );
+    let row = listed["rows"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|one| one["taskId"] == task.as_str()))
+        .cloned()
+        .unwrap_or_else(|| panic!("{task} is not listed: {listed}"));
+    assert_eq!(row["write"]["merged"], true, "{row}");
+    assert_eq!(row["write"].get("deployed"), None, "{row}");
+    assert_eq!(row["unreleased"], UNPUBLISHED_WHY, "{row}");
 }
 
 /// ⑤ The backfill lists first and writes only what git proves: merged where the commit is in

@@ -28,8 +28,9 @@ pub(crate) fn see(
     commits: &[String],
     base: Option<&str>,
     tags: Option<&str>,
+    release: Option<&str>,
 ) -> CommitsSeen {
-    see_with(&LocalVcs, repo, commits, base, tags)
+    see_with(&LocalVcs, repo, commits, base, tags, release)
 }
 
 /// [`see`], asking `vcs`. A base or a commit git gave no answer for is left out, and a name more
@@ -40,6 +41,7 @@ fn see_with(
     commits: &[String],
     base: Option<&str>,
     tags: Option<&str>,
+    _release: Option<&str>,
 ) -> CommitsSeen {
     let mut seen = CommitsSeen {
         repo: repo.display().to_string(),
@@ -70,7 +72,15 @@ fn see_with(
             (Some(full), Some(tags)) if in_base != Some(false) => first_tag(vcs, repo, full, tags),
             _ => None,
         };
-        seen.insert(named, CommitSeen { full, in_base, tag });
+        seen.insert(
+            named,
+            CommitSeen {
+                full,
+                in_base,
+                tag,
+                unpublished: None,
+            },
+        );
     }
     seen
 }
@@ -92,8 +102,9 @@ pub(crate) fn see_ranges(
     heads: &[String],
     base: &str,
     tags: &str,
+    release: Option<&str>,
 ) {
-    see_ranges_with(&LocalVcs, seen, repo, heads, base, tags);
+    see_ranges_with(&LocalVcs, seen, repo, heads, base, tags, release);
 }
 
 fn see_ranges_with(
@@ -103,6 +114,7 @@ fn see_ranges_with(
     heads: &[String],
     base: &str,
     tags: &str,
+    _release: Option<&str>,
 ) {
     let Some(Some(base_head)) = resolve(vcs, repo, base) else {
         return;
@@ -1101,7 +1113,7 @@ mod tests {
         git(repo, &["cherry-pick", &first]);
         let range = |repo: &Path| {
             let mut seen = CommitsSeen::default();
-            see_ranges(&mut seen, repo, &[head.clone()], "main", "v*");
+            see_ranges(&mut seen, repo, &[head.clone()], "main", "v*", None);
             seen.range(&head)
                 .cloned()
                 .expect("git answered for the range")
@@ -1139,7 +1151,7 @@ mod tests {
         git(repo, &["merge", "-q", "--no-ff", "-m", "take side", "side"]);
         let merge = git(repo, &["rev-parse", "HEAD"]);
         let mut seen = CommitsSeen::default();
-        see_ranges(&mut seen, repo, &[side.clone()], "main", "v*");
+        see_ranges(&mut seen, repo, &[side.clone()], "main", "v*", None);
         let merged = seen.range(&side).expect("git answered for the merged head");
         assert_eq!(merged.commits, vec![(side.clone(), true)]);
         assert_eq!(merged.landed_as.as_deref(), Some(merge.as_str()));
@@ -1148,7 +1160,7 @@ mod tests {
     /// What git says of the range `head` reviewed, against `main` (t-119569).
     fn reviewed_range(repo: &Path, head: &str) -> RangeSeen {
         let mut seen = CommitsSeen::default();
-        see_ranges(&mut seen, repo, &[head.to_string()], "main", "v*");
+        see_ranges(&mut seen, repo, &[head.to_string()], "main", "v*", None);
         seen.range(head)
             .cloned()
             .unwrap_or_else(|| panic!("git answered for the range {head}"))
@@ -1344,9 +1356,9 @@ mod tests {
         assert_eq!(range.landed_as, None);
     }
 
-    /// A release counts once origin holds its tag (check B · A): with no origin there is none to
-    /// read and the range says so; a tag only local — a release still running, or one that failed
-    /// — is none; pushed, it is the release.
+    /// A release counts once the remote named — origin here — holds its tag (check B · A): with no
+    /// origin there is no published base to read and the range says so; a tag only local is none;
+    /// pushed, it is the release.
     #[test]
     fn a_release_tag_counts_once_origin_holds_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1357,7 +1369,7 @@ mod tests {
         let copy = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["tag", "v1.0.1"]);
 
-        let alone = reviewed_range(repo, &change);
+        let alone = released_range(repo, &change, Some("origin"));
         assert_eq!(alone.landed_as.as_deref(), Some(copy.as_str()));
         assert_eq!(alone.tag, None, "no origin, no release: {alone:?}");
         assert!(
@@ -1373,7 +1385,7 @@ mod tests {
         let url = origin.path().to_str().expect("a UTF-8 path");
         git(repo, &["remote", "add", "origin", url]);
         git(repo, &["push", "-q", "origin", "main"]);
-        let local = reviewed_range(repo, &change);
+        let local = released_range(repo, &change, Some("origin"));
         assert_eq!(local.tag, None, "origin holds main, not the tag: {local:?}");
         assert!(
             local
@@ -1384,9 +1396,142 @@ mod tests {
         );
 
         git(repo, &["push", "-q", "origin", "v1.0.1"]);
-        let released = reviewed_range(repo, &change);
+        let released = released_range(repo, &change, Some("origin"));
         assert_eq!(released.tag.as_deref(), Some("v1.0.1"), "{released:?}");
         assert_eq!(released.unpublished, None, "{released:?}");
+    }
+
+    /// What git says of the range `head` reviewed, against `main`, a release read only where
+    /// `release` names the remote releases are published to (t-119569).
+    fn released_range(repo: &Path, head: &str, release: Option<&str>) -> RangeSeen {
+        let mut seen = CommitsSeen::default();
+        see_ranges(&mut seen, repo, &[head.to_string()], "main", "v*", release);
+        seen.range(head)
+            .cloned()
+            .unwrap_or_else(|| panic!("git answered for the range {head}"))
+    }
+
+    /// A bare repository standing for a remote, and its path as the URL a caller names it by.
+    fn bare(dir: &tempfile::TempDir) -> String {
+        git(dir.path(), &["init", "-q", "--bare", "-b", "main"]);
+        dir.path().to_str().expect("a UTF-8 path").to_string()
+    }
+
+    /// A release counts only where the caller names it published (t-119569, the delta check's 2):
+    /// the private origin may hold a release's tag before the lane publishes it — the public
+    /// snapshot needs it there first — so a tag on origin proves nothing unless origin is the
+    /// remote named. With none named no release is read, and the range says so; a remote named
+    /// that lacks the tag is no release; one that holds a tag of that name is — even on its own
+    /// history, as the public snapshot repository is.
+    #[test]
+    fn a_release_counts_only_where_the_caller_names_it_published() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = forked(dir.path());
+        let change = commit(repo, "change");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["cherry-pick", &change]);
+        git(repo, &["tag", "v1.0.1"]);
+        let origin = tempfile::tempdir().expect("tempdir");
+        let origin_url = bare(&origin);
+        git(repo, &["remote", "add", "origin", origin_url.as_str()]);
+        git(repo, &["push", "-q", "origin", "main", "v1.0.1"]);
+
+        let unnamed = released_range(repo, &change, None);
+        assert_eq!(
+            unnamed.tag, None,
+            "origin holds the tag, and no remote was named: {unnamed:?}"
+        );
+        assert!(
+            unnamed
+                .unpublished
+                .as_deref()
+                .is_some_and(|why| why.contains("--release-remote")),
+            "{unnamed:?}"
+        );
+
+        let public = tempfile::tempdir().expect("tempdir");
+        let public_url = bare(&public);
+        let lacking = released_range(repo, &change, Some(public_url.as_str()));
+        assert_eq!(
+            lacking.tag, None,
+            "the remote named has no such tag: {lacking:?}"
+        );
+        assert!(
+            lacking
+                .unpublished
+                .as_deref()
+                .is_some_and(|why| why.contains("v1.0.1") && why.contains(&public_url)),
+            "{lacking:?}"
+        );
+
+        // Published there: a tag of that name on the public repository's own history.
+        let snapshot = tempfile::tempdir().expect("tempdir");
+        git(snapshot.path(), &["init", "-q", "-b", "main"]);
+        commit(snapshot.path(), "snapshot");
+        git(snapshot.path(), &["tag", "v1.0.1"]);
+        git(
+            snapshot.path(),
+            &["push", "-q", public_url.as_str(), "main", "v1.0.1"],
+        );
+        let shipped = released_range(repo, &change, Some(public_url.as_str()));
+        assert_eq!(shipped.tag.as_deref(), Some("v1.0.1"), "{shipped:?}");
+        assert_eq!(shipped.unpublished, None, "{shipped:?}");
+        assert_eq!(
+            released_range(repo, &change, Some("origin")).tag.as_deref(),
+            Some("v1.0.1"),
+            "origin, named, is read as any remote is"
+        );
+    }
+
+    /// The backfill's old road — commits a result names, with no review — reads a release by the
+    /// same rule (t-119569, the delta check's 1): a tag only local, or one only a remote nobody
+    /// named holds, is no release; the remote named holding it is.
+    #[test]
+    fn the_old_road_reads_a_release_only_where_the_caller_names_it_published() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        let released = commit(repo, "one");
+        git(repo, &["tag", "v1.0.0"]);
+        let origin = tempfile::tempdir().expect("tempdir");
+        let origin_url = bare(&origin);
+        git(repo, &["remote", "add", "origin", origin_url.as_str()]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let public = tempfile::tempdir().expect("tempdir");
+        let public_url = bare(&public);
+        let read = |release: Option<&str>| {
+            see(
+                repo,
+                std::slice::from_ref(&released),
+                Some("main"),
+                Some("v*"),
+                release,
+            )
+            .commit(&released)
+            .cloned()
+            .expect("git answered for the commit")
+        };
+
+        let local = read(Some(public_url.as_str()));
+        assert_eq!(
+            (local.in_base, local.tag.as_deref()),
+            (Some(true), None),
+            "only local: {local:?}"
+        );
+        assert!(local.unpublished.is_some(), "{local:?}");
+        git(repo, &["push", "-q", "origin", "v1.0.0"]);
+        let unnamed = read(None);
+        assert_eq!(
+            unnamed.tag, None,
+            "origin holds it, and no remote was named: {unnamed:?}"
+        );
+        assert!(unnamed.unpublished.is_some(), "{unnamed:?}");
+        git(repo, &["push", "-q", public_url.as_str(), "v1.0.0"]);
+        assert_eq!(
+            read(Some(public_url.as_str())).tag.as_deref(),
+            Some("v1.0.0"),
+            "published where named"
+        );
     }
 
     /// MEASUREMENT (ignored, t-119569): the 「쌓인 일」 count of a real repository's checkouts as the
@@ -1469,8 +1614,9 @@ mod tests {
         );
     }
 
-    /// A throwaway repository: `main` with a released commit and an unreleased one after it, and a
-    /// side branch `main` does not hold.
+    /// A throwaway repository: `main` with a tagged commit and an untagged one after it, and a
+    /// side branch `main` does not hold. Asked with no release remote named, no tag is read as a
+    /// release (t-119569): the commit is said with why.
     #[test]
     fn git_answers_for_a_commit_the_base_holds_one_it_does_not_and_one_it_does_not_know() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1495,6 +1641,7 @@ mod tests {
             ],
             Some("main"),
             Some("v*"),
+            None,
         );
         let main = git(repo, &["rev-parse", "main"]);
         assert_eq!(
@@ -1504,22 +1651,32 @@ mod tests {
                 head: Some(main),
             })
         );
+        let tagged = seen
+            .commit(&short)
+            .expect("git answered for the short name");
         assert_eq!(
-            seen.commit(&short),
-            Some(&CommitSeen {
-                full: Some(released.clone()),
-                in_base: Some(true),
-                tag: Some("v1.0.0".to_string()),
-            }),
-            "an abbreviated name resolves to the full commit, in the release that holds it"
+            (
+                tagged.full.as_deref(),
+                tagged.in_base,
+                tagged.tag.as_deref()
+            ),
+            (Some(released.as_str()), Some(true), None),
+            "an abbreviated name resolves to the full commit; no release is read with no remote named"
         );
+        assert!(
+            tagged.unpublished.is_some(),
+            "the commit says why: {tagged:?}"
+        );
+        let untagged = seen
+            .commit(&unreleased)
+            .expect("git answered for the commit");
         assert_eq!(
-            seen.commit(&unreleased),
-            Some(&CommitSeen {
-                full: Some(unreleased.clone()),
-                in_base: Some(true),
-                tag: None,
-            })
+            (
+                untagged.full.as_deref(),
+                untagged.in_base,
+                untagged.tag.as_deref()
+            ),
+            (Some(unreleased.as_str()), Some(true), None)
         );
         assert_eq!(
             seen.commit(&aside).map(|one| one.in_base),
@@ -1532,7 +1689,13 @@ mod tests {
         );
 
         // A base git does not know resolves to nothing, and nothing is measured against it.
-        let blind = see(repo, std::slice::from_ref(&released), Some("nope"), None);
+        let blind = see(
+            repo,
+            std::slice::from_ref(&released),
+            Some("nope"),
+            None,
+            None,
+        );
         assert_eq!(blind.base.as_ref().and_then(|base| base.head.clone()), None);
         assert_eq!(blind.commit(&released).map(|one| one.in_base), Some(None));
     }
@@ -2275,7 +2438,7 @@ mod tests {
         let repo = dir.path();
         let (short, fulls) = two_commits_one_prefix(repo);
 
-        let seen = see(repo, std::slice::from_ref(&short), Some("main"), None);
+        let seen = see(repo, std::slice::from_ref(&short), Some("main"), None, None);
         assert!(
             seen.is_ambiguous(&short),
             "{short} names {fulls:?}: {seen:?}"
@@ -2373,6 +2536,7 @@ mod tests {
             std::slice::from_ref(&commit),
             Some("main"),
             Some("v*"),
+            None,
         );
         assert_eq!(seen.commit(&commit), None, "{seen:?}");
         assert_eq!(seen.base, None, "{seen:?}");

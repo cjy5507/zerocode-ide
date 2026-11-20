@@ -33,6 +33,11 @@ pub const BACKFILL_VERB: &str = "task-backfill";
 /// [`carrier_generation`] alone.
 pub const COORDINATOR_CARRIER: &str = "coordinator@g";
 
+/// The flag that names where releases are published — a remote's name or URL — for a backfill to
+/// read a release from (t-119569). It has no default: the private origin may hold a release's tag
+/// before the lane publishes it, so a release is read only where the caller names it published.
+pub const RELEASE_REMOTE_FLAG: &str = "--release-remote";
+
 /// The ref a backfill measures landed commits against when `--base` names none.
 pub const DEFAULT_BASE: &str = "main";
 
@@ -161,8 +166,12 @@ pub struct CommitSeen {
     /// Whether the commit is the base or one of its ancestors; `None` when nothing was asked or
     /// git could not say.
     pub in_base: Option<bool>,
-    /// The first release tag (in version order) that holds the commit, when one does.
+    /// The first release tag (in version order) that holds the commit and that the release remote
+    /// the caller named holds ([`RELEASE_REMOTE_FLAG`]), when one does.
     pub tag: Option<String>,
+    /// Why no release tag is read where one may hold the commit: no release remote was named, the
+    /// remote named does not hold the tag, or it could not be asked (t-119569).
+    pub unpublished: Option<String>,
 }
 
 impl CommitsSeen {
@@ -1197,6 +1206,7 @@ fn prove(
                 full: Some(full),
                 in_base: Some(true),
                 tag,
+                ..
             }) => {
                 let reviews = reviews_named(&task.result, &task.id)
                     .into_iter()
