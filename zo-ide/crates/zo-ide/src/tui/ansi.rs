@@ -54,17 +54,38 @@ impl Role {
     }
 
     /// This role's colour in the default `terminal` theme in the look this
-    /// process draws — every road from a role to a terminal colour takes it.
-    /// Inline code is the blue slot in the marks look: a theme's own
-    /// inline-code colour, else its blue, which is also where the window puts
-    /// Claude Code's inline code. A slot, so a change of the terminal's theme
-    /// recolours it in place; and not the cyan of links. The codex look keeps
-    /// codex's cyan, whose bytes it writes.
+    /// process draws — every road from a role to a terminal colour takes it
+    /// ([`Self::terminal_ink_in`]). `None` is the terminal's own ink (`39`).
     #[must_use]
-    pub fn terminal_ink(self) -> Color {
+    pub fn terminal_ink(self) -> Option<Color> {
+        self.terminal_ink_in(
+            super::style::current().style == super::style::TuiStyle::Marks,
+            super::palette::window_lifts_slot_colours(),
+        )
+    }
+
+    /// This role's colour under `terminal` in the marks look (`marks`) or the
+    /// codex look, in the ZeroCode window (`window`) or another terminal;
+    /// `None` is the terminal's own ink. Inline code is the blue slot in the
+    /// marks look: a theme's own inline-code colour, else its blue, which is
+    /// also where the window puts Claude Code's inline code — a slot, so a
+    /// change of the terminal's theme recolours it in place, and not the cyan
+    /// of links. In the window the heading, the caret, the model's name and
+    /// the folder take the window's own ink, as its body text does, and a
+    /// warning the slot of `⚠` and `Full Access`: a change of the window's
+    /// theme reaches them, and on screen a slot keeps one meaning — the
+    /// footer's mode marks (`Full Access`, `Plan mode`, a goal, a loop) are
+    /// the only colour beside the model and the folder, and the heading and
+    /// the caret are told by their weight, never by the colour of a caution.
+    /// Another terminal keeps their fixed colours; the codex look keeps
+    /// codex's, whose bytes it writes.
+    #[must_use]
+    pub const fn terminal_ink_in(self, marks: bool, window: bool) -> Option<Color> {
         match self {
-            Self::Code if super::style::current().style == super::style::TuiStyle::Marks => Color::BLUE,
-            other => other.terminal_color(),
+            Self::Code if marks => Some(Color::BLUE),
+            Self::Heading | Self::Caret | Self::Model | Self::Cwd if marks && window => None,
+            Self::Warning if marks && window => Some(super::palette::NOTICE_WARN),
+            other => Some(other.terminal_color()),
         }
     }
 }
@@ -112,7 +133,10 @@ impl Color {
             Self::Rgb(r, g, b) => {
                 let _ = write!(out, "38;2;{r};{g};{b}");
             }
-            Self::Role(role) => role.terminal_ink().params(out),
+            Self::Role(role) => match role.terminal_ink() {
+                Some(color) => color.params(out),
+                None => out.push_str("39"),
+            },
         }
     }
 
@@ -132,7 +156,10 @@ impl Color {
             Self::Rgb(r, g, b) => {
                 let _ = write!(out, "48;2;{r};{g};{b}");
             }
-            Self::Role(role) => role.terminal_ink().background_params(out),
+            Self::Role(role) => match role.terminal_ink() {
+                Some(color) => color.background_params(out),
+                None => out.push_str("49"),
+            },
         }
     }
 }
@@ -232,8 +259,8 @@ impl Style {
             && super::style::current().style == super::style::TuiStyle::Marks
             && color_level != ColorLevel::Ansi16;
         if !use_named_theme {
-            self.fg = self.fg.map(lower_role_to_terminal);
-            self.bg = self.bg.map(lower_role_to_terminal);
+            self.fg = self.fg.and_then(lower_role_to_terminal);
+            self.bg = self.bg.and_then(lower_role_to_terminal);
             match ground {
                 Ground::Measured(palette) => self.resolve_terminal_palette(palette, keep_sgr_dim),
                 Ground::Lightness { light } => self.resolve_terminal_lightness(light),
@@ -327,7 +354,7 @@ impl Style {
                         Color::Rgb(resolved_rgb.0, resolved_rgb.1, resolved_rgb.2)
                     });
                 } else {
-                    self.fg = Some(lower_role_to_terminal(fg));
+                    self.fg = lower_role_to_terminal(fg);
                     match ground {
                         Ground::Measured(palette) => self.resolve_terminal_fg(palette, keep_sgr_dim),
                         // A role this theme has no colour for is drawn as
@@ -341,9 +368,8 @@ impl Style {
             }
         }
         if let Some(Color::Role(role)) = self.bg {
-            let bg_color = super::theme::with_active(|theme| theme.role_color(role))
-                .map_or_else(|| role.terminal_ink(), |(r, g, b)| Color::Rgb(r, g, b));
-            self.bg = Some(bg_color);
+            self.bg = super::theme::with_active(|theme| theme.role_color(role))
+                .map_or_else(|| role.terminal_ink(), |(r, g, b)| Some(Color::Rgb(r, g, b)));
         }
         if let Some(palette) = palette {
             self.bg = self.bg.and_then(|color| palette.resolve_depth(color));
@@ -387,10 +413,12 @@ impl Style {
 
 }
 
-fn lower_role_to_terminal(color: Color) -> Color {
+/// `color` with a role lowered to its `terminal` colour; `None` where the role
+/// takes the terminal's own ink ([`Role::terminal_ink`]).
+fn lower_role_to_terminal(color: Color) -> Option<Color> {
     match color {
         Color::Role(role) => role.terminal_ink(),
-        other => other,
+        other => Some(other),
     }
 }
 
@@ -1049,8 +1077,8 @@ mod tests {
             &mut out,
         );
         assert_eq!(out, "\u{1b}[36;49mx");
-        assert_eq!(super::Role::Code.terminal_ink(), Color::CYAN);
-        assert_eq!(super::Role::Link.terminal_ink(), Color::CYAN);
+        assert_eq!(super::Role::Code.terminal_ink(), Some(Color::CYAN));
+        assert_eq!(super::Role::Link.terminal_ink(), Some(Color::CYAN));
     }
 
     #[test]

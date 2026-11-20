@@ -2398,3 +2398,74 @@ fn every_builtin_themes_inline_code_clears_the_floor_on_its_own_ground() {
     }
     let _ = super::theme::set(super::theme::Theme::terminal());
 }
+
+/// The ANSI slot a colour draws in, `None` for the terminal's own ink or a
+/// colour no slot holds — `33` and `38;5;3` are the same slot on screen.
+fn slot_of(color: Option<super::ansi::Color>) -> Option<u8> {
+    use super::ansi::Color;
+    match color? {
+        Color::Base(index) => Some(index),
+        Color::BrightBase(index) => Some(index + 8),
+        Color::Indexed(index) if index < 16 => Some(index),
+        Color::Indexed(_) | Color::Rgb(..) | Color::Role(_) => None,
+    }
+}
+
+/// In the ZeroCode window the `terminal` theme's fixed roles follow the
+/// window: the heading, the caret, the model's name and the folder take its
+/// own ink, as body text does, and a warning the slot of `⚠` and `Full
+/// Access`. So none of the four shares a slot with a mode mark the footer
+/// carries — `Full Access` (yellow) or `Plan mode`, a goal, a loop (magenta)
+/// — and inline code keeps its blue and links their cyan. Another terminal
+/// keeps their fixed colours, and the codex look codex's own.
+#[test]
+fn in_the_window_the_terminal_themes_roles_follow_the_window() {
+    use super::ansi::{Color, Role};
+    let full_access = slot_of(Some(super::palette::NOTICE_WARN));
+    let mode = slot_of(Some(Color::MAGENTA));
+    for (role, in_window) in [
+        (Role::Code, Some(Color::BLUE)),
+        (Role::Link, Some(Color::CYAN)),
+        (Role::Heading, None),
+        (Role::Caret, None),
+        (Role::Model, None),
+        (Role::Cwd, None),
+        (Role::Warning, Some(super::palette::NOTICE_WARN)),
+    ] {
+        let ink = role.terminal_ink_in(true, true);
+        assert_eq!(ink, in_window, "{role:?} in the window");
+        if role != Role::Warning {
+            assert_ne!(slot_of(ink), full_access, "{role:?} in the window takes Full Access's slot");
+        }
+        assert_ne!(slot_of(ink), mode, "{role:?} in the window takes the mode marks' slot");
+        let elsewhere = if role == Role::Code { Color::BLUE } else { role.terminal_color() };
+        assert_eq!(role.terminal_ink_in(true, false), Some(elsewhere), "{role:?} in another terminal");
+        assert_eq!(role.terminal_ink_in(false, true), Some(role.terminal_color()), "{role:?} in the codex look");
+    }
+}
+
+/// In the window the `terminal` theme's footer is its roles, which the
+/// window's own ink draws there; in another terminal it keeps the syntax
+/// theme's softened colour.
+#[test]
+fn in_the_window_the_terminal_footer_takes_its_roles() {
+    use super::ansi::{Color, Role};
+    use super::ground::Ground;
+    use super::palette::{self, ColorLevel, TerminalPalette};
+
+    if !style::in_fresh_run(&path("in_the_window_the_terminal_footer_takes_its_roles")) {
+        return;
+    }
+    style::init(&Preferences::default());
+    let _ = super::theme::set(super::theme::Theme::terminal());
+    let dark = TerminalPalette::new((224, 224, 224), (28, 30, 38), ColorLevel::TrueColor);
+    let footer = |scopes: &[&str], fallback, window| {
+        super::view::footer_theme_style_in(scopes, fallback, Ground::Measured(dark), ColorLevel::TrueColor, window).fg
+    };
+    let model = ["entity.name.type", "support.type", "variable"];
+    let cwd = ["string", "markup.underline.link"];
+    assert_eq!(footer(&model, palette::FOOTER_MODEL, true), Some(Color::Role(Role::Model)));
+    assert_eq!(footer(&cwd, palette::FOOTER_CWD, true), Some(Color::Role(Role::Cwd)));
+    assert!(matches!(footer(&model, palette::FOOTER_MODEL, false), Some(Color::Rgb(..))), "another terminal");
+    assert!(matches!(footer(&cwd, palette::FOOTER_CWD, false), Some(Color::Rgb(..))), "another terminal");
+}

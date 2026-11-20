@@ -275,7 +275,7 @@ impl TerminalPalette {
     #[must_use]
     pub fn resolve(self, color: Color) -> Option<Color> {
         let color = match color {
-            Color::Role(role) => role.terminal_ink(),
+            Color::Role(role) => role.terminal_ink()?,
             other => other,
         };
         let color = self.adapt_for_background(color);
@@ -287,7 +287,7 @@ impl TerminalPalette {
     #[must_use]
     pub(crate) fn resolve_depth(self, color: Color) -> Option<Color> {
         let color = match color {
-            Color::Role(role) => role.terminal_ink(),
+            Color::Role(role) => role.terminal_ink()?,
             other => other,
         };
         match (self.color_level, color) {
@@ -610,10 +610,12 @@ struct Ansi16InkCacheEntry {
 /// the person changes the terminal's theme (`ui/shell-term.js`, Orca's
 /// `minimumContrastRatio`), so there a slot zo would lift stays a slot:
 /// lifted to RGB it would keep the palette zo measured at start, and a change
-/// of the window's theme would leave it behind. Read once; a unit-test build
+/// of the window's theme would leave it behind. The `terminal` theme's fixed
+/// roles follow the window there too, as its own ink or a slot
+/// ([`super::ansi::Role::terminal_ink_in`]). Read once; a unit-test build
 /// answers `false` wherever it runs.
 #[cfg(not(test))]
-fn window_lifts_slot_colours() -> bool {
+pub(crate) fn window_lifts_slot_colours() -> bool {
     /// The value the window gives `TERM_PROGRAM` in every pane
     /// (`TERMINAL_NAME`, `crates/zerocode-pty/src/grid.rs`).
     const WINDOW_TERM_PROGRAM: &str = "ZeroCode";
@@ -624,7 +626,7 @@ fn window_lifts_slot_colours() -> bool {
 }
 
 #[cfg(test)]
-const fn window_lifts_slot_colours() -> bool {
+pub(crate) const fn window_lifts_slot_colours() -> bool {
     false
 }
 
