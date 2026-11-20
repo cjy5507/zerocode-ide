@@ -83,7 +83,13 @@ fn see_with(
 /// and that the published `base` holds (`origin/<base>`, where there is one) — so a tag a release
 /// cut while it still runs is none. A head git gave no answer for is left out, and the ledger says
 /// git was not asked.
-pub(crate) fn see_ranges(seen: &mut CommitsSeen, repo: &Path, heads: &[String], base: &str, tags: &str) {
+pub(crate) fn see_ranges(
+    seen: &mut CommitsSeen,
+    repo: &Path,
+    heads: &[String],
+    base: &str,
+    tags: &str,
+) {
     see_ranges_with(&LocalVcs, seen, repo, heads, base, tags);
 }
 
@@ -822,7 +828,9 @@ mod tests {
         let range = |repo: &Path| {
             let mut seen = CommitsSeen::default();
             see_ranges(&mut seen, repo, &[head.clone()], "main", "v*");
-            seen.range(&head).cloned().expect("git answered for the range")
+            seen.range(&head)
+                .cloned()
+                .expect("git answered for the range")
         };
 
         let partial = range(repo);
@@ -838,8 +846,15 @@ mod tests {
         git(repo, &["update-ref", "refs/remotes/origin/main", "main~1"]);
         git(repo, &["tag", "v1.0.1"]);
         let landed = range(repo);
-        assert!(landed.commits.iter().all(|(_, landed)| *landed), "{landed:?}");
-        assert_eq!(landed.landed_as.as_deref(), Some(copy.as_str()), "the newest copy");
+        assert!(
+            landed.commits.iter().all(|(_, landed)| *landed),
+            "{landed:?}"
+        );
+        assert_eq!(
+            landed.landed_as.as_deref(),
+            Some(copy.as_str()),
+            "the newest copy"
+        );
         assert_eq!(
             landed.tag, None,
             "v1.0.0 holds none of it, and v1.0.1 is not on the published main yet"

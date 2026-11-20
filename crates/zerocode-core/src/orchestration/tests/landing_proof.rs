@@ -109,12 +109,20 @@ fn a_range_picked_onto_main_lands_and_ships_on_the_review_that_stands() {
     assert_eq!(row["write"]["mergeHead"], LANDED_AS, "{row}");
     assert_eq!(row["write"]["deployed"], true, "{row}");
     assert_eq!(row["write"]["release"], "v1.2.0", "{row}");
-    assert_eq!(row["write"].get("verified"), None, "the ledger writes no verification: {row}");
+    assert_eq!(
+        row["write"].get("verified"),
+        None,
+        "the ledger writes no verification: {row}"
+    );
     assert_eq!(row["why"], serde_json::Value::Null, "{row}");
     assert_eq!(listed["landings"], 1, "{listed}");
     assert!(!review(&bench, &task).merged, "a list wrote something");
 
-    let applied = backfill(&mut bench, "task-backfill --apply", git_says(landed_and_released()));
+    let applied = backfill(
+        &mut bench,
+        "task-backfill --apply",
+        git_says(landed_and_released()),
+    );
     assert!(
         applied["applied"]
             .as_array()
@@ -122,11 +130,20 @@ fn a_range_picked_onto_main_lands_and_ships_on_the_review_that_stands() {
         "{applied}"
     );
     let after = review(&bench, &task);
-    assert!(after.verified && after.merged && after.deployed, "{after:?}");
+    assert!(
+        after.verified && after.merged && after.deployed,
+        "{after:?}"
+    );
     assert_eq!(after.merge_head.as_deref(), Some(LANDED_AS));
     assert_eq!(after.author, ReviewAuthor::Coordinator);
-    assert_eq!(after.attempt, before.attempt, "bound to the attempt the review read");
-    assert_eq!(after.source, before.source, "bound to the source the review read");
+    assert_eq!(
+        after.attempt, before.attempt,
+        "bound to the attempt the review read"
+    );
+    assert_eq!(
+        after.source, before.source,
+        "bound to the source the review read"
+    );
     let run = &bench.ledger.runs()[0];
     let result: serde_json::Value =
         serde_json::from_str(run.task(&task).expect("the task").result.as_str()).expect("JSON");
@@ -159,7 +176,11 @@ fn a_landing_keeps_what_an_earlier_backfill_kept() {
         "task-update --task {task} --attempt {attempt} --source {HEAD} --result \
          {{\"verified\":true,\"backfill\":{{\"by\":\"task-backfill\",\"original\":\"was\"}}}}"
     ));
-    backfill(&mut bench, "task-backfill --apply", git_says(landed_and_released()));
+    backfill(
+        &mut bench,
+        "task-backfill --apply",
+        git_says(landed_and_released()),
+    );
     let run = &bench.ledger.runs()[0];
     let result: serde_json::Value =
         serde_json::from_str(run.task(&task).expect("the task").result.as_str()).expect("JSON");
@@ -168,7 +189,9 @@ fn a_landing_keeps_what_an_earlier_backfill_kept() {
         result["backfill"]["landing"]["facts"]["release"], "v1.2.0",
         "{result}"
     );
-    assert!(coordinator_take::backfilled(run.task(&task).expect("the task")));
+    assert!(coordinator_take::backfilled(
+        run.task(&task).expect("the task")
+    ));
 }
 
 /// One commit of the range missing from `main` is no landing: the row says which, and nothing is
@@ -192,7 +215,10 @@ fn a_range_with_one_commit_missing_from_main_writes_nothing_and_says_which() {
         "{why}"
     );
     let after = review(&bench, &task);
-    assert!(after.verified && !after.merged && !after.deployed, "{after:?}");
+    assert!(
+        after.verified && !after.merged && !after.deployed,
+        "{after:?}"
+    );
 }
 
 /// A release tag cut before the merge holds none of it: the merge is written, the release is not.

@@ -966,8 +966,8 @@ fn prove_landing(
     seen: Option<&CommitsSeen>,
     base: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let head = landing_head(progress)
-        .ok_or("its review names no commit, and a report lands nothing")?;
+    let head =
+        landing_head(progress).ok_or("its review names no commit, and a report lands nothing")?;
     let seen = seen
         .filter(|seen| seen.base.as_ref().is_some_and(|asked| asked.name == base))
         .ok_or_else(|| format!("git was not asked about this range against {base}"))?;
