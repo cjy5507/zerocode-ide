@@ -2169,7 +2169,7 @@ final class Provider {
             }
             let query = readingQuery(params)
             let index = try optionalInteger(params, "elementIndex")
-                ?? (query.isEmpty ? nil : chosenIndex(query, in: snapshot))
+                ?? (query.isEmpty ? nil : chosenIndex(query, in: snapshot, guardWords: confirmGuardWords(params["confirmGuard"])))
             let requestedPoint = try index == nil ? coordinatePoint(params: params, xKey: "x", yKey: "y", snapshot: snapshot) : nil
             // A web view offers a press some seconds after its tree is switched on,
             // and ignores a window event while it is not key: before that offer the
@@ -2245,7 +2245,7 @@ final class Provider {
         var named = try optionalInteger(params, "elementIndex")
         let query = readingQuery(params)
         if named == nil, !query.isEmpty {
-            named = try chosenIndex(query, in: snapshot)
+            named = try chosenIndex(query, in: snapshot, guardWords: confirmGuardWords(params["confirmGuard"]))
         }
         if let elementIndex = named {
             let record = try inView(try element(snapshot, elementIndex), in: snapshot)
@@ -2316,7 +2316,7 @@ final class Provider {
     /// that reads the words exactly; none or several is answered by name so
     /// the caller narrows with --role/--label or presses by index — the press
     /// never guesses between two controls.
-    private func chosenIndex(_ query: ElementQuery, in snapshot: Snapshot) throws -> Int {
+    private func chosenIndex(_ query: ElementQuery, in snapshot: Snapshot, guardWords: [String: [String]]? = nil) throws -> Int {
         switch query.choose(among: readingFaces(snapshot)) {
         case .one(let index):
             return index
@@ -2330,7 +2330,7 @@ final class Provider {
                     app: snapshot.app.name,
                     windowTitle: snapshot.windowTitle,
                     words: query.words,
-                    shown: ReadingRefusal.shownWords(shownFaces(query, in: snapshot)),
+                    shown: ReadingRefusal.shownWords(shownFaces(query, in: snapshot, guardWords: guardWords)),
                     cut: lookCut(snapshot),
                     others: otherWindowsWords(snapshot)
                 )
@@ -2355,10 +2355,10 @@ final class Provider {
     /// The elements this look shows with the asked words in their shown name
     /// (`SnapshotRenderHeuristics.displayName`: a link's text, a row's cells),
     /// of the asked role, which a click by reading did not match.
-    private func shownFaces(_ query: ElementQuery, in snapshot: Snapshot) -> [ElementFace] {
+    private func shownFaces(_ query: ElementQuery, in snapshot: Snapshot, guardWords: [String: [String]]?) -> [ElementFace] {
         ReadingRefusal.shownOnly(query, among: readingFaces(snapshot).compactMap { face in
             snapshot.elements[face.index]?.name.map { ReadingRefusal.Shown(face: face, name: $0) }
-        })
+        }, guardWords: guardWords)
     }
 
     /// Why this look did not read the whole window, in a refusal's words; nil

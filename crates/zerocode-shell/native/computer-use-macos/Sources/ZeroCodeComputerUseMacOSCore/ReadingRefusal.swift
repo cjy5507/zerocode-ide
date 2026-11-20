@@ -113,7 +113,14 @@ public enum ReadingRefusal {
     /// any: a link named by its contents, a row by its cells. A link's address
     /// is not its text. An asked role narrows them as it narrows the click.
     /// Each comes back with its shown text as its label.
-    public static func shownOnly(_ query: ElementQuery, among elements: [Shown]) -> [ElementFace] {
+    ///
+    /// None whose shown text holds one of the person's confirmation words
+    /// (`guardWords`, the table `confirmKind` reads) is offered: the check that
+    /// holds a payment, transfer or delete press reads a control's first name,
+    /// not its shown text, so a link named «Go» that shows «Delete project»
+    /// could be pressed unasked (t-121539 I-4, an older gap). A refusal never
+    /// sends a model to one (t-121849).
+    public static func shownOnly(_ query: ElementQuery, among elements: [Shown], guardWords: [String: [String]]? = nil) -> [ElementFace] {
         let words = [query.label, query.text].compactMap { $0 }
         guard !words.isEmpty else { return [] }
         return elements.compactMap { element in
@@ -123,6 +130,7 @@ public enum ReadingRefusal {
             if words.contains(where: { word in matched.contains { $0.localizedCaseInsensitiveContains(word) } }) { return nil }
             let text = shownText(role: face.role, name: element.name)
             guard words.allSatisfy({ text.localizedCaseInsensitiveContains($0) }) else { return nil }
+            if let guardWords, confirmKind(of: text, words: guardWords) != nil { return nil }
             return ElementFace(index: face.index, role: face.role, label: text, value: nil, description: nil)
         }
     }

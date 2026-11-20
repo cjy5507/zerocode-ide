@@ -53,6 +53,20 @@ final class ReadingRefusalTests: XCTestCase {
     }
 
     /// t-121539 I-5: one item of a refusal keeps 80 characters at most.
+    /// t-121849: no element whose shown text holds one of the person's
+    /// confirmation words is offered, since the check reads another of its
+    /// names; any other is offered as before.
+    func testAnElementWhoseTextHoldsAConfirmationWordIsNotOffered() {
+        let guardWords = ["payment": ["pay"], "transfer": ["transfer"], "delete": ["delete"]]
+        let project = ElementQuery(text: nil, role: nil, label: "project")
+        let goLink = shown(7, "AXLink", name: "[Delete project](https://example.com/projects/1/delete)", description: "Go")
+        XCTAssertEqual(ReadingRefusal.shownOnly(project, among: [goLink], guardWords: guardWords), [])
+        XCTAssertEqual(ReadingRefusal.shownOnly(project, among: [goLink]).map(\.index), [7], "without the person's words it is offered")
+        let authorize = ElementQuery(text: nil, role: nil, label: "Authorize")
+        let plain = shown(12, "AXLink", name: "[Authorize](https://example.com/a)")
+        XCTAssertEqual(ReadingRefusal.shownOnly(authorize, among: [plain], guardWords: guardWords).map(\.index), [12])
+    }
+
     func testALongTitleOrTextIsClippedToEightyCharacters() {
         let long = String(repeating: "a", count: 300)
         let window = ReadingRefusal.otherWindowsWords(app: "Notes", others: [.init(windowId: 7, title: long)]) ?? ""
@@ -148,9 +162,9 @@ final class ReadingRefusalSourceTests: XCTestCase {
     }
 
     func testAClickByReadingThatFindsNoneSaysWhatTheLookMissed() throws {
-        let chosen = try body(of: "private func chosenIndex(_ query: ElementQuery, in snapshot: Snapshot) throws -> Int {", in: try helperSource())
+        let chosen = try body(of: "private func chosenIndex(_ query: ElementQuery, in snapshot: Snapshot, guardWords: [String: [String]]? = nil) throws -> Int {", in: try helperSource())
         XCTAssertTrue(chosen.contains("ReadingRefusal.noControl("), String(chosen))
-        XCTAssertTrue(chosen.contains("shown: ReadingRefusal.shownWords(shownFaces(query, in: snapshot))"), String(chosen))
+        XCTAssertTrue(chosen.contains("shown: ReadingRefusal.shownWords(shownFaces(query, in: snapshot, guardWords: guardWords))"), String(chosen))
         XCTAssertTrue(chosen.contains("cut: lookCut(snapshot)"), String(chosen))
         XCTAssertTrue(chosen.contains("others: otherWindowsWords(snapshot)"), String(chosen))
     }
@@ -165,7 +179,11 @@ final class ReadingRefusalSourceTests: XCTestCase {
     }
 
     func testTheElementsThatShowTheWordsOnlyInTheirTextAreTheCoresChoice() throws {
-        let shown = try body(of: "private func shownFaces(_ query: ElementQuery, in snapshot: Snapshot) -> [ElementFace] {", in: try helperSource())
+        let source = try helperSource()
+        let shown = try body(of: "private func shownFaces(_ query: ElementQuery, in snapshot: Snapshot, guardWords: [String: [String]]?) -> [ElementFace] {", in: source)
         XCTAssertTrue(shown.contains("ReadingRefusal.shownOnly(query, among:"), String(shown))
+        XCTAssertTrue(shown.contains("}, guardWords: guardWords)"), String(shown))
+        // Both presses by words hand the person's confirmation words to the refusal (t-121849).
+        XCTAssertEqual(source.components(separatedBy: "chosenIndex(query, in: snapshot, guardWords: confirmGuardWords(params[\"confirmGuard\"]))").count - 1, 2)
     }
 }
