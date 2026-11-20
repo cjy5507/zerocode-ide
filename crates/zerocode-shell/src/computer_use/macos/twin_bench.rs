@@ -17,9 +17,16 @@
 //! «Authorize» by its words in the app's front window; when the refusal names
 //! another window (`window_id N` in zo's tool, `--window-id N` from the
 //! helper itself), look at it and press the number its look reads; else take
-//! the `window` road. Each road is counted in steps, refusals (their codes)
-//! and milliseconds, and judged by the windows' own record of who was
-//! pressed: the target once, any other never.
+//! the `window` road. `number`, on the offset scene three times under each
+//! helper: the road the built helper took there from the window its refusal
+//! named, walked from the target's own number — look, press by number, move
+//! clear when covered, look and press again — so the two helpers walk one
+//! script (CU pane m-123323). Each road is counted in steps, refusals (their
+//! codes) and milliseconds — each step also with when it was asked, from the
+//! road's first — each look with the window its answer names and
+//! the fixture window whose words its tree shows, each move with where it
+//! left the window, and each road is judged by the windows' own record of who
+//! was pressed: the target once, any other never.
 //!
 //! Input rules (CU pane m-122438): the fixture scenes and the late-press scene
 //! are background presses and moves only — no pointer, no keys, no window
@@ -168,6 +175,8 @@ struct Road {
     steps: Vec<Value>,
     refusals: Vec<String>,
     last_refusal: Option<String>,
+    /// When the road's first step was asked: each step's `at` counts from it.
+    started: Option<Instant>,
 }
 
 impl Road {
@@ -178,10 +187,17 @@ impl Road {
         method: &str,
         params: &Value,
     ) -> Option<Value> {
+        let at = self.started.get_or_insert_with(Instant::now).elapsed();
         let (ms, answer) = call(session, method, params);
         let refused = answer.as_ref().err().cloned();
-        self.steps
-            .push(json!({"step": what, "method": method, "ms": ms.round(), "refused": refused}));
+        let mut step = json!({
+            "step": what, "method": method, "ms": ms.round(), "refused": refused,
+            "at": (at.as_secs_f64() * 1000.0).round(),
+        });
+        if let Ok(answer) = &answer {
+            seen(&mut step, method, answer);
+        }
+        self.steps.push(step);
         if let Some(refused) = &refused {
             self.refusals
                 .push(refused.split(':').next().unwrap_or_default().to_string());
@@ -206,6 +222,38 @@ impl Road {
             "pressed_other": presses.iter().filter(|&&number| number != target).count(),
             "trail": self.steps,
         })
+    }
+}
+
+/// The words each fixture window shows, one per window: which one a tree
+/// shows says whose tree a look read.
+const BODIES: [&str; 3] = ["BACK", "FRONT", "ONLY"];
+
+/// What a step's answer says of the windows, for reading a road afterwards
+/// (CU pane m-123323): a look's `window` — the window its answer names and
+/// where the window list stood it, `[x, y, width, height]` — and `read`, the
+/// fixture window whose words its tree shows; a window move's `frame`, where
+/// the accessibility tree stood the window when the move answered.
+fn seen(step: &mut Value, method: &str, answer: &Value) {
+    match method {
+        "getAppState" => {
+            let window = &answer["snapshot"]["window"];
+            step["window"] = json!({
+                "id": window["id"],
+                "frame": [window["x"], window["y"], window["width"], window["height"]],
+            });
+            let tree = answer["snapshot"]["treeText"].as_str().unwrap_or_default();
+            let read: Vec<&str> = BODIES
+                .into_iter()
+                .filter(|body| tree.lines().any(|line| line.contains(body)))
+                .collect();
+            step["read"] = json!(read.join("+"));
+        }
+        "windowAction" => {
+            let frame = &answer["frame"];
+            step["frame"] = json!([frame["x"], frame["y"], frame["width"], frame["height"]]);
+        }
+        _ => {}
     }
 }
 
@@ -436,21 +484,30 @@ fn app_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) 
         window_road(road, session, fixture, target);
         return;
     };
-    let look = json!({"app": app, "windowId": named, "noScreenshot": true, "background": true});
+    by_number(
+        road,
+        session,
+        fixture,
+        named,
+        "look at the window the refusal names",
+    );
+}
+
+/// Look at `window`, press the number its look reads for «Authorize», and
+/// when that press is covered move `window` clear (Q1), then look and press
+/// by number once more — with nothing waited between the steps.
+fn by_number(road: &mut Road, session: &Session, fixture: &Fixture, window: u64, looked: &str) {
+    let app = fixture.app();
+    let look = json!({"app": app, "windowId": window, "noScreenshot": true, "background": true});
     for attempt in 0..2 {
         let Some(number) = road
-            .step(
-                session,
-                "look at the window the refusal names",
-                "getAppState",
-                &look,
-            )
+            .step(session, looked, "getAppState", &look)
             .and_then(|state| number_of(&state, "Authorize"))
         else {
             return;
         };
         let press = json!({
-            "app": app, "windowId": named, "elementIndex": number,
+            "app": app, "windowId": window, "elementIndex": number,
             "background": true, "noScreenshot": true,
         });
         if road
@@ -461,17 +518,29 @@ fn app_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) 
             return;
         }
         let advice = road.last_refusal.clone().unwrap_or_default();
-        let Some((window, x, y, what)) = clear_step(&advice, &fixture.ready, named) else {
+        let Some((moved, x, y, what)) = clear_step(&advice, &fixture.ready, window) else {
             return;
         };
         let _ = road.step(
             session,
             what,
             "windowAction",
-            &json!({"action": "move", "windowId": window, "x": x, "y": y}),
+            &json!({"action": "move", "windowId": moved, "x": x, "y": y}),
         );
     }
 }
+
+/// The same-script cell (CU pane m-123323): the road the built helper took on
+/// offset/app from the window its refusal named, walked by both helpers from
+/// the target's own number, since the installed helper's refusal names none.
+fn number_road(road: &mut Road, session: &Session, fixture: &Fixture, target: u64) {
+    by_number(road, session, fixture, target, "look at the target window");
+}
+
+/// How many times each helper walks the same-script cell (coordinator
+/// m-123333): a look that races a move is a matter of milliseconds, so one
+/// walk could meet it, or miss it, by chance.
+const SAME_SCRIPT_WALKS: usize = 3;
 
 /// The scenes and roads, each on a fresh fixture, under one helper.
 fn under(session: &Session, program: &Path, root: &Path, helper: &str) -> Value {
@@ -522,6 +591,23 @@ fn under(session: &Session, program: &Path, root: &Path, helper: &str) -> Value 
             scenes[mode][name] = report;
         }
     }
+    let walks: Vec<Value> = (0..SAME_SCRIPT_WALKS)
+        .map(|walk| {
+            let fixture = Fixture::start(
+                program,
+                root,
+                "offset",
+                &format!("{helper}-offset-number-{walk}"),
+            );
+            let target = fixture.target();
+            let mut road = Road::default();
+            number_road(&mut road, session, &fixture, target);
+            // A press's effect reaches the window's record a moment after its answer.
+            std::thread::sleep(Duration::from_millis(300));
+            road.report(&fixture, target)
+        })
+        .collect();
+    scenes["offset"]["number"] = json!(walks);
     scenes
 }
 
@@ -1156,4 +1242,27 @@ fn the_q1b_road_moves_the_window_the_refusal_names_until_it_no_longer_covers_the
 fn the_window_over_the_button_is_never_moved_off_the_screen() {
     let ready = twins_ready([0.0, 25.0, 760.0, 520.0]);
     assert_eq!(aside_of(&ready, 2, 1), None);
+}
+
+#[test]
+fn a_look_says_whose_tree_it_read_and_where_the_window_list_stood_its_window() {
+    let answer = json!({"snapshot": {
+        "window": {"id": 243991, "title": "Home | Fixture", "x": 730, "y": 403, "width": 720, "height": 480},
+        "treeText": "App=twin-fixture (pid 1)\nWindow: \"Home | Fixture\", App: twin-fixture.\n\n1 window Home | Fixture\n\t2 text FRONT\n\t3 button Overview\n\nNo UI element is currently focused.",
+    }});
+    let mut step = json!({"step": "look", "method": "getAppState"});
+    seen(&mut step, "getAppState", &answer);
+    assert_eq!(
+        step["read"], "FRONT",
+        "the tree of the window in front, whatever window it was asked"
+    );
+    assert_eq!(step["window"]["id"], 243991);
+    assert_eq!(step["window"]["frame"], json!([730, 403, 720, 480]));
+    let mut moved = json!({"step": "move", "method": "windowAction"});
+    seen(
+        &mut moved,
+        "windowAction",
+        &json!({"frame": {"x": 642, "y": 425, "width": 720, "height": 480}}),
+    );
+    assert_eq!(moved["frame"], json!([642, 425, 720, 480]));
 }
