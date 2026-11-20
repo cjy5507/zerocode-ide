@@ -54,7 +54,7 @@ REPO = Path(__file__).resolve().parents[3]
 RELEASE = REPO / "tools" / "release"
 LANE = RELEASE / "lane.sh"
 SCRIPTS = ["lane.sh", "enqueue.sh", "status.sh", "install-launchd.sh", "rollback.sh", "bump.sh",
-           "verify-every-recipe.sh", "lane-env.sh", "win-installer.sh"]
+           "verify-every-recipe.sh", "lane-env.sh", "win-installer.sh", "coord-gate.sh"]
 
 PHASES = [
     "archive", "gate-root", "gate-zo", "flakes", "push",
@@ -597,10 +597,13 @@ class Syntax(LaneCase):
         self.assertEqual(Path(table.get("RECEIPT_PY", "")), RELEASE / "coord_receipt.py")
         # 11-08: what a sha's gates passed is kept beside installed.json too, for its next run.
         self.assertEqual(Path(table.get("PASSED", "")).parent, Path(table["INSTALLED"]).parent)
-        # …of jobs the coordinator's build line ran, under the workspace folder where the
-        # window's board reads it (schedule_timeline.rs LINE_FOLDER), of the coordinator's run.
-        self.assertEqual(Path(table.get("RELEASE_BUILD_LINE", "")).parts[-2:], ("build-line", "build-queue"))
-        self.assertEqual(table.get("RELEASE_COORD_RUN"), "run-4275")
+        # …of jobs the build line ran — `zo line`, in zo's home (zerocode-core line.rs) — and held
+        # to no run until the coordinator's launch names its own (t-119757: the old default outlived its run).
+        self.assertEqual(Path(table.get("RELEASE_BUILD_LINE", "")).parts[-2:], (".zo", "line"))
+        self.assertEqual(table.get("RELEASE_COORD_RUN"), "")
+        moved = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True,
+                               env={**self.lane.env(), "ZO_HOME": posix(Path(self._tmp) / "zo")}).stdout
+        self.assertIn(f"RELEASE_BUILD_LINE='{posix(Path(self._tmp) / 'zo')}/line'", moved.splitlines(), "zo's own home, as zo reads it")
 
     def test_the_release_repo_is_the_feed_the_app_polls(self):
         # Every gate runs in a clone of the checkout, whose `origin` is a path
@@ -2764,7 +2767,8 @@ class Receipt(LaneCase):
     another run or owner, and a head that does not hold the tree its jobs printed (ZO's
     review, P2-1·P2-3). Stubs stand for git (RECEIPT_CHANGED_PATHS, HEAD_TREE,
     COMMIT_TIME) and for each gate's recipe list (GATE_<LANE>_RECIPES); the receipt is
-    read for real, against the fixture's build line (RELEASE_BUILD_LINE)."""
+    read for real, against the fixture's zo line (RELEASE_BUILD_LINE) and run
+    (RELEASE_COORD_RUN, t-119757)."""
 
     ROOT = "pii-check test win-check"
     ZO = "test win-check"
@@ -2785,7 +2789,8 @@ class Receipt(LaneCase):
 
     def setUp(self):
         super().setUp()
-        self.lane.extra_env["RELEASE_BUILD_LINE"] = str(Path(self._tmp) / "build-queue")
+        self.lane.extra_env["RELEASE_BUILD_LINE"] = str(receipt_fixture.line_of(self._tmp))
+        self.lane.extra_env["RELEASE_COORD_RUN"] = receipt_fixture.RUN   # the coordinator's launch names its run
 
     def beside(self, receipt):
         """Keep RECEIPT for SHA_A past the door, as a file the lane alone reads."""
@@ -2848,6 +2853,15 @@ class Receipt(LaneCase):
         self.assertIn("skipped: receipt coord-l9", log)
         self.assertIn("skipped=gate-root(receipt coord-l9", self.lane.status_line())
 
+    def test_a_receipt_still_skips_both_gates_after_the_stack_checkout_is_removed(self):
+        # ZO's review of t-119757, F1: the coordinator cleans the stack after landing, maybe before the lane
+        # reads the receipt — make wrote down that the jobs ran at the top, so their recipes still count.
+        receipt = self.receipt()
+        shutil.rmtree(Path(self._tmp) / "coord-gate")
+        self.assertEqual(self.cut(receipt), {}, "neither gate ran")
+        self.assertTrue(self.lane.phase("gate-zo")["skipped"].startswith("receipt coord-l9"), self.lane.phase("gate-zo"))
+        self.assertEqual(self.lane.status()["outcome"], "green")
+
     def test_a_gate_run_as_two_lines_is_one_receipt_that_skips_both_gates(self):
         # t-76396: mkgate-split's coord-<label>-root and coord-<label>-zo, not a whole gate again.
         owners = {"g1-build": "coord-l9-root", "g2-tests": "coord-l9-root", "g3-zo": "coord-l9-zo"}
@@ -2907,7 +2921,7 @@ class Receipt(LaneCase):
         door = self.enqueue("--receipt", str(red))
         self.assertEqual(door.returncode, 1, door.stdout + door.stderr)
         self.assertIn("the receipt is refused", door.stdout)
-        self.assertIn("ended rc=1", door.stdout)
+        self.assertIn(f"job {receipt_fixture.job_id('l9', 'g1')} ended failed; nothing queued", door.stdout)
         self.assertEqual(self.lane.queue(), [])
         self.assertFalse(self.kept().exists())
 
@@ -2917,7 +2931,7 @@ class Receipt(LaneCase):
         self.kept().parent.mkdir(parents=True)
         self.kept().write_text(receipt_fixture.sealed(jobs))
         self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
-        self.assertIn(f"refused: job 0-{receipt_fixture.FIRST_JOB}-coord-l9-g1 ended rc=1",
+        self.assertIn(f"refused: job {receipt_fixture.job_id('l9', 'g1')} ended failed",
                       self.lane.phase("gate-root").get("receipt", ""))
 
     def test_evidence_changed_after_the_door_is_refused_and_the_gates_run_whole(self):
@@ -2967,44 +2981,102 @@ class Receipt(LaneCase):
         self.assertEqual(self.cut(below), {"root": self.ROOT.split(), "zo": self.ZO.split()})
         self.assertIn("0/3 root recipes green, owes pii-check test win-check", self.lane.phase("gate-root").get("receipt", ""))
 
-    def test_jobs_outside_the_build_lines_done_folder_are_refused_and_the_gates_run_whole(self):
-        # ZO's review, P2-1: jobs copied out of done/ by hand are no jobs the line ran.
+    def test_jobs_outside_the_build_lines_folder_are_refused_and_the_gates_run_whole(self):
+        # ZO's review, P2-1: jobs copied out of the line's folder by hand are no jobs the line ran.
         jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", self.GATE)
         elsewhere = Path(self._tmp) / "elsewhere"
-        elsewhere.mkdir()
+        for folder in ("jobs", "logs"):
+            (elsewhere / folder).mkdir(parents=True)
         for path in jobs:
-            for kind in ("job", "rc", "log"):
-                shutil.copy2(str(path)[:-len(".job")] + "." + kind, elsewhere)
+            shutil.copy2(path, elsewhere / "jobs")
+            for kind in (receipt_fixture.log_of(path), receipt_fixture.rc_of(path)):
+                shutil.copy2(kind, elsewhere / "logs")
         copied = Path(self._tmp) / "copied.json"
-        copied.write_text(receipt_fixture.sealed([elsewhere / path.name for path in jobs]))
+        copied.write_text(receipt_fixture.sealed([elsewhere / "jobs" / path.name for path in jobs]))
         self.beside(copied)
         self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
-        done = (Path(self._tmp) / "build-queue" / "done").resolve()
-        self.assertIn(f"refused: job 0-{receipt_fixture.FIRST_JOB}-coord-l9-g1-build is not in {done}",
+        kept = (receipt_fixture.line_of(self._tmp) / "jobs").resolve()
+        self.assertIn(f"refused: job {receipt_fixture.job_id('l9', 'g1-build')} is not in {kept}",
                       self.lane.phase("gate-root").get("receipt", ""))
 
-    def test_jobs_the_runner_never_ran_are_refused_and_the_gates_run_whole(self):
-        # …and jobs written into done/ by hand have no RUN and DONE lines in the runner's log.
-        self.beside(self.receipt())
-        (Path(self._tmp) / "build-queue" / "runner.log").write_text("")
+    def test_jobs_the_line_did_not_end_green_are_refused_and_the_gates_run_whole(self):
+        # What the old queue's runner.log said of a job, the line's record says itself.
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", self.GATE)
+        receipt_fixture.rewrite(jobs[0], state="waiting", started_ms=None, ended_ms=None)
+        careless = Path(self._tmp) / "careless.json"
+        careless.write_text(receipt_fixture.sealed(jobs))
+        self.beside(careless)
         self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
-        self.assertIn(f"runner.log never ended job 0-{receipt_fixture.FIRST_JOB}-coord-l9-g1-build green under coord-l9",
+        self.assertIn(f"refused: job {receipt_fixture.job_id('l9', 'g1-build')} ended waiting",
                       self.lane.phase("gate-zo").get("receipt", ""))
 
-    def test_the_door_refuses_jobs_the_runner_never_ran(self):
-        receipt = self.receipt()
-        (Path(self._tmp) / "build-queue" / "runner.log").write_text("")
-        door = self.enqueue("--receipt", str(receipt))
+    def test_the_door_refuses_jobs_the_line_did_not_end_green(self):
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", self.GATE)
+        receipt_fixture.rewrite(jobs[1], state="capped", rc=1)
+        careless = Path(self._tmp) / "careless.json"
+        careless.write_text(receipt_fixture.sealed(jobs))
+        door = self.enqueue("--receipt", str(careless))
         self.assertEqual(door.returncode, 1, door.stdout + door.stderr)
-        self.assertIn("runner.log never ended job", door.stdout)
+        self.assertIn(f"job {receipt_fixture.job_id('l9', 'g2-tests', 1)} ended capped; nothing queued", door.stdout)
         self.assertEqual(self.lane.queue(), [])
         self.assertFalse(self.kept().exists())
 
+    def test_a_lane_given_no_coordinator_run_leaves_the_receipt_unused_and_runs_the_gates_whole(self):
+        # t-119757: no default run — the person's own agent names none, and only the coordinator's launch does.
+        self.beside(self.receipt())
+        self.lane.extra_env["RELEASE_COORD_RUN"] = ""
+        self.lane.enqueue(SHA_A)
+        self.lane.run(GATE_ROOT_RECIPES=self.ROOT, GATE_ZO_RECIPES=self.ZO)
+        self.assertEqual(self.ran(), {"root": "all", "zo": "all"})
+        for phase in ("gate-root", "gate-zo"):
+            with self.subTest(phase=phase):
+                self.assertEqual(self.lane.phase(phase).get("receipt"),
+                                 "unused: the lane was given no coordinator run (RELEASE_COORD_RUN)")
+        door = self.enqueue("--receipt", str(self.receipt()), "--keep-only")
+        self.assertEqual(door.returncode, 1, door.stdout + door.stderr)
+        self.assertIn("the lane was given no coordinator run (RELEASE_COORD_RUN) to hold the jobs to; nothing kept", door.stdout)
+
+    def test_a_receipt_of_the_old_build_queue_is_refused_aloud_and_the_gates_run_whole(self):
+        old = Path(self._tmp) / "v1.json"
+        old.write_text(json.dumps({"receipt": 1, "who": "coord-l64", "run": receipt_fixture.RUN, "jobs": [], "sealed": {},
+                                   "made": 1}))
+        self.beside(old)
+        self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
+        self.assertIn("refused: the receipt is a version 1 receipt of the old build queue",
+                      self.lane.phase("gate-root").get("receipt", ""))
+
+    def test_keep_only_keeps_the_receipt_for_a_lane_started_with_the_sha_and_queues_nothing(self):
+        # The coordinator's launch runs `lane.sh <sha>` itself (no queue): the receipt waits in receipts/.
+        door = self.enqueue("--receipt", str(self.receipt()), "--keep-only")
+        self.assertEqual(door.returncode, 0, door.stdout + door.stderr)
+        self.assertIn(f"receipt coord-l9 tree {receipt_fixture.TREE[:8]} kept for {SHA_A[:8]}", door.stdout)
+        self.assertIn("not queued (--keep-only)", door.stdout)
+        self.assertEqual(self.lane.queue(), [])
+        self.assertTrue(self.kept().exists())
+        self.lane.run(SHA_A, GATE_ROOT_RECIPES=self.ROOT, GATE_ZO_RECIPES=self.ZO)
+        self.assertEqual(self.ran(), {}, "neither gate ran")
+        self.assertTrue(self.lane.phase("gate-zo")["skipped"].startswith("receipt coord-l9"))
+        self.assertEqual(self.lane.status()["outcome"], "green")
+
+    def test_keep_only_keeps_nothing_of_a_receipt_that_does_not_stand(self):
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", {"g1": [("test", "just test", 101)]})
+        red = Path(self._tmp) / "red.json"
+        red.write_text(receipt_fixture.sealed(jobs))
+        door = self.enqueue("--receipt", str(red), "--keep-only")
+        self.assertEqual(door.returncode, 1, door.stdout + door.stderr)
+        self.assertIn("ended failed; nothing kept", door.stdout)
+        self.assertFalse(self.kept().exists())
+        self.assertEqual(self.lane.queue(), [])
+        bare = self.enqueue("--keep-only")
+        self.assertEqual(bare.returncode, 2, bare.stdout + bare.stderr)
+        self.assertIn("--keep-only keeps a receipt: name it with --receipt", bare.stdout)
+        self.assertEqual(self.lane.queue(), [])
+
     def test_jobs_that_say_another_run_are_refused_and_the_gates_run_whole(self):
         # ZO's review, P2-1: the jobs' own `# run:` is held to the lane's RELEASE_COORD_RUN.
-        self.beside(self.receipt(run="run-11955"))
+        self.beside(self.receipt(run="run-2002"))
         self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
-        self.assertIn(f"refused: the jobs say run run-11955, not {receipt_fixture.RUN}",
+        self.assertIn(f"refused: the jobs say run run-2002, not {receipt_fixture.RUN}",
                       self.lane.phase("gate-root").get("receipt", ""))
 
     def test_jobs_that_say_no_coordinator_are_refused_and_the_gates_run_whole(self):
@@ -3034,17 +3106,46 @@ class Receipt(LaneCase):
                       f"({receipt_fixture.TREE[:8]})", self.lane.phase("gate-root").get("receipt", ""))
 
 
+# lane.sh's receipt_cover and what it calls, read out of lane.sh and run for real in a checkout:
+# git's diff, commit time and trees, the checkout's recipe lists and coord_receipt.py.
+COVER_FUNCTIONS = ('eval "$(grep -E \'^(RELEASE_STAMP_FILES|RELEASE_NOTES|NOTES_READERS|RELEASE_COORD_RUN)=\' "$0")"; '
+                   'eval "$(sed -n -e \'/^is_dry()/p\' -e \'/^gate_dir()/p\' -e \'/^stamp_only()/,/^}/p\' '
+                   '-e \'/^real_changes()/,/^}/p\' -e \'/^gate_recipes()/,/^}/p\' -e \'/^commit_time()/,/^}/p\' '
+                   '-e \'/^tree_of()/,/^}/p\' -e \'/^notes_edited()/,/^}/p\' -e \'/^receipt_cover()/,/^}/p\' "$0")"; '
+                   'RELEASE_DRY_RUN=0 SELF_DIR=$(dirname "$0") RECEIPT_PY=$(dirname "$0")/coord_receipt.py '
+                   'SCRATCH=$1 SHA=$2 SHA8=${2:0:8} RECEIPTS=$3 RELEASE_BUILD_LINE=$4; ')
+
+
+def cover_on_git(case, repo, sha, receipts, line, lane, env):
+    """Seal CASE.jobs into SHA's receipt and ask receipt_cover LANE of it in REPO: rc, only and said."""
+    made = subprocess.run([sys.executable, str(RELEASE / "coord_receipt.py"), "make", *map(str, case.jobs)],
+                          capture_output=True, text=True)
+    case.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+    (Path(receipts) / f"{sha}.json").write_text(made.stdout)
+    out = subprocess.run([BASH, "-c", COVER_FUNCTIONS + f'receipt_cover {lane}; echo "rc=$?"; echo "only=$ONLY"; '
+                          'echo "said=$RECEIPT"', str(LANE), str(repo), sha, str(receipts), str(line)],
+                         env=env, capture_output=True, text=True)
+    return dict(l.split("=", 1) for l in out.stdout.splitlines() if l.split("=", 1)[0] in ("rc", "only", "said"))
+
+
+def gate_as_coord_gate_runs_it(repo):
+    """The jobs coord-gate.sh runs over REPO's gate lists: the root's `just <recipe>` and zo's
+    `bash -c 'cd zo-ide && just <recipe>'` (key zo-<recipe>), every recipe of `--list` once."""
+    listed = {}
+    for lane, folder in (("root", repo), ("zo", Path(repo) / "zo-ide")):
+        out = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), "--list"], cwd=folder,
+                             capture_output=True, text=True, check=True).stdout.split()
+        listed[lane] = out
+    return {"g-root": [(recipe, f"just {recipe}", 0) for recipe in listed["root"]],
+            "g-zo": [(f"zo-{recipe}", f"bash -c 'cd zo-ide && just {recipe}'", 0) for recipe in listed["zo"]]}, listed
+
+
 class ReceiptOnGit(unittest.TestCase):
     """receipt_cover on a real repository: git's own diff between a job's head and the
     sha, git's commit time, the scratch's recipe lists (verify-every-recipe.sh --list)
     and coord_receipt.py, all run for real (t-47516)."""
 
-    FUNCTIONS = ('eval "$(grep -E \'^(RELEASE_STAMP_FILES|RELEASE_NOTES|NOTES_READERS|RELEASE_COORD_RUN)=\' "$0")"; '
-                 'eval "$(sed -n -e \'/^is_dry()/p\' -e \'/^gate_dir()/p\' -e \'/^stamp_only()/,/^}/p\' '
-                 '-e \'/^real_changes()/,/^}/p\' -e \'/^gate_recipes()/,/^}/p\' -e \'/^commit_time()/,/^}/p\' '
-                 '-e \'/^tree_of()/,/^}/p\' -e \'/^notes_edited()/,/^}/p\' -e \'/^receipt_cover()/,/^}/p\' "$0")"; '
-                 'RELEASE_DRY_RUN=0 SELF_DIR=$(dirname "$0") RECEIPT_PY=$(dirname "$0")/coord_receipt.py '
-                 'SCRATCH=$1 SHA=$2 SHA8=${2:0:8} RECEIPTS=$3 RELEASE_BUILD_LINE=$4; ')
+    FUNCTIONS = COVER_FUNCTIONS
     GATE = {
         "g1-build": [("pii-check", "just pii-check", 0), ("test", "just test", 0),
                      ("win-check", "just win-check-if-available", 0)],
@@ -3058,7 +3159,7 @@ class ReceiptOnGit(unittest.TestCase):
         self.receipts = self.tmp / "receipts"
         self.receipts.mkdir()
         self.env = {**WINDOWS_ENV, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp),
-                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_CONFIG_NOSYSTEM": "1", "RELEASE_COORD_RUN": receipt_fixture.RUN,
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@x", "GIT_AUTHOR_DATE": self.COMMITTED, "GIT_COMMITTER_DATE": self.COMMITTED}
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True, env=self.env)
@@ -3095,16 +3196,8 @@ class ReceiptOnGit(unittest.TestCase):
                                                tree=tree or self.git("rev-parse", f"{head}^{{tree}}"))
 
     def cover(self, lane, sha=None):
-        sha = sha or self.release
-        made = subprocess.run([sys.executable, str(RELEASE / "coord_receipt.py"), "make", *map(str, self.jobs)],
-                              capture_output=True, text=True)
-        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
-        (self.receipts / f"{sha}.json").write_text(made.stdout)
-        out = subprocess.run([BASH, "-c", self.FUNCTIONS + f'receipt_cover {lane}; echo "rc=$?"; echo "only=$ONLY"; '
-                              'echo "said=$RECEIPT"', str(LANE), str(self.repo), sha, str(self.receipts),
-                              str(self.tmp / "build-queue")],
-                             env=self.env, capture_output=True, text=True)
-        return dict(l.split("=", 1) for l in out.stdout.splitlines() if l.split("=", 1)[0] in ("rc", "only", "said"))
+        return cover_on_git(self, self.repo, sha or self.release, self.receipts, receipt_fixture.line_of(self.tmp),
+                            lane, self.env)
 
     def test_the_tree_before_the_bump_leaves_the_notes_readers_and_the_strict_windows_check(self):
         root = self.cover("root")
@@ -3166,6 +3259,93 @@ class ReceiptOnGit(unittest.TestCase):
                 root = self.cover("root", sha)
                 self.assertEqual((root["rc"], root["only"]), ("1", ""), root)
                 self.assertIn(f"refused: CHANGELOG.md is not a plain file edited in place since {self.gated[:8]}", root["said"])
+
+    def test_a_stamp_file_or_a_lock_file_changed_past_its_version_lines_is_another_tree(self):
+        # The stamp is version lines only; any other line of a stamp file, and any line of a file that is
+        # no stamp file — package-lock.json is none: bump.sh never writes it — is the tree changing.
+        for name, path, text in (("a dependency in Cargo.toml", "Cargo.toml",
+                                  '[package]\nname = "t"\nversion = "1.0.1"\n\n[dependencies]\nserde = "1"\n'),
+                                 ("package-lock.json's version line", "package-lock.json", '{\n  "version": "1.0.1"\n}\n')):
+            with self.subTest(change=name):
+                self.git("checkout", "-q", "--detach", self.release)
+                self.write(path, text)
+                later = self.commit(f"release: v1.0.1 and {name}")
+                root = self.cover("root", later)
+                self.assertEqual((root["rc"], root["only"]), ("1", ""), root)
+                self.assertIn(f"refused: {self.gated[:8]} holds another tree (CHANGELOG.md {path} ", root["said"])
+
+
+class ReceiptOnThe168Pair(unittest.TestCase):
+    """The coordinator's own pair (t-119757): v1.1.168's stack head ed535252c, the tree the coordinator
+    gated, and its release commit 8275c6ef6, read from this repository. They differ in the stamp's
+    version lines (Cargo.toml, tauri.conf.json, zo-ide/Cargo.toml, both Cargo.lock) and the notes
+    alone, so a receipt of the gated tree that ran every recipe of both lists (as coord-gate.sh runs
+    them) stands for the release: zo's gate is covered whole and the root's owes the notes' reader.
+    The same pair with one more line in any other file is another tree. The recipe lists are this
+    checkout's own; the commits are skipped where a clone does not hold them."""
+
+    GATED = "ed535252c38cad6363c01b0ed59b82a6c9e1c85e"
+    CUT = "8275c6ef6e04ef20ddcfbc40ba2495fc4d4a58eb"
+
+    def setUp(self):
+        for sha in (self.GATED, self.CUT):
+            if subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", f"{sha}^{{commit}}"],
+                              capture_output=True).returncode != 0:
+                self.skipTest(f"{sha[:9]} is not in this clone")
+        self.tmp = Path(tempfile.mkdtemp(prefix="lane-168-"))
+        self.receipts = self.tmp / "receipts"
+        self.receipts.mkdir()
+        self.env = {**WINDOWS_ENV, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp),
+                    "GIT_CONFIG_NOSYSTEM": "1", "RELEASE_COORD_RUN": receipt_fixture.RUN}
+        gate, self.listed = gate_as_coord_gate_runs_it(REPO)
+        tree = subprocess.run(["git", "-C", str(REPO), "rev-parse", f"{self.GATED}^{{tree}}"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        self.jobs = receipt_fixture.write_gate(self.tmp, "r168", gate, head=self.GATED, tree=tree,
+                                               who={"g-root": "coord-r168-root", "g-zo": "coord-r168-zo"})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_the_gated_tree_stands_for_the_release_and_owes_only_the_notes_reader(self):
+        root = cover_on_git(self, REPO, self.CUT, self.receipts, receipt_fixture.line_of(self.tmp), "root", self.env)
+        n = len(self.listed["root"])
+        self.assertEqual((root["rc"], root["only"]), ("0", "pii-check"), root)
+        self.assertIn(f"coord-r168-root+coord-r168-zo of {receipt_fixture.RUN} as its jobs say", root["said"])
+        self.assertIn(f"{n - 1}/{n} root recipes green, the notes changed, owes pii-check", root["said"])
+        zo = cover_on_git(self, REPO, self.CUT, self.receipts, receipt_fixture.line_of(self.tmp), "zo", self.env)
+        m = len(self.listed["zo"])
+        self.assertEqual((zo["rc"], zo["only"]), ("0", ""), zo)
+        self.assertIn(f"{m}/{m} zo recipes green, the notes changed", zo["said"])
+
+    def test_the_pair_with_one_more_line_anywhere_else_is_another_tree(self):
+        # A commit over the release in a clone of its own (--shared: this repository's objects, none written here).
+        clone = self.tmp / "clone"
+        subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(REPO), str(clone)], check=True, env=self.env)
+        for name in ("justfile", "zo-ide/justfile"):   # the lists the lane reads off its scratch's files
+            (clone / name).parent.mkdir(parents=True, exist_ok=True)
+            (clone / name).write_bytes(subprocess.run(["git", "-C", str(clone), "show", f"{self.CUT}:{name}"],
+                                                      capture_output=True, check=True).stdout)
+
+        def git(*args, stdin=None):
+            return subprocess.run(["git", "-C", str(clone), *args], input=stdin, capture_output=True, text=True,
+                                  check=True, env={**self.env, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+                                                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}).stdout.strip()
+
+        def one_more(path, change):
+            git("read-tree", self.CUT)
+            text = git("show", f"{self.CUT}:{path}") + "\n"
+            blob = git("hash-object", "-w", "--stdin", stdin=change(text))
+            git("update-index", "--cacheinfo", f"100644,{blob},{path}")
+            return git("commit-tree", git("write-tree"), "-p", self.CUT, "-m", f"one more line in {path}")
+
+        for path, change in (("tools/release/flakes.txt", lambda text: text + "root:one_more_flake\n"),
+                             ("Cargo.lock", lambda text: text.replace("checksum = ", "checksum  = ", 1)),
+                             ("Cargo.toml", lambda text: text + "# one more line\n")):
+            with self.subTest(path=path):
+                sha = one_more(path, change)
+                root = cover_on_git(self, clone, sha, self.receipts, receipt_fixture.line_of(self.tmp), "root", self.env)
+                self.assertEqual((root["rc"], root["only"]), ("1", ""), root)
+                self.assertIn(f"refused: {self.GATED[:8]} holds another tree (CHANGELOG.md {path} ", root["said"])
 
 
 def common_dir_of(repo):

@@ -207,65 +207,146 @@ only what passed is kept. The records go when the sha ends green or
 superseded, as its receipt does, and a red or refused sha keeps them for its
 next turn. `tests/test_lane.py Resume` pins the rule.
 
-## A coordinator's gate receipt (2026-10-22, t-47516)
+## A coordinator's gate receipt (2026-10-22, t-47516; on `zo line` since 2026-11-20, t-119757)
 
-The coordinator gates each landing on its build line before it cuts a release
+The coordinator gates each landing on the build line before it cuts a release
 from it, so the lane's gates ran the same recipes on the same tree a second
 time: v1.1.84 (`b0965106`) spent 3168 s in gate-root and 1719 s in gate-zo on
-the tree the coordinator's l64 had gated green an hour before. A cut can now
-carry that gate's receipt:
+the tree the coordinator's l64 had gated green an hour before. A cut can carry
+that gate's receipt. Since the build line became `zo line` (its old queue's
+runner ran its last job on 2026-11-09) the lane read none — v1.1.168 spent
+2,837 + 1,618 s re-running the coordinator's tree — until the receipt was read
+off `zo line` jobs (t-119757). The coordinator gates the stacked tree with
+`coord-gate.sh`, one job a gate, put in from the top of that checkout:
 
-    python3 tools/release/coord_receipt.py make <build-queue>/done/0-*-coord-<label>-*.job > receipt.json
-    tools/release/enqueue.sh <sha> --receipt receipt.json
+    cd <stack> && zo line add --owner coord-<label>-root --first --quiet --cap 2h --notify run:<run> -- \
+      bash tools/release/coord-gate.sh --who coord-<label>-root --logs <folder> root
+    cd <stack> && zo line add --owner coord-<label>-zo --first --quiet --cap 1h --notify run:<run> -- \
+      bash tools/release/coord-gate.sh --who coord-<label>-zo --logs <folder> zo
+    python3 tools/release/coord_receipt.py make <zo home>/line/jobs/<root job>.json <zo home>/line/jobs/<zo job>.json > <folder>/receipt.json \
+      && RELEASE_COORD_RUN=<run> tools/release/enqueue.sh <release sha> --receipt <folder>/receipt.json --keep-only
 
-`make` reads every job the build line ran — the rc file, the `head <sha> tree
-<tree>` its log opened with, one green `RC <key>=<rc>` line and one log per
-`entry`, a `verdict: bad=0`, one owner (`# who:`), run (`# run:`) and folder
-(`# cwd:`) for all — and seals the bytes it read (sha256). `enqueue.sh` reads the
-receipt once, as the lane does (a receipt that does not stand queues nothing),
-and keeps it as `receipts/<sha>.json` before the queue file appears. At each gate
-the lane reads all of it again and:
+`<label>` is letters and digits; `<folder>` is an absolute folder outside the
+checkout; the third line runs after both jobs passed and the release commit is
+cut on top of the gated head. `make` writes down whether the jobs ran at the top
+of their checkout, so the stack may be removed before the lane reads the receipt:
+a checkout no longer there is taken at what `make` found. `--in-lane-env` is the
+script's own second step (past `lane-env.sh` and `run-current`): a job whose
+command names it is refused. `--quiet` runs a job alone, so the two gates run
+one after another, as the lane's do (a gate starts only once the load is at or
+under `CALM_LOAD`; the gates hold tests that are sensitive to time). Two jobs
+put in without `--quiet` may run beside each other in two slots, and the
+receipt takes them alike, but that is for after their flakiness was measured:
+one red job refuses the whole receipt. One job may run both gates (`--who
+coord-<label> … root zo`).
+
+For each gate it names, `coord-gate.sh` runs every recipe of that gate's own
+list (`verify-every-recipe.sh --list`, the strict `win-check` included) as
+exactly `just <recipe>` — the root's from the top, zo's as `bash -c 'cd zo-ide &&
+just <recipe>'` under the key `zo-<recipe>` — in the environment the lane's gates
+get (`lane-env.sh`), each entry's output in `<folder>/<key>.log`, after waiting
+for the calm the lane waits for (at most the table's `CALM_WAIT_SECS`). It runs
+only in the checkout the line ran it in, at its top and clean (a `node_modules`
+link aside), and stops (rc 2) before any recipe when it cannot make a receipt: an
+owner that is no coordinator's, a logs folder inside the checkout, no run. Its
+log opens, under the line's own `zo line: …` lines, with `# who:`, `# run:` (its
+pane's `zerocode-orc run-current`), `# cwd:` and `# logs:`, then `head <sha> tree
+<tree>`; it says `entry <key> <command>` and `RC <key>=<rc> (<n>s)` for every
+entry and ends with `verdict: bad=<n>` — red, and rc 1, when an entry was red or
+the checkout's head or a tracked file changed while it ran (a file a recipe leaves
+untracked is no change to the tree: the lane's scratch is left the same file).
+
+`make` reads every job's record (`<zo home>/line/jobs/<id>.json`: passed, rc 0,
+a start and an end, its command `bash tools/release/coord-gate.sh …`), its rc
+file and its log (`<zo home>/line/logs/<id>.rc`, `.log`): the log's owner and
+folder must be the record's own (`owner`, `checkout`), every entry closed green
+with a log of its own, the verdict `bad=0`; all the jobs name one run, tree,
+logs folder and checkout, and no two ran one entry. It seals the bytes it read
+(sha256). `enqueue.sh` reads the receipt once, as the lane does — a receipt that
+does not stand queues and keeps nothing — and keeps it as `receipts/<sha>.json`
+before the queue file appears; with `--keep-only` it keeps it and queues nothing,
+for a lane the coordinator starts with the sha itself (`lane.sh <sha>`, which
+reads `receipts/<sha>.json` all the same). At each gate the lane reads all of
+it again and:
 
 - refuses it — the gate runs whole, and the phase says why (`"receipt":"refused:
-  …"` in status.json, `receipt=` from status.sh) — when a job is red or capped,
-  the jobs name two trees, owners, runs or folders, a sealed byte changed, the
-  receipt is older than its last job, a job is not one the build line ran (its
-  files outside `RELEASE_BUILD_LINE`'s `done/`, or no `RUN` and green `DONE` line
-  of it under its owner in that line's `runner.log`), the jobs say another run
-  than `RELEASE_COORD_RUN` or an owner other than a coordinator's
-  `coord-<label>`, git finds a job's head not to hold the tree its jobs printed,
-  or that tree to differ from the sha's apart from the stamp's version lines and
-  the release notes edited in place (modified, a plain `100644` file on both
-  sides — never linked, removed or given another mode), or a job ended before
-  its head was committed;
+  …"` in status.json, `receipt=` from status.sh) — when a job did not pass (its
+  record says failed, capped, stopped, lost, waiting or running, or an rc other
+  than 0, or its rc file does), ran anything but the checkout's own
+  `coord-gate.sh` — its inner `--in-lane-env` step included, or with a `--who`
+  other than its owner or a `--logs` other than its log's folder — its log names
+  another owner or folder than its record, the receipt's word on running at the
+  top differs from a checkout still there, the
+  jobs name two trees, owners, runs, logs folders or checkouts, two jobs ran one
+  entry, a sealed byte changed, the receipt is older than its last job, a job is
+  not one the build line ran (its record outside `RELEASE_BUILD_LINE`'s `jobs/`),
+  the jobs say another run than `RELEASE_COORD_RUN` or an owner other than a
+  coordinator's `coord-<label>` (or its `-root` and `-zo` jobs), git finds a job's
+  head not to hold the tree its jobs printed, or that tree to differ from the
+  sha's apart from the stamp's version lines and the release notes edited in place
+  (modified, a plain `100644` file on both sides — never linked, removed or given
+  another mode), or a job ended before its head was committed;
+- leaves it unused — the gate runs whole and says so — when the lane was given no
+  `RELEASE_COORD_RUN`: it has no default (the old one, run-4275, outlived its run);
+  the coordinator's launch names its own, the person's launchd agent none;
 - counts a recipe as gated only where an entry ran exactly `just <recipe>` in the
   gate's folder from the top of the checkout — a bare `just <recipe>` for the
-  root, `zsh -c 'cd zo-ide && just <recipe>'` for zo, and nothing at all when the
-  jobs ran anywhere but the top (their `# cwd:` holds no `.git`): from zo-ide a
-  bare `just test` is zo's — weighed against the gate's own list
+  root, `bash -c 'cd zo-ide && just <recipe>'` (or `zsh`, `sh`) for zo, and nothing
+  at all when the jobs ran anywhere but the top (their checkout holds no `.git`):
+  from zo-ide a bare `just test` is zo's — weighed against the gate's own list
   (`verify-every-recipe.sh --list`): the lane's strict `win-check` is never
   covered by `win-check-if-available`, which says SKIPPED on a cold target, and
   zo's tests run by package are no `just test`;
 - owes `NOTES_READERS` again when the release notes changed since the gated tree
   — bump.sh writes them into every release commit, and only pii-check reads them;
 - runs only what is left owed (`verify-every-recipe.sh --only`), and skips the
-  phase aloud when nothing is: `gate-root rc=0 0s … skipped: receipt
-  coord-<label> of <run> as its jobs say (the lane's coordinator run), tree
-  <tree8>: 16/16 root recipes green — logs <folder>`.
+  phase aloud when nothing is: `gate-zo rc=0 0s … skipped: receipt
+  coord-<label>-root+coord-<label>-zo of <run> as its jobs say (the lane's
+  coordinator run), tree <tree8>: 6/6 zo recipes green, the notes changed — logs
+  <folder>`.
 
-Nothing in a receipt is signed. The owner and run are what the jobs say of
-themselves (`# who:`, `# run:`), held only to the lane's own values; the seal says
-the bytes did not change after `make`, not who made them; and every file read —
-the jobs, the runner's log, the entry logs — is one any agent of the same user can
-write. The checks stop a job copied by hand, refused or never run by the line, one
-of another run or owner, a head and tree that disagree, and a gate of another tree
+What a receipt of `coord-gate.sh`'s two jobs leaves the lane, by the v1.1.168
+lane's own times (gate-root 2,837 s, gate-zo 1,618 s):
+
+| gate | recipes the receipt covers | owed in the lane | lane time |
+|---|---|---|---|
+| root | 18 of 19: every recipe but pii-check | pii-check (the notes; 4 s in 168) | about 4 s, after the calm wait |
+| zo | 6 of 6 | nothing — the phase is skipped aloud | 0 s |
+| either, receipt refused or unused | none | the whole gate | 2,837 s / 1,618 s |
+
+The checks a coordinator may run beside the gate — `cargo check --all-targets`
+of each workspace, the timing of zo line's own tests — are no recipe of either
+list: no receipt carries them, and the lane does not run them as such (its
+`lint`, `shell-lint` and zo's `clippy` and `test` build what they build).
+
+Nothing in a receipt is signed. The owner is what the job was put in under
+(`zo line add --owner`), the run what the gate script printed (`# run:`, its
+pane's `zerocode-orc run-current`), held only to the lane's own values; the
+entries are what the gate script printed it ran — the command check ties them to
+the checkout's own `coord-gate.sh`, which prints each command it runs and the
+checkout's clean head at its start and end, so a tree whose script printed
+otherwise is another tree; the seal says the bytes did not change after `make`,
+not who made them; and every file read — the records, the logs, the entry logs —
+is one any agent of the same user can write. The checks stop a job copied by
+hand, one the line did not end green, one of another run or owner, one put in
+from another checkout than the one it gated (v1.1.168's jobs ran from main and
+gated a stack tree), a head and tree that disagree, and a gate of another tree
 (ZO's review of t-47516); they do not stop one who writes all of those files on
-purpose.
+purpose. A notice zo line could not send is written at the end of the job's log
+after the job ended (`zo line: telling … did not go`): read before it, the
+receipt then no longer stands, so `make` runs once the jobs' ends were told.
+
+A receipt of the old build queue (version 1: `<build-queue>/done/*.job` and its
+`runner.log`) is refused with that reason, and the gate runs whole: that queue
+has run nothing since 2026-11-09. `RELEASE_BUILD_LINE` is zo's line folder
+(`${ZO_HOME:-$HOME/.zo}/line`, as zo reads its home).
 
 The receipt is kept beside the lane log as `out/receipt-<sha8>.json`; a sha that
 ends red or refused keeps it for its next turn. `tests/test_coord_receipt.py`
-pins the reading; `tests/test_lane.py Receipt` pins the lane with stubs and
-`ReceiptOnGit` the same on a real repository.
+pins the reading and the gate script (`GateScript` runs `coord-gate.sh` for
+real); `tests/test_lane.py Receipt` pins the lane with stubs, `ReceiptOnGit` the
+same on a real repository and `ReceiptOnThe168Pair` on v1.1.168's own gated head
+and release commit.
 
 ## The quick check before a batch (2026-10-25, t-73910)
 

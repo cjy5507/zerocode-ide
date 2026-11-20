@@ -190,13 +190,14 @@ UPDATER_KEY_PASSWORD_FILE=${UPDATER_KEY_PASSWORD_FILE:-$UPDATER_KEY.password}   
 FEED_PY=$SELF_DIR/updater_feed.py
 UNITS_PY=$SELF_DIR/workspace_units.py   # drops the repository's own build units, and build-script runs copied in from another target, from a target (trim_targets)
 RECEIPT_PY=$SELF_DIR/coord_receipt.py   # reads a coordinator's gate receipt again (receipt_cover); enqueue.sh reads it at the door
-# A receipt's jobs are ones the coordinator's build line ran: their files in its done/, each
-# started and ended green in its runner.log — the queue under the project's workspace folder,
-# where the window's board reads it too (crates/zerocode-shell/src/schedule_timeline.rs
-# LINE_FOLDER). Their owner and run are only what the jobs say of themselves, held to the
-# coordinator's: coord-<label> of RELEASE_COORD_RUN, or its -root and -zo lines (t-47516, t-76396).
-RELEASE_BUILD_LINE=${RELEASE_BUILD_LINE:-$HOME/zerocode/workspaces/$(basename "$RELEASE_REPO")/build-line/build-queue}
-RELEASE_COORD_RUN=${RELEASE_COORD_RUN:-run-4275}
+# A receipt's jobs are ones the build line ran — `zo line`, whose folder is zo's home's line/
+# (crates/zerocode-core/src/line.rs): each job's record in its jobs/, passed with rc 0, its log
+# and rc file in its logs/. Their owner and run are only what the jobs say of themselves, held to
+# the coordinator's: coord-<label> of RELEASE_COORD_RUN, or its -root and -zo jobs (t-47516,
+# t-76396, t-119757). The run has no default: the coordinator's launch names its own, and a lane
+# given none takes no receipt (the old default, run-4275, outlived its run and refused every one).
+RELEASE_BUILD_LINE=${RELEASE_BUILD_LINE:-${ZO_HOME:-$HOME/.zo}/line}
+RELEASE_COORD_RUN=${RELEASE_COORD_RUN:-}
 LEGACY_INSTALL_SH=$SELF_DIR/legacy/install.sh   # the old CLI's installer, verbatim (§2.7)
 APP_INSTALL_SH=$SELF_DIR/install.sh             # the app's installer: reads the feed beside it, so it goes up with every release
 # -------------------------------------------------------------------------------
@@ -1344,15 +1345,17 @@ gate_owed() { # root|zo — 0 when the gate must run; otherwise SKIP says why an
 }
 
 # ------------------------------------------- the coordinator's gate receipt --
-# A sha cut from a tree the coordinator already gated on its build line carries
-# that gate's receipt (enqueue.sh --receipt, kept as $RECEIPTS/<sha>.json). The
+# A sha cut from a tree the coordinator already gated on the build line carries
+# that gate's receipt (enqueue.sh --receipt [--keep-only], kept as $RECEIPTS/<sha>.json). The
 # receipt only locates the build line's evidence and seals its bytes; coord_receipt.py
-# reads all of it again — each job's rc file, the head and tree its log opened with,
-# one green RC line and one log per entry, a verdict of no red, one owner, run and
-# folder — holds every job to RELEASE_BUILD_LINE (in its done/, started and ended green
-# in its runner.log) and the jobs' own word on owner and run to the coordinator's
-# (coord-<label> of RELEASE_COORD_RUN, or its -root and -zo lines), and counts a recipe as gated only where an
+# reads all of it again — each zo line job's record (passed, rc 0, its command the
+# checkout's own coord-gate.sh) and rc file, the owner and folder its log names, the head
+# and tree its log opened with, one green RC line and one log per entry, a verdict of no
+# red, one run, tree and checkout — holds every job to RELEASE_BUILD_LINE (its record in
+# the line's jobs/) and the jobs' own word on owner and run to the coordinator's
+# (coord-<label> of RELEASE_COORD_RUN, or its -root and -zo jobs), and counts a recipe as gated only where an
 # entry ran exactly `just <recipe>` in that gate's folder from the top of the checkout.
+# A lane given no RELEASE_COORD_RUN leaves a receipt unused.
 # The receipt stands for this sha when git finds every job's head to hold the tree its
 # jobs printed, and that tree to be the sha's apart from the stamp's version lines and
 # the release notes edited in place (whose readers are then owed again), and every job
@@ -1388,6 +1391,7 @@ receipt_cover() { # LANE — 0 when this sha's receipt stands, ONLY what it left
   local lane=$1 file="$RECEIPTS/$SHA.json" facts kind rest head ended committed recipes r who= run= tree= logs= heads= covered= owed= notes= n=0 total=0
   ONLY=; RECEIPT=
   [ -f "$file" ] || return 1
+  [ -n "$RELEASE_COORD_RUN" ] || { RECEIPT="unused: the lane was given no coordinator run (RELEASE_COORD_RUN)"; return 1; }
   facts=$(python3 "$RECEIPT_PY" read --receipt "$file" --dir "$(gate_dir "$lane")" \
             --line "$RELEASE_BUILD_LINE" --run "$RELEASE_COORD_RUN" 2>&1) \
     || { RECEIPT="refused: $facts"; return 1; }
