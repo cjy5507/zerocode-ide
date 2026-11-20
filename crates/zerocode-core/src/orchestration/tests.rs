@@ -26730,6 +26730,9 @@ mod land_check;
 /// t-78890 (O8): the landing of a stack written on every member in one `task-update --members`
 /// (`tests/land_record.rs`).
 mod land_record;
+/// t-119569: the landing of verified work proven from git alone, and nothing written that git
+/// did not prove (`tests/landing_proof.rs`).
+mod landing_proof;
 /// t-34501: late landings told to the coordinator, a branch that ran away told to its worker
 /// (`tests/landing_watch.rs`).
 mod landing_watch;

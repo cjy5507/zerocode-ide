@@ -35,9 +35,7 @@ fn git_says() -> CommitsSeen {
             head: Some(MAIN.to_string()),
         }),
         tags: Some("v*".to_string()),
-        commits: Default::default(),
-        patches: Default::default(),
-        ambiguous: Default::default(),
+        ..CommitsSeen::default()
     };
     for (named, full, in_base, tag) in [
         (LANDED, Some(LANDED), Some(true), Some("v1.0.1")),

@@ -50,9 +50,7 @@ fn see_with(
             })
         }),
         tags: tags.map(str::to_string),
-        commits: Default::default(),
-        patches: Default::default(),
-        ambiguous: Default::default(),
+        ..CommitsSeen::default()
     };
     let base_head = seen.base.as_ref().and_then(|base| base.head.clone());
     for named in commits {
@@ -75,6 +73,11 @@ fn see_with(
         seen.insert(named, CommitSeen { full, in_base, tag });
     }
     seen
+}
+
+/// What git says in `repo` about the range each of `heads` reviewed (t-119569) — not read yet.
+pub(crate) fn see_ranges(seen: &mut CommitsSeen, repo: &Path, heads: &[String], base: &str, tags: &str) {
+    let _ = (seen, repo, heads, base, tags);
 }
 
 /// [`change_key`] kept by commit id for as long as the window runs (t-119569): a commit never
@@ -651,6 +654,70 @@ mod tests {
         git(repo, &["add", file]);
         git(repo, &["commit", "-q", "-m", file]);
         git(repo, &["rev-parse", "HEAD"])
+    }
+
+    /// The range a verified review read, as the landing proof asks git (t-119569): a range picked
+    /// onto `main` beside a line `main` changed (where git's own patch identity calls the copy
+    /// another change) lands once every commit of it is there, as the newest copy; one commit
+    /// still missing is no landing; a tag counts only once it holds the landing and the published
+    /// `main` holds it; and a head merged as it is landed as its merge.
+    #[test]
+    fn a_reviewed_range_lands_once_every_change_is_in_main_and_ships_in_a_published_tag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("file"), "a\nb\nc\n").expect("write");
+        git(repo, &["add", "file"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        git(repo, &["checkout", "-q", "-b", "work"]);
+        std::fs::write(repo.join("file"), "a\nB\nc\n").expect("write");
+        git(repo, &["commit", "-q", "-am", "first"]);
+        let first = git(repo, &["rev-parse", "HEAD"]);
+        let head = commit(repo, "second");
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("file"), "z\na\nb\nc\n").expect("write");
+        git(repo, &["commit", "-q", "-am", "elsewhere"]);
+        git(repo, &["tag", "v1.0.0"]);
+        git(repo, &["cherry-pick", &first]);
+        let range = |repo: &Path| {
+            let mut seen = CommitsSeen::default();
+            see_ranges(&mut seen, repo, &[head.clone()], "main", "v*");
+            seen.range(&head).cloned().expect("git answered for the range")
+        };
+
+        let partial = range(repo);
+        assert_eq!(
+            partial.commits,
+            vec![(first.clone(), true), (head.clone(), false)],
+            "the first change is in main beside a line main moved; the second is not"
+        );
+        assert_eq!((partial.landed_as, partial.tag), (None, None));
+
+        git(repo, &["cherry-pick", &head]);
+        let copy = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["update-ref", "refs/remotes/origin/main", "main~1"]);
+        git(repo, &["tag", "v1.0.1"]);
+        let landed = range(repo);
+        assert!(landed.commits.iter().all(|(_, landed)| *landed), "{landed:?}");
+        assert_eq!(landed.landed_as.as_deref(), Some(copy.as_str()), "the newest copy");
+        assert_eq!(
+            landed.tag, None,
+            "v1.0.0 holds none of it, and v1.0.1 is not on the published main yet"
+        );
+        git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+        assert_eq!(range(repo).tag.as_deref(), Some("v1.0.1"), "published");
+
+        // A head merged as it is: its own range of one, landed as the merge that took it.
+        git(repo, &["checkout", "-q", "-b", "side"]);
+        let side = commit(repo, "side");
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", "-m", "take side", "side"]);
+        let merge = git(repo, &["rev-parse", "HEAD"]);
+        let mut seen = CommitsSeen::default();
+        see_ranges(&mut seen, repo, &[side.clone()], "main", "v*");
+        let merged = seen.range(&side).expect("git answered for the merged head");
+        assert_eq!(merged.commits, vec![(side.clone(), true)]);
+        assert_eq!(merged.landed_as.as_deref(), Some(merge.as_str()));
     }
 
     /// MEASUREMENT (ignored, t-119569): the 「쌓인 일」 count of a real repository's checkouts as the

@@ -72,6 +72,26 @@ pub struct CommitsSeen {
     /// The names, in lower case, that more than one object's hash starts with, so git named no
     /// commit for them (t-98182 L4) — told apart from a name git knows nothing of.
     pub ambiguous: BTreeSet<String>,
+    /// What git said about the range each reviewed head read (t-119569), keyed by the head as it
+    /// was named, in lower case: asked of the heads [`backfill_heads`] names, against the
+    /// backfill's base.
+    pub ranges: BTreeMap<String, RangeSeen>,
+}
+
+/// One reviewed range as git answered for it (t-119569): the commits the head holds that the base
+/// did not when the work forked from it — a head landed as it is, merged or fast-forwarded, is
+/// its own range of one, held by the base — each with whether the base holds its change now,
+/// itself or a copy picked onto the base with the same change (git's own patch identity); the
+/// commit of the base the last of them landed as; and the first release tag that holds that
+/// landing and that the published base holds — a tag cut while a release still runs is none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RangeSeen {
+    /// The range's commits, and whether the base holds each one's change.
+    pub commits: Vec<(String, bool)>,
+    /// The commit of the base the range's last change landed as, when every one landed.
+    pub landed_as: Option<String>,
+    /// The first release tag, in version order, that holds `landed_as` and is published.
+    pub tag: Option<String>,
 }
 
 /// One head's change — its own commits, the base they stand on left out — file by file: line
@@ -162,6 +182,17 @@ impl CommitsSeen {
     /// Write down that more than one object's hash starts with `named`.
     pub fn insert_ambiguous(&mut self, named: &str) {
         self.ambiguous.insert(named.trim().to_ascii_lowercase());
+    }
+
+    /// What git said about the range `head` reviewed, whatever case it was written in.
+    #[must_use]
+    pub fn range(&self, head: &str) -> Option<&RangeSeen> {
+        self.ranges.get(&head.trim().to_ascii_lowercase())
+    }
+
+    /// Write down what git said about the range `head` reviewed.
+    pub fn insert_range(&mut self, head: &str, seen: RangeSeen) {
+        self.ranges.insert(head.trim().to_ascii_lowercase(), seen);
     }
 }
 
