@@ -1366,7 +1366,7 @@ mod tests {
         );
         let last = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         let copy = git(repo, &["rev-parse", "HEAD"]);
         let beside = reviewed_range(repo, &last);
         assert_eq!(beside.commits, vec![(change.clone(), true)], "{beside:?}");
@@ -1387,7 +1387,7 @@ mod tests {
         git(repo, &["merge", "-q", "--no-ff", "-m", "take main", "main"]);
         let merge = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         let range = reviewed_range(repo, &merge);
         assert_eq!(range.merges, vec![merge.clone()], "{range:?}");
         assert_eq!(range.commits, vec![(change.clone(), true)], "{range:?}");
@@ -1401,7 +1401,7 @@ mod tests {
         let repo = forked(dir.path());
         let change = commit(repo, "change");
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         let copy = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["revert", "--no-edit", &copy]);
         let revert = git(repo, &["rev-parse", "HEAD"]);
@@ -1467,7 +1467,9 @@ mod tests {
         let change = commit(repo, "change");
         git(repo, &["checkout", "-q", "main"]);
         git(repo, &["checkout", "-q", "-b", "side"]);
-        git(repo, &["cherry-pick", &change]);
+        // `-x`, so the copy is another commit: picked onto the original's own parent within the
+        // same second, git would make the very same commit, and the head itself would be tied on.
+        git(repo, &["cherry-pick", "-x", &change]);
         git(repo, &["checkout", "-q", "main"]);
         git(
             repo,
@@ -1495,7 +1497,7 @@ mod tests {
         let repo = forked(dir.path());
         let change = commit(repo, "change");
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         let copy = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["tag", "v1.0.1"]);
 
@@ -1559,7 +1561,7 @@ mod tests {
         let repo = forked(dir.path());
         let change = commit(repo, "change");
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         git(repo, &["tag", "v1.0.1"]);
         let origin = tempfile::tempdir().expect("tempdir");
         let origin_url = bare(&origin);
@@ -1625,7 +1627,7 @@ mod tests {
         let change = commit(repo, "change");
         git(repo, &["checkout", "-q", "main"]);
         let before = git(repo, &["rev-parse", "HEAD"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         git(repo, &["tag", "v1.0.1"]);
         let origin = tempfile::tempdir().expect("tempdir");
         let origin_url = bare(&origin);
@@ -1683,7 +1685,7 @@ mod tests {
         let change = commit(repo, "change");
         git(repo, &["checkout", "-q", "main"]);
         git(repo, &["tag", "v1.0.0"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         git(repo, &["tag", "v1.0.1"]);
         let origin = tempfile::tempdir().expect("tempdir");
         let origin_url = bare(&origin);
@@ -1738,7 +1740,7 @@ mod tests {
         git(repo, &["checkout", "-q", "-b", "work"]);
         let change = commit(repo, "change");
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         git(repo, &["tag", "v1.0.1"]);
         git(repo, &["push", "-q", "origin", "main"]);
         // Another place holding the same history's old commit, tagged v1.0.1 there.
@@ -1796,7 +1798,7 @@ mod tests {
         let repo = forked(dir.path());
         let change = commit(repo, "change");
         git(repo, &["checkout", "-q", "main"]);
-        git(repo, &["cherry-pick", &change]);
+        git(repo, &["cherry-pick", "-x", &change]);
         git(repo, &["tag", "v1.0.1"]);
         let origin = tempfile::tempdir().expect("tempdir");
         let origin_url = bare(&origin);
