@@ -77,6 +77,33 @@ fn see_with(
     seen
 }
 
+/// [`change_key`] kept by commit id for as long as the window runs (t-119569): a commit never
+/// changes, so its key is asked of git once — by the 「쌓인 일」 tab's rows and a landing proof alike.
+/// A commit git gave no key for is not kept, and is asked again next time.
+pub(crate) fn change_key_kept(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<String> {
+    let cache = || {
+        static KEPT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+            std::sync::OnceLock::new();
+        KEPT.get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if let Some(key) = cache().get(commit) {
+        return Some(key.clone());
+    }
+    let key = change_key(vcs, repo, commit)?;
+    let mut kept = cache();
+    if kept.len() >= CHANGE_KEYS_KEPT {
+        kept.clear();
+    }
+    kept.insert(commit.to_string(), key.clone());
+    Some(key)
+}
+
+/// How many change keys a window keeps before it starts again: every unlanded commit of every
+/// checkout it lists and every range it proves, many times over (178 unlanded on 11-20).
+const CHANGE_KEYS_KEPT: usize = 8_192;
+
 /// The commit `name` names in `repo`, in full: `Some(None)` when git knows no such commit, and
 /// `None` when git gave no answer at all.
 fn resolve(vcs: &dyn Vcs, repo: &Path, name: &str) -> Option<Option<String>> {
@@ -433,6 +460,32 @@ fn patch(
     }
 }
 
+/// The one key a commit's own change reads by (t-119569): its change against its first parent, file by
+/// file as a replayed change is digested ([`Context::Dropped`] — line numbers, hunks and the base's own
+/// lines aside, every added and removed line exactly), folded into one SHA-256 and cut to
+/// [`CHANGE_KEY_CHARS`]. So the same change picked onto another branch keys the same, and any other change
+/// does not. `None` where git gave no answer — a root commit, a diff past [`DIFF_MAX`], a git that did
+/// not start — and the caller then keys the commit by its own id.
+pub(crate) fn change_key(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let parent = format!("{commit}^");
+    let patch = patch(vcs, repo, &parent, commit, 1, Context::Dropped)?;
+    let mut digest = Sha256::new();
+    for (file, part) in &patch.files {
+        digest.update(file.as_bytes());
+        digest.update(b"\0");
+        digest.update(part.as_bytes());
+        digest.update(b"\n");
+    }
+    let mut key = format!("{:x}", digest.finalize());
+    key.truncate(CHANGE_KEY_CHARS);
+    Some(key)
+}
+
+/// How many hex digits of a change key go on the wire: 64 bits, against a few hundred changes a window
+/// holds at most — a collision there is a chance of about one in 10^14.
+const CHANGE_KEY_CHARS: usize = 16;
+
 /// Whether a change's digest holds the base's own lines beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Context {
@@ -597,6 +650,40 @@ mod tests {
         git(repo, &["add", file]);
         git(repo, &["commit", "-q", "-m", file]);
         git(repo, &["rev-parse", "HEAD"])
+    }
+
+    /// A commit's change key (t-119569) is the same for the same change picked onto another branch —
+    /// where its parent, its line numbers and its id all differ — and differs for any other change, so
+    /// the 「쌓인 일」 tab counts the copy a stack's checkout holds once with the commit it was copied
+    /// from.
+    #[test]
+    fn the_same_change_picked_onto_another_branch_keys_the_same_and_another_change_does_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("file"), "a\nb\nc\n").expect("write");
+        git(repo, &["add", "file"]);
+        git(repo, &["commit", "-q", "-m", "base"]);
+        git(repo, &["checkout", "-q", "-b", "work"]);
+        std::fs::write(repo.join("file"), "a\nB\nc\n").expect("write");
+        git(repo, &["commit", "-q", "-am", "the change"]);
+        let original = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["checkout", "-q", "-b", "stack"]);
+        // The stack stands on another base: lines above the change moved, so its line numbers did too.
+        std::fs::write(repo.join("file"), "z\na\nb\nc\n").expect("write");
+        git(repo, &["commit", "-q", "-am", "elsewhere"]);
+        git(repo, &["cherry-pick", &original]);
+        let copy = git(repo, &["rev-parse", "HEAD"]);
+        let other = commit(repo, "another");
+        assert_ne!(original, copy, "a cherry-pick is a commit of its own");
+
+        let key = |commit: &str| change_key(&LocalVcs, repo, commit).expect("git keys the change");
+        assert_eq!(key(&original), key(&copy), "the same change, picked elsewhere");
+        assert_ne!(key(&original), key(&other), "another change");
+        assert_eq!(key(&original).len(), CHANGE_KEY_CHARS);
+        let root = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
+        assert_eq!(change_key(&LocalVcs, repo, &root), None, "a root commit has no parent to read against");
     }
 
     /// A throwaway repository: `main` with a released commit and an unreleased one after it, and a

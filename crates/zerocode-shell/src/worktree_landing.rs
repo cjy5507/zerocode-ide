@@ -30,6 +30,12 @@ pub(super) struct WorktreeLanding {
     pub(super) detached: bool,
     /// `unlanded`일 때 내용 기준으로 비교 ref에 없는 커밋 수.
     pub(super) ahead: u32,
+    /// `unlanded`일 때 그 커밋들 각각의 변경 열쇠(t-119569, [`crate::commit_witness::change_key`]): 같은
+    /// 변경은 어느 작업 폴더의 어느 커밋이든 같은 열쇠다 — 서로 위에 쌓은 가지도, 쌓는 나무에 옮겨 담은
+    /// 사본도. 창의 「쌓인 일」이 프로젝트 전체에서 이 열쇠의 합집합을 센다(커밋 수의 합은 같은 변경을 작업
+    /// 폴더마다 다시 셌다). 열쇠를 못 구한 커밋은 제 커밋 id가 열쇠다. 다른 상태에서는 비어 있다.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) changes: Vec<String>,
     /// 추적 중인 파일에 커밋하지 않은 변경이 있다.
     pub(super) dirty: bool,
     /// git이 무시하는 파일이 이 작업 폴더에 남아 있다 (t-34315): 빌드 결과,
@@ -127,6 +133,7 @@ impl WorktreeLanding {
             state: "pending",
             detached: false,
             ahead: 0,
+            changes: Vec::new(),
             dirty: false,
             ignored: false,
             ignored_checked_ms: None,
@@ -920,6 +927,7 @@ fn classify_landing(
         state: "unknown",
         detached: branch.is_none(),
         ahead: 0,
+        changes: Vec::new(),
         dirty: false,
         ignored: false,
         ignored_checked_ms: None,
@@ -971,6 +979,7 @@ fn classify_landing(
     } else {
         landing.state = "unlanded";
         landing.ahead = u32::try_from(ahead).unwrap_or(u32::MAX);
+        landing.changes = unlanded_changes(host, path, &cherry);
         landing.behind = commits_behind(host, path, head, target);
         landing.far_behind = landing
             .behind
@@ -978,6 +987,22 @@ fn classify_landing(
         landing.conflict = conflict_of(&probe);
     }
     landing
+}
+
+/// The change key of every commit `git cherry` named not in the compare ref (its `+` lines), in its
+/// order (t-119569, [`crate::commit_witness::change_key_kept`]): asked of git once a window for each
+/// commit. A commit git gave no key for is keyed by its own id.
+fn unlanded_changes(host: &Host, path: &Path, cherry: &str) -> Vec<String> {
+    cherry
+        .lines()
+        .filter_map(|line| line.strip_prefix('+'))
+        .map(str::trim)
+        .filter(|commit| !commit.is_empty())
+        .map(|commit| {
+            crate::commit_witness::change_key_kept(host.vcs(), path, commit)
+                .unwrap_or_else(|| commit.to_string())
+        })
+        .collect()
 }
 
 /// 병합 시험의 답을 칸으로 옮긴다: 깨끗함은 `total 0`, 충돌은 전체 수와 앞쪽 이름, 못 읽음은 없음.

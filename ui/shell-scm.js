@@ -665,20 +665,34 @@ function unlandedCheckouts(project = projectOfWorktree(activeWorktreePath) ?? pr
   return (project?.worktrees ?? []).filter((worktree) => !worktree.is_main && worktree.landing?.state === "unlanded");
 }
 
-function unlandedCommitCount(checkouts) {
-  return checkouts.reduce((sum, worktree) => sum + (worktree.landing.ahead ?? 0), 0);
+/* How many changes of the project on screen are not in main yet (t-119569): each change once, however many
+ * checkouts hold it. Branches stacked on each other hold the same commits, and a stack's checkout holds copies
+ * of other checkouts' commits picked onto it; summed checkout by checkout, 53 changes read as 99 on 11-20 (the
+ * person read 「쌓인 일 182」 as work piling up). The key of each commit's change is the backend's
+ * (`landing.changes`, the same digest whichever commit carries the change); a row without keys adds its own
+ * count. A branch's own row still says its own commits (`landing.ahead`, the sidebar's 「미반영 N」). */
+function unlandedChangeCount(checkouts) {
+  const changes = new Set();
+  let unkeyed = 0;
+  for (const worktree of checkouts) {
+    const keys = worktree.landing?.changes;
+    if (Array.isArray(keys) && keys.length > 0) for (const key of keys) changes.add(key);
+    else unkeyed += worktree.landing?.ahead ?? 0;
+  }
+  return changes.size + unkeyed;
 }
 
 function paintStackedWorkCount() {
   const count = el("activity-pile-count");
-  const commits = unlandedCommitCount(unlandedCheckouts());
+  const changes = unlandedChangeCount(unlandedCheckouts());
   const halted = (buildsHere() ?? []).some((build) => build.state === "failed");
-  writeHidden(count, commits === 0 && !halted);
-  writeTextContent(count, commits === 0 ? "" : String(commits));
-  // The rail folds the word: the number and a stopped gate are said in the tab's name and its tip (t-84803).
+  writeHidden(count, changes === 0 && !halted);
+  writeTextContent(count, changes === 0 ? "" : String(changes));
+  // The rail folds the word: the number and a stopped gate are said in the tab's name and its tip (t-84803) —
+  // and the tip says what the number counts (t-119569).
   if ((count.dataset.tone ?? "") !== (halted ? "halt" : "")) count.dataset.tone = halted ? "halt" : "";
-  const words = halted ? t("pile.titleHalt", "쌓인 일 {{count}} — 빌드 실패", { count: commits })
-    : commits === 0 ? t("pile.title", "쌓인 일") : t("pile.titleCount", "쌓인 일 {{count}}", { count: commits });
+  const words = halted ? t("pile.titleHalt", "쌓인 일 — main에 아직 없는 변경 {{count}} · 빌드 실패", { count: changes })
+    : changes === 0 ? t("pile.title", "쌓인 일") : t("pile.titleCount", "쌓인 일 — main에 아직 없는 변경 {{count}}", { count: changes });
   const tab = el("activity-pile-tab");
   if (tab.dataset.tip !== words) tab.dataset.tip = words;
   writeAttribute(tab, "aria-label", words);
@@ -752,10 +766,10 @@ function pileBuildsSection(builds) {
  * that checkout. */
 function pileUnlandedSection(checkouts, unseated) {
   if (checkouts.length === 0) return null;
-  const commits = unlandedCommitCount(checkouts);
+  const changes = unlandedChangeCount(checkouts);
   const total = deskElement("p", "pile-total");
-  total.append(deskElement("strong", "pile-total-count", String(commits)),
-    deskElement("span", "pile-total-words", t("pile.total", "커밋 · 가지 {{branches}}", { branches: checkouts.length })));
+  total.append(deskElement("strong", "pile-total-count", String(changes)),
+    deskElement("span", "pile-total-words", t("pile.total", "main에 없는 변경 · 가지 {{branches}}", { branches: checkouts.length })));
   // A bar for each branch, as long as its commits.
   const bar = deskElement("div", "pile-bar");
   bar.setAttribute("aria-hidden", "true");
