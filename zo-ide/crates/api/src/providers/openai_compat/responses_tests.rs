@@ -290,11 +290,11 @@ fn pictures_on_responses_follow_the_endpoint_as_on_chat() {
     assert_eq!(placeholder["input"][0]["content"][0]["type"], json!("input_text"));
 }
 
-/// OpenAI's own API puts the person's first request on `/responses` at the
-/// catalog row's `max`; a refusal of `reasoning.effort` sends it again once at
-/// the highest rung it names. The official address is the one wire decision a
-/// loopback fake cannot take, so the endpoint's having said that its tools go
-/// to `/responses` stands in for it here.
+/// An effort refused on `/responses` itself — a request that reaches it at the
+/// catalog row's `max` once the endpoint said its tools go there but before
+/// any effort was refused — goes again once at the highest rung the refusal
+/// lists. The fake refuses in the form a gateway's page quotes, naming no
+/// field, since OpenAI's own words there were not seen.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn a_refused_effort_on_responses_goes_again_at_the_rung_it_names() {
