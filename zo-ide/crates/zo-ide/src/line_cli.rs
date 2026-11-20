@@ -85,6 +85,8 @@ const FLOOR_ENV: &str = "ZO_LINE_DISK_FLOOR_GIB";
 const WAITER_GRACE_MS: i64 = 60_000;
 /// The lines of a log `zo line log` prints.
 const LOG_TAIL_LINES: usize = 200;
+/// How a ledger address names a run's chair: `run:<run>`, found in that run.
+const RUN_ADDRESS: &str = "run:";
 /// How much of what a failed `zerocode-orc send` said the job's log keeps.
 const SAID_CHARS: usize = 400;
 /// The machine's slot folder under zo's home — `zo build`'s.
@@ -264,7 +266,7 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
             run_job(&line, &machine, &job.id, true).map(Ended::Ran)
         }
         Verb::Add(put) => {
-            let job = put_with_waiter(&line, &machine, job_of(&put, cwd))?;
+            let job = put_with_waiter(&line, &machine, told_in_this_panes_run(job_of(&put, cwd)))?;
             let places = line::places(&line.jobs(), &|owner| line.last_end(owner), line.turn());
             put_receipt(&line, &job, json!({ "job": job.id, "place": places.get(&job.id) }))
         }
@@ -379,6 +381,14 @@ fn put_with_waiter(line: &Line, machine: &MachineRules, mut job: Job) -> Result<
     Ok(job)
 }
 
+/// `job`, told in the run this process's pane stands in when its address is
+/// one another run cannot find — a worker, a pane (`notify_run`, t-119309).
+/// Asked before the line's lock is taken: the ledger may take seconds to answer.
+fn told_in_this_panes_run(mut job: Job) -> Job {
+    job.notify_run = job.notify.as_deref().filter(|to| !to.starts_with(RUN_ADDRESS)).and_then(|_| run_of_this_pane());
+    job
+}
+
 /// The job a put makes, waiting from now.
 fn job_of(put: &Put, cwd: &Path) -> Job {
     let now = now_ms();
@@ -395,6 +405,7 @@ fn job_of(put: &Put, cwd: &Path) -> Job {
         cap_secs: put.cap_secs.unwrap_or(line::CAP_DEFAULT_SECS),
         command: put.command.clone(),
         notify: put.notify.clone(),
+        notify_run: None,
         state: JobState::Waiting,
         queued_ms: now,
         started_ms: None,
@@ -1092,29 +1103,19 @@ fn tee(output: Option<impl io::Read + Send + 'static>, log: &File, to_err: bool)
 }
 
 /// Tells the ledger how the job ended, when it named where: through
-/// `zerocode-orc send` on this machine's PATH, with the environment of the
-/// process that put the job in. `send` changes the ledger, so it goes under a
-/// name the window can take again unchanged, the job's: without one the window
-/// refused every end the line told (t-118403). A send that does not go is left,
-/// and the job's log says so as its last line.
+/// `zerocode-orc send`, with the environment of the process that tells — the
+/// job's waiter, which has the one of the process that put the job in, or the
+/// look that ended the job (`tell_ended`) — in the run the address is found in
+/// (`send_args`). `send` changes the ledger, so it goes under a name the window
+/// can take again unchanged, the job's: without one the window refused every
+/// end the line told (t-118403). A send that does not go is left, and the job's
+/// log says so as its last line.
 fn notify(line: &Line, job: &Job, took: Duration) {
     let Some(to) = job.notify.as_deref() else {
         return;
     };
-    let what = if job.what.is_empty() { job.command.join(" ") } else { job.what.clone() };
-    let body = format!(
-        "zo line {}: {what} — {} (rc {}, {}s)",
-        job.id,
-        state_word(job.state),
-        job.rc.unwrap_or(-1),
-        took.as_secs()
-    );
-    let mut send = Command::new("zerocode-orc");
-    let name = format!("zo-line-{}", job.id);
-    send.args(["send", "--to", to, "--type", "status", "--body", &body, "--retry-request", &name]);
-    if let Some(run) = to.strip_prefix("run:") {
-        send.args(["--run", run]);
-    }
+    let mut send = ledger_command();
+    send.args(send_args(job, to, took));
     let said = send
         .current_dir(&job.checkout)
         .stdin(Stdio::null())
@@ -1130,6 +1131,51 @@ fn notify(line: &Line, job: &Job, took: Duration) {
     if let Ok(log) = OpenOptions::new().create(true).append(true).open(&path) {
         close_log(&log, &path, &format!("zo line: telling {to} how the job ended did not go: {why}"));
     }
+}
+
+/// The words `notify` gives `zerocode-orc` to tell `to` how `job` ended. The
+/// window finds a worker or a pane in the run its caller stands in, and the
+/// look that ends a job may stand in another run, or in none: the send names
+/// the run the address is found in — a run's own, or the one the pane that put
+/// the job in stood in (`notify_run`, t-119309). The sender signs as itself.
+fn send_args(job: &Job, to: &str, took: Duration) -> Vec<String> {
+    let what = if job.what.is_empty() { job.command.join(" ") } else { job.what.clone() };
+    let body = format!(
+        "zo line {}: {what} — {} (rc {}, {}s)",
+        job.id,
+        state_word(job.state),
+        job.rc.unwrap_or(-1),
+        took.as_secs()
+    );
+    let name = format!("zo-line-{}", job.id);
+    let mut args: Vec<String> = ["send", "--to", to, "--type", "status", "--body", body.as_str(), "--retry-request", name.as_str()]
+        .map(str::to_owned)
+        .into();
+    if let Some(run) = to.strip_prefix(RUN_ADDRESS).or(job.notify_run.as_deref()) {
+        args.extend(["--run".to_owned(), run.to_owned()]);
+    }
+    args
+}
+
+/// The ledger's command as this machine runs it.
+fn ledger_command() -> Command {
+    Command::new("zerocode-orc")
+}
+
+/// The run this process's pane stands in, as `zerocode-orc run-current` says:
+/// none when it stands in none, or the ledger cannot be asked.
+fn run_of_this_pane() -> Option<String> {
+    let said = ledger_command().arg("run-current").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    if !said.status.success() {
+        return None;
+    }
+    run_named(&said.stdout)
+}
+
+/// The run `run-current`'s answer names.
+fn run_named(answer: &[u8]) -> Option<String> {
+    let answer: serde_json::Value = serde_json::from_slice(answer).ok()?;
+    answer["runId"].as_str().filter(|run| !run.is_empty()).map(str::to_owned)
 }
 
 /// The first line a command said on stderr, at most `SAID_CHARS` characters.
@@ -1560,6 +1606,40 @@ mod tests {
         let fails = rules(&home.path().join(SLOTS_FOLDER));
         assert!(put_with_waiter(&line, &fails, job_of(&put, cwd.path())).is_err());
         assert_eq!(line.jobs().len(), 1, "nothing else was put in");
+    }
+
+    /// The send that tells a job's end names the run its address is found in:
+    /// a run's own, or, for a worker or a pane, the run the pane that put the job
+    /// in stood in — whoever tells it (t-119309). A job put in from no run, or
+    /// by a zo before it, names none, as before.
+    #[test]
+    fn a_tell_names_the_run_its_address_is_found_in() {
+        let put = Put { what: "검사".to_owned(), command: words(&["true"]), ..Put::default() };
+        let run_of = |args: &[String]| args.iter().position(|word| word == "--run").map(|at| args[at + 1].clone());
+        for (to, put_from, told_in) in [
+            ("worker:w-7", Some("run-put"), Some("run-put")),
+            ("pane:team-1/%3", Some("run-put"), Some("run-put")),
+            ("worker:w-7", None, None),
+            ("run:run-9", None, Some("run-9")),
+            ("run:run-9", Some("run-put"), Some("run-9")),
+        ] {
+            let job = Job { notify: Some(to.to_owned()), notify_run: put_from.map(str::to_owned), ..job_of(&put, Path::new("/")) };
+            let args = send_args(&job, to, Duration::from_secs(3));
+            assert_eq!(run_of(&args).as_deref(), told_in, "{to} put in from {put_from:?}: {args:?}");
+            assert_eq!(args[..5], ["send", "--to", to, "--type", "status"], "{args:?}");
+            assert_eq!(args[6], format!("zo line {}: 검사 — waiting (rc -1, 3s)", job.id));
+            assert_eq!(args[7..9], ["--retry-request".to_owned(), format!("zo-line-{}", job.id)]);
+        }
+    }
+
+    /// The run a pane stands in is the one `run-current` names; an answer that
+    /// names none says the pane stands in no run.
+    #[test]
+    fn the_run_a_pane_stands_in_is_the_one_run_current_names() {
+        assert_eq!(run_named(br#"{"runId":"run-94975","name":"x","seated":false}"#), Some("run-94975".to_owned()));
+        for said in [&b""[..], b"no json", br#"{"runId":""}"#, br#"{"runId":7}"#, br#"["run-1"]"#] {
+            assert_eq!(run_named(said), None, "{}", String::from_utf8_lossy(said));
+        }
     }
 
     /// What a failed `zerocode-orc send` said, as the job's log keeps it: its

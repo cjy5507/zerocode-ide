@@ -136,6 +136,12 @@ pub struct Job {
     /// Where the ledger is told how it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<String>,
+    /// The run the pane that put the job in stood in, when `notify` names an
+    /// address another run cannot find (a worker, a pane): its end is told in
+    /// that run, whoever tells it (t-119309). A record written before it has
+    /// none, and is told as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_run: Option<String>,
     pub state: JobState,
     pub queued_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -594,6 +600,29 @@ pub fn places(jobs: &[Job], last_end: &dyn Fn(&str) -> i64, turn: u64) -> HashMa
 mod tests {
     use super::*;
 
+    /// A record v1.1.168 wrote has no `notify_run` and reads as one with none,
+    /// and one with none is written without it, as before (t-119309). A record
+    /// that has one keeps it.
+    #[test]
+    fn a_record_without_a_notify_run_reads_as_none_and_none_is_not_written() {
+        let old = r#"{"id":"j-1","project":"/p/.git","checkout":"/p","owner":"w-1","cap_secs":60,
+            "command":["true"],"notify":"worker:w-1","state":"waiting","queued_ms":1,"pid":7}"#;
+        let job: Job = serde_json::from_str(old).expect("a record of v1.1.168");
+        assert_eq!(
+            (job.notify.as_deref(), job.notify_run.as_deref()),
+            (Some("worker:w-1"), None)
+        );
+        let written = serde_json::to_string(&job).expect("json");
+        assert!(!written.contains("notify_run"), "{written}");
+        let told = Job {
+            notify_run: Some("run-9".into()),
+            ..job
+        };
+        let back: Job =
+            serde_json::from_str(&serde_json::to_string(&told).expect("json")).expect("read back");
+        assert_eq!(back, told);
+    }
+
     #[test]
     fn a_look_carries_what_waits_and_runs_and_the_newest_ended_with_a_stamp_that_moves() {
         let home = tempfile::tempdir().expect("a zo home");
@@ -613,6 +642,7 @@ mod tests {
             cap_secs: 60,
             command: vec!["true".into()],
             notify: None,
+            notify_run: None,
             state,
             queued_ms: queued,
             started_ms: None,
@@ -669,6 +699,7 @@ mod tests {
             cap_secs: CAP_DEFAULT_SECS,
             command: vec!["true".to_owned()],
             notify: None,
+            notify_run: None,
             state: JobState::Waiting,
             queued_ms,
             started_ms: None,
