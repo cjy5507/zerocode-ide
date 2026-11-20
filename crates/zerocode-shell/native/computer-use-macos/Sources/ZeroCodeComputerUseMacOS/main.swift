@@ -3542,9 +3542,17 @@ private func isTargetWindowFocused(_ snapshot: Snapshot) -> Bool {
     guard let frame = absoluteFrame(focusedWindow) else {
         return false
     }
-    // A twin at the target's very frame is another window, and keys sent
-    // now would reach it (CU slowness 11-20, t-121376).
-    if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {
+    // Another window over the target — a twin, one stacked a little off it,
+    // a larger one behind it — is not the target, whatever their overlap:
+    // the look's own window says which window the target is, and keys sent
+    // now would reach the other (CU slowness 11-20, t-121376, t-121748). A
+    // sheet, popover or panel inside the target is smaller and stays the
+    // target's. A look with no window of its own asks the numbers instead.
+    if let looked = snapshot.rootIndex.flatMap({ snapshot.elements[$0]?.element }).flatMap(containingWindow) {
+        if !CFEqual(focusedWindow, looked), DesktopWindowPick.isAnotherWindowOver(frame: frame, targetBounds: snapshot.windowBounds) {
+            return false
+        }
+    } else if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {
         return false
     }
     let intersection = frame.intersection(snapshot.windowBounds)

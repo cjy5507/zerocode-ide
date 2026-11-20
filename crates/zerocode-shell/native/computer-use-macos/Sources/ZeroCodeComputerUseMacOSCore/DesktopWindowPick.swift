@@ -35,8 +35,9 @@ public enum DesktopWindowPick {
     /// only one that carries none is told by its frame against `targetBounds`
     /// (the window list's bounds of `target`, nil when not read). When more
     /// than one fits, `linked` — the window-server number the accessibility
-    /// library links the window at an index to — decides, if exactly one of
-    /// them is linked to `target` and no name points at another; else
+    /// library links the window at an index to — decides, if every one of
+    /// them has a link, exactly one is linked to `target`, and no name points
+    /// at another; else
     /// `targetTitle` — the window list's name for `target` — if exactly one
     /// of them carries it. Neither is asked for anything else, so a window
     /// that was renamed since is still found alone at its frame, and a pick
@@ -58,7 +59,11 @@ public enum DesktopWindowPick {
         case 1: return .found(fitting[0])
         default:
             let named = targetTitle?.isEmpty == false ? fitting.filter { windows[$0].title == targetTitle } : []
-            let byLink = fitting.filter { linked($0) == target }
+            // A link decides only when every window at the frame has one: a
+            // twin whose link is not known could not be told from the
+            // target afterwards either, when keys are sent (t-121748).
+            let links = fitting.map(linked)
+            let byLink = links.contains(nil) ? [] : zip(fitting, links).filter { $0.1 == target }.map { $0.0 }
             if byLink.count == 1 {
                 // The link is the window server's own; a name that points at
                 // another of them contradicts it, and nothing is guessed.
@@ -78,6 +83,18 @@ public enum DesktopWindowPick {
     public static func isAnotherAtTheSameFrame(frame: CGRect, number: UInt32?, target: UInt32, targetBounds: CGRect) -> Bool {
         guard let number, framesMatch(frame, targetBounds) else { return false }
         return number != target
+    }
+
+    /// Whether a window at `frame`, known to be another window than the one
+    /// at `targetBounds`, stands over it as a twin would: covering it by the
+    /// cover rule and no smaller than three quarters of it — the same frame,
+    /// one stacked a little off it, or a larger window behind it. A sheet, a
+    /// popover or a panel inside the target is smaller and is not. A proof
+    /// that reads overlap asks this of a focused window it knows is not the
+    /// target's own before the overlap may take it for the target
+    /// (CU slowness 11-20, t-121376, t-121748).
+    public static func isAnotherWindowOver(frame: CGRect, targetBounds: CGRect) -> Bool {
+        covers(frame, targetBounds) && area(frame) >= area(targetBounds) * coverShare
     }
 
     /// How much of the smaller of two frames must lie inside the other for a

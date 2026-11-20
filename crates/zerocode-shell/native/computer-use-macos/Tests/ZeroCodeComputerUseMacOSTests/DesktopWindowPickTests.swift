@@ -161,6 +161,45 @@ final class DesktopWindowPickTests: XCTestCase {
         XCTAssertEqual(asked, [0, 2], "only the numberless windows at the shared frame are asked")
     }
 
+    /// t-121748: a link decides only when every window at the frame has one.
+    /// A twin whose link is not known could not be told from the target when
+    /// keys are sent, so the pick is what it was before the link.
+    func testALinkDecidesOnlyWhenEveryWindowAtTheFrameHasOne() {
+        let frame = CGRect(x: 0, y: 33, width: 1512, height: 949)
+        let twins: [Named] = [(nil, frame, "Home | Cloudflare"), (nil, frame, "Home | Cloudflare")]
+        let halfKnown: [UInt32?] = [nil, 77]
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, targetTitle: "Home | Cloudflare", windows: twins, linked: { halfKnown[$0] }),
+            .ambiguous, "the front twin's link is not known")
+        let named: [Named] = [(nil, frame, "Inbox"), (nil, frame, "Docs")]
+        XCTAssertEqual(
+            DesktopWindowPick.pick(target: target, targetBounds: frame, targetTitle: "Docs", windows: named, linked: { halfKnown[$0] }),
+            .found(1), "the name decides as it did")
+    }
+
+    /// t-121748: the focus proof reads overlap, and a window of the target's
+    /// size stacked a little off it passes the overlap — keys meant for the
+    /// window behind would reach it. A window known to be another and over
+    /// the target is not the target; a sheet, popover or panel inside it is.
+    func testAWindowOverTheTargetIsOneOfItsSizeAndASheetInsideItIsNot() {
+        let bounds = CGRect(x: 0, y: 33, width: 1512, height: 949)
+        XCTAssertTrue(DesktopWindowPick.isAnotherWindowOver(frame: bounds, targetBounds: bounds), "a twin")
+        XCTAssertTrue(
+            DesktopWindowPick.isAnotherWindowOver(frame: bounds.offsetBy(dx: 22, dy: 22), targetBounds: bounds),
+            "stacked 22 points off, 96 % over")
+        XCTAssertTrue(DesktopWindowPick.isAnotherWindowOver(frame: bounds.offsetBy(dx: 3, dy: 0), targetBounds: bounds), "three points off")
+        XCTAssertTrue(
+            DesktopWindowPick.isAnotherWindowOver(frame: bounds, targetBounds: CGRect(x: 300, y: 200, width: 600, height: 400)),
+            "a larger window behind a small target")
+        XCTAssertFalse(
+            DesktopWindowPick.isAnotherWindowOver(frame: CGRect(x: 600, y: 300, width: 320, height: 200), targetBounds: bounds),
+            "a sheet or popover inside the target")
+        XCTAssertFalse(DesktopWindowPick.isAnotherWindowOver(frame: bounds.offsetBy(dx: 1600, dy: 0), targetBounds: bounds), "a window beside it")
+        XCTAssertFalse(
+            DesktopWindowPick.isAnotherWindowOver(frame: CGRect(x: 0, y: 33, width: 1000, height: 949), targetBounds: bounds),
+            "two thirds of the target is smaller than three quarters")
+    }
+
     /// A focus proof reads frames, so a twin at the target's very frame would
     /// pass it for the target and take its keys. A twin known to be another
     /// window is not the target; a window whose number is not known, or that

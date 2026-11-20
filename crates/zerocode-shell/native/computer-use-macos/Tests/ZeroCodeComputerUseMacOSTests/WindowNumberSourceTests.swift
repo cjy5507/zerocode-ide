@@ -40,9 +40,17 @@ final class WindowNumberSourceTests: XCTestCase {
     func testTheFocusProofsNeverTakeATwinForTheTarget() throws {
         let source = try helperSource()
         let focused = try body(of: source, from: "private func isTargetWindowFocused(_ snapshot: Snapshot) -> Bool {", to: "private func isTwinOfTarget(")
-        let twin = try XCTUnwrap(focused.range(of: "isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds)"))
+        let looked = try XCTUnwrap(
+            focused.range(of: "if let looked = snapshot.rootIndex.flatMap({ snapshot.elements[$0]?.element }).flatMap(containingWindow) {"),
+            "the look's own window says which window the target is")
+        let over = try XCTUnwrap(
+            focused.range(of: "if !CFEqual(focusedWindow, looked), DesktopWindowPick.isAnotherWindowOver(frame: frame, targetBounds: snapshot.windowBounds) {"),
+            "another window over the target is not it, twins stacked off it too (t-121748)")
+        let twin = try XCTUnwrap(focused.range(of: "} else if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {"))
         let overlap = try XCTUnwrap(focused.range(of: "let intersection = frame.intersection(snapshot.windowBounds)"))
-        XCTAssertLessThan(twin.lowerBound, overlap.lowerBound, "the twin is ruled out before the frames are compared")
+        XCTAssertLessThan(looked.lowerBound, over.lowerBound)
+        XCTAssertLessThan(over.lowerBound, twin.lowerBound)
+        XCTAssertLessThan(twin.lowerBound, overlap.lowerBound, "another window is ruled out before the frames are compared")
         let check = try body(of: source, from: "private func isTwinOfTarget(", to: "private enum AXElementProbe {")
         XCTAssertTrue(check.contains("number: windowNumber(window) ?? WindowServerNumber.of(window)"))
         XCTAssertTrue(check.contains("DesktopWindowPick.isAnotherAtTheSameFrame("))
