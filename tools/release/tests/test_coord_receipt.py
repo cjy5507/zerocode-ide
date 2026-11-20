@@ -656,6 +656,26 @@ class FlakeJudgment(ReceiptCase):
         self.assertIn("is red for real as the release lane's flakes phase reads it: root:recipe:shell-test",
                       self.refused(lambda: coord_receipt.make(jobs)))
 
+    def test_a_red_entry_that_named_nothing_is_not_cleared_by_another_entrys_flake(self):
+        # The review's P-1: `shell-test` ended red with neither a test's name nor just's words in its own
+        # log (just killed, the log cut short). `test`'s flake passed its three solo runs; read by the
+        # gate's names alone, those cleared `shell-test` too, and a half-run recipe counted as green.
+        gate = {"g1": [("test", "just test", 101), ("shell-test", "just shell-test", 1)]}
+        jobs = self.gate(gate, rc={"g1": 0}, said={"test": receipt_fixture.cargo_failures([FLAKE]),
+                                                   "shell-test": "   Compiling zerocode-shell v0.1.0\n"})
+        receipt_fixture.judged(jobs[0], solo("root", FLAKE))
+        self.assertIn("is red for real as the release lane's flakes phase reads it: root:recipe:shell-test",
+                      self.refused(lambda: coord_receipt.make(jobs)))
+
+    def test_two_red_entries_that_each_name_their_flake_are_each_judged(self):
+        # The lane's normal day after P-1: every red entry that names its own tests is judged solo.
+        gate = {"g1": [("test", "just test", 101), ("shell-test", "just shell-test", 101)]}
+        jobs = self.gate(gate, rc={"g1": 0}, said={"test": receipt_fixture.cargo_failures([FLAKE]),
+                                                   "shell-test": receipt_fixture.cargo_failures(["shell_flake"], recipe="shell-test")})
+        receipt_fixture.judged(jobs[0], solo("root", FLAKE) + solo("root", "shell_flake"))
+        facts = self.facts(self.made(jobs), ".")
+        self.assertEqual([line for line in facts if line.startswith("cleared ")], ["cleared shell-test", "cleared test"])
+
     def test_a_red_gate_that_named_nothing_is_red_for_real(self):
         jobs = self.gate(self.RED, rc={"g1": 0}, said={"test": "it died with no word of any test\n"})
         receipt_fixture.judged(jobs[0], solo("root", FLAKE))
@@ -968,6 +988,18 @@ class GateScript(ReceiptCase):
         self.assertIn(f"flakes: red — solo root {FLAKE} run 2 rc=101", ran.stdout.splitlines())
         self.assertTrue(ran.stdout.splitlines()[-1].startswith("verdict: bad=1 (root on "), ran.stdout)
         self.assertIn("ended failed", self.refused(lambda: coord_receipt.make([self.on_the_line(ran.stdout, "coord-l9-root", 1)])))
+
+    def test_a_red_entry_that_named_nothing_beside_a_flake_keeps_the_job_red(self):
+        # The review's P-1 on the gate script: `alpha` ends red and its log names nothing (no test, no
+        # just's words), `beta` names a flake that passes alone. The flake is not judged for both.
+        (self.tmp / "red.txt").write_text("alpha\nbeta\n")
+        (self.tmp / "said-beta.txt").write_text(receipt_fixture.cargo_failures([FLAKE], recipe="beta"))
+        ran = self.gate("--who", "coord-l9-root", "--logs", str(self.logs), "--calm-wait", "0", "root",
+                        target=self.tmp / "slot-target")
+        self.assertEqual(ran.returncode, 1, ran.stdout + ran.stderr)
+        self.assertIn("real root:recipe:alpha", ran.stdout.splitlines())
+        self.assertEqual(self.solo_lines(ran), [], "nothing is judged solo when a red is real")
+        self.assertTrue(ran.stdout.splitlines()[-1].startswith("verdict: bad=2 (root on "), ran.stdout)
 
     def test_a_recipe_that_failed_without_naming_a_test_is_red_for_real_and_nothing_runs_solo(self):
         ran = self.flaky(said=receipt_fixture.unnamed_failure("beta"))

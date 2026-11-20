@@ -310,9 +310,34 @@ class Syntax(LaneCase):
         )
         self.assertTrue(all(secs[:-1].isdigit() and secs.endswith("s") for _, secs in closes), closes)
 
+    def test_a_red_recipe_whose_own_output_named_nothing_is_red_for_real_beside_a_named_one(self):
+        # t-121630, the review's P-1: `test` names a flake; `shell-test` ended red (just killed, or its
+        # log cut short by a full disk) with no name and no just's words. Read by the gate's names alone,
+        # the flake's solo greens cleared both; its own closing line now makes it `recipe:shell-test`.
+        log = Path(self._tmp) / "gate.log"
+        log.write_text("==> verify recipe test\n"
+                       "failures:\n    pane::tests::a_flake\n\ntest result: FAILED.\n"
+                       "error: recipe `test` failed on line 1 with exit code 101\n"
+                       "<== verify recipe test rc=101 3s\n"
+                       "==> verify recipe shell-test\n   Compiling zerocode-shell v0.1.0\n"
+                       "<== verify recipe shell-test rc=137 2s\n"
+                       "==> verify recipe quiet-green\n<== verify recipe quiet-green rc=0 0s\n"
+                       "==> verify recipe cut-short\nfailures:\n    a::tests::named_before_the_cut\n"
+                       "<== verify recipe cut-short rc=137 1s\n"
+                       "==> verify recipe after-the-cut\n    not::a::failure::name\n"
+                       "<== verify recipe after-the-cut rc=0 0s\n")
+        parse = ('eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"')
+        named = subprocess.run([BASH, "-c", parse, posix(LANE), posix(log)], capture_output=True, text=True,
+                               check=True).stdout.split()
+        # A red recipe that named a test keeps its name (the lane's normal day); one that named nothing
+        # is red for real; a green one names nothing; a failures block cut short stops at its recipe.
+        self.assertEqual(named, ["a::tests::named_before_the_cut", "pane::tests::a_flake", "recipe:shell-test"])
+
     def test_the_lane_parser_reads_the_closing_lines_as_nothing(self):
         # The `<==` line sits between one recipe's failure and the next `==>`
-        # mark; failed_tests must name exactly what it named without it.
+        # mark; for a red recipe whose output named it (a test, or just's own
+        # words), failed_tests names exactly what it named without the line.
+        # (A red recipe that named nothing at all is its closing line's to name.)
         if shutil.which("just") is None:
             self.skipTest("just is not installed")
         work = Path(self._tmp) / "justdir"
@@ -3770,6 +3795,34 @@ class Quiet(LaneCase):
         self.assertNotIn("ending it red", lane_log)
         self.assertEqual(self.lane.status()["outcome"], "green")
         self.assertIsNone(self.lane.status()["stalled"])
+
+    def test_a_red_recipe_that_named_nothing_is_not_cleared_by_another_recipes_flake(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        # t-121630, the review's P-1, on the lane's own gate: `unit` names a listed flake that passes
+        # solo; then `shell-test` ends just itself with SIGKILL, so its log holds neither a name nor
+        # just's words. Before, the flake's three green solo runs cleared the gate; now the gate is red.
+        work = self.justdir([("unit", f"printf 'failures:\\n    pane::tests::{FLAKE_ZO}\\n\\ntest result: FAILED.\\n'; exit 101"),
+                             ("shell-test", "kill -KILL $PPID")])
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(GATE_ZO_JUSTDIR=posix(work), SOLO_RCS="0")
+        st = self.lane.status()
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(st["outcome"], "red", st)
+        self.assertIn("zo:recipe:shell-test", st["reason"])
+        self.assertFalse([line for line in self.lane.stub_lines() if " solo " in line], "nothing is judged solo when a red is real")
+
+    def test_a_named_red_recipe_alone_is_still_judged_solo_on_the_lanes_own_gate(self):
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        # The lane's normal day after P-1: one red recipe that names its flake is judged solo, as before.
+        work = self.justdir([("unit", f"printf 'failures:\\n    pane::tests::{FLAKE_ZO}\\n\\ntest result: FAILED.\\n'; exit 101"),
+                             ("green", "true")])
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(GATE_ZO_JUSTDIR=posix(work), SOLO_RCS="0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.lane.status()["outcome"], "green")
+        self.assertEqual(len([line for line in self.lane.stub_lines() if " solo zo " in line]), 3)
 
     def test_a_recipe_ended_at_its_cap_stays_red_though_the_tests_it_named_pass_solo(self):
         if shutil.which("just") is None:
