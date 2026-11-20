@@ -787,6 +787,44 @@ export async function testBoardNow(browser, origin, ok) {
       JSON.stringify(resolved) === JSON.stringify([["gate-701", "harvest", null], ["gate-702", "answer", "릴리스 기준"]]),
       JSON.stringify(resolved));
 
+    /* ---- 코디 자리가 빈 런(t-119569, 확인 A): 워커가 남은 동안 그 질문과 결정에 답할 이는 사람뿐이라 당신 차례에
+     * 그대로 서고 맨 위 문장도 그것을 센다 — 「지금 도는 일」이 그 결정 행을 「당신 차례에 있습니다」라고 말하는 그대로. */
+    await draftScene(page, { holds: true });
+    await page.evaluate(() => {
+      window.__DESK__ = { ...window.__DESK__, revision: (Number(window.__DESK__.revision) || 1) + 1,
+        runs: window.__DESK__.runs.map((one) => ({ ...one, held: false, seat: false })) };
+      boardNowChoice.asksAll = true;
+      refreshDeskLedger();
+    });
+    await fullBoard(page);
+    await page.evaluate(() => {
+      // Every goal's rows, so each decision's own row in running now is drawn whatever the goal's length.
+      const view = document.querySelector("#board-view");
+      for (const goal of boardGoals(boardRunRows(deskLedger, Date.now(), view), Date.now())) boardNowChoice.goalsAll.add(goal.key);
+      paintCoordinatorDesk(view);
+    });
+    await fullBoard(page);
+    const seatless = await page.evaluate(() => {
+      const view = document.querySelector("#board-view");
+      const work = (id) => view.querySelector(`.board-run[data-task="run-desk/${id}"] .board-run-work`)?.textContent ?? null;
+      const said = {
+        held: deskLedger.runs.map((one) => one.held),
+        asks: [...view.querySelectorAll('[data-desk-block="asks"] .board-asks > li')].map((row) => row.dataset.ask),
+        // The decision somebody asked, with no worker of its own: its row's words are the stage's alone.
+        decided: work("t-66600"),
+        title: view.querySelector(".board-now-title").textContent,
+      };
+      boardNowChoice.goalsAll.clear();
+      return said;
+    });
+    ok("in a run whose coordinator seat stands empty, its question and its decisions stay your turn, counted on top, as running now says",
+      seatless.held.length > 0 && seatless.held.every((held) => held === false)
+        && seatless.asks.includes("hold:run-desk/gate-701") && seatless.asks.includes("hold:run-desk/gate-702")
+        && seatless.asks.some((key) => key.startsWith("question:"))
+        && typeof seatless.decided === "string" && seatless.decided.includes("당신 차례에 있습니다")
+        && seatless.title === `답할 일 ${seatless.asks.length}개 — 나머지는 저절로 돕니다`,
+      JSON.stringify(seatless));
+
     /* ---- 긴 선택지 결정 행 (t-79611): 질문과 목표 줄은 읽히는 폭을 지키고, 선택지는 잘리지 않는다 ---- */
     await draftScene(page, { holds: true, longHold: true });
     await page.evaluate(() => { boardNowChoice.asksAll = true; paintCoordinatorDesk(document.querySelector("#board-view")); });

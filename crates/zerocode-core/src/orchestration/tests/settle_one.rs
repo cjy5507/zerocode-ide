@@ -23,6 +23,11 @@ fn task_of(bench: &mut Bench, spec: &str) -> String {
 /// task down as done by hand — the shape of the 158 the person's board held
 /// (t-119569) and of the measurement closed `outdated` on 11-20.
 fn done_by_hand(bench: &mut Bench, spec: &str) -> String {
+    done_by_hand_saying(bench, spec, "{\"outcome\":\"measured\"}")
+}
+
+/// [`done_by_hand`], the coordinator writing `result` as the task's.
+fn done_by_hand_saying(bench: &mut Bench, spec: &str, result: &str) -> String {
     let id = task_of(bench, spec);
     let (worker, _pane) = bench.seat(&format!("worker-start --agent codex --task {id}"));
     bench
@@ -33,7 +38,7 @@ fn done_by_hand(bench: &mut Bench, spec: &str) -> String {
         bench.json(&format!("task-update --task {id} --status ready"));
     }
     bench.json(&format!(
-        "task-update --task {id} --status completed --result {{\"outcome\":\"measured\"}}"
+        "task-update --task {id} --status completed --result {result}"
     ));
     id
 }
@@ -208,6 +213,60 @@ fn the_one_call_settle_is_refused_where_a_review_has_something_to_name_or_nobody
         .expect("the run has a seat")
         .vacated_ms = Some(at);
     refused(&mut bench, leader, &line(&open), "nobody sitting");
+}
+
+/// A result that names a commit is code that may have landed (t-119569, the other provider's check
+/// B · G): settled as nothing to land, it would read as done with no code. Refused with nothing
+/// written, naming the commit and the two roads that read it — the review, and the backfill that
+/// proves a landing from git. Both shapes: the coordinator's own words with the commit one object
+/// down, and an old row in a worker's words with the commit on top.
+#[test]
+fn a_task_whose_result_names_a_commit_is_not_settled_as_nothing_to_land() {
+    const NESTED: &str = "89abcdef0123";
+    const ON_TOP: &str = "0123456789abcdef0123456789abcdef01234567";
+    let mut bench = Bench::new();
+    bench.json("run-create --name settle-commit");
+    let nested = done_by_hand_saying(
+        &mut bench,
+        "nested",
+        &format!("{{\"landed\":{{\"mergeHead\":\"{NESTED}\"}}}}"),
+    );
+    let old = done_by_hand(&mut bench, "old");
+    let held = bench.ledger.runs[0]
+        .tasks
+        .iter_mut()
+        .find(|one| one.id == old)
+        .expect("the task");
+    held.result = format!("{{\"ok\":true,\"commit\":\"{ON_TOP}\"}}").into();
+    held.result_author = Some(ResultAuthor::Worker {
+        worker: "w-0".to_string(),
+        dispatch: None,
+    });
+
+    let work = |bench: &Bench| {
+        let held = bench.ledger.export();
+        (held.runs, held.tasks, held.dispatches, held.messages, held.gates)
+    };
+    for (id, commit, under) in [
+        (&nested, NESTED, "landed.mergeHead"),
+        (&old, ON_TOP, "commit"),
+    ] {
+        let before = work(&bench);
+        let refused = bench.run(&format!(
+            "task-settle --task {id} --why done --report /reports/r.md"
+        ));
+        assert_ne!(
+            refused.reply.exit_code, 0,
+            "{id}, naming {commit}, was settled as nothing to land"
+        );
+        let says = &refused.reply.stderr;
+        assert!(
+            says.contains(commit) && says.contains(under) && says.contains("task-backfill"),
+            "{id} was refused for another reason: {says}"
+        );
+        assert!(work(&bench) == before, "{id}'s refusal wrote something");
+        assert_ne!(stage(&bench, id), WorkStage::NothingToLand, "{id}");
+    }
 }
 
 /// The settle's review is a review like any other: a later attempt moves it,
