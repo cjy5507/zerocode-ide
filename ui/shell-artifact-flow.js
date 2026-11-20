@@ -962,10 +962,20 @@ function artifactFlowReleasePrototype() {
  * 나이가 한 줄씩 선다. 거르개가 걸린 동안은 맞는 줄만 서고 누름은 물러난다 — 누름은 무더기 전부의
  * 것이다. */
 
-/* 서 있을 무더기와 그 줄들. 든 일이 없어도 방금 누른 답(되돌리기)이 서 있으면 선다. */
+/* 셋째 무더기(t-119569): 코디 자리가 비고 워커도 없는 실행의 「지금」 일 — 검증됐는데 착지 전이거나 결정을
+ * 기다리는 것. 아무도 이어받을 수 없으니 「지금」에 세지 않고 접힌 한 줄에 둔다. 누름은 없다: 자리를 다시 여는
+ * 것은 코디의 일이고, 다시 앉으면 그 줄은 「지금」으로 돌아온다. 런타임이 실은 무더기(`vacant`)는 이름을 싣지
+ * 않아 누름 단추가 서지 않는다. */
+const ARTIFACT_FLOW_VACANT_PILE = Object.freeze({
+  kind: "vacant", press: null, left: [], names: null, flow: "vacant", key: "artifacts.flow.pileVacant", word: "자리 빈 실행의 일",
+  note: { key: "artifacts.flow.pileVacantNote", word: "코디 자리가 비고 워커도 없는 실행 · 「지금」에 세지 않음" },
+});
+
+/* 서 있을 무더기와 그 줄들. 든 일이 없어도 방금 누른 답(되돌리기)이 서 있으면 선다. 남은 일의 둘은 상황판의
+ * 표(`SETTLE_PILES`, shell-board-now.js — 이 파일보다 나중에 실린다)이고, 셋째는 이 파일의 것이다. */
 function artifactFlowPiles(flow, admitted, narrowed) {
   const now = Date.now();
-  return SETTLE_PILES.map((pile) => {
+  return [...SETTLE_PILES, ARTIFACT_FLOW_VACANT_PILE].map((pile) => {
     const held = flow?.[pile.flow];
     const lines = admitted(held);
     const count = narrowed ? lines.length : (held?.tasks?.length ?? 0) + (held?.more ?? 0);

@@ -174,6 +174,15 @@ pub(crate) struct Flow {
     /// Finished work no review stands for, and nobody is coming back to
     /// write one: what a 「검토 생략」 waives. Not 「지금」.
     pub(crate) unreviewed: FlowPile,
+    /// Work that would stand in 「지금」 — verified and not landed, or held by
+    /// a decision — of a run nobody can carry on: its coordinator seat is
+    /// empty and no worker of it is summoned (t-119569, the desk's
+    /// [`in_play`]). Folded into one line, and no press: sitting in the seat
+    /// again is the coordinator's road, and its lines come back to 「지금」
+    /// then. Not 「지금」.
+    ///
+    /// [`in_play`]: crate::orchestration::desk::in_play
+    pub(crate) vacant: FlowPile,
     /// How many tasks one press may name ([`PRESS_TASKS_MAX`]): a longer
     /// pile is cleared that many at a time, oldest first.
     pub(crate) press_max: usize,
@@ -1224,6 +1233,8 @@ enum Place {
     /// Left behind, open ([`Flow::left`]) or finished ([`Flow::unreviewed`]).
     Left,
     Unreviewed,
+    /// 「지금」's work of a run nobody can carry on ([`Flow::vacant`]).
+    Vacant,
     Next,
     Release(usize),
     /// Shipped in a release past the kept ones.
@@ -1490,6 +1501,9 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
     let mut lines: Vec<(Place, FlowTask)> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for index in indexes.iter().filter(|index| ours(index)) {
+        // Nobody can carry this run's 「지금」 on: no seat is held and no worker
+        // of it is summoned (t-119569) — its lines there fold into one.
+        let vacant = !crate::orchestration::desk::in_play(index.run);
         // The lines in view are read first, each with its stage, and finished
         // work waits on a review by the stage its line read — no stage is read
         // twice (t-71220). Work out of view never stood in 「지금」: of it, only
@@ -1542,6 +1556,10 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
                 if !matches!(place, Place::Left | Place::Unreviewed) {
                     line.left = None;
                 }
+                let place = match place {
+                    Place::Now if vacant => Place::Vacant,
+                    other => other,
+                };
                 lines.push((place, line));
             }
         }
@@ -1603,6 +1621,7 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
             Place::Now => flow.now.tasks.push(line),
             Place::Left => flow.left.tasks.push(line),
             Place::Unreviewed => flow.unreviewed.tasks.push(line),
+            Place::Vacant => flow.vacant.tasks.push(line),
             Place::Next => flow.next.tasks.push(line),
             Place::Release(at) => flow.releases[at].group.tasks.push(line),
             Place::Older => older_tasks += 1,
@@ -1634,6 +1653,9 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
     }
     pile_up(&mut flow.left, Some(Left::Settle), table);
     pile_up(&mut flow.unreviewed, None, table);
+    // A run nobody sits in takes no press from here: its pile names nothing.
+    pile_up(&mut flow.vacant, None, table);
+    flow.vacant.named.clear();
     let past = &git.releases[table.releases_kept.min(git.releases.len())..];
     if let (Some(newest), Some(oldest)) = (past.first(), past.last()) {
         flow.older = Some(FlowOlder {
