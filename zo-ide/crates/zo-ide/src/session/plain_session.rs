@@ -943,9 +943,13 @@ impl PlainSession {
             &model,
             || super::runtime_builder::person_attached_tools(&cwd, options.mcp_config.as_deref()),
         );
-        // A run nobody attends is not given the tools only a person answers
-        // (`PERSON_ONLY_TOOLS`), before the deny set below is read.
-        if root && withholds_person_only_tools(options.headless, stored_prompt.as_ref()) {
+        // A run nobody can answer is not given the tools only a person answers
+        // (`PERSON_ONLY_TOOLS`), before the deny set below is read: nobody
+        // attends it and its stdin is no terminal, the same absence the plain
+        // front-end decides a parked question by (`ide::run_loop`). `--plain`
+        // on a terminal a person types into keeps them.
+        let nobody_answers = options.headless && !std::io::IsTerminal::is_terminal(&std::io::stdin());
+        if root && withholds_person_only_tools(nobody_answers, stored_prompt.as_ref()) {
             crate::runtime_support::withhold_tools(PERSON_ONLY_TOOLS);
         }
         // What the session reaches of what it is given: the text built below
@@ -3126,14 +3130,14 @@ fn host_orchestration_for(
 /// every request for a call that can only be refused.
 const PERSON_ONLY_TOOLS: &[&str] = &["AskUserQuestion"];
 
-/// Whether a root session is withheld [`PERSON_ONLY_TOOLS`]: nobody attends
+/// Whether a root session is withheld [`PERSON_ONLY_TOOLS`]: nobody can answer
 /// it, and the prompt it sends was not built to teach them — a new run, or a
 /// reopen of a run that was itself withheld them. A reopen whose stored
 /// prompt teaches them (one a person opened, or one zo 1.1.168 opened) keeps
 /// them, so its prompt and tools stay the bytes they were; a session a person
-/// attends is never withheld them.
-fn withholds_person_only_tools(headless: bool, stored: Option<&StoredPrompt>) -> bool {
-    headless
+/// can answer is never withheld them.
+fn withholds_person_only_tools(nobody_answers: bool, stored: Option<&StoredPrompt>) -> bool {
+    nobody_answers
         && stored.is_none_or(|stored| !runtime::teaches_clarifying_questions(&stored.sections))
 }
 
