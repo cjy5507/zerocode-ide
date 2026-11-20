@@ -19,17 +19,47 @@ final class ReadingRefusalTests: XCTestCase {
         XCTAssertNil(ReadingRefusal.otherWindowsWords(app: "Fixture", others: []))
     }
 
+    private func shown(_ index: Int, _ role: String, name: String, title: String? = nil, value: String? = nil, description: String? = nil) -> ReadingRefusal.Shown {
+        ReadingRefusal.Shown(face: ElementFace(index: index, role: role, label: title, value: value, description: description), name: name)
+    }
+
     func testAnElementThatShowsTheWordsOnlyInItsTextIsNamedByNumber() {
-        let link = ElementFace(index: 12, role: "AXLink", label: "[Authorize](https://example.com/a)", value: nil, description: nil)
+        let query = ElementQuery(text: nil, role: nil, label: "Authorize")
+        let found = ReadingRefusal.shownOnly(query, among: [shown(12, "AXLink", name: "[Authorize](https://example.com/a)")])
+        XCTAssertEqual(found, [ElementFace(index: 12, role: "AXLink", label: "Authorize", value: nil, description: nil)])
         XCTAssertEqual(
-            ReadingRefusal.shownWords([link]),
-            "these words show in the text of 12 AXLink «[Authorize](https://example.com/a)», not in a label or description: press one by its --element-index"
+            ReadingRefusal.shownWords(found),
+            "these words show only in the text of 12 AXLink «Authorize», which a click by words does not read: press one by its --element-index"
         )
         let rows = (1...4).map { ElementFace(index: $0, role: "AXRow", label: "Authorize \($0)", value: nil, description: nil) }
         XCTAssertEqual(
             ReadingRefusal.shownWords(rows),
-            "these words show in the text of 1 AXRow «Authorize 1»; 2 AXRow «Authorize 2»; 3 AXRow «Authorize 3» and 1 more, not in a label or description: press one by its --element-index"
+            "these words show only in the text of 1 AXRow «Authorize 1»; 2 AXRow «Authorize 2»; 3 AXRow «Authorize 3» and 1 more, which a click by words does not read: press one by its --element-index"
         )
+    }
+
+    /// t-121539 고칠 것 2: a link's address is not its text, and an element
+    /// whose label already holds a word is not one that shows it only in its text.
+    func testALinkAddressAndAMatchedLabelAreNotTextOnly() {
+        let settings = ElementQuery(text: nil, role: nil, label: "Settings")
+        XCTAssertEqual(ReadingRefusal.shownOnly(settings, among: [shown(3, "AXLink", name: "[Profile](https://example.com/settings/profile)")]), [])
+        let both = ElementQuery(text: "now", role: nil, label: "Continue")
+        XCTAssertEqual(ReadingRefusal.shownOnly(both, among: [shown(4, "AXButton", name: "Continue now", title: "Continue")]), [])
+        let asButton = ElementQuery(text: nil, role: "button", label: "Authorize")
+        XCTAssertEqual(ReadingRefusal.shownOnly(asButton, among: [shown(5, "AXLink", name: "[Authorize](https://example.com/a)")]), [])
+        XCTAssertEqual(ReadingRefusal.shownText(role: "AXLink", name: "[Save \\[draft\\]](https://example.com/s)"), "Save [draft]")
+        XCTAssertEqual(ReadingRefusal.shownText(role: "AXButton", name: "[Save](x)"), "[Save](x)")
+        XCTAssertEqual(ReadingRefusal.shownText(role: "AXLink", name: "Save"), "Save")
+    }
+
+    /// t-121539 I-5: one item of a refusal keeps 80 characters at most.
+    func testALongTitleOrTextIsClippedToEightyCharacters() {
+        let long = String(repeating: "a", count: 300)
+        let window = ReadingRefusal.otherWindowsWords(app: "Notes", others: [.init(windowId: 7, title: long)]) ?? ""
+        XCTAssertTrue(window.contains("«" + String(repeating: "a", count: 79) + "…»"), window)
+        XCTAssertFalse(window.contains(String(repeating: "a", count: 80)), window)
+        let text = ReadingRefusal.shownWords([ElementFace(index: 1, role: "AXRow", label: long, value: nil, description: nil)]) ?? ""
+        XCTAssertTrue(text.contains("«" + String(repeating: "a", count: 79) + "…»"), text)
     }
 
     func testALookThatStoppedEarlySaysWhereAndWhy() {
@@ -43,7 +73,7 @@ final class ReadingRefusalTests: XCTestCase {
         )
         XCTAssertEqual(
             ReadingRefusal.cutWords(truncated: true, cutShort: nil, maxDepthReached: true, read: 300, maxNodes: 1200),
-            "this look stopped at its depth limit, so deeper elements were not read"
+            "this look read no deeper than its depth limit, so deeper elements were not read"
         )
         XCTAssertEqual(
             ReadingRefusal.cutWords(truncated: true, cutShort: "app_unresponsive", maxDepthReached: false, read: 40, maxNodes: 1200),
@@ -132,5 +162,10 @@ final class ReadingRefusalSourceTests: XCTestCase {
         XCTAssertTrue(label.contains("let why = record == nil ? unreadablePoint(point, in: snapshot) : .notAControl"), String(label))
         XCTAssertTrue(label.contains("throw ProviderError.coded(\"element_not_found\", ReadingRefusal.backgroundTarget(why))"), String(label))
         XCTAssertTrue(source.contains("return try label(backgroundClickRecord(at: point, in: snapshot), in: snapshot, at: point)"))
+    }
+
+    func testTheElementsThatShowTheWordsOnlyInTheirTextAreTheCoresChoice() throws {
+        let shown = try body(of: "private func shownFaces(_ query: ElementQuery, in snapshot: Snapshot) -> [ElementFace] {", in: try helperSource())
+        XCTAssertTrue(shown.contains("ReadingRefusal.shownOnly(query, among:"), String(shown))
     }
 }

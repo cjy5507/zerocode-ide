@@ -2346,13 +2346,9 @@ final class Provider {
     /// (`SnapshotRenderHeuristics.displayName`: a link's text, a row's cells),
     /// of the asked role, which a click by reading did not match.
     private func shownFaces(_ query: ElementQuery, in snapshot: Snapshot) -> [ElementFace] {
-        guard let words = query.label ?? query.text else { return [] }
-        let byName = ElementQuery(text: nil, role: query.role, label: words)
-        return snapshot.order.compactMap { index -> ElementFace? in
-            guard let record = snapshot.elements[index], let name = record.name,
-                  byName.matches(role: record.role, label: name, value: nil, description: nil) else { return nil }
-            return ElementFace(index: index, role: record.role, label: name, value: nil, description: nil)
-        }
+        ReadingRefusal.shownOnly(query, among: readingFaces(snapshot).compactMap { face in
+            snapshot.elements[face.index]?.name.map { ReadingRefusal.Shown(face: face, name: $0) }
+        })
     }
 
     /// Why this look did not read the whole window, in a refusal's words; nil

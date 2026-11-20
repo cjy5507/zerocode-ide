@@ -23,13 +23,25 @@ public enum ReadingRefusal {
 
         /// `--window-id 7 «Inbox»`, or the number alone when it shows no title.
         var said: String {
-            let shown = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let shown = ReadingRefusal.clipped(title ?? "")
             return shown.isEmpty ? "--window-id \(windowId)" : "--window-id \(windowId) «\(shown)»"
         }
     }
 
     /// How many other windows one refusal names.
     public static let mostOtherWindows = 3
+
+    /// How many characters one item of a refusal — a window's title, an
+    /// element's text — keeps, so that a long title cannot make it long.
+    public static let mostItemCharacters = 80
+
+    /// An item as a refusal names it: trimmed, and cut with "…" past
+    /// `mostItemCharacters`.
+    static func clipped(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > mostItemCharacters else { return trimmed }
+        return String(trimmed.prefix(mostItemCharacters - 1)) + "…"
+    }
 
     /// Why a look did not read the whole window, as a refusal says it; nil
     /// when it read all of it.
@@ -45,7 +57,7 @@ public enum ReadingRefusal {
             return "the app stopped answering after \(read) elements, before the end of the window"
         default:
             return maxDepthReached
-                ? "this look stopped at its depth limit, so deeper elements were not read"
+                ? "this look read no deeper than its depth limit, so deeper elements were not read"
                 : "this look stopped at its \(maxNodes)-element limit, before the end of the window"
         }
     }
@@ -61,15 +73,69 @@ public enum ReadingRefusal {
     /// How many elements one refusal names as showing the words.
     public static let mostShown = 3
 
-    /// The elements a look shows with the asked words in their shown name — a
-    /// link named by its text, a row by its cells — while their label and
-    /// description, which a click by reading matches, lack them; nil when
-    /// none does. The click still chooses nothing: a press names one by number.
+    /// What a person reads of an element by the name a look gave it: a link's
+    /// `[text](address)` (`SnapshotRenderHeuristics.displayName`) is its text,
+    /// unescaped, and never its address; any other name is itself.
+    public static func shownText(role: String?, name: String) -> String {
+        guard role == "AXLink", name.hasPrefix("[") else { return name }
+        var text = ""
+        var rest = name.dropFirst()
+        while let glyph = rest.first {
+            rest = rest.dropFirst()
+            switch glyph {
+            case "\\":
+                guard let escaped = rest.first else { return name }
+                text.append(escaped)
+                rest = rest.dropFirst()
+            case "]":
+                return rest.first == "(" ? text : name
+            default:
+                text.append(glyph)
+            }
+        }
+        return name
+    }
+
+    /// One element as the check below weighs it: what a click by reading
+    /// matches of it, and the name a look shows it by.
+    public struct Shown: Equatable {
+        public let face: ElementFace
+        public let name: String
+
+        public init(face: ElementFace, name: String) {
+            self.face = face
+            self.name = name
+        }
+    }
+
+    /// The elements whose shown text holds every asked word while nothing a
+    /// click by reading matches of them — label, value, description — holds
+    /// any: a link named by its contents, a row by its cells. A link's address
+    /// is not its text. An asked role narrows them as it narrows the click.
+    /// Each comes back with its shown text as its label.
+    public static func shownOnly(_ query: ElementQuery, among elements: [Shown]) -> [ElementFace] {
+        let words = [query.label, query.text].compactMap { $0 }
+        guard !words.isEmpty else { return [] }
+        return elements.compactMap { element in
+            let face = element.face
+            if let role = query.role, query.normalizedRole(role) != query.normalizedRole(face.role ?? "") { return nil }
+            let matched = [face.label, face.value, face.description].compactMap { $0 }
+            if words.contains(where: { word in matched.contains { $0.localizedCaseInsensitiveContains(word) } }) { return nil }
+            let text = shownText(role: face.role, name: element.name)
+            guard words.allSatisfy({ text.localizedCaseInsensitiveContains($0) }) else { return nil }
+            return ElementFace(index: face.index, role: face.role, label: text, value: nil, description: nil)
+        }
+    }
+
+    /// The elements `shownOnly` found, as a refusal names them; nil when none
+    /// does. The click still chooses nothing: a press names one by number.
     public static func shownWords(_ faces: [ElementFace]) -> String? {
         guard !faces.isEmpty else { return nil }
-        let named = faces.prefix(mostShown).map(\.said).joined(separator: "; ")
+        let named = faces.prefix(mostShown)
+            .map { ElementFace(index: $0.index, role: $0.role, label: $0.label.map(clipped), value: nil, description: nil).said }
+            .joined(separator: "; ")
         let more = faces.count > mostShown ? " and \(faces.count - mostShown) more" : ""
-        return "these words show in the text of \(named)\(more), not in a label or description: press one by its --element-index"
+        return "these words show only in the text of \(named)\(more), which a click by words does not read: press one by its --element-index"
     }
 
     /// A click by reading that no control of the look answers: the words it
