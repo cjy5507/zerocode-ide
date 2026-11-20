@@ -87,11 +87,18 @@ task-settle --task <id> --why '<one line: why the work is done>' --report <the r
 
 It walks the same three steps — the seat's own attempt, a hand-in of the why and
 the report on it, and the review of that hand-in — and writes the task 완료 —
-착지할 것 없음 (`verified` and `nothingToLand`), keeping the result it had under
-`settled`. It is refused for a task an attempt handed something in on (review that
-hand-in with `task-update` instead), for one a coordinator review already stands
-on, and for one carried, held by a decision, waiting on its dependencies, failed or
-closed. Do not close finished work `outdated`: nothing reads that as done.
+착지할 것 없음 (`verified`, `nothingToLand` and `report`). The keys the result
+had stay where they were; what the settle writes over (the review keys, `report`,
+`verificationWithdrawn`, an earlier `settled`) moves to `settled.replaced`, a
+result that was not a JSON object is kept
+as `settled.original`, and `settled` also holds who settled it, when, the why and
+the report. It is refused for a task an attempt handed something in on (review
+that hand-in with `task-update` instead), for one whose result names a commit
+(`commit`, `mergeHead`, `head` and the like — code may have landed: review it, or
+let `task-backfill` prove its landing), for one a coordinator review already
+stands on, and for one carried, held by a decision, waiting on its dependencies,
+failed or closed. Do not close finished work `outdated`: nothing reads that as
+done.
 
 Once a stack is on main, write its landing on every member in the same turn:
 `task-update --members t-1,t-2 --result '{"merged":true,"mergeHead":"<sha>"}'

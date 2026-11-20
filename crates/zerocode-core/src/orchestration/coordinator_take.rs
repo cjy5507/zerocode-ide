@@ -1214,7 +1214,9 @@ const SETTLE_KEY: &str = "settled";
 /// it the same way ([`Run::review_of`]).
 ///
 /// Refused before anything moves: from anywhere but the live coordinator seat; for a task an attempt
-/// handed something in on (that hand-in is what to review, with `task-update`); for one a coordinator
+/// handed something in on (that hand-in is what to review, with `task-update`); for one whose result
+/// names a commit (code may have landed — settled as nothing to land, it would read as done with no
+/// code: it is reviewed, or [`BACKFILL_VERB`] proves its landing from git); for one a coordinator
 /// review already stands on; and for one carried, held by a decision, waiting on its dependencies,
 /// failed or closed.
 pub(super) fn settle_one(
@@ -1303,6 +1305,12 @@ pub(super) fn settle_one(
             "attempt {attempt} handed {source} in on task {task_id} — review that hand-in with \
              `task-update --task {task_id} --attempt {attempt} --source {source}`; {SETTLE_VERB} \
              --task settles work nothing was handed in on"
+        ));
+    }
+    if let Some(named) = commits_named(task.result.as_str()).into_iter().next() {
+        return Err(format!(
+            "task {task_id}'s result names commit {} under `{}` — code may have landed there, so              it is not settled as nothing to land: review it with `task-update --task {task_id}`,              or let `{BACKFILL_VERB}` prove its landing from git",
+            named.commit, named.under
         ));
     }
     let original = task.result.to_string();
