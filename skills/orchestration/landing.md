@@ -120,6 +120,25 @@ listed rows (attempt, hand-in, review) from the coordinator seat, one task's fai
 never stopping the others. The original result is kept: its keys stay, a review key it
 held moves under `backfill.replaced`, and `backfill.by` reads `task-backfill`.
 
+The same list holds the verified tasks whose landing nobody wrote (`"landing": true`),
+with what git proves of each against `--base` and `origin` — and the ledger never
+writes `verified` there; each landing is bound to the coordinator review that stands:
+
+- `merged` (with `mergeHead`, the newest copy on the base) only when every commit of the
+  range the review read is on the base's first-parent line as the same change: the same
+  lines, by the same author at the same moment under the same subject, as a cherry-pick
+  or a rebase keeps them. A squash proves nothing. A range holding a merge commit proves
+  nothing, nor does one of commits that change nothing alone (those are left out of any
+  other range).
+- `deployed` (with `release`) only when a release tag holds that landing, `origin/<base>`
+  holds the tag, and origin itself holds the same tag (`git ls-remote`): the release lane
+  pushes its tag once it ends green, so a tag only local is a release still running or
+  one that failed. With no `origin/<base>`, no release is read.
+- Neither where the base reverted the landing (`This reverts commit <id>`).
+
+A row it cannot prove says why, and nothing is written for it. The release's after-step
+and the coordinator call it; nothing calls it on a timer.
+
 ## Decision gates
 
 When a slice reaches a decision that is a person's or the coordinator's to

@@ -30,7 +30,7 @@ pub(super) struct WorktreeLanding {
     pub(super) detached: bool,
     /// `unlanded`일 때 내용 기준으로 비교 ref에 없는 커밋 수.
     pub(super) ahead: u32,
-    /// `unlanded`일 때 그 커밋들 각각의 변경 열쇠(t-119569, [`crate::commit_witness::change_key`]): 같은
+    /// `unlanded`일 때 그 커밋들 각각의 변경 열쇠(t-119569, [`crate::commit_witness::change_key_kept`]): 같은
     /// 변경은 어느 작업 폴더의 어느 커밋이든 같은 열쇠다 — 서로 위에 쌓은 가지도, 쌓는 나무에 옮겨 담은
     /// 사본도. 창의 「쌓인 일」이 프로젝트 전체에서 이 열쇠의 합집합을 센다(커밋 수의 합은 같은 변경을 작업
     /// 폴더마다 다시 셌다). 열쇠를 못 구한 커밋은 제 커밋 id가 열쇠다. 다른 상태에서는 비어 있다.

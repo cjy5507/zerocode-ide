@@ -20871,9 +20871,9 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          that nobody has touched for --days (default one week), and apart the completed ones that \
          can take no review: listed; only the open ones are closed `outdated`, and only with \
          --apply, from the coordinator seat | --task <id> --why <line> --report <path> · work \
-         nothing was handed in on (a measurement, a design, work done by hand) settled as done \
-         with nothing to land, from the coordinator seat: the seat's own attempt, a hand-in of \
-         the why and the report, and its review, in one call",
+         nothing was handed in on and whose result names no commit (a measurement, a design, \
+         work done by hand) settled as done with nothing to land, from the coordinator seat: the \
+         seat's own attempt, a hand-in of the why and the report, and its review, in one call",
         Doing::Policy,
     ),
     (
@@ -20917,9 +20917,11 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
          named; verified only when a review task the result names passed) or why not; --apply, \
          from the coordinator seat, writes the attempt, hand-in and review, keeping the original \
          result beside them; and the verified tasks whose landing nobody wrote (landing: true): \
-         merged only when every commit of the range the review read is in --base as the same \
-         change, deployed only when a published release tag holds that landing — never a \
-         verification — or why not; --apply writes them bound to the standing review",
+         merged only when every commit of the range the review read is on --base's first-parent \
+         line as the same change by the same author, moment and subject, and the range holds no \
+         merge and not only empty commits; deployed only when a release tag origin holds holds \
+         that landing; neither where --base reverted it — never a verification — or why not; \
+         --apply writes them bound to the standing review",
         Doing::Policy,
     ),
     (

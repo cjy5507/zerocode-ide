@@ -77,12 +77,15 @@ fn see_with(
 
 /// What git says in `repo` about the range each of `heads` reviewed (t-119569), against `base`,
 /// written into `seen` ([`CommitsSeen::insert_range`]): the head's own commits — the ones `base`
-/// did not hold when the work forked — each with whether `base` holds that change now, by git's
-/// own patch identity, so the same change picked onto `base` is the same; the commit of `base`
-/// the last of them landed as; and the first release tag matching `tags` that holds that landing
-/// and that the published `base` holds (`origin/<base>`, where there is one) — so a tag a release
-/// cut while it still runs is none. A head git gave no answer for is left out, and the ledger says
-/// git was not asked.
+/// did not hold when the work forked — each with whether `base`'s first-parent line holds that
+/// change now ([`change_of`]: the same change by the same author at the same moment under the same
+/// subject, as a cherry-pick or a rebase keeps it); the merges inside the range and its commits
+/// that change nothing, apart; the commit of `base` the last of them landed as; the commits of
+/// `base` that revert that landing; and the first release tag matching `tags` that holds the
+/// landing, that `origin/<base>` holds, and that origin itself holds — the release lane pushes its
+/// tag only once it ends green, so a tag only local is a release still running or one that failed
+/// ([`Releases`]). A head git gave no answer for is left out, and the ledger says git was not
+/// asked.
 pub(crate) fn see_ranges(
     seen: &mut CommitsSeen,
     repo: &Path,
@@ -104,10 +107,15 @@ fn see_ranges_with(
     let Some(Some(base_head)) = resolve(vcs, repo, base) else {
         return;
     };
-    let remote = format!("origin/{base}");
-    let published = match resolve(vcs, repo, &remote) {
-        Some(Some(_)) if !base.contains('/') => remote,
-        _ => base.to_string(),
+    let remote = format!("{ORIGIN}/{base}");
+    let mut releases = Releases {
+        vcs,
+        repo,
+        tags,
+        base,
+        published: matches!(resolve(vcs, repo, &remote), Some(Some(_))).then_some(remote),
+        on_origin: None,
+        here: None,
     };
     for named in heads {
         let Some(Some(head)) = resolve(vcs, repo, named) else {
@@ -116,22 +124,149 @@ fn see_ranges_with(
         let Some(mut range) = range_of(vcs, repo, &head, &base_head) else {
             continue;
         };
-        range.tag = range
-            .landed_as
-            .as_deref()
-            .and_then(|landed| published_tag(vcs, repo, landed, tags, &published));
+        releases.read(&mut range);
         seen.insert_range(named, range);
     }
 }
 
-/// One head's range against `base_head`, its tag aside. A head the base holds is its own range of
-/// one, landed as the first commit of the base's first-parent line that holds it. Any other head's
-/// range is its commits the base does not hold by ancestry, each landed or not by its change key
-/// ([`change_key`]: line numbers and the lines around the change aside — git's own patch identity
-/// counts the lines around it, and a change picked onto a base that moved a line beside it is
-/// another change to git), and landed as the newest copy of them on the base: the last change to
-/// arrive. `None` where git gave no answer, or the base moved more than [`RANGE_BASE_MAX`] commits
-/// since the fork — too long to read on a verb's way.
+/// The remote a release is published to, and whose copy of the base a release tag must sit on.
+const ORIGIN: &str = "origin";
+
+/// Release tags by name, each with the object it names (a tag object, or a commit for a light one).
+type Tags = std::collections::BTreeMap<String, String>;
+
+/// Where a landing's release is read from (t-119569): the release tags `tags` names, the base as
+/// origin holds it (`published`, none where this repository has no `origin/<base>`), and the tags
+/// origin and this repository hold — each asked once, and only where a tag may count.
+struct Releases<'a> {
+    vcs: &'a dyn Vcs,
+    repo: &'a Path,
+    tags: &'a str,
+    base: &'a str,
+    published: Option<String>,
+    on_origin: Option<Option<Tags>>,
+    here: Option<Option<Tags>>,
+}
+
+impl Releases<'_> {
+    /// The release of `range`'s landing, into it: the first tag in version order that holds the
+    /// landing, that the published base holds, and that origin holds as this repository does — or,
+    /// where one may hold it and none is read as released, why ([`RangeSeen::unpublished`]).
+    fn read(&mut self, range: &mut RangeSeen) {
+        let Some(landed) = range.landed_as.as_deref() else {
+            return;
+        };
+        let Some(published) = self.published.as_deref() else {
+            range.unpublished = Some(format!(
+                "there is no {ORIGIN}/{} to read a published release from",
+                self.base
+            ));
+            return;
+        };
+        let (vcs, repo) = (self.vcs, self.repo);
+        let Some(held) = held_tags(vcs, repo, landed, self.tags, published) else {
+            return;
+        };
+        let Some(first) = held.first() else {
+            return;
+        };
+        let Some(on_origin) = self
+            .on_origin
+            .get_or_insert_with(|| tags_on_origin(vcs, repo))
+        else {
+            range.unpublished = Some(format!(
+                "{ORIGIN} could not be asked whether {first} is published"
+            ));
+            return;
+        };
+        let Some(here) = self.here.get_or_insert_with(|| tags_here(vcs, repo)) else {
+            return;
+        };
+        range.tag = held
+            .iter()
+            .find(|tag| {
+                here.get(*tag)
+                    .is_some_and(|id| on_origin.get(*tag) == Some(id))
+            })
+            .cloned();
+        if range.tag.is_none() {
+            range.unpublished = Some(format!(
+                "{first} holds the landing, but {ORIGIN} has no such tag yet — the release has not \
+                 published it"
+            ));
+        }
+    }
+}
+
+/// The tags matching `tags`, in version order, that hold `commit` and that `published` holds.
+fn held_tags(
+    vcs: &dyn Vcs,
+    repo: &Path,
+    commit: &str,
+    tags: &str,
+    published: &str,
+) -> Option<Vec<String>> {
+    let asked = [
+        "tag",
+        "--list",
+        tags,
+        "--contains",
+        commit,
+        "--merged",
+        published,
+        "--sort=v:refname",
+    ];
+    Some(
+        said(vcs, repo, &asked, None)?
+            .lines()
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// The tags origin holds, asked of origin itself (`ls-remote`): a tag pushed and one only cut here
+/// look alike in this repository. `None` where origin gave no answer within the budget.
+fn tags_on_origin(vcs: &dyn Vcs, repo: &Path) -> Option<Tags> {
+    let said = said(vcs, repo, &["ls-remote", "--tags", ORIGIN], None)?;
+    Some(
+        said.lines()
+            .filter_map(|line| {
+                let (id, name) = line.split_once('\t')?;
+                let name = name.trim().strip_prefix("refs/tags/")?;
+                (!name.ends_with("^{}")).then(|| (name.to_string(), id.trim().to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// The tags this repository holds.
+fn tags_here(vcs: &dyn Vcs, repo: &Path) -> Option<Tags> {
+    let asked = [
+        "for-each-ref",
+        "--format=%(refname:strip=2)%00%(objectname)",
+        "refs/tags",
+    ];
+    Some(
+        said(vcs, repo, &asked, None)?
+            .lines()
+            .filter_map(|line| {
+                let (name, id) = line.split_once('\0')?;
+                Some((name.trim().to_string(), id.trim().to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// One head's range against `base_head`, its release aside. A head the base holds is its own range
+/// of one, landed as the first commit of the base's first-parent line that holds it. Any other
+/// head's range is its commits the base does not hold by ancestry — the merges among them and the
+/// commits that change nothing said apart — each landed or not by a copy on the base's first-parent
+/// line ([`change_of`]), and landed as the newest copy: the last change to arrive. Either way, the
+/// commits of the base after the landing that revert it are said ([`reverts_of`]). `None` where git
+/// gave no answer, or the base moved more than [`RANGE_BASE_MAX`] commits since the fork — too long
+/// to read on a verb's way.
 fn range_of(vcs: &dyn Vcs, repo: &Path, head: &str, base_head: &str) -> Option<RangeSeen> {
     if holds(vcs, repo, base_head, head)? {
         let asked = crate::worktree_landing::trunk_log(head, base_head);
@@ -141,118 +276,236 @@ fn range_of(vcs: &dyn Vcs, repo: &Path, head: &str, base_head: &str) -> Option<R
             crate::worktree_landing::TrunkEntry::Commit { sha, .. } => sha.to_string(),
             crate::worktree_landing::TrunkEntry::Target => base_head.to_string(),
         };
+        // What the landing brought: where a merge took the head, the merge and the side it merged,
+        // up to the head. A head fast-forwarded onto the base's line gives git no place where the
+        // work began, so there a revert of any commit the head holds counts ([`reverts_held_by`]).
+        let reverted = if landed == head {
+            reverts_held_by(vcs, repo, head, &format!("{head}..{base_head}"))?
+        } else {
+            let mut brought = vec![head.to_string(), landed.clone()];
+            let side = logged(vcs, repo, &[format!("{landed}^1..{head}").as_str()])?;
+            brought.extend(side.into_iter().map(|one| one.id));
+            brought.sort();
+            brought.dedup();
+            reverts_of(vcs, repo, &brought, &format!("{landed}..{base_head}"))?
+        };
         return Some(RangeSeen {
             commits: vec![(head.to_string(), true)],
             landed_as: Some(landed),
+            reverted,
             ..RangeSeen::default()
         });
     }
-    let listed = |range: String, oldest_first: bool| {
-        let mut asked = vec!["rev-list", "--no-merges"];
-        if oldest_first {
-            asked.push("--reverse");
-        }
-        asked.push(&range);
-        said(vcs, repo, &asked, None).map(|said| {
-            said.lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-    };
-    let ours = listed(format!("{base_head}..{head}"), true)?;
-    // Newest first: the first copy found is the last change to have landed.
-    let theirs = listed(format!("{head}..{base_head}"), false)?;
+    let ours = logged(vcs, repo, &["--reverse", &format!("{base_head}..{head}")])?;
+    // Newest first, and the base's own line alone (ruling §4): a copy only a side branch holds —
+    // tied on by `merge -s ours`, say — is no landing.
+    let theirs = logged(
+        vcs,
+        repo,
+        &[
+            "--first-parent",
+            "--no-merges",
+            &format!("{head}..{base_head}"),
+        ],
+    )?;
     if theirs.len() > RANGE_BASE_MAX {
         return None;
     }
-    let mut keyed = Vec::with_capacity(theirs.len());
-    for commit in &theirs {
-        keyed.push((change_key_kept(vcs, repo, commit)?, commit.as_str()));
-    }
-    let mut commits = Vec::with_capacity(ours.len());
-    let mut newest_copy: Option<usize> = None;
-    for commit in &ours {
-        let key = change_key_kept(vcs, repo, commit)?;
-        let copy = keyed.iter().position(|(held, _)| *held == key);
-        if let Some(at) = copy {
-            newest_copy = Some(newest_copy.map_or(at, |was| was.min(at)));
+    let mut range = RangeSeen::default();
+    let mut copies: Vec<usize> = Vec::new();
+    for one in &ours {
+        if one.merge {
+            range.merges.push(one.id.clone());
+            continue;
         }
-        commits.push((commit.clone(), copy.is_some()));
+        let change = change_kept(vcs, repo, &one.id)?;
+        if change.empty {
+            range.empty.push(one.id.clone());
+            continue;
+        }
+        let mut copy = None;
+        for (at, held) in theirs.iter().enumerate() {
+            // Who wrote it, when and under what subject first, off the one log: a diff is read only
+            // for a commit that matches all three.
+            if held.wrote == one.wrote && change_kept(vcs, repo, &held.id)?.key == change.key {
+                copy = Some(at);
+                break;
+            }
+        }
+        copies.extend(copy);
+        range.commits.push((one.id.clone(), copy.is_some()));
     }
-    let landed = !commits.is_empty() && commits.iter().all(|(_, landed)| *landed);
-    Some(RangeSeen {
-        commits,
-        landed_as: newest_copy
-            .filter(|_| landed)
-            .map(|at| keyed[at].1.to_string()),
-        ..RangeSeen::default()
-    })
+    if !range.commits.is_empty() && range.commits.iter().all(|(_, landed)| *landed) {
+        range.landed_as = copies.iter().min().map(|at| theirs[*at].id.clone());
+        let brought: Vec<String> = range
+            .commits
+            .iter()
+            .map(|(commit, _)| commit.clone())
+            .chain(copies.iter().map(|at| theirs[*at].id.clone()))
+            .collect();
+        range.reverted = reverts_of(vcs, repo, &brought, &format!("{head}..{base_head}"))?;
+    }
+    Some(range)
 }
 
 /// How many commits the base may have moved since a reviewed range forked before a landing proof
-/// stops reading it: every one is a diff read once and kept by its id ([`change_key_kept`]), and a
-/// range that old is the coordinator's to write by hand.
+/// stops reading it: each is a line of one log, and a diff read once and kept by its id
+/// ([`change_kept`]) only where it matches a commit of the range by its author, moment and subject;
+/// a range that old is the coordinator's to write by hand.
 const RANGE_BASE_MAX: usize = 1_000;
 
-/// [`change_key`] kept by commit id for as long as the window runs (t-119569): a commit never
-/// changes, so its key is asked of git once — by the 「쌓인 일」 tab's rows and a landing proof alike.
-/// A commit git gave no key for is not kept, and is asked again next time.
-pub(crate) fn change_key_kept(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<String> {
+/// One commit as [`logged`] lists it.
+struct Logged {
+    id: String,
+    /// Whether it has more than one parent.
+    merge: bool,
+    /// What [`WROTE`] says of it: its author, author date and subject.
+    wrote: String,
+}
+
+/// The commits `asked` names — a range, and how to walk it — each with its parents counted and what
+/// [`WROTE`] says of it.
+fn logged(vcs: &dyn Vcs, repo: &Path, asked: &[&str]) -> Option<Vec<Logged>> {
+    let mut args = vec!["log", "--no-color", "--date=raw", LISTED];
+    args.extend_from_slice(asked);
+    said(vcs, repo, &args, None)?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (id, rest) = line.split_once('\0')?;
+            let (parents, wrote) = rest.split_once('\0')?;
+            Some(Logged {
+                id: id.trim().to_string(),
+                merge: parents.split_whitespace().count() > 1,
+                wrote: wrote.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// What a commit's copy keeps when it is picked or rebased onto another branch, and a squash or a
+/// rewrite does not: its author, author date and subject — as `git show -s` writes them.
+const WROTE: &str = "--format=%an%x00%ae%x00%ad%x00%s";
+
+/// [`WROTE`] after the commit's id and its parents, for a log of many.
+const LISTED: &str = "--format=%H%x00%P%x00%an%x00%ae%x00%ad%x00%s";
+
+/// What git's own revert writes in the commit it makes: `This reverts commit <id>.`
+const REVERTS: &str = "This reverts commit ";
+
+/// The commits of `range` that revert one of `brought`, each with the one it reverts, read off the
+/// words git's own revert writes ([`REVERTS`]). Every parent's line is read: a revert a side branch
+/// carried in reverts it all the same.
+fn reverts_of(
+    vcs: &dyn Vcs,
+    repo: &Path,
+    brought: &[String],
+    range: &str,
+) -> Option<Vec<(String, String)>> {
+    if brought.is_empty() {
+        return Some(Vec::new());
+    }
+    let greps: Vec<String> = brought
+        .iter()
+        .map(|one| format!("--grep={REVERTS}{one}"))
+        .collect();
+    let mut args = vec![
+        "log",
+        "--no-color",
+        "--fixed-strings",
+        "--format=%H%x1f%B%x1e",
+    ];
+    args.extend(greps.iter().map(String::as_str));
+    args.push(range);
+    let said = said(vcs, repo, &args, None)?;
+    let mut found: Vec<(String, String)> = Vec::new();
+    for record in said.split('\u{1e}') {
+        let Some((id, words)) = record.trim_start().split_once('\u{1f}') else {
+            continue;
+        };
+        for one in brought {
+            let pair = (id.trim().to_string(), one.clone());
+            if words.contains(&format!("{REVERTS}{one}")) && !found.contains(&pair) {
+                found.push(pair);
+            }
+        }
+    }
+    Some(found)
+}
+
+/// The commits of `range` that revert a commit `head` holds, each with the one it reverts — for a
+/// head fast-forwarded onto the base, where git cannot tell which of the commits under it were the
+/// work: a revert of any of them counts, an older commit's too (and the coordinator then writes that
+/// landing by hand). A commit git does not know, or no answer from git, counts as well: nothing is
+/// written on a guess.
+fn reverts_held_by(
+    vcs: &dyn Vcs,
+    repo: &Path,
+    head: &str,
+    range: &str,
+) -> Option<Vec<(String, String)>> {
+    let grep = format!("--grep={REVERTS}");
+    let asked = [
+        "log",
+        "--no-color",
+        "--fixed-strings",
+        grep.as_str(),
+        "--format=%H%x1f%B%x1e",
+        range,
+    ];
+    let said = said(vcs, repo, &asked, None)?;
+    let mut found: Vec<(String, String)> = Vec::new();
+    for record in said.split('\u{1e}') {
+        let Some((id, words)) = record.trim_start().split_once('\u{1f}') else {
+            continue;
+        };
+        for named in words.split(REVERTS).skip(1) {
+            let reverted: String = named.chars().take_while(char::is_ascii_hexdigit).collect();
+            if reverted.len() < 7 || holds(vcs, repo, head, &reverted) == Some(false) {
+                continue;
+            }
+            let pair = (id.trim().to_string(), reverted);
+            if !found.contains(&pair) {
+                found.push(pair);
+            }
+        }
+    }
+    Some(found)
+}
+
+/// [`change_of`] kept by commit id for as long as the window runs (t-119569): a commit never
+/// changes, so its change is asked of git once — by the 「쌓인 일」 tab's rows and a landing proof
+/// alike. A commit git gave no answer for is not kept, and is asked again next time.
+fn change_kept(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<Change> {
     let cache = || {
         static KEPT: std::sync::OnceLock<
-            std::sync::Mutex<std::collections::HashMap<String, String>>,
+            std::sync::Mutex<std::collections::HashMap<String, Change>>,
         > = std::sync::OnceLock::new();
         KEPT.get_or_init(Default::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     };
-    if let Some(key) = cache().get(commit) {
-        return Some(key.clone());
+    if let Some(change) = cache().get(commit) {
+        return Some(change.clone());
     }
-    let key = change_key(vcs, repo, commit)?;
+    let change = change_of(vcs, repo, commit)?;
     let mut kept = cache();
     if kept.len() >= CHANGE_KEYS_KEPT {
         kept.clear();
     }
-    kept.insert(commit.to_string(), key.clone());
-    Some(key)
+    kept.insert(commit.to_string(), change.clone());
+    Some(change)
 }
 
-/// How many change keys a window keeps before it starts again: every unlanded commit of every
+/// [`Change::key`] of `commit`, kept ([`change_kept`]) — what the 「쌓인 일」 tab counts each change
+/// once by.
+pub(crate) fn change_key_kept(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<String> {
+    change_kept(vcs, repo, commit).map(|change| change.key)
+}
+
+/// How many changes a window keeps before it starts again: every unlanded commit of every
 /// checkout it lists and every range it proves, many times over (178 unlanded on 11-20).
 const CHANGE_KEYS_KEPT: usize = 8_192;
-
-/// The first tag matching `tags`, in version order, that holds `commit` and that `published`
-/// holds — a tag on a branch the base has not taken yet is none.
-fn published_tag(
-    vcs: &dyn Vcs,
-    repo: &Path,
-    commit: &str,
-    tags: &str,
-    published: &str,
-) -> Option<String> {
-    said(
-        vcs,
-        repo,
-        &[
-            "tag",
-            "--list",
-            tags,
-            "--contains",
-            commit,
-            "--merged",
-            published,
-            "--sort=v:refname",
-        ],
-        None,
-    )?
-    .lines()
-    .map(str::trim)
-    .find(|tag| !tag.is_empty())
-    .map(str::to_string)
-}
 
 /// The commit `name` names in `repo`, in full: `Some(None)` when git knows no such commit, and
 /// `None` when git gave no answer at all.
@@ -610,17 +863,35 @@ fn patch(
     }
 }
 
-/// The one key a commit's own change reads by (t-119569): its change against its first parent, file by
-/// file as a replayed change is digested ([`Context::Dropped`] — line numbers, hunks and the base's own
-/// lines aside, every added and removed line exactly), folded into one SHA-256 and cut to
-/// [`CHANGE_KEY_CHARS`]. So the same change picked onto another branch keys the same, and any other change
-/// does not. `None` where git gave no answer — a root commit, a diff past [`DIFF_MAX`], a git that did
-/// not start — and the caller then keys the commit by its own id.
-pub(crate) fn change_key(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<String> {
+/// What one commit's change is matched by (t-119569, the other provider's check B · C · D): who
+/// wrote it, when and under what subject ([`WROTE`]), and its change against its first parent, file
+/// by file as a replayed change is digested ([`Context::Dropped`] — line numbers, hunks and the
+/// base's own lines aside, every added and removed line exactly), folded into one SHA-256 and cut to
+/// [`CHANGE_KEY_CHARS`]. A copy a cherry-pick or a rebase makes keeps all of it, so it keys the same
+/// wherever it was picked; a commit that only happens to make the same lines — elsewhere in the
+/// file, or none at all — keeps none of who, when and what it said, and keys apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Change {
+    key: String,
+    /// Whether the commit changes nothing (`--allow-empty`): there is nothing of it to land.
+    empty: bool,
+}
+
+/// [`Change`] of `commit`: `None` where git gave no answer — a root commit, a diff past
+/// [`DIFF_MAX`], a git that did not start — and the caller then keys the commit by its own id.
+fn change_of(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<Change> {
     use sha2::{Digest, Sha256};
+    let wrote = said(
+        vcs,
+        repo,
+        &["show", "-s", "--no-color", "--date=raw", WROTE, commit],
+        None,
+    )?;
     let parent = format!("{commit}^");
     let patch = patch(vcs, repo, &parent, commit, 1, Context::Dropped)?;
     let mut digest = Sha256::new();
+    digest.update(wrote.trim_end_matches('\n').as_bytes());
+    digest.update(b"\0\0");
     for (file, part) in &patch.files {
         digest.update(file.as_bytes());
         digest.update(b"\0");
@@ -629,7 +900,10 @@ pub(crate) fn change_key(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<Str
     }
     let mut key = format!("{:x}", digest.finalize());
     key.truncate(CHANGE_KEY_CHARS);
-    Some(key)
+    Some(Change {
+        key,
+        empty: patch.files.is_empty(),
+    })
 }
 
 /// How many hex digits of a change key go on the wire: 64 bits, against a few hundred changes a window
@@ -808,7 +1082,7 @@ mod tests {
     /// still missing is no landing; a tag cut before it holds none of it; and a head merged as it
     /// is landed as its merge.
     #[test]
-    fn a_reviewed_range_lands_once_every_change_is_in_main_and_ships_in_a_published_tag() {
+    fn a_reviewed_range_lands_once_every_change_is_in_main_as_its_newest_copy() {
         let dir = tempfile::tempdir().expect("tempdir");
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
@@ -1141,7 +1415,7 @@ mod tests {
                 summed += 1;
                 commits.insert(commit.to_string());
                 changes.insert(
-                    change_key(&LocalVcs, repo, commit).unwrap_or_else(|| commit.to_string()),
+                    change_key_kept(&LocalVcs, repo, commit).unwrap_or_else(|| commit.to_string()),
                 );
             }
         }
@@ -1178,7 +1452,8 @@ mod tests {
         let other = commit(repo, "another");
         assert_ne!(original, copy, "a cherry-pick is a commit of its own");
 
-        let key = |commit: &str| change_key(&LocalVcs, repo, commit).expect("git keys the change");
+        let key =
+            |commit: &str| change_key_kept(&LocalVcs, repo, commit).expect("git keys the change");
         assert_eq!(
             key(&original),
             key(&copy),
@@ -1188,7 +1463,7 @@ mod tests {
         assert_eq!(key(&original).len(), CHANGE_KEY_CHARS);
         let root = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
         assert_eq!(
-            change_key(&LocalVcs, repo, &root),
+            change_key_kept(&LocalVcs, repo, &root),
             None,
             "a root commit has no parent to read against"
         );

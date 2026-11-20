@@ -974,8 +974,10 @@ pub fn backfill_heads(run: &Run) -> Vec<String> {
 /// The landing git proves for one task of [`landing_unrecorded`] (t-119569), as the keys to write
 /// — or why none, and then nothing is written. Merged only when every commit of the range its
 /// review read is in the base as the same change, with the commit of the base the last of them
-/// landed as; a commit the subject of a merge names is never enough alone. Deployed only when a
-/// published release tag holds that landing — a tag cut before the merge holds none of it.
+/// landed as; a commit the subject of a merge names is never enough alone, and a range holding a
+/// merge commit or nothing but commits that change nothing proves none. Deployed only when a
+/// release tag origin holds holds that landing — a tag cut before the merge holds none of it, and a
+/// tag only local is a release still running. Neither where the base reverted the landing.
 fn prove_landing(
     progress: &WorkProgress,
     seen: Option<&CommitsSeen>,
@@ -994,8 +996,24 @@ fn prove_landing(
         .ok_or_else(|| format!("git was not asked about the range {head} reviewed"))?;
     let mut facts = serde_json::Map::new();
     if progress.stage == WorkStage::Verified {
+        if !range.merges.is_empty() {
+            return Err(format!(
+                "the range {head} reviewed holds {} merge commit(s) — what a merge changes itself \
+                 matches no commit of {base}, so no copy proves it: {}",
+                range.merges.len(),
+                range.merges.join(", ")
+            ));
+        }
         if range.commits.is_empty() {
-            return Err(format!("git found no commit in the range {head} reviewed"));
+            return Err(if range.empty.is_empty() {
+                format!("git found no commit in the range {head} reviewed")
+            } else {
+                format!(
+                    "the range {head} reviewed holds only commits that change nothing — nothing \
+                     landed to prove: {}",
+                    range.empty.join(", ")
+                )
+            });
         }
         let missing: Vec<&str> = range
             .commits
@@ -1018,16 +1036,28 @@ fn prove_landing(
         facts.insert(REVIEW_KEY_GROUPS[1][0].to_string(), true.into());
         facts.insert(land_record::MERGE_HEAD_KEY.to_string(), landed.into());
     }
+    if let Some((revert, reverted)) = range.reverted.first() {
+        return Err(format!(
+            "{base} reverts the landing: {revert} reverts {reverted}{} — neither merged nor \
+             deployed is written",
+            match range.reverted.len() {
+                1 => String::new(),
+                all => format!(" ({all} reverts in all)"),
+            }
+        ));
+    }
     match &range.tag {
         Some(tag) => {
             facts.insert(DEPLOYED_KEY.to_string(), true.into());
             facts.insert(land_record::RELEASE_KEY.to_string(), tag.clone().into());
         }
         None if facts.is_empty() => {
-            return Err(format!(
-                "no published release tag holds {} yet",
-                range.landed_as.as_deref().unwrap_or(&head)
-            ));
+            return Err(range.unpublished.clone().unwrap_or_else(|| {
+                format!(
+                    "no published release tag holds {} yet",
+                    range.landed_as.as_deref().unwrap_or(&head)
+                )
+            }));
         }
         None => {}
     }
