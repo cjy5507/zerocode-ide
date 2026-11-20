@@ -2579,7 +2579,10 @@ kbd {
   color: var(--signal-you);
 }
 
-.team-badge.is-letters {
+/* Mail to acknowledge, and reports the coordinator has to verify (t-119569): the coordinator's own work, so no
+ * signal colour — the quiet hairline badge. Only a question is the person's blue. */
+.team-badge.is-letters,
+.team-badge.is-reviews {
   border: var(--rule-width) solid var(--nav-plane-rule);
   color: var(--ink-mist);
 }
@@ -44445,8 +44448,10 @@ button.board-build-failure-part:focus-visible {
 }
 
 /* 남은 일의 무더기 (t-71220) — 끝난 과업의 접힘과 같은 줄: 이름과 수, 무엇이 드는지의 메모, 그
- * 곁에 원장의 답 한 줄 · 되돌리기 · 누름 단추. 메모는 문장이라 고정폭이 아니다. */
-.board-goal.is-left .board-goal-note {
+ * 곁에 원장의 답 한 줄 · 되돌리기 · 누름 단추. 메모는 문장이라 고정폭이 아니다. 코디가 검증할
+ * 보고의 줄(t-119569)도 같은 접힘이다 — 펼치면 그 밑에 검토 행이 선다. */
+.board-goal.is-left .board-goal-note,
+.board-goal.is-reviews .board-goal-note {
   min-width: 0;
   font: var(--type-label-13);
 }
@@ -64928,6 +64933,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .threads.is-railed .team-project,
 .threads.is-railed .team-run,
 .threads.is-railed .team-badge.is-letters,
+.threads.is-railed .team-badge.is-reviews,
 .threads.is-railed .team-chip:not(.is-question) {
   display: none;
 }

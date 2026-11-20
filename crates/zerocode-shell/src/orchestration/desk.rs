@@ -492,6 +492,18 @@ pub(crate) struct DeskRun {
     /// the sidebar's landing line (t-56141).
     pub(crate) landing: usize,
     pub(crate) batched: usize,
+    /// Its work handed in and waiting on a review — the stage the desk calls
+    /// `reported`, less the work nobody is coming back to — and when the
+    /// longest-waiting of it was last touched (its hand-in): the coordinator
+    /// card's 「검증 N」 (t-119569). A review is the coordinator's to write,
+    /// so the board no longer stands it in the person's turn.
+    pub(crate) reviews: usize,
+    pub(crate) reviews_since_ms: Option<i64>,
+    /// Its decisions standing in front of a task — the stage the desk calls
+    /// `gate` — counted beside its questions (`mail`): what the board's
+    /// person's turn leaves out for a run nobody sits in, since nobody there
+    /// can carry an answer (t-119569).
+    pub(crate) gates: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -865,6 +877,15 @@ pub(crate) fn finished(run: &Run, task: &Task) -> bool {
     FINISHED_STAGES.contains(&stage_of(run, task))
 }
 
+/// Whether a desk row is work handed in that waits on its coordinator's
+/// review: the `reported` stage — a withdrawn verification among it — with
+/// somebody still coming back to it (t-119569). The person's turn on the
+/// board no longer stands it; the coordinator card counts it
+/// ([`DeskRun::reviews`]).
+fn awaiting_coordinator(row: &DeskTask) -> bool {
+    row.stage == "reported" && row.left.is_none()
+}
+
 /// Whether a run is in play: somebody is coordinating it, or somebody is
 /// still working for it. A finished run with nobody at it is history — on the
 /// desk, and for the board's rows of finished work (`ledger_agents_for_seats`).
@@ -1074,6 +1095,19 @@ pub(crate) fn desk_snapshot_of(
                 .filter(|(_, _, row)| row.stage == "verified")
                 .count(),
             batched,
+            reviews: staged_tasks[tasks_before..]
+                .iter()
+                .filter(|(_, _, row)| awaiting_coordinator(row))
+                .count(),
+            reviews_since_ms: staged_tasks[tasks_before..]
+                .iter()
+                .filter(|(_, _, row)| awaiting_coordinator(row))
+                .map(|(_, _, row)| row.touched_ms)
+                .min(),
+            gates: staged_tasks[tasks_before..]
+                .iter()
+                .filter(|(_, _, row)| row.stage == "gate" && row.left.is_none())
+                .count(),
         });
     }
     let mut stages = Vec::with_capacity(STAGES.len());

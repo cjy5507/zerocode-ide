@@ -7363,7 +7363,7 @@ function teamCoordinatorProject(seat, term) {
   return [...counts].sort((one, other) => other[1] - one[1])[0]?.[0] ?? "";
 }
 
-function teamCoordinatorEntry(seat) {
+function teamCoordinatorEntry(seat, now) {
   const term = Number.isInteger(seat.term) ? seat.term : null;
   const agent = term === null ? null : paneAgents.get(term) ?? null;
   const run = seat.name || seat.run;
@@ -7388,6 +7388,10 @@ function teamCoordinatorEntry(seat) {
   const account = term === null || typeof paneAccountWords !== "function" ? null : paneAccountWords(term);
   const questions = Number(seat.mail) || 0;
   const letters = Number(seat.news) || 0;
+  // 넘겼고 아직 검수가 없는 일(t-119569): 검수는 코디의 몫이라 상황판의 「당신 차례」가 아니라 이 카드가 센다 —
+  // 몇 건이고, 가장 오래 기다린 것이 언제 넘어왔는지. 「통과」 단추는 상황판의 「코디가 검증할 보고」 줄 안에 있다.
+  const reviews = Number(seat.reviews) || 0;
+  const reviewAge = agoWord(Number(seat.reviews_since_ms) || now, now);
   const project = teamCoordinatorProject(seat, term);
   return {
     key: `c:${seat.run}`,
@@ -7407,6 +7411,8 @@ function teamCoordinatorEntry(seat) {
     questionsTip: t("sidebar.team.questionsTip", "이 코디가 답해야 할 질문 {{count}}통", { count: questions }),
     letters: letters > 0 ? t("sidebar.team.letters", "편지 {{count}}", { count: letters }) : "",
     lettersTip: t("sidebar.team.lettersTip", "이 코디가 아직 확인하지 않은 소식 {{count}}통", { count: letters }),
+    reviews: reviews > 0 ? t("sidebar.team.reviews", "검증 {{count}} · {{age}}", { count: reviews, age: reviewAge }) : "",
+    reviewsTip: t("sidebar.team.reviewsTip", "이 코디가 검증할 보고 {{count}}건 — 가장 오래된 것은 {{age}} 전에 넘어왔습니다", { count: reviews, age: reviewAge }),
     tip: paneRoleTip({ kind: "coordinator", seats: [{ name: seat.name, run: seat.run, generation: seat.generation ?? 0 }] }),
   };
 }
@@ -7505,7 +7511,7 @@ function sidebarTeamEntries(now) {
   for (const seat of sidebarTeamData.seats) {
     landing += Number(seat.landing) || 0;
     batched += Number(seat.batched) || 0;
-    entries.push(teamCoordinatorEntry(seat));
+    entries.push(teamCoordinatorEntry(seat, now));
     entries.push(...teamRunEntries(seat.run, byRun.get(seat.run) ?? []));
   }
   entries.push({
@@ -7542,7 +7548,7 @@ function teamEntrySaid(entry) {
         entry.taken ? 1 : 0, entry.term ?? "", t(TEAM_STATES[entry.state].key, TEAM_STATES[entry.state].word)].join("|");
     case "coordinator":
       return [entry.name, entry.project, entry.projectTip, entry.run, entry.agent ?? "", entry.now, entry.nowTip, entry.questions, entry.questionsTip,
-        entry.letters, entry.lettersTip, entry.tip, entry.term ?? "", entry.seat.held ? 1 : 0].join("|");
+        entry.letters, entry.lettersTip, entry.reviews, entry.reviewsTip, entry.tip, entry.term ?? "", entry.seat.held ? 1 : 0].join("|");
     case "mine":
       return [entry.ownWords, entry.ownTip, entry.takenWords, entry.takenTip, entry.own.join(","), entry.taken.join(",")].join("|");
     case "landing":
@@ -7602,8 +7608,9 @@ function buildTeamNode(entry) {
     const run = teamPart(line, "span", "team-run");
     const questions = teamPart(line, "span", "team-badge is-question");
     const letters = teamPart(line, "span", "team-badge is-letters");
+    const reviews = teamPart(line, "span", "team-badge is-reviews");
     const now = teamPart(node, "span", "team-now");
-    node.__parts = { face, name, project, run, questions, letters, now };
+    node.__parts = { face, name, project, run, questions, letters, reviews, now };
     return node;
   }
   if (entry.kind === "group") {
@@ -7697,6 +7704,7 @@ function dressTeamNode(node, entry) {
     writeTeamText(parts.run, entry.run);
     writeTeamText(parts.questions, entry.questions, entry.questionsTip);
     writeTeamText(parts.letters, entry.letters, entry.lettersTip);
+    writeTeamText(parts.reviews, entry.reviews, entry.reviewsTip);
     writeTeamText(parts.now, entry.now, entry.nowTip);
     node.classList.toggle("is-vacant", !entry.seat.held);
     node.disabled = entry.term === null;
@@ -7704,7 +7712,7 @@ function dressTeamNode(node, entry) {
     if (entry.term === null) delete node.dataset.teamTerm;
     else node.dataset.teamTerm = String(entry.term);
     writeTeamTip(node);
-    node.setAttribute("aria-label", [entry.name, entry.project, entry.run, entry.questions, entry.letters, entry.now].filter(Boolean).join(" · "));
+    node.setAttribute("aria-label", [entry.name, entry.project, entry.run, entry.questions, entry.letters, entry.reviews, entry.now].filter(Boolean).join(" · "));
     return;
   }
   const state = TEAM_STATES[entry.state];

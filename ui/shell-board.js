@@ -190,7 +190,8 @@ function deskBlock(desk, { id, quietHead = false }) {
 }
 
 /* 데스크 블록, 탭마다 읽는 차례대로 — DOM 순서가 곧 좁은 판의 순서다(t-67607, 시안 B).
- * 「지금」은 당신 차례·지금 도는 일·빌드·통합 묶음(11-10: 좁은 판에서 지금 움직이는 것이 빌드 기록보다 먼저 읽힌다 —
+ * 「지금」은 당신 차례·코디가 검증할 보고(t-119569: 접힌 한 줄, 넓은 판에서는 세 장 밑에 폭을 다 쓴다)·지금 도는
+ * 일·빌드·통합 묶음(11-10: 좁은 판에서 지금 움직이는 것이 빌드 기록보다 먼저 읽힌다 —
  * 넓은 판의 자리는 격자가 정한다), 「워커」는 워커의 표·에이전트 대화·이 기계, 「기록」은
  * 오늘 끝난 일의 표·누적 수(시안 B, t-70264)와 소식·과업 흐름이다. 「일정」에는 데스크 블록이
  * 없다 — 그 탭의 블록은 일정의 그릇 하나다(`paintBoardSchedule`, t-67482). 그리는 손은 블록에
@@ -198,6 +199,7 @@ function deskBlock(desk, { id, quietHead = false }) {
  * 탭은 고를 때 그린다(`chooseBoardTab`). */
 const DESK_BLOCKS = Object.freeze([
   { id: "asks", tab: "now", paint: paintDeskAsks },
+  { id: "reviews", tab: "now", paint: paintDeskReviews, quietHead: true },
   { id: "running", tab: "now", paint: paintDeskRunning },
   { id: "builds", tab: "now", paint: paintDeskBuilds },
   { id: "batches", tab: "now", paint: paintDeskBatches },
@@ -249,14 +251,19 @@ function paintCoordinatorDesk(view) {
 }
 
 /* 맨 위 문장의 N — 사람이 답해야 움직이는 것의 수, 백엔드가 센 그대로: 답할 우편
- * (`counts.mail`)과 결정·검증 대기 단계의 과업 수(`stages`). 당신 차례 카드가 그리는
- * 행은 이 수가 세는 바로 그것들이다(`boardAsks`). */
+ * (`counts.mail`)과 결정 단계의 과업 수(`stages`). 당신 차례 카드가 그리는 행은 이 수가 세는
+ * 바로 그것들이다(`boardAsks`). 검증을 기다리는 넘김(`reported`)은 세지 않는다(t-119569, 사람
+ * 11-20 「이건 cu 사라지지않음」): 검수는 코디의 몫이라 「코디가 검증할 보고」 줄과 조율 카드가 센다. */
 function deskOwed(ledger) {
   if (!ledger) return 0;
   // 아무도 돌아오지 않는 일(남은 일, t-71220)은 누구의 차례도 아니다 — 백엔드가 단계마다 따로 센
   // 그 수(`left`)를 뺀다.
   const stages = new Map((ledger.stages ?? []).map((one) => [one.stage, (Number(one.count) || 0) - (Number(one.left) || 0)]));
-  return (Number(ledger.counts?.mail) || 0) + (stages.get("gate") ?? 0) + (stages.get("reported") ?? 0);
+  // 코디 자리가 빈 런의 질문과 결정은 이 판에서 아무도 답할 수 없다(t-119569) — 그 런이 센 수만큼 뺀다.
+  // 자리가 빈 런만 `held: false`를 싣는다(`DeskRun::held`).
+  const seatless = (ledger.runs ?? []).filter((run) => run.held === false)
+    .reduce((sum, run) => sum + (Number(run.mail) || 0) + (Number(run.gates) || 0), 0);
+  return Math.max(0, (Number(ledger.counts?.mail) || 0) + (stages.get("gate") ?? 0) - seatless);
 }
 
 /* ---- 기계 띠 ---------------------------------------------------------------

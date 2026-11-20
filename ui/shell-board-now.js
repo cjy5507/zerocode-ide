@@ -49,6 +49,8 @@ const BOARD_ASKS_SHOWN = 4;
  * 판이 다시 그려져도 남는다. */
 const boardNowChoice = {
   asksAll: false, asksOpen: new Set(), agentsOpen: false, folded: new Set(), goalsAll: new Set(), raw: new Set(), reports: new Set(), answers: new Map(),
+  // 「코디가 검증할 보고」 줄을 펼쳤는가(t-119569) — 처음에는 접혀 있다: 사람의 차례가 아니다.
+  reviewsOpen: false,
 };
 
 /* 누른 결정·통과(행 키마다): 보내는 중인가, 원장이 받았는가, 원장이 돌려준 답, 틀린 말.
@@ -445,11 +447,17 @@ function boardRunRaw(row) {
 
 /* ---- 당신 차례 --------------------------------------------------------------
  *
- * 사람이 답해야 움직이는 것만: 워커의 질문(그 자리에서 답하기 — 답할 우편의 편지
- * 그대로, `paintDeskLetter`), 원장이 세운 결정(거두기·다시 띄우기·열기), 그리고
- * 보고가 와서 검증을 기다리는 과업(보고 읽기·통과). 셋 다 원장이 이미 고른 목록에서
- * 오고, 이 화면은 고르지도 세지도 않는다. */
-const BOARD_ASK_ORDER = Object.freeze(["question", "talk", "hold", "review"]);
+ * 사람만 풀 수 있는 것만(t-119569): 워커의 질문(그 자리에서 답하기 — 답할 우편의 편지
+ * 그대로, `paintDeskLetter`), 원장이 세운 결정(거두기·다시 띄우기·열기), 사람을 기다리는
+ * 대화. 넘김의 검수는 코디의 몫이라 여기 서지 않는다 — 「코디가 검증할 보고」 줄이 든다
+ * (`paintDeskReviews`). 코디 자리가 빈 런의 질문과 결정도 서지 않는다: 이 판에서 그 답을 실어
+ * 갈 자리가 없다. 셋 다 원장이 이미 고른 목록에서 오고, 이 화면은 고르지도 세지도 않는다. */
+const BOARD_ASK_ORDER = Object.freeze(["question", "talk", "hold"]);
+
+/* 그 런에 코디가 앉아 있는가(어느 창에서든) — 자리가 빈 런만 `held: false`를 싣는다(`DeskRun::held`). */
+function boardRunHeld(ledger, run) {
+  return (ledger?.runs ?? []).find((one) => one.run === run)?.held !== false;
+}
 
 function boardAsks(ledger, talks = []) {
   const asks = [];
@@ -457,20 +465,30 @@ function boardAsks(ledger, talks = []) {
   // 답을 받을 때까지 멈춰 있다.
   for (const group of talks) asks.push({ kind: "talk", key: `talk:${group.key}`, group, at: boardTalkSince(group) });
   for (const letter of Array.isArray(ledger?.mail) ? ledger.mail : []) {
+    if (!boardRunHeld(ledger, letter.run)) continue;
     asks.push({ kind: "question", key: `question:${deskLetterKey(letter)}`, letter, at: Number(letter.created_ms) || 0 });
   }
   for (const task of Array.isArray(ledger?.tasks) ? ledger.tasks : []) {
     // 아무도 돌아오지 않는 일은 누구의 차례도 아니다 — 남은 일의 무더기에 선다(`paintDeskLeft`).
-    if (task.left) continue;
+    if (task.left || !boardRunHeld(ledger, task.run)) continue;
     if (task.stage === "gate" && task.gate) {
       asks.push({ kind: "hold", key: `hold:${task.run}/${task.gate.id}`, task, at: Number(task.created_ms) || 0 });
-    } else if (task.stage === "reported") {
-      asks.push({ kind: "review", key: `review:${task.run}/${task.id}`, task, at: Number(task.created_ms) || 0 });
     }
   }
-  // 질문이 먼저 — 묻는 워커는 답을 받을 때까지 멈춰 있다. 그다음이 결정, 검토이고, 같은
+  // 질문이 먼저 — 묻는 워커는 답을 받을 때까지 멈춰 있다. 그다음이 결정이고, 같은
   // 종류 안에서는 오래된 것이 먼저다.
   return asks.sort((a, b) => BOARD_ASK_ORDER.indexOf(a.kind) - BOARD_ASK_ORDER.indexOf(b.kind) || a.at - b.at);
+}
+
+/* 코디가 검증할 보고(t-119569) — 넘겼고 아직 검수가 없는 일, 검증 철회 포함, 오래된 것부터. 아무도 돌아오지
+ * 않는 일은 원장이 이미 남은 일로 읽었다(`task.left`): 코디 자리가 빈 런의 넘김이 그렇다. */
+function boardReportsToVerify(ledger) {
+  const reviews = [];
+  for (const task of Array.isArray(ledger?.tasks) ? ledger.tasks : []) {
+    if (task.left || task.stage !== "reported" || !boardRunHeld(ledger, task.run)) continue;
+    reviews.push({ kind: "review", key: `review:${task.run}/${task.id}`, task, at: Number(task.created_ms) || 0 });
+  }
+  return reviews.sort((a, b) => a.at - b.at);
 }
 
 /* 이 창이 그 런의 코디네이터 자리를 들고 있는가 — 답·결정·통과는 그 자리로만 간다. */
@@ -882,8 +900,7 @@ function paintDeskAsks(block, now, view) {
     }
     if (ask.kind === "question") paintBoardQuestion(row, ask, now, view);
     else if (ask.kind === "talk") paintBoardTalkAsk(row, ask, now);
-    else if (ask.kind === "hold") paintBoardHold(row, ask, now, view);
-    else paintBoardReview(row, ask, now, view);
+    else paintBoardHold(row, ask, now, view);
     return row;
   }));
   writeHidden(list, shown.length === 0);
@@ -900,14 +917,68 @@ function paintDeskAsks(block, now, view) {
   writeTextContent(foot.lastElementChild, owed === 0
     ? t("board.now.asksNone", "지금 당신을 기다리는 결정은 없습니다.")
     : t("board.now.asksRest", "이 밖에 당신을 기다리는 결정은 없습니다."));
-  // 원장의 목록을 떠난 행은 누른 기록과 펼친 것을 데리고 간다.
-  const standing = new Set(asks.map((ask) => ask.key));
+  // 원장의 목록을 떠난 행은 누른 기록과 펼친 것을 데리고 간다 — 코디가 검증할 보고의 행도 같은 기록을 쓴다.
+  const standing = new Set([...asks, ...boardReportsToVerify(ledger)].map((ask) => ask.key));
   for (const key of boardPresses.keys()) if (!standing.has(key) && !boardPresses.get(key).sending) boardPresses.delete(key);
   for (const key of boardNowChoice.reports) if (!standing.has(key)) boardNowChoice.reports.delete(key);
   for (const key of boardNowChoice.asksOpen) if (!standing.has(key)) boardNowChoice.asksOpen.delete(key);
   for (const key of boardNowChoice.answers.keys()) if (!standing.has(key)) boardNowChoice.answers.delete(key);
   const letters = new Set(asks.filter((ask) => ask.letter).map((ask) => ask.letter.id));
   for (const id of deskDrafts.keys()) if (!letters.has(id)) deskDrafts.delete(id);
+  return true;
+}
+
+/* ---- 코디가 검증할 보고 (t-119569) ------------------------------------------
+ *
+ * 사람 11-20: 검증이 철회된 넘김 하나가 「당신 차례 · 답하지 않으면 그 일은 멈춰 있습니다」에 하루 남았다
+ * (「이건 cu 사라지지않음」). 검증은 코디의 몫이다 — 넘겼고 아직 검수가 없는 일은 사람의 차례에 서지 않고 이
+ * 접힌 한 줄이 센다. 몇 건이고 가장 오래 기다린 것이 언제인지는 사이드바의 조율 카드가 같은 데스크 답
+ * (`DeskRun::reviews`)으로 말한다. 펼치면 예전 검토 행 그대로다: 보고 읽기와 「통과」 — 사람이 직접 통과시킬
+ * 수 있고, 단추는 숨지 않는다(`paintBoardReview`). 수는 원장이 센 단계의 수다: 행은 단계마다 몇 줄만 온다. */
+function paintDeskReviews(block, now, view) {
+  const ledger = deskLedger;
+  if (!ledger) return false;
+  const reviews = boardReportsToVerify(ledger);
+  const stage = (ledger.stages ?? []).find((one) => one.stage === "reported");
+  const count = Math.max(reviews.length, (Number(stage?.count) || 0) - (Number(stage?.left) || 0));
+  if (count === 0) return false;
+  writeTextContent(block.firstElementChild, t("board.now.reviewsHead", "코디가 검증할 보고"));
+  const body = block.lastElementChild;
+  let head = body.querySelector(":scope > .board-goal");
+  let list = body.querySelector(":scope > .board-asks");
+  if (!head || !list) {
+    head = deskElement("div", "board-goal is-done is-reviews");
+    const fold = deskElement("button", "board-goal-fold");
+    fold.type = "button";
+    fold.innerHTML = icon("chevron", false);
+    fold.append(deskElement("span", "board-goal-name"));
+    fold.onclick = () => {
+      boardNowChoice.reviewsOpen = !boardNowChoice.reviewsOpen;
+      paintCoordinatorDesk(view);
+    };
+    head.append(fold, deskElement("span", "board-goal-note"));
+    list = deskElement("ol", "board-asks is-coordinator");
+    body.replaceChildren(head, list);
+  }
+  const open = boardNowChoice.reviewsOpen;
+  const fold = head.querySelector(".board-goal-fold");
+  writeAttribute(fold, "aria-expanded", String(open));
+  fold.querySelector(".icon")?.classList.toggle("is-open", open);
+  writeTextContent(fold.querySelector(".board-goal-name"), t("board.now.reviewsLine", "코디가 검증할 보고 {{count}}건", { count }));
+  writeTextContent(head.querySelector(".board-goal-note"),
+    t("board.now.reviewsNote", "검증은 코디의 몫입니다 · 펼치면 보고를 읽고 직접 통과시킬 수도 있습니다"));
+  const shown = open ? reviews : [];
+  const held = new Map([...list.children].map((node) => [node.dataset.ask, node]));
+  reconcileElementOrder(list, shown.map((ask) => {
+    let row = held.get(ask.key);
+    if (!row) {
+      row = boardAskShell(ask.kind);
+      row.dataset.ask = ask.key;
+    }
+    paintBoardReview(row, ask, now, view);
+    return row;
+  }));
+  writeHidden(list, shown.length === 0);
   return true;
 }
 
