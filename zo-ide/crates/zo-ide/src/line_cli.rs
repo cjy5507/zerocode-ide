@@ -1159,6 +1159,12 @@ fn send_args(job: &Job, to: &str, took: Duration) -> Vec<String> {
 
 /// The ledger's command as this machine runs it.
 fn ledger_command() -> Command {
+    let endpoint = std::env::var_os(zerocode_core::hook::ENDPOINT_ENV);
+    ledger_command_on(std::env::var_os("PATH").as_deref(), endpoint.as_deref().map(Path::new), cfg!(windows))
+}
+
+/// The ledger's command on a machine whose `PATH` and window endpoint are these.
+fn ledger_command_on(_path: Option<&OsStr>, _endpoint: Option<&Path>, _windows: bool) -> Command {
     Command::new("zerocode-orc")
 }
 
@@ -1630,6 +1636,69 @@ mod tests {
             assert_eq!(args[6], format!("zo line {}: 검사 — waiting (rc -1, 3s)", job.id));
             assert_eq!(args[7..9], ["--retry-request".to_owned(), format!("zo-line-{}", job.id)]);
         }
+    }
+
+    /// Red → green (t-119309, I-t118403-W1): zo's line runs the ledger's command
+    /// as zo's Agent tool does. On Windows that is the `.ps1` the window installs,
+    /// found on PATH or beside the window's endpoint, through Windows `PowerShell`:
+    /// a bare `zerocode-orc` finds only a `zerocode-orc.exe` there, which the
+    /// window does not install, so no end the line told on Windows went anywhere.
+    /// Elsewhere the command itself; found nowhere, the bare name, whose failure to
+    /// start the job's log says.
+    #[test]
+    fn the_line_runs_the_ledgers_command_as_zos_agent_tool_does() {
+        let root = tempfile::tempdir().expect("a folder");
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("folders");
+        for name in ["zerocode-orc", "zerocode-orc.ps1", "zerocode-orc.cmd"] {
+            std::fs::write(bin.join(name), "a fixture command; never run here").expect("written");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(bin.join("zerocode-orc"), std::fs::Permissions::from_mode(0o755)).expect("runnable");
+        }
+        let ps1 = bin.join("zerocode-orc.ps1");
+        let on_windows = ledger_command_on(Some(bin.as_os_str()), None, true);
+        assert_eq!(on_windows.get_program(), "powershell.exe", "a bare name finds no `.cmd` or `.ps1` on Windows");
+        let said: Vec<&OsStr> = on_windows.get_args().collect();
+        let policy = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"].map(OsStr::new);
+        assert_eq!(said, [&policy[..], &[ps1.as_os_str()][..]].concat());
+        let elsewhere = ledger_command_on(Some(bin.as_os_str()), None, false);
+        assert_eq!((elsewhere.get_program(), elsewhere.get_args().count()), (bin.join("zerocode-orc").as_os_str(), 0));
+        let endpoint = root.path().join("application/agent-hooks/endpoint.env");
+        let beside = zerocode_core::agent_shims::orchestration_program(&endpoint, true).expect("a place");
+        std::fs::create_dir_all(beside.parent().expect("a folder")).expect("folders");
+        std::fs::write(&beside, "a fixture command; never run here").expect("written");
+        let empty = root.path().join("empty");
+        let found = ledger_command_on(Some(empty.as_os_str()), Some(endpoint.as_path()), true);
+        assert_eq!(found.get_args().last(), Some(beside.as_os_str()), "nothing on PATH: the one beside the window's endpoint");
+        let none = ledger_command_on(None, None, true);
+        assert_eq!((none.get_program(), none.get_args().count()), (OsStr::new("zerocode-orc"), 0));
+    }
+
+    /// The words a tell gives the ledger on Windows reach the window's `.ps1`
+    /// whole through `PowerShell`'s `-File`: the flags as words, and a body with
+    /// quotes, `$(`, a backtick, `%PATH%`, a line break, Korean and a dash. Run
+    /// with `--ignored` where `pwsh` is on PATH; `pwsh` on this Mac stands in for
+    /// Windows `PowerShell`, and how Windows quotes the command line it starts
+    /// (`CreateProcess`) is not seen here (t-119309).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "needs pwsh on PATH: cargo test -- --ignored"]
+    fn the_words_a_tell_gives_powershell_reach_the_script_whole() {
+        let root = tempfile::tempdir().expect("a folder");
+        std::fs::write(root.path().join("zerocode-orc.ps1"), "[System.IO.File]::WriteAllLines($env:ORC_SEEN, [string[]]$args)\n")
+            .expect("the fake");
+        let seen = root.path().join("seen");
+        let put = Put { what: "검사 \"quoted\" $(not run) `tick` %PATH%\nsecond line — 끝".to_owned(), command: words(&["true"]), ..Put::default() };
+        let job = Job { notify_run: Some("run-put".to_owned()), ..job_of(&put, Path::new("/")) };
+        let told = send_args(&job, "worker:w-7", Duration::from_secs(1));
+        let windows = ledger_command_on(Some(root.path().as_os_str()), None, true);
+        let status = Command::new("pwsh").args(windows.get_args()).args(&told).env("ORC_SEEN", &seen).status().expect("pwsh runs");
+        assert!(status.success(), "{status}");
+        let got = std::fs::read_to_string(&seen).expect("what the script got");
+        assert_eq!(got, format!("{}\n", told.join("\n")), "{told:?}");
     }
 
     /// The run a pane stands in is the one `run-current` names; an answer that
