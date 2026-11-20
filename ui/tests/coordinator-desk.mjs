@@ -501,15 +501,16 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       };
     });
     const shut = await readMail();
-    ok("the questions to answer wait under 당신 차례 with the decisions and the reports, oldest first, four at a time",
-      shut.asksHead === "당신 차례" && shut.asks.length === 4 && shut.asksMore === "10개 더 보기" &&
-      shut.title === "답할 일 14개 — 나머지는 저절로 돕니다" &&
+    // The six reports are the coordinator's to verify (t-119569): they wait on its own line, not here.
+    ok("the questions to answer wait under 당신 차례 with the decisions, oldest first, four at a time — the reports do not",
+      shut.asksHead === "당신 차례" && shut.asks.length === 4 && shut.asksMore === "4개 더 보기" &&
+      shut.title === "답할 일 8개 — 나머지는 저절로 돕니다" && !shut.asks.some((key) => key.startsWith("review:")) &&
       shut.asksFoot === "이 밖에 당신을 기다리는 결정은 없습니다.", JSON.stringify(shut));
     await page.click('#board-view [data-desk-block="asks"] .board-asks-more');
     await settleMail();
     const asked = await readMail();
     ok("opened, 당신 차례 holds every question the ledger owes (t-9456) — the questions alone among the letters, oldest first",
-      asked.asks.length === 14 && asked.asksMore === "접기" &&
+      asked.asks.length === 8 && asked.asksMore === "접기" &&
       asked.questions.map((one) => one.key).join() === [901, 906, 908, 913, 915, 920].map((n) => `run-desk/m-${n}`).join() &&
       asked.questions.every((one) => one.kind === "질문"), JSON.stringify(asked));
     await page.click('#board-view [data-desk-block="asks"] .board-asks-more');

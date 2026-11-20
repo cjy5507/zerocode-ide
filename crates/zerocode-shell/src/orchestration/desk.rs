@@ -2884,6 +2884,86 @@ mod tests {
         assert_eq!(after["examined"]["base"], "main", "{after}");
     }
 
+    /// The coordinator card counts the work handed in that waits on its review,
+    /// with when the longest-waiting of it came in, and the decisions in front
+    /// of its tasks (t-119569): a review is the coordinator's to write, so the
+    /// board's person's turn no longer stands it, and the card says it instead.
+    /// Work nobody is coming back to is no card's — the board's piles hold it.
+    #[test]
+    fn a_runs_card_counts_its_reports_to_verify_and_its_decisions() {
+        let now = crate::now_epoch_ms();
+        let minute = 60_000;
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("card-reviews", now - 60 * minute);
+        ledger
+            .seat_coordinator(&run, "team-lead/%1", None, now - 59 * minute)
+            .expect("a coordinator");
+        // Somebody still at the run whoever sits, so it stays in play below.
+        ledger
+            .start_worker(&run, "codex", ("team-card", "%9"), None, now - 58 * minute)
+            .expect("a worker at the run");
+        let hand_in = |ledger: &mut Ledger, title: &str, pane: &str, at: i64| {
+            let task = ledger
+                .create_task(&run, "x".into(), title.into(), vec![], None, at)
+                .expect("a task");
+            let started = ledger
+                .start_worker(&run, "claude", ("team-card", pane), Some(&task), at + 1)
+                .expect("a worker");
+            ledger
+                .post(
+                    &run,
+                    Draft {
+                        from: worker_address(&started.worker),
+                        to: ledger.run(&run).expect("the run").address(),
+                        kind: MessageKind::WorkerDone,
+                        body: Text::from(r#"{"ok":true,"head":"abcdef1234567"}"#.to_string()),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: None,
+                        task: Some(task.clone()),
+                        dispatch: started.dispatch.clone(),
+                    },
+                    at + 2,
+                )
+                .expect("the report");
+            task
+        };
+        hand_in(&mut ledger, "older", "%2", now - 40 * minute);
+        hand_in(&mut ledger, "newer", "%3", now - 10 * minute);
+        let asked = ledger
+            .create_task(&run, "x".into(), "asked".into(), vec![], None, now - 5 * minute)
+            .expect("a task");
+        ledger
+            .create_gate(&run, &asked, "rpc or rest?".into(), vec![], now - 4 * minute)
+            .expect("a decision");
+
+        // Read as the sidebar reads it: the JSON of the card.
+        let card_of = |ledger: &Ledger| -> serde_json::Value {
+            desk_json(ledger)["runs"]
+                .as_array()
+                .and_then(|runs| runs.iter().find(|one| one["run"] == run.as_str()))
+                .cloned()
+                .unwrap_or_else(|| panic!("the run has no card"))
+        };
+        let card = card_of(&ledger);
+        assert_eq!(card["reviews"], 2, "{card}");
+        assert_eq!(
+            card["reviews_since_ms"],
+            now - 40 * minute + 2,
+            "the oldest report's hand-in: {card}"
+        );
+        assert_eq!(card["gates"], 1, "{card}");
+
+        // A run nobody sits in: its reports are left behind (the board's pile), so no card counts them.
+        ledger.team_dissolved("team-lead", now);
+        let card = card_of(&ledger);
+        assert_eq!(card["held"], false, "{card}");
+        assert_eq!(card["reviews"], 0, "{card}");
+        assert_eq!(card["reviews_since_ms"], serde_json::Value::Null, "{card}");
+        assert_eq!(card["gates"], 1, "the decision still stands: {card}");
+    }
+
     /// Free words answer a decision somebody opened, never a hold the ledger
     /// opened (review t-68962 P3 ⑤): the worker that exited before reporting
     /// left a hold that takes harvest or dispatch; the person's own question

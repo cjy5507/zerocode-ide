@@ -153,9 +153,51 @@ export async function testStackedWork(browser, origin, ok) {
       return { tip: document.getElementById("activity-pile-tab").dataset.tip, tone: count.dataset.tone, hidden: count.hidden };
     });
     ok(
-      "a failed build of the project turns the tab's words and tone to it",
-      halted.tip === "쌓인 일 8 — 빌드 실패" && halted.tone === "halt" && halted.hidden === false,
+      "a failed build of the project turns the tab's words and tone to it, and the tip still says what the number counts",
+      halted.tip === "쌓인 일 — main에 아직 없는 변경 8 · 빌드 실패" && halted.tone === "halt" && halted.hidden === false,
       JSON.stringify(halted),
+    );
+
+    /* t-119569: one change is counted once, however many checkouts hold it — branches stacked on each other hold the
+     * same commits, and a stack's checkout holds copies of other checkouts' commits (the person's 「쌓인 일 182」 was
+     * 89 changes on 11-20). The key of each commit's change is the backend's (`landing.changes`); a branch's own row
+     * still says its own commits. */
+    const shared = await page.evaluate(async () => {
+      const held = window.__ANSWER__.project_catalog;
+      const catalog = held();
+      const keys = (from, count) => Array.from({ length: count }, (_, at) => `c${from + at}`);
+      window.__ANSWER__.project_catalog = () => catalog.map((project) => ({
+        ...project,
+        worktrees: project.worktrees.map((worktree) => worktree.landing?.state !== "unlanded" ? worktree
+          : { ...worktree, landing: { ...worktree.landing,
+            changes: worktree.landing.ahead === 6 ? keys(0, 6) : keys(4, 2) } }),
+      }));
+      window.__PILE_BUILDS__ = window.__PILE_BUILDS__.map((one) => ({ ...one, state: "running", running_since_ms: Date.now() - 60_000,
+        steps: one.steps.map((step) => ({ ...step, state: "running", secs: undefined })) }));
+      await askBoardBuilds();
+      await refreshWorktrees();
+      const tab = document.getElementById("activity-pile-tab");
+      tab.click();
+      await window.__PAINTED__();
+      const panel = document.getElementById("activity-pile");
+      const said = {
+        count: document.getElementById("activity-pile-count").textContent,
+        tip: tab.dataset.tip,
+        total: panel.querySelector(".pile-total")?.textContent.replace(/\s+/g, " ").trim() ?? "",
+        branches: [...panel.querySelectorAll(".pile-branch-count")].map((one) => one.textContent),
+      };
+      // Back as the scenes after this one found it: the catalog without keys, and source control up.
+      panel.querySelector(".pile-scm")?.click();
+      await window.__PAINTED__();
+      window.__ANSWER__.project_catalog = held;
+      await refreshWorktrees();
+      return said;
+    });
+    ok(
+      "a change two checkouts both hold is counted once on the tab and in the panel's total, while each branch still says its own commits",
+      shared.count === "6" && shared.tip === "쌓인 일 — main에 아직 없는 변경 6" && shared.total === "6main에 없는 변경 · 가지 2"
+        && JSON.stringify(shared.branches) === JSON.stringify(["6", "2"]),
+      JSON.stringify(shared),
     );
 
     /* t-84799 B9: the gate line reads the schedule's last answer — the gate the board's own line names — and keeps its dash

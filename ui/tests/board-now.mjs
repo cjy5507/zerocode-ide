@@ -487,6 +487,11 @@ function readNow() {
     } : null,
     askMeta: [...view.querySelectorAll('[data-desk-block="asks"] .board-asks > li')].map((item) =>
       (item.querySelector(".board-desk-letter-who") ?? item.querySelector(".board-ask-meta"))?.textContent),
+    // The reports wait on the coordinator's line (t-119569): folded to one line until it is opened.
+    reviewsLine: view.querySelector('[data-desk-block="reviews"] .board-goal-name')?.textContent ?? null,
+    reviewsOpen: view.querySelector('[data-desk-block="reviews"] .board-goal-fold')?.getAttribute("aria-expanded") ?? null,
+    reviewMeta: [...view.querySelectorAll('[data-desk-block="reviews"] .board-asks > li')].map((item) =>
+      item.querySelector(".board-ask-meta")?.textContent),
     badge: (() => {
       const kind = view.querySelector('[data-desk-block="asks"] .board-ask-kind');
       return kind ? { ground: getComputedStyle(kind).backgroundColor, ink: getComputedStyle(kind).color } : null;
@@ -516,8 +521,9 @@ export async function testBoardNow(browser, origin, ok) {
       head.tab === "now" && head.ledger === "on" && JSON.stringify(head.tabs)
         === JSON.stringify([["now", "true", 0], ["schedule", "false", -1], ["workers", "false", -1], ["history", "false", -1]]),
       JSON.stringify(head));
-    ok("the sentence on top counts what waits on the person — one question and one review",
-      head.title === "답할 일 2개 — 나머지는 저절로 돕니다", JSON.stringify(head));
+    // A report is the coordinator's to review (t-119569, the person 11-20: 「이건 cu 사라지지않음」): it is no figure here.
+    ok("the sentence on top counts what waits on the person — the one question; the report is the coordinator's",
+      head.title === "답할 일 1개 — 나머지는 저절로 돕니다", JSON.stringify(head));
     ok("the second line names what ends next and when — the running build, at the time its steps' usual times add up to",
       /^다음으로 끝나는 일은 새 버전 발행 v1\.1\.84, .+쯤입니다\.$/.test(head.sub), head.sub);
 
@@ -586,9 +592,11 @@ export async function testBoardNow(browser, origin, ok) {
     ok("the badge of your turn is the draft's solid blue under white words",
       now.badge?.ink === "rgb(255, 255, 255)" && now.badge?.ground === "rgb(0, 98, 209)", JSON.stringify(now.badge));
     ok("each row of your turn carries the draft's line: the goal, the task and its id, the model, how long ago",
-      now.askMeta[0] === "일정 타임라인 t-67490 · Opus 5.5 · 3분 전"
-        && now.askMeta[1] === "컴퓨터 사용을 사람처럼 · 헬퍼 회차 A·B·C t-66790 · Sonnet 5.5 · 12분 전 — 통과시키면 다음 발행에 같이 실립니다",
+      now.askMeta.length === 1 && now.askMeta[0] === "일정 타임라인 t-67490 · Opus 5.5 · 3분 전",
       JSON.stringify(now.askMeta));
+    ok("the report waits on the coordinator's line instead, folded to one line that counts it",
+      now.reviewsLine === "코디가 검증할 보고 1건" && now.reviewsOpen === "false" && now.reviewMeta.length === 0,
+      JSON.stringify({ line: now.reviewsLine, open: now.reviewsOpen, rows: now.reviewMeta }));
 
     /* ---- 긴 질문은 세 줄로 접힌다 (11-08 사람의 화면: 질문 하나가 열세 줄로 카드 높이를 다 썼다) ---- */
     await draftScene(page, { longAsk: true });
@@ -634,12 +642,21 @@ export async function testBoardNow(browser, origin, ok) {
         && opened.build.rows[3] === "발행약 2분",
       JSON.stringify({ folded: now.build?.rows, opened: opened.build?.rows }));
 
-    /* ---- 당신 차례: 질문·검토, 행 안의 첫 행동 ---- */
+    /* ---- 당신 차례: 질문, 행 안의 첫 행동 — 넘김의 검수는 코디가 검증할 보고 줄에(t-119569) ---- */
     const asks = await page.evaluate(() => [...document.querySelectorAll('#board-view [data-desk-block="asks"] .board-asks > li')]
       .map((row) => ({ key: row.dataset.ask, buttons: [...row.querySelectorAll("button:not([hidden])")].map((one) => one.textContent) })));
-    ok("your turn holds the question first, with its answer button, then the report with read and pass",
-      asks.length === 2 && asks[0].key.startsWith("review:") === false && asks[0].buttons.includes("답하기")
-        && asks[1].buttons.includes("보고 읽기") && asks[1].buttons.includes("통과"), JSON.stringify(asks));
+    ok("your turn holds the question alone, with its answer button — no report stands there",
+      asks.length === 1 && asks[0].key.startsWith("review:") === false && asks[0].buttons.includes("답하기"), JSON.stringify(asks));
+    await page.click('#board-view [data-desk-block="reviews"] .board-goal-fold');
+    await fullBoard(page);
+    const reviews = await page.evaluate(() => [...document.querySelectorAll('#board-view [data-desk-block="reviews"] .board-asks > li')]
+      .map((row) => ({ key: row.dataset.ask, meta: row.querySelector(".board-ask-meta")?.textContent,
+        buttons: [...row.querySelectorAll("button:not([hidden])")].map((one) => one.textContent) })));
+    ok("opened, the coordinator's line holds the report with read and pass — the person may still pass it — and the draft's line",
+      reviews.length === 1 && reviews[0].key === "review:run-desk/t-66790"
+        && reviews[0].buttons.includes("보고 읽기") && reviews[0].buttons.includes("통과")
+        && reviews[0].meta === "컴퓨터 사용을 사람처럼 · 헬퍼 회차 A·B·C t-66790 · Sonnet 5.5 · 12분 전 — 통과시키면 다음 발행에 같이 실립니다",
+      JSON.stringify(reviews));
     await page.click('#board-view [data-ask^="review:"] [data-act="pass"]');
     const passed = await page.evaluate(async () => {
       await new Promise((done) => setTimeout(done, 0));
@@ -684,7 +701,7 @@ export async function testBoardNow(browser, origin, ok) {
     ok("the legend reads running, waiting its turn, stopped and finished",
       JSON.stringify(runs.legend) === JSON.stringify(["도는 중", "차례 기다림", "멈춤", "끝남"]), JSON.stringify(runs.legend));
     // Today's count lives on the History tab (11-08): the foot keeps its door, so the waiting row's wait has its figure.
-    ok("a report waiting on you is your turn's row, not a finished one: three finished tasks fold, and the foot is the door to today's record",
+    ok("a report waiting on a review is no finished row of the table: three finished tasks fold, and the foot is the door to today's record",
       !now.reported && JSON.stringify(now.doneFold) === JSON.stringify(["끝난 과업 3개"])
         && now.runsFoot === "오늘 끝난 일 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
       JSON.stringify(now));
@@ -694,6 +711,7 @@ export async function testBoardNow(browser, origin, ok) {
       await draftScene(page, { withdrawn: why });
       return page.evaluate(() => {
         boardPresses.clear();
+        boardNowChoice.reviewsOpen = true;
         paintCoordinatorDesk(document.querySelector("#board-view"));
         const row = document.querySelector('#board-view [data-ask="review:run-desk/t-66790"]');
         return {
@@ -735,7 +753,7 @@ export async function testBoardNow(browser, origin, ok) {
     });
     ok("보고 읽기 on a withdrawn row opens the report, turns into 보고 접기 and writes nothing to the ledger",
       reread.open === "true" && reread.name === "보고 접기" && reread.report && reread.sent === 1, JSON.stringify(reread));
-    await page.evaluate(() => boardNowChoice.reports.clear());
+    await page.evaluate(() => { boardNowChoice.reports.clear(); boardNowChoice.reviewsOpen = false; });
 
     /* ---- 결정: 우리말 한 줄 · 원문은 접힌 안 · 단추는 원장의 두 답 ---- */
     await draftScene(page, { holds: true });

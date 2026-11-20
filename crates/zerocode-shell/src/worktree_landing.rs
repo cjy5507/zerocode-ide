@@ -1660,6 +1660,51 @@ mod tests {
         serde_json::to_value(landing).expect("a landing serializes")
     }
 
+    /// The 「쌓인 일」 tab counts a change once (t-119569): each unlanded commit's
+    /// change key rides on its row, the same for the same change in two
+    /// checkouts — a branch stacked on another holds the same commit, and a
+    /// stack's checkout holds a copy picked onto it — and another key for
+    /// another change. Summed checkout by checkout, 89 changes read as 178 on
+    /// 11-20.
+    #[test]
+    fn an_unlanded_rows_changes_are_keyed_alike_across_checkouts_and_copies() {
+        let bench = Bench::open();
+        let work = bench.worktree("work");
+        bench.commit(&work, "w.txt", "work\n");
+        let original = git(&work, &["rev-parse", "HEAD"]);
+        let stacked = bench.root.join("stacked");
+        git(
+            &bench.repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "wt/stacked",
+                &stacked.to_string_lossy(),
+                "wt/work",
+            ],
+        );
+        bench.commit(&stacked, "s.txt", "stacked\n");
+        let stack = bench.worktree("stack");
+        bench.commit(&stack, "base.txt", "elsewhere\n");
+        git(&stack, &["cherry-pick", &original]);
+        assert_ne!(git(&stack, &["rev-parse", "HEAD"]), original, "a copy");
+
+        let keys = |at: &Path| -> Vec<String> {
+            serde_json::from_value(told(&bench.landing(at))["changes"].clone()).unwrap_or_default()
+        };
+        let (own, stacked_keys, stack_keys) = (keys(&work), keys(&stacked), keys(&stack));
+        assert_eq!(own.len(), 1, "{own:?}");
+        assert_eq!((stacked_keys.len(), stack_keys.len()), (2, 2), "{stacked_keys:?} {stack_keys:?}");
+        assert!(stacked_keys.contains(&own[0]), "the stacked branch holds the same commit");
+        assert!(stack_keys.contains(&own[0]), "the stack holds a copy of the same change");
+        let mut all: Vec<&String> = own.iter().chain(&stacked_keys).chain(&stack_keys).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), 3, "the work, the stacked branch's own and the stack's own: {all:?}");
+    }
+
     /// A checkout whose work is in the compare ref, the way a project that
     /// ignores its build output cuts one: the rule is on main before the
     /// checkout exists.

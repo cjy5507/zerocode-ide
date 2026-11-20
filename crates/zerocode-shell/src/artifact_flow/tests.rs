@@ -715,6 +715,82 @@ fn work_nobody_is_coming_back_to_stands_in_its_piles_and_not_in_now() {
     assert_eq!(json["unreviewed"]["tasks"][0]["left"], "unreviewed");
 }
 
+/// 「지금」 counts work somebody can carry on (t-119569): a run whose coordinator
+/// seat is empty and whose workers are all released folds its 「지금」 work —
+/// verified and not landed, here — into one line of its own, which names
+/// nothing for a press; the same work stands in 「지금」 again once somebody sits.
+#[test]
+fn a_run_nobody_can_carry_on_folds_its_now_into_one_line() {
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("acme-vacant", at(-400));
+    assert!(ledger.state_run_project(&run, PROJECT, SEAT, at(-400)));
+    ledger
+        .seat_coordinator(&run, SEAT, None, at(-400))
+        .expect("the coordinator sits");
+    let done = ledger
+        .create_task(
+            &run,
+            "do it".to_string(),
+            "verified, not landed".to_string(),
+            vec![],
+            None,
+            at(-30),
+        )
+        .expect("a task");
+    let attempt = handed(
+        &mut ledger,
+        &run,
+        &done,
+        "%2",
+        (-29, -28),
+        r#"{"ok":true,"head":"a1a1a1a"}"#,
+    );
+    ledger
+        .update_task(
+            &run,
+            &done,
+            None,
+            Some(r#"{"verified":true}"#.to_string()),
+            coordinator(Some(attempt), Some("a1a1a1a")),
+            at(-27),
+        )
+        .expect("the review");
+    let worker = ledger.run(&run).expect("the run").workers[0].id.clone();
+    ledger.begin_release(&worker).expect("the release begins");
+    ledger.finish_release(&worker, None);
+    ledger.team_dissolved("team-acme", at(-26));
+    let git = GitFacts::default();
+    let read = |ledger: &Ledger| {
+        assemble(&Reading {
+            root: "/acme/app",
+            project: Some(PROJECT),
+            ledger: Some(ledger),
+            git: &git,
+            table: &table(),
+            now_ms: at(READ_AT),
+        })
+    };
+
+    // Read as the window reads it: the flow's JSON.
+    let vacant = |flow: &Flow| -> serde_json::Value {
+        serde_json::to_value(flow).expect("the flow serializes")["vacant"].clone()
+    };
+    let flow = read(&ledger);
+    assert!(ids(&flow.now).is_empty(), "{flow:#?}");
+    let pile = vacant(&flow);
+    assert_eq!(pile["tasks"][0]["task"], done.as_str(), "{pile}");
+    assert_eq!(pile["tasks"][0]["stage"], "verified", "{pile}");
+    assert_eq!(pile["tasks"].as_array().map(Vec::len), Some(1), "{pile}");
+    assert_eq!(pile["named"], serde_json::json!([]), "a press names nothing here: {pile}");
+
+    ledger
+        .seat_coordinator(&run, SEAT, None, at(-1))
+        .expect("a coordinator sits again");
+    let flow = read(&ledger);
+    assert_eq!(ids(&flow.now), [done.as_str()], "{flow:#?}");
+    assert_eq!(vacant(&flow)["tasks"], serde_json::json!([]), "{flow:#?}");
+}
+
 /// The ledger's landing moment is when the coordinator wrote `merged`
 /// (`AfterReport::merged_ms`), and it stamps none for a release
 /// (`deployed_ms` is always empty): git's merge commit and release say when,
