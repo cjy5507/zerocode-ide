@@ -41,7 +41,9 @@ zo line forget <job> · zo line restore <job>
   first slot only (a whole suite); --quiet runs alone (a measurement): from
   its turn nothing new starts until the machine is empty. Nothing starts while
   the line is paused or the disk is below its floor; near it, the folders of
-  idle slots go first. Cargo builds in the slot's own folder (zo's home,
+  idle slots go first. The floor is 16 GiB free, or the whole GiB that
+  ZO_LINE_DISK_FLOOR_GIB names in the environment of the zo that put the job
+  in (0 for none). Cargo builds in the slot's own folder (zo's home,
   build-slots/targets/<slot>), the job's workspace crates removed from it
   before and after, so only registry crates carry over; a job that names its
   CARGO_TARGET_DIR builds there, untouched. `run` exits as its
@@ -71,6 +73,12 @@ const WAITER_ENV: &str = "ZO_LINE_WAITER";
 const WAITER_START: Duration = Duration::from_secs(2);
 /// How often that process looks whether it does.
 const WAITER_LOOK: Duration = Duration::from_millis(10);
+/// The variable that names the line's disk floor in whole GiB, `0` for none
+/// (`floor_gib`). A job's waiter has the environment of the `zo` that put the
+/// job in, so the floor is that one's. The line's own integration tests give
+/// their line none: below 17 GiB free they said `skipped:` and passed in no
+/// time (t-119309).
+const FLOOR_ENV: &str = "ZO_LINE_DISK_FLOOR_GIB";
 /// How long after a job is put in its waiter may still be taking its lock:
 /// `add` waits `WAITER_START` for it and writes the record, and on a very busy
 /// machine the lock stands only after that (`end_orphans`).
@@ -224,6 +232,7 @@ fn cap_secs(word: &str) -> Result<u32, String> {
 /// One sentence a person reads: why nothing was done.
 pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
     let verb = parse(args)?;
+    let floor_gib = floor_gib(std::env::var_os(FLOOR_ENV).as_deref())?;
     let home = line::zo_home().ok_or_else(|| "no home folder to keep the line in".to_owned())?;
     let line = Line::at(&home);
     line.make().map_err(|error| error.to_string())?;
@@ -238,7 +247,7 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Ended, String> {
     let machine = MachineRules {
         slots,
         at_once,
-        floor_gib: line::DISK_FLOOR_DEFAULT_GIB,
+        floor_gib,
         look_every: LOOK_EVERY,
         env: |name| std::env::var_os(name),
         free: free_bytes,
@@ -869,6 +878,19 @@ fn alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn alive(_pid: u32) -> bool {
     true
+}
+
+/// The disk floor in GiB that `value` of `FLOOR_ENV` names: the line's default
+/// when it is unset or empty, `0` for none. A word that is no whole number of
+/// GiB is refused, never read as the default — a floor someone set and the
+/// line ignored would hold or start jobs nobody expected.
+fn floor_gib(value: Option<&OsStr>) -> Result<u64, String> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(line::DISK_FLOOR_DEFAULT_GIB);
+    };
+    value.to_str().and_then(|word| word.parse().ok()).ok_or_else(|| {
+        format!("{FLOOR_ENV} takes a whole number of GiB, 0 for no floor — not `{}`", value.to_string_lossy())
+    })
 }
 
 /// `free` bytes of disk below `floor_gib`.
@@ -1854,6 +1876,25 @@ mod tests {
         assert_eq!(run_job(&line, &machine, &job.id, false), Ok(0));
         let left: Vec<_> = std::fs::read_dir(slots.join("targets")).expect("the folders' folder").collect();
         assert!(left.is_empty(), "both idle slots' folders went: {left:?}");
+    }
+
+    /// The line's floor is its default unless `ZO_LINE_DISK_FLOOR_GIB` names
+    /// another in whole GiB, 0 for none; a word that is no such number is
+    /// refused, not read as the default (t-119309). No floor holds nothing
+    /// back, a full disk too.
+    #[test]
+    fn a_floor_the_environment_names_is_the_lines_and_a_word_that_is_none_is_refused() {
+        assert_eq!(floor_gib(None), Ok(line::DISK_FLOOR_DEFAULT_GIB));
+        assert_eq!(floor_gib(Some(OsStr::new(""))), Ok(line::DISK_FLOOR_DEFAULT_GIB), "set empty is unset");
+        assert_eq!(floor_gib(Some(OsStr::new("0"))), Ok(0));
+        assert_eq!(floor_gib(Some(OsStr::new("24"))), Ok(24));
+        for word in ["-1", "16GiB", "1.5", " 8", "lots"] {
+            let refused = floor_gib(Some(OsStr::new(word))).expect_err(word);
+            assert!(refused.contains(FLOOR_ENV) && refused.contains(&format!("`{word}`")), "{refused}");
+        }
+        assert!(!disk_low(Some(0), 0), "no floor holds nothing back, whatever the disk holds");
+        assert!(disk_low(Some((1 << 30) - 1), 1));
+        assert!(USAGE.contains(FLOOR_ENV), "{USAGE}");
     }
 
     /// `zo line list` answers what an agent asks it — is the line busy, how
