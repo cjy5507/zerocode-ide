@@ -47,22 +47,22 @@ final class WindowNumberSourceTests: XCTestCase {
             focused.range(of: "case let .window(looked):\n        if !CFEqual(focusedWindow, looked), !belongs(focusedWindow, to: looked) {\n            return false"),
             "any window that is not the look's own or one of its own is another, whatever its size (t-121748, t-122045)")
         let unreadable = try XCTUnwrap(
-            focused.range(of: "case .unreadable:\n        return false"),
-            "a look whose window cannot be read now is refused, not asked the numbers (t-122045)")
-        let twin = try XCTUnwrap(
-            focused.range(of: "case .absent:\n        if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {"),
-            "a look with no window of its own asks the numbers as before")
+            focused.range(of: "case .unreadable, .absent:\n        return false"),
+            "a look whose window cannot be read now, or whose tree read nothing, is refused (t-122045, t-122428)")
         let overlap = try XCTUnwrap(focused.range(of: "let intersection = frame.intersection(snapshot.windowBounds)"))
         XCTAssertLessThan(looked.lowerBound, other.lowerBound)
         XCTAssertLessThan(other.lowerBound, unreadable.lowerBound)
-        XCTAssertLessThan(unreadable.lowerBound, twin.lowerBound)
-        XCTAssertLessThan(twin.lowerBound, overlap.lowerBound, "another window is ruled out before the frames are compared")
+        XCTAssertLessThan(unreadable.lowerBound, overlap.lowerBound, "another window is ruled out before the frames are compared")
         XCTAssertFalse(focused.contains("isAnotherWindowOver"), "no size decides which window the target is")
+        let proof = try body(of: source, from: "private func isTargetWindowFocused(_ snapshot: Snapshot) -> Bool {", to: "private enum LookedWindow {")
+        XCTAssertFalse(
+            proof.contains("isTwinOfTarget(focusedWindow"),
+            "the number-only twin check misses a window stacked off the target; the focus proof never falls back to it")
         let own = try body(of: source, from: "private func belongs(_ window: AXUIElement, to looked: AXUIElement) -> Bool {", to: "private func isTwinOfTarget(")
         XCTAssertTrue(own.contains("copyElement(current, kAXParentAttribute as String)"), "one of its own: a parent reaches the looked window")
         XCTAssertTrue(own.contains("if CFEqual(parent, looked) { return true }"))
         let reading = try body(of: source, from: "private func lookedWindow(of snapshot: Snapshot) -> LookedWindow {", to: "private func belongs(")
-        XCTAssertTrue(reading.contains("else { return .absent }"), "no root: a look by number only")
+        XCTAssertTrue(reading.contains("else { return .absent }"), "no root: the look's tree read no element")
         XCTAssertTrue(reading.contains("containingWindow(root).map(LookedWindow.window) ?? .unreadable"), "a root whose window cannot be read now")
         let check = try body(of: source, from: "private func isTwinOfTarget(", to: "private enum AXElementProbe {")
         XCTAssertTrue(check.contains("number: windowNumber(window) ?? WindowServerNumber.of(window)"))

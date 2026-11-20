@@ -3548,27 +3548,26 @@ private func isTargetWindowFocused(_ snapshot: Snapshot) -> Bool {
     // or panel whose accessibility parents reach it — and the frames agree as
     // before. Any other window of the app — a twin, one stacked a little off
     // it, a smaller one over it — is another window whatever its size, and
-    // keys sent now would reach it. A look whose window cannot be read now is
-    // refused; a look with no window of its own asks the numbers instead.
+    // keys sent now would reach it. A look whose window cannot be read now,
+    // or whose tree read nothing at all (its window closed meanwhile, or the
+    // app did not answer), gives no window to aim keys at and is refused
+    // (t-122045, t-122428): every look is read from a window, a surface or a
+    // known element, so none is a look by number only.
     switch lookedWindow(of: snapshot) {
     case let .window(looked):
         if !CFEqual(focusedWindow, looked), !belongs(focusedWindow, to: looked) {
             return false
         }
-    case .unreadable:
+    case .unreadable, .absent:
         return false
-    case .absent:
-        if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {
-            return false
-        }
     }
     let intersection = frame.intersection(snapshot.windowBounds)
     return !intersection.isNull && intersection.area >= min(frame.area, snapshot.windowBounds.area) * 0.75
 }
 
 /// The window a look was read from, as it reads now: the look's own window,
-/// one it had that cannot be read now (gone, or not answering), or none it
-/// ever had — a look by number only.
+/// one it had that cannot be read now (gone, or not answering), or none
+/// because its tree read no element at all.
 private enum LookedWindow {
     case window(AXUIElement)
     case unreadable
