@@ -1,7 +1,8 @@
 // The person's 11-20 scene on throwaway windows (CU slowness, t-121376): one
 // app's windows with one title, the one behind holding the «Authorize» button
 // the errand was for. Never activates, sits behind everything, records every
-// press as `pressed <window number>` so a run is judged by the windows' own
+// press as `pressed <window number>` and every key a window takes as
+// `key <window number> <key code>`, so a run is judged by the windows' own
 // record, and names its windows in `ready` (JSON, written once they stand).
 //
 //   swiftc -O tools/computer-bench/TwinWindowsFixture.swift -o <dir>/twin-fixture -framework AppKit
@@ -12,7 +13,15 @@
 //   twins       two at one frame; «Authorize» behind, «Overview» in front
 //   twins-same  two at one frame; «Authorize» in both (a press in the wrong one shows)
 //   offset      two of one size, the one behind 22 points off; «Authorize» behind
+//   small-over  a smaller window of the app over the target; «Authorize» behind
 import AppKit
+
+/// A window's content that takes keys and records them under its window's number.
+final class KeyView: NSView {
+    var record: ((String) -> Void)?
+    override var acceptsFirstResponder: Bool { true }
+    override func keyDown(with event: NSEvent) { record?("key \(window?.windowNumber ?? 0) \(event.keyCode)") }
+}
 
 final class Fixture: NSObject, NSApplicationDelegate {
     let mode: String, dir: URL
@@ -34,13 +43,16 @@ final class Fixture: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentRect: frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.title = "Home | Fixture"
         window.isReleasedWhenClosed = false
-        let content = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        let content = KeyView(frame: NSRect(origin: .zero, size: frame.size))
+        content.record = { [weak self] line in self?.log(line) }
         let label = NSTextField(labelWithString: body)
         label.frame = NSRect(x: 16, y: frame.height - 48, width: 320, height: 20)
         let press = NSButton(title: button, target: self, action: #selector(pressed(_:)))
         press.frame = NSRect(x: 16, y: frame.height - 96, width: 140, height: 28)
         content.addSubview(label); content.addSubview(press)
         window.contentView = content
+        window.initialFirstResponder = content
+        window.makeFirstResponder(content)
         return window
     }
 
@@ -54,6 +66,9 @@ final class Fixture: NSObject, NSApplicationDelegate {
         case "twins-same":
             windows = [makeWindow(at: frame, body: "BACK", button: "Authorize"),
                        makeWindow(at: frame, body: "FRONT", button: "Authorize")]
+        case "small-over":
+            windows = [makeWindow(at: frame, body: "BACK", button: "Authorize"),
+                       makeWindow(at: NSRect(x: frame.minX + 160, y: frame.minY + 90, width: 400, height: 300), body: "FRONT", button: "Overview")]
         case "offset":
             windows = [makeWindow(at: frame.offsetBy(dx: -22, dy: 22), body: "BACK", button: "Authorize"),
                        makeWindow(at: frame, body: "FRONT", button: "Overview")]

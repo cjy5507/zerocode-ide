@@ -93,11 +93,21 @@ impl Fixture {
 
     /// The windows pressed so far, by their numbers, in order.
     fn presses(&self) -> Vec<u64> {
+        self.numbers_after("pressed ")
+    }
+
+    /// The windows that took a key so far, by their numbers, in order.
+    fn keys(&self) -> Vec<u64> {
+        self.numbers_after("key ")
+    }
+
+    fn numbers_after(&self, prefix: &str) -> Vec<u64> {
         std::fs::read_to_string(self.directory.join("events.log"))
             .unwrap_or_default()
             .lines()
-            .filter_map(|line| line.strip_prefix("pressed "))
-            .filter_map(|number| number.trim().parse().ok())
+            .filter_map(|line| line.strip_prefix(prefix))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .filter_map(|number| number.parse().ok())
             .collect()
     }
 }
@@ -501,18 +511,30 @@ fn twin_bench_chrome() {
         "<title>Home | Fixture</title><button>FRONT</button>",
     )
     .expect("a page");
+    // The person touched the mouse or keys since the run began: nothing more
+    // is opened or asked (t-122045 I-5).
+    let touched = || person_idle() < PERSON_AWAY.min(idle);
     let frame = [120, 120, 1000, 700];
-    let (app, back, front) = {
-        let setup = Session::connect(launch_at(&built).expect("helper")).expect("answers");
-        let (app, back) = chrome_window(&setup, &chrome, &profile, &back_page, frame, None);
+    let setup = Session::connect(launch_at(&built).expect("helper")).expect("answers");
+    let (app, back) = chrome_window(&setup, &chrome, &profile, &back_page, frame, None);
+    let mut report = json!({"back": back});
+    let mut stopped = touched();
+    if !stopped {
         let (_, front) = chrome_window(&setup, &chrome, &profile, &front_page, frame, Some(&app));
-        (app, back, front)
-    };
-    std::thread::sleep(Duration::from_millis(500));
-    let mut report = json!({"back": back, "front": front});
-    for (label, helper) in [("installed", &baseline), ("built", &built)] {
+        report["front"] = json!(front);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    'arms: for (label, helper) in [("installed", &baseline), ("built", &built)] {
+        if stopped {
+            break;
+        }
         let session = Session::connect(launch_at(helper).expect("helper")).expect("answers");
-        for (side, number, word) in [("back", back, "BACK"), ("front", front, "FRONT")] {
+        for (side, word) in [("back", "BACK"), ("front", "FRONT")] {
+            if touched() {
+                stopped = true;
+                break 'arms;
+            }
+            let number = report[side].as_u64().unwrap_or_default();
             let (ms, answer) = call(
                 &session,
                 "getAppState",
@@ -527,8 +549,64 @@ fn twin_bench_chrome() {
             };
         }
     }
+    report["stopped_by_the_person"] = json!(stopped);
     let pid = app.trim_start_matches("pid:");
     let _ = crate::proc::quiet_command("/bin/kill").arg(pid).status();
+    let text = serde_json::to_string_pretty(&report).expect("a report");
+    std::fs::write(&out, &text).expect("the report");
+    println!("{text}");
+}
+
+/// The third review's condition (t-122045): one key sent in the foreground to
+/// the window a look named, after the app was raised for it. On one window
+/// alone the key must reach it — the look's window element and the focused
+/// one are the same element. On twins, a window stacked off the target and a
+/// smaller window over it, the key must reach no other window. Real input, to
+/// the fixture windows only, while the person is away.
+#[test]
+#[ignore = "sends a real key to owned fixture windows while the person is away; run by reports/cu-slow-chrome-1515/jobs/repro-twin-web.sh"]
+fn twin_bench_keys() {
+    let program = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_FIXTURE").expect("fixture"));
+    let baseline = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_BASELINE").expect("baseline"));
+    let built = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_BUILT").expect("built helper"));
+    let out = PathBuf::from(std::env::var_os("ZEROCODE_TWIN_KEYS_OUT").expect("report path"));
+    let root = out.parent().expect("report folder").join("key-fixtures");
+    let mut report = json!({});
+    for (label, helper) in [("installed", &baseline), ("built", &built)] {
+        let session = Session::connect(launch_at(helper).expect("helper")).expect("answers");
+        for mode in ["single", "twins", "offset", "small-over"] {
+            let idle = person_idle();
+            if idle < PERSON_AWAY {
+                report[label][mode] = json!({"skipped": format!("the person was at the machine {}s ago", idle.as_secs())});
+                continue;
+            }
+            let fixture = Fixture::start(&program, &root, mode, &format!("{label}-{mode}-keys"));
+            let (app, target) = (fixture.app(), fixture.target());
+            let look =
+                json!({"app": app, "windowId": target, "noScreenshot": true, "background": true});
+            let (_, looked) = call(&session, "getAppState", &look);
+            let (ms, answer) = if looked.is_ok() && person_idle() >= PERSON_AWAY.min(idle) {
+                let key =
+                    json!({"app": app, "windowId": target, "key": "Return", "restoreWindow": true});
+                call(&session, "pressKey", &key)
+            } else {
+                (
+                    0.0,
+                    Err("not sent: the look was refused or the person came back".to_string()),
+                )
+            };
+            // A key's effect reaches the window's record a moment after its answer.
+            std::thread::sleep(Duration::from_millis(300));
+            let keys = fixture.keys();
+            report[label][mode] = json!({
+                "look_refused": looked.err(),
+                "ms": ms.round(),
+                "refused": answer.err(),
+                "key_target": keys.iter().filter(|&&number| number == target).count(),
+                "key_other": keys.iter().filter(|&&number| number != target).count(),
+            });
+        }
+    }
     let text = serde_json::to_string_pretty(&report).expect("a report");
     std::fs::write(&out, &text).expect("the report");
     println!("{text}");
