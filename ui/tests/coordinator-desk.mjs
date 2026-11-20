@@ -666,7 +666,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await settleMail();
     const clearedAsks = await readMail();
     ok("once the ledger records the answer and the acknowledgement, those letters leave the desk",
-      cleared.head === `소식 · ${landed[1]}` && clearedAsks.title === `답할 일 ${landed[0] + 8}개 — 나머지는 저절로 돕니다` &&
+      // The questions left and the fixture's two decisions — its reports wait on the coordinator's line (t-119569).
+      cleared.head === `소식 · ${landed[1]}` && clearedAsks.title === `답할 일 ${landed[0] + 2}개 — 나머지는 저절로 돕니다` &&
       !cleared.letters.some((one) => one.key === "run-desk/m-903") &&
       !clearedAsks.questions.some((one) => one.key === "run-desk/m-901"),
       JSON.stringify({ cleared, clearedAsks }));

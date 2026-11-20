@@ -469,7 +469,8 @@ function readNow() {
     rows: { queue: cells(row("t-66912")), run: cells(row("t-67561")), runHands: cells(row("t-66788")), halt: cells(row("t-66410")) },
     order: [...view.querySelectorAll(".board-run")].map((node) => node.dataset.task.split("/")[1]),
     reported: Boolean(row("t-66790")),
-    doneFold: [...view.querySelectorAll(".board-goal.is-done .board-goal-name")].map((node) => node.textContent),
+    // The finished tasks the table folds — the coordinator's line of reports wears the same folded look (t-119569).
+    doneFold: [...view.querySelectorAll('[data-desk-block="running"] .board-goal.is-done .board-goal-name')].map((node) => node.textContent),
     runsFoot: view.querySelector(".board-runs-foot")?.textContent,
     runningHint: view.querySelector('[data-desk-block="running"] .board-desk-head-note')?.textContent,
     build: one ? {
@@ -493,7 +494,8 @@ function readNow() {
     reviewMeta: [...view.querySelectorAll('[data-desk-block="reviews"] .board-asks > li')].map((item) =>
       item.querySelector(".board-ask-meta")?.textContent),
     badge: (() => {
-      const kind = view.querySelector('[data-desk-block="asks"] .board-ask-kind');
+      // A decision's badge or a question's — one rule draws both (t-119569: a report is no row of your turn).
+      const kind = view.querySelector('[data-desk-block="asks"] :is(.board-ask-kind, .board-desk-letter-kind)');
       return kind ? { ground: getComputedStyle(kind).backgroundColor, ink: getComputedStyle(kind).color } : null;
     })(),
   };

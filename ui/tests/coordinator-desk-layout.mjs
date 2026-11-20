@@ -108,7 +108,8 @@ export async function testCoordinatorDeskLayout(browser, origin, ok) {
       Boolean(running) && near(running.left, wide.desk.left) && near(running.width, asks.width)
         && near(running.top, asks.bottom + wide.gap) && builds.left > running.right, JSON.stringify(wide.by));
     ok("the Now tab shows its own blocks and none of the others'",
-      wide.shown.every((block) => ["asks", "builds", "batches", "running"].includes(block.id)), JSON.stringify(wide.shown.map((one) => one.id)));
+      // 「코디가 검증할 보고」 is a block of Now as well (t-119569).
+      wide.shown.every((block) => ["asks", "reviews", "builds", "batches", "running"].includes(block.id)), JSON.stringify(wide.shown.map((one) => one.id)));
     await page.screenshot({ path: `${SHOTS}/now-1440.png` });
 
     /* ---- 한 장만 서면 그 장이 행을 다 쓴다 ---- */
