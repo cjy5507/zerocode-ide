@@ -177,29 +177,6 @@ final class DesktopWindowPickTests: XCTestCase {
             .found(1), "the name decides as it did")
     }
 
-    /// t-121748: the focus proof reads overlap, and a window of the target's
-    /// size stacked a little off it passes the overlap — keys meant for the
-    /// window behind would reach it. A window known to be another and over
-    /// the target is not the target; a sheet, popover or panel inside it is.
-    func testAWindowOverTheTargetIsOneOfItsSizeAndASheetInsideItIsNot() {
-        let bounds = CGRect(x: 0, y: 33, width: 1512, height: 949)
-        XCTAssertTrue(DesktopWindowPick.isAnotherWindowOver(frame: bounds, targetBounds: bounds), "a twin")
-        XCTAssertTrue(
-            DesktopWindowPick.isAnotherWindowOver(frame: bounds.offsetBy(dx: 22, dy: 22), targetBounds: bounds),
-            "stacked 22 points off, 96 % over")
-        XCTAssertTrue(DesktopWindowPick.isAnotherWindowOver(frame: bounds.offsetBy(dx: 3, dy: 0), targetBounds: bounds), "three points off")
-        XCTAssertTrue(
-            DesktopWindowPick.isAnotherWindowOver(frame: bounds, targetBounds: CGRect(x: 300, y: 200, width: 600, height: 400)),
-            "a larger window behind a small target")
-        XCTAssertFalse(
-            DesktopWindowPick.isAnotherWindowOver(frame: CGRect(x: 600, y: 300, width: 320, height: 200), targetBounds: bounds),
-            "a sheet or popover inside the target")
-        XCTAssertFalse(DesktopWindowPick.isAnotherWindowOver(frame: bounds.offsetBy(dx: 1600, dy: 0), targetBounds: bounds), "a window beside it")
-        XCTAssertFalse(
-            DesktopWindowPick.isAnotherWindowOver(frame: CGRect(x: 0, y: 33, width: 1000, height: 949), targetBounds: bounds),
-            "two thirds of the target is smaller than three quarters")
-    }
-
     /// A focus proof reads frames, so a twin at the target's very frame would
     /// pass it for the target and take its keys. A twin known to be another
     /// window is not the target; a window whose number is not known, or that

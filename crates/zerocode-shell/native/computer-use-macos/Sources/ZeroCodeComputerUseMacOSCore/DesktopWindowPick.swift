@@ -85,18 +85,6 @@ public enum DesktopWindowPick {
         return number != target
     }
 
-    /// Whether a window at `frame`, known to be another window than the one
-    /// at `targetBounds`, stands over it as a twin would: covering it by the
-    /// cover rule and no smaller than three quarters of it — the same frame,
-    /// one stacked a little off it, or a larger window behind it. A sheet, a
-    /// popover or a panel inside the target is smaller and is not. A proof
-    /// that reads overlap asks this of a focused window it knows is not the
-    /// target's own before the overlap may take it for the target
-    /// (CU slowness 11-20, t-121376, t-121748).
-    public static func isAnotherWindowOver(frame: CGRect, targetBounds: CGRect) -> Bool {
-        covers(frame, targetBounds) && area(frame) >= area(targetBounds) * coverShare
-    }
-
     /// How much of the smaller of two frames must lie inside the other for a
     /// window to cover where a target stands.
     public static let coverShare: CGFloat = 0.75

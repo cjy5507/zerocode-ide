@@ -3542,21 +3542,54 @@ private func isTargetWindowFocused(_ snapshot: Snapshot) -> Bool {
     guard let frame = absoluteFrame(focusedWindow) else {
         return false
     }
-    // Another window over the target — a twin, one stacked a little off it,
-    // a larger one behind it — is not the target, whatever their overlap:
-    // the look's own window says which window the target is, and keys sent
-    // now would reach the other (CU slowness 11-20, t-121376, t-121748). A
-    // sheet, popover or panel inside the target is smaller and stays the
-    // target's. A look with no window of its own asks the numbers instead.
-    if let looked = snapshot.rootIndex.flatMap({ snapshot.elements[$0]?.element }).flatMap(containingWindow) {
-        if !CFEqual(focusedWindow, looked), DesktopWindowPick.isAnotherWindowOver(frame: frame, targetBounds: snapshot.windowBounds) {
+    // The look's own window says which window the target is (CU slowness
+    // 11-20, t-121376 · t-121748 · t-122045). The focused window may take the
+    // keys only when it is that window or one of its own — a sheet, popover
+    // or panel whose accessibility parents reach it — and the frames agree as
+    // before. Any other window of the app — a twin, one stacked a little off
+    // it, a smaller one over it — is another window whatever its size, and
+    // keys sent now would reach it. A look whose window cannot be read now is
+    // refused; a look with no window of its own asks the numbers instead.
+    switch lookedWindow(of: snapshot) {
+    case let .window(looked):
+        if !CFEqual(focusedWindow, looked), !belongs(focusedWindow, to: looked) {
             return false
         }
-    } else if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {
+    case .unreadable:
         return false
+    case .absent:
+        if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {
+            return false
+        }
     }
     let intersection = frame.intersection(snapshot.windowBounds)
     return !intersection.isNull && intersection.area >= min(frame.area, snapshot.windowBounds.area) * 0.75
+}
+
+/// The window a look was read from, as it reads now: the look's own window,
+/// one it had that cannot be read now (gone, or not answering), or none it
+/// ever had — a look by number only.
+private enum LookedWindow {
+    case window(AXUIElement)
+    case unreadable
+    case absent
+}
+
+private func lookedWindow(of snapshot: Snapshot) -> LookedWindow {
+    guard let root = snapshot.rootIndex.flatMap({ snapshot.elements[$0]?.element }) else { return .absent }
+    return containingWindow(root).map(LookedWindow.window) ?? .unreadable
+}
+
+/// Whether `window` is one of `looked`'s own — a sheet, popover or panel
+/// whose accessibility parents reach the looked window.
+private func belongs(_ window: AXUIElement, to looked: AXUIElement) -> Bool {
+    var current = window
+    for _ in 0..<16 {
+        guard let parent = copyElement(current, kAXParentAttribute as String) else { return false }
+        if CFEqual(parent, looked) { return true }
+        current = parent
+    }
+    return false
 }
 
 /// Whether `window`, standing at `frame`, is a twin of window `target` at

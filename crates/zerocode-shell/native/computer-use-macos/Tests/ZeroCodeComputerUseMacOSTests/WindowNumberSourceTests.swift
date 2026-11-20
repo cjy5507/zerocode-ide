@@ -41,16 +41,29 @@ final class WindowNumberSourceTests: XCTestCase {
         let source = try helperSource()
         let focused = try body(of: source, from: "private func isTargetWindowFocused(_ snapshot: Snapshot) -> Bool {", to: "private func isTwinOfTarget(")
         let looked = try XCTUnwrap(
-            focused.range(of: "if let looked = snapshot.rootIndex.flatMap({ snapshot.elements[$0]?.element }).flatMap(containingWindow) {"),
+            focused.range(of: "switch lookedWindow(of: snapshot) {"),
             "the look's own window says which window the target is")
-        let over = try XCTUnwrap(
-            focused.range(of: "if !CFEqual(focusedWindow, looked), DesktopWindowPick.isAnotherWindowOver(frame: frame, targetBounds: snapshot.windowBounds) {"),
-            "another window over the target is not it, twins stacked off it too (t-121748)")
-        let twin = try XCTUnwrap(focused.range(of: "} else if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {"))
+        let other = try XCTUnwrap(
+            focused.range(of: "case let .window(looked):\n        if !CFEqual(focusedWindow, looked), !belongs(focusedWindow, to: looked) {\n            return false"),
+            "any window that is not the look's own or one of its own is another, whatever its size (t-121748, t-122045)")
+        let unreadable = try XCTUnwrap(
+            focused.range(of: "case .unreadable:\n        return false"),
+            "a look whose window cannot be read now is refused, not asked the numbers (t-122045)")
+        let twin = try XCTUnwrap(
+            focused.range(of: "case .absent:\n        if isTwinOfTarget(focusedWindow, frame: frame, target: snapshot.windowId, targetBounds: snapshot.windowBounds) {"),
+            "a look with no window of its own asks the numbers as before")
         let overlap = try XCTUnwrap(focused.range(of: "let intersection = frame.intersection(snapshot.windowBounds)"))
-        XCTAssertLessThan(looked.lowerBound, over.lowerBound)
-        XCTAssertLessThan(over.lowerBound, twin.lowerBound)
+        XCTAssertLessThan(looked.lowerBound, other.lowerBound)
+        XCTAssertLessThan(other.lowerBound, unreadable.lowerBound)
+        XCTAssertLessThan(unreadable.lowerBound, twin.lowerBound)
         XCTAssertLessThan(twin.lowerBound, overlap.lowerBound, "another window is ruled out before the frames are compared")
+        XCTAssertFalse(focused.contains("isAnotherWindowOver"), "no size decides which window the target is")
+        let own = try body(of: source, from: "private func belongs(_ window: AXUIElement, to looked: AXUIElement) -> Bool {", to: "private func isTwinOfTarget(")
+        XCTAssertTrue(own.contains("copyElement(current, kAXParentAttribute as String)"), "one of its own: a parent reaches the looked window")
+        XCTAssertTrue(own.contains("if CFEqual(parent, looked) { return true }"))
+        let reading = try body(of: source, from: "private func lookedWindow(of snapshot: Snapshot) -> LookedWindow {", to: "private func belongs(")
+        XCTAssertTrue(reading.contains("else { return .absent }"), "no root: a look by number only")
+        XCTAssertTrue(reading.contains("containingWindow(root).map(LookedWindow.window) ?? .unreadable"), "a root whose window cannot be read now")
         let check = try body(of: source, from: "private func isTwinOfTarget(", to: "private enum AXElementProbe {")
         XCTAssertTrue(check.contains("number: windowNumber(window) ?? WindowServerNumber.of(window)"))
         XCTAssertTrue(check.contains("DesktopWindowPick.isAnotherAtTheSameFrame("))
