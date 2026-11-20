@@ -66,18 +66,24 @@ pub fn run_is_held_below(mode: PermissionMode) -> bool {
     !is_full_access(mode) && mode != PermissionMode::ReadOnly
 }
 
+/// What a `/goal` start says when its run is held read-only (t-122771): a
+/// goal with no gate stops after turns that change nothing, so the person is
+/// told both ways to let it write.
+pub const GOAL_READ_ONLY_RUN_NOTE: &str =
+    "read-only run (add --allow-writes or switch to Full Access to let it write)";
+
 /// What a `/goal` start says about writing (t-122771): whether its turns may
-/// write, and — when they may not — the one step that would let them.
+/// write, and — when they may not — how to let them.
 #[must_use]
 pub fn run_writes_note(allow_writes: bool, mode: PermissionMode) -> &'static str {
     if is_full_access(mode) {
         "may write (Full Access)"
     } else if mode == PermissionMode::ReadOnly {
-        "read-only session (/permissions to let it write)"
+        "read-only session (switch to Full Access with /permissions to let it write)"
     } else if allow_writes {
         "may write as this session allows (--allow-writes)"
     } else {
-        READ_ONLY_RUN_NOTE
+        GOAL_READ_ONLY_RUN_NOTE
     }
 }
 
@@ -341,11 +347,11 @@ mod tests {
     }
 
     /// t-122771: a `/goal` start says whether its turns may write, and when
-    /// they may not, the one step that lets them — the run's flag where the
-    /// run is held, `/permissions` where the session itself is read-only.
+    /// they may not, how to let them — the run's flag or Full Access where
+    /// the run is held, Full Access where the session itself is read-only.
     #[test]
     fn a_start_says_whether_its_run_may_write() {
-        use super::{run_writes_note, READ_ONLY_RUN_NOTE};
+        use super::{run_writes_note, GOAL_READ_ONLY_RUN_NOTE};
         use runtime::PermissionMode;
 
         for allow_writes in [false, true] {
@@ -354,11 +360,15 @@ mod tests {
             }
             assert_eq!(
                 run_writes_note(allow_writes, PermissionMode::ReadOnly),
-                "read-only session (/permissions to let it write)"
+                "read-only session (switch to Full Access with /permissions to let it write)"
             );
         }
+        assert_eq!(
+            GOAL_READ_ONLY_RUN_NOTE,
+            "read-only run (add --allow-writes or switch to Full Access to let it write)"
+        );
         for mode in [PermissionMode::WorkspaceWrite, PermissionMode::Prompt] {
-            assert_eq!(run_writes_note(false, mode), READ_ONLY_RUN_NOTE, "{mode:?}");
+            assert_eq!(run_writes_note(false, mode), GOAL_READ_ONLY_RUN_NOTE, "{mode:?}");
             assert_eq!(
                 run_writes_note(true, mode),
                 "may write as this session allows (--allow-writes)",

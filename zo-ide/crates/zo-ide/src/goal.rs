@@ -531,8 +531,10 @@ impl GoalController {
             GoalCommand::Status | GoalCommand::History => self.status_report(),
             GoalCommand::Start { goal, options } => {
                 let state = GoalState::new(goal, &options, true, &self.limits);
-                // The one line says what was armed: how the run ends and the
-                // four limits; the session adds whether its turns may write.
+                // The one line says what was armed: the objective as it was
+                // read (a first word taken as a command shows here), how the
+                // run ends and the four limits; the session adds whether its
+                // turns may write.
                 let ends = if state.until.is_some() {
                     "until condition".to_string()
                 } else if state.checks.is_empty() {
@@ -544,7 +546,8 @@ impl GoalController {
                     format!("{} gate(s)", state.checks.len())
                 };
                 let notice = format!(
-                    "goal: running · {ends} · four limits armed (turns {} · continuations {} · output tokens {} · {}s)",
+                    "goal: running · \"{}\" · {ends} · four limits armed (turns {} · continuations {} · output tokens {} · {}s)",
+                    one_line(&state.objective, 72),
                     state.max_assistant_turns,
                     state.max_continuations,
                     state.max_output_tokens,
@@ -743,6 +746,9 @@ impl GoalController {
         let Some(state) = self.state.as_mut() else {
             return Ok("goal: result ignored because the goal was cleared".to_string());
         };
+        // The line an ungated run's stall ends with: what happened and what
+        // the person can do next, in place of the status line (t-122771).
+        let mut stalled_notice = None;
         if state.objective != turn.objective {
             return Ok("goal: result ignored because the goal changed during the turn".to_string());
         }
@@ -823,6 +829,13 @@ impl GoalController {
             };
             if state.stalled_turns >= max_stalled_turns {
                 state.pause("two unattended turns made no workspace, gate, or todo progress");
+                // Most often the work is done and nothing is left to change.
+                stalled_notice = state.ungated().then(|| {
+                    format!(
+                        "goal: {} (paused) · stopped: {max_stalled_turns} turns in a row changed nothing · /goal done if the goal is met, /goal resume to keep going",
+                        one_line(&state.objective, 72)
+                    )
+                });
             } else {
                 match turn.kind {
                 GoalTurnKind::Plan => {
@@ -911,7 +924,7 @@ impl GoalController {
                 }
             }
         }
-        let notice = self.status_report();
+        let notice = stalled_notice.unwrap_or_else(|| self.status_report());
         self.persist().map_err(|error| error.to_string())?;
         Ok(notice)
     }
@@ -1559,7 +1572,7 @@ mod tests {
         assert_eq!(
             result.notice,
             format!(
-                "goal: running · no gate: ends after {} turns with no change, at a limit, or on /goal done · four limits armed (turns {} · continuations {} · output tokens {} · {}s)",
+                "goal: running · \"ship it\" · no gate: ends after {} turns with no change, at a limit, or on /goal done · four limits armed (turns {} · continuations {} · output tokens {} · {}s)",
                 limits.max_stalled_turns,
                 limits.max_assistant_turns,
                 limits.max_continuations,
@@ -1578,7 +1591,9 @@ mod tests {
             .expect("start");
         assert!(result.started);
         assert!(
-            result.notice.starts_with("goal: running · 1 gate(s) · four limits armed (turns 3 · "),
+            result
+                .notice
+                .starts_with("goal: running · \"ship it\" · 1 gate(s) · four limits armed (turns 3 · "),
             "{}",
             result.notice
         );
@@ -1655,7 +1670,9 @@ mod tests {
     }
 
     /// The run a read-only session cannot move ends by the stall rule: two
-    /// turns that change nothing pause it, and the footer says it stalled.
+    /// turns that change nothing pause it. Most often the work is done, so
+    /// the line says what happened and what to do next, and the footer says
+    /// it stalled.
     #[test]
     fn an_ungated_goal_stops_after_two_turns_without_progress() {
         use super::{footer_status_from_snapshot, GoalFooterStatus};
@@ -1664,10 +1681,15 @@ mod tests {
         controller.limits.max_stalled_turns = 2;
         controller.apply("ship it --no-plan", None).expect("start");
         let first = controller.dispatch_next().expect("dispatch").expect("turn");
-        controller.record_turn(&first, turn_report("w", "w")).expect("record");
+        let notice = controller.record_turn(&first, turn_report("w", "w")).expect("record");
         assert!(controller.is_running(), "one turn without change is not a stall yet");
+        assert!(notice.contains("(running)"), "{notice}");
         let second = controller.dispatch_next().expect("dispatch").expect("turn");
-        controller.record_turn(&second, turn_report("w", "w")).expect("record");
+        let notice = controller.record_turn(&second, turn_report("w", "w")).expect("record");
+        assert_eq!(
+            notice,
+            "goal: ship it (paused) · stopped: 2 turns in a row changed nothing · /goal done if the goal is met, /goal resume to keep going"
+        );
         assert!(!controller.is_running());
         assert!(controller.dispatch_next().expect("dispatch").is_none());
         let (goal, autonomous) = controller.status_fields();

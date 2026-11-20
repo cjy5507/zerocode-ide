@@ -1281,6 +1281,10 @@ async fn e2e_goal_resumes_after_provider_retry_after_and_reaches_its_condition()
 /// first action changes the workspace and the ones after it do not.
 const BARE_GOAL: &str = "/goal PARITY_SCENARIO:goal_turns go";
 
+/// The head of the line a goal with no gate starts with: the objective as
+/// it was read, then how the run ends.
+const BARE_GOAL_STARTED: &str = "goal: running · \"PARITY_SCENARIO:goal_turns go\" · no gate:";
+
 /// How many captured requests carry `tag` (a goal turn's prompt marker).
 fn requests_carrying(requests: &[CapturedRequest], tag: &str) -> usize {
     requests.iter().filter(|request| request.raw_body.contains(tag)).count()
@@ -1301,7 +1305,7 @@ async fn e2e_bare_goal_starts_at_once_and_stops_when_nothing_changes() {
     let mut run = pty(&layout, &service.base_url(), &interactive_args());
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(format!("{BARE_GOAL}\r").as_bytes()).expect("type the goal");
-    let started = run.wait_for("goal: running · no gate", TEST_TIMEOUT);
+    let started = run.wait_for(BARE_GOAL_STARTED, TEST_TIMEOUT);
     run.wait_for_after("(paused)", started, TEST_TIMEOUT);
     let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
     let requests = service.captured_requests().await;
@@ -1317,8 +1321,8 @@ async fn e2e_bare_goal_starts_at_once_and_stops_when_nothing_changes() {
         "the action turn did not act:\n{capture}"
     );
     assert!(
-        capture.contains("turns made no workspace"),
-        "the run did not end by its turns changing nothing:\n{capture}"
+        capture.contains("turns in a row changed nothing") && capture.contains("/goal done"),
+        "the run did not end by its turns changing nothing, or did not say what to do next:\n{capture}"
     );
     assert!(!capture.contains("(completed)"), "a goal with no gate said it was achieved:\n{capture}");
 }
@@ -1336,7 +1340,7 @@ async fn e2e_bare_goal_in_a_writing_session_runs_read_only_and_stalls() {
     let mut run = pty(&layout, &service.base_url(), &["--permission-mode", "workspace-write"]);
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(format!("{BARE_GOAL}\r").as_bytes()).expect("type the goal");
-    let started = run.wait_for("goal: running · no gate", TEST_TIMEOUT);
+    let started = run.wait_for(BARE_GOAL_STARTED, TEST_TIMEOUT);
     run.wait_for_after("(paused)", started, TEST_TIMEOUT);
     let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
     let requests = service.captured_requests().await;
@@ -1351,7 +1355,7 @@ async fn e2e_bare_goal_in_a_writing_session_runs_read_only_and_stalls() {
         "the action turns did not run: {requests:#?}"
     );
     assert!(
-        capture.contains("turns made no workspace"),
+        capture.contains("turns in a row changed nothing"),
         "the read-only run did not stop by the stall rule:\n{capture}"
     );
     assert!(!capture.contains("(completed)"), "a goal with no gate said it was achieved:\n{capture}");
@@ -1371,7 +1375,7 @@ async fn e2e_goal_start_without_a_gate_starts_too() {
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(b"/goal start PARITY_SCENARIO:goal_turns go --max-turns 2\r")
         .expect("type the goal");
-    let started = run.wait_for("goal: running · no gate", TEST_TIMEOUT);
+    let started = run.wait_for(BARE_GOAL_STARTED, TEST_TIMEOUT);
     run.wait_for_after("assistant-turn limit reached (2/2)", started, TEST_TIMEOUT);
     let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
     let requests = service.captured_requests().await;
@@ -1397,7 +1401,7 @@ async fn e2e_bare_goal_stops_at_its_turn_limit() {
     run.wait_for("directory:", TEST_TIMEOUT);
     run.send(format!("{BARE_GOAL} --max-turns 2\r").as_bytes())
         .expect("type the goal");
-    let started = run.wait_for("goal: running · no gate", TEST_TIMEOUT);
+    let started = run.wait_for(BARE_GOAL_STARTED, TEST_TIMEOUT);
     run.wait_for_after("assistant-turn limit reached (2/2)", started, TEST_TIMEOUT);
     let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
 
@@ -1431,12 +1435,12 @@ async fn e2e_piped_bare_goal_runs_before_the_pipe_ends() {
     assert!(output.status.success(), "the piped goal exited with {:?}:\n{stdout}", output.status);
     assert!(
         stdout.contains(
-            "goal: running · no gate: ends after 2 turns with no change, at a limit, or on /goal done · four limits armed (turns "
+            "goal: running · \"PARITY_SCENARIO:goal_turns go\" · no gate: ends after 2 turns with no change, at a limit, or on /goal done · four limits armed (turns "
         ),
         "the start did not say how the run ends and what bounds it:\n{stdout}"
     );
     assert!(
-        stdout.contains(" · read-only run (add --allow-writes to let it write)"),
+        stdout.contains(" · read-only run (add --allow-writes or switch to Full Access to let it write)"),
         "the start did not say the run is read-only:\n{stdout}"
     );
     assert!(
@@ -1444,8 +1448,10 @@ async fn e2e_piped_bare_goal_runs_before_the_pipe_ends() {
         "the piped goal's actions did not run: {requests:#?}"
     );
     assert!(
-        stdout.contains("(paused)") && stdout.contains("turns made no workspace"),
-        "the piped goal did not end by the stall rule:\n{stdout}"
+        stdout.contains(
+            "goal: PARITY_SCENARIO:goal_turns go (paused) · stopped: 2 turns in a row changed nothing · /goal done if the goal is met, /goal resume to keep going"
+        ),
+        "the piped goal did not end by the stall rule with the next step:\n{stdout}"
     );
     assert!(!stdout.contains("(completed)"), "a goal with no gate said it was achieved:\n{stdout}");
 }
