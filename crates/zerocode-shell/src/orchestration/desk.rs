@@ -2958,10 +2958,23 @@ mod tests {
         hand_in(&mut ledger, "older", "%2", now - 40 * minute);
         hand_in(&mut ledger, "newer", "%3", now - 10 * minute);
         let asked = ledger
-            .create_task(&run, "x".into(), "asked".into(), vec![], None, now - 5 * minute)
+            .create_task(
+                &run,
+                "x".into(),
+                "asked".into(),
+                vec![],
+                None,
+                now - 5 * minute,
+            )
             .expect("a task");
         ledger
-            .create_gate(&run, &asked, "rpc or rest?".into(), vec![], now - 4 * minute)
+            .create_gate(
+                &run,
+                &asked,
+                "rpc or rest?".into(),
+                vec![],
+                now - 4 * minute,
+            )
             .expect("a decision");
 
         // Read as the sidebar reads it: the JSON of the card.
@@ -2973,7 +2986,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("the run has no card"))
         };
         let card = card_of(&ledger);
-        assert_eq!(card["reviews"], 2, "two reports, and the decision is not one: {card}");
+        assert_eq!(
+            card["reviews"], 2,
+            "two reports, and the decision is not one: {card}"
+        );
         assert_eq!(
             card["reviews_since_ms"],
             now - 40 * minute + 2,

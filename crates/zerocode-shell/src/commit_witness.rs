@@ -82,8 +82,9 @@ fn see_with(
 /// A commit git gave no key for is not kept, and is asked again next time.
 pub(crate) fn change_key_kept(vcs: &dyn Vcs, repo: &Path, commit: &str) -> Option<String> {
     let cache = || {
-        static KEPT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
-            std::sync::OnceLock::new();
+        static KEPT: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<String, String>>,
+        > = std::sync::OnceLock::new();
         KEPT.get_or_init(Default::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -677,7 +678,9 @@ mod tests {
             {
                 summed += 1;
                 commits.insert(commit.to_string());
-                changes.insert(change_key(&LocalVcs, repo, commit).unwrap_or_else(|| commit.to_string()));
+                changes.insert(
+                    change_key(&LocalVcs, repo, commit).unwrap_or_else(|| commit.to_string()),
+                );
             }
         }
         println!(
@@ -714,11 +717,19 @@ mod tests {
         assert_ne!(original, copy, "a cherry-pick is a commit of its own");
 
         let key = |commit: &str| change_key(&LocalVcs, repo, commit).expect("git keys the change");
-        assert_eq!(key(&original), key(&copy), "the same change, picked elsewhere");
+        assert_eq!(
+            key(&original),
+            key(&copy),
+            "the same change, picked elsewhere"
+        );
         assert_ne!(key(&original), key(&other), "another change");
         assert_eq!(key(&original).len(), CHANGE_KEY_CHARS);
         let root = git(repo, &["rev-list", "--max-parents=0", "HEAD"]);
-        assert_eq!(change_key(&LocalVcs, repo, &root), None, "a root commit has no parent to read against");
+        assert_eq!(
+            change_key(&LocalVcs, repo, &root),
+            None,
+            "a root commit has no parent to read against"
+        );
     }
 
     /// A throwaway repository: `main` with a released commit and an unreleased one after it, and a

@@ -96,10 +96,17 @@ fn work_nothing_was_handed_in_on_is_settled_in_one_call_as_done_with_nothing_to_
     assert_eq!(review.author, ReviewAuthor::Coordinator);
     assert_eq!(review.attempt.as_deref(), Some(dispatch));
     assert_eq!(review.source.as_deref(), Some(handed));
-    assert!(!review.unreviewable, "a settled task still reads unreviewable");
+    assert!(
+        !review.unreviewable,
+        "a settled task still reads unreviewable"
+    );
     let attempt = run.newest_attempt(&id).expect("the seat's attempt");
     assert_eq!(attempt.id, dispatch);
-    assert!(attempt.worker.starts_with(coordinator_take::COORDINATOR_CARRIER));
+    assert!(
+        attempt
+            .worker
+            .starts_with(coordinator_take::COORDINATOR_CARRIER)
+    );
     assert_eq!(attempt.source.as_deref(), Some(handed));
     let result: serde_json::Value =
         serde_json::from_str(held.result.as_str()).expect("the result is JSON");
@@ -161,7 +168,13 @@ fn the_one_call_settle_is_refused_where_a_review_has_something_to_name_or_nobody
     // tallied for the day, so the whole projection is not the measure.
     let work = |bench: &Bench| {
         let held = bench.ledger.export();
-        (held.runs, held.tasks, held.dispatches, held.messages, held.gates)
+        (
+            held.runs,
+            held.tasks,
+            held.dispatches,
+            held.messages,
+            held.gates,
+        )
     };
     let refused = |bench: &mut Bench, pane: &str, line: &str, says: &str| {
         let before = work(bench);
@@ -180,7 +193,12 @@ fn the_one_call_settle_is_refused_where_a_review_has_something_to_name_or_nobody
     refused(&mut bench, leader, &line(&carried), "carried by an attempt");
     refused(&mut bench, leader, &line(&closed), "is closed");
     refused(&mut bench, leader, &line(&gated), "blocked by gate");
-    refused(&mut bench, leader, &line(&waiting), "waiting on its dependencies");
+    refused(
+        &mut bench,
+        leader,
+        &line(&waiting),
+        "waiting on its dependencies",
+    );
     refused(
         &mut bench,
         leader,
@@ -199,7 +217,12 @@ fn the_one_call_settle_is_refused_where_a_review_has_something_to_name_or_nobody
         &format!("task-settle --task {plain} --why done --report /r.md --apply"),
         "does not support --apply",
     );
-    refused(&mut bench, &carrier_pane, &line(&plain), "coordinator's verb");
+    refused(
+        &mut bench,
+        &carrier_pane,
+        &line(&plain),
+        "coordinator's verb",
+    );
 
     // A review already stands: settled once, it is not settled again.
     settle(&mut bench, &plain);
@@ -245,7 +268,13 @@ fn a_task_whose_result_names_a_commit_is_not_settled_as_nothing_to_land() {
 
     let work = |bench: &Bench| {
         let held = bench.ledger.export();
-        (held.runs, held.tasks, held.dispatches, held.messages, held.gates)
+        (
+            held.runs,
+            held.tasks,
+            held.dispatches,
+            held.messages,
+            held.gates,
+        )
     };
     for (id, commit, under) in [
         (&nested, NESTED, "landed.mergeHead"),

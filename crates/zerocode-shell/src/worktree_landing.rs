@@ -1721,13 +1721,27 @@ mod tests {
         };
         let (own, stacked_keys, stack_keys) = (keys(&work), keys(&stacked), keys(&stack));
         assert_eq!(own.len(), 1, "{own:?}");
-        assert_eq!((stacked_keys.len(), stack_keys.len()), (2, 2), "{stacked_keys:?} {stack_keys:?}");
-        assert!(stacked_keys.contains(&own[0]), "the stacked branch holds the same commit");
-        assert!(stack_keys.contains(&own[0]), "the stack holds a copy of the same change");
+        assert_eq!(
+            (stacked_keys.len(), stack_keys.len()),
+            (2, 2),
+            "{stacked_keys:?} {stack_keys:?}"
+        );
+        assert!(
+            stacked_keys.contains(&own[0]),
+            "the stacked branch holds the same commit"
+        );
+        assert!(
+            stack_keys.contains(&own[0]),
+            "the stack holds a copy of the same change"
+        );
         let mut all: Vec<&String> = own.iter().chain(&stacked_keys).chain(&stack_keys).collect();
         all.sort();
         all.dedup();
-        assert_eq!(all.len(), 3, "the work, the stacked branch's own and the stack's own: {all:?}");
+        assert_eq!(
+            all.len(),
+            3,
+            "the work, the stacked branch's own and the stack's own: {all:?}"
+        );
     }
 
     /// A checkout whose work is in the compare ref, the way a project that

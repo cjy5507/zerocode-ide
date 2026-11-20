@@ -781,7 +781,11 @@ fn a_run_nobody_can_carry_on_folds_its_now_into_one_line() {
     assert_eq!(pile["tasks"][0]["task"], done.as_str(), "{pile}");
     assert_eq!(pile["tasks"][0]["stage"], "verified", "{pile}");
     assert_eq!(pile["tasks"].as_array().map(Vec::len), Some(1), "{pile}");
-    assert_eq!(pile["named"], serde_json::json!([]), "a press names nothing here: {pile}");
+    assert_eq!(
+        pile["named"],
+        serde_json::json!([]),
+        "a press names nothing here: {pile}"
+    );
 
     ledger
         .seat_coordinator(&run, SEAT, None, at(-1))
