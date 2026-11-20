@@ -1456,41 +1456,57 @@ async fn e2e_piped_bare_goal_runs_before_the_pipe_ends() {
     assert!(!stdout.contains("(completed)"), "a goal with no gate said it was achieved:\n{stdout}");
 }
 
-/// A run a spent budget stops says why on the screen (t-122771). The
-/// session's budget paused it after a turn — or a later goal at its first
-/// dispatch — and nothing said so: a goal typed after the budget was spent
-/// answered "running" and then did nothing. One continuation is the limit
-/// here, so the first goal spends the session's budget in two turns.
+/// A run a spent budget stops says why, and the person's own start or
+/// resume goes on (t-122771). Before, the session's budget paused a run
+/// after a turn and nothing said so, a goal typed afterwards answered
+/// "running" and did nothing, and `/goal resume` answered "resumed" and
+/// stopped again. One continuation is the limit here, so a run spends the
+/// session's budget in two turns: the first goal stops and says why, the
+/// second goal's start renews the budget and runs until it stops the same
+/// way, and the person's resume renews it again and the goal passes its
+/// gate. Each line is typed after the one before has stopped, as a person
+/// would: a slash line typed during a turn waits for the turn's end.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn e2e_a_goal_the_session_budget_stops_says_why() {
+async fn e2e_a_spent_budget_says_why_and_the_persons_start_or_resume_goes_on() {
     let layout = Layout::new();
     layout.model_led();
     let service = MockAnthropicService::spawn()
         .await
         .expect("start goal mock service");
-    let output = run_pipe_with_env(
+    let mut run = PtyRun::spawn_with_env(
         &layout.cwd,
         &layout.home,
         &layout.sessions,
         &layout.state,
         &service.base_url(),
-        &["--plain", "--permission-mode", "danger-full-access"],
-        b"/goal start PARITY_SCENARIO:goal_turns go --check \"touch gate-ran\"\n/goal start PARITY_SCENARIO:goal_turns again --check \"touch gate-ran\"\n",
+        &interactive_args(),
         &[("ZO_AUTONOMY_MAX_CONTINUATIONS", "1")],
     )
-    .expect("run two piped goals");
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    show_permission_lines("full access · two piped goals on one continuation", &stdout);
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"/goal start PARITY_SCENARIO:goal_turns go --check \"touch gate-ran\"\r")
+        .expect("type the first goal");
+    let first = run.wait_for(
+        "goal: PARITY_SCENARIO:goal_turns go (paused) · stopped: session continuation limit reached (1/1)",
+        TEST_TIMEOUT,
+    );
+    run.send(b"/goal start PARITY_SCENARIO:goal_turns again --check \"touch gate-ran\"\r")
+        .expect("type the second goal");
+    let second = run.wait_for_after(
+        "goal: PARITY_SCENARIO:goal_turns again (paused) · stopped: session continuation limit reached (1/1)",
+        first,
+        TEST_TIMEOUT,
+    );
+    run.send(b"/goal resume\r").expect("type the resume");
+    let resumed = run.wait_for_after("four limits renewed", second, TEST_TIMEOUT);
+    run.wait_for_after("goal: PARITY_SCENARIO:goal_turns again (completed)", resumed, TEST_TIMEOUT);
+    let capture = strip_ansi(&String::from_utf8_lossy(&run.finish()));
 
-    assert!(output.status.success(), "the piped goals exited with {:?}:\n{stdout}", output.status);
-    for objective in ["PARITY_SCENARIO:goal_turns go", "PARITY_SCENARIO:goal_turns again"] {
-        assert!(
-            stdout.contains(&format!(
-                "goal: {objective} (paused) · stopped: session continuation limit reached (1/1) · /goal done if the goal is met"
-            )),
-            "the goal {objective:?} stopped on the session's budget without saying so:\n{stdout}"
-        );
-    }
+    assert!(
+        capture.contains("/goal resume to keep going"),
+        "the stop did not say what to do next:\n{capture}"
+    );
+    assert!(layout.cwd.join("gate-ran").exists(), "the resumed goal's gate never ran:\n{capture}");
 }
 
 /// A prompt named on the command line is the person's words, never a

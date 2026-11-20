@@ -260,6 +260,21 @@ impl GoalState {
         self.checks.is_empty() && self.until.is_none()
     }
 
+    /// A person's resume (t-122771): the run it arms gets the four limits
+    /// afresh, and the stall count starts again — the unattended turns it
+    /// counts are the ones after the person's word. The objective, the plan
+    /// and the gates stay; a reopened session and the scheduler's wakeups
+    /// never come here.
+    fn renew_limits(&mut self) {
+        self.continuations = 0;
+        self.dispatched_turns = 0;
+        self.assistant_turns = 0;
+        self.output_tokens = 0;
+        self.active_millis = 0;
+        self.active_since_unix_ms = None;
+        self.stalled_turns = 0;
+    }
+
     fn elapsed_millis(&self, now: u64) -> u64 {
         self.active_millis.saturating_add(
             self.active_since_unix_ms
@@ -355,6 +370,10 @@ pub struct GoalCommandResult {
     /// This command started an autonomous run: a `/goal <objective>`, `start`
     /// or `set`. The session adds whether its turns may write.
     pub started: bool,
+    /// The person's command armed a run with fresh limits — a start, or a
+    /// resume that runs — so the session renews its budget for it
+    /// (t-122771).
+    pub armed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,6 +512,7 @@ impl GoalController {
                 return Ok(GoalCommandResult {
                     notice: "goal: none".to_string(),
                     started: false,
+                    armed: false,
                 });
             };
             state.complete();
@@ -500,6 +520,7 @@ impl GoalController {
             return Ok(GoalCommandResult {
                 notice: "goal: completed explicitly".to_string(),
                 started: false,
+                armed: false,
             });
         }
         // commands' broad compatibility parser treats `stop` as clear. zo's
@@ -527,6 +548,7 @@ impl GoalController {
         workspace_fingerprint: Option<&str>,
     ) -> Result<GoalCommandResult, String> {
         let mut started = false;
+        let mut armed = false;
         let notice = match command {
             GoalCommand::Status | GoalCommand::History => self.status_report(),
             GoalCommand::Start { goal, options } => {
@@ -555,6 +577,7 @@ impl GoalController {
                 );
                 self.state = Some(state);
                 started = true;
+                armed = true;
                 notice
             }
             GoalCommand::Verify => {
@@ -562,6 +585,7 @@ impl GoalController {
                     return Ok(GoalCommandResult {
                         notice: "goal: none".to_string(),
                         started: false,
+                        armed: false,
                     });
                 };
                 if state.checks.is_empty() && state.until.is_none() {
@@ -595,6 +619,7 @@ impl GoalController {
                     return Ok(GoalCommandResult {
                         notice: "goal: none".to_string(),
                         started: false,
+                        armed: false,
                     });
                 };
                 state.pause("stopped explicitly");
@@ -605,23 +630,26 @@ impl GoalController {
                     return Ok(GoalCommandResult {
                         notice: "goal: none".to_string(),
                         started: false,
+                        armed: false,
                     });
                 };
                 // An ungated goal resumes too (t-122771): its run ends by the
                 // same stall rule, limits and `/goal done` as when it started.
+                // The person's resume is a new consent: the run it arms gets
+                // the four limits afresh, so a run a limit stopped goes on —
+                // the footer's `(/goal resume)` is no longer a dead end.
                 if state.phase == GoalPhase::Completed {
                     "goal: already completed; edit or clear it before another run".to_string()
-                } else if let Some(exhausted) = state.exhaustion() {
-                    state.pause(exhausted.clone());
-                    format!("goal: cannot resume — {exhausted}")
                 } else {
+                    state.renew_limits();
                     state.phase = GoalPhase::Running;
                     state.pause_reason = None;
                     state.pending.get_or_insert(GoalTurnKind::Action);
                     state.next_at_unix_ms = None;
                     state.scheduled_trigger = Some(Trigger::Immediate);
                     state.start_clock();
-                    "goal: autonomous continuation resumed".to_string()
+                    armed = true;
+                    "goal: autonomous continuation resumed · four limits renewed".to_string()
                 }
             }
             GoalCommand::Clear => {
@@ -634,6 +662,7 @@ impl GoalController {
                 return Ok(GoalCommandResult {
                     notice: "goal: cleared".to_string(),
                     started: false,
+                    armed: false,
                 });
             }
             GoalCommand::Edit { goal } => {
@@ -648,6 +677,7 @@ impl GoalController {
                     return Ok(GoalCommandResult {
                         notice: "goal: saved · autonomous off (/goal resume starts it)".to_string(),
                         started: false,
+                        armed: false,
                     });
                 };
                 let was_running = state.phase == GoalPhase::Running;
@@ -671,7 +701,11 @@ impl GoalController {
             }
         };
         self.persist().map_err(|error| error.to_string())?;
-        Ok(GoalCommandResult { notice, started })
+        Ok(GoalCommandResult {
+            notice,
+            started,
+            armed,
+        })
     }
 
     /// 다음 자동 턴을 디스패치한다. 첫 action 뒤의 모든 턴은 continuation으로
@@ -746,9 +780,10 @@ impl GoalController {
         let Some(state) = self.state.as_mut() else {
             return Ok("goal: result ignored because the goal was cleared".to_string());
         };
-        // The line an ungated run's stall ends with: what happened and what
-        // the person can do next, in place of the status line (t-122771).
-        let mut stalled_notice = None;
+        // The line a run a limit or an ungated run's stall stopped ends with:
+        // what stopped it and what the person can do next, in place of the
+        // status line (t-122771).
+        let mut end_notice = None;
         if state.objective != turn.objective {
             return Ok("goal: result ignored because the goal changed during the turn".to_string());
         }
@@ -814,6 +849,7 @@ impl GoalController {
                 state.pause(format!("autonomous turn failed: {error}"));
             }
         } else if let Some(exhausted) = state.exhaustion() {
+            end_notice = Some(stopped_line(state, &exhausted));
             state.pause(exhausted);
         } else {
             state.transient_failures = 0;
@@ -830,10 +866,10 @@ impl GoalController {
             if state.stalled_turns >= max_stalled_turns {
                 state.pause("two unattended turns made no workspace, gate, or todo progress");
                 // Most often the work is done and nothing is left to change.
-                stalled_notice = state.ungated().then(|| {
-                    format!(
-                        "goal: {} (paused) · stopped: {max_stalled_turns} turns in a row changed nothing · /goal done if the goal is met, /goal resume to keep going",
-                        one_line(&state.objective, 72)
+                end_notice = state.ungated().then(|| {
+                    stopped_line(
+                        state,
+                        &format!("{max_stalled_turns} turns in a row changed nothing"),
                     )
                 });
             } else {
@@ -924,7 +960,7 @@ impl GoalController {
                 }
             }
         }
-        let notice = stalled_notice.unwrap_or_else(|| self.status_report());
+        let notice = end_notice.unwrap_or_else(|| self.status_report());
         self.persist().map_err(|error| error.to_string())?;
         Ok(notice)
     }
@@ -1041,10 +1077,7 @@ impl GoalController {
             .as_ref()
             .filter(|state| state.phase == GoalPhase::Paused)?;
         let reason = state.pause_reason.as_deref()?;
-        Some(format!(
-            "goal: {} (paused) · stopped: {reason} · /goal done if the goal is met",
-            one_line(&state.objective, 72)
-        ))
+        Some(stopped_line(state, reason))
     }
 
     pub fn pause_for_session_limit(&mut self, reason: &str) -> Result<(), String> {
@@ -1186,6 +1219,16 @@ pub fn record_gate_verdict(
     .with_shape_label(api::plan_shape_for_attempt(attempt).unwrap_or_default())
     .with_attempt_key(attempt);
     let _ = runtime::record_route_outcome(cwd, &record);
+}
+
+/// The line a run ends with when a limit or the stall rule stopped it: what
+/// stopped it and what the person can do next (t-122771). A person's resume
+/// renews the four limits, so `/goal resume` goes on.
+fn stopped_line(state: &GoalState, reason: &str) -> String {
+    format!(
+        "goal: {} (paused) · stopped: {reason} · /goal done if the goal is met, /goal resume to keep going",
+        one_line(&state.objective, 72)
+    )
 }
 
 fn prompt_for(state: &GoalState, kind: &GoalTurnKind) -> String {
@@ -1583,6 +1626,7 @@ mod tests {
         let (_temp, mut controller) = controller();
         let result = controller.apply("ship it", None).expect("start");
         assert!(result.started);
+        assert!(result.armed, "a person's start renews the session's budget");
         assert!(controller.is_running());
         assert_eq!(controller.objective(), Some("ship it"));
         let limits = &controller.limits;
@@ -1639,6 +1683,7 @@ mod tests {
         let (_temp, mut controller) = controller();
         let result = controller.apply("edit ship it", None).expect("edit");
         assert!(!result.started);
+        assert!(!result.armed);
         assert!(!controller.is_running());
         assert_eq!(controller.objective(), Some("ship it"));
         assert_eq!(result.notice, "goal: saved · autonomous off (/goal resume starts it)");
@@ -1646,6 +1691,7 @@ mod tests {
 
         let resumed = controller.apply("resume", None).expect("resume");
         assert!(!resumed.started);
+        assert!(resumed.armed);
         assert!(controller.is_running(), "{}", resumed.notice);
         let turn = controller.dispatch_next().expect("dispatch").expect("turn");
         assert_eq!(turn.kind, GoalTurnKind::Action);
@@ -1730,7 +1776,7 @@ mod tests {
             .expect("pause");
         assert_eq!(
             controller.stop_line().as_deref(),
-            Some("goal: ship it (paused) · stopped: session continuation limit reached (8/8) · /goal done if the goal is met")
+            Some("goal: ship it (paused) · stopped: session continuation limit reached (8/8) · /goal done if the goal is met, /goal resume to keep going")
         );
 
         let (_bounded_temp, mut bounded) = self::controller();
@@ -1743,6 +1789,42 @@ mod tests {
         assert!(line.contains("· stopped: continuation limit reached"), "{line}");
         bounded.apply("done", None).expect("done");
         assert_eq!(bounded.stop_line(), None);
+    }
+
+    /// A limit stopped the run. Reopening the session renews nothing — the
+    /// run comes back paused with its counts — while the person's
+    /// `/goal resume` renews the four limits, so the next dispatch runs: the
+    /// footer's `(/goal resume)` is not a dead end (t-122771).
+    #[test]
+    fn only_a_persons_resume_renews_the_limits() {
+        let (temp, mut controller) = controller();
+        let transcript = temp.path().join("session.jsonl");
+        controller.apply("ship it --no-plan", None).expect("start");
+        let state = controller.state.as_mut().expect("state");
+        state.dispatched_turns = 1;
+        state.continuations = state.max_continuations;
+        state.assistant_turns = state.max_assistant_turns - 1;
+        state.stalled_turns = 1;
+        assert!(controller.dispatch_next().expect("dispatch").is_none(), "the limit stops it");
+        assert!(!controller.is_running());
+
+        let mut loaded = GoalController::load(&transcript, Some("ship it"), true);
+        assert!(!loaded.is_running());
+        assert!(loaded.dispatch_next().expect("dispatch").is_none());
+        let kept = loaded.state.as_ref().expect("state");
+        assert_eq!(kept.continuations, kept.max_continuations, "a reopened session renewed the limits");
+        assert_eq!(kept.assistant_turns, kept.max_assistant_turns - 1);
+
+        let resumed = loaded.apply("resume", None).expect("resume");
+        assert!(resumed.armed);
+        assert_eq!(resumed.notice, "goal: autonomous continuation resumed · four limits renewed");
+        let renewed = loaded.state.as_ref().expect("state");
+        assert_eq!(
+            (renewed.continuations, renewed.assistant_turns, renewed.stalled_turns),
+            (0, 0, 0)
+        );
+        let turn = loaded.dispatch_next().expect("dispatch").expect("the resumed run goes on");
+        assert_eq!(turn.kind, GoalTurnKind::Action);
     }
 
     /// `--every` spaces an ungated goal's actions: after one, the next waits.

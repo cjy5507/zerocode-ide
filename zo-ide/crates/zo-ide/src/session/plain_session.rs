@@ -2112,6 +2112,11 @@ impl PlainSession {
             .then(|| crate::goal::workspace_fingerprint(&self.cwd).ok())
             .flatten();
         let mut result = self.autonomy.goal.apply(raw, fingerprint.as_deref())?;
+        if result.armed {
+            self.autonomy
+                .renew_session_budget()
+                .map_err(|error| error.to_string())?;
+        }
         if result.started {
             let writes = crate::autonomy::run_writes_note(
                 self.autonomy.goal.allows_writes(),

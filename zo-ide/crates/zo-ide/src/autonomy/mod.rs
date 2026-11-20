@@ -225,6 +225,19 @@ impl Autonomy {
         self.persist_budget()
     }
 
+    /// A person's own `/goal` start or resume renews the session's budget
+    /// (t-122771): each command they type is a new consent, and the run it
+    /// arms is held to the four limits again. The budget is goal and loop
+    /// together, so a loop's share renews too — but a loop the spent budget
+    /// paused stays paused. A block on unknown cost stays, and a reopened
+    /// session or the scheduler's own wakeup renews nothing.
+    pub fn renew_session_budget(&mut self) -> io::Result<()> {
+        self.budget.assistant_turns = 0;
+        self.budget.output_tokens = 0;
+        self.budget.active_millis = 0;
+        self.persist_budget()
+    }
+
     pub fn record_usage(&mut self, output_tokens: u64, active_millis: u64) -> io::Result<()> {
         self.budget.assistant_turns = self.budget.assistant_turns.saturating_add(1);
         self.budget.output_tokens = self.budget.output_tokens.saturating_add(output_tokens);
@@ -375,6 +388,69 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    /// t-122771: the person's own start or resume renews the session's
+    /// budget; a reopened session renews nothing, and a block on unknown
+    /// cost is never renewed.
+    #[test]
+    fn a_persons_start_renews_the_session_budget_but_not_a_block() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transcript = temp.path().join("s.jsonl");
+        let mut autonomy = Autonomy::load(&transcript, None, false);
+        autonomy.limits.max_assistant_turns = 2;
+        autonomy.record_usage(5, 10).expect("a turn");
+        autonomy.record_usage(5, 10).expect("a turn");
+        assert!(autonomy.exhaustion().is_some());
+
+        let mut reopened = Autonomy::load(&transcript, None, true);
+        reopened.limits.max_assistant_turns = 2;
+        assert!(reopened.exhaustion().is_some(), "a reopened session renewed the budget");
+        reopened.renew_session_budget().expect("renew");
+        assert_eq!(reopened.exhaustion(), None);
+        assert_eq!(Autonomy::load(&transcript, None, true).status().budget.assistant_turns, 0);
+
+        reopened.block("unknown graph cost").expect("block");
+        reopened.renew_session_budget().expect("renew");
+        assert_eq!(reopened.exhaustion().as_deref(), Some("unknown graph cost"));
+    }
+
+    /// t-122771: the session's budget is goal and loop together, so a
+    /// person's goal start renews a loop's share as well — but a loop the
+    /// spent budget paused stays paused: it does not run on by itself
+    /// through the renewed budget, only on `/loop resume`.
+    #[test]
+    fn a_renewed_session_budget_does_not_wake_a_loop_it_paused() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transcript = temp.path().join("s.jsonl");
+        let mut autonomy = Autonomy::load(&transcript, None, false);
+        autonomy
+            .loops
+            .apply(
+                commands::LoopCommand::StartDynamic {
+                    prompt: "poll CI".to_string(),
+                },
+                1_000,
+                temp.path(),
+            )
+            .expect("a loop");
+        autonomy.limits.max_assistant_turns = 1;
+        autonomy.record_usage(1, 1).expect("a loop turn");
+        let reason = autonomy.exhaustion().expect("the budget is spent");
+        autonomy.loops.pause_for_session_limit(&reason).expect("pause");
+
+        autonomy.goal.apply("ship it", None).expect("a goal");
+        autonomy.renew_session_budget().expect("the person's start renews it");
+        assert_eq!(autonomy.exhaustion(), None);
+        assert_eq!(autonomy.status().loops[0].phase, "paused");
+        assert!(
+            autonomy
+                .loops
+                .dispatch_due(u64::MAX / 2, temp.path())
+                .expect("dispatch")
+                .is_none(),
+            "the paused loop ran on the renewed budget"
+        );
     }
 
     /// t-122771: a goal now starts the moment it is written, beside a loop
