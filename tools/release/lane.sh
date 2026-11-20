@@ -286,6 +286,7 @@ SHA=; SHA8=; SCRATCH=; LOG=; QUEUE_FILE=; STARTED_AT=; PHASE=; PHASE_T0=0
 PHASES_JSON=; DISK_FREE_GB=0; OUTCOME=null; REASON=; SWEPT=1; LOCK_HELD=0
 VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=   # SKIP: why the phase being ended did nothing; WHY: a step's red in words
 ONLY=; RECEIPT=   # a gate's recipes a coordinator's receipt left owed, and what that receipt did (receipt_cover)
+RECEIPT_JUDGED=   # the failures a receipt that stood cleared solo for a gate it covered, as solo_plan writes them (flake_reals counts them)
 STALLED=null      # status.json's `stalled` while a gate's recipe writes nothing past its say time (watch_gate), else null
 WIN_INSTALLER=    # this run's Windows installer (build-win): the only one bundle-updater signs, never one an earlier run left
 WIN_SHIPPED=0     # 1 once bundle-updater put that installer, its .sig and its feed row under out/ — publish sends the three or none
@@ -747,6 +748,12 @@ plan_names() { # PLAN LANE -> 0 when the plan holds a failure name under that la
   case $'\n'"$1" in *$'\n'"$2"$'\t'*) return 0 ;; esac
   return 1
 }
+say_unlisted_ahead() { # PLAN — each unlisted name of PLAN said in the log before the solo runs judge it
+  local lane kind unit f
+  while IFS=$'\t' read -r lane kind unit f; do
+    [ "$kind" != unlisted ] || log "unlisted red $lane:$f — judged solo"
+  done <<< "$1"
+}
 # say_unlisted PLAN LANE UNIT PASSED VERDICT — each unlisted name that unit's solo runs judged: in the
 # lane log, and kept in $UNLISTED with the day, the sha and its gate log, where the person writing a
 # flakes.txt line finds the evidence for it (t-9741).
@@ -765,7 +772,22 @@ ui_solo() {
   local harness=${1%%/*} suite=${1#*/}
   env "$UI_SUITE_CHOOSER=^$(printf '%s' "$suite" | sed 's/[][\\.*^$+?(){}|]/\\&/g')\$" just "$harness-browser-test"
 }
-run_solo() { # LANE NAME RUN -> prints rc
+# solo_road LANE NAME TOP TARGET — one solo run of NAME, as the flakes phase runs one, from the checkout TOP,
+# cargo building in TARGET (the gate's own target, so nothing is built again; none: cargo's own place).
+solo_road() {
+  local lane=$1 name=$2 top=$3 target=$4
+  case "$lane:$name" in
+    # A node harness is judged by the very recipe the gate ran, so a new harness
+    # needs no line here: whole when its checks have no suite to stand in (or it
+    # named none), and one suite alone when the check that failed named its suite.
+    root:harness:*) ( cd "$top" && just "${name#harness:}-browser-test" ) ;;
+    root:ui:*) ( cd "$top" && ui_solo "${name#ui:}" ) ;;
+    root:*) ( cd "$top" && { [ -z "$target" ] || export CARGO_TARGET_DIR="$target"; } && cargo test --workspace "$name" ) ;;
+    zo:*)   ( cd "$top/zo-ide" && { [ -z "$target" ] || export CARGO_TARGET_DIR="$target"; } \
+                && ZO_DISABLE_KEYCHAIN=1 cargo test --workspace "$name" ) ;;
+  esac
+}
+run_solo() { # LANE NAME RUN AT -> prints rc (AT, the unit's place among its gate's units, names a coordinator's log alone)
   local lane=$1 name=$2 n=$3 rc log="$OUT/solo-$1-$SHA8-$3.log" target
   target=$(target_dir "$lane-gate")
   if is_dry; then
@@ -777,16 +799,60 @@ run_solo() { # LANE NAME RUN -> prints rc
     for w in $seq; do i=$(( i + 1 )); last=$w; [ "$i" -eq "$nth" ] && { echo "$w"; return 0; }; done
     echo "$last"; return 0
   fi
-  case "$lane:$name" in
-    # A node harness is judged by the very recipe the gate ran, so a new harness
-    # needs no line here: whole when its checks have no suite to stand in (or it
-    # named none), and one suite alone when the check that failed named its suite.
-    root:harness:*) ( cd "$SCRATCH" && just "${name#harness:}-browser-test" ) > "$log" 2>&1; rc=$? ;;
-    root:ui:*) ( cd "$SCRATCH" && ui_solo "${name#ui:}" ) > "$log" 2>&1; rc=$? ;;
-    root:*) ( cd "$SCRATCH" && CARGO_TARGET_DIR=$target cargo test --workspace "$name" ) > "$log" 2>&1; rc=$? ;;
-    zo:*)   ( cd "$SCRATCH/zo-ide" && ZO_DISABLE_KEYCHAIN=1 CARGO_TARGET_DIR=$target cargo test --workspace "$name" ) > "$log" 2>&1; rc=$? ;;
-  esac
+  solo_road "$lane" "$name" "$SCRATCH" "$target" > "$log" 2>&1; rc=$?
   echo "$rc"
+}
+# flake_reals PLAN ROOT_RC ZO_RC [JUDGED] — what the flakes phase calls red for real in PLAN (solo_plan's lines
+# of both gates) under those gates' ends, " <lane>:<name>" each, before any solo run; nothing when every name
+# may be judged solo. JUDGED: the plan lines a coordinator's receipt already cleared solo for a gate it covered
+# (receipt_cover) — not judged again, but counted toward MAX_SOLO_JUDGED as if this run had met them, since
+# the bound is over both gates together. The lane's own flakes phase and a coordinator's gate (lane.sh
+# --judge-flakes) read it alike.
+flake_reals() {
+  local plan=$1 lane kind unit f real= names=0   # unlisted names only — a listed cluster is what flakes.txt is for
+  while IFS=$'\t' read -r lane kind unit f; do
+    [ "$kind" != unlisted ] || names=$(( names + 1 ))
+    # A recipe that failed without naming a test is real whatever else failed by name.
+    [ "$kind" != recipe ] || real="$real $lane:$f"
+  done <<< "$plan"
+  while IFS=$'\t' read -r lane kind unit f; do
+    [ "$kind" != unlisted ] || names=$(( names + 1 ))
+  done <<< "${4-}"
+  # A red with no failure names is a build/harness failure, not a test: real.
+  [ "$2" = 0 ] || plan_names "$plan" root || real=" root:?$real"
+  [ "$3" = 0 ] || plan_names "$plan" zo || real="$real zo:?"
+  # Too many unlisted names at once is a regression, not a flake storm.
+  if [ "$names" -gt "$MAX_SOLO_JUDGED" ]; then
+    while IFS=$'\t' read -r lane kind unit f; do
+      [ -z "$lane" ] || [ "$kind" = recipe ] || real="$real $lane:$f"
+    done <<< "$plan"
+  fi
+  printf '%s' "$real"
+}
+# solo_units PLAN -> "<lane>\t<unit>", one solo road per unit however many of its names failed (a suite of a
+# browser harness is re-run once a round for every check of it that was red), in the plan's order.
+solo_units() { printf '%s\n' "$1" | awk -F'\t' 'NF && $2 != "recipe" && !seen[$1 FS $3]++ { print $1 FS $3 }'; }
+# solo_judge PLAN — the judgment itself: each unit of PLAN run alone SOLO_RUNS times through run_solo, in the
+# plan's order, each run said as `solo <lane> <unit> <run>/<SOLO_RUNS> rc=<rc>` in the log, each unit's
+# unlisted names said with how it went (say_unlisted); the first red run ends it. 0 when every run of every
+# unit was green; 1 at a red one, SOLO_RED saying which. One count, one order, one stop for the lane's flakes
+# phase and a coordinator's gate alike (lane.sh --judge-flakes, t-121630).
+solo_judge() {
+  local lane unit i rc at root_at=0 zo_at=0
+  SOLO_RED=
+  # The list comes in on fd 3, so nothing a solo run starts can read it.
+  while IFS=$'\t' read -r lane unit <&3; do
+    [ -n "$lane" ] || continue
+    if [ "$lane" = root ]; then root_at=$(( root_at + 1 )); at=$root_at; else zo_at=$(( zo_at + 1 )); at=$zo_at; fi
+    for i in $(seq 1 "$SOLO_RUNS"); do
+      rc=$(run_solo "$lane" "$unit" "$i" "$at"); log "solo $lane $unit $i/$SOLO_RUNS rc=$rc"
+      if [ "$rc" != 0 ]; then
+        say_unlisted "$1" "$lane" "$unit" $(( i - 1 )) red
+        SOLO_RED="solo $lane $unit run $i rc=$rc"; return 1
+      fi
+    done
+    say_unlisted "$1" "$lane" "$unit" "$SOLO_RUNS" green
+  done 3<<< "$(solo_units "$1")"
 }
 do_push() {
   local log="$OUT/push-$SHA8.log"
@@ -1389,6 +1455,7 @@ notes_edited() {
 }
 receipt_cover() { # LANE — 0 when this sha's receipt stands, ONLY what it left owed; 1 when there is none or it is refused (RECEIPT says why)
   local lane=$1 file="$RECEIPTS/$SHA.json" facts kind rest head ended committed recipes r who= run= tree= logs= heads= covered= owed= notes= n=0 total=0
+  local cleared= judged=
   ONLY=; RECEIPT=
   [ -f "$file" ] || return 1
   [ -n "$RELEASE_COORD_RUN" ] || { RECEIPT="unused: the lane was given no coordinator run (RELEASE_COORD_RUN)"; return 1; }
@@ -1402,6 +1469,8 @@ receipt_cover() { # LANE — 0 when this sha's receipt stands, ONLY what it left
       tree) tree=$rest ;;
       logs) logs=$rest ;;
       recipe) covered="$covered $rest " ;;
+      cleared) cleared="$cleared $rest" ;;   # a red entry of this gate's folder the receipt's flakes judgment cleared
+      judged) case $rest in "$lane"$'\t'*) judged="$judged$rest"$'\n' ;; esac ;;   # one failure it cleared, solo_plan's line
       head) heads="$heads$rest"$'\n' ;;
     esac
   done <<< "$facts"
@@ -1432,7 +1501,9 @@ receipt_cover() { # LANE — 0 when this sha's receipt stands, ONLY what it left
     owed="$owed $r"
   done
   ONLY=${owed# }
-  RECEIPT="$who of $run as its jobs say (the lane's coordinator run), tree ${tree:0:8}: $n/$total $lane recipes green${notes:+, the notes changed}${ONLY:+, owes $ONLY} — logs $logs"
+  # The failures it cleared count toward this run's bound on names judged solo, as if the gate had run here.
+  RECEIPT_JUDGED="$RECEIPT_JUDGED$judged"
+  RECEIPT="$who of $run as its jobs say (the lane's coordinator run), tree ${tree:0:8}: $n/$total $lane recipes green${cleared:+ (red, cleared solo as the flakes phase clears a red gate:$cleared)}${notes:+, the notes changed}${ONLY:+, owes $ONLY} — logs $logs"
   return 0
 }
 gate_left() { # LANE — 0 when the gate still runs: whole, or ONLY what a receipt left; 1 when a receipt covered it all (SKIP says so)
@@ -1562,21 +1633,7 @@ judge_sha() {
   # One line per failure name — its lane, whether flakes.txt lists it, what a solo run re-runs for
   # it, the name — read line by line, so a browser check's name with spaces in it stays one name.
   plan=$(solo_plan root "$OUT/gate-root-$SHA8.log"; solo_plan zo "$OUT/gate-zo-$SHA8.log")
-  real=; names=0   # unlisted names only — a listed cluster is what flakes.txt is for
-  while IFS=$'\t' read -r lane kind unit f; do
-    [ "$kind" != unlisted ] || names=$(( names + 1 ))
-    # A recipe that failed without naming a test is real whatever else failed by name.
-    [ "$kind" != recipe ] || real="$real $lane:$f"
-  done <<< "$plan"
-  # A red with no failure names is a build/harness failure, not a test: real.
-  [ "$root_rc" = 0 ] || plan_names "$plan" root || real=" root:?$real"
-  [ "$zo_rc" = 0 ] || plan_names "$plan" zo || real="$real zo:?"
-  # Too many unlisted names at once is a regression, not a flake storm.
-  if [ "$names" -gt "$MAX_SOLO_JUDGED" ]; then
-    while IFS=$'\t' read -r lane kind unit f; do
-      [ -z "$lane" ] || [ "$kind" = recipe ] || real="$real $lane:$f"
-    done <<< "$plan"
-  fi
+  real=$(flake_reals "$plan" "$root_rc" "$zo_rc" "$RECEIPT_JUDGED")
   if [ -n "$real" ]; then
     step_done flakes 1
     red "gate red for real: root rc=$root_rc zo rc=$zo_rc [$(printf '%s' "$real" | sed 's/^ //')]"; return 1
@@ -1584,9 +1641,7 @@ judge_sha() {
   # Every remaining name is judged solo, listed or not; an unlisted one is
   # named so the person can add it to flakes.txt once it has passed solo —
   # and named again with its judgment, which $UNLISTED keeps (t-9741).
-  while IFS=$'\t' read -r lane kind unit f; do
-    [ "$kind" != unlisted ] || log "unlisted red $lane:$f — judged solo"
-  done <<< "$plan"
+  say_unlisted_ahead "$plan"
   if [ "$root_rc" != 0 ] || [ "$zo_rc" != 0 ]; then
     # The solo run is the judgment — flake or real — so it gets the calm
     # machine a gate gets. It follows the zo gate immediately, and a 2px anchor
@@ -1595,20 +1650,7 @@ judge_sha() {
     # load 7.75, failed again in the solo right behind it, and were green every
     # time they were asked on an idle machine.
     heavy wait_for_calm flakes-solo
-    # One solo road per unit, however many of its names failed: a suite of a
-    # browser harness is re-run once a round for every check of it that was red.
-    # The list comes in on fd 3, so nothing a solo run starts can read it.
-    while IFS=$'\t' read -r lane unit <&3; do
-      [ -n "$lane" ] || continue
-      for i in $(seq 1 "$SOLO_RUNS"); do
-        rc=$(run_solo "$lane" "$unit" "$i"); log "solo $lane $unit $i/$SOLO_RUNS rc=$rc"
-        if [ "$rc" != 0 ]; then
-          say_unlisted "$plan" "$lane" "$unit" $(( i - 1 )) red
-          step_done flakes 1; red "solo $lane $unit run $i rc=$rc"; return 1
-        fi
-      done
-      say_unlisted "$plan" "$lane" "$unit" "$SOLO_RUNS" green
-    done 3<<< "$(printf '%s\n' "$plan" | awk -F'\t' 'NF && $2 != "recipe" && !seen[$1 FS $3]++ { print $1 FS $3 }')"
+    if ! solo_judge "$plan"; then step_done flakes 1; red "$SOLO_RED"; return 1; fi
   fi
   # A red gate's target served its solo judgments; now it too is done with.
   [ "$root_rc" = 0 ] || release_gate_target root-gate
@@ -1693,7 +1735,7 @@ run_sha() { # SHA [QUEUE_FILE]
   SHA=$1; SHA8=$(printf '%s' "$1" | cut -c1-8); QUEUE_FILE=${2:-}
   SCRATCH=$RELEASE_SCRATCH_ROOT/gate-$SHA8; LOG=$OUT/lane-$SHA8.log
   STARTED_AT=$(now_iso); PHASES_JSON=; OUTCOME=null; REASON=; SWEPT=0
-  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=; STALLED=null; WIN_INSTALLER=; WIN_SHIPPED=0; WIN_RED=
+  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=; RECEIPT_JUDGED=; STALLED=null; WIN_INSTALLER=; WIN_SHIPPED=0; WIN_RED=
   rm -rf "$WORK"; mkdir -p "$WORK"
   log "== lane $SHA8 start (dry=$RELEASE_DRY_RUN)"
   report_begin
@@ -1702,6 +1744,83 @@ run_sha() { # SHA [QUEUE_FILE]
   sweep_sha
   return $rc
 }
+
+# ----------------------------------------- the flakes judgment of a coordinator's gate --
+# coord-gate.sh runs each gate's recipes as entries of its own job — `just <recipe>` from the top, zo's
+# in zo-ide — each one's output in <logs>/<key>.log, and coord_receipt.py reads that job again
+# (t-119757). A red entry is judged as the flakes phase above judges a red gate: by these very functions,
+# never a copy of them (t-121630).
+#
+#   lane.sh --flake-plan ENTRY...                          what the flakes phase makes of the entries
+#   lane.sh --judge-flakes TOP TARGET LOGS CALM ENTRY...   …and the judgment, when it may judge them
+#
+# An ENTRY is four words, <root|zo> <recipe> <rc> <log>: one recipe of that gate, how it ended and its
+# output. Each gate's entries are read, in their order, as that gate's log — `==> verify recipe <recipe>`
+# over each one's output, as verify-every-recipe.sh writes the lane's — red when one of them was red, and
+# the plan is the flakes phase's own (solo_plan, flake_reals, solo_units, SOLO_RUNS). --flake-plan prints
+# it, one a line, and changes nothing:
+#   runs <SOLO_RUNS>
+#   real <lane>:<name> ...    what no solo run may clear, when anything is (and then nothing is judged)
+#   plan <lane>\t<kind>\t<unit>\t<name>   each failure name, as solo_plan writes it (kind: listed, unlisted, recipe)
+#   unit <lane> <unit>        each unit the judgment runs alone SOLO_RUNS times, in the order it runs them
+# --judge-flakes prints the same and, when something was red and nothing is real, waits as the flakes
+# phase waits (wait_for_calm flakes-solo, at most CALM seconds) and judges through solo_judge: each run
+# from the checkout TOP, cargo building in TARGET (empty: cargo's own place), its output in
+# LOGS/solo.<lane>.<at>.<run>.log (AT: the unit's place among its gate's units), said as the lane says it
+# (`<time> solo <lane> <unit> <run>/<SOLO_RUNS> rc=<rc>`) on its standard output — the job's log — and
+# nowhere in the lane's own home ($UNLISTED included). It exits 0 when nothing was red or every unit
+# passed every run, 1 when a failure is real or a run was red, and 2 when it was asked wrong.
+flake_entries() { # FOLDER ENTRY... — FOLDER/root.log and FOLDER/zo.log as above; FLAKE_RC_ROOT, FLAKE_RC_ZO: 1 when an entry of that gate was red
+  local folder=$1 lane recipe rc log
+  shift
+  [ $# -gt 0 ] || return 2
+  : > "$folder/root.log" && : > "$folder/zo.log" || return 2
+  FLAKE_RC_ROOT=0; FLAKE_RC_ZO=0
+  while [ $# -gt 0 ]; do
+    [ $# -ge 4 ] || return 2
+    lane=$1 recipe=$2 rc=$3 log=$4; shift 4
+    case $lane in root|zo) ;; *) return 2 ;; esac
+    [ -n "$rc" ] && [ -f "$log" ] || return 2
+    # The output's last line may lack its newline: the next mark starts a line of its own.
+    { echo "==> verify recipe $recipe"; cat "$log"; echo; } >> "$folder/$lane.log" || return 2
+    if [ "$rc" != 0 ]; then
+      if [ "$lane" = root ]; then FLAKE_RC_ROOT=1; else FLAKE_RC_ZO=1; fi
+    fi
+  done
+}
+case ${1:-} in
+  --flake-plan|--judge-flakes)
+    mode=$1; shift
+    export LC_ALL=C   # one order of names (failed_tests' sort) for the gate that judged and the reader that judges again
+    if [ "$mode" = --judge-flakes ]; then
+      [ $# -ge 4 ] || { echo "usage: lane.sh --judge-flakes TOP TARGET LOGS CALM <root|zo> <recipe> <rc> <log>..." >&2; exit 2; }
+      top=$1 target=$2 logs=$3 calm=$4; shift 4
+      case $calm in ''|*[!0-9]*) echo "lane.sh --judge-flakes: CALM is seconds, not '$calm'" >&2; exit 2 ;; esac
+      [ -d "$top" ] && [ -d "$logs" ] || { echo "lane.sh --judge-flakes: no checkout $top or no logs folder $logs" >&2; exit 2; }
+    fi
+    gates=$(mktemp -d "${TMPDIR:-/tmp}/flake-plan.XXXXXX") || exit 2
+    trap 'rm -rf "$gates"' EXIT
+    flake_entries "$gates" "$@" \
+      || { echo "usage: lane.sh $mode … ENTRY... — each <root|zo> <recipe> <rc> <log>, its log a file" >&2; exit 2; }
+    plan=$(solo_plan root "$gates/root.log"; solo_plan zo "$gates/zo.log")
+    real=$(flake_reals "$plan" "$FLAKE_RC_ROOT" "$FLAKE_RC_ZO")
+    echo "runs $SOLO_RUNS"
+    [ -z "$real" ] || echo "real$real"
+    printf '%s\n' "$plan" | sed -n 's/^./plan &/p'
+    solo_units "$plan" | while IFS=$'\t' read -r lane unit; do [ -z "$lane" ] || echo "unit $lane $unit"; done
+    [ "$mode" = --judge-flakes ] || exit 0
+    [ -z "$real" ] || exit 1
+    [ "$FLAKE_RC_ROOT$FLAKE_RC_ZO" != 00 ] || exit 0
+    # Where the runs go and what is said of them are the gate's: its checkout, its target, its logs
+    # folder and its own log — never the lane's log, out/ or unlisted.txt.
+    UNLISTED=/dev/null; LOG=; CALM_WAIT_SECS=$calm
+    run_solo() { solo_road "$1" "$2" "$top" "$target" > "$logs/solo.$1.$4.$3.log" 2>&1 < /dev/null; echo $?; }
+    say_unlisted_ahead "$plan"
+    wait_for_calm flakes-solo
+    solo_judge "$plan" || { echo "flakes: red — $SOLO_RED"; exit 1; }
+    echo "flakes: every unit passed $SOLO_RUNS solo runs"
+    exit 0 ;;
+esac
 
 # ------------------------------------------------------------------- traps --
 on_signal() { # NAME

@@ -25,8 +25,12 @@
 #   # who: <owner>   # run: <its pane's `zerocode-orc run-current`>   # cwd: <the checkout>   # logs: <folder>
 #   head <sha> tree <tree>
 #   entry <key> <command>   then   RC <key>=<rc> (<n>s)     for every entry
-#   verdict: bad=<n> (<gates> on <head>)
-# the lines coord_receipt.py reads. `--in-lane-env` is its own second step, not a way in: a job
+#   <time> solo <lane> <unit> <run>/<runs> rc=<rc>            for every solo run, when an entry was red
+#   verdict: bad=<n> (<gates> on <head>[, <n> red entries cleared solo])
+# the lines coord_receipt.py reads. A red entry is judged as the release lane's flakes phase judges a red
+# gate — by the lane's own functions (lane.sh --judge-flakes): what may be judged solo, how many runs, what
+# clears it — and a red entry that judgment cleared is no red of the verdict (t-121630); each solo run's
+# output is in <folder>/solo.<lane>.<at>.<run>.log. `--in-lane-env` is its own second step, not a way in: a job
 # put in with it skipped lane-env.sh and run-current, and its receipt is refused. It exits 0 when every entry was green and the checkout is
 # still that head with its tracked files unchanged, 1 when one was not, and 2 when it could not
 # start (it starts only in a clean checkout).
@@ -89,28 +93,41 @@ wait_for_calm() { # GATE — as the lane waits before a gate: the 1-minute load 
 }
 # A word with anything but these letters goes in single quotes; no word here holds one.
 quote() { local word out=; for word in "$@"; do case $word in ''|*[!A-Za-z0-9_./:=@%+-]*) out="$out '$word'" ;; *) out="$out $word" ;; esac; done; printf '%s' "${out# }"; }
-bad=0
-entry() { # KEY COMMAND... — said, run with its output in <logs>/<key>.log, closed with its RC line
-  local key=$1 started rc
-  shift
+bad=0 red=0 ran=()
+entry() { # GATE RECIPE KEY COMMAND... — said, run with its output in <logs>/<key>.log, closed with its RC line
+  local gate=$1 recipe=$2 key=$3 started rc
+  shift 3
   echo "entry $key $(quote "$@")"
   started=$SECONDS
   "$@" > "$logs/$key.log" 2>&1 < /dev/null; rc=$?
   echo "RC $key=$rc ($(( SECONDS - started ))s)"
-  [ "$rc" = 0 ] || bad=$(( bad + 1 ))
+  ran+=("$gate" "$recipe" "$rc" "$logs/$key.log")   # what the flakes judgment reads: lane.sh's ENTRY
+  [ "$rc" = 0 ] || { bad=$(( bad + 1 )); red=$(( red + 1 )); }
 }
 for lane in "$@"; do
   wait_for_calm "$lane"
   if [ "$lane" = root ]; then
     recipes=$(bash "$self_dir/verify-every-recipe.sh" --list) || recipes=
     [ -n "$recipes" ] || { echo "STOP the root gate's recipes are unknown (verify-every-recipe.sh --list)"; bad=$(( bad + 1 )); continue; }
-    for recipe in $recipes; do entry "$recipe" just "$recipe"; done
+    for recipe in $recipes; do entry root "$recipe" "$recipe" just "$recipe"; done
   else
     recipes=$(cd zo-ide && bash "$self_dir/verify-every-recipe.sh" --list) || recipes=
     [ -n "$recipes" ] || { echo "STOP the zo gate's recipes are unknown (verify-every-recipe.sh --list in zo-ide)"; bad=$(( bad + 1 )); continue; }
-    for recipe in $recipes; do entry "zo-$recipe" bash -c "cd zo-ide && just $recipe"; done
+    for recipe in $recipes; do entry zo "$recipe" "zo-$recipe" bash -c "cd zo-ide && just $recipe"; done
   fi
 done
+# A red entry is judged as the release lane's flakes phase judges a red gate, by the lane's own functions
+# (lane.sh --judge-flakes: the same plan of what may be judged, the same solo runs, the same verdict),
+# here in the checkout it gated, cargo building where the gate's did; what it says goes into this log and
+# each run's output into <logs>/solo.<lane>.<at>.<run>.log. Red entries it cleared are no red of the
+# verdict; the receipt's reader judges them again from those logs (coord_receipt.py, t-121630).
+cleared=
+if [ "$red" -gt 0 ]; then
+  echo "flakes: $red red entr$([ "$red" = 1 ] && echo y || echo ies), judged as the release lane's flakes phase judges a red gate"
+  if bash "$self_dir/lane.sh" --judge-flakes "$here" "${CARGO_TARGET_DIR-}" "$logs" "$calm" "${ran[@]}"; then
+    bad=$(( bad - red )); cleared=", $red red entr$([ "$red" = 1 ] && echo y || echo ies) cleared solo"
+  fi
+fi
 # At the end the head and every tracked file are what was gated; a file a recipe left untracked is
 # no change to the tree, and the lane's scratch is left the same file.
 edited() { git status --porcelain --untracked-files=no 2>/dev/null; }
@@ -118,5 +135,5 @@ if [ "$(git rev-parse HEAD 2>/dev/null)" != "$head" ] || [ -n "$(edited)" ]; the
   echo "STOP the checkout changed while the gate ran: $(git rev-parse --short=9 HEAD 2>/dev/null) $(edited | head -3 | tr '\n' ' ')"
   bad=$(( bad + 1 ))
 fi
-echo "verdict: bad=$bad ($* on ${head:0:9})"
+echo "verdict: bad=$bad ($* on ${head:0:9}$cleared)"
 [ "$bad" = 0 ]

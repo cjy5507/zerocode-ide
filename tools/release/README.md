@@ -228,7 +228,9 @@ off `zo line` jobs (t-119757). The coordinator gates the stacked tree with
 
 `<label>` is letters and digits; `<folder>` is an absolute folder outside the
 checkout; the third line runs after both jobs passed and the release commit is
-cut on top of the gated head. The stack may be removed as soon as both jobs
+cut on top of the gated head. The coordinator sees a job's end by watching its
+record file or with `zo line wait <job>`: a notice told to its own `run:` does not
+come back to it (I-t121651-1). The stack may be removed as soon as both jobs
 ended, before `make` too: the jobs' own logs say they ran at its top, and nothing
 reads it again. `<folder>` stays until the lane has read the receipt, which reads
 every entry's log there again. `--in-lane-env` is the
@@ -254,17 +256,42 @@ coordinator's, a logs folder inside the checkout, no run. Its
 log opens, under the line's own `zo line: …` lines, with `# who:`, `# run:` (its
 pane's `zerocode-orc run-current`), `# cwd:` and `# logs:`, then `head <sha> tree
 <tree>`; it says `entry <key> <command>` and `RC <key>=<rc> (<n>s)` for every
-entry and ends with `verdict: bad=<n>` — red, and rc 1, when an entry was red or
-the checkout's head or a tracked file changed while it ran (a file a recipe leaves
-untracked is no change to the tree: the lane's scratch is left the same file).
+entry and ends with `verdict: bad=<n>` — red, and rc 1, when an entry was red and
+not cleared, or the checkout's head or a tracked file changed while it ran (a file
+a recipe leaves untracked is no change to the tree: the lane's scratch is left the
+same file).
+
+A red entry is judged as the lane's own flakes phase judges a red gate
+(2026-11-20, t-121630: v1.1.169's stacked gate was one supervisor test short of a
+receipt — red in the gate, green alone — and the lane ran both gates again). The
+judgment is the lane's, never a copy: `coord-gate.sh` hands its entries to
+`lane.sh --judge-flakes`, which reads each gate's entries as that gate's log and
+plans with the flakes phase's own functions — `solo_plan` (what failed, by name,
+and whether `flakes.txt` lists it), `flake_reals` (a recipe that failed without
+naming a test, a red gate that named none, and more than `MAX_SOLO_JUDGED`
+unlisted names over both gates are red for real, and nothing is judged),
+`solo_units` and `solo_judge` (each unit alone `SOLO_RUNS` times through the same
+`solo_road`, from the gated checkout, cargo building in the gate's own target,
+until the first red run). Each run is said in the job's log as the lane says it,
+`<time> solo <lane> <unit> <run>/<runs> rc=<rc>`, its output in
+`<folder>/solo.<lane>.<at>.<run>.log`; a red entry the judgment cleared is no red
+of the verdict (`verdict: bad=0 (… , 1 red entry cleared solo)`). Nothing of it
+is written into the lane's own home (its log, `out/`, `unlisted.txt`).
 
 `make` reads every job's record (`<zo home>/line/jobs/<id>.json`: passed, rc 0,
 a start and an end, its command `bash tools/release/coord-gate.sh …`), its rc
 file and its log (`<zo home>/line/logs/<id>.rc`, `.log`): the log's owner and
-folder must be the record's own (`owner`, `checkout`), every entry closed green
-with a log of its own, the verdict `bad=0`; all the jobs name one run, tree,
-logs folder and checkout, and no two ran one entry. It seals the bytes it read
-(sha256). `enqueue.sh` reads the receipt once, as the lane does — a receipt that
+folder must be the record's own (`owner`, `checkout`), every entry closed with a
+log of its own, the verdict `bad=0`; all the jobs name one run, tree, logs folder
+and checkout, and no two ran one entry. An entry closed red stands only as the
+lane's flakes phase would clear it, judged again from the sealed logs and never
+from a word of the receipt: every recipe entry of all the jobs is handed to
+`lane.sh --flake-plan` (the lane's plan, as above, over both gates at once — the
+bound on unlisted names is over both), nothing in its plan may be real, and every
+unit it names must have passed its `SOLO_RUNS` runs — said by the job that ran its
+gate, in the plan's order, each run's log there — and a job with solo runs and no
+red entry, or a red entry that ran no recipe, makes no receipt. It seals the bytes
+it read (sha256), the solo runs' logs included. `enqueue.sh` reads the receipt once, as the lane does — a receipt that
 does not stand queues and keeps nothing — and keeps it as `receipts/<sha>.json`
 before the queue file appears; with `--keep-only` it keeps it and queues nothing,
 for a lane the coordinator starts with the sha itself (`lane.sh <sha>`, which
@@ -279,7 +306,9 @@ it again and:
   other than its owner or a `--logs` other than its log's folder — its log names
   another owner or folder than its record or stops before its head and tree, the
   jobs name two trees, owners, runs, logs folders or checkouts, two jobs ran one
-  entry, a sealed byte changed, the receipt is older than its last job, a job is
+  entry, a red entry is not cleared as above (red for real, a solo run short or
+  red, a run of anything the plan does not name, no solo run at all), a sealed
+  byte changed, the receipt is older than its last job, a job is
   not one the build line ran (its record outside `RELEASE_BUILD_LINE`'s `jobs/`),
   the jobs say another run than `RELEASE_COORD_RUN` or an owner other than a
   coordinator's `coord-<label>` (or its `-root` and `-zo` jobs), git finds a job's
@@ -299,6 +328,11 @@ it again and:
   (`verify-every-recipe.sh --list`): the lane's strict `win-check` is never
   covered by `win-check-if-available`, which says SKIPPED on a cold target, and
   zo's tests run by package are no `just test`;
+- counts a recipe whose entry was red and is cleared solo like any other, and says
+  so (`… 18/19 root recipes green (red, cleared solo as the flakes phase clears a
+  red gate: test) …`); the names it cleared count toward this run's own
+  `MAX_SOLO_JUDGED` in the flakes phase (`RECEIPT_JUDGED`), as if the gate had run
+  here, so a gate the lane runs itself beside a receipt is bounded over both;
 - owes `NOTES_READERS` again when the release notes changed since the gated tree
   — bump.sh writes them into every release commit, and only pii-check reads them;
 - runs only what is left owed (`verify-every-recipe.sh --only`), and skips the
@@ -346,9 +380,11 @@ has run nothing since 2026-11-09. `RELEASE_BUILD_LINE` is zo's line folder
 The receipt is kept beside the lane log as `out/receipt-<sha8>.json`; a sha that
 ends red or refused keeps it for its next turn. `tests/test_coord_receipt.py`
 pins the reading and the gate script (`GateScript` runs `coord-gate.sh` for
-real); `tests/test_lane.py Receipt` pins the lane with stubs, `ReceiptOnGit` the
+real, a red test it judges solo included), `FlakeJudgment` each rule a red entry
+stands on; `tests/test_lane.py Receipt` pins the lane with stubs, `ReceiptOnGit` the
 same on a real repository and `ReceiptOnThe168Pair` on v1.1.168's own gated head
-and release commit.
+and release commit, and `FlakePlan` that `lane.sh --flake-plan` and
+`--judge-flakes` are the flakes phase's own plan, count, order and stop.
 
 ## The quick check before a batch (2026-10-25, t-73910)
 

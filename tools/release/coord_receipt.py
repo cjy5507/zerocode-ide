@@ -22,8 +22,14 @@ The receipt only locates the evidence and seals its bytes (the sha256 of every f
 its start and end, its rc file says 0, its command is `bash tools/release/coord-gate.sh …`
 (never its inner `--in-lane-env` step) with `--who` its owner and `--logs` its log's folder,
 its log's `# who:` and `# cwd:` are the owner and checkout its record names, the log opens
-with a head and a tree, every entry it ran closed with a green RC line and left its own log,
-and its verdict counted no red; every job names one run, tree, logs folder and checkout,
+with a head and a tree, every entry it ran closed with an RC line and left its own log, and
+its verdict counted no red. An entry may be red only as the release lane's flakes phase clears
+a red gate (t-121630): every recipe entry of the receipt's jobs is read as its gate's log by the
+lane's own plan (`lane.sh --flake-plan`, its SOLO_RUNS and its bound on names judged solo over
+both gates), nothing in it may be red for real, and every unit it names must have passed that
+many solo runs — `<time> solo <lane> <unit> <run>/<runs> rc=0`, said by the job that ran its
+gate in the lane's order, each run's output in `<logs>/solo.<lane>.<at>.<run>.log` — and nothing
+the receipt says counts for it; every job names one run, tree, logs folder and checkout,
 no two jobs ran one entry, and the receipt was made after the last job ended. Every job must
 be one the build line LINE ran: its record sits in LINE's jobs/, its log and rc file in
 LINE's logs/. The run is only what the gate script printed (`# run:`, its pane's
@@ -34,7 +40,9 @@ for a gate run as two jobs, both `coord-<label>-root` and `coord-<label>-zo` of 
 
     who <owner> · run <run> · tree <tree> · logs <folder> · cwd <the checkout the jobs ran in>
     head <sha> <the earliest end, epoch seconds, of a job on that head>
+    judged <lane> <kind> <unit> <name>   a failure the flakes judgment cleared, as the lane's solo_plan writes it (tabs between)
     recipe <name>    with --dir: a recipe of that folder an entry ran exactly as `just <name>`
+    cleared <name>   with --dir: one of those whose entry was red and is cleared solo
 
 and exits 1 with one line saying why when the receipt does not stand. Every job ran at the
 top of its checkout by its own log: anywhere else the gate script stops before its head and
@@ -55,6 +63,7 @@ import os
 import re
 import shlex
 import stat
+import subprocess
 import time
 from pathlib import Path
 
@@ -77,6 +86,12 @@ SHELLS = {"zsh", "bash", "sh"}
 FACTS = ("run", "tree", "logs", "cwd")   # what every job of a receipt names alike (its owner may be one of two, see COORDINATOR)
 COORDINATOR = re.compile(r"coord-([A-Za-z0-9]+)(?:-(root|zo))?")   # the coordinator's own jobs: coord-<the landing's label>, or
                                                                     # coord-<label>-root and coord-<label>-zo for a gate run as two jobs
+# A red entry stands only as the release lane's flakes phase would clear it, and that phase is the lane's:
+# its plan is read from lane.sh (--flake-plan), never written again here (t-121630).
+LANE = Path(__file__).resolve().with_name("lane.sh")
+GATES = (("root", "."), ("zo", "zo-ide"))   # each gate of the lane and the folder its recipes run from
+SOLO = re.compile(r"(?:\d\d:\d\d:\d\d )?solo (root|zo) (.+) (\d+)/(\d+) rc=(\S+)")   # one solo run, as solo_judge says it
+PLAN_SECS = 60   # the longest the lane's plan may take to read: it reads the entries' logs once, in a second or two
 
 
 class Refused(Exception):
@@ -186,7 +201,7 @@ def job(path):
         raise Refused(f"job {name}'s log says cwd {header['cwd']}, its record ran it in {record['checkout']}")
     if os.path.realpath(told.get("--logs") or "") != os.path.realpath(header["logs"]) or not told.get("--logs"):
         raise Refused(f"job {name} ran coord-gate.sh --logs {told.get('--logs')}, its log says # logs: {header['logs']}")
-    entries, closed, verdicts = {}, {}, []
+    entries, closed, verdicts, solos = {}, {}, [], []
     for line in log[at + 1:]:
         if line.startswith("entry "):
             try:
@@ -201,6 +216,9 @@ def job(path):
             if found[1] in closed:
                 raise Refused(f"job {name} closed entry {found[1]} twice")
             closed[found[1]] = found[2]
+        elif SOLO.fullmatch(line):
+            found = SOLO.fullmatch(line)
+            solos.append((found[1], found[2], int(found[3]), int(found[4]), found[5]))
         elif line.startswith("verdict: "):
             verdicts.append(line)
     if not entries:
@@ -209,8 +227,12 @@ def job(path):
         missing = sorted(set(entries) ^ set(closed))
         raise Refused(f"job {name}'s entries and RC lines differ at {missing[0]}")
     red = sorted(key for key, value in closed.items() if value != "0")
-    if red:
-        raise Refused(f"job {name} entry {red[0]} rc={closed[red[0]]}")
+    # A red entry is weighed by the flakes judgment its solo runs say (flakes, across the receipt's jobs);
+    # with none, nothing could have cleared it — and solo runs where nothing was red are no judgment.
+    if red and not solos:
+        raise Refused(f"job {name} entry {red[0]} rc={closed[red[0]]}, and no solo run judged it")
+    if solos and not red:
+        raise Refused(f"job {name} ran solo runs, but no entry of it was red")
     verdict = VERDICT.fullmatch(verdicts[0]) if len(verdicts) == 1 else None
     if not verdict or verdict[1] != "0":
         raise Refused(f"job {name}'s verdict is not bad=0")
@@ -218,9 +240,16 @@ def job(path):
     for key in entries:
         where = os.path.join(folder, f"{key}.log")
         seen[where] = hashlib.sha256(plain_bytes(where)).hexdigest()
+    places = {}
+    for lane, unit, run, _, _ in solos:   # each run's output, where solo_judge's run_solo put it (lane.sh --judge-flakes)
+        units = places.setdefault(lane, [])
+        if unit not in units:
+            units.append(unit)
+        where = os.path.join(folder, f"solo.{lane}.{units.index(unit) + 1}.{run}.log")
+        seen[where] = hashlib.sha256(plain_bytes(where)).hexdigest()
     return {"name": name, "path": path, "who": record["owner"], "run": header["run"], "cwd": record["checkout"],
             "head": opening[1], "tree": opening[2], "ended": record["ended_ms"] / 1000, "entries": entries,
-            "logs": folder, "seen": seen}
+            "closed": closed, "solos": solos, "logs": folder, "seen": seen}
 
 
 def split_gate(owners):
@@ -257,6 +286,92 @@ def agreed(jobs):
     return {"who": "+".join(owners), **{key: jobs[0][key] for key in FACTS}}
 
 
+def lane_plan(entries):
+    """What the release lane's flakes phase makes of ENTRIES (lane.sh --flake-plan's words: <lane> <recipe> <rc>
+    <log>, four an entry): {"runs": SOLO_RUNS, "real": what it calls red for real (or ""), "plan": solo_plan's
+    lines, "units": [(lane, unit), ...] in the order its judgment runs them}."""
+    try:
+        said = subprocess.run(["bash", str(LANE), "--flake-plan", *entries], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=PLAN_SECS)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise Refused(f"the release lane's flakes plan could not be read ({LANE} --flake-plan: {error})") from None
+    if said.returncode != 0:
+        why = (said.stderr or said.stdout).strip().splitlines()
+        raise Refused(f"the release lane's flakes plan could not be read ({LANE} --flake-plan rc={said.returncode}: "
+                      f"{why[-1] if why else 'nothing said'})")
+    plan = {"runs": 0, "real": "", "plan": [], "units": []}
+    for line in said.stdout.splitlines():
+        word, _, rest = line.partition(" ")
+        if word == "runs" and rest.isdigit():
+            plan["runs"] = int(rest)
+        elif word == "real":
+            plan["real"] = rest
+        elif word == "plan" and rest.count("\t") == 3:
+            plan["plan"].append(rest)
+        elif word == "unit" and " " in rest:
+            plan["units"].append(tuple(rest.split(" ", 1)))
+    if plan["runs"] < 1:
+        raise Refused(f"the release lane's flakes plan named no count of solo runs ({LANE} --flake-plan)")
+    return plan
+
+
+def gate_of(command):
+    """(lane, recipe) when COMMAND ran exactly `just <recipe>` in that gate's folder from the checkout's top, else None."""
+    for lane, folder in GATES:
+        recipe = recipe_of(command, folder)
+        if recipe:
+            return lane, recipe
+    return None
+
+
+def flakes(jobs):
+    """The red entries of JOBS, judged again as the release lane's flakes phase judges a red gate (t-121630).
+    Every recipe entry is read, in each gate's order, as that gate's log by the lane's own plan (lane.sh
+    --flake-plan: what may be judged solo, and how many times) — of all the jobs at once, since the lane bounds
+    the names it judges solo over both gates together. Nothing in it may be real, and every unit it names must
+    have passed that many solo runs, said in the job that ran its gate, in the lane's order. The solo lines say
+    what the gate script ran; what they must say is the lane's, read here from the sealed entry logs. Returns
+    the plan's lines (solo_plan's) of what was cleared; none when nothing was red."""
+    entries, red, holders = [], [], {}
+    for one in jobs:
+        for key, command in one["entries"].items():
+            rc, gate = one["closed"][key], gate_of(command)
+            if gate is None:
+                if rc != "0":
+                    raise Refused(f"job {one['name']} entry {key} rc={rc} ran no recipe of either gate, "
+                                  "and no flakes judgment clears anything else")
+                continue
+            holders.setdefault(gate[0], set()).add(one["name"])
+            entries += [gate[0], gate[1], rc, os.path.join(one["logs"], f"{key}.log")]
+            if rc != "0":
+                red.append(f"job {one['name']} entry {key} rc={rc}")
+    if not red:
+        return []
+    plan = lane_plan(entries)
+    if plan["real"]:
+        raise Refused(f"{red[0]} is red for real as the release lane's flakes phase reads it: {plan['real']}")
+    runs = plan["runs"]
+    for lane, _ in GATES:
+        said = [(one["name"], solo) for one in jobs for solo in one["solos"] if solo[0] == lane]
+        strays = sorted({name for name, _ in said} - holders.get(lane, set()))
+        if strays:
+            raise Refused(f"job {strays[0]} says solo runs of the {lane} gate, none of whose recipes it ran")
+        want = [(lane, unit, run, runs, "0") for where, unit in plan["units"] if where == lane for run in range(1, runs + 1)]
+        got = [solo for _, solo in said]
+        for at, solo in enumerate(got):
+            if at >= len(want) or solo[:4] != want[at][:4]:
+                expected = (f"run {want[at][2]}/{runs} of {want[at][1]}" if at < len(want)
+                            else f"no run past the {len(want)} the lane's plan has")
+                raise Refused(f"{red[0]}: its {lane} gate's solo run {at + 1} says run {solo[2]}/{solo[3]} of "
+                              f"{solo[1]}, where the release lane's flakes judgment runs {expected}")
+            if solo[4] != "0":
+                raise Refused(f"{red[0]}: solo run {solo[2]}/{solo[3]} of {solo[1]} was red (rc={solo[4]}) — red for real")
+        if len(got) < len(want):
+            raise Refused(f"{red[0]}: the release lane's flakes judgment runs {want[len(got)][1]} solo {runs} times, "
+                          f"and the {lane} gate's job says {sum(1 for solo in got if solo[1] == want[len(got)][1])}")
+    return plan["plan"]
+
+
 def on_the_line(jobs, line):
     """Every job is one the build line LINE ran: its record sits in LINE's jobs/ (its log and rc file beside it in logs/)."""
     kept = os.path.realpath(os.path.join(line, "jobs"))
@@ -290,6 +405,7 @@ def recipe_of(command, folder):
 def make(paths):
     jobs = [job(path) for path in paths]
     facts = agreed(jobs)
+    flakes(jobs)   # a red entry the lane's flakes judgment would not clear makes no receipt; the receipt holds no word of it
     seen = {}
     for one in jobs:
         seen.update(one["seen"])
@@ -333,14 +449,21 @@ def read(path, folder=None, line=None, run=None):
         on_the_line(jobs, line)
     if run is not None:
         held_to(facts, run)
+    # A red entry stands only as the lane's flakes phase would clear it, judged again here from the sealed
+    # logs; nothing the receipt itself says counts for it (t-121630).
+    judged = flakes(jobs)
     heads = {}
     for one in jobs:
         heads[one["head"]] = min(heads.get(one["head"], one["ended"]), one["ended"])
     said = [f"{key} {value}" for key, value in facts.items()]
     said += [f"head {head} {int(ended)}" for head, ended in sorted(heads.items())]
+    said += [f"judged {failure}" for failure in judged]
     if folder is not None:
         recipes ={recipe_of(command, folder) for one in jobs for command in one["entries"].values()}
         said += [f"recipe {name}" for name in sorted(recipes - {None})]
+        cleared = {recipe_of(command, folder) for one in jobs for key, command in one["entries"].items()
+                   if one["closed"][key] != "0"}
+        said += [f"cleared {name}" for name in sorted(cleared - {None})]
     return said
 
 
