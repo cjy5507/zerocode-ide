@@ -3,10 +3,10 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
-use zerocode_core::agent_shims::{PaneTeamGrant, orchestration_program, read_pane_team_grant};
+use zerocode_core::agent_shims::{PaneTeamGrant, find_orchestration_program, read_pane_team_grant};
 
 pub(super) struct Door {
     pub(super) program: PathBuf,
@@ -63,29 +63,10 @@ pub(super) fn resolve(
             .map_err(|error| Unavailable::UnreadableGrant(error.kind()))?
             .ok_or(Unavailable::NoGrant)?)
     };
-    let name = format!("{}{}", zerocode_core::agent_shims::ORCHESTRATION_COMMAND, if windows { ".ps1" } else { "" });
-    let from_path = lookup("PATH").and_then(|path| {
-        std::env::split_paths(&path).map(|directory| directory.join(&name)).find(|path| command_file(path, windows))
-    });
-    let program = from_path.or_else(|| endpoint.as_deref()
-        .and_then(|path| orchestration_program(path, windows)).filter(|path| command_file(path, windows)))
+    // One finding of the installed command for every ledger client outside the window: zo's line too.
+    let program = find_orchestration_program(lookup("PATH").as_deref(), endpoint.as_deref(), windows)
         .ok_or(Unavailable::NoProgram)?;
     Ok(Door { program, grant })
-}
-
-fn command_file(path: &Path, windows: bool) -> bool {
-    let Ok(metadata) = path.metadata() else { return false };
-    if !metadata.is_file() { return false; }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        windows || metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = windows;
-        true
-    }
 }
 
 /// Check again at each command: a revoked file grant must stop an in-flight

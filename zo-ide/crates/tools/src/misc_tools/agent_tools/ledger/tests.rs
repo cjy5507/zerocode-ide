@@ -335,7 +335,7 @@ fn every_native_fork_spelling_is_refused_before_the_ledger_door() {
 #[test]
 fn windows_calls_the_powershell_script_without_cmd_rejecting_multiline_prompts() {
     let prompt = "first line\nquotes \" and %PATH% $(literal)";
-    let mut command = command_for(Path::new("zerocode-orc.ps1"), true);
+    let mut command = orchestration_command(Path::new("zerocode-orc.ps1"), true);
     command.args(["worker-start", "--prompt", prompt]);
     assert_eq!(command.get_program(), "powershell.exe");
     let args: Vec<_> = command.get_args().collect();

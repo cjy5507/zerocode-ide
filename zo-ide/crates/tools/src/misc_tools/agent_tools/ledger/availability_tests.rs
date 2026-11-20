@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 
+use zerocode_core::agent_shims::orchestration_program;
+
 use super::*;
 
 struct Fixture {
@@ -123,6 +125,23 @@ fn diagnostics_distinguish_a_missing_pane_grant_command_and_bad_file() {
 fn the_windows_door_is_the_installed_powershell_script() {
     let fixture = Fixture::new(true);
     assert_eq!(fixture.resolve(true).unwrap().program, fixture.program);
+}
+
+/// The Agent tool finds its Windows door as it did before the finding moved to
+/// zerocode-core for zo's line too (t-119309): the `.ps1` on PATH first — never
+/// the `.cmd` beside it, nor a bare name — and the window's own after.
+#[test]
+fn the_windows_door_on_path_is_the_powershell_script_before_the_windows_own() {
+    let mut fixture = Fixture::new(true);
+    let on_path = tempfile::tempdir().unwrap();
+    let folder = on_path.path();
+    for name in ["zerocode-orc", "zerocode-orc.cmd", "zerocode-orc.ps1"] {
+        fs::write(folder.join(name), "fixture command; never executed by this test").unwrap();
+    }
+    fixture.env.insert("PATH".into(), folder.as_os_str().to_owned());
+    assert_eq!(fixture.resolve(true).unwrap().program, folder.join("zerocode-orc.ps1"));
+    fs::remove_file(folder.join("zerocode-orc.ps1")).unwrap();
+    assert_eq!(fixture.resolve(true).unwrap().program, fixture.program, "the .cmd on PATH is not the door");
 }
 
 #[cfg(unix)]

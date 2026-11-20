@@ -1,8 +1,10 @@
 //! Installed surface shims, including the window's private-token loaders.
 //! Installers and surface metadata consumers share these exact bytes.
 
+mod ledger_command;
 mod pane_grant;
 
+pub use ledger_command::{find_orchestration_program, orchestration_command};
 pub use pane_grant::{
     PaneTeamGrant, orchestration_program, path_reaching_orchestration, read_pane_team_grant,
 };

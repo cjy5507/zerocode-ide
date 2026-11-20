@@ -4,12 +4,13 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+// Rust의 .cmd 실행은 줄바꿈 인자를 거절한다. Windows에서는 기존 문과 같은 프로세스 정책으로 .ps1을 직접 부른다 — 줄도 같은 한 벌(t-119309).
+use zerocode_core::agent_shims::orchestration_command;
 
 use super::{AgentInput, AgentJob, AgentOutput, completion::AgentCompletion};
 use crate::ToolError;
@@ -123,7 +124,7 @@ impl Client {
     fn call(&self, words: &[String]) -> Result<Value, ToolError> {
         validate_words(words)?;
         if let Some(run) = &self.run { validate_words(std::slice::from_ref(run))?; }
-        let mut command = command_for(&self.program, cfg!(windows));
+        let mut command = orchestration_command(&self.program, cfg!(windows));
         command.args(words);
         #[cfg(test)]
         command.env_clear();
@@ -151,18 +152,6 @@ impl Client {
         let mut args: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
         args.extend(["--retry-request".into(), retry.into()]);
         self.call(&args)
-    }
-}
-
-fn command_for(program: &Path, windows: bool) -> Command {
-    if windows {
-        // Rust의 .cmd 실행은 줄바꿈 인자를 거절한다. 기존 문과 같은 프로세스 정책으로 .ps1을 직접 부른다.
-        let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"]);
-        command.arg(program);
-        command
-    } else {
-        Command::new(program)
     }
 }
 
