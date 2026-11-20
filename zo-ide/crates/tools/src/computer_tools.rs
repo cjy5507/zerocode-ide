@@ -2284,6 +2284,37 @@ fn check_batch_len(count: usize) -> Result<(), ToolError> {
     Ok(())
 }
 
+/// What a batch whose window defaults name half a window is told (CU
+/// slowness 11-20, refusal 4): the half that is missing, as the model's last
+/// picture names it when that picture was of the half given — to add only if
+/// the steps act in that window — else where to find it, or how to scope
+/// each step instead.
+fn batch_defaults_need_both(app: Option<&str>, window_id: Option<u64>, ctx: &ToolContext) -> String {
+    const NEED_BOTH: &str = "batch window defaults need both a nonempty app and a positive window_id from an observation; otherwise scope each step";
+    match (app.map(str::trim).filter(|app| !app.is_empty()), window_id.filter(|id| *id > 0)) {
+        (Some(app), None) => last_picture_window(ctx).map_or_else(
+            || {
+                format!(
+                    "{NEED_BOTH}: observe {} first and add the window_id its answer names beside \"app\", or drop the batch's app and put it on each step",
+                    json!({ "action": "observe", "app": app })
+                )
+            },
+            |(seen, named)| {
+                format!(
+                    "{NEED_BOTH}: your last picture was of window {seen}{named}; if the steps act in that window, add \"window_id\": {seen} beside \"app\" on the batch, else drop the batch's app and put it on each step"
+                )
+            },
+        ),
+        (None, Some(window_id)) => last_picture_window(ctx).filter(|(seen, _)| *seen == window_id).map_or_else(
+            || format!("{NEED_BOTH}: add beside \"window_id\" the app you observed window {window_id} by"),
+            |(_, named)| {
+                format!("{NEED_BOTH}: your last picture was of window {window_id}{named}; add beside \"window_id\" on the batch the app you observed it by")
+            },
+        ),
+        _ => NEED_BOTH.to_string(),
+    }
+}
+
 /// One batch: checked whole by the core before any look is paid, one trip
 /// down the shim, one look after — and each step answered under the model's
 /// own action name, in its picture's pixels.
@@ -2302,7 +2333,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
         (Some(app), Some(window_id)) if !app.trim().is_empty() && window_id > 0 => {
             Some(ComputerTarget { app: app.to_string(), window_id: Some(window_id) })
         }
-        _ => return Err(ToolError::InvalidInput("batch window defaults need both a nonempty app and a positive window_id from an observation; otherwise scope each step".into())),
+        (app, window_id) => return Err(ToolError::InvalidInput(batch_defaults_need_both(app, window_id, ctx))),
     };
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
     for (at, step) in steps.iter_mut().enumerate() {
@@ -4831,6 +4862,46 @@ pub(crate) mod tests {
         .to_string();
         assert!(error.contains(&format!("step 2: {APP_POINTS_NEED_THEIR_WINDOW}: your last picture was of window 41 of Fixture")), "{error}");
         assert!(error.contains(r#"send "window_id": 41 beside app on the batch, or on this step"#), "{error}");
+        assert_eq!(calls(dir.path()), looked, "nothing reached the window");
+    }
+
+    /// CU slowness 11-20, refusal 4: batch window defaults that name half a
+    /// window are told the half that is missing — the last picture's window
+    /// to add only if the steps act in it, or the app to add beside a window
+    /// ID — and, with no such picture, the look to take or how to scope each
+    /// step. Nothing is sent.
+    #[cfg(unix)]
+    #[test]
+    fn batch_defaults_naming_half_a_window_are_told_the_half_that_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let steps = json!([{"action": "left_click", "label": "Open"}]);
+        let refused = |fields: Value, ctx: &ToolContext| run_computer(&fields, ctx, &road).expect_err("half a window").to_string();
+        let unlooked = refused(json!({"action": "batch", "app": "Fixture", "steps": steps}), &ctx);
+        assert!(unlooked.contains("batch window defaults need both"), "{unlooked}");
+        assert!(
+            unlooked.contains(r#"observe {"action":"observe","app":"Fixture"} first and add the window_id its answer names beside "app", or drop the batch's app and put it on each step"#),
+            "{unlooked}"
+        );
+        let numbered = refused(json!({"action": "batch", "window_id": 41, "steps": steps}), &ctx);
+        assert!(numbered.contains(r#"add beside "window_id" the app you observed window 41 by"#), "{numbered}");
+        std::fs::write(dir.path().join("window-title"), "Docs").unwrap();
+        looked_at_window_41(dir.path(), &ctx, &road);
+        let looked = calls(dir.path());
+        let named = refused(json!({"action": "batch", "app": "Fixture", "steps": steps}), &ctx);
+        assert!(
+            named.contains(r#"your last picture was of window 41 «Docs» of Fixture; if the steps act in that window, add "window_id": 41 beside "app" on the batch, else drop the batch's app and put it on each step"#),
+            "{named}"
+        );
+        let numbered = refused(json!({"action": "batch", "window_id": 41, "steps": steps}), &ctx);
+        assert!(
+            numbered.contains(r#"your last picture was of window 41 «Docs» of Fixture; add beside "window_id" on the batch the app you observed it by"#),
+            "{numbered}"
+        );
+        let other = refused(json!({"action": "batch", "window_id": 42, "steps": steps}), &ctx);
+        assert!(other.contains(r#"add beside "window_id" the app you observed window 42 by"#), "{other}");
+        assert!(!other.contains("your last picture"), "another window's picture is not this one's: {other}");
         assert_eq!(calls(dir.path()), looked, "nothing reached the window");
     }
 
