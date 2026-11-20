@@ -488,10 +488,16 @@ fn a_road_names_its_endpoint_without_what_may_hold_a_key() {
         "https://api.openai.com/v1/",
         "https://api.openai.com/v1/chat/completions",
         "HTTPS://API.OpenAI.com/v1",
-        "https://user:secret@api.openai.com/v1?api-key=K-SECRET#part",
     ] {
         assert_eq!(road(written), "openai-api-key https://api.openai.com/v1", "{written}");
     }
+    // A user and a password before the host, a query and a fragment after the
+    // path: on a placeholder host, since `secret@host` reads as a mailbox to
+    // the release tree's scan for real people.
+    assert_eq!(
+        road("https://user:secret@api.example.com/v1?api-key=K-SECRET#part"),
+        "openai-api-key https://api.example.com/v1"
+    );
     assert_eq!(road("http://127.0.0.1:8080/v1"), "openai-api-key http://127.0.0.1:8080/v1");
     assert!(!road("https://k:K-SECRET@gateway.example.com/v1?key=K-SECRET").contains("K-SECRET"));
 }
