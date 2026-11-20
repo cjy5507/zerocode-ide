@@ -652,6 +652,41 @@ mod tests {
         git(repo, &["rev-parse", "HEAD"])
     }
 
+    /// MEASUREMENT (ignored, t-119569): the 「쌓인 일」 count of a real repository's checkouts as the
+    /// window counts it — summed checkout by checkout, each commit once, and each change once by its
+    /// key — against `origin/main`. Read only: `PILE_REPO=<repo> cargo test -p zerocode-shell --
+    /// --ignored --nocapture the_piles_count_on_a_real_repository`.
+    #[test]
+    #[ignore = "reads the repository PILE_REPO names"]
+    fn the_piles_count_on_a_real_repository() {
+        let Ok(repo) = std::env::var("PILE_REPO") else {
+            return;
+        };
+        let repo = Path::new(&repo);
+        let mut summed = 0;
+        let mut commits = std::collections::BTreeSet::new();
+        let mut changes = std::collections::BTreeSet::new();
+        for checkout in git(repo, &["worktree", "list", "--porcelain"])
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+        {
+            let head = git(Path::new(checkout), &["rev-parse", "HEAD"]);
+            for commit in git(repo, &["cherry", "origin/main", &head])
+                .lines()
+                .filter_map(|line| line.strip_prefix("+ "))
+            {
+                summed += 1;
+                commits.insert(commit.to_string());
+                changes.insert(change_key(&LocalVcs, repo, commit).unwrap_or_else(|| commit.to_string()));
+            }
+        }
+        println!(
+            "pile: summed {summed} · each commit once {} · each change once {}",
+            commits.len(),
+            changes.len()
+        );
+    }
+
     /// A commit's change key (t-119569) is the same for the same change picked onto another branch —
     /// where its parent, its line numbers and its id all differ — and differs for any other change, so
     /// the 「쌓인 일」 tab counts the copy a stack's checkout holds once with the commit it was copied
