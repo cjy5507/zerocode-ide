@@ -155,7 +155,8 @@ struct Releases<'a> {
     base: Option<&'a str>,
     remote: Option<&'a str>,
     published: Option<String>,
-    on_remote: Option<Option<Tags>>,
+    on_remote: Option<Option<RemoteRefs>>,
+    shared: Option<bool>,
     here: Option<Option<Tags>>,
 }
 
@@ -179,15 +180,18 @@ impl<'a> Releases<'a> {
             remote,
             published,
             on_remote: None,
+            shared: None,
             here: None,
         }
     }
 
     /// The release of `landed` and, where a tag may hold it and none is read as its release, why:
     /// the first tag in version order that holds it, that the published base holds, and that the
-    /// remote named holds — the same object as here, or, where that remote keeps its own history
-    /// (the public snapshot repository does), a tag of that name whose object this repository does
-    /// not have. `(None, None)` where nothing was asked or no tag holds it.
+    /// remote named holds at the same commit as here (each tag peeled to its commit) — or, on a
+    /// remote that shares none of this history (a published snapshot keeps its own), a tag of that
+    /// name. On a remote that shares this history a tag at another commit — an annotated tag made
+    /// elsewhere, one moved onto a commit not fetched here — is no release. `(None, None)` where
+    /// nothing was asked or no tag holds it.
     fn release_of(&mut self, landed: &str) -> (Option<String>, Option<String>) {
         let (Some(tags), Some(base)) = (self.tags, self.base) else {
             return (None, None);
@@ -218,7 +222,7 @@ impl<'a> Releases<'a> {
         };
         let Some(there) = self
             .on_remote
-            .get_or_insert_with(|| tags_on(vcs, repo, remote))
+            .get_or_insert_with(|| refs_on(vcs, repo, remote))
         else {
             return (
                 None,
@@ -230,16 +234,33 @@ impl<'a> Releases<'a> {
         let Some(here) = self.here.get_or_insert_with(|| tags_here(vcs, repo)) else {
             return (None, None);
         };
+        let shared = *self
+            .shared
+            .get_or_insert_with(|| shares_history(vcs, repo, &there.commits));
+        // A tag there at another commit than here's, on a remote that shares this history.
+        let mut elsewhere = None;
         let released = held
             .iter()
-            .find(|tag| match there.get(*tag) {
+            .find(|tag| match there.tags.get(*tag) {
                 None => false,
-                Some(id) => here.get(*tag) == Some(id) || !knows(vcs, repo, id),
+                Some(commit) if here.get(*tag) == Some(commit) => true,
+                Some(_) if shared => {
+                    elsewhere.get_or_insert_with(|| (*tag).clone());
+                    false
+                }
+                Some(_) => true,
             })
             .cloned();
-        match released {
-            Some(tag) => (Some(tag), None),
-            None => (
+        match (released, elsewhere) {
+            (Some(tag), _) => (Some(tag), None),
+            (None, Some(tag)) => (
+                None,
+                Some(format!(
+                    "{remote} holds {tag} at another commit than this repository's {tag} — fetch \
+                     its tags and ask again"
+                )),
+            ),
+            (None, None) => (
                 None,
                 Some(format!(
                     "{first} holds it, but {remote} has no such tag yet — the release has not been \
@@ -278,47 +299,81 @@ fn held_tags(
     )
 }
 
-/// The tags `remote` holds — a remote's name or a URL — asked of that remote itself (`ls-remote`):
-/// a tag pushed and one only cut here look alike in this repository. `None` where the remote gave
-/// no answer within the budget.
-fn tags_on(vcs: &dyn Vcs, repo: &Path, remote: &str) -> Option<Tags> {
-    let said = said(vcs, repo, &["ls-remote", "--tags", "--", remote], None)?;
-    Some(
-        said.lines()
-            .filter_map(|line| {
-                let (id, name) = line.split_once('\t')?;
-                let name = name.trim().strip_prefix("refs/tags/")?;
-                (!name.ends_with("^{}")).then(|| (name.to_string(), id.trim().to_string()))
-            })
-            .collect(),
-    )
+/// One remote's refs, as `ls-remote` lists them: each tag by name with the commit it names (an
+/// annotated tag peeled to its commit), and the commits its branches and tags name.
+struct RemoteRefs {
+    tags: Tags,
+    commits: Vec<String>,
 }
 
-/// The tags this repository holds.
+/// The refs `remote` holds — a remote's name or a URL — asked of that remote itself (`ls-remote`):
+/// a tag pushed and one only cut here look alike in this repository. `None` where the remote gave
+/// no answer within the budget.
+fn refs_on(vcs: &dyn Vcs, repo: &Path, remote: &str) -> Option<RemoteRefs> {
+    let said = said(vcs, repo, &["ls-remote", "--", remote], None)?;
+    let mut tags = Tags::new();
+    let mut peeled = Tags::new();
+    let mut commits = Vec::new();
+    for line in said.lines() {
+        let Some((id, name)) = line.split_once('\t') else {
+            continue;
+        };
+        let (id, name) = (id.trim().to_string(), name.trim());
+        match name.strip_prefix("refs/tags/") {
+            Some(tag) => match tag.strip_suffix("^{}") {
+                Some(tag) => {
+                    peeled.insert(tag.to_string(), id);
+                }
+                None => {
+                    tags.insert(tag.to_string(), id);
+                }
+            },
+            None if name == "HEAD" || name.starts_with("refs/heads/") => commits.push(id),
+            None => {}
+        }
+    }
+    tags.extend(peeled);
+    commits.extend(tags.values().cloned());
+    Some(RemoteRefs { tags, commits })
+}
+
+/// The tags this repository holds, each peeled to the commit it names.
 fn tags_here(vcs: &dyn Vcs, repo: &Path) -> Option<Tags> {
     let asked = [
         "for-each-ref",
-        "--format=%(refname:strip=2)%00%(objectname)",
+        "--format=%(refname:strip=2)%00%(objectname)%00%(*objectname)",
         "refs/tags",
     ];
     Some(
         said(vcs, repo, &asked, None)?
             .lines()
             .filter_map(|line| {
-                let (name, id) = line.split_once('\0')?;
-                Some((name.trim().to_string(), id.trim().to_string()))
+                let mut parts = line.split('\0');
+                let (name, object, peeled) = (parts.next()?, parts.next()?, parts.next()?);
+                let commit = if peeled.trim().is_empty() {
+                    object
+                } else {
+                    peeled
+                };
+                Some((name.trim().to_string(), commit.trim().to_string()))
             })
             .collect(),
     )
 }
 
-/// Whether this repository has `object` — any answer but git's own refusal counts as yes, so a
-/// remote's tag is read as another history's only where git said it has no such object.
-fn knows(vcs: &dyn Vcs, repo: &Path, object: &str) -> bool {
-    !matches!(
-        vcs.try_within(repo, &["cat-file", "-e", object], GIT_BUDGET),
-        Within::Refused(_)
-    )
+/// How many of a remote's commits are asked whether this repository has them, to tell a remote
+/// that shares this history from one with a history of its own: its branches first.
+const SHARED_ASKED: usize = 64;
+
+/// Whether this repository has any of `commits` — a remote that names one shares this history. No
+/// answer from git counts as yes: then only the same commit is read as the release.
+fn shares_history(vcs: &dyn Vcs, repo: &Path, commits: &[String]) -> bool {
+    if commits.is_empty() {
+        return false;
+    }
+    let mut asked = vec!["rev-list", "--no-walk", "--ignore-missing"];
+    asked.extend(commits.iter().take(SHARED_ASKED).map(String::as_str));
+    said(vcs, repo, &asked, None).is_none_or(|known| !known.trim().is_empty())
 }
 
 /// One head's range against `base_head`, its release aside. A head the base holds is its own range
