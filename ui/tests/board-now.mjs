@@ -471,6 +471,10 @@ function readNow() {
     reported: Boolean(row("t-66790")),
     // The finished tasks the table folds — the coordinator's line of reports wears the same folded look (t-119569).
     doneFold: [...view.querySelectorAll('[data-desk-block="running"] .board-goal.is-done .board-goal-name')].map((node) => node.textContent),
+    // Every folded line outside running now's table and the coordinator's line: none stands in the draft's scene.
+    foldsElsewhere: [...view.querySelectorAll(".board-goal.is-done .board-goal-name")]
+      .filter((node) => !node.closest('[data-desk-block="running"], [data-desk-block="reviews"]'))
+      .map((node) => node.textContent),
     runsFoot: view.querySelector(".board-runs-foot")?.textContent,
     runningHint: view.querySelector('[data-desk-block="running"] .board-desk-head-note')?.textContent,
     build: one ? {
@@ -704,7 +708,7 @@ export async function testBoardNow(browser, origin, ok) {
       JSON.stringify(runs.legend) === JSON.stringify(["도는 중", "차례 기다림", "멈춤", "끝남"]), JSON.stringify(runs.legend));
     // Today's count lives on the History tab (11-08): the foot keeps its door, so the waiting row's wait has its figure.
     ok("a report waiting on a review is no finished row of the table: three finished tasks fold, and the foot is the door to today's record",
-      !now.reported && JSON.stringify(now.doneFold) === JSON.stringify(["끝난 과업 3개"])
+      !now.reported && JSON.stringify(now.doneFold) === JSON.stringify(["끝난 과업 3개"]) && now.foldsElsewhere.length === 0
         && now.runsFoot === "오늘 끝난 일 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
       JSON.stringify(now));
 
@@ -770,8 +774,15 @@ export async function testBoardNow(browser, origin, ok) {
         asked: [...asked.querySelectorAll(".board-ask-acts > button:not([hidden])")].map((one) => one.textContent),
         askedTitle: asked.querySelector(".board-ask-title").textContent,
         english: /exited|harvest|dispatch again/.test(row.innerText),
+        badge: (() => {
+          const kind = row.querySelector(".board-ask-kind");
+          return kind ? { ground: getComputedStyle(kind).backgroundColor, ink: getComputedStyle(kind).color } : null;
+        })(),
       };
     });
+    // The question's badge is measured on the first screen; a decision's is measured here (t-119569).
+    ok("a decision's badge in your turn is the same solid blue under white words",
+      hold.badge?.ink === "rgb(255, 255, 255)" && hold.badge?.ground === "rgb(0, 98, 209)", JSON.stringify(hold.badge));
     ok("a hold reads in Korean — what happened and what to do — with the ledger's sentence folded behind 원문 보기",
       hold.title.includes("w-66501") && hold.title.includes("2개") && hold.raw && !hold.english, JSON.stringify(hold));
     ok("a hold offers open, collect and start again", JSON.stringify(hold.buttons) === JSON.stringify(["열기", "거두기", "다시 띄우기"]),
