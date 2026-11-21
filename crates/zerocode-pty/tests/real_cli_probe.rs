@@ -25,7 +25,10 @@
 //! at every beat: each change is kept as its size, its write and birth
 //! moments on the probe's clock and how many steps it holds — never a word of
 //! it. That answers when a CLI that writes its session as one document
-//! (Devin's ATIF file) writes it: as the turn goes, or once at its end.
+//! (Devin's ATIF file) writes it: as the turn goes, or once at its end. A
+//! second one-line prompt (`ZEROCODE_REAL_CLI_PROBE_PROMPT_AGAIN`) goes in
+//! after the first turn's `Stop`, so the file is also seen between two turns
+//! of one session.
 
 #![cfg(unix)]
 
@@ -258,9 +261,17 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
     };
     let out = Path::new(&out);
     assert!(out.is_dir(), "{} is not a folder", out.display());
-    let prompt = std::env::var("ZEROCODE_REAL_CLI_PROBE_PROMPT")
-        .ok()
-        .filter(|line| !line.trim().is_empty() && !line.contains('\n'));
+    let one_line = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|line| !line.trim().is_empty() && !line.contains('\n'))
+    };
+    let prompt = one_line("ZEROCODE_REAL_CLI_PROBE_PROMPT");
+    let prompts: Vec<String> = prompt
+        .iter()
+        .cloned()
+        .chain(one_line("ZEROCODE_REAL_CLI_PROBE_PROMPT_AGAIN").filter(|_| prompt.is_some()))
+        .collect();
     let words: Vec<String> = argv.split_whitespace().map(str::to_string).collect();
     let (program, args) = words.split_first().expect("a program to start");
 
@@ -364,20 +375,44 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    if pasted {
+    // Each prompt's turn, watched to its own `Stop` and a while past it; the
+    // first prompt went in above, each next one once the screen is quiet.
+    let heard_times =
+        |events: &[Heard], name: &str| events.iter().filter(|one| one.event == name).count();
+    let turns: &[String] = if pasted { &prompts } else { &[] };
+    for (at, line) in turns.iter().enumerate() {
+        let nth = at + 1;
+        if nth > 1 {
+            let waited = Instant::now();
+            while waited.elapsed() < QUIET_FALLBACK
+                && !lane
+                    .last_output_at()
+                    .is_some_and(|last| last.elapsed() >= QUIET)
+            {
+                lane.pump();
+                events.extend(heard.try_iter());
+                session_file.look(began, &events);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let words = format!("\x1b[200~{line}\x1b[201~");
+            lane.write_input(words.as_bytes()).expect("the paste");
+            std::thread::sleep(Duration::from_millis(150));
+            lane.write_input(b"\r").expect("the Enter");
+            first(&mut facts, &format!("entered{nth}Ms"));
+        }
         let entered = Instant::now();
         let mut pressed_again = false;
         while entered.elapsed() < TURN_PATIENCE {
             lane.pump();
             events.extend(heard.try_iter());
             session_file.look(began, &events);
-            let taken = events.iter().any(|one| one.event == "UserPromptSubmit");
+            let taken = heard_times(&events, "UserPromptSubmit") >= nth;
             if !taken && !pressed_again && entered.elapsed() >= ENTER_AGAIN_AFTER {
                 lane.write_input(b"\r").expect("the Enter again");
-                first(&mut facts, "enteredAgainMs");
+                first(&mut facts, &format!("enteredAgain{nth}Ms"));
                 pressed_again = true;
             }
-            if events.iter().any(|one| one.event == "Stop") {
+            if heard_times(&events, "Stop") >= nth {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -390,7 +425,7 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
             std::thread::sleep(Duration::from_millis(50));
         }
         lane.pump();
-        screens.push(("after-turn".into(), lane.terminal().grid().visible_text()));
+        screens.push((format!("after-turn-{nth}"), lane.terminal().grid().visible_text()));
     }
 
     // Out the way a person leaves it, then the lane's own end.
