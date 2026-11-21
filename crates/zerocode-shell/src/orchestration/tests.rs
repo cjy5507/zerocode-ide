@@ -26254,6 +26254,9 @@ struct SwitchWorld {
     /// Run once, right before the first receipt is written — the ledger's
     /// disk refusing writes from there on (astra R4).
     before_receipt: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// How often the situation was read — what the window reads off its
+    /// disk (t-124254).
+    looks: Mutex<usize>,
 }
 
 /// One change a test makes to the switch's world from inside the switch.
@@ -26276,6 +26279,7 @@ impl SwitchWorld {
             logins: std::sync::Arc::clone(&host.logins),
             after_select: Mutex::new(None),
             before_receipt: Mutex::new(None),
+            looks: Mutex::new(0),
         }
     }
 
@@ -26316,6 +26320,7 @@ impl SwitchWorld {
 impl crate::account_switch::SwitchDoors for SwitchWorld {
     fn situation(&self, now_ms: i64) -> Result<crate::account_switch::Situation, String> {
         *self.now.lock().unwrap() = now_ms;
+        *self.looks.lock().unwrap() += 1;
         let gauges = self.gauges.lock().unwrap().clone();
         let named = self.logins.lock().unwrap().clone();
         let logins = gauges
@@ -26337,9 +26342,20 @@ impl crate::account_switch::SwitchDoors for SwitchWorld {
             failures: self.failures.lock().unwrap().clone(),
             logins,
             owed: crate::account_switch::owed_followers(self.journal.path()),
+            waiting: crate::account_switch::waiting_followers(self.journal.path()),
             picked: crate::account_switch::person_pick(self.journal.path()),
             now_ms,
         })
+    }
+    /// Every reading the world holds, as one number: any change to any of
+    /// them — a new one, a failed one, one taken away — moves it.
+    fn readings_seen(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(&*self.gauges.lock().unwrap())
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        hasher.finish()
     }
     fn select(&self, to: Option<&str>) -> Result<(), String> {
         if let Some(why) = self.refuse.lock().unwrap().clone() {
@@ -26911,6 +26927,7 @@ fn a_manual_switch_cuts_no_turn_and_its_panes_follow_it() {
             at_turn_end: 5,
             person: 0,
             left: 0,
+            when_free: 0,
         },
         "{applied:?}"
     );
@@ -27299,6 +27316,7 @@ fn a_near_limit_switch_moves_every_worker_to_the_new_account_without_a_restart()
             at_turn_end: count(WORKING),
             person: 0,
             left: 0,
+            when_free: 0,
         },
         "{applied:?}"
     );
@@ -27427,6 +27445,7 @@ fn a_persons_panes_keep_their_login_and_a_line_with_their_words_waits() {
             at_turn_end: 2,
             person: 2,
             left: 0,
+            when_free: 0,
         },
         "{applied:?}"
     );
@@ -27643,6 +27662,7 @@ fn a_pane_the_window_just_typed_at_is_not_closed_by_a_switch_but_moves_at_that_t
             at_turn_end: 1,
             person: 0,
             left: 0,
+            when_free: 0,
         },
         "{applied:?}"
     );
@@ -27837,6 +27857,7 @@ fn a_pane_owed_its_move_follows_the_newest_pick_at_its_turn_end() {
             at_turn_end: 1,
             person: 0,
             left: 0,
+            when_free: 0,
         }
     );
     assert_eq!(
@@ -27965,6 +27986,7 @@ fn a_pick_back_to_the_account_a_pane_runs_as_owes_that_pane_nothing() {
             at_turn_end: 1,
             person: 1,
             left: 0,
+            when_free: 0,
         }
     );
     let back = crate::account_switch::switch_by_person(
@@ -27981,6 +28003,7 @@ fn a_pick_back_to_the_account_a_pane_runs_as_owes_that_pane_nothing() {
             at_turn_end: 0,
             person: 0,
             left: 0,
+            when_free: 0,
         }
     );
     assert!(
@@ -28017,6 +28040,9 @@ struct BlockedPick {
     stood: WalledClaude,
     at: i64,
     pick: crate::account_switch::Applied,
+    /// How often this thread had asked the table to choose the default once
+    /// the pick was made — what the late moves must leave as it is.
+    decided: usize,
 }
 
 impl BlockedPick {
@@ -28036,7 +28062,23 @@ impl BlockedPick {
             at,
         )
         .expect("the person's pick");
-        Self { stood, at, pick }
+        let decided = crate::account_switch::decided_on_this_thread();
+        Self {
+            stood,
+            at,
+            pick,
+            decided,
+        }
+    }
+
+    /// The window never asked the table to choose an account since the
+    /// pick: what followed it late is the person's pick, not the beat's.
+    fn chose_nothing(&self) {
+        assert_eq!(
+            crate::account_switch::decided_on_this_thread(),
+            self.decided,
+            "a late move asked the table to choose an account"
+        );
     }
 
     fn census(&self) -> serde_json::Value {
@@ -28185,6 +28227,7 @@ fn a_working_pane_a_blocked_pick_left_follows_at_a_turn_end_once_its_account_rea
             && follows[0].contains("waited for c-fixture to read room"),
         "{follows:#?}"
     );
+    picked.chose_nothing();
     assert_eq!(stood.died(at + 70_000), 0);
 }
 
@@ -28262,6 +28305,7 @@ fn a_pane_resting_at_its_wall_follows_the_picked_account_only_on_a_newer_reading
     assert_eq!(pane["toAccount"], "c-fixture");
     assert_eq!(picked.follows_of(&worker, term).len(), 1);
     assert_eq!(stood.world.selects(), vec![Some("c-fixture".to_string())]);
+    picked.chose_nothing();
     assert_eq!(stood.died(fresh + 20_000), 0);
 }
 
@@ -28402,6 +28446,7 @@ fn with_the_switch_off_the_panes_a_blocked_pick_left_still_follow_the_persons_pi
         assert_eq!(picked.pane_receipt(one, at + 30_000)["by"], "person");
     }
     assert_eq!(stood.world.selects(), vec![Some("c-fixture".to_string())]);
+    picked.chose_nothing();
     assert_eq!(stood.died(at + 40_000), 0);
 }
 
@@ -28497,6 +28542,53 @@ fn a_pick_back_ends_a_waiting_move_and_a_freed_account_moves_nothing() {
         picked.lines()
     );
     assert_eq!(stood.died(at + 20_000), 0);
+}
+
+/// t-124254, the coordinator's word (m-124345): a pane resting at its wall
+/// can wait hours for its account's room, and the beat runs every second —
+/// so a beat over moves that only wait answers from one number of memory
+/// while no reading lands, and reads neither the journal nor the situation
+/// (what the window reads off its disk). A reading that lands, still with no
+/// room, is looked at once; one with room moves the pane.
+#[test]
+fn a_beat_over_moves_that_wait_for_room_reads_nothing_until_a_reading_lands() {
+    let picked = BlockedPick::stand(WalledClaude::stand(125_800, 0), 60_000, |_, _| {});
+    let stood = &picked.stood;
+    let at = picked.at;
+    let (worker, term) = (stood.worker.clone(), stood.leader + 1);
+    let looks = || *stood.world.looks.lock().unwrap();
+    let reads = crate::account_switch::book_reads_on_this_thread;
+    // The first beat after the pick looks, and finds nothing it may move.
+    assert_eq!(picked.follow(at + 1_000), 0);
+    let (looked, read) = (looks(), reads());
+    for step in 0..30 {
+        assert_eq!(picked.follow(at + 2_000 + step * 1_000), 0);
+    }
+    assert_eq!(
+        (looks(), reads()),
+        (looked, read),
+        "a beat read the disk while no reading landed"
+    );
+    // A reading lands, still at the blocked line: one look, and quiet again.
+    account_reads(&stood.world, "c-fixture", BLOCKED, at + 40_000);
+    assert_eq!(picked.follow(at + 41_000), 0);
+    assert_eq!(looks(), looked + 1);
+    assert!(reads() > read);
+    let (looked, read) = (looks(), reads());
+    for step in 0..5 {
+        assert_eq!(picked.follow(at + 42_000 + step * 1_000), 0);
+    }
+    assert_eq!((looks(), reads()), (looked, read));
+    assert_eq!(term_now(&worker), term);
+    // A reading with room: the pane follows.
+    account_reads(&stood.world, "c-fixture", 5, at + 50_000);
+    assert_eq!(picked.follow(at + 51_000), 1, "{:#?}", picked.lines());
+    assert_ne!(term_now(&worker), term);
+    assert_eq!(
+        stood.host.pane_account(term_now(&worker)).as_deref(),
+        Some("c-fixture")
+    );
+    picked.chose_nothing();
 }
 
 /// t-46106: the beat moves a worker a switch still owes a move to BEFORE

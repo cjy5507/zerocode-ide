@@ -658,6 +658,15 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     await pickClaudeAccount(NEW);
     const pick = receipts().at(-1) ?? null;
     said.pick = pick?.querySelector(".toast-text")?.textContent ?? "";
+    // A pick whose account has no room for some panes says them as a fifth
+    // count, out of the same answer (t-124254).
+    for (const one of receipts()) one.remove();
+    window.__ACCOUNTS__ = { ...picked, switched: { moved: 0, at_turn_end: 1, person: 0, left: 0, when_free: 2 } };
+    accountReport = { ...picked };
+    await pickClaudeAccount(NEW);
+    const waiting = receipts().at(-1) ?? null;
+    said.whenFree = waiting?.querySelector(".toast-text")?.textContent ?? "";
+    said.whenFreeTip = waiting?.dataset.tip ?? "";
     delete window.__SWITCH_APPLIED__;
     return said;
   }, {
@@ -678,6 +687,14 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
       receipt.tip.includes("턴 끝에 옮길 판") && receipt.button === "BUTTON" && receipt.buttonType === "button" &&
       receipt.buttonTip.length > 0 && receipt.opened &&
       /옮긴 판 2 · 턴 끝에 옮길 판 1 · 사람 판 0 · 남은 판 1/.test(receipt.pick),
+    JSON.stringify(receipt),
+  );
+  ok(
+    "a pick whose account has no room for some panes says them as a fifth count — they move once the account frees — with what it means on hover, and a receipt with no such pane says no fifth count (t-124254)",
+    /옮긴 판 0 · 턴 끝에 옮길 판 1 · 사람 판 0 · 남은 판 0 · 계정이 풀리면 옮길 판 2/.test(receipt.whenFree) &&
+      receipt.whenFreeTip.includes("계정이 풀리면 옮길 판:") &&
+      !receipt.words.includes("계정이 풀리면") && !receipt.pick.includes("계정이 풀리면") &&
+      !receipt.tip.includes("계정이 풀리면"),
     JSON.stringify(receipt),
   );
 

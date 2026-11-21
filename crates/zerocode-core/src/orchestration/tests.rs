@@ -28111,6 +28111,7 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
         panes_at_turn_end: 0,
         panes_person: 0,
         panes_left: 0,
+        panes_when_free: 0,
     };
     let written = bench
         .ledger
@@ -28168,6 +28169,7 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
         panes_at_turn_end: 2,
         panes_person: 1,
         panes_left: 0,
+        panes_when_free: 3,
         reason: "near_limit".to_string(),
         ..receipt.clone()
     };
@@ -28203,6 +28205,7 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
     assert_eq!(body["panesAtTurnEnd"], 2);
     assert_eq!(body["panesPerson"], 1);
     assert_eq!(body["panesLeft"], 0);
+    assert_eq!(body["panesWhenFree"], 3);
     // An empty key is refused; a peer typing the kind is refused.
     assert!(
         bench
@@ -30209,6 +30212,7 @@ fn a_walled_workers_chip_stands_only_while_a_press_would_be_taken() {
         panes_at_turn_end: 0,
         panes_person: 0,
         panes_left: 0,
+        panes_when_free: 0,
     };
     moving
         .ledger

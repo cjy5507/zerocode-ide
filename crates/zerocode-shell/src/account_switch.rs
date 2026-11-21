@@ -24,7 +24,11 @@
 //! took over, or that no worker holds, keeps its login and is counted as
 //! the person's. Before, the default moved alone: on 2026-10-11 a near-limit
 //! switch left seven workers on the old login at 97–98%, and only a window
-//! restart brought them over.
+//! restart brought them over. A pane the table keeps from the landing only
+//! because the landing has no room for its model waits instead, owed its
+//! move, and follows once a newer reading of the landing has room
+//! (t-124254): the default the person picked, reached late — the window
+//! picks no account for it.
 //!
 //! Both kinds move by the restore road a window restart already uses — the
 //! ledger rests the worker, the pane closes and its process group is gone,
@@ -54,7 +58,7 @@ use crate::agent_teams::{Host, PaneExit, PaneLogin};
 use zerocode_core::LaunchOverride;
 use zerocode_core::account_autoswitch::{
     AccountGauge, AutoSwitchMode, CLAUDE_ACCOUNT_AUTOSWITCH, Decision, Fitness, Question,
-    SwitchReason, best_candidate, decide, fitness_table, judge_follower, judge_pane,
+    SwitchReason, best_candidate, decide, fitness_table, has_room_for, judge_follower, judge_pane,
 };
 use zerocode_core::orchestration::{
     AccountMove, AccountSwitchReceipt, RestCause, SwitchRest, WorkerState,
@@ -95,6 +99,30 @@ pub(crate) fn hold_switch_line() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How often this thread asked the table to choose the default
+    /// (`decide`, t-124254) — what a test reads to show that a pane which
+    /// follows the person's pick late never has the window choose for it.
+    static DECIDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How often this thread read the switch journal off the disk
+    /// (t-124254) — what a test reads to show that a beat over a move
+    /// waiting for its landing's room reads nothing until a reading moves.
+    static BOOK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`DECIDED`] on the calling thread.
+#[cfg(test)]
+pub(crate) fn decided_on_this_thread() -> usize {
+    DECIDED.with(std::cell::Cell::get)
+}
+
+/// [`BOOK_READS`] on the calling thread.
+#[cfg(test)]
+pub(crate) fn book_reads_on_this_thread() -> usize {
+    BOOK_READS.with(std::cell::Cell::get)
+}
+
 /// When the window's default last moved, and to whom — the cooldown's
 /// clock. Window memory: a restart ends the cooldown, which is the same
 /// answer the gauges give (they are read again at boot).
@@ -130,6 +158,10 @@ pub(crate) struct Situation {
     /// ([`owed_followers`], t-46106) — what the plan's census says of a pane
     /// left on another account: moving, or left.
     pub(crate) owed: Vec<String>,
+    /// The ones among `owed` whose landing had no room for them when last
+    /// asked (t-124254): nothing moves them until a newer reading has room,
+    /// and the census says they stay where they are.
+    pub(crate) waiting: Vec<String>,
     /// The account the person picked themselves, and when ([`person_pick`],
     /// t-78096) — read off the disk at every look, so a restart keeps it.
     pub(crate) picked: Option<PersonPick>,
@@ -217,6 +249,10 @@ pub(crate) trait SwitchDoors {
     /// The clock a pane's move is committed by — the moment of use, after
     /// the selection and the checks, never the moment the plan was read.
     fn now_ms(&self) -> i64;
+    /// A count that moves whenever any managed account's reading lands or
+    /// leaves (t-124254) — read off memory, never the disk: what the beat
+    /// compares before it looks at a move that waits for its landing's room.
+    fn readings_seen(&self) -> u64;
     /// One receipt in the ledger's own voice. `Ok(false)` is a receipt no
     /// run is concerned with, or one already written (its key); `Err` is a
     /// ledger that refused, and the journal keeps the receipt owed.
@@ -247,6 +283,7 @@ impl SwitchDoors for WindowDoors<'_> {
             }
         };
         let store = accounts::read_store(config_root);
+        let owed = owed_panes(&self.journal_dir());
         Ok(Situation {
             mode,
             active: zerocode_core::active_account(&store.accounts, &store.selection)
@@ -268,10 +305,19 @@ impl SwitchDoors for WindowDoors<'_> {
                 .iter()
                 .map(|account| (account.id.clone(), claude_login_key(account)))
                 .collect(),
-            owed: owed_followers(&self.journal_dir()),
+            owed: owed.iter().map(|pane| pane.worker.clone()).collect(),
+            waiting: owed
+                .iter()
+                .filter(|pane| pane.waits_for_room())
+                .map(|pane| pane.worker.clone())
+                .collect(),
             picked: person_pick(&self.journal_dir()),
             now_ms,
         })
+    }
+
+    fn readings_seen(&self) -> u64 {
+        claude_account_readings_seen()
     }
 
     fn select(&self, to: Option<&str>) -> Result<(), String> {
@@ -491,8 +537,9 @@ pub(crate) enum Stance {
     /// The person's: a worker they took over, or a pane no worker holds —
     /// on whichever account. Never moved.
     Person,
-    /// On another account, or on none the window recorded, and nothing will
-    /// move it.
+    /// On another account, or on none the window recorded, and nothing
+    /// moves it now — a pane whose landing has no room for it stands here
+    /// too until a newer reading has room (t-124254); its move is still owed.
     Left,
 }
 
@@ -608,6 +655,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         failures,
         logins,
         owed,
+        waiting,
         picked,
         now_ms,
     } = situation;
@@ -645,19 +693,23 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
     let decision = match (&active, mode.acts()) {
         (_, false) => Decision::Stay { why: "off" },
         (None, true) => Decision::Stay { why: "unknown" },
-        (Some(source), true) => decide(&Question {
-            source,
-            gauges: &gauges,
-            model: None,
-            last_switch_ms,
-            // Only a pane the window can NAME the account of is a witness
-            // against the source (astra A4).
-            walled: walled
-                .iter()
-                .any(|row| row.account.as_deref() == Some(source.as_str())),
-            picked: picked_at_ms.is_some(),
-            now_ms,
-        }),
+        (Some(source), true) => {
+            #[cfg(test)]
+            DECIDED.with(|count| count.set(count.get() + 1));
+            decide(&Question {
+                source,
+                gauges: &gauges,
+                model: None,
+                last_switch_ms,
+                // Only a pane the window can NAME the account of is a witness
+                // against the source (astra A4).
+                walled: walled
+                    .iter()
+                    .any(|row| row.account.as_deref() == Some(source.as_str())),
+                picked: picked_at_ms.is_some(),
+                now_ms,
+            })
+        }
     };
     let landing = match &decision {
         Decision::Switch { to, .. } => Some(to.clone()),
@@ -677,7 +729,7 @@ pub(crate) fn plan_with(host: &dyn Host, situation: Situation) -> SwitchPlan {
         }
     }
     let token = token_of(mode, active.as_deref(), &decision, &walled, &logins);
-    let panes = census(host, active.as_deref(), &walled, &owed);
+    let panes = census(host, active.as_deref(), &walled, &owed, &waiting);
     let next = active.as_deref().and_then(|source| {
         best_candidate(
             source,
@@ -716,6 +768,7 @@ fn census(
     active: Option<&str>,
     walled: &[WalledRow],
     owed: &[String],
+    waiting: &[String],
 ) -> Vec<PaneAccount> {
     let seated = crate::orchestration::claude_workers_seated();
     let mut panes: Vec<PaneAccount> = seated
@@ -728,7 +781,7 @@ fn census(
                 Stance::Person
             } else if account.is_some() && account.as_deref() == active {
                 Stance::Current
-            } else if owed.contains(&seat.worker) {
+            } else if owed.contains(&seat.worker) && !waiting.contains(&seat.worker) {
                 if rests_for_a_move(host, seat.term) {
                     Stance::Moving
                 } else {
@@ -780,6 +833,10 @@ struct Approval<'a> {
     from_login: Option<String>,
     landing: &'a str,
     to_login: Option<String>,
+    /// The move was owed only once the landing has room for the pane
+    /// (t-124254): the table once kept it from a landing with none, and the
+    /// last door asks for a reading with room, not only the table's word.
+    waits_for_room: bool,
 }
 
 impl<'a> Approval<'a> {
@@ -791,6 +848,7 @@ impl<'a> Approval<'a> {
             from_login: login_of(&plan.logins, from),
             landing,
             to_login: login_of(&plan.logins, landing),
+            waits_for_room: false,
         })
     }
 
@@ -920,6 +978,14 @@ pub(crate) struct JournalPane {
     pub(crate) to_pane: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) to_account: Option<String>,
+    /// The landing had no room for this pane when its move was to be made
+    /// (t-124254) — a window that limits its model stood at the blocked
+    /// line there — and this is the moment of that reading. The move stays
+    /// owed, and is made at the first look that finds the pane between turns
+    /// with a NEWER reading of the landing that has room; a newer one without
+    /// room is written here in its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) blocked_reading_ms: Option<i64>,
 }
 
 impl JournalPane {
@@ -930,6 +996,22 @@ impl JournalPane {
             && now.pane == self.from_pane
             && (self.from_team.is_empty() || now.team == self.from_team)
     }
+
+    /// Owed its move to the default and not moving yet (t-46106): found at
+    /// work, or kept from a landing with no room for it (t-124254).
+    fn owed_a_follow(&self) -> bool {
+        self.follows && !self.rested && self.to_pane.is_none()
+    }
+
+    /// [`Self::owed_a_follow`], for `worker`'s move.
+    fn owed_to(&self, worker: &str) -> bool {
+        self.worker == worker && self.owed_a_follow()
+    }
+
+    /// Owed its move only once the landing has room for it (t-124254).
+    fn waits_for_room(&self) -> bool {
+        self.blocked_reading_ms.is_some()
+    }
 }
 
 fn journal_file(dir: &Path) -> PathBuf {
@@ -939,6 +1021,8 @@ fn journal_file(dir: &Path) -> PathBuf {
 /// The book on disk: empty when there is no file; the first round's
 /// one-switch file read as a book of one.
 fn read_book(dir: &Path) -> Result<JournalBook, String> {
+    #[cfg(test)]
+    BOOK_READS.with(|count| count.set(count.get() + 1));
     let text = match std::fs::read_to_string(journal_file(dir)) {
         Ok(text) => text,
         Err(why) if why.kind() == std::io::ErrorKind::NotFound => {
@@ -1050,6 +1134,12 @@ fn write_before_the_first_effect(dir: &Path, book: &JournalBook) -> Result<(), S
 }
 
 fn replace_book(dir: &Path, book: &JournalBook) -> Result<(), String> {
+    // A book that changes is looked at again on the next beat, whether or
+    // not the write lands (t-124254).
+    waits_judged()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(dir);
     if book.switches.is_empty() {
         return remove_if_present(&journal_file(dir), "전환 일지를");
     }
@@ -1096,6 +1186,7 @@ impl Journal {
             panes_at_turn_end: 0,
             panes_person: 0,
             panes_left: 0,
+            panes_when_free: 0,
         }
     }
 
@@ -1235,7 +1326,8 @@ fn send_receipts(
         u32::try_from(kept.iter().filter(|pane| which(pane)).count()).unwrap_or(u32::MAX)
     };
     let pending = count(&|pane| pane.to_pane.is_none() && pane.rested);
-    let at_turn_end = count(&|pane| pane.follows && !pane.rested);
+    let at_turn_end = count(&|pane| pane.owed_a_follow() && !pane.waits_for_room());
+    let when_free = count(&|pane| pane.owed_a_follow() && pane.waits_for_room());
     journal.panes = kept;
     if journal.default {
         if journal.landed || active == journal.to.as_deref() {
@@ -1249,6 +1341,7 @@ fn send_receipts(
             receipt.panes_at_turn_end = at_turn_end;
             receipt.panes_person = journal.person;
             receipt.panes_left = journal.left;
+            receipt.panes_when_free = when_free;
             match doors.record(receipt, now_ms) {
                 Ok(written) => {
                     settled.written += usize::from(written);
@@ -1379,13 +1472,15 @@ pub(crate) struct Applied {
 
 /// What one switch did with the panes on accounts other than its landing
 /// (t-46106), counted the way its toast says them: moved now, owed a move at
-/// their turn's end, the person's, and left where they are.
+/// their turn's end, the person's, left where they are — and owed a move
+/// once the landing has room for them (t-124254).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct SwitchCensus {
     pub(crate) moved: u32,
     pub(crate) at_turn_end: u32,
     pub(crate) person: u32,
     pub(crate) left: u32,
+    pub(crate) when_free: u32,
 }
 
 impl SwitchCensus {
@@ -1393,17 +1488,21 @@ impl SwitchCensus {
     /// stands once they are settled.
     fn of(panes: &[MovedPane], journal: &Journal) -> Self {
         let count = |many: usize| u32::try_from(many).unwrap_or(u32::MAX);
-        Self {
-            moved: count(panes.iter().filter(|pane| pane.ok).count()),
-            at_turn_end: count(
+        let owed = |waits: bool| {
+            count(
                 journal
                     .panes
                     .iter()
-                    .filter(|pane| pane.follows && !pane.rested)
+                    .filter(|pane| pane.owed_a_follow() && pane.waits_for_room() == waits)
                     .count(),
-            ),
+            )
+        };
+        Self {
+            moved: count(panes.iter().filter(|pane| pane.ok).count()),
+            at_turn_end: owed(false),
             person: journal.person,
             left: journal.left,
+            when_free: owed(true),
         }
     }
 }
@@ -1512,6 +1611,7 @@ pub(crate) fn apply_with(
                     follows: false,
                     to_pane: None,
                     to_account: None,
+                    blocked_reading_ms: None,
                 })
             })
             .collect(),
@@ -1717,22 +1817,69 @@ fn follow_logins() -> &'static Mutex<FollowLogins> {
 /// it was (t-46106).
 type FollowLogins = HashMap<String, Vec<(String, String)>>;
 
-/// The workers a switch in the book at `dir` still owes a move to the
-/// default (t-46106): found at work when it moved, not rested yet. A look
-/// only — the book this window could not write first, then the file; a
-/// book nobody can read owes nothing here, and the road that settles it
-/// sets it aside and says so.
-pub(crate) fn owed_followers(dir: &Path) -> Vec<String> {
+/// What the beat last made of the moves that wait for their landing's room
+/// (t-124254), by journal directory: the count of readings
+/// ([`SwitchDoors::readings_seen`]) it judged them under — kept only when
+/// every move the book owed was such a move and none could be made on those
+/// readings. A beat that finds the same count has nothing to look at and
+/// answers from this one number of memory: a pane resting at its wall can
+/// wait for hours, and neither the journal nor the situation is read for it
+/// every second. A write of the book forgets it ([`replace_book`]).
+fn waits_judged() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    static HELD: std::sync::OnceLock<Mutex<HashMap<PathBuf, u64>>> = std::sync::OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Every move a switch in the book at `dir` still owes a pane to the
+/// default (t-46106): found at work when it moved, or kept from a landing
+/// with no room for it (t-124254), not rested yet. A look only — the book
+/// this window could not write first, then the file; a book nobody can read
+/// owes nothing here, and the road that settles it sets it aside and says
+/// so.
+fn owed_panes(dir: &Path) -> Vec<JournalPane> {
     unwritten_book(dir)
         .or_else(|| read_book(dir).ok())
         .unwrap_or_default()
         .switches
-        .iter()
-        .flat_map(|journal| journal.panes.iter())
-        .filter(|pane| pane.follows && !pane.rested && pane.to_pane.is_none())
-        .map(|pane| pane.worker.clone())
+        .into_iter()
+        .flat_map(|journal| journal.panes)
+        .filter(JournalPane::owed_a_follow)
         .collect()
 }
+
+/// The workers of [`owed_panes`].
+pub(crate) fn owed_followers(dir: &Path) -> Vec<String> {
+    owed_panes(dir)
+        .into_iter()
+        .map(|pane| pane.worker)
+        .collect()
+}
+
+/// The ones among [`owed_followers`] whose landing had no room for them
+/// when last asked (t-124254): they move once a newer reading has room. The
+/// window's own look counts them off the same read ([`owed_panes`]).
+#[cfg(test)]
+pub(crate) fn waiting_followers(dir: &Path) -> Vec<String> {
+    owed_panes(dir)
+        .into_iter()
+        .filter(JournalPane::waits_for_room)
+        .map(|pane| pane.worker)
+        .collect()
+}
+
+/// When `landing`'s reading in `gauges` was taken — 0 for one nobody took,
+/// which any reading is newer than (t-124254).
+fn reading_at(gauges: &[AccountGauge], landing: &str) -> i64 {
+    gauges
+        .iter()
+        .find(|gauge| gauge.id == landing)
+        .map_or(0, |gauge| gauge.observed_at_ms)
+}
+
+/// What a following pane's last door says when its landing has no room for
+/// it (t-124254) — the one refusal besides "not between turns" that keeps
+/// the move owed rather than given up: it waits for a newer reading.
+const NO_ROOM: &str = "has no room for this pane now";
 
 /// Whether a switch may move the pane in `term` now (t-46106): the host
 /// sees it between turns, and no words this window typed at it on its own
@@ -1751,7 +1898,9 @@ fn rests_for_a_move(host: &dyn Host, term: u32) -> bool {
 struct Followers {
     /// Between turns: this switch moves them now.
     now: Vec<WalledRow>,
-    /// At work: owed their move at the end of their turn.
+    /// Owed their move: at work, at the end of their turn; or, at work or
+    /// not, once the landing has room for them — the ones whose verdict is
+    /// [`Decision::landing_blocked`] (t-124254).
     owed: Vec<WalledRow>,
     /// The person's: a worker they took over, or a pane no worker holds.
     person: u32,
@@ -1767,19 +1916,15 @@ struct Followers {
 /// asleep or already on the landing by now, so they are not among them; a
 /// walled pane it could not move is, and may still follow.
 ///
-/// A pane at work whose move an older switch still owes (`owed_before`,
-/// t-124041) stays owed, whatever the table says of `landing` now: the end
-/// of its turn asks the table again ([`still_follows`]). On 2026-11-20 the
-/// person picked twice in three seconds, the second pick's table kept every
-/// pane from its account at that moment, and the panes the first pick owed
-/// were refused at their turn's end for a default that had moved on.
-fn followers_of(
-    host: &dyn Host,
-    landing: &str,
-    gauges: &[AccountGauge],
-    owed_before: &[String],
-    now_ms: i64,
-) -> Followers {
+/// A pane the table keeps from `landing` only because the landing has no
+/// room for its model (t-124254) stays owed, at work or between turns — at
+/// its wall among them: it follows once a newer reading of `landing` has
+/// room ([`follow_with`]). On 2026-11-20 the person picked an account whose
+/// session stood at the blocked line, the table kept thirteen panes from it
+/// at that moment, and nothing asked again: they met the old account's
+/// weekly wall half an hour later and stood there until the window
+/// restarted. Its own login under another row is left, and counted so.
+fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms: i64) -> Followers {
     let mut found = Followers::default();
     let seated = crate::orchestration::claude_workers_seated();
     for seat in &seated {
@@ -1812,9 +1957,7 @@ fn followers_of(
             .or_else(|| seat.model.clone());
         let verdict = judge_follower(&account, model.as_deref(), landing, gauges, now_ms);
         let sends = matches!(verdict, Decision::Switch { .. });
-        let still_owed =
-            !sends && owed_before.contains(&seat.worker) && !rests_for_a_move(host, seat.term);
-        if !sends && !still_owed {
+        if !sends && !verdict.landing_blocked() {
             found.left.push((
                 seat.worker.clone(),
                 format!(
@@ -1833,7 +1976,7 @@ fn followers_of(
             generation: seat.generation,
             verdict,
         };
-        if !still_owed && rests_for_a_move(host, seat.term) {
+        if sends && rests_for_a_move(host, seat.term) {
             found.now.push(row);
         } else {
             found.owed.push(row);
@@ -1856,12 +1999,13 @@ fn followers_of(
 /// worker pane left on another account is written into `journal` before any
 /// of them is touched; the ones between turns move now, by the road a
 /// walled pane takes, and the ones at work stay owed for the beat to move
-/// at their turn's end ([`follow_with`]). A move an older switch still owed
-/// a pane is this one's now, whatever this one's table says of its landing
-/// (t-124041): a pane at work keeps it, and the end of its turn asks the
-/// table again; a pane this switch finds on the landing already, leaves, or
-/// counts the person's owes the older switch nothing any more. `logins` are
-/// the ones the switch was approved under. Answers the moves made.
+/// at their turn's end ([`follow_with`]). A pane the landing has no room for
+/// stays owed too, with the moment of the reading that had none, and the
+/// beat moves it once a newer reading has room (t-124254). A move an older
+/// switch still owed a pane this switch sees is this one's to judge now
+/// (t-124041): the older one owes it nothing any more — this landing is the
+/// one it may follow to. `logins` are the ones the switch was approved
+/// under. Answers the moves made.
 #[allow(clippy::too_many_arguments)]
 fn follow_the_default(
     host: &dyn Host,
@@ -1873,37 +2017,32 @@ fn follow_the_default(
     logins: &[(String, String)],
     now_ms: i64,
 ) -> Vec<MovedPane> {
-    let owed_before: Vec<String> = book
-        .switches
-        .iter()
-        .filter(|older| older.key != journal.key)
-        .flat_map(|older| older.panes.iter())
-        .filter(|pane| pane.follows && !pane.rested && pane.to_pane.is_none())
-        .map(|pane| pane.worker.clone())
-        .collect();
-    let found = followers_of(host, landing, gauges, &owed_before, now_ms);
+    let found = followers_of(host, landing, gauges, now_ms);
     for (worker, why) in &found.left {
         doors.log(&format!(
             "account-switch: {} leaves worker {worker} on its account — {why}",
             journal.key
         ));
     }
-    for row in &found.owed {
-        if !matches!(row.verdict, Decision::Switch { .. }) {
-            doors.log(&format!(
-                "account-switch: {} keeps worker {} owed its move at its turn's end — an older \
-                 switch owed it, and the table keeps it from {landing} now ({}): the end of its \
-                 turn asks the table again",
-                journal.key,
-                row.worker,
-                serde_json::to_string(&row.verdict).unwrap_or_default()
-            ));
-        }
+    for row in found
+        .owed
+        .iter()
+        .filter(|row| row.verdict.landing_blocked())
+    {
+        doors.log(&format!(
+            "account-switch: {} keeps worker {} owed its move until {landing} has room for it \
+             — the table keeps it from {landing} now ({}): a newer reading of {landing} with \
+             room moves it at its first rest",
+            journal.key,
+            row.worker,
+            serde_json::to_string(&row.verdict).unwrap_or_default()
+        ));
     }
     journal.person = journal.person.saturating_add(found.person);
     journal.left = journal
         .left
         .saturating_add(u32::try_from(found.left.len()).unwrap_or(u32::MAX));
+    let read_at = reading_at(gauges, landing);
     for row in found.now.iter().chain(&found.owed) {
         let Some(now) = crate::orchestration::worker_now(&row.worker) else {
             continue;
@@ -1919,6 +2058,7 @@ fn follow_the_default(
             follows: true,
             to_pane: None,
             to_account: None,
+            blocked_reading_ms: row.verdict.landing_blocked().then_some(read_at),
         });
     }
     for older in &mut book.switches {
@@ -1947,8 +2087,10 @@ fn follow_the_default(
 /// by the walled pane's road: rested at the fence only while it is between
 /// turns, closed, seated again as the same worker in the same conversation.
 /// A pane that took its next turn before its rest stays owed — the end of
-/// that turn moves it. One that cannot be moved faithfully is let go, said
-/// in the log, and counted left.
+/// that turn moves it. A pane whose landing has no room for it at its last
+/// door stays owed as well, with the moment of the reading it was refused on
+/// (t-124254): a newer reading with room moves it. One that cannot be moved
+/// faithfully is let go, said in the log, and counted left.
 fn move_follower(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
@@ -1968,6 +2110,10 @@ fn move_follower(
         from_login: login_of(logins, &from),
         landing: &landing,
         to_login: login_of(logins, &landing),
+        waits_for_room: journal
+            .panes
+            .iter()
+            .any(|entry| entry.owed_to(&row.worker) && entry.waits_for_room()),
     };
     let session = crate::orchestration::worker_now(&row.worker).and_then(|now| now.session);
     let dir = doors.journal_dir();
@@ -1999,7 +2145,7 @@ fn move_follower(
         },
     );
     doors.log(&format!(
-        "account-switch: follows pane {} worker {} {from}→{landing} {}ms ok={}{}",
+        "account-switch: follows pane {} worker {} {from}→{landing} {}ms ok={}{}{}",
         row.term,
         row.worker,
         moved.ms,
@@ -2008,17 +2154,28 @@ fn move_follower(
             .why
             .as_deref()
             .map(|why| format!(" ({why})"))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        if moved.ok && approval.waits_for_room {
+            format!(" — it waited for {landing} to read room")
+        } else {
+            String::new()
+        }
     ));
     let rested = journal
         .panes
         .iter()
         .any(|entry| entry.worker == row.worker && entry.follows && entry.rested);
-    let at_work_again = moved
-        .why
-        .as_deref()
-        .is_some_and(|why| why.contains(crate::orchestration::NOT_BETWEEN_TURNS));
-    if !moved.ok && !rested && !at_work_again {
+    let refused = |words: &str| moved.why.as_deref().is_some_and(|why| why.contains(words));
+    if !moved.ok && !rested && refused(NO_ROOM) {
+        let read_at = doors
+            .situation(doors.now_ms())
+            .map_or(0, |now| reading_at(&now.gauges, &landing));
+        for entry in &mut journal.panes {
+            if entry.owed_to(&row.worker) {
+                entry.blocked_reading_ms = Some(read_at);
+            }
+        }
+    } else if !moved.ok && !rested && !refused(crate::orchestration::NOT_BETWEEN_TURNS) {
         journal
             .panes
             .retain(|entry| entry.worker != row.worker || !entry.follows || entry.rested);
@@ -2032,8 +2189,10 @@ fn move_follower(
 /// allows its road, its logins are the ones it was given under — the
 /// default is still where the pane is going, the worker still sits in the
 /// term and on the attempt it is moved on, not the person's, still runs as
-/// the account it leaves, the table still sends it, and its pane is between
-/// turns.
+/// the account it leaves, the table still sends it — and, for a move that
+/// waits for its landing's room, the landing's reading has room for it
+/// (t-124254) — and its pane is between turns. A landing with no room
+/// refuses in its own words ([`NO_ROOM`]), which keep the move owed.
 fn still_follows(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
@@ -2070,16 +2229,17 @@ fn still_follows(
             approval.from
         ));
     }
-    if !matches!(
-        judge_follower(
-            approval.from,
-            row.model.as_deref(),
-            landing,
-            &now.gauges,
-            now.now_ms
-        ),
-        Decision::Switch { .. }
-    ) {
+    let model = row.model.as_deref();
+    let verdict = judge_follower(approval.from, model, landing, &now.gauges, now.now_ms);
+    if verdict.landing_blocked()
+        || (approval.waits_for_room && !has_room_for(landing, model, &now.gauges, now.now_ms))
+    {
+        return Err(format!(
+            "{landing} {NO_ROOM} — not moved; its move stays owed until a newer reading of \
+             {landing} has room"
+        ));
+    }
+    if !matches!(verdict, Decision::Switch { .. }) {
         return Err(format!(
             "the table does not send this pane to {landing} now — not moved"
         ));
@@ -2095,15 +2255,28 @@ fn still_follows(
 }
 
 /// The beat's half of following the default (t-46106): ONE pane a switch
-/// still owes a move to — found at work when its default moved — moved as
-/// soon as the window sees it between turns, before the mail pointer can
-/// start its next turn; then what that leaves owed is settled. A window
-/// whose journal owes nothing does nothing but look; a switch in flight is
-/// left to finish its own (the line is tried, never waited on). A move whose
-/// yes this window never heard — its memory is a newer process's — is let
-/// go. Answers the panes moved.
+/// still owes a move to — found at work when its default moved, or kept from
+/// a landing with no room for it (t-124254) — moved as soon as the window
+/// sees it between turns, before the mail pointer can start its next turn;
+/// then what that leaves owed is settled. A window whose journal owes nothing
+/// does nothing but look; one whose every owed move waits for room that no
+/// reading since its last look could give answers from one number of memory
+/// ([`waits_judged`]); a switch in flight is left to finish its own (the line
+/// is tried, never waited on). A move whose yes this window never heard — its
+/// memory is a newer process's — is let go. Answers the panes moved.
 pub(crate) fn follow_with(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -> usize {
     let dir = doors.journal_dir();
+    // Read before anything else, so a reading that lands while this look
+    // runs moves the count past it and the next beat looks again.
+    let readings = doors.readings_seen();
+    let judged = waits_judged()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&dir)
+        .copied();
+    if judged == Some(readings) {
+        return 0;
+    }
     if owed_followers(&dir).is_empty() {
         return 0;
     }
@@ -2119,17 +2292,9 @@ pub(crate) fn follow_with(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64)
             return 0;
         }
     };
-    let ready = book.switches.iter().enumerate().find_map(|(at, journal)| {
-        journal.panes.iter().find_map(|pane| {
-            if !pane.follows || pane.rested || pane.to_pane.is_some() {
-                return None;
-            }
-            let now = crate::orchestration::worker_now(&pane.worker)?;
-            let term = now.term.filter(|_| pane.still_in(&now))?;
-            rests_for_a_move(host, term).then(|| (at, pane.clone(), term, now))
-        })
-    });
-    let Some((at, pane, term, now)) = ready else {
+    let Some((at, pane, term, now)) =
+        ready_follower(host, doors, &dir, &mut book, readings, now_ms)
+    else {
         return 0;
     };
     let mut journal = book.switches[at].clone();
@@ -2190,6 +2355,82 @@ pub(crate) fn follow_with(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64)
         ));
     }
     usize::from(moved.ok)
+}
+
+/// The first move a switch in `book` still owes that may be made now
+/// (t-46106): its worker sits where the switch found it, its pane is between
+/// turns, and — for a move that waits for its landing's room (t-124254) — a
+/// reading of the landing newer than the one that had none has room for the
+/// pane's model. The situation is read only for such a move, once a look;
+/// the pane's transcript only once a newer reading is there. A newer reading
+/// without room is written on the move in place of the older, so the next
+/// look waits for one newer still. When every move the book owes waits and
+/// none may be made on the readings counted `readings`, that count is kept
+/// ([`waits_judged`]) and the next beats read nothing until it moves.
+fn ready_follower(
+    host: &dyn Host,
+    doors: &dyn SwitchDoors,
+    dir: &Path,
+    book: &mut JournalBook,
+    readings: u64,
+    now_ms: i64,
+) -> Option<(usize, JournalPane, u32, crate::orchestration::WorkerNow)> {
+    let mut gauges: Option<Vec<AccountGauge>> = None;
+    let mut only_waits = true;
+    let mut noted = false;
+    let mut ready = None;
+    'look: for (at, journal) in book.switches.iter_mut().enumerate() {
+        let landing = journal.to.clone().unwrap_or_default();
+        for pane in journal.panes.iter_mut().filter(|pane| pane.owed_a_follow()) {
+            let since = pane.blocked_reading_ms;
+            only_waits &= since.is_some();
+            let Some(now) = crate::orchestration::worker_now(&pane.worker) else {
+                continue;
+            };
+            let Some(term) = now.term.filter(|_| pane.still_in(&now)) else {
+                continue;
+            };
+            if let Some(since) = since {
+                let read = gauges.get_or_insert_with(|| {
+                    doors
+                        .situation(now_ms)
+                        .map(|seen| seen.gauges)
+                        .unwrap_or_default()
+                });
+                let read_at = reading_at(read, &landing);
+                if read_at <= since {
+                    continue;
+                }
+                let model = pane_tuning(host, term)
+                    .and_then(|tuning| tuning.model)
+                    .or_else(|| now.model.clone());
+                if !has_room_for(&landing, model.as_deref(), read, now_ms) {
+                    pane.blocked_reading_ms = Some(read_at);
+                    noted = true;
+                    continue;
+                }
+                // Room it may move on: its turn's end, or a line a person
+                // empties, is looked for on every beat from here.
+                only_waits = false;
+            }
+            if rests_for_a_move(host, term) {
+                ready = Some((at, pane.clone(), term, now));
+                break 'look;
+            }
+        }
+    }
+    if ready.is_none() {
+        if noted && let Err(why) = write_book(dir, book) {
+            doors.log(&format!("account-switch: {why}"));
+        }
+        if only_waits {
+            waits_judged()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(dir.to_path_buf(), readings);
+        }
+    }
+    ready
 }
 
 /// What the rest and the close left, inside the restore line.
@@ -2480,13 +2721,14 @@ pub(crate) fn switch_by_person(
     }
     let census = SwitchCensus::of(&panes, &journal);
     doors.log(&format!(
-        "account-switch: person picked {}→{} ({}ms) moved={} at_turn_end={} person={} left={} \
-         receipts={} owed={}",
+        "account-switch: person picked {}→{} ({}ms) moved={} at_turn_end={} when_free={} \
+         person={} left={} receipts={} owed={}",
         journal.from.as_deref().unwrap_or("system"),
         to.unwrap_or("system"),
         default_ms,
         census.moved,
         census.at_turn_end,
+        census.when_free,
         census.person,
         census.left,
         settled.written,

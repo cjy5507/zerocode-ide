@@ -345,7 +345,9 @@ pub enum Decision {
     /// — never presumed to be the selected one, astra A4), `landed` (a pane
     /// that already runs as the account it would follow to, t-46106),
     /// `picked` (an account the person picked themselves, past the warn
-    /// line and short of its wall, t-78096).
+    /// line and short of its wall, t-78096), `blocked` (a follower whose
+    /// landing has no room for its model: a window that limits the model
+    /// stands at the blocked line there, t-124254).
     Stay { why: &'static str },
     /// Every window that crossed the line resets within the table's near
     /// window: wait for it rather than move.
@@ -356,6 +358,17 @@ pub enum Decision {
         to: String,
         reason: SwitchReason,
     },
+}
+
+impl Decision {
+    /// Whether this is the stay of a follower whose landing has no room for
+    /// its model (t-124254) — the one stay a newer reading of the landing can
+    /// end. A landing that is the pane's own login under another row stays
+    /// `no_candidate`: no reading makes that a move.
+    #[must_use]
+    pub fn landing_blocked(&self) -> bool {
+        matches!(self, Self::Stay { why: "blocked" })
+    }
 }
 
 /// What the beat asks about.
@@ -607,6 +620,12 @@ pub fn judge_pane(
 /// does not hold it back: new launches already run there, and a pane left
 /// behind is the very mismatch the person saw — the status bar on the new
 /// account at 0%, seven panes on the old one at 98% (2026-10-11).
+///
+/// The two stays say different words (t-124254): the pane's own login is
+/// `no_candidate`, which no reading changes, and a blocked landing is
+/// `blocked` ([`Decision::landing_blocked`]), which a newer reading with room
+/// ends. On 2026-11-20 thirteen panes were left under the one word, and
+/// nothing could tell which of them waited only for a number.
 #[must_use]
 pub fn judge_follower(
     pane_account: &str,
@@ -623,18 +642,40 @@ pub fn judge_follower(
     if own
         .zip(target)
         .is_some_and(|(own, target)| own.same_login_as(target))
-        || target
-            .is_some_and(|target| fitness(target, pane_model, now_ms).unfit == Some(Unfit::Blocked))
     {
         return Decision::Stay {
             why: "no_candidate",
         };
+    }
+    if target
+        .is_some_and(|target| fitness(target, pane_model, now_ms).unfit == Some(Unfit::Blocked))
+    {
+        return Decision::Stay { why: "blocked" };
     }
     Decision::Switch {
         from: pane_account.to_string(),
         to: landing.to_string(),
         reason: SwitchReason::Follows,
     }
+}
+
+/// Whether `landing`'s reading has room for a launch of `pane_model` now
+/// (t-124254): a successful read, fresh, not from the future, every window
+/// that limits the model under the blocked line. What frees a follower its
+/// landing once kept it from must be a number — a reading nobody took, one
+/// that failed or one grown old is no room, even where [`judge_follower`]
+/// would not hold a pane back for it.
+#[must_use]
+pub fn has_room_for(
+    landing: &str,
+    pane_model: Option<&str>,
+    gauges: &[AccountGauge],
+    now_ms: i64,
+) -> bool {
+    gauges
+        .iter()
+        .find(|gauge| gauge.id == landing)
+        .is_some_and(|gauge| fitness(gauge, pane_model, now_ms).unfit.is_none())
 }
 
 /// Every account's fitness for the default (every window), for the accounts
@@ -1192,20 +1233,31 @@ mod tests {
             judge_follower("b", None, "b", &gauges, NOW),
             Decision::Stay { why: "landed" }
         );
-        // The landing is the pane's own login under another row.
+        // The landing is the pane's own login under another row: no reading
+        // makes that a move (t-124254).
         let mut twin = gauges.clone();
         twin[1].identity = twin[0].identity.clone();
+        let own_login = judge_follower("a", None, "b", &twin, NOW);
         assert_eq!(
-            judge_follower("a", None, "b", &twin, NOW),
+            own_login,
             Decision::Stay {
                 why: "no_candidate"
             }
         );
-        // The landing is blocked for every model.
+        assert!(!own_login.landing_blocked());
+        // The landing is blocked for every model: a stay of its own word,
+        // the one a newer reading with room ends (t-124254).
         let mut walled = gauges.clone();
         walled[1].windows[1].used_percent = policy.blocked_at_percent;
+        let blocked = judge_follower("a", None, "b", &walled, NOW);
+        assert_eq!(blocked, Decision::Stay { why: "blocked" });
+        assert!(blocked.landing_blocked());
+        // Its own login AND blocked is its own login: the pane is left, not
+        // owed a move it can never make.
+        let mut both = walled.clone();
+        both[1].identity = both[0].identity.clone();
         assert_eq!(
-            judge_follower("a", None, "b", &walled, NOW),
+            judge_follower("a", None, "b", &both, NOW),
             Decision::Stay {
                 why: "no_candidate"
             }
@@ -1231,11 +1283,65 @@ mod tests {
         );
         assert_eq!(
             judge_follower("a", Some("claude-fable-5-1"), "b", &fable, NOW),
-            Decision::Stay {
-                why: "no_candidate"
-            }
+            Decision::Stay { why: "blocked" }
         );
         assert_eq!(SwitchReason::Follows.word(), "follows");
+    }
+
+    /// t-124254: what frees a follower its blocked landing is a reading with
+    /// room for its model — `ok`, fresh, not from the future, every window
+    /// that limits the model under the blocked line. No reading, a failed
+    /// one, an old one, one whose window has already reset, one from the
+    /// future and one at the line are none; a Fable-only week at the line
+    /// is room for an Opus pane and none for a Fable one. The lines are the
+    /// table's, not this test's.
+    #[test]
+    fn a_landing_has_room_only_on_a_fresh_reading_under_the_blocked_line_for_the_panes_model() {
+        let policy = &CLAUDE_ACCOUNT_AUTOSWITCH;
+        let under = policy.blocked_at_percent - 1;
+        let gauges = [
+            gauge(
+                "a",
+                "claude_max",
+                &[("session", 99, HOUR), ("weekly", 25, DAYS6)],
+            ),
+            gauge(
+                "b",
+                "claude_team",
+                &[("session", under, HOUR), ("weekly", 25, DAYS6)],
+            ),
+        ];
+        assert!(has_room_for("b", None, &gauges, NOW));
+        assert!(!has_room_for("c", None, &gauges, NOW), "nobody read it");
+        let mut at_line = gauges.clone();
+        at_line[1].windows[0].used_percent = policy.blocked_at_percent;
+        assert!(!has_room_for("b", None, &at_line, NOW));
+        let mut failed = gauges.clone();
+        failed[1].status = "error".to_string();
+        failed[1].windows.clear();
+        assert!(!has_room_for("b", None, &failed, NOW));
+        let mut old = gauges.clone();
+        old[1].observed_at_ms = NOW - policy.gauge_max_age_ms - 1;
+        assert!(!has_room_for("b", None, &old, NOW));
+        let mut reset = gauges.clone();
+        reset[1].windows[0].resets_at_ms = Some(NOW - 1);
+        assert!(!has_room_for("b", None, &reset, NOW));
+        let mut ahead = gauges.clone();
+        ahead[1].observed_at_ms = NOW + 1;
+        assert!(!has_room_for("b", None, &ahead, NOW));
+        let mut fable = gauges.clone();
+        fable[1].windows.push(GaugeWindow {
+            kind: "fable_weekly".to_string(),
+            used_percent: policy.blocked_at_percent,
+            resets_at_ms: DAYS6,
+        });
+        assert!(has_room_for("b", Some("claude-opus-5-5"), &fable, NOW));
+        assert!(!has_room_for("b", Some("claude-fable-5-1"), &fable, NOW));
+        // Where the table follows without a number, room asks for one.
+        assert!(matches!(
+            judge_follower("a", None, "b", &failed, NOW),
+            Decision::Switch { .. }
+        ));
     }
 
     #[test]

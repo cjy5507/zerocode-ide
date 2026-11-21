@@ -79,6 +79,26 @@ pub(super) fn claude_account_usage_cache(
     CACHE.get_or_init(|| Mutex::new(load_account_readings(local_data_root)))
 }
 
+/// How many times a reading has landed in the map above, or left it, since
+/// the window started (t-124254) — one number of memory the account switch's
+/// beat compares before it reads anything else: a move that waits for its
+/// landing's room has nothing to look at again until this moves, and a pane
+/// resting at its wall can wait for hours.
+static CLAUDE_ACCOUNT_READINGS_SEEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The count [`CLAUDE_ACCOUNT_READINGS_SEEN`] holds now.
+pub(super) fn claude_account_readings_seen() -> u64 {
+    CLAUDE_ACCOUNT_READINGS_SEEN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// One more reading landed or left — told while the map's lock is held, so
+/// a beat that reads the count and then the map never sees a newer map
+/// under an older count.
+fn note_account_reading_moved() {
+    CLAUDE_ACCOUNT_READINGS_SEEN.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
 /// The readings file as it stands on disk.
 pub(super) fn load_account_readings(local_data_root: &Path) -> HashMap<String, AccountReading> {
     std::fs::read_to_string(claude_account_usage_file(local_data_root))
@@ -123,6 +143,7 @@ pub(super) fn forget_claude_account_usage(local_data_root: &Path, id: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if held.remove(id).is_some() {
+        note_account_reading_moved();
         write_account_usage_file(local_data_root, &held);
     }
 }
@@ -381,6 +402,7 @@ pub(super) fn land_claude_account_usage(
             usage: landed,
         },
     );
+    note_account_reading_moved();
     write_account_usage_file(local_data_root, &held);
     true
 }

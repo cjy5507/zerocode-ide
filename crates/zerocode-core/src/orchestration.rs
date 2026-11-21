@@ -17569,10 +17569,16 @@ pub struct AccountSwitchReceipt {
     #[serde(default)]
     pub panes_person: u32,
     /// Panes left on another account for any other reason — a login the
-    /// window never recorded, a pane it could not move faithfully, a landing
-    /// at its wall (t-46106).
+    /// window never recorded, a pane it could not move faithfully, its own
+    /// login under another row (t-46106).
     #[serde(default)]
     pub panes_left: u32,
+    /// Worker panes on another account the landing had no room for — a
+    /// window that limits the pane's model stood at the blocked line there:
+    /// each is owed its move and follows once a newer reading of the landing
+    /// has room, with a receipt of its own (t-124254).
+    #[serde(default)]
+    pub panes_when_free: u32,
 }
 
 impl AccountSwitchReceipt {
@@ -17592,6 +17598,7 @@ impl AccountSwitchReceipt {
             "panesAtTurnEnd": self.panes_at_turn_end,
             "panesPerson": self.panes_person,
             "panesLeft": self.panes_left,
+            "panesWhenFree": self.panes_when_free,
             "policy": crate::account_autoswitch::POLICY_WORD,
             "switchedAtMs": now_ms,
         });
@@ -17602,8 +17609,9 @@ impl AccountSwitchReceipt {
                     "every new summons runs as `toAccount`, and a worker pane on another \
                      account follows it as the same worker in the same conversation: \
                      `panesMoved` were between turns and moved now, `panesAtTurnEnd` move \
-                     when their turn ends, `panesPerson` are the person's and keep their \
-                     login, `panesLeft` could not be moved; each moved pane writes a \
+                     when their turn ends, `panesWhenFree` move once a newer reading of \
+                     `toAccount` has room for them, `panesPerson` are the person's and keep \
+                     their login, `panesLeft` could not be moved; each moved pane writes a \
                      receipt of its own"
                 );
             }

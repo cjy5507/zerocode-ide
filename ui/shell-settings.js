@@ -6196,11 +6196,13 @@ async function applyAccountSwitch(by, token) {
 }
 
 /* 전환의 영수증 한 줄(t-46106): 무엇을 바꿨는지, 그리고 다른 계정에 있던 판의 네
- * 수 — 지금 옮긴 판, 턴이 끝나면 옮길 판, 사람의 판, 옮기지 못하고 남은 판. 수마다
- * 뜻은 호버가 말하고, 단추 하나가 계정 화면을 연다. 박자의 전환과 사람의 선택이
- * 같은 말을 한다. */
+ * 수 — 지금 옮긴 판, 턴이 끝나면 옮길 판, 사람의 판, 옮기지 못하고 남은 판. 고른
+ * 계정이 한도에 막혀 그 계정이 풀리면 옮길 판이 있으면 그 수를 다섯째로 붙인다
+ * (t-124254). 수마다 뜻은 호버가 말하고, 단추 하나가 계정 화면을 연다. 박자의
+ * 전환과 사람의 선택이 같은 말을 한다. */
 function saySwitchCensus(head, census) {
   const words = [head];
+  const tips = [t("settings.accounts.switchedCensusTip", "옮긴 판: 지금 새 계정으로 이어진 판 · 턴 끝에 옮길 판: 일하는 중이라 턴이 끝나면 옮길 판 · 사람 판: 사람이 쓰는 판이라 옮기지 않는 판 · 남은 판: 옮길 수 없어 옛 계정에 남은 판")];
   if (census) {
     words.push(t("settings.accounts.switchedCensus", "옮긴 판 {{moved}} · 턴 끝에 옮길 판 {{turnEnd}} · 사람 판 {{person}} · 남은 판 {{left}}", {
       moved: census.moved ?? 0,
@@ -6208,9 +6210,15 @@ function saySwitchCensus(head, census) {
       person: census.person ?? 0,
       left: census.left ?? 0,
     }));
+    if ((census.when_free ?? 0) > 0) {
+      words.push(t("settings.accounts.switchedCensusWhenFree", "계정이 풀리면 옮길 판 {{whenFree}}", {
+        whenFree: census.when_free,
+      }));
+      tips.push(t("settings.accounts.switchedCensusWhenFreeTip", "계정이 풀리면 옮길 판: 고른 계정이 지금 한도에 막혀 있어, 그 계정의 새 사용량에 여유가 보이면 같은 워커·같은 대화로 옮길 판"));
+    }
   }
   const note = toast(words.join(" · "), "", {
-    tip: t("settings.accounts.switchedCensusTip", "옮긴 판: 지금 새 계정으로 이어진 판 · 턴 끝에 옮길 판: 일하는 중이라 턴이 끝나면 옮길 판 · 사람 판: 사람이 쓰는 판이라 옮기지 않는 판 · 남은 판: 옮길 수 없어 옛 계정에 남은 판"),
+    tip: tips.join(" · "),
     action: {
       label: t("settings.accounts.switchedOpen", "계정 보기"),
       tip: t("settings.accounts.switchedOpenTip", "계정마다 남은 몫과 자동 전환을 엽니다"),
