@@ -1929,14 +1929,24 @@ struct Followers {
 /// walled pane it could not move is, and may still follow.
 ///
 /// A pane the table keeps from `landing` only because the landing has no
-/// room for its model (t-124254) stays owed, at work or between turns — at
-/// its wall among them: it follows once a newer reading of `landing` has
-/// room ([`follow_with`]). On 2026-11-20 the person picked an account whose
+/// room for its model (t-124254) stays owed when the switch is the person's
+/// own pick (`wait_for_room`), at work or between turns — at its wall among
+/// them: it follows once a newer reading of `landing` has room
+/// ([`follow_with`]). On 2026-11-20 the person picked an account whose
 /// session stood at the blocked line, the table kept thirteen panes from it
 /// at that moment, and nothing asked again: they met the old account's
 /// weekly wall half an hour later and stood there until the window
-/// restarted. Its own login under another row is left, and counted so.
-fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms: i64) -> Followers {
+/// restarted. A switch of the window's own (`auto`, `ask`) leaves such a
+/// pane where it is, as before: the person allowed a late move only to an
+/// account they picked themselves (11-21). Its own login under another row
+/// is left, and counted so.
+fn followers_of(
+    host: &dyn Host,
+    landing: &str,
+    gauges: &[AccountGauge],
+    wait_for_room: bool,
+    now_ms: i64,
+) -> Followers {
     let mut found = Followers::default();
     let seated = crate::orchestration::claude_workers_seated();
     for seat in &seated {
@@ -1969,7 +1979,7 @@ fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms:
             .or_else(|| seat.model.clone());
         let verdict = judge_follower(&account, model.as_deref(), landing, gauges, now_ms);
         let sends = matches!(verdict, Decision::Switch { .. });
-        if !sends && !verdict.landing_blocked() {
+        if !sends && !(wait_for_room && verdict.landing_blocked()) {
             found.left.push((
                 seat.worker.clone(),
                 format!(
@@ -2011,9 +2021,10 @@ fn followers_of(host: &dyn Host, landing: &str, gauges: &[AccountGauge], now_ms:
 /// worker pane left on another account is written into `journal` before any
 /// of them is touched; the ones between turns move now, by the road a
 /// walled pane takes, and the ones at work stay owed for the beat to move
-/// at their turn's end ([`follow_with`]). A pane the landing has no room for
-/// stays owed too, with the moment of the reading that had none, and the
-/// beat moves it once a newer reading has room (t-124254). A move an older
+/// at their turn's end ([`follow_with`]). On the person's own pick a pane the
+/// landing has no room for stays owed too, with the moment of the reading
+/// that had none, and the beat moves it once a newer reading has room
+/// (t-124254); on a switch of the window's own it is left. A move an older
 /// switch still owed a pane this switch sees is this one's to judge now
 /// (t-124041): the older one owes it nothing any more — this landing is the
 /// one it may follow to. `logins` are the ones the switch was approved
@@ -2029,7 +2040,7 @@ fn follow_the_default(
     logins: &[(String, String)],
     now_ms: i64,
 ) -> Vec<MovedPane> {
-    let found = followers_of(host, landing, gauges, now_ms);
+    let found = followers_of(host, landing, gauges, journal.by == PERSON, now_ms);
     for (worker, why) in &found.left {
         doors.log(&format!(
             "account-switch: {} leaves worker {worker} on its account — {why}",
@@ -2099,10 +2110,11 @@ fn follow_the_default(
 /// by the walled pane's road: rested at the fence only while it is between
 /// turns, closed, seated again as the same worker in the same conversation.
 /// A pane that took its next turn before its rest stays owed — the end of
-/// that turn moves it. A pane whose landing has no room for it at its last
-/// door stays owed as well, with the moment of the reading it was refused on
-/// (t-124254): a newer reading with room moves it. One that cannot be moved
-/// faithfully is let go, said in the log, and counted left.
+/// that turn moves it. On the person's own pick, a pane whose landing has no
+/// room for it at its last door stays owed as well, with the moment of the
+/// reading it was refused on (t-124254): a newer reading with room moves it.
+/// One that cannot be moved faithfully is let go, said in the log, and
+/// counted left — on a switch of the window's own, one with no room too.
 fn move_follower(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
@@ -2178,7 +2190,7 @@ fn move_follower(
         .iter()
         .any(|entry| entry.worker == row.worker && entry.follows && entry.rested);
     let refused = |words: &str| moved.why.as_deref().is_some_and(|why| why.contains(words));
-    if !moved.ok && !rested && refused(NO_ROOM) {
+    if !moved.ok && !rested && refused(NO_ROOM) && by == PERSON {
         let read_at = doors
             .situation(doors.now_ms())
             .map_or(0, |now| reading_at(&now.gauges, &landing));

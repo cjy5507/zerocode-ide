@@ -28573,6 +28573,66 @@ fn a_pick_back_ends_a_waiting_move_and_a_freed_account_moves_nothing() {
     assert_eq!(stood.died(at + 20_000), 0);
 }
 
+/// t-124254, the person's word of 11-21 — 「직접 고르신 계정으로만 옮기고, 옮기는
+/// 시점만 자동입니다」: only the person's own pick leaves a pane waiting for its
+/// account's room (m-124737). Under 「켬」 the beat's own switch, whose landing
+/// stands at the blocked line by the time its panes are looked at, leaves them
+/// where they are, as before — nothing owed, nothing counted to follow — and a
+/// reading of that landing with room later moves none of them.
+#[test]
+fn an_auto_switch_into_a_landing_with_no_room_leaves_the_panes_and_owes_them_nothing() {
+    let stood = WalledClaude::near_limit(126_000, 1, 1);
+    let at = stood.began + 20_000;
+    let (working, working_term) = stood.working[0].clone();
+    let plan = stood.plan(at);
+    assert!(
+        matches!(
+            plan.decision,
+            zerocode_core::account_autoswitch::Decision::Switch { ref to, .. } if to == "b-fixture"
+        ),
+        "{plan:?}"
+    );
+    // The landing fills up between the select and the panes.
+    *stood.world.after_select.lock().unwrap() = Some(Box::new(move |world: &SwitchWorld| {
+        account_reads(world, "b-fixture", BLOCKED, at);
+    }));
+    stood.host.seating_onto(stood.leader + 100);
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("applied");
+    assert!(applied.switched_default, "{applied:?}");
+    assert_eq!(
+        serde_json::to_value(&applied.census).expect("a census"),
+        serde_json::json!({"moved": 0, "at_turn_end": 0, "person": 0, "left": 2, "when_free": 0}),
+        "{:#?}",
+        stood.world.lines.lock().unwrap()
+    );
+    assert!(
+        crate::account_switch::owed_followers(stood.world.journal.path()).is_empty(),
+        "{}",
+        stood.journal_text()
+    );
+    // The landing reads room again and the working pane's turn ends:
+    // nothing moves.
+    account_reads(&stood.world, "b-fixture", 5, at + 5_000);
+    stood.host.busy.lock().unwrap().remove(&working_term);
+    for step in 0..3 {
+        assert_eq!(
+            crate::account_switch::follow_with(&stood.host, &stood.world, at + 10_000 + step),
+            0
+        );
+    }
+    assert!(stood.host.closed().is_empty(), "{:?}", stood.host.closed());
+    assert_eq!(term_now(&stood.worker), stood.leader + 1);
+    assert_eq!(term_now(&working), working_term);
+    assert_eq!(
+        stood.host.pane_account(working_term).as_deref(),
+        Some("a-fixture")
+    );
+    assert_eq!(stood.died(at + 20_000), 0);
+    crate::agent_teams::forget_term(stood.leader + 100);
+}
+
 /// t-124254, the coordinator's word (m-124345): a pane resting at its wall
 /// can wait hours for its account's room, and the beat runs every second —
 /// so a beat over moves that only wait answers from one number of memory
