@@ -288,7 +288,7 @@ fn the_document_road_branches_on_no_agents_name() {
     let roads = [
         ("document_read", block_after(&core_transcript, "pub fn document_read(")),
         ("step_turns", block_after(&core_transcript, "fn step_turns(")),
-        ("call_result", block_after(&core_transcript, "fn call_result(")),
+        ("call_result", block_after(&core_transcript, "fn call_result<")),
         ("format_of", block_after(&core_binding, "pub fn format_of(")),
         ("written_whole", block_after(&core_vault, "pub const fn written_whole(")),
         ("carded", block_after(&core_vault, "pub const fn carded(")),
