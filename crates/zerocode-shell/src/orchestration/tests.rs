@@ -27682,25 +27682,33 @@ fn a_pane_the_window_just_typed_at_is_not_closed_by_a_switch_but_moves_at_that_t
 /// its session at `used`, read a minute before `now_ms` (t-124041). `reads`
 /// puts the list back to two accounts, so this is said after it.
 fn c_reads(world: &SwitchWorld, used: u8, now_ms: i64) {
+    account_reads(world, "c-fixture", used, now_ms - 60_000);
+}
+
+/// `id` (Team) beside the accounts the world reads already, its session at
+/// `used` and its week at 40%, read at `read_at_ms` (t-124254) — the moment
+/// of the reading itself, which a pane waiting for its landing's room is
+/// asked again by. A reading of `id` already there is replaced.
+fn account_reads(world: &SwitchWorld, id: &str, used: u8, read_at_ms: i64) {
     let mut gauges = world.gauges.lock().unwrap();
-    gauges.retain(|gauge| gauge.id != "c-fixture");
+    gauges.retain(|gauge| gauge.id != id);
     gauges.push(zerocode_core::account_autoswitch::AccountGauge {
-        id: "c-fixture".to_string(),
+        id: id.to_string(),
         org_type: Some("claude_team".to_string()),
-        identity: Some("login-of-c-fixture".to_string()),
+        identity: Some(format!("login-of-{id}")),
         windows: vec![
             zerocode_core::account_autoswitch::GaugeWindow {
                 kind: "session".to_string(),
                 used_percent: used,
-                resets_at_ms: Some(now_ms + 3 * 60 * 60_000),
+                resets_at_ms: Some(read_at_ms + 3 * 60 * 60_000),
             },
             zerocode_core::account_autoswitch::GaugeWindow {
                 kind: "weekly".to_string(),
                 used_percent: 40,
-                resets_at_ms: Some(now_ms + 5 * 24 * 60 * 60_000),
+                resets_at_ms: Some(read_at_ms + 5 * 24 * 60 * 60_000),
             },
         ],
-        observed_at_ms: now_ms - 60_000,
+        observed_at_ms: read_at_ms,
         status: "ok".to_string(),
     });
 }
@@ -27761,8 +27769,8 @@ impl TwoPicks {
 
 impl Drop for TwoPicks {
     fn drop(&mut self) {
-        for term in [self.stood.leader + 100, self.stood.leader + 101] {
-            crate::agent_teams::forget_term(term);
+        for step in 100..=102 {
+            crate::agent_teams::forget_term(self.stood.leader + step);
         }
     }
 }
@@ -27775,7 +27783,9 @@ impl Drop for TwoPicks {
 /// was no longer its account. A pane owed its move follows the NEWEST pick:
 /// the second pick keeps the move owed and counts it so, and the turn's end
 /// asks the table again — `c-fixture` has room by then, so the pane moves
-/// there, as the same worker on the same attempt, once.
+/// there, as the same worker on the same attempt, once. The pane the second
+/// pick found on `b-fixture` between turns waited for `c-fixture`'s room too
+/// (t-124254), and follows it on the next beat.
 #[test]
 fn a_pane_owed_its_move_follows_the_newest_pick_at_its_turn_end() {
     use crate::account_switch::SwitchCensus;
@@ -27787,16 +27797,23 @@ fn a_pane_owed_its_move_follows_the_newest_pick_at_its_turn_end() {
     // room. Then the turn ends.
     c_reads(&stood.world, 5, picks.at + 70_000);
     stood.host.busy.lock().unwrap().remove(&term);
-    assert_eq!(
-        crate::account_switch::follow_with(&stood.host, &stood.world, picks.at + 80_000),
-        1,
-        "{:#?}",
-        picks.lines()
-    );
+    // t-124254: both panes the second pick kept from `c-fixture` follow it
+    // now, one a beat — the one at work at its turn's end, and the one it
+    // found on `b-fixture` between turns.
+    let moved: usize = (0..4)
+        .map(|step| {
+            crate::account_switch::follow_with(&stood.host, &stood.world, picks.at + 80_000 + step)
+        })
+        .sum();
+    assert_eq!(moved, 2, "{:#?}", picks.lines());
     let moved_to = term_now(&worker);
     assert_ne!(moved_to, term);
     assert_eq!(
         stood.host.pane_account(moved_to).as_deref(),
+        Some("c-fixture")
+    );
+    assert_eq!(
+        stood.host.pane_account(term_now(&stood.worker)).as_deref(),
         Some("c-fixture")
     );
     let row = stood.row(&worker);
@@ -27804,15 +27821,15 @@ fn a_pane_owed_its_move_follows_the_newest_pick_at_its_turn_end() {
     assert_eq!(row.dispatch, dispatch, "the move spent the attempt");
     // On the default now: no later look moves it again.
     assert_eq!(
-        crate::account_switch::follow_with(&stood.host, &stood.world, picks.at + 80_001),
+        crate::account_switch::follow_with(&stood.host, &stood.world, picks.at + 80_010),
         0
     );
     assert_eq!(term_now(&worker), moved_to);
     assert!(!stood.host.closed().contains(&moved_to));
     assert_eq!(stood.died(picks.at + 90_000), 0);
-    // What each pick said of the panes, the toast's four counts: the first
-    // moved one and owed one; the second kept that one owed, and left the
-    // pane it found on `b-fixture`, which nobody owed and the table kept.
+    // What each pick said of the panes, the toast's counts: the first moved
+    // one and owed one; the second kept both from `c-fixture` until it reads
+    // room (t-124254), and left none.
     assert_eq!(
         picks.first.census,
         SwitchCensus {
@@ -27823,13 +27840,8 @@ fn a_pane_owed_its_move_follows_the_newest_pick_at_its_turn_end() {
         }
     );
     assert_eq!(
-        picks.second.census,
-        SwitchCensus {
-            moved: 0,
-            at_turn_end: 1,
-            person: 0,
-            left: 1,
-        },
+        serde_json::to_value(&picks.second.census).expect("a census"),
+        serde_json::json!({"moved": 0, "at_turn_end": 0, "person": 0, "left": 0, "when_free": 2}),
         "{:#?}",
         picks.lines()
     );
@@ -27842,8 +27854,9 @@ fn a_pane_owed_its_move_follows_the_newest_pick_at_its_turn_end() {
     assert_eq!(second["by"], "person");
     assert_eq!(second["fromAccount"], "b-fixture");
     assert_eq!(second["panesMoved"], 0);
-    assert_eq!(second["panesAtTurnEnd"], 1);
-    assert_eq!(second["panesLeft"], 1);
+    assert_eq!(second["panesAtTurnEnd"], 0);
+    assert_eq!(second["panesLeft"], 0);
+    assert_eq!(second["panesWhenFree"], 2);
     let pane = bodies
         .iter()
         .find(|body| body["moved"] == "pane" && body["workerId"] == worker.as_str())
@@ -27851,20 +27864,20 @@ fn a_pane_owed_its_move_follows_the_newest_pick_at_its_turn_end() {
     assert_eq!(pane["fromAccount"], "a-fixture");
     assert_eq!(pane["toAccount"], "c-fixture");
     assert_eq!(pane["by"], "person");
-    // And the log: the second pick says it keeps the move owed, and says
-    // why it leaves the other pane; no move is refused for a default that
-    // moved on.
+    // And the log: the second pick says it keeps both moves owed until
+    // `c-fixture` has room, and why; it leaves nobody; no move is refused
+    // for a default that moved on.
     let lines = picks.lines();
+    for kept in [&worker, &stood.worker] {
+        assert!(
+            lines.iter().any(|line| line.contains(&format!(
+                "keeps worker {kept} owed its move until c-fixture has room"
+            )) && line.contains("\"why\":\"blocked\"")),
+            "{lines:#?}"
+        );
+    }
     assert!(
-        lines.iter().any(|line| line.contains(&format!(
-            "keeps worker {worker} owed its move at its turn's end"
-        ))),
-        "{lines:#?}"
-    );
-    assert!(
-        lines.iter().any(|line| line
-            .contains(&format!("leaves worker {} on its account", stood.worker))
-            && line.contains("no_candidate")),
+        lines.iter().all(|line| !line.contains("leaves worker")),
         "{lines:#?}"
     );
     assert!(
@@ -27877,13 +27890,13 @@ fn a_pane_owed_its_move_follows_the_newest_pick_at_its_turn_end() {
 }
 
 /// t-124041: the same two picks, and `c-fixture` still at its blocked line
-/// when the pane's turn ends. The table is asked once more there and keeps
-/// the pane: it stays on `a-fixture` in its own pane, nothing owes it a move
-/// any more, and the log says the table's reason — not a default that moved
-/// on.
+/// when the pane's turn ends. The pane stays on `a-fixture` in its own pane,
+/// and the log says the table's reason — not a default that moved on. Since
+/// t-124254 the reason is said once, at the pick, the turn's end asks nothing
+/// while no newer reading of `c-fixture` lands, and the move is still owed
+/// until `c-fixture` has room — not given up.
 #[test]
 fn a_pane_owed_its_move_stays_with_the_tables_reason_while_the_newest_pick_is_blocked() {
-    use crate::account_switch::SwitchCensus;
     let picks = TwoPicks::stand(95_300);
     let stood = &picks.stood;
     let (worker, term) = picks.working.clone();
@@ -27897,35 +27910,34 @@ fn a_pane_owed_its_move_stays_with_the_tables_reason_while_the_newest_pick_is_bl
     assert_eq!(stood.host.pane_account(term).as_deref(), Some("a-fixture"));
     assert_eq!(stood.row(&worker).state, WorkerState::Active);
     assert_eq!(
-        picks.second.census,
-        SwitchCensus {
-            moved: 0,
-            at_turn_end: 1,
-            person: 0,
-            left: 1,
-        },
+        serde_json::to_value(&picks.second.census).expect("a census"),
+        serde_json::json!({"moved": 0, "at_turn_end": 0, "person": 0, "left": 0, "when_free": 2}),
         "{:#?}",
         picks.lines()
     );
     let lines = picks.lines();
+    assert!(
+        lines.iter().any(|line| line.contains(&format!(
+            "keeps worker {worker} owed its move until c-fixture has room"
+        )) && line.contains("\"why\":\"blocked\"")),
+        "{lines:#?}"
+    );
     let asked: Vec<&String> = lines
         .iter()
         .filter(|line| line.contains(&format!("follows pane {term} worker {worker} ")))
         .collect();
-    assert_eq!(asked.len(), 1, "{lines:#?}");
-    assert!(
-        asked[0].contains("a-fixture→c-fixture")
-            && asked[0].contains("ok=false")
-            && asked[0].contains("the table does not send this pane to c-fixture"),
-        "{lines:#?}"
-    );
+    assert!(asked.is_empty(), "{lines:#?}");
     assert!(
         lines
             .iter()
             .all(|line| !line.contains("is not moved there")),
         "{lines:#?}"
     );
-    assert!(crate::account_switch::owed_followers(stood.world.journal.path()).is_empty());
+    let mut owed = crate::account_switch::owed_followers(stood.world.journal.path());
+    owed.sort();
+    let mut waiting = vec![stood.worker.clone(), worker.clone()];
+    waiting.sort();
+    assert_eq!(owed, waiting, "{}", stood.journal_text());
     assert_eq!(stood.died(picks.at + 90_000), 0);
 }
 
@@ -27991,6 +28003,500 @@ fn a_pick_back_to_the_account_a_pane_runs_as_owes_that_pane_nothing() {
     );
     assert_eq!(stood.died(at + 20_000), 0);
     crate::agent_teams::forget_term(stood.leader + 100);
+}
+
+/// The table's blocked line — what `c-fixture` reads at when the person
+/// picks it in the t-124254 scenes.
+const BLOCKED: u8 = zerocode_core::account_autoswitch::CLAUDE_ACCOUNT_AUTOSWITCH.blocked_at_percent;
+
+/// 2026-11-20 20:20:01 on the fixture (t-124254): the person picks
+/// `c-fixture`, whose session reads at the blocked line, the reading
+/// `reading_age_ms` old — so at that moment the table keeps every pane from
+/// it. `before` is said to the window first, at the pick's moment.
+struct BlockedPick {
+    stood: WalledClaude,
+    at: i64,
+    pick: crate::account_switch::Applied,
+}
+
+impl BlockedPick {
+    fn stand(
+        stood: WalledClaude,
+        reading_age_ms: i64,
+        before: impl FnOnce(&WalledClaude, i64),
+    ) -> Self {
+        let at = stood.began + 20_000;
+        account_reads(&stood.world, "c-fixture", BLOCKED, at - reading_age_ms);
+        before(&stood, at);
+        stood.host.seating_onto(stood.leader + 100);
+        let pick = crate::account_switch::switch_by_person(
+            &stood.host,
+            &stood.world,
+            Some("c-fixture"),
+            at,
+        )
+        .expect("the person's pick");
+        Self { stood, at, pick }
+    }
+
+    fn census(&self) -> serde_json::Value {
+        serde_json::to_value(&self.pick.census).expect("a census")
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.stood.world.lines.lock().unwrap().clone()
+    }
+
+    /// Every line that says what became of a move of `worker` out of `term`.
+    fn follows_of(&self, worker: &str, term: u32) -> Vec<String> {
+        self.lines()
+            .into_iter()
+            .filter(|line| line.contains(&format!("follows pane {term} worker {worker} ")))
+            .collect()
+    }
+
+    fn follow(&self, now_ms: i64) -> usize {
+        crate::account_switch::follow_with(&self.stood.host, &self.stood.world, now_ms)
+    }
+
+    fn owed(&self) -> Vec<String> {
+        let mut owed = crate::account_switch::owed_followers(self.stood.world.journal.path());
+        owed.sort();
+        owed
+    }
+
+    /// The receipt of the pick that moved the default to `to`.
+    fn default_receipt(&self, to: &str, at: i64) -> serde_json::Value {
+        self.stood
+            .receipts(at)
+            .into_iter()
+            .find(|body| body["moved"] == "default" && body["toAccount"] == to)
+            .expect("the pick's receipt")
+    }
+
+    /// The receipt of `worker`'s pane move.
+    fn pane_receipt(&self, worker: &str, at: i64) -> serde_json::Value {
+        self.stood
+            .receipts(at)
+            .into_iter()
+            .find(|body| body["moved"] == "pane" && body["workerId"] == worker)
+            .expect("the moved pane's receipt")
+    }
+}
+
+impl Drop for BlockedPick {
+    fn drop(&mut self) {
+        for step in 100..=103 {
+            crate::agent_teams::forget_term(self.stood.leader + step);
+        }
+    }
+}
+
+/// t-124254 ① (가), I-t124041-1: a pane at work on `a-fixture` when the person
+/// picks `c-fixture` — whose session stands at the blocked line — is not left
+/// behind: its move is owed until `c-fixture` has room, and the toast and the
+/// receipt count it so. Its turn ends with no newer reading: nothing is asked
+/// and nothing is said. A newer reading still at the line: it stays, owed. A
+/// reading with room lands while its next turn runs: nothing moves mid-turn.
+/// That turn ends: it follows the person's pick, the same worker on the same
+/// attempt, with a receipt of its own `by: person` and one line in the log.
+#[test]
+fn a_working_pane_a_blocked_pick_left_follows_at_a_turn_end_once_its_account_reads_room() {
+    let picked = BlockedPick::stand(
+        WalledClaude::near_limit(124_400, 1, 1),
+        60_000,
+        |stood, at| {
+            // The pane between turns is the person's: only the one at work is
+            // anybody's to move.
+            super::pane_taken_over(stood.leader + 1, "words", at - 1);
+        },
+    );
+    let stood = &picked.stood;
+    let at = picked.at;
+    let (worker, term) = stood.working[0].clone();
+    let dispatch = stood.row(&worker).dispatch;
+    assert_eq!(
+        picked.census(),
+        serde_json::json!({"moved": 0, "at_turn_end": 0, "person": 1, "left": 0, "when_free": 1}),
+        "{:#?}",
+        picked.lines()
+    );
+    let default = picked.default_receipt("c-fixture", at + 1);
+    assert_eq!(default["by"], "person");
+    assert_eq!(default["panesWhenFree"], 1);
+    assert_eq!(default["panesAtTurnEnd"], 0);
+    assert_eq!(default["panesLeft"], 0);
+    assert_eq!(default["panesPerson"], 1);
+    assert!(
+        picked.lines().iter().any(|line| line.contains(&format!(
+            "keeps worker {worker} owed its move until c-fixture has room"
+        ))),
+        "{:#?}",
+        picked.lines()
+    );
+    // Its turn ends; nothing newer has been read.
+    stood.host.busy.lock().unwrap().remove(&term);
+    assert_eq!(picked.follow(at + 10_000), 0);
+    assert!(
+        picked.follows_of(&worker, term).is_empty(),
+        "{:#?}",
+        picked.lines()
+    );
+    // A newer reading, still at the blocked line: the pane stays, owed.
+    account_reads(&stood.world, "c-fixture", BLOCKED, at + 15_000);
+    assert_eq!(picked.follow(at + 20_000), 0);
+    assert_eq!(term_now(&worker), term);
+    assert_eq!(stood.host.pane_account(term).as_deref(), Some("a-fixture"));
+    assert_eq!(picked.owed(), vec![worker.clone()]);
+    assert!(
+        picked.follows_of(&worker, term).is_empty(),
+        "{:#?}",
+        picked.lines()
+    );
+    // Its next turn runs, and a reading with room lands meanwhile.
+    stood.host.working(term);
+    account_reads(&stood.world, "c-fixture", 5, at + 30_000);
+    assert_eq!(picked.follow(at + 40_000), 0);
+    assert_eq!(term_now(&worker), term, "a pane was moved mid-turn");
+    // That turn ends: the pane follows the person's pick.
+    stood.host.busy.lock().unwrap().remove(&term);
+    assert_eq!(picked.follow(at + 50_000), 1, "{:#?}", picked.lines());
+    let moved_to = term_now(&worker);
+    assert_ne!(moved_to, term);
+    assert_eq!(
+        stood.host.pane_account(moved_to).as_deref(),
+        Some("c-fixture")
+    );
+    let row = stood.row(&worker);
+    assert_eq!(row.state, WorkerState::Active);
+    assert_eq!(row.dispatch, dispatch, "the move spent the attempt");
+    assert_eq!(picked.follow(at + 50_001), 0);
+    assert!(picked.owed().is_empty(), "{}", stood.journal_text());
+    assert_eq!(stood.world.selects(), vec![Some("c-fixture".to_string())]);
+    let pane = picked.pane_receipt(&worker, at + 60_000);
+    assert_eq!(pane["by"], "person");
+    assert_eq!(pane["fromAccount"], "a-fixture");
+    assert_eq!(pane["toAccount"], "c-fixture");
+    let follows = picked.follows_of(&worker, term);
+    assert_eq!(follows.len(), 1, "{follows:#?}");
+    assert!(
+        follows[0].contains("a-fixture→c-fixture")
+            && follows[0].contains("ok=true")
+            && follows[0].contains("waited for c-fixture to read room"),
+        "{follows:#?}"
+    );
+    assert_eq!(stood.died(at + 70_000), 0);
+}
+
+/// t-124254 ② (나), I-t124041-2: 2026-11-20 after 20:50 on the fixture — a
+/// worker resting at the weekly wall of `a-fixture`, its move owed to the
+/// account the person picked, `c-fixture`, whose session stood at the
+/// blocked line. No newer reading, a newer read that failed, a reading with
+/// room grown old by the time anybody looks, a newer reading still at the
+/// line: it stays where it is, and nothing is asked or said. A fresh reading
+/// with room: it follows, the same worker on the same attempt.
+#[test]
+fn a_pane_resting_at_its_wall_follows_the_picked_account_only_on_a_newer_reading_with_room() {
+    let max_age = zerocode_core::account_autoswitch::CLAUDE_ACCOUNT_AUTOSWITCH.gauge_max_age_ms;
+    // The pick's reading is all but old already, so a newer one can be old
+    // a few minutes later.
+    let picked = BlockedPick::stand(WalledClaude::stand(124_600, 0), max_age - 60_000, |_, _| {});
+    let stood = &picked.stood;
+    let at = picked.at;
+    let (worker, term) = (stood.worker.clone(), stood.leader + 1);
+    let dispatch = stood.row(&worker).dispatch;
+    assert_eq!(
+        picked.census(),
+        serde_json::json!({"moved": 0, "at_turn_end": 0, "person": 0, "left": 0, "when_free": 1}),
+        "{:#?}",
+        picked.lines()
+    );
+    let stays = |now_ms: i64, what: &str| {
+        assert_eq!(picked.follow(now_ms), 0, "{what}: {:#?}", picked.lines());
+        assert_eq!(term_now(&worker), term, "{what}");
+        assert_eq!(
+            stood.host.pane_account(term).as_deref(),
+            Some("a-fixture"),
+            "{what}"
+        );
+        assert_eq!(picked.owed(), vec![worker.clone()], "{what}");
+        assert!(
+            picked.follows_of(&worker, term).is_empty(),
+            "{what}: {:#?}",
+            picked.lines()
+        );
+    };
+    stays(at + 10_000, "no newer reading");
+    {
+        let mut gauges = stood.world.gauges.lock().unwrap();
+        let read = gauges
+            .iter_mut()
+            .find(|gauge| gauge.id == "c-fixture")
+            .expect("c-fixture's reading");
+        read.status = "error".to_string();
+        read.windows.clear();
+        read.observed_at_ms = at - max_age + 120_000;
+    }
+    stays(at + 20_000, "a newer read that failed");
+    let old = at - max_age + 180_000;
+    account_reads(&stood.world, "c-fixture", 5, old);
+    stays(old + max_age + 1_000, "a reading with room, old by now");
+    let blocked = old + max_age + 5_000;
+    account_reads(&stood.world, "c-fixture", BLOCKED, blocked);
+    stays(blocked + 5_000, "a newer reading still at the line");
+    let fresh = blocked + 15_000;
+    account_reads(&stood.world, "c-fixture", 5, fresh);
+    assert_eq!(picked.follow(fresh + 1_000), 1, "{:#?}", picked.lines());
+    let moved_to = term_now(&worker);
+    assert_ne!(moved_to, term);
+    assert_eq!(
+        stood.host.pane_account(moved_to).as_deref(),
+        Some("c-fixture")
+    );
+    let row = stood.row(&worker);
+    assert_eq!(row.state, WorkerState::Active);
+    assert_eq!(row.dispatch, dispatch, "the move spent the attempt");
+    assert!(picked.owed().is_empty(), "{}", stood.journal_text());
+    let pane = picked.pane_receipt(&worker, fresh + 10_000);
+    assert_eq!(pane["by"], "person");
+    assert_eq!(pane["toAccount"], "c-fixture");
+    assert_eq!(picked.follows_of(&worker, term).len(), 1);
+    assert_eq!(stood.world.selects(), vec![Some("c-fixture".to_string())]);
+    assert_eq!(stood.died(fresh + 20_000), 0);
+}
+
+/// t-124254 ③: what the new road never moves. A pane on `a-fixture` when the
+/// person picks `c-fixture`, the same login under another row — and at the
+/// blocked line, which does not make it a pane that waits for room; a pane
+/// the person took over; a pane whose login the window never recorded. Each
+/// is counted where it stands at the pick, nothing is owed, and a reading of
+/// `c-fixture` with room moves none of them on any beat.
+#[test]
+fn a_pane_left_for_its_own_login_the_persons_and_one_nobody_owes_never_follow_a_reading_with_room()
+{
+    let picked = BlockedPick::stand(
+        WalledClaude::near_limit(124_800, 3, 0),
+        60_000,
+        |stood, at| {
+            let mut gauges = stood.world.gauges.lock().unwrap();
+            let c = gauges
+                .iter_mut()
+                .find(|gauge| gauge.id == "c-fixture")
+                .expect("c-fixture's reading");
+            c.identity = Some("login-of-a-fixture".to_string());
+            drop(gauges);
+            super::pane_taken_over(stood.leader + 1, "words", at - 1);
+            let (_, unrecorded) = stood.walled_more[1].clone();
+            stood.host.accounts.lock().unwrap().remove(&unrecorded);
+        },
+    );
+    let stood = &picked.stood;
+    let at = picked.at;
+    assert_eq!(
+        picked.census(),
+        serde_json::json!({"moved": 0, "at_turn_end": 0, "person": 1, "left": 2, "when_free": 0}),
+        "{:#?}",
+        picked.lines()
+    );
+    assert!(picked.owed().is_empty(), "{}", stood.journal_text());
+    let (twin, twin_term) = stood.walled_more[0].clone();
+    assert!(
+        picked.lines().iter().any(|line| line
+            .contains(&format!("leaves worker {twin} on its account"))
+            && line.contains("no_candidate")),
+        "{:#?}",
+        picked.lines()
+    );
+    account_reads(&stood.world, "c-fixture", 5, at + 5_000);
+    {
+        let mut gauges = stood.world.gauges.lock().unwrap();
+        if let Some(c) = gauges.iter_mut().find(|gauge| gauge.id == "c-fixture") {
+            c.identity = Some("login-of-a-fixture".to_string());
+        }
+    }
+    for step in 0..3 {
+        assert_eq!(picked.follow(at + 10_000 + step), 0);
+    }
+    assert!(stood.host.closed().is_empty(), "{:?}", stood.host.closed());
+    assert_eq!(term_now(&twin), twin_term);
+    assert_eq!(term_now(&stood.worker), stood.leader + 1);
+    assert_eq!(term_now(&stood.walled_more[1].0), stood.walled_more[1].1);
+    assert!(
+        picked
+            .lines()
+            .iter()
+            .all(|line| !line.contains("follows pane")),
+        "{:#?}",
+        picked.lines()
+    );
+    assert_eq!(stood.died(at + 20_000), 0);
+}
+
+/// t-124254 ④: a pane waiting for its account's room is not moved under a
+/// person's words. A reading with room lands while a person's unsent words
+/// sit on its line: no beat moves it, or even asks. The line is emptied:
+/// the next beat moves it.
+#[test]
+fn a_pane_waiting_for_its_accounts_room_moves_only_once_a_persons_words_leave_its_line() {
+    let picked = BlockedPick::stand(WalledClaude::stand(125_000, 0), 60_000, |_, _| {});
+    let stood = &picked.stood;
+    let at = picked.at;
+    let (worker, term) = (stood.worker.clone(), stood.leader + 1);
+    assert_eq!(picked.owed(), vec![worker.clone()]);
+    stood.host.drafts.lock().unwrap().insert(term);
+    account_reads(&stood.world, "c-fixture", 5, at + 5_000);
+    for step in 0..3 {
+        assert_eq!(picked.follow(at + 10_000 + step), 0);
+    }
+    assert_eq!(term_now(&worker), term);
+    assert!(!stood.host.closed().contains(&term));
+    assert!(
+        picked.follows_of(&worker, term).is_empty(),
+        "{:#?}",
+        picked.lines()
+    );
+    stood.host.drafts.lock().unwrap().remove(&term);
+    assert_eq!(picked.follow(at + 20_000), 1, "{:#?}", picked.lines());
+    assert_eq!(
+        stood.host.pane_account(term_now(&worker)).as_deref(),
+        Some("c-fixture")
+    );
+    assert_eq!(stood.died(at + 30_000), 0);
+}
+
+/// t-124254 ⑤, the person's rule of 2026-10-28: with the switch 「끔」 the
+/// window never chooses an account. The panes a blocked pick left — one at
+/// work, one between turns — still follow the account the person picked
+/// once it reads room: that is the person's own pick, made late. No other
+/// account is ever selected, and every pane lands on `c-fixture`.
+#[test]
+fn with_the_switch_off_the_panes_a_blocked_pick_left_still_follow_the_persons_pick() {
+    let picked = BlockedPick::stand(
+        WalledClaude::near_limit(125_200, 1, 1),
+        60_000,
+        |stood, _| {
+            *stood.world.mode.lock().unwrap() =
+                zerocode_core::account_autoswitch::AutoSwitchMode::Off;
+        },
+    );
+    let stood = &picked.stood;
+    let at = picked.at;
+    let (worker, term) = stood.working[0].clone();
+    assert_eq!(
+        picked.census(),
+        serde_json::json!({"moved": 0, "at_turn_end": 0, "person": 0, "left": 0, "when_free": 2}),
+        "{:#?}",
+        picked.lines()
+    );
+    stood.host.busy.lock().unwrap().remove(&term);
+    assert_eq!(picked.follow(at + 10_000), 0);
+    account_reads(&stood.world, "c-fixture", 5, at + 15_000);
+    let moved: usize = (0..4).map(|step| picked.follow(at + 20_000 + step)).sum();
+    assert_eq!(moved, 2, "{:#?}", picked.lines());
+    for one in [&worker, &stood.worker] {
+        assert_eq!(
+            stood.host.pane_account(term_now(one)).as_deref(),
+            Some("c-fixture"),
+            "{one}"
+        );
+        assert_eq!(picked.pane_receipt(one, at + 30_000)["by"], "person");
+    }
+    assert_eq!(stood.world.selects(), vec![Some("c-fixture".to_string())]);
+    assert_eq!(stood.died(at + 40_000), 0);
+}
+
+/// t-124254 ⑥, the t-124041 rule: a newer pick takes the waiting moves
+/// over. The person picks `c-fixture` while it is blocked, then `d-fixture`,
+/// which has room: the pane between turns follows to `d-fixture` at once,
+/// the one at work at its turn's end — and when `c-fixture` reads room
+/// later, nothing goes there.
+#[test]
+fn a_newer_pick_takes_a_waiting_move_over_and_the_blocked_account_is_never_followed() {
+    let picked = BlockedPick::stand(
+        WalledClaude::near_limit(125_400, 1, 1),
+        60_000,
+        |stood, at| {
+            account_reads(&stood.world, "d-fixture", 10, at - 60_000);
+        },
+    );
+    let stood = &picked.stood;
+    let at = picked.at;
+    let (worker, term) = stood.working[0].clone();
+    let again = crate::account_switch::switch_by_person(
+        &stood.host,
+        &stood.world,
+        Some("d-fixture"),
+        at + 3_000,
+    )
+    .expect("the newer pick");
+    assert_eq!(
+        serde_json::to_value(&again.census).expect("a census"),
+        serde_json::json!({"moved": 1, "at_turn_end": 1, "person": 0, "left": 0, "when_free": 0}),
+        "{:#?}",
+        picked.lines()
+    );
+    account_reads(&stood.world, "c-fixture", 5, at + 5_000);
+    assert_eq!(picked.follow(at + 10_000), 0, "{:#?}", picked.lines());
+    stood.host.busy.lock().unwrap().remove(&term);
+    assert_eq!(picked.follow(at + 20_000), 1, "{:#?}", picked.lines());
+    assert_eq!(picked.follow(at + 20_001), 0);
+    for one in [&worker, &stood.worker] {
+        assert_eq!(
+            stood.host.pane_account(term_now(one)).as_deref(),
+            Some("d-fixture"),
+            "{one}"
+        );
+    }
+    assert!(
+        picked
+            .lines()
+            .iter()
+            .all(|line| !line.contains("follows pane") || !line.contains("→c-fixture")),
+        "{:#?}",
+        picked.lines()
+    );
+    assert!(picked.owed().is_empty(), "{}", stood.journal_text());
+    assert_eq!(stood.died(at + 30_000), 0);
+}
+
+/// t-124254 ⑥: a pick back to the account the panes run as ends the waiting
+/// moves. The person picks `c-fixture` while it is blocked, then
+/// `a-fixture` again: nothing is owed, and when `c-fixture` reads room and
+/// the pane's turn ends, nothing moves and no move is refused.
+#[test]
+fn a_pick_back_ends_a_waiting_move_and_a_freed_account_moves_nothing() {
+    let picked = BlockedPick::stand(WalledClaude::near_limit(125_600, 1, 1), 60_000, |_, _| {});
+    let stood = &picked.stood;
+    let at = picked.at;
+    let (worker, term) = stood.working[0].clone();
+    let back = crate::account_switch::switch_by_person(
+        &stood.host,
+        &stood.world,
+        Some("a-fixture"),
+        at + 3_000,
+    )
+    .expect("the pick back");
+    assert_eq!(
+        serde_json::to_value(&back.census).expect("a census"),
+        serde_json::json!({"moved": 0, "at_turn_end": 0, "person": 0, "left": 0, "when_free": 0}),
+        "{:#?}",
+        picked.lines()
+    );
+    assert!(picked.owed().is_empty(), "{}", stood.journal_text());
+    account_reads(&stood.world, "c-fixture", 5, at + 5_000);
+    stood.host.busy.lock().unwrap().remove(&term);
+    for step in 0..3 {
+        assert_eq!(picked.follow(at + 10_000 + step), 0);
+    }
+    assert!(stood.host.closed().is_empty(), "{:?}", stood.host.closed());
+    assert_eq!(term_now(&worker), term);
+    assert_eq!(stood.host.pane_account(term).as_deref(), Some("a-fixture"));
+    assert!(
+        picked.lines().iter().all(|line| !line.contains("ok=false")),
+        "{:#?}",
+        picked.lines()
+    );
+    assert_eq!(stood.died(at + 20_000), 0);
 }
 
 /// t-46106: the beat moves a worker a switch still owes a move to BEFORE
