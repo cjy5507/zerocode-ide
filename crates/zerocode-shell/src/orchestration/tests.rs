@@ -29627,7 +29627,27 @@ fn a_refused_receipt_stays_owed_until_the_ledger_takes_it_once() {
         crate::account_switch::reconcile(&stood.host, &stood.world, at + 4),
         0
     );
-    assert!(stood.journal_text().is_empty(), "{}", stood.journal_text());
+    // Every receipt is written. What the journal keeps is the move the pick
+    // owes the pane the beat moved to `b-fixture`: the person picked
+    // `a-fixture` while it stood at its wall, and the pane follows it once a
+    // newer reading has room (t-124254).
+    let book: crate::account_switch::JournalBook =
+        serde_json::from_str(&stood.journal_text()).expect("a book");
+    assert!(
+        book.switches.iter().all(|journal| !journal.default),
+        "{book:?}"
+    );
+    let kept: Vec<&crate::account_switch::JournalPane> = book
+        .switches
+        .iter()
+        .flat_map(|journal| &journal.panes)
+        .collect();
+    assert_eq!(kept.len(), 1, "{book:?}");
+    assert_eq!(kept[0].worker, stood.worker);
+    assert!(
+        kept[0].follows && !kept[0].rested && kept[0].blocked_reading_ms.is_some(),
+        "{book:?}"
+    );
     let bodies = stood.receipts(at + 5);
     assert_eq!(bodies.len(), 3, "{bodies:?}");
     let pane: Vec<&serde_json::Value> = bodies
