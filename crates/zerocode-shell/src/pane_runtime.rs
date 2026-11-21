@@ -1401,6 +1401,13 @@ pub(super) fn note_pane_state(
     worktree: Option<&str>,
     report: &hooks::PaneHookReport,
 ) {
+    // The one place a window is told a pane's state. The news itself and its
+    // second telling, once a store that settles after a turn has been written
+    // (t-124593), both go through it: one sender of `hook:agent`, as this
+    // door promises.
+    fn tell_window<S: serde::Serialize + Clone>(app: &AppHandle, shown: S) {
+        let _ = app.emit("hook:agent", shown);
+    }
     // An explanation waiting on this pane's turn, or waiting for a page from it
     // (t-32787): one atomic load when none stands.
     crate::explain_door::note_pane_state(app, report);
@@ -1778,11 +1785,11 @@ pub(super) fn note_pane_state(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .drop_pane(&term);
-                let _ = app.emit("hook:agent", again);
+                tell_window(&app, again);
             },
         );
     }
-    let _ = app.emit("hook:agent", shown);
+    tell_window(app, shown);
     if report.state == zerocode_core::hook::HookState::Done
         && let Some(cleanup) = app
             .state::<AppState>()
