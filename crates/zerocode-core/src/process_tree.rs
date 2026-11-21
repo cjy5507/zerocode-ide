@@ -95,7 +95,7 @@ pub fn as_a_question(command: &mut Command) -> &mut Command {
 /// Ask `command` one question within `limit` — its outputs piped or not as
 /// the caller set them — as the head of a tree of its own
 /// ([`lead_own_tree`]): each piped output is read beside the wait (to
-/// [`OUTPUT_CAP`]) so a long answer cannot stall it against a full pipe, a
+/// `OUTPUT_CAP`) so a long answer cannot stall it against a full pipe, a
 /// run past the limit is ended whole, and an output that has not reached
 /// this side when the run ends is waited for no longer than the limit's
 /// rest. The one bounded question this crate asks a CLI with (t-124593):

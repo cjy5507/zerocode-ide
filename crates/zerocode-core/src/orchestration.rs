@@ -20560,7 +20560,7 @@ pub fn tuning_words(
 }
 
 /// The launch words that name `model` for `agent`'s CLI — the measured
-/// row's own spelling ([`tuning_of`]), for a road that names a model
+/// row's own spelling (`tuning_of`), for a road that names a model
 /// the ledger did not summon with: the release that stands for the one a
 /// resumed conversation last ran (t-46882).
 ///
@@ -20692,7 +20692,7 @@ fn agent_row(
 
 /// `summonUnavailable`: the launch table has measured no `--model` for this
 /// agent's CLI, so a summons cannot name one.
-const SUMMON_NO_MODEL_FLAG: &str = "its CLI takes no measured --model at launch";
+pub(crate) const SUMMON_NO_MODEL_FLAG: &str = "its CLI takes no measured --model at launch";
 /// `summonUnavailable`: a model can be named but no effort, so no difficulty
 /// row can be launched as a whole.
 const SUMMON_NO_EFFORT_FLAG: &str = "its CLI takes no measured effort at launch";

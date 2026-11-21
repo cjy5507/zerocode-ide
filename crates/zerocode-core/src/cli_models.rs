@@ -38,6 +38,14 @@ pub const ASK_LIMIT: Duration = Duration::from_secs(30);
 /// the cause, short of carrying a page of somebody's output around.
 const SAID_CAP: usize = 160;
 
+/// `models.why` for an agent whose row names no source.
+const NO_SOURCE: &str =
+    "its CLI's help names no command that lists its models, and zo's catalog serves none of them";
+
+/// `models.why` for a list nobody reads: what a list would be for is a
+/// `--model`, and the CLI takes none (the catalog's own sentence for that).
+const PICKS_NOTHING: &str = crate::orchestration::SUMMON_NO_MODEL_FLAG;
+
 /// The program that answers for zo's catalog, as a reader is shown it.
 pub const ZO_CATALOG_PROGRAM: &str = "zo";
 
@@ -278,8 +286,9 @@ fn first_line(text: &str) -> String {
 /// nothing to say:
 ///
 /// - `unknown`: its row names no source;
-/// - `not-read`: its CLI lists models and takes no measured model flag, so
-///   a list would pick nothing for a summons, and none is read;
+/// - `not-read`: its CLI lists models and takes no measured model flag
+///   (`PICKS_NOTHING`), so a list would pick nothing for a summons, and
+///   none is read;
 /// - `not-asked`: a source nobody has read yet, with its command;
 /// - a read: its state (`listed`, `unread`, `failed`, `no-answer`,
 ///   `not-started`), the command, and its age.
@@ -290,10 +299,7 @@ pub fn json(agent: &str, snapshot: Option<&Snapshot>, now_ms: i64) -> serde_json
     let program = spec.map_or(agent, |spec| spec.detect);
     let from = match source {
         ModelSource::Unknown => {
-            return serde_json::json!({
-                "state": "unknown",
-                "why": "its CLI's help names no command that lists its models, and zo's catalog serves none of them",
-            });
+            return serde_json::json!({"state": "unknown", "why": NO_SOURCE});
         }
         ModelSource::OwnList(road) => said_as(program, road.words),
         ModelSource::ZoCatalog(_) | ModelSource::ZoCatalogAll | ModelSource::ZoOtherLogin(_) => {
@@ -301,11 +307,7 @@ pub fn json(agent: &str, snapshot: Option<&Snapshot>, now_ms: i64) -> serde_json
         }
     };
     if spec.is_some_and(|spec| spec.harness.tuning.is_none()) {
-        return serde_json::json!({
-            "state": "not-read",
-            "from": from,
-            "why": "its CLI takes no measured --model at launch, so a list would pick nothing",
-        });
+        return serde_json::json!({"state": "not-read", "from": from, "why": PICKS_NOTHING});
     }
     let Some(held) = snapshot else {
         return serde_json::json!({"state": "not-asked", "from": from});
