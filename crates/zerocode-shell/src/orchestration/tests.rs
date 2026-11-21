@@ -28200,6 +28200,23 @@ fn a_working_pane_a_blocked_pick_left_follows_at_a_turn_end_once_its_account_rea
     account_reads(&stood.world, "c-fixture", 5, at + 30_000);
     assert_eq!(picked.follow(at + 40_000), 0);
     assert_eq!(term_now(&worker), term, "a pane was moved mid-turn");
+    // While it works, the beat only watches for its turn's end: it reads
+    // neither the journal nor the situation.
+    let disk = || {
+        (
+            *stood.world.looks.lock().unwrap(),
+            crate::account_switch::book_reads_on_this_thread(),
+        )
+    };
+    let read = disk();
+    for step in 1..=5 {
+        assert_eq!(picked.follow(at + 40_000 + step), 0);
+    }
+    assert_eq!(
+        disk(),
+        read,
+        "a beat read the disk while it watched a pane at work"
+    );
     // That turn ends: the pane follows the person's pick.
     stood.host.busy.lock().unwrap().remove(&term);
     assert_eq!(picked.follow(at + 50_000), 1, "{:#?}", picked.lines());

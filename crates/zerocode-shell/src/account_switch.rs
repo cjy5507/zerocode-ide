@@ -1817,16 +1817,28 @@ fn follow_logins() -> &'static Mutex<FollowLogins> {
 /// it was (t-46106).
 type FollowLogins = HashMap<String, Vec<(String, String)>>;
 
-/// What the beat last made of the moves that wait for their landing's room
-/// (t-124254), by journal directory: the count of readings
-/// ([`SwitchDoors::readings_seen`]) it judged them under — kept only when
-/// every move the book owed was such a move and none could be made on those
-/// readings. A beat that finds the same count has nothing to look at and
-/// answers from this one number of memory: a pane resting at its wall can
-/// wait for hours, and neither the journal nor the situation is read for it
-/// every second. A write of the book forgets it ([`replace_book`]).
-fn waits_judged() -> &'static Mutex<HashMap<PathBuf, u64>> {
-    static HELD: std::sync::OnceLock<Mutex<HashMap<PathBuf, u64>>> = std::sync::OnceLock::new();
+/// What the beat last made of a book whose every owed move waits for its
+/// landing's room (t-124254), by journal directory ([`waits_judged`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Waits {
+    /// The count of readings ([`SwitchDoors::readings_seen`]) it was judged
+    /// under.
+    readings: u64,
+    /// The panes a reading of that count gave room but that were not between
+    /// turns: at work, or with a person's words on their line. Their rest is
+    /// asked of the host — memory — on every beat.
+    watch: Vec<u32>,
+}
+
+/// [`Waits`], kept only when every move the book owed was one that waits for
+/// its landing's room and none could be made on the readings it was judged
+/// under (t-124254). A beat that finds the same count, and none of the
+/// watched panes between turns, has nothing to look at and answers from
+/// memory: a pane resting at its wall can wait for hours, and neither the
+/// journal nor the situation is read for it every second. A write of the book
+/// forgets it ([`replace_book`]).
+fn waits_judged() -> &'static Mutex<HashMap<PathBuf, Waits>> {
+    static HELD: std::sync::OnceLock<Mutex<HashMap<PathBuf, Waits>>> = std::sync::OnceLock::new();
     HELD.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2260,21 +2272,28 @@ fn still_follows(
 /// sees it between turns, before the mail pointer can start its next turn;
 /// then what that leaves owed is settled. A window whose journal owes nothing
 /// does nothing but look; one whose every owed move waits for room that no
-/// reading since its last look could give answers from one number of memory
-/// ([`waits_judged`]); a switch in flight is left to finish its own (the line
-/// is tried, never waited on). A move whose yes this window never heard — its
+/// reading since its last look could give, or for the rest of a pane it is
+/// watching, answers from memory ([`waits_judged`]); a switch in flight is
+/// left to finish its own (the line is tried, never waited on). A move whose yes this window never heard — its
 /// memory is a newer process's — is let go. Answers the panes moved.
 pub(crate) fn follow_with(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64) -> usize {
     let dir = doors.journal_dir();
     // Read before anything else, so a reading that lands while this look
-    // runs moves the count past it and the next beat looks again.
+    // runs moves the count past it and the next beat looks again. The
+    // watched panes' rest is the host's memory, not the disk.
     let readings = doors.readings_seen();
     let judged = waits_judged()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&dir)
-        .copied();
-    if judged == Some(readings) {
+        .cloned();
+    if let Some(judged) = judged
+        && judged.readings == readings
+        && !judged
+            .watch
+            .iter()
+            .any(|term| rests_for_a_move(host, *term))
+    {
         return 0;
     }
     if owed_followers(&dir).is_empty() {
@@ -2364,9 +2383,11 @@ pub(crate) fn follow_with(host: &dyn Host, doors: &dyn SwitchDoors, now_ms: i64)
 /// pane's model. The situation is read only for such a move, once a look;
 /// the pane's transcript only once a newer reading is there. A newer reading
 /// without room is written on the move in place of the older, so the next
-/// look waits for one newer still. When every move the book owes waits and
-/// none may be made on the readings counted `readings`, that count is kept
-/// ([`waits_judged`]) and the next beats read nothing until it moves.
+/// look waits for one newer still; one with room on a pane that is not
+/// between turns has that pane watched. When every move the book owes waits
+/// and none may be made on the readings counted `readings`, that count and
+/// the watched panes are kept ([`waits_judged`]), and the next beats read
+/// nothing until the count moves or a watched pane comes to rest.
 fn ready_follower(
     host: &dyn Host,
     doors: &dyn SwitchDoors,
@@ -2377,6 +2398,7 @@ fn ready_follower(
 ) -> Option<(usize, JournalPane, u32, crate::orchestration::WorkerNow)> {
     let mut gauges: Option<Vec<AccountGauge>> = None;
     let mut only_waits = true;
+    let mut watch = Vec::new();
     let mut noted = false;
     let mut ready = None;
     'look: for (at, journal) in book.switches.iter_mut().enumerate() {
@@ -2410,8 +2432,8 @@ fn ready_follower(
                     continue;
                 }
                 // Room it may move on: its turn's end, or a line a person
-                // empties, is looked for on every beat from here.
-                only_waits = false;
+                // empties, is watched for on every beat from here.
+                watch.push(term);
             }
             if rests_for_a_move(host, term) {
                 ready = Some((at, pane.clone(), term, now));
@@ -2427,7 +2449,7 @@ fn ready_follower(
             waits_judged()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(dir.to_path_buf(), readings);
+                .insert(dir.to_path_buf(), Waits { readings, watch });
         }
     }
     ready
