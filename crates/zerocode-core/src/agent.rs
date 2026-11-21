@@ -882,17 +882,17 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         ready_timeout_ms: None,
         harness: Harness {
             submit_ack: SubmitAck::Hook,
-            // Devin CLI 3000.14.30821 in a checkout it has not been told to
-            // trust stops at 「Do you trust the authors of this directory?」
-            // (`❭ 1 Yes, trust` / `2 No, exit`), drawn a second after its
-            // start and still standing at thirteen (2026-11-21, a bare
-            // summons into a fresh worktree, t-124593). Both summonses of
-            // 14:29 and 14:30 pasted their briefing into it: the Enter chose
-            // 「Yes, trust」, the words went nowhere, and the empty composer
-            // behind it never reported a prompt. Its help names the one-launch
-            // answer — `--respect-workspace-trust [true|false]`, "Defaults to
-            // true in every mode" — and this window writes no Devin
-            // configuration, which is the person's.
+            // Seen (2026-11-21, t-124593): Devin CLI 3000.14.30821 started
+            // bare in a checkout the ledger had just cut stood at 「Do you
+            // trust the authors of this directory?」 (`❭ 1 Yes, trust` /
+            // `2 No, exit`) a second after its start and still at thirteen;
+            // both briefed summonses of 14:29 and 14:30 ended with the
+            // briefing pasted and unacknowledged and an empty composer on
+            // the screen. Read into it, not seen: the paste and its Enter
+            // went to that menu. Its help names the one-launch answer —
+            // `--respect-workspace-trust [true|false]`, "Defaults to true in
+            // every mode" — and this window writes no Devin configuration,
+            // which is the person's.
             blocked: &[BlockedSignal::TrustFlag(&[
                 "--respect-workspace-trust",
                 "false",
@@ -900,8 +900,11 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             vault_resume_carries_launch_args: true,
             // `devin --help` (3000.14.30821, 2026-11-21): `--model <MODEL>`
             // (also `DEVIN_MODEL`), and no effort flag. `models list --format
-            // json` — "List available models, organized by model family",
-            // "json: Machine-readable JSON (for scripts)".
+            // json` — "List available models, organized by model family" —
+            // answered the same day (t-124593, 0.7 s): `{"families":[{"slug",
+            // "aliases","variants":[{"model_uid","label",…}]}]}`, 55 families
+            // and 1,302 models, no default named; an effort is part of a
+            // model's id (`…-high`, `…-max`), not a flag of its own.
             tuning: Some(LaunchTuning {
                 model_flag: "--model",
                 effort: None,
@@ -909,7 +912,13 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             }),
             models: ModelSource::OwnList(ListRoad {
                 words: &["models", "list", "--format", "json"],
-                shape: ListShape::Unmeasured,
+                shape: ListShape::Json {
+                    list: "/families",
+                    each: Some("/variants"),
+                    id: "/model_uid",
+                    name: Some("/label"),
+                    default: None,
+                },
             }),
             ..Harness::PLAIN
         },
@@ -1009,10 +1018,10 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
             // `opencode --help` (2.2.5, 2026-11-21): the TUI this row launches
             // names no `--model` (only `opencode run` and `opencode mini` take
             // one), so it takes no tuning; `models` — "List all available
-            // models".
+            // models" — answered the same day: one `provider/model` id a line.
             models: ModelSource::OwnList(ListRoad {
                 words: &["models"],
-                shape: ListShape::Unmeasured,
+                shape: ListShape::Lines,
             }),
             ..Harness::PLAIN
         },
@@ -1316,6 +1325,7 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
                 words: &["chat", "--list-models", "--format", "json"],
                 shape: ListShape::Json {
                     list: "/models",
+                    each: None,
                     id: "/model_id",
                     name: Some("/model_name"),
                     default: Some("/default_model"),

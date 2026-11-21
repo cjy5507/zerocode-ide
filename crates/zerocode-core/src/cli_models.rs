@@ -166,18 +166,21 @@ pub fn read(shape: ListShape, ran: &Ran) -> Answer {
                 bytes: stdout.len(),
                 why,
             };
-            match shape {
-                ListShape::Unmeasured => unread(UnreadWhy::Unmeasured),
+            let listed = match shape {
+                ListShape::Unmeasured => return unread(UnreadWhy::Unmeasured),
                 ListShape::Json {
                     list,
+                    each,
                     id,
                     name,
                     default,
-                } => json_list(stdout, list, id, name, default).map_or_else(
-                    || unread(UnreadWhy::NotTheShape),
-                    |(models, default)| Answer::Listed { models, default },
-                ),
-            }
+                } => json_list(stdout, list, each, id, name, default),
+                ListShape::Lines => line_list(stdout),
+            };
+            listed.map_or_else(
+                || unread(UnreadWhy::NotTheShape),
+                |(models, default)| Answer::Listed { models, default },
+            )
         }
         Ran::Ended {
             code,
@@ -231,13 +234,14 @@ pub fn said_as(program: &str, words: &[&str]) -> String {
         .join(" ")
 }
 
-/// A JSON answer read by the row's pointers: every entry of the list needs
-/// its id; the name rides only where it differs from the id; the default is
-/// the CLI's own. An entry without an id makes the whole answer not the
-/// measured shape — half a list is not the CLI's list.
+/// A JSON answer read by the row's pointers: every model needs its id; the
+/// name rides only where it differs from the id; the default is the CLI's
+/// own. A model without an id, or a group without its list, makes the whole
+/// answer not the measured shape — half a list is not the CLI's list.
 fn json_list(
     text: &str,
     list: &str,
+    each: Option<&str>,
     id: &str,
     name: Option<&str>,
     default: Option<&str>,
@@ -251,10 +255,19 @@ fn json_list(
             .filter(|said| !said.is_empty())
             .map(str::to_string)
     };
-    let models = value
-        .pointer(list)?
-        .as_array()?
-        .iter()
+    let entries = value.pointer(list)?.as_array()?;
+    let models: Vec<&serde_json::Value> = match each {
+        Some(pointer) => entries
+            .iter()
+            .map(|group| group.pointer(pointer).and_then(serde_json::Value::as_array))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+        None => entries.iter().collect(),
+    };
+    let models = models
+        .into_iter()
         .map(|entry| {
             let id = text_at(entry, id)?;
             let name = name
@@ -264,6 +277,20 @@ fn json_list(
         })
         .collect::<Option<Vec<_>>>()?;
     Some((models, default.and_then(|pointer| text_at(&value, pointer))))
+}
+
+/// A plain answer, one id a line; one with no id at all is not the shape.
+fn line_list(text: &str) -> Option<(Vec<Listed>, Option<String>)> {
+    let models: Vec<Listed> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|id| Listed {
+            id: id.to_string(),
+            name: None,
+        })
+        .collect();
+    (!models.is_empty()).then_some((models, None))
 }
 
 /// The first line that says something, private values masked, cut to
@@ -320,9 +347,12 @@ pub fn json(agent: &str, snapshot: Option<&Snapshot>, now_ms: i64) -> serde_json
     });
     match &held.answer {
         Answer::Listed { models, default } => {
+            // The ids a `--model` takes, and how many: a CLI that lists a
+            // thousand models (devin, 1,302) would double this answer with
+            // names no summons takes.
             row["state"] = serde_json::json!("listed");
+            row["count"] = serde_json::json!(models.len());
             row["ids"] = serde_json::json!(models.iter().map(|one| &one.id).collect::<Vec<_>>());
-            row["models"] = serde_json::json!(models);
             row["default"] = serde_json::json!(default);
         }
         Answer::Unread { bytes, why } => {
@@ -394,6 +424,7 @@ mod tests {
         // The same reader, other pointers: a bare list of ids.
         let bare = ListShape::Json {
             list: "",
+            each: None,
             id: "",
             name: None,
             default: None,
@@ -504,7 +535,70 @@ mod tests {
         assert_eq!(row["readAtMs"], 1_000);
         assert_eq!(row["ageMs"], 60_000);
         assert_eq!(row["from"], "kiro-cli chat --list-models --format json");
-        assert_eq!(row["models"][1]["name"], "Example Model");
+        assert_eq!(row["count"], 2);
+    }
+
+    /// devin groups its models by family, and opencode prints one a line
+    /// (both measured 2026-11-21): each is read by its row's values, with
+    /// made-up models in the measured shapes.
+    #[test]
+    fn a_grouped_list_and_a_list_of_lines_are_read_by_their_rows() {
+        let grouped = r#"{"families":[
+            {"slug":"family-a","aliases":["a"],"variants":[
+                {"model_uid":"family-a-high","label":"Family A High","is_new":false},
+                {"model_uid":"family-a-max","label":"Family A Max","is_new":true}]},
+            {"slug":"family-b","aliases":[],"variants":[
+                {"model_uid":"family-b","label":"family-b","is_new":false}]}
+        ]}"#;
+        let devin = road_of("devin").expect("devin's row names its list");
+        assert_eq!(
+            read(devin.shape, &ended(0, grouped, "")),
+            Answer::Listed {
+                models: vec![
+                    Listed {
+                        id: "family-a-high".into(),
+                        name: Some("Family A High".into()),
+                    },
+                    Listed {
+                        id: "family-a-max".into(),
+                        name: Some("Family A Max".into()),
+                    },
+                    Listed {
+                        id: "family-b".into(),
+                        name: None,
+                    },
+                ],
+                default: None,
+            }
+        );
+        // A family without its list is not the shape measured.
+        let broken = r#"{"families":[{"slug":"family-a"}]}"#;
+        assert!(matches!(
+            read(devin.shape, &ended(0, broken, "")),
+            Answer::Unread {
+                why: UnreadWhy::NotTheShape,
+                ..
+            }
+        ));
+
+        let opencode = road_of("opencode").expect("opencode's row names its list");
+        assert_eq!(
+            read(opencode.shape, &ended(0, "provider-a/model-a\n\nprovider-b/model-b\n", "")).listed(),
+            [
+                Listed {
+                    id: "provider-a/model-a".into(),
+                    name: None,
+                },
+                Listed {
+                    id: "provider-b/model-b".into(),
+                    name: None,
+                },
+            ]
+        );
+        assert!(matches!(
+            read(opencode.shape, &ended(0, "\n  \n", "")),
+            Answer::Unread { .. }
+        ));
     }
 
     /// The roads as the window runs them, against the real CLIs of this

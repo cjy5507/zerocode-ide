@@ -5,9 +5,11 @@
 //! models reads the catalog the model chip already reads (`zo models
 //! --json`, [`crate::slash_catalog::agent_lineup`]) — no second road to a
 //! provider; an agent whose row names its own CLI's list command is asked
-//! that command ([`zerocode_core::cli_models`]) in the same read, and its
-//! answer becomes rows of the same kind (`Lineup::from_listed`). Which is
-//! which is the row's value, never a name here.
+//! that command ([`zerocode_core::cli_models`]) by the same read — after
+//! zo's lineups are told, and only when its last answer is gone or older
+//! than the refresh rule — and its answer becomes rows of the same kind
+//! (`Lineup::from_listed`). Which is which is the row's value, never a name
+//! here.
 //!
 //! Readers inside the ledger actor only PEEK at what is held: a
 //! summons's origin, `agent-list`, the settings pane. A reader that finds the
@@ -238,22 +240,86 @@ fn read_in_background(now_ms: i64, force: bool) {
 }
 
 /// One read: every agent's lineup and what zo said of its sources, laid
-/// against the book, held, and told to the window.
+/// against the book, held, and told to the window — then, after that is
+/// told, the CLI lists that are due (t-124593).
+///
+/// zo's catalog is published first, with each CLI's list as last heard, so
+/// a reader — a login switch's refresh, the settings screen's — never waits
+/// on a CLI. A list is asked again only when none is held or the one held
+/// is older than [`REFRESH_AFTER_MS`]: the same rule a reader's peek uses,
+/// so a refresh between two hours asks no CLI at all. The read counts as
+/// finished once its lists are in.
 fn read_once(roots: &Roots, now_ms: i64) {
-    // The agents whose own CLI lists their models are asked first, each
-    // once; the rest read zo's catalog.
-    let answers: BTreeMap<String, cli_models::Snapshot> = lineup_agents()
-        .filter_map(|agent| Some((agent.to_string(), ask_own_list(agent, now_ms)?)))
-        .collect();
+    let heard = held()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .answers
+        .clone();
     let lineups = lineups_of(|agent| match cli_models::road_of(agent) {
-        Some(_) => answers
-            .get(agent)
-            .and_then(|heard| Lineup::from_listed(agent, heard.answer.listed())),
+        Some(_) => listed_lineup(agent, heard.get(agent)),
         None => crate::slash_catalog::agent_lineup(agent, &roots.home),
     });
     // The same cached catalog the lineups were read from — never a second
     // `zo models` run.
     let sources = sources_of(&crate::slash_catalog::zo_model_list(&roots.home), now_ms);
+    let due = lists_due(&heard, now_ms);
+    publish(roots, lineups, Some(sources), now_ms, due.is_empty());
+    if due.is_empty() {
+        return;
+    }
+    let asked: BTreeMap<String, cli_models::Snapshot> = due
+        .into_iter()
+        .filter_map(|agent| Some((agent.to_string(), ask_own_list(agent, now_ms)?)))
+        .collect();
+    let lineups = {
+        let mut held = held()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut lineups = held.snapshot.lineups.clone();
+        for (agent, answer) in &asked {
+            match listed_lineup(agent, Some(answer)) {
+                Some(lineup) => {
+                    lineups.insert(agent.clone(), lineup);
+                }
+                None => {
+                    lineups.remove(agent);
+                }
+            }
+        }
+        held.answers.extend(asked);
+        lineups
+    };
+    publish(roots, lineups, None, now_ms, true);
+}
+
+/// The agents whose own CLI's list is due: none held, or the one held past
+/// [`REFRESH_AFTER_MS`].
+fn lists_due(heard: &BTreeMap<String, cli_models::Snapshot>, now_ms: i64) -> Vec<&'static str> {
+    lineup_agents()
+        .filter(|agent| cli_models::road_of(agent).is_some())
+        .filter(|agent| {
+            heard.get(*agent).is_none_or(|held| {
+                now_ms.saturating_sub(held.read_at_ms) >= REFRESH_AFTER_MS
+            })
+        })
+        .collect()
+}
+
+/// The lineup a CLI's own list gives, from what it last said.
+fn listed_lineup(agent: &str, heard: Option<&cli_models::Snapshot>) -> Option<Lineup> {
+    heard.and_then(|heard| Lineup::from_listed(agent, heard.answer.listed()))
+}
+
+/// Lay `lineups` against the book, hold them — with zo's report on its
+/// sources when this read has one — and tell the window; `done` counts the
+/// read finished for [`refresh_and_wait`].
+fn publish(
+    roots: &Roots,
+    lineups: BTreeMap<String, Lineup>,
+    sources: Option<Sources>,
+    now_ms: i64,
+    done: bool,
+) {
     let path = roots.config_root.join(SEEN_FILE);
     let mut seen = load_seen(&path);
     let changes = observe(&mut seen, &lineups, now_ms);
@@ -266,12 +332,17 @@ fn read_once(roots: &Roots, now_ms: i64) {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         held.snapshot = Snapshot { lineups, seen };
-        held.sources = sources;
-        held.answers = answers;
+        if let Some(sources) = sources {
+            held.sources = sources;
+        }
         held.read_at_ms = Some(now_ms);
-        held.finished += 1;
+        if done {
+            held.finished += 1;
+        }
     }
-    finished().notify_all();
+    if done {
+        finished().notify_all();
+    }
     if let Some(app) = WINDOW.get() {
         if !changes.is_empty() {
             let _ = app.emit(CHANGED_EVENT, &changes);
@@ -621,6 +692,29 @@ mod tests {
             );
         }
         assert!(lineups_of(|_| None).is_empty(), "no catalog, no lineup");
+    }
+
+    /// A CLI's list is asked again only when none is held or the one held is
+    /// past the refresh rule — so a login switch's refresh between two hours
+    /// asks no CLI at all (t-124593).
+    #[test]
+    fn a_cli_list_is_asked_again_only_when_none_is_held_or_it_is_old() {
+        let heard = |agent: &str, read_at_ms: i64| {
+            (
+                agent.to_string(),
+                cli_models::Snapshot {
+                    agent: agent.to_string(),
+                    asked: String::new(),
+                    answer: cli_models::Answer::NoAnswer,
+                    read_at_ms,
+                    took_ms: 0,
+                },
+            )
+        };
+        let now = 10 * REFRESH_AFTER_MS;
+        assert_eq!(lists_due(&BTreeMap::new(), now), ["devin", "kiro"]);
+        let held = BTreeMap::from([heard("devin", now - 1), heard("kiro", now - REFRESH_AFTER_MS)]);
+        assert_eq!(lists_due(&held, now), ["kiro"]);
     }
 
     /// t-46882: what the window is told beside a pane's model — each

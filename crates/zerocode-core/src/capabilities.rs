@@ -605,16 +605,21 @@ pub struct ListRoad {
 #[serde(rename_all = "kebab-case")]
 pub enum ListShape {
     /// A JSON document, read by JSON pointers (RFC 6901): the list at
-    /// `list` ("" is the document itself), and within each entry the id the
-    /// CLI's model flag takes at `id` ("" is the entry itself, a string) and
-    /// the name it shows at `name`; the CLI's own default at `default`,
-    /// within the document.
+    /// `list` ("" is the document itself); where the CLI groups its models,
+    /// the list within each of those entries at `each`; and within each model
+    /// the id the CLI's model flag takes at `id` ("" is the entry itself, a
+    /// string) and the name it shows at `name`; the CLI's own default at
+    /// `default`, within the document.
     Json {
         list: &'static str,
+        each: Option<&'static str>,
         id: &'static str,
         name: Option<&'static str>,
         default: Option<&'static str>,
     },
+    /// Plain text, one id the CLI's model flag takes a line, blank lines
+    /// aside.
+    Lines,
     /// Nobody has read this road's answer yet: it is asked, and no model is
     /// read out of what it says.
     Unmeasured,
