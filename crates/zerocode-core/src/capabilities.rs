@@ -1198,6 +1198,18 @@ mod tests {
         }
     }
 
+    /// Devin's first-run trust menu took both summonses of 2026-11-21 14:29
+    /// and 14:30 (t-124593): its row names the one-launch flag that keeps the
+    /// menu away, as every reader of the row's stops reads them.
+    #[test]
+    fn devins_row_names_the_flag_that_keeps_its_trust_menu_away() {
+        let devin = agent_capabilities("devin").expect("devin is in the catalog");
+        assert_eq!(
+            serde_json::to_value(devin.blocked).expect("the stops serialize"),
+            serde_json::json!([{"trust-flag": ["--respect-workspace-trust", "false"]}])
+        );
+    }
+
     #[test]
     fn blocked_signals_are_the_row_plus_what_its_transports_imply() {
         let signals = |id: &str| agent_capabilities(id).expect(id).blocked_signals();

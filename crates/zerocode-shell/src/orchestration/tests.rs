@@ -7563,6 +7563,106 @@ fn a_summoned_worker_launches_on_the_terms_its_owner_set() {
     );
 }
 
+/// The four CLIs that were summoned before t-124593 launch on exactly the
+/// lines they did: the measured launch words, the tuning the table spells,
+/// nothing added. Pinned letter for letter, so teaching the other installed
+/// CLIs to take a model cannot move a line that already worked.
+#[test]
+fn the_launch_lines_that_already_worked_stay_letter_for_letter() {
+    let catalog = Catalog::new(Vec::new());
+    for (agent, line) in [
+        (
+            "zo",
+            "zo --permission-mode danger-full-access --model example-model --effort high",
+        ),
+        (
+            "claude",
+            "claude --dangerously-skip-permissions --model example-model --effort high",
+        ),
+        (
+            "codex",
+            "codex --dangerously-bypass-approvals-and-sandbox -c features.daemon_auto_start=false \
+             --model example-model -c model_reasoning_effort=high",
+        ),
+        (
+            "antigravity",
+            "agy --dangerously-skip-permissions --model example-model --effort high",
+        ),
+    ] {
+        let tuning =
+            zerocode_core::orchestration::launch_words(agent, "example-model", Some("high"))
+                .expect("the launch table tunes it");
+        assert_eq!(
+            catalog
+                .command_for(agent, "", &tuning)
+                .expect("in the catalog"),
+            line,
+            "{agent}"
+        );
+    }
+}
+
+/// A person's own devin pane launches exactly as before t-124593: the common
+/// launch words carry no trust answer, and the one door that tells devin it
+/// may skip its trust menu is the worker split, for the checkout it just cut
+/// (`agent_tools_runtime::trust_flag_words`). The launch a person opens, the
+/// resume a board door makes and the line the ledger journals never say it.
+#[test]
+fn a_persons_devin_pane_keeps_its_launch_line_and_its_trust_question() {
+    assert_eq!(
+        launch_plan("devin", None).args,
+        ["--permission-mode", "bypass"],
+        "the common launch words of devin moved"
+    );
+    assert_eq!(
+        Catalog::new(Vec::new())
+            .command_for("devin", "", &[])
+            .expect("devin is in the catalog"),
+        "devin --permission-mode bypass",
+        "the line the ledger journals for a devin worker moved"
+    );
+    for (file, source) in [
+        ("cmd/terminal.rs", include_str!("../cmd/terminal.rs")),
+        ("cmd/board.rs", include_str!("../cmd/board.rs")),
+        ("orchestration.rs", include_str!("../orchestration.rs")),
+    ] {
+        assert!(
+            !source.contains("trust_flag") && !source.contains("--respect-workspace-trust"),
+            "{file} tells a CLI to skip its trust menu"
+        );
+    }
+}
+
+/// A row whose launch is a program and its subcommand is spawned as those
+/// words (t-124593). The summons used to hand `kiro-cli chat --tui` over as
+/// ONE quoted word, so the pane went looking for a program of that name —
+/// while a person's own launch of the same row split it.
+#[test]
+fn a_cli_launched_through_a_subcommand_is_spawned_as_its_words() {
+    let catalog = Catalog::new(Vec::new());
+    let line = catalog
+        .command_for("kiro", "", &[])
+        .expect("kiro is in the catalog");
+    assert_eq!(line, "kiro-cli chat --tui --trust-all-tools");
+    for spec in zerocode_core::AGENT_SPECS
+        .iter()
+        .filter(|spec| spec.launch.contains(' ') && spec.runs_on(std::env::consts::OS))
+    {
+        let argv = crate::split_command(
+            &catalog
+                .command_for(spec.id, "", &[])
+                .expect("in the catalog"),
+        );
+        let launched: Vec<&str> = spec.launch.split_whitespace().collect();
+        assert_eq!(
+            argv.iter().take(launched.len()).map(String::as_str).collect::<Vec<_>>(),
+            launched,
+            "{}: the launch reached the pane as {argv:?}",
+            spec.id
+        );
+    }
+}
+
 #[test]
 fn a_restarted_claude_worker_keeps_the_name_it_was_summoned_under() {
     let peer_name = "zc-r7-w9";

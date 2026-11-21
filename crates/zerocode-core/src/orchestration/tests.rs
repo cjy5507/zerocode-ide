@@ -13354,6 +13354,65 @@ fn a_worker_is_tuned_only_as_its_agent_spells_it() {
     }
 }
 
+/// A CLI whose own help names a model flag on the very command its row
+/// launches is summoned on the model a coordinator names (t-124593:
+/// `worker-start --agent devin --model …` was refused as taking no model,
+/// though `devin --help` names `--model`). An effort none of them names
+/// levels for is still refused by name, and a CLI whose launched TUI names
+/// no model flag stays refused — the table follows the measurement only.
+#[test]
+fn a_cli_whose_help_names_a_model_flag_is_summoned_on_the_model_it_is_given() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name every-cli");
+    let measured = ["devin", "kiro", "qwen-code", "grok"];
+    bench.launcher = Catalog(&["devin", "kiro", "qwen-code", "grok", "opencode"]);
+    for agent in measured {
+        let planned = bench.run(&format!(
+            "worker-start --agent {agent} --model example-model"
+        ));
+        assert_eq!(planned.reply.exit_code, 0, "{agent}: {}", planned.reply.stderr);
+        let Effect::Split { ref command, .. } = planned.effect else {
+            panic!("{agent}: no split: {:?}", planned.effect);
+        };
+        assert!(
+            command.starts_with(&format!("{agent} --model example-model")),
+            "{agent}: the model does not lead the launch line: {command}"
+        );
+        let said: serde_json::Value =
+            serde_json::from_str(&planned.reply.stdout).expect("a start receipt");
+        assert_eq!(said["model"], "example-model", "{agent}");
+        assert_eq!(
+            said["launchNotice"],
+            serde_json::Value::Null,
+            "{agent}: a CLI with no effort ride was told an effort default applies"
+        );
+
+        let unridden = bench.run(&format!(
+            "worker-start --agent {agent} --model example-model --effort high"
+        ));
+        assert_eq!(unridden.reply.exit_code, 1, "{agent}");
+        assert!(
+            unridden
+                .reply
+                .stderr
+                .contains(&format!("{agent} does not support launch-time effort")),
+            "{agent}: {}",
+            unridden.reply.stderr
+        );
+    }
+
+    let refused = bench.run("worker-start --agent opencode --model example-model");
+    assert_eq!(refused.reply.exit_code, 1);
+    assert!(
+        refused
+            .reply
+            .stderr
+            .contains("opencode does not support launch-time model selection"),
+        "{}",
+        refused.reply.stderr
+    );
+}
+
 /* ---- who can be summoned ----------------------------------------- */
 
 /// A launcher that has looked at a machine holding exactly these commands.
@@ -13394,6 +13453,20 @@ impl Launcher for Looked {
     fn presence(&self) -> Option<Vec<crate::agent::AgentPresence>> {
         Some(crate::agent::agent_presence(Some(&self.path), "macos"))
     }
+}
+
+/// Every catalog row says what its CLI listed or why there is nothing to
+/// say (t-124593): `unknown` for a CLI whose help names no list, and
+/// `not-asked`, with the command it would be, for one nobody asked yet.
+#[test]
+fn every_catalog_row_says_what_its_cli_listed_or_why_not() {
+    let machine = Looked::at(&["kiro-cli", "qwen"]);
+    let said = answered(&machine, "agent-list");
+    assert_eq!(row_for(&said, "qwen-code")["models"]["state"], "unknown");
+    let kiro = &row_for(&said, "kiro")["models"];
+    assert_eq!(kiro["state"], "not-asked");
+    assert_eq!(kiro["from"], "kiro-cli chat --list-models --format json");
+    assert_eq!(row_for(&said, "devin")["models"]["state"], "not-asked");
 }
 
 /// Ask one launcher one read verb, with no ledger state in the way.
@@ -13555,6 +13628,12 @@ fn agent_list_ranks_nothing_and_recommends_nothing() {
             // without being a table somebody has to keep.
             "launched",
             "missingRequirement",
+            // What the agent's own CLI listed when the window asked it,
+            // with when — the CLI's words, typed by nobody, and `unknown`
+            // for a CLI whose help names no list (t-124593). Not a ranking
+            // and not a gate: a `--model` it does not hold still goes to
+            // the CLI.
+            "models",
             "name",
             // The window's last observation of the binary and the login,
             // with its age — a measurement of the machine, like
