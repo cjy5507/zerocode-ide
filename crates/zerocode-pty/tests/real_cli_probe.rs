@@ -38,6 +38,10 @@ const TURN_PATIENCE: Duration = Duration::from_secs(120);
 /// How long after its Enter a prompt the CLI has not reported taking gets
 /// the Enter once more — the window's own second press, in spirit.
 const ENTER_AGAIN_AFTER: Duration = Duration::from_secs(4);
+/// How long a drawn composer is given to fall quiet before the prompt goes in
+/// anyway — so a start that never settles still spends its one model call on
+/// a question the facts can answer, and says it did.
+const QUIET_FALLBACK: Duration = Duration::from_secs(10);
 /// The moments of the start whose screens are kept, from the spawn.
 const START_SHOTS: [Duration; 3] = [
     Duration::from_secs(1),
@@ -251,8 +255,16 @@ fn a_real_cli_starts_takes_a_line_and_reports_through_its_hooks() {
             screens.push(("at-quiet-ready".into(), screen.clone()));
             ready_at = Some(Instant::now());
         }
-        // The prompt goes in at the window's own moment, or not at all.
-        if let (Some(line), Some(_), false) = (prompt.as_deref(), ready_at, pasted) {
+        // The prompt goes in at the window's own moment — or, when that
+        // never comes, once the composer has stood a while, and says so.
+        let fallback = prompt.is_some()
+            && !pasted
+            && ready_at.is_none()
+            && composer_at.is_some_and(|at: Instant| at.elapsed() >= QUIET_FALLBACK);
+        if fallback {
+            facts.insert("pastedWithoutQuietReady".into(), serde_json::json!(true));
+        }
+        if let (Some(line), true, false) = (prompt.as_deref(), ready_at.is_some() || fallback, pasted) {
             let words = format!("\x1b[200~{line}\x1b[201~");
             lane.write_input(words.as_bytes()).expect("the paste");
             std::thread::sleep(Duration::from_millis(150));
