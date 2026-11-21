@@ -432,8 +432,8 @@ pub fn json(agent: &str, snapshot: Option<&Snapshot>, now_ms: i64, ids: Ids) -> 
 fn families_of(models: &[Listed]) -> Vec<serde_json::Value> {
     let mut families: Vec<(&str, usize)> = Vec::new();
     for family in models.iter().filter_map(|one| one.family.as_deref()) {
-        match families.iter_mut().find(|(name, _)| *name == family) {
-            Some((_, count)) => *count += 1,
+        match families.iter().position(|(name, _)| *name == family) {
+            Some(at) => families[at].1 += 1,
             None => families.push((family, 1)),
         }
     }
