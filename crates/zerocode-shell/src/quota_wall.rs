@@ -2061,12 +2061,23 @@ pub(crate) mod tests {
         );
         assert!(session.stands(at("2026-09-23T09:30:00.000Z")));
         assert!(!session.stands(at("2026-09-23T09:33:00.000Z")));
+        // What an early lift is judged by (t-123972): the record's own time,
+        // and the reset the provider named in it.
+        assert_eq!(
+            (session.at_ms, session.resets_at_ms),
+            (at("2026-09-23T08:55:23.536Z"), Some(1_790_155_800_000))
+        );
 
         // Reset 23.7 hours away: past the longest wait, which then decides.
         let weekly = read(&[CLAUDE_WEEKLY_WALL_RECORD]).expect("a weekly wall");
         assert_eq!(
             weekly.stands_until_ms,
             at("2026-09-20T02:19:15.811Z") + policy.max_wait_ms
+        );
+        assert_eq!(
+            (weekly.at_ms, weekly.resets_at_ms),
+            (at("2026-09-20T02:19:15.811Z"), Some(1_789_956_000_000)),
+            "the weekly wall lost the reset an early lift reads"
         );
 
         let cap = read(&[CLAUDE_MODEL_CAP_RECORD]).expect("a model's own cap");
@@ -2075,6 +2086,10 @@ pub(crate) mod tests {
             cap.stands_until_ms,
             at("2026-09-21T21:08:12.346Z") + policy.max_wait_ms,
             "a cap that names no reset stands for the longest wait"
+        );
+        assert_eq!(
+            cap.resets_at_ms, None,
+            "a model's own cap names no reset, and no number lifts it early"
         );
 
         let login =
